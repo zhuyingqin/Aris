@@ -304,6 +304,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "flow"
+version = "0.4.15"
+dependencies = [
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+]
+
+[[package]]
 name = "fnv"
 version = "1.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
