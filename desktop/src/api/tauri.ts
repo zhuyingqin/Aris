@@ -5,6 +5,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 export const isTauri = (): boolean =>
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 import type {
+  ChatStatus,
   ConfigPatch,
   ConfigView,
   RunEvent,
@@ -74,6 +75,28 @@ export const skillView = (name: string) =>
 export const sessionsList = () => invoke<SessionSummary[]>("sessions_list");
 export const sessionGet = (id: string) =>
   invoke<SessionTranscript>("session_get", { id });
+
+// ── Chat engine (P2) ──────────────────────────────────────────────────────────
+
+export const chatStatus = () => invoke<ChatStatus>("chat_status");
+export const chatSend = (message: string) =>
+  invoke<string>("chat_send", { message });
+export const chatReset = () => invoke<void>("chat_reset");
+
+export const onChatDelta = (handler: (text: string) => void) =>
+  listen<string>("chat-delta", (e) => handler(e.payload));
+export const onChatTool = (
+  handler: (t: { id?: string; name: string; input: string }) => void,
+) => listen<{ id?: string; name: string; input: string }>("chat-tool", (e) => handler(e.payload));
+export const onChatToolResult = (
+  handler: (t: { name: string; output: string; isError: boolean }) => void,
+) =>
+  listen<{ name: string; output: string; isError: boolean }>(
+    "chat-tool-result",
+    (e) => handler(e.payload),
+  );
+export const onChatDone = (handler: (text: string) => void) =>
+  listen<string>("chat-done", (e) => handler(e.payload));
 
 // ── Live events ───────────────────────────────────────────────────────────────
 

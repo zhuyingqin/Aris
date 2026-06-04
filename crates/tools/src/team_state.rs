@@ -19,16 +19,25 @@ pub(crate) const COORDINATION_TOOLS: &[&str] = &[
 ];
 
 const STATE_VERSION: u32 = 1;
+const DEFAULT_MAX_TEAMMATES: usize = 4;
+const MAX_TEAMMATES_HARD_LIMIT: usize = 8;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SpawnTeammateInput {
     pub(crate) team_id: Option<String>,
     pub(crate) team_name: Option<String>,
+    pub(crate) team_design: Option<TeamDesignContract>,
     pub(crate) lead_session: Option<String>,
     pub(crate) description: String,
     pub(crate) prompt: String,
     pub(crate) subagent_type: Option<String>,
+    pub(crate) role: Option<String>,
+    pub(crate) responsibility: Option<String>,
+    pub(crate) context_scope: Option<String>,
+    pub(crate) deliverable: Option<String>,
+    pub(crate) success_criteria: Option<Vec<String>>,
+    pub(crate) stop_condition: Option<String>,
     pub(crate) name: Option<String>,
     pub(crate) model: Option<String>,
     pub(crate) task_id: Option<String>,
@@ -47,6 +56,7 @@ pub(crate) struct PreparedTeammate {
     pub(crate) agent_name: Option<String>,
     pub(crate) prompt: String,
     pub(crate) worktree_path: Option<String>,
+    pub(crate) design: TeammateDesignContract,
 }
 
 #[derive(Debug, Clone)]
@@ -158,6 +168,7 @@ pub(crate) struct TeamState {
     pub(crate) name: String,
     pub(crate) lead_session: String,
     pub(crate) status: TeamStatus,
+    pub(crate) design: Option<TeamDesignContract>,
     pub(crate) members: Vec<TeamMember>,
     pub(crate) created_at: u64,
     pub(crate) updated_at: u64,
@@ -170,6 +181,12 @@ pub(crate) struct TeamMember {
     pub(crate) agent_id: String,
     pub(crate) name: String,
     pub(crate) role: Option<String>,
+    pub(crate) responsibility: Option<String>,
+    pub(crate) context_scope: Option<String>,
+    pub(crate) deliverable: Option<String>,
+    #[serde(default)]
+    pub(crate) success_criteria: Vec<String>,
+    pub(crate) stop_condition: Option<String>,
     pub(crate) session_id: Option<String>,
     pub(crate) status: String,
     pub(crate) task_id: Option<String>,
@@ -210,6 +227,7 @@ pub(crate) struct TeamTask {
     pub(crate) team_id: String,
     pub(crate) title: String,
     pub(crate) body: String,
+    pub(crate) design: Option<TeammateDesignContract>,
     pub(crate) dependencies: Vec<String>,
     pub(crate) claimed_by: Option<String>,
     pub(crate) lease_expires_at: Option<u64>,
@@ -218,6 +236,29 @@ pub(crate) struct TeamTask {
     pub(crate) events: Vec<TaskEvent>,
     pub(crate) created_at: u64,
     pub(crate) updated_at: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TeamDesignContract {
+    pub(crate) rationale: String,
+    pub(crate) coordination_pattern: String,
+    pub(crate) coordinator: String,
+    pub(crate) context_policy: String,
+    pub(crate) verification_plan: String,
+    pub(crate) stop_condition: String,
+    pub(crate) max_teammates: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TeammateDesignContract {
+    pub(crate) role: String,
+    pub(crate) responsibility: String,
+    pub(crate) context_scope: String,
+    pub(crate) deliverable: String,
+    pub(crate) success_criteria: Vec<String>,
+    pub(crate) stop_condition: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -364,6 +405,184 @@ pub(crate) fn inherited_lead_session() -> String {
     std::env::var("ARIS_SESSION_ID").unwrap_or_else(|_| "session-unknown".to_string())
 }
 
+fn validate_team_design(design: &TeamDesignContract) -> Result<TeamDesignContract, String> {
+    let normalized = TeamDesignContract {
+        rationale: required_contract_text("teamDesign.rationale", Some(&design.rationale), 24)?,
+        coordination_pattern: required_contract_text(
+            "teamDesign.coordinationPattern",
+            Some(&design.coordination_pattern),
+            8,
+        )?,
+        coordinator: required_contract_text(
+            "teamDesign.coordinator",
+            Some(&design.coordinator),
+            3,
+        )?,
+        context_policy: required_contract_text(
+            "teamDesign.contextPolicy",
+            Some(&design.context_policy),
+            18,
+        )?,
+        verification_plan: required_contract_text(
+            "teamDesign.verificationPlan",
+            Some(&design.verification_plan),
+            18,
+        )?,
+        stop_condition: required_contract_text(
+            "teamDesign.stopCondition",
+            Some(&design.stop_condition),
+            18,
+        )?,
+        max_teammates: design.max_teammates.or(Some(DEFAULT_MAX_TEAMMATES)),
+    };
+    let max_teammates = normalized.max_teammates.unwrap_or(DEFAULT_MAX_TEAMMATES);
+    if max_teammates == 0 || max_teammates > MAX_TEAMMATES_HARD_LIMIT {
+        return Err(format!(
+            "teamDesign.maxTeammates must be between 1 and {MAX_TEAMMATES_HARD_LIMIT}"
+        ));
+    }
+    Ok(normalized)
+}
+
+fn validate_teammate_design(input: &SpawnTeammateInput) -> Result<TeammateDesignContract, String> {
+    let success_criteria = input.success_criteria.as_ref().ok_or_else(|| {
+        "successCriteria is required and must contain at least two verifiable criteria".to_string()
+    })?;
+    if success_criteria.len() < 2 {
+        return Err(
+            "successCriteria is required and must contain at least two verifiable criteria"
+                .to_string(),
+        );
+    }
+    let mut criteria = Vec::new();
+    for (index, criterion) in success_criteria.iter().enumerate() {
+        criteria.push(required_contract_text(
+            &format!("successCriteria[{index}]"),
+            Some(criterion),
+            8,
+        )?);
+    }
+    Ok(TeammateDesignContract {
+        role: required_contract_text("role", input.role.as_ref(), 3)?,
+        responsibility: required_contract_text(
+            "responsibility",
+            input.responsibility.as_ref(),
+            18,
+        )?,
+        context_scope: required_contract_text("contextScope", input.context_scope.as_ref(), 18)?,
+        deliverable: required_contract_text("deliverable", input.deliverable.as_ref(), 12)?,
+        success_criteria: criteria,
+        stop_condition: required_contract_text("stopCondition", input.stop_condition.as_ref(), 18)?,
+    })
+}
+
+fn required_contract_text(
+    field: &str,
+    value: Option<&String>,
+    min_chars: usize,
+) -> Result<String, String> {
+    let value = value
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| format!("{field} is required for Agent Team design"))?;
+    if value.chars().count() < min_chars {
+        return Err(format!(
+            "{field} is too vague for Agent Team design; expected at least {min_chars} characters"
+        ));
+    }
+    Ok(value.to_string())
+}
+
+fn validate_team_capacity(team: &TeamState) -> Result<(), String> {
+    let max_teammates = team
+        .design
+        .as_ref()
+        .and_then(|design| design.max_teammates)
+        .unwrap_or(DEFAULT_MAX_TEAMMATES);
+    if team.members.len() >= max_teammates {
+        return Err(format!(
+            "team {} already has {} teammate(s), reaching maxTeammates={max_teammates}",
+            team.team_id,
+            team.members.len()
+        ));
+    }
+    Ok(())
+}
+
+fn validate_non_overlapping_teammate(
+    team: &TeamState,
+    tasks: &[TeamTask],
+    task_id: &str,
+    task_title: &str,
+    design: &TeammateDesignContract,
+) -> Result<(), String> {
+    let requested_role = normalized_contract_key(&design.role);
+    if team.members.iter().any(|member| {
+        member
+            .role
+            .as_deref()
+            .is_some_and(|role| normalized_contract_key(role) == requested_role)
+    }) {
+        return Err(format!(
+            "role `{}` already exists in team {}; teammate roles must be non-overlapping",
+            design.role, team.team_id
+        ));
+    }
+
+    let requested_title = normalized_contract_key(task_title);
+    if tasks.iter().any(|task| {
+        task.team_id == team.team_id
+            && task.task_id != task_id
+            && normalized_contract_key(&task.title) == requested_title
+            && !matches!(
+                task.status,
+                TeamTaskStatus::Completed | TeamTaskStatus::Failed | TeamTaskStatus::Cancelled
+            )
+    }) {
+        return Err(format!(
+            "task title `{task_title}` already exists in team {}; use a distinct, bounded responsibility",
+            team.team_id
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_spawn_dependencies_ready(
+    tasks: &[TeamTask],
+    team_id: &str,
+    dependencies: &[String],
+) -> Result<(), String> {
+    if dependencies.is_empty() {
+        return Ok(());
+    }
+    let completed = tasks
+        .iter()
+        .filter(|task| task.team_id == team_id && matches!(task.status, TeamTaskStatus::Completed))
+        .map(|task| task.task_id.as_str())
+        .collect::<BTreeSet<_>>();
+    let unmet = dependencies
+        .iter()
+        .filter(|dependency| !completed.contains(dependency.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    if unmet.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "SpawnTeammate cannot start a task with unmet dependencies {:?}; complete prerequisites before spawning dependent teammates",
+        unmet
+    ))
+}
+
+fn normalized_contract_key(value: &str) -> String {
+    value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
+}
+
 pub(crate) fn prepare_teammate(input: &SpawnTeammateInput) -> Result<PreparedTeammate, String> {
     if input.description.trim().is_empty() {
         return Err("description must not be empty".to_string());
@@ -371,6 +590,7 @@ pub(crate) fn prepare_teammate(input: &SpawnTeammateInput) -> Result<PreparedTea
     if input.prompt.trim().is_empty() {
         return Err("prompt must not be empty".to_string());
     }
+    let teammate_design = validate_teammate_design(input)?;
 
     let lead_session = input
         .lead_session
@@ -379,11 +599,40 @@ pub(crate) fn prepare_teammate(input: &SpawnTeammateInput) -> Result<PreparedTea
         .map(str::to_string)
         .unwrap_or_else(inherited_lead_session);
     let lead_session_for_prompt = lead_session.clone();
+    let team_exists = input
+        .team_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .is_some_and(|team_id| team_path(team_id).exists());
+    let design_for_existing_team = input
+        .team_design
+        .as_ref()
+        .map(validate_team_design)
+        .transpose()?;
+    let design_for_new_team = if team_exists {
+        None
+    } else {
+        Some(validate_team_design(
+            input
+                .team_design
+                .as_ref()
+                .ok_or_else(|| "teamDesign is required when creating an Agent Team".to_string())?,
+        )?)
+    };
     let mut team = ensure_team(
         input.team_id.as_deref(),
         input.team_name.as_deref(),
         &lead_session,
+        design_for_new_team,
     )?;
+    if team.design.is_none() {
+        let design = design_for_existing_team.ok_or_else(|| {
+            "teamDesign is required because this existing team has no design contract".to_string()
+        })?;
+        team.design = Some(design);
+        save_team(&team)?;
+    }
+    validate_team_capacity(&team)?;
     let now = epoch_secs();
     let task_id = input
         .task_id
@@ -399,16 +648,19 @@ pub(crate) fn prepare_teammate(input: &SpawnTeammateInput) -> Result<PreparedTea
         .unwrap_or(input.description.as_str())
         .to_string();
     let mut tasks = load_tasks()?;
+    validate_non_overlapping_teammate(&team, &tasks, &task_id, &task_title, &teammate_design)?;
+    let dependencies = input.dependencies.clone().unwrap_or_default();
+    validate_spawn_dependencies_ready(&tasks, &team.team_id, &dependencies)?;
     if !tasks
         .iter()
         .any(|task| task.team_id == team.team_id && task.task_id == task_id)
     {
-        let dependencies = input.dependencies.clone().unwrap_or_default();
         let mut task = TeamTask {
             task_id: task_id.clone(),
             team_id: team.team_id.clone(),
             title: task_title,
             body: input.prompt.clone(),
+            design: Some(teammate_design.clone()),
             dependencies,
             claimed_by: Some(member_id.clone()),
             lease_expires_at: Some(now + 3_600),
@@ -471,10 +723,58 @@ pub(crate) fn prepare_teammate(input: &SpawnTeammateInput) -> Result<PreparedTea
          You are teammate `{member_id}` in team `{team_id}`.\n\
          Lead session: `{lead_session}`.\n\
          Current task id: `{task_id}`.\n\
+         Coordination contract: `{pattern}`. Coordinator: `{coordinator}`.\n\
+         Team context policy: {context_policy}\n\
+         Team verification plan: {verification_plan}\n\
+         Team stop condition: {team_stop_condition}\n\
          Use ClaimTask, CompleteTask, SendMessage, and ListTeam for coordination.\n\
-         Mark the task complete with CompleteTask before your final response.\n",
+         Do not take work outside your context scope or duplicate another teammate's role.\n\
+         Mark the task complete with CompleteTask before your final response.\n\n\
+         # Teammate Contract\n\
+         Role: {role}\n\
+         Responsibility: {responsibility}\n\
+         Context scope: {context_scope}\n\
+         Deliverable: {deliverable}\n\
+         Success criteria:\n{success_criteria}\n\
+         Stop condition: {stop_condition}\n",
         team_id = team.team_id,
         lead_session = lead_session_for_prompt,
+        pattern = team
+            .design
+            .as_ref()
+            .map(|design| design.coordination_pattern.as_str())
+            .unwrap_or("unspecified"),
+        coordinator = team
+            .design
+            .as_ref()
+            .map(|design| design.coordinator.as_str())
+            .unwrap_or("lead"),
+        context_policy = team
+            .design
+            .as_ref()
+            .map(|design| design.context_policy.as_str())
+            .unwrap_or("structured handoffs only"),
+        verification_plan = team
+            .design
+            .as_ref()
+            .map(|design| design.verification_plan.as_str())
+            .unwrap_or("verify deliverables before completion"),
+        team_stop_condition = team
+            .design
+            .as_ref()
+            .map(|design| design.stop_condition.as_str())
+            .unwrap_or("complete when criteria are met"),
+        role = teammate_design.role,
+        responsibility = teammate_design.responsibility,
+        context_scope = teammate_design.context_scope,
+        deliverable = teammate_design.deliverable,
+        success_criteria = teammate_design
+            .success_criteria
+            .iter()
+            .map(|criterion| format!("- {criterion}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        stop_condition = teammate_design.stop_condition,
     );
     if let Some(path) = &worktree_path {
         prompt.push_str(&format!(
@@ -491,6 +791,7 @@ pub(crate) fn prepare_teammate(input: &SpawnTeammateInput) -> Result<PreparedTea
         agent_name: input.name.clone(),
         prompt,
         worktree_path,
+        design: teammate_design,
     })
 }
 
@@ -505,7 +806,12 @@ pub(crate) fn register_spawned_agent(
         member_id: prepared.member_id.clone(),
         agent_id: record.agent_id.clone(),
         name: record.name,
-        role: record.subagent_type.clone(),
+        role: Some(prepared.design.role.clone()),
+        responsibility: Some(prepared.design.responsibility.clone()),
+        context_scope: Some(prepared.design.context_scope.clone()),
+        deliverable: Some(prepared.design.deliverable.clone()),
+        success_criteria: prepared.design.success_criteria.clone(),
+        stop_condition: Some(prepared.design.stop_condition.clone()),
         session_id: None,
         status: record.status,
         task_id: Some(prepared.task_id.clone()),
@@ -535,6 +841,9 @@ pub(crate) fn register_spawned_agent(
         payload: json!({
             "description": record.description,
             "model": record.model,
+            "subagentType": record.subagent_type,
+            "role": prepared.design.role,
+            "deliverable": prepared.design.deliverable,
         }),
     })?;
     snapshot(Some(&prepared.team_id), false, false)
@@ -1024,6 +1333,7 @@ fn ensure_team(
     team_id: Option<&str>,
     name: Option<&str>,
     lead_session: &str,
+    design: Option<TeamDesignContract>,
 ) -> Result<TeamState, String> {
     if let Some(team_id) = team_id.filter(|value| !value.trim().is_empty()) {
         if team_path(team_id).exists() {
@@ -1044,6 +1354,7 @@ fn ensure_team(
             .to_string(),
         lead_session: lead_session.to_string(),
         status: TeamStatus::Active,
+        design,
         members: Vec::new(),
         created_at: now,
         updated_at: now,

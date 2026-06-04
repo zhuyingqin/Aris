@@ -96,9 +96,19 @@ fn cli_runs_team_coordination_tools_and_persists_shared_state() {
     let spawn_args = json!({
         "teamId": "team-cli",
         "teamName": "CLI Team",
+        "teamDesign": valid_team_design(),
         "description": "Audit coordination state",
         "prompt": "Inspect shared state and report back.",
         "subagentType": "Explore",
+        "role": "state-auditor",
+        "responsibility": "Inspect persisted team coordination state and report whether the expected records exist.",
+        "contextScope": "Only inspect the current smoke-test run-state and teammate manifest files.",
+        "deliverable": "A concise state audit result for the lead session.",
+        "successCriteria": [
+            "Confirms team, task, mailbox, and event records are present.",
+            "Does not modify unrelated files or create extra teammates."
+        ],
+        "stopCondition": "Stop after the shared state audit result is complete and recorded.",
         "name": "scout",
         "taskId": "task-cli",
         "taskTitle": "Audit coordination state"
@@ -141,6 +151,7 @@ fn cli_runs_team_coordination_tools_and_persists_shared_state() {
     assert!(
         requests.first().is_some_and(|body| {
             body.contains("\"SpawnTeammate\"")
+                && body.contains("\"teamDesign\"")
                 && body.contains("\"SendMessage\"")
                 && body.contains("\"CompleteTask\"")
                 && body.contains("\"ListTeam\"")
@@ -154,8 +165,10 @@ fn cli_runs_team_coordination_tools_and_persists_shared_state() {
 
     let team = read_json(case.run_state_dir().join("teams").join("team-cli.json"));
     assert_eq!(team["name"], "CLI Team");
+    assert_eq!(team["design"]["coordinator"], "lead session");
     assert_eq!(team["members"].as_array().map(Vec::len).unwrap_or(0), 1);
     assert_eq!(team["members"][0]["taskId"], "task-cli");
+    assert_eq!(team["members"][0]["role"], "state-auditor");
 
     let tasks = read_json(case.run_state_dir().join("tasks.json"));
     let task = tasks
@@ -195,6 +208,102 @@ fn cli_runs_team_coordination_tools_and_persists_shared_state() {
 
     let sessions = session_files(case.cwd());
     assert_eq!(sessions.len(), 1, "one session should be persisted");
+}
+
+#[test]
+fn cli_rejects_team_spawn_without_design_contract() {
+    let case = TestCase::new("team-contract-required");
+    let spawn_args = json!({
+        "teamId": "team-missing-design",
+        "teamName": "Missing Design Team",
+        "description": "Write the paper",
+        "prompt": "Write the whole paper with other agents.",
+        "subagentType": "Write",
+        "name": "writer"
+    });
+    let server = FakeOpenAiServer::start(vec![
+        sse_tool_call("call_spawn", "SpawnTeammate", &spawn_args),
+        sse_text("The invalid team spawn was rejected."),
+    ]);
+
+    let output = run_aris_prompt(
+        &case,
+        server.base_url(),
+        "Try to start an unstructured paper-writing team.",
+    );
+    assert_success(&output);
+
+    let requests = server.requests();
+    assert!(
+        requests
+            .get(1)
+            .is_some_and(|body| body.contains("teamDesign is required")),
+        "second request should contain the SpawnTeammate validation error: {requests:?}"
+    );
+    assert!(
+        !case
+            .run_state_dir()
+            .join("teams")
+            .join("team-missing-design.json")
+            .exists(),
+        "invalid team should not be persisted"
+    );
+}
+
+#[test]
+fn cli_rejects_overlapping_team_roles_and_tasks() {
+    let case = TestCase::new("team-overlap-rejected");
+    let first = valid_spawn_args(
+        "team-overlap",
+        "writer-a",
+        "paper-writer",
+        "Draft Method Section",
+        "Draft the method section from the supplied evidence only.",
+        "Produce a bounded method-section draft for the lead integrator.",
+    );
+    let second = valid_spawn_args(
+        "team-overlap",
+        "writer-b",
+        "paper-writer",
+        "Draft Method Section",
+        "Draft the same method section again in parallel.",
+        "Produce a second method-section draft for comparison.",
+    );
+    let server = FakeOpenAiServer::start(vec![
+        sse_tool_call("call_first", "SpawnTeammate", &first),
+        sse_tool_call("call_second", "SpawnTeammate", &second),
+        sse_text("The overlapping teammate was rejected."),
+    ]);
+
+    let output = run_aris_prompt(
+        &case,
+        server.base_url(),
+        "Start a paper-writing team with a duplicate writer role.",
+    );
+    assert_success(&output);
+
+    let requests = server.requests();
+    assert!(
+        requests.get(2).is_some_and(|body| {
+            body.contains("role `paper-writer` already exists")
+                || body.contains("task title `Draft Method Section` already exists")
+        }),
+        "third request should contain the overlap validation error: {requests:?}"
+    );
+
+    let team = read_json(case.run_state_dir().join("teams").join("team-overlap.json"));
+    assert_eq!(team["members"].as_array().map(Vec::len).unwrap_or(0), 1);
+    let tasks = read_json(case.run_state_dir().join("tasks.json"));
+    assert_eq!(
+        tasks
+            .as_array()
+            .expect("tasks array")
+            .iter()
+            .filter(|task| task["teamId"] == "team-overlap")
+            .count(),
+        1,
+        "overlapping second task should not be persisted"
+    );
 }
 
 struct TestCase {
@@ -358,6 +467,48 @@ fn sse_text(text: &str) -> String {
         }
     });
     format!("data: {chunk}\n\ndata: [DONE]\n\n")
+}
+
+fn valid_team_design() -> Value {
+    json!({
+        "rationale": "The task needs bounded parallel work with a separate verification path.",
+        "coordinationPattern": "lead-coordinator-with-specialized-teammates",
+        "coordinator": "lead session",
+        "contextPolicy": "The lead passes only task-specific artifacts and teammates use structured tool handoffs.",
+        "verificationPlan": "The lead checks each deliverable against persisted files and task success criteria.",
+        "stopCondition": "Stop when all assigned deliverables satisfy their success criteria and are integrated.",
+        "maxTeammates": 4
+    })
+}
+
+fn valid_spawn_args(
+    team_id: &str,
+    name: &str,
+    role: &str,
+    task_title: &str,
+    responsibility: &str,
+    deliverable: &str,
+) -> Value {
+    json!({
+        "teamId": team_id,
+        "teamName": "Paper Writing Team",
+        "teamDesign": valid_team_design(),
+        "description": task_title,
+        "prompt": responsibility,
+        "subagentType": "Write",
+        "role": role,
+        "responsibility": responsibility,
+        "contextScope": "Use only the supplied paper plan, evidence notes, and current run-state records.",
+        "deliverable": deliverable,
+        "successCriteria": [
+            "The deliverable is scoped to the assigned section and cites evidence boundaries.",
+            "The teammate records completion only after the requested artifact is available."
+        ],
+        "stopCondition": "Stop after the assigned writing artifact is complete and handed back.",
+        "name": name,
+        "taskId": format!("task-{name}"),
+        "taskTitle": task_title
+    })
 }
 
 fn read_http_body(stream: &mut TcpStream) -> String {

@@ -10,7 +10,7 @@ use serde_json::{Map, Value};
 
 use crate::state;
 
-fn load_object() -> Map<String, Value> {
+pub(crate) fn load_object() -> Map<String, Value> {
     std::fs::read_to_string(state::config_path())
         .ok()
         .and_then(|text| serde_json::from_str::<Value>(&text).ok())

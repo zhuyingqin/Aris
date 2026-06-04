@@ -222,3 +222,27 @@ export interface SessionTranscript {
   id: string;
   messages: SessionMessage[];
 }
+
+// ── Chat engine (P2) ──────────────────────────────────────────────────────────
+
+export interface ChatStatus {
+  ready: boolean;
+  model?: string | null;
+  provider?: string | null;
+  message?: string | null;
+}
+
+export interface ChatToolCall {
+  id?: string;
+  name: string;
+  input: string;
+  output?: string;
+  isError?: boolean;
+}
+
+export interface ChatTurn {
+  role: "user" | "assistant";
+  text: string;
+  tools: ChatToolCall[];
+  streaming?: boolean;
+}

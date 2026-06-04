@@ -293,10 +293,42 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 "properties": {
                     "teamId": { "type": "string" },
                     "teamName": { "type": "string" },
+                    "teamDesign": {
+                        "type": "object",
+                        "description": "Required for Agent Team coordination: why multi-agent is justified, who coordinates, how context is bounded, how output is verified, and when the team stops.",
+                        "properties": {
+                            "rationale": { "type": "string" },
+                            "coordinationPattern": { "type": "string" },
+                            "coordinator": { "type": "string" },
+                            "contextPolicy": { "type": "string" },
+                            "verificationPlan": { "type": "string" },
+                            "stopCondition": { "type": "string" },
+                            "maxTeammates": { "type": "integer", "minimum": 1, "maximum": 8 }
+                        },
+                        "required": [
+                            "rationale",
+                            "coordinationPattern",
+                            "coordinator",
+                            "contextPolicy",
+                            "verificationPlan",
+                            "stopCondition"
+                        ],
+                        "additionalProperties": false
+                    },
                     "leadSession": { "type": "string" },
                     "description": { "type": "string" },
                     "prompt": { "type": "string" },
                     "subagentType": { "type": "string" },
+                    "role": { "type": "string" },
+                    "responsibility": { "type": "string" },
+                    "contextScope": { "type": "string" },
+                    "deliverable": { "type": "string" },
+                    "successCriteria": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "minItems": 2
+                    },
+                    "stopCondition": { "type": "string" },
                     "name": { "type": "string" },
                     "model": { "type": "string" },
                     "taskId": { "type": "string" },
@@ -306,7 +338,17 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                     "worktreeBranch": { "type": "string" },
                     "worktreePath": { "type": "string" }
                 },
-                "required": ["description", "prompt"],
+                "required": [
+                    "description",
+                    "prompt",
+                    "teamDesign",
+                    "role",
+                    "responsibility",
+                    "contextScope",
+                    "deliverable",
+                    "successCriteria",
+                    "stopCondition"
+                ],
                 "additionalProperties": false
             }),
             required_permission: PermissionMode::DangerFullAccess,
@@ -4902,10 +4944,45 @@ mod tests {
         let prepared = team_state::prepare_teammate(&team_state::SpawnTeammateInput {
             team_id: None,
             team_name: Some("Ship Team".to_string()),
+            team_design: Some(team_state::TeamDesignContract {
+                rationale: "The audit needs a bounded teammate plus lead-side verification."
+                    .to_string(),
+                coordination_pattern: "lead-coordinator-with-specialized-teammate".to_string(),
+                coordinator: "lead-session".to_string(),
+                context_policy:
+                    "The lead passes only the relevant files and expects structured handoff notes."
+                        .to_string(),
+                verification_plan:
+                    "The lead checks the audit result against persisted team state and events."
+                        .to_string(),
+                stop_condition:
+                    "Stop when the audit deliverable satisfies all criteria and is recorded."
+                        .to_string(),
+                max_teammates: Some(4),
+            }),
             lead_session: None,
             description: "Audit implementation".to_string(),
             prompt: "Inspect the code and report findings.".to_string(),
             subagent_type: Some("Explore".to_string()),
+            role: Some("implementation-auditor".to_string()),
+            responsibility: Some(
+                "Inspect the requested implementation surface and report concrete findings."
+                    .to_string(),
+            ),
+            context_scope: Some(
+                "Use only files and run-state records relevant to this team-state smoke test."
+                    .to_string(),
+            ),
+            deliverable: Some(
+                "A concise implementation audit report for the lead session.".to_string(),
+            ),
+            success_criteria: Some(vec![
+                "The report names the inspected coordination state artifacts.".to_string(),
+                "The report avoids modifying unrelated workspace files.".to_string(),
+            ]),
+            stop_condition: Some(
+                "Stop after the implementation audit result is complete and recorded.".to_string(),
+            ),
             name: Some("audit".to_string()),
             model: None,
             task_id: None,
@@ -4934,8 +5011,59 @@ mod tests {
         assert_eq!(snapshot.team.name, "Ship Team");
         assert_eq!(snapshot.team.members.len(), 1);
         assert_eq!(
+            snapshot
+                .team
+                .design
+                .as_ref()
+                .map(|design| design.coordinator.as_str()),
+            Some("lead-session")
+        );
+        assert_eq!(
+            snapshot.team.members[0].role.as_deref(),
+            Some("implementation-auditor")
+        );
+        assert_eq!(
             snapshot.tasks[0].status,
             team_state::TeamTaskStatus::InProgress
+        );
+        let premature_dependent = team_state::prepare_teammate(&team_state::SpawnTeammateInput {
+            team_id: Some(prepared.team_id.clone()),
+            team_name: Some("Ship Team".to_string()),
+            team_design: None,
+            lead_session: None,
+            description: "Verify audit result".to_string(),
+            prompt: "Verify the audit result after the audit task completes.".to_string(),
+            subagent_type: Some("Verification".to_string()),
+            role: Some("audit-verifier".to_string()),
+            responsibility: Some(
+                "Verify the completed audit result against the persisted run-state records."
+                    .to_string(),
+            ),
+            context_scope: Some(
+                "Use only the completed audit output and this team-state smoke test run-state."
+                    .to_string(),
+            ),
+            deliverable: Some("A concise verification report for the completed audit.".to_string()),
+            success_criteria: Some(vec![
+                "The verifier waits until the prerequisite audit task is complete.".to_string(),
+                "The report names any mismatch between the audit result and run-state.".to_string(),
+            ]),
+            stop_condition: Some(
+                "Stop after verification is complete and the report is handed back.".to_string(),
+            ),
+            name: Some("verify-audit".to_string()),
+            model: None,
+            task_id: Some("verify-audit".to_string()),
+            task_title: Some("Verify audit result".to_string()),
+            dependencies: Some(vec![prepared.task_id.clone()]),
+            worktree: None,
+            worktree_branch: None,
+            worktree_path: None,
+        })
+        .expect_err("dependent teammate should not spawn before prerequisites complete");
+        assert!(
+            premature_dependent.contains("unmet dependencies"),
+            "unexpected dependency error: {premature_dependent}"
         );
 
         let message = team_state::send_message(team_state::SendMessageInput {

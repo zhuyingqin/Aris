@@ -1,5 +1,6 @@
 mod commands;
 mod config;
+mod engine;
 mod sessions;
 mod state;
 mod watcher;
@@ -7,6 +8,7 @@ mod watcher;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .manage(engine::ChatState::default())
         .setup(|app| {
             watcher::spawn_event_watcher(app.handle().clone());
             Ok(())
@@ -28,6 +30,9 @@ pub fn run() {
             config::config_set,
             sessions::sessions_list,
             sessions::session_get,
+            engine::chat_status,
+            engine::chat_send,
+            engine::chat_reset,
         ])
         .run(tauri::generate_context!())
         .expect("error while running ARIS Studio");

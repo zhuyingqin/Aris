@@ -4147,11 +4147,20 @@ fn build_system_prompt(model_id: Option<&str>) -> Result<Vec<String>, Box<dyn st
 
     prompt.push(
         "# Agent Team and Dynamic Workflow Coordination\n\
-         For broad work that benefits from parallel investigation or implementation, use the \
-         Agent Team tools instead of only a single background Agent: SpawnTeammate, SendMessage, \
-         ClaimTask, CompleteTask, ListTeam, and AgentSupervisor. Team tasks have dependencies, \
-         leases, results, and mailbox messages; dependent tasks become available after their \
-         prerequisites complete.\n\n\
+         Start simple. Prefer a single agent or a sequential workflow unless the task truly needs \
+         parallel independent exploration, strict context isolation, specialized tool use, or \
+         long-running teammates. Do not create an Agent Team just because the work is large or \
+         because extra agents sound useful.\n\n\
+         When an Agent Team is justified, the lead session is the coordinator: it plans the work, \
+         assigns bounded non-overlapping roles, controls shared context, integrates outputs, and \
+         decides when to stop. Use SpawnTeammate only with a structured teamDesign contract plus \
+         each teammate's role, responsibility, contextScope, deliverable, successCriteria, and \
+         stopCondition. Add a verifier role or explicit verification plan when output quality, \
+         facts, citations, code, or experiment claims matter. Coordinate through SpawnTeammate, \
+         SendMessage, ClaimTask, CompleteTask, ListTeam, and AgentSupervisor; avoid free-form \
+         teammate discussion as the coordination mechanism. Team tasks have dependencies, leases, \
+         results, and mailbox messages; dependent tasks become available after their prerequisites \
+         complete.\n\n\
          For multi-phase high-effort work, first call Workflow with action=plan to show the phase \
          plan and raw sandboxed orchestration script. Start only after approval with \
          action=start and approval=allow_once or approval=always. Workflow scripts may only \

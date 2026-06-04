@@ -11,6 +11,7 @@ import {
 const MAX_EVENTS = 500;
 
 export type Tab =
+  | "chat"
   | "studio"
   | "monitor"
   | "teams"
@@ -39,7 +40,7 @@ interface AppState {
 }
 
 export const useStore = create<AppState>((set, get) => ({
-  tab: "studio",
+  tab: "chat",
   setTab: (tab) => set({ tab }),
 
   stateDir: "",
