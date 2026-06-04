@@ -190,11 +190,7 @@ pub fn apply_proposal(id: usize) -> Result<String, String> {
     if target_path.exists() {
         let backup_dir = backups_dir();
         fs::create_dir_all(&backup_dir).map_err(|e| e.to_string())?;
-        let backup_name = format!(
-            "{}_{}.SKILL.md",
-            proposal.target_skill,
-            chrono_simple_now()
-        );
+        let backup_name = format!("{}_{}.SKILL.md", proposal.target_skill, chrono_simple_now());
         let backup_path = backup_dir.join(backup_name);
         fs::copy(&target_path, &backup_path).map_err(|e| e.to_string())?;
     }
@@ -342,7 +338,7 @@ mod tests {
         assert!(!is_valid_skill_name(""));
         assert!(!is_valid_skill_name(".."));
         assert!(!is_valid_skill_name("../../.zshrc"));
-        assert!(!is_valid_skill_name("Auto-Review"));  // uppercase
+        assert!(!is_valid_skill_name("Auto-Review")); // uppercase
         assert!(!is_valid_skill_name("-starts-with-hyphen"));
         assert!(!is_valid_skill_name("has space"));
         assert!(!is_valid_skill_name("has/slash"));

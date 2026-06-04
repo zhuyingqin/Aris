@@ -1411,7 +1411,10 @@ mod tests {
             None
         );
         // No error key → None.
-        assert_eq!(stream_error_detail(&json!({"usage": {"prompt_tokens": 1}})), None);
+        assert_eq!(
+            stream_error_detail(&json!({"usage": {"prompt_tokens": 1}})),
+            None
+        );
         // Explicit null error → None (some providers send `error: null`).
         assert_eq!(stream_error_detail(&json!({"error": null})), None);
         // Error object with message + string code.
@@ -1467,7 +1470,9 @@ mod tests {
         );
         // finish_reason alongside a delta.
         assert_eq!(
-            choice_finish_reason(&json!({"delta": {"content": "x"}, "finish_reason": "tool_calls"})),
+            choice_finish_reason(
+                &json!({"delta": {"content": "x"}, "finish_reason": "tool_calls"})
+            ),
             Some("tool_calls")
         );
         // Empty string finish_reason → None (not a terminal signal).
@@ -1478,7 +1483,10 @@ mod tests {
             None
         );
         // Absent finish_reason → None.
-        assert_eq!(choice_finish_reason(&json!({"delta": {"content": "x"}})), None);
+        assert_eq!(
+            choice_finish_reason(&json!({"delta": {"content": "x"}})),
+            None
+        );
     }
 
     // Tool-call delta accumulation across chunks.

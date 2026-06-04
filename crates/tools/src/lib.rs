@@ -1899,6 +1899,24 @@ pub fn discover_skills() -> Vec<SkillMeta> {
     skills
 }
 
+/// Return the raw `SKILL.md` markdown for a skill by name, resolving filesystem
+/// skills first (user > project > codex roots) and falling back to the bundled
+/// copy. Used by external UIs (e.g. the desktop app) to preview a skill without
+/// executing it. Returns `None` if no skill of that name exists.
+pub fn skill_markdown(name: &str) -> Option<String> {
+    if let Ok(path) = resolve_skill_path(name) {
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            return Some(content);
+        }
+    }
+    for (bundled_name, content) in BUNDLED_SKILLS {
+        if bundled_name.eq_ignore_ascii_case(name) {
+            return Some((*content).to_string());
+        }
+    }
+    None
+}
+
 /// Parse YAML frontmatter from a SKILL.md file.
 /// Expects `---` delimited YAML block at the top with fields like
 /// name, description, argument-hint, allowed-tools.
