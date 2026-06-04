@@ -21,6 +21,9 @@ use runtime::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+mod team_state;
+mod workflow_state;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolManifestEntry {
     pub name: String,
@@ -283,6 +286,159 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             required_permission: PermissionMode::DangerFullAccess,
         },
         ToolSpec {
+            name: "SpawnTeammate",
+            description: "Launch a background teammate in an Agent Team and register it in TeamStore with a claimed task.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "teamId": { "type": "string" },
+                    "teamName": { "type": "string" },
+                    "leadSession": { "type": "string" },
+                    "description": { "type": "string" },
+                    "prompt": { "type": "string" },
+                    "subagentType": { "type": "string" },
+                    "name": { "type": "string" },
+                    "model": { "type": "string" },
+                    "taskId": { "type": "string" },
+                    "taskTitle": { "type": "string" },
+                    "dependencies": { "type": "array", "items": { "type": "string" } },
+                    "worktree": { "type": "boolean" },
+                    "worktreeBranch": { "type": "string" },
+                    "worktreePath": { "type": "string" }
+                },
+                "required": ["description", "prompt"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::DangerFullAccess,
+        },
+        ToolSpec {
+            name: "SendMessage",
+            description: "Send a mailbox message between teammates or from a teammate to the lead session.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "teamId": { "type": "string" },
+                    "from": { "type": "string" },
+                    "to": { "type": "string" },
+                    "subject": { "type": "string" },
+                    "body": { "type": "string" },
+                    "taskId": { "type": "string" }
+                },
+                "required": ["from", "to", "body"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::WorkspaceWrite,
+        },
+        ToolSpec {
+            name: "ClaimTask",
+            description: "Claim the next unblocked team task or renew a task lease.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "teamId": { "type": "string" },
+                    "taskId": { "type": "string" },
+                    "claimant": { "type": "string" },
+                    "leaseSeconds": { "type": "integer", "minimum": 1 }
+                },
+                "required": ["claimant"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::WorkspaceWrite,
+        },
+        ToolSpec {
+            name: "CompleteTask",
+            description: "Complete or fail a team task, store the result, and unblock dependent tasks.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "teamId": { "type": "string" },
+                    "taskId": { "type": "string" },
+                    "actor": { "type": "string" },
+                    "result": { "type": "string" },
+                    "status": { "type": "string", "enum": ["completed", "failed"] }
+                },
+                "required": ["taskId", "actor", "result"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::WorkspaceWrite,
+        },
+        ToolSpec {
+            name: "ListTeam",
+            description: "Inspect the active Agent Team, including members, task state, mailbox, agent status, and optional event history.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "teamId": { "type": "string" },
+                    "includeMessages": { "type": "boolean" },
+                    "includeEvents": { "type": "boolean" }
+                },
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
+            name: "AgentSupervisor",
+            description: "Inspect and control durable background agent lifecycle state: list, status, logs, stop request, or restart.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["list", "status", "logs", "stop", "restart"]
+                    },
+                    "agentId": { "type": "string" },
+                    "teamId": { "type": "string" },
+                    "tailBytes": { "type": "integer", "minimum": 1 }
+                },
+                "required": ["action"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::DangerFullAccess,
+        },
+        ToolSpec {
+            name: "Workflow",
+            description: "Plan, start, inspect, pause, resume, stop, save, discover, or restart a dynamic workflow run using a sandboxed orchestration script API.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["plan", "start", "list", "inspect", "pause", "resume", "stop", "restart", "save", "discover"]
+                    },
+                    "runId": { "type": "string" },
+                    "name": { "type": "string" },
+                    "script": { "type": "string" },
+                    "scriptPath": { "type": "string" },
+                    "saveAs": { "type": "string" },
+                    "approval": {
+                        "type": "string",
+                        "enum": ["allow_once", "always", "deny"]
+                    },
+                    "maxConcurrency": { "type": "integer", "minimum": 1 },
+                    "maxAgents": { "type": "integer", "minimum": 1 }
+                },
+                "required": ["action"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::DangerFullAccess,
+        },
+        ToolSpec {
+            name: "EnterWorktree",
+            description: "Create or list git worktrees for isolating parallel teammate edits.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "action": { "type": "string", "enum": ["create", "list"] },
+                    "branch": { "type": "string" },
+                    "path": { "type": "string" },
+                    "base": { "type": "string" }
+                },
+                "required": ["action"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::DangerFullAccess,
+        },
+        ToolSpec {
             name: "ToolSearch",
             description: "Search for deferred or specialized tools by exact name or keywords.",
             input_schema: json!({
@@ -421,6 +577,24 @@ pub fn execute_tool(name: &str, input: &Value) -> Result<String, String> {
         "LlmReview" => from_value::<LlmReviewInput>(input).and_then(run_llm_review),
         "Skill" => from_value::<SkillInput>(input).and_then(run_skill),
         "Agent" => from_value::<AgentInput>(input).and_then(run_agent),
+        "SpawnTeammate" => {
+            from_value::<team_state::SpawnTeammateInput>(input).and_then(run_spawn_teammate)
+        }
+        "SendMessage" => {
+            from_value::<team_state::SendMessageInput>(input).and_then(run_send_message)
+        }
+        "ClaimTask" => from_value::<team_state::ClaimTaskInput>(input).and_then(run_claim_task),
+        "CompleteTask" => {
+            from_value::<team_state::CompleteTaskInput>(input).and_then(run_complete_task)
+        }
+        "ListTeam" => from_value::<team_state::ListTeamInput>(input).and_then(run_list_team),
+        "AgentSupervisor" => {
+            from_value::<team_state::AgentSupervisorInput>(input).and_then(run_agent_supervisor)
+        }
+        "Workflow" => from_value::<workflow_state::WorkflowInput>(input).and_then(run_workflow),
+        "EnterWorktree" => {
+            from_value::<team_state::EnterWorktreeInput>(input).and_then(run_enter_worktree)
+        }
         "ToolSearch" => from_value::<ToolSearchInput>(input).and_then(run_tool_search),
         "NotebookEdit" => from_value::<NotebookEditInput>(input).and_then(run_notebook_edit),
         "Sleep" => from_value::<SleepInput>(input).and_then(run_sleep),
@@ -497,6 +671,38 @@ fn run_skill(input: SkillInput) -> Result<String, String> {
 
 fn run_agent(input: AgentInput) -> Result<String, String> {
     to_pretty_json(execute_agent(input)?)
+}
+
+fn run_spawn_teammate(input: team_state::SpawnTeammateInput) -> Result<String, String> {
+    to_pretty_json(execute_spawn_teammate(input)?)
+}
+
+fn run_send_message(input: team_state::SendMessageInput) -> Result<String, String> {
+    to_pretty_json(team_state::send_message(input)?)
+}
+
+fn run_claim_task(input: team_state::ClaimTaskInput) -> Result<String, String> {
+    to_pretty_json(team_state::claim_task(input)?)
+}
+
+fn run_complete_task(input: team_state::CompleteTaskInput) -> Result<String, String> {
+    to_pretty_json(team_state::complete_task(input)?)
+}
+
+fn run_list_team(input: team_state::ListTeamInput) -> Result<String, String> {
+    to_pretty_json(team_state::list_team(input)?)
+}
+
+fn run_agent_supervisor(input: team_state::AgentSupervisorInput) -> Result<String, String> {
+    to_pretty_json(execute_agent_supervisor(input)?)
+}
+
+fn run_workflow(input: workflow_state::WorkflowInput) -> Result<String, String> {
+    to_pretty_json(execute_workflow(input)?)
+}
+
+fn run_enter_worktree(input: team_state::EnterWorktreeInput) -> Result<String, String> {
+    to_pretty_json(team_state::enter_worktree(input)?)
 }
 
 fn run_tool_search(input: ToolSearchInput) -> Result<String, String> {
@@ -803,6 +1009,8 @@ struct AgentOutput {
     completed_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    usage: Option<team_state::AgentTokenUsage>,
 }
 
 #[derive(Debug, Clone)]
@@ -1335,7 +1543,11 @@ fn execute_todo_write(input: TodoWriteInput) -> Result<TodoWriteOutput, String> 
 }
 
 fn execute_skill(input: SkillInput) -> Result<SkillOutput, String> {
-    let requested = input.skill.trim().trim_start_matches('/').trim_start_matches('$');
+    let requested = input
+        .skill
+        .trim()
+        .trim_start_matches('/')
+        .trim_start_matches('$');
 
     // Try filesystem search roots first (user overrides take priority)
     if let Ok(skill_path) = resolve_skill_path(requested) {
@@ -1504,7 +1716,9 @@ fn inject_resolver_preamble(
         }
     }
     if !report.failed_helpers.is_empty() {
-        preamble.push_str("\nWarning: the following bundled helpers failed to extract and may be unavailable:\n");
+        preamble.push_str(
+            "\nWarning: the following bundled helpers failed to extract and may be unavailable:\n",
+        );
         for entry in &report.failed_helpers {
             preamble.push_str(&format!(
                 "- `{}` — {}\n",
@@ -1545,10 +1759,19 @@ fn skill_search_roots() -> Vec<std::path::PathBuf> {
 
     // 1. ~/.config/aris/skills/ (ARIS user-level, highest priority)
     let home = runtime::home_dir();
-    roots.push(std::path::PathBuf::from(&home).join(".config").join("aris").join("skills"));
+    roots.push(
+        std::path::PathBuf::from(&home)
+            .join(".config")
+            .join("aris")
+            .join("skills"),
+    );
 
     // 2. ~/.claude/skills/ (Claude Code compat, user-level)
-    roots.push(std::path::PathBuf::from(&home).join(".claude").join("skills"));
+    roots.push(
+        std::path::PathBuf::from(&home)
+            .join(".claude")
+            .join("skills"),
+    );
 
     // 3. Project-level .claude/skills/
     if let Ok(cwd) = std::env::current_dir() {
@@ -1563,7 +1786,8 @@ fn skill_search_roots() -> Vec<std::path::PathBuf> {
     // 4. ARIS bundled share/skills/ (next to binary)
     if let Ok(exe) = std::env::current_exe() {
         if let Some(bin_dir) = exe.parent() {
-            let share_skills = bin_dir.parent()
+            let share_skills = bin_dir
+                .parent()
                 .map(|p| p.join("share").join("aris").join("skills"))
                 .unwrap_or_else(|| bin_dir.join("share").join("aris").join("skills"));
             roots.push(share_skills);
@@ -1663,7 +1887,11 @@ pub fn discover_skills() -> Vec<SkillMeta> {
             continue;
         }
         seen.insert(name.to_string());
-        let meta = parse_skill_frontmatter(name, content, std::path::PathBuf::from(format!("<bundled:{name}>")));
+        let meta = parse_skill_frontmatter(
+            name,
+            content,
+            std::path::PathBuf::from(format!("<bundled:{name}>")),
+        );
         skills.push(meta);
     }
 
@@ -1674,11 +1902,7 @@ pub fn discover_skills() -> Vec<SkillMeta> {
 /// Parse YAML frontmatter from a SKILL.md file.
 /// Expects `---` delimited YAML block at the top with fields like
 /// name, description, argument-hint, allowed-tools.
-fn parse_skill_frontmatter(
-    dir_name: &str,
-    content: &str,
-    path: std::path::PathBuf,
-) -> SkillMeta {
+fn parse_skill_frontmatter(dir_name: &str, content: &str, path: std::path::PathBuf) -> SkillMeta {
     let mut name = dir_name.to_string();
     let mut description = None;
     let mut argument_hint = None;
@@ -1748,7 +1972,10 @@ pub fn render_skill_discovery_section() -> Option<String> {
         let desc = skill.description.as_deref().unwrap_or("No description");
         // Truncate description to 200 chars (char-safe for CJK)
         let desc_short: String = desc.chars().take(200).collect();
-        let hint = skill.argument_hint.as_deref().map_or(String::new(), |h| format!(" {h}"));
+        let hint = skill
+            .argument_hint
+            .as_deref()
+            .map_or(String::new(), |h| format!(" {h}"));
         lines.push(format!("- `/{}{hint}` — {}", skill.name, desc_short));
     }
 
@@ -1769,7 +1996,140 @@ fn execute_agent(input: AgentInput) -> Result<AgentOutput, String> {
     execute_agent_with_spawn(input, spawn_agent_job)
 }
 
+fn execute_spawn_teammate(input: team_state::SpawnTeammateInput) -> Result<Value, String> {
+    let prepared = team_state::prepare_teammate(&input)?;
+    let allowed_tools = allowed_tools_for_teammate(input.subagent_type.as_deref());
+    let agent = execute_agent_with_spawn_and_tools(
+        AgentInput {
+            description: input.description.clone(),
+            prompt: prepared.prompt.clone(),
+            subagent_type: input.subagent_type.clone(),
+            name: prepared.agent_name.clone(),
+            model: input.model.clone(),
+        },
+        spawn_agent_job,
+        Some(allowed_tools),
+    )?;
+    let snapshot = team_state::register_spawned_agent(
+        &prepared,
+        team_state::AgentRecord {
+            agent_id: agent.agent_id.clone(),
+            name: agent.name.clone(),
+            description: agent.description.clone(),
+            subagent_type: agent.subagent_type.clone(),
+            model: agent.model.clone(),
+            status: agent.status.clone(),
+            output_file: agent.output_file.clone(),
+            manifest_file: agent.manifest_file.clone(),
+        },
+    )?;
+    Ok(json!({
+        "agent": agent,
+        "team": snapshot.team,
+        "tasks": snapshot.tasks,
+        "mailbox": snapshot.mailbox,
+        "stateDir": snapshot.state_dir,
+    }))
+}
+
+fn execute_agent_supervisor(input: team_state::AgentSupervisorInput) -> Result<Value, String> {
+    if input.action == team_state::AgentSupervisorAction::Restart {
+        let agent_id = input
+            .agent_id
+            .as_deref()
+            .ok_or_else(|| "agentId is required for restart".to_string())?;
+        let agent = team_state::load_agent_manifest(agent_id)?;
+        let prompt = team_state::extract_agent_prompt(&agent)?;
+        let restarted = execute_agent(AgentInput {
+            description: format!("Restart {}", agent.description),
+            prompt,
+            subagent_type: agent.subagent_type.clone(),
+            name: Some(format!("{}-restart", agent.name)),
+            model: agent.model.clone(),
+        })?;
+        let supervisor = team_state::agent_supervisor(input)?;
+        return Ok(json!({
+            "action": "restart",
+            "restartedAgent": restarted,
+            "supervisor": supervisor,
+        }));
+    }
+    Ok(serde_json::to_value(team_state::agent_supervisor(input)?)
+        .map_err(|error| error.to_string())?)
+}
+
+fn execute_workflow(input: workflow_state::WorkflowInput) -> Result<Value, String> {
+    match input.action {
+        workflow_state::WorkflowAction::Plan => {
+            Ok(serde_json::to_value(workflow_state::plan_workflow(&input)?)
+                .map_err(|error| error.to_string())?)
+        }
+        workflow_state::WorkflowAction::Start | workflow_state::WorkflowAction::Restart => {
+            let created = workflow_state::create_run(&input)?;
+            let mut run = created.run.clone();
+            if matches!(
+                run.status,
+                workflow_state::WorkflowRunStatus::ApprovalRequired
+            ) {
+                return Ok(json!({
+                    "stateDir": team_state::state_root().display().to_string(),
+                    "action": "approval_required",
+                    "run": run,
+                    "plan": created.plan,
+                    "message": "review the phase plan and raw script, then retry with approval=allow_once or approval=always"
+                }));
+            }
+            for spec in &created.plan.agents {
+                let agent = execute_agent(AgentInput {
+                    description: spec.description.clone(),
+                    prompt: spec.prompt.clone(),
+                    subagent_type: spec.subagent_type.clone(),
+                    name: spec.name.clone(),
+                    model: spec.model.clone(),
+                })?;
+                run = workflow_state::record_agent(
+                    &run.run_id,
+                    &agent.agent_id,
+                    &agent.name,
+                    &agent.description,
+                    &agent.status,
+                )?;
+            }
+            if let Some(result) = created.plan.final_result.as_deref() {
+                run = workflow_state::complete_run_with_result(&run.run_id, result)?;
+            }
+            Ok(json!({
+                "stateDir": team_state::state_root().display().to_string(),
+                "action": "start",
+                "run": run,
+                "plan": created.plan,
+            }))
+        }
+        workflow_state::WorkflowAction::List
+        | workflow_state::WorkflowAction::Inspect
+        | workflow_state::WorkflowAction::Pause
+        | workflow_state::WorkflowAction::Resume
+        | workflow_state::WorkflowAction::Stop
+        | workflow_state::WorkflowAction::Save
+        | workflow_state::WorkflowAction::Discover => Ok(serde_json::to_value(
+            workflow_state::control_workflow(&input)?,
+        )
+        .map_err(|error| error.to_string())?),
+    }
+}
+
 fn execute_agent_with_spawn<F>(input: AgentInput, spawn_fn: F) -> Result<AgentOutput, String>
+where
+    F: FnOnce(AgentJob) -> Result<(), String>,
+{
+    execute_agent_with_spawn_and_tools(input, spawn_fn, None)
+}
+
+fn execute_agent_with_spawn_and_tools<F>(
+    input: AgentInput,
+    spawn_fn: F,
+    allowed_tools_override: Option<BTreeSet<String>>,
+) -> Result<AgentOutput, String>
 where
     F: FnOnce(AgentJob) -> Result<(), String>,
 {
@@ -1795,7 +2155,8 @@ where
         .unwrap_or_else(|| slugify_agent_name(&input.description));
     let created_at = iso8601_now();
     let system_prompt = build_agent_system_prompt(&normalized_subagent_type)?;
-    let allowed_tools = allowed_tools_for_subagent(&normalized_subagent_type);
+    let allowed_tools = allowed_tools_override
+        .unwrap_or_else(|| allowed_tools_for_subagent(&normalized_subagent_type));
 
     let output_contents = format!(
         "# Agent Task
@@ -1827,6 +2188,7 @@ where
         started_at: Some(created_at),
         completed_at: None,
         error: None,
+        usage: None,
     };
     write_agent_manifest(&manifest)?;
 
@@ -1839,7 +2201,7 @@ where
     };
     if let Err(error) = spawn_fn(job) {
         let error = format!("failed to spawn sub-agent: {error}");
-        persist_agent_terminal_state(&manifest, "failed", None, Some(error.clone()))?;
+        persist_agent_terminal_state(&manifest, "failed", None, Some(error.clone()), None)?;
         return Err(error);
     }
 
@@ -1856,8 +2218,13 @@ fn spawn_agent_job(job: AgentJob) -> Result<(), String> {
             match result {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => {
-                    let _ =
-                        persist_agent_terminal_state(&job.manifest, "failed", None, Some(error));
+                    let _ = persist_agent_terminal_state(
+                        &job.manifest,
+                        "failed",
+                        None,
+                        Some(error),
+                        None,
+                    );
                 }
                 Err(_) => {
                     let _ = persist_agent_terminal_state(
@@ -1865,6 +2232,7 @@ fn spawn_agent_job(job: AgentJob) -> Result<(), String> {
                         "failed",
                         None,
                         Some(String::from("sub-agent thread panicked")),
+                        None,
                     );
                 }
             }
@@ -1879,7 +2247,18 @@ fn run_agent_job(job: &AgentJob) -> Result<(), String> {
         .run_turn(job.prompt.clone(), None)
         .map_err(|error| error.to_string())?;
     let final_text = final_assistant_text(&summary);
-    persist_agent_terminal_state(&job.manifest, "completed", Some(final_text.as_str()), None)
+    persist_agent_terminal_state(
+        &job.manifest,
+        "completed",
+        Some(final_text.as_str()),
+        None,
+        Some(team_state::AgentTokenUsage {
+            input_tokens: summary.usage.input_tokens,
+            output_tokens: summary.usage.output_tokens,
+            cache_creation_input_tokens: summary.usage.cache_creation_input_tokens,
+            cache_read_input_tokens: summary.usage.cache_read_input_tokens,
+        }),
+    )
 }
 
 fn build_agent_runtime(
@@ -2004,7 +2383,41 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
             "PowerShell",
         ],
     };
-    tools.into_iter().map(str::to_string).collect()
+    let mut allowed = tools
+        .into_iter()
+        .map(str::to_string)
+        .collect::<BTreeSet<_>>();
+    for tool in team_state::COORDINATION_TOOLS {
+        allowed.insert((*tool).to_string());
+    }
+    allowed
+}
+
+fn allowed_tools_for_teammate(subagent_type: Option<&str>) -> BTreeSet<String> {
+    let normalized = normalize_subagent_type(subagent_type);
+    let base = allowed_tools_for_subagent(&normalized);
+    let inherited = std::env::var("ARIS_ALLOWED_TOOLS")
+        .ok()
+        .map(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .collect::<BTreeSet<_>>()
+        })
+        .filter(|tools| !tools.is_empty());
+    let mut allowed = if let Some(inherited) = inherited {
+        base.intersection(&inherited)
+            .cloned()
+            .collect::<BTreeSet<_>>()
+    } else {
+        base
+    };
+    for tool in team_state::COORDINATION_TOOLS {
+        allowed.insert((*tool).to_string());
+    }
+    allowed
 }
 
 fn agent_permission_policy() -> PermissionPolicy {
@@ -2027,6 +2440,7 @@ fn persist_agent_terminal_state(
     status: &str,
     result: Option<&str>,
     error: Option<String>,
+    usage: Option<team_state::AgentTokenUsage>,
 ) -> Result<(), String> {
     append_agent_output(
         &manifest.output_file,
@@ -2036,6 +2450,7 @@ fn persist_agent_terminal_state(
     next_manifest.status = status.to_string();
     next_manifest.completed_at = Some(iso8601_now());
     next_manifest.error = error;
+    next_manifest.usage = usage.or_else(|| manifest.usage.clone());
     write_agent_manifest(&next_manifest)
 }
 
@@ -2146,8 +2561,8 @@ impl ApiClient for AnthropicRuntimeClient {
                                 input.push_str(&partial_json);
                             }
                         }
-                        ContentBlockDelta::ThinkingDelta { .. } => {},
-                        ContentBlockDelta::SignatureDelta { .. } => {},
+                        ContentBlockDelta::ThinkingDelta { .. } => {}
+                        ContentBlockDelta::SignatureDelta { .. } => {}
                     },
                     ApiStreamEvent::ContentBlockStop(_) => {
                         if let Some((id, name, input)) = pending_tool.take() {
@@ -2167,7 +2582,12 @@ impl ApiClient for AnthropicRuntimeClient {
                         events.push(AssistantEvent::MessageStop);
                     }
                     ApiStreamEvent::Error(e) => {
-                        let msg = e.error.get("message").and_then(|v| v.as_str()).unwrap_or("stream error").to_string();
+                        let msg = e
+                            .error
+                            .get("message")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("stream error")
+                            .to_string();
                         return Err(RuntimeError::new(msg));
                     }
                 }
@@ -3355,20 +3775,61 @@ struct LlmReviewInput {
 /// env var. Returns (key_env, default_base_url, provider_tag).
 /// The provider_tag lets us compare against `ARIS_REVIEWER_PROVIDER` to detect
 /// mismatches (e.g. executor requested `gpt-5.5` but user configured `kimi`).
-fn route_openai_compat_model(model: &str) -> (&'static str, &'static str, &'static str) {
+fn route_openai_compat_model(model: &str) -> (&'static str, String, &'static str) {
     if model.contains("gemini") {
-        ("GEMINI_API_KEY", "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", "gemini")
+        (
+            "GEMINI_API_KEY",
+            "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions".to_string(),
+            "gemini",
+        )
     } else if model.contains("glm") || model.contains("GLM") {
-        ("GLM_API_KEY", "https://open.bigmodel.cn/api/paas/v4/chat/completions", "glm")
+        (
+            "GLM_API_KEY",
+            "https://open.bigmodel.cn/api/paas/v4/chat/completions".to_string(),
+            "glm",
+        )
     } else if model.starts_with("MiniMax") || model.starts_with("minimax") {
-        ("MINIMAX_API_KEY", "https://api.minimax.chat/v1/chat/completions", "minimax")
+        ("MINIMAX_API_KEY", minimax_chat_completions_url(), "minimax")
     } else if model.contains("kimi") || model.contains("moonshot") {
-        ("KIMI_API_KEY", "https://api.moonshot.cn/v1/chat/completions", "kimi")
+        (
+            "KIMI_API_KEY",
+            "https://api.moonshot.cn/v1/chat/completions".to_string(),
+            "kimi",
+        )
     } else if model.contains("deepseek") {
-        ("DEEPSEEK_API_KEY", "https://api.deepseek.com/v1/chat/completions", "deepseek")
+        (
+            "DEEPSEEK_API_KEY",
+            "https://api.deepseek.com/v1/chat/completions".to_string(),
+            "deepseek",
+        )
     } else {
         // Default: OpenAI (also covers gpt, o3, o4)
-        ("OPENAI_API_KEY", "https://api.openai.com/v1/chat/completions", "openai")
+        (
+            "OPENAI_API_KEY",
+            "https://api.openai.com/v1/chat/completions".to_string(),
+            "openai",
+        )
+    }
+}
+
+fn minimax_chat_completions_url() -> String {
+    let base = std::env::var("ARIS_MINIMAX_BASE_URL")
+        .or_else(|_| std::env::var("MINIMAX_BASE_URL"))
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "https://api.minimaxi.com/v1".to_string());
+    openai_chat_completions_url(&base)
+}
+
+fn openai_chat_completions_url(base_url: &str) -> String {
+    let trimmed = base_url.trim().trim_end_matches('/');
+    if trimmed.ends_with("/chat/completions") {
+        trimmed.to_string()
+    } else if trimmed.ends_with("/v1") {
+        format!("{trimmed}/chat/completions")
+    } else {
+        format!("{trimmed}/v1/chat/completions")
     }
 }
 
@@ -3396,10 +3857,7 @@ fn env_non_empty(name: &str) -> bool {
 /// read `ARIS_REVIEWER_PROVIDER` because `/reviewer <model>` updates the model
 /// env var but leaves the provider env var stale, which would block legitimate
 /// overrides (e.g. `/reviewer gpt-5.5` after `/setup Gemini`).
-fn resolve_reviewer_model<'a>(
-    input_model: Option<&'a str>,
-    configured_model: &'a str,
-) -> &'a str {
+fn resolve_reviewer_model<'a>(input_model: Option<&'a str>, configured_model: &'a str) -> &'a str {
     let Some(requested) = input_model.filter(|s| !s.is_empty()) else {
         return configured_model;
     };
@@ -3420,12 +3878,18 @@ fn resolve_reviewer_model<'a>(
 }
 
 fn run_llm_review(input: LlmReviewInput) -> Result<String, String> {
-    let env_reviewer_model = std::env::var("ARIS_REVIEWER_MODEL").ok().filter(|s| !s.is_empty());
+    let env_reviewer_model = std::env::var("ARIS_REVIEWER_MODEL")
+        .ok()
+        .filter(|s| !s.is_empty());
     let configured_model = env_reviewer_model.as_deref().unwrap_or("gpt-5.5");
 
     // Check for user-configured reviewer provider and base URL
-    let reviewer_provider = std::env::var("ARIS_REVIEWER_PROVIDER").ok().filter(|s| !s.is_empty());
-    let custom_base_url = std::env::var("ARIS_REVIEWER_BASE_URL").ok().filter(|s| !s.is_empty());
+    let reviewer_provider = std::env::var("ARIS_REVIEWER_PROVIDER")
+        .ok()
+        .filter(|s| !s.is_empty());
+    let custom_base_url = std::env::var("ARIS_REVIEWER_BASE_URL")
+        .ok()
+        .filter(|s| !s.is_empty());
 
     // Custom OpenAI-compatible reviewer mode. Uses ARIS_REVIEWER_AUTH_TOKEN as
     // the API key and ARIS_REVIEWER_BASE_URL for the endpoint. Routes through
@@ -3434,7 +3898,10 @@ fn run_llm_review(input: LlmReviewInput) -> Result<String, String> {
         let key = std::env::var("ARIS_REVIEWER_AUTH_TOKEN")
             .ok()
             .filter(|k| !k.is_empty())
-            .ok_or_else(|| "LlmReview: ARIS_REVIEWER_AUTH_TOKEN not set (needed for custom reviewer)".to_string())?;
+            .ok_or_else(|| {
+                "LlmReview: ARIS_REVIEWER_AUTH_TOKEN not set (needed for custom reviewer)"
+                    .to_string()
+            })?;
         // For Custom reviewer, refuse to fall back to gpt-5.5 — that would
         // silently send the user's request to the wrong model on their custom
         // proxy. Require explicit model from input or ARIS_REVIEWER_MODEL.
@@ -3474,7 +3941,10 @@ fn run_llm_review(input: LlmReviewInput) -> Result<String, String> {
             .or_else(|_| std::env::var("ANTHROPIC_AUTH_TOKEN"))
             .ok()
             .filter(|k| !k.is_empty())
-            .ok_or_else(|| "LlmReview: ARIS_REVIEWER_AUTH_TOKEN not set (needed for anthropic-compat reviewer)".to_string())?;
+            .ok_or_else(|| {
+                "LlmReview: ARIS_REVIEWER_AUTH_TOKEN not set (needed for anthropic-compat reviewer)"
+                    .to_string()
+            })?;
         let model = input
             .model
             .as_deref()
@@ -3591,8 +4061,8 @@ fn send_reviewer_request_with_retry(
                 eprintln!(
                     "\x1b[33m  LlmReview {status} (attempt {attempt}/{MAX_ATTEMPTS}), retrying in {backoff_ms}ms: {preview}\x1b[0m"
                 );
-                let deadline = std::time::Instant::now()
-                    + std::time::Duration::from_millis(backoff_ms);
+                let deadline =
+                    std::time::Instant::now() + std::time::Duration::from_millis(backoff_ms);
                 while std::time::Instant::now() < deadline {
                     if runtime::is_interrupted() {
                         runtime::clear_interrupt();
@@ -3612,8 +4082,8 @@ fn send_reviewer_request_with_retry(
                 eprintln!(
                     "\x1b[33m  LlmReview transient error (attempt {attempt}/{MAX_ATTEMPTS}), retrying in {backoff_ms}ms:\n{detail}\x1b[0m"
                 );
-                let deadline = std::time::Instant::now()
-                    + std::time::Duration::from_millis(backoff_ms);
+                let deadline =
+                    std::time::Instant::now() + std::time::Duration::from_millis(backoff_ms);
                 while std::time::Instant::now() < deadline {
                     if runtime::is_interrupted() {
                         runtime::clear_interrupt();
@@ -3740,7 +4210,10 @@ fn call_openai_compat_reviewer(
 
     // Build a fresh client per request to avoid reusing a broken connection pool.
     let response = send_reviewer_request_with_retry(|| {
-        fresh_reviewer_client().post(base_url).bearer_auth(api_key).json(&body)
+        fresh_reviewer_client()
+            .post(base_url)
+            .bearer_auth(api_key)
+            .json(&body)
     })?;
 
     let json: serde_json::Value = response
@@ -3767,6 +4240,7 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
+    use super::team_state;
     use super::{
         agent_permission_policy, allowed_tools_for_subagent, execute_agent_with_spawn,
         execute_tool, final_assistant_text, mvp_tool_specs, persist_agent_terminal_state,
@@ -3802,6 +4276,14 @@ mod tests {
         assert!(names.contains(&"TodoWrite"));
         assert!(names.contains(&"Skill"));
         assert!(names.contains(&"Agent"));
+        assert!(names.contains(&"SpawnTeammate"));
+        assert!(names.contains(&"SendMessage"));
+        assert!(names.contains(&"ClaimTask"));
+        assert!(names.contains(&"CompleteTask"));
+        assert!(names.contains(&"ListTeam"));
+        assert!(names.contains(&"AgentSupervisor"));
+        assert!(names.contains(&"Workflow"));
+        assert!(names.contains(&"EnterWorktree"));
         assert!(names.contains(&"ToolSearch"));
         assert!(names.contains(&"NotebookEdit"));
         assert!(names.contains(&"Sleep"));
@@ -4102,7 +4584,12 @@ mod tests {
         // Point HOME to temp dir so ~/.claude/skills/ resolves there
         let _guard = env_lock();
         let original_home = std::env::var("HOME").ok();
-        let claude_skills = tmp.parent().unwrap().join("claude-home").join(".claude").join("skills");
+        let claude_skills = tmp
+            .parent()
+            .unwrap()
+            .join("claude-home")
+            .join(".claude")
+            .join("skills");
         fs::create_dir_all(&claude_skills).expect("create claude skills dir");
         // Copy the skill into the claude skills dir
         let target_skill = claude_skills.join("test-skill");
@@ -4286,6 +4773,7 @@ mod tests {
                     "completed",
                     Some("Finished successfully"),
                     None,
+                    None,
                 )
             },
         )
@@ -4312,6 +4800,7 @@ mod tests {
                     "failed",
                     None,
                     Some(String::from("simulated failure")),
+                    None,
                 )
             },
         )
@@ -4362,11 +4851,13 @@ mod tests {
         assert!(general.contains("bash"));
         assert!(general.contains("write_file"));
         assert!(!general.contains("Agent"));
+        assert!(general.contains("ListTeam"));
 
         let explore = allowed_tools_for_subagent("Explore");
         assert!(explore.contains("read_file"));
         assert!(explore.contains("grep_search"));
         assert!(!explore.contains("bash"));
+        assert!(explore.contains("SendMessage"));
 
         let plan = allowed_tools_for_subagent("Plan");
         assert!(plan.contains("TodoWrite"));
@@ -4377,6 +4868,185 @@ mod tests {
         assert!(verification.contains("bash"));
         assert!(verification.contains("PowerShell"));
         assert!(!verification.contains("write_file"));
+    }
+
+    #[test]
+    fn team_state_tracks_members_tasks_mailbox_and_completion() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = temp_path("team-state");
+        std::env::set_var("ARIS_RUN_STATE_DIR", &dir);
+        std::env::set_var("ARIS_SESSION_ID", "lead-session");
+        std::env::set_var("ARIS_PERMISSION_MODE", "workspace-write");
+        std::env::set_var("ARIS_ALLOWED_TOOLS", "read_file,grep_search,ListTeam");
+
+        let prepared = team_state::prepare_teammate(&team_state::SpawnTeammateInput {
+            team_id: None,
+            team_name: Some("Ship Team".to_string()),
+            lead_session: None,
+            description: "Audit implementation".to_string(),
+            prompt: "Inspect the code and report findings.".to_string(),
+            subagent_type: Some("Explore".to_string()),
+            name: Some("audit".to_string()),
+            model: None,
+            task_id: None,
+            task_title: None,
+            dependencies: None,
+            worktree: None,
+            worktree_branch: None,
+            worktree_path: None,
+        })
+        .expect("teammate should prepare");
+
+        let snapshot = team_state::register_spawned_agent(
+            &prepared,
+            team_state::AgentRecord {
+                agent_id: "agent-1".to_string(),
+                name: "audit".to_string(),
+                description: "Audit implementation".to_string(),
+                subagent_type: Some("Explore".to_string()),
+                model: Some("claude-sonnet-4-6".to_string()),
+                status: "running".to_string(),
+                output_file: dir.join("agent-1.md").display().to_string(),
+                manifest_file: dir.join("agent-1.json").display().to_string(),
+            },
+        )
+        .expect("agent should register");
+        assert_eq!(snapshot.team.name, "Ship Team");
+        assert_eq!(snapshot.team.members.len(), 1);
+        assert_eq!(
+            snapshot.tasks[0].status,
+            team_state::TeamTaskStatus::InProgress
+        );
+
+        let message = team_state::send_message(team_state::SendMessageInput {
+            team_id: Some(prepared.team_id.clone()),
+            from: prepared.member_id.clone(),
+            to: "lead".to_string(),
+            subject: Some("status".to_string()),
+            body: "audit started".to_string(),
+            task_id: Some(prepared.task_id.clone()),
+        })
+        .expect("message should send");
+        assert_eq!(message.team_id, prepared.team_id);
+
+        let claimed = team_state::claim_task(team_state::ClaimTaskInput {
+            team_id: Some(prepared.team_id.clone()),
+            task_id: Some(prepared.task_id.clone()),
+            claimant: prepared.member_id.clone(),
+            lease_seconds: Some(30),
+        })
+        .expect("same member should renew lease");
+        assert_eq!(
+            claimed.claimed_by.as_deref(),
+            Some(prepared.member_id.as_str())
+        );
+
+        let completed = team_state::complete_task(team_state::CompleteTaskInput {
+            team_id: Some(prepared.team_id.clone()),
+            task_id: prepared.task_id.clone(),
+            actor: prepared.member_id.clone(),
+            result: "no issues".to_string(),
+            status: Some(team_state::TaskCompletionStatus::Completed),
+        })
+        .expect("task should complete");
+        assert_eq!(
+            completed.tasks[0].status,
+            team_state::TeamTaskStatus::Completed
+        );
+        assert_eq!(completed.mailbox.len(), 1);
+        let duplicate = team_state::complete_task(team_state::CompleteTaskInput {
+            team_id: Some(prepared.team_id.clone()),
+            task_id: prepared.task_id.clone(),
+            actor: "lead".to_string(),
+            result: "overwrite attempt".to_string(),
+            status: Some(team_state::TaskCompletionStatus::Completed),
+        })
+        .expect_err("terminal task result must not be overwritten");
+        assert!(
+            duplicate.contains("refusing to overwrite"),
+            "unexpected duplicate completion error: {duplicate}"
+        );
+        let snapshot = team_state::list_team(team_state::ListTeamInput {
+            team_id: Some(prepared.team_id.clone()),
+            include_messages: Some(true),
+            include_events: Some(true),
+        })
+        .expect("snapshot should load");
+        assert_eq!(snapshot.tasks[0].result.as_deref(), Some("no issues"));
+        assert_eq!(
+            snapshot.tasks[0]
+                .events
+                .iter()
+                .filter(|event| event.kind == "TaskCompleted")
+                .count(),
+            1
+        );
+
+        std::env::remove_var("ARIS_RUN_STATE_DIR");
+        std::env::remove_var("ARIS_SESSION_ID");
+        std::env::remove_var("ARIS_PERMISSION_MODE");
+        std::env::remove_var("ARIS_ALLOWED_TOOLS");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn workflow_requires_approval_and_can_complete_without_agents() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = temp_path("workflow-state");
+        std::env::set_var("ARIS_RUN_STATE_DIR", &dir);
+        std::env::set_var("ARIS_SESSION_ID", "lead-session");
+        let script = "emitPhase(\"synthesis\")\nsaveResult(\"final report\")";
+
+        let plan = execute_tool(
+            "Workflow",
+            &json!({
+                "action": "plan",
+                "script": script
+            }),
+        )
+        .expect("plan should succeed");
+        let plan_json: serde_json::Value = serde_json::from_str(&plan).expect("valid plan json");
+        assert_eq!(plan_json["plan"]["phases"][0], "synthesis");
+
+        let approval_required = execute_tool(
+            "Workflow",
+            &json!({
+                "action": "start",
+                "script": script
+            }),
+        )
+        .expect("unapproved start should persist approval-required run");
+        let approval_json: serde_json::Value =
+            serde_json::from_str(&approval_required).expect("valid approval json");
+        assert_eq!(approval_json["action"], "approval_required");
+
+        let started = execute_tool(
+            "Workflow",
+            &json!({
+                "action": "start",
+                "name": "quick-check",
+                "script": script,
+                "approval": "allow_once"
+            }),
+        )
+        .expect("approved start should succeed");
+        let started_json: serde_json::Value = serde_json::from_str(&started).expect("valid json");
+        assert_eq!(started_json["run"]["status"], "completed");
+        assert_eq!(started_json["run"]["result"], "final report");
+        assert_eq!(
+            started_json["run"]["completedCache"]
+                .as_array()
+                .map(Vec::len),
+            Some(1)
+        );
+
+        std::env::remove_var("ARIS_RUN_STATE_DIR");
+        std::env::remove_var("ARIS_SESSION_ID");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[derive(Debug)]
@@ -5148,6 +5818,8 @@ printf 'pwsh:%s' "$1"
         "GEMINI_API_KEY",
         "GLM_API_KEY",
         "MINIMAX_API_KEY",
+        "ARIS_MINIMAX_BASE_URL",
+        "MINIMAX_BASE_URL",
         "KIMI_API_KEY",
     ];
 
@@ -5181,14 +5853,38 @@ printf 'pwsh:%s' "$1"
 
     #[test]
     fn route_openai_compat_model_picks_provider_from_name() {
+        let _g = env_lock_reviewer().lock().unwrap();
+        let _snap = ReviewerEnvSnapshot::capture_and_clear();
+
         assert_eq!(route_openai_compat_model("gpt-5.5").0, "OPENAI_API_KEY");
-        assert_eq!(route_openai_compat_model("gemini-2.5-pro").0, "GEMINI_API_KEY");
+        assert_eq!(
+            route_openai_compat_model("gemini-2.5-pro").0,
+            "GEMINI_API_KEY"
+        );
         assert_eq!(route_openai_compat_model("GLM-5").0, "GLM_API_KEY");
-        assert_eq!(route_openai_compat_model("MiniMax-M2.7").0, "MINIMAX_API_KEY");
+        assert_eq!(
+            route_openai_compat_model("MiniMax-M2.7").0,
+            "MINIMAX_API_KEY"
+        );
+        assert_eq!(
+            route_openai_compat_model("MiniMax-M2.7").1,
+            "https://api.minimaxi.com/v1/chat/completions"
+        );
+        std::env::set_var(
+            "ARIS_MINIMAX_BASE_URL",
+            "https://minimax-proxy.example.com/openai",
+        );
+        assert_eq!(
+            route_openai_compat_model("MiniMax-M2.7").1,
+            "https://minimax-proxy.example.com/openai/v1/chat/completions"
+        );
         assert_eq!(route_openai_compat_model("kimi-k2.5").0, "KIMI_API_KEY");
         assert_eq!(route_openai_compat_model("moonshot-v1").0, "KIMI_API_KEY");
         // DeepSeek models route to their own API key.
-        assert_eq!(route_openai_compat_model("deepseek-chat").0, "DEEPSEEK_API_KEY");
+        assert_eq!(
+            route_openai_compat_model("deepseek-chat").0,
+            "DEEPSEEK_API_KEY"
+        );
     }
 
     #[test]

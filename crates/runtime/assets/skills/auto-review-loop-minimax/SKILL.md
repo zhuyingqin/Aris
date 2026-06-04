@@ -39,7 +39,8 @@ mcp__minimax-chat__minimax_chat:
 If MCP is not available, use curl directly:
 
 ```bash
-curl -s "https://api.minimax.io/v1/chat/completions" \
+MINIMAX_BASE_URL="${MINIMAX_BASE_URL:-https://api.minimaxi.com/v1}"
+curl -s "${MINIMAX_BASE_URL%/}/chat/completions" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $MINIMAX_API_KEY" \
   -d '{
@@ -53,6 +54,7 @@ curl -s "https://api.minimax.io/v1/chat/completions" \
 ```
 
 **API Key**: Read from `~/.claude/settings.json` under `env.MINIMAX_API_KEY`, or from environment variable.
+**Base URL**: Override with `MINIMAX_BASE_URL` when using another MiniMax region or proxy.
 
 **Why MiniMax instead of Codex MCP?** Codex CLI uses OpenAI's Responses API (`/v1/responses`) which is not supported by third-party providers. See: https://github.com/openai/codex/discussions/7782
 
@@ -113,7 +115,8 @@ Use mcp__minimax-chat__minimax_chat tool with:
 
 **If MCP NOT available (Fallback):**
 ```bash
-curl -s "https://api.minimax.io/v1/chat/completions" \
+MINIMAX_BASE_URL="${MINIMAX_BASE_URL:-https://api.minimaxi.com/v1}"
+curl -s "${MINIMAX_BASE_URL%/}/chat/completions" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $MINIMAX_API_KEY" \
   -d '{
@@ -265,7 +268,8 @@ mcp__minimax-chat__minimax_chat:
 
 **curl Fallback:**
 ```bash
-curl -s "https://api.minimax.io/v1/chat/completions" \
+MINIMAX_BASE_URL="${MINIMAX_BASE_URL:-https://api.minimaxi.com/v1}"
+curl -s "${MINIMAX_BASE_URL%/}/chat/completions" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $MINIMAX_API_KEY" \
   -d '{

@@ -78,6 +78,7 @@ impl Spinner {
         out.flush()
     }
 
+    #[allow(dead_code)]
     pub fn finish(
         &mut self,
         label: &str,
@@ -93,6 +94,17 @@ impl Spinner {
             Print(format!("✔ {label}\n")),
             ResetColor
         )?;
+        out.flush()
+    }
+
+    pub fn finish_after_stream(
+        &mut self,
+        label: &str,
+        _theme: &ColorTheme,
+        out: &mut impl Write,
+    ) -> io::Result<()> {
+        self.frame_index = 0;
+        writeln!(out, "\n{label}")?;
         out.flush()
     }
 

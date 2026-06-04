@@ -197,8 +197,22 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
     },
     SlashCommandSpec {
         name: "session",
-        summary: "List or switch managed local sessions",
-        argument_hint: Some("[list|switch <session-id>]"),
+        summary: "List, switch, or inspect managed local sessions",
+        argument_hint: Some("[list|switch <session-id>|timeline [session-id]]"),
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "team",
+        summary: "Inspect Agent Team members, tasks, mailbox, and events",
+        argument_hint: Some("[list|events|messages|supervisor] [team-id]"),
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "workflows",
+        summary: "List, inspect, control, save, discover, or start dynamic workflows",
+        argument_hint: Some(
+            "[list|inspect|pause|resume|stop|restart|save|discover|start|allow-once|always|deny|inject]",
+        ),
         resume_supported: false,
     },
     SlashCommandSpec {
@@ -258,6 +272,14 @@ pub enum SlashCommand {
         path: Option<String>,
     },
     Session {
+        action: Option<String>,
+        target: Option<String>,
+    },
+    Team {
+        action: Option<String>,
+        target: Option<String>,
+    },
+    Workflows {
         action: Option<String>,
         target: Option<String>,
     },
@@ -351,6 +373,14 @@ impl SlashCommand {
                 path: parts.next().map(ToOwned::to_owned),
             },
             "session" => Self::Session {
+                action: parts.next().map(ToOwned::to_owned),
+                target: parts.next().map(ToOwned::to_owned),
+            },
+            "team" => Self::Team {
+                action: parts.next().map(ToOwned::to_owned),
+                target: parts.next().map(ToOwned::to_owned),
+            },
+            "workflows" => Self::Workflows {
                 action: parts.next().map(ToOwned::to_owned),
                 target: parts.next().map(ToOwned::to_owned),
             },
@@ -466,6 +496,8 @@ pub fn handle_slash_command(
         | SlashCommand::Version
         | SlashCommand::Export { .. }
         | SlashCommand::Session { .. }
+        | SlashCommand::Team { .. }
+        | SlashCommand::Workflows { .. }
         | SlashCommand::MetaOptimize { .. }
         | SlashCommand::Unknown { .. } => None,
     }
@@ -576,6 +608,20 @@ mod tests {
                 target: Some("abc123".to_string())
             })
         );
+        assert_eq!(
+            SlashCommand::parse("/team events team-1"),
+            Some(SlashCommand::Team {
+                action: Some("events".to_string()),
+                target: Some("team-1".to_string())
+            })
+        );
+        assert_eq!(
+            SlashCommand::parse("/workflows inspect workflow-1"),
+            Some(SlashCommand::Workflows {
+                action: Some("inspect".to_string()),
+                target: Some("workflow-1".to_string())
+            })
+        );
     }
 
     #[test]
@@ -604,8 +650,12 @@ mod tests {
         assert!(help.contains("/diff"));
         assert!(help.contains("/version"));
         assert!(help.contains("/export [file]"));
-        assert!(help.contains("/session [list|switch <session-id>]"));
-        assert_eq!(slash_command_specs().len(), 28);
+        assert!(help.contains("/session [list|switch <session-id>|timeline [session-id]]"));
+        assert!(help.contains("/team [list|events|messages|supervisor] [team-id]"));
+        assert!(help.contains(
+            "/workflows [list|inspect|pause|resume|stop|restart|save|discover|start|allow-once|always|deny|inject]"
+        ));
+        assert_eq!(slash_command_specs().len(), 30);
         assert_eq!(resume_supported_slash_commands().len(), 11);
     }
 

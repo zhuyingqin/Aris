@@ -6,6 +6,7 @@ mod meta_optimize;
 mod openai_compat;
 mod openai_executor;
 mod render;
+mod timeline;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
@@ -26,6 +27,11 @@ use commands::{
     render_slash_command_help, resume_supported_slash_commands, slash_command_specs, SlashCommand,
 };
 use compat_harness::{extract_manifest, UpstreamPaths};
+use crossterm::{
+    cursor::MoveToColumn,
+    execute,
+    terminal::{Clear, ClearType},
+};
 use init::initialize_repo;
 use render::{MarkdownStreamState, Spinner, TerminalRenderer};
 use runtime::{
@@ -1014,7 +1020,11 @@ fn run_resume_command(
             let removed = result.removed_message_count;
             let kept = result.compacted_session.messages.len();
             let skipped = removed == 0;
-            result.compacted_session.save_to_path(session_path)?;
+            save_session_artifacts(
+                &session_id_from_path(session_path),
+                session_path,
+                &result.compacted_session,
+            )?;
             Ok(ResumeCommandOutcome {
                 session: result.compacted_session,
                 message: Some(format_compact_report(removed, kept, skipped)),
@@ -1030,7 +1040,7 @@ fn run_resume_command(
                 });
             }
             let cleared = Session::new();
-            cleared.save_to_path(session_path)?;
+            save_session_artifacts(&session_id_from_path(session_path), session_path, &cleared)?;
             Ok(ResumeCommandOutcome {
                 session: cleared,
                 message: Some(format!(
@@ -1113,6 +1123,8 @@ fn run_resume_command(
         | SlashCommand::Skills { .. }
         | SlashCommand::Permissions { .. }
         | SlashCommand::Session { .. }
+        | SlashCommand::Team { .. }
+        | SlashCommand::Workflows { .. }
         | SlashCommand::MetaOptimize { .. }
         | SlashCommand::Unknown { .. } => Err("unsupported resumed slash command".into()),
     }
@@ -1238,6 +1250,7 @@ impl LiveCli {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let system_prompt = build_system_prompt(Some(&model))?;
         let session = create_managed_session_handle()?;
+        set_coordination_context_env(&session.id, allowed_tools.as_ref(), permission_mode);
         let runtime = build_runtime(
             Session::new(),
             model.clone(),
@@ -1489,11 +1502,16 @@ impl LiveCli {
             TerminalRenderer::new().color_theme(),
             &mut stdout,
         )?;
+        // Clear the spinner row before streaming starts. The spinner and
+        // model output share the same terminal row; clearing at finish time
+        // erases short one-line answers.
+        execute!(stdout, MoveToColumn(0), Clear(ClearType::CurrentLine))?;
+        stdout.flush()?;
         let mut permission_prompter = CliPermissionPrompter::new(self.permission_mode);
         let result = self.runtime.run_turn(input, Some(&mut permission_prompter));
         match result {
             Ok(summary) => {
-                spinner.finish(
+                spinner.finish_after_stream(
                     "\x1b[38;5;74m●\x1b[0m \x1b[2mDone\x1b[0m",
                     TerminalRenderer::new().color_theme(),
                     &mut stdout,
@@ -1659,6 +1677,13 @@ impl LiveCli {
             SlashCommand::Session { action, target } => {
                 self.handle_session_command(action.as_deref(), target.as_deref())?
             }
+            SlashCommand::Team { action, target } => {
+                self.handle_team_command(action.as_deref(), target.as_deref())?;
+                false
+            }
+            SlashCommand::Workflows { action, target } => {
+                self.handle_workflows_command(action.as_deref(), target.as_deref())?
+            }
             SlashCommand::MetaOptimize { action, target } => {
                 self.handle_meta_optimize(action.as_deref(), target.as_deref())?;
                 false
@@ -1687,7 +1712,7 @@ impl LiveCli {
     }
 
     fn persist_session(&self) -> Result<(), Box<dyn std::error::Error>> {
-        self.runtime.session().save_to_path(&self.session.path)?;
+        save_session_artifacts(&self.session.id, &self.session.path, self.runtime.session())?;
         Ok(())
     }
 
@@ -2233,6 +2258,11 @@ impl LiveCli {
         let previous = self.permission_mode.as_str().to_string();
         let session = self.runtime.session().clone();
         self.permission_mode = permission_mode_from_label(normalized);
+        set_coordination_context_env(
+            &self.session.id,
+            self.allowed_tools.as_ref(),
+            self.permission_mode,
+        );
         self.runtime = build_runtime(
             session,
             self.model.clone(),
@@ -2258,6 +2288,11 @@ impl LiveCli {
         }
 
         self.session = create_managed_session_handle()?;
+        set_coordination_context_env(
+            &self.session.id,
+            self.allowed_tools.as_ref(),
+            self.permission_mode,
+        );
         self.runtime = build_runtime(
             Session::new(),
             self.model.clone(),
@@ -2293,6 +2328,11 @@ impl LiveCli {
         let handle = resolve_session_reference(&session_ref)?;
         let session = Session::load_from_path(&handle.path)?;
         let message_count = session.messages.len();
+        set_coordination_context_env(
+            &handle.id,
+            self.allowed_tools.as_ref(),
+            self.permission_mode,
+        );
         self.runtime = build_runtime(
             session,
             self.model.clone(),
@@ -2365,6 +2405,11 @@ impl LiveCli {
                 let handle = resolve_session_reference(target)?;
                 let session = Session::load_from_path(&handle.path)?;
                 let message_count = session.messages.len();
+                set_coordination_context_env(
+                    &handle.id,
+                    self.allowed_tools.as_ref(),
+                    self.permission_mode,
+                );
                 self.runtime = build_runtime(
                     session,
                     self.model.clone(),
@@ -2383,11 +2428,204 @@ impl LiveCli {
                 );
                 Ok(true)
             }
+            Some("timeline") => {
+                let (handle, session) = if let Some(target) = target {
+                    let handle = resolve_session_reference(target)?;
+                    let session = Session::load_from_path(&handle.path)?;
+                    (handle, session)
+                } else {
+                    (self.session.clone(), self.runtime.session().clone())
+                };
+                println!(
+                    "{}",
+                    timeline::render_timeline_report(&handle.id, &handle.path, &session, 24)?
+                );
+                Ok(false)
+            }
             Some(other) => {
-                println!("Unknown /session action '{other}'. Use /session list or /session switch <session-id>.");
+                println!(
+                    "Unknown /session action '{other}'. Use /session list, /session switch <session-id>, or /session timeline [session-id]."
+                );
                 Ok(false)
             }
         }
+    }
+
+    fn handle_team_command(
+        &self,
+        action: Option<&str>,
+        target: Option<&str>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let output = match action {
+            None | Some("list") => {
+                execute_tool_for_cli("ListTeam", &team_tool_input(target, false, false))?
+            }
+            Some("messages") => {
+                execute_tool_for_cli("ListTeam", &team_tool_input(target, true, false))?
+            }
+            Some("events") => {
+                execute_tool_for_cli("ListTeam", &team_tool_input(target, true, true))?
+            }
+            Some("supervisor") => {
+                let mut input = json!({ "action": "list" });
+                if let Some(team_id) = target {
+                    input["teamId"] = json!(team_id);
+                }
+                execute_tool_for_cli("AgentSupervisor", &input)?
+            }
+            Some(other) => {
+                println!(
+                    "Unknown /team action '{other}'. Use /team list, /team messages, /team events, or /team supervisor."
+                );
+                return Ok(());
+            }
+        };
+        println!("{output}");
+        Ok(())
+    }
+
+    fn handle_workflows_command(
+        &mut self,
+        action: Option<&str>,
+        target: Option<&str>,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
+        let action = action.unwrap_or("list");
+        match action {
+            "list" => {
+                println!(
+                    "{}",
+                    execute_tool_for_cli("Workflow", &json!({ "action": "list" }))?
+                );
+                Ok(false)
+            }
+            "discover" => {
+                println!(
+                    "{}",
+                    execute_tool_for_cli("Workflow", &json!({ "action": "discover" }))?
+                );
+                Ok(false)
+            }
+            "start" => {
+                let Some(target) = target else {
+                    println!("Usage: /workflows start <saved-name-or-script-path>");
+                    return Ok(false);
+                };
+                let input = workflow_start_input("plan", target, None);
+                println!("{}", execute_tool_for_cli("Workflow", &input)?);
+                Ok(false)
+            }
+            "allow-once" | "always" => {
+                let Some(target) = target else {
+                    println!("Usage: /workflows {action} <saved-name-or-script-path>");
+                    return Ok(false);
+                };
+                let approval = if action == "allow-once" {
+                    "allow_once"
+                } else {
+                    "always"
+                };
+                let input = workflow_start_input("start", target, Some(approval));
+                println!("{}", execute_tool_for_cli("Workflow", &input)?);
+                Ok(false)
+            }
+            "deny" => {
+                println!("Workflow approval denied.");
+                Ok(false)
+            }
+            "inspect" | "pause" | "resume" | "stop" | "restart" => {
+                let Some(run_id) = target else {
+                    println!("Usage: /workflows {action} <run-id>");
+                    return Ok(false);
+                };
+                let tool_action = if action == "restart" {
+                    "restart"
+                } else {
+                    action
+                };
+                println!(
+                    "{}",
+                    execute_tool_for_cli(
+                        "Workflow",
+                        &json!({
+                            "action": tool_action,
+                            "runId": run_id,
+                            "approval": "allow_once"
+                        }),
+                    )?
+                );
+                Ok(false)
+            }
+            "inject" => {
+                let Some(run_id) = target else {
+                    println!("Usage: /workflows inject <run-id>");
+                    return Ok(false);
+                };
+                self.inject_workflow_result(run_id)
+            }
+            "save" => {
+                let Some(script_path) = target else {
+                    println!("Usage: /workflows save <script-path>");
+                    return Ok(false);
+                };
+                let save_as = Path::new(script_path)
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .unwrap_or("workflow");
+                println!(
+                    "{}",
+                    execute_tool_for_cli(
+                        "Workflow",
+                        &json!({
+                            "action": "save",
+                            "scriptPath": script_path,
+                            "saveAs": save_as,
+                        }),
+                    )?
+                );
+                Ok(false)
+            }
+            other => {
+                println!(
+                    "Unknown /workflows action '{other}'. Use list, discover, start, allow-once, always, inspect, pause, resume, stop, restart, save, or inject."
+                );
+                Ok(false)
+            }
+        }
+    }
+
+    fn inject_workflow_result(&mut self, run_id: &str) -> Result<bool, Box<dyn std::error::Error>> {
+        let output =
+            execute_tool_for_cli("Workflow", &json!({ "action": "inspect", "runId": run_id }))?;
+        let value: serde_json::Value = serde_json::from_str(&output)?;
+        let result = value
+            .get("run")
+            .and_then(|run| run.get("result"))
+            .and_then(|result| result.as_str())
+            .filter(|result| !result.trim().is_empty())
+            .ok_or_else(|| format!("workflow {run_id} has no completed result to inject"))?;
+        let text =
+            format!("# Workflow Result\n\nRun `{run_id}` completed in the background.\n\n{result}");
+        let mut session = self.runtime.session().clone();
+        session
+            .messages
+            .push(ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: text.clone(),
+            }]));
+        self.runtime = build_runtime(
+            session,
+            self.model.clone(),
+            self.system_prompt.clone(),
+            true,
+            true,
+            self.allowed_tools.clone(),
+            self.permission_mode,
+        )?;
+        self.persist_session()?;
+        println!(
+            "Workflow\n  Result           injected\n  Run              {run_id}\n  Session          {}",
+            self.session.id
+        );
+        Ok(true)
     }
 
     fn handle_plan_mode(&mut self, task: Option<&str>) -> Result<bool, Box<dyn std::error::Error>> {
@@ -2762,6 +3000,16 @@ fn sessions_dir() -> Result<PathBuf, Box<dyn std::error::Error>> {
     Ok(path)
 }
 
+fn save_session_artifacts(
+    session_id: &str,
+    session_path: &Path,
+    session: &Session,
+) -> Result<(), Box<dyn std::error::Error>> {
+    session.save_to_path(session_path)?;
+    timeline::save_timeline_for_session(session_id, session, session_path)?;
+    Ok(())
+}
+
 fn create_managed_session_handle() -> Result<SessionHandle, Box<dyn std::error::Error>> {
     let id = generate_session_id();
     let path = sessions_dir()?.join(format!("{id}.json"));
@@ -2794,12 +3042,28 @@ fn resolve_session_reference(reference: &str) -> Result<SessionHandle, Box<dyn s
     Ok(SessionHandle { id, path })
 }
 
+fn session_id_from_path(path: &Path) -> String {
+    path.file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("session")
+        .trim_end_matches(".timeline")
+        .to_string()
+}
+
+fn is_timeline_artifact_path(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|value| value.to_str())
+        .is_some_and(|name| name.ends_with(".timeline.json"))
+}
+
 fn list_managed_sessions() -> Result<Vec<ManagedSessionSummary>, Box<dyn std::error::Error>> {
     let mut sessions = Vec::new();
     for entry in fs::read_dir(sessions_dir()?)? {
         let entry = entry?;
         let path = entry.path();
-        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json")
+            || is_timeline_artifact_path(&path)
+        {
             continue;
         }
         let metadata = entry.metadata()?;
@@ -3130,7 +3394,10 @@ fn deploy_meta_opt_hooks() -> Result<String, Box<dyn std::error::Error>> {
 /// and safe to overwrite on every `aris init` since only we put them there.
 const META_OPT_HOOK_SCRIPTS: &[(&str, &str)] = &[
     ("tools/meta_opt/log_event.sh", "aris-meta-opt-log-event.sh"),
-    ("tools/meta_opt/check_ready.sh", "aris-meta-opt-check-ready.sh"),
+    (
+        "tools/meta_opt/check_ready.sh",
+        "aris-meta-opt-check-ready.sh",
+    ),
 ];
 
 /// Pure-fn variant of [`deploy_meta_opt_hooks`] that takes explicit `home` +
@@ -3878,6 +4145,20 @@ fn build_system_prompt(model_id: Option<&str>) -> Result<Vec<String>, Box<dyn st
         );
     }
 
+    prompt.push(
+        "# Agent Team and Dynamic Workflow Coordination\n\
+         For broad work that benefits from parallel investigation or implementation, use the \
+         Agent Team tools instead of only a single background Agent: SpawnTeammate, SendMessage, \
+         ClaimTask, CompleteTask, ListTeam, and AgentSupervisor. Team tasks have dependencies, \
+         leases, results, and mailbox messages; dependent tasks become available after their \
+         prerequisites complete.\n\n\
+         For multi-phase high-effort work, first call Workflow with action=plan to show the phase \
+         plan and raw sandboxed orchestration script. Start only after approval with \
+         action=start and approval=allow_once or approval=always. Workflow scripts may only \
+         coordinate agents through emitPhase, spawnAgent, waitAll, and saveResult."
+            .to_string(),
+    );
+
     Ok(prompt)
 }
 
@@ -3897,6 +4178,24 @@ fn init_aris_tasks_env() {
             aris_tasks_path().to_string_lossy().as_ref(),
         );
     }
+}
+
+fn set_coordination_context_env(
+    session_id: &str,
+    allowed_tools: Option<&AllowedToolSet>,
+    permission_mode: PermissionMode,
+) {
+    env::set_var("ARIS_SESSION_ID", session_id);
+    env::set_var("ARIS_PERMISSION_MODE", permission_mode.as_str());
+    let tools = allowed_tools
+        .map(|tools| tools.iter().cloned().collect::<Vec<_>>())
+        .unwrap_or_else(|| {
+            mvp_tool_specs()
+                .into_iter()
+                .map(|spec| spec.name.to_string())
+                .collect()
+        });
+    env::set_var("ARIS_ALLOWED_TOOLS", tools.join(","));
 }
 
 fn build_runtime_feature_config(
@@ -4387,7 +4686,87 @@ fn slash_command_completion_candidates() -> Vec<(String, String)> {
     skill_candidates.sort_by(|a, b| a.0.cmp(&b.0));
     candidates.extend(skill_candidates);
 
+    let mut workflow_candidates = discover_saved_workflow_names()
+        .into_iter()
+        .filter_map(|name| {
+            let candidate = format!("/workflows start {name}");
+            if seen.contains(&candidate) {
+                return None;
+            }
+            seen.insert(candidate.clone());
+            Some((candidate, "Start saved dynamic workflow".to_string()))
+        })
+        .collect::<Vec<_>>();
+    workflow_candidates.sort_by(|a, b| a.0.cmp(&b.0));
+    candidates.extend(workflow_candidates);
+
     candidates
+}
+
+fn discover_saved_workflow_names() -> Vec<String> {
+    let mut names = BTreeSet::new();
+    if let Ok(cwd) = env::current_dir() {
+        collect_workflow_names(&cwd.join(".claude").join("workflows"), &mut names);
+    }
+    collect_workflow_names(
+        &PathBuf::from(runtime::home_dir())
+            .join(".claude")
+            .join("workflows"),
+        &mut names,
+    );
+    names.into_iter().collect()
+}
+
+fn collect_workflow_names(dir: &Path, names: &mut BTreeSet<String>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("js") {
+            continue;
+        }
+        if let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) {
+            names.insert(stem.to_string());
+        }
+    }
+}
+
+fn execute_tool_for_cli(
+    tool_name: &str,
+    input: &serde_json::Value,
+) -> Result<String, Box<dyn std::error::Error>> {
+    execute_tool(tool_name, input).map_err(|error| {
+        Box::new(io::Error::new(io::ErrorKind::Other, error)) as Box<dyn std::error::Error>
+    })
+}
+
+fn team_tool_input(
+    team_id: Option<&str>,
+    include_messages: bool,
+    include_events: bool,
+) -> serde_json::Value {
+    let mut input = json!({
+        "includeMessages": include_messages,
+        "includeEvents": include_events,
+    });
+    if let Some(team_id) = team_id {
+        input["teamId"] = json!(team_id);
+    }
+    input
+}
+
+fn workflow_start_input(action: &str, target: &str, approval: Option<&str>) -> serde_json::Value {
+    let mut input = json!({ "action": action });
+    if Path::new(target).exists() {
+        input["scriptPath"] = json!(target);
+    } else {
+        input["name"] = json!(target);
+    }
+    if let Some(approval) = approval {
+        input["approval"] = json!(approval);
+    }
+    input
 }
 
 /// Extract the `description:` field from a SKILL.md YAML frontmatter.
@@ -5652,7 +6031,7 @@ mod tests {
         assert!(help.contains("/diff"));
         assert!(help.contains("/version"));
         assert!(help.contains("/export [file]"));
-        assert!(help.contains("/session [list|switch <session-id>]"));
+        assert!(help.contains("/session [list|switch <session-id>|timeline [session-id]]"));
         assert!(help.contains("/exit"));
     }
 
@@ -6107,8 +6486,8 @@ mod tests {
         let home = root.join("home");
         std::fs::create_dir_all(&home).expect("create home");
 
-        let report = deploy_meta_opt_hooks_to(&home, &cache_dir)
-            .expect("first deploy should succeed");
+        let report =
+            deploy_meta_opt_hooks_to(&home, &cache_dir).expect("first deploy should succeed");
         assert!(
             report.contains("Meta-Optimize hooks deployed"),
             "report missing header: {report}"
@@ -6119,8 +6498,14 @@ mod tests {
         // v0.4.13 codex round-1 #1: ARIS-namespaced destination names
         let log_event = hooks_dir.join("aris-meta-opt-log-event.sh");
         let check_ready = hooks_dir.join("aris-meta-opt-check-ready.sh");
-        assert!(log_event.is_file(), "aris-meta-opt-log-event.sh should exist");
-        assert!(check_ready.is_file(), "aris-meta-opt-check-ready.sh should exist");
+        assert!(
+            log_event.is_file(),
+            "aris-meta-opt-log-event.sh should exist"
+        );
+        assert!(
+            check_ready.is_file(),
+            "aris-meta-opt-check-ready.sh should exist"
+        );
 
         let log_event_body =
             std::fs::read_to_string(&log_event).expect("read aris-meta-opt-log-event.sh");

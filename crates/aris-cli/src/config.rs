@@ -11,6 +11,16 @@ use serde::{Deserialize, Serialize};
 
 const CONFIG_DIR: &str = ".config/aris";
 const CONFIG_FILE: &str = "config.json";
+const DEFAULT_MINIMAX_BASE_URL: &str = "https://api.minimaxi.com/v1";
+
+fn default_minimax_base_url() -> String {
+    std::env::var("ARIS_MINIMAX_BASE_URL")
+        .or_else(|_| std::env::var("MINIMAX_BASE_URL"))
+        .ok()
+        .map(|value| value.trim().trim_end_matches('/').to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| DEFAULT_MINIMAX_BASE_URL.to_string())
+}
 
 /// Controls which env vars `apply_to_env_inner` is allowed to overwrite.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -339,68 +349,68 @@ pub fn run_interactive_setup() -> io::Result<ArisConfig> {
     let switched_executor = exec_choice != default_executor;
 
     // (provider, key_env, key_label, base_url, default_model)
-    let exec_info: (&str, &str, &str, Option<&str>, &str) = match exec_choice {
+    let exec_info: (&str, &str, &str, Option<String>, &str) = match exec_choice {
         "2" => (
             "openai",
             "EXECUTOR_API_KEY",
             "OpenAI API key",
-            Some("https://api.openai.com/v1"),
+            Some("https://api.openai.com/v1".to_string()),
             "gpt-5.5",
         ),
         "3" => (
             "openai",
             "EXECUTOR_API_KEY",
             "Gemini API key",
-            Some("https://generativelanguage.googleapis.com/v1beta/openai"),
+            Some("https://generativelanguage.googleapis.com/v1beta/openai".to_string()),
             "gemini-2.5-pro",
         ),
         "4" => (
             "openai",
             "EXECUTOR_API_KEY",
             "GLM API key",
-            Some("https://open.bigmodel.cn/api/paas/v4"),
+            Some("https://open.bigmodel.cn/api/paas/v4".to_string()),
             "GLM-5",
         ),
         "5" => (
             "openai",
             "EXECUTOR_API_KEY",
             "MiniMax API key",
-            Some("https://api.minimax.chat/v1"),
+            Some(default_minimax_base_url()),
             "MiniMax-M2.7",
         ),
         "6" => (
             "openai",
             "EXECUTOR_API_KEY",
             "Kimi API key",
-            Some("https://api.moonshot.cn/v1"),
+            Some("https://api.moonshot.cn/v1".to_string()),
             "kimi-k2.5",
         ),
         "7" => (
             "anthropic-compat",
             "ANTHROPIC_AUTH_TOKEN",
             "DeepSeek API key",
-            Some("https://api.deepseek.com/anthropic"),
+            Some("https://api.deepseek.com/anthropic".to_string()),
             "deepseek-v4-pro",
         ),
         "8" => (
             "openai",
             "EXECUTOR_API_KEY",
             "Xiaomi API key",
-            Some("https://token-plan-cn.xiaomimimo.com/v1"),
+            Some("https://token-plan-cn.xiaomimimo.com/v1".to_string()),
             "mimo-v2.5-pro",
         ),
         "9" => (
             "openai",
             "EXECUTOR_API_KEY",
             "Qwen (DashScope) API key",
-            Some("https://dashscope.aliyuncs.com/compatible-mode/v1"),
+            Some("https://dashscope.aliyuncs.com/compatible-mode/v1".to_string()),
             "qwen3.6-plus",
         ),
         "10" => (
             "openai",
             "EXECUTOR_API_KEY",
             "Doubao (Ark) API key",
-            Some("https://ark.cn-beijing.volces.com/api/v3"),
+            Some("https://ark.cn-beijing.volces.com/api/v3".to_string()),
             "doubao-pro-4k",
         ),
         "11" => ("custom", "EXECUTOR_API_KEY", "API key", None, ""),
@@ -435,8 +445,8 @@ pub fn run_interactive_setup() -> io::Result<ArisConfig> {
     // proxy). Previously we always overwrote the URL to the provider's built-in
     // default, which silently wiped custom URLs between setup runs.
     if switched_executor {
-        if let Some(url) = exec_info.3 {
-            config.executor_base_url = Some(url.into());
+        if let Some(url) = &exec_info.3 {
+            config.executor_base_url = Some(url.clone());
         } else {
             config.executor_base_url = None;
         }
