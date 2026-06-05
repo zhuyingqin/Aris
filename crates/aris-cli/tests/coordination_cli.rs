@@ -213,13 +213,26 @@ fn cli_runs_team_coordination_tools_and_persists_shared_state() {
 #[test]
 fn cli_rejects_team_spawn_without_design_contract() {
     let case = TestCase::new("team-contract-required");
+    // All teammate-design fields are valid; teamDesign (team-level contract) is
+    // intentionally omitted so the validation fails specifically on that check.
     let spawn_args = json!({
         "teamId": "team-missing-design",
         "teamName": "Missing Design Team",
         "description": "Write the paper",
         "prompt": "Write the whole paper with other agents.",
         "subagentType": "Write",
-        "name": "writer"
+        "name": "writer",
+        "role": "paper-writer",
+        "responsibility": "Draft the full paper from supplied evidence and outline notes.",
+        "contextScope": "Use only the supplied paper plan and evidence notes from run-state.",
+        "deliverable": "A complete paper draft saved to the run-state directory.",
+        "successCriteria": [
+            "The draft covers all required sections and cites the supplied evidence.",
+            "The output file is persisted and readable by the lead session."
+        ],
+        "stopCondition": "Stop after the paper draft artifact is complete and handed back.",
+        "taskId": "task-write-paper",
+        "taskTitle": "Draft the full paper"
     });
     let server = FakeOpenAiServer::start(vec![
         sse_tool_call("call_spawn", "SpawnTeammate", &spawn_args),
