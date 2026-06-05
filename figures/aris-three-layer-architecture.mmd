@@ -1,0 +1,73 @@
+%%{init: {"theme": "base", "themeVariables": {"background": "#ffffff", "primaryFontFamily": "Arial"}}}%%
+flowchart TB
+  classDef ui fill:#eef6ff,stroke:#2563eb,stroke-width:1px,color:#102a43
+  classDef team fill:#f4fbf7,stroke:#16a34a,stroke-width:1px,color:#102a43
+  classDef exec fill:#fff7ed,stroke:#ea580c,stroke-width:1px,color:#102a43
+  classDef data fill:#f8fafc,stroke:#64748b,stroke-width:1px,color:#102a43
+  classDef warn fill:#fff1f2,stroke:#e11d48,stroke-width:1px,color:#102a43
+
+  subgraph L3["UI / CLI call layer"]
+    direction LR
+    React["React views<br/>TeamView, Chat, Settings"]
+    TauriCmd["Tauri commands<br/>desktop/src-tauri/src/commands.rs"]
+    DesktopChat["Desktop chat command<br/>desktop/src-tauri/src/engine.rs"]
+    CLI["aris CLI / REPL<br/>crates/aris-cli/src/main.rs"]
+  end
+
+  subgraph L2["Team state-machine layer"]
+    direction LR
+    ToolFacade["Tool facade<br/>tools::execute_tool"]
+    TeamSM["Team state machine<br/>Spawn, Claim, Complete, Wait, Verify"]
+    WorkflowSM["Workflow state machine<br/>Plan, Start, Pause, Resume, Stop"]
+    ReviewerGate["Verification gate<br/>VerifyDeliverable / LlmReview"]
+    StateStore["Run-state files<br/>teams, tasks, mailbox, events, manifests"]
+  end
+
+  subgraph L1["Unified executor layer"]
+    direction LR
+    Runtime["ConversationRuntime<br/>session loop, permissions, compaction"]
+    SharedExec["Shared executor boundary<br/>provider config, retries, streaming, cancel, usage"]
+    Dup["Current duplication to collapse<br/>CLI openai_executor.rs + desktop engine.rs"]
+    AnthropicExec["Anthropic executor<br/>Messages API / SSE"]
+    OpenAIExec["OpenAI-compatible executor<br/>chat completions / SSE"]
+    ApiCrate["api crate<br/>HTTP, auth, SSE types"]
+  end
+
+  subgraph External["External systems"]
+    direction LR
+    LLMs["LLM providers<br/>Anthropic, OpenAI, Gemini, Kimi, MiniMax, custom proxies"]
+    Filesystem["Workspace + ARIS state dir"]
+  end
+
+  React --> TauriCmd
+  React --> DesktopChat
+  TauriCmd --> ToolFacade
+  CLI --> ToolFacade
+  CLI --> Runtime
+  DesktopChat --> Runtime
+
+  Runtime --> SharedExec
+  Runtime --> ToolFacade
+  ToolFacade --> TeamSM
+  ToolFacade --> WorkflowSM
+  TeamSM --> StateStore
+  WorkflowSM --> StateStore
+  TeamSM --> ReviewerGate
+  ReviewerGate --> SharedExec
+
+  SharedExec --> AnthropicExec
+  SharedExec --> OpenAIExec
+  Dup -. "consolidate into" .-> SharedExec
+  AnthropicExec --> ApiCrate
+  OpenAIExec --> ApiCrate
+  ApiCrate --> LLMs
+  StateStore --> Filesystem
+
+  CLI -.-> Dup
+  DesktopChat -.-> Dup
+
+  class React,TauriCmd,DesktopChat,CLI ui
+  class ToolFacade,TeamSM,WorkflowSM,ReviewerGate team
+  class Runtime,SharedExec,AnthropicExec,OpenAIExec,ApiCrate exec
+  class StateStore,LLMs,Filesystem data
+  class Dup warn

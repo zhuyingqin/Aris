@@ -118,6 +118,26 @@ pub(crate) struct ListTeamInput {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct WaitForTeammatesInput {
+    pub(crate) team_id: Option<String>,
+    /// Wait only for these task ids; default waits for all of the team's tasks.
+    pub(crate) task_ids: Option<Vec<String>>,
+    pub(crate) timeout_seconds: Option<u64>,
+    pub(crate) poll_interval_seconds: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct VerifyDeliverableInput {
+    pub(crate) team_id: Option<String>,
+    pub(crate) task_id: String,
+    pub(crate) criteria: Option<Vec<String>>,
+    pub(crate) instructions: Option<String>,
+    pub(crate) model: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct AgentSupervisorInput {
     pub(crate) action: AgentSupervisorAction,
     pub(crate) agent_id: Option<String>,
@@ -220,6 +240,26 @@ pub(crate) enum TeamTaskStatus {
     Cancelled,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum VerificationStatus {
+    /// Reviewer returned GO / GO-WITH-NITS.
+    Passed,
+    /// Reviewer returned NO-GO / NEEDS-REWORK.
+    Failed,
+    /// Verdict was ambiguous — the lead must read the review and decide.
+    NeedsJudgment,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TaskVerification {
+    pub(crate) status: VerificationStatus,
+    pub(crate) reviewer: Option<String>,
+    pub(crate) summary: String,
+    pub(crate) verified_at: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct TeamTask {
@@ -233,6 +273,8 @@ pub(crate) struct TeamTask {
     pub(crate) lease_expires_at: Option<u64>,
     pub(crate) status: TeamTaskStatus,
     pub(crate) result: Option<String>,
+    #[serde(default)]
+    pub(crate) verification: Option<TaskVerification>,
     pub(crate) events: Vec<TaskEvent>,
     pub(crate) created_at: u64,
     pub(crate) updated_at: u64,
@@ -365,6 +407,42 @@ pub(crate) enum AgentSupervisorActionLabel {
     Logs,
     Stop,
     Restart,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct WaitTaskResult {
+    pub(crate) task_id: String,
+    pub(crate) title: String,
+    pub(crate) status: TeamTaskStatus,
+    pub(crate) verification: Option<VerificationStatus>,
+    pub(crate) settled: bool,
+    pub(crate) claimed_by: Option<String>,
+    pub(crate) agent_status: Option<String>,
+    pub(crate) result: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct WaitForTeammatesOutput {
+    pub(crate) team_id: String,
+    pub(crate) waited_seconds: u64,
+    pub(crate) all_settled: bool,
+    pub(crate) timed_out: bool,
+    pub(crate) interrupted: bool,
+    pub(crate) pending: usize,
+    pub(crate) tasks: Vec<WaitTaskResult>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct VerifyDeliverableOutput {
+    pub(crate) team_id: String,
+    pub(crate) task_id: String,
+    pub(crate) status: VerificationStatus,
+    pub(crate) reviewer: Option<String>,
+    pub(crate) review: String,
+    pub(crate) task: TeamTask,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -666,6 +744,7 @@ pub(crate) fn prepare_teammate(input: &SpawnTeammateInput) -> Result<PreparedTea
             lease_expires_at: Some(now + 3_600),
             status: TeamTaskStatus::InProgress,
             result: None,
+            verification: None,
             events: vec![TaskEvent {
                 ts: now,
                 kind: "TaskCreated".to_string(),
@@ -1187,6 +1266,377 @@ pub(crate) fn agent_supervisor(
     })
 }
 
+/// Block until the given team's tasks all reach a terminal state (or time out),
+/// then return each task's status and stored result. This folds the playbook's
+/// WAIT and GATHER steps into one call so the lead does not have to poll with
+/// repeated LLM tool round-trips — the blocking happens runtime-side.
+///
+/// A task counts as "settled" if its own status is terminal (completed / failed
+/// / cancelled) OR the teammate that claimed it has exited (agent manifest
+/// completed / failed). The agent-exit check prevents an indefinite wait when a
+/// teammate finishes its run without calling CompleteTask. The wait also returns
+/// early on Ctrl+C (interrupt) or once `timeout_seconds` elapses, in which case
+/// `all_settled` is false and `pending` reports how many tasks are still open.
+pub(crate) fn wait_for_teammates(
+    input: WaitForTeammatesInput,
+) -> Result<WaitForTeammatesOutput, String> {
+    const DEFAULT_TIMEOUT_SECS: u64 = 1_800;
+    const MAX_TIMEOUT_SECS: u64 = 7_200;
+    const DEFAULT_POLL_SECS: u64 = 3;
+    const MAX_POLL_SECS: u64 = 60;
+
+    let team_id = resolve_team_id(input.team_id.as_deref())?;
+    let timeout_secs = input
+        .timeout_seconds
+        .unwrap_or(DEFAULT_TIMEOUT_SECS)
+        .clamp(1, MAX_TIMEOUT_SECS);
+    let poll_secs = input
+        .poll_interval_seconds
+        .unwrap_or(DEFAULT_POLL_SECS)
+        .clamp(1, MAX_POLL_SECS);
+    let wanted = input
+        .task_ids
+        .as_ref()
+        .map(|ids| ids.iter().cloned().collect::<BTreeSet<_>>());
+
+    let started = epoch_secs();
+    loop {
+        // Refresh member status from agent manifests so a teammate that exited
+        // without calling CompleteTask still counts as settled.
+        let mut team = load_team(&team_id)?;
+        refresh_team_members_from_agents(&mut team)?;
+        save_team(&team)?;
+        let member_status = team
+            .members
+            .iter()
+            .map(|member| (member.member_id.clone(), member.status.clone()))
+            .collect::<BTreeMap<_, _>>();
+
+        let tasks = load_tasks()?
+            .into_iter()
+            .filter(|task| task.team_id == team_id)
+            .filter(|task| {
+                wanted
+                    .as_ref()
+                    .map_or(true, |set| set.contains(&task.task_id))
+            })
+            .collect::<Vec<_>>();
+
+        let evaluated = tasks
+            .iter()
+            .map(|task| {
+                let agent_exited = task
+                    .claimed_by
+                    .as_ref()
+                    .and_then(|member_id| member_status.get(member_id))
+                    .is_some_and(|status| status == "completed" || status == "failed");
+                let is_settled = matches!(
+                    task.status,
+                    TeamTaskStatus::Completed | TeamTaskStatus::Failed | TeamTaskStatus::Cancelled
+                ) || agent_exited;
+                (task, is_settled)
+            })
+            .collect::<Vec<_>>();
+
+        let all_settled = evaluated.iter().all(|(_, settled)| *settled);
+        let waited = epoch_secs().saturating_sub(started);
+        let interrupted = runtime::is_interrupted();
+        let timed_out = !all_settled && waited >= timeout_secs;
+
+        if all_settled || timed_out || interrupted {
+            let pending = evaluated.iter().filter(|(_, settled)| !*settled).count();
+            let results = evaluated
+                .iter()
+                .map(|(task, settled)| WaitTaskResult {
+                    task_id: task.task_id.clone(),
+                    title: task.title.clone(),
+                    status: task.status.clone(),
+                    verification: task.verification.as_ref().map(|v| v.status),
+                    settled: *settled,
+                    claimed_by: task.claimed_by.clone(),
+                    agent_status: task
+                        .claimed_by
+                        .as_ref()
+                        .and_then(|member_id| member_status.get(member_id).cloned()),
+                    result: task.result.clone(),
+                })
+                .collect::<Vec<_>>();
+            return Ok(WaitForTeammatesOutput {
+                team_id,
+                waited_seconds: waited,
+                all_settled,
+                timed_out,
+                interrupted,
+                pending,
+                tasks: results,
+            });
+        }
+
+        std::thread::sleep(std::time::Duration::from_secs(poll_secs));
+    }
+}
+
+/// Classify an external reviewer's free-text verdict into a verification status,
+/// using the GO / NO-GO convention ARIS reviewers already follow. Reject verdicts
+/// (NO-GO / NEEDS-REWORK) are checked before GO so "NO-GO" is never read as a pass;
+/// anything without a recognizable verdict token stays NeedsJudgment rather than
+/// being guessed either way.
+#[must_use]
+pub(crate) fn parse_review_verdict(review: &str) -> VerificationStatus {
+    let upper = review.to_uppercase();
+    let has_token = |token: &str| {
+        upper
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|word| word == token)
+    };
+    if upper.contains("NO-GO")
+        || upper.contains("NO GO")
+        || has_token("NOGO")
+        || upper.contains("NEEDS-REWORK")
+        || upper.contains("NEEDS REWORK")
+    {
+        VerificationStatus::Failed
+    } else if upper.contains("GO-WITH-NITS")
+        || upper.contains("GO-WITH-CAUTION")
+        || has_token("GO")
+        || has_token("LGTM")
+    {
+        VerificationStatus::Passed
+    } else {
+        VerificationStatus::NeedsJudgment
+    }
+}
+
+/// Load a single task by team + task id (returns an owned copy).
+pub(crate) fn get_task(team_id: &str, task_id: &str) -> Result<TeamTask, String> {
+    load_tasks()?
+        .into_iter()
+        .find(|task| task.team_id == team_id && task.task_id == task_id)
+        .ok_or_else(|| format!("task `{task_id}` not found in team `{team_id}`"))
+}
+
+/// Record an independent verification verdict on a task and log the event.
+pub(crate) fn record_verification(
+    team_id: &str,
+    task_id: &str,
+    verification: TaskVerification,
+) -> Result<TeamTask, String> {
+    let status_label = match verification.status {
+        VerificationStatus::Passed => "passed",
+        VerificationStatus::Failed => "failed",
+        VerificationStatus::NeedsJudgment => "needs_judgment",
+    };
+    let mut tasks = load_tasks()?;
+    let now = epoch_secs();
+    let updated = {
+        let task = tasks
+            .iter_mut()
+            .find(|task| task.team_id == team_id && task.task_id == task_id)
+            .ok_or_else(|| format!("task `{task_id}` not found in team `{team_id}`"))?;
+        task.verification = Some(verification);
+        task.updated_at = now;
+        task.events.push(TaskEvent {
+            ts: now,
+            kind: "TaskVerified".to_string(),
+            actor: Some(inherited_lead_session()),
+            message: Some(format!("verification {status_label}")),
+        });
+        task.clone()
+    };
+    save_tasks(&tasks)?;
+    append_event(RunEvent {
+        version: STATE_VERSION,
+        event_id: make_id("event"),
+        ts: now,
+        kind: "TaskVerified".to_string(),
+        team_id: Some(team_id.to_string()),
+        session_id: Some(inherited_lead_session()),
+        agent_id: None,
+        task_id: Some(task_id.to_string()),
+        message_id: None,
+        workflow_run_id: None,
+        payload: json!({ "status": status_label }),
+    })?;
+    Ok(updated)
+}
+
+/// Verification transition for a teammate deliverable. The Team layer owns the
+/// task lookup, review prompt construction, verdict classification, and state
+/// write-back; the caller only supplies the executor-specific reviewer callback.
+pub(crate) fn verify_deliverable(
+    input: VerifyDeliverableInput,
+    review: impl FnOnce(String, Option<String>) -> Result<String, String>,
+) -> Result<VerifyDeliverableOutput, String> {
+    let team_id = resolve_team_id(input.team_id.as_deref())?;
+    let task = get_task(&team_id, &input.task_id)?;
+    let result = task
+        .result
+        .clone()
+        .filter(|text| !text.trim().is_empty())
+        .ok_or_else(|| {
+            format!(
+                "task `{}` has no result to verify yet — verify only after the teammate completes it",
+                input.task_id
+            )
+        })?;
+
+    let criteria = input
+        .criteria
+        .filter(|list| !list.is_empty())
+        .or_else(|| {
+            task.design
+                .as_ref()
+                .map(|design| design.success_criteria.clone())
+        })
+        .unwrap_or_default();
+    let criteria_block = if criteria.is_empty() {
+        "(no explicit success criteria provided)".to_string()
+    } else {
+        criteria
+            .iter()
+            .map(|criterion| format!("- {criterion}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let deliverable_desc = task
+        .design
+        .as_ref()
+        .map_or(task.title.as_str(), |design| design.deliverable.as_str());
+
+    let review_prompt = format!(
+        "You are an adversarial reviewer acting as the verification gate for one teammate's \
+         deliverable on an Agent Team. Judge ONLY whether the deliverable below satisfies its \
+         success criteria. Be strict about unsupported claims, missing evidence, and unmet \
+         criteria.\n\n# Deliverable expected\n{deliverable_desc}\n\n# Success criteria\n{criteria_block}\n\n\
+         # Extra instructions\n{instructions}\n\n# Deliverable to review\n{result}\n\n\
+         Give concrete findings, then end with a single verdict line that is exactly one of: \
+         `GO` (meets all criteria), `GO-WITH-NITS` (acceptable, minor issues only), or `NO-GO` \
+         (criteria not met).",
+        instructions = input.instructions.as_deref().unwrap_or("(none)"),
+    );
+
+    let review_text = review(review_prompt, input.model.clone())?;
+    let status = parse_review_verdict(&review_text);
+    let reviewer = input.model.clone().or_else(|| {
+        std::env::var("ARIS_REVIEWER_MODEL")
+            .ok()
+            .filter(|model| !model.is_empty())
+    });
+    let verified_at = epoch_secs();
+    let updated = record_verification(
+        &team_id,
+        &input.task_id,
+        TaskVerification {
+            status,
+            reviewer: reviewer.clone(),
+            summary: review_text.clone(),
+            verified_at,
+        },
+    )?;
+
+    Ok(VerifyDeliverableOutput {
+        team_id,
+        task_id: input.task_id,
+        status,
+        reviewer,
+        review: review_text,
+        task: updated,
+    })
+}
+
+/// Render the active team as a readable terminal view (header, tasks with status
+/// + verification glyphs, members, recent events) instead of raw JSON. Backs the
+/// `/team` REPL command.
+pub(crate) fn render_team_view(team_id: Option<&str>) -> Result<String, String> {
+    let snap = snapshot(team_id, false, true)?;
+    let team = &snap.team;
+
+    let member_name = |member_id: &str| -> String {
+        team.members
+            .iter()
+            .find(|member| member.member_id == member_id)
+            .map_or_else(|| member_id.to_string(), |member| member.name.clone())
+    };
+
+    let team_status = match team.status {
+        TeamStatus::Active => "active",
+        TeamStatus::Paused => "paused",
+        TeamStatus::Completed => "completed",
+        TeamStatus::Failed => "failed",
+    };
+
+    let mut out = String::new();
+    out.push_str(&format!(
+        "Team \"{}\"  [{}]   (id: {})\n",
+        team.name, team_status, team.team_id
+    ));
+    if let Some(design) = &team.design {
+        out.push_str(&format!(
+            "coordination: {} \u{b7} stop: {}\n",
+            design.coordination_pattern, design.stop_condition
+        ));
+    }
+
+    out.push_str(&format!("\nTasks ({})\n", snap.tasks.len()));
+    if snap.tasks.is_empty() {
+        out.push_str("  (none yet)\n");
+    }
+    for task in &snap.tasks {
+        let glyph = match task.status {
+            TeamTaskStatus::Pending => "\u{b7}",
+            TeamTaskStatus::Blocked => "\u{23f8}",
+            TeamTaskStatus::InProgress => "\u{23f3}",
+            TeamTaskStatus::Completed => "\u{2713}",
+            TeamTaskStatus::Failed => "\u{2717}",
+            TeamTaskStatus::Cancelled => "\u{2298}",
+        };
+        let who = task
+            .claimed_by
+            .as_deref()
+            .map_or_else(|| "unclaimed".to_string(), |id| member_name(id));
+        let verify = match task.verification.as_ref().map(|v| v.status) {
+            Some(VerificationStatus::Passed) => "verified \u{2713}",
+            Some(VerificationStatus::Failed) => "verified \u{2717}",
+            Some(VerificationStatus::NeedsJudgment) => "verify ? needs-judgment",
+            None => "unverified",
+        };
+        out.push_str(&format!(
+            "  {glyph} {} \u{2014} by {who} \u{b7} {verify}",
+            task.title
+        ));
+        if !task.dependencies.is_empty() {
+            out.push_str(&format!(" \u{b7} waits: {}", task.dependencies.join(", ")));
+        }
+        out.push('\n');
+    }
+
+    out.push_str(&format!("\nMembers ({})\n", team.members.len()));
+    if team.members.is_empty() {
+        out.push_str("  (none yet)\n");
+    }
+    for member in &team.members {
+        let role = member.role.as_deref().unwrap_or("\u{2014}");
+        out.push_str(&format!(
+            "  \u{2022} {} ({}) \u{2014} {}\n",
+            member.name, role, member.status
+        ));
+    }
+
+    let recent = snap.events.iter().rev().take(6).collect::<Vec<_>>();
+    if !recent.is_empty() {
+        out.push_str("\nRecent events\n");
+        for event in recent.iter().rev() {
+            let suffix = event
+                .task_id
+                .as_deref()
+                .map_or_else(String::new, |task_id| format!(" {task_id}"));
+            out.push_str(&format!("  {}{}\n", event.kind, suffix));
+        }
+    }
+
+    Ok(out)
+}
+
 pub(crate) fn create_worktree(
     branch: &str,
     path: &str,
@@ -1523,6 +1973,9 @@ fn tail_file(path: &str, max_bytes: usize) -> Result<String, String> {
 }
 
 fn agent_store_dir() -> Result<PathBuf, String> {
+    if let Ok(path) = std::env::var("ARIS_AGENT_STORE_DIR") {
+        return Ok(PathBuf::from(path));
+    }
     if let Ok(path) = std::env::var("CLAWD_AGENT_STORE") {
         return Ok(PathBuf::from(path));
     }

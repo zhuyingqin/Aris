@@ -204,7 +204,7 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
     SlashCommandSpec {
         name: "team",
         summary: "Inspect Agent Team members, tasks, mailbox, and events",
-        argument_hint: Some("[list|events|messages|supervisor] [team-id]"),
+        argument_hint: Some("[list|raw|events|messages|supervisor] [team-id]"),
         resume_supported: false,
     },
     SlashCommandSpec {

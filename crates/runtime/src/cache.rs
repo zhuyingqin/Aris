@@ -357,10 +357,9 @@ mod tests {
             r#"\$\{?ARIS_CACHE_DIR(?::-[^}]*)?\}?/((?:tools|skills/[a-zA-Z0-9_-]+|shared-references)/[a-zA-Z0-9_./-]+\.(?:py|sh|tex|cls|bst|md|toml|yaml|yml|json))"#,
         )
         .expect("compile cache_re");
-        let legacy_re = Regex::new(
-            r#"(?m)\bpython3\s+(?:"|)?(tools/[a-zA-Z0-9_./-]+\.(?:py|sh))(?:"|)?"#,
-        )
-        .expect("compile legacy_re");
+        let legacy_re =
+            Regex::new(r#"(?m)\bpython3\s+(?:"|)?(tools/[a-zA-Z0-9_./-]+\.(?:py|sh))(?:"|)?"#)
+                .expect("compile legacy_re");
 
         let mut missing: Vec<(String, String)> = Vec::new();
         for (skill_name, content) in crate::BUNDLED_SKILLS {

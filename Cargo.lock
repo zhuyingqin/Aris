@@ -33,6 +33,7 @@ name = "aris-cli"
 version = "0.4.15"
 dependencies = [
  "api",
+ "aris-executor",
  "commands",
  "compat-harness",
  "crossterm",
@@ -46,6 +47,17 @@ dependencies = [
  "syntect",
  "tokio",
  "tools",
+]
+
+[[package]]
+name = "aris-executor"
+version = "0.4.15"
+dependencies = [
+ "api",
+ "reqwest",
+ "runtime",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

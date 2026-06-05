@@ -82,7 +82,10 @@ pub fn workflow_control(id: String, action: String) -> Result<Value, String> {
 
 #[tauri::command]
 pub fn workflow_save(name: String, script: String) -> Result<Value, String> {
-    call("Workflow", json!({ "action": "save", "saveAs": name, "script": script }))
+    call(
+        "Workflow",
+        json!({ "action": "save", "saveAs": name, "script": script }),
+    )
 }
 
 #[tauri::command]

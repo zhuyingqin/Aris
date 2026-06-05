@@ -90,6 +90,7 @@ export const chatStatus = () => invoke<ChatStatus>("chat_status");
 export const chatSend = (message: string) =>
   invoke<string>("chat_send", { message });
 export const chatReset = () => invoke<void>("chat_reset");
+export const chatCancel = () => invoke<void>("chat_cancel");
 
 export const onChatDelta = (handler: (text: string) => void) =>
   listen<string>("chat-delta", (e) => handler(e.payload));

@@ -6,11 +6,19 @@ mod sessions;
 mod state;
 mod watcher;
 
+use tauri::{image::Image, Manager};
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .manage(engine::ChatState::default())
         .setup(|app| {
+            state::init_workspace_environment()?;
+            if let Some(window) = app.get_webview_window("main") {
+                if let Ok(icon) = Image::from_bytes(include_bytes!("../icons/icon.png")) {
+                    let _ = window.set_icon(icon);
+                }
+            }
             watcher::spawn_event_watcher(app.handle().clone());
             Ok(())
         })
@@ -34,6 +42,7 @@ pub fn run() {
             engine::chat_status,
             engine::chat_send,
             engine::chat_reset,
+            engine::chat_cancel,
             files::file_search,
             files::file_read,
         ])

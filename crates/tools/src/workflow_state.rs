@@ -336,13 +336,14 @@ pub(crate) fn control_workflow(input: &WorkflowInput) -> Result<WorkflowOutput, 
 pub(crate) fn discover_saved_workflows() -> Vec<SavedWorkflow> {
     let mut workflows = Vec::new();
     collect_saved_workflows(&project_workflows_dir(), "project", &mut workflows);
-    collect_saved_workflows(
-        &PathBuf::from(runtime::home_dir())
-            .join(".claude")
-            .join("workflows"),
-        "user",
-        &mut workflows,
-    );
+    let user_workflows_dir = std::env::var("ARIS_USER_WORKFLOWS_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            PathBuf::from(runtime::home_dir())
+                .join(".claude")
+                .join("workflows")
+        });
+    collect_saved_workflows(&user_workflows_dir, "user", &mut workflows);
     workflows.sort_by(|left, right| left.name.cmp(&right.name));
     workflows
 }
@@ -711,6 +712,9 @@ fn run_manifest_path(run_id: &str) -> PathBuf {
 }
 
 fn project_workflows_dir() -> PathBuf {
+    if let Ok(path) = std::env::var("ARIS_WORKFLOWS_DIR") {
+        return PathBuf::from(path);
+    }
     std::env::current_dir()
         .unwrap_or_else(|_| PathBuf::from("."))
         .join(".claude")

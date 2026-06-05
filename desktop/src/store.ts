@@ -101,6 +101,7 @@ export const useStore = create<AppState>((set, get) => ({
       }));
       // An incoming event almost always means run/team state moved.
       void get().refreshRuns();
+      void get().refreshTeam();
     }).then((fn) => {
       if (disposed) fn();
       else unlisten = fn;

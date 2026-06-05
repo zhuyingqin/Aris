@@ -1,7 +1,8 @@
 use std::cmp::Reverse;
+use std::ffi::OsString;
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::Instant;
 
 use glob::Pattern;
@@ -219,21 +220,39 @@ pub fn edit_file(
 
 pub fn glob_search(pattern: &str, path: Option<&str>) -> io::Result<GlobSearchOutput> {
     let started = Instant::now();
+    let root = workspace_root()?;
     let base_dir = path
         .map(normalize_path)
         .transpose()?
-        .unwrap_or(std::env::current_dir()?);
-    let search_pattern = if Path::new(pattern).is_absolute() {
-        pattern.to_owned()
+        .unwrap_or(match root.as_ref() {
+            Some(root) => root.clone(),
+            None => std::env::current_dir()?,
+        });
+    let search_path = if Path::new(pattern).is_absolute() {
+        PathBuf::from(pattern)
     } else {
-        base_dir.join(pattern).to_string_lossy().into_owned()
+        base_dir.join(pattern)
     };
+    if let Some(root) = root.as_ref() {
+        ensure_within_workspace(&lexically_normalize(&search_path), root)?;
+    }
+    let search_pattern = search_path.to_string_lossy().into_owned();
 
     let mut matches = Vec::new();
     let entries = glob::glob(&search_pattern)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error.to_string()))?;
     for entry in entries.flatten() {
-        if entry.is_file() {
+        if !entry.is_file() {
+            continue;
+        }
+        if let Some(root) = root.as_ref() {
+            let Ok(canonical) = entry.canonicalize() else {
+                continue;
+            };
+            if canonical.starts_with(root) {
+                matches.push(canonical);
+            }
+        } else {
             matches.push(entry);
         }
     }
@@ -261,12 +280,16 @@ pub fn glob_search(pattern: &str, path: Option<&str>) -> io::Result<GlobSearchOu
 }
 
 pub fn grep_search(input: &GrepSearchInput) -> io::Result<GrepSearchOutput> {
+    let root = workspace_root()?;
     let base_path = input
         .path
         .as_deref()
         .map(normalize_path)
         .transpose()?
-        .unwrap_or(std::env::current_dir()?);
+        .unwrap_or(match root.as_ref() {
+            Some(root) => root.clone(),
+            None => std::env::current_dir()?,
+        });
 
     let regex = RegexBuilder::new(&input.pattern)
         .case_insensitive(input.case_insensitive.unwrap_or(false))
@@ -446,42 +469,146 @@ fn make_patch(original: &str, updated: &str) -> Vec<StructuredPatchHunk> {
 }
 
 fn normalize_path(path: &str) -> io::Result<PathBuf> {
-    let candidate = if Path::new(path).is_absolute() {
-        PathBuf::from(path)
-    } else {
-        std::env::current_dir()?.join(path)
-    };
-    candidate.canonicalize()
+    let root = workspace_root()?;
+    let candidate = path_candidate(path, root.as_deref())?;
+    let canonical = candidate.canonicalize()?;
+    if let Some(root) = root.as_ref() {
+        ensure_within_workspace(&canonical, root)?;
+    }
+    Ok(canonical)
 }
 
 fn normalize_path_allow_missing(path: &str) -> io::Result<PathBuf> {
-    let candidate = if Path::new(path).is_absolute() {
-        PathBuf::from(path)
-    } else {
-        std::env::current_dir()?.join(path)
-    };
+    let root = workspace_root()?;
+    let candidate = path_candidate(path, root.as_deref())?;
+    let canonical = canonicalize_allow_missing(&candidate)?;
+    if let Some(root) = root.as_ref() {
+        ensure_within_workspace(&canonical, root)?;
+    }
+    Ok(canonical)
+}
 
+fn workspace_root() -> io::Result<Option<PathBuf>> {
+    let Ok(raw) = std::env::var("ARIS_WORKSPACE_ROOT") else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let root = PathBuf::from(trimmed);
+    fs::create_dir_all(&root)?;
+    Ok(Some(root.canonicalize()?))
+}
+
+fn path_candidate(path: &str, workspace_root: Option<&Path>) -> io::Result<PathBuf> {
+    let path = Path::new(path);
+    if path.is_absolute() {
+        return Ok(path.to_path_buf());
+    }
+    match workspace_root {
+        Some(root) => Ok(root.join(path)),
+        None => Ok(std::env::current_dir()?.join(path)),
+    }
+}
+
+fn ensure_within_workspace(path: &Path, root: &Path) -> io::Result<()> {
+    if path.starts_with(root) {
+        return Ok(());
+    }
+    Err(io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        format!(
+            "path `{}` is outside the isolated workspace `{}`",
+            path.display(),
+            root.display()
+        ),
+    ))
+}
+
+fn canonicalize_allow_missing(candidate: &Path) -> io::Result<PathBuf> {
+    let candidate = lexically_normalize(candidate);
     if let Ok(canonical) = candidate.canonicalize() {
         return Ok(canonical);
     }
 
-    if let Some(parent) = candidate.parent() {
-        let canonical_parent = parent
-            .canonicalize()
-            .unwrap_or_else(|_| parent.to_path_buf());
-        if let Some(name) = candidate.file_name() {
-            return Ok(canonical_parent.join(name));
-        }
+    let mut ancestor = candidate.as_path();
+    let mut missing = Vec::<OsString>::new();
+    while !ancestor.exists() {
+        let name = ancestor.file_name().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("no existing ancestor for `{}`", candidate.display()),
+            )
+        })?;
+        missing.push(name.to_os_string());
+        ancestor = ancestor.parent().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("no existing ancestor for `{}`", candidate.display()),
+            )
+        })?;
     }
 
-    Ok(candidate)
+    let mut canonical = ancestor.canonicalize()?;
+    for component in missing.iter().rev() {
+        canonical.push(component);
+    }
+    Ok(canonical)
+}
+
+fn lexically_normalize(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::Normal(value) => normalized.push(value),
+        }
+    }
+    normalized
 }
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::{OsStr, OsString};
+    use std::path::Path;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{edit_file, glob_search, grep_search, read_file, write_file, GrepSearchInput};
+
+    struct EnvGuard {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl EnvGuard {
+        fn unset(key: &'static str) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::remove_var(key);
+            Self { key, previous }
+        }
+
+        fn set(key: &'static str, value: impl AsRef<OsStr>) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            if let Some(previous) = self.previous.as_ref() {
+                std::env::set_var(self.key, previous);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
 
     fn temp_path(name: &str) -> std::path::PathBuf {
         let unique = SystemTime::now()
@@ -493,6 +620,8 @@ mod tests {
 
     #[test]
     fn reads_and_writes_files() {
+        let _lock = crate::test_env_lock();
+        let _env = EnvGuard::unset("ARIS_WORKSPACE_ROOT");
         let path = temp_path("read-write.txt");
         let write_output = write_file(path.to_string_lossy().as_ref(), "one\ntwo\nthree")
             .expect("write should succeed");
@@ -505,6 +634,8 @@ mod tests {
 
     #[test]
     fn edits_file_contents() {
+        let _lock = crate::test_env_lock();
+        let _env = EnvGuard::unset("ARIS_WORKSPACE_ROOT");
         let path = temp_path("edit.txt");
         write_file(path.to_string_lossy().as_ref(), "alpha beta alpha")
             .expect("initial write should succeed");
@@ -515,6 +646,8 @@ mod tests {
 
     #[test]
     fn globs_and_greps_directory() {
+        let _lock = crate::test_env_lock();
+        let _env = EnvGuard::unset("ARIS_WORKSPACE_ROOT");
         let dir = temp_path("search-dir");
         std::fs::create_dir_all(&dir).expect("directory should be created");
         let file = dir.join("demo.rs");
@@ -546,5 +679,65 @@ mod tests {
         })
         .expect("grep should succeed");
         assert!(grep_output.content.unwrap_or_default().contains("hello"));
+    }
+
+    #[test]
+    fn workspace_root_allows_relative_paths_inside_root() {
+        let _lock = crate::test_env_lock();
+        let root = temp_path("workspace-root");
+        std::fs::create_dir_all(&root).expect("workspace should be created");
+        let _env = EnvGuard::set("ARIS_WORKSPACE_ROOT", &root);
+
+        write_file("notes/demo.txt", "inside").expect("write inside workspace should succeed");
+        let output =
+            read_file("notes/demo.txt", None, None).expect("read inside workspace should succeed");
+
+        assert_eq!(output.file.content, "inside");
+        assert!(Path::new(&output.file.file_path).starts_with(root.canonicalize().unwrap()));
+    }
+
+    #[test]
+    fn workspace_root_blocks_absolute_reads_outside_root() {
+        let _lock = crate::test_env_lock();
+        let root = temp_path("workspace-root");
+        let outside = temp_path("outside.txt");
+        std::fs::create_dir_all(&root).expect("workspace should be created");
+        std::fs::write(&outside, "outside").expect("outside file should be created");
+        let _env = EnvGuard::set("ARIS_WORKSPACE_ROOT", &root);
+
+        let err = read_file(outside.to_string_lossy().as_ref(), None, None)
+            .expect_err("outside read should be blocked");
+
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+    }
+
+    #[test]
+    fn workspace_root_blocks_parent_traversal_writes() {
+        let _lock = crate::test_env_lock();
+        let root = temp_path("workspace-root");
+        std::fs::create_dir_all(&root).expect("workspace should be created");
+        let _env = EnvGuard::set("ARIS_WORKSPACE_ROOT", &root);
+
+        let err = write_file("../outside.txt", "outside")
+            .expect_err("parent traversal write should be blocked");
+
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+    }
+
+    #[test]
+    fn workspace_root_blocks_absolute_globs_outside_root() {
+        let _lock = crate::test_env_lock();
+        let root = temp_path("workspace-root");
+        let outside = temp_path("outside-dir");
+        std::fs::create_dir_all(&root).expect("workspace should be created");
+        std::fs::create_dir_all(&outside).expect("outside dir should be created");
+        std::fs::write(outside.join("secret.rs"), "fn main() {}")
+            .expect("outside file should be created");
+        let _env = EnvGuard::set("ARIS_WORKSPACE_ROOT", &root);
+
+        let err = glob_search(&format!("{}/*.rs", outside.display()), None)
+            .expect_err("outside glob should be blocked");
+
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
     }
 }

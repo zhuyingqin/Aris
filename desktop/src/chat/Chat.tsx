@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import MarkdownContent from "./MarkdownContent";
 import {
+  chatCancel,
   chatReset,
   chatSend,
   chatStatus,
@@ -127,7 +128,9 @@ export default function Chat() {
 
   // Skills picker
   const [skills, setSkills] = useState<SkillMeta[]>([]);
-  const [showPicker, setShowPicker] = useState(false);
+  // Picker visibility is derived from `pickerMode`; this setter is kept as a
+  // no-op reset hook at session boundaries (the boolean itself is unused).
+  const [, setShowPicker] = useState(false);
   const [skillFilter, setSkillFilter] = useState("");
   const [pickerIdx, setPickerIdx] = useState(0);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -567,9 +570,23 @@ export default function Chat() {
               onChange={handleInputChange}
               onKeyDown={handleKeyDown}
             />
-            <button className="primary" onClick={send} disabled={!status?.ready || busy}>
-              {busy ? "…" : "Send"}
-            </button>
+            {busy ? (
+              <button
+                className="primary"
+                onClick={() => void chatCancel()}
+                title="Stop the running turn"
+              >
+                ■ Stop
+              </button>
+            ) : (
+              <button
+                className="primary"
+                onClick={send}
+                disabled={!status?.ready}
+              >
+                Send
+              </button>
+            )}
           </div>
         </div>
       </div>

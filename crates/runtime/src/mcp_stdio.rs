@@ -2400,7 +2400,9 @@ mod tests {
         runtime.block_on(async {
             let script_path = write_notifications_then_response_script(1);
             let mut transport = script_transport(&script_path);
-            transport.env.insert("NOTIFICATION_COUNT".to_string(), "1".to_string());
+            transport
+                .env
+                .insert("NOTIFICATION_COUNT".to_string(), "1".to_string());
             let mut process =
                 McpStdioProcess::spawn(&transport).expect("spawn notif-then-response server");
 
@@ -2438,9 +2440,10 @@ mod tests {
         runtime.block_on(async {
             let script_path = write_notifications_then_response_script(5);
             let mut transport = script_transport(&script_path);
-            transport.env.insert("NOTIFICATION_COUNT".to_string(), "5".to_string());
-            let mut process =
-                McpStdioProcess::spawn(&transport).expect("spawn many-notifs server");
+            transport
+                .env
+                .insert("NOTIFICATION_COUNT".to_string(), "5".to_string());
+            let mut process = McpStdioProcess::spawn(&transport).expect("spawn many-notifs server");
 
             let response = process
                 .initialize(

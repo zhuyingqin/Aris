@@ -7,6 +7,7 @@ import TeamView from "./teams/TeamView";
 import Settings from "./settings/Settings";
 import Skills from "./skills/Skills";
 import Sessions from "./sessions/Sessions";
+import arisIcon from "./assets/aris-icon.svg";
 
 interface NavItem {
   id: Tab;
@@ -59,7 +60,7 @@ export default function App() {
     <div className="app">
       <aside className="sidebar">
         <div className="brand">
-          <span className="brand-icon">🌙</span>
+          <img className="brand-mark" src={arisIcon} alt="" />
           <span className="brand-text">
             ARIS
             <small>Team · Workflow · Chat</small>

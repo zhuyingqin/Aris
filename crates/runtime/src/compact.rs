@@ -366,7 +366,8 @@ fn estimate_message_tokens(message: &ConversationMessage) -> usize {
                 tool_name, output, ..
             } => (tool_name.len() + output.len()) / 4 + 1,
             ContentBlock::Thinking {
-                thinking, signature,
+                thinking,
+                signature,
             } => (thinking.len() + signature.len()) / 4 + 1,
         })
         .sum()
@@ -472,10 +473,7 @@ mod tests {
         // All 4 messages got summarized (since no User in the tail window).
         assert_eq!(result.removed_message_count, 4);
         assert_eq!(result.compacted_session.messages.len(), 1);
-        assert_eq!(
-            result.compacted_session.messages[0].role,
-            MessageRole::User
-        );
+        assert_eq!(result.compacted_session.messages[0].role, MessageRole::User);
         assert!(matches!(
             &result.compacted_session.messages[0].blocks[0],
             ContentBlock::Text { text } if text.contains("Summary:")
@@ -532,14 +530,8 @@ mod tests {
         assert_eq!(result.removed_message_count, 6);
         // Compacted session: [User-continuation, User("next question"), Assistant("answer")]
         assert_eq!(result.compacted_session.messages.len(), 3);
-        assert_eq!(
-            result.compacted_session.messages[0].role,
-            MessageRole::User
-        );
-        assert_eq!(
-            result.compacted_session.messages[1].role,
-            MessageRole::User
-        );
+        assert_eq!(result.compacted_session.messages[0].role, MessageRole::User);
+        assert_eq!(result.compacted_session.messages[1].role, MessageRole::User);
         assert!(matches!(
             &result.compacted_session.messages[1].blocks[0],
             ContentBlock::Text { text } if text == "next question"
@@ -582,10 +574,7 @@ mod tests {
         // All 4 messages summarized, only continuation (User) remains.
         assert_eq!(result.removed_message_count, 4);
         assert_eq!(result.compacted_session.messages.len(), 1);
-        assert_eq!(
-            result.compacted_session.messages[0].role,
-            MessageRole::User
-        );
+        assert_eq!(result.compacted_session.messages[0].role, MessageRole::User);
     }
 
     #[test]
