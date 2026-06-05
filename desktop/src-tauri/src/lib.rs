@@ -1,6 +1,7 @@
 mod commands;
 mod config;
 mod engine;
+mod files;
 mod sessions;
 mod state;
 mod watcher;
@@ -33,6 +34,8 @@ pub fn run() {
             engine::chat_status,
             engine::chat_send,
             engine::chat_reset,
+            files::file_search,
+            files::file_read,
         ])
         .run(tauri::generate_context!())
         .expect("error while running ARIS Studio");
