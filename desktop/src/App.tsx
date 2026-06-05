@@ -59,8 +59,11 @@ export default function App() {
     <div className="app">
       <aside className="sidebar">
         <div className="brand">
-          🌙 ARIS Studio
-          <small>Team · Workflow · Chat</small>
+          <span className="brand-icon">🌙</span>
+          <span className="brand-text">
+            ARIS
+            <small>Team · Workflow · Chat</small>
+          </span>
         </div>
         {NAV_GROUPS.map((g) => (
           <div className="nav-group" key={g.group}>

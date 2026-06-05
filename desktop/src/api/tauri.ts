@@ -76,6 +76,14 @@ export const sessionsList = () => invoke<SessionSummary[]>("sessions_list");
 export const sessionGet = (id: string) =>
   invoke<SessionTranscript>("session_get", { id });
 
+// ── File browser ─────────────────────────────────────────────────────────────
+
+export const fileSearch = (pattern: string, root?: string) =>
+  invoke<string[]>("file_search", { pattern, root: root ?? null });
+
+export const fileRead = (path: string, limit?: number) =>
+  invoke<string>("file_read", { path, limit: limit ?? null });
+
 // ── Chat engine (P2) ──────────────────────────────────────────────────────────
 
 export const chatStatus = () => invoke<ChatStatus>("chat_status");

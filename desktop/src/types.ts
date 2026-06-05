@@ -232,17 +232,21 @@ export interface ChatStatus {
   message?: string | null;
 }
 
-export interface ChatToolCall {
-  id?: string;
-  name: string;
-  input: string;
-  output?: string;
-  isError?: boolean;
-}
+// Ordered blocks within an assistant turn – rendered in arrival order so
+// "text → tool → text → tool → final text" displays correctly.
+export type ChatBlock =
+  | { kind: "text"; text: string }
+  | {
+      kind: "tool";
+      id?: string;
+      name: string;
+      input: string;
+      output?: string;
+      isError?: boolean;
+    };
 
 export interface ChatTurn {
   role: "user" | "assistant";
-  text: string;
-  tools: ChatToolCall[];
+  blocks: ChatBlock[];
   streaming?: boolean;
 }
