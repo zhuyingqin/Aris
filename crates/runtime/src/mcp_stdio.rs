@@ -605,7 +605,7 @@ pub struct McpStdioProcess {
 
 impl McpStdioProcess {
     pub fn spawn(transport: &McpStdioTransport) -> io::Result<Self> {
-        let mut command = Command::new(&transport.command);
+        let mut command = crate::hidden_tokio_command(&transport.command);
         command
             .args(&transport.args)
             .stdin(Stdio::piped())

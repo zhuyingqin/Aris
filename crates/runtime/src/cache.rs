@@ -429,14 +429,14 @@ mod tests {
         // Best-effort: if git + origin/main is reachable, verify the pin
         // is an ancestor of origin/main. Skipped silently when the
         // current shell can't resolve origin/main (local dev, sandbox).
-        let main_check = std::process::Command::new("git")
+        let main_check = crate::hidden_command("git")
             .args(["rev-parse", "--verify", "--quiet", "origin/main"])
             .output();
         if let Ok(out) = main_check {
             if out.status.success() {
                 let main_sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
                 if !main_sha.is_empty() && main_sha != commit {
-                    let ancestor = std::process::Command::new("git")
+                    let ancestor = crate::hidden_command("git")
                         .args(["merge-base", "--is-ancestor", commit, &main_sha])
                         .status();
                     if let Ok(status) = ancestor {

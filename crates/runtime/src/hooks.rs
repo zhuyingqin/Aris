@@ -4,6 +4,7 @@ use std::process::Command;
 use serde_json::json;
 
 use crate::config::{RuntimeFeatureConfig, RuntimeHookConfig};
+use crate::hidden_command;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HookEvent {
@@ -230,15 +231,15 @@ fn format_hook_warning(command: &str, code: i32, stdout: Option<&str>, stderr: &
 
 fn shell_command(command: &str) -> CommandWithStdin {
     #[cfg(windows)]
-    let mut command_builder = {
-        let mut command_builder = Command::new("cmd");
+    let command_builder = {
+        let mut command_builder = hidden_command("cmd");
         command_builder.arg("/C").arg(command);
         CommandWithStdin::new(command_builder)
     };
 
     #[cfg(not(windows))]
     let command_builder = {
-        let mut command_builder = Command::new("sh");
+        let mut command_builder = hidden_command("sh");
         command_builder.arg("-lc").arg(command);
         CommandWithStdin::new(command_builder)
     };

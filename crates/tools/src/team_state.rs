@@ -1,7 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -1656,7 +1655,7 @@ pub(crate) fn create_worktree(
     if branch_exists {
         args.push(branch);
     }
-    let output = Command::new("git")
+    let output = runtime::hidden_command("git")
         .args(args)
         .output()
         .map_err(|error| error.to_string())?;
@@ -1675,7 +1674,7 @@ pub(crate) fn create_worktree(
 pub(crate) fn enter_worktree(input: EnterWorktreeInput) -> Result<WorktreeOutput, String> {
     match input.action {
         WorktreeAction::List => {
-            let output = Command::new("git")
+            let output = runtime::hidden_command("git")
                 .args(["worktree", "list", "--porcelain"])
                 .output()
                 .map_err(|error| error.to_string())?;
@@ -1706,7 +1705,7 @@ pub(crate) fn enter_worktree(input: EnterWorktreeInput) -> Result<WorktreeOutput
                 .as_deref()
                 .filter(|value| !value.trim().is_empty())
             {
-                let output = Command::new("git")
+                let output = runtime::hidden_command("git")
                     .args(["branch", branch, base])
                     .output()
                     .map_err(|error| error.to_string())?;

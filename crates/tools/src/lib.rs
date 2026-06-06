@@ -1,6 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{Duration, Instant};
 
 // Bundled skills are compiled into the runtime crate and re-exported
@@ -3397,7 +3396,7 @@ fn execute_repl(input: ReplInput) -> Result<ReplOutput, String> {
     let _ = input.timeout_ms;
     let runtime = resolve_repl_runtime(&input.language)?;
     let started = Instant::now();
-    let output = Command::new(runtime.program)
+    let output = runtime::hidden_command(runtime.program)
         .args(runtime.args)
         .arg(&input.code)
         .output()
@@ -3674,7 +3673,7 @@ fn set_nested_value(root: &mut serde_json::Map<String, Value>, path: &[&str], ne
 }
 
 fn iso8601_timestamp() -> String {
-    if let Ok(output) = Command::new("date")
+    if let Ok(output) = runtime::hidden_command("date")
         .args(["-u", "+%Y-%m-%dT%H:%M:%SZ"])
         .output()
     {
@@ -3711,7 +3710,7 @@ fn detect_powershell_shell() -> std::io::Result<&'static str> {
 }
 
 fn command_exists(command: &str) -> bool {
-    std::process::Command::new("sh")
+    runtime::hidden_command("sh")
         .arg("-lc")
         .arg(format!("command -v {command} >/dev/null 2>&1"))
         .status()
@@ -3727,7 +3726,7 @@ fn execute_shell_command(
     run_in_background: Option<bool>,
 ) -> std::io::Result<runtime::BashCommandOutput> {
     if run_in_background.unwrap_or(false) {
-        let child = std::process::Command::new(shell)
+        let child = runtime::hidden_command(shell)
             .arg("-NoProfile")
             .arg("-NonInteractive")
             .arg("-Command")
@@ -3755,7 +3754,7 @@ fn execute_shell_command(
         });
     }
 
-    let mut process = std::process::Command::new(shell);
+    let mut process = runtime::hidden_command(shell);
     process
         .arg("-NoProfile")
         .arg("-NonInteractive")
