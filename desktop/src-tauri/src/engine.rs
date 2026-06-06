@@ -2,18 +2,15 @@
 //!
 //! The provider executor lives in `aris-executor`; this module only adapts it
 //! to Tauri events and UI-facing commands.
-//! Streaming surface (Tauri events): `chat-delta`, `chat-tool`, `chat-tool-result`, `chat-done`.
+//! Streaming surface (Tauri events): `chat-delta`, `chat-thinking-delta`,
+//! `chat-tool`, `chat-tool-result`, `chat-done`.
 
 use std::{path::PathBuf, sync::Mutex};
 
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, State};
 
-use runtime::{
-    load_system_prompt, team_orchestration_section, ContentBlock, ConversationRuntime,
-    PermissionMode, PermissionPolicy, RuntimeError, Session, ToolError, ToolExecutor, TurnSummary,
-};
-use tools::mvp_tool_specs;
+use runtime::{PermissionMode, RuntimeError, Session, ToolError, ToolExecutor};
 
 /// Per-app chat session.
 pub struct ChatState(pub Mutex<Session>);
@@ -92,6 +89,11 @@ impl aris_executor::StreamObserver for DesktopStreamObserver {
         Ok(())
     }
 
+    fn on_thinking_delta(&mut self, thinking: &str) -> Result<(), RuntimeError> {
+        let _ = self.app.emit("chat-thinking-delta", thinking);
+        Ok(())
+    }
+
     fn on_tool_call(&mut self, id: &str, name: &str, input: &str) -> Result<(), RuntimeError> {
         let _ = self.app.emit(
             "chat-tool",
@@ -101,29 +103,23 @@ impl aris_executor::StreamObserver for DesktopStreamObserver {
     }
 }
 
-fn executor_tool_specs() -> Vec<aris_executor::ExecutorToolSpec> {
-    mvp_tool_specs()
+fn desktop_tool_specs() -> Vec<tools::ToolSpec> {
+    tools::mvp_tool_specs()
         .into_iter()
         .filter(|spec| desktop_chat_tool_allowed(spec.name))
-        .map(|spec| {
-            aris_executor::ExecutorToolSpec::new(spec.name, spec.description, spec.input_schema)
-        })
         .collect()
 }
 
-fn desktop_permission_policy() -> PermissionPolicy {
-    mvp_tool_specs().into_iter().fold(
-        PermissionPolicy::new(PermissionMode::WorkspaceWrite),
-        |policy, spec| {
-            if !desktop_chat_tool_allowed(spec.name) {
-                return policy;
-            }
-            let required = if spec.name == "SpawnTeammate" {
+fn desktop_permission_policy(tool_specs: &[tools::ToolSpec]) -> runtime::PermissionPolicy {
+    aris_chat::permission_policy_for_tools_with(
+        tool_specs.to_vec(),
+        PermissionMode::WorkspaceWrite,
+        |spec| {
+            if spec.name == "SpawnTeammate" {
                 PermissionMode::WorkspaceWrite
             } else {
                 spec.required_permission
-            };
-            policy.with_tool_requirement(spec.name, required)
+            }
         },
     )
 }
@@ -139,104 +135,34 @@ fn truncate(text: &str, max: usize) -> String {
     }
 }
 
-fn max_tokens_for_model(model: &str) -> u32 {
-    if model.contains("opus") {
-        32_000
-    } else {
-        64_000
-    }
-}
-
 fn build_system_prompt(model: &str) -> Vec<String> {
     let workspace = std::env::var("ARIS_WORKSPACE_ROOT")
         .map(PathBuf::from)
         .or_else(|_| std::env::current_dir())
         .unwrap_or_else(|_| crate::state::workspace_dir());
-    let mut prompt = load_system_prompt(
-        workspace.clone(),
-        runtime::today_iso(),
-        std::env::consts::OS,
-        "unknown",
-        Some(model),
-    )
-    .unwrap_or_default();
-    prompt.push(format!(
+    let isolation = format!(
         "Desktop isolation: this chat runs inside the ARIS desktop workspace at `{}`. Treat that directory as the only workspace. Do not request, infer, read, write, or search files outside it. Absolute paths outside this root are blocked by the runtime, and shell/REPL/notebook tools are unavailable in desktop Chat.",
         workspace.display()
-    ));
-    // Give the desktop chat lead the same Agent Team orchestration playbook the
-    // CLI lead gets, so it can actually form and drive teams (SpawnTeammate,
-    // WaitForTeammates, VerifyDeliverable) instead of merely holding the tools.
-    prompt.push(team_orchestration_section());
-    prompt
-}
-
-fn final_assistant_text(summary: &TurnSummary) -> String {
-    summary
-        .assistant_messages
-        .last()
-        .map(|message| {
-            message
-                .blocks
-                .iter()
-                .filter_map(|block| match block {
-                    ContentBlock::Text { text } => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("")
-        })
-        .unwrap_or_default()
+    );
+    aris_chat::build_common_system_prompt(aris_chat::CommonSystemPromptOptions {
+        workspace,
+        current_date: runtime::today_iso(),
+        os_name: std::env::consts::OS.to_string(),
+        os_version: "unknown".to_string(),
+        model_id: Some(model.to_string()),
+        product_surface: "desktop research automation app".to_string(),
+        language: std::env::var("ARIS_LANGUAGE").unwrap_or_else(|_| "cn".to_string()),
+        include_language_preference: true,
+        include_team_orchestration: true,
+        extra_sections: vec![isolation.clone()],
+    })
+    .unwrap_or_else(|_| vec![isolation])
 }
 
 /// Read config.json and validate the executor is configured. Returns
-/// `(model, provider, api_key, base_url)` or a user-facing error string.
-fn resolve_executor() -> Result<(String, String, String, String), String> {
-    let obj = crate::config::load_object();
-    let get = |key: &str| {
-        obj.get(key)
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-            .map(ToString::to_string)
-    };
-
-    let provider = get("executor_provider").unwrap_or_else(|| "anthropic".to_string());
-    let model = get("executor_model").unwrap_or_else(|| "claude-opus-4-7".to_string());
-
-    match provider.as_str() {
-        "anthropic" | "anthropic-compat" => {
-            if let Some(key) = get("executor_api_key") {
-                if provider == "anthropic-compat" {
-                    std::env::set_var("ANTHROPIC_AUTH_TOKEN", &key);
-                } else {
-                    std::env::set_var("ANTHROPIC_API_KEY", &key);
-                }
-            }
-            if let Some(base) = get("executor_base_url") {
-                std::env::set_var("ANTHROPIC_BASE_URL", &base);
-                std::env::set_var("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS", "1");
-            }
-            let has_auth = std::env::var("ANTHROPIC_API_KEY").is_ok_and(|v| !v.is_empty())
-                || std::env::var("ANTHROPIC_AUTH_TOKEN").is_ok_and(|v| !v.is_empty());
-            if !has_auth {
-                return Err(
-                    "No Anthropic API key configured. Add it on the Settings page.".to_string(),
-                );
-            }
-            Ok((model, provider, String::new(), String::new()))
-        }
-        // OpenAI-compatible: "openai", "minimax", "custom", or any unknown value
-        _ => {
-            let api_key = get("executor_api_key").ok_or_else(|| {
-                format!(
-                    "No API key configured for provider '{provider}'. Add it on the Settings page."
-                )
-            })?;
-            let base_url =
-                get("executor_base_url").unwrap_or_else(|| "https://api.openai.com/v1".to_string());
-            Ok((model, provider, api_key, base_url))
-        }
-    }
+/// `(model, provider, executor_config)` or a user-facing error string.
+fn resolve_executor() -> Result<(String, String, aris_chat::ChatExecutorConfig), String> {
+    aris_chat::resolve_settings_executor_config(&crate::config::load_object())
 }
 
 // ── Tauri commands ────────────────────────────────────────────────────────────
@@ -253,7 +179,7 @@ pub struct ChatStatus {
 #[tauri::command]
 pub fn chat_status() -> ChatStatus {
     match resolve_executor() {
-        Ok((model, provider, _, _)) => ChatStatus {
+        Ok((model, provider, _)) => ChatStatus {
             ready: true,
             model: Some(model),
             provider: Some(provider),
@@ -274,7 +200,7 @@ pub async fn chat_send(
     state: State<'_, ChatState>,
     message: String,
 ) -> Result<String, String> {
-    let (model, provider, api_key, base_url) = resolve_executor()?;
+    let (model, _provider, executor_config) = resolve_executor()?;
     let session = state
         .0
         .lock()
@@ -285,46 +211,27 @@ pub async fn chat_send(
     let (text, updated): (String, Session) = tauri::async_runtime::spawn_blocking(move || {
         // Clear any stale interrupt from a previous Stop so this turn starts clean.
         runtime::clear_interrupt();
-        let tool_specs = executor_tool_specs();
+        let tool_specs = desktop_tool_specs();
+        let permission_policy = desktop_permission_policy(&tool_specs);
         let observer: Box<dyn aris_executor::StreamObserver> = Box::new(DesktopStreamObserver {
             app: worker_app.clone(),
         });
-        let client: aris_executor::ExecutorClient = match provider.as_str() {
-            "anthropic" | "anthropic-compat" => {
-                let auth = api::resolve_startup_auth_source(|| Ok(None))
-                    .map_err(|error| error.to_string())?;
-                aris_executor::ExecutorClient::Anthropic(
-                    aris_executor::AnthropicRuntimeClient::new(
-                        auth,
-                        api::read_base_url(),
-                        api::read_send_betas(),
-                        model.clone(),
-                        true,
-                        tool_specs,
-                        max_tokens_for_model(&model),
-                        observer,
-                    )?,
-                )
-            }
-            _ => aris_executor::ExecutorClient::OpenAI(aris_executor::OpenAIRuntimeClient::new(
-                aris_executor::OpenAIExecutorConfig { api_key, base_url },
-                model.clone(),
-                true,
-                tool_specs,
-                observer,
-            )?),
-        };
         let executor = KernelToolExecutor { app: worker_app };
         let system_prompt = build_system_prompt(&model);
-        let mut runtime = ConversationRuntime::new(
+        let mut runtime = aris_chat::build_conversation_runtime(
             session,
-            client,
+            executor_config,
+            model,
+            true,
+            tool_specs,
+            observer,
             executor,
-            desktop_permission_policy(),
+            permission_policy,
             system_prompt,
-        );
+            runtime::RuntimeFeatureConfig::default(),
+        )?;
         let summary = runtime.run_turn(message, None).map_err(|e| e.to_string())?;
-        let text = final_assistant_text(&summary);
+        let text = aris_chat::final_assistant_text(&summary);
         Ok::<(String, Session), String>((text, runtime.into_session()))
     })
     .await

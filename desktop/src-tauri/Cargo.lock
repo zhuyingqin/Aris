@@ -59,10 +59,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "aris-chat"
+version = "0.4.15"
+dependencies = [
+ "api",
+ "aris-executor",
+ "runtime",
+ "serde_json",
+ "tools",
+]
+
+[[package]]
 name = "aris-desktop"
 version = "0.1.0"
 dependencies = [
  "api",
+ "aris-chat",
  "aris-executor",
  "runtime",
  "serde",

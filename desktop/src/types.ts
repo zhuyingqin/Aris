@@ -244,6 +244,7 @@ export interface ChatStatus {
 // "text → tool → text → tool → final text" displays correctly.
 export type ChatBlock =
   | { kind: "text"; text: string }
+  | { kind: "thinking"; thinking: string }
   | {
       kind: "tool";
       id?: string;

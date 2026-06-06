@@ -28,4 +28,5 @@ tools = { path = "../../crates/tools" }
 runtime = { path = "../../crates/runtime" }
 api = { path = "../../crates/api" }
 aris-executor = { path = "../../crates/executor" }
+aris-chat = { path = "../../crates/chat" }
 tokio = { version = "1", features = ["rt-multi-thread"] }

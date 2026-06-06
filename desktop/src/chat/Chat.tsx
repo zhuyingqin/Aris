@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import MarkdownContent from "./MarkdownContent";
+import MarkdownContent, { ThinkBlock } from "./MarkdownContent";
 import {
   chatCancel,
   chatReset,
@@ -10,6 +10,7 @@ import {
   isTauri,
   onChatDelta,
   onChatDone,
+  onChatThinkingDelta,
   onChatTool,
   onChatToolResult,
   skillsList,
@@ -100,6 +101,18 @@ function appendTextDelta(blocks: ChatBlock[], delta: string): ChatBlock[] {
     copy[copy.length - 1] = { kind: "text", text: last.text + delta };
   } else {
     copy.push({ kind: "text", text: delta });
+  }
+  return copy;
+}
+
+/** Append a thinking delta to last thinking block, or push a new one. */
+function appendThinkingDelta(blocks: ChatBlock[], delta: string): ChatBlock[] {
+  const copy = blocks.slice();
+  const last = copy[copy.length - 1];
+  if (last && last.kind === "thinking") {
+    copy[copy.length - 1] = { kind: "thinking", thinking: last.thinking + delta };
+  } else {
+    copy.push({ kind: "thinking", thinking: delta });
   }
   return copy;
 }
@@ -256,6 +269,10 @@ export default function Chat() {
       // Text delta → append to last text block (or create one) in chronological order
       onChatDelta((text) =>
         patchLastAssistant((t) => ({ ...t, blocks: appendTextDelta(t.blocks, text) })),
+      ),
+      // Native provider thinking/reasoning block.
+      onChatThinkingDelta((thinking) =>
+        patchLastAssistant((t) => ({ ...t, blocks: appendThinkingDelta(t.blocks, thinking) })),
       ),
       // New tool call → push a tool block after any existing blocks
       onChatTool((tool) =>
@@ -659,6 +676,18 @@ function ChatBubble({
             <MarkdownContent key={i} text={block.text} streaming={isLast && turn.streaming} />
           ) : (
             <div key={i} className="chat-text">{block.text}</div>
+          );
+        }
+
+        if (block.kind === "thinking") {
+          if (!block.thinking) return null;
+          const isLast = i === turn.blocks.length - 1;
+          return (
+            <ThinkBlock
+              key={i}
+              content={block.thinking}
+              streaming={isLast && turn.streaming}
+            />
           );
         }
 

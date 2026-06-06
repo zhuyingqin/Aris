@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 api = { path = "../api" }
+aris-chat = { path = "../chat" }
 aris-executor = { path = "../executor" }
 commands = { path = "../commands" }
 compat-harness = { path = "../compat-harness" }

@@ -1,1 +1,1 @@
-pub use aris_executor::{resolve_openai_executor_config, OpenAIRuntimeClient};
+pub use aris_executor::resolve_openai_executor_config;

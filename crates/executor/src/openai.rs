@@ -923,11 +923,14 @@ on a compatible third-party proxy, or use Claude/another provider as executor an
                         }
 
                         if let Some(delta) = choice.get("delta") {
-                            // Kimi: capture reasoning_content from delta
-                            if supports_reasoning {
-                                if let Some(rc) =
-                                    delta.get("reasoning_content").and_then(|r| r.as_str())
-                                {
+                            // Display any reasoning_content a compatible provider
+                            // emits. Cache/replay remains limited to models known
+                            // to accept reasoning_content on subsequent requests.
+                            if let Some(rc) =
+                                delta.get("reasoning_content").and_then(|r| r.as_str())
+                            {
+                                if !rc.is_empty() {
+                                    observer.on_thinking_delta(rc)?;
                                     current_reasoning.push_str(rc);
                                 }
                             }

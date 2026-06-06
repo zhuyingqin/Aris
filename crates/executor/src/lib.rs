@@ -46,6 +46,10 @@ pub trait StreamObserver: Send {
         Ok(())
     }
 
+    fn on_thinking_delta(&mut self, _thinking: &str) -> Result<(), RuntimeError> {
+        Ok(())
+    }
+
     fn on_tool_call(&mut self, _id: &str, _name: &str, _input: &str) -> Result<(), RuntimeError> {
         Ok(())
     }
@@ -188,6 +192,9 @@ impl ApiClient for AnthropicRuntimeClient {
                             signature,
                         } = &start.content_block
                         {
+                            if !thinking.is_empty() {
+                                observer.on_thinking_delta(thinking)?;
+                            }
                             pending_thinking = Some((thinking.clone(), signature.clone()));
                         } else {
                             push_output_block(
@@ -213,6 +220,9 @@ impl ApiClient for AnthropicRuntimeClient {
                         ContentBlockDelta::ThinkingDelta { thinking } => {
                             if let Some((text, _)) = &mut pending_thinking {
                                 text.push_str(&thinking);
+                            }
+                            if !thinking.is_empty() {
+                                observer.on_thinking_delta(&thinking)?;
                             }
                         }
                         ContentBlockDelta::SignatureDelta { signature } => {
@@ -320,6 +330,9 @@ fn push_output_block(
             thinking,
             signature,
         } => {
+            if !thinking.is_empty() {
+                observer.on_thinking_delta(&thinking)?;
+            }
             events.push(AssistantEvent::Thinking {
                 thinking,
                 signature,
@@ -359,6 +372,9 @@ fn response_to_events(
                 thinking,
                 signature,
             } => {
+                if !thinking.is_empty() {
+                    observer.on_thinking_delta(&thinking)?;
+                }
                 events.push(AssistantEvent::Thinking {
                     thinking,
                     signature,
@@ -416,4 +432,72 @@ fn convert_messages(messages: &[ConversationMessage]) -> Vec<InputMessage> {
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use api::{MessageResponse, OutputContentBlock, Usage};
+    use runtime::RuntimeError;
+
+    use super::{response_to_events, StreamObserver};
+
+    struct RecordingObserver {
+        deltas: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl StreamObserver for RecordingObserver {
+        fn on_text_delta(&mut self, text: &str) -> Result<(), RuntimeError> {
+            self.deltas.lock().unwrap().push(format!("text:{text}"));
+            Ok(())
+        }
+
+        fn on_thinking_delta(&mut self, thinking: &str) -> Result<(), RuntimeError> {
+            self.deltas
+                .lock()
+                .unwrap()
+                .push(format!("thinking:{thinking}"));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn response_notifies_observer_about_thinking_blocks() {
+        let deltas = Arc::new(Mutex::new(Vec::new()));
+        let mut observer: Box<dyn StreamObserver> = Box::new(RecordingObserver {
+            deltas: Arc::clone(&deltas),
+        });
+        let response = MessageResponse {
+            id: "msg-test".to_string(),
+            kind: "message".to_string(),
+            role: "assistant".to_string(),
+            content: vec![
+                OutputContentBlock::Thinking {
+                    thinking: "inspect".to_string(),
+                    signature: String::new(),
+                },
+                OutputContentBlock::Text {
+                    text: "answer".to_string(),
+                },
+            ],
+            model: "test-model".to_string(),
+            stop_reason: Some("end_turn".to_string()),
+            stop_sequence: None,
+            usage: Usage {
+                input_tokens: 1,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
+                output_tokens: 2,
+            },
+            request_id: None,
+        };
+
+        response_to_events(response, &mut observer).unwrap();
+
+        assert_eq!(
+            *deltas.lock().unwrap(),
+            vec!["thinking:inspect".to_string(), "text:answer".to_string()]
+        );
+    }
 }

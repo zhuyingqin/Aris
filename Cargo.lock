@@ -29,10 +29,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "aris-chat"
+version = "0.4.15"
+dependencies = [
+ "api",
+ "aris-executor",
+ "runtime",
+ "serde_json",
+ "tools",
+]
+
+[[package]]
 name = "aris-cli"
 version = "0.4.15"
 dependencies = [
  "api",
+ "aris-chat",
  "aris-executor",
  "commands",
  "compat-harness",
@@ -144,6 +156,7 @@ name = "commands"
 version = "0.4.15"
 dependencies = [
  "runtime",
+ "serde_json",
 ]
 
 [[package]]

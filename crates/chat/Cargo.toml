@@ -1,13 +1,16 @@
 [package]
-name = "commands"
+name = "aris-chat"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
-[lints]
-workspace = true
-
 [dependencies]
+api = { path = "../api" }
+aris-executor = { path = "../executor" }
 runtime = { path = "../runtime" }
 serde_json = "1"
+tools = { path = "../tools" }
+
+[lints]
+workspace = true
