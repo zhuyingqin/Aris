@@ -6,6 +6,9 @@ export default defineConfig({
   plugins: [react()],
   base: "./",
   clearScreen: false,
+  resolve: {
+    dedupe: ["react", "react-dom"],
+  },
   server: {
     host: "127.0.0.1",
     port: 1420,

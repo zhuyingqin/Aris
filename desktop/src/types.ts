@@ -254,8 +254,22 @@ export type ChatBlock =
       isError?: boolean;
     };
 
+export interface ChatAttachment {
+  id: string;
+  kind: "file" | "image";
+  name: string;
+  path?: string;
+  mimeType?: string;
+  content?: string;
+  preview?: string;
+}
+
 export interface ChatTurn {
+  id: string;
   role: "user" | "assistant";
   blocks: ChatBlock[];
   streaming?: boolean;
+  error?: string;
+  stopped?: boolean;
+  attachments?: ChatAttachment[];
 }

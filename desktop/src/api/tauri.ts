@@ -75,6 +75,9 @@ export const skillView = (name: string) =>
 export const sessionsList = () => invoke<SessionSummary[]>("sessions_list");
 export const sessionGet = (id: string) =>
   invoke<SessionTranscript>("session_get", { id });
+export const chatUiSessionsLoad = <T>() => invoke<T[]>("chat_ui_sessions_load");
+export const chatUiSessionsSave = <T>(sessions: T[]) =>
+  invoke<void>("chat_ui_sessions_save", { sessions });
 
 // ── File browser ─────────────────────────────────────────────────────────────
 
@@ -83,13 +86,21 @@ export const fileSearch = (pattern: string, root?: string) =>
 
 export const fileRead = (path: string, limit?: number) =>
   invoke<string>("file_read", { path, limit: limit ?? null });
+export const projectChatStarters = () => invoke<string[]>("project_chat_starters");
 
 // ── Chat engine (P2) ──────────────────────────────────────────────────────────
 
 export const chatStatus = () => invoke<ChatStatus>("chat_status");
-export const chatSend = (message: string) =>
-  invoke<string>("chat_send", { message });
-export const chatReset = () => invoke<void>("chat_reset");
+export const chatSend = (sessionId: string, message: string) =>
+  invoke<string>("chat_send", { sessionId, message });
+export const chatReset = (sessionId: string) =>
+  invoke<void>("chat_reset", { sessionId });
+export const chatSetContext = (
+  sessionId: string,
+  messages: { role: "user" | "assistant"; text: string }[],
+) => invoke<void>("chat_set_context", { sessionId, messages });
+export const chatDelete = (sessionId: string) =>
+  invoke<void>("chat_delete", { sessionId });
 export const chatCancel = () => invoke<void>("chat_cancel");
 
 export const onChatDelta = (handler: (text: string) => void) =>

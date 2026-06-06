@@ -5,19 +5,22 @@
 //! Streaming surface (Tauri events): `chat-delta`, `chat-thinking-delta`,
 //! `chat-tool`, `chat-tool-result`, `chat-done`.
 
-use std::{path::PathBuf, sync::Mutex};
+use std::{collections::HashMap, path::PathBuf, sync::Mutex};
 
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, State};
 
-use runtime::{PermissionMode, RuntimeError, Session, ToolError, ToolExecutor};
+use runtime::{
+    ContentBlock, ConversationMessage, PermissionMode, RuntimeError, Session, ToolError,
+    ToolExecutor,
+};
 
-/// Per-app chat session.
-pub struct ChatState(pub Mutex<Session>);
+/// Per-app chat sessions, keyed by the UI session id.
+pub struct ChatState(pub Mutex<HashMap<String, Session>>);
 
 impl Default for ChatState {
     fn default() -> Self {
-        Self(Mutex::new(Session::new()))
+        Self(Mutex::new(HashMap::new()))
     }
 }
 
@@ -165,6 +168,37 @@ fn resolve_executor() -> Result<(String, String, aris_chat::ChatExecutorConfig),
     aris_chat::resolve_settings_executor_config(&crate::config::load_object())
 }
 
+fn validate_session_id(session_id: &str) -> Result<(), String> {
+    if session_id.is_empty()
+        || session_id.contains('/')
+        || session_id.contains('\\')
+        || session_id.contains("..")
+    {
+        return Err("invalid chat session id".to_string());
+    }
+    Ok(())
+}
+
+fn chat_session_path(session_id: &str) -> Result<PathBuf, String> {
+    validate_session_id(session_id)?;
+    Ok(crate::state::sessions_dir().join(format!("{session_id}.json")))
+}
+
+fn load_chat_session(session_id: &str) -> Result<Session, String> {
+    let path = chat_session_path(session_id)?;
+    if path.exists() {
+        Session::load_from_path(path).map_err(|e| e.to_string())
+    } else {
+        Ok(Session::new())
+    }
+}
+
+fn save_chat_session(session_id: &str, session: &Session) -> Result<(), String> {
+    session
+        .save_to_path(chat_session_path(session_id)?)
+        .map_err(|e| e.to_string())
+}
+
 // ── Tauri commands ────────────────────────────────────────────────────────────
 
 #[derive(serde::Serialize)]
@@ -198,14 +232,20 @@ pub fn chat_status() -> ChatStatus {
 pub async fn chat_send(
     app: AppHandle,
     state: State<'_, ChatState>,
+    session_id: String,
     message: String,
 ) -> Result<String, String> {
     let (model, _provider, executor_config) = resolve_executor()?;
-    let session = state
-        .0
-        .lock()
-        .map_err(|_| "chat state poisoned".to_string())?
-        .clone();
+    validate_session_id(&session_id)?;
+    let session = {
+        let sessions = state
+            .0
+            .lock()
+            .map_err(|_| "chat state poisoned".to_string())?;
+        sessions.get(&session_id).cloned()
+    }
+    .map(Ok)
+    .unwrap_or_else(|| load_chat_session(&session_id))?;
 
     let worker_app = app.clone();
     let (text, updated): (String, Session) = tauri::async_runtime::spawn_blocking(move || {
@@ -237,20 +277,80 @@ pub async fn chat_send(
     .await
     .map_err(|e| e.to_string())??;
 
-    *state
+    save_chat_session(&session_id, &updated)?;
+    state
         .0
         .lock()
-        .map_err(|_| "chat state poisoned".to_string())? = updated;
+        .map_err(|_| "chat state poisoned".to_string())?
+        .insert(session_id, updated);
     let _ = app.emit("chat-done", &text);
     Ok(text)
 }
 
 #[tauri::command]
-pub fn chat_reset(state: State<ChatState>) -> Result<(), String> {
-    *state
+pub fn chat_reset(state: State<ChatState>, session_id: String) -> Result<(), String> {
+    validate_session_id(&session_id)?;
+    let fresh = Session::new();
+    save_chat_session(&session_id, &fresh)?;
+    state
         .0
         .lock()
-        .map_err(|_| "chat state poisoned".to_string())? = Session::new();
+        .map_err(|_| "chat state poisoned".to_string())?
+        .insert(session_id, fresh);
+    Ok(())
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatContextMessage {
+    role: String,
+    text: String,
+}
+
+#[tauri::command]
+pub fn chat_set_context(
+    state: State<ChatState>,
+    session_id: String,
+    messages: Vec<ChatContextMessage>,
+) -> Result<(), String> {
+    validate_session_id(&session_id)?;
+    let mut session = Session::new();
+    for message in messages {
+        match message.role.as_str() {
+            "user" => session
+                .messages
+                .push(ConversationMessage::user_text(message.text)),
+            "assistant" => {
+                session
+                    .messages
+                    .push(ConversationMessage::assistant(vec![ContentBlock::Text {
+                        text: message.text,
+                    }]))
+            }
+            _ => return Err("chat context only supports user and assistant messages".to_string()),
+        }
+    }
+    save_chat_session(&session_id, &session)?;
+    state
+        .0
+        .lock()
+        .map_err(|_| "chat state poisoned".to_string())?
+        .insert(session_id, session);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn chat_delete(state: State<ChatState>, session_id: String) -> Result<(), String> {
+    validate_session_id(&session_id)?;
+    state
+        .0
+        .lock()
+        .map_err(|_| "chat state poisoned".to_string())?
+        .remove(&session_id);
+    let path = chat_session_path(&session_id)?;
+    if path.exists() {
+        std::fs::remove_file(path).map_err(|e| e.to_string())?;
+    }
     Ok(())
 }
 

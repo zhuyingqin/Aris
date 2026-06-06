@@ -9,6 +9,8 @@ use runtime::{ContentBlock, MessageRole, Session};
 
 use crate::state;
 
+const CHAT_UI_SESSIONS_FILE: &str = "chat-ui-sessions.json";
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionSummary {
@@ -34,6 +36,7 @@ pub fn sessions_list() -> Vec<SessionSummary> {
         if !name.ends_with(".json")
             || name.ends_with(".timeline.json")
             || name.ends_with(".json.tmp")
+            || name == CHAT_UI_SESSIONS_FILE
         {
             continue;
         }
@@ -108,4 +111,33 @@ pub fn session_get(id: String) -> Result<Value, String> {
         })
         .collect();
     Ok(json!({ "id": id, "messages": messages }))
+}
+
+#[tauri::command]
+pub fn chat_ui_sessions_load() -> Result<Value, String> {
+    let path = state::runtime_dir().join(CHAT_UI_SESSIONS_FILE);
+    if !path.exists() {
+        return Ok(Value::Array(Vec::new()));
+    }
+    let raw = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let value: Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+    if !value.is_array() {
+        return Err("chat UI session store must be an array".to_string());
+    }
+    Ok(value)
+}
+
+#[tauri::command]
+pub fn chat_ui_sessions_save(sessions: Value) -> Result<(), String> {
+    if !sessions.is_array() {
+        return Err("chat UI session store must be an array".to_string());
+    }
+    let path = state::runtime_dir().join(CHAT_UI_SESSIONS_FILE);
+    let tmp = path.with_extension("json.tmp");
+    let data = serde_json::to_vec_pretty(&sessions).map_err(|e| e.to_string())?;
+    std::fs::write(&tmp, data).map_err(|e| e.to_string())?;
+    if path.exists() {
+        std::fs::remove_file(&path).map_err(|e| e.to_string())?;
+    }
+    std::fs::rename(tmp, path).map_err(|e| e.to_string())
 }

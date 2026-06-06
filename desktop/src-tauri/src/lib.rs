@@ -39,12 +39,17 @@ pub fn run() {
             config::config_set,
             sessions::sessions_list,
             sessions::session_get,
+            sessions::chat_ui_sessions_load,
+            sessions::chat_ui_sessions_save,
             engine::chat_status,
             engine::chat_send,
             engine::chat_reset,
+            engine::chat_set_context,
+            engine::chat_delete,
             engine::chat_cancel,
             files::file_search,
             files::file_read,
+            files::project_chat_starters,
         ])
         .run(tauri::generate_context!())
         .expect("error while running ARIS Studio");

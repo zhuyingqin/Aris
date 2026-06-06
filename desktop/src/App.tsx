@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useStore, type Tab } from "./store";
 import Chat from "./chat/Chat";
 import Studio from "./studio/Studio";
@@ -53,8 +53,15 @@ export default function App() {
   const error = useStore((s) => s.error);
   const setError = useStore((s) => s.setError);
   const init = useStore((s) => s.init);
+  const [theme, setTheme] = useState<"dark" | "light">(
+    () => (localStorage.getItem("aris-theme") === "light" ? "light" : "dark"),
+  );
 
   useEffect(() => init(), [init]);
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    localStorage.setItem("aris-theme", theme);
+  }, [theme]);
 
   return (
     <div className="app">
@@ -85,8 +92,17 @@ export default function App() {
 
       <header className="app-head">
         <div className="app-title">{LABELS[tab]}</div>
-        <div className="dir" title="run-state directory">
-          {stateDir || "…"}
+        <div className="app-head-actions">
+          <div className="dir" title="run-state directory">
+            {stateDir || "…"}
+          </div>
+          <button
+            className="theme-toggle"
+            onClick={() => setTheme((value) => value === "dark" ? "light" : "dark")}
+            aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} theme`}
+          >
+            {theme === "dark" ? "Light" : "Dark"}
+          </button>
         </div>
       </header>
 
