@@ -90,6 +90,37 @@ export interface WorkflowOutput {
   message?: string | null;
 }
 
+export interface DesktopCommandSpec {
+  name: string;
+  description: string;
+  argumentHint?: string | null;
+}
+
+export interface ChatCommandSelectionItem {
+  value: string;
+  label: string;
+  description?: string | null;
+  isCurrent: boolean;
+}
+
+export interface ChatCommandSelection {
+  command: string;
+  title: string;
+  subtitle?: string | null;
+  current?: string | null;
+  items: ChatCommandSelectionItem[];
+}
+
+export interface ChatCommandResult {
+  handled: boolean;
+  message?: string | null;
+  prompt?: string | null;
+  selection?: ChatCommandSelection | null;
+  replaceTurns: boolean;
+  openSettings: boolean;
+  refreshStatus: boolean;
+}
+
 // ── Team / Agents ────────────────────────────────────────────────────────────
 
 export interface RunEvent {
@@ -248,23 +279,6 @@ export interface SessionTranscript {
 }
 
 // ── Chat engine (P2) ──────────────────────────────────────────────────────────
-
-export interface CliRunRequest {
-  args: string[];
-  timeoutMs?: number;
-}
-
-export interface CliRunOutput {
-  command: string;
-  executable: string;
-  cwd: string;
-  code?: number | null;
-  success: boolean;
-  timedOut: boolean;
-  elapsedMs: number;
-  stdout: string;
-  stderr: string;
-}
 
 export interface ChatStatus {
   ready: boolean;

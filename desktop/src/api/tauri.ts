@@ -5,12 +5,12 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 export const isTauri = (): boolean =>
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 import type {
+  ChatCommandResult,
   ChatStatus,
-  CliRunOutput,
-  CliRunRequest,
   ConfigPatch,
   ConfigTestResult,
   ConfigView,
+  DesktopCommandSpec,
   RunEvent,
   SessionSummary,
   SessionTranscript,
@@ -86,9 +86,6 @@ export const chatUiSessionsSave = <T>(sessions: T[]) =>
 
 // ── File browser ─────────────────────────────────────────────────────────────
 
-export const cliRun = (req: CliRunRequest) =>
-  invoke<CliRunOutput>("cli_run", { req });
-
 export const fileSearch = (pattern: string, root?: string) =>
   invoke<string[]>("file_search", { pattern, root: root ?? null });
 
@@ -99,6 +96,10 @@ export const projectChatStarters = () => invoke<string[]>("project_chat_starters
 // ── Chat engine (P2) ──────────────────────────────────────────────────────────
 
 export const chatStatus = () => invoke<ChatStatus>("chat_status");
+export const chatCommandSpecs = () =>
+  invoke<DesktopCommandSpec[]>("chat_command_specs");
+export const chatRunCommand = (sessionId: string, input: string) =>
+  invoke<ChatCommandResult>("chat_run_command", { sessionId, input });
 export const chatSend = (sessionId: string, message: string) =>
   invoke<string>("chat_send", { sessionId, message });
 export const chatReset = (sessionId: string) =>
@@ -119,9 +120,9 @@ export const onChatTool = (
   handler: (t: { id?: string; name: string; input: string }) => void,
 ) => listen<{ id?: string; name: string; input: string }>("chat-tool", (e) => handler(e.payload));
 export const onChatToolResult = (
-  handler: (t: { name: string; output: string; isError: boolean }) => void,
+  handler: (t: { id?: string; name: string; output: string; isError: boolean }) => void,
 ) =>
-  listen<{ name: string; output: string; isError: boolean }>(
+  listen<{ id?: string; name: string; output: string; isError: boolean }>(
     "chat-tool-result",
     (e) => handler(e.payload),
   );

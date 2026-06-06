@@ -1,14 +1,16 @@
 // @vitest-environment jsdom
 
 import { useState } from "react";
-import { act, cleanup, render, renderHook, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, renderHook, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ChatAttachment, ChatTurn, SkillMeta } from "../types";
-import ChatComposer, { resizeComposerTextarea } from "./ChatComposer";
+import type { ChatAttachment, ChatCommandSelection, ChatTurn, DesktopCommandSpec, SkillMeta } from "../types";
+import ChatComposer, { attachmentFromFile, resizeComposerTextarea } from "./ChatComposer";
 import { diffFromTool } from "./ChatMessage";
+import CommandSelection from "./CommandSelection";
 import { isNearBottom } from "./ChatThread";
 import { makeId } from "./model";
+import { appendToolOutput } from "./useChatStream";
 import { useChatSessions } from "./useChatSessions";
 
 class ResizeObserverMock {
@@ -20,6 +22,10 @@ class ResizeObserverMock {
 beforeEach(() => {
   localStorage.clear();
   vi.stubGlobal("ResizeObserver", ResizeObserverMock);
+  Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+    configurable: true,
+    value: vi.fn(),
+  });
 });
 
 afterEach(() => {
@@ -54,6 +60,29 @@ describe("Chat interaction helpers", () => {
     });
     expect(change?.diff).toContain("-old");
     expect(change?.diff).toContain("+new");
+  });
+
+  it("omits dropped binary bodies without reading them into the renderer", async () => {
+    const file = new File(["binary"], "archive.zip", { type: "application/zip" });
+    const text = vi.fn();
+    Object.defineProperty(file, "text", { configurable: true, value: text });
+
+    const attachment = await attachmentFromFile(file);
+
+    expect(text).not.toHaveBeenCalled();
+    expect(attachment.content).toContain("Binary file content omitted");
+  });
+
+  it("matches tool results by call id before tool name", () => {
+    const blocks = [
+      { kind: "tool" as const, id: "first", name: "read_file", input: "{}" },
+      { kind: "tool" as const, id: "second", name: "read_file", input: "{}" },
+    ];
+
+    const next = appendToolOutput(blocks, "first", "read_file", "first output", false);
+
+    expect(next[0]).toMatchObject({ id: "first", output: "first output" });
+    expect(next[1]).not.toHaveProperty("output");
   });
 });
 
@@ -135,9 +164,11 @@ const SKILLS: SkillMeta[] = [
 ];
 
 function ComposerHarness({
+  commands = [],
   skills = SKILLS,
   onSubmit = () => undefined,
 }: {
+  commands?: DesktopCommandSpec[];
   skills?: SkillMeta[];
   onSubmit?: () => void;
 }) {
@@ -146,6 +177,7 @@ function ComposerHarness({
   return (
     <ChatComposer
       input={input}
+      commands={commands}
       skills={skills}
       attachments={attachments}
       busy={false}
@@ -179,11 +211,10 @@ describe("ChatComposer picker keyboard operation", () => {
     render(
       <ComposerHarness
         onSubmit={onSubmit}
-        skills={[
+        commands={[
           {
             name: "model",
             description: "Show or switch model",
-            path: "<desktop-command:model>",
           },
         ]}
       />,
@@ -197,6 +228,66 @@ describe("ChatComposer picker keyboard operation", () => {
     expect((textbox as HTMLTextAreaElement).value).toBe("/model");
   });
 
+  it("submits an unmatched slash command instead of trapping Enter in the picker", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn();
+    render(<ComposerHarness onSubmit={onSubmit} commands={[]} skills={[]} />);
+    const textbox = screen.getByRole("textbox");
+
+    await user.type(textbox, "/some-custom-command");
+    await user.keyboard("{Enter}");
+
+    expect(onSubmit).toHaveBeenCalledOnce();
+  });
+
+  it("groups desktop commands separately from skills", async () => {
+    const user = userEvent.setup();
+    render(
+      <ComposerHarness
+        commands={[
+          {
+            name: "help",
+            description: "Show commands",
+          },
+        ]}
+        skills={[{ name: "paper-plan", description: "Plan a paper", path: "paper-plan/SKILL.md" }]}
+      />,
+    );
+    const textbox = screen.getByRole("textbox");
+
+    await user.type(textbox, "/");
+
+    const picker = screen.getByRole("listbox");
+    expect(within(picker).getByText("Slash menu")).toBeTruthy();
+    expect(within(picker).getByText("System commands")).toBeTruthy();
+    expect(within(picker).getByText("All skills")).toBeTruthy();
+  });
+
+  it("scrolls the active picker item into view when arrowing", async () => {
+    const user = userEvent.setup();
+    const scrollIntoView = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+      configurable: true,
+      value: scrollIntoView,
+    });
+    render(
+      <ComposerHarness
+        commands={[
+          { name: "help", description: "Show commands" },
+          { name: "model", description: "Switch model" },
+        ]}
+        skills={[{ name: "paper-plan", description: "Plan a paper", path: "paper-plan/SKILL.md" }]}
+      />,
+    );
+    const textbox = screen.getByRole("textbox");
+
+    await user.type(textbox, "/");
+    scrollIntoView.mockClear();
+    await user.keyboard("{ArrowDown}");
+
+    expect(scrollIntoView).toHaveBeenCalled();
+  });
+
   it("attaches a recent @ file with Enter instead of inserting its body", async () => {
     localStorage.setItem("aris-chat-recent-files", JSON.stringify(["src/chat/Chat.tsx"]));
     const user = userEvent.setup();
@@ -208,5 +299,55 @@ describe("ChatComposer picker keyboard operation", () => {
 
     expect((textbox as HTMLTextAreaElement).value).toBe("");
     expect(screen.getByText("Chat.tsx")).toBeTruthy();
+  });
+});
+
+describe("CommandSelection", () => {
+  const selection: ChatCommandSelection = {
+    command: "model",
+    title: "Select executor model",
+    subtitle: "Provider: anthropic",
+    current: "claude-opus-4-7",
+    items: [
+      {
+        value: "claude-opus-4-7",
+        label: "claude-opus-4-7",
+        description: "Current model",
+        isCurrent: true,
+      },
+      {
+        value: "claude-sonnet-4-6",
+        label: "claude-sonnet-4-6",
+        description: "Everyday model",
+        isCurrent: false,
+      },
+    ],
+  };
+
+  it("selects an option with keyboard navigation and keeps the active item in view", async () => {
+    const user = userEvent.setup();
+    const onSelect = vi.fn();
+    const scrollIntoView = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+      configurable: true,
+      value: scrollIntoView,
+    });
+
+    render(
+      <CommandSelection
+        selection={selection}
+        bottomOffset={120}
+        onSelect={onSelect}
+        onCancel={() => undefined}
+      />,
+    );
+
+    const listbox = screen.getByRole("listbox");
+    await user.keyboard("{ArrowDown}{Enter}");
+
+    expect(document.activeElement).toBe(listbox);
+    expect(listbox.getAttribute("aria-activedescendant")).toContain("option-1");
+    expect(scrollIntoView).toHaveBeenCalled();
+    expect(onSelect).toHaveBeenCalledWith("claude-sonnet-4-6");
   });
 });

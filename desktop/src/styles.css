@@ -182,6 +182,15 @@ textarea {
   font-weight: 600;
   font-size: 14px;
 }
+.app-head-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.app-nav-toggle,
+.app-nav-backdrop {
+  display: none;
+}
 .app-main {
   grid-area: main;
   min-height: 0;
@@ -357,8 +366,15 @@ textarea {
   overflow: auto;
 }
 .run-row {
-  padding: 10px 12px;
+  display: block;
+  width: 100%;
+  border: 0;
   border-bottom: 1px solid var(--border);
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  padding: 10px 12px;
   cursor: pointer;
 }
 .run-row.active {
@@ -1463,7 +1479,7 @@ textarea {
   z-index: 100;
   display: flex;
   flex-direction: column;
-  max-height: 420px;
+  max-height: min(420px, calc(100vh - 100% - 64px));
 }
 .skill-picker-header {
   font-size: 11px;
@@ -2194,281 +2210,11 @@ textarea {
 }
 .md-think-body p { margin: 4px 0; }
 
-/* CLI command center */
-.cli-page {
-  display: grid;
-  grid-template-columns: 330px minmax(0, 1fr);
-  height: 100%;
-  min-height: 0;
-  background: var(--bg);
-}
-
-.cli-catalog {
-  border-right: 1px solid var(--border);
-  background: var(--bg-1);
-  overflow: auto;
-  padding-bottom: 14px;
-}
-
-.cli-command-group + .cli-command-group {
-  border-top: 1px solid var(--border);
-}
-
-.cli-command-list {
-  display: flex;
-  flex-direction: column;
-  gap: 7px;
-  padding: 9px 10px 12px;
-}
-
-.cli-command-card {
-  display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  gap: 4px;
-  width: 100%;
-  min-height: 76px;
-  padding: 9px 10px;
-  background: var(--bg-2);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  text-align: left;
-}
-
-.cli-command-card:hover {
-  background: var(--bg-3);
-  border-color: var(--accent);
-}
-
-.cli-command-card-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  color: var(--text);
-  font-weight: 700;
-  font-size: 13px;
-}
-
-.cli-command-kind {
-  flex-shrink: 0;
-  padding: 1px 6px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  color: var(--text-dim);
-  font-size: 9px;
-  font-weight: 800;
-  letter-spacing: 0.5px;
-}
-
-.cli-native .cli-command-kind {
-  border-color: rgba(110, 231, 170, 0.45);
-  color: #6ee7aa;
-}
-
-.cli-command-note {
-  color: var(--text-dim);
-  font-size: 11px;
-  line-height: 1.35;
-}
-
-.cli-command-card code,
-.cli-status-row code,
-.cli-meta code,
-.cli-prefix {
-  font-family: ui-monospace, "Cascadia Code", Menlo, Consolas, monospace;
-  letter-spacing: 0;
-}
-
-.cli-command-card code {
-  display: block;
-  overflow: hidden;
-  color: var(--text-dim);
-  font-size: 11px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.cli-console {
-  display: grid;
-  grid-template-rows: auto auto auto auto minmax(0, 1fr);
-  min-width: 0;
-  min-height: 0;
-}
-
-.cli-runbar {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) 82px auto;
-  gap: 8px;
-  align-items: center;
-  min-height: 52px;
-  padding: 9px 12px;
-  border-bottom: 1px solid var(--border);
-  background: var(--bg-1);
-}
-
-.cli-prefix {
-  display: inline-flex;
-  align-items: center;
-  min-height: 34px;
-  padding: 0 10px;
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  background: var(--bg-2);
-  color: var(--text-dim);
-  font-size: 12px;
-}
-
-.cli-runbar input {
-  width: 100%;
-  min-width: 0;
-  min-height: 34px;
-  font-family: ui-monospace, "Cascadia Code", Menlo, Consolas, monospace;
-}
-
-.cli-runbar select,
-.cli-runbar button {
-  min-height: 34px;
-}
-
-.cli-status-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-height: 38px;
-  padding: 7px 12px;
-  border-bottom: 1px solid var(--border);
-  color: var(--text-dim);
-  font-size: 12px;
-  overflow: hidden;
-}
-
-.cli-status-row code {
-  overflow: hidden;
-  color: var(--text);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.cli-muted {
-  color: var(--text-dim);
-}
-
-.cli-meta {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
-  padding: 10px 12px;
-  border-bottom: 1px solid var(--border);
-  background: var(--bg);
-}
-
-.cli-meta > div {
-  min-width: 0;
-  padding: 8px 10px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--bg-1);
-}
-
-.cli-meta span {
-  display: block;
-  margin-bottom: 3px;
-  color: var(--text-dim);
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.5px;
-  text-transform: uppercase;
-}
-
-.cli-meta code {
-  display: block;
-  overflow: hidden;
-  color: var(--text);
-  font-size: 11px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.cli-output-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  min-height: 38px;
-  border-bottom: 1px solid var(--border);
-  background: var(--bg-1);
-}
-
-.cli-output-actions {
-  display: flex;
-  gap: 6px;
-  padding-right: 10px;
-}
-
-.cli-output-actions button {
-  padding: 3px 9px;
-  background: transparent;
-  color: var(--text-dim);
-  font-size: 11px;
-}
-
-.cli-output {
-  min-height: 0;
-  margin: 0;
-  overflow: auto;
-  padding: 14px 16px;
-  background: #0b1016;
-  color: var(--text);
-  font: 12.5px/1.6 ui-monospace, "Cascadia Code", Menlo, Consolas, monospace;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-:root[data-theme="light"] .cli-output {
-  background: #f5f7fa;
-}
-
-@media (max-width: 1120px) {
-  .cli-page {
-    grid-template-columns: 280px minmax(0, 1fr);
-  }
-}
-
-@media (max-width: 820px) {
-  .cli-page {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: 220px minmax(0, 1fr);
-  }
-
-  .cli-catalog {
-    border-right: none;
-    border-bottom: 1px solid var(--border);
-  }
-
-  .cli-command-list {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .cli-runbar {
-    grid-template-columns: auto minmax(0, 1fr);
-  }
-
-  .cli-runbar select,
-  .cli-runbar button {
-    width: 100%;
-  }
-
-  .cli-meta {
-    grid-template-columns: 1fr;
-  }
-}
-
 /* error toast */
 .toast {
   position: absolute;
   right: 16px;
-  bottom: 16px;
+  top: 16px;
   max-width: 420px;
   background: #3a1718;
   border: 1px solid var(--red);
@@ -2921,6 +2667,105 @@ textarea {
   text-transform: uppercase;
 }
 
+.command-select {
+  position: absolute;
+  z-index: 110;
+  left: max(20px, calc((100% - 860px) / 2));
+  right: max(20px, calc((100% - 860px) / 2));
+  display: flex;
+  max-height: min(440px, calc(100% - 96px));
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-1);
+  box-shadow: 0 14px 38px rgba(0, 0, 0, 0.36);
+}
+
+.command-select-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-2);
+}
+
+.command-select-title {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.command-select-subtitle {
+  margin-top: 2px;
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.command-select-close {
+  flex-shrink: 0;
+  padding: 2px 7px;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.command-select-scroll {
+  flex: 1;
+  overflow-y: auto;
+  outline: none;
+}
+
+.command-select-item {
+  display: grid;
+  width: 100%;
+  grid-template-columns: minmax(180px, 0.42fr) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+  background: transparent;
+  text-align: left;
+}
+
+.command-select-item:hover,
+.command-select-item.active {
+  background: var(--bg-3);
+}
+
+.command-select-label {
+  overflow: hidden;
+  color: var(--accent);
+  font-family: ui-monospace, "Cascadia Code", monospace;
+  font-size: 12px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.command-select-desc {
+  overflow: hidden;
+  color: var(--text-dim);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.command-select-current {
+  justify-self: end;
+  padding: 2px 6px;
+  border: 1px solid color-mix(in srgb, var(--accent) 48%, var(--border));
+  border-radius: 999px;
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 700;
+}
+
 .chat-undo {
   position: absolute;
   z-index: 100;
@@ -2998,10 +2843,14 @@ textarea {
     transform: translateX(-102%);
     transition: transform 0.16s ease;
     box-shadow: 10px 0 30px rgba(0, 0, 0, 0.25);
+    visibility: hidden;
+    pointer-events: none;
   }
 
   .chat-sidebar.open {
     transform: translateX(0);
+    visibility: visible;
+    pointer-events: auto;
   }
 
   .chat-sidebar-close,
@@ -3022,7 +2871,58 @@ textarea {
   }
 
   .sidebar {
-    display: none;
+    position: fixed;
+    z-index: 220;
+    inset: 0 auto 0 0;
+    display: flex;
+    width: min(280px, 82vw);
+    transform: translateX(-102%);
+    transition: transform 0.16s ease;
+    box-shadow: 10px 0 30px rgba(0, 0, 0, 0.3);
+    visibility: hidden;
+    pointer-events: none;
+  }
+
+  .sidebar.mobile-open {
+    transform: translateX(0);
+    visibility: visible;
+    pointer-events: auto;
+  }
+
+  .sidebar .brand-text {
+    display: flex;
+  }
+
+  .sidebar .brand {
+    justify-content: flex-start;
+    padding-inline: 10px;
+  }
+
+  .sidebar .nav-group-label {
+    font-size: 9px;
+  }
+
+  .sidebar .nav-item,
+  .sidebar .nav-item:not(.active),
+  .sidebar .nav-item.active {
+    justify-content: flex-start;
+    padding: 7px 10px;
+    font-size: 13px;
+  }
+
+  .app-nav-toggle {
+    display: inline-flex;
+    padding: 3px 8px;
+  }
+
+  .app-nav-backdrop {
+    position: fixed;
+    z-index: 210;
+    inset: 0;
+    display: block;
+    border: 0;
+    border-radius: 0;
+    background: rgba(0, 0, 0, 0.42);
   }
 
   .app-head .dir,
@@ -3045,5 +2945,25 @@ textarea {
 
   .chat-user .chat-text {
     max-width: 92%;
+  }
+
+  .command-select {
+    left: 10px;
+    right: 10px;
+  }
+
+  .command-select-item {
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: start;
+  }
+
+  .command-select-desc {
+    grid-column: 1 / -1;
+    white-space: normal;
+  }
+
+  .command-select-current {
+    grid-column: 2;
+    grid-row: 1;
   }
 }

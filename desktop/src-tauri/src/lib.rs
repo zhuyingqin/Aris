@@ -1,8 +1,8 @@
-mod cli;
 mod commands;
 mod config;
 mod engine;
 mod files;
+mod process;
 mod sessions;
 mod state;
 mod watcher;
@@ -36,7 +36,6 @@ pub fn run() {
             commands::skills_list,
             commands::skill_view,
             commands::state_dir,
-            cli::cli_run,
             config::config_get,
             config::config_set,
             config::config_test,
@@ -45,6 +44,8 @@ pub fn run() {
             sessions::chat_ui_sessions_load,
             sessions::chat_ui_sessions_save,
             engine::chat_status,
+            engine::chat_command_specs,
+            engine::chat_run_command,
             engine::chat_send,
             engine::chat_reset,
             engine::chat_set_context,

@@ -4,7 +4,6 @@ import Chat from "./chat/Chat";
 import Studio from "./studio/Studio";
 import Monitor from "./monitor/Monitor";
 import TeamView from "./teams/TeamView";
-import Cli from "./cli/Cli";
 import Settings from "./settings/Settings";
 import Skills from "./skills/Skills";
 import Sessions from "./sessions/Sessions";
@@ -29,10 +28,6 @@ const NAV_GROUPS: { group: string; items: NavItem[] }[] = [
       { id: "monitor", label: "Run Monitor", icon: "📈" },
       { id: "teams", label: "Team", icon: "👥" },
     ],
-  },
-  {
-    group: "Console",
-    items: [{ id: "cli", label: "CLI", icon: "$" }],
   },
   {
     group: "Library",
@@ -61,16 +56,25 @@ export default function App() {
   const [theme, setTheme] = useState<"dark" | "light">(
     () => (localStorage.getItem("aris-theme") === "light" ? "light" : "dark"),
   );
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
 
   useEffect(() => init(), [init]);
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
     localStorage.setItem("aris-theme", theme);
   }, [theme]);
+  useEffect(() => {
+    if (!mobileNavOpen) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setMobileNavOpen(false);
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [mobileNavOpen]);
 
   return (
     <div className="app">
-      <aside className="sidebar">
+      <aside className={`sidebar${mobileNavOpen ? " mobile-open" : ""}`}>
         <div className="brand">
           <img className="brand-mark" src={arisIcon} alt="" />
           <span className="brand-text">
@@ -85,7 +89,10 @@ export default function App() {
               <button
                 key={t.id}
                 className={`nav-item${tab === t.id ? " active" : ""}`}
-                onClick={() => setTab(t.id)}
+                onClick={() => {
+                  setTab(t.id);
+                  setMobileNavOpen(false);
+                }}
               >
                 <span className="nav-icon">{t.icon}</span>
                 {t.label}
@@ -94,9 +101,26 @@ export default function App() {
           </div>
         ))}
       </aside>
+      {mobileNavOpen && (
+        <button
+          className="app-nav-backdrop"
+          onClick={() => setMobileNavOpen(false)}
+          aria-label="Close navigation"
+        />
+      )}
 
       <header className="app-head">
-        <div className="app-title">{LABELS[tab]}</div>
+        <div className="app-head-title">
+          <button
+            className="app-nav-toggle"
+            onClick={() => setMobileNavOpen((open) => !open)}
+            aria-label="Toggle navigation"
+            aria-expanded={mobileNavOpen}
+          >
+            Menu
+          </button>
+          <div className="app-title">{LABELS[tab]}</div>
+        </div>
         <div className="app-head-actions">
           <div className="dir" title="run-state directory">
             {stateDir || "…"}
@@ -116,13 +140,12 @@ export default function App() {
         {tab === "studio" && <Studio />}
         {tab === "monitor" && <Monitor />}
         {tab === "teams" && <TeamView />}
-        {tab === "cli" && <Cli />}
         {tab === "skills" && <Skills />}
         {tab === "sessions" && <Sessions />}
         {tab === "settings" && <Settings />}
 
         {error && (
-          <div className="toast">
+          <div className="toast" role="alert" aria-live="assertive">
             {error}
             <button onClick={() => setError(null)}>dismiss</button>
           </div>

@@ -79,7 +79,11 @@ export default function ChatSidebar({
                 role="button"
                 tabIndex={0}
                 onKeyDown={(event) => {
-                  if (event.key === "Enter") onOpen(session.id);
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    onOpen(session.id);
+                    onClose();
+                  }
                 }}
               >
                 {renamingId === session.id ? (

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { configGet, configSet, configTest, isTauri } from "../api/tauri";
 import { useStore } from "../store";
 import type { ConfigPatch, ConfigTestResult, ConfigView } from "../types";
@@ -228,7 +228,10 @@ function PresetTextInput({
       <select
         value={currentPreset}
         onChange={(event) => {
-          if (event.target.value === "__custom") return;
+          if (event.target.value === "__custom") {
+            onChange("");
+            return;
+          }
           onChange(event.target.value);
         }}
       >
@@ -354,6 +357,9 @@ export default function Settings() {
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [testState, setTestState] = useState<TestState>("idle");
   const [testResult, setTestResult] = useState<ConfigTestResult | null>(null);
+  const operationVersion = useRef(0);
+  const activeOperation = useRef<{ kind: "save" | "test"; version: number } | null>(null);
+  const savedTimer = useRef<number | null>(null);
 
   const load = (v: ConfigView) => {
     setView(v);
@@ -374,6 +380,11 @@ export default function Settings() {
     if (!isTauri()) return;
     configGet().then(load).catch((e) => setError(String(e)));
   }, [setError]);
+  useEffect(() => () => {
+    operationVersion.current += 1;
+    activeOperation.current = null;
+    if (savedTimer.current !== null) window.clearTimeout(savedTimer.current);
+  }, []);
 
   if (!isTauri()) {
     return (
@@ -391,6 +402,9 @@ export default function Settings() {
   }
 
   const upd = (patch: Partial<ConfigPatch>) => {
+    operationVersion.current += 1;
+    activeOperation.current = null;
+    if (savedTimer.current !== null) window.clearTimeout(savedTimer.current);
     setSaveState("idle");
     setTestState("idle");
     setTestResult(null);
@@ -405,27 +419,44 @@ export default function Settings() {
   };
 
   const save = async () => {
+    if (activeOperation.current) return;
+    const version = ++operationVersion.current;
+    activeOperation.current = { kind: "save", version };
+    if (savedTimer.current !== null) window.clearTimeout(savedTimer.current);
     setSaveState("saving");
+    setTestState("idle");
+    setTestResult(null);
     const patch = buildPatch();
     try {
       const next = await configSet(patch);
+      if (version !== operationVersion.current) return;
       load(next);
       setSaveState("saved");
-      setTimeout(() => setSaveState("idle"), 3000);
+      savedTimer.current = window.setTimeout(() => {
+        if (version === operationVersion.current) setSaveState("idle");
+      }, 3000);
     } catch (e) {
+      if (version !== operationVersion.current) return;
       setError(String(e));
       setSaveState("error");
+    } finally {
+      if (activeOperation.current?.version === version) activeOperation.current = null;
     }
   };
 
   const test = async () => {
+    if (activeOperation.current) return;
+    const version = ++operationVersion.current;
+    activeOperation.current = { kind: "test", version };
     setTestState("testing");
     setTestResult(null);
     try {
       const result = await configTest(buildPatch());
+      if (version !== operationVersion.current) return;
       setTestResult(result);
       setTestState(result.ok ? "passed" : "failed");
     } catch (e) {
+      if (version !== operationVersion.current) return;
       const message = String(e);
       setTestResult({
         ok: false,
@@ -437,6 +468,8 @@ export default function Settings() {
         },
       });
       setTestState("failed");
+    } finally {
+      if (activeOperation.current?.version === version) activeOperation.current = null;
     }
   };
 
@@ -455,8 +488,10 @@ export default function Settings() {
     const meta = EXECUTOR_PROVIDERS[provider] ?? EXECUTOR_PROVIDERS.custom;
     upd({
       executorProvider: provider,
-      executorModel: meta.defaultModel || form.executorModel || "",
-      executorBaseUrl: meta.defaultBaseUrl ?? (provider === "anthropic" ? "" : form.executorBaseUrl ?? ""),
+      executorModel: provider === "custom" ? form.executorModel ?? "" : meta.defaultModel,
+      executorBaseUrl: provider === "custom"
+        ? form.executorBaseUrl ?? ""
+        : meta.defaultBaseUrl ?? meta.baseUrls?.[0]?.value ?? "",
     });
   };
 
@@ -464,12 +499,18 @@ export default function Settings() {
     const meta = REVIEWER_PROVIDERS[provider] ?? REVIEWER_PROVIDERS.custom;
     upd({
       reviewerProvider: provider,
-      reviewerModel: meta.defaultModel || form.reviewerModel || "",
-      reviewerBaseUrl: meta.defaultBaseUrl ?? (provider === "" ? "" : form.reviewerBaseUrl ?? ""),
+      reviewerModel: provider === "custom" ? form.reviewerModel ?? "" : meta.defaultModel,
+      reviewerBaseUrl: provider === "custom"
+        ? form.reviewerBaseUrl ?? ""
+        : meta.defaultBaseUrl ?? meta.baseUrls?.[0]?.value ?? "",
     });
   };
 
   const clearTestOnSecretChange = () => {
+    operationVersion.current += 1;
+    activeOperation.current = null;
+    if (savedTimer.current !== null) window.clearTimeout(savedTimer.current);
+    setSaveState("idle");
     setTestState("idle");
     setTestResult(null);
   };
@@ -653,7 +694,7 @@ export default function Settings() {
         <button
           className={`st-save-btn${saveState === "saving" ? " saving" : ""}`}
           onClick={save}
-          disabled={saveState === "saving"}
+          disabled={saveState === "saving" || testState === "testing"}
         >
           {saveState === "saving" ? "Saving..." : saveState === "saved" ? "Saved" : "Save settings"}
         </button>

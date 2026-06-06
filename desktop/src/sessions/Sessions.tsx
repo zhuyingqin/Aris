@@ -16,10 +16,19 @@ export default function Sessions() {
   }, [setError]);
 
   useEffect(() => {
+    setMessages([]);
     if (!selected) return;
+    let cancelled = false;
     sessionGet(selected)
-      .then((t) => setMessages(t.messages))
-      .catch((e) => setError(String(e)));
+      .then((t) => {
+        if (!cancelled) setMessages(t.messages);
+      })
+      .catch((e) => {
+        if (!cancelled) setError(String(e));
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [selected, setError]);
 
   if (!isTauri()) {
@@ -38,7 +47,8 @@ export default function Sessions() {
         <div className="panel-title">Sessions ({sessions.length})</div>
         {sessions.length === 0 && <div className="empty">No saved sessions.</div>}
         {sessions.map((s) => (
-          <div
+          <button
+            type="button"
             key={s.id}
             className={`run-row${s.id === selected ? " active" : ""}`}
             onClick={() => setSelected(s.id)}
@@ -47,7 +57,7 @@ export default function Sessions() {
             <div className="sub">
               {s.messageCount} msgs · {fmtTs(s.modifiedEpochSecs)}
             </div>
-          </div>
+          </button>
         ))}
       </div>
 

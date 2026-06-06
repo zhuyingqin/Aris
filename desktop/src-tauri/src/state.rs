@@ -60,6 +60,13 @@ pub fn init_workspace_environment() -> io::Result<PathBuf> {
     std::env::set_var("ARIS_WORKFLOWS_DIR", &workflows);
     std::env::set_var("ARIS_USER_WORKFLOWS_DIR", &user_workflows);
     std::env::set_var("CLAWD_AGENT_STORE", &agent_store);
+    std::env::set_var(
+        "CLAWD_TODO_STORE",
+        PathBuf::from(runtime::home_dir())
+            .join(".config")
+            .join("aris")
+            .join("tasks.json"),
+    );
     std::env::set_var("ARIS_ALLOWED_TOOLS", DESKTOP_ALLOWED_AGENT_TOOLS.join(","));
     std::env::set_current_dir(&workspace)?;
 

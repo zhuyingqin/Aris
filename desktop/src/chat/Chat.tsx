@@ -1,17 +1,19 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   chatDelete,
+  chatCommandSpecs,
+  chatRunCommand,
   chatSetContext,
   chatStatus,
-  configSet,
   fileRead,
   isTauri,
   projectChatStarters,
   skillsList,
 } from "../api/tauri";
 import { useStore } from "../store";
-import type { ChatAttachment, ChatStatus, ChatTurn, SkillMeta } from "../types";
+import type { ChatAttachment, ChatCommandSelection, ChatStatus, DesktopCommandSpec, ChatTurn, SkillMeta } from "../types";
 import ChatComposer from "./ChatComposer";
+import CommandSelection from "./CommandSelection";
 import ChatSidebar from "./ChatSidebar";
 import ChatThread from "./ChatThread";
 import { makeId, textFromTurn } from "./model";
@@ -68,26 +70,15 @@ function assistantTextTurn(text: string): ChatTurn {
   return { id: makeId("turn"), role: "assistant", blocks: [{ kind: "text", text }] };
 }
 
-const BUILTIN_SLASH_COMMANDS: SkillMeta[] = [
-  {
-    name: "model",
-    description: "Show or switch the executor model. Usage: /model [model-id]",
-    path: "<desktop-command:model>",
-  },
+const FALLBACK_SLASH_COMMANDS: DesktopCommandSpec[] = [
+  { name: "help", description: "Show available slash commands" },
+  { name: "model", description: "Show or switch the executor model", argumentHint: "[model]" },
+  { name: "permissions", description: "Show or switch the active permission mode", argumentHint: "[mode]" },
 ];
 
-function resolveDesktopModelAlias(model: string, provider?: string | null): string {
-  if (provider === "openai") return model;
-  if (model === "opus") return "claude-opus-4-7";
-  if (model === "sonnet") return "claude-sonnet-4-6";
-  if (model === "haiku") return "claude-haiku-4-5-20251001";
-  return model;
-}
-
-function parseModelCommand(text: string): { requested?: string } | null {
-  const match = text.trim().match(/^\/model(?:\s+(.+))?$/i);
-  if (!match) return null;
-  return { requested: match[1]?.trim() || undefined };
+interface PendingCommandSelection {
+  sessionId: string;
+  selection: ChatCommandSelection;
 }
 
 export default function Chat() {
@@ -109,6 +100,7 @@ export default function Chat() {
   } = useChatSessions();
   const [status, setStatus] = useState<ChatStatus | null>(null);
   const [skills, setSkills] = useState<SkillMeta[]>([]);
+  const [desktopCommands, setDesktopCommands] = useState<DesktopCommandSpec[]>(FALLBACK_SLASH_COMMANDS);
   const [starters, setStarters] = useState([
     "Explain this project's architecture and key modules.",
     "Check the uncommitted changes and identify risks.",
@@ -118,8 +110,12 @@ export default function Chat() {
   const [composerHeight, setComposerHeight] = useState(120);
   const [editingTurnId, setEditingTurnId] = useState<string | null>(null);
   const [deleted, setDeleted] = useState<ChatSession | null>(null);
-  const deleteTimer = useRef<number | null>(null);
-  const composerSkills = useMemo(() => [...BUILTIN_SLASH_COMMANDS, ...skills], [skills]);
+  const [pendingCommandSelection, setPendingCommandSelection] = useState<PendingCommandSelection | null>(null);
+  const [focusRequest, setFocusRequest] = useState(0);
+  const deleteTimers = useRef(new Map<string, number>());
+  const sendLock = useRef(false);
+  const commandSelectionLock = useRef(false);
+  const focusComposer = useCallback(() => setFocusRequest((value) => value + 1), []);
 
   const patchAssistant = useCallback((sessionId: string, fn: (turn: ChatTurn) => ChatTurn) => {
     patchTurns(sessionId, (turns) => {
@@ -178,13 +174,22 @@ export default function Chat() {
   useEffect(() => {
     refreshStatus();
     if (!isTauri()) return;
+    chatCommandSpecs().then(setDesktopCommands).catch(() => setDesktopCommands(FALLBACK_SLASH_COMMANDS));
     skillsList().then(setSkills).catch(() => undefined);
     projectChatStarters().then(setStarters).catch(() => undefined);
   }, [refreshStatus]);
 
   useEffect(() => () => {
-    if (deleteTimer.current !== null) window.clearTimeout(deleteTimer.current);
+    deleteTimers.current.forEach((timer, sessionId) => {
+      window.clearTimeout(timer);
+      if (isTauri()) void chatDelete(sessionId);
+    });
+    deleteTimers.current.clear();
   }, []);
+
+  useEffect(() => {
+    setPendingCommandSelection(null);
+  }, [currentId]);
 
   const setAttachments = (next: ChatAttachment[]) => {
     if (!currentSession) return;
@@ -197,8 +202,9 @@ export default function Chat() {
     text: string,
     attached: ChatAttachment[],
     resetContext = false,
+    promptOverride?: string,
   ) => {
-    const prompt = await outgoingMessage(text, attached);
+    const prompt = promptOverride ?? (await outgoingMessage(text, attached));
     if (!isTauri()) {
       patchTurns(session.id, () => [
         ...prefix,
@@ -220,79 +226,120 @@ export default function Chat() {
     await run(session.id, prompt);
   }, [patchTurns, run, updateSession]);
 
-  const runModelCommand = useCallback(async (session: ChatSession, text: string) => {
-    const command = parseModelCommand(text);
-    if (!command) return false;
+  const runSlashCommand = useCallback(async (
+    session: ChatSession,
+    text: string,
+    attached: ChatAttachment[],
+  ) => {
+    if (!text.trim().startsWith("/") || attached.length > 0) return false;
 
-    const previousModel = status?.model ?? "not configured";
-    const provider = status?.provider ?? null;
-    let reply = "";
-
-    if (!command.requested) {
-      reply = [
-        `Current model: ${previousModel}`,
-        `Provider: ${provider ?? "unknown"}`,
-        "",
-        "Use `/model <model-id>` to switch. Short aliases: `opus`, `sonnet`, `haiku`.",
-      ].join("\n");
-    } else {
-      const nextModel = resolveDesktopModelAlias(command.requested, provider);
-      try {
-        if (isTauri()) {
-          await configSet({ executorModel: nextModel });
-          const nextStatus = await chatStatus();
-          setStatus(nextStatus);
-        } else {
-          setStatus({ ready: true, model: nextModel, provider: provider ?? "Browser" });
-        }
-        reply = [
-          `Switched model: ${previousModel} -> ${nextModel}`,
-          "",
-          "Future desktop chat turns will use this model. The setting is shared with ARIS CLI and Workflow.",
-        ].join("\n");
-      } catch (error) {
-        const message = String(error);
-        setError(message);
-        reply = `Could not switch model: ${message}`;
-      }
+    if (!isTauri()) {
+      const command = text.trim().slice(1).split(/\s+/)[0] || "help";
+      const reply = command === "help"
+        ? FALLBACK_SLASH_COMMANDS
+          .map((item) => `/${item.name}${item.argumentHint ? ` ${item.argumentHint}` : ""} - ${item.description}`)
+          .join("\n")
+        : "Desktop slash commands run inside the Tauri app.";
+      patchTurns(session.id, (turns) => [...turns, userTurn(text, []), assistantTextTurn(reply)]);
+      updateSession(session.id, (item) => ({ ...item, draft: "", draftAttachments: [] }));
+      setEditingTurnId(null);
+      return true;
     }
 
-    patchTurns(session.id, (turns) => [
-      ...turns,
-      userTurn(text, []),
-      assistantTextTurn(reply),
-    ]);
-    updateSession(session.id, (item) => ({ ...item, draft: "", draftAttachments: [] }));
-    setEditingTurnId(null);
-    return true;
-  }, [patchTurns, setError, status, updateSession]);
+    try {
+      const result = await chatRunCommand(session.id, text);
+      if (!result.handled) return false;
+      if (result.openSettings) setTab("settings");
+      if (result.refreshStatus) refreshStatus();
+      if (result.selection) {
+        setPendingCommandSelection({ sessionId: session.id, selection: result.selection });
+        setEditingTurnId(null);
+        return true;
+      }
+      if (result.prompt) {
+        await beginRun(
+          session,
+          result.replaceTurns ? [] : session.turns,
+          text,
+          [],
+          false,
+          result.prompt,
+        );
+        return true;
+      }
+      patchTurns(session.id, (turns) => [
+        ...(result.replaceTurns ? [] : turns),
+        userTurn(text, []),
+        assistantTextTurn(result.message ?? ""),
+      ]);
+      updateSession(session.id, (item) => ({ ...item, draft: "", draftAttachments: [] }));
+      setEditingTurnId(null);
+      return true;
+    } catch (error) {
+      const message = String(error);
+      setError(message);
+      patchTurns(session.id, (turns) => [
+        ...turns,
+        userTurn(text, []),
+        assistantTextTurn(`Command failed: ${message}`),
+      ]);
+      updateSession(session.id, (item) => ({ ...item, draft: "", draftAttachments: [] }));
+      setEditingTurnId(null);
+      return true;
+    }
+  }, [beginRun, patchTurns, refreshStatus, setError, setTab, updateSession]);
+
+  const selectCommandOption = useCallback(async (value: string) => {
+    const pending = pendingCommandSelection;
+    const session = currentSessionRef.current;
+    if (!pending || !session || session.id !== pending.sessionId || busyRef.current || commandSelectionLock.current) return;
+    commandSelectionLock.current = true;
+    setPendingCommandSelection(null);
+    focusComposer();
+    try {
+      await runSlashCommand(session, `/${pending.selection.command} ${value}`, []);
+    } finally {
+      commandSelectionLock.current = false;
+    }
+  }, [focusComposer, pendingCommandSelection, runSlashCommand]);
 
   const send = async () => {
-    if (!currentSession || busy || (!input.trim() && attachments.length === 0)) return;
-    if (attachments.length === 0 && await runModelCommand(currentSession, input)) return;
-    if (editingTurnId) {
-      const index = currentSession.turns.findIndex((turn) => turn.id === editingTurnId);
-      const prefix = index >= 0 ? currentSession.turns.slice(0, index) : currentSession.turns;
-      await beginRun(currentSession, prefix, input, attachments, true);
-      return;
+    if (sendLock.current || !currentSession || busy || (!input.trim() && attachments.length === 0)) return;
+    sendLock.current = true;
+    try {
+      if (!status?.ready && (!input.trim().startsWith("/") || attachments.length > 0)) return;
+      if (await runSlashCommand(currentSession, input, attachments)) return;
+      if (editingTurnId) {
+        const index = currentSession.turns.findIndex((turn) => turn.id === editingTurnId);
+        const prefix = index >= 0 ? currentSession.turns.slice(0, index) : currentSession.turns;
+        await beginRun(currentSession, prefix, input, attachments, true);
+        return;
+      }
+      await beginRun(currentSession, currentSession.turns, input, attachments);
+    } finally {
+      sendLock.current = false;
     }
-    await beginRun(currentSession, currentSession.turns, input, attachments);
   };
 
   const retry = useCallback(async (assistant: ChatTurn) => {
     const session = currentSessionRef.current;
-    if (!session || busyRef.current) return;
+    if (!session || busyRef.current || sendLock.current) return;
     const assistantIndex = session.turns.findIndex((turn) => turn.id === assistant.id);
     const userIndex = assistantIndex - 1;
     const previousUser = session.turns[userIndex];
     if (userIndex < 0 || previousUser?.role !== "user") return;
-    await beginRun(
-      session,
-      session.turns.slice(0, userIndex),
-      textFromTurn(previousUser),
-      previousUser.attachments ?? [],
-      true,
-    );
+    sendLock.current = true;
+    try {
+      await beginRun(
+        session,
+        session.turns.slice(0, userIndex),
+        textFromTurn(previousUser),
+        previousUser.attachments ?? [],
+        true,
+      );
+    } finally {
+      sendLock.current = false;
+    }
   }, [beginRun]);
 
   const edit = useCallback((turn: ChatTurn) => {
@@ -301,28 +348,37 @@ export default function Chat() {
     setDraft(session.id, textFromTurn(turn));
     updateSession(session.id, (item) => ({ ...item, draftAttachments: turn.attachments ?? [] }));
     setEditingTurnId(turn.id);
-  }, [setDraft, updateSession]);
+    focusComposer();
+  }, [focusComposer, setDraft, updateSession]);
 
   const continueStopped = useCallback(async () => {
     const session = currentSessionRef.current;
-    if (!session || busyRef.current) return;
-    await beginRun(session, session.turns, "Continue from where you stopped.", [], true);
+    if (!session || busyRef.current || sendLock.current) return;
+    sendLock.current = true;
+    try {
+      await beginRun(session, session.turns, "Continue from where you stopped.", [], true);
+    } finally {
+      sendLock.current = false;
+    }
   }, [beginRun]);
 
   const deleteSession = (id: string) => {
     const removed = removeSession(id);
     if (!removed) return;
     setDeleted(removed);
-    if (deleteTimer.current !== null) window.clearTimeout(deleteTimer.current);
-    deleteTimer.current = window.setTimeout(() => {
+    const timer = window.setTimeout(() => {
       if (isTauri()) void chatDelete(removed.id);
-      setDeleted(null);
+      deleteTimers.current.delete(removed.id);
+      setDeleted((current) => current?.id === removed.id ? null : current);
     }, 6000);
+    deleteTimers.current.set(removed.id, timer);
   };
 
   const undoDelete = () => {
     if (!deleted) return;
-    if (deleteTimer.current !== null) window.clearTimeout(deleteTimer.current);
+    const timer = deleteTimers.current.get(deleted.id);
+    if (timer !== undefined) window.clearTimeout(timer);
+    deleteTimers.current.delete(deleted.id);
     restoreSession(deleted);
     setDeleted(null);
   };
@@ -364,19 +420,39 @@ export default function Chat() {
           turns={turns}
           composerHeight={composerHeight}
           starters={starters}
-          onStarter={(prompt) => currentSession && setDraft(currentSession.id, prompt)}
+          onStarter={(prompt) => {
+            if (!currentSession) return;
+            setDraft(currentSession.id, prompt);
+            focusComposer();
+          }}
           onEdit={edit}
           onRetry={retry}
           onContinue={continueStopped}
         />
+        {pendingCommandSelection && pendingCommandSelection.sessionId === currentId && (
+          <CommandSelection
+            selection={pendingCommandSelection.selection}
+            bottomOffset={composerHeight + 12}
+            onSelect={(value) => void selectCommandOption(value)}
+            onCancel={() => {
+              setPendingCommandSelection(null);
+              focusComposer();
+            }}
+          />
+        )}
         <ChatComposer
           input={input}
-          skills={composerSkills}
+          commands={desktopCommands}
+          skills={skills}
           attachments={attachments}
           busy={busy}
           ready={Boolean(status?.ready)}
           editing={Boolean(editingTurnId)}
-          onInputChange={(value) => currentSession && setDraft(currentSession.id, value)}
+          focusRequest={focusRequest}
+          onInputChange={(value) => {
+            if (pendingCommandSelection) setPendingCommandSelection(null);
+            if (currentSession) setDraft(currentSession.id, value);
+          }}
           onAttachmentsChange={setAttachments}
           onSubmit={() => void send()}
           onStop={() => void stop()}

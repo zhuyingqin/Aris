@@ -53,6 +53,15 @@ pub trait ApiClient {
 
 pub trait ToolExecutor {
     fn execute(&mut self, tool_name: &str, input: &str) -> Result<String, ToolError>;
+
+    fn execute_with_id(
+        &mut self,
+        _tool_use_id: &str,
+        tool_name: &str,
+        input: &str,
+    ) -> Result<String, ToolError> {
+        self.execute(tool_name, input)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -278,11 +287,13 @@ where
                                 is_error: true,
                             }]
                         } else {
-                            let (mut output, mut is_error) =
-                                match self.tool_executor.execute(&tool_name, &input) {
-                                    Ok(output) => (output, false),
-                                    Err(error) => (error.to_string(), true),
-                                };
+                            let (mut output, mut is_error) = match self
+                                .tool_executor
+                                .execute_with_id(&tool_use_id, &tool_name, &input)
+                            {
+                                Ok(output) => (output, false),
+                                Err(error) => (error.to_string(), true),
+                            };
                             output = merge_hook_feedback(pre_hook_result.messages(), output, false);
 
                             let post_hook_result = self

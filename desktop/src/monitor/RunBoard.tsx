@@ -1,9 +1,12 @@
+import { useRef, useState } from "react";
 import { useStore } from "../store";
 import { workflowControl } from "../api/tauri";
 import { Badge, fmtTs } from "../util";
 import type { WorkflowAgentRun, WorkflowControlAction } from "../types";
 
 export default function RunBoard() {
+  const [pendingAction, setPendingAction] = useState<WorkflowControlAction | null>(null);
+  const pendingActionRef = useRef<WorkflowControlAction | null>(null);
   const runs = useStore((s) => s.runs);
   const selectedRunId = useStore((s) => s.selectedRunId);
   const refreshRuns = useStore((s) => s.refreshRuns);
@@ -23,11 +26,17 @@ export default function RunBoard() {
   }
 
   const control = async (action: WorkflowControlAction) => {
+    if (pendingActionRef.current) return;
+    pendingActionRef.current = action;
+    setPendingAction(action);
     try {
       await workflowControl(run.runId, action);
       await refreshRuns();
     } catch (err) {
       setError(String(err));
+    } finally {
+      pendingActionRef.current = null;
+      setPendingAction(null);
     }
   };
 
@@ -54,24 +63,26 @@ export default function RunBoard() {
         <Badge status={run.status} />
         <span className="spacer" style={{ flex: 1 }} />
         <button
-          disabled={s !== "running"}
+          disabled={s !== "running" || Boolean(pendingAction)}
           onClick={() => control("pause")}
         >
-          Pause
+          {pendingAction === "pause" ? "Pausing..." : "Pause"}
         </button>
         <button
-          disabled={s !== "paused"}
+          disabled={s !== "paused" || Boolean(pendingAction)}
           onClick={() => control("resume")}
         >
-          Resume
+          {pendingAction === "resume" ? "Resuming..." : "Resume"}
         </button>
         <button
-          disabled={s === "stopped" || s === "completed"}
+          disabled={s === "stopped" || s === "completed" || Boolean(pendingAction)}
           onClick={() => control("stop")}
         >
-          Stop
+          {pendingAction === "stop" ? "Stopping..." : "Stop"}
         </button>
-        <button onClick={() => control("restart")}>Restart</button>
+        <button disabled={Boolean(pendingAction)} onClick={() => control("restart")}>
+          {pendingAction === "restart" ? "Restarting..." : "Restart"}
+        </button>
       </div>
 
       <div className="run-row sub" style={{ paddingLeft: 0, border: "none" }}>

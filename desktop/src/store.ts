@@ -15,7 +15,6 @@ export type Tab =
   | "studio"
   | "monitor"
   | "teams"
-  | "cli"
   | "settings"
   | "skills"
   | "sessions";
@@ -91,6 +90,33 @@ export const useStore = create<AppState>((set, get) => ({
 
     let disposed = false;
     let unlisten: (() => void) | null = null;
+    let refreshTimer: number | null = null;
+    let refreshInFlight = false;
+    let refreshQueued = false;
+    const runRefresh = async () => {
+      if (disposed) return;
+      if (refreshInFlight) {
+        refreshQueued = true;
+        return;
+      }
+      refreshInFlight = true;
+      await Promise.all([get().refreshRuns(), get().refreshTeam()]);
+      refreshInFlight = false;
+      if (refreshQueued) {
+        refreshQueued = false;
+        scheduleRefresh();
+      }
+    };
+    const scheduleRefresh = () => {
+      if (disposed) return;
+      refreshQueued = true;
+      if (refreshTimer !== null || refreshInFlight) return;
+      refreshTimer = window.setTimeout(() => {
+        refreshTimer = null;
+        refreshQueued = false;
+        void runRefresh();
+      }, 120);
+    };
 
     fetchStateDir()
       .then((dir) => set({ stateDir: dir }))
@@ -100,24 +126,22 @@ export const useStore = create<AppState>((set, get) => ({
       set((s) => ({
         events: [...s.events, event].slice(-MAX_EVENTS),
       }));
-      // An incoming event almost always means run/team state moved.
-      void get().refreshRuns();
-      void get().refreshTeam();
+      // Coalesce bursts while keeping the event timeline live.
+      scheduleRefresh();
     }).then((fn) => {
       if (disposed) fn();
       else unlisten = fn;
     });
 
-    void get().refreshRuns();
-    void get().refreshTeam();
+    void runRefresh();
     const poll = window.setInterval(() => {
-      void get().refreshRuns();
-      void get().refreshTeam();
+      scheduleRefresh();
     }, 3000);
 
     return () => {
       disposed = true;
       if (unlisten) unlisten();
+      if (refreshTimer !== null) window.clearTimeout(refreshTimer);
       window.clearInterval(poll);
     };
   },

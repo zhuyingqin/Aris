@@ -1,5 +1,4 @@
 use serde_json::json;
-use std::process::Command;
 
 /// Search files by glob pattern. Requires a non-empty query to avoid
 /// scanning the whole tree. Returns up to 50 matching paths.
@@ -40,7 +39,7 @@ pub fn project_chat_starters() -> Vec<String> {
     let root = crate::state::workspace_dir();
     let root_arg = root.to_string_lossy().to_string();
     let mut starters = vec!["Explain this project's architecture and key modules.".to_string()];
-    let dirty = Command::new("git")
+    let dirty = crate::process::hidden_command("git")
         .args(["-C", root_arg.as_str(), "status", "--porcelain"])
         .output()
         .map(|output| output.status.success() && !output.stdout.is_empty())

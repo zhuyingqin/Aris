@@ -1,10 +1,11 @@
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import ReactFlow, {
   Background,
   Controls,
   MiniMap,
   type Edge,
   type Node,
+  type ReactFlowInstance,
 } from "reactflow";
 import { useStore } from "../store";
 import type { TeamTask } from "../types";
@@ -42,6 +43,7 @@ function taskLabel(task: TeamTask): string {
  */
 export default function TeamGraph() {
   const team = useStore((s) => s.team);
+  const [flowInstance, setFlowInstance] = useState<ReactFlowInstance | null>(null);
 
   const { nodes, edges } = useMemo(() => {
     const nodes: Node[] = [];
@@ -120,6 +122,15 @@ export default function TeamGraph() {
 
     return { nodes, edges };
   }, [team]);
+  const graphSignature = `${nodes.map((node) => node.id).join("|")}:${edges.map((edge) => edge.id).join("|")}`;
+
+  useEffect(() => {
+    if (!flowInstance) return;
+    const frame = window.requestAnimationFrame(() => {
+      void flowInstance.fitView({ padding: 0.2, duration: 180 });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [flowInstance, graphSignature]);
 
   if (!team) {
     return (
@@ -134,6 +145,7 @@ export default function TeamGraph() {
       <ReactFlow
         nodes={nodes}
         edges={edges}
+        onInit={setFlowInstance}
         fitView
         minZoom={0.2}
         nodesConnectable={false}

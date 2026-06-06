@@ -1,10 +1,14 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { fileSearch, isTauri } from "../api/tauri";
-import type { ChatAttachment, SkillMeta } from "../types";
+import type { ChatAttachment, DesktopCommandSpec, SkillMeta } from "../types";
 import { fuzzyMatch, makeId } from "./model";
 
 const RECENT_SKILLS_KEY = "aris-chat-recent-skills";
 const RECENT_FILES_KEY = "aris-chat-recent-files";
+const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+const MAX_TEXT_BYTES = 1024 * 1024;
+const MAX_DROPPED_FILES = 20;
+const TEXT_FILE_EXTENSION = /\.(?:c|cc|cpp|css|csv|go|h|hpp|html|java|js|json|jsx|md|mjs|py|rs|sh|sql|svg|toml|ts|tsx|txt|xml|yaml|yml)$/i;
 
 function loadRecent(key: string): string[] {
   try {
@@ -19,13 +23,13 @@ function remember(key: string, value: string) {
   localStorage.setItem(key, JSON.stringify(next));
 }
 
-function isDesktopCommand(skill: SkillMeta | undefined): boolean {
-  return skill?.path.startsWith("<desktop-command:") ?? false;
+function isExactDesktopCommand(input: string, command: DesktopCommandSpec | undefined): boolean {
+  return Boolean(command && input.trim().toLowerCase() === `/${command.name.toLowerCase()}`);
 }
 
-function isExactDesktopCommand(input: string, skill: SkillMeta | undefined): boolean {
-  return Boolean(skill && isDesktopCommand(skill) && input.trim().toLowerCase() === `/${skill.name.toLowerCase()}`);
-}
+type SlashPickerItem =
+  | { kind: "command"; command: DesktopCommandSpec; group: "System commands" }
+  | { kind: "skill"; skill: SkillMeta; group: "Recent skills" | "All skills" };
 
 export function resizeComposerTextarea(textarea: HTMLTextAreaElement) {
   textarea.style.height = "0px";
@@ -34,8 +38,17 @@ export function resizeComposerTextarea(textarea: HTMLTextAreaElement) {
   textarea.style.overflowY = textarea.scrollHeight > maxHeight ? "auto" : "hidden";
 }
 
-async function attachmentFromFile(file: File): Promise<ChatAttachment> {
+export async function attachmentFromFile(file: File): Promise<ChatAttachment> {
   if (file.type.startsWith("image/")) {
+    if (file.size > MAX_IMAGE_BYTES) {
+      return {
+        id: makeId("attachment"),
+        kind: "file",
+        name: file.name,
+        mimeType: file.type,
+        content: `(Image omitted because it is larger than ${MAX_IMAGE_BYTES / 1024 / 1024} MB.)`,
+      };
+    }
     const preview = await new Promise<string>((resolve, reject) => {
       const reader = new FileReader();
       reader.onload = () => resolve(String(reader.result));
@@ -44,17 +57,35 @@ async function attachmentFromFile(file: File): Promise<ChatAttachment> {
     });
     return { id: makeId("attachment"), kind: "image", name: file.name, mimeType: file.type, preview, content: preview };
   }
+  const isText = file.type.startsWith("text/")
+    || file.type === "application/json"
+    || file.type === "application/xml"
+    || TEXT_FILE_EXTENSION.test(file.name);
+  if (!isText) {
+    return {
+      id: makeId("attachment"),
+      kind: "file",
+      name: file.name,
+      mimeType: file.type || "application/octet-stream",
+      content: "(Binary file content omitted. Attach a workspace path with @ to let ARIS read it safely.)",
+    };
+  }
+  const truncated = file.size > MAX_TEXT_BYTES;
+  const content = await file.slice(0, MAX_TEXT_BYTES).text();
   return {
     id: makeId("attachment"),
     kind: "file",
     name: file.name,
     mimeType: file.type || "text/plain",
-    content: await file.text(),
+    content: truncated
+      ? `${content}\n\n(File truncated after ${MAX_TEXT_BYTES / 1024 / 1024} MB.)`
+      : content,
   };
 }
 
 interface Props {
   input: string;
+  commands: DesktopCommandSpec[];
   skills: SkillMeta[];
   attachments: ChatAttachment[];
   busy: boolean;
@@ -66,10 +97,12 @@ interface Props {
   onStop: () => void;
   onCancelEdit: () => void;
   onHeightChange: (height: number) => void;
+  focusRequest?: number;
 }
 
 export default function ChatComposer({
   input,
+  commands,
   skills,
   attachments,
   busy,
@@ -81,37 +114,77 @@ export default function ChatComposer({
   onStop,
   onCancelEdit,
   onHeightChange,
+  focusRequest = 0,
 }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
+  const pickerScrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const activePickerItemRef = useRef<HTMLButtonElement | null>(null);
   const [pickerMode, setPickerMode] = useState<"skill" | "file" | null>(null);
   const [pickerIndex, setPickerIndex] = useState(0);
   const [pickerQuery, setPickerQuery] = useState("");
   const [fileResults, setFileResults] = useState<string[]>([]);
   const [dragging, setDragging] = useState(false);
+  const fileSearchVersion = useRef(0);
   const recentSkills = loadRecent(RECENT_SKILLS_KEY);
   const recentFiles = loadRecent(RECENT_FILES_KEY);
 
-  const filteredSkills = useMemo(
-    () => skills.filter((skill) => fuzzyMatch(pickerQuery, `${skill.name} ${skill.description ?? ""}`)),
-    [pickerQuery, skills],
-  );
-  const skillItems = useMemo(() => {
+  const slashItems = useMemo<SlashPickerItem[]>(() => {
+    const commandMatches = commands
+      .filter((command) => fuzzyMatch(pickerQuery, `${command.name} ${command.description ?? ""}`))
+      .map((command) => ({ kind: "command" as const, command, group: "System commands" as const }));
+    const commandNames = new Set(commands.map((command) => command.name.toLowerCase()));
+    const filteredSkills = skills.filter((skill) => (
+      !commandNames.has(skill.name.toLowerCase())
+      && fuzzyMatch(pickerQuery, `${skill.name} ${skill.description ?? ""}`)
+    ));
     const recent = recentSkills
       .map((name) => filteredSkills.find((skill) => skill.name === name))
-      .filter((skill): skill is SkillMeta => Boolean(skill));
-    const recentNames = new Set(recent.map((skill) => skill.name));
-    return [...recent, ...filteredSkills.filter((skill) => !recentNames.has(skill.name))];
-  }, [filteredSkills, recentSkills]);
+      .filter((skill): skill is SkillMeta => Boolean(skill))
+      .map((skill) => ({ kind: "skill" as const, skill, group: "Recent skills" as const }));
+    const recentNames = new Set(recent.map((item) => item.skill.name));
+    const rest = filteredSkills
+      .filter((skill) => !recentNames.has(skill.name))
+      .map((skill) => ({ kind: "skill" as const, skill, group: "All skills" as const }));
+    return [...commandMatches, ...recent, ...rest];
+  }, [commands, pickerQuery, recentSkills, skills]);
   const fileItems = useMemo(
     () => [...recentFiles.filter((path) => fuzzyMatch(pickerQuery, path)), ...fileResults.filter((path) => !recentFiles.includes(path))],
     [fileResults, pickerQuery, recentFiles],
   );
-  const activeItems = pickerMode === "skill" ? skillItems : fileItems;
+  const activeItems = pickerMode === "skill" ? slashItems : fileItems;
+  const isCommandInput = input.trim().startsWith("/");
+  const canSubmit = !busy
+    && (ready || (isCommandInput && attachments.length === 0))
+    && (input.trim().length > 0 || attachments.length > 0);
 
   useLayoutEffect(() => {
     if (textareaRef.current) resizeComposerTextarea(textareaRef.current);
   }, [input]);
+  useEffect(() => {
+    if (focusRequest > 0) textareaRef.current?.focus();
+  }, [focusRequest]);
+
+  useLayoutEffect(() => {
+    const active = activePickerItemRef.current;
+    const scroller = pickerScrollRef.current;
+    if (!active || !scroller) return;
+
+    const activeTop = active.offsetTop;
+    const activeBottom = activeTop + active.offsetHeight;
+    const visibleTop = scroller.scrollTop;
+    const visibleBottom = visibleTop + scroller.clientHeight;
+    if (activeTop < visibleTop) {
+      scroller.scrollTop = activeTop;
+    } else if (activeBottom > visibleBottom) {
+      scroller.scrollTop = activeBottom - scroller.clientHeight;
+    }
+    active.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+  }, [activeItems.length, pickerIndex, pickerMode]);
+
+  useEffect(() => {
+    setPickerIndex((index) => Math.min(index, Math.max(activeItems.length - 1, 0)));
+  }, [activeItems.length]);
 
   useLayoutEffect(() => {
     if (!wrapRef.current) return;
@@ -123,16 +196,24 @@ export default function ChatComposer({
   }, [onHeightChange]);
 
   useEffect(() => {
+    const version = ++fileSearchVersion.current;
     if (pickerMode !== "file" || !pickerQuery.trim() || !isTauri()) {
       setFileResults([]);
       return;
     }
     const timer = window.setTimeout(() => {
       fileSearch(`**/*${pickerQuery}*`)
-        .then((results) => setFileResults(results.slice(0, 40)))
-        .catch(() => setFileResults([]));
+        .then((results) => {
+          if (version === fileSearchVersion.current) setFileResults(results.slice(0, 40));
+        })
+        .catch(() => {
+          if (version === fileSearchVersion.current) setFileResults([]);
+        });
     }, 120);
-    return () => window.clearTimeout(timer);
+    return () => {
+      window.clearTimeout(timer);
+      fileSearchVersion.current += 1;
+    };
   }, [pickerMode, pickerQuery]);
 
   const updatePicker = (value: string, cursor: number) => {
@@ -165,10 +246,10 @@ export default function ChatComposer({
     window.requestAnimationFrame(() => textarea.focus());
   };
 
-  const chooseSkill = (skill: SkillMeta | undefined) => {
-    if (!skill) return;
-    remember(RECENT_SKILLS_KEY, skill.name);
-    replaceActiveToken(`/${skill.name} `);
+  const chooseSlashItem = (item: SlashPickerItem | undefined) => {
+    if (!item) return;
+    if (item.kind === "skill") remember(RECENT_SKILLS_KEY, item.skill.name);
+    replaceActiveToken(`/${item.kind === "command" ? item.command.name : item.skill.name} `);
   };
 
   const chooseFile = (path: string | undefined) => {
@@ -182,12 +263,33 @@ export default function ChatComposer({
   };
 
   const chooseActive = () => {
-    if (pickerMode === "skill") chooseSkill(skillItems[pickerIndex]);
+    if (pickerMode === "skill") chooseSlashItem(slashItems[pickerIndex]);
     else chooseFile(fileItems[pickerIndex]);
   };
 
   const addFiles = async (files: File[]) => {
-    const next = await Promise.all(files.map(attachmentFromFile));
+    const next = await Promise.all(files.slice(0, MAX_DROPPED_FILES).map(async (file) => {
+      try {
+        return await attachmentFromFile(file);
+      } catch {
+        return {
+          id: makeId("attachment"),
+          kind: "file" as const,
+          name: file.name,
+          mimeType: file.type || "application/octet-stream",
+          content: "(File content could not be read.)",
+        };
+      }
+    }));
+    if (files.length > MAX_DROPPED_FILES) {
+      next.push({
+        id: makeId("attachment"),
+        kind: "file",
+        name: "additional-files-omitted.txt",
+        mimeType: "text/plain",
+        content: `${files.length - MAX_DROPPED_FILES} additional dropped files were omitted.`,
+      });
+    }
     onAttachmentsChange([...attachments, ...next]);
   };
 
@@ -212,24 +314,26 @@ export default function ChatComposer({
       {pickerMode && (
         <div className="skill-picker" role="listbox">
           <div className="skill-picker-header">
-            <span>{pickerMode === "skill" ? "Skills" : "Files"}</span>
-            <span>↑↓ select · Enter attach · Esc close</span>
+            <span>{pickerMode === "skill" ? "Slash menu" : "Files"}</span>
+            <span>Up/Down select · Enter use · Esc close</span>
           </div>
-          <div className="skill-picker-scroll">
+          <div className="skill-picker-scroll" ref={pickerScrollRef}>
             {activeItems.length === 0 && <div className="picker-empty">No matches</div>}
-            {pickerMode === "skill" && skillItems.map((skill, index) => (
-              <div key={skill.name}>
-                {index === 0 && <div className="picker-group-label">{recentSkills.includes(skill.name) ? "Recent" : "All skills"}</div>}
-                {index > 0 && !recentSkills.includes(skill.name) && recentSkills.includes(skillItems[index - 1].name) && <div className="picker-group-label">All skills</div>}
+            {pickerMode === "skill" && slashItems.map((item, index) => (
+              <div key={`${item.kind}-${item.kind === "command" ? item.command.name : item.skill.name}`}>
+                {(index === 0 || slashItems[index - 1].group !== item.group) && <div className="picker-group-label">{item.group}</div>}
                 <button
                   className={`skill-picker-item${index === pickerIndex ? " active" : ""}`}
+                  ref={index === pickerIndex ? activePickerItemRef : undefined}
                   onMouseDown={(event) => {
                     event.preventDefault();
-                    chooseSkill(skill);
+                    chooseSlashItem(item);
                   }}
                 >
-                  <span className="skill-picker-name">/{skill.name}</span>
-                  <span className="skill-picker-desc">{skill.description}</span>
+                  <span className="skill-picker-name">/{item.kind === "command" ? item.command.name : item.skill.name}</span>
+                  <span className="skill-picker-desc">
+                    {item.kind === "command" ? item.command.description : item.skill.description}
+                  </span>
                 </button>
               </div>
             ))}
@@ -239,6 +343,7 @@ export default function ChatComposer({
                 {index > 0 && !recentFiles.includes(path) && recentFiles.includes(fileItems[index - 1]) && <div className="picker-group-label">Search results</div>}
                 <button
                   className={`file-picker-item${index === pickerIndex ? " active" : ""}`}
+                  ref={index === pickerIndex ? activePickerItemRef : undefined}
                   onMouseDown={(event) => {
                     event.preventDefault();
                     chooseFile(path);
@@ -279,8 +384,8 @@ export default function ChatComposer({
         <textarea
           ref={textareaRef}
           value={input}
-          disabled={!ready || busy}
-          placeholder={ready ? "Message ARIS" : "Configure an API key in Settings first"}
+          disabled={busy}
+          placeholder={ready ? "Message ARIS" : "Configure an API key, or type /help"}
           onChange={(event) => {
             onInputChange(event.target.value);
             updatePicker(event.target.value, event.target.selectionStart ?? event.target.value.length);
@@ -296,7 +401,7 @@ export default function ChatComposer({
             if (pickerMode) {
               if (event.key === "ArrowDown") {
                 event.preventDefault();
-                setPickerIndex((index) => Math.min(index + 1, activeItems.length - 1));
+                setPickerIndex((index) => Math.min(index + 1, Math.max(activeItems.length - 1, 0)));
                 return;
               }
               if (event.key === "ArrowUp") {
@@ -309,14 +414,25 @@ export default function ChatComposer({
                 return;
               }
               if (event.key === "Enter" && !event.shiftKey) {
-                event.preventDefault();
-                if (pickerMode === "skill" && isExactDesktopCommand(input, skillItems[pickerIndex])) {
+                if (activeItems.length === 0) {
+                  setPickerMode(null);
+                } else {
+                  event.preventDefault();
+                }
+                const activeSlashItem = slashItems[pickerIndex];
+                if (
+                  pickerMode === "skill"
+                  && activeSlashItem?.kind === "command"
+                  && isExactDesktopCommand(input, activeSlashItem.command)
+                ) {
                   setPickerMode(null);
                   onSubmit();
                   return;
                 }
-                chooseActive();
-                return;
+                if (activeItems.length > 0) {
+                  chooseActive();
+                  return;
+                }
               }
             }
             if (event.key === "Enter" && !event.shiftKey) {
@@ -327,7 +443,7 @@ export default function ChatComposer({
         />
         <div className="chat-input-footer">
           <div className="chat-input-hints">
-            <span><kbd>/</kbd> Commands / Skills</span>
+            <span><kbd>/</kbd> Commands and skills</span>
             <span><kbd>@</kbd> Files</span>
             <span className="chat-input-shortcut">Drop files · Paste images · Shift+Enter newline</span>
           </div>
@@ -337,7 +453,7 @@ export default function ChatComposer({
             <button
               className="chat-send-btn"
               onClick={onSubmit}
-              disabled={!ready || (!input.trim() && attachments.length === 0)}
+              disabled={!canSubmit}
               aria-label={editing ? "Resend edited message" : "Send message"}
             >
               ↑

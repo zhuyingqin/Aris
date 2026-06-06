@@ -77,7 +77,8 @@ export function useChatStream({ patchAssistant, onComplete, onError }: StreamHan
           const blocks = turn.blocks.slice();
           for (let index = blocks.length - 1; index >= 0; index -= 1) {
             const block = blocks[index];
-            if (block.kind === "tool" && block.name === result.name && block.output === undefined) {
+            const idMatches = result.id ? block.kind === "tool" && block.id === result.id : true;
+            if (block.kind === "tool" && idMatches && block.name === result.name && block.output === undefined) {
               blocks[index] = { ...block, output: result.output, isError: result.isError };
               break;
             }
@@ -117,8 +118,14 @@ export function useChatStream({ patchAssistant, onComplete, onError }: StreamHan
   }, [flush, onComplete, onError]);
 
   const stop = useCallback(async () => {
+    if (stopRequested.current) return;
     stopRequested.current = true;
-    await chatCancel();
+    try {
+      await chatCancel();
+    } catch (error) {
+      stopRequested.current = false;
+      throw error;
+    }
   }, []);
 
   return { busy, run, stop, runningSessionId: runningSession.current };
@@ -126,6 +133,7 @@ export function useChatStream({ patchAssistant, onComplete, onError }: StreamHan
 
 export function appendToolOutput(
   blocks: ChatBlock[],
+  id: string | undefined,
   name: string,
   output: string,
   isError: boolean,
@@ -134,7 +142,8 @@ export function appendToolOutput(
   let index = -1;
   for (let candidate = copy.length - 1; candidate >= 0; candidate -= 1) {
     const block = copy[candidate];
-    if (block.kind === "tool" && block.name === name && block.output === undefined) {
+    const idMatches = id ? block.kind === "tool" && block.id === id : true;
+    if (block.kind === "tool" && idMatches && block.name === name && block.output === undefined) {
       index = candidate;
       break;
     }

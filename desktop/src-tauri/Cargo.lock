@@ -76,6 +76,7 @@ dependencies = [
  "api",
  "aris-chat",
  "aris-executor",
+ "commands",
  "reqwest 0.12.28",
  "runtime",
  "serde",
@@ -391,6 +392,14 @@ checksum = "ba5a308b75df32fe02788e748662718f03fde005016435c444eea572398219fd"
 dependencies = [
  "bytes",
  "memchr",
+]
+
+[[package]]
+name = "commands"
+version = "0.4.15"
+dependencies = [
+ "runtime",
+ "serde_json",
 ]
 
 [[package]]

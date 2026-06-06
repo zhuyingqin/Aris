@@ -16,11 +16,22 @@ export default function Skills() {
   }, [setError]);
 
   useEffect(() => {
-    if (!selected) return;
+    if (!selected) {
+      setContent("");
+      return;
+    }
+    let cancelled = false;
     setContent("Loading…");
     skillView(selected)
-      .then(setContent)
-      .catch((e) => setContent(`Error: ${e}`));
+      .then((value) => {
+        if (!cancelled) setContent(value);
+      })
+      .catch((e) => {
+        if (!cancelled) setContent(`Error: ${e}`);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [selected]);
 
   const shown = useMemo(() => {
@@ -56,7 +67,8 @@ export default function Skills() {
           />
         </div>
         {shown.map((s) => (
-          <div
+          <button
+            type="button"
             key={s.name}
             className={`run-row${s.name === selected ? " active" : ""}`}
             onClick={() => setSelected(s.name)}
@@ -70,7 +82,7 @@ export default function Skills() {
             <div className="sub">
               {s.path.startsWith("<bundled") ? "bundled" : s.path}
             </div>
-          </div>
+          </button>
         ))}
       </div>
 
