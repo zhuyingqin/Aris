@@ -134,20 +134,26 @@ const SKILLS: SkillMeta[] = [
   { name: "review", description: "Review code", path: "review/SKILL.md" },
 ];
 
-function ComposerHarness() {
+function ComposerHarness({
+  skills = SKILLS,
+  onSubmit = () => undefined,
+}: {
+  skills?: SkillMeta[];
+  onSubmit?: () => void;
+}) {
   const [input, setInput] = useState("");
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
   return (
     <ChatComposer
       input={input}
-      skills={SKILLS}
+      skills={skills}
       attachments={attachments}
       busy={false}
       ready
       editing={false}
       onInputChange={setInput}
       onAttachmentsChange={setAttachments}
-      onSubmit={() => undefined}
+      onSubmit={onSubmit}
       onStop={() => undefined}
       onCancelEdit={() => undefined}
       onHeightChange={() => undefined}
@@ -165,6 +171,30 @@ describe("ChatComposer picker keyboard operation", () => {
     await user.keyboard("{Enter}");
 
     expect((textbox as HTMLTextAreaElement).value).toBe("/paper-plan ");
+  });
+
+  it("submits an exact built-in slash command with Enter", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn();
+    render(
+      <ComposerHarness
+        onSubmit={onSubmit}
+        skills={[
+          {
+            name: "model",
+            description: "Show or switch model",
+            path: "<desktop-command:model>",
+          },
+        ]}
+      />,
+    );
+    const textbox = screen.getByRole("textbox");
+
+    await user.type(textbox, "/model");
+    await user.keyboard("{Enter}");
+
+    expect(onSubmit).toHaveBeenCalledOnce();
+    expect((textbox as HTMLTextAreaElement).value).toBe("/model");
   });
 
   it("attaches a recent @ file with Enter instead of inserting its body", async () => {

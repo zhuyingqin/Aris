@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   chatDelete,
   chatSetContext,
   chatStatus,
+  configSet,
   fileRead,
   isTauri,
   projectChatStarters,
@@ -63,8 +64,35 @@ function assistantTurn(): ChatTurn {
   return { id: makeId("turn"), role: "assistant", blocks: [], streaming: true };
 }
 
+function assistantTextTurn(text: string): ChatTurn {
+  return { id: makeId("turn"), role: "assistant", blocks: [{ kind: "text", text }] };
+}
+
+const BUILTIN_SLASH_COMMANDS: SkillMeta[] = [
+  {
+    name: "model",
+    description: "Show or switch the executor model. Usage: /model [model-id]",
+    path: "<desktop-command:model>",
+  },
+];
+
+function resolveDesktopModelAlias(model: string, provider?: string | null): string {
+  if (provider === "openai") return model;
+  if (model === "opus") return "claude-opus-4-7";
+  if (model === "sonnet") return "claude-sonnet-4-6";
+  if (model === "haiku") return "claude-haiku-4-5-20251001";
+  return model;
+}
+
+function parseModelCommand(text: string): { requested?: string } | null {
+  const match = text.trim().match(/^\/model(?:\s+(.+))?$/i);
+  if (!match) return null;
+  return { requested: match[1]?.trim() || undefined };
+}
+
 export default function Chat() {
   const setTab = useStore((state) => state.setTab);
+  const setError = useStore((state) => state.setError);
   const {
     sessions,
     currentId,
@@ -91,6 +119,7 @@ export default function Chat() {
   const [editingTurnId, setEditingTurnId] = useState<string | null>(null);
   const [deleted, setDeleted] = useState<ChatSession | null>(null);
   const deleteTimer = useRef<number | null>(null);
+  const composerSkills = useMemo(() => [...BUILTIN_SLASH_COMMANDS, ...skills], [skills]);
 
   const patchAssistant = useCallback((sessionId: string, fn: (turn: ChatTurn) => ChatTurn) => {
     patchTurns(sessionId, (turns) => {
@@ -138,15 +167,20 @@ export default function Chat() {
   currentSessionRef.current = currentSession;
   busyRef.current = busy;
 
-  useEffect(() => {
+  const refreshStatus = useCallback(() => {
     if (!isTauri()) {
       setStatus({ ready: true, model: "Preview", provider: "Browser" });
       return;
     }
     chatStatus().then(setStatus).catch((error) => setStatus({ ready: false, message: String(error) }));
+  }, []);
+
+  useEffect(() => {
+    refreshStatus();
+    if (!isTauri()) return;
     skillsList().then(setSkills).catch(() => undefined);
     projectChatStarters().then(setStarters).catch(() => undefined);
-  }, []);
+  }, [refreshStatus]);
 
   useEffect(() => () => {
     if (deleteTimer.current !== null) window.clearTimeout(deleteTimer.current);
@@ -186,8 +220,56 @@ export default function Chat() {
     await run(session.id, prompt);
   }, [patchTurns, run, updateSession]);
 
+  const runModelCommand = useCallback(async (session: ChatSession, text: string) => {
+    const command = parseModelCommand(text);
+    if (!command) return false;
+
+    const previousModel = status?.model ?? "not configured";
+    const provider = status?.provider ?? null;
+    let reply = "";
+
+    if (!command.requested) {
+      reply = [
+        `Current model: ${previousModel}`,
+        `Provider: ${provider ?? "unknown"}`,
+        "",
+        "Use `/model <model-id>` to switch. Short aliases: `opus`, `sonnet`, `haiku`.",
+      ].join("\n");
+    } else {
+      const nextModel = resolveDesktopModelAlias(command.requested, provider);
+      try {
+        if (isTauri()) {
+          await configSet({ executorModel: nextModel });
+          const nextStatus = await chatStatus();
+          setStatus(nextStatus);
+        } else {
+          setStatus({ ready: true, model: nextModel, provider: provider ?? "Browser" });
+        }
+        reply = [
+          `Switched model: ${previousModel} -> ${nextModel}`,
+          "",
+          "Future desktop chat turns will use this model. The setting is shared with ARIS CLI and Workflow.",
+        ].join("\n");
+      } catch (error) {
+        const message = String(error);
+        setError(message);
+        reply = `Could not switch model: ${message}`;
+      }
+    }
+
+    patchTurns(session.id, (turns) => [
+      ...turns,
+      userTurn(text, []),
+      assistantTextTurn(reply),
+    ]);
+    updateSession(session.id, (item) => ({ ...item, draft: "", draftAttachments: [] }));
+    setEditingTurnId(null);
+    return true;
+  }, [patchTurns, setError, status, updateSession]);
+
   const send = async () => {
     if (!currentSession || busy || (!input.trim() && attachments.length === 0)) return;
+    if (attachments.length === 0 && await runModelCommand(currentSession, input)) return;
     if (editingTurnId) {
       const index = currentSession.turns.findIndex((turn) => turn.id === editingTurnId);
       const prefix = index >= 0 ? currentSession.turns.slice(0, index) : currentSession.turns;
@@ -289,7 +371,7 @@ export default function Chat() {
         />
         <ChatComposer
           input={input}
-          skills={skills}
+          skills={composerSkills}
           attachments={attachments}
           busy={busy}
           ready={Boolean(status?.ready)}

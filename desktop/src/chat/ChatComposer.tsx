@@ -19,6 +19,14 @@ function remember(key: string, value: string) {
   localStorage.setItem(key, JSON.stringify(next));
 }
 
+function isDesktopCommand(skill: SkillMeta | undefined): boolean {
+  return skill?.path.startsWith("<desktop-command:") ?? false;
+}
+
+function isExactDesktopCommand(input: string, skill: SkillMeta | undefined): boolean {
+  return Boolean(skill && isDesktopCommand(skill) && input.trim().toLowerCase() === `/${skill.name.toLowerCase()}`);
+}
+
 export function resizeComposerTextarea(textarea: HTMLTextAreaElement) {
   textarea.style.height = "0px";
   const maxHeight = Number.parseFloat(getComputedStyle(textarea).maxHeight) || 320;
@@ -302,6 +310,11 @@ export default function ChatComposer({
               }
               if (event.key === "Enter" && !event.shiftKey) {
                 event.preventDefault();
+                if (pickerMode === "skill" && isExactDesktopCommand(input, skillItems[pickerIndex])) {
+                  setPickerMode(null);
+                  onSubmit();
+                  return;
+                }
                 chooseActive();
                 return;
               }
@@ -314,7 +327,7 @@ export default function ChatComposer({
         />
         <div className="chat-input-footer">
           <div className="chat-input-hints">
-            <span><kbd>/</kbd> Skills</span>
+            <span><kbd>/</kbd> Commands / Skills</span>
             <span><kbd>@</kbd> Files</span>
             <span className="chat-input-shortcut">Drop files · Paste images · Shift+Enter newline</span>
           </div>
