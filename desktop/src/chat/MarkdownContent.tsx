@@ -61,8 +61,8 @@ function CodeBlock({ className, children }: { className?: string; children?: Rea
 
 // ── Think-block toggle ────────────────────────────────────────────────────────
 
-function ThinkBlock({ content }: { content: string }) {
-  const [open, setOpen] = useState(false);
+export function ThinkBlock({ content, streaming = false }: { content: string; streaming?: boolean }) {
+  const [open, setOpen] = useState(streaming);
   const preview = content.slice(0, 80).replace(/\s+/g, " ");
   return (
     <div className="md-think">

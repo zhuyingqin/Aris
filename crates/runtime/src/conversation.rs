@@ -5,7 +5,7 @@ use crate::compact::{
     compact_session, estimate_session_tokens, CompactionConfig, CompactionResult,
 };
 use crate::config::RuntimeFeatureConfig;
-use crate::event_sink::{EventSink, EventType, NoopEventSink, RuntimeEvent, now_iso8601};
+use crate::event_sink::{now_iso8601, EventSink, EventType, NoopEventSink, RuntimeEvent};
 use crate::hooks::{HookRunResult, HookRunner};
 use crate::permissions::{PermissionOutcome, PermissionPolicy, PermissionPrompter};
 use crate::session::{ContentBlock, ConversationMessage, MessageRole, Session};
@@ -302,11 +302,15 @@ where
                                 // Parse skill name from input JSON for dedicated event
                                 let skill_name = serde_json::from_str::<serde_json::Value>(&input)
                                     .ok()
-                                    .and_then(|v| v.get("skill").and_then(|s| s.as_str().map(String::from)))
+                                    .and_then(|v| {
+                                        v.get("skill").and_then(|s| s.as_str().map(String::from))
+                                    })
                                     .unwrap_or_default();
                                 let skill_args = serde_json::from_str::<serde_json::Value>(&input)
                                     .ok()
-                                    .and_then(|v| v.get("args").and_then(|s| s.as_str().map(String::from)))
+                                    .and_then(|v| {
+                                        v.get("args").and_then(|s| s.as_str().map(String::from))
+                                    })
                                     .unwrap_or_default();
                                 self.event_sink.emit(&RuntimeEvent {
                                     timestamp: now_iso8601(),
@@ -416,7 +420,8 @@ where
         // Notify the client so any per-message-index state (e.g. OpenAI
         // executor's reasoning_cache keyed by usize) is cleared.
         // Default no-op for stateless clients.
-        self.api_client.on_session_compacted(result.removed_message_count);
+        self.api_client
+            .on_session_compacted(result.removed_message_count);
         Some(AutoCompactionEvent {
             removed_message_count: result.removed_message_count,
         })
@@ -455,9 +460,15 @@ fn build_assistant_message(
                 flush_text_block(&mut text, &mut blocks);
                 blocks.push(ContentBlock::ToolUse { id, name, input });
             }
-            AssistantEvent::Thinking { thinking, signature } => {
+            AssistantEvent::Thinking {
+                thinking,
+                signature,
+            } => {
                 flush_text_block(&mut text, &mut blocks);
-                blocks.push(ContentBlock::Thinking { thinking, signature });
+                blocks.push(ContentBlock::Thinking {
+                    thinking,
+                    signature,
+                });
             }
             AssistantEvent::Usage(value) => usage = Some(value),
             AssistantEvent::MessageStop => {
@@ -941,10 +952,7 @@ mod tests {
             max_estimated_tokens: 1,
         });
         assert!(result.summary.contains("Conversation summary"));
-        assert_eq!(
-            result.compacted_session.messages[0].role,
-            MessageRole::User
-        );
+        assert_eq!(result.compacted_session.messages[0].role, MessageRole::User);
     }
 
     #[cfg(windows)]

@@ -63,6 +63,11 @@ pub struct ToolSpec {
 
 #[must_use]
 #[allow(clippy::too_many_lines)]
+/// Render the active Agent Team as a readable terminal view (backs `/team`).
+pub fn render_team_view(team_id: Option<&str>) -> Result<String, String> {
+    team_state::render_team_view(team_id)
+}
+
 pub fn mvp_tool_specs() -> Vec<ToolSpec> {
     vec![
         ToolSpec {
@@ -438,6 +443,65 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             required_permission: PermissionMode::DangerFullAccess,
         },
         ToolSpec {
+            name: "WaitForTeammates",
+            description: "Block until an Agent Team's tasks finish (or time out), then return each task's final status and stored result. Use this instead of polling AgentSupervisor/ListTeam in a loop: it waits efficiently on the runtime side and folds the WAIT and GATHER steps into one call. A task settles when its status is terminal or its owning teammate exits, so a teammate that forgets CompleteTask will not hang the wait. Returns early on Ctrl+C or timeout with partial results (check all_settled / pending).",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "teamId": { "type": "string" },
+                    "taskIds": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Wait only for these task ids; default waits for all of the team's tasks."
+                    },
+                    "timeoutSeconds": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 7200,
+                        "description": "Max seconds to wait before returning partial results (default 1800)."
+                    },
+                    "pollIntervalSeconds": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 60,
+                        "description": "Seconds between status checks (default 3)."
+                    }
+                },
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
+            name: "VerifyDeliverable",
+            description: "Verification gate for an Agent Team: run an independent reviewer over a completed task's result against its success criteria, then record the GO/NO-GO verdict on the task. Use this in the DECIDE step before trusting or integrating any deliverable involving facts, citations, code, or experiment claims. Returns status passed/failed/needs_judgment plus the full review. Requires a configured reviewer (same setup as LlmReview).",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "teamId": { "type": "string" },
+                    "taskId": {
+                        "type": "string",
+                        "description": "The completed task whose stored result should be verified."
+                    },
+                    "criteria": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Override the success criteria to check; defaults to the teammate contract's successCriteria."
+                    },
+                    "instructions": {
+                        "type": "string",
+                        "description": "Extra review guidance specific to this deliverable."
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": "Optional reviewer model override; prefer omitting to use the configured reviewer."
+                    }
+                },
+                "required": ["taskId"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
             name: "Workflow",
             description: "Plan, start, inspect, pause, resume, stop, save, discover, or restart a dynamic workflow run using a sandboxed orchestration script API.",
             input_schema: json!({
@@ -633,6 +697,12 @@ pub fn execute_tool(name: &str, input: &Value) -> Result<String, String> {
         "AgentSupervisor" => {
             from_value::<team_state::AgentSupervisorInput>(input).and_then(run_agent_supervisor)
         }
+        "WaitForTeammates" => {
+            from_value::<team_state::WaitForTeammatesInput>(input).and_then(run_wait_for_teammates)
+        }
+        "VerifyDeliverable" => {
+            from_value::<team_state::VerifyDeliverableInput>(input).and_then(run_verify_deliverable)
+        }
         "Workflow" => from_value::<workflow_state::WorkflowInput>(input).and_then(run_workflow),
         "EnterWorktree" => {
             from_value::<team_state::EnterWorktreeInput>(input).and_then(run_enter_worktree)
@@ -737,6 +807,16 @@ fn run_list_team(input: team_state::ListTeamInput) -> Result<String, String> {
 
 fn run_agent_supervisor(input: team_state::AgentSupervisorInput) -> Result<String, String> {
     to_pretty_json(execute_agent_supervisor(input)?)
+}
+
+fn run_wait_for_teammates(input: team_state::WaitForTeammatesInput) -> Result<String, String> {
+    to_pretty_json(team_state::wait_for_teammates(input)?)
+}
+
+fn run_verify_deliverable(input: team_state::VerifyDeliverableInput) -> Result<String, String> {
+    to_pretty_json(team_state::verify_deliverable(input, |prompt, model| {
+        run_llm_review(LlmReviewInput { prompt, model })
+    })?)
 }
 
 fn run_workflow(input: workflow_state::WorkflowInput) -> Result<String, String> {
@@ -2352,7 +2432,7 @@ fn build_agent_system_prompt(subagent_type: &str) -> Result<Vec<String>, String>
     )
     .map_err(|error| error.to_string())?;
     prompt.push(format!(
-        "You are a background sub-agent of type `{subagent_type}`. Work only on the delegated task, use only the tools available to you, do not ask the user questions, and finish with a concise result."
+        "You are a background sub-agent of type `{subagent_type}`. Work only on the delegated task, use only the tools available to you, do not ask the user questions, and finish with a concise result. You are an individual contributor: do not spawn your own teammates or form nested teams. If you are part of a team, coordinate only through the team tools described in your task and report your result with CompleteTask before finishing."
     ));
     Ok(prompt)
 }
@@ -2443,20 +2523,11 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
             "PowerShell",
         ],
     };
-    let mut allowed = tools
-        .into_iter()
-        .map(str::to_string)
-        .collect::<BTreeSet<_>>();
-    for tool in team_state::COORDINATION_TOOLS {
-        allowed.insert((*tool).to_string());
-    }
-    allowed
+    apply_inherited_allowed_tools(tools.into_iter().map(str::to_string).collect())
 }
 
-fn allowed_tools_for_teammate(subagent_type: Option<&str>) -> BTreeSet<String> {
-    let normalized = normalize_subagent_type(subagent_type);
-    let base = allowed_tools_for_subagent(&normalized);
-    let inherited = std::env::var("ARIS_ALLOWED_TOOLS")
+fn inherited_allowed_tools() -> Option<BTreeSet<String>> {
+    std::env::var("ARIS_ALLOWED_TOOLS")
         .ok()
         .map(|value| {
             value
@@ -2466,18 +2537,29 @@ fn allowed_tools_for_teammate(subagent_type: Option<&str>) -> BTreeSet<String> {
                 .map(str::to_string)
                 .collect::<BTreeSet<_>>()
         })
-        .filter(|tools| !tools.is_empty());
-    let mut allowed = if let Some(inherited) = inherited {
-        base.intersection(&inherited)
+        .filter(|tools| !tools.is_empty())
+}
+
+fn apply_inherited_allowed_tools(base: BTreeSet<String>) -> BTreeSet<String> {
+    let inherited = inherited_allowed_tools();
+    let mut allowed = if let Some(inherited) = inherited.as_ref() {
+        base.intersection(inherited)
             .cloned()
             .collect::<BTreeSet<_>>()
     } else {
         base
     };
     for tool in team_state::COORDINATION_TOOLS {
-        allowed.insert((*tool).to_string());
+        if inherited.as_ref().is_none_or(|tools| tools.contains(*tool)) {
+            allowed.insert((*tool).to_string());
+        }
     }
     allowed
+}
+
+fn allowed_tools_for_teammate(subagent_type: Option<&str>) -> BTreeSet<String> {
+    let normalized = normalize_subagent_type(subagent_type);
+    allowed_tools_for_subagent(&normalized)
 }
 
 fn agent_permission_policy() -> PermissionPolicy {
@@ -2971,6 +3053,9 @@ fn canonical_tool_token(value: &str) -> String {
 }
 
 fn agent_store_dir() -> Result<std::path::PathBuf, String> {
+    if let Ok(path) = std::env::var("ARIS_AGENT_STORE_DIR") {
+        return Ok(std::path::PathBuf::from(path));
+    }
     if let Ok(path) = std::env::var("CLAWD_AGENT_STORE") {
         return Ok(std::path::PathBuf::from(path));
     }
@@ -4292,6 +4377,7 @@ fn call_openai_compat_reviewer(
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
+    use std::ffi::{OsStr, OsString};
     use std::fs;
     use std::io::{Read, Write};
     use std::net::{SocketAddr, TcpListener};
@@ -4321,6 +4407,35 @@ mod tests {
             .expect("time")
             .as_nanos();
         std::env::temp_dir().join(format!("clawd-tools-{unique}-{name}"))
+    }
+
+    struct EnvGuard {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl EnvGuard {
+        fn unset(key: &'static str) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::remove_var(key);
+            Self { key, previous }
+        }
+
+        fn set(key: &'static str, value: impl AsRef<OsStr>) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            if let Some(previous) = self.previous.as_ref() {
+                std::env::set_var(self.key, previous);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
     }
 
     #[test]
@@ -4907,6 +5022,10 @@ mod tests {
 
     #[test]
     fn agent_tool_subset_mapping_is_expected() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _env = EnvGuard::unset("ARIS_ALLOWED_TOOLS");
         let general = allowed_tools_for_subagent("general-purpose");
         assert!(general.contains("bash"));
         assert!(general.contains("write_file"));
@@ -4928,6 +5047,30 @@ mod tests {
         assert!(verification.contains("bash"));
         assert!(verification.contains("PowerShell"));
         assert!(!verification.contains("write_file"));
+    }
+
+    #[test]
+    fn inherited_allowed_tools_filter_subagent_and_coordination_tools() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _env = EnvGuard::set(
+            "ARIS_ALLOWED_TOOLS",
+            "read_file,grep_search,ListTeam,CompleteTask",
+        );
+
+        let general = allowed_tools_for_subagent("general-purpose");
+
+        assert!(general.contains("read_file"));
+        assert!(general.contains("grep_search"));
+        assert!(general.contains("ListTeam"));
+        assert!(general.contains("CompleteTask"));
+        assert!(!general.contains("bash"));
+        assert!(!general.contains("PowerShell"));
+        assert!(!general.contains("Workflow"));
+        assert!(!general.contains("EnterWorktree"));
+        assert!(!general.contains("AgentSupervisor"));
+        assert!(!general.contains("SpawnTeammate"));
     }
 
     #[test]
@@ -5130,11 +5273,176 @@ mod tests {
             1
         );
 
+        // step 3: record an independent verification verdict and confirm it
+        // round-trips through persisted task state and logs an event.
+        let verified = team_state::record_verification(
+            &prepared.team_id,
+            &prepared.task_id,
+            team_state::TaskVerification {
+                status: team_state::VerificationStatus::Passed,
+                reviewer: Some("gpt-5.5".to_string()),
+                summary: "GO".to_string(),
+                verified_at: 0,
+            },
+        )
+        .expect("verification should record");
+        assert_eq!(
+            verified.verification.as_ref().map(|v| v.status),
+            Some(team_state::VerificationStatus::Passed)
+        );
+        let snapshot = team_state::list_team(team_state::ListTeamInput {
+            team_id: Some(prepared.team_id.clone()),
+            include_messages: Some(false),
+            include_events: Some(true),
+        })
+        .expect("snapshot should reload");
+        assert_eq!(
+            snapshot.tasks[0].verification.as_ref().map(|v| v.status),
+            Some(team_state::VerificationStatus::Passed)
+        );
+        assert_eq!(
+            snapshot.tasks[0]
+                .events
+                .iter()
+                .filter(|event| event.kind == "TaskVerified")
+                .count(),
+            1
+        );
+
+        // step 4: the /team view renders the live team state.
+        let view =
+            team_state::render_team_view(Some(&prepared.team_id)).expect("team view should render");
+        assert!(view.contains("Ship Team"), "view missing team name: {view}");
+        assert!(
+            view.contains("verified \u{2713}"),
+            "view missing verification glyph: {view}"
+        );
+
         std::env::remove_var("ARIS_RUN_STATE_DIR");
         std::env::remove_var("ARIS_SESSION_ID");
         std::env::remove_var("ARIS_PERMISSION_MODE");
         std::env::remove_var("ARIS_ALLOWED_TOOLS");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn wait_for_teammates_settles_and_times_out() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = temp_path("wait-team");
+        std::env::set_var("ARIS_RUN_STATE_DIR", &dir);
+        std::env::set_var("ARIS_SESSION_ID", "lead-session");
+
+        let prepared = team_state::prepare_teammate(&team_state::SpawnTeammateInput {
+            team_id: None,
+            team_name: Some("Wait Team".to_string()),
+            team_design: Some(team_state::TeamDesignContract {
+                rationale: "Need one bounded teammate plus lead-side verification.".to_string(),
+                coordination_pattern: "lead-fan-out".to_string(),
+                coordinator: "lead-session".to_string(),
+                context_policy: "Lead passes only the relevant slice.".to_string(),
+                verification_plan: "Lead checks the result against run-state.".to_string(),
+                stop_condition: "Stop when the deliverable meets all criteria.".to_string(),
+                max_teammates: Some(4),
+            }),
+            lead_session: None,
+            description: "Do the thing".to_string(),
+            prompt: "Do the thing and report.".to_string(),
+            subagent_type: Some("Explore".to_string()),
+            role: Some("worker".to_string()),
+            responsibility: Some("Do the one delegated thing and report findings.".to_string()),
+            context_scope: Some("Only the files relevant to this wait smoke test.".to_string()),
+            deliverable: Some("A concise report for the lead.".to_string()),
+            success_criteria: Some(vec![
+                "The report states what was done.".to_string(),
+                "The report avoids touching unrelated files.".to_string(),
+            ]),
+            stop_condition: Some("Stop after the report is recorded.".to_string()),
+            name: Some("worker".to_string()),
+            model: None,
+            task_id: None,
+            task_title: None,
+            dependencies: None,
+            worktree: None,
+            worktree_branch: None,
+            worktree_path: None,
+        })
+        .expect("teammate should prepare");
+
+        // While the task is in progress, a short wait returns timed-out and unsettled.
+        let timed = team_state::wait_for_teammates(team_state::WaitForTeammatesInput {
+            team_id: Some(prepared.team_id.clone()),
+            task_ids: None,
+            timeout_seconds: Some(1),
+            poll_interval_seconds: Some(1),
+        })
+        .expect("wait should return");
+        assert!(!timed.all_settled, "in-progress task must not be settled");
+        assert!(timed.timed_out, "short wait should time out");
+        assert_eq!(timed.pending, 1);
+
+        // Once the task completes, the wait returns immediately with the result.
+        team_state::complete_task(team_state::CompleteTaskInput {
+            team_id: Some(prepared.team_id.clone()),
+            task_id: prepared.task_id.clone(),
+            actor: prepared.member_id.clone(),
+            result: "done".to_string(),
+            status: Some(team_state::TaskCompletionStatus::Completed),
+        })
+        .expect("task should complete");
+
+        let settled = team_state::wait_for_teammates(team_state::WaitForTeammatesInput {
+            team_id: Some(prepared.team_id.clone()),
+            task_ids: None,
+            timeout_seconds: Some(30),
+            poll_interval_seconds: Some(1),
+        })
+        .expect("wait should return");
+        assert!(settled.all_settled, "completed task should be settled");
+        assert!(!settled.timed_out);
+        assert_eq!(settled.pending, 0);
+        assert_eq!(settled.tasks.len(), 1);
+        assert_eq!(settled.tasks[0].result.as_deref(), Some("done"));
+        assert_eq!(
+            settled.tasks[0].status,
+            team_state::TeamTaskStatus::Completed
+        );
+
+        std::env::remove_var("ARIS_RUN_STATE_DIR");
+        std::env::remove_var("ARIS_SESSION_ID");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn parse_review_verdict_classifies_go_and_no_go() {
+        use team_state::VerificationStatus;
+        assert_eq!(
+            team_state::parse_review_verdict("Looks solid overall. Verdict: GO"),
+            VerificationStatus::Passed
+        );
+        assert_eq!(
+            team_state::parse_review_verdict("Acceptable with caveats. GO-WITH-NITS"),
+            VerificationStatus::Passed
+        );
+        assert_eq!(
+            team_state::parse_review_verdict("Criteria not met. NO-GO."),
+            VerificationStatus::Failed
+        );
+        assert_eq!(
+            team_state::parse_review_verdict("This NEEDS-REWORK before it can land."),
+            VerificationStatus::Failed
+        );
+        // "NO-GO" contains "GO" but must classify as Failed, not Passed.
+        assert_eq!(
+            team_state::parse_review_verdict("Strong NO-GO from me."),
+            VerificationStatus::Failed
+        );
+        // No recognizable verdict token -> defer to the lead.
+        assert_eq!(
+            team_state::parse_review_verdict("Some thoughts, but no clear verdict here."),
+            VerificationStatus::NeedsJudgment
+        );
     }
 
     #[test]

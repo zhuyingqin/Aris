@@ -672,7 +672,11 @@ pub(crate) fn parse_stream_idle_timeout_secs(raw: Option<&str>) -> Option<Durati
 /// sending TCP RST or HTTP body.
 #[must_use]
 pub fn resolve_stream_idle_timeout() -> Option<Duration> {
-    parse_stream_idle_timeout_secs(std::env::var("ARIS_STREAM_IDLE_TIMEOUT_SECS").ok().as_deref())
+    parse_stream_idle_timeout_secs(
+        std::env::var("ARIS_STREAM_IDLE_TIMEOUT_SECS")
+            .ok()
+            .as_deref(),
+    )
 }
 
 /// Whether a reqwest::Error represents a transient stream-body failure
@@ -898,8 +902,7 @@ impl MessageStream {
                 Some(dur) => match tokio::time::timeout(dur, chunk_future).await {
                     Ok(inner) => inner,
                     Err(_elapsed) => {
-                        if !self.has_emitted_meaningful_content
-                            && self.stream_retries_remaining > 0
+                        if !self.has_emitted_meaningful_content && self.stream_retries_remaining > 0
                         {
                             self.stream_retries_remaining -= 1;
                             eprintln!(
@@ -1422,9 +1425,9 @@ mod tests {
     #[test]
     fn event_is_meaningful_content_classification() {
         use crate::types::{
-            ContentBlockDelta, ContentBlockDeltaEvent, ContentBlockStartEvent, ContentBlockStopEvent,
-            MessageDelta, MessageDeltaEvent, MessageResponse, MessageStartEvent, MessageStopEvent,
-            OutputContentBlock, StreamEvent, Usage,
+            ContentBlockDelta, ContentBlockDeltaEvent, ContentBlockStartEvent,
+            ContentBlockStopEvent, MessageDelta, MessageDeltaEvent, MessageResponse,
+            MessageStartEvent, MessageStopEvent, OutputContentBlock, StreamEvent, Usage,
         };
 
         fn dummy_message_response() -> MessageResponse {
@@ -1447,13 +1450,13 @@ mod tests {
         }
 
         // Protocol-only frames: NOT meaningful (safe to discard on retry).
-        assert!(!super::event_is_meaningful_content(&StreamEvent::MessageStart(
-            MessageStartEvent {
+        assert!(!super::event_is_meaningful_content(
+            &StreamEvent::MessageStart(MessageStartEvent {
                 message: dummy_message_response(),
-            }
-        )));
-        assert!(!super::event_is_meaningful_content(&StreamEvent::MessageDelta(
-            MessageDeltaEvent {
+            })
+        ));
+        assert!(!super::event_is_meaningful_content(
+            &StreamEvent::MessageDelta(MessageDeltaEvent {
                 delta: MessageDelta {
                     stop_reason: None,
                     stop_sequence: None,
@@ -1464,57 +1467,61 @@ mod tests {
                     cache_read_input_tokens: 0,
                     output_tokens: 0,
                 },
-            }
-        )));
-        assert!(!super::event_is_meaningful_content(&StreamEvent::MessageStop(
-            MessageStopEvent {}
-        )));
+            })
+        ));
+        assert!(!super::event_is_meaningful_content(
+            &StreamEvent::MessageStop(MessageStopEvent {})
+        ));
 
         // Empty text_delta — caller hasn't seen any chars yet, safe to discard.
-        assert!(!super::event_is_meaningful_content(&StreamEvent::ContentBlockDelta(
-            ContentBlockDeltaEvent {
+        assert!(!super::event_is_meaningful_content(
+            &StreamEvent::ContentBlockDelta(ContentBlockDeltaEvent {
                 index: 0,
-                delta: ContentBlockDelta::TextDelta { text: String::new() },
-            }
-        )));
+                delta: ContentBlockDelta::TextDelta {
+                    text: String::new()
+                },
+            })
+        ));
 
         // Non-empty text_delta — committed user-visible content, MUST be meaningful.
-        assert!(super::event_is_meaningful_content(&StreamEvent::ContentBlockDelta(
-            ContentBlockDeltaEvent {
+        assert!(super::event_is_meaningful_content(
+            &StreamEvent::ContentBlockDelta(ContentBlockDeltaEvent {
                 index: 0,
                 delta: ContentBlockDelta::TextDelta {
                     text: "hello".to_string(),
                 },
-            }
-        )));
+            })
+        ));
 
         // ContentBlockStop — block-level commitment, must be meaningful.
-        assert!(super::event_is_meaningful_content(&StreamEvent::ContentBlockStop(
-            ContentBlockStopEvent { index: 0 }
-        )));
+        assert!(super::event_is_meaningful_content(
+            &StreamEvent::ContentBlockStop(ContentBlockStopEvent { index: 0 })
+        ));
 
         // ContentBlockStart::ToolUse — caller writes pending_tool state on
         // the start frame; even with empty `input`, transparent retry now
         // would risk stale tool_use commit on next BlockStop. Conservative
         // per round-3 finding.
-        assert!(super::event_is_meaningful_content(&StreamEvent::ContentBlockStart(
-            ContentBlockStartEvent {
+        assert!(super::event_is_meaningful_content(
+            &StreamEvent::ContentBlockStart(ContentBlockStartEvent {
                 index: 0,
                 content_block: OutputContentBlock::ToolUse {
                     id: "x".to_string(),
                     name: "y".to_string(),
                     input: serde_json::json!({}),
                 },
-            }
-        )));
+            })
+        ));
 
         // ContentBlockStart::Text with empty text — no commitment yet.
-        assert!(!super::event_is_meaningful_content(&StreamEvent::ContentBlockStart(
-            ContentBlockStartEvent {
+        assert!(!super::event_is_meaningful_content(
+            &StreamEvent::ContentBlockStart(ContentBlockStartEvent {
                 index: 0,
-                content_block: OutputContentBlock::Text { text: String::new() },
-            }
-        )));
+                content_block: OutputContentBlock::Text {
+                    text: String::new()
+                },
+            })
+        ));
     }
 
     /// v0.4.13 codex round-1 #3 — verify the premature-EOF retry trigger
@@ -1526,33 +1533,43 @@ mod tests {
         // Happy path: MessageStart consumed (no meaningful), no terminal,
         // parser finished with leftover_empty, retries remain → SHOULD retry.
         assert!(super::should_retry_on_premature_eof(
-            /* has_emitted_meaningful_content */ false,
-            /* observed_terminal */ false,
-            /* parser_errored */ false,
-            /* leftover_empty */ true,
+            /* has_emitted_meaningful_content */ false, /* observed_terminal */ false,
+            /* parser_errored */ false, /* leftover_empty */ true,
             /* stream_retries_remaining */ 2,
         ));
 
         // Parser errored variant: should also retry.
-        assert!(super::should_retry_on_premature_eof(false, false, true, false, 2));
+        assert!(super::should_retry_on_premature_eof(
+            false, false, true, false, 2
+        ));
 
         // Meaningful content already emitted (e.g. real text_delta yielded) →
         // NO retry, would tear output.
-        assert!(!super::should_retry_on_premature_eof(true, false, false, true, 2));
+        assert!(!super::should_retry_on_premature_eof(
+            true, false, false, true, 2
+        ));
 
         // observed_terminal (MessageStop seen) → complete short response,
         // NOT a premature EOF, NO retry.
-        assert!(!super::should_retry_on_premature_eof(false, true, false, true, 2));
+        assert!(!super::should_retry_on_premature_eof(
+            false, true, false, true, 2
+        ));
 
         // Neither parser errored NOR leftover_empty → there are events
         // about to be replayed; NO retry, drain them.
-        assert!(!super::should_retry_on_premature_eof(false, false, false, false, 2));
+        assert!(!super::should_retry_on_premature_eof(
+            false, false, false, false, 2
+        ));
 
         // Retry budget exhausted → NO retry regardless of other state.
-        assert!(!super::should_retry_on_premature_eof(false, false, true, true, 0));
+        assert!(!super::should_retry_on_premature_eof(
+            false, false, true, true, 0
+        ));
 
         // Single retry left + good preconditions → DO retry.
-        assert!(super::should_retry_on_premature_eof(false, false, true, true, 1));
+        assert!(super::should_retry_on_premature_eof(
+            false, false, true, true, 1
+        ));
     }
 
     /// v0.4.14 C11 — chunk-idle timeout env parser truth table. Pure
@@ -1565,16 +1582,28 @@ mod tests {
         use std::time::Duration;
 
         // unset → default 120s
-        assert_eq!(parse_stream_idle_timeout_secs(None), Some(Duration::from_secs(120)));
+        assert_eq!(
+            parse_stream_idle_timeout_secs(None),
+            Some(Duration::from_secs(120))
+        );
 
         // valid mid-range
-        assert_eq!(parse_stream_idle_timeout_secs(Some("30")), Some(Duration::from_secs(30)));
+        assert_eq!(
+            parse_stream_idle_timeout_secs(Some("30")),
+            Some(Duration::from_secs(30))
+        );
 
         // below clamp (10s) → clamped up to 10s
-        assert_eq!(parse_stream_idle_timeout_secs(Some("5")), Some(Duration::from_secs(10)));
+        assert_eq!(
+            parse_stream_idle_timeout_secs(Some("5")),
+            Some(Duration::from_secs(10))
+        );
 
         // above clamp (1800s) → clamped down to 1800s
-        assert_eq!(parse_stream_idle_timeout_secs(Some("9999")), Some(Duration::from_secs(1800)));
+        assert_eq!(
+            parse_stream_idle_timeout_secs(Some("9999")),
+            Some(Duration::from_secs(1800))
+        );
 
         // zero → opt-out (None == indefinite wait)
         assert_eq!(parse_stream_idle_timeout_secs(Some("0")), None);
@@ -1583,13 +1612,25 @@ mod tests {
         assert_eq!(parse_stream_idle_timeout_secs(Some("-1")), None);
 
         // parse failure → fall back to default 120s, not silently disable
-        assert_eq!(parse_stream_idle_timeout_secs(Some("abc")), Some(Duration::from_secs(120)));
+        assert_eq!(
+            parse_stream_idle_timeout_secs(Some("abc")),
+            Some(Duration::from_secs(120))
+        );
 
         // blank / whitespace-only → treated as missing → default 120s
-        assert_eq!(parse_stream_idle_timeout_secs(Some("   ")), Some(Duration::from_secs(120)));
+        assert_eq!(
+            parse_stream_idle_timeout_secs(Some("   ")),
+            Some(Duration::from_secs(120))
+        );
 
         // exact boundaries → pass through
-        assert_eq!(parse_stream_idle_timeout_secs(Some("10")), Some(Duration::from_secs(10)));
-        assert_eq!(parse_stream_idle_timeout_secs(Some("1800")), Some(Duration::from_secs(1800)));
+        assert_eq!(
+            parse_stream_idle_timeout_secs(Some("10")),
+            Some(Duration::from_secs(10))
+        );
+        assert_eq!(
+            parse_stream_idle_timeout_secs(Some("1800")),
+            Some(Duration::from_secs(1800))
+        );
     }
 }

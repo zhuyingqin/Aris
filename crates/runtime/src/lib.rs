@@ -40,14 +40,14 @@ pub use conversation::{
     auto_compaction_threshold_from_env, ApiClient, ApiRequest, AssistantEvent, AutoCompactionEvent,
     ConversationRuntime, RuntimeError, StaticToolExecutor, ToolError, ToolExecutor, TurnSummary,
 };
+pub use event_sink::{
+    now_iso8601, today_iso, EventSink, EventType, JsonlEventSink, MetaLoggingLevel, NoopEventSink,
+    RuntimeEvent,
+};
 pub use file_ops::{
     edit_file, glob_search, grep_search, read_file, write_file, EditFileOutput, GlobSearchOutput,
     GrepSearchInput, GrepSearchOutput, ReadFileOutput, StructuredPatchHunk, TextFilePayload,
     WriteFileOutput,
-};
-pub use event_sink::{
-    EventSink, EventType, JsonlEventSink, MetaLoggingLevel, NoopEventSink, RuntimeEvent,
-    now_iso8601, today_iso,
 };
 pub use hooks::{HookEvent, HookRunResult, HookRunner};
 pub use mcp::{
@@ -78,8 +78,8 @@ pub use permissions::{
     PermissionPrompter, PermissionRequest,
 };
 pub use prompt::{
-    load_system_prompt, prepend_bullets, ContextFile, ProjectContext, PromptBuildError,
-    SystemPromptBuilder, SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
+    load_system_prompt, prepend_bullets, team_orchestration_section, ContextFile, ProjectContext,
+    PromptBuildError, SystemPromptBuilder, SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
 };
 pub use remote::{
     inherited_upstream_proxy_env, no_proxy_list, read_token, upstream_proxy_ws_url,
@@ -101,8 +101,7 @@ pub fn home_dir() -> String {
 
 /// Global interrupt flag set by SIGINT handler. Streaming loops check this
 /// between chunks/iterations to allow Ctrl+C to interrupt long operations.
-pub static INTERRUPTED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+pub static INTERRUPTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 #[must_use]
 pub fn is_interrupted() -> bool {

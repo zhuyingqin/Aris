@@ -118,6 +118,13 @@ export interface MailboxMessage {
   createdAt?: number;
 }
 
+export interface TaskVerification {
+  status: "passed" | "failed" | "needs_judgment";
+  reviewer?: string | null;
+  summary?: string;
+  verifiedAt?: number;
+}
+
 export interface TeamTask {
   taskId: string;
   teamId?: string;
@@ -127,6 +134,7 @@ export interface TeamTask {
   claimedBy?: string | null;
   dependencies?: string[];
   result?: string | null;
+  verification?: TaskVerification | null;
   createdAt?: number;
   updatedAt?: number;
 }
@@ -236,6 +244,7 @@ export interface ChatStatus {
 // "text → tool → text → tool → final text" displays correctly.
 export type ChatBlock =
   | { kind: "text"; text: string }
+  | { kind: "thinking"; thinking: string }
   | {
       kind: "tool";
       id?: string;

@@ -128,7 +128,11 @@ impl EventSink for JsonlEventSink {
                 input_summary,
                 is_error,
             } => {
-                let event_name = if *is_error { "tool_failure" } else { "tool_call" };
+                let event_name = if *is_error {
+                    "tool_failure"
+                } else {
+                    "tool_call"
+                };
                 let summary = if self.level == MetaLoggingLevel::Content {
                     sanitize_field(input_summary, 200)
                 } else {
@@ -166,11 +170,7 @@ impl EventSink for JsonlEventSink {
                         sanitize_field(preview, 100)
                     } else {
                         // In metadata mode, just record that a slash command was used
-                        preview
-                            .split_whitespace()
-                            .next()
-                            .unwrap_or("")
-                            .to_string()
+                        preview.split_whitespace().next().unwrap_or("").to_string()
                     };
                     format!(
                         r#"{{"ts":"{}","session":"{}","event":"slash_command","command":"{}"}}"#,

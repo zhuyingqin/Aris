@@ -17,14 +17,16 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use api::{resolve_startup_auth_source, AnthropicClient, AuthSource};
+#[cfg(test)]
 use api::{
-    resolve_startup_auth_source, AnthropicClient, AuthSource, ContentBlockDelta, InputContentBlock,
-    InputMessage, MessageRequest, MessageResponse, OutputContentBlock,
-    StreamEvent as ApiStreamEvent, ToolChoice, ToolDefinition, ToolResultContentBlock,
+    InputContentBlock, InputMessage, MessageResponse, OutputContentBlock, ToolResultContentBlock,
 };
 
 use commands::{
-    render_slash_command_help, resume_supported_slash_commands, slash_command_specs, SlashCommand,
+    plan_team_command, plan_workflows_command, render_slash_command_help,
+    resume_supported_slash_commands, slash_command_specs, SlashCommand, TeamCommandPlan,
+    WorkflowCommandPlan,
 };
 use compat_harness::{extract_manifest, UpstreamPaths};
 use crossterm::{
@@ -34,28 +36,19 @@ use crossterm::{
 };
 use init::initialize_repo;
 use render::{MarkdownStreamState, Spinner, TerminalRenderer};
+#[cfg(test)]
+use runtime::AssistantEvent;
 use runtime::{
     clear_oauth_credentials, generate_pkce_pair, generate_state, load_system_prompt,
-    parse_oauth_callback_request_target, save_oauth_credentials, ApiClient, ApiRequest,
-    AssistantEvent, CompactionConfig, ConfigLoader, ConfigSource, ContentBlock,
-    ConversationMessage, ConversationRuntime, MessageRole, OAuthAuthorizationRequest, OAuthConfig,
-    OAuthTokenExchangeRequest, PermissionMode, PermissionPolicy, ProjectContext, RuntimeError,
-    Session, TokenUsage, ToolError, ToolExecutor, UsageTracker,
+    parse_oauth_callback_request_target, save_oauth_credentials, CompactionConfig, ConfigLoader,
+    ConfigSource, ContentBlock, ConversationMessage, ConversationRuntime, MessageRole,
+    OAuthAuthorizationRequest, OAuthConfig, OAuthTokenExchangeRequest, PermissionMode,
+    ProjectContext, RuntimeError, Session, TokenUsage, ToolError, ToolExecutor, UsageTracker,
 };
 use serde_json::json;
 use tools::{execute_tool, mvp_tool_specs, ToolSpec};
 
 const DEFAULT_MODEL: &str = "claude-opus-4-7";
-fn max_tokens_for_model(model: &str) -> u32 {
-    if model.contains("opus") {
-        32_000
-    } else if model.contains("gpt") || model.contains("o3") || model.contains("o4") {
-        16_384
-    } else {
-        // Works for Claude sonnet/haiku (64k), and most OpenAI-compat providers
-        64_000
-    }
-}
 const DEFAULT_OAUTH_CALLBACK_PORT: u16 = 4545;
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const BUILD_TARGET: Option<&str> = option_env!("TARGET");
@@ -1229,7 +1222,7 @@ struct LiveCli {
     allowed_tools: Option<AllowedToolSet>,
     permission_mode: PermissionMode,
     system_prompt: Vec<String>,
-    runtime: ConversationRuntime<ExecutorClient, CliToolExecutor>,
+    runtime: ConversationRuntime<aris_executor::ExecutorClient, CliToolExecutor>,
     session: SessionHandle,
     /// Plan mode state: stores original permissions/tools before entering plan mode.
     plan_mode: Option<PlanModeState>,
@@ -2456,27 +2449,16 @@ impl LiveCli {
         action: Option<&str>,
         target: Option<&str>,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let output = match action {
-            None | Some("list") => {
-                execute_tool_for_cli("ListTeam", &team_tool_input(target, false, false))?
+        let output = match plan_team_command(action, target) {
+            TeamCommandPlan::RenderTeamView { team_id } => {
+                tools::render_team_view(team_id.as_deref()).map_err(|error| {
+                    Box::new(io::Error::new(io::ErrorKind::Other, error))
+                        as Box<dyn std::error::Error>
+                })?
             }
-            Some("messages") => {
-                execute_tool_for_cli("ListTeam", &team_tool_input(target, true, false))?
-            }
-            Some("events") => {
-                execute_tool_for_cli("ListTeam", &team_tool_input(target, true, true))?
-            }
-            Some("supervisor") => {
-                let mut input = json!({ "action": "list" });
-                if let Some(team_id) = target {
-                    input["teamId"] = json!(team_id);
-                }
-                execute_tool_for_cli("AgentSupervisor", &input)?
-            }
-            Some(other) => {
-                println!(
-                    "Unknown /team action '{other}'. Use /team list, /team messages, /team events, or /team supervisor."
-                );
+            TeamCommandPlan::Tool { name, input } => execute_tool_for_cli(name, &input)?,
+            TeamCommandPlan::Message(message) => {
+                println!("{message}");
                 return Ok(());
             }
         };
@@ -2489,105 +2471,14 @@ impl LiveCli {
         action: Option<&str>,
         target: Option<&str>,
     ) -> Result<bool, Box<dyn std::error::Error>> {
-        let action = action.unwrap_or("list");
-        match action {
-            "list" => {
-                println!(
-                    "{}",
-                    execute_tool_for_cli("Workflow", &json!({ "action": "list" }))?
-                );
-                Ok(false)
-            }
-            "discover" => {
-                println!(
-                    "{}",
-                    execute_tool_for_cli("Workflow", &json!({ "action": "discover" }))?
-                );
-                Ok(false)
-            }
-            "start" => {
-                let Some(target) = target else {
-                    println!("Usage: /workflows start <saved-name-or-script-path>");
-                    return Ok(false);
-                };
-                let input = workflow_start_input("plan", target, None);
+        match plan_workflows_command(action, target) {
+            WorkflowCommandPlan::Tool { input } => {
                 println!("{}", execute_tool_for_cli("Workflow", &input)?);
                 Ok(false)
             }
-            "allow-once" | "always" => {
-                let Some(target) = target else {
-                    println!("Usage: /workflows {action} <saved-name-or-script-path>");
-                    return Ok(false);
-                };
-                let approval = if action == "allow-once" {
-                    "allow_once"
-                } else {
-                    "always"
-                };
-                let input = workflow_start_input("start", target, Some(approval));
-                println!("{}", execute_tool_for_cli("Workflow", &input)?);
-                Ok(false)
-            }
-            "deny" => {
-                println!("Workflow approval denied.");
-                Ok(false)
-            }
-            "inspect" | "pause" | "resume" | "stop" | "restart" => {
-                let Some(run_id) = target else {
-                    println!("Usage: /workflows {action} <run-id>");
-                    return Ok(false);
-                };
-                let tool_action = if action == "restart" {
-                    "restart"
-                } else {
-                    action
-                };
-                println!(
-                    "{}",
-                    execute_tool_for_cli(
-                        "Workflow",
-                        &json!({
-                            "action": tool_action,
-                            "runId": run_id,
-                            "approval": "allow_once"
-                        }),
-                    )?
-                );
-                Ok(false)
-            }
-            "inject" => {
-                let Some(run_id) = target else {
-                    println!("Usage: /workflows inject <run-id>");
-                    return Ok(false);
-                };
-                self.inject_workflow_result(run_id)
-            }
-            "save" => {
-                let Some(script_path) = target else {
-                    println!("Usage: /workflows save <script-path>");
-                    return Ok(false);
-                };
-                let save_as = Path::new(script_path)
-                    .file_stem()
-                    .and_then(|stem| stem.to_str())
-                    .unwrap_or("workflow");
-                println!(
-                    "{}",
-                    execute_tool_for_cli(
-                        "Workflow",
-                        &json!({
-                            "action": "save",
-                            "scriptPath": script_path,
-                            "saveAs": save_as,
-                        }),
-                    )?
-                );
-                Ok(false)
-            }
-            other => {
-                println!(
-                    "Unknown /workflows action '{other}'. Use list, discover, start, allow-once, always, inspect, pause, resume, stop, restart, save, or inject."
-                );
+            WorkflowCommandPlan::Inject { run_id } => self.inject_workflow_result(&run_id),
+            WorkflowCommandPlan::Message(message) => {
+                println!("{message}");
                 Ok(false)
             }
         }
@@ -3990,13 +3881,19 @@ fn resolve_export_path(
 }
 
 fn build_system_prompt(model_id: Option<&str>) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-    let mut prompt = match load_system_prompt(
-        env::current_dir()?,
-        &runtime::today_iso(),
-        env::consts::OS,
-        "unknown",
-        model_id,
-    ) {
+    let options = aris_chat::CommonSystemPromptOptions {
+        workspace: env::current_dir()?,
+        current_date: runtime::today_iso(),
+        os_name: env::consts::OS.to_string(),
+        os_version: "unknown".to_string(),
+        model_id: model_id.map(ToOwned::to_owned),
+        product_surface: "research automation CLI".to_string(),
+        language: std::env::var("ARIS_LANGUAGE").unwrap_or_else(|_| "cn".to_string()),
+        include_language_preference: false,
+        include_team_orchestration: true,
+        extra_sections: Vec::new(),
+    };
+    let mut prompt = match aris_chat::build_common_system_prompt(options) {
         Ok(p) => p,
         Err(e) => {
             eprintln!(
@@ -4007,58 +3904,6 @@ fn build_system_prompt(model_id: Option<&str>) -> Result<Vec<String>, Box<dyn st
         }
     };
 
-    // ARIS identity: tell the model exactly who it is to prevent hallucination.
-    let model_name = model_id.unwrap_or("unknown");
-    let friendly_name = match model_name {
-        "claude-opus-4-7" => "Claude Opus 4.7",
-        "claude-sonnet-4-6" => "Claude Sonnet 4.6",
-        "claude-haiku-4-5-20251001" => "Claude Haiku 4.5",
-        "deepseek-v4-pro" => "DeepSeek V4 Pro",
-        "mimo-v2.5-pro" => "Xiaomi MiMo v2.5 Pro",
-        "mimo-v2.5" => "Xiaomi MiMo v2.5",
-        "mimo-v2-pro" => "Xiaomi MiMo v2 Pro",
-        "mimo-v2-omni" => "Xiaomi MiMo v2 Omni",
-        "qwen3.6-plus" => "Qwen 3.6 Plus",
-        "qwen3.6-flash" => "Qwen 3.6 Flash",
-        "qwen3.6-max-preview" => "Qwen 3.6 Max Preview",
-        "doubao-pro-4k" => "Doubao Pro 4K",
-        "doubao-lite-4k" => "Doubao Lite 4K",
-        other => other,
-    };
-    // Map model-name prefix to developer/vendor for the ARIS identity line.
-    // Without this, e.g. a DeepSeek user would see "developed by Anthropic".
-    let developer = if model_name.starts_with("mimo-") {
-        "Xiaomi"
-    } else if model_name.starts_with("deepseek-") {
-        "DeepSeek"
-    } else if model_name.starts_with("qwen-") || model_name.starts_with("qwen3.") {
-        "Alibaba"
-    } else if model_name.starts_with("doubao-") {
-        "ByteDance"
-    } else if model_name.starts_with("gpt-")
-        || model_name.starts_with("o1")
-        || model_name.starts_with("o3")
-        || model_name.starts_with("o4")
-    {
-        "OpenAI"
-    } else if model_name.starts_with("gemini-") {
-        "Google"
-    } else if model_name.starts_with("GLM") || model_name.starts_with("glm") {
-        "Zhipu"
-    } else if model_name.starts_with("MiniMax") || model_name.starts_with("minimax") {
-        "MiniMax"
-    } else if model_name.starts_with("kimi-") || model_name.starts_with("moonshot-") {
-        "Moonshot"
-    } else {
-        "Anthropic"
-    };
-    prompt.push(format!(
-        "You are running inside ARIS (Auto Research in Sleep), a research automation CLI. \
-         Your exact model is {model_name} ({friendly_name}), developed by {developer}. \
-         When users ask what model you are, answer: \"{friendly_name}\" (model ID: {model_name}). \
-         Do NOT guess or hallucinate a different version number."
-    ));
-
     // ARIS language preference
     let lang = std::env::var("ARIS_LANGUAGE").unwrap_or_else(|_| "cn".into());
     if lang == "cn" {
@@ -4066,15 +3911,6 @@ fn build_system_prompt(model_id: Option<&str>) -> Result<Vec<String>, Box<dyn st
     } else {
         prompt.push("User language preference is English. Always respond in English unless the user explicitly writes in another language.".to_string());
     }
-
-    // ARIS override: tell the model to use LlmReview instead of Codex MCP for external reviews.
-    prompt.push(
-        "IMPORTANT: When a skill instructs you to use `mcp__codex__codex` or `mcp__codex__codex-reply` \
-         for external LLM review, use the `LlmReview` tool instead. The LlmReview tool calls \
-         Gemini or OpenAI directly (via GEMINI_API_KEY or OPENAI_API_KEY) without needing MCP. \
-         Pass the full review prompt as the `prompt` parameter to LlmReview."
-            .to_string(),
-    );
 
     // ARIS persistent memory (multi-file index system)
     memories::migrate_legacy_memory();
@@ -4145,29 +3981,6 @@ fn build_system_prompt(model_id: Option<&str>) -> Result<Vec<String>, Box<dyn st
         );
     }
 
-    prompt.push(
-        "# Agent Team and Dynamic Workflow Coordination\n\
-         Start simple. Prefer a single agent or a sequential workflow unless the task truly needs \
-         parallel independent exploration, strict context isolation, specialized tool use, or \
-         long-running teammates. Do not create an Agent Team just because the work is large or \
-         because extra agents sound useful.\n\n\
-         When an Agent Team is justified, the lead session is the coordinator: it plans the work, \
-         assigns bounded non-overlapping roles, controls shared context, integrates outputs, and \
-         decides when to stop. Use SpawnTeammate only with a structured teamDesign contract plus \
-         each teammate's role, responsibility, contextScope, deliverable, successCriteria, and \
-         stopCondition. Add a verifier role or explicit verification plan when output quality, \
-         facts, citations, code, or experiment claims matter. Coordinate through SpawnTeammate, \
-         SendMessage, ClaimTask, CompleteTask, ListTeam, and AgentSupervisor; avoid free-form \
-         teammate discussion as the coordination mechanism. Team tasks have dependencies, leases, \
-         results, and mailbox messages; dependent tasks become available after their prerequisites \
-         complete.\n\n\
-         For multi-phase high-effort work, first call Workflow with action=plan to show the phase \
-         plan and raw sandboxed orchestration script. Start only after approval with \
-         action=start and approval=allow_once or approval=always. Workflow scripts may only \
-         coordinate agents through emitPhase, spawnAgent, waitAll, and saveResult."
-            .to_string(),
-    );
-
     Ok(prompt)
 }
 
@@ -4231,36 +4044,88 @@ fn build_runtime(
     emit_output: bool,
     allowed_tools: Option<AllowedToolSet>,
     permission_mode: PermissionMode,
-) -> Result<ConversationRuntime<ExecutorClient, CliToolExecutor>, Box<dyn std::error::Error>> {
-    let executor: ExecutorClient =
-        if let Some(config) = openai_executor::resolve_openai_executor_config() {
-            ExecutorClient::OpenAI(openai_executor::OpenAIRuntimeClient::new(
-                config,
-                model,
-                enable_tools,
-                emit_output,
-                allowed_tools.clone(),
-            )?)
-        } else {
-            ExecutorClient::Anthropic(AnthropicRuntimeClient::new(
-                model,
-                enable_tools,
-                emit_output,
-                allowed_tools.clone(),
-            )?)
-        };
-
+) -> Result<
+    ConversationRuntime<aris_executor::ExecutorClient, CliToolExecutor>,
+    Box<dyn std::error::Error>,
+> {
+    let tool_specs = filter_tool_specs(allowed_tools.as_ref());
+    let observer = cli_stream_observer(emit_output);
     let feature_config = build_runtime_feature_config()?;
     let event_sink = build_event_sink(&feature_config);
-    Ok(ConversationRuntime::new_with_features(
+    let executor_config = aris_chat::resolve_env_executor_config(|| {
+        resolve_cli_auth_source().map_err(|error| error.to_string())
+    })
+    .map_err(|error| io::Error::new(io::ErrorKind::Other, error))?;
+    let runtime = aris_chat::build_conversation_runtime(
         session,
-        executor,
+        executor_config,
+        model,
+        enable_tools,
+        tool_specs,
+        observer,
         CliToolExecutor::new(allowed_tools, emit_output),
         permission_policy(permission_mode),
         system_prompt,
         feature_config,
     )
-    .with_event_sink(event_sink))
+    .map_err(|error| io::Error::new(io::ErrorKind::Other, error))?;
+    Ok(runtime.with_event_sink(event_sink))
+}
+
+fn cli_stream_observer(emit_output: bool) -> Box<dyn aris_executor::StreamObserver> {
+    Box::new(CliStreamObserver {
+        renderer: TerminalRenderer::new(),
+        markdown_stream: MarkdownStreamState::default(),
+        emit_output,
+    })
+}
+
+struct CliStreamObserver {
+    renderer: TerminalRenderer,
+    markdown_stream: MarkdownStreamState,
+    emit_output: bool,
+}
+
+impl CliStreamObserver {
+    fn flush_markdown(&mut self) -> Result<(), RuntimeError> {
+        if !self.emit_output {
+            return Ok(());
+        }
+        if let Some(rendered) = self.markdown_stream.flush(&self.renderer) {
+            write!(io::stdout(), "{rendered}")
+                .and_then(|()| io::stdout().flush())
+                .map_err(|error| RuntimeError::new(error.to_string()))?;
+        }
+        Ok(())
+    }
+}
+
+impl aris_executor::StreamObserver for CliStreamObserver {
+    fn on_text_delta(&mut self, text: &str) -> Result<(), RuntimeError> {
+        if !self.emit_output {
+            return Ok(());
+        }
+        if let Some(rendered) = self.markdown_stream.push(&self.renderer, text) {
+            write!(io::stdout(), "{rendered}")
+                .and_then(|()| io::stdout().flush())
+                .map_err(|error| RuntimeError::new(error.to_string()))?;
+        }
+        Ok(())
+    }
+
+    fn on_tool_call(&mut self, _id: &str, name: &str, input: &str) -> Result<(), RuntimeError> {
+        if !self.emit_output {
+            return Ok(());
+        }
+        self.flush_markdown()?;
+        writeln!(io::stdout(), "\n{}", format_tool_call_start(name, input))
+            .and_then(|()| io::stdout().flush())
+            .map_err(|error| RuntimeError::new(error.to_string()))
+    }
+
+    fn on_message_stop(&mut self) -> Result<(), RuntimeError> {
+        self.flush_markdown()
+    }
 }
 
 fn build_event_sink(
@@ -4322,64 +4187,6 @@ impl runtime::PermissionPrompter for CliPermissionPrompter {
     }
 }
 
-// ── Executor client enum: dispatches to Anthropic or OpenAI-compat ───────────
-
-enum ExecutorClient {
-    Anthropic(AnthropicRuntimeClient),
-    OpenAI(openai_executor::OpenAIRuntimeClient),
-}
-
-impl ApiClient for ExecutorClient {
-    fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
-        match self {
-            Self::Anthropic(c) => c.stream(request),
-            Self::OpenAI(c) => c.stream(request),
-        }
-    }
-
-    fn on_session_compacted(&mut self, removed_count: usize) {
-        match self {
-            // Anthropic uses thinking blocks inside session content, no
-            // out-of-band cache to invalidate.
-            Self::Anthropic(_) => {}
-            // OpenAI executor's reasoning_cache is keyed by message index;
-            // compaction shifts every index so we drop the whole cache.
-            // Re-population happens organically as the model emits new
-            // reasoning_content blocks post-compaction.
-            Self::OpenAI(c) => c.on_session_compacted(removed_count),
-        }
-    }
-}
-
-struct AnthropicRuntimeClient {
-    runtime: tokio::runtime::Runtime,
-    client: AnthropicClient,
-    model: String,
-    enable_tools: bool,
-    emit_output: bool,
-    allowed_tools: Option<AllowedToolSet>,
-}
-
-impl AnthropicRuntimeClient {
-    fn new(
-        model: String,
-        enable_tools: bool,
-        emit_output: bool,
-        allowed_tools: Option<AllowedToolSet>,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
-        Ok(Self {
-            runtime: tokio::runtime::Runtime::new()?,
-            client: AnthropicClient::from_auth(resolve_cli_auth_source()?)
-                .with_base_url(api::read_base_url())
-                .with_send_betas(api::read_send_betas()),
-            model,
-            enable_tools,
-            emit_output,
-            allowed_tools,
-        })
-    }
-}
-
 fn resolve_cli_auth_source() -> Result<AuthSource, Box<dyn std::error::Error>> {
     Ok(resolve_startup_auth_source(|| {
         let cwd = env::current_dir().map_err(api::ApiError::from)?;
@@ -4390,245 +4197,8 @@ fn resolve_cli_auth_source() -> Result<AuthSource, Box<dyn std::error::Error>> {
     })?)
 }
 
-impl ApiClient for AnthropicRuntimeClient {
-    #[allow(clippy::too_many_lines)]
-    fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
-        let message_request = MessageRequest {
-            model: self.model.clone(),
-            max_tokens: max_tokens_for_model(&self.model),
-            messages: convert_messages(&request.messages),
-            system: if request.system_prompt.is_empty() {
-                None
-            } else {
-                let prompt = request.system_prompt.join("\n\n");
-                // ttl:"1h" requires claude-code-20250219 beta (OAuth only)
-                let is_oauth = self.client.auth_source().bearer_token().is_some()
-                    && self.client.auth_source().api_key().is_none();
-                let cache_control = if is_oauth {
-                    serde_json::json!({ "type": "ephemeral", "ttl": "1h" })
-                } else {
-                    serde_json::json!({ "type": "ephemeral" })
-                };
-                Some(serde_json::json!([{
-                    "type": "text",
-                    "text": prompt,
-                    "cache_control": cache_control
-                }]))
-            },
-            tools: self.enable_tools.then(|| {
-                filter_tool_specs(self.allowed_tools.as_ref())
-                    .into_iter()
-                    .map(|spec| ToolDefinition {
-                        name: spec.name.to_string(),
-                        description: Some(spec.description.to_string()),
-                        input_schema: spec.input_schema,
-                    })
-                    .collect()
-            }),
-            tool_choice: self.enable_tools.then_some(ToolChoice::Auto),
-            stream: true,
-        };
-
-        self.runtime.block_on(async {
-            let mut stream = self
-                .client
-                .stream_message(&message_request)
-                .await
-                .map_err(|error| RuntimeError::new(error.to_string()))?;
-            let mut stdout = io::stdout();
-            let mut sink = io::sink();
-            let out: &mut dyn Write = if self.emit_output {
-                &mut stdout
-            } else {
-                &mut sink
-            };
-            let renderer = TerminalRenderer::new();
-            let mut markdown_stream = MarkdownStreamState::default();
-            let mut events = Vec::new();
-            let mut pending_tool: Option<(String, String, String)> = None;
-            let mut pending_thinking: Option<(String, String)> = None;
-            let mut saw_stop = false;
-            // v0.4.10 T35: cache initial input/cache token usage from
-            // MessageStart so the eventual MessageDelta can merge them
-            // into a complete TokenUsage event.
-            let mut start_usage: Option<api::Usage> = None;
-
-            while let Some(event) = stream
-                .next_event()
-                .await
-                .map_err(|error| RuntimeError::new(error.to_string()))?
-            {
-                // Check for Ctrl+C interrupt between events
-                if runtime::is_interrupted() {
-                    runtime::clear_interrupt();
-                    return Err(RuntimeError::new("interrupted by user"));
-                }
-                match event {
-                    ApiStreamEvent::MessageStart(start) => {
-                        // v0.4.10 T35: stash the initial input/cache token
-                        // counts. Anthropic streaming splits usage across
-                        // message_start (input + cache) and message_delta
-                        // (output), so we have to remember the start
-                        // numbers and merge them on the final delta. The
-                        // previous code only used delta.usage and lost
-                        // input/cache entirely.
-                        start_usage = Some(start.message.usage.clone());
-                        for block in start.message.content {
-                            push_output_block(block, out, &mut events, &mut pending_tool, true)?;
-                        }
-                    }
-                    ApiStreamEvent::ContentBlockStart(start) => {
-                        if let OutputContentBlock::Thinking {
-                            thinking,
-                            signature,
-                        } = &start.content_block
-                        {
-                            pending_thinking = Some((thinking.clone(), signature.clone()));
-                        } else {
-                            push_output_block(
-                                start.content_block,
-                                out,
-                                &mut events,
-                                &mut pending_tool,
-                                true,
-                            )?;
-                        }
-                    }
-                    ApiStreamEvent::ContentBlockDelta(delta) => match delta.delta {
-                        ContentBlockDelta::TextDelta { text } => {
-                            if !text.is_empty() {
-                                if let Some(rendered) = markdown_stream.push(&renderer, &text) {
-                                    write!(out, "{rendered}")
-                                        .and_then(|()| out.flush())
-                                        .map_err(|error| RuntimeError::new(error.to_string()))?;
-                                }
-                                events.push(AssistantEvent::TextDelta(text));
-                            }
-                        }
-                        ContentBlockDelta::InputJsonDelta { partial_json } => {
-                            if let Some((_, _, input)) = &mut pending_tool {
-                                input.push_str(&partial_json);
-                            }
-                        }
-                        ContentBlockDelta::ThinkingDelta { thinking } => {
-                            if let Some((ref mut t, _)) = pending_thinking {
-                                t.push_str(&thinking);
-                            }
-                        }
-                        ContentBlockDelta::SignatureDelta { signature } => {
-                            if let Some((_, ref mut s)) = pending_thinking {
-                                *s = signature;
-                            }
-                        }
-                    },
-                    ApiStreamEvent::ContentBlockStop(_) => {
-                        if let Some(rendered) = markdown_stream.flush(&renderer) {
-                            write!(out, "{rendered}")
-                                .and_then(|()| out.flush())
-                                .map_err(|error| RuntimeError::new(error.to_string()))?;
-                        }
-                        if let Some((id, name, input)) = pending_tool.take() {
-                            // Display tool call now that input is fully accumulated
-                            writeln!(out, "\n{}", format_tool_call_start(&name, &input))
-                                .and_then(|()| out.flush())
-                                .map_err(|error| RuntimeError::new(error.to_string()))?;
-                            events.push(AssistantEvent::ToolUse { id, name, input });
-                        }
-                        if let Some((thinking, signature)) = pending_thinking.take() {
-                            events.push(AssistantEvent::Thinking {
-                                thinking,
-                                signature,
-                            });
-                        }
-                    }
-                    ApiStreamEvent::MessageDelta(delta) => {
-                        // v0.4.10 T35 / C8 landmine fix: merge the
-                        // earlier MessageStart usage (input/cache) with
-                        // this delta's output_tokens before emitting,
-                        // since the streaming protocol splits them.
-                        // Falls back to delta-only if MessageStart was
-                        // somehow missed (defensive — should not happen
-                        // on a well-formed stream).
-                        let start = start_usage.as_ref();
-                        events.push(AssistantEvent::Usage(TokenUsage {
-                            input_tokens: start
-                                .map(|u| u.input_tokens)
-                                .unwrap_or(delta.usage.input_tokens),
-                            output_tokens: delta.usage.output_tokens,
-                            cache_creation_input_tokens: start
-                                .map(|u| u.cache_creation_input_tokens)
-                                .unwrap_or(delta.usage.cache_creation_input_tokens),
-                            cache_read_input_tokens: start
-                                .map(|u| u.cache_read_input_tokens)
-                                .unwrap_or(delta.usage.cache_read_input_tokens),
-                        }));
-                    }
-                    ApiStreamEvent::MessageStop(_) => {
-                        saw_stop = true;
-                        if let Some(rendered) = markdown_stream.flush(&renderer) {
-                            write!(out, "{rendered}")
-                                .and_then(|()| out.flush())
-                                .map_err(|error| RuntimeError::new(error.to_string()))?;
-                        }
-                        events.push(AssistantEvent::MessageStop);
-                    }
-                    ApiStreamEvent::Error(e) => {
-                        let msg = e
-                            .error
-                            .get("message")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("stream error")
-                            .to_string();
-                        return Err(RuntimeError::new(msg));
-                    }
-                }
-            }
-
-            if !saw_stop
-                && events.iter().any(|event| {
-                    matches!(event, AssistantEvent::TextDelta(text) if !text.is_empty())
-                        || matches!(event, AssistantEvent::ToolUse { .. })
-                })
-            {
-                events.push(AssistantEvent::MessageStop);
-            }
-
-            if events
-                .iter()
-                .any(|event| matches!(event, AssistantEvent::MessageStop))
-            {
-                return Ok(events);
-            }
-
-            let response = self
-                .client
-                .send_message(&MessageRequest {
-                    stream: false,
-                    ..message_request.clone()
-                })
-                .await
-                .map_err(|error| RuntimeError::new(error.to_string()))?;
-            response_to_events(response, out)
-        })
-    }
-}
-
 fn final_assistant_text(summary: &runtime::TurnSummary) -> String {
-    summary
-        .assistant_messages
-        .last()
-        .map(|message| {
-            message
-                .blocks
-                .iter()
-                .filter_map(|block| match block {
-                    ContentBlock::Text { text } => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("")
-        })
-        .unwrap_or_default()
+    aris_chat::final_assistant_text(summary)
 }
 
 fn collect_tool_uses(summary: &runtime::TurnSummary) -> Vec<serde_json::Value> {
@@ -4748,34 +4318,6 @@ fn execute_tool_for_cli(
     execute_tool(tool_name, input).map_err(|error| {
         Box::new(io::Error::new(io::ErrorKind::Other, error)) as Box<dyn std::error::Error>
     })
-}
-
-fn team_tool_input(
-    team_id: Option<&str>,
-    include_messages: bool,
-    include_events: bool,
-) -> serde_json::Value {
-    let mut input = json!({
-        "includeMessages": include_messages,
-        "includeEvents": include_events,
-    });
-    if let Some(team_id) = team_id {
-        input["teamId"] = json!(team_id);
-    }
-    input
-}
-
-fn workflow_start_input(action: &str, target: &str, approval: Option<&str>) -> serde_json::Value {
-    let mut input = json!({ "action": action });
-    if Path::new(target).exists() {
-        input["scriptPath"] = json!(target);
-    } else {
-        input["name"] = json!(target);
-    }
-    if let Some(approval) = approval {
-        input["approval"] = json!(approval);
-    }
-    input
 }
 
 /// Extract the `description:` field from a SKILL.md YAML frontmatter.
@@ -5161,6 +4703,7 @@ fn truncate_for_summary(value: &str, limit: usize) -> String {
     }
 }
 
+#[cfg(test)]
 fn push_output_block(
     block: OutputContentBlock,
     out: &mut (impl Write + ?Sized),
@@ -5205,6 +4748,7 @@ fn push_output_block(
     Ok(())
 }
 
+#[cfg(test)]
 fn response_to_events(
     response: MessageResponse,
     out: &mut (impl Write + ?Sized),
@@ -5281,18 +4825,15 @@ impl ToolExecutor for CliToolExecutor {
     }
 }
 
-fn permission_policy(mode: PermissionMode) -> PermissionPolicy {
-    tool_permission_specs()
-        .into_iter()
-        .fold(PermissionPolicy::new(mode), |policy, spec| {
-            policy.with_tool_requirement(spec.name, spec.required_permission)
-        })
+fn permission_policy(mode: PermissionMode) -> runtime::PermissionPolicy {
+    aris_chat::permission_policy_for_tools(tool_permission_specs(), mode)
 }
 
 fn tool_permission_specs() -> Vec<ToolSpec> {
     mvp_tool_specs()
 }
 
+#[cfg(test)]
 fn convert_messages(messages: &[ConversationMessage]) -> Vec<InputMessage> {
     messages
         .iter()

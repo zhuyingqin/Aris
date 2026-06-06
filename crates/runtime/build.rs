@@ -206,7 +206,8 @@ fn bundle_tree_excluding(
         let rel_str = rel.to_string_lossy().replace('\\', "/");
 
         // Defense: reject ".." segments (WalkDir shouldn't produce them, but be paranoid)
-        if rel.components()
+        if rel
+            .components()
             .any(|c| matches!(c, std::path::Component::ParentDir))
         {
             panic!("parent-dir segment in asset path: {rel_str}");
@@ -218,10 +219,7 @@ fn bundle_tree_excluding(
         }
 
         // Extension allow-list (cheap check first)
-        let ext = rel
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("");
+        let ext = rel.extension().and_then(|e| e.to_str()).unwrap_or("");
         if !ALLOWED_EXTS.contains(&ext) {
             continue;
         }

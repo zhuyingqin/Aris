@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import MarkdownContent from "./MarkdownContent";
+import MarkdownContent, { ThinkBlock } from "./MarkdownContent";
 import {
+  chatCancel,
   chatReset,
   chatSend,
   chatStatus,
@@ -9,6 +10,7 @@ import {
   isTauri,
   onChatDelta,
   onChatDone,
+  onChatThinkingDelta,
   onChatTool,
   onChatToolResult,
   skillsList,
@@ -103,6 +105,18 @@ function appendTextDelta(blocks: ChatBlock[], delta: string): ChatBlock[] {
   return copy;
 }
 
+/** Append a thinking delta to last thinking block, or push a new one. */
+function appendThinkingDelta(blocks: ChatBlock[], delta: string): ChatBlock[] {
+  const copy = blocks.slice();
+  const last = copy[copy.length - 1];
+  if (last && last.kind === "thinking") {
+    copy[copy.length - 1] = { kind: "thinking", thinking: last.thinking + delta };
+  } else {
+    copy.push({ kind: "thinking", thinking: delta });
+  }
+  return copy;
+}
+
 // ── Main component ─────────────────────────────────────────────────────────────
 
 export default function Chat() {
@@ -127,7 +141,9 @@ export default function Chat() {
 
   // Skills picker
   const [skills, setSkills] = useState<SkillMeta[]>([]);
-  const [showPicker, setShowPicker] = useState(false);
+  // Picker visibility is derived from `pickerMode`; this setter is kept as a
+  // no-op reset hook at session boundaries (the boolean itself is unused).
+  const [, setShowPicker] = useState(false);
   const [skillFilter, setSkillFilter] = useState("");
   const [pickerIdx, setPickerIdx] = useState(0);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -253,6 +269,10 @@ export default function Chat() {
       // Text delta → append to last text block (or create one) in chronological order
       onChatDelta((text) =>
         patchLastAssistant((t) => ({ ...t, blocks: appendTextDelta(t.blocks, text) })),
+      ),
+      // Native provider thinking/reasoning block.
+      onChatThinkingDelta((thinking) =>
+        patchLastAssistant((t) => ({ ...t, blocks: appendThinkingDelta(t.blocks, thinking) })),
       ),
       // New tool call → push a tool block after any existing blocks
       onChatTool((tool) =>
@@ -567,9 +587,23 @@ export default function Chat() {
               onChange={handleInputChange}
               onKeyDown={handleKeyDown}
             />
-            <button className="primary" onClick={send} disabled={!status?.ready || busy}>
-              {busy ? "…" : "Send"}
-            </button>
+            {busy ? (
+              <button
+                className="primary"
+                onClick={() => void chatCancel()}
+                title="Stop the running turn"
+              >
+                ■ Stop
+              </button>
+            ) : (
+              <button
+                className="primary"
+                onClick={send}
+                disabled={!status?.ready}
+              >
+                Send
+              </button>
+            )}
           </div>
         </div>
       </div>
@@ -642,6 +676,18 @@ function ChatBubble({
             <MarkdownContent key={i} text={block.text} streaming={isLast && turn.streaming} />
           ) : (
             <div key={i} className="chat-text">{block.text}</div>
+          );
+        }
+
+        if (block.kind === "thinking") {
+          if (!block.thinking) return null;
+          const isLast = i === turn.blocks.length - 1;
+          return (
+            <ThinkBlock
+              key={i}
+              content={block.thinking}
+              streaming={isLast && turn.streaming}
+            />
           );
         }
 
