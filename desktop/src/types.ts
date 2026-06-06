@@ -249,6 +249,23 @@ export interface SessionTranscript {
 
 // ── Chat engine (P2) ──────────────────────────────────────────────────────────
 
+export interface CliRunRequest {
+  args: string[];
+  timeoutMs?: number;
+}
+
+export interface CliRunOutput {
+  command: string;
+  executable: string;
+  cwd: string;
+  code?: number | null;
+  success: boolean;
+  timedOut: boolean;
+  elapsedMs: number;
+  stdout: string;
+  stderr: string;
+}
+
 export interface ChatStatus {
   ready: boolean;
   model?: string | null;

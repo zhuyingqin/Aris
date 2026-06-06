@@ -15,6 +15,7 @@ export type Tab =
   | "studio"
   | "monitor"
   | "teams"
+  | "cli"
   | "settings"
   | "skills"
   | "sessions";

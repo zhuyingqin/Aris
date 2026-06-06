@@ -2194,6 +2194,276 @@ textarea {
 }
 .md-think-body p { margin: 4px 0; }
 
+/* CLI command center */
+.cli-page {
+  display: grid;
+  grid-template-columns: 330px minmax(0, 1fr);
+  height: 100%;
+  min-height: 0;
+  background: var(--bg);
+}
+
+.cli-catalog {
+  border-right: 1px solid var(--border);
+  background: var(--bg-1);
+  overflow: auto;
+  padding-bottom: 14px;
+}
+
+.cli-command-group + .cli-command-group {
+  border-top: 1px solid var(--border);
+}
+
+.cli-command-list {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 9px 10px 12px;
+}
+
+.cli-command-card {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+  width: 100%;
+  min-height: 76px;
+  padding: 9px 10px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  text-align: left;
+}
+
+.cli-command-card:hover {
+  background: var(--bg-3);
+  border-color: var(--accent);
+}
+
+.cli-command-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--text);
+  font-weight: 700;
+  font-size: 13px;
+}
+
+.cli-command-kind {
+  flex-shrink: 0;
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-dim);
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.5px;
+}
+
+.cli-native .cli-command-kind {
+  border-color: rgba(110, 231, 170, 0.45);
+  color: #6ee7aa;
+}
+
+.cli-command-note {
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.cli-command-card code,
+.cli-status-row code,
+.cli-meta code,
+.cli-prefix {
+  font-family: ui-monospace, "Cascadia Code", Menlo, Consolas, monospace;
+  letter-spacing: 0;
+}
+
+.cli-command-card code {
+  display: block;
+  overflow: hidden;
+  color: var(--text-dim);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cli-console {
+  display: grid;
+  grid-template-rows: auto auto auto auto minmax(0, 1fr);
+  min-width: 0;
+  min-height: 0;
+}
+
+.cli-runbar {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) 82px auto;
+  gap: 8px;
+  align-items: center;
+  min-height: 52px;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-1);
+}
+
+.cli-prefix {
+  display: inline-flex;
+  align-items: center;
+  min-height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg-2);
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.cli-runbar input {
+  width: 100%;
+  min-width: 0;
+  min-height: 34px;
+  font-family: ui-monospace, "Cascadia Code", Menlo, Consolas, monospace;
+}
+
+.cli-runbar select,
+.cli-runbar button {
+  min-height: 34px;
+}
+
+.cli-status-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 38px;
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-dim);
+  font-size: 12px;
+  overflow: hidden;
+}
+
+.cli-status-row code {
+  overflow: hidden;
+  color: var(--text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cli-muted {
+  color: var(--text-dim);
+}
+
+.cli-meta {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+}
+
+.cli-meta > div {
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-1);
+}
+
+.cli-meta span {
+  display: block;
+  margin-bottom: 3px;
+  color: var(--text-dim);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+}
+
+.cli-meta code {
+  display: block;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cli-output-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 38px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-1);
+}
+
+.cli-output-actions {
+  display: flex;
+  gap: 6px;
+  padding-right: 10px;
+}
+
+.cli-output-actions button {
+  padding: 3px 9px;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.cli-output {
+  min-height: 0;
+  margin: 0;
+  overflow: auto;
+  padding: 14px 16px;
+  background: #0b1016;
+  color: var(--text);
+  font: 12.5px/1.6 ui-monospace, "Cascadia Code", Menlo, Consolas, monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+:root[data-theme="light"] .cli-output {
+  background: #f5f7fa;
+}
+
+@media (max-width: 1120px) {
+  .cli-page {
+    grid-template-columns: 280px minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 820px) {
+  .cli-page {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: 220px minmax(0, 1fr);
+  }
+
+  .cli-catalog {
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .cli-command-list {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .cli-runbar {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .cli-runbar select,
+  .cli-runbar button {
+    width: 100%;
+  }
+
+  .cli-meta {
+    grid-template-columns: 1fr;
+  }
+}
+
 /* error toast */
 .toast {
   position: absolute;

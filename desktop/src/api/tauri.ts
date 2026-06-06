@@ -6,6 +6,8 @@ export const isTauri = (): boolean =>
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 import type {
   ChatStatus,
+  CliRunOutput,
+  CliRunRequest,
   ConfigPatch,
   ConfigTestResult,
   ConfigView,
@@ -83,6 +85,9 @@ export const chatUiSessionsSave = <T>(sessions: T[]) =>
   invoke<void>("chat_ui_sessions_save", { sessions });
 
 // ── File browser ─────────────────────────────────────────────────────────────
+
+export const cliRun = (req: CliRunRequest) =>
+  invoke<CliRunOutput>("cli_run", { req });
 
 export const fileSearch = (pattern: string, root?: string) =>
   invoke<string[]>("file_search", { pattern, root: root ?? null });

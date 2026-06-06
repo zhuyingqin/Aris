@@ -4,6 +4,7 @@ import Chat from "./chat/Chat";
 import Studio from "./studio/Studio";
 import Monitor from "./monitor/Monitor";
 import TeamView from "./teams/TeamView";
+import Cli from "./cli/Cli";
 import Settings from "./settings/Settings";
 import Skills from "./skills/Skills";
 import Sessions from "./sessions/Sessions";
@@ -28,6 +29,10 @@ const NAV_GROUPS: { group: string; items: NavItem[] }[] = [
       { id: "monitor", label: "Run Monitor", icon: "📈" },
       { id: "teams", label: "Team", icon: "👥" },
     ],
+  },
+  {
+    group: "Console",
+    items: [{ id: "cli", label: "CLI", icon: "$" }],
   },
   {
     group: "Library",
@@ -111,6 +116,7 @@ export default function App() {
         {tab === "studio" && <Studio />}
         {tab === "monitor" && <Monitor />}
         {tab === "teams" && <TeamView />}
+        {tab === "cli" && <Cli />}
         {tab === "skills" && <Skills />}
         {tab === "sessions" && <Sessions />}
         {tab === "settings" && <Settings />}

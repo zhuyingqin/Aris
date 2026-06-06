@@ -1,3 +1,4 @@
+mod cli;
 mod commands;
 mod config;
 mod engine;
@@ -35,6 +36,7 @@ pub fn run() {
             commands::skills_list,
             commands::skill_view,
             commands::state_dir,
+            cli::cli_run,
             config::config_get,
             config::config_set,
             config::config_test,
