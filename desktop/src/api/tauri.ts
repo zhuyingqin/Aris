@@ -7,6 +7,7 @@ export const isTauri = (): boolean =>
 import type {
   ChatStatus,
   ConfigPatch,
+  ConfigTestResult,
   ConfigView,
   RunEvent,
   SessionSummary,
@@ -67,6 +68,8 @@ export const stateDir = () => invoke<string>("state_dir");
 export const configGet = () => invoke<ConfigView>("config_get");
 export const configSet = (patch: ConfigPatch) =>
   invoke<ConfigView>("config_set", { patch });
+export const configTest = (patch: ConfigPatch) =>
+  invoke<ConfigTestResult>("config_test", { patch });
 
 export const skillsList = () => invoke<SkillMeta[]>("skills_list");
 export const skillView = (name: string) =>

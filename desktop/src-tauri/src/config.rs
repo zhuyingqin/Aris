@@ -5,6 +5,7 @@
 //! and so the schema can't drift. API keys are never returned to the frontend —
 //! only a masked preview + a "has key" flag.
 
+use api::AuthSource;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -92,6 +93,26 @@ pub struct ConfigPatch {
     pub language: Option<String>,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigTestDetail {
+    pub ok: bool,
+    pub label: String,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub base_url: Option<String>,
+    pub message: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigTestResult {
+    pub ok: bool,
+    pub message: String,
+    pub executor: ConfigTestDetail,
+    pub reviewer: Option<ConfigTestDetail>,
+}
+
 /// `Some(non-empty)` sets the key, `Some("")` clears it, `None` leaves it.
 fn set_or_clear(obj: &mut Map<String, Value>, key: &str, value: Option<String>) {
     match value {
@@ -114,22 +135,19 @@ fn set_secret(obj: &mut Map<String, Value>, key: &str, value: Option<String>) {
     }
 }
 
-#[tauri::command]
-pub fn config_set(patch: ConfigPatch) -> Result<ConfigView, String> {
-    let mut obj = load_object();
-
+fn apply_patch(obj: &mut Map<String, Value>, patch: ConfigPatch) {
     let reviewer_disabled = patch.reviewer_provider.as_deref() == Some("");
 
-    set_or_clear(&mut obj, "executor_provider", patch.executor_provider);
-    set_or_clear(&mut obj, "executor_model", patch.executor_model);
-    set_or_clear(&mut obj, "executor_base_url", patch.executor_base_url);
-    set_or_clear(&mut obj, "reviewer_provider", patch.reviewer_provider);
-    set_or_clear(&mut obj, "reviewer_model", patch.reviewer_model);
-    set_or_clear(&mut obj, "reviewer_base_url", patch.reviewer_base_url);
-    set_or_clear(&mut obj, "language", patch.language);
+    set_or_clear(obj, "executor_provider", patch.executor_provider);
+    set_or_clear(obj, "executor_model", patch.executor_model);
+    set_or_clear(obj, "executor_base_url", patch.executor_base_url);
+    set_or_clear(obj, "reviewer_provider", patch.reviewer_provider);
+    set_or_clear(obj, "reviewer_model", patch.reviewer_model);
+    set_or_clear(obj, "reviewer_base_url", patch.reviewer_base_url);
+    set_or_clear(obj, "language", patch.language);
 
-    set_secret(&mut obj, "executor_api_key", patch.executor_api_key);
-    set_secret(&mut obj, "reviewer_api_key", patch.reviewer_api_key);
+    set_secret(obj, "executor_api_key", patch.executor_api_key);
+    set_secret(obj, "reviewer_api_key", patch.reviewer_api_key);
 
     if reviewer_disabled {
         for key in [
@@ -141,6 +159,12 @@ pub fn config_set(patch: ConfigPatch) -> Result<ConfigView, String> {
             obj.remove(key);
         }
     }
+}
+
+#[tauri::command]
+pub fn config_set(patch: ConfigPatch) -> Result<ConfigView, String> {
+    let mut obj = load_object();
+    apply_patch(&mut obj, patch);
 
     let path = state::config_path();
     if let Some(parent) = path.parent() {
@@ -150,4 +174,262 @@ pub fn config_set(patch: ConfigPatch) -> Result<ConfigView, String> {
         serde_json::to_string_pretty(&Value::Object(obj.clone())).map_err(|e| e.to_string())?;
     std::fs::write(&path, json).map_err(|e| e.to_string())?;
     Ok(build_view(&obj))
+}
+
+fn normalized_base_url(value: Option<String>, default_value: &str) -> String {
+    let trimmed = value
+        .as_deref()
+        .unwrap_or(default_value)
+        .trim()
+        .trim_end_matches('/');
+    let trimmed = trimmed
+        .strip_suffix("/chat/completions")
+        .unwrap_or(trimmed)
+        .strip_suffix("/messages")
+        .unwrap_or(trimmed)
+        .strip_suffix("/models")
+        .unwrap_or(trimmed)
+        .trim_end_matches('/');
+    if trimmed.is_empty() {
+        default_value.to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn openai_default_base(provider: &str, model: &str) -> &'static str {
+    match provider {
+        "gemini" => "https://generativelanguage.googleapis.com/v1beta/openai",
+        "glm" => "https://open.bigmodel.cn/api/paas/v4",
+        "minimax" => "https://api.minimaxi.com/v1",
+        "kimi" => "https://api.moonshot.cn/v1",
+        "deepseek" => "https://api.deepseek.com/v1",
+        _ if model.contains("gemini") => "https://generativelanguage.googleapis.com/v1beta/openai",
+        _ if model.contains("glm") || model.contains("GLM") => {
+            "https://open.bigmodel.cn/api/paas/v4"
+        }
+        _ if model.starts_with("MiniMax") || model.starts_with("minimax") => {
+            "https://api.minimaxi.com/v1"
+        }
+        _ if model.contains("kimi") || model.contains("moonshot") => "https://api.moonshot.cn/v1",
+        _ if model.contains("deepseek") => "https://api.deepseek.com/v1",
+        _ => "https://api.openai.com/v1",
+    }
+}
+
+fn models_url(base_url: &str) -> String {
+    format!("{}/models", base_url.trim_end_matches('/'))
+}
+
+fn get_non_empty(obj: &Map<String, Value>, key: &str) -> Option<String> {
+    get_str(obj, key).filter(|value| !value.trim().is_empty())
+}
+
+async fn check_response(label: &str, request: reqwest::RequestBuilder) -> Result<String, String> {
+    let response = request
+        .send()
+        .await
+        .map_err(|error| format!("{label}: request failed: {error}"))?;
+    let status = response.status();
+    if status.is_success() {
+        return Ok(format!("{label}: connection OK ({status})"));
+    }
+    let body = response.text().await.unwrap_or_default();
+    let body = body.trim();
+    if body.is_empty() {
+        Err(format!("{label}: endpoint returned {status}"))
+    } else {
+        let snippet: String = body.chars().take(220).collect();
+        Err(format!("{label}: endpoint returned {status}: {snippet}"))
+    }
+}
+
+async fn test_anthropic(
+    label: &str,
+    provider: String,
+    model: String,
+    base_url: String,
+    auth: AuthSource,
+) -> ConfigTestDetail {
+    let client = match reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+    {
+        Ok(client) => client,
+        Err(error) => {
+            return ConfigTestDetail {
+                ok: false,
+                label: label.to_string(),
+                provider: Some(provider),
+                model: Some(model),
+                base_url: Some(base_url),
+                message: format!("Could not create HTTP client: {error}"),
+            };
+        }
+    };
+    let request = auth
+        .apply(client.get(models_url(&base_url)))
+        .header("anthropic-version", "2023-06-01");
+    match check_response(label, request).await {
+        Ok(message) => ConfigTestDetail {
+            ok: true,
+            label: label.to_string(),
+            provider: Some(provider),
+            model: Some(model),
+            base_url: Some(base_url),
+            message,
+        },
+        Err(message) => ConfigTestDetail {
+            ok: false,
+            label: label.to_string(),
+            provider: Some(provider),
+            model: Some(model),
+            base_url: Some(base_url),
+            message,
+        },
+    }
+}
+
+async fn test_openai_compat(
+    label: &str,
+    provider: String,
+    model: String,
+    base_url: String,
+    api_key: String,
+) -> ConfigTestDetail {
+    let client = match reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+    {
+        Ok(client) => client,
+        Err(error) => {
+            return ConfigTestDetail {
+                ok: false,
+                label: label.to_string(),
+                provider: Some(provider),
+                model: Some(model),
+                base_url: Some(base_url),
+                message: format!("Could not create HTTP client: {error}"),
+            };
+        }
+    };
+    let request = client.get(models_url(&base_url)).bearer_auth(api_key);
+    match check_response(label, request).await {
+        Ok(message) => ConfigTestDetail {
+            ok: true,
+            label: label.to_string(),
+            provider: Some(provider),
+            model: Some(model),
+            base_url: Some(base_url),
+            message,
+        },
+        Err(message) => ConfigTestDetail {
+            ok: false,
+            label: label.to_string(),
+            provider: Some(provider),
+            model: Some(model),
+            base_url: Some(base_url),
+            message,
+        },
+    }
+}
+
+async fn test_reviewer(obj: &Map<String, Value>) -> Option<ConfigTestDetail> {
+    let provider = get_non_empty(obj, "reviewer_provider")?;
+    let model = get_non_empty(obj, "reviewer_model").unwrap_or_else(|| "gpt-5.5".to_string());
+    let key = match get_non_empty(obj, "reviewer_api_key") {
+        Some(key) => key,
+        None => {
+            return Some(ConfigTestDetail {
+                ok: false,
+                label: "Reviewer".to_string(),
+                provider: Some(provider),
+                model: Some(model),
+                base_url: get_non_empty(obj, "reviewer_base_url"),
+                message: "Reviewer API key is missing.".to_string(),
+            })
+        }
+    };
+    if provider == "anthropic-compat" || provider == "deepseek" {
+        let default_base = if provider == "deepseek" {
+            "https://api.deepseek.com/anthropic"
+        } else {
+            "https://api.anthropic.com"
+        };
+        let base_url = normalized_base_url(get_non_empty(obj, "reviewer_base_url"), default_base);
+        return Some(
+            test_anthropic(
+                "Reviewer",
+                provider,
+                model,
+                base_url,
+                AuthSource::BearerToken(key),
+            )
+            .await,
+        );
+    }
+
+    let base_url = normalized_base_url(
+        get_non_empty(obj, "reviewer_base_url"),
+        openai_default_base(&provider, &model),
+    );
+    Some(test_openai_compat("Reviewer", provider, model, base_url, key).await)
+}
+
+#[tauri::command]
+pub async fn config_test(patch: ConfigPatch) -> Result<ConfigTestResult, String> {
+    let mut obj = load_object();
+    apply_patch(&mut obj, patch);
+
+    let executor = match aris_chat::resolve_settings_executor_config(&obj) {
+        Ok((model, provider, aris_chat::ChatExecutorConfig::Anthropic { auth, base_url, .. })) => {
+            test_anthropic(
+                "Executor",
+                provider,
+                model,
+                normalized_base_url(Some(base_url), "https://api.anthropic.com"),
+                auth,
+            )
+            .await
+        }
+        Ok((
+            model,
+            provider,
+            aris_chat::ChatExecutorConfig::OpenAiCompatible { api_key, base_url },
+        )) => {
+            test_openai_compat(
+                "Executor",
+                provider,
+                model,
+                normalized_base_url(Some(base_url), "https://api.openai.com/v1"),
+                api_key,
+            )
+            .await
+        }
+        Err(message) => ConfigTestDetail {
+            ok: false,
+            label: "Executor".to_string(),
+            provider: get_non_empty(&obj, "executor_provider"),
+            model: get_non_empty(&obj, "executor_model"),
+            base_url: get_non_empty(&obj, "executor_base_url"),
+            message,
+        },
+    };
+
+    let reviewer = test_reviewer(&obj).await;
+    let reviewer_ok = reviewer.as_ref().map(|detail| detail.ok).unwrap_or(true);
+    let ok = executor.ok && reviewer_ok;
+    let message = if ok {
+        "Connection test passed.".to_string()
+    } else {
+        "Connection test failed. Check the details below.".to_string()
+    };
+    Ok(ConfigTestResult {
+        ok,
+        message,
+        executor,
+        reviewer,
+    })
 }

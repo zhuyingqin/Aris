@@ -200,6 +200,22 @@ export interface ConfigPatch {
   language?: string;
 }
 
+export interface ConfigTestDetail {
+  ok: boolean;
+  label: string;
+  provider?: string | null;
+  model?: string | null;
+  baseUrl?: string | null;
+  message: string;
+}
+
+export interface ConfigTestResult {
+  ok: boolean;
+  message: string;
+  executor: ConfigTestDetail;
+  reviewer?: ConfigTestDetail | null;
+}
+
 // tools::SkillMeta serializes with snake_case field names.
 export interface SkillMeta {
   name: string;

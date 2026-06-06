@@ -37,6 +37,7 @@ pub fn run() {
             commands::state_dir,
             config::config_get,
             config::config_set,
+            config::config_test,
             sessions::sessions_list,
             sessions::session_get,
             sessions::chat_ui_sessions_load,
