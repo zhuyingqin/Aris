@@ -1,282 +1,153 @@
-# 🌙 ARIS-Code — Auto Research in Sleep
+# ARIS Studio
 
-```
-    ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
-    ░  █████╗ ██████╗ ██╗███████╗            ░
-    ░ ██╔══██╗██╔══██╗██║██╔════╝            ░
-    ░ ███████║██████╔╝██║███████╗            ░
-    ░ ██╔══██║██╔══██╗██║╚════██║            ░
-    ░ ██║  ██║██║  ██║██║███████║            ░
-    ░ ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝╚══════╝           ░
-    ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
-         🟦 [Claude]    🟩 [GPT 🕶️]
-         executor  ←→  reviewer
-         Let AI do research while you sleep
-```
+Desktop research automation workspace for agent-team workflows, adversarial review, and paper-centric AI work.
 
-![ARIS-Code Screenshot](aris-code-screenshot.png)
+ARIS Studio is the desktop application for ARIS. It keeps the executor/reviewer idea from the original ARIS research agent, but moves the daily experience into a local Tauri app: chat, project switching, skills, workflow design, run monitoring, sessions, settings, and PDF-readable review attachments.
 
-> **Adversarial · Multi-Agent Research Automation CLI**
-> Executor acts · Reviewer critiques · Iterate to excellence
+This README documents the desktop application. The legacy ARIS CLI implementation is no longer the product entry point; the remaining CLI/runtime crates are treated as shared libraries for the desktop app.
 
-[![GitHub Release](https://img.shields.io/github/v/release/wanshuiyin/Auto-claude-code-research-in-sleep?style=flat-square)](https://github.com/wanshuiyin/Auto-claude-code-research-in-sleep/releases)
-[![Platform](https://img.shields.io/badge/platform-macOS%20Apple%20Silicon-black?style=flat-square&logo=apple)](https://github.com/wanshuiyin/Auto-claude-code-research-in-sleep)
-[![License](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
+[Main README](README.md) | [Chinese README](README_CN.md)
 
----
+## What It Does
 
-## ✨ What is ARIS-Code?
+- Chat with the ARIS executor from a desktop UI, with streamed tool calls and persisted sessions.
+- Configure executor and reviewer providers, models, base URLs, API keys, and language from Settings.
+- Browse bundled research skills and invoke slash-skill workflows directly from Chat.
+- Attach local files to Chat. Text PDFs can be read by the `read_file` tool, so automatic review flows can inspect paper PDFs without an external PDF utility.
+- Switch between local research projects. Each project keeps its own sessions, run state, agents, workflows, and user workflow drafts.
+- Design workflows in Workflow Studio using a visual graph and the ARIS workflow DSL.
+- Start, pause, resume, cancel, and monitor workflow runs with live phase, agent, event, task, and mailbox views.
 
-**ARIS-Code** (*Auto Research in Sleep*) is a terminal-based AI research assistant built for academic researchers. Its core philosophy:
+PDF support is text extraction, not OCR. Scanned or image-only PDFs still need OCR before ARIS can reason over their contents.
 
-- 🤖 **Executor**: The primary LLM — writes code, surveys literature, drafts papers, plans experiments
-- 🔍 **Reviewer**: An independent LLM that adversarially critiques the Executor's output via the `LlmReview` tool
-- 🔄 **Iterate**: Executor writes → Reviewer critiques → Executor revises → loop until quality converges
+## Current Status
 
-With **42 bundled research skills**, ARIS covers the full pipeline from idea discovery to paper submission.
+- Product: ARIS Studio
+- Desktop version: `0.2.0`
+- Desktop shell: Tauri 2 + React + Vite
+- Primary bundle target: Windows NSIS installer
+- Local-first storage: configuration and project runtime data stay on the user's machine
 
----
+## Quick Start
 
-## 🚀 Installation (macOS Apple Silicon)
+Prerequisites:
 
-```bash
-curl -fsSL https://github.com/wanshuiyin/Auto-claude-code-research-in-sleep/releases/download/v0.1.0/aris-code-darwin-arm64.tar.gz | tar xz
-sudo mv aris-code /usr/local/bin/aris
-aris
-```
+- Windows 10/11 with WebView2 Runtime
+- Node.js 18 or newer
+- Rust stable with the MSVC toolchain
+- Visual Studio Build Tools with the C++ build tools installed
 
-> Currently supports **macOS Apple Silicon (M1/M2/M3/M4)** only. Support for other platforms is on the roadmap.
+Build and run from source:
 
----
-
-## ⚙️ First-Run Setup
-
-The first time you run `aris`, an interactive setup wizard launches automatically:
-
-```
-🌙 ARIS-Code Setup Wizard
-
-[1/3] Choose Executor provider (primary LLM)
-  > Anthropic Claude
-    OpenAI GPT
-    Google Gemini
-    Zhipu GLM
-    MiniMax
-Enter API Key: sk-...
-
-[2/3] Choose Reviewer provider (adversarial LLM)
-  > OpenAI GPT
-    Google Gemini
-    Zhipu GLM
-    MiniMax
-Enter API Key: sk-...
-
-[3/3] Choose language preference
-    中文 (CN)
-  > English (EN)
-
-✅ Config saved to ~/.config/aris/config.json
+```powershell
+git clone https://github.com/zhuyingqin/Aris.git
+cd Aris\desktop
+npm install
+npm run tauri dev
 ```
 
-After setup you drop straight into the REPL. Run `/setup` at any time to reconfigure without restarting.
+Create the Windows desktop bundle:
 
----
-
-## 🤖 Supported Providers
-
-| Provider | As Executor | As Reviewer | Key Models |
-|----------|:-----------:|:-----------:|-----------|
-| 🟣 Anthropic Claude | ✅ | — | claude-opus, claude-sonnet, claude-haiku |
-| 🟢 OpenAI | ✅ | ✅ | gpt-5.4, gpt-5.4-mini, gpt-5.4-nano |
-| 🔵 Google Gemini | ✅ | ✅ | gemini-2.5-pro, gemini-2.5-flash |
-| 🔶 Zhipu GLM | ✅ | ✅ | GLM-5, GLM-5-Turbo |
-| 🔷 MiniMax | ✅ | ✅ | MiniMax-M2.7, MiniMax-M2.7-highspeed |
-
-> **Design note**: Anthropic Claude is Executor-only; all other providers can serve as both Executor and Reviewer. The classic pairing is **Claude Executor + GPT/GLM Reviewer** for true adversarial multi-agent research.
-
----
-
-## 🎯 Key Features
-
-### 1. 🔄 Adversarial Multi-Agent Architecture
-
-```
-User input
-    ↓
-[Executor LLM]  ──── calls ────→  LlmReview Tool
-  write / code                         ↓
-  research / analyze             [Reviewer LLM]
-    ↑                             independent critique
-    └──────── review feedback ───┘
-              iterate until quality target met
+```powershell
+cd desktop
+npm run tauri build
 ```
 
-**LlmReview in action**:
+The release build produces:
 
-```
-❯ Please review this paper for me
-# ARIS reads the paper, calls LlmReview to get GPT-5.4/GLM-5/MiniMax's
-# independent assessment — multi-round adversarial dialogue ensues
+- App executable: `desktop\src-tauri\target\release\aris-desktop.exe`
+- Windows installer: `desktop\src-tauri\target\release\bundle\nsis\ARIS Studio_0.2.0_x64-setup.exe`
 
-❯ Use LlmReview to say hello to the reviewer
-# Direct LlmReview tool invocation
-```
+## Configuration
 
-### 2. 📚 42 Bundled Research Skills
+Open the Settings tab in ARIS Studio to configure:
 
-Use `/skills` to list all available skills:
+- Executor provider, model, base URL, and API key
+- Reviewer provider, model, base URL, and API key
+- UI/output language
+- Connectivity checks for the configured models
 
-```
-/research-lit        — Literature search & survey
-/idea-discovery      — Full idea discovery pipeline
-/research-review     — GPT xhigh deep review
-/paper-write         — LaTeX paper drafting
-/paper-compile       — Paper compilation & error fixing
-/auto-review-loop    — Autonomous multi-round review loop
-/experiment-plan     — Experiment roadmap generation
-/run-experiment      — Remote GPU deployment
-/peer-review         — Conference reviewer simulation
-/rebuttal            — Submission rebuttal generation
-...  (42 total)
+Configuration is stored locally at:
+
+```text
+~/.config/aris/config.json
 ```
 
-**Three-tier skill priority** (higher overrides lower):
-```
-~/.config/aris/skills/   [user custom — highest priority]
-~/.claude/skills/        [Claude Code compatible]
-bundled skills           [42 out-of-the-box skills]
-```
+API keys are masked in the UI. They are read and written locally by the Tauri backend and are not returned to the frontend as raw secrets.
 
-### 3. 🖥️ REPL Commands
+## Project Data
 
-| Command | Description |
-|---------|-------------|
-| `/help` | List all commands |
-| `/model` | Switch Executor model |
-| `/reviewer` | Switch Reviewer model |
-| `/permissions` | Toggle permission mode (allow / deny / ask) |
-| `/setup` | Reconfigure without restarting |
-| `/skills` | List / show / export skills |
-| `/status` | Show current configuration |
-| `/cost` | Token usage & cost summary |
-| `/compact` | Compress conversation history |
-| `/clear` | Clear the screen |
-| `/version` | Version info |
-| `/research-review` | Invoke research review skill directly |
-| `/paper-write` | Invoke paper writing skill directly |
-| `...` | All 42 skill slash commands |
+By default, ARIS Studio creates and uses:
 
-### 4. 🌐 Language Preference
-
-Your chosen language (CN/EN) is injected into the system prompt so ARIS always responds in your preferred language — no per-message configuration needed.
-
-### 5. 🛡️ Anti-Hallucination Design
-
-The system prompt explicitly informs the model of its exact identity (ARIS-Code), preventing role confusion in multi-agent scenarios where the Executor and Reviewer are different models from different providers.
-
----
-
-## 📖 Usage Examples
-
-### Literature Survey
-```
-❯ /research-lit find the latest work on diffusion models for protein design
+```text
+~/.config/aris/desktop-workspace
+~/.config/aris/desktop-runtime
 ```
 
-### Autonomous Review Loop
-```
-❯ /auto-review-loop
-# ARIS reads the paper in the current directory and runs:
-# draft → review → revise → review → ... until quality converges
-```
+Per-project runtime data is stored below:
 
-### Switch Executor Model
-```
-❯ /model
-  Current Executor: claude-sonnet-4-5
-  Switch to:
-  > claude-opus-4
-    gpt-5.4
-    gemini-2.5-pro
+```text
+~/.config/aris/desktop-runtime/projects/<project-id>/
 ```
 
-### Switch Reviewer
-```
-❯ /reviewer
-  Current Reviewer: gpt-5.4
-  Switch to:
-  > glm-5
-    gemini-2.5-pro
-    minimax-m2.7
-```
+Each project may contain:
 
-### Direct Adversarial Review
-```
-❯ Review my method section — be brutal
-# Executor reads the section, calls LlmReview,
-# receives an independent adversarial critique, and iterates
-```
+- `sessions/` - desktop chat sessions
+- `run-state/` - workflow run events and status
+- `agents/` - agent/task state
+- `workflows/` - saved workflow plans
+- `user-workflows/` - user-authored workflow drafts
 
----
+You can add or switch projects from the project selector in the desktop header. `ARIS_WORKSPACE_ROOT` can be used to override the default workspace root for advanced local setups.
 
-## 📁 Configuration
+## Auto Review And PDFs
 
-```
-~/.config/aris/
-├── config.json        # Main config (provider, API keys, language)
-└── skills/            # Custom user skills (override bundled skills)
-```
+The desktop auto-review path now preserves local PDF attachments as file-path attachments. When a skill or chat turn asks ARIS to review a paper, the agent can call `read_file` on the attached `.pdf`; the runtime extracts text from common text-based PDF streams, including Flate-compressed streams and ToUnicode character maps.
 
-**Example config.json**:
-```json
-{
-  "executor": {
-    "provider": "anthropic",
-    "model": "claude-sonnet-4-5",
-    "api_key": "sk-ant-..."
-  },
-  "reviewer": {
-    "provider": "openai",
-    "model": "gpt-5.4",
-    "api_key": "sk-..."
-  },
-  "language": "EN"
-}
+This means workflows such as paper review, paper improvement, and literature review can work with local PDF attachments in the desktop UI. Encrypted PDFs, unusual encodings, and scanned PDFs may still require manual text extraction or OCR.
+
+## Development
+
+Useful commands:
+
+```powershell
+cd desktop
+npm run test
+npm run typecheck
+npm run build
+npm run tauri dev
+npm run tauri build
 ```
 
----
+Rust checks:
 
-## 🗺️ Roadmap
+```powershell
+cd desktop\src-tauri
+cargo check
+```
 
-- [x] Phase 0: Rust fork foundation (based on claw-code)
-- [x] Phase 1: Multi-provider support (Anthropic / OpenAI / Gemini / GLM / MiniMax)
-- [x] Phase 1: LlmReview adversarial critique tool
-- [x] Phase 1: 42 bundled research skills
-- [x] Phase 1: Language preference & anti-hallucination system prompt
-- [ ] Phase 2: Skills system polish (three-tier priority UI)
-- [ ] Phase 2: Web UI dashboard
-- [ ] Phase 3: Linux / Windows support
-- [ ] Phase 3: Local model integration (Ollama)
+PDF extraction regression tests run from the repository root:
 
----
+```powershell
+cargo test -p runtime reads_pdf
+```
 
-## 🙏 Credits & Acknowledgements
+## Repository Layout
 
-**ARIS-Code is built on the excellent foundation of [claw-code](https://github.com/ultraworkers/claw-code).**
+```text
+desktop/             React/Tauri desktop application
+desktop/src/         Chat, settings, skills, sessions, studio, monitor, teams
+desktop/src-tauri/   Tauri commands and desktop backend
+crates/runtime/      Filesystem, permissions, session, and PDF text utilities
+crates/tools/        Tool registry used by agents and desktop commands
+crates/executor/     Agent execution engine
+crates/chat/         Chat stream primitives
+crates/commands/     Shared command handling
+docs/                Screenshots and supporting docs
+```
 
-claw-code is an open-source Rust reimplementation of Claude Code. It provided the REPL framework, tool-calling infrastructure, and cross-platform compilation that made ARIS-Code possible. Huge thanks to the ultraworkers team for their outstanding work!
+## Design Notes
 
-- 🔗 claw-code: https://github.com/ultraworkers/claw-code
-- 🔗 ARIS-Code: https://github.com/wanshuiyin/Auto-claude-code-research-in-sleep
+ARIS Studio reuses the ARIS coordination kernel rather than duplicating agent logic in the frontend. The desktop UI sends commands to the local Tauri backend, which calls the shared Rust crates for tools, sessions, skills, chat execution, and workflow state.
 
----
-
-## 📄 License
-
-MIT License © 2025 ARIS-Code Contributors
-
----
-
-<div align="center">
-  <sub>🌙 Let AI do research while you sleep · Built with ❤️ and Rust</sub>
-</div>
+The older terminal-oriented ARIS CLI documentation has intentionally been removed from this README. For this repository, the supported user-facing entry point is now ARIS Studio.
