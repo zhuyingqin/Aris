@@ -626,6 +626,7 @@ pub async fn chat_send(
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .map_err(|_| "another chat turn is already running".to_string())?;
     let _busy = ChatBusyGuard(&state.busy);
+    crate::config::apply_reviewer_environment(true);
     let (model, _provider, executor_config) = resolve_executor()?;
     validate_session_id(&session_id)?;
     let session = get_cached_or_disk_session(&state, &session_id)?;

@@ -173,7 +173,52 @@ pub fn config_set(patch: ConfigPatch) -> Result<ConfigView, String> {
     let json =
         serde_json::to_string_pretty(&Value::Object(obj.clone())).map_err(|e| e.to_string())?;
     std::fs::write(&path, json).map_err(|e| e.to_string())?;
+    apply_reviewer_environment_from(&obj, true);
     Ok(build_view(&obj))
+}
+
+pub(crate) fn apply_reviewer_environment(force: bool) {
+    let obj = load_object();
+    apply_reviewer_environment_from(&obj, force);
+}
+
+fn set_env_if_allowed(key: &str, value: Option<String>, force: bool) {
+    let Some(value) = value.filter(|item| !item.trim().is_empty()) else {
+        return;
+    };
+    if force || std::env::var(key).is_err() {
+        std::env::set_var(key, value);
+    }
+}
+
+fn apply_reviewer_environment_from(obj: &Map<String, Value>, force: bool) {
+    let provider = get_non_empty(obj, "reviewer_provider");
+    let key = get_non_empty(obj, "reviewer_api_key");
+
+    set_env_if_allowed("ARIS_REVIEWER_PROVIDER", provider.clone(), force);
+    set_env_if_allowed("ARIS_REVIEWER_MODEL", get_non_empty(obj, "reviewer_model"), force);
+    set_env_if_allowed(
+        "ARIS_REVIEWER_BASE_URL",
+        get_non_empty(obj, "reviewer_base_url"),
+        force,
+    );
+    set_env_if_allowed("ARIS_LANGUAGE", get_non_empty(obj, "language"), force);
+
+    match provider.as_deref() {
+        Some("gemini") => set_env_if_allowed("GEMINI_API_KEY", key, force),
+        Some("openai") => set_env_if_allowed("OPENAI_API_KEY", key, force),
+        Some("glm") => set_env_if_allowed("GLM_API_KEY", key, force),
+        Some("minimax") => set_env_if_allowed("MINIMAX_API_KEY", key, force),
+        Some("kimi") => set_env_if_allowed("KIMI_API_KEY", key, force),
+        Some("deepseek") => {
+            set_env_if_allowed("DEEPSEEK_API_KEY", key.clone(), force);
+            set_env_if_allowed("ARIS_REVIEWER_AUTH_TOKEN", key, force);
+        }
+        Some("anthropic-compat" | "custom") => {
+            set_env_if_allowed("ARIS_REVIEWER_AUTH_TOKEN", key, force);
+        }
+        _ => {}
+    }
 }
 
 fn normalized_base_url(value: Option<String>, default_value: &str) -> String {

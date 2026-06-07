@@ -92,9 +92,10 @@ pub fn language_preference_section(language: &str) -> String {
 #[must_use]
 pub fn llm_review_override_section() -> String {
     "IMPORTANT: When a skill instructs you to use `mcp__codex__codex` or `mcp__codex__codex-reply` \
-     for external LLM review, use the `LlmReview` tool instead. The LlmReview tool calls \
-     Gemini or OpenAI directly (via GEMINI_API_KEY or OPENAI_API_KEY) without needing MCP. \
-     Pass the full review prompt as the `prompt` parameter to LlmReview."
+     for external LLM review, use the `LlmReview` tool instead. The LlmReview tool uses \
+     the user's configured reviewer from ARIS settings. Pass the full review prompt as \
+     the `prompt` parameter and omit the optional `model` field unless the user explicitly \
+     asks for a reviewer override."
         .to_string()
 }
 
