@@ -16,6 +16,7 @@ mod mcp_client;
 mod mcp_stdio;
 mod oauth;
 mod permissions;
+mod process;
 mod prompt;
 mod remote;
 pub mod sandbox;
@@ -77,6 +78,7 @@ pub use permissions::{
     PermissionMode, PermissionOutcome, PermissionPolicy, PermissionPromptDecision,
     PermissionPrompter, PermissionRequest,
 };
+pub use process::{hidden_command, hidden_tokio_command, hide_window};
 pub use prompt::{
     load_system_prompt, prepend_bullets, team_orchestration_section, ContextFile, ProjectContext,
     PromptBuildError, SystemPromptBuilder, SYSTEM_PROMPT_DYNAMIC_BOUNDARY,

@@ -17,7 +17,8 @@ export default function Monitor() {
           <div className="empty">No runs yet.</div>
         )}
         {runs.map((r) => (
-          <div
+          <button
+            type="button"
             key={r.runId}
             className={`run-row${r.runId === selectedRunId ? " active" : ""}`}
             onClick={() => selectRun(r.runId)}
@@ -27,7 +28,7 @@ export default function Monitor() {
               <Badge status={r.status} />
             </div>
             <div className="sub">{r.runId}</div>
-          </div>
+          </button>
         ))}
       </div>
 

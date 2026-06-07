@@ -12,7 +12,7 @@ use crate::sandbox::{
     build_linux_sandbox_command, resolve_sandbox_status_for_request, FilesystemIsolationMode,
     SandboxConfig, SandboxStatus,
 };
-use crate::ConfigLoader;
+use crate::{hidden_command, hidden_tokio_command, ConfigLoader};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BashCommandInput {
@@ -234,7 +234,7 @@ fn prepare_command(
     }
 
     if let Some(launcher) = build_linux_sandbox_command(command, cwd, sandbox_status) {
-        let mut prepared = Command::new(launcher.program);
+        let mut prepared = hidden_command(launcher.program);
         prepared.args(launcher.args);
         prepared.current_dir(cwd);
         prepared.envs(launcher.env);
@@ -242,12 +242,12 @@ fn prepare_command(
     }
 
     if cfg!(windows) {
-        let mut prepared = Command::new("cmd");
+        let mut prepared = hidden_command("cmd");
         prepared.arg("/C").arg(command).current_dir(cwd);
         return prepared;
     }
 
-    let mut prepared = Command::new("sh");
+    let mut prepared = hidden_command("sh");
     prepared.arg("-lc").arg(command).current_dir(cwd);
     if sandbox_status.filesystem_active {
         prepared.env("HOME", cwd.join(".sandbox-home"));
@@ -267,7 +267,7 @@ fn prepare_tokio_command(
     }
 
     if let Some(launcher) = build_linux_sandbox_command(command, cwd, sandbox_status) {
-        let mut prepared = TokioCommand::new(launcher.program);
+        let mut prepared = hidden_tokio_command(launcher.program);
         prepared.args(launcher.args);
         prepared.current_dir(cwd);
         prepared.envs(launcher.env);
@@ -275,12 +275,12 @@ fn prepare_tokio_command(
     }
 
     if cfg!(windows) {
-        let mut prepared = TokioCommand::new("cmd");
+        let mut prepared = hidden_tokio_command("cmd");
         prepared.arg("/C").arg(command).current_dir(cwd);
         return prepared;
     }
 
-    let mut prepared = TokioCommand::new("sh");
+    let mut prepared = hidden_tokio_command("sh");
     prepared.arg("-lc").arg(command).current_dir(cwd);
     if sandbox_status.filesystem_active {
         prepared.env("HOME", cwd.join(".sandbox-home"));

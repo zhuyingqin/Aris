@@ -90,6 +90,37 @@ export interface WorkflowOutput {
   message?: string | null;
 }
 
+export interface DesktopCommandSpec {
+  name: string;
+  description: string;
+  argumentHint?: string | null;
+}
+
+export interface ChatCommandSelectionItem {
+  value: string;
+  label: string;
+  description?: string | null;
+  isCurrent: boolean;
+}
+
+export interface ChatCommandSelection {
+  command: string;
+  title: string;
+  subtitle?: string | null;
+  current?: string | null;
+  items: ChatCommandSelectionItem[];
+}
+
+export interface ChatCommandResult {
+  handled: boolean;
+  message?: string | null;
+  prompt?: string | null;
+  selection?: ChatCommandSelection | null;
+  replaceTurns: boolean;
+  openSettings: boolean;
+  refreshStatus: boolean;
+}
+
 // ── Team / Agents ────────────────────────────────────────────────────────────
 
 export interface RunEvent {
@@ -200,6 +231,35 @@ export interface ConfigPatch {
   language?: string;
 }
 
+export interface ConfigTestDetail {
+  ok: boolean;
+  label: string;
+  provider?: string | null;
+  model?: string | null;
+  baseUrl?: string | null;
+  message: string;
+}
+
+export interface ConfigTestResult {
+  ok: boolean;
+  message: string;
+  executor: ConfigTestDetail;
+  reviewer?: ConfigTestDetail | null;
+}
+
+export interface DesktopProject {
+  id: string;
+  name: string;
+  path: string;
+  addedAt: number;
+  lastOpenedAt: number;
+}
+
+export interface ProjectView {
+  projects: DesktopProject[];
+  currentProject: DesktopProject;
+}
+
 // tools::SkillMeta serializes with snake_case field names.
 export interface SkillMeta {
   name: string;
@@ -254,8 +314,22 @@ export type ChatBlock =
       isError?: boolean;
     };
 
+export interface ChatAttachment {
+  id: string;
+  kind: "file" | "image";
+  name: string;
+  path?: string;
+  mimeType?: string;
+  content?: string;
+  preview?: string;
+}
+
 export interface ChatTurn {
+  id: string;
   role: "user" | "assistant";
   blocks: ChatBlock[];
   streaming?: boolean;
+  error?: string;
+  stopped?: boolean;
+  attachments?: ChatAttachment[];
 }

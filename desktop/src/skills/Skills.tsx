@@ -5,6 +5,7 @@ import type { SkillMeta } from "../types";
 
 export default function Skills() {
   const setError = useStore((s) => s.setError);
+  const projectId = useStore((s) => s.currentProject?.id);
   const [skills, setSkills] = useState<SkillMeta[]>([]);
   const [filter, setFilter] = useState("");
   const [selected, setSelected] = useState<string | null>(null);
@@ -12,15 +13,28 @@ export default function Skills() {
 
   useEffect(() => {
     if (!isTauri()) return;
+    setSelected(null);
+    setContent("");
     skillsList().then(setSkills).catch((e) => setError(String(e)));
-  }, [setError]);
+  }, [projectId, setError]);
 
   useEffect(() => {
-    if (!selected) return;
+    if (!selected) {
+      setContent("");
+      return;
+    }
+    let cancelled = false;
     setContent("Loading…");
     skillView(selected)
-      .then(setContent)
-      .catch((e) => setContent(`Error: ${e}`));
+      .then((value) => {
+        if (!cancelled) setContent(value);
+      })
+      .catch((e) => {
+        if (!cancelled) setContent(`Error: ${e}`);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [selected]);
 
   const shown = useMemo(() => {
@@ -56,7 +70,8 @@ export default function Skills() {
           />
         </div>
         {shown.map((s) => (
-          <div
+          <button
+            type="button"
             key={s.name}
             className={`run-row${s.name === selected ? " active" : ""}`}
             onClick={() => setSelected(s.name)}
@@ -70,7 +85,7 @@ export default function Skills() {
             <div className="sub">
               {s.path.startsWith("<bundled") ? "bundled" : s.path}
             </div>
-          </div>
+          </button>
         ))}
       </div>
 

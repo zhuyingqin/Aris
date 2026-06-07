@@ -1,17 +1,8 @@
-/**
- * Renders assistant text with:
- *  - <think>…</think> blocks collapsed (show/hide toggle)
- *  - Full markdown via react-markdown + remark-gfm
- *  - Code blocks with language badge + copy button
- *  - Syntax highlighting via highlight.js (github-dark theme)
- */
-import { useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
 import "highlight.js/styles/github-dark.css";
-
-// ── Think-block parser ────────────────────────────────────────────────────────
 
 interface Segment {
   kind: "text" | "think";
@@ -20,38 +11,64 @@ interface Segment {
 
 function parseThinkBlocks(raw: string): Segment[] {
   const segments: Segment[] = [];
-  const re = /<think>([\s\S]*?)<\/think>/g;
+  const pattern = /<think>([\s\S]*?)<\/think>/g;
   let last = 0;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(raw)) !== null) {
-    if (m.index > last) segments.push({ kind: "text", content: raw.slice(last, m.index) });
-    segments.push({ kind: "think", content: m[1].trim() });
-    last = m.index + m[0].length;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(raw)) !== null) {
+    if (match.index > last) segments.push({ kind: "text", content: raw.slice(last, match.index) });
+    segments.push({ kind: "think", content: match[1].trim() });
+    last = match.index + match[0].length;
   }
   if (last < raw.length) segments.push({ kind: "text", content: raw.slice(last) });
   return segments;
 }
 
-// ── Code block with copy ──────────────────────────────────────────────────────
+function useThrottledText(text: string, streaming: boolean) {
+  const [rendered, setRendered] = useState(text);
+  const latest = useRef(text);
+  const timer = useRef<number | null>(null);
+  latest.current = text;
+
+  useEffect(() => {
+    if (!streaming) {
+      if (timer.current !== null) window.clearTimeout(timer.current);
+      timer.current = null;
+      setRendered(text);
+      return;
+    }
+    if (timer.current === null) {
+      timer.current = window.setTimeout(() => {
+        timer.current = null;
+        setRendered(latest.current);
+      }, 100);
+    }
+  }, [streaming, text]);
+
+  useEffect(() => () => {
+    if (timer.current !== null) window.clearTimeout(timer.current);
+  }, []);
+
+  return rendered;
+}
 
 function CodeBlock({ className, children }: { className?: string; children?: React.ReactNode }) {
   const [copied, setCopied] = useState(false);
-  const lang = (className ?? "").replace("language-", "") || "text";
+  const language = (className ?? "").replace("language-", "") || "text";
   const code = String(children ?? "").replace(/\n$/, "");
-
-  const copy = () => {
-    navigator.clipboard.writeText(code).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1800);
-    });
-  };
-
   return (
     <div className="md-code-block">
       <div className="md-code-header">
-        <span className="md-code-lang">{lang}</span>
-        <button className="md-code-copy" onClick={copy}>
-          {copied ? "✓ copied" : "copy"}
+        <span className="md-code-lang">{language}</span>
+        <button
+          className="md-code-copy"
+          onClick={() => {
+            void navigator.clipboard.writeText(code).then(() => {
+              setCopied(true);
+              window.setTimeout(() => setCopied(false), 1400);
+            });
+          }}
+        >
+          {copied ? "Copied" : "Copy"}
         </button>
       </div>
       <code className={className}>{children}</code>
@@ -59,73 +76,60 @@ function CodeBlock({ className, children }: { className?: string; children?: Rea
   );
 }
 
-// ── Think-block toggle ────────────────────────────────────────────────────────
-
-export function ThinkBlock({ content, streaming = false }: { content: string; streaming?: boolean }) {
+export const ThinkBlock = memo(function ThinkBlock({
+  content,
+  streaming = false,
+}: {
+  content: string;
+  streaming?: boolean;
+}) {
   const [open, setOpen] = useState(streaming);
   const preview = content.slice(0, 80).replace(/\s+/g, " ");
   return (
     <div className="md-think">
-      <button className="md-think-toggle" onClick={() => setOpen((v) => !v)}>
+      <button className="md-think-toggle" onClick={() => setOpen((value) => !value)}>
         <span className="md-think-icon">{open ? "▾" : "▸"}</span>
         <span className="md-think-label">Thinking</span>
-        {!open && <span className="md-think-preview">{preview}{content.length > 80 ? "…" : ""}</span>}
+        {!open && <span className="md-think-preview">{preview}{content.length > 80 ? "..." : ""}</span>}
       </button>
-      {open && (
-        <div className="md-think-body">
-          <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
-        </div>
-      )}
+      {open && <div className="md-think-body"><ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown></div>}
     </div>
   );
-}
+});
 
-// ── Main export ───────────────────────────────────────────────────────────────
-
-export default function MarkdownContent({ text, streaming }: { text: string; streaming?: boolean }) {
-  const segments = parseThinkBlocks(text);
-
+function MarkdownContent({ text, streaming = false }: { text: string; streaming?: boolean }) {
+  const rendered = useThrottledText(text, streaming);
+  const segments = parseThinkBlocks(rendered);
   return (
     <div className="md-content">
-      {segments.map((seg, i) => {
-        if (seg.kind === "think") {
-          return <ThinkBlock key={i} content={seg.content} />;
-        }
-        const content = streaming && i === segments.length - 1
-          ? seg.content  // cursor handled by parent
-          : seg.content;
-        if (!content.trim()) return null;
+      {segments.map((segment, index) => {
+        if (segment.kind === "think") return <ThinkBlock key={index} content={segment.content} />;
+        if (!segment.content.trim()) return null;
         return (
           <ReactMarkdown
-            key={i}
+            key={index}
             remarkPlugins={[remarkGfm]}
             rehypePlugins={[rehypeHighlight]}
             components={{
-              // Code blocks — use our custom renderer
               pre({ children }) {
                 return <>{children}</>;
               },
               code({ className, children, ...props }) {
-                const isBlock = className?.startsWith("language-");
-                if (isBlock) {
-                  return <CodeBlock className={className}>{children}</CodeBlock>;
-                }
-                return <code className="md-inline-code" {...props}>{children}</code>;
+                return className?.startsWith("language-")
+                  ? <CodeBlock className={className}>{children}</CodeBlock>
+                  : <code className="md-inline-code" {...props}>{children}</code>;
               },
-              // Open links externally
               a({ href, children }) {
-                return (
-                  <a href={href} target="_blank" rel="noreferrer" className="md-link">
-                    {children}
-                  </a>
-                );
+                return <a href={href} target="_blank" rel="noreferrer" className="md-link">{children}</a>;
               },
             }}
           >
-            {content}
+            {segment.content}
           </ReactMarkdown>
         );
       })}
     </div>
   );
 }
+
+export default memo(MarkdownContent);

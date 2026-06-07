@@ -5,9 +5,13 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 export const isTauri = (): boolean =>
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 import type {
+  ChatCommandResult,
   ChatStatus,
   ConfigPatch,
+  ConfigTestResult,
   ConfigView,
+  DesktopCommandSpec,
+  ProjectView,
   RunEvent,
   SessionSummary,
   SessionTranscript,
@@ -61,12 +65,19 @@ export const agentSupervisor = (action: string, agent?: string) =>
   invoke<unknown>("agent_supervisor", { action, agent: agent ?? null });
 
 export const stateDir = () => invoke<string>("state_dir");
+export const projectsGet = () => invoke<ProjectView>("projects_get");
+export const projectAdd = (path: string) =>
+  invoke<ProjectView>("project_add", { path });
+export const projectSetCurrent = (id: string) =>
+  invoke<ProjectView>("project_set_current", { id });
 
 // ── Settings / Skills / Sessions (P1) ─────────────────────────────────────────
 
 export const configGet = () => invoke<ConfigView>("config_get");
 export const configSet = (patch: ConfigPatch) =>
   invoke<ConfigView>("config_set", { patch });
+export const configTest = (patch: ConfigPatch) =>
+  invoke<ConfigTestResult>("config_test", { patch });
 
 export const skillsList = () => invoke<SkillMeta[]>("skills_list");
 export const skillView = (name: string) =>
@@ -75,6 +86,9 @@ export const skillView = (name: string) =>
 export const sessionsList = () => invoke<SessionSummary[]>("sessions_list");
 export const sessionGet = (id: string) =>
   invoke<SessionTranscript>("session_get", { id });
+export const chatUiSessionsLoad = <T>() => invoke<T[]>("chat_ui_sessions_load");
+export const chatUiSessionsSave = <T>(sessions: T[]) =>
+  invoke<void>("chat_ui_sessions_save", { sessions });
 
 // ── File browser ─────────────────────────────────────────────────────────────
 
@@ -83,13 +97,25 @@ export const fileSearch = (pattern: string, root?: string) =>
 
 export const fileRead = (path: string, limit?: number) =>
   invoke<string>("file_read", { path, limit: limit ?? null });
+export const projectChatStarters = () => invoke<string[]>("project_chat_starters");
 
 // ── Chat engine (P2) ──────────────────────────────────────────────────────────
 
 export const chatStatus = () => invoke<ChatStatus>("chat_status");
-export const chatSend = (message: string) =>
-  invoke<string>("chat_send", { message });
-export const chatReset = () => invoke<void>("chat_reset");
+export const chatCommandSpecs = () =>
+  invoke<DesktopCommandSpec[]>("chat_command_specs");
+export const chatRunCommand = (sessionId: string, input: string) =>
+  invoke<ChatCommandResult>("chat_run_command", { sessionId, input });
+export const chatSend = (sessionId: string, message: string) =>
+  invoke<string>("chat_send", { sessionId, message });
+export const chatReset = (sessionId: string) =>
+  invoke<void>("chat_reset", { sessionId });
+export const chatSetContext = (
+  sessionId: string,
+  messages: { role: "user" | "assistant"; text: string }[],
+) => invoke<void>("chat_set_context", { sessionId, messages });
+export const chatDelete = (sessionId: string, projectId?: string) =>
+  invoke<void>("chat_delete", { sessionId, projectId: projectId ?? null });
 export const chatCancel = () => invoke<void>("chat_cancel");
 
 export const onChatDelta = (handler: (text: string) => void) =>
@@ -100,9 +126,9 @@ export const onChatTool = (
   handler: (t: { id?: string; name: string; input: string }) => void,
 ) => listen<{ id?: string; name: string; input: string }>("chat-tool", (e) => handler(e.payload));
 export const onChatToolResult = (
-  handler: (t: { name: string; output: string; isError: boolean }) => void,
+  handler: (t: { id?: string; name: string; output: string; isError: boolean }) => void,
 ) =>
-  listen<{ name: string; output: string; isError: boolean }>(
+  listen<{ id?: string; name: string; output: string; isError: boolean }>(
     "chat-tool-result",
     (e) => handler(e.payload),
   );

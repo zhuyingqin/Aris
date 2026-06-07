@@ -1,6 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{Duration, Instant};
 
 // Bundled skills are compiled into the runtime crate and re-exported
@@ -92,7 +91,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "read_file",
-            description: "Read a text file from the workspace.",
+            description: "Read a text file or extract readable text from a PDF in the workspace.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -3397,7 +3396,7 @@ fn execute_repl(input: ReplInput) -> Result<ReplOutput, String> {
     let _ = input.timeout_ms;
     let runtime = resolve_repl_runtime(&input.language)?;
     let started = Instant::now();
-    let output = Command::new(runtime.program)
+    let output = runtime::hidden_command(runtime.program)
         .args(runtime.args)
         .arg(&input.code)
         .output()
@@ -3674,7 +3673,7 @@ fn set_nested_value(root: &mut serde_json::Map<String, Value>, path: &[&str], ne
 }
 
 fn iso8601_timestamp() -> String {
-    if let Ok(output) = Command::new("date")
+    if let Ok(output) = runtime::hidden_command("date")
         .args(["-u", "+%Y-%m-%dT%H:%M:%SZ"])
         .output()
     {
@@ -3711,7 +3710,7 @@ fn detect_powershell_shell() -> std::io::Result<&'static str> {
 }
 
 fn command_exists(command: &str) -> bool {
-    std::process::Command::new("sh")
+    runtime::hidden_command("sh")
         .arg("-lc")
         .arg(format!("command -v {command} >/dev/null 2>&1"))
         .status()
@@ -3727,7 +3726,7 @@ fn execute_shell_command(
     run_in_background: Option<bool>,
 ) -> std::io::Result<runtime::BashCommandOutput> {
     if run_in_background.unwrap_or(false) {
-        let child = std::process::Command::new(shell)
+        let child = runtime::hidden_command(shell)
             .arg("-NoProfile")
             .arg("-NonInteractive")
             .arg("-Command")
@@ -3755,7 +3754,7 @@ fn execute_shell_command(
         });
     }
 
-    let mut process = std::process::Command::new(shell);
+    let mut process = runtime::hidden_command(shell);
     process
         .arg("-NoProfile")
         .arg("-NonInteractive")
@@ -4022,6 +4021,28 @@ fn resolve_reviewer_model<'a>(input_model: Option<&'a str>, configured_model: &'
     requested
 }
 
+fn resolve_anthropic_compat_reviewer_model<'a>(
+    input_model: Option<&'a str>,
+    configured_model: &'a str,
+    reviewer_provider: Option<&str>,
+) -> &'a str {
+    let Some(requested) = input_model.filter(|s| !s.is_empty()) else {
+        return configured_model;
+    };
+    if requested == configured_model {
+        return requested;
+    }
+
+    if reviewer_provider == Some("deepseek") {
+        let (_, _, requested_provider) = route_openai_compat_model(requested);
+        if requested_provider != "deepseek" {
+            return configured_model;
+        }
+    }
+
+    requested
+}
+
 fn run_llm_review(input: LlmReviewInput) -> Result<String, String> {
     let env_reviewer_model = std::env::var("ARIS_REVIEWER_MODEL")
         .ok()
@@ -4090,11 +4111,12 @@ fn run_llm_review(input: LlmReviewInput) -> Result<String, String> {
                 "LlmReview: ARIS_REVIEWER_AUTH_TOKEN not set (needed for anthropic-compat reviewer)"
                     .to_string()
             })?;
-        let model = input
-            .model
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .unwrap_or(configured_model);
+        let model = input.model.as_deref().filter(|s| !s.is_empty());
+        let model = resolve_anthropic_compat_reviewer_model(
+            model,
+            configured_model,
+            reviewer_provider.as_deref(),
+        );
         let default_base = if reviewer_provider.as_deref() == Some("deepseek") {
             "https://api.deepseek.com/anthropic"
         } else {
@@ -4390,8 +4412,8 @@ mod tests {
     use super::{
         agent_permission_policy, allowed_tools_for_subagent, execute_agent_with_spawn,
         execute_tool, final_assistant_text, mvp_tool_specs, persist_agent_terminal_state,
-        resolve_reviewer_model, route_openai_compat_model, AgentInput, AgentJob,
-        SubagentToolExecutor,
+        resolve_anthropic_compat_reviewer_model, resolve_reviewer_model, route_openai_compat_model,
+        AgentInput, AgentJob, SubagentToolExecutor,
     };
     use runtime::{ApiRequest, AssistantEvent, ConversationRuntime, RuntimeError, Session};
     use serde_json::json;
@@ -6395,6 +6417,29 @@ printf 'pwsh:%s' "$1"
             model, "gpt-5.5-mini",
             "same-provider override should be honored when the key is set"
         );
+    }
+
+    #[test]
+    fn resolve_anthropic_compat_reviewer_model_keeps_deepseek_configured() {
+        let model = resolve_anthropic_compat_reviewer_model(
+            Some("gpt-5.5"),
+            "deepseek-v4-pro",
+            Some("deepseek"),
+        );
+        assert_eq!(
+            model, "deepseek-v4-pro",
+            "skill-level GPT overrides must not replace a configured DeepSeek reviewer"
+        );
+    }
+
+    #[test]
+    fn resolve_anthropic_compat_reviewer_model_honors_deepseek_override() {
+        let model = resolve_anthropic_compat_reviewer_model(
+            Some("deepseek-chat"),
+            "deepseek-v4-pro",
+            Some("deepseek"),
+        );
+        assert_eq!(model, "deepseek-chat");
     }
 
     #[test]

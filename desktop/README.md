@@ -1,60 +1,104 @@
-# ARIS Studio (desktop)
+# ARIS Studio Desktop
 
-A Tauri desktop app for **designing agent-team workflows** and **monitoring runs**
-live. It reuses the ARIS coordination kernel (`crates/tools`) directly — no API
-keys ever leave the machine, and no business logic is duplicated.
+This directory contains the Tauri desktop application for ARIS Studio.
 
-This is **P0**: workflow design + plan/save + start/control + live monitoring of
-the run-state the `aris` CLI produces. In-app LLM agent execution and the chat
-console land in later phases.
+The desktop app is the primary user-facing product in this repository. It wraps the shared ARIS runtime and tool crates with a local UI for chat, skills, project switching, workflow design, run monitoring, settings, and persisted sessions.
 
 ## Architecture
 
+```text
+React + Vite frontend
+        |
+        | Tauri invoke/listen
+        v
+desktop/src-tauri backend
+        |
+        | shared Rust crates
+        v
+crates/runtime + crates/tools + crates/executor + crates/chat + crates/commands
 ```
-React + Vite + React Flow (webview)
-        │  invoke()              │  listen("run-event")
-        ▼                        ▼
-src-tauri/commands.rs  ───►  tools::execute_tool("Workflow"/"ListTeam"/…)
-src-tauri/watcher.rs   ───►  tails  <run-state>/events.jsonl
-                                     │
-                             ./.claude/run-state/  (or $ARIS_RUN_STATE_DIR)
-```
 
-- **Studio** — React Flow canvas + DSL editor (`emitPhase` / `spawnAgent` /
-  `waitAll` / `saveResult`). The DSL string is the single source of truth and is
-  validated server-side via `workflow_plan` before start/save. Grammar mirrors
-  `crates/tools/src/workflow_state.rs`.
-- **Run Monitor** — phase swimlanes (status-coloured), agent cards, a live event
-  timeline, and the team mailbox. Polls every 3s and reacts to `run-event`.
-- **Team** — tasks (with dependencies) and agents from `ListTeam`.
+Main frontend areas:
 
-## Prerequisites
+- `src/chat/` - desktop chat, attachments, slash commands, sessions, streamed tool output
+- `src/settings/` - model/provider configuration and connection checks
+- `src/skills/` - bundled skill browser
+- `src/sessions/` - persisted session list
+- `src/studio/` - workflow canvas and DSL editor
+- `src/monitor/` - workflow run board, phases, events, agents, mailbox
+- `src/teams/` - team/task views
 
-- Node 18+ and npm
-- Rust (stable, MSVC on Windows) + the platform's WebView (WebView2 on Win 11)
-- Tauri CLI: `npm i` installs `@tauri-apps/cli`
+Main backend areas:
+
+- `src-tauri/src/config.rs` - local `~/.config/aris/config.json` settings
+- `src-tauri/src/engine.rs` - chat execution bridge
+- `src-tauri/src/files.rs` - file reads used by attachments and preview
+- `src-tauri/src/projects.rs` - project registration and switching
+- `src-tauri/src/state.rs` - desktop workspace/runtime directory layout
+- `src-tauri/src/workflow.rs` - workflow planning, persistence, and control
 
 ## Develop
 
-```bash
+```powershell
 cd desktop
 npm install
-npm run test        # vitest — DSL round-trip + graph projection
-npm run tauri dev   # launches the desktop app (vite dev server + Rust)
+npm run tauri dev
 ```
 
-Point the app at a run-state directory by launching it from a repo that has
-`./.claude/run-state/`, or set `ARIS_RUN_STATE_DIR`. The current effective path is
-shown in the header.
+Browser-only frontend development can use:
+
+```powershell
+npm run dev
+```
+
+Some features need the Tauri backend and will only work in `npm run tauri dev`.
 
 ## Build
 
-```bash
-npm run build          # frontend -> dist/ (required before a bare cargo build,
-                       #   because generate_context! embeds dist)
-npm run tauri build    # full desktop bundle (needs icons added first)
+```powershell
+cd desktop
+npm run tauri build
 ```
 
-> The Tauri crate is a **standalone workspace** (`desktop/src-tauri`), isolated
-> from the root ARIS workspace so the heavy Tauri dependency tree never affects
-> the core crates' build/CI. It consumes `crates/tools` via a path dependency.
+Build outputs:
+
+- `src-tauri\target\release\aris-desktop.exe`
+- `src-tauri\target\release\bundle\nsis\ARIS Studio_0.2.0_x64-setup.exe`
+
+## Checks
+
+```powershell
+cd desktop
+npm run test
+npm run typecheck
+npm run build
+```
+
+```powershell
+cd desktop\src-tauri
+cargo check
+```
+
+From the repository root, the PDF extraction regression tests can be run with:
+
+```powershell
+cargo test -p runtime reads_pdf
+```
+
+## Runtime Data
+
+ARIS Studio stores configuration and runtime state locally:
+
+```text
+~/.config/aris/config.json
+~/.config/aris/desktop-workspace
+~/.config/aris/desktop-runtime
+```
+
+Each non-default project receives an isolated runtime directory below:
+
+```text
+~/.config/aris/desktop-runtime/projects/<project-id>/
+```
+
+The backend sets the project-specific `ARIS_RUN_STATE_DIR`, `ARIS_SESSIONS_DIR`, `ARIS_AGENT_STORE_DIR`, `ARIS_WORKFLOWS_DIR`, and `ARIS_USER_WORKFLOWS_DIR` environment variables before running desktop agent workflows.

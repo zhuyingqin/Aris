@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { ReactFlowProvider } from "reactflow";
 import WorkflowCanvas from "./WorkflowCanvas";
 import FreeformBoard from "./FreeformBoard";
@@ -23,6 +23,8 @@ export default function Studio() {
   const [info, setInfo] = useState<string | null>(null);
   const [mode, setMode] = useState<"dsl" | "freeform">("dsl");
   const [seedNonce, setSeedNonce] = useState(0);
+  const [pendingAction, setPendingAction] = useState<"plan" | "save" | "start" | null>(null);
+  const pendingActionRef = useRef<typeof pendingAction>(null);
 
   const setTab = useStore((s) => s.setTab);
   const selectRun = useStore((s) => s.selectRun);
@@ -63,6 +65,9 @@ export default function Studio() {
     });
 
   const doPlan = async () => {
+    if (pendingActionRef.current) return;
+    pendingActionRef.current = "plan";
+    setPendingAction("plan");
     setInfo(null);
     try {
       const out = await workflowPlan(script);
@@ -74,21 +79,33 @@ export default function Studio() {
       );
     } catch (err) {
       setError(String(err));
+    } finally {
+      pendingActionRef.current = null;
+      setPendingAction(null);
     }
   };
 
   const doSave = async () => {
+    if (pendingActionRef.current) return;
     const wfName = window.prompt("Save workflow as:", name || "my-workflow");
     if (!wfName) return;
+    pendingActionRef.current = "save";
+    setPendingAction("save");
     try {
       const out = await workflowSave(wfName, script);
       setInfo(out.message ?? `Saved "${wfName}".`);
     } catch (err) {
       setError(String(err));
+    } finally {
+      pendingActionRef.current = null;
+      setPendingAction(null);
     }
   };
 
   const doStart = async () => {
+    if (pendingActionRef.current) return;
+    pendingActionRef.current = "start";
+    setPendingAction("start");
     try {
       const out = await workflowStart({
         script,
@@ -101,6 +118,9 @@ export default function Studio() {
       setTab("monitor");
     } catch (err) {
       setError(String(err));
+    } finally {
+      pendingActionRef.current = null;
+      setPendingAction(null);
     }
   };
 
@@ -146,8 +166,12 @@ export default function Studio() {
         </button>
         <span className="spacer" />
         {info && <span className="hint">{info}</span>}
-        <button onClick={doPlan}>Plan</button>
-        <button onClick={doSave}>Save</button>
+        <button onClick={doPlan} disabled={Boolean(pendingAction) || Boolean(error)}>
+          {pendingAction === "plan" ? "Planning..." : "Plan"}
+        </button>
+        <button onClick={doSave} disabled={Boolean(pendingAction) || Boolean(error)}>
+          {pendingAction === "save" ? "Saving..." : "Save"}
+        </button>
         <input
           style={{ width: 130 }}
           placeholder="run name"
@@ -163,8 +187,8 @@ export default function Studio() {
           <option value="always">always</option>
           <option value="deny">deny</option>
         </select>
-        <button className="primary" onClick={doStart} disabled={!!error}>
-          Start ▶
+        <button className="primary" onClick={doStart} disabled={Boolean(error) || Boolean(pendingAction)}>
+          {pendingAction === "start" ? "Starting..." : "Start"}
         </button>
       </div>
 

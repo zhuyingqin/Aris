@@ -1,10 +1,12 @@
 use std::cmp::Reverse;
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
-use std::io;
+use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
 use std::time::Instant;
 
+use flate2::read::{DeflateDecoder, ZlibDecoder};
 use glob::Pattern;
 use regex::RegexBuilder;
 use serde::{Deserialize, Serialize};
@@ -136,7 +138,20 @@ pub fn read_file(
     limit: Option<usize>,
 ) -> io::Result<ReadFileOutput> {
     let absolute_path = normalize_path(path)?;
-    let content = fs::read_to_string(&absolute_path)?;
+    let content = if is_pdf_path(&absolute_path) {
+        extract_pdf_text(&absolute_path)?
+    } else {
+        fs::read_to_string(&absolute_path)?
+    };
+    Ok(read_text_payload(absolute_path, &content, offset, limit))
+}
+
+fn read_text_payload(
+    absolute_path: PathBuf,
+    content: &str,
+    offset: Option<usize>,
+    limit: Option<usize>,
+) -> ReadFileOutput {
     let lines: Vec<&str> = content.lines().collect();
     let start_index = offset.unwrap_or(0).min(lines.len());
     let end_index = limit.map_or(lines.len(), |limit| {
@@ -144,7 +159,7 @@ pub fn read_file(
     });
     let selected = lines[start_index..end_index].join("\n");
 
-    Ok(ReadFileOutput {
+    ReadFileOutput {
         kind: String::from("text"),
         file: TextFilePayload {
             file_path: absolute_path.to_string_lossy().into_owned(),
@@ -153,7 +168,7 @@ pub fn read_file(
             start_line: start_index.saturating_add(1),
             total_lines: lines.len(),
         },
-    })
+    }
 }
 
 pub fn write_file(path: &str, content: &str) -> io::Result<WriteFileOutput> {
@@ -450,6 +465,810 @@ fn apply_limit<T>(
     )
 }
 
+type PdfUnicodeMap = BTreeMap<Vec<u8>, String>;
+
+#[derive(Debug)]
+struct PdfStream<'a> {
+    dict: &'a [u8],
+    data: &'a [u8],
+}
+
+#[derive(Debug)]
+struct DecodedPdfStream<'a> {
+    dict: &'a [u8],
+    data: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+enum PdfToken {
+    String(Vec<u8>),
+    Array(Vec<PdfToken>),
+    Number(f32),
+    Word(String),
+}
+
+fn is_pdf_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"))
+}
+
+fn extract_pdf_text(path: &Path) -> io::Result<String> {
+    let bytes = fs::read(path)?;
+    if !bytes.starts_with(b"%PDF") {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("`{}` is not a PDF file", path.display()),
+        ));
+    }
+
+    let mut decoded_streams = Vec::new();
+    for stream in pdf_streams(&bytes) {
+        let data = decode_pdf_stream(stream.dict, stream.data);
+        if !data.is_empty() {
+            decoded_streams.push(DecodedPdfStream {
+                dict: stream.dict,
+                data,
+            });
+        }
+    }
+
+    let mut unicode_map = PdfUnicodeMap::new();
+    for stream in &decoded_streams {
+        if looks_like_cmap_stream(&stream.data) {
+            parse_to_unicode_cmap(&stream.data, &mut unicode_map);
+        }
+    }
+
+    let mut extracted = String::new();
+    for stream in &decoded_streams {
+        if looks_like_cmap_stream(&stream.data) || looks_like_image_stream(stream.dict) {
+            continue;
+        }
+        if !looks_like_page_content_stream(&stream.data) {
+            continue;
+        }
+        let text = extract_pdf_content_text(&stream.data, &unicode_map);
+        if !text.trim().is_empty() {
+            if !extracted.trim().is_empty() {
+                extracted.push_str("\n\n");
+            }
+            extracted.push_str(&text);
+        }
+    }
+
+    let normalized = normalize_pdf_text(&extracted);
+    if normalized.trim().is_empty() {
+        Ok(format!(
+            "[PDF text extraction found no readable text in `{}`. The PDF may be scanned/image-only or use an unsupported encoding.]",
+            path.display()
+        ))
+    } else {
+        Ok(normalized)
+    }
+}
+
+fn pdf_streams(bytes: &[u8]) -> Vec<PdfStream<'_>> {
+    let mut streams = Vec::new();
+    let mut cursor = 0;
+    while let Some(relative_stream_pos) = find_subslice(&bytes[cursor..], b"stream") {
+        let stream_pos = cursor + relative_stream_pos;
+        let stream_data_start = skip_stream_newline(bytes, stream_pos + b"stream".len());
+        let Some(relative_end_pos) = find_subslice(&bytes[stream_data_start..], b"endstream")
+        else {
+            break;
+        };
+        let stream_data_end = stream_data_start + relative_end_pos;
+        if stream_data_end < stream_data_start {
+            cursor = stream_pos + b"stream".len();
+            continue;
+        }
+
+        let dict_start = rfind_subslice(&bytes[..stream_pos], b"<<").unwrap_or(stream_pos);
+        streams.push(PdfStream {
+            dict: &bytes[dict_start..stream_pos],
+            data: &bytes[stream_data_start..stream_data_end],
+        });
+        cursor = stream_data_end + b"endstream".len();
+    }
+    streams
+}
+
+fn skip_stream_newline(bytes: &[u8], index: usize) -> usize {
+    if bytes.get(index) == Some(&b'\r') && bytes.get(index + 1) == Some(&b'\n') {
+        index + 2
+    } else if matches!(bytes.get(index), Some(b'\n' | b'\r')) {
+        index + 1
+    } else {
+        index
+    }
+}
+
+fn decode_pdf_stream(dict: &[u8], data: &[u8]) -> Vec<u8> {
+    if ascii_contains(dict, b"/FlateDecode") || ascii_contains(dict, b"/Fl") {
+        if let Some(decoded) = inflate_pdf_stream(data) {
+            return decoded;
+        }
+    }
+    trim_pdf_stream_data(data).to_vec()
+}
+
+fn inflate_pdf_stream(data: &[u8]) -> Option<Vec<u8>> {
+    for candidate in [data, trim_pdf_stream_data(data)] {
+        if let Some(decoded) = decode_zlib(candidate) {
+            return Some(decoded);
+        }
+        if let Some(decoded) = decode_deflate(candidate) {
+            return Some(decoded);
+        }
+    }
+    None
+}
+
+fn decode_zlib(data: &[u8]) -> Option<Vec<u8>> {
+    let mut decoder = ZlibDecoder::new(data);
+    let mut out = Vec::new();
+    decoder.read_to_end(&mut out).ok()?;
+    Some(out)
+}
+
+fn decode_deflate(data: &[u8]) -> Option<Vec<u8>> {
+    let mut decoder = DeflateDecoder::new(data);
+    let mut out = Vec::new();
+    decoder.read_to_end(&mut out).ok()?;
+    Some(out)
+}
+
+fn trim_pdf_stream_data(data: &[u8]) -> &[u8] {
+    let mut end = data.len();
+    while end > 0 && matches!(data[end - 1], b'\n' | b'\r' | b'\t' | b' ') {
+        end -= 1;
+    }
+    &data[..end]
+}
+
+fn looks_like_cmap_stream(data: &[u8]) -> bool {
+    ascii_contains(data, b"begincmap")
+        || ascii_contains(data, b"beginbfchar")
+        || ascii_contains(data, b"beginbfrange")
+}
+
+fn looks_like_image_stream(dict: &[u8]) -> bool {
+    ascii_contains(dict, b"/Subtype") && ascii_contains(dict, b"/Image")
+}
+
+fn looks_like_page_content_stream(data: &[u8]) -> bool {
+    ascii_contains(data, b"BT")
+        && (ascii_contains(data, b"Tj")
+            || ascii_contains(data, b"TJ")
+            || ascii_contains(data, b" T*")
+            || ascii_contains(data, b" ET"))
+}
+
+fn parse_to_unicode_cmap(data: &[u8], map: &mut PdfUnicodeMap) {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum CMapMode {
+        BfChar,
+        BfRange,
+    }
+
+    let text = String::from_utf8_lossy(data);
+    let mut mode = None;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.contains("beginbfchar") {
+            mode = Some(CMapMode::BfChar);
+            continue;
+        }
+        if trimmed.contains("beginbfrange") {
+            mode = Some(CMapMode::BfRange);
+            continue;
+        }
+        if trimmed.contains("endbfchar") || trimmed.contains("endbfrange") {
+            mode = None;
+            continue;
+        }
+
+        let hex_values = hex_strings_in_line(trimmed);
+        match mode {
+            Some(CMapMode::BfChar) => {
+                for pair in hex_values.chunks(2) {
+                    if pair.len() == 2 {
+                        let source = hex_to_bytes(&pair[0]);
+                        let target = unicode_hex_to_string(&pair[1]);
+                        if !source.is_empty() && !target.is_empty() {
+                            map.insert(source, target);
+                        }
+                    }
+                }
+            }
+            Some(CMapMode::BfRange) => parse_cmap_range(trimmed, &hex_values, map),
+            None => {}
+        }
+    }
+}
+
+fn parse_cmap_range(line: &str, hex_values: &[String], map: &mut PdfUnicodeMap) {
+    if hex_values.len() < 3 {
+        return;
+    }
+    let start = hex_to_bytes(&hex_values[0]);
+    let end = hex_to_bytes(&hex_values[1]);
+    if start.is_empty() || start.len() != end.len() {
+        return;
+    }
+    let Some(start_value) = big_endian_bytes_to_u32(&start) else {
+        return;
+    };
+    let Some(end_value) = big_endian_bytes_to_u32(&end) else {
+        return;
+    };
+    if end_value < start_value {
+        return;
+    }
+
+    let span = end_value - start_value;
+    if line.contains('[') {
+        for (offset, target_hex) in hex_values.iter().skip(2).enumerate() {
+            let source_value =
+                start_value.saturating_add(u32::try_from(offset).unwrap_or(u32::MAX));
+            if source_value > end_value {
+                break;
+            }
+            let source = u32_to_big_endian_bytes(source_value, start.len());
+            let target = unicode_hex_to_string(target_hex);
+            if !target.is_empty() {
+                map.insert(source, target);
+            }
+        }
+        return;
+    }
+
+    let target = hex_to_bytes(&hex_values[2]);
+    let Some(target_value) = big_endian_bytes_to_u32(&target) else {
+        return;
+    };
+    for offset in 0..=span {
+        let source = u32_to_big_endian_bytes(start_value + offset, start.len());
+        let target_bytes = u32_to_big_endian_bytes(target_value + offset, target.len());
+        let target_text = decode_utf16be_units(&target_bytes);
+        if !target_text.is_empty() {
+            map.insert(source, target_text);
+        }
+    }
+}
+
+fn extract_pdf_content_text(data: &[u8], unicode_map: &PdfUnicodeMap) -> String {
+    let mut index = 0;
+    let mut stack = Vec::new();
+    let mut output = String::new();
+
+    while let Some(token) = next_pdf_token(data, &mut index) {
+        match token {
+            PdfToken::Word(word) => {
+                if handle_pdf_text_operator(&word, &stack, unicode_map, &mut output) {
+                    stack.clear();
+                } else if looks_like_pdf_operator(&word) {
+                    stack.clear();
+                } else {
+                    stack.push(PdfToken::Word(word));
+                }
+            }
+            other => {
+                stack.push(other);
+                if stack.len() > 64 {
+                    stack.remove(0);
+                }
+            }
+        }
+    }
+
+    normalize_pdf_text(&output)
+}
+
+fn handle_pdf_text_operator(
+    operator: &str,
+    stack: &[PdfToken],
+    unicode_map: &PdfUnicodeMap,
+    output: &mut String,
+) -> bool {
+    match operator {
+        "BT" => true,
+        "ET" | "T*" | "Td" | "TD" => {
+            push_pdf_line_break(output);
+            true
+        }
+        "Tj" => {
+            if let Some(token) = stack
+                .iter()
+                .rev()
+                .find(|token| matches!(token, PdfToken::String(_)))
+            {
+                push_pdf_text(output, &decode_pdf_text_token(token, unicode_map));
+            }
+            true
+        }
+        "TJ" => {
+            if let Some(PdfToken::Array(items)) = stack
+                .iter()
+                .rev()
+                .find(|token| matches!(token, PdfToken::Array(_)))
+            {
+                push_pdf_text(output, &decode_pdf_text_array(items, unicode_map));
+            }
+            true
+        }
+        "'" | "\"" => {
+            push_pdf_line_break(output);
+            if let Some(token) = stack
+                .iter()
+                .rev()
+                .find(|token| matches!(token, PdfToken::String(_)))
+            {
+                push_pdf_text(output, &decode_pdf_text_token(token, unicode_map));
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+fn next_pdf_token(data: &[u8], index: &mut usize) -> Option<PdfToken> {
+    skip_pdf_whitespace_and_comments(data, index);
+    let current = *data.get(*index)?;
+    match current {
+        b'(' => Some(PdfToken::String(parse_pdf_literal_string(data, index))),
+        b'<' if data.get(*index + 1) != Some(&b'<') => {
+            Some(PdfToken::String(parse_pdf_hex_string(data, index)))
+        }
+        b'[' => Some(PdfToken::Array(parse_pdf_array(data, index))),
+        b']' => {
+            *index += 1;
+            Some(PdfToken::Word(String::from("]")))
+        }
+        b'<' | b'>' => {
+            let end = (*index + 2).min(data.len());
+            let word = String::from_utf8_lossy(&data[*index..end]).into_owned();
+            *index = end;
+            Some(PdfToken::Word(word))
+        }
+        _ => Some(parse_pdf_word(data, index)),
+    }
+}
+
+fn parse_pdf_array(data: &[u8], index: &mut usize) -> Vec<PdfToken> {
+    *index += 1;
+    let mut items = Vec::new();
+    loop {
+        skip_pdf_whitespace_and_comments(data, index);
+        match data.get(*index) {
+            Some(b']') => {
+                *index += 1;
+                break;
+            }
+            Some(_) => {
+                if let Some(token) = next_pdf_token(data, index) {
+                    items.push(token);
+                } else {
+                    break;
+                }
+            }
+            None => break,
+        }
+    }
+    items
+}
+
+fn parse_pdf_literal_string(data: &[u8], index: &mut usize) -> Vec<u8> {
+    *index += 1;
+    let mut depth = 1usize;
+    let mut out = Vec::new();
+    while *index < data.len() && depth > 0 {
+        let byte = data[*index];
+        *index += 1;
+        match byte {
+            b'\\' => parse_pdf_escape(data, index, &mut out),
+            b'(' => {
+                depth += 1;
+                out.push(byte);
+            }
+            b')' => {
+                depth = depth.saturating_sub(1);
+                if depth > 0 {
+                    out.push(byte);
+                }
+            }
+            _ => out.push(byte),
+        }
+    }
+    out
+}
+
+fn parse_pdf_escape(data: &[u8], index: &mut usize, out: &mut Vec<u8>) {
+    let Some(&byte) = data.get(*index) else {
+        return;
+    };
+    *index += 1;
+    match byte {
+        b'n' => out.push(b'\n'),
+        b'r' => out.push(b'\r'),
+        b't' => out.push(b'\t'),
+        b'b' => out.push(0x08),
+        b'f' => out.push(0x0C),
+        b'(' | b')' | b'\\' => out.push(byte),
+        b'\r' => {
+            if data.get(*index) == Some(&b'\n') {
+                *index += 1;
+            }
+        }
+        b'\n' => {}
+        b'0'..=b'7' => {
+            let mut value = byte - b'0';
+            for _ in 0..2 {
+                let Some(&next) = data.get(*index) else {
+                    break;
+                };
+                if !(b'0'..=b'7').contains(&next) {
+                    break;
+                }
+                *index += 1;
+                value = value.saturating_mul(8).saturating_add(next - b'0');
+            }
+            out.push(value);
+        }
+        _ => out.push(byte),
+    }
+}
+
+fn parse_pdf_hex_string(data: &[u8], index: &mut usize) -> Vec<u8> {
+    *index += 1;
+    let start = *index;
+    while *index < data.len() && data[*index] != b'>' {
+        *index += 1;
+    }
+    let raw = String::from_utf8_lossy(&data[start..*index]);
+    if data.get(*index) == Some(&b'>') {
+        *index += 1;
+    }
+    hex_to_bytes(&raw)
+}
+
+fn parse_pdf_word(data: &[u8], index: &mut usize) -> PdfToken {
+    let start = *index;
+    while *index < data.len() && !is_pdf_whitespace(data[*index]) && !is_pdf_delimiter(data[*index])
+    {
+        *index += 1;
+    }
+    if *index == start {
+        *index += 1;
+    }
+    let word = String::from_utf8_lossy(&data[start..*index]).into_owned();
+    word.parse::<f32>()
+        .map_or(PdfToken::Word(word), PdfToken::Number)
+}
+
+fn skip_pdf_whitespace_and_comments(data: &[u8], index: &mut usize) {
+    loop {
+        while data
+            .get(*index)
+            .is_some_and(|byte| is_pdf_whitespace(*byte))
+        {
+            *index += 1;
+        }
+        if data.get(*index) == Some(&b'%') {
+            while data
+                .get(*index)
+                .is_some_and(|byte| !matches!(byte, b'\n' | b'\r'))
+            {
+                *index += 1;
+            }
+            continue;
+        }
+        break;
+    }
+}
+
+fn is_pdf_whitespace(byte: u8) -> bool {
+    matches!(byte, b'\0' | b'\t' | b'\n' | b'\x0C' | b'\r' | b' ')
+}
+
+fn is_pdf_delimiter(byte: u8) -> bool {
+    matches!(
+        byte,
+        b'(' | b')' | b'<' | b'>' | b'[' | b']' | b'{' | b'}' | b'%'
+    )
+}
+
+fn looks_like_pdf_operator(word: &str) -> bool {
+    word.chars()
+        .all(|ch| ch.is_ascii_alphabetic() || matches!(ch, '\'' | '"'))
+}
+
+fn decode_pdf_text_array(items: &[PdfToken], unicode_map: &PdfUnicodeMap) -> String {
+    let mut out = String::new();
+    for item in items {
+        match item {
+            PdfToken::String(_) => {
+                push_pdf_text(&mut out, &decode_pdf_text_token(item, unicode_map))
+            }
+            PdfToken::Number(value) if *value < -120.0 => push_pdf_text(&mut out, " "),
+            _ => {}
+        }
+    }
+    out
+}
+
+fn decode_pdf_text_token(token: &PdfToken, unicode_map: &PdfUnicodeMap) -> String {
+    match token {
+        PdfToken::String(bytes) => decode_pdf_text_bytes(bytes, unicode_map),
+        _ => String::new(),
+    }
+}
+
+fn decode_pdf_text_bytes(bytes: &[u8], unicode_map: &PdfUnicodeMap) -> String {
+    if bytes.is_empty() {
+        return String::new();
+    }
+    if let Some(decoded) = decode_utf16_with_bom(bytes) {
+        return decoded;
+    }
+    if let Some(decoded) = decode_bytes_with_cmap(bytes, unicode_map) {
+        return decoded;
+    }
+    if looks_like_utf16be(bytes) {
+        return decode_utf16be_units(bytes);
+    }
+    bytes
+        .iter()
+        .filter_map(|byte| pdf_doc_byte(*byte))
+        .collect()
+}
+
+fn decode_bytes_with_cmap(bytes: &[u8], unicode_map: &PdfUnicodeMap) -> Option<String> {
+    let max_key_len = unicode_map.keys().map(Vec::len).max()?;
+    let mut index = 0;
+    let mut hits = 0usize;
+    let mut out = String::new();
+    while index < bytes.len() {
+        let mut matched = false;
+        for len in (1..=max_key_len).rev() {
+            if index + len > bytes.len() {
+                continue;
+            }
+            if let Some(value) = unicode_map.get(&bytes[index..index + len]) {
+                out.push_str(value);
+                index += len;
+                hits += 1;
+                matched = true;
+                break;
+            }
+        }
+        if !matched {
+            if let Some(ch) = pdf_doc_byte(bytes[index]) {
+                out.push(ch);
+            }
+            index += 1;
+        }
+    }
+    (hits > 0).then_some(out)
+}
+
+fn decode_utf16_with_bom(bytes: &[u8]) -> Option<String> {
+    if bytes.starts_with(&[0xFE, 0xFF]) {
+        return Some(decode_utf16be_units(&bytes[2..]));
+    }
+    if bytes.starts_with(&[0xFF, 0xFE]) {
+        let units = bytes[2..]
+            .chunks_exact(2)
+            .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]));
+        return Some(decode_utf16_units(units));
+    }
+    None
+}
+
+fn looks_like_utf16be(bytes: &[u8]) -> bool {
+    bytes.len() >= 4
+        && bytes.len() % 2 == 0
+        && bytes
+            .chunks_exact(2)
+            .filter(|chunk| chunk[0] == 0 && chunk[1].is_ascii())
+            .count()
+            >= bytes.len() / 6
+}
+
+fn decode_utf16be_units(bytes: &[u8]) -> String {
+    let units = bytes
+        .chunks_exact(2)
+        .map(|chunk| u16::from_be_bytes([chunk[0], chunk[1]]));
+    decode_utf16_units(units)
+}
+
+fn decode_utf16_units(units: impl Iterator<Item = u16>) -> String {
+    std::char::decode_utf16(units)
+        .map(|result| result.unwrap_or(char::REPLACEMENT_CHARACTER))
+        .collect()
+}
+
+fn pdf_doc_byte(byte: u8) -> Option<char> {
+    fn cp(value: u32) -> Option<char> {
+        char::from_u32(value)
+    }
+
+    match byte {
+        0x00 => None,
+        b'\n' | b'\r' | b'\t' => Some(' '),
+        0x20..=0x7E => Some(char::from(byte)),
+        0x80 => cp(0x20AC),
+        0x82 => cp(0x201A),
+        0x83 => cp(0x0192),
+        0x84 => cp(0x201E),
+        0x85 => cp(0x2026),
+        0x86 => cp(0x2020),
+        0x87 => cp(0x2021),
+        0x88 => cp(0x02C6),
+        0x89 => cp(0x2030),
+        0x8A => cp(0x0160),
+        0x8B => cp(0x2039),
+        0x8C => cp(0x0152),
+        0x8E => cp(0x017D),
+        0x91 => cp(0x2018),
+        0x92 => cp(0x2019),
+        0x93 => cp(0x201C),
+        0x94 => cp(0x201D),
+        0x95 => cp(0x2022),
+        0x96 => cp(0x2013),
+        0x97 => cp(0x2014),
+        0x98 => cp(0x02DC),
+        0x99 => cp(0x2122),
+        0x9A => cp(0x0161),
+        0x9B => cp(0x203A),
+        0x9C => cp(0x0153),
+        0x9E => cp(0x017E),
+        0x9F => cp(0x0178),
+        0xA0 => Some(' '),
+        0xA1..=0xFF => char::from_u32(u32::from(byte)),
+        _ => None,
+    }
+}
+
+fn push_pdf_text(output: &mut String, text: &str) {
+    if text.is_empty() {
+        return;
+    }
+    output.push_str(text);
+}
+
+fn push_pdf_line_break(output: &mut String) {
+    if !output.ends_with('\n') {
+        output.push('\n');
+    }
+}
+
+fn normalize_pdf_text(input: &str) -> String {
+    input
+        .lines()
+        .map(collapse_inline_whitespace)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn collapse_inline_whitespace(line: &str) -> String {
+    let mut out = String::new();
+    let mut previous_was_space = false;
+    for ch in line.chars() {
+        if ch.is_whitespace() {
+            if !previous_was_space && !out.is_empty() {
+                out.push(' ');
+                previous_was_space = true;
+            }
+        } else {
+            out.push(ch);
+            previous_was_space = false;
+        }
+    }
+    out.trim().to_string()
+}
+
+fn hex_strings_in_line(line: &str) -> Vec<String> {
+    let bytes = line.as_bytes();
+    let mut index = 0;
+    let mut values = Vec::new();
+    while index < bytes.len() {
+        if bytes[index] == b'<' && bytes.get(index + 1) != Some(&b'<') {
+            let start = index + 1;
+            index = start;
+            while index < bytes.len() && bytes[index] != b'>' {
+                index += 1;
+            }
+            if index < bytes.len() {
+                values.push(line[start..index].to_string());
+            }
+        }
+        index += 1;
+    }
+    values
+}
+
+fn hex_to_bytes(raw: &str) -> Vec<u8> {
+    let mut digits = raw
+        .bytes()
+        .filter(|byte| byte.is_ascii_hexdigit())
+        .collect::<Vec<_>>();
+    if digits.len() % 2 == 1 {
+        digits.push(b'0');
+    }
+    digits
+        .chunks(2)
+        .filter_map(|pair| {
+            let hi = hex_nibble(pair[0])?;
+            let lo = hex_nibble(pair[1])?;
+            Some((hi << 4) | lo)
+        })
+        .collect()
+}
+
+fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn unicode_hex_to_string(raw: &str) -> String {
+    let bytes = hex_to_bytes(raw);
+    if bytes.len() >= 2 && bytes.len() % 2 == 0 {
+        decode_utf16be_units(&bytes)
+    } else {
+        bytes
+            .iter()
+            .filter_map(|byte| pdf_doc_byte(*byte))
+            .collect()
+    }
+}
+
+fn big_endian_bytes_to_u32(bytes: &[u8]) -> Option<u32> {
+    if bytes.len() > 4 {
+        return None;
+    }
+    let mut value = 0u32;
+    for byte in bytes {
+        value = (value << 8) | u32::from(*byte);
+    }
+    Some(value)
+}
+
+fn u32_to_big_endian_bytes(value: u32, len: usize) -> Vec<u8> {
+    (0..len)
+        .rev()
+        .map(|shift| ((value >> (shift * 8)) & 0xFF) as u8)
+        .collect()
+}
+
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() {
+        return Some(0);
+    }
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+fn rfind_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() {
+        return Some(haystack.len());
+    }
+    haystack
+        .windows(needle.len())
+        .rposition(|window| window == needle)
+}
+
+fn ascii_contains(haystack: &[u8], needle: &[u8]) -> bool {
+    find_subslice(haystack, needle).is_some()
+}
+
 fn make_patch(original: &str, updated: &str) -> Vec<StructuredPatchHunk> {
     let mut lines = Vec::new();
     for line in original.lines() {
@@ -576,8 +1395,11 @@ fn lexically_normalize(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use std::ffi::{OsStr, OsString};
+    use std::io::Write;
     use std::path::Path;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    use flate2::{write::ZlibEncoder, Compression};
 
     use super::{edit_file, glob_search, grep_search, read_file, write_file, GrepSearchInput};
 
@@ -618,6 +1440,31 @@ mod tests {
         std::env::temp_dir().join(format!("clawd-native-{name}-{unique}"))
     }
 
+    fn zlib_bytes(data: &[u8]) -> Vec<u8> {
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(data).expect("write compressed stream");
+        encoder.finish().expect("finish compressed stream")
+    }
+
+    fn pdf_with_streams(streams: &[(&str, Vec<u8>)]) -> Vec<u8> {
+        let mut pdf = b"%PDF-1.4\n".to_vec();
+        for (index, (dict_extra, data)) in streams.iter().enumerate() {
+            pdf.extend_from_slice(
+                format!(
+                    "{} 0 obj\n<< /Length {}{} >>\nstream\n",
+                    index + 1,
+                    data.len(),
+                    dict_extra
+                )
+                .as_bytes(),
+            );
+            pdf.extend_from_slice(data);
+            pdf.extend_from_slice(b"\nendstream\nendobj\n");
+        }
+        pdf.extend_from_slice(b"%%EOF\n");
+        pdf
+    }
+
     #[test]
     fn reads_and_writes_files() {
         let _lock = crate::test_env_lock();
@@ -630,6 +1477,51 @@ mod tests {
         let read_output = read_file(path.to_string_lossy().as_ref(), Some(1), Some(1))
             .expect("read should succeed");
         assert_eq!(read_output.file.content, "two");
+    }
+
+    #[test]
+    fn reads_pdf_text_from_flate_stream() {
+        let _lock = crate::test_env_lock();
+        let _env = EnvGuard::unset("ARIS_WORKSPACE_ROOT");
+        let path = temp_path("paper").with_extension("pdf");
+        let content_stream = b"BT /F1 12 Tf 72 720 Td (Hello PDF) Tj T* (Second line) Tj ET";
+        let pdf = pdf_with_streams(&[(" /Filter /FlateDecode", zlib_bytes(content_stream))]);
+        std::fs::write(&path, pdf).expect("pdf should be written");
+
+        let output = read_file(path.to_string_lossy().as_ref(), None, None)
+            .expect("pdf read should succeed");
+
+        assert_eq!(output.file.content, "Hello PDF\nSecond line");
+    }
+
+    #[test]
+    fn reads_pdf_text_with_to_unicode_cmap() {
+        let _lock = crate::test_env_lock();
+        let _env = EnvGuard::unset("ARIS_WORKSPACE_ROOT");
+        let path = temp_path("unicode-paper").with_extension("pdf");
+        let cmap = br#"
+/CIDInit /ProcSet findresource begin
+12 dict begin
+begincmap
+1 beginbfchar
+<0001> <0041>
+<0002> <0042>
+<0003> <0020>
+<0004> <03A9>
+endbfchar
+endcmap
+CMapName currentdict /CMap defineresource pop
+end
+end
+"#;
+        let content_stream = b"BT /F1 12 Tf 72 720 Td <0001000200030004> Tj ET";
+        let pdf = pdf_with_streams(&[("", cmap.to_vec()), ("", content_stream.to_vec())]);
+        std::fs::write(&path, pdf).expect("pdf should be written");
+
+        let output = read_file(path.to_string_lossy().as_ref(), None, None)
+            .expect("pdf read should succeed");
+
+        assert_eq!(output.file.content, "AB \u{03A9}");
     }
 
     #[test]

@@ -1,7 +1,6 @@
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use crate::config::{ConfigError, ConfigLoader, RuntimeConfig};
 
@@ -234,7 +233,7 @@ fn push_context_file(files: &mut Vec<ContextFile>, path: PathBuf) -> std::io::Re
 }
 
 fn read_git_status(cwd: &Path) -> Option<String> {
-    let output = Command::new("git")
+    let output = crate::hidden_command("git")
         .args(["--no-optional-locks", "status", "--short", "--branch"])
         .current_dir(cwd)
         .output()
@@ -272,7 +271,7 @@ fn read_git_diff(cwd: &Path) -> Option<String> {
 }
 
 fn read_git_output(cwd: &Path, args: &[&str]) -> Option<String> {
-    let output = Command::new("git")
+    let output = crate::hidden_command("git")
         .args(args)
         .current_dir(cwd)
         .output()

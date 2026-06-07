@@ -1,9 +1,11 @@
+import { useEffect, useState } from "react";
 import ReactFlow, {
   Background,
   Controls,
   MiniMap,
   type Edge,
   type Node,
+  type ReactFlowInstance,
 } from "reactflow";
 import { nodeTypes } from "./nodes";
 import type { FlowEdge, FlowNode, FlowNodeData } from "./dsl";
@@ -21,6 +23,7 @@ export default function WorkflowCanvas({
   selectedIndex,
   onSelect,
 }: Props) {
+  const [flowInstance, setFlowInstance] = useState<ReactFlowInstance | null>(null);
   const rfNodes: Node<FlowNodeData>[] = nodes.map((n) => ({
     ...n,
     selected:
@@ -33,14 +36,25 @@ export default function WorkflowCanvas({
     source: e.source,
     target: e.target,
   }));
+  const graphSignature = `${nodes.map((node) => node.id).join("|")}:${edges.map((edge) => edge.id).join("|")}`;
+
+  useEffect(() => {
+    if (!flowInstance) return;
+    const frame = window.requestAnimationFrame(() => {
+      void flowInstance.fitView({ padding: 0.2, duration: 180 });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [flowInstance, graphSignature]);
 
   return (
     <ReactFlow
       nodes={rfNodes}
       edges={rfEdges}
       nodeTypes={nodeTypes}
+      onInit={setFlowInstance}
       onNodeClick={(_, node) => onSelect(node.data.statementIndex)}
       nodesConnectable={false}
+      nodesDraggable={false}
       fitView
       minZoom={0.2}
     >

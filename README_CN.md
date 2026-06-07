@@ -1,4 +1,4 @@
-# 🌙 ARIS-Code — Auto Research in Sleep
+# 🌙 ARIS Studio — Auto Research in Sleep
 
 ```
     ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
@@ -11,351 +11,240 @@
     ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
          🟦 [Claude]    🟩 [GPT 🕶️]
          executor  ←→  reviewer
-         让 AI 边睡边帮你做研究
+         Studio 桌面端 · 让 AI 边睡边帮你做研究
 ```
 
-![ARIS-Code Screenshot](docs/screenshot.png)
+![ARIS Studio 截图](docs/screenshot.png)
 
-> **对抗·多智能体研究自动化 CLI**
-> Executor 执行 · Reviewer 审查 · 迭代精进
+> **ARIS 的桌面应用** —— Executor 执行 · Reviewer 审查 · 迭代精进。
 
-[![GitHub Release](https://img.shields.io/github/v/release/wanshuiyin/Auto-claude-code-research-in-sleep?style=flat-square)](https://github.com/wanshuiyin/Auto-claude-code-research-in-sleep/releases)
-[![Platform](https://img.shields.io/badge/platform-macOS%20|%20Linux%20|%20Windows-black?style=flat-square)](https://github.com/wanshuiyin/Auto-claude-code-research-in-sleep)
+[![Version](https://img.shields.io/badge/version-0.2.0-blue?style=flat-square)](https://github.com/zhuyingqin/Aris/releases)
+[![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D6?style=flat-square&logo=windows)](https://github.com/zhuyingqin/Aris)
+[![Built with Tauri](https://img.shields.io/badge/built%20with-Tauri%202-FFC131?style=flat-square&logo=tauri)](https://tauri.app)
+[![UI](https://img.shields.io/badge/UI-React%20%2B%20Vite-61DAFB?style=flat-square&logo=react)](https://react.dev)
 [![License](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
+
+[English](README.md) · **中文**
 
 
 ## 📰 最新动态
 
-> **v0.4.15** (2026-05-29) — **OpenAI-兼容流式健壮性** hotfix。关闭 [#249](https://github.com/wanshuiyin/Auto-claude-code-research-in-sleep/issues/249)：MiniMax（及其他 OpenAI-compatible provider / 代理）实际不可用,因为 clean-EOF 完成判定把 `data: [DONE]` 哨兵当成**唯一**权威完成信号。**🔴 #249**：非空 `choices[].finish_reason` 才是 Chat Completions spec 定义的终止帧标志,`[DONE]` 只是部分 compat provider 不发的 transport 约定（MiniMax 发 `finish_reason: "stop"` 然后直接关连接、不发 `[DONE]`）。clean-EOF 判定现在抽成可单测的纯函数 `stream_eof_action(...)`,见到 `[DONE]` **或** 非空 `finish_reason` 任一即算完成;**不**在 finish_reason 处提前停读（include_usage 模式下尾随的 usage-only chunk 仍被消费,/cost 不受影响）;真截断仍硬报错,出输出前的 proxy abort 仍走重试。**OE7**：finish_reason 移到 `delta` guard 之前读,只带 finish_reason 无 delta 的终止 choice 也能识别。**OE2**：任何非空 finish_reason（`length`/`content_filter`/`max_output`/`sensitive`）都 flush pending tool,保留 in-stream 顺序 + 逐 tool 渲染。**OE4**：mid-stream error 信封（顶层非 null `error`、无 `choices`）现在硬报错,不再被 choices guard 静默吞（闭合"finish_reason 后又来 error chunk 被误判成功"的 regression 窗口）。**OE3**：SSE `data:` 解析容忍冒号后无空格（`data:{...}`,W3C 合法,部分 compat provider 这么发）。+5 单测（77→82）把此前零覆盖的 SSE 完成逻辑抽成纯函数。Anthropic SSE 路径未动。Codex MCP（gpt-5.5 xhigh）3 轮 review（GO-WITH-NITS → GO-WITH-NITS → **GO**）;推 v0.4.16：CL2（Anthropic stop_reason 对称）、OE6/OE5/OE8、ProviderFamily (P7) + Subagent parity (P8)。
+> **v0.2.0** (2026-06) —— 多项目工作区（各自独立的 sessions、runs、agents、workflows）、可读取的 PDF 附件用于
+> 自动 Review、Chat 中的 reasoning/"thinking" 内容、带 in-chat `/model` 切换的命令中心，以及一系列加固
+> （`LlmReview` 走 Settings 配置的 reviewer、支持 Anthropic 兼容 endpoint、Windows 子进程不再弹控制台）。
 
-> **v0.4.14** (2026-05-25) — **安全 + 文档卫生 release**，关闭 v0.4.13 codex audit（gpt-5.5 xhigh，6/10 NEEDS-REWORK）最关键的几项。**🔴 S9 (P0)：system prompt 配置脱敏** — v0.4.14 之前 `render_config_section()` 把合并后的 `settings.json` 原样塞进发给 LLM provider 的 system prompt，会泄漏 `env` 映射、`mcpServers.<name>.headers.Authorization` Bearer token、hook command env、签名 URL 的 query 参数、`apiKey` 等字段。新渲染器：白名单顶层字段（`model`/`permissionMode`/`theme`/`outputStyle`/`permissions`/`sandbox`，子树仍走递归 redact）原样输出；敏感 key（`apikey`/`token`/`secret`/`password`/`authorization`/`headers`/`env`/`_KEY`/`_SECRET`/`_TOKEN`）递归替换成 `[REDACTED]`；`mcpServers.<name>.command` 替换成 `<configured>` / `<empty>` / `<unrecognized shape>` 占位符；`mcpServers.<name>.url` 仅保留 `<scheme://host[:port]>` origin（scheme 仅允许 `http`/`https`/`ws`/`wss`，host 仅 ASCII，port 仅数字，IPv6 走 `[...]`）；hook command 字符串完全不输出，只显示 event + hook 计数。Regression test 覆盖 9 处 leak 面。**🟡 P9 (P1)：DeepSeek help 行** — `aris --help` 现在指向 `aris setup` option 7（真正的 `anthropic-compat` 菜单项），不再印那条 resolver 根本不认的 `EXECUTOR_PROVIDER=anthropic-compat` env-var 路径。**🟡 M1/M2 (P1) 文档**：`aris doctor` 在 `mcpServers.len() > 0` 时打黄色实验性 warning，因为 `McpServerManager` 还没接入 `CliToolExecutor` 工具分发（v0.4.16 落地）；README + README_CN 加同样 callout。**🟢 C11 (P2) 流式 idle timeout** — Anthropic `MessageStream` 和 OpenAI SSE loop 都在 `response.chunk().await` 外面包 `tokio::time::timeout`（`ARIS_STREAM_IDLE_TIMEOUT_SECS`，默认 120，clamp `[10, 1800]`，设 0 / 负数关闭）；超时走和 mid-body abort 同一条 retry 路径。关闭"aris 永远卡死无输出"症状（上游 HTTPS proxy 不发 keepalive 时）。**🟢 H11 (P2)**：`tools/sync_main_skills.sh` 版本提示从 v0.4.11 升到 v0.4.13。Codex MCP（gpt-5.5 xhigh）4 轮 review（NO-GO + 4 finding → GO-WITH-NITS + 3 → NO-GO + 1 port smuggling → **GO**）。
+> **v0.1.1** (2026-05) —— Chat UI 大改：会话历史、markdown 渲染、`@` 文件提及、有序的流式工具输出。
 
-> **v0.4.13** (2026-05-25) — **收尾 release**，关闭从 v0.4.10 到 v0.4.12 累积的所有 codex audit P1 + 补长尾 regression test。**🟡 v0.4.10 P1.D per-server MCP timeout** — `mcpServers.<name>.requestTimeoutSecs` override > `MCP_REQUEST_TIMEOUT_SECS` env > 300s default（clamp 1..=1800），让 codex MCP 可以 5 分钟而 fs MCP 5 秒 timeout 共存。**🟡 v0.4.10 known limitation 关闭** — `McpStdioProcess::request()` 跳过 JSON-RPC notification (id 缺失/null) 继续读直到 response，`notifications/log` / `notifications/progress` 不再杀连接。**🟢 meta_opt hook 通过 `aris init` 部署** — `tools/meta_opt/{log_event,check_ready}.sh` 嵌入 binary，`aris init` 写 ARIS-namespaced **`aris-meta-opt-log-event.sh`** / **`aris-meta-opt-check-ready.sh`** 到 `~/.claude/hooks/`（codex round-1 #1：永远不覆盖用户已有的同名 hook）；settings.json 合并 idempotent + backup 强保证 + tempfile + rename 原子写。**🧪 9 个 v0.4.12 targeted regression test** 覆盖 sandbox.strictMode (3) + parse strictMode + provider_match pricing + has_word o-series + stream_options 400 + meaningful-content classification + premature-EOF retry truth table（codex round-1 #3 — `should_retry_on_premature_eof()` 提成纯函数，7 行真值表测试）。**📦 Bundle**：76 skills，**54 helpers**（之前 52；+2 meta_opt 脚本）。**📦 main 分支 Gemini 源头修复** (`fedf361`)：`gemini-search` / `research-lit` 的 `auto-gemini-3` alias 现在在 main，下次 sync 不再 drift。Codex MCP（gpt-5.5 xhigh）3 轮 review（NO-GO + 3 个 hook/atomic/test finding → NO-GO + release metadata 没 bump → GO）。
+> **v0.1.0** (2026-05) —— 首个桌面应用：内置 Chat、带连通性检查的 Settings、skills 浏览器、持久化 Sessions、首版 Workflow Studio + 运行监控、NSIS 打包。
 
-> **v0.4.12** (2026-05-22) — **Bug-fix + 小功能 release**。**🚨 #238 `sandbox.strictMode` 配置** — `SandboxConfig` 加 `strict_mode: Option<bool>`（`settings.json` 里读 `sandbox.strictMode`）；为 `true` 时 **所有** LLM tool-call override 都被忽略，关掉 `dangerouslyDisableSandbox: true` 静默绕过用户严格 sandbox 配置的漏洞。`aris doctor` 显示当前生效 sandbox 状态；bash tool schema 文档化 strict-mode 行为。**#232 DeepSeek 弃用同步** — `auto-review-loop-llm` SKILL.md + setup UI 从老的 `deepseek-chat` / `deepseek-reasoner` 改成 `deepseek-v4-flash` / `deepseek-v4-pro`（老 alias 2026-07-24 弃用；reasoner 模型 reject `tool_choice`）。**v0.4.10 codex audit 4 个 P1 follow-up**：P1.A Anthropic 流式 retry 改成基于 `has_emitted_meaningful_content`（不是裸 `events_emitted`），只发了 `MessageStart` 就 EOF 也可 retry；P1.B `supports_reasoning_effort` 用 word-boundary 匹配让 `openai/o3-mini` / `proxy:o4` provider-prefixed 名字也走 reasoning-effort 路径（reviewer 镜像 `tools/lib.rs` 同步改）；P1.C `stream_options.include_usage` proxy fallback —— 真的 400 报 `stream_options` 是 unknown field 时 retry 一次去掉这个字段；P2 pricing 用新 `provider_match` helper 让 `qwen3.6-plus` / `kimi-k2.5` / `glm-4-plus` 走对 tier，同时拒绝 `my-kimi-clone` 这种 mid-word 误判。**Skills 追新**：嵌入 `/interview-cheatsheet` + `/render-html`（共 76 skills，52 helpers；`build.rs` `ALLOWED_EXTS` 加 `html` 让 render-html templates 能嵌入）。**v0.4.11 follow-up**：`EXCLUDED_SKILL_PREFIXES` exact list → `starts_with("skills-codex")`；CI workflow `fetch-depth: 0` 让 drift-test ancestor check 真生效。全程 Codex MCP（gpt-5.5 xhigh）4 轮 review（GO-WITH-CAUTION + 8 个 finding → GO-WITH-CAUTION + 3 个精度 finding → NO-GO + 5 个 blocker → 修完 GO）。
-
-> **v0.4.11** (2026-05-18) — **Skills 包刷新 / research workflow 同步 release**。Binary runtime 行为相对 v0.4.10 基本不变；嵌入的 skill 集合追上 `main` 当前状态。**新嵌入 10 个 skill**：`/citation-audit`（第四层文献审计：存在性 + metadata + 引用 context 覆盖）+ `/experiment-queue`（SSH 多 seed 任务队列，含 OOM retry + 残留 screen 清理）+ `/kill-argument`（理论论文双线对抗审）+ `/resubmit-pipeline`（W5：纯文本换会议投稿，含 kill-argument 门）+ `/paper-talk`（端到端 conference talk pipeline）+ `/slides-polish`（逐页 Codex 排版审）+ `/overleaf-sync`（通过 Git bridge 双向同步 Overleaf，token 走 Keychain）+ `/gemini-search` + `/openalex`（更广文献源）+ `/qzcli`（启智平台 GPU 任务管理）。**46 个已有 SKILL.md 刷新** —— 最重要的是 canonical resolver chain 全面铺开（修复真实用户事故：research-wiki 因硬编码 `tools/research_wiki.py` 空了一周）+ submission assurance gate + external verifier 上线（paper-writing Phase 6 现在能跑通）+ proof-checker `--restatement-check` / `--deep-fix` opt-in flag。**Helpers**：tools/ 9 → 18 个；`research_wiki.py` 从 315 行刷到 767 行（含 canonical `ingest_paper` API；否则 SKILL.md 调的 API 在 bundle 里不存在）。**Sync 基础设施**：`tools/sync_main_skills.sh` 自动化 main → bundle rsync（含 symlink 前置检测 + codex-mirror prune + `SKILLS_SOURCE_COMMIT` 钉版本）；3 个新 CI drift test 覆盖全部 4 个 resolver layer pattern。**Gemini MCP** 在 `/research-lit` 改成 `model: 'auto-gemini-3'`。全程 Codex MCP（gpt-5.5 xhigh）4 轮交叉评审。
-
-> **v0.4.10** (2026-05-17) — **流式 + MCP 可靠性 release**。**C6**（关闭 `#228` 那条 "error decoding response body" 中流报错循环）：Anthropic `MessageStream` 和 OpenAI SSE 循环均支持 chunk decode 失败 / 早 EOF 时整段重启请求（`ARIS_STREAM_RETRY`，默认 2，clamp 0..=5，只在尚未输出任何内容时触发，输出不会撕裂）。**M3**（关闭 `#151` / `#172` "Calling codex..." 卡死）：MCP stdio `request()` 加 300s 默认超时同时覆盖 send + read（env `MCP_REQUEST_TIMEOUT_SECS` 覆盖，clamp 1..=1800）；`response.id ↔ request.id` 关联校验；`ensure_server_ready()` 用 `try_wait()` 检测进程死亡并透明 respawn；任何失败路径都 `kill().await` 回收子进程让下次调用从干净状态开始。新增 3 个 MCP regression test。**C8/P4**：OpenAI 流式请求体加 `stream_options.include_usage: true`，解析 `prompt_tokens_details.cached_tokens` → `cache_read_input_tokens`；Anthropic `MessageStart.usage`（含 input + cache 两半）和 `MessageDelta.usage`（含 output）合并，让 post-compaction cache 命中率显示真实数字。**C9** 多 provider 计费：GPT-5.5/5.4/o1/o3/o4（cache_read = input × 0.1，OpenAI 实际 prefix-cache 折扣——此前 generic 50% 高估了 5 倍）、Gemini 2.5/2.0、DeepSeek V3/V4/R1（区分 cache_hit / cache_miss）、GLM、MiniMax、Kimi/Moonshot、MiMo、Qwen、Doubao；`has_word()` 边界匹配让 `openai/o3-mini` / `provider/<model>` 正确路由 tier。**清理**：9 个 dead-code warning 修复，`aris setup` help 文案 + doctor 字符串与实际行为同步，对 v0.4.10 触及的 7 个文件跑 `cargo fmt`。全程 Codex MCP（gpt-5.5 xhigh）交叉评审。
-
-> **v0.4.9** (2026-05-17) — **关闭 Codex v0.4.7 audit 残留 (L1+L3+L4)** + skill-helper 子系统收尾。**L1**：`tools` crate 也切到 `native-tls`，三个 reqwest 消费者 TLS 统一（DashScope 类 endpoint 走 LlmReview reviewer path 也能用了，不只是主 executor）。Linux CI 装 OpenSSL dev headers。**L3**：ApiClient trait 加 `on_session_compacted()`；OpenAI message-index-keyed reasoning_cache 在 auto-compaction 后清空，post-compaction replay 不再 aim 错误 index。**L4**：拆 `supports_reasoning_content_replay` predicate（超集含 Kimi/Moonshot/Xiaomi-MiMo/DeepSeek-R1 — 这些 emit reasoning_content 但不接受 reasoning_effort）+ 32K char 单 turn cap + 128K char 总 cache cap（oldest-eviction）。另：2 个新 skill 嵌入（`/figure-spec` + `/paper-illustration-image2` 含 `scripts/` 子目录，新 resolver Layer 0b = `$ARIS_CACHE_DIR/skills/<name>/scripts/`）；`research_wiki.py` 从 skill-local 提升到 shared `tools/`（9+ 调用方）；5 个 SKILL.md 迁移到 fallback chain（`exa-search`, `semantic-scholar`, `arxiv`, `idea-creator`）；inventory cargo test + smoke shell 脚本防 H6 regression。
-
-> **v0.4.8** (2026-05-17) — **Skill helper 子系统重写** + **两个社区 bug 修复**。Bundled helper 现在 startup 时提取到 `~/.config/aris/cache/<version>/`（而不是 cwd）；每次 Skill 调用都会输出 `helperReport`（含 cache dir + 4 层 resolver preamble）。`/skills export` 一并导出 helper。新 `integration-contract.md` 定义 6 个失败策略（A gate / B side-effect / C forensic / D1 cascade / D2 multi-source / E diagnostic）。8 个 shared helper（arxiv/deepxiv/exa/S2/openalex fetcher + save_trace + verify_papers + verify_paper_audits）嵌入二进制。`/research-lit` + `/deepxiv` SKILL.md 迁移到 fallback chain。修复：(a) `gpt-5.5 + tools` 在 OpenAI 400 错误（gpt-5.5/o3/o4 + tools 时剥离 `reasoning_effort`），(b) Custom reviewer 每次启动变 gpt-5.5（`/setup` 菜单选项 9 vs 8 bug + `LlmReview` 不再为 Custom fallback gpt-5.5）。
-
-> **v0.4.7** (2026-05-16) — **DashScope Coding Plan 405 修复**（#159）通过 `native-tls` 切换 — 贡献者 [@GetIT-Sunday](https://github.com/GetIT-Sunday) (#225) | **所有 reasoning model 的 `reasoning_content` replay**（OpenAI o1/o3/o4、DeepSeek-R1 等），不再只是 Kimi — 配合 v0.4.5 `reasoning_effort='xhigh'` 让多轮 reasoning 对话连贯 — 贡献者 [@GetIT-Sunday](https://github.com/GetIT-Sunday) (#226) | 清理：删除 600+ 行 `rusty-claude-cli` 原型死代码（`app.rs` / `args.rs` / `runtime/sse.rs`）+ 未使用的 `rustyline` 依赖 + 用户面 "Claw Code" → "ARIS-Code" 品牌统一。
-
-> **v0.4.6** (2026-05-14) — **🚨 两个长期静默 bug 修复**：(1) `PermissionMode::Prompt` 因 derived-`Ord` 顺序错误**一直在静默放过所有 tool 调用**（用户选"问我"实际等同直接 allow），现在正确路由到 prompter；(2) system prompt 写死 `current_date = "2026-03-31"`，导致 model 把 2026-03 之后所有真实数据（包括用户自己的 arXiv 论文）都判为"未来 / prompt injection"——现在用 `runtime::today_iso()` 真实系统时间。另外 **Custom OpenAI 兼容 provider**（`/setup` 选项 11，reviewer 选项 9）+ dynamic `/models` 自动发现 — 贡献者 [@Anduin9527](https://github.com/Anduin9527) (#221 + #222)。
-
-> **v0.4.5** (2026-05-13) — **推理模型一等公民支持** — `reasoning_effort='xhigh'` 真正发到请求体（GPT-5.5 / o1 / o3 / o4 / DeepSeek-thinking）| **Thinking content blocks** 全链路打通（修 #161 unknown variant + 400 Bad Request）| **多 tool result 合并** 修复（`tool_use_ids_without_tool_result` 并发 tool 错）| **DeepSeek V4 Pro** + **Xiaomi MiMo** + **Qwen 3.6** + **Doubao** 加入 `/setup`（选项 7-10）| **Claude Code 对象式 hooks** 解析器 | 默认模型升级到 **Claude Opus 4.7 + GPT-5.5** | REPL 输入加固：折行不再无限复制 / Cmd+V 多行粘贴不再每行 auto-submit / CJK 字符在折行边界正确渲染 | 新增 CI workflow | 贡献者: [@GO-player-hhy](https://github.com/GO-player-hhy) (#186), [@Jxy-yxJ](https://github.com/Jxy-yxJ) (#171), [@GetIT-Sunday](https://github.com/GetIT-Sunday) (#216 部分)
-
-> **v0.4.4** (2026-04-20) — **`/setup` 配 Claude 中转站不再强制走 Bearer**(修 ModelScope / newcli.com 等只认 x-api-key 的代理) | `/setup` 加入常用第三方代理 URL 提示(OpenRouter / DeepSeek / DashScope / ModelScope 等) | Provider 切换时清干净残留 state | 自定义 base URL 不再被 `/setup` 二次覆盖 | LlmReview executor 猜错 model 时自动 fallback 到配置的 reviewer | 修复 #158 / #162
-
-> **v0.4.3** (2026-04-17) — **第三方 Anthropic-compat 代理(Bedrock 等)支持** — 跳过代理不认的 beta flag | `anthropic` provider 也正确传播自定义 base URL(之前只有 `anthropic-compat`) | 贡献者 [@screw-44](https://github.com/screw-44)
-
-> **v0.4.2** (2026-04-17) — **Auto-compaction 崩溃修复**(skill 跑完后的空响应问题) | OpenAI-compat executor 下 compaction 摘要不再丢失 | 自定义 executor base URL 启动 setup 后生效 | shell 预设 API key 不再被清掉 | `EXECUTOR_BASE_URL` trim + 空值处理
-
-> **v0.4.1** (2026-04-15) — Reviewer/Executor 自动重试 (429/5xx/网络抖动) | Ctrl+C 后标志污染修复 | 每次 reviewer 请求新 HTTP client(绕过坏连接池) | 详细错误链
->
-> **v0.4.0** (2026-04-15) — **Plan 模式** (`/plan`) | Ctrl+C 协作式中断(不再直接退出) | API 错误不再退出 REPL | 工具输出折叠 | 同步 62 个 skills
->
-> <details><summary>历史版本</summary>
->
-> **v0.3.9** (2026-04-11) — 代理/自定义 base URL | 本地模型 (LM Studio/Ollama) | Research Wiki | 自进化 Meta-Optimize | Session 原子写入 | Bash 安全校验 | Windows (experimental)
->
-> **v0.3.5** (2026-04-08) — Research Wiki | 自进化 Meta-Optimize | Session 原子写入 | Bash 安全校验 | Windows 支持
->
-> **v0.3.3** (2026-04-04) — 修复所有 Claude Code hooks 配置崩溃路径
->
-> **v0.3.0** (2026-04-03) — 多文件记忆索引 | 结构化任务系统 (TodoWrite) | `/plan` | 安全加固
->
-> **v0.2.2** (2026-04-03) — `/plan` 步骤规划 | `/tasks` 持久任务
->
-> **v0.2.1** (2026-04-03) — 持久记忆 | Kimi K2.5 多轮修复 | 中文光标修复
->
-> **v0.2.0** (2026-04-02) — 开源发布 | Kimi + MiniMax + GLM | 智能路由 | CI/CD
->
-> **v0.1.0** (2026-04-02) — 首次发布 | 多执行者/审阅者 | 42 个技能
->
-> </details>
->
-> [完整更新日志 →](CHANGELOG.md)
+> [完整 CLI Changelog →](CHANGELOG.md)
 
 
 ---
 
-## ✨ 简介
+## ✨ ARIS Studio 是什么？
 
-**ARIS-Code**（*Auto Research in Sleep*）是一个面向学术研究者的终端 AI 编程/研究助手。它的核心思想是：
+**ARIS Studio**（*Auto Research in Sleep*）是一个本地桌面工作台，用和 ARIS-Code 相同的对抗式循环跑完整研究流程
+（从找 idea 到论文投稿）：
 
-- 🤖 **Executor**（执行者）：主力 LLM，负责写代码、查文献、写论文、跑实验
-- 🔍 **Reviewer**（审查者）：独立 LLM，通过 `LlmReview` 工具对 Executor 的输出进行对抗性审查
-- 🔄 **迭代精进**：Executor 写 → Reviewer 批 → Executor 修 → 循环直至高质量
+- 🤖 **Executor** —— 主力 LLM：写代码、调研文献、起草论文、规划实验
+- 🔍 **Reviewer** —— 独立 LLM，通过 `LlmReview` 工具批判 executor 的输出
+- 🔄 **迭代** —— 写 → 批 → 改，直到质量收敛
 
-内置 **42 个研究技能**（Skills），覆盖从选题到投稿的完整研究流水线。
+旧的 ARIS CLI 不再是入口；CLI / runtime 相关 crate 现在作为桌面端复用的底层库。
 
 ---
 
 ## 🚀 安装
 
-**macOS (Apple Silicon)**
-```bash
-curl -fsSL https://github.com/wanshuiyin/Auto-claude-code-research-in-sleep/releases/latest/download/aris-code-darwin-arm64.tar.gz | tar xz
-sudo mv aris /usr/local/bin/aris
+ARIS Studio 以 **Windows** 桌面应用形式发布（Tauri 2 + React + Vite），打包为 NSIS 安装包。
+
+**依赖：** Windows 10/11 + WebView2 Runtime · Node.js 18+ · Rust stable（MSVC）· Visual Studio C++ Build Tools
+
+### 从源码运行
+
+```powershell
+git clone https://github.com/zhuyingqin/Aris.git
+cd Aris\desktop
+npm install
+npm run tauri dev
 ```
 
-**macOS (Intel)**
-```bash
-curl -fsSL https://github.com/wanshuiyin/Auto-claude-code-research-in-sleep/releases/latest/download/aris-code-darwin-x64.tar.gz | tar xz
-sudo mv aris /usr/local/bin/aris
+### 构建 Windows 安装包
+
+```powershell
+cd desktop
+npm run tauri build
 ```
 
-**Linux (x64)**
-```bash
-curl -fsSL https://github.com/wanshuiyin/Auto-claude-code-research-in-sleep/releases/latest/download/aris-code-linux-x64.tar.gz | tar xz
-sudo mv aris /usr/local/bin/aris
-```
-
-**Windows (x64)**
-下载 [`aris-code-windows-x64.zip`](https://github.com/wanshuiyin/Auto-claude-code-research-in-sleep/releases/latest/download/aris-code-windows-x64.zip)，解压后在 PowerShell 或 Windows Terminal 中运行 `aris.exe`。
-
-> 运行 `aris` 启动，首次运行会自动触发交互式配置向导。
+产物在 `desktop\src-tauri\target\release\` 下：`aris-desktop.exe` 与 `ARIS Studio_0.2.0_x64-setup.exe`。
 
 ---
 
 ## ⚙️ 首次配置
 
-首次运行 `aris` 会自动触发交互式引导配置：
+首次启动会打开 **Settings**，在这里配置：
 
-```
-🌙 ARIS-Code 首次配置向导
+- **Executor** 与 **Reviewer** —— provider、model、base URL、API key
+- **语言** 与对当前模型配置的 **连通性检查**
 
-[1/3] 选择 Executor 提供商（主力执行 LLM）
-  > Anthropic Claude
-    OpenAI GPT
-    Google Gemini
-    Zhipu GLM
-    MiniMax
-请输入 API Key: sk-...
-
-[2/3] 选择 Reviewer 提供商（对抗审查 LLM）
-  > OpenAI GPT
-    Google Gemini
-    Zhipu GLM
-    MiniMax
-请输入 API Key: sk-...
-
-[3/3] 选择语言偏好
-  > 中文 (CN)
-    English (EN)
-
-✅ 配置已保存至 ~/.config/aris/config.json
-```
-
-配置完成后直接进入 REPL，也可随时在 REPL 中执行 `/setup` 重新配置，无需重启。
+配置保存在本地 `~/.config/aris/config.json`。API key 在 UI 中脱敏 —— Tauri 后端在本地读写，不会把原始密钥返回前端。
 
 ---
 
-## 🤖 支持的模型提供商
+## 🤖 支持的 Provider
 
-| 提供商 | 作为 Executor | 作为 Reviewer | 主要模型 |
-|--------|:------------:|:------------:|---------|
-| 🟣 Anthropic Claude | ✅ | — | claude-opus, claude-sonnet, claude-haiku |
-| 🟢 OpenAI | ✅ | ✅ | gpt-5.4, gpt-5.4-mini, gpt-5.4-nano |
-| 🔵 Google Gemini | ✅ | ✅ | gemini-2.5-pro, gemini-2.5-flash |
-| 🔶 Zhipu GLM | ✅ | ✅ | GLM-5, GLM-5-Turbo |
-| 🔷 MiniMax | ✅ | ✅ | MiniMax-M2.7, MiniMax-M2.7-highspeed |
+| Provider | Executor | Reviewer | 主要模型 |
+|----------|:--------:|:--------:|---------|
+| 🟣 Anthropic Claude | ✅ | — | claude-opus、claude-sonnet、claude-haiku |
+| 🟢 OpenAI | ✅ | ✅ | gpt-5.x、o 系列 |
+| 🔵 Google Gemini | ✅ | ✅ | gemini-2.5-pro、gemini-2.5-flash |
+| 🔶 智谱 GLM | ✅ | ✅ | GLM-5、GLM-5-Turbo |
+| 🔷 MiniMax | ✅ | ✅ | MiniMax-M2.x |
+| ⚙️ OpenAI 兼容 | ✅ | ✅ | 自定义 base URL —— DeepSeek、Kimi、Qwen、LM Studio / Ollama、代理 |
+| ⚙️ Anthropic 兼容 | ✅ | — | 自定义 base URL —— Claude 代理 / 中转站 |
 
-> **设计说明**：Anthropic Claude 仅作 Executor，其他四家可同时作 Executor 和 Reviewer。推荐经典搭配：**Claude Executor + GPT/GLM Reviewer**，构成真正的对抗多智能体。
+> Claude 只能作 executor；其余 provider 既可作 executor 也可作 reviewer。经典搭配是 **Claude executor + GPT/GLM reviewer**。
 
 ---
 
-## 🎯 核心功能
+## 🎯 核心能力
 
-### 1. 🔄 对抗·多智能体架构
+- **💬 桌面 Chat** —— 流式工具调用、有序输出、markdown、会话历史、`@` 文件提及，以及 reasoning/"thinking" 内容；会话按项目持久化。
+- **🔄 对抗式 Review** —— `LlmReview` 走 Settings 中的 reviewer，executor 与 reviewer 可以是不同 provider 的不同模型。
+- **📚 内置 Skills** —— 在 Skills 页浏览，或在 Chat 中通过 slash skill 调用。
+- **🧩 Workflow Studio** —— 在可视化画布上设计智能体团队工作流，底层基于 ARIS DSL。
+- **📊 运行监控** —— 启动 / 暂停 / 恢复 / 取消运行，实时查看 phase、agent、event、task、mailbox。
+- **📎 PDF 附件** —— ARIS 通过 `read_file` 读取文本型 PDF，可直接审本地论文（文本提取，非 OCR）。
+- **🗂️ 多项目** —— 在顶部切换项目，各自独立的 sessions、runs、agents、workflows。
+- **🔒 本地优先** —— 配置与运行数据都留在你的机器上。
+
+对抗式循环一图概括：
 
 ```
-用户输入
+你（在 Chat 中）
     ↓
-[Executor LLM]  ──── 调用工具 ────→  LlmReview Tool
-  写代码/论文                           ↓
-  查文献/分析                      [Reviewer LLM]
-    ↑                               独立审查
-    └──────── 审查意见 ──────────────┘
-                  迭代直至质量达标
+[Executor LLM]  ──── 调用 ────→  LlmReview 工具
+  写 / 写代码                        ↓
+  调研 / 分析                  [Reviewer LLM]
+    ↑                           独立批判
+    └──────── review 反馈 ──────┘
+              迭代到质量达标
 ```
 
-**直接调用 LlmReview 示例**：
+常用 slash-skill（完整列表见 **Skills** 页）：
 
 ```
-❯ 帮我 review 一下这篇论文
-# ARIS 读取论文后，调用 LlmReview 获取 GPT-5.4/GLM-5/MiniMax 的独立评审
-# Executor 和 Reviewer 展开多轮对抗对话
-
-❯ 用 LlmReview 给审稿人打个招呼
-# 直接调用 LlmReview 工具
+/research-lit       /idea-discovery     /research-review
+/auto-review-loop   /experiment-plan    /paper-write
+/paper-compile      /rebuttal           ...
 ```
-
-### 2. 📚 42 个内置研究技能
-
-通过 `/skills` 命令查看所有可用技能：
-
-```
-/research-lit      — 文献搜索与综述
-/idea-discovery    — 研究思路发现流水线
-/research-review   — GPT xhigh 深度 review
-/paper-write       — LaTeX 论文写作
-/paper-compile     — 论文编译与修复
-/auto-review-loop  — 自动多轮 review 循环
-/experiment-plan   — 实验规划
-/run-experiment    — 远程 GPU 实验部署
-/peer-review       — 同行评审模拟
-/rebuttal          — 投稿 Rebuttal 生成
-...（共 42 个）
-```
-
-**技能三级优先级**（高优先覆盖低优先）：
-```
-~/.config/aris/skills/   [用户自定义，最高优先]
-~/.claude/skills/        [Claude Code 兼容]
-内置 bundled skills      [42 个开箱即用]
-```
-
-### 3. 🖥️ REPL 交互命令
-
-| 命令 | 功能 |
-|------|------|
-| `/help` | 查看所有命令 |
-| `/model` | 切换 Executor 模型 |
-| `/reviewer` | 切换 Reviewer 模型 |
-| `/permissions` | 切换权限模式（允许/拒绝/询问） |
-| `/setup` | 重新配置（无需重启） |
-| `/skills` | 查看/展示/导出技能列表 |
-| `/status` | 当前配置状态 |
-| `/cost` | Token 用量与费用统计 |
-| `/compact` | 压缩对话历史 |
-| `/clear` | 清空屏幕 |
-| `/version` | 版本信息 |
-| `/research-review` | 直接调用 review 技能 |
-| `/paper-write` | 直接调用写作技能 |
-| `...` | 以及全部 42 个技能命令 |
-
-### 4. 🌐 多语言支持
-
-配置语言偏好（CN/EN）后，语言设置会注入系统提示，ARIS 始终以你选择的语言响应。
-
-### 5. 🛡️ 防幻觉设计
-
-系统提示明确告知模型其身份（ARIS-Code），避免模型在多智能体场景下混淆自身角色。
 
 ---
 
 ## 📖 使用示例
 
-### 文献调研
 ```
-❯ /research-lit 帮我找一下 diffusion model 在 protein design 上的最新进展
+# 审论文 —— 在 Chat 附加一篇 .pdf，然后：
+帮我 review 这篇论文
+
+# 对当前项目的论文跑自主 Review 循环：
+/auto-review-loop
+
+# 文献调研：
+/research-lit diffusion model 做蛋白质设计的最新工作
 ```
 
-### 自动 Review 循环
-```
-❯ /auto-review-loop
-# ARIS 自动读取当前目录的论文，循环调用 Reviewer，
-# 实现修改 → review → 修改 → review，直至质量达标
-```
-
-### 切换模型
-```
-❯ /model
-  当前 Executor: claude-sonnet-4-5
-  切换为:
-  > claude-opus-4
-    gpt-5.4
-    gemini-2.5-pro
-```
-
-### 切换 Reviewer
-```
-❯ /reviewer
-  当前 Reviewer: gpt-5.4
-  切换为:
-  > glm-5
-    gemini-2.5-pro
-    minimax-m2.7
-```
+跑工作流：在 **Workflow Studio** 设计并保存计划，再到 **运行监控** 启动并实时观察。
 
 ---
 
-## 📁 配置文件
+## 📁 配置与项目数据
 
-```
+```text
 ~/.config/aris/
-├── config.json        # 主配置（提供商、API Key、语言等）
-└── skills/            # 用户自定义技能（覆盖内置技能）
+├── config.json                 # provider、model、base URL、key、语言
+├── desktop-workspace           # 默认 workspace root
+└── desktop-runtime/
+    └── projects/<project-id>/
+        ├── sessions/           # 聊天会话
+        ├── run-state/          # 运行事件与状态
+        ├── agents/             # agent/task 状态
+        ├── workflows/          # 保存的计划
+        └── user-workflows/     # 用户手写草稿
 ```
 
-**config.json 示例**：
-```json
-{
-  "executor": {
-    "provider": "anthropic",
-    "model": "claude-sonnet-4-5",
-    "api_key": "sk-ant-..."
-  },
-  "reviewer": {
-    "provider": "openai",
-    "model": "gpt-5.4",
-    "api_key": "sk-..."
-  },
-  "language": "CN"
-}
-```
+用 `ARIS_WORKSPACE_ROOT` 可覆盖默认 workspace root。
 
 ---
 
-## 🔌 MCP servers（实验性）
+## 🧱 架构
 
-> ⚠ **实验性**：截至 v0.4.14，`settings.json` 中配置的 MCP servers 仅在
-> `aris doctor` 中被解析展示，**MCP server 的工具调用尚未被分发进 LLM 的
-> 工具上下文**。完整的 MCP 工具分发计划在 v0.4.16 落地。
->
-> 当 `mcpServers` 字段存在于合并后的设置时，`aris doctor` 会打印警告，
-> 避免你误以为工具已经接通。Codex MCP（被 review 系列技能使用）是例外
-> ——它走的是专用 reviewer 路径，而不是通用的 MCP tool-dispatch pipeline。
+ARIS Studio 复用 ARIS kernel，而不是在前端重写 agent 逻辑：UI 调用本地 Tauri 后端，后端再调用共享 Rust crate。
+
+```text
+React + Vite 前端
+        │  Tauri invoke / listen
+        ▼
+desktop/src-tauri 后端
+        │  共享 Rust crate
+        ▼
+crates/runtime + crates/executor + crates/tools + crates/chat + crates/commands
+```
+
+| 路径 | 作用 |
+|------|------|
+| `desktop/src/` | React UI —— chat、settings、skills、sessions、studio、monitor、teams |
+| `desktop/src-tauri/` | Tauri commands 与桌面后端 |
+| `crates/runtime/` | 文件系统、权限、session、PDF 文本读取 |
+| `crates/executor/` | provider 客户端与流式 |
+| `crates/tools/` | agent 与桌面命令共用的工具注册表 |
+| `crates/chat/` | 共享 chat 运行时装配 |
+| `crates/commands/` | 共享命令解析与定义 |
+
+> **设计铁律：** 桌面端绝不 spawn 或解析 `aris-cli` —— CLI 与 Desktop 是同一核心 runtime 之上的两个 shell。
+> 参见 [cli-desktop-architecture.md](docs/development-logic/cli-desktop-architecture.md)。
+
+---
+
+## 🛠️ 开发
+
+```powershell
+cd desktop
+npm run test        # vitest
+npm run typecheck   # tsc
+npm run tauri dev   # 运行 app
+
+cd src-tauri && cargo check          # Rust 检查
+cargo test -p runtime reads_pdf      # PDF 读取测试（仓库根目录）
+```
 
 ---
 
 ## 🗺️ 路线图
 
-- [x] Phase 0：Rust fork 基础架构（基于 claw-code）
-- [x] Phase 1：多 Provider 支持（Anthropic/OpenAI/Gemini/GLM/MiniMax）
-- [x] Phase 1：LlmReview 对抗审查工具
-- [x] Phase 1：42 个研究技能内置
-- [x] Phase 1：语言偏好与防幻觉系统提示
-- [ ] Phase 2：Skills 系统完善（三级优先级 UI）
-- [ ] Phase 2：Web UI 仪表盘
-- [ ] Phase 3：Linux / Windows 支持
-- [ ] Phase 3：本地模型（Ollama）集成
+- [x] **P0** —— 桌面 shell（Tauri 2 + React + Vite）：Chat、Settings、Sessions、Skills
+- [x] **P0** —— 共享 `runtime` / `executor` / `tools` / `chat` / `commands` crate（不耦合 `aris-cli`）
+- [x] **P1** —— Workflow Studio、运行监控、多项目工作区、PDF 自动 Review 附件
+- [ ] **P2** —— 生成前端 ⇄ Rust 类型契约，减少 schema 漂移
+- [ ] **P2** —— macOS / Linux 桌面打包
+- [ ] **P2** —— 更丰富的 team/agent 监控与工作流模板
 
 ---
 
 ## 🙏 致谢
 
-**ARIS-Code 建立在 [claw-code](https://github.com/ultraworkers/claw-code) 的优秀基础之上。**
-
-claw-code 是 Claude Code 的 Rust 开源重新实现，为本项目提供了坚实的 REPL 框架、工具调用基础设施和跨平台编译能力。衷心感谢 ultraworkers 团队的出色工作！
-
-- 🔗 claw-code 项目：https://github.com/ultraworkers/claw-code
-- 🔗 ARIS-Code 项目：https://github.com/wanshuiyin/Auto-claude-code-research-in-sleep
+ARIS Studio 是 **[ARIS-Code](https://github.com/wanshuiyin/Auto-claude-code-research-in-sleep)** 的桌面 shell，
+构建在 **[claw-code](https://github.com/ultraworkers/claw-code)**（Claude Code 的 Rust 复刻）之上。感谢两个团队。
 
 ---
 
 ## 📄 License
 
-MIT License © 2025 ARIS-Code Contributors
+MIT License © 2026 ARIS Contributors
 
 ---
 
 <div align="center">
-  <sub>🌙 让 AI 在你睡觉时帮你做研究 · Built with ❤️ and Rust</sub>
+  <sub>🌙 让 AI 边睡边帮你做研究 · 用 ❤️、Rust 和 Tauri 构建</sub>
 </div>
-

@@ -1,7 +1,7 @@
-import { useEffect, useState } from "react";
-import { configGet, configSet, isTauri } from "../api/tauri";
+import { useEffect, useRef, useState } from "react";
+import { configGet, configSet, configTest, isTauri } from "../api/tauri";
 import { useStore } from "../store";
-import type { ConfigPatch, ConfigView } from "../types";
+import type { ConfigPatch, ConfigTestResult, ConfigView } from "../types";
 
 // ── Provider metadata ─────────────────────────────────────────────────────────
 
@@ -10,45 +10,177 @@ interface ProviderMeta {
   hint: string;
   defaultModel: string;
   defaultBaseUrl?: string;
+  models?: PresetOption[];
+  baseUrls?: PresetOption[];
 }
+
+interface PresetOption {
+  label: string;
+  value: string;
+  hint?: string;
+}
+
+const EXECUTOR_MODELS: PresetOption[] = [
+  { label: "Claude Opus 4.7", value: "claude-opus-4-7", hint: "Anthropic" },
+  { label: "Claude Sonnet 4.6", value: "claude-sonnet-4-6", hint: "Anthropic" },
+  { label: "GPT-5.5", value: "gpt-5.5", hint: "OpenAI-compatible" },
+  { label: "Gemini 2.5 Pro", value: "gemini-2.5-pro", hint: "Google OpenAI-compatible" },
+  { label: "GLM-5", value: "GLM-5", hint: "Zhipu" },
+  { label: "MiniMax M3", value: "MiniMax-M3", hint: "MiniMax" },
+  { label: "MiniMax M2.7", value: "MiniMax-M2.7", hint: "MiniMax" },
+  { label: "Kimi K2.5", value: "kimi-k2.5", hint: "Moonshot" },
+  { label: "DeepSeek V4 Pro", value: "deepseek-v4-pro", hint: "DeepSeek" },
+  { label: "Qwen 3.6 Plus", value: "qwen3.6-plus", hint: "DashScope" },
+  { label: "Doubao Pro 4K", value: "doubao-pro-4k", hint: "Ark" },
+  { label: "Mimo V2.5 Pro", value: "mimo-v2.5-pro", hint: "Xiaomi" },
+];
+
+const OPENAI_COMPAT_URLS: PresetOption[] = [
+  { label: "OpenAI", value: "https://api.openai.com/v1", hint: "Official OpenAI-compatible" },
+  { label: "MiniMax", value: "https://api.minimaxi.com/v1", hint: "Official MiniMax" },
+  { label: "Gemini", value: "https://generativelanguage.googleapis.com/v1beta/openai", hint: "Google OpenAI-compatible" },
+  { label: "GLM", value: "https://open.bigmodel.cn/api/paas/v4", hint: "Zhipu GLM" },
+  { label: "Kimi", value: "https://api.moonshot.cn/v1", hint: "Moonshot" },
+  { label: "DeepSeek", value: "https://api.deepseek.com/v1", hint: "OpenAI-compatible" },
+  { label: "Qwen", value: "https://dashscope.aliyuncs.com/compatible-mode/v1", hint: "DashScope" },
+  { label: "Qwen Coding", value: "https://coding.dashscope.aliyuncs.com/v1", hint: "DashScope Coding Plan" },
+  { label: "Doubao", value: "https://ark.cn-beijing.volces.com/api/v3", hint: "Volcengine Ark" },
+  { label: "OpenRouter", value: "https://openrouter.ai/api/v1", hint: "OpenRouter" },
+];
+
+const ANTHROPIC_URLS: PresetOption[] = [
+  { label: "Official", value: "", hint: "Use Anthropic default" },
+  { label: "Anthropic API", value: "https://api.anthropic.com", hint: "Explicit official endpoint" },
+  { label: "NewCLI", value: "https://code.newcli.com/claude", hint: "Claude-Code-compatible proxy" },
+  { label: "ModelScope", value: "https://api-inference.modelscope.cn", hint: "Anthropic-format proxy" },
+];
+
+const ANTHROPIC_COMPAT_URLS: PresetOption[] = [
+  { label: "Official", value: "https://api.anthropic.com", hint: "Anthropic-compatible" },
+  { label: "MiniMax", value: "https://api.minimaxi.com/anthropic", hint: "MiniMax Anthropic-compatible" },
+  { label: "DeepSeek", value: "https://api.deepseek.com/anthropic", hint: "DeepSeek Anthropic-compatible" },
+  { label: "NewCLI", value: "https://code.newcli.com/claude", hint: "Claude proxy" },
+  { label: "ModelScope", value: "https://api-inference.modelscope.cn", hint: "Anthropic-format proxy" },
+];
 
 const EXECUTOR_PROVIDERS: Record<string, ProviderMeta> = {
   anthropic: {
     label: "Anthropic",
     hint: "Claude models via official API",
-    defaultModel: "claude-sonnet-4-6",
+    defaultModel: "claude-opus-4-7",
+    models: EXECUTOR_MODELS.filter((m) => m.hint === "Anthropic"),
+    baseUrls: ANTHROPIC_URLS,
   },
   "anthropic-compat": {
     label: "Anthropic-compat",
     hint: "Claude via custom base URL / proxy",
     defaultModel: "claude-sonnet-4-6",
+    models: [
+      { label: "Claude Sonnet 4.6", value: "claude-sonnet-4-6", hint: "Claude proxy" },
+      { label: "MiniMax M3", value: "MiniMax-M3", hint: "MiniMax Anthropic-compatible" },
+      { label: "DeepSeek V4 Pro", value: "deepseek-v4-pro", hint: "DeepSeek Anthropic-compatible" },
+    ],
+    baseUrls: ANTHROPIC_COMPAT_URLS,
   },
   openai: {
     label: "OpenAI-compatible",
     hint: "OpenAI, MiniMax, DeepSeek, Kimi…",
     defaultModel: "MiniMax-M2.7",
-    defaultBaseUrl: "https://api.minimax.chat/v1",
+    defaultBaseUrl: "https://api.minimaxi.com/v1",
+    models: EXECUTOR_MODELS.filter((m) => m.hint !== "Anthropic"),
+    baseUrls: OPENAI_COMPAT_URLS,
   },
   custom: {
     label: "Custom",
     hint: "Any other provider",
     defaultModel: "",
+    models: EXECUTOR_MODELS,
+    baseUrls: [...OPENAI_COMPAT_URLS, ...ANTHROPIC_COMPAT_URLS.filter((item) => item.value)],
   },
 };
 
 const REVIEWER_PROVIDERS: Record<string, ProviderMeta> = {
   "": { label: "None", hint: "Disable reviewer", defaultModel: "" },
-  openai: { label: "OpenAI-compatible", hint: "GPT, MiniMax, DeepSeek…", defaultModel: "" },
-  minimax: { label: "MiniMax", hint: "MiniMax native API", defaultModel: "MiniMax-M2.7" },
-  gemini: { label: "Gemini", hint: "Google Gemini", defaultModel: "gemini-2.5-pro" },
-  glm: { label: "GLM", hint: "Zhipu GLM", defaultModel: "" },
-  kimi: { label: "Kimi", hint: "Moonshot Kimi", defaultModel: "" },
-  "anthropic-compat": { label: "Anthropic-compat", hint: "Claude via proxy", defaultModel: "" },
-  deepseek: { label: "DeepSeek", hint: "DeepSeek models", defaultModel: "" },
-  custom: { label: "Custom", hint: "Any provider", defaultModel: "" },
+  openai: {
+    label: "OpenAI-compatible",
+    hint: "GPT, MiniMax, DeepSeek…",
+    defaultModel: "gpt-5.5",
+    models: EXECUTOR_MODELS.filter((m) => m.hint !== "Anthropic"),
+    baseUrls: OPENAI_COMPAT_URLS,
+  },
+  minimax: {
+    label: "MiniMax",
+    hint: "MiniMax native API",
+    defaultModel: "MiniMax-M2.7",
+    models: EXECUTOR_MODELS.filter((m) => m.value.startsWith("MiniMax")),
+    baseUrls: OPENAI_COMPAT_URLS.filter((u) => u.label === "MiniMax"),
+  },
+  gemini: {
+    label: "Gemini",
+    hint: "Google Gemini",
+    defaultModel: "gemini-2.5-pro",
+    models: EXECUTOR_MODELS.filter((m) => m.value.includes("gemini")),
+    baseUrls: OPENAI_COMPAT_URLS.filter((u) => u.label === "Gemini"),
+  },
+  glm: {
+    label: "GLM",
+    hint: "Zhipu GLM",
+    defaultModel: "GLM-5",
+    models: EXECUTOR_MODELS.filter((m) => m.value.includes("GLM")),
+    baseUrls: OPENAI_COMPAT_URLS.filter((u) => u.label === "GLM"),
+  },
+  kimi: {
+    label: "Kimi",
+    hint: "Moonshot Kimi",
+    defaultModel: "kimi-k2.5",
+    models: EXECUTOR_MODELS.filter((m) => m.value.includes("kimi")),
+    baseUrls: OPENAI_COMPAT_URLS.filter((u) => u.label === "Kimi"),
+  },
+  "anthropic-compat": {
+    label: "Anthropic-compat",
+    hint: "Claude via proxy",
+    defaultModel: "claude-sonnet-4-6",
+    models: [
+      { label: "Claude Sonnet 4.6", value: "claude-sonnet-4-6", hint: "Claude proxy" },
+      { label: "DeepSeek V4 Pro", value: "deepseek-v4-pro", hint: "DeepSeek" },
+    ],
+    baseUrls: ANTHROPIC_COMPAT_URLS,
+  },
+  deepseek: {
+    label: "DeepSeek",
+    hint: "DeepSeek models",
+    defaultModel: "deepseek-v4-pro",
+    models: EXECUTOR_MODELS.filter((m) => m.value.includes("deepseek")),
+    baseUrls: [
+      { label: "Anthropic-compatible", value: "https://api.deepseek.com/anthropic", hint: "Thinking-capable reviewer" },
+      { label: "OpenAI-compatible", value: "https://api.deepseek.com/v1", hint: "OpenAI-compatible reviewer" },
+    ],
+  },
+  custom: {
+    label: "Custom",
+    hint: "Any provider",
+    defaultModel: "",
+    models: EXECUTOR_MODELS,
+    baseUrls: [...OPENAI_COMPAT_URLS, ...ANTHROPIC_COMPAT_URLS.filter((item) => item.value)],
+  },
 };
 
 // ── Sub-components ────────────────────────────────────────────────────────────
+
+function normalizeExecutorProvider(provider: string | null | undefined, baseUrl: string | null | undefined): string {
+  const current = provider || "anthropic";
+  const lower = (baseUrl ?? "").trim().toLowerCase();
+  if (
+    current === "anthropic"
+    && (
+      lower.includes("minimaxi.com/anthropic")
+      || lower.includes("deepseek.com/anthropic")
+    )
+  ) {
+    return "anthropic-compat";
+  }
+  return current;
+}
 
 function Row({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
   return (
@@ -93,6 +225,48 @@ function KeyInput({
       >
         {show ? "Hide" : "Show"}
       </button>
+    </div>
+  );
+}
+
+function PresetTextInput({
+  value,
+  placeholder,
+  options,
+  onChange,
+}: {
+  value: string;
+  placeholder: string;
+  options: PresetOption[];
+  onChange: (v: string) => void;
+}) {
+  const currentPreset = options.find((option) => option.value === value)?.value ?? "__custom";
+  return (
+    <div className="st-preset-control">
+      <select
+        value={currentPreset}
+        onChange={(event) => {
+          if (event.target.value === "__custom") {
+            onChange("");
+            return;
+          }
+          onChange(event.target.value);
+        }}
+      >
+        <option value="__custom">Custom / manual</option>
+        {options.map((option) => (
+          <option key={`${option.label}:${option.value || "blank"}`} value={option.value}>
+            {option.label}
+            {option.hint ? ` · ${option.hint}` : ""}
+          </option>
+        ))}
+      </select>
+      <input
+        value={value}
+        placeholder={placeholder}
+        onChange={(event) => onChange(event.target.value)}
+        spellCheck={false}
+      />
     </div>
   );
 }
@@ -173,9 +347,24 @@ function LayerSection({
   );
 }
 
+function TestDetail({ detail }: { detail: ConfigTestResult["executor"] }) {
+  return (
+    <div className={`st-test-detail${detail.ok ? " ok" : " failed"}`}>
+      <div className="st-test-detail-head">
+        <span className="st-test-dot" />
+        <span className="st-test-label">{detail.label}</span>
+        {detail.model && <span className="st-test-meta">{detail.model}</span>}
+      </div>
+      <div className="st-test-message">{detail.message}</div>
+      {detail.baseUrl && <div className="st-test-url">{detail.baseUrl}</div>}
+    </div>
+  );
+}
+
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 type SaveState = "idle" | "saving" | "saved" | "error";
+type TestState = "idle" | "testing" | "passed" | "failed";
 
 export default function Settings() {
   const setError = useStore((s) => s.setError);
@@ -184,11 +373,17 @@ export default function Settings() {
   const [execKey, setExecKey] = useState("");
   const [revKey, setRevKey] = useState("");
   const [saveState, setSaveState] = useState<SaveState>("idle");
+  const [testState, setTestState] = useState<TestState>("idle");
+  const [testResult, setTestResult] = useState<ConfigTestResult | null>(null);
+  const operationVersion = useRef(0);
+  const activeOperation = useRef<{ kind: "save" | "test"; version: number } | null>(null);
+  const savedTimer = useRef<number | null>(null);
 
   const load = (v: ConfigView) => {
+    const executorProvider = normalizeExecutorProvider(v.executorProvider, v.executorBaseUrl);
     setView(v);
     setForm({
-      executorProvider: v.executorProvider ?? "anthropic",
+      executorProvider,
       executorModel: v.executorModel ?? "",
       executorBaseUrl: v.executorBaseUrl ?? "",
       reviewerProvider: v.reviewerProvider ?? "",
@@ -204,6 +399,11 @@ export default function Settings() {
     if (!isTauri()) return;
     configGet().then(load).catch((e) => setError(String(e)));
   }, [setError]);
+  useEffect(() => () => {
+    operationVersion.current += 1;
+    activeOperation.current = null;
+    if (savedTimer.current !== null) window.clearTimeout(savedTimer.current);
+  }, []);
 
   if (!isTauri()) {
     return (
@@ -221,34 +421,118 @@ export default function Settings() {
   }
 
   const upd = (patch: Partial<ConfigPatch>) => {
+    operationVersion.current += 1;
+    activeOperation.current = null;
+    if (savedTimer.current !== null) window.clearTimeout(savedTimer.current);
     setSaveState("idle");
+    setTestState("idle");
+    setTestResult(null);
     setForm((f) => ({ ...f, ...patch }));
   };
 
-  const save = async () => {
-    setSaveState("saving");
+  const buildPatch = () => {
     const patch: ConfigPatch = { ...form };
     if (execKey.trim()) patch.executorApiKey = execKey.trim();
     if (revKey.trim()) patch.reviewerApiKey = revKey.trim();
+    return patch;
+  };
+
+  const save = async () => {
+    if (activeOperation.current) return;
+    const version = ++operationVersion.current;
+    activeOperation.current = { kind: "save", version };
+    if (savedTimer.current !== null) window.clearTimeout(savedTimer.current);
+    setSaveState("saving");
+    setTestState("idle");
+    setTestResult(null);
+    const patch = buildPatch();
     try {
       const next = await configSet(patch);
+      if (version !== operationVersion.current) return;
       load(next);
       setSaveState("saved");
-      setTimeout(() => setSaveState("idle"), 3000);
+      savedTimer.current = window.setTimeout(() => {
+        if (version === operationVersion.current) setSaveState("idle");
+      }, 3000);
     } catch (e) {
+      if (version !== operationVersion.current) return;
       setError(String(e));
       setSaveState("error");
+    } finally {
+      if (activeOperation.current?.version === version) activeOperation.current = null;
+    }
+  };
+
+  const test = async () => {
+    if (activeOperation.current) return;
+    const version = ++operationVersion.current;
+    activeOperation.current = { kind: "test", version };
+    setTestState("testing");
+    setTestResult(null);
+    try {
+      const result = await configTest(buildPatch());
+      if (version !== operationVersion.current) return;
+      setTestResult(result);
+      setTestState(result.ok ? "passed" : "failed");
+    } catch (e) {
+      if (version !== operationVersion.current) return;
+      const message = String(e);
+      setTestResult({
+        ok: false,
+        message,
+        executor: {
+          ok: false,
+          label: "Settings",
+          message,
+        },
+      });
+      setTestState("failed");
+    } finally {
+      if (activeOperation.current?.version === version) activeOperation.current = null;
     }
   };
 
   const execProvider = form.executorProvider ?? "anthropic";
   const revProvider = form.reviewerProvider ?? "";
+  const execMeta = EXECUTOR_PROVIDERS[execProvider] ?? EXECUTOR_PROVIDERS.custom;
+  const revMeta = REVIEWER_PROVIDERS[revProvider] ?? REVIEWER_PROVIDERS.custom;
   const execKeyStatus = view.hasExecutorKey
     ? `Saved key: ${view.executorKeyMasked ?? "configured"}`
     : "No key saved yet";
   const revKeyStatus = view.hasReviewerKey
     ? `Saved key: ${view.reviewerKeyMasked ?? "configured"}`
     : "No reviewer key saved yet";
+
+  const chooseExecutorProvider = (provider: string) => {
+    const meta = EXECUTOR_PROVIDERS[provider] ?? EXECUTOR_PROVIDERS.custom;
+    upd({
+      executorProvider: provider,
+      executorModel: provider === "custom" ? form.executorModel ?? "" : meta.defaultModel,
+      executorBaseUrl: provider === "custom"
+        ? form.executorBaseUrl ?? ""
+        : meta.defaultBaseUrl ?? meta.baseUrls?.[0]?.value ?? "",
+    });
+  };
+
+  const chooseReviewerProvider = (provider: string) => {
+    const meta = REVIEWER_PROVIDERS[provider] ?? REVIEWER_PROVIDERS.custom;
+    upd({
+      reviewerProvider: provider,
+      reviewerModel: provider === "custom" ? form.reviewerModel ?? "" : meta.defaultModel,
+      reviewerBaseUrl: provider === "custom"
+        ? form.reviewerBaseUrl ?? ""
+        : meta.defaultBaseUrl ?? meta.baseUrls?.[0]?.value ?? "",
+    });
+  };
+
+  const clearTestOnSecretChange = () => {
+    operationVersion.current += 1;
+    activeOperation.current = null;
+    if (savedTimer.current !== null) window.clearTimeout(savedTimer.current);
+    setSaveState("idle");
+    setTestState("idle");
+    setTestResult(null);
+  };
 
   return (
     <div className="st-page">
@@ -276,7 +560,7 @@ export default function Settings() {
               <ProviderSelect
                 value={execProvider}
                 providers={EXECUTOR_PROVIDERS}
-                onChange={(v) => upd({ executorProvider: v })}
+                onChange={chooseExecutorProvider}
               />
             </div>
 
@@ -289,25 +573,30 @@ export default function Settings() {
                 value={execKey}
                 placeholder={view.hasExecutorKey ? "leave blank to keep, paste a new key to replace" : "paste your API key"}
                 masked={view.executorKeyMasked}
-                onChange={setExecKey}
+                onChange={(value) => {
+                  clearTestOnSecretChange();
+                  setExecKey(value);
+                }}
               />
             </SecretPanel>
 
             <Row label="Model" hint="Model ID sent in API requests">
-              <input
+              <PresetTextInput
                 value={form.executorModel ?? ""}
                 placeholder={EXECUTOR_PROVIDERS[execProvider]?.defaultModel || "e.g. claude-sonnet-4-6"}
-                onChange={(e) => upd({ executorModel: e.target.value })}
+                options={execMeta.models ?? EXECUTOR_MODELS}
+                onChange={(value) => upd({ executorModel: value })}
               />
             </Row>
 
             <Row label="Base URL" hint="Leave blank for official endpoint">
-              <input
+              <PresetTextInput
                 value={form.executorBaseUrl ?? ""}
                 placeholder={
                   EXECUTOR_PROVIDERS[execProvider]?.defaultBaseUrl || "(official default)"
                 }
-                onChange={(e) => upd({ executorBaseUrl: e.target.value })}
+                options={execMeta.baseUrls ?? OPENAI_COMPAT_URLS}
+                onChange={(value) => upd({ executorBaseUrl: value })}
               />
             </Row>
         </LayerSection>
@@ -323,7 +612,7 @@ export default function Settings() {
               <ProviderSelect
                 value={revProvider}
                 providers={REVIEWER_PROVIDERS}
-                onChange={(v) => upd({ reviewerProvider: v })}
+                onChange={chooseReviewerProvider}
               />
             </div>
 
@@ -343,23 +632,28 @@ export default function Settings() {
                     value={revKey}
                     placeholder={view.hasReviewerKey ? "leave blank to keep, paste a new key to replace" : "paste reviewer API key"}
                     masked={view.reviewerKeyMasked}
-                    onChange={setRevKey}
+                    onChange={(value) => {
+                      clearTestOnSecretChange();
+                      setRevKey(value);
+                    }}
                   />
                 </SecretPanel>
 
                 <Row label="Model" hint="Model ID for reviewer">
-                  <input
+                  <PresetTextInput
                     value={form.reviewerModel ?? ""}
                     placeholder={REVIEWER_PROVIDERS[revProvider]?.defaultModel || "model ID"}
-                    onChange={(e) => upd({ reviewerModel: e.target.value })}
+                    options={revMeta.models ?? EXECUTOR_MODELS}
+                    onChange={(value) => upd({ reviewerModel: value })}
                   />
                 </Row>
 
                 <Row label="Base URL" hint="Leave blank for official endpoint">
-                  <input
+                  <PresetTextInput
                     value={form.reviewerBaseUrl ?? ""}
                     placeholder="(official default)"
-                    onChange={(e) => upd({ reviewerBaseUrl: e.target.value })}
+                    options={revMeta.baseUrls ?? OPENAI_COMPAT_URLS}
+                    onChange={(value) => upd({ reviewerBaseUrl: value })}
                   />
                 </Row>
               </>
@@ -399,16 +693,35 @@ export default function Settings() {
       </div>
 
       {/* ── Save bar ── */}
+      {testResult && (
+        <div className={`st-test-panel${testResult.ok ? " ok" : " failed"}`}>
+          <div className="st-test-summary">{testResult.message}</div>
+          <div className="st-test-grid">
+            <TestDetail detail={testResult.executor} />
+            {testResult.reviewer && <TestDetail detail={testResult.reviewer} />}
+          </div>
+        </div>
+      )}
       <div className="st-save-bar">
+        <button
+          className={`st-test-btn${testState === "testing" ? " testing" : ""}`}
+          onClick={test}
+          disabled={testState === "testing" || saveState === "saving"}
+        >
+          {testState === "testing" ? "Testing..." : "Test current settings"}
+        </button>
         <button
           className={`st-save-btn${saveState === "saving" ? " saving" : ""}`}
           onClick={save}
-          disabled={saveState === "saving"}
+          disabled={saveState === "saving" || testState === "testing"}
         >
           {saveState === "saving" ? "Saving..." : saveState === "saved" ? "Saved" : "Save settings"}
         </button>
         {saveState === "saved" && (
-          <span className="st-save-info">Restart the app for changes to take effect.</span>
+          <span className="st-save-info">Saved. Chat will use this configuration on the next turn.</span>
+        )}
+        {testState === "passed" && saveState !== "saving" && saveState !== "saved" && (
+          <span className="st-save-info">Current form passed. Click Save settings before using it in Chat.</span>
         )}
       </div>
     </div>

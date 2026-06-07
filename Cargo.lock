@@ -1089,6 +1089,7 @@ dependencies = [
 name = "runtime"
 version = "0.4.15"
 dependencies = [
+ "flate2",
  "glob",
  "regex",
  "serde",

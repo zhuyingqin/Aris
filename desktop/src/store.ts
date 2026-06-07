@@ -1,14 +1,24 @@
 import { create } from "zustand";
-import type { RunEvent, TeamSnapshot, WorkflowRun } from "./types";
+import type { DesktopProject, RunEvent, TeamSnapshot, WorkflowRun } from "./types";
 import {
   isTauri,
   onRunEvent,
+  projectAdd,
+  projectsGet,
+  projectSetCurrent,
   stateDir as fetchStateDir,
   teamList,
   workflowList,
 } from "./api/tauri";
 
 const MAX_EVENTS = 500;
+const PREVIEW_PROJECT: DesktopProject = {
+  id: "default",
+  name: "ARIS Desktop Workspace",
+  path: "browser preview",
+  addedAt: 0,
+  lastOpenedAt: 0,
+};
 
 export type Tab =
   | "chat"
@@ -29,11 +39,16 @@ interface AppState {
   team: TeamSnapshot | null;
   events: RunEvent[];
   error: string | null;
+  projects: DesktopProject[];
+  currentProject: DesktopProject | null;
+  projectBusy: boolean;
 
   selectRun: (id: string | null) => void;
   refreshRuns: () => Promise<void>;
   refreshTeam: () => Promise<void>;
   setError: (message: string | null) => void;
+  addProject: (path: string) => Promise<void>;
+  switchProject: (id: string) => Promise<void>;
 
   /** Wire up live events + periodic polling. Returns a teardown fn. */
   init: () => () => void;
@@ -49,9 +64,55 @@ export const useStore = create<AppState>((set, get) => ({
   team: null,
   events: [],
   error: null,
+  projects: [],
+  currentProject: null,
+  projectBusy: false,
 
   selectRun: (id) => set({ selectedRunId: id }),
   setError: (message) => set({ error: message }),
+  addProject: async (path) => {
+    set({ projectBusy: true, error: null });
+    try {
+      const view = await projectAdd(path);
+      set({
+        projects: view.projects,
+        currentProject: view.currentProject,
+        runs: [],
+        selectedRunId: null,
+        team: null,
+        events: [],
+      });
+      set({ stateDir: await fetchStateDir() });
+      await Promise.all([get().refreshRuns(), get().refreshTeam()]);
+    } catch (error) {
+      set({ error: String(error) });
+      throw error;
+    } finally {
+      set({ projectBusy: false });
+    }
+  },
+  switchProject: async (id) => {
+    if (id === get().currentProject?.id) return;
+    set({ projectBusy: true, error: null });
+    try {
+      const view = await projectSetCurrent(id);
+      set({
+        projects: view.projects,
+        currentProject: view.currentProject,
+        runs: [],
+        selectedRunId: null,
+        team: null,
+        events: [],
+      });
+      set({ stateDir: await fetchStateDir() });
+      await Promise.all([get().refreshRuns(), get().refreshTeam()]);
+    } catch (error) {
+      set({ error: String(error) });
+      throw error;
+    } finally {
+      set({ projectBusy: false });
+    }
+  },
 
   refreshRuns: async () => {
     try {
@@ -84,39 +145,71 @@ export const useStore = create<AppState>((set, get) => ({
   init: () => {
     // Plain-browser preview (no Tauri backend): render the static UI only.
     if (!isTauri()) {
-      set({ stateDir: "browser preview — run `npm run tauri dev` for live data" });
+      set({
+        stateDir: "browser preview — run `npm run tauri dev` for live data",
+        projects: [PREVIEW_PROJECT],
+        currentProject: PREVIEW_PROJECT,
+      });
       return () => {};
     }
 
     let disposed = false;
     let unlisten: (() => void) | null = null;
+    let refreshTimer: number | null = null;
+    let refreshInFlight = false;
+    let refreshQueued = false;
+    const runRefresh = async () => {
+      if (disposed) return;
+      if (refreshInFlight) {
+        refreshQueued = true;
+        return;
+      }
+      refreshInFlight = true;
+      await Promise.all([get().refreshRuns(), get().refreshTeam()]);
+      refreshInFlight = false;
+      if (refreshQueued) {
+        refreshQueued = false;
+        scheduleRefresh();
+      }
+    };
+    const scheduleRefresh = () => {
+      if (disposed) return;
+      refreshQueued = true;
+      if (refreshTimer !== null || refreshInFlight) return;
+      refreshTimer = window.setTimeout(() => {
+        refreshTimer = null;
+        refreshQueued = false;
+        void runRefresh();
+      }, 120);
+    };
 
     fetchStateDir()
       .then((dir) => set({ stateDir: dir }))
       .catch(() => undefined);
+    projectsGet()
+      .then((view) => set({ projects: view.projects, currentProject: view.currentProject }))
+      .catch((error) => set({ error: String(error) }));
 
     onRunEvent((event) => {
       set((s) => ({
         events: [...s.events, event].slice(-MAX_EVENTS),
       }));
-      // An incoming event almost always means run/team state moved.
-      void get().refreshRuns();
-      void get().refreshTeam();
+      // Coalesce bursts while keeping the event timeline live.
+      scheduleRefresh();
     }).then((fn) => {
       if (disposed) fn();
       else unlisten = fn;
     });
 
-    void get().refreshRuns();
-    void get().refreshTeam();
+    void runRefresh();
     const poll = window.setInterval(() => {
-      void get().refreshRuns();
-      void get().refreshTeam();
+      scheduleRefresh();
     }, 3000);
 
     return () => {
       disposed = true;
       if (unlisten) unlisten();
+      if (refreshTimer !== null) window.clearTimeout(refreshTimer);
       window.clearInterval(poll);
     };
   },
