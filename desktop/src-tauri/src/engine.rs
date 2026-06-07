@@ -894,6 +894,7 @@ fn executor_model_selection(provider: &str, current: &str) -> ChatCommandSelecti
             "Google - fast Gemini",
         ),
         ("GLM-5", "GLM-5", "Zhipu - GLM 5 latest"),
+        ("MiniMax-M3", "MiniMax-M3", "MiniMax - M3"),
         ("MiniMax-M2.7", "MiniMax-M2.7", "MiniMax - M2.7 latest"),
         ("kimi-k2.5", "kimi-k2.5", "Kimi - K2.5 reasoning"),
         ("deepseek-v4-pro", "deepseek-v4-pro", "DeepSeek - V4 Pro"),
@@ -964,6 +965,7 @@ fn reviewer_model_selection(provider: &str, current: &str) -> ChatCommandSelecti
         ),
         ("GLM-5", "GLM-5", "Zhipu - most capable"),
         ("GLM-5-Turbo", "GLM-5-Turbo", "Zhipu - fast"),
+        ("MiniMax-M3", "MiniMax-M3", "MiniMax - M3"),
         ("MiniMax-M2.7", "MiniMax-M2.7", "MiniMax - latest"),
         (
             "MiniMax-M2.7-highspeed",

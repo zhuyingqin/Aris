@@ -702,10 +702,10 @@ export default function Settings() {
           {saveState === "saving" ? "Saving..." : saveState === "saved" ? "Saved" : "Save settings"}
         </button>
         {saveState === "saved" && (
-          <span className="st-save-info">Restart the app for changes to take effect.</span>
+          <span className="st-save-info">Saved. Chat will use this configuration on the next turn.</span>
         )}
         {testState === "passed" && saveState !== "saving" && saveState !== "saved" && (
-          <span className="st-save-info">Current form passed the connection test.</span>
+          <span className="st-save-info">Current form passed. Click Save settings before using it in Chat.</span>
         )}
       </div>
     </div>
