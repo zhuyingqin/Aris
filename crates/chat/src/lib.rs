@@ -289,10 +289,7 @@ fn normalize_settings_executor_provider(provider: String, base_url: Option<&str>
     let Some(base_url) = base_url.map(|value| value.trim().to_lowercase()) else {
         return provider;
     };
-    if base_url.contains("minimaxi.com/anthropic")
-        || base_url.contains("deepseek.com/anthropic")
-        || (base_url.contains("/anthropic") && !base_url.contains("api.anthropic.com"))
-    {
+    if base_url.contains("minimaxi.com/anthropic") || base_url.contains("deepseek.com/anthropic") {
         "anthropic-compat".to_string()
     } else {
         provider

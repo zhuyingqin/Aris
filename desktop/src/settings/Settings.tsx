@@ -175,7 +175,6 @@ function normalizeExecutorProvider(provider: string | null | undefined, baseUrl:
     && (
       lower.includes("minimaxi.com/anthropic")
       || lower.includes("deepseek.com/anthropic")
-      || (lower.includes("/anthropic") && !lower.includes("api.anthropic.com"))
     )
   ) {
     return "anthropic-compat";
