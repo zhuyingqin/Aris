@@ -8,6 +8,7 @@ const RECENT_FILES_KEY = "aris-chat-recent-files";
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 const MAX_TEXT_BYTES = 1024 * 1024;
 const MAX_DROPPED_FILES = 20;
+const IMAGE_UNSUPPORTED_MESSAGE = "(Image preview only. Vision input is not supported in desktop Chat yet.)";
 const TEXT_FILE_EXTENSION = /\.(?:c|cc|cpp|css|csv|go|h|hpp|html|java|js|json|jsx|md|mjs|py|rs|sh|sql|svg|toml|ts|tsx|txt|xml|yaml|yml)$/i;
 const PDF_FILE_EXTENSION = /\.pdf$/i;
 
@@ -65,7 +66,14 @@ export async function attachmentFromFile(file: File): Promise<ChatAttachment> {
       reader.onerror = () => reject(reader.error);
       reader.readAsDataURL(file);
     });
-    return { id: makeId("attachment"), kind: "image", name: file.name, mimeType: file.type, preview, content: preview };
+    return {
+      id: makeId("attachment"),
+      kind: "image",
+      name: file.name,
+      mimeType: file.type,
+      preview,
+      content: IMAGE_UNSUPPORTED_MESSAGE,
+    };
   }
   const isPdf = file.type === "application/pdf" || PDF_FILE_EXTENSION.test(file.name);
   const draggedPath = pathFromDraggedFile(file);

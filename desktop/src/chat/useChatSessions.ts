@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { chatUiSessionsLoad, chatUiSessionsSave, isTauri } from "../api/tauri";
+import { useStore } from "../store";
 import type { ChatTurn } from "../types";
 import { CURRENT_KEY, SESSIONS_KEY, makeSession, migrateSession, titleFromTurns } from "./model";
 import type { ChatSession } from "./types";
@@ -15,6 +16,7 @@ function loadLocalSessions(): ChatSession[] {
 }
 
 export function useChatSessions(projectId = "default") {
+  const setError = useStore((state) => state.setError);
   const [allSessions, setAllSessions] = useState<ChatSession[]>(() => {
     const stored = loadLocalSessions();
     return stored.length > 0 ? stored : [makeSession(projectId)];
@@ -43,14 +45,15 @@ export function useChatSessions(projectId = "default") {
           setAllSessions(migrated);
           setCurrentId((id) => migrated.some((session) => session.id === id) ? id : "");
         } else {
-          void chatUiSessionsSave(sessionsRef.current);
+          void chatUiSessionsSave(sessionsRef.current)
+            .catch((error) => setError(`Failed to save chat sessions: ${String(error)}`));
         }
         hydrated.current = true;
       })
       .catch(() => {
         hydrated.current = true;
       });
-  }, []);
+  }, [setError]);
 
   useEffect(() => {
     if (!isTauri()) {
@@ -62,10 +65,11 @@ export function useChatSessions(projectId = "default") {
     }
     if (!hydrated.current || !isTauri()) return;
     const timer = window.setTimeout(() => {
-      void chatUiSessionsSave(allSessions);
+      void chatUiSessionsSave(allSessions)
+        .catch((error) => setError(`Failed to save chat sessions: ${String(error)}`));
     }, 250);
     return () => window.clearTimeout(timer);
-  }, [allSessions]);
+  }, [allSessions, setError]);
 
   useEffect(() => {
     if (currentId) localStorage.setItem(CURRENT_KEY, currentId);

@@ -75,6 +75,29 @@ export function textFromTurn(turn: ChatTurn): string {
     .join("\n");
 }
 
+export function transcriptFromTurn(turn: ChatTurn): string {
+  const sections: string[] = [];
+  for (const block of turn.blocks) {
+    if (block.kind === "text") {
+      if (block.text.trim()) sections.push(block.text);
+      continue;
+    }
+    if (block.kind === "tool") {
+      const label = block.id ? `${block.name} (${block.id})` : block.name;
+      const parts = [`[Tool call: ${label}]`];
+      if (block.input && block.input !== "{}") parts.push(block.input);
+      if (block.output !== undefined) {
+        parts.push(`[Tool result: ${block.name}${block.isError ? " failed" : ""}]`);
+        if (block.output.trim()) parts.push(block.output);
+      } else {
+        parts.push(`[Tool result: ${block.name} interrupted before output]`);
+      }
+      sections.push(parts.join("\n"));
+    }
+  }
+  return sections.join("\n\n");
+}
+
 export function titleFromTurns(turns: ChatTurn[]): string {
   const first = turns.find((turn) => turn.role === "user");
   const text = first ? textFromTurn(first).trim() : "";

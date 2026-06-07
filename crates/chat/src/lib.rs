@@ -236,12 +236,14 @@ pub fn resolve_settings_executor_config(
             .map(ToString::to_string)
     };
 
-    let provider = get("executor_provider").unwrap_or_else(|| "anthropic".to_string());
+    let stored_provider = get("executor_provider").unwrap_or_else(|| "anthropic".to_string());
     let model = get("executor_model").unwrap_or_else(|| DEFAULT_MODEL.to_string());
+    let configured_base_url = get("executor_base_url");
+    let provider =
+        normalize_settings_executor_provider(stored_provider, configured_base_url.as_deref());
 
     match provider.as_str() {
         "anthropic" | "anthropic-compat" => {
-            let configured_base_url = get("executor_base_url");
             let base_url = configured_base_url
                 .clone()
                 .unwrap_or_else(api::read_base_url);
@@ -277,6 +279,23 @@ pub fn resolve_settings_executor_config(
                 ChatExecutorConfig::OpenAiCompatible { api_key, base_url },
             ))
         }
+    }
+}
+
+fn normalize_settings_executor_provider(provider: String, base_url: Option<&str>) -> String {
+    if provider != "anthropic" {
+        return provider;
+    }
+    let Some(base_url) = base_url.map(|value| value.trim().to_lowercase()) else {
+        return provider;
+    };
+    if base_url.contains("minimaxi.com/anthropic")
+        || base_url.contains("deepseek.com/anthropic")
+        || (base_url.contains("/anthropic") && !base_url.contains("api.anthropic.com"))
+    {
+        "anthropic-compat".to_string()
+    } else {
+        provider
     }
 }
 
@@ -433,6 +452,35 @@ mod tests {
             } => {
                 assert_eq!(auth, AuthSource::ApiKey("anthropic-key".to_string()));
                 assert_eq!(base_url, "https://anthropic.example");
+                assert!(!send_betas);
+            }
+            ChatExecutorConfig::OpenAiCompatible { .. } => panic!("expected Anthropic config"),
+        }
+    }
+
+    #[test]
+    fn resolves_anthropic_compat_proxy_even_when_old_provider_is_anthropic() {
+        let obj = json!({
+            "executor_provider": "anthropic",
+            "executor_model": "MiniMax-M3",
+            "executor_api_key": "minimax-key",
+            "executor_base_url": "https://api.minimaxi.com/anthropic"
+        })
+        .as_object()
+        .cloned()
+        .expect("object");
+
+        let (model, provider, config) = resolve_settings_executor_config(&obj).expect("config");
+        assert_eq!(model, "MiniMax-M3");
+        assert_eq!(provider, "anthropic-compat");
+        match config {
+            ChatExecutorConfig::Anthropic {
+                auth,
+                base_url,
+                send_betas,
+            } => {
+                assert_eq!(auth, AuthSource::BearerToken("minimax-key".to_string()));
+                assert_eq!(base_url, "https://api.minimaxi.com/anthropic");
                 assert!(!send_betas);
             }
             ChatExecutorConfig::OpenAiCompatible { .. } => panic!("expected Anthropic config"),

@@ -167,6 +167,22 @@ const REVIEWER_PROVIDERS: Record<string, ProviderMeta> = {
 
 // ── Sub-components ────────────────────────────────────────────────────────────
 
+function normalizeExecutorProvider(provider: string | null | undefined, baseUrl: string | null | undefined): string {
+  const current = provider || "anthropic";
+  const lower = (baseUrl ?? "").trim().toLowerCase();
+  if (
+    current === "anthropic"
+    && (
+      lower.includes("minimaxi.com/anthropic")
+      || lower.includes("deepseek.com/anthropic")
+      || (lower.includes("/anthropic") && !lower.includes("api.anthropic.com"))
+    )
+  ) {
+    return "anthropic-compat";
+  }
+  return current;
+}
+
 function Row({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
   return (
     <div className="st-row">
@@ -365,9 +381,10 @@ export default function Settings() {
   const savedTimer = useRef<number | null>(null);
 
   const load = (v: ConfigView) => {
+    const executorProvider = normalizeExecutorProvider(v.executorProvider, v.executorBaseUrl);
     setView(v);
     setForm({
-      executorProvider: v.executorProvider ?? "anthropic",
+      executorProvider,
       executorModel: v.executorModel ?? "",
       executorBaseUrl: v.executorBaseUrl ?? "",
       reviewerProvider: v.reviewerProvider ?? "",

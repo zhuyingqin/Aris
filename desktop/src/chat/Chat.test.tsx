@@ -6,10 +6,10 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChatAttachment, ChatCommandSelection, ChatTurn, DesktopCommandSpec, DesktopProject, SkillMeta } from "../types";
 import ChatComposer, { attachmentFromFile, resizeComposerTextarea } from "./ChatComposer";
-import { diffFromTool } from "./ChatMessage";
+import ChatMessage, { diffFromTool } from "./ChatMessage";
 import CommandSelection from "./CommandSelection";
 import { isNearBottom } from "./ChatThread";
-import { groupSessionsByProject, makeId, makeSession, migrateSession } from "./model";
+import { groupSessionsByProject, makeId, makeSession, migrateSession, transcriptFromTurn } from "./model";
 import { appendToolOutput } from "./useChatStream";
 import { useChatSessions } from "./useChatSessions";
 
@@ -84,6 +84,17 @@ describe("Chat interaction helpers", () => {
     expect(attachment.name).toBe("paper.pdf");
   });
 
+  it("keeps image previews out of the prompt body", async () => {
+    const file = new File(["fake-png"], "shot.png", { type: "image/png" });
+
+    const attachment = await attachmentFromFile(file);
+
+    expect(attachment.kind).toBe("image");
+    expect(attachment.preview).toMatch(/^data:image\/png;base64,/);
+    expect(attachment.content).toContain("Vision input is not supported");
+    expect(attachment.content).not.toMatch(/^data:/);
+  });
+
   it("matches tool results by call id before tool name", () => {
     const blocks = [
       { kind: "tool" as const, id: "first", name: "read_file", input: "{}" },
@@ -94,6 +105,50 @@ describe("Chat interaction helpers", () => {
 
     expect(next[0]).toMatchObject({ id: "first", output: "first output" });
     expect(next[1]).not.toHaveProperty("output");
+  });
+
+  it("falls back to the latest matching tool name when a result id is stale", () => {
+    const blocks = [
+      { kind: "tool" as const, id: "first", name: "read_file", input: "{}" },
+      { kind: "tool" as const, id: "second", name: "read_file", input: "{}" },
+    ];
+
+    const next = appendToolOutput(blocks, "missing", "read_file", "latest output", false);
+
+    expect(next[0]).not.toHaveProperty("output");
+    expect(next[1]).toMatchObject({ id: "second", output: "latest output" });
+  });
+
+  it("serializes assistant tool blocks for retry context", () => {
+    const turn: ChatTurn = {
+      id: "assistant-1",
+      role: "assistant",
+      blocks: [
+        { kind: "text", text: "I checked the file." },
+        { kind: "tool", id: "tool-1", name: "read_file", input: "{\"path\":\"README.md\"}", output: "README body" },
+      ],
+    };
+
+    const transcript = transcriptFromTurn(turn);
+
+    expect(transcript).toContain("I checked the file.");
+    expect(transcript).toContain("[Tool call: read_file (tool-1)]");
+    expect(transcript).toContain("README body");
+  });
+
+  it("renders an empty assistant response instead of a blank bubble", () => {
+    render(
+      <ChatMessage
+        turn={{ id: "assistant-empty", role: "assistant", blocks: [] }}
+        canRetry={false}
+        onEdit={() => undefined}
+        onRetry={() => undefined}
+        onContinue={() => undefined}
+        onOpenTeam={() => undefined}
+      />,
+    );
+
+    expect(screen.getByText("Model returned an empty response.")).toBeTruthy();
   });
 });
 

@@ -4,6 +4,20 @@ import MarkdownContent, { ThinkBlock } from "./MarkdownContent";
 import { textFromTurn } from "./model";
 
 const FILE_WRITE_TOOLS = new Set(["write_file", "edit_file", "str_replace_based_edit_tool"]);
+const TEAM_HANDOFF_TOOLS = new Set([
+  "PlanTeam",
+  "SpawnTeammate",
+  "WaitForTeammates",
+  "VerifyDeliverable",
+  "TeamControl",
+]);
+const TEAM_HANDOFF_MARKERS = [
+  "PlanTeam",
+  "SpawnTeammate",
+  "teamDesign",
+  "Agent Team",
+  "successCriteria",
+];
 
 interface FileChange {
   path: string;
@@ -89,16 +103,36 @@ function ToolCall({ block }: { block: Extract<ChatBlock, { kind: "tool" }> }) {
   );
 }
 
+function hasRenderableContent(turn: ChatTurn): boolean {
+  return turn.blocks.some((block) => {
+    if (block.kind === "text") return Boolean(block.text.trim());
+    if (block.kind === "thinking") return Boolean(block.thinking.trim());
+    return true;
+  });
+}
+
+function hasTeamHandoff(turn: ChatTurn): boolean {
+  if (turn.role !== "assistant") return false;
+  return turn.blocks.some((block) => {
+    if (block.kind === "tool") return TEAM_HANDOFF_TOOLS.has(block.name);
+    if (block.kind !== "text") return false;
+    return TEAM_HANDOFF_MARKERS.some((marker) => block.text.includes(marker));
+  });
+}
+
 interface Props {
   turn: ChatTurn;
   canRetry: boolean;
   onEdit: (turn: ChatTurn) => void;
   onRetry: (turn: ChatTurn) => void;
   onContinue: () => void;
+  onOpenTeam: () => void;
 }
 
-function ChatMessage({ turn, canRetry, onEdit, onRetry, onContinue }: Props) {
+function ChatMessage({ turn, canRetry, onEdit, onRetry, onContinue, onOpenTeam }: Props) {
   const text = textFromTurn(turn);
+  const hasContent = hasRenderableContent(turn);
+  const showTeamHandoff = hasTeamHandoff(turn) && !turn.streaming;
   return (
     <article className={`chat-turn chat-${turn.role}${turn.error ? " chat-turn-error" : ""}`}>
       {turn.role === "user" && turn.attachments && turn.attachments.length > 0 && (
@@ -120,6 +154,18 @@ function ChatMessage({ turn, canRetry, onEdit, onRetry, onContinue }: Props) {
         }
         return <ToolCall key={block.id ?? index} block={block} />;
       })}
+      {!turn.streaming && !turn.error && !hasContent && turn.role === "assistant" && (
+        <div className="chat-empty-response">Model returned an empty response.</div>
+      )}
+      {showTeamHandoff && (
+        <div className="chat-team-handoff">
+          <div>
+            <strong>Team handoff available</strong>
+            <span>Open the Team view to inspect or continue the team workflow.</span>
+          </div>
+          <button onClick={onOpenTeam}>Open Team</button>
+        </div>
+      )}
       {turn.streaming && <span className="chat-inline-cursor">▌</span>}
       {turn.error && (
         <div className="chat-error-card">

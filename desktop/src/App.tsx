@@ -173,7 +173,9 @@ export default function App() {
       </header>
 
       <main className="app-main">
-        {tab === "chat" && <Chat />}
+        <div hidden={tab !== "chat"}>
+          <Chat />
+        </div>
         {tab === "studio" && <Studio />}
         {tab === "monitor" && <Monitor />}
         {tab === "teams" && <TeamView />}

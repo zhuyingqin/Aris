@@ -16,6 +16,7 @@ interface Props {
   onEdit: (turn: ChatTurn) => void;
   onRetry: (turn: ChatTurn) => void;
   onContinue: () => void;
+  onOpenTeam: () => void;
 }
 
 export default function ChatThread({
@@ -27,6 +28,7 @@ export default function ChatThread({
   onEdit,
   onRetry,
   onContinue,
+  onOpenTeam,
 }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [following, setFollowing] = useState(true);
@@ -95,6 +97,7 @@ export default function ChatThread({
                     onEdit={onEdit}
                     onRetry={onRetry}
                     onContinue={onContinue}
+                    onOpenTeam={onOpenTeam}
                   />
                 </div>
               );

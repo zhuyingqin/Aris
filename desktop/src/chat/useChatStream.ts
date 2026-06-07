@@ -74,15 +74,13 @@ export function useChatStream({ patchAssistant, onComplete, onError }: StreamHan
         const sessionId = runningSession.current;
         if (!sessionId) return;
         patchAssistant(sessionId, (turn) => {
-          const blocks = turn.blocks.slice();
-          for (let index = blocks.length - 1; index >= 0; index -= 1) {
-            const block = blocks[index];
-            const idMatches = result.id ? block.kind === "tool" && block.id === result.id : true;
-            if (block.kind === "tool" && idMatches && block.name === result.name && block.output === undefined) {
-              blocks[index] = { ...block, output: result.output, isError: result.isError };
-              break;
-            }
-          }
+          const blocks = appendToolOutput(
+            turn.blocks,
+            result.id,
+            result.name,
+            result.output,
+            result.isError,
+          );
           return { ...turn, blocks };
         });
       }),
@@ -139,15 +137,22 @@ export function appendToolOutput(
   isError: boolean,
 ): ChatBlock[] {
   const copy = blocks.slice();
-  let index = -1;
-  for (let candidate = copy.length - 1; candidate >= 0; candidate -= 1) {
-    const block = copy[candidate];
-    const idMatches = id ? block.kind === "tool" && block.id === id : true;
-    if (block.kind === "tool" && idMatches && block.name === name && block.output === undefined) {
-      index = candidate;
-      break;
+  const findPendingTool = (matchId: boolean) => {
+    for (let candidate = copy.length - 1; candidate >= 0; candidate -= 1) {
+      const block = copy[candidate];
+      if (
+        block.kind === "tool"
+        && block.name === name
+        && block.output === undefined
+        && (!matchId || block.id === id)
+      ) {
+        return candidate;
+      }
     }
-  }
+    return -1;
+  };
+  let index = id ? findPendingTool(true) : -1;
+  if (index < 0) index = findPendingTool(false);
   if (index >= 0) {
     const block = copy[index];
     if (block.kind === "tool") copy[index] = { ...block, output, isError };

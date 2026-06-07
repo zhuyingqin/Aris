@@ -83,6 +83,13 @@ const DESKTOP_CHAT_BLOCKED_TOOLS: &[&str] = &[
     "Config",
     "Agent",
     "AgentSupervisor",
+    "SpawnTeammate",
+    "SendMessage",
+    "ClaimTask",
+    "CompleteTask",
+    "WaitForTeammates",
+    "VerifyDeliverable",
+    "TeamControl",
     "Workflow",
     "EnterWorktree",
 ];
@@ -175,13 +182,7 @@ fn desktop_permission_policy(
     tool_specs: &[tools::ToolSpec],
     active_mode: PermissionMode,
 ) -> runtime::PermissionPolicy {
-    aris_chat::permission_policy_for_tools_with(tool_specs.to_vec(), active_mode, |spec| {
-        if spec.name == "SpawnTeammate" {
-            PermissionMode::WorkspaceWrite
-        } else {
-            spec.required_permission
-        }
-    })
+    aris_chat::permission_policy_for_tools(tool_specs.to_vec(), active_mode)
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -204,6 +205,7 @@ fn build_system_prompt(model: &str) -> Vec<String> {
         "Desktop isolation: this chat runs inside the ARIS desktop workspace at `{}`. Treat that directory as the only workspace. Do not request, infer, read, write, or search files outside it. Absolute paths outside this root are blocked by the runtime, and shell/REPL/notebook tools are unavailable in desktop Chat.",
         workspace.display()
     );
+    let team_boundary = "Desktop Chat boundary: produce team plans in prose only. Do not spawn, control, wait for, or verify teammates from Chat; the Team view owns execution and supervision.".to_string();
     aris_chat::build_common_system_prompt(aris_chat::CommonSystemPromptOptions {
         workspace,
         current_date: runtime::today_iso(),
@@ -213,8 +215,8 @@ fn build_system_prompt(model: &str) -> Vec<String> {
         product_surface: "desktop research automation app".to_string(),
         language: std::env::var("ARIS_LANGUAGE").unwrap_or_else(|_| "cn".to_string()),
         include_language_preference: true,
-        include_team_orchestration: true,
-        extra_sections: vec![isolation.clone()],
+        include_team_orchestration: false,
+        extra_sections: vec![isolation.clone(), team_boundary],
     })
     .unwrap_or_else(|_| vec![isolation])
 }

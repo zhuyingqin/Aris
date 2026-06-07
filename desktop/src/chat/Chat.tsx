@@ -16,10 +16,21 @@ import ChatComposer from "./ChatComposer";
 import CommandSelection from "./CommandSelection";
 import ChatSidebar from "./ChatSidebar";
 import ChatThread from "./ChatThread";
-import { makeId, textFromTurn } from "./model";
+import { makeId, textFromTurn, transcriptFromTurn } from "./model";
 import type { ChatSession } from "./types";
 import { useChatSessions } from "./useChatSessions";
 import { useChatStream } from "./useChatStream";
+
+const EMPTY_ASSISTANT_RESPONSE = "Model returned an empty response.";
+const IMAGE_UNSUPPORTED_MESSAGE = "(Image preview only. Vision input is not supported in desktop Chat yet.)";
+
+function hasRenderableBlock(turn: ChatTurn) {
+  return turn.blocks.some((block) => {
+    if (block.kind === "text") return Boolean(block.text.trim());
+    if (block.kind === "thinking") return Boolean(block.thinking.trim());
+    return true;
+  });
+}
 
 async function outgoingMessage(text: string, attachments: ChatAttachment[]) {
   const sections = [text.trim()];
@@ -34,7 +45,7 @@ async function outgoingMessage(text: string, attachments: ChatAttachment[]) {
     }
     sections.push(
       attachment.kind === "image"
-        ? `[Attached image: ${attachment.name}]\n${content ?? ""}`
+        ? `[Attached image: ${attachment.name}]\n${content ?? IMAGE_UNSUPPORTED_MESSAGE}`
         : `[Attached file: ${attachment.path ?? attachment.name}]\n\`\`\`\n${content ?? ""}\n\`\`\``,
     );
   }
@@ -47,7 +58,7 @@ async function contextForRetry(turns: ChatTurn[]) {
     if (turn.streaming || turn.error) continue;
     const text = turn.role === "user"
       ? await outgoingMessage(textFromTurn(turn), turn.attachments ?? [])
-      : textFromTurn(turn);
+      : transcriptFromTurn(turn);
     if (text.trim()) messages.push({ role: turn.role, text });
   }
   return messages;
@@ -84,6 +95,7 @@ interface PendingCommandSelection {
 export default function Chat() {
   const setTab = useStore((state) => state.setTab);
   const setError = useStore((state) => state.setError);
+  const refreshTeam = useStore((state) => state.refreshTeam);
   const projects = useStore((state) => state.projects);
   const currentProject = useStore((state) => state.currentProject);
   const projectBusy = useStore((state) => state.projectBusy);
@@ -119,9 +131,22 @@ export default function Chat() {
   const deleteTimers = useRef(new Map<string, { timer: number; projectId: string }>());
   const sendLock = useRef(false);
   const commandSelectionLock = useRef(false);
+  const currentSessionRef = useRef(currentSession);
+  currentSessionRef.current = currentSession;
   const focusComposer = useCallback(() => setFocusRequest((value) => value + 1), []);
 
-  const patchAssistant = useCallback((sessionId: string, fn: (turn: ChatTurn) => ChatTurn) => {
+  const syncBackendContext = useCallback((sessionId: string, nextTurns: ChatTurn[]) => {
+    if (!isTauri()) return;
+    void contextForRetry(nextTurns)
+      .then((messages) => chatSetContext(sessionId, messages))
+      .catch((error) => setError(String(error)));
+  }, [setError]);
+
+  const patchAssistant = useCallback((
+    sessionId: string,
+    fn: (turn: ChatTurn) => ChatTurn,
+    afterPatch?: (turns: ChatTurn[]) => void,
+  ) => {
     patchTurns(sessionId, (turns) => {
       const copy = turns.slice();
       let index = -1;
@@ -132,6 +157,7 @@ export default function Chat() {
         }
       }
       if (index >= 0) copy[index] = fn(copy[index]);
+      if (afterPatch) afterPatch(copy);
       return copy;
     });
   }, [patchTurns]);
@@ -139,9 +165,16 @@ export default function Chat() {
   const onComplete = useCallback((sessionId: string, reply: string) => {
     patchAssistant(sessionId, (turn) => {
       const hasText = turn.blocks.some((block) => block.kind === "text" && block.text.trim());
+      const nextBlocks = hasText
+        ? turn.blocks
+        : reply.trim()
+          ? [...turn.blocks, { kind: "text" as const, text: reply }]
+          : hasRenderableBlock(turn)
+            ? turn.blocks
+            : [{ kind: "text" as const, text: EMPTY_ASSISTANT_RESPONSE }];
       return {
         ...turn,
-        blocks: hasText || !reply ? turn.blocks : [...turn.blocks, { kind: "text", text: reply }],
+        blocks: nextBlocks,
         streaming: false,
         error: undefined,
         stopped: false,
@@ -150,21 +183,23 @@ export default function Chat() {
   }, [patchAssistant]);
 
   const onError = useCallback((sessionId: string, error: string, stopped: boolean) => {
-    patchAssistant(sessionId, (turn) => ({
-      ...turn,
-      streaming: false,
-      error: stopped ? undefined : error,
-      stopped,
-    }));
-  }, [patchAssistant]);
+    patchAssistant(
+      sessionId,
+      (turn) => ({
+        ...turn,
+        streaming: false,
+        error: stopped ? undefined : error,
+        stopped,
+      }),
+      stopped ? (nextTurns) => syncBackendContext(sessionId, nextTurns) : undefined,
+    );
+  }, [patchAssistant, syncBackendContext]);
 
   const { busy, run, stop } = useChatStream({ patchAssistant, onComplete, onError });
   const turns = currentSession?.turns ?? [];
   const input = currentSession?.draft ?? "";
   const attachments = currentSession?.draftAttachments ?? [];
-  const currentSessionRef = useRef(currentSession);
   const busyRef = useRef(busy);
-  currentSessionRef.current = currentSession;
   busyRef.current = busy;
 
   const refreshStatus = useCallback(() => {
@@ -373,6 +408,10 @@ export default function Chat() {
     }
   }, [beginRun]);
 
+  const openTeamView = useCallback(() => {
+    void refreshTeam().finally(() => setTab("teams"));
+  }, [refreshTeam, setTab]);
+
   const deleteSession = (id: string) => {
     const removed = removeSession(id);
     if (!removed) return;
@@ -448,6 +487,7 @@ export default function Chat() {
           onEdit={edit}
           onRetry={retry}
           onContinue={continueStopped}
+          onOpenTeam={openTeamView}
         />
         {pendingCommandSelection && pendingCommandSelection.sessionId === currentId && (
           <CommandSelection
