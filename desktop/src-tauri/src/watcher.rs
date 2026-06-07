@@ -19,9 +19,14 @@ use crate::state;
 
 pub fn spawn_event_watcher(app: AppHandle) {
     thread::spawn(move || {
-        let path = state::events_path();
+        let mut active_path = state::events_path();
         let mut offset: u64 = 0;
         loop {
+            let path = state::events_path();
+            if path != active_path {
+                active_path = path.clone();
+                offset = 0;
+            }
             if let Ok(mut file) = File::open(&path) {
                 let len = file.metadata().map(|meta| meta.len()).unwrap_or(0);
                 if len < offset {

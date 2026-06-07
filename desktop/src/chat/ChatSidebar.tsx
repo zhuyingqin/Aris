@@ -1,15 +1,17 @@
 import { useMemo, useState } from "react";
-import { fuzzyMatch, groupSessions } from "./model";
+import type { DesktopProject } from "../types";
+import { fuzzyMatch, groupSessionsByProject } from "./model";
 import type { ChatSession } from "./types";
 
 interface Props {
   sessions: ChatSession[];
+  projects: DesktopProject[];
   currentId: string;
   open: boolean;
   busy: boolean;
   onClose: () => void;
   onNew: () => void;
-  onOpen: (id: string) => void;
+  onOpen: (id: string) => void | Promise<void>;
   onRename: (id: string, title: string) => void;
   onTogglePinned: (id: string) => void;
   onDelete: (id: string) => void;
@@ -17,6 +19,7 @@ interface Props {
 
 export default function ChatSidebar({
   sessions,
+  projects,
   currentId,
   open,
   busy,
@@ -31,8 +34,11 @@ export default function ChatSidebar({
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
   const groups = useMemo(
-    () => groupSessions(sessions.filter((session) => fuzzyMatch(query, session.title))),
-    [query, sessions],
+    () => groupSessionsByProject(
+      sessions.filter((session) => fuzzyMatch(query, session.title)),
+      projects,
+    ),
+    [projects, query, sessions],
   );
 
   const beginRename = (session: ChatSession) => {
@@ -65,14 +71,14 @@ export default function ChatSidebar({
       <div className="chat-session-list">
         {groups.length === 0 && <div className="chat-session-empty">No matching chats</div>}
         {groups.map((group) => (
-          <section className="chat-session-group" key={group.label}>
+          <section className="chat-session-group" key={group.id}>
             <div className="chat-sidebar-label">{group.label}</div>
             {group.sessions.map((session) => (
               <div
                 key={session.id}
                 className={`chat-session-item${session.id === currentId ? " active" : ""}`}
                 onClick={() => {
-                  onOpen(session.id);
+                  void onOpen(session.id);
                   onClose();
                 }}
                 onDoubleClick={() => beginRename(session)}
@@ -81,7 +87,7 @@ export default function ChatSidebar({
                 onKeyDown={(event) => {
                   if (event.key === "Enter" || event.key === " ") {
                     event.preventDefault();
-                    onOpen(session.id);
+                    void onOpen(session.id);
                     onClose();
                   }
                 }}

@@ -91,7 +91,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "read_file",
-            description: "Read a text file from the workspace.",
+            description: "Read a text file or extract readable text from a PDF in the workspace.",
             input_schema: json!({
                 "type": "object",
                 "properties": {

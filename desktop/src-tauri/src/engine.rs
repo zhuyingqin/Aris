@@ -9,7 +9,10 @@ use std::{
     collections::HashMap,
     fs,
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex,
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -31,6 +34,7 @@ use runtime::{
 pub struct ChatState {
     sessions: Mutex<HashMap<String, Session>>,
     permission_modes: Mutex<HashMap<String, PermissionMode>>,
+    busy: AtomicBool,
 }
 
 impl Default for ChatState {
@@ -38,7 +42,34 @@ impl Default for ChatState {
         Self {
             sessions: Mutex::new(HashMap::new()),
             permission_modes: Mutex::new(HashMap::new()),
+            busy: AtomicBool::new(false),
         }
+    }
+}
+
+impl ChatState {
+    pub fn is_busy(&self) -> bool {
+        self.busy.load(Ordering::SeqCst)
+    }
+
+    pub fn clear(&self) -> Result<(), String> {
+        self.sessions
+            .lock()
+            .map_err(|_| "chat state poisoned".to_string())?
+            .clear();
+        self.permission_modes
+            .lock()
+            .map_err(|_| "chat state poisoned".to_string())?
+            .clear();
+        Ok(())
+    }
+}
+
+struct ChatBusyGuard<'a>(&'a AtomicBool);
+
+impl Drop for ChatBusyGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
     }
 }
 
@@ -590,6 +621,11 @@ pub async fn chat_send(
     session_id: String,
     message: String,
 ) -> Result<String, String> {
+    state
+        .busy
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .map_err(|_| "another chat turn is already running".to_string())?;
+    let _busy = ChatBusyGuard(&state.busy);
     let (model, _provider, executor_config) = resolve_executor()?;
     validate_session_id(&session_id)?;
     let session = get_cached_or_disk_session(&state, &session_id)?;
@@ -671,7 +707,11 @@ pub fn chat_set_context(
 }
 
 #[tauri::command]
-pub fn chat_delete(state: State<ChatState>, session_id: String) -> Result<(), String> {
+pub fn chat_delete(
+    state: State<ChatState>,
+    session_id: String,
+    project_id: Option<String>,
+) -> Result<(), String> {
     validate_session_id(&session_id)?;
     state
         .sessions
@@ -683,7 +723,15 @@ pub fn chat_delete(state: State<ChatState>, session_id: String) -> Result<(), St
         .lock()
         .map_err(|_| "chat state poisoned".to_string())?
         .remove(&session_id);
-    let path = chat_session_path(&session_id)?;
+    let path = match project_id {
+        Some(project_id) => {
+            if !crate::state::valid_project_id(&project_id) {
+                return Err("invalid project id".to_string());
+            }
+            crate::state::sessions_dir_for_project(&project_id).join(format!("{session_id}.json"))
+        }
+        None => chat_session_path(&session_id)?,
+    };
     if path.exists() {
         std::fs::remove_file(path).map_err(|e| e.to_string())?;
     }

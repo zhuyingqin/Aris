@@ -84,8 +84,12 @@ interface PendingCommandSelection {
 export default function Chat() {
   const setTab = useStore((state) => state.setTab);
   const setError = useStore((state) => state.setError);
+  const projects = useStore((state) => state.projects);
+  const currentProject = useStore((state) => state.currentProject);
+  const projectBusy = useStore((state) => state.projectBusy);
+  const switchProject = useStore((state) => state.switchProject);
   const {
-    sessions,
+    allSessions,
     currentId,
     currentSession,
     setCurrentId,
@@ -97,7 +101,7 @@ export default function Chat() {
     togglePinned,
     removeSession,
     restoreSession,
-  } = useChatSessions();
+  } = useChatSessions(currentProject?.id ?? "default");
   const [status, setStatus] = useState<ChatStatus | null>(null);
   const [skills, setSkills] = useState<SkillMeta[]>([]);
   const [desktopCommands, setDesktopCommands] = useState<DesktopCommandSpec[]>(FALLBACK_SLASH_COMMANDS);
@@ -112,7 +116,7 @@ export default function Chat() {
   const [deleted, setDeleted] = useState<ChatSession | null>(null);
   const [pendingCommandSelection, setPendingCommandSelection] = useState<PendingCommandSelection | null>(null);
   const [focusRequest, setFocusRequest] = useState(0);
-  const deleteTimers = useRef(new Map<string, number>());
+  const deleteTimers = useRef(new Map<string, { timer: number; projectId: string }>());
   const sendLock = useRef(false);
   const commandSelectionLock = useRef(false);
   const focusComposer = useCallback(() => setFocusRequest((value) => value + 1), []);
@@ -177,12 +181,12 @@ export default function Chat() {
     chatCommandSpecs().then(setDesktopCommands).catch(() => setDesktopCommands(FALLBACK_SLASH_COMMANDS));
     skillsList().then(setSkills).catch(() => undefined);
     projectChatStarters().then(setStarters).catch(() => undefined);
-  }, [refreshStatus]);
+  }, [currentProject?.id, refreshStatus]);
 
   useEffect(() => () => {
-    deleteTimers.current.forEach((timer, sessionId) => {
+    deleteTimers.current.forEach(({ timer, projectId }, sessionId) => {
       window.clearTimeout(timer);
-      if (isTauri()) void chatDelete(sessionId);
+      if (isTauri()) void chatDelete(sessionId, projectId);
     });
     deleteTimers.current.clear();
   }, []);
@@ -231,10 +235,14 @@ export default function Chat() {
     text: string,
     attached: ChatAttachment[],
   ) => {
-    if (!text.trim().startsWith("/") || attached.length > 0) return false;
+    const trimmed = text.trim();
+    if (!trimmed.startsWith("/")) return false;
+    const commandName = trimmed.slice(1).split(/\s+/)[0]?.toLowerCase() ?? "";
+    const isKnownSkill = skills.some((skill) => skill.name.toLowerCase() === commandName);
+    if (attached.length > 0 && !isKnownSkill) return false;
 
     if (!isTauri()) {
-      const command = text.trim().slice(1).split(/\s+/)[0] || "help";
+      const command = commandName || "help";
       const reply = command === "help"
         ? FALLBACK_SLASH_COMMANDS
           .map((item) => `/${item.name}${item.argumentHint ? ` ${item.argumentHint}` : ""} - ${item.description}`)
@@ -257,13 +265,16 @@ export default function Chat() {
         return true;
       }
       if (result.prompt) {
+        const prompt = attached.length > 0
+          ? await outgoingMessage(result.prompt, attached)
+          : result.prompt;
         await beginRun(
           session,
           result.replaceTurns ? [] : session.turns,
           text,
-          [],
+          attached,
           false,
-          result.prompt,
+          prompt,
         );
         return true;
       }
@@ -287,7 +298,7 @@ export default function Chat() {
       setEditingTurnId(null);
       return true;
     }
-  }, [beginRun, patchTurns, refreshStatus, setError, setTab, updateSession]);
+  }, [beginRun, patchTurns, refreshStatus, setError, setTab, skills, updateSession]);
 
   const selectCommandOption = useCallback(async (value: string) => {
     const pending = pendingCommandSelection;
@@ -367,17 +378,17 @@ export default function Chat() {
     if (!removed) return;
     setDeleted(removed);
     const timer = window.setTimeout(() => {
-      if (isTauri()) void chatDelete(removed.id);
+      if (isTauri()) void chatDelete(removed.id, removed.projectId);
       deleteTimers.current.delete(removed.id);
       setDeleted((current) => current?.id === removed.id ? null : current);
     }, 6000);
-    deleteTimers.current.set(removed.id, timer);
+    deleteTimers.current.set(removed.id, { timer, projectId: removed.projectId });
   };
 
   const undoDelete = () => {
     if (!deleted) return;
-    const timer = deleteTimers.current.get(deleted.id);
-    if (timer !== undefined) window.clearTimeout(timer);
+    const pending = deleteTimers.current.get(deleted.id);
+    if (pending) window.clearTimeout(pending.timer);
     deleteTimers.current.delete(deleted.id);
     restoreSession(deleted);
     setDeleted(null);
@@ -386,17 +397,26 @@ export default function Chat() {
   return (
     <div className="chat-root">
       <ChatSidebar
-        sessions={sessions}
+        sessions={allSessions}
+        projects={projects}
         currentId={currentId}
         open={sidebarOpen}
-        busy={busy}
+        busy={busy || projectBusy}
         onClose={() => setSidebarOpen(false)}
         onNew={() => {
           setEditingTurnId(null);
           setCurrentId(newSession());
           setSidebarOpen(false);
         }}
-        onOpen={(id) => {
+        onOpen={async (id) => {
+          const target = allSessions.find((session) => session.id === id);
+          if (target && target.projectId !== currentProject?.id) {
+            try {
+              await switchProject(target.projectId);
+            } catch {
+              return;
+            }
+          }
           setEditingTurnId(null);
           setCurrentId(id);
         }}

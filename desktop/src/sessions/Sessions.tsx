@@ -6,14 +6,17 @@ import type { SessionMessage, SessionSummary } from "../types";
 
 export default function Sessions() {
   const setError = useStore((s) => s.setError);
+  const projectId = useStore((s) => s.currentProject?.id);
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [messages, setMessages] = useState<SessionMessage[]>([]);
 
   useEffect(() => {
     if (!isTauri()) return;
+    setSelected(null);
+    setMessages([]);
     sessionsList().then(setSessions).catch((e) => setError(String(e)));
-  }, [setError]);
+  }, [projectId, setError]);
 
   useEffect(() => {
     setMessages([]);

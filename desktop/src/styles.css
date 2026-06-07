@@ -2254,6 +2254,31 @@ textarea {
   min-width: 0;
 }
 
+.project-switcher {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.project-switcher select {
+  width: min(220px, 24vw);
+  height: 28px;
+  padding: 2px 28px 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-2);
+  color: var(--text);
+  font-size: 12px;
+}
+
+.project-switcher button {
+  height: 28px;
+  padding: 3px 9px;
+  white-space: nowrap;
+  font-size: 11px;
+}
+
 .theme-toggle {
   min-width: 48px;
   padding: 3px 8px;
@@ -2929,6 +2954,10 @@ textarea {
   .chat-model,
   .chat-input-shortcut {
     display: none;
+  }
+
+  .project-switcher select {
+    width: 132px;
   }
 
   .chat-scroll {

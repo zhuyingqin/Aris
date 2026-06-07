@@ -11,6 +11,7 @@ import type {
   ConfigTestResult,
   ConfigView,
   DesktopCommandSpec,
+  ProjectView,
   RunEvent,
   SessionSummary,
   SessionTranscript,
@@ -64,6 +65,11 @@ export const agentSupervisor = (action: string, agent?: string) =>
   invoke<unknown>("agent_supervisor", { action, agent: agent ?? null });
 
 export const stateDir = () => invoke<string>("state_dir");
+export const projectsGet = () => invoke<ProjectView>("projects_get");
+export const projectAdd = (path: string) =>
+  invoke<ProjectView>("project_add", { path });
+export const projectSetCurrent = (id: string) =>
+  invoke<ProjectView>("project_set_current", { id });
 
 // ── Settings / Skills / Sessions (P1) ─────────────────────────────────────────
 
@@ -108,8 +114,8 @@ export const chatSetContext = (
   sessionId: string,
   messages: { role: "user" | "assistant"; text: string }[],
 ) => invoke<void>("chat_set_context", { sessionId, messages });
-export const chatDelete = (sessionId: string) =>
-  invoke<void>("chat_delete", { sessionId });
+export const chatDelete = (sessionId: string, projectId?: string) =>
+  invoke<void>("chat_delete", { sessionId, projectId: projectId ?? null });
 export const chatCancel = () => invoke<void>("chat_cancel");
 
 export const onChatDelta = (handler: (text: string) => void) =>

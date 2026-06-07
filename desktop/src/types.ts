@@ -247,6 +247,19 @@ export interface ConfigTestResult {
   reviewer?: ConfigTestDetail | null;
 }
 
+export interface DesktopProject {
+  id: string;
+  name: string;
+  path: string;
+  addedAt: number;
+  lastOpenedAt: number;
+}
+
+export interface ProjectView {
+  projects: DesktopProject[];
+  currentProject: DesktopProject;
+}
+
 // tools::SkillMeta serializes with snake_case field names.
 export interface SkillMeta {
   name: string;

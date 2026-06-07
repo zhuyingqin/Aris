@@ -1,4 +1,4 @@
-import type { ChatBlock, ChatTurn } from "../types";
+import type { ChatBlock, ChatTurn, DesktopProject } from "../types";
 import type { ChatSession } from "./types";
 
 export const SESSIONS_KEY = "aris-chat-sessions-v2";
@@ -8,10 +8,11 @@ export function makeId(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-export function makeSession(): ChatSession {
+export function makeSession(projectId = "default"): ChatSession {
   const now = Date.now();
   return {
     id: makeId("chat"),
+    projectId,
     title: "New chat",
     turns: [],
     draft: "",
@@ -50,10 +51,11 @@ export function migrateTurn(raw: Partial<ChatTurn> & Record<string, unknown>): C
   };
 }
 
-export function migrateSession(raw: Partial<ChatSession>): ChatSession {
+export function migrateSession(raw: Partial<ChatSession>, fallbackProjectId = "default"): ChatSession {
   const now = Date.now();
   return {
     id: raw.id || makeId("chat"),
+    projectId: raw.projectId || fallbackProjectId,
     title: raw.title || "New chat",
     turns: Array.isArray(raw.turns)
       ? raw.turns.map((turn) => migrateTurn(turn as Partial<ChatTurn> & Record<string, unknown>))
@@ -111,21 +113,26 @@ export function fuzzyMatch(query: string, value: string): boolean {
   return false;
 }
 
-export type SessionGroup = { label: string; sessions: ChatSession[] };
+export type SessionGroup = { id: string; label: string; sessions: ChatSession[] };
 
-export function groupSessions(sessions: ChatSession[]): SessionGroup[] {
-  const now = new Date();
-  const startToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-  const day = 24 * 60 * 60 * 1000;
-  const sorted = [...sessions].sort((a, b) => b.updatedAt - a.updatedAt);
-  const definitions = [
-    { label: "Pinned", test: (session: ChatSession) => session.pinned },
-    { label: "Today", test: (session: ChatSession) => !session.pinned && session.updatedAt >= startToday },
-    { label: "Yesterday", test: (session: ChatSession) => !session.pinned && session.updatedAt >= startToday - day && session.updatedAt < startToday },
-    { label: "Previous 7 days", test: (session: ChatSession) => !session.pinned && session.updatedAt >= startToday - day * 7 && session.updatedAt < startToday - day },
-    { label: "Older", test: (session: ChatSession) => !session.pinned && session.updatedAt < startToday - day * 7 },
-  ];
-  return definitions
-    .map(({ label, test }) => ({ label, sessions: sorted.filter(test) }))
-    .filter((group) => group.sessions.length > 0);
+export function groupSessionsByProject(
+  sessions: ChatSession[],
+  projects: DesktopProject[],
+): SessionGroup[] {
+  const names = new Map(projects.map((project) => [project.id, project.name]));
+  const order = new Map(projects.map((project, index) => [project.id, index]));
+  const grouped = new Map<string, ChatSession[]>();
+  for (const session of sessions) {
+    const list = grouped.get(session.projectId) ?? [];
+    list.push(session);
+    grouped.set(session.projectId, list);
+  }
+  return [...grouped.entries()]
+    .sort(([left], [right]) => (order.get(left) ?? Number.MAX_SAFE_INTEGER) - (order.get(right) ?? Number.MAX_SAFE_INTEGER))
+    .map(([projectId, projectSessions]) => ({
+      id: projectId,
+      label: names.get(projectId) ?? (projectId === "default" ? "ARIS Desktop Workspace" : "Unknown project"),
+      sessions: projectSessions.sort((left, right) =>
+        Number(right.pinned) - Number(left.pinned) || right.updatedAt - left.updatedAt),
+    }));
 }

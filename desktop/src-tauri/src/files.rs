@@ -22,7 +22,7 @@ pub fn file_search(pattern: String, root: Option<String>) -> Result<Vec<String>,
     Ok(paths)
 }
 
-/// Read the first N lines of a file.
+/// Read the first N lines of a text file or extracted PDF text.
 #[tauri::command]
 pub fn file_read(path: String, limit: Option<u32>) -> Result<String, String> {
     let lim = limit.unwrap_or(200);
@@ -37,21 +37,10 @@ pub fn file_read(path: String, limit: Option<u32>) -> Result<String, String> {
 #[tauri::command]
 pub fn project_chat_starters() -> Vec<String> {
     let root = crate::state::workspace_dir();
-    let root_arg = root.to_string_lossy().to_string();
-    let mut starters = vec!["Explain this project's architecture and key modules.".to_string()];
-    let dirty = crate::process::hidden_command("git")
-        .args(["-C", root_arg.as_str(), "status", "--porcelain"])
-        .output()
-        .map(|output| output.status.success() && !output.stdout.is_empty())
-        .unwrap_or(false);
-    if dirty {
-        starters.push(
-            "Review the uncommitted changes and identify the highest-risk issues.".to_string(),
-        );
-    } else {
-        starters
-            .push("Inspect the current project and identify the highest-risk issues.".to_string());
-    }
+    let mut starters = vec![
+        "Explain this project's architecture and key modules.".to_string(),
+        "Inspect the current project and identify the highest-risk issues.".to_string(),
+    ];
     if root.join("package.json").exists() && root.join("Cargo.toml").exists() {
         starters.push("Run the frontend and Rust tests, then fix any failures.".to_string());
     } else if root.join("package.json").exists() {

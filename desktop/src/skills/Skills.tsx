@@ -5,6 +5,7 @@ import type { SkillMeta } from "../types";
 
 export default function Skills() {
   const setError = useStore((s) => s.setError);
+  const projectId = useStore((s) => s.currentProject?.id);
   const [skills, setSkills] = useState<SkillMeta[]>([]);
   const [filter, setFilter] = useState("");
   const [selected, setSelected] = useState<string | null>(null);
@@ -12,8 +13,10 @@ export default function Skills() {
 
   useEffect(() => {
     if (!isTauri()) return;
+    setSelected(null);
+    setContent("");
     skillsList().then(setSkills).catch((e) => setError(String(e)));
-  }, [setError]);
+  }, [projectId, setError]);
 
   useEffect(() => {
     if (!selected) {

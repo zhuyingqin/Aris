@@ -4,12 +4,12 @@ import { useState } from "react";
 import { act, cleanup, render, renderHook, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ChatAttachment, ChatCommandSelection, ChatTurn, DesktopCommandSpec, SkillMeta } from "../types";
+import type { ChatAttachment, ChatCommandSelection, ChatTurn, DesktopCommandSpec, DesktopProject, SkillMeta } from "../types";
 import ChatComposer, { attachmentFromFile, resizeComposerTextarea } from "./ChatComposer";
 import { diffFromTool } from "./ChatMessage";
 import CommandSelection from "./CommandSelection";
 import { isNearBottom } from "./ChatThread";
-import { makeId } from "./model";
+import { groupSessionsByProject, makeId, makeSession, migrateSession } from "./model";
 import { appendToolOutput } from "./useChatStream";
 import { useChatSessions } from "./useChatSessions";
 
@@ -71,6 +71,17 @@ describe("Chat interaction helpers", () => {
 
     expect(text).not.toHaveBeenCalled();
     expect(attachment.content).toContain("Binary file content omitted");
+  });
+
+  it("keeps a dragged Tauri PDF as a readable path attachment", async () => {
+    const file = new File(["%PDF-1.4"], "paper.pdf", { type: "application/pdf" });
+    Object.defineProperty(file, "path", { configurable: true, value: "C:\\Project\\paper.pdf" });
+
+    const attachment = await attachmentFromFile(file);
+
+    expect(attachment.path).toBe("C:\\Project\\paper.pdf");
+    expect(attachment.content).toBeUndefined();
+    expect(attachment.name).toBe("paper.pdf");
   });
 
   it("matches tool results by call id before tool name", () => {
@@ -155,6 +166,42 @@ describe("useChatSessions", () => {
       if (removed) result.current.restoreSession(removed);
     });
     expect(result.current.sessions.some((session) => session.id === id)).toBe(true);
+  });
+
+  it("keeps chats isolated when switching projects", async () => {
+    const { result, rerender } = renderHook(
+      ({ projectId }) => useChatSessions(projectId),
+      { initialProps: { projectId: "project-a" } },
+    );
+    await waitFor(() => expect(result.current.currentSession?.projectId).toBe("project-a"));
+    const first = result.current.currentId;
+
+    rerender({ projectId: "project-b" });
+    await waitFor(() => expect(result.current.currentSession?.projectId).toBe("project-b"));
+
+    expect(result.current.currentId).not.toBe(first);
+    expect(result.current.allSessions.some((session) => session.projectId === "project-a")).toBe(true);
+  });
+});
+
+describe("project chat grouping", () => {
+  const projects: DesktopProject[] = [
+    { id: "project-a", name: "Alpha", path: "C:/Alpha", addedAt: 1, lastOpenedAt: 2 },
+    { id: "project-b", name: "Beta", path: "C:/Beta", addedAt: 1, lastOpenedAt: 1 },
+  ];
+
+  it("migrates legacy chats to the default project", () => {
+    expect(migrateSession({ title: "Legacy" }).projectId).toBe("default");
+  });
+
+  it("groups chats by project instead of date", () => {
+    const alpha = { ...makeSession("project-a"), title: "Alpha chat" };
+    const beta = { ...makeSession("project-b"), title: "Beta chat" };
+
+    const groups = groupSessionsByProject([beta, alpha], projects);
+
+    expect(groups.map((group) => group.label)).toEqual(["Alpha", "Beta"]);
+    expect(groups[0].sessions[0].projectId).toBe("project-a");
   });
 });
 

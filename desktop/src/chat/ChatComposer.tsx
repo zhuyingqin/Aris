@@ -9,6 +9,16 @@ const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 const MAX_TEXT_BYTES = 1024 * 1024;
 const MAX_DROPPED_FILES = 20;
 const TEXT_FILE_EXTENSION = /\.(?:c|cc|cpp|css|csv|go|h|hpp|html|java|js|json|jsx|md|mjs|py|rs|sh|sql|svg|toml|ts|tsx|txt|xml|yaml|yml)$/i;
+const PDF_FILE_EXTENSION = /\.pdf$/i;
+
+function pathFromDraggedFile(file: File): string | undefined {
+  const path = (file as File & { path?: unknown }).path;
+  return typeof path === "string" && path.trim() ? path : undefined;
+}
+
+function basename(path: string): string {
+  return path.replace(/\\/g, "/").split("/").pop() || path;
+}
 
 function loadRecent(key: string): string[] {
   try {
@@ -56,6 +66,17 @@ export async function attachmentFromFile(file: File): Promise<ChatAttachment> {
       reader.readAsDataURL(file);
     });
     return { id: makeId("attachment"), kind: "image", name: file.name, mimeType: file.type, preview, content: preview };
+  }
+  const isPdf = file.type === "application/pdf" || PDF_FILE_EXTENSION.test(file.name);
+  const draggedPath = pathFromDraggedFile(file);
+  if (isPdf && draggedPath) {
+    return {
+      id: makeId("attachment"),
+      kind: "file",
+      name: basename(draggedPath),
+      mimeType: file.type || "application/pdf",
+      path: draggedPath,
+    };
   }
   const isText = file.type.startsWith("text/")
     || file.type === "application/json"
@@ -257,7 +278,7 @@ export default function ChatComposer({
     remember(RECENT_FILES_KEY, path);
     onAttachmentsChange([
       ...attachments.filter((attachment) => attachment.path !== path),
-      { id: makeId("attachment"), kind: "file", name: path.replace(/\\/g, "/").split("/").pop() ?? path, path },
+      { id: makeId("attachment"), kind: "file", name: basename(path), path },
     ]);
     replaceActiveToken("");
   };

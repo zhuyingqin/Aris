@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { open } from "@tauri-apps/plugin-dialog";
 import { useStore, type Tab } from "./store";
 import Chat from "./chat/Chat";
 import Studio from "./studio/Studio";
@@ -53,10 +54,30 @@ export default function App() {
   const error = useStore((s) => s.error);
   const setError = useStore((s) => s.setError);
   const init = useStore((s) => s.init);
+  const projects = useStore((s) => s.projects);
+  const currentProject = useStore((s) => s.currentProject);
+  const projectBusy = useStore((s) => s.projectBusy);
+  const addProject = useStore((s) => s.addProject);
+  const switchProject = useStore((s) => s.switchProject);
   const [theme, setTheme] = useState<"dark" | "light">(
     () => (localStorage.getItem("aris-theme") === "light" ? "light" : "dark"),
   );
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+
+  const chooseProject = async () => {
+    const selected = await open({
+      directory: true,
+      multiple: false,
+      title: "Add ARIS project",
+    });
+    if (typeof selected === "string") {
+      try {
+        await addProject(selected);
+      } catch {
+        // The store surfaces project errors in the global toast.
+      }
+    }
+  };
 
   useEffect(() => init(), [init]);
   useEffect(() => {
@@ -122,8 +143,24 @@ export default function App() {
           <div className="app-title">{LABELS[tab]}</div>
         </div>
         <div className="app-head-actions">
-          <div className="dir" title="run-state directory">
-            {stateDir || "…"}
+          <div className="project-switcher">
+            <select
+              aria-label="Current project"
+              value={currentProject?.id ?? ""}
+              disabled={projectBusy || projects.length === 0}
+              onChange={(event) => void switchProject(event.target.value).catch(() => undefined)}
+              title={currentProject?.path}
+            >
+              {projects.map((project) => (
+                <option key={project.id} value={project.id}>{project.name}</option>
+              ))}
+            </select>
+            <button onClick={() => void chooseProject()} disabled={projectBusy || projects.length === 0}>
+              Add project
+            </button>
+          </div>
+          <div className="dir" title={stateDir || "run-state directory"}>
+            {currentProject?.path ?? stateDir}
           </div>
           <button
             className="theme-toggle"
