@@ -221,6 +221,15 @@ fn models_url(base_url: &str) -> String {
     format!("{}/models", base_url.trim_end_matches('/'))
 }
 
+fn anthropic_messages_url(base_url: &str) -> String {
+    let base_url = base_url.trim_end_matches('/');
+    if base_url.ends_with("/v1") {
+        format!("{base_url}/messages")
+    } else {
+        format!("{base_url}/v1/messages")
+    }
+}
+
 fn get_non_empty(obj: &Map<String, Value>, key: &str) -> Option<String> {
     get_str(obj, key).filter(|value| !value.trim().is_empty())
 }
@@ -269,8 +278,19 @@ async fn test_anthropic(
         }
     };
     let request = auth
-        .apply(client.get(models_url(&base_url)))
-        .header("anthropic-version", "2023-06-01");
+        .apply(client.post(anthropic_messages_url(&base_url)))
+        .header("anthropic-version", "2023-06-01")
+        .header("content-type", "application/json")
+        .json(&serde_json::json!({
+            "model": model,
+            "max_tokens": 1,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "ping"
+                }
+            ]
+        }));
     match check_response(label, request).await {
         Ok(message) => ConfigTestDetail {
             ok: true,

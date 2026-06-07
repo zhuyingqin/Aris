@@ -26,6 +26,7 @@ const EXECUTOR_MODELS: PresetOption[] = [
   { label: "GPT-5.5", value: "gpt-5.5", hint: "OpenAI-compatible" },
   { label: "Gemini 2.5 Pro", value: "gemini-2.5-pro", hint: "Google OpenAI-compatible" },
   { label: "GLM-5", value: "GLM-5", hint: "Zhipu" },
+  { label: "MiniMax M3", value: "MiniMax-M3", hint: "MiniMax" },
   { label: "MiniMax M2.7", value: "MiniMax-M2.7", hint: "MiniMax" },
   { label: "Kimi K2.5", value: "kimi-k2.5", hint: "Moonshot" },
   { label: "DeepSeek V4 Pro", value: "deepseek-v4-pro", hint: "DeepSeek" },
@@ -56,6 +57,7 @@ const ANTHROPIC_URLS: PresetOption[] = [
 
 const ANTHROPIC_COMPAT_URLS: PresetOption[] = [
   { label: "Official", value: "https://api.anthropic.com", hint: "Anthropic-compatible" },
+  { label: "MiniMax", value: "https://api.minimaxi.com/anthropic", hint: "MiniMax Anthropic-compatible" },
   { label: "DeepSeek", value: "https://api.deepseek.com/anthropic", hint: "DeepSeek Anthropic-compatible" },
   { label: "NewCLI", value: "https://code.newcli.com/claude", hint: "Claude proxy" },
   { label: "ModelScope", value: "https://api-inference.modelscope.cn", hint: "Anthropic-format proxy" },
@@ -75,6 +77,7 @@ const EXECUTOR_PROVIDERS: Record<string, ProviderMeta> = {
     defaultModel: "claude-sonnet-4-6",
     models: [
       { label: "Claude Sonnet 4.6", value: "claude-sonnet-4-6", hint: "Claude proxy" },
+      { label: "MiniMax M3", value: "MiniMax-M3", hint: "MiniMax Anthropic-compatible" },
       { label: "DeepSeek V4 Pro", value: "deepseek-v4-pro", hint: "DeepSeek Anthropic-compatible" },
     ],
     baseUrls: ANTHROPIC_COMPAT_URLS,
