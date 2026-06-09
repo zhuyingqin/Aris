@@ -68,6 +68,11 @@ pub fn sessions_list() -> Vec<SessionSummary> {
 fn block_to_json(block: &ContentBlock) -> Value {
     match block {
         ContentBlock::Text { text } => json!({ "kind": "text", "text": text }),
+        ContentBlock::Image { media_type, data } => json!({
+            "kind": "image",
+            "mediaType": media_type,
+            "bytes": data.len(),
+        }),
         ContentBlock::ToolUse { name, input, .. } => {
             json!({ "kind": "toolUse", "name": name, "input": input })
         }

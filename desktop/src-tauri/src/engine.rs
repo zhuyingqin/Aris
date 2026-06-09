@@ -258,6 +258,93 @@ fn save_chat_session(session_id: &str, session: &Session) -> Result<(), String> 
         .map_err(|e| e.to_string())
 }
 
+const MAX_CHAT_IMAGE_BASE64_CHARS: usize = 12 * 1024 * 1024;
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatImageInput {
+    name: Option<String>,
+    mime_type: String,
+    data: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatSendRequest {
+    text: String,
+    #[serde(default)]
+    images: Vec<ChatImageInput>,
+}
+
+fn split_data_url(value: &str) -> Option<(&str, &str)> {
+    let rest = value.strip_prefix("data:")?;
+    let (metadata, data) = rest.split_once(',')?;
+    if !metadata
+        .split(';')
+        .any(|part| part.eq_ignore_ascii_case("base64"))
+    {
+        return None;
+    }
+    let media_type = metadata.split(';').next().unwrap_or_default();
+    Some((media_type, data))
+}
+
+fn image_block_from_input(input: ChatImageInput) -> Result<ContentBlock, String> {
+    let declared_media_type = input.mime_type.trim();
+    let (media_type, data) = match split_data_url(input.data.trim()) {
+        Some((url_media_type, data)) => {
+            let media_type = if declared_media_type.is_empty() {
+                url_media_type
+            } else {
+                declared_media_type
+            };
+            (media_type, data.trim())
+        }
+        None => (declared_media_type, input.data.trim()),
+    };
+
+    if !media_type.starts_with("image/") {
+        return Err(format!(
+            "attached image {} has unsupported media type `{}`",
+            input.name.unwrap_or_else(|| "<unnamed>".to_string()),
+            media_type
+        ));
+    }
+    if data.is_empty() {
+        return Err("attached image data is empty".to_string());
+    }
+    if data.len() > MAX_CHAT_IMAGE_BASE64_CHARS {
+        return Err(format!(
+            "attached image is too large for model input ({} MB base64 limit)",
+            MAX_CHAT_IMAGE_BASE64_CHARS / 1024 / 1024
+        ));
+    }
+
+    Ok(ContentBlock::Image {
+        media_type: media_type.to_string(),
+        data: data.to_string(),
+    })
+}
+
+fn user_message_from_request(request: ChatSendRequest) -> Result<ConversationMessage, String> {
+    let mut blocks = Vec::new();
+    let text = request.text.trim();
+    if !text.is_empty() {
+        blocks.push(ContentBlock::Text {
+            text: text.to_string(),
+        });
+    }
+    for image in request.images {
+        blocks.push(image_block_from_input(image)?);
+    }
+    if blocks.is_empty() {
+        blocks.push(ContentBlock::Text {
+            text: "Attached context".to_string(),
+        });
+    }
+    Ok(ConversationMessage::user_blocks(blocks))
+}
+
 fn get_cached_or_disk_session(state: &ChatState, session_id: &str) -> Result<Session, String> {
     let cached = state
         .sessions
@@ -623,6 +710,27 @@ pub async fn chat_send(
     session_id: String,
     message: String,
 ) -> Result<String, String> {
+    let user_message = ConversationMessage::user_text(message);
+    run_chat_turn(app, &state, session_id, user_message).await
+}
+
+#[tauri::command]
+pub async fn chat_send_rich(
+    app: AppHandle,
+    state: State<'_, ChatState>,
+    session_id: String,
+    request: ChatSendRequest,
+) -> Result<String, String> {
+    let user_message = user_message_from_request(request)?;
+    run_chat_turn(app, &state, session_id, user_message).await
+}
+
+async fn run_chat_turn(
+    app: AppHandle,
+    state: &ChatState,
+    session_id: String,
+    user_message: ConversationMessage,
+) -> Result<String, String> {
     state
         .busy
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -657,14 +765,16 @@ pub async fn chat_send(
             system_prompt,
             runtime::RuntimeFeatureConfig::default(),
         )?;
-        let summary = runtime.run_turn(message, None).map_err(|e| e.to_string())?;
+        let summary = runtime
+            .run_turn_message(user_message, None)
+            .map_err(|e| e.to_string())?;
         let text = aris_chat::final_assistant_text(&summary);
         Ok::<(String, Session), String>((text, runtime.into_session()))
     })
     .await
     .map_err(|e| e.to_string())??;
 
-    store_chat_session(&state, session_id, updated)?;
+    store_chat_session(state, session_id, updated)?;
     let _ = app.emit("chat-done", &text);
     Ok(text)
 }
@@ -681,6 +791,8 @@ pub fn chat_reset(state: State<ChatState>, session_id: String) -> Result<(), Str
 pub struct ChatContextMessage {
     role: String,
     text: String,
+    #[serde(default)]
+    images: Vec<ChatImageInput>,
 }
 
 #[tauri::command]
@@ -695,7 +807,10 @@ pub fn chat_set_context(
         match message.role.as_str() {
             "user" => session
                 .messages
-                .push(ConversationMessage::user_text(message.text)),
+                .push(user_message_from_request(ChatSendRequest {
+                    text: message.text,
+                    images: message.images,
+                })?),
             "assistant" => {
                 session
                     .messages
@@ -1964,6 +2079,7 @@ fn render_simple_timeline(id: &str, path: &Path, session: &Session) -> String {
             .iter()
             .find_map(|block| match block {
                 ContentBlock::Text { text } => Some(text.as_str()),
+                ContentBlock::Image { media_type, .. } => Some(media_type.as_str()),
                 ContentBlock::ToolUse { name, .. } => Some(name.as_str()),
                 ContentBlock::ToolResult { tool_name, .. } => Some(tool_name.as_str()),
                 ContentBlock::Thinking { thinking, .. } => Some(thinking.as_str()),
@@ -2009,6 +2125,12 @@ fn render_export_text(session: &Session) -> String {
         for block in &message.blocks {
             match block {
                 ContentBlock::Text { text } => lines.push(text.clone()),
+                ContentBlock::Image { media_type, data } => {
+                    lines.push(format!(
+                        "[image media_type={media_type} bytes={}]",
+                        data.len()
+                    ));
+                }
                 ContentBlock::ToolUse { id, name, input } => {
                     lines.push(format!("[tool_use id={id} name={name}] {input}"));
                 }
@@ -2087,4 +2209,77 @@ fn indent_block(value: &str, spaces: usize) -> String {
         .map(|line| format!("{indent}{line}"))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rich_chat_request_maps_data_url_to_image_block() {
+        let message = user_message_from_request(ChatSendRequest {
+            text: "look".to_string(),
+            images: vec![ChatImageInput {
+                name: Some("shot.png".to_string()),
+                mime_type: "image/png".to_string(),
+                data: "data:image/png;base64,ZmFrZQ==".to_string(),
+            }],
+        })
+        .expect("rich request should parse");
+
+        assert!(matches!(
+            &message.blocks[0],
+            ContentBlock::Text { text } if text == "look"
+        ));
+        assert!(matches!(
+            &message.blocks[1],
+            ContentBlock::Image { media_type, data }
+                if media_type == "image/png" && data == "ZmFrZQ=="
+        ));
+    }
+
+    #[test]
+    fn rich_chat_request_rejects_non_image_media_type() {
+        let error = user_message_from_request(ChatSendRequest {
+            text: String::new(),
+            images: vec![ChatImageInput {
+                name: Some("note.txt".to_string()),
+                mime_type: "text/plain".to_string(),
+                data: "ZmFrZQ==".to_string(),
+            }],
+        })
+        .expect_err("non-image upload should be rejected");
+
+        assert!(error.contains("unsupported media type"));
+    }
+
+    #[test]
+    fn skill_prompt_routes_named_skill_to_skill_tool() {
+        let prompt = skill_prompt("research-lit", "reservoir computing");
+
+        assert!(prompt.contains("Use the Skill tool"));
+        assert!(prompt.contains("\"research-lit\""));
+        assert!(prompt.contains("reservoir computing"));
+    }
+
+    #[test]
+    fn skills_command_lists_bundled_skills() {
+        let result = handle_skills_command(Some("list"), None).expect("skills list");
+
+        assert!(result.handled);
+        let message = result.message.expect("message");
+        assert!(message.contains("Available skills"));
+        assert!(message.contains("/research-lit"));
+    }
+
+    #[test]
+    fn skills_command_shows_bundled_skill_markdown() {
+        let result =
+            handle_skills_command(Some("show"), Some("research-lit")).expect("skills show");
+
+        assert!(result.handled);
+        let message = result.message.expect("message");
+        assert!(message.contains("/research-lit"));
+        assert!(message.contains("# Research Literature Review"));
+    }
 }

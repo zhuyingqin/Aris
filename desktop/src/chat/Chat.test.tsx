@@ -9,7 +9,7 @@ import ChatComposer, { attachmentFromFile, resizeComposerTextarea } from "./Chat
 import ChatMessage, { diffFromTool } from "./ChatMessage";
 import CommandSelection from "./CommandSelection";
 import { isNearBottom } from "./ChatThread";
-import { groupSessionsByProject, makeId, makeSession, migrateSession, transcriptFromTurn } from "./model";
+import { fuzzyScore, groupSessionsByProject, makeId, makeSession, migrateSession, transcriptFromTurn } from "./model";
 import { appendToolOutput } from "./useChatStream";
 import { useChatSessions } from "./useChatSessions";
 
@@ -93,6 +93,15 @@ describe("Chat interaction helpers", () => {
     expect(attachment.preview).toMatch(/^data:image\/png;base64,/);
     expect(attachment.content).toContain("Vision input is not supported");
     expect(attachment.content).not.toMatch(/^data:/);
+  });
+
+  it("scores direct slash-style abbreviations above weak subsequence matches", () => {
+    const literature = fuzzyScore("lit", "research-lit literature paper search");
+    const weak = fuzzyScore("lit", "utility cleanup");
+
+    expect(literature).not.toBeNull();
+    expect(weak).not.toBeNull();
+    expect(literature ?? 999).toBeLessThan(weak ?? 999);
   });
 
   it("matches tool results by call id before tool name", () => {
@@ -268,10 +277,12 @@ const SKILLS: SkillMeta[] = [
 function ComposerHarness({
   commands = [],
   skills = SKILLS,
+  sendBlocked = false,
   onSubmit = () => undefined,
 }: {
   commands?: DesktopCommandSpec[];
   skills?: SkillMeta[];
+  sendBlocked?: boolean;
   onSubmit?: () => void;
 }) {
   const [input, setInput] = useState("");
@@ -283,6 +294,7 @@ function ComposerHarness({
       skills={skills}
       attachments={attachments}
       busy={false}
+      sendBlocked={sendBlocked}
       ready
       editing={false}
       onInputChange={setInput}
@@ -296,6 +308,22 @@ function ComposerHarness({
 }
 
 describe("ChatComposer picker keyboard operation", () => {
+  it("keeps the draft editable while another chat is running", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn();
+    render(<ComposerHarness sendBlocked onSubmit={onSubmit} />);
+    const textbox = screen.getByRole("textbox") as HTMLTextAreaElement;
+
+    await user.type(textbox, "draft for later");
+
+    expect(textbox.disabled).toBe(false);
+    expect(textbox.value).toBe("draft for later");
+    const sendButton = screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement;
+    expect(sendButton.disabled).toBe(true);
+    await user.keyboard("{Enter}");
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
   it("selects a fuzzy-matched slash skill with Enter", async () => {
     const user = userEvent.setup();
     render(<ComposerHarness />);
@@ -305,6 +333,27 @@ describe("ChatComposer picker keyboard operation", () => {
     await user.keyboard("{Enter}");
 
     expect((textbox as HTMLTextAreaElement).value).toBe("/paper-plan ");
+  });
+
+  it("surfaces literature skills for /lit", async () => {
+    const user = userEvent.setup();
+    render(
+      <ComposerHarness
+        skills={[
+          { name: "utility-cleanup", description: "General maintenance helpers", path: "utility-cleanup/SKILL.md" },
+          { name: "research-lit", description: "Search and analyze research papers", path: "research-lit/SKILL.md" },
+          { name: "comm-lit-review", description: "Communications-domain literature review", path: "comm-lit-review/SKILL.md" },
+        ]}
+      />,
+    );
+    const textbox = screen.getByRole("textbox");
+
+    await user.type(textbox, "/lit");
+
+    const picker = screen.getByRole("listbox");
+    const names = within(picker).getAllByText(/^\/.+/).map((item) => item.textContent);
+    expect(names.slice(0, 2)).toEqual(["/comm-lit-review", "/research-lit"]);
+    expect(within(picker).getByText("/research-lit")).toBeTruthy();
   });
 
   it("submits an exact built-in slash command with Enter", async () => {
@@ -401,6 +450,24 @@ describe("ChatComposer picker keyboard operation", () => {
 
     expect((textbox as HTMLTextAreaElement).value).toBe("");
     expect(screen.getByText("Chat.tsx")).toBeTruthy();
+  });
+
+  it("attaches an uploaded image with a preview", async () => {
+    const user = userEvent.setup();
+    render(<ComposerHarness />);
+
+    const fileInput = screen.getByTestId("chat-file-input") as HTMLInputElement;
+    const clickInput = vi.spyOn(fileInput, "click");
+    await user.click(screen.getByRole("button", { name: "Attach files" }));
+    expect(clickInput).toHaveBeenCalledOnce();
+
+    const file = new File(["fake-png"], "shot.png", { type: "image/png" });
+    await user.upload(fileInput, file);
+
+    expect(await screen.findByText("shot.png")).toBeTruthy();
+    const preview = await screen.findByRole("img", { name: "shot.png" });
+    expect((preview as HTMLImageElement).src).toMatch(/^data:image\/png;base64,/);
+    expect(screen.getByRole("button", { name: "Remove shot.png" })).toBeTruthy();
   });
 });
 

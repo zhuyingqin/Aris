@@ -5,6 +5,7 @@ import {
   onRunEvent,
   projectAdd,
   projectsGet,
+  projectsReorder,
   projectSetCurrent,
   stateDir as fetchStateDir,
   teamList,
@@ -49,6 +50,7 @@ interface AppState {
   setError: (message: string | null) => void;
   addProject: (path: string) => Promise<void>;
   switchProject: (id: string) => Promise<void>;
+  reorderProjects: (ids: string[]) => Promise<void>;
 
   /** Wire up live events + periodic polling. Returns a teardown fn. */
   init: () => () => void;
@@ -108,6 +110,41 @@ export const useStore = create<AppState>((set, get) => ({
       await Promise.all([get().refreshRuns(), get().refreshTeam()]);
     } catch (error) {
       set({ error: String(error) });
+      throw error;
+    } finally {
+      set({ projectBusy: false });
+    }
+  },
+  reorderProjects: async (ids) => {
+    const previousProjects = get().projects;
+    const previousCurrentProject = get().currentProject;
+    const uniqueIds = new Set(ids);
+    if (
+      ids.length !== previousProjects.length ||
+      uniqueIds.size !== ids.length ||
+      ids.every((id, index) => id === previousProjects[index]?.id)
+    ) {
+      return;
+    }
+    const byId = new Map(previousProjects.map((project) => [project.id, project]));
+    if (ids.some((id) => !byId.has(id))) return;
+    set({
+      projects: ids.map((id) => byId.get(id)!),
+      projectBusy: true,
+      error: null,
+    });
+    try {
+      const view = await projectsReorder(ids);
+      set({
+        projects: view.projects,
+        currentProject: view.currentProject,
+      });
+    } catch (error) {
+      set({
+        projects: previousProjects,
+        currentProject: previousCurrentProject,
+        error: String(error),
+      });
       throw error;
     } finally {
       set({ projectBusy: false });

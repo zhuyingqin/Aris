@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use runtime::BUNDLED_SKILLS;
 
 use api::{
-    read_base_url, AnthropicClient, ContentBlockDelta, InputContentBlock, InputMessage,
+    read_base_url, AnthropicClient, ContentBlockDelta, ImageSource, InputContentBlock, InputMessage,
     MessageRequest, MessageResponse, OutputContentBlock, StreamEvent as ApiStreamEvent, ToolChoice,
     ToolDefinition, ToolResultContentBlock,
 };
@@ -1687,7 +1687,7 @@ fn execute_skill(input: SkillInput) -> Result<SkillOutput, String> {
         );
         return Ok(SkillOutput {
             skill: input.skill,
-            path: skill_path.display().to_string(),
+            path: forward_slash(&skill_path.display().to_string()),
             args: input.args,
             description,
             prompt,
@@ -2806,6 +2806,9 @@ fn convert_messages(messages: &[ConversationMessage]) -> Vec<InputMessage> {
                 .iter()
                 .map(|block| match block {
                     ContentBlock::Text { text } => InputContentBlock::Text { text: text.clone() },
+                    ContentBlock::Image { media_type, data } => InputContentBlock::Image {
+                        source: ImageSource::base64(media_type.clone(), data.clone()),
+                    },
                     ContentBlock::ToolUse { id, name, input } => InputContentBlock::ToolUse {
                         id: id.clone(),
                         name: name.clone(),
@@ -3710,12 +3713,26 @@ fn detect_powershell_shell() -> std::io::Result<&'static str> {
 }
 
 fn command_exists(command: &str) -> bool {
+    #[cfg(windows)]
+    {
+        return runtime::hidden_command("where.exe")
+            .arg(command)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+    }
+
+    #[cfg(not(windows))]
+    {
     runtime::hidden_command("sh")
         .arg("-lc")
         .arg(format!("command -v {command} >/dev/null 2>&1"))
         .status()
         .map(|status| status.success())
         .unwrap_or(false)
+    }
 }
 
 #[allow(clippy::too_many_lines)]
@@ -4047,12 +4064,22 @@ fn run_llm_review(input: LlmReviewInput) -> Result<String, String> {
     let env_reviewer_model = std::env::var("ARIS_REVIEWER_MODEL")
         .ok()
         .filter(|s| !s.is_empty());
-    let configured_model = env_reviewer_model.as_deref().unwrap_or("gpt-5.5");
 
     // Check for user-configured reviewer provider and base URL
     let reviewer_provider = std::env::var("ARIS_REVIEWER_PROVIDER")
         .ok()
         .filter(|s| !s.is_empty());
+    if matches!(
+        reviewer_provider.as_deref(),
+        Some("none" | "disabled" | "off")
+    ) {
+        return Err(
+            "LlmReview: reviewer is disabled in ARIS settings. Configure a reviewer before using LlmReview."
+                .to_string(),
+        );
+    }
+
+    let configured_model = env_reviewer_model.as_deref().unwrap_or("gpt-5.5");
     let custom_base_url = std::env::var("ARIS_REVIEWER_BASE_URL")
         .ok()
         .filter(|s| !s.is_empty());
@@ -4411,9 +4438,10 @@ mod tests {
     use super::team_state;
     use super::{
         agent_permission_policy, allowed_tools_for_subagent, execute_agent_with_spawn,
-        execute_tool, final_assistant_text, mvp_tool_specs, persist_agent_terminal_state,
-        resolve_anthropic_compat_reviewer_model, resolve_reviewer_model, route_openai_compat_model,
-        AgentInput, AgentJob, SubagentToolExecutor,
+        discover_skills, execute_tool, final_assistant_text, mvp_tool_specs,
+        persist_agent_terminal_state, resolve_anthropic_compat_reviewer_model,
+        resolve_reviewer_model, route_openai_compat_model, run_llm_review, skill_markdown,
+        AgentInput, AgentJob, LlmReviewInput, SubagentToolExecutor,
     };
     use runtime::{ApiRequest, AssistantEvent, ConversationRuntime, RuntimeError, Session};
     use serde_json::json;
@@ -4779,20 +4807,21 @@ mod tests {
         .expect("write SKILL.md");
 
         // Point HOME to temp dir so ~/.claude/skills/ resolves there
-        let _guard = env_lock();
-        let original_home = std::env::var("HOME").ok();
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let claude_skills = tmp
             .parent()
             .unwrap()
             .join("claude-home")
             .join(".claude")
             .join("skills");
+        let _home_guard = EnvGuard::set("HOME", claude_skills.parent().unwrap().parent().unwrap());
         fs::create_dir_all(&claude_skills).expect("create claude skills dir");
         // Copy the skill into the claude skills dir
         let target_skill = claude_skills.join("test-skill");
         fs::create_dir_all(&target_skill).expect("create target skill dir");
         fs::copy(skill_dir.join("SKILL.md"), target_skill.join("SKILL.md")).expect("copy skill");
-        std::env::set_var("HOME", claude_skills.parent().unwrap().parent().unwrap());
 
         let result = execute_tool(
             "Skill",
@@ -4831,11 +4860,49 @@ mod tests {
             .ends_with("/test-skill/SKILL.md"));
 
         // Cleanup
-        if let Some(home) = original_home {
-            std::env::set_var("HOME", home);
-        }
         let _ = fs::remove_dir_all(&tmp);
         let _ = fs::remove_dir_all(claude_skills.parent().unwrap().parent().unwrap());
+    }
+
+    #[test]
+    fn bundled_skill_is_discoverable_and_invokable() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = temp_path("bundled-skill-home");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).expect("create isolated home");
+        let _home = EnvGuard::set("HOME", &tmp);
+        let _userprofile = EnvGuard::set("USERPROFILE", &tmp);
+        let _codex_home = EnvGuard::unset("CODEX_HOME");
+
+        let skills = discover_skills();
+        assert!(
+            skills.iter().any(|skill| skill.name == "research-lit"),
+            "research-lit should be listed among bundled skills"
+        );
+
+        let markdown = skill_markdown("research-lit").expect("bundled skill markdown");
+        assert!(markdown.contains("# Research Literature Review"));
+
+        let result = execute_tool(
+            "Skill",
+            &json!({
+                "skill": "research-lit",
+                "args": "reservoir computing"
+            }),
+        )
+        .expect("bundled Skill should load");
+        let output: serde_json::Value = serde_json::from_str(&result).expect("valid json");
+        assert_eq!(output["skill"], "research-lit");
+        assert_eq!(output["path"], "<bundled:research-lit>");
+        assert_eq!(output["args"], "reservoir computing");
+        assert!(output["prompt"]
+            .as_str()
+            .expect("prompt")
+            .contains("# Research Literature Review"));
+
+        let _ = fs::remove_dir_all(&tmp);
     }
 
     #[test]
@@ -6098,6 +6165,7 @@ mod tests {
         assert!(output["stdout"].as_str().expect("stdout").contains('2'));
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn powershell_runs_via_stub_shell() {
         let _guard = env_lock()
@@ -6146,6 +6214,34 @@ printf 'pwsh:%s' "$1"
 
         let output: serde_json::Value = serde_json::from_str(&result).expect("json");
         assert_eq!(output["stdout"], "pwsh:Write-Output hello");
+        assert!(output["stderr"].as_str().expect("stderr").is_empty());
+
+        let background_output: serde_json::Value = serde_json::from_str(&background).expect("json");
+        assert!(background_output["backgroundTaskId"].as_str().is_some());
+        assert_eq!(background_output["backgroundedByUser"], true);
+        assert_eq!(background_output["assistantAutoBackgrounded"], false);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn powershell_runs_via_system_shell() {
+        let result = execute_tool(
+            "PowerShell",
+            &json!({"command": "Write-Output hello", "timeout": 1000}),
+        )
+        .expect("PowerShell should succeed");
+
+        let background = execute_tool(
+            "PowerShell",
+            &json!({"command": "Write-Output hello", "run_in_background": true}),
+        )
+        .expect("PowerShell background should succeed");
+
+        let output: serde_json::Value = serde_json::from_str(&result).expect("json");
+        assert!(output["stdout"]
+            .as_str()
+            .expect("stdout")
+            .contains("hello"));
         assert!(output["stderr"].as_str().expect("stderr").is_empty());
 
         let background_output: serde_json::Value = serde_json::from_str(&background).expect("json");
@@ -6440,6 +6536,22 @@ printf 'pwsh:%s' "$1"
             Some("deepseek"),
         );
         assert_eq!(model, "deepseek-chat");
+    }
+
+    #[test]
+    fn llm_review_disabled_reviewer_does_not_fall_back_to_gpt() {
+        let _g = env_lock_reviewer().lock().unwrap();
+        let _snap = ReviewerEnvSnapshot::capture_and_clear();
+        std::env::set_var("ARIS_REVIEWER_PROVIDER", "none");
+
+        let error = run_llm_review(LlmReviewInput {
+            prompt: "ping".to_string(),
+            model: None,
+        })
+        .expect_err("disabled reviewer should stop before default model routing");
+
+        assert!(error.contains("reviewer is disabled"));
+        assert!(!error.contains("gpt-5.5"));
     }
 
     #[test]

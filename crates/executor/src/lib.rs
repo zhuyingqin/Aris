@@ -5,7 +5,7 @@
 //! returns normalized [`runtime::AssistantEvent`] values.
 
 use api::{
-    AnthropicClient, AuthSource, ContentBlockDelta, InputContentBlock, InputMessage,
+    AnthropicClient, AuthSource, ContentBlockDelta, ImageSource, InputContentBlock, InputMessage,
     MessageRequest, MessageResponse, OutputContentBlock, StreamEvent as ApiStreamEvent, ToolChoice,
     ToolDefinition, ToolResultContentBlock,
 };
@@ -400,6 +400,9 @@ fn convert_messages(messages: &[ConversationMessage]) -> Vec<InputMessage> {
                 .iter()
                 .map(|block| match block {
                     ContentBlock::Text { text } => InputContentBlock::Text { text: text.clone() },
+                    ContentBlock::Image { media_type, data } => InputContentBlock::Image {
+                        source: ImageSource::base64(media_type.clone(), data.clone()),
+                    },
                     ContentBlock::ToolUse { id, name, input } => InputContentBlock::ToolUse {
                         id: id.clone(),
                         name: name.clone(),
@@ -438,10 +441,10 @@ fn convert_messages(messages: &[ConversationMessage]) -> Vec<InputMessage> {
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use api::{MessageResponse, OutputContentBlock, Usage};
-    use runtime::RuntimeError;
+    use api::{InputContentBlock, MessageResponse, OutputContentBlock, Usage};
+    use runtime::{ContentBlock, ConversationMessage, RuntimeError};
 
-    use super::{response_to_events, StreamObserver};
+    use super::{convert_messages, response_to_events, StreamObserver};
 
     struct RecordingObserver {
         deltas: Arc<Mutex<Vec<String>>>,
@@ -499,5 +502,30 @@ mod tests {
             *deltas.lock().unwrap(),
             vec!["thinking:inspect".to_string(), "text:answer".to_string()]
         );
+    }
+
+    #[test]
+    fn convert_messages_maps_images_to_anthropic_image_blocks() {
+        let messages = vec![ConversationMessage::user_blocks(vec![
+            ContentBlock::Text {
+                text: "describe this".to_string(),
+            },
+            ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: "ZmFrZQ==".to_string(),
+            },
+        ])];
+
+        let converted = convert_messages(&messages);
+
+        assert_eq!(converted.len(), 1);
+        assert_eq!(converted[0].role, "user");
+        assert!(matches!(
+            &converted[0].content[1],
+            InputContentBlock::Image { source }
+                if source.kind == "base64"
+                    && source.media_type == "image/png"
+                    && source.data == "ZmFrZQ=="
+        ));
     }
 }

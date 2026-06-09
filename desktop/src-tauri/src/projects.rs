@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::Mutex,
     time::{SystemTime, UNIX_EPOCH},
@@ -173,37 +173,66 @@ fn current_project(registry: &ProjectRegistry) -> Result<DesktopProject, String>
 }
 
 fn view(registry: &ProjectRegistry) -> Result<ProjectView, String> {
-    let mut projects = registry.projects.clone();
-    projects.sort_by(|left, right| {
-        right
-            .last_opened_at
-            .cmp(&left.last_opened_at)
-            .then_with(|| left.name.cmp(&right.name))
-    });
     Ok(ProjectView {
-        projects,
+        projects: registry.projects.clone(),
         current_project: current_project(registry)?,
     })
 }
 
 fn activate(registry: &mut ProjectRegistry, id: &str) -> Result<(), String> {
-    let now = now_epoch_secs();
-    let project = registry
-        .projects
-        .iter_mut()
-        .find(|project| project.id == id)
-        .ok_or_else(|| "project not found".to_string())?;
-    let path = PathBuf::from(&project.path);
+    let (project_id, path) = {
+        let project = registry
+            .projects
+            .iter()
+            .find(|project| project.id == id)
+            .ok_or_else(|| "project not found".to_string())?;
+        (project.id.clone(), PathBuf::from(&project.path))
+    };
     if !path.is_dir() {
         return Err(format!(
             "project directory does not exist: {}",
             path.display()
         ));
     }
-    state::apply_project_environment(&path, &project.id).map_err(|error| error.to_string())?;
-    project.last_opened_at = now;
-    registry.current_project_id = project.id.clone();
+    state::apply_project_environment(&path, &project_id).map_err(|error| error.to_string())?;
+    registry.current_project_id = project_id;
     save_registry(registry)
+}
+
+fn reorder_registry(registry: &mut ProjectRegistry, project_ids: &[String]) -> Result<(), String> {
+    if project_ids.len() != registry.projects.len() {
+        return Err("project reorder must include every project exactly once".to_string());
+    }
+
+    let known: HashSet<&str> = registry
+        .projects
+        .iter()
+        .map(|project| project.id.as_str())
+        .collect();
+    let mut seen = HashSet::new();
+    for id in project_ids {
+        if !known.contains(id.as_str()) {
+            return Err(format!("unknown project id: {id}"));
+        }
+        if !seen.insert(id.as_str()) {
+            return Err(format!("duplicate project id: {id}"));
+        }
+    }
+
+    let mut by_id: HashMap<String, DesktopProject> = registry
+        .projects
+        .drain(..)
+        .map(|project| (project.id.clone(), project))
+        .collect();
+    registry.projects = project_ids
+        .iter()
+        .map(|id| {
+            by_id
+                .remove(id)
+                .expect("project ids were validated before reorder")
+        })
+        .collect();
+    Ok(())
 }
 
 fn ensure_switch_allowed(chat: &ChatState) -> Result<(), String> {
@@ -300,11 +329,42 @@ pub fn project_set_current(
     view(&registry)
 }
 
+#[tauri::command]
+pub fn projects_reorder(
+    projects: State<ProjectState>,
+    project_ids: Vec<String>,
+) -> Result<ProjectView, String> {
+    let mut registry = projects
+        .registry
+        .lock()
+        .map_err(|_| "project state poisoned".to_string())?;
+    reorder_registry(&mut registry, &project_ids)?;
+    save_registry(&registry)?;
+    view(&registry)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{clean_canonical_path, normalize_path, project_id};
+    use super::{
+        clean_canonical_path, normalize_path, project_id, reorder_registry, view, DesktopProject,
+        ProjectRegistry,
+    };
     use crate::state::valid_project_id;
     use std::path::{Path, PathBuf};
+
+    fn test_project(id: &str, name: &str, last_opened_at: u64) -> DesktopProject {
+        DesktopProject {
+            id: id.to_string(),
+            name: name.to_string(),
+            path: format!("C:/{name}"),
+            added_at: 1,
+            last_opened_at,
+        }
+    }
+
+    fn ids(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_string()).collect()
+    }
 
     #[test]
     fn project_ids_are_stable_for_the_same_path() {
@@ -329,5 +389,71 @@ mod tests {
         assert!(valid_project_id("project-0123456789abcdef"));
         assert!(!valid_project_id("../project"));
         assert!(!valid_project_id("project-not-hexadecimal"));
+    }
+
+    #[test]
+    fn project_view_preserves_registry_order() {
+        let registry = ProjectRegistry {
+            projects: vec![
+                test_project("project-b", "Beta", 20),
+                test_project("project-a", "Alpha", 90),
+            ],
+            current_project_id: "project-a".to_string(),
+        };
+
+        let view = view(&registry).expect("project view should build");
+
+        assert_eq!(
+            view.projects
+                .iter()
+                .map(|project| project.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["project-b", "project-a"]
+        );
+    }
+
+    #[test]
+    fn reorder_registry_requires_the_same_project_set() {
+        let registry = ProjectRegistry {
+            projects: vec![
+                test_project("project-a", "Alpha", 1),
+                test_project("project-b", "Beta", 2),
+            ],
+            current_project_id: "project-a".to_string(),
+        };
+
+        let mut missing = registry.clone();
+        assert!(reorder_registry(&mut missing, &ids(&["project-a"])).is_err());
+
+        let mut unknown = registry.clone();
+        assert!(reorder_registry(&mut unknown, &ids(&["project-a", "project-c"])).is_err());
+
+        let mut duplicate = registry.clone();
+        assert!(reorder_registry(&mut duplicate, &ids(&["project-a", "project-a"])).is_err());
+    }
+
+    #[test]
+    fn reorder_registry_updates_order_without_touching_metadata() {
+        let mut registry = ProjectRegistry {
+            projects: vec![
+                test_project("project-a", "Alpha", 1),
+                test_project("project-b", "Beta", 2),
+            ],
+            current_project_id: "project-a".to_string(),
+        };
+
+        reorder_registry(&mut registry, &ids(&["project-b", "project-a"]))
+            .expect("valid reorder should succeed");
+
+        assert_eq!(
+            registry
+                .projects
+                .iter()
+                .map(|project| project.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["project-b", "project-a"]
+        );
+        assert_eq!(registry.projects[0].last_opened_at, 2);
+        assert_eq!(registry.current_project_id, "project-a");
     }
 }

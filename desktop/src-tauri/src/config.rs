@@ -210,8 +210,15 @@ fn apply_reviewer_environment_from(obj: &Map<String, Value>, force: bool) {
     let provider = get_non_empty(obj, "reviewer_provider");
     let key = get_non_empty(obj, "reviewer_api_key");
 
+    if force && provider.is_none() {
+        std::env::set_var("ARIS_REVIEWER_PROVIDER", "none");
+    }
     set_env_if_allowed("ARIS_REVIEWER_PROVIDER", provider.clone(), force);
-    set_env_if_allowed("ARIS_REVIEWER_MODEL", get_non_empty(obj, "reviewer_model"), force);
+    set_env_if_allowed(
+        "ARIS_REVIEWER_MODEL",
+        get_non_empty(obj, "reviewer_model"),
+        force,
+    );
     set_env_if_allowed(
         "ARIS_REVIEWER_BASE_URL",
         get_non_empty(obj, "reviewer_base_url"),
@@ -523,7 +530,7 @@ mod tests {
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
-    fn forced_reviewer_environment_clears_stale_aris_values() {
+    fn forced_reviewer_environment_marks_reviewer_disabled_after_clearing() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         std::env::set_var("ARIS_REVIEWER_PROVIDER", "openai");
         std::env::set_var("ARIS_REVIEWER_MODEL", "gpt-5.5");
@@ -532,10 +539,14 @@ mod tests {
 
         apply_reviewer_environment_from(&Map::new(), true);
 
-        assert!(std::env::var("ARIS_REVIEWER_PROVIDER").is_err());
+        assert_eq!(
+            std::env::var("ARIS_REVIEWER_PROVIDER").as_deref(),
+            Ok("none")
+        );
         assert!(std::env::var("ARIS_REVIEWER_MODEL").is_err());
         assert!(std::env::var("ARIS_REVIEWER_BASE_URL").is_err());
         assert!(std::env::var("ARIS_REVIEWER_AUTH_TOKEN").is_err());
+        std::env::remove_var("ARIS_REVIEWER_PROVIDER");
     }
 
     #[test]
@@ -546,7 +557,10 @@ mod tests {
         std::env::set_var("ARIS_REVIEWER_AUTH_TOKEN", "old-token");
 
         let mut obj = Map::new();
-        obj.insert("reviewer_provider".to_string(), Value::String("deepseek".to_string()));
+        obj.insert(
+            "reviewer_provider".to_string(),
+            Value::String("deepseek".to_string()),
+        );
         obj.insert(
             "reviewer_model".to_string(),
             Value::String("deepseek-v4-pro".to_string()),
@@ -555,11 +569,17 @@ mod tests {
             "reviewer_base_url".to_string(),
             Value::String("https://api.deepseek.com/anthropic".to_string()),
         );
-        obj.insert("reviewer_api_key".to_string(), Value::String("new-token".to_string()));
+        obj.insert(
+            "reviewer_api_key".to_string(),
+            Value::String("new-token".to_string()),
+        );
 
         apply_reviewer_environment_from(&obj, true);
 
-        assert_eq!(std::env::var("ARIS_REVIEWER_PROVIDER").as_deref(), Ok("deepseek"));
+        assert_eq!(
+            std::env::var("ARIS_REVIEWER_PROVIDER").as_deref(),
+            Ok("deepseek")
+        );
         assert_eq!(
             std::env::var("ARIS_REVIEWER_MODEL").as_deref(),
             Ok("deepseek-v4-pro")

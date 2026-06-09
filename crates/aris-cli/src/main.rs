@@ -20,7 +20,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use api::{resolve_startup_auth_source, AnthropicClient, AuthSource};
 #[cfg(test)]
 use api::{
-    InputContentBlock, InputMessage, MessageResponse, OutputContentBlock, ToolResultContentBlock,
+    ImageSource, InputContentBlock, InputMessage, MessageResponse, OutputContentBlock,
+    ToolResultContentBlock,
 };
 
 use commands::{
@@ -3803,6 +3804,9 @@ fn render_export_text(session: &Session) -> String {
         for block in &message.blocks {
             match block {
                 ContentBlock::Text { text } => lines.push(text.clone()),
+                ContentBlock::Image { media_type, data } => {
+                    lines.push(format!("[image media_type={media_type} bytes={}]", data.len()));
+                }
                 ContentBlock::ToolUse { id, name, input } => {
                     lines.push(format!("[tool_use id={id} name={name}] {input}"));
                 }
@@ -3833,6 +3837,7 @@ fn default_export_filename(session: &Session) -> String {
         .find_map(|message| match message.role {
             MessageRole::User => message.blocks.iter().find_map(|block| match block {
                 ContentBlock::Text { text } => Some(text.as_str()),
+                ContentBlock::Image { .. } => None,
                 _ => None,
             }),
             _ => None,
@@ -4847,6 +4852,9 @@ fn convert_messages(messages: &[ConversationMessage]) -> Vec<InputMessage> {
                 .iter()
                 .map(|block| match block {
                     ContentBlock::Text { text } => InputContentBlock::Text { text: text.clone() },
+                    ContentBlock::Image { media_type, data } => InputContentBlock::Image {
+                        source: ImageSource::base64(media_type.clone(), data.clone()),
+                    },
                     ContentBlock::ToolUse { id, name, input } => InputContentBlock::ToolUse {
                         id: id.clone(),
                         name: name.clone(),

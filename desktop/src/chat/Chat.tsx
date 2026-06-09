@@ -9,6 +9,9 @@ import {
   isTauri,
   projectChatStarters,
   skillsList,
+  type ChatContextMessage,
+  type ChatImageInput,
+  type ChatSendRequest,
 } from "../api/tauri";
 import { useStore } from "../store";
 import type { ChatAttachment, ChatCommandSelection, ChatStatus, DesktopCommandSpec, ChatTurn, SkillMeta } from "../types";
@@ -32,9 +35,31 @@ function hasRenderableBlock(turn: ChatTurn) {
   });
 }
 
-async function outgoingMessage(text: string, attachments: ChatAttachment[]) {
+function mimeTypeFromDataUrl(value: string): string | null {
+  const match = /^data:([^;,]+);base64,/.exec(value);
+  return match?.[1] ?? null;
+}
+
+function imageInputFromAttachment(attachment: ChatAttachment): ChatImageInput | null {
+  if (attachment.kind !== "image" || !attachment.preview) return null;
+  return {
+    name: attachment.name,
+    mimeType: attachment.mimeType || mimeTypeFromDataUrl(attachment.preview) || "image/png",
+    data: attachment.preview,
+  };
+}
+
+async function outgoingMessage(text: string, attachments: ChatAttachment[]): Promise<ChatSendRequest> {
   const sections = [text.trim()];
+  const images: ChatImageInput[] = [];
   for (const attachment of attachments) {
+    if (attachment.kind === "image") {
+      sections.push(`[Attached image: ${attachment.name}]`);
+      const image = imageInputFromAttachment(attachment);
+      if (image) images.push(image);
+      else sections.push(attachment.content ?? IMAGE_UNSUPPORTED_MESSAGE);
+      continue;
+    }
     let content = attachment.content;
     if (!content && attachment.path) {
       try {
@@ -44,22 +69,28 @@ async function outgoingMessage(text: string, attachments: ChatAttachment[]) {
       }
     }
     sections.push(
-      attachment.kind === "image"
-        ? `[Attached image: ${attachment.name}]\n${content ?? IMAGE_UNSUPPORTED_MESSAGE}`
-        : `[Attached file: ${attachment.path ?? attachment.name}]\n\`\`\`\n${content ?? ""}\n\`\`\``,
+      `[Attached file: ${attachment.path ?? attachment.name}]\n\`\`\`\n${content ?? ""}\n\`\`\``,
     );
   }
-  return sections.filter(Boolean).join("\n\n");
+  return {
+    text: sections.filter(Boolean).join("\n\n"),
+    images,
+  };
 }
 
 async function contextForRetry(turns: ChatTurn[]) {
-  const messages: { role: "user" | "assistant"; text: string }[] = [];
+  const messages: ChatContextMessage[] = [];
   for (const turn of turns) {
     if (turn.streaming || turn.error) continue;
-    const text = turn.role === "user"
-      ? await outgoingMessage(textFromTurn(turn), turn.attachments ?? [])
-      : transcriptFromTurn(turn);
-    if (text.trim()) messages.push({ role: turn.role, text });
+    if (turn.role === "user") {
+      const message = await outgoingMessage(textFromTurn(turn), turn.attachments ?? []);
+      if (message.text.trim() || (message.images?.length ?? 0) > 0) {
+        messages.push({ role: "user", text: message.text, images: message.images });
+      }
+    } else {
+      const text = transcriptFromTurn(turn);
+      if (text.trim()) messages.push({ role: "assistant", text });
+    }
   }
   return messages;
 }
@@ -100,6 +131,7 @@ export default function Chat() {
   const currentProject = useStore((state) => state.currentProject);
   const projectBusy = useStore((state) => state.projectBusy);
   const switchProject = useStore((state) => state.switchProject);
+  const reorderProjects = useStore((state) => state.reorderProjects);
   const {
     allSessions,
     currentId,
@@ -128,6 +160,7 @@ export default function Chat() {
   const [deleted, setDeleted] = useState<ChatSession | null>(null);
   const [pendingCommandSelection, setPendingCommandSelection] = useState<PendingCommandSelection | null>(null);
   const [focusRequest, setFocusRequest] = useState(0);
+  const [exporting, setExporting] = useState(false);
   const deleteTimers = useRef(new Map<string, { timer: number; projectId: string }>());
   const sendLock = useRef(false);
   const commandSelectionLock = useRef(false);
@@ -195,7 +228,9 @@ export default function Chat() {
     );
   }, [patchAssistant, syncBackendContext]);
 
-  const { busy, run, stop } = useChatStream({ patchAssistant, onComplete, onError });
+  const { busy, run, stop, runningSessionId } = useChatStream({ patchAssistant, onComplete, onError });
+  const currentChatBusy = busy && runningSessionId === currentId;
+  const otherChatBusy = busy && runningSessionId !== null && runningSessionId !== currentId;
   const turns = currentSession?.turns ?? [];
   const input = currentSession?.draft ?? "";
   const attachments = currentSession?.draftAttachments ?? [];
@@ -241,9 +276,11 @@ export default function Chat() {
     text: string,
     attached: ChatAttachment[],
     resetContext = false,
-    promptOverride?: string,
+    promptOverride?: string | ChatSendRequest,
   ) => {
-    const prompt = promptOverride ?? (await outgoingMessage(text, attached));
+    const prompt = typeof promptOverride === "string"
+      ? { text: promptOverride }
+      : promptOverride ?? (await outgoingMessage(text, attached));
     if (!isTauri()) {
       patchTurns(session.id, () => [
         ...prefix,
@@ -302,7 +339,7 @@ export default function Chat() {
       if (result.prompt) {
         const prompt = attached.length > 0
           ? await outgoingMessage(result.prompt, attached)
-          : result.prompt;
+          : { text: result.prompt };
         await beginRun(
           session,
           result.replaceTurns ? [] : session.turns,
@@ -412,6 +449,38 @@ export default function Chat() {
     void refreshTeam().finally(() => setTab("teams"));
   }, [refreshTeam, setTab]);
 
+  const exportCurrentChat = useCallback(async () => {
+    const session = currentSessionRef.current;
+    if (!session || busyRef.current || exporting || session.turns.length === 0) return;
+    setExporting(true);
+    try {
+      if (!isTauri()) {
+        patchTurns(session.id, (turns) => [
+          ...turns,
+          assistantTextTurn("Export is available in the Tauri app."),
+        ]);
+        return;
+      }
+      const result = await chatRunCommand(session.id, "/export");
+      if (!result.handled) return;
+      if (result.openSettings) setTab("settings");
+      if (result.refreshStatus) refreshStatus();
+      patchTurns(session.id, (turns) => [
+        ...turns,
+        assistantTextTurn(result.message ?? "Export complete."),
+      ]);
+    } catch (error) {
+      const message = String(error);
+      setError(message);
+      patchTurns(session.id, (turns) => [
+        ...turns,
+        assistantTextTurn(`Export failed: ${message}`),
+      ]);
+    } finally {
+      setExporting(false);
+    }
+  }, [exporting, patchTurns, refreshStatus, setError, setTab]);
+
   const deleteSession = (id: string) => {
     const removed = removeSession(id);
     if (!removed) return;
@@ -440,7 +509,7 @@ export default function Chat() {
         projects={projects}
         currentId={currentId}
         open={sidebarOpen}
-        busy={busy || projectBusy}
+        busy={projectBusy}
         onClose={() => setSidebarOpen(false)}
         onNew={() => {
           setEditingTurnId(null);
@@ -462,6 +531,7 @@ export default function Chat() {
         onRename={renameSession}
         onTogglePinned={togglePinned}
         onDelete={deleteSession}
+        onReorderProjects={reorderProjects}
       />
       <main className={`chat${turns.length === 0 ? " chat-empty" : ""}`}>
         <header className="chat-head">
@@ -472,7 +542,18 @@ export default function Chat() {
               ? <span className="chat-model">{status.model} · {status.provider}</span>
               : <span className="chat-model chat-model-error">{status?.message ?? "Checking..."}</span>}
           </div>
-          {!status?.ready && <button onClick={() => setTab("settings")}>Settings</button>}
+          <div className="chat-head-actions">
+            <button
+              className="chat-export-btn"
+              onClick={() => void exportCurrentChat()}
+              disabled={busy || exporting || turns.length === 0}
+              title="Export current chat"
+              aria-label="Export current chat"
+            >
+              {exporting ? "Exporting" : "Export"}
+            </button>
+            {!status?.ready && <button onClick={() => setTab("settings")}>Settings</button>}
+          </div>
         </header>
         <ChatThread
           sessionId={currentId}
@@ -505,7 +586,8 @@ export default function Chat() {
           commands={desktopCommands}
           skills={skills}
           attachments={attachments}
-          busy={busy}
+          busy={currentChatBusy}
+          sendBlocked={otherChatBusy}
           ready={Boolean(status?.ready)}
           editing={Boolean(editingTurnId)}
           focusRequest={focusRequest}

@@ -627,6 +627,9 @@ fn message_preview(message: &ConversationMessage) -> String {
     for block in &message.blocks {
         match block {
             ContentBlock::Text { text } => parts.push(text.clone()),
+            ContentBlock::Image { media_type, data } => {
+                parts.push(format!("image {media_type}: {} base64 chars", data.len()));
+            }
             ContentBlock::ToolUse { name, input, .. } => {
                 parts.push(format!("tool_use {name}: {input}"));
             }

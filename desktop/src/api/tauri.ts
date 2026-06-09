@@ -70,6 +70,8 @@ export const projectAdd = (path: string) =>
   invoke<ProjectView>("project_add", { path });
 export const projectSetCurrent = (id: string) =>
   invoke<ProjectView>("project_set_current", { id });
+export const projectsReorder = (projectIds: string[]) =>
+  invoke<ProjectView>("projects_reorder", { projectIds });
 
 // ── Settings / Skills / Sessions (P1) ─────────────────────────────────────────
 
@@ -106,13 +108,33 @@ export const chatCommandSpecs = () =>
   invoke<DesktopCommandSpec[]>("chat_command_specs");
 export const chatRunCommand = (sessionId: string, input: string) =>
   invoke<ChatCommandResult>("chat_run_command", { sessionId, input });
-export const chatSend = (sessionId: string, message: string) =>
-  invoke<string>("chat_send", { sessionId, message });
+
+export interface ChatImageInput {
+  name?: string;
+  mimeType: string;
+  data: string;
+}
+
+export interface ChatSendRequest {
+  text: string;
+  images?: ChatImageInput[];
+}
+
+export interface ChatContextMessage {
+  role: "user" | "assistant";
+  text: string;
+  images?: ChatImageInput[];
+}
+
+export const chatSend = (sessionId: string, message: string | ChatSendRequest) => {
+  const request = typeof message === "string" ? { text: message } : message;
+  return invoke<string>("chat_send_rich", { sessionId, request });
+};
 export const chatReset = (sessionId: string) =>
   invoke<void>("chat_reset", { sessionId });
 export const chatSetContext = (
   sessionId: string,
-  messages: { role: "user" | "assistant"; text: string }[],
+  messages: ChatContextMessage[],
 ) => invoke<void>("chat_set_context", { sessionId, messages });
 export const chatDelete = (sessionId: string, projectId?: string) =>
   invoke<void>("chat_delete", { sessionId, projectId: projectId ?? null });

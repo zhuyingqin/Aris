@@ -12,6 +12,8 @@ use regex::RegexBuilder;
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
+const MAX_READ_FILE_CONTENT_CHARS: usize = 200_000;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TextFilePayload {
     #[serde(rename = "filePath")]
@@ -23,6 +25,9 @@ pub struct TextFilePayload {
     pub start_line: usize,
     #[serde(rename = "totalLines")]
     pub total_lines: usize,
+    #[serde(rename = "totalChars")]
+    pub total_chars: usize,
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -158,17 +163,36 @@ fn read_text_payload(
         start_index.saturating_add(limit).min(lines.len())
     });
     let selected = lines[start_index..end_index].join("\n");
+    let total_chars = content.chars().count();
+    let (content, truncated) = truncate_read_content(selected);
 
     ReadFileOutput {
         kind: String::from("text"),
         file: TextFilePayload {
-            file_path: absolute_path.to_string_lossy().into_owned(),
-            content: selected,
+            file_path: display_path(&absolute_path),
+            content,
             num_lines: end_index.saturating_sub(start_index),
             start_line: start_index.saturating_add(1),
             total_lines: lines.len(),
+            total_chars,
+            truncated,
         },
     }
+}
+
+fn truncate_read_content(content: String) -> (String, bool) {
+    if content.chars().count() <= MAX_READ_FILE_CONTENT_CHARS {
+        return (content, false);
+    }
+
+    let mut truncated = content
+        .chars()
+        .take(MAX_READ_FILE_CONTENT_CHARS)
+        .collect::<String>();
+    truncated.push_str(
+        "\n\n[read_file truncated: selected content exceeded 200000 characters. Use a narrower offset/limit window or grep_search.]",
+    );
+    (truncated, true)
 }
 
 pub fn write_file(path: &str, content: &str) -> io::Result<WriteFileOutput> {
@@ -185,7 +209,7 @@ pub fn write_file(path: &str, content: &str) -> io::Result<WriteFileOutput> {
         } else {
             String::from("create")
         },
-        file_path: absolute_path.to_string_lossy().into_owned(),
+        file_path: display_path(&absolute_path),
         content: content.to_owned(),
         structured_patch: make_patch(original_file.as_deref().unwrap_or(""), content),
         original_file,
@@ -222,7 +246,7 @@ pub fn edit_file(
     fs::write(&absolute_path, &updated)?;
 
     Ok(EditFileOutput {
-        file_path: absolute_path.to_string_lossy().into_owned(),
+        file_path: display_path(&absolute_path),
         old_string: old_string.to_owned(),
         new_string: new_string.to_owned(),
         original_file: original_file.clone(),
@@ -283,7 +307,7 @@ pub fn glob_search(pattern: &str, path: Option<&str>) -> io::Result<GlobSearchOu
     let filenames = matches
         .into_iter()
         .take(100)
-        .map(|path| path.to_string_lossy().into_owned())
+        .map(|path| display_path(&path))
         .collect::<Vec<_>>();
 
     Ok(GlobSearchOutput {
@@ -341,7 +365,7 @@ pub fn grep_search(input: &GrepSearchInput) -> io::Result<GrepSearchOutput> {
         if output_mode == "count" {
             let count = regex.find_iter(&file_contents).count();
             if count > 0 {
-                filenames.push(file_path.to_string_lossy().into_owned());
+                filenames.push(display_path(&file_path));
                 total_matches += count;
             }
             continue;
@@ -360,16 +384,16 @@ pub fn grep_search(input: &GrepSearchInput) -> io::Result<GrepSearchOutput> {
             continue;
         }
 
-        filenames.push(file_path.to_string_lossy().into_owned());
+        filenames.push(display_path(&file_path));
         if output_mode == "content" {
             for index in matched_lines {
                 let start = index.saturating_sub(input.before.unwrap_or(context));
                 let end = (index + input.after.unwrap_or(context) + 1).min(lines.len());
                 for (current, line) in lines.iter().enumerate().take(end).skip(start) {
                     let prefix = if input.line_numbers.unwrap_or(true) {
-                        format!("{}:{}:", file_path.to_string_lossy(), current + 1)
+                        format!("{}:{}:", display_path(&file_path), current + 1)
                     } else {
-                        format!("{}:", file_path.to_string_lossy())
+                        format!("{}:", display_path(&file_path))
                     };
                     content_lines.push(format!("{prefix}{line}"));
                 }
@@ -420,6 +444,10 @@ fn collect_search_files(base_path: &Path) -> io::Result<Vec<PathBuf>> {
         }
     }
     Ok(files)
+}
+
+fn display_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
 }
 
 fn matches_optional_filters(
@@ -1396,12 +1424,14 @@ fn lexically_normalize(path: &Path) -> PathBuf {
 mod tests {
     use std::ffi::{OsStr, OsString};
     use std::io::Write;
-    use std::path::Path;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use flate2::{write::ZlibEncoder, Compression};
 
-    use super::{edit_file, glob_search, grep_search, read_file, write_file, GrepSearchInput};
+    use super::{
+        display_path, edit_file, glob_search, grep_search, read_file, write_file, GrepSearchInput,
+        MAX_READ_FILE_CONTENT_CHARS,
+    };
 
     struct EnvGuard {
         key: &'static str,
@@ -1477,6 +1507,44 @@ mod tests {
         let read_output = read_file(path.to_string_lossy().as_ref(), Some(1), Some(1))
             .expect("read should succeed");
         assert_eq!(read_output.file.content, "two");
+    }
+
+    #[test]
+    fn reads_large_file_with_line_window() {
+        let _lock = crate::test_env_lock();
+        let _env = EnvGuard::unset("ARIS_WORKSPACE_ROOT");
+        let path = temp_path("large-window.txt");
+        let content = (1..=6_000)
+            .map(|line| format!("line-{line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(&path, content).expect("large file should be written");
+
+        let output = read_file(path.to_string_lossy().as_ref(), Some(4_999), Some(3))
+            .expect("large file window should read");
+
+        assert_eq!(output.file.content, "line-5000\nline-5001\nline-5002");
+        assert_eq!(output.file.start_line, 5_000);
+        assert_eq!(output.file.total_lines, 6_000);
+        assert!(!output.file.truncated);
+    }
+
+    #[test]
+    fn read_file_truncates_very_long_single_line() {
+        let _lock = crate::test_env_lock();
+        let _env = EnvGuard::unset("ARIS_WORKSPACE_ROOT");
+        let path = temp_path("long-single-line.json");
+        let content = "x".repeat(MAX_READ_FILE_CONTENT_CHARS + 128);
+        std::fs::write(&path, &content).expect("long line file should be written");
+
+        let output = read_file(path.to_string_lossy().as_ref(), None, Some(1))
+            .expect("long single-line file should read with truncation");
+
+        assert_eq!(output.file.total_lines, 1);
+        assert_eq!(output.file.total_chars, MAX_READ_FILE_CONTENT_CHARS + 128);
+        assert!(output.file.truncated);
+        assert!(output.file.content.len() < content.len());
+        assert!(output.file.content.contains("[read_file truncated:"));
     }
 
     #[test]
@@ -1585,7 +1653,8 @@ end
             read_file("notes/demo.txt", None, None).expect("read inside workspace should succeed");
 
         assert_eq!(output.file.content, "inside");
-        assert!(Path::new(&output.file.file_path).starts_with(root.canonicalize().unwrap()));
+        let canonical_root = display_path(&root.canonicalize().unwrap());
+        assert!(output.file.file_path.starts_with(&canonical_root));
     }
 
     #[test]

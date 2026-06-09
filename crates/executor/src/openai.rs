@@ -1080,15 +1080,7 @@ fn convert_messages_openai(
                 // Already handled above
             }
             MessageRole::User => {
-                let text = message
-                    .blocks
-                    .iter()
-                    .filter_map(|b| match b {
-                        ContentBlock::Text { text } => Some(text.as_str()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
+                let content = openai_user_content(&message.blocks);
 
                 // Also emit tool_result blocks as separate "tool" role messages
                 for block in &message.blocks {
@@ -1106,10 +1098,10 @@ fn convert_messages_openai(
                     }
                 }
 
-                if !text.is_empty() {
+                if let Some(content) = content {
                     result.push(json!({
                         "role": "user",
-                        "content": text,
+                        "content": content,
                     }));
                 }
             }
@@ -1150,6 +1142,7 @@ fn convert_messages_openai(
                             }));
                         }
                         ContentBlock::ToolResult { .. } => {}
+                        ContentBlock::Image { .. } => {}
                         ContentBlock::Thinking { .. } => {}
                     }
                 }
@@ -1174,6 +1167,41 @@ fn convert_messages_openai(
     }
 
     result
+}
+
+fn openai_user_content(blocks: &[ContentBlock]) -> Option<Value> {
+    let has_image = blocks
+        .iter()
+        .any(|block| matches!(block, ContentBlock::Image { .. }));
+    if !has_image {
+        let text = blocks
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        return (!text.is_empty()).then(|| json!(text));
+    }
+
+    let content = blocks
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } if !text.is_empty() => Some(json!({
+                "type": "text",
+                "text": text,
+            })),
+            ContentBlock::Image { media_type, data } => Some(json!({
+                "type": "image_url",
+                "image_url": {
+                    "url": format!("data:{media_type};base64,{data}"),
+                },
+            })),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    (!content.is_empty()).then(|| json!(content))
 }
 
 fn convert_tool_spec_openai(spec: &ExecutorToolSpec) -> Value {
@@ -1282,6 +1310,31 @@ mod tests {
             .unwrap_or("")
             .contains("compaction summary"));
         assert_eq!(result[1]["role"], "user");
+    }
+
+    #[test]
+    fn convert_messages_maps_images_to_openai_image_url_blocks() {
+        let messages = vec![ConversationMessage::user_blocks(vec![
+            ContentBlock::Text {
+                text: "describe this".into(),
+            },
+            ContentBlock::Image {
+                media_type: "image/png".into(),
+                data: "ZmFrZQ==".into(),
+            },
+        ])];
+
+        let result = convert_messages_openai(&messages, None, &std::collections::HashMap::new());
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0]["role"], "user");
+        assert_eq!(result[0]["content"][0]["type"], "text");
+        assert_eq!(result[0]["content"][0]["text"], "describe this");
+        assert_eq!(result[0]["content"][1]["type"], "image_url");
+        assert_eq!(
+            result[0]["content"][1]["image_url"]["url"],
+            "data:image/png;base64,ZmFrZQ=="
+        );
     }
 
     // v0.4.13 regression — v0.4.12 P1.B promoted the o-series detector

@@ -1,7 +1,7 @@
 {
   "name": "aris-studio",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.2.1",
   "type": "module",
   "description": "ARIS Studio — desktop UI for designing and monitoring agent teams & workflows",
   "scripts": {

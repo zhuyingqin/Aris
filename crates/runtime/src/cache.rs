@@ -288,7 +288,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
         let err = extract_one(&tmp, "/etc/passwd", "evil").unwrap_err();
-        assert!(err.contains("absolute"), "got: {err}");
+        assert!(
+            err.contains("absolute") || err.contains("root-dir"),
+            "got: {err}"
+        );
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

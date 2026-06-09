@@ -9,6 +9,7 @@ import {
   onChatTool,
   onChatToolResult,
 } from "../api/tauri";
+import type { ChatSendRequest } from "../api/tauri";
 import type { ChatBlock, ChatTurn } from "../types";
 import { appendTextDelta, appendThinkingDelta } from "./model";
 
@@ -20,6 +21,7 @@ interface StreamHandlers {
 
 export function useChatStream({ patchAssistant, onComplete, onError }: StreamHandlers) {
   const [busy, setBusy] = useState(false);
+  const [runningSessionId, setRunningSessionId] = useState<string | null>(null);
   const busyRef = useRef(false);
   const runningSession = useRef<string | null>(null);
   const stopRequested = useRef(false);
@@ -92,10 +94,11 @@ export function useChatStream({ patchAssistant, onComplete, onError }: StreamHan
     };
   }, [flush, patchAssistant, scheduleFlush]);
 
-  const run = useCallback(async (sessionId: string, message: string) => {
+  const run = useCallback(async (sessionId: string, message: string | ChatSendRequest) => {
     if (busyRef.current) return false;
     busyRef.current = true;
     runningSession.current = sessionId;
+    setRunningSessionId(sessionId);
     stopRequested.current = false;
     setBusy(true);
     try {
@@ -109,6 +112,7 @@ export function useChatStream({ patchAssistant, onComplete, onError }: StreamHan
       return false;
     } finally {
       runningSession.current = null;
+      setRunningSessionId(null);
       stopRequested.current = false;
       busyRef.current = false;
       setBusy(false);
@@ -126,7 +130,7 @@ export function useChatStream({ patchAssistant, onComplete, onError }: StreamHan
     }
   }, []);
 
-  return { busy, run, stop, runningSessionId: runningSession.current };
+  return { busy, run, stop, runningSessionId };
 }
 
 export function appendToolOutput(

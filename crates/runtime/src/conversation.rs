@@ -204,12 +204,29 @@ where
     pub fn run_turn(
         &mut self,
         user_input: impl Into<String>,
-        mut prompter: Option<&mut dyn PermissionPrompter>,
+        prompter: Option<&mut dyn PermissionPrompter>,
     ) -> Result<TurnSummary, RuntimeError> {
         let user_text = user_input.into();
+        self.run_turn_message(ConversationMessage::user_text(user_text), prompter)
+    }
+
+    pub fn run_turn_message(
+        &mut self,
+        user_message: ConversationMessage,
+        mut prompter: Option<&mut dyn PermissionPrompter>,
+    ) -> Result<TurnSummary, RuntimeError> {
+        let user_text = user_message
+            .blocks
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
         self.session
             .messages
-            .push(ConversationMessage::user_text(user_text.clone()));
+            .push(user_message);
 
         // Emit user prompt event
         let is_slash = user_text.trim_start().starts_with('/');
