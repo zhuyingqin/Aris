@@ -31,7 +31,11 @@ pub async fn literature_search(
     let limit = max_results.unwrap_or(20).clamp(1, 50);
     tauri::async_runtime::spawn_blocking(move || {
         let outcome = tools::literature::search_remote(&query, &sources, limit)?;
-        Ok(json!({ "papers": outcome.papers, "warnings": outcome.warnings }))
+        Ok(json!({
+            "papers": outcome.papers,
+            "warnings": outcome.warnings,
+            "sourceCounts": outcome.source_counts,
+        }))
     })
     .await
     .map_err(|e| e.to_string())?

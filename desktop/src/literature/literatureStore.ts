@@ -6,9 +6,13 @@ import {
   literatureSave,
   literatureSearch,
   onChatDone,
+  onChatTool,
+  onChatToolResult,
 } from "../api/tauri";
 import {
   emptyLibrary,
+  type ActivityEntry,
+  type ActivityLevel,
   type LiteratureLibrary,
   type LiteraturePaper,
   type LiteratureSearchResult,
@@ -16,6 +20,8 @@ import {
   type PdfDownloadResult,
   type RemotePaper,
 } from "./literatureTypes";
+
+const MAX_ACTIVITY_ENTRIES = 200;
 
 const PERSIST_DELAY_MS = 600;
 
@@ -201,8 +207,13 @@ interface LiteratureState {
     warnings: string[];
   } | null;
   error: string | null;
+  /** Terminal-style log narrating every library write and agent action. */
+  activity: ActivityEntry[];
+  activityOpen: boolean;
 
-  load: (projectId: string) => Promise<void>;
+  setActivityOpen: (open: boolean) => void;
+  clearActivity: () => void;
+  load: (projectId: string, options?: { quiet?: boolean }) => Promise<void>;
   /** Reload the library when a chat turn ends — literature skills may have
    * upserted papers through the kernel tools. Returns a teardown fn. */
   watchAgentActivity: () => () => void;
@@ -218,6 +229,19 @@ interface LiteratureState {
 }
 
 export const useLiteratureStore = create<LiteratureState>((set, get) => {
+  const log = (level: ActivityLevel, text: string, options?: { open?: boolean }) => {
+    const entry: ActivityEntry = {
+      id: makeId("act"),
+      at: isoNow(),
+      level,
+      text,
+    };
+    set((state) => ({
+      activity: [...state.activity, entry].slice(-MAX_ACTIVITY_ENTRIES),
+      activityOpen: options?.open ? true : state.activityOpen,
+    }));
+  };
+
   const persist = () => {
     if (!isTauri()) return;
     if (persistTimer) clearTimeout(persistTimer);
@@ -249,9 +273,13 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
     searching: false,
     lastSearch: null,
     error: null,
+    activity: [],
+    activityOpen: false,
 
-    load: async (projectId) => {
-      if (get().loaded && get().loadedProjectId === projectId) return;
+    setActivityOpen: (open) => set({ activityOpen: open }),
+    clearActivity: () => set({ activity: [] }),
+
+    load: async (projectId, options) => {
       // Drop any pending save: the backend already points at the new project,
       // so flushing now would write the old project's library into it.
       if (persistTimer) {
@@ -274,30 +302,110 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
           loaded: true,
           loadedProjectId: projectId,
         });
+        if (!options?.quiet) {
+          log("info", `Loaded ${raw.papers?.length ?? 0} papers from papers/library.json`);
+        }
       } catch (error) {
         set({ error: `failed to load library: ${String(error)}` });
+        log("error", `✗ Failed to load library: ${String(error)}`, { open: true });
       }
     },
 
     watchAgentActivity: () => {
       if (!isTauri()) return () => {};
       let disposed = false;
-      let unlisten: (() => void) | null = null;
-      void onChatDone(() => {
-        if (disposed) return;
-        // A pending UI save means fresh local edits; let them win this round.
-        if (persistTimer) return;
-        const projectId = get().loadedProjectId;
-        if (!projectId) return;
-        set({ loaded: false });
-        void get().load(projectId);
-      }).then((teardown) => {
-        if (disposed) teardown();
-        else unlisten = teardown;
-      });
+      const teardowns: Array<() => void> = [];
+      // Set when a Literature* tool ran during the current chat turn, so the
+      // chat-done reload can say why the library changed.
+      let agentTouchedLibrary = false;
+
+      const register = (subscription: Promise<() => void>) => {
+        void subscription.then((teardown) => {
+          if (disposed) teardown();
+          else teardowns.push(teardown);
+        });
+      };
+
+      register(
+        onChatTool((tool) => {
+          if (disposed || !tool.name.startsWith("Literature")) return;
+          agentTouchedLibrary = true;
+          let input: Record<string, unknown> = {};
+          try {
+            input = JSON.parse(tool.input) as Record<string, unknown>;
+          } catch {
+            // tool input is informational only
+          }
+          if (tool.name === "LiteratureSearch") {
+            log("info", `→ Agent (Chat): searching "${String(input.query ?? "…")}"`, {
+              open: true,
+            });
+          } else if (tool.name === "LiteratureLibraryUpsert") {
+            const count = Array.isArray(input.papers) ? input.papers.length : "?";
+            log("info", `→ Agent (Chat): saving ${count} records to the library…`, {
+              open: true,
+            });
+          } else if (tool.name === "LiteraturePdfDownload") {
+            log("info", `→ Agent (Chat): downloading PDF ${String(input.fileName ?? "")}`, {
+              open: true,
+            });
+          }
+        }),
+      );
+
+      register(
+        onChatToolResult((result) => {
+          if (disposed || !result.name.startsWith("Literature")) return;
+          if (result.isError) {
+            log("warn", `! Agent ${result.name} failed: ${result.output.slice(0, 160)}`);
+            return;
+          }
+          let output: Record<string, unknown> = {};
+          try {
+            output = JSON.parse(result.output) as Record<string, unknown>;
+          } catch {
+            return;
+          }
+          if (result.name === "LiteratureLibraryUpsert") {
+            log(
+              "ok",
+              `✓ Agent saved ${Number(output.added ?? 0)} new / ${Number(output.merged ?? 0)} merged → papers/library.json`,
+            );
+          } else if (result.name === "LiteraturePdfDownload") {
+            log("ok", `✓ Agent downloaded ${String(output.relativePath ?? "PDF")}`);
+          }
+        }),
+      );
+
+      register(
+        onChatDone(() => {
+          if (disposed) return;
+          const touched = agentTouchedLibrary;
+          agentTouchedLibrary = false;
+          // A pending UI save means fresh local edits; let them win this round.
+          if (persistTimer) return;
+          const projectId = get().loadedProjectId;
+          if (!projectId) return;
+          const before = get().library.papers.length;
+          set({ loaded: false });
+          void get()
+            .load(projectId, { quiet: true })
+            .then(() => {
+              if (!touched) return;
+              const delta = get().library.papers.length - before;
+              log(
+                delta > 0 ? "ok" : "info",
+                delta > 0
+                  ? `✓ Library reloaded after chat turn: +${delta} ${delta === 1 ? "paper" : "papers"}`
+                  : "Library reloaded after chat turn (no new papers)",
+              );
+            });
+        }),
+      );
+
       return () => {
         disposed = true;
-        if (unlisten) unlisten();
+        for (const teardown of teardowns) teardown();
       };
     },
 
@@ -312,8 +420,15 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
         return;
       }
       set({ searching: true, error: null });
+      log("info", `→ Searching arXiv + Crossref for "${trimmed}"`, { open: true });
       try {
         const result = await literatureSearch<LiteratureSearchResult>(trimmed, sources);
+        for (const entry of result.sourceCounts ?? []) {
+          log("info", `· ${entry.source} returned ${entry.count} records`);
+        }
+        for (const warning of result.warnings) {
+          log("warn", `! ${warning}`);
+        }
         const searchId = makeId("search");
         let newCount = 0;
         mutate((library) => {
@@ -351,8 +466,14 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
             warnings: result.warnings,
           },
         });
+        const merged = result.papers.length - newCount;
+        log(
+          "ok",
+          `✓ ${newCount} new saved to Inbox · ${merged} already in library (metadata refreshed) → papers/library.json`,
+        );
       } catch (error) {
         set({ error: `search failed: ${String(error)}` });
+        log("error", `✗ Search failed: ${String(error)}`, { open: true });
       } finally {
         set({ searching: false });
       }
@@ -408,6 +529,7 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
         ...entry,
         pdf: { ...entry.pdf, status: "downloading", error: undefined },
       }));
+      log("info", `→ Downloading PDF: ${pdfFileName(paper)}`, { open: true });
       try {
         const saved = await literatureDownloadPdf<PdfDownloadResult>(url, pdfFileName(paper));
         patchPapers([id], (entry) => ({
@@ -423,12 +545,14 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
             bytes: saved.bytes,
           },
         }));
+        log("ok", `✓ PDF saved → ${saved.relativePath} (${Math.max(1, Math.round(saved.bytes / 1024))} KB)`);
       } catch (error) {
         patchPapers([id], (entry) => ({
           ...entry,
           pdf: { ...entry.pdf, status: "failed", error: String(error) },
         }));
         set({ error: `PDF download failed: ${String(error)}` });
+        log("error", `✗ PDF download failed: ${String(error)}`, { open: true });
       }
     },
 
@@ -445,4 +569,6 @@ export const resetLiteratureStore = () =>
     searching: false,
     lastSearch: null,
     error: null,
+    activity: [],
+    activityOpen: false,
   });

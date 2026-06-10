@@ -109,6 +109,17 @@ export interface RemotePaper {
 export interface LiteratureSearchResult {
   papers: RemotePaper[];
   warnings: string[];
+  sourceCounts?: Array<{ source: string; count: number }>;
+}
+
+export type ActivityLevel = "info" | "ok" | "warn" | "error";
+
+/** One line in the Literature activity log (the page's "terminal"). */
+export interface ActivityEntry {
+  id: string;
+  at: string;
+  level: ActivityLevel;
+  text: string;
 }
 
 export interface PdfDownloadResult {

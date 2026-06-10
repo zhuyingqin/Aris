@@ -11,6 +11,8 @@ const mocks = vi.hoisted(() => ({
   literatureSearch: vi.fn(),
   literatureDownloadPdf: vi.fn(),
   onChatDone: vi.fn(),
+  onChatTool: vi.fn(),
+  onChatToolResult: vi.fn(),
 }));
 
 vi.mock("../api/tauri", () => ({
@@ -20,6 +22,8 @@ vi.mock("../api/tauri", () => ({
   literatureSearch: mocks.literatureSearch,
   literatureDownloadPdf: mocks.literatureDownloadPdf,
   onChatDone: mocks.onChatDone,
+  onChatTool: mocks.onChatTool,
+  onChatToolResult: mocks.onChatToolResult,
   projectAdd: vi.fn(),
   projectsGet: vi.fn(),
   projectsReorder: vi.fn(),
@@ -32,6 +36,12 @@ import { resetLiteratureStore } from "./literatureStore";
 import { useStore } from "../store";
 
 let chatDoneHandler: ((text: string) => void) | null = null;
+let chatToolHandler:
+  | ((tool: { id?: string; name: string; input: string }) => void)
+  | null = null;
+let chatToolResultHandler:
+  | ((result: { id?: string; name: string; output: string; isError: boolean }) => void)
+  | null = null;
 
 const fixturePaper: LiteraturePaper = {
   id: "arxiv:1111.00001",
@@ -65,10 +75,35 @@ beforeEach(() => {
   resetLiteratureStore();
   useStore.setState({ tab: "literature", pendingChatInput: null });
   chatDoneHandler = null;
+  chatToolHandler = null;
+  chatToolResultHandler = null;
   mocks.onChatDone.mockReset().mockImplementation((handler: (text: string) => void) => {
     chatDoneHandler = handler;
     return Promise.resolve(() => {});
   });
+  mocks.onChatTool
+    .mockReset()
+    .mockImplementation(
+      (handler: (tool: { id?: string; name: string; input: string }) => void) => {
+        chatToolHandler = handler;
+        return Promise.resolve(() => {});
+      },
+    );
+  mocks.onChatToolResult
+    .mockReset()
+    .mockImplementation(
+      (
+        handler: (result: {
+          id?: string;
+          name: string;
+          output: string;
+          isError: boolean;
+        }) => void,
+      ) => {
+        chatToolResultHandler = handler;
+        return Promise.resolve(() => {});
+      },
+    );
   mocks.literatureLoad.mockReset().mockResolvedValue(fixtureLibrary());
   mocks.literatureSave.mockReset().mockResolvedValue(undefined);
   mocks.literatureSearch.mockReset().mockResolvedValue({
@@ -105,6 +140,7 @@ beforeEach(() => {
       },
     ],
     warnings: [],
+    sourceCounts: [{ source: "arXiv", count: 2 }],
   });
   mocks.literatureDownloadPdf.mockReset().mockResolvedValue({
     path: "C:/project/papers/1111.00001.pdf",
@@ -128,6 +164,60 @@ describe("Literature library", () => {
     expect(screen.getByText("1 paper · 0 PDFs")).toBeTruthy();
   });
 
+  it("keeps the nav short by hiding empty later stages", async () => {
+    render(<Literature />);
+    await screen.findAllByText("Persisted Paper on Grounded Reading");
+
+    expect(screen.getByRole("button", { name: "Inbox 1" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Shortlist 0" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Screened 0" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Agent read 0" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Excluded 0" })).toBeNull();
+  });
+
+  it("narrates the search lifecycle in the activity log", async () => {
+    const user = userEvent.setup();
+    render(<Literature />);
+    await screen.findAllByText("Persisted Paper on Grounded Reading");
+
+    await user.type(screen.getByLabelText("Remote search query"), "retrieval agents");
+    await user.click(screen.getByRole("button", { name: "Search & save" }));
+    await screen.findAllByText("Deep Retrieval Agents for Literature Triage");
+
+    const log = screen.getByRole("log", { name: "Literature activity log" });
+    expect(within(log).getByText(/Searching arXiv \+ Crossref for "retrieval agents"/)).toBeTruthy();
+    expect(within(log).getByText(/arXiv returned 2 records/)).toBeTruthy();
+    expect(
+      within(log).getByText(/1 new saved to Inbox · 1 already in library/),
+    ).toBeTruthy();
+  });
+
+  it("logs literature tool calls made by the agent in Chat", async () => {
+    render(<Literature />);
+    await screen.findAllByText("Persisted Paper on Grounded Reading");
+    await waitFor(() => expect(chatToolHandler).not.toBeNull());
+
+    await act(async () => {
+      chatToolHandler?.({
+        name: "LiteratureLibraryUpsert",
+        input: JSON.stringify({ papers: [{}, {}, {}] }),
+      });
+      chatToolResultHandler?.({
+        name: "LiteratureLibraryUpsert",
+        output: JSON.stringify({ added: 3, merged: 0 }),
+        isError: false,
+      });
+    });
+
+    const log = screen.getByRole("log", { name: "Literature activity log" });
+    expect(
+      within(log).getByText(/Agent \(Chat\): saving 3 records to the library/),
+    ).toBeTruthy();
+    expect(
+      within(log).getByText(/Agent saved 3 new \/ 0 merged → papers\/library.json/),
+    ).toBeTruthy();
+  });
+
   it("runs a remote search, dedupes into the library, and persists", async () => {
     const user = userEvent.setup();
     render(<Literature />);
@@ -137,7 +227,7 @@ describe("Literature library", () => {
       screen.getByLabelText("Remote search query"),
       "retrieval agents",
     );
-    await user.click(screen.getByRole("button", { name: "Quick lookup" }));
+    await user.click(screen.getByRole("button", { name: "Search & save" }));
 
     expect(
       await screen.findAllByText("Deep Retrieval Agents for Literature Triage"),
@@ -147,7 +237,7 @@ describe("Literature library", () => {
       ["arxiv", "crossref"],
     );
     // One of the two results matched the stored record: only one new paper.
-    expect(screen.getByText(/2 results · 1 new in Inbox/)).toBeTruthy();
+    expect(screen.getByText(/2 results \/ 1 saved to Inbox/)).toBeTruthy();
     // The saved search shows up in the nav with both provenance hits.
     expect(screen.getByRole("button", { name: "retrieval agents 2" })).toBeTruthy();
     // The duplicate was enriched, not duplicated.
@@ -173,7 +263,7 @@ describe("Literature library", () => {
     expect(screen.getByRole("button", { name: "Downloaded 1" })).toBeTruthy();
   });
 
-  it("dispatches the selected literature skill to Chat for agent search", async () => {
+  it("opens Chat with the selected literature skill", async () => {
     const user = userEvent.setup();
     render(<Literature />);
     await screen.findAllByText("Persisted Paper on Grounded Reading");
@@ -182,7 +272,7 @@ describe("Literature library", () => {
       screen.getByLabelText("Remote search query"),
       "retrieval agents",
     );
-    await user.click(screen.getByRole("button", { name: "Agent search" }));
+    await user.click(screen.getByRole("button", { name: "Open in Chat" }));
     expect(useStore.getState().pendingChatInput).toBe('/arxiv "retrieval agents" - max: 20');
     expect(useStore.getState().tab).toBe("chat");
 
@@ -191,8 +281,21 @@ describe("Literature library", () => {
       screen.getByLabelText("Literature skill"),
       "research-lit",
     );
-    await user.click(screen.getByRole("button", { name: "Agent search" }));
+    await user.click(screen.getByRole("button", { name: "Open in Chat" }));
     expect(useStore.getState().pendingChatInput).toBe('/research-lit "retrieval agents"');
+  });
+
+  it("opens Chat from the selected paper detail", async () => {
+    const user = userEvent.setup();
+    render(<Literature />);
+    await screen.findAllByText("Persisted Paper on Grounded Reading");
+
+    await user.click(screen.getByRole("button", { name: "Ask Agent" }));
+
+    expect(useStore.getState().pendingChatInput).toBe(
+      '/research-lit "Persisted Paper on Grounded Reading"',
+    );
+    expect(useStore.getState().tab).toBe("chat");
   });
 
   it("reloads the library after a chat turn ends (skill upserts land)", async () => {
@@ -212,6 +315,22 @@ describe("Literature library", () => {
     );
     expect(
       (await screen.findAllByText("Persisted Paper on Grounded Reading (v2)")).length,
+    ).toBeGreaterThan(0);
+  });
+
+  it("reloads from disk when the Literature view is opened again", async () => {
+    const first = render(<Literature />);
+    await screen.findAllByText("Persisted Paper on Grounded Reading");
+    first.unmount();
+
+    const updated = fixtureLibrary();
+    updated.papers[0].title = "Persisted Paper on Grounded Reading (fresh)";
+    mocks.literatureLoad.mockResolvedValue(updated);
+    render(<Literature />);
+
+    await waitFor(() => expect(mocks.literatureLoad).toHaveBeenCalledTimes(2));
+    expect(
+      (await screen.findAllByText("Persisted Paper on Grounded Reading (fresh)")).length,
     ).toBeGreaterThan(0);
   });
 

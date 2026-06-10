@@ -77,6 +77,7 @@ pub fn run_literature_search(input: LiteratureSearchInput) -> Result<String, Str
     serde_json::to_string_pretty(&json!({
         "papers": outcome.papers,
         "warnings": outcome.warnings,
+        "sourceCounts": outcome.source_counts,
         "note": "Record results with the LiteratureLibraryUpsert tool so they appear in the shared literature library (papers/library.json).",
     }))
     .map_err(|e| e.to_string())
@@ -334,10 +335,18 @@ pub struct RemotePaper {
     pub cited_by: Option<u64>,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceCount {
+    pub source: String,
+    pub count: usize,
+}
+
 #[derive(Debug)]
 pub struct SearchOutcome {
     pub papers: Vec<RemotePaper>,
     pub warnings: Vec<String>,
+    pub source_counts: Vec<SourceCount>,
 }
 
 fn http_client() -> Result<reqwest::blocking::Client, String> {
@@ -364,15 +373,28 @@ pub fn search_remote(
     let client = http_client()?;
     let mut papers = Vec::new();
     let mut warnings = Vec::new();
+    let mut source_counts = Vec::new();
     if wants("arxiv") {
         match search_arxiv(&client, query, limit) {
-            Ok(batch) => papers.extend(batch),
+            Ok(batch) => {
+                source_counts.push(SourceCount {
+                    source: "arXiv".to_string(),
+                    count: batch.len(),
+                });
+                papers.extend(batch);
+            }
             Err(error) => warnings.push(format!("arXiv: {error}")),
         }
     }
     if wants("crossref") {
         match search_crossref(&client, query, limit) {
-            Ok(batch) => papers.extend(batch),
+            Ok(batch) => {
+                source_counts.push(SourceCount {
+                    source: "Crossref".to_string(),
+                    count: batch.len(),
+                });
+                papers.extend(batch);
+            }
             Err(error) => warnings.push(format!("Crossref: {error}")),
         }
     }
@@ -382,6 +404,7 @@ pub fn search_remote(
     Ok(SearchOutcome {
         papers: dedupe(papers),
         warnings,
+        source_counts,
     })
 }
 

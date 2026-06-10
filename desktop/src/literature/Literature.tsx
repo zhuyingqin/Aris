@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useStore } from "../store";
 import { useLiteratureStore } from "./literatureStore";
 import type {
@@ -9,30 +9,31 @@ import type {
 } from "./literatureTypes";
 import "./Literature.css";
 
-/** Skills the Agent search lane can dispatch to Chat. The skill stays the
- * orchestration layer; results land here via the shared library. */
+/** Optional Chat handoff. Literature owns search/save; Chat owns deeper reading. */
 const AGENT_SKILLS: Array<{ id: string; label: string; command: (query: string) => string }> = [
   {
     id: "arxiv",
-    label: "/arxiv — search + download",
+    label: "/arxiv search",
     command: (query) => `/arxiv "${query}" - max: 20`,
   },
   {
     id: "research-lit",
-    label: "/research-lit — deep multi-source review",
+    label: "/research-lit review",
     command: (query) => `/research-lit "${query}"`,
   },
 ];
 
 const QUICK_SOURCES = ["arxiv", "crossref"];
 
-const STAGES: Array<{ id: PaperStage; label: string }> = [
-  { id: "inbox", label: "Inbox" },
-  { id: "screened", label: "Screened" },
-  { id: "shortlist", label: "Shortlist" },
-  { id: "downloaded", label: "Downloaded" },
-  { id: "read", label: "Agent read" },
-  { id: "excluded", label: "Excluded" },
+/** Stages in the left nav. Later stages only appear once they have papers,
+ * so the nav stays short while the workflow is young. */
+const STAGES: Array<{ id: PaperStage; label: string; alwaysVisible: boolean }> = [
+  { id: "inbox", label: "Inbox", alwaysVisible: true },
+  { id: "screened", label: "Screened", alwaysVisible: false },
+  { id: "shortlist", label: "Shortlist", alwaysVisible: true },
+  { id: "downloaded", label: "Downloaded", alwaysVisible: true },
+  { id: "read", label: "Agent read", alwaysVisible: false },
+  { id: "excluded", label: "Excluded", alwaysVisible: false },
 ];
 
 const STAGE_LABELS: Record<PaperStage, string> = Object.fromEntries(
@@ -181,21 +182,27 @@ export default function Literature() {
     [papers],
   );
 
-  /** Primary lane: dispatch the literature skill to Chat; the skill records
-   * results into papers/library.json, which this view reloads on chat-done. */
+  const openAgentChat = (input: string) => {
+    setPendingChatInput(input);
+    setTab("chat");
+  };
+
+  /** Optional handoff: open Chat with the selected literature skill. */
   const submitAgentSearch = () => {
     const trimmed = draftQuery.trim();
     if (!trimmed) return;
     const skill = AGENT_SKILLS.find((entry) => entry.id === agentSkill) ?? AGENT_SKILLS[0];
-    setPendingChatInput(skill.command(trimmed));
-    setTab("chat");
+    openAgentChat(skill.command(trimmed));
   };
 
-  /** Secondary lane: direct metadata lookup using the same kernel engine the
-   * skills call (LiteratureSearch tool) — instant, no LLM round trip. */
+  /** Primary lane: direct metadata lookup and save into papers/library.json. */
   const submitQuickSearch = () => {
     if (!draftQuery.trim() || searching) return;
     void runSearch(draftQuery, QUICK_SOURCES);
+  };
+
+  const askAgentAboutPaper = (paper: LiteraturePaper) => {
+    openAgentChat(`/research-lit "${paper.title}"`);
   };
 
   const selectPaper = (paper: LiteraturePaper) => {
@@ -233,11 +240,22 @@ export default function Literature() {
           value={draftQuery}
           onChange={(event) => setDraftQuery(event.target.value)}
           onKeyDown={(event) => {
-            if (event.key === "Enter") submitAgentSearch();
+            if (event.key !== "Enter") return;
+            if (event.ctrlKey || event.metaKey) submitAgentSearch();
+            else submitQuickSearch();
           }}
-          placeholder="Search the literature…"
+          placeholder="Search the literature..."
           aria-label="Remote search query"
         />
+        <button
+          type="button"
+          className="primary"
+          onClick={submitQuickSearch}
+          disabled={searching || !draftQuery.trim()}
+          title="Search arXiv + Crossref and save results to this library"
+        >
+          {searching ? "Searching..." : "Search & save"}
+        </button>
         <select
           className="lit-skill-select"
           value={agentSkill}
@@ -252,20 +270,11 @@ export default function Literature() {
         </select>
         <button
           type="button"
-          className="primary"
           onClick={submitAgentSearch}
           disabled={!draftQuery.trim()}
-          title="Run the selected skill in Chat — it searches, downloads, and records results into this library"
+          title="Open Chat with the selected literature skill"
         >
-          Agent search
-        </button>
-        <button
-          type="button"
-          onClick={submitQuickSearch}
-          disabled={searching || !draftQuery.trim()}
-          title="Instant arXiv + Crossref metadata lookup (the same engine the skills use), without the agent"
-        >
-          {searching ? "Searching…" : "Quick lookup"}
+          Open in Chat
         </button>
       </div>
 
@@ -281,9 +290,9 @@ export default function Literature() {
           ) : (
             lastSearch && (
               <span>
-                {lastSearch.resultCount} results · {lastSearch.newCount} new in Inbox
+                {lastSearch.resultCount} results / {lastSearch.newCount} saved to Inbox
                 {lastSearch.warnings.length > 0 &&
-                  ` · ${lastSearch.warnings.join(" · ")}`}
+                  ` / ${lastSearch.warnings.join(" / ")}`}
               </span>
             )
           )}
@@ -306,11 +315,9 @@ export default function Literature() {
               active={view === "starred"}
               onClick={() => setView("starred")}
             />
-          </div>
-
-          <div className="lit-nav-section">
-            <div className="panel-title">Pipeline</div>
-            {STAGES.map((stage) => (
+            {STAGES.filter(
+              (stage) => stage.alwaysVisible || (stageCounts.get(stage.id) ?? 0) > 0,
+            ).map((stage) => (
               <NavItem
                 key={stage.id}
                 label={stage.label}
@@ -322,28 +329,9 @@ export default function Literature() {
             ))}
           </div>
 
-          {library.collections.length > 0 && (
-            <div className="lit-nav-section">
-              <div className="panel-title">Collections</div>
-              {library.collections.map((collection) => (
-                <NavItem
-                  key={collection.id}
-                  label={collection.label}
-                  count={
-                    papers.filter((paper) => paper.collectionIds.includes(collection.id))
-                      .length
-                  }
-                  active={view === `col:${collection.id}`}
-                  onClick={() => setView(`col:${collection.id}`)}
-                />
-              ))}
-            </div>
-          )}
-
           {library.searches.length > 0 && (
-            <div className="lit-nav-section">
-              <div className="panel-title">Saved searches</div>
-              {library.searches.slice(0, 8).map((search) => (
+            <NavSection title="Saved searches" defaultOpen>
+              {library.searches.slice(0, 5).map((search) => (
                 <div className="lit-search-row" key={search.id}>
                   <NavItem
                     label={search.query}
@@ -364,12 +352,28 @@ export default function Literature() {
                   </button>
                 </div>
               ))}
-            </div>
+            </NavSection>
+          )}
+
+          {library.collections.length > 0 && (
+            <NavSection title="Collections" defaultOpen>
+              {library.collections.map((collection) => (
+                <NavItem
+                  key={collection.id}
+                  label={collection.label}
+                  count={
+                    papers.filter((paper) => paper.collectionIds.includes(collection.id))
+                      .length
+                  }
+                  active={view === `col:${collection.id}`}
+                  onClick={() => setView(`col:${collection.id}`)}
+                />
+              ))}
+            </NavSection>
           )}
 
           {allTags.length > 0 && (
-            <div className="lit-nav-section">
-              <div className="panel-title">Tags</div>
+            <NavSection title="Tags" defaultOpen={false}>
               <div className="lit-tags">
                 {allTags.map((tag) => (
                   <button
@@ -382,7 +386,7 @@ export default function Literature() {
                   </button>
                 ))}
               </div>
-            </div>
+            </NavSection>
           )}
         </aside>
 
@@ -418,10 +422,10 @@ export default function Literature() {
               <div className="lit-empty-library">
                 <p>Your library is empty.</p>
                 <p className="dim">
-                  Agent search runs the <code>/arxiv</code> or{" "}
-                  <code>/research-lit</code> skill in Chat; everything it finds
-                  is recorded in <code>papers/library.json</code> and shows up
-                  here. Quick lookup queries arXiv + Crossref directly.
+                  "Search & save" queries arXiv + Crossref and saves every result
+                  straight to the Inbox (duplicates are merged, never re-added).
+                  "Open in Chat" runs a literature skill that records its findings
+                  into the same library — watch both in the Activity log below.
                 </p>
                 <div className="lit-example-queries">
                   {EXAMPLE_QUERIES.map((example) => (
@@ -559,8 +563,15 @@ export default function Literature() {
                       >
                         Shortlist
                       </button>
-                    )}
+                  )}
                   <PdfAction paper={selectedPaper} onDownload={downloadPdf} />
+                  <button
+                    type="button"
+                    onClick={() => askAgentAboutPaper(selectedPaper)}
+                    title="Open Chat for deeper reading"
+                  >
+                    Ask Agent
+                  </button>
                   {selectedPaper.stage === "excluded" ? (
                     <button
                       type="button"
@@ -614,6 +625,8 @@ export default function Literature() {
         </section>
       </div>
 
+      <ActivityDrawer />
+
       <div className="lit-footer">
         <span>
           {papers.length} {papers.length === 1 ? "paper" : "papers"} · {downloadedCount}{" "}
@@ -623,6 +636,104 @@ export default function Literature() {
           {currentProject ? `${currentProject.name} · papers/library.json` : "papers/library.json"}
         </span>
       </div>
+    </div>
+  );
+}
+
+/** Terminal-style log: what ran, what came back, and when papers entered the
+ * library — covering both direct searches and skills running in Chat. */
+function ActivityDrawer() {
+  const activity = useLiteratureStore((s) => s.activity);
+  const open = useLiteratureStore((s) => s.activityOpen);
+  const setOpen = useLiteratureStore((s) => s.setActivityOpen);
+  const clear = useLiteratureStore((s) => s.clearActivity);
+  const logRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const node = logRef.current;
+    if (open && node) node.scrollTop = node.scrollHeight;
+  }, [activity, open]);
+
+  const latest = activity[activity.length - 1];
+  return (
+    <div className="lit-activity">
+      <button
+        type="button"
+        className="lit-activity-head"
+        onClick={() => setOpen(!open)}
+        aria-expanded={open}
+      >
+        <span className="lit-activity-title">Activity</span>
+        <span className={`lit-activity-last ${latest?.level ?? ""}`}>
+          {latest
+            ? latest.text
+            : "idle — searches, downloads, and agent actions are logged here"}
+        </span>
+        <span className="lit-activity-caret" aria-hidden="true">
+          {open ? "▾" : "▸"}
+        </span>
+      </button>
+      {open && (
+        <div className="lit-activity-body">
+          <div
+            className="lit-activity-log"
+            ref={logRef}
+            role="log"
+            aria-label="Literature activity log"
+          >
+            {activity.length === 0 && (
+              <div className="lit-activity-line info">No activity yet this session.</div>
+            )}
+            {activity.map((entry) => (
+              <div key={entry.id} className={`lit-activity-line ${entry.level}`}>
+                <span className="lit-activity-ts">{formatLogTime(entry.at)}</span>
+                {entry.text}
+              </div>
+            ))}
+          </div>
+          <div className="lit-activity-actions">
+            <button type="button" onClick={clear} disabled={activity.length === 0}>
+              Clear
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function formatLogTime(at: string) {
+  const date = new Date(at);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleTimeString(undefined, { hour12: false });
+}
+
+/** Collapsible left-nav group, used by the secondary sections so the nav
+ * stays short by default. */
+function NavSection({
+  title,
+  defaultOpen,
+  children,
+}: {
+  title: string;
+  defaultOpen: boolean;
+  children: ReactNode;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div className="lit-nav-section">
+      <button
+        type="button"
+        className="lit-section-toggle"
+        onClick={() => setOpen((value) => !value)}
+        aria-expanded={open}
+      >
+        <span>{title}</span>
+        <span className="lit-section-caret" aria-hidden="true">
+          {open ? "▾" : "▸"}
+        </span>
+      </button>
+      {open && children}
     </div>
   );
 }

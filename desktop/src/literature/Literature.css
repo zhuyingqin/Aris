@@ -611,6 +611,145 @@
   padding: 3px 8px;
 }
 
+/* ── Nav section toggles ── */
+
+.lit-section-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  padding: 8px 10px 4px;
+  text-align: left;
+}
+
+.lit-section-toggle:hover {
+  color: var(--text);
+  background: transparent;
+  border-color: transparent;
+}
+
+.lit-section-caret {
+  font-size: 10px;
+}
+
+/* ── Activity log (terminal) ── */
+
+.lit-activity {
+  border-top: 1px solid var(--border);
+  background: var(--bg-1);
+}
+
+.lit-activity-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 6px 12px;
+  text-align: left;
+}
+
+.lit-activity-head:hover {
+  background: var(--bg-2);
+  border-color: transparent;
+}
+
+.lit-activity-title {
+  flex-shrink: 0;
+  color: var(--text-dim);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+}
+
+.lit-activity-last {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-dim);
+  font-family: ui-monospace, "Cascadia Code", monospace;
+  font-size: 11px;
+}
+
+.lit-activity-last.ok {
+  color: var(--green);
+}
+
+.lit-activity-last.warn {
+  color: var(--amber);
+}
+
+.lit-activity-last.error {
+  color: var(--red);
+}
+
+.lit-activity-caret {
+  flex-shrink: 0;
+  color: var(--text-dim);
+  font-size: 10px;
+}
+
+.lit-activity-body {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  border-top: 1px solid var(--border);
+  background: var(--bg);
+  padding: 8px 12px;
+}
+
+.lit-activity-log {
+  flex: 1;
+  min-width: 0;
+  max-height: 150px;
+  overflow-y: auto;
+  font-family: ui-monospace, "Cascadia Code", monospace;
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.lit-activity-line {
+  display: flex;
+  gap: 10px;
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+}
+
+.lit-activity-line.ok {
+  color: var(--green);
+}
+
+.lit-activity-line.warn {
+  color: var(--amber);
+}
+
+.lit-activity-line.error {
+  color: var(--red);
+}
+
+.lit-activity-ts {
+  flex-shrink: 0;
+  opacity: 0.55;
+}
+
+.lit-activity-actions button {
+  font-size: 11px;
+  padding: 3px 9px;
+}
+
 /* ── Footer ── */
 
 .lit-footer {
