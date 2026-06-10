@@ -396,6 +396,52 @@ describe("Literature library", () => {
     ).toBeGreaterThan(0);
   });
 
+  it("generates a structured abstract brief with source tags", async () => {
+    const user = userEvent.setup();
+    const withAbstract = fixtureLibrary();
+    withAbstract.papers[0].abstract =
+      "Screening is hard. We propose a staged pipeline for triage. It reaches 0.94 recall at 8x less reading time. A limitation is the CS-only evaluation.";
+    withAbstract.projectFocus = {
+      question: "agent screening of literature",
+      motivation: "",
+      scope: "screening, triage",
+      currentAssumptions: "",
+    };
+    mocks.literatureLoad.mockResolvedValue(withAbstract);
+
+    render(<Literature />);
+    await screen.findAllByText("Persisted Paper on Grounded Reading");
+    // Brief is the default detail tab; generate from the abstract.
+    await user.click(screen.getByRole("button", { name: "Generate brief from abstract" }));
+
+    const detail = document.querySelector(".lit-brief") as HTMLElement;
+    expect(detail).toBeTruthy();
+    expect(within(detail).getByText(/staged pipeline for triage/)).toBeTruthy();
+    expect(within(detail).getByText(/0\.94 recall/)).toBeTruthy();
+    expect(within(detail).getByText(/CS-only evaluation/)).toBeTruthy();
+    // For-you is grounded in the project focus.
+    expect(within(detail).getByText(/Overlaps your focus on/)).toBeTruthy();
+    // Every line is provenance-tagged to the abstract.
+    expect(within(detail).getAllByText("[abstract]").length).toBe(5);
+  });
+
+  it("seeds a new search from a paper's stated limitation (upward loop)", async () => {
+    const user = userEvent.setup();
+    const withAbstract = fixtureLibrary();
+    withAbstract.papers[0].abstract =
+      "We propose a method. However, evaluation covers CS corpora only.";
+    mocks.literatureLoad.mockResolvedValue(withAbstract);
+
+    render(<Literature />);
+    await screen.findAllByText("Persisted Paper on Grounded Reading");
+    await user.click(screen.getByRole("button", { name: "Generate brief from abstract" }));
+    await user.click(screen.getByRole("button", { name: "Search this gap →" }));
+
+    expect((screen.getByLabelText("Remote search query") as HTMLInputElement).value).toContain(
+      "CS corpora only",
+    );
+  });
+
   it("batch-moves selected papers along the pipeline", async () => {
     const user = userEvent.setup();
     render(<Literature />);

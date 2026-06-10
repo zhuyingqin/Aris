@@ -13,16 +13,19 @@ import {
   emptyLibrary,
   type ActivityEntry,
   type ActivityLevel,
+  type BriefSection,
   type CriterionKind,
   type CriteriaSuggestion,
   type LiteratureLibrary,
   type LiteraturePaper,
   type LiteratureReviewTask,
   type LiteratureSearchResult,
+  type PaperBrief,
   type PaperFit,
   type PaperScreening,
   type PaperStage,
   type PdfDownloadResult,
+  type ProjectFocus,
   type RemotePaper,
   type ScreeningCriterion,
   type ScreeningDecision,
@@ -340,6 +343,92 @@ const maybeSuggestCriteria = (
   };
 };
 
+// ── Abstract Brief (M2.b) ───────────────────────────────────────────────────
+// Heuristic, deterministic, offline — the same "agent drafts, human verifies"
+// stance as the screener. A real LLM read is a clean later swap behind
+// `generateBrief`. Every section is tagged with its source so the
+// no-anchor-no-claim rule holds.
+
+const emptyFocus = (): ProjectFocus => ({
+  question: "",
+  motivation: "",
+  scope: "",
+  currentAssumptions: "",
+});
+
+const splitSentences = (text: string) =>
+  text
+    .replace(/\s+/g, " ")
+    .split(/(?<=[.!?])\s+/)
+    .map((sentence) => sentence.trim())
+    .filter((sentence) => sentence.length > 0);
+
+const BRIEF_CUES = {
+  problem: ["problem", "challeng", "difficult", "lack", "gap", "unclear", "bottleneck", "address", "tackle", "struggl"],
+  method: ["propose", "present", "introduc", "method", "approach", "model", "framework", "algorithm", "architecture", "design", "develop", "leverage"],
+  results: ["result", "achiev", "outperform", "improv", "accuracy", "state-of-the-art", "sota", "demonstrat", "show that", "reduc", "gain", "boost", "speedup", "faster"],
+  limits: ["limitation", "future work", "however", "only", "does not", "do not", "fail", "remain", "open problem", "yet to", "not address"],
+};
+
+const abstractSection = (text: string): BriefSection => ({ text, source: "abstract" });
+
+const pickSentence = (
+  sentences: string[],
+  cues: string[],
+  options?: { preferNumbers?: boolean },
+) => {
+  const scored = sentences.map((sentence) => {
+    const lower = sentence.toLowerCase();
+    let score = cues.reduce((total, cue) => (lower.includes(cue) ? total + 1 : total), 0);
+    if (options?.preferNumbers && /\d/.test(sentence)) score += 1;
+    return { sentence, score };
+  });
+  return scored.filter((entry) => entry.score > 0).sort((a, b) => b.score - a.score)[0]?.sentence;
+};
+
+const forYouSection = (paper: LiteraturePaper, focus?: ProjectFocus): BriefSection => {
+  const question = focus?.question.trim();
+  if (!question) {
+    return abstractSection(
+      "Set a research focus (Edit focus above) to get a read tailored to your question.",
+    );
+  }
+  const focusTerms = tokensFrom(`${question} ${focus?.scope ?? ""}`);
+  const paperTerms = new Set(tokensFrom(`${paper.title} ${paper.abstract}`));
+  const shared = focusTerms.filter((term) => paperTerms.has(term));
+  if (shared.length === 0) {
+    return abstractSection(
+      `Tangential to your focus on “${question}” — no direct term overlap with the abstract. Surfaced for breadth.`,
+    );
+  }
+  return abstractSection(
+    `Overlaps your focus on ${shared.slice(0, 4).join(", ")}. Read against your question “${question}”.`,
+  );
+};
+
+const briefFromPaper = (paper: LiteraturePaper, focus?: ProjectFocus): PaperBrief => {
+  const sentences = splitSentences(paper.abstract);
+  const fallback = (label: string) =>
+    abstractSection(
+      sentences.length === 0
+        ? `No abstract on file — ${label} needs the full text.`
+        : `${label} not stated in the abstract — open the full text to confirm.`,
+    );
+  const problem = pickSentence(sentences, BRIEF_CUES.problem) ?? sentences[0];
+  const method = pickSentence(sentences, BRIEF_CUES.method);
+  const results = pickSentence(sentences, BRIEF_CUES.results, { preferNumbers: true });
+  const limits = pickSentence(sentences, BRIEF_CUES.limits);
+  return {
+    problem: problem ? abstractSection(problem) : fallback("Problem"),
+    method: method ? abstractSection(method) : fallback("Method"),
+    results: results ? abstractSection(results) : fallback("Results"),
+    limits: limits ? abstractSection(limits) : fallback("Limitations"),
+    forYou: forYouSection(paper, focus),
+    basis: "abstract",
+    generatedAt: isoNow(),
+  };
+};
+
 const PREVIEW_LIBRARY: LiteratureLibrary = {
   version: 1,
   papers: [
@@ -353,7 +442,7 @@ const PREVIEW_LIBRARY: LiteratureLibrary = {
       arxivId: "2602.01491",
       url: "https://arxiv.org/abs/2602.01491",
       abstract:
-        "A system design for decomposing literature review work into retrieval, screening, reading, and evidence-grounded writing steps.",
+        "Literature review is bottlenecked by entangled screening and reading. We propose a four-stage agentic pipeline that decomposes the work into retrieval, metadata screening, full-text reading, and evidence-grounded writing. On a 2,100-paper benchmark the system reaches 0.94 screening recall at 8x less reading time. A limitation is that evaluation covers CS corpora only.",
       tags: ["agent", "review"],
       collectionIds: [],
       searchIds: ["search-preview"],
@@ -443,6 +532,12 @@ const PREVIEW_LIBRARY: LiteratureLibrary = {
     },
   ],
   collections: [{ id: "col-core", label: "Core review" }],
+  projectFocus: {
+    question: "How should an agent screen and read literature for a researcher?",
+    motivation: "Building a literature workspace where the agent drafts and the human verifies.",
+    scope: "agent screening, grounded reading, evidence anchoring",
+    currentAssumptions: "Metadata-first triage beats read-everything.",
+  },
   reviewTasks: [
     {
       id: "task-preview",
@@ -513,6 +608,8 @@ interface LiteratureState {
   addTags: (ids: string[], tags: string[]) => void;
   addCollection: (label: string) => void;
   assignCollection: (ids: string[], collectionId: string) => void;
+  setProjectFocus: (patch: Partial<ProjectFocus>) => void;
+  generateBrief: (paperId: string) => void;
   downloadPdf: (id: string) => Promise<void>;
   setError: (message: string | null) => void;
 }
@@ -596,6 +693,7 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
             searches: raw.searches ?? [],
             collections: raw.collections ?? [],
             reviewTasks,
+            projectFocus: raw.projectFocus,
           },
           loaded: true,
           loadedProjectId: projectId,
@@ -1084,6 +1182,25 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
           : [...paper.collectionIds, collectionId],
       })),
 
+    setProjectFocus: (patch) => {
+      mutate((library) => ({
+        ...library,
+        projectFocus: { ...emptyFocus(), ...(library.projectFocus ?? {}), ...patch },
+      }));
+    },
+
+    generateBrief: (paperId) => {
+      const focus = get().library.projectFocus;
+      const paper = get().library.papers.find((entry) => entry.id === paperId);
+      if (!paper) return;
+      patchPapers([paperId], (entry) => ({
+        ...entry,
+        brief: briefFromPaper(entry, focus),
+        unread: false,
+      }));
+      log("ok", `Brief generated from abstract: ${paper.title}`);
+    },
+
     downloadPdf: async (id) => {
       const paper = get().library.papers.find((entry) => entry.id === id);
       const url = paper?.pdf.url;
@@ -1133,6 +1250,9 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
     setError: (message) => set({ error: message }),
   };
 });
+
+/** Test helper: build a Brief without going through the store. */
+export const briefForTest = briefFromPaper;
 
 /** Test helper: reset the singleton store between cases. */
 export const resetLiteratureStore = () =>

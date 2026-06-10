@@ -14,13 +14,45 @@ export type PaperFit = "high" | "medium" | "low";
 
 export type PdfStatus = "none" | "queued" | "downloading" | "downloaded" | "failed";
 
-export type DetailTab = "metadata" | "agent" | "evidence";
+export type DetailTab = "brief" | "metadata" | "agent" | "evidence";
 
 export type ScreeningDecision = "include" | "exclude" | "maybe";
 
 export type CriterionKind = "include" | "exclude";
 
 export type AnchorKind = "abstract" | "metadata" | "pdf";
+
+/** Project-level reference frame for the Agent's "for you" judgment — what
+ * makes a Brief tailored rather than a generic summary. Stored at the top of
+ * library.json. */
+export interface ProjectFocus {
+  question: string;
+  motivation: string;
+  scope: string;
+  currentAssumptions: string;
+}
+
+export type BriefField = "problem" | "method" | "results" | "limits" | "forYou";
+
+/** One Brief section. `source` records where the claim came from so the
+ * "no anchor, no claim" rule holds — `abstract` at M2.b, page-anchored `pdf`
+ * at M3.b. */
+export interface BriefSection {
+  text: string;
+  source: AnchorKind;
+}
+
+/** A 5-section structured read of a paper — a 5-minute replacement for a
+ * 30-minute skim. M2.b generates these from the abstract. */
+export interface PaperBrief {
+  problem: BriefSection;
+  method: BriefSection;
+  results: BriefSection;
+  limits: BriefSection;
+  forYou: BriefSection;
+  basis: "abstract" | "fulltext";
+  generatedAt: string;
+}
 
 export interface PaperPdf {
   status: PdfStatus;
@@ -122,6 +154,7 @@ export interface LiteraturePaper {
   pdf: PaperPdf;
   verdict?: AgentVerdict;
   screenings?: Record<string, PaperScreening>;
+  brief?: PaperBrief;
   agentSummary?: string;
   evidence: EvidenceNote[];
 }
@@ -146,6 +179,7 @@ export interface LiteratureLibrary {
   searches: LiteratureSearch[];
   collections: LiteratureCollection[];
   reviewTasks: LiteratureReviewTask[];
+  projectFocus?: ProjectFocus;
 }
 
 /** One row returned by the `literature_search` Tauri command. */

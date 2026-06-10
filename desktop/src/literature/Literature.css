@@ -1098,6 +1098,168 @@ kbd {
   padding: 14px;
 }
 
+/* ── Brief tab (M2.b) ── */
+
+.lit-focus {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-1);
+  margin-bottom: 14px;
+}
+
+.lit-focus-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+}
+
+.lit-focus-summary .lit-note-label {
+  margin-bottom: 0;
+  flex-shrink: 0;
+}
+
+.lit-focus-q {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+  font-size: 12px;
+}
+
+.lit-focus-summary button {
+  flex-shrink: 0;
+  font-size: 11px;
+  padding: 3px 9px;
+}
+
+.lit-focus-editor {
+  display: grid;
+  gap: 8px;
+  padding: 0 10px 10px;
+}
+
+.lit-focus-editor label {
+  display: grid;
+  grid-template-columns: 84px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+}
+
+.lit-focus-editor label span {
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.lit-focus-editor input {
+  min-width: 0;
+  font-size: 12px;
+  padding: 5px 8px;
+}
+
+.lit-brief {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.lit-brief-row {
+  border-left: 2px solid var(--border);
+  padding-left: 10px;
+}
+
+.lit-brief-row.for-you {
+  border-left-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+  border-radius: 0 6px 6px 0;
+  padding: 4px 10px 6px;
+}
+
+.lit-brief-row-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 3px;
+}
+
+.lit-brief-label {
+  color: var(--text-dim);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+}
+
+.lit-brief-row p {
+  margin: 0;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.lit-src {
+  border-radius: 4px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  padding: 1px 5px;
+}
+
+.lit-src.src-abstract {
+  background: color-mix(in srgb, var(--accent-2) 16%, transparent);
+  color: var(--accent-2);
+}
+
+.lit-src.src-pdf {
+  background: color-mix(in srgb, var(--amber) 16%, transparent);
+  color: var(--amber);
+}
+
+.lit-src.src-metadata {
+  background: var(--bg-3);
+  color: var(--text-dim);
+}
+
+.lit-brief-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.lit-brief-foot .dim {
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.lit-brief-foot button {
+  flex-shrink: 0;
+  font-size: 11px;
+  padding: 3px 9px;
+}
+
+.lit-brief-empty {
+  text-align: center;
+  padding: 18px 8px;
+}
+
+.lit-brief-empty p {
+  margin: 0 0 8px;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.lit-brief-empty .dim {
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .lit-kv {
   display: grid;
   grid-template-columns: 72px minmax(0, 1fr);

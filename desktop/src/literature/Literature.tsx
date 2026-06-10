@@ -2,12 +2,14 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useStore } from "../store";
 import { useLiteratureStore } from "./literatureStore";
 import type {
+  BriefSection,
   DetailTab,
   LiteraturePaper,
   LiteratureReviewTask,
   PaperFit,
   PaperScreening,
   PaperStage,
+  ProjectFocus,
   ScreeningCriterion,
   ScreeningDecision,
 } from "./literatureTypes";
@@ -180,6 +182,8 @@ export default function Literature() {
   const toggleStar = useLiteratureStore((s) => s.toggleStar);
   const markRead = useLiteratureStore((s) => s.markRead);
   const addTags = useLiteratureStore((s) => s.addTags);
+  const generateBrief = useLiteratureStore((s) => s.generateBrief);
+  const setProjectFocus = useLiteratureStore((s) => s.setProjectFocus);
   const downloadPdf = useLiteratureStore((s) => s.downloadPdf);
   const setError = useLiteratureStore((s) => s.setError);
 
@@ -190,8 +194,9 @@ export default function Literature() {
   const [sort, setSort] = useState<SortKey>("added");
   const [checked, setChecked] = useState<Set<string>>(new Set());
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [detailTab, setDetailTab] = useState<DetailTab>("metadata");
+  const [detailTab, setDetailTab] = useState<DetailTab>("brief");
   const [tagDraft, setTagDraft] = useState("");
+  const omnibarRef = useRef<HTMLInputElement | null>(null);
   const [queueMode, setQueueMode] = useState(false);
   const [queueIndex, setQueueIndex] = useState(0);
   const [showFullAbstract, setShowFullAbstract] = useState(false);
@@ -317,6 +322,20 @@ export default function Literature() {
 
   const askAgentAboutPaper = (paper: LiteraturePaper) => {
     openAgentChat(`/research-lit "${paper.title}"`);
+  };
+
+  // Upward loop: a paper's stated limitation becomes the seed for the next
+  // search, so reading feeds back into retrieval instead of dead-ending.
+  const spawnSearchFromLimit = (seed: string) => {
+    setDraftQuery(seed);
+    setView("all");
+    requestAnimationFrame(() => {
+      const node = omnibarRef.current;
+      if (node) {
+        node.focus();
+        node.select();
+      }
+    });
   };
 
   const selectPaper = (paper: LiteraturePaper) => {
@@ -567,6 +586,7 @@ export default function Literature() {
     <div className="lit-page">
       <div className="lit-omnibar">
         <input
+          ref={omnibarRef}
           className="lit-omnibar-input"
           value={draftQuery}
           onChange={(event) => setDraftQuery(event.target.value)}
@@ -881,6 +901,7 @@ export default function Literature() {
                 <div className="lit-tabbar" role="tablist" aria-label="Paper detail">
                   {(
                     [
+                      { id: "brief", label: "Brief" },
                       { id: "metadata", label: "Metadata" },
                       { id: "agent", label: "Agent notes" },
                       { id: "evidence", label: "Evidence" },
@@ -904,6 +925,10 @@ export default function Literature() {
                   paper={selectedPaper}
                   activeTask={activeReviewTask}
                   screening={selectedScreening}
+                  projectFocus={library.projectFocus}
+                  onGenerateBrief={generateBrief}
+                  onSpawnSearch={spawnSearchFromLimit}
+                  onSetFocus={setProjectFocus}
                   tagDraft={tagDraft}
                   onTagDraft={setTagDraft}
                   onAddTag={addTagToSelected}
@@ -1482,11 +1507,164 @@ function PdfAction({
   );
 }
 
+const BRIEF_ROWS: Array<{
+  key: "problem" | "method" | "results" | "limits" | "forYou";
+  label: string;
+}> = [
+  { key: "problem", label: "Problem" },
+  { key: "method", label: "Method" },
+  { key: "results", label: "Results" },
+  { key: "limits", label: "Limitations" },
+  { key: "forYou", label: "For you" },
+];
+
+function SourceTag({ section }: { section: BriefSection }) {
+  return <span className={`lit-src src-${section.source}`}>[{section.source}]</span>;
+}
+
+function FocusEditor({
+  focus,
+  onSetFocus,
+}: {
+  focus?: ProjectFocus;
+  onSetFocus: (patch: Partial<ProjectFocus>) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const question = focus?.question?.trim();
+  return (
+    <div className="lit-focus">
+      <div className="lit-focus-summary">
+        <span className="lit-note-label">Research focus</span>
+        <span className="lit-focus-q">{question || "not set — the “For you” read needs it"}</span>
+        <button type="button" onClick={() => setOpen((value) => !value)}>
+          {open ? "Done" : "Edit focus"}
+        </button>
+      </div>
+      {open && (
+        <div className="lit-focus-editor">
+          <label>
+            <span>Question</span>
+            <input
+              value={focus?.question ?? ""}
+              onChange={(event) => onSetFocus({ question: event.target.value })}
+              placeholder="What are you trying to answer?"
+              aria-label="Focus question"
+            />
+          </label>
+          <label>
+            <span>Scope</span>
+            <input
+              value={focus?.scope ?? ""}
+              onChange={(event) => onSetFocus({ scope: event.target.value })}
+              placeholder="Methods / sub-areas in scope"
+              aria-label="Focus scope"
+            />
+          </label>
+          <label>
+            <span>Motivation</span>
+            <input
+              value={focus?.motivation ?? ""}
+              onChange={(event) => onSetFocus({ motivation: event.target.value })}
+              placeholder="Why this matters for your work"
+              aria-label="Focus motivation"
+            />
+          </label>
+          <label>
+            <span>Assumptions</span>
+            <input
+              value={focus?.currentAssumptions ?? ""}
+              onChange={(event) => onSetFocus({ currentAssumptions: event.target.value })}
+              placeholder="What you currently believe"
+              aria-label="Focus assumptions"
+            />
+          </label>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function BriefView({
+  paper,
+  projectFocus,
+  onGenerateBrief,
+  onSpawnSearch,
+  onSetFocus,
+}: {
+  paper: LiteraturePaper;
+  projectFocus?: ProjectFocus;
+  onGenerateBrief: (paperId: string) => void;
+  onSpawnSearch: (seed: string) => void;
+  onSetFocus: (patch: Partial<ProjectFocus>) => void;
+}) {
+  const brief = paper.brief;
+  return (
+    <div className="lit-detail-scroll">
+      <FocusEditor focus={projectFocus} onSetFocus={onSetFocus} />
+      {brief ? (
+        <>
+          <div className="lit-brief">
+            {BRIEF_ROWS.map(({ key, label }) => {
+              const section = brief[key];
+              return (
+                <section
+                  className={`lit-brief-row${key === "forYou" ? " for-you" : ""}`}
+                  key={key}
+                >
+                  <div className="lit-brief-row-head">
+                    <span className="lit-brief-label">{label}</span>
+                    <SourceTag section={section} />
+                  </div>
+                  <p>{section.text}</p>
+                  {key === "limits" && (
+                    <button
+                      type="button"
+                      className="lit-linkish"
+                      onClick={() => onSpawnSearch(section.text)}
+                    >
+                      Search this gap →
+                    </button>
+                  )}
+                </section>
+              );
+            })}
+          </div>
+          <div className="lit-brief-foot">
+            <span className="dim">
+              Generated from the {brief.basis} · {brief.generatedAt.slice(0, 10)} · every line is
+              tagged with its source
+            </span>
+            <button type="button" onClick={() => onGenerateBrief(paper.id)}>
+              Regenerate
+            </button>
+          </div>
+        </>
+      ) : (
+        <div className="lit-brief-empty">
+          <p>No brief yet.</p>
+          <p className="dim">
+            A 5-section read — Problem, Method, Results, Limitations, and how it bears on your
+            focus — built from the abstract in seconds. Open the PDF later to anchor each line to
+            a page.
+          </p>
+          <button type="button" className="primary" onClick={() => onGenerateBrief(paper.id)}>
+            Generate brief from abstract
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function PaperDetail({
   tab,
   paper,
   activeTask,
   screening,
+  projectFocus,
+  onGenerateBrief,
+  onSpawnSearch,
+  onSetFocus,
   tagDraft,
   onTagDraft,
   onAddTag,
@@ -1495,10 +1673,26 @@ function PaperDetail({
   paper: LiteraturePaper;
   activeTask: LiteratureReviewTask | null;
   screening?: PaperScreening;
+  projectFocus?: ProjectFocus;
+  onGenerateBrief: (paperId: string) => void;
+  onSpawnSearch: (seed: string) => void;
+  onSetFocus: (patch: Partial<ProjectFocus>) => void;
   tagDraft: string;
   onTagDraft: (value: string) => void;
   onAddTag: () => void;
 }) {
+  if (tab === "brief") {
+    return (
+      <BriefView
+        paper={paper}
+        projectFocus={projectFocus}
+        onGenerateBrief={onGenerateBrief}
+        onSpawnSearch={onSpawnSearch}
+        onSetFocus={onSetFocus}
+      />
+    );
+  }
+
   if (tab === "agent") {
     return (
       <div className="lit-detail-scroll">
