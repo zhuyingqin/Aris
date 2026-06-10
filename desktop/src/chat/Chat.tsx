@@ -117,6 +117,11 @@ const FALLBACK_SLASH_COMMANDS: DesktopCommandSpec[] = [
   { name: "model", description: "Show or switch the executor model", argumentHint: "[model]" },
   { name: "permissions", description: "Show or switch the active permission mode", argumentHint: "[mode]" },
 ];
+const HIDDEN_SLASH_COMMANDS = new Set(["team", "teams", "workflow", "workflows"]);
+
+function visibleDesktopCommands(commands: DesktopCommandSpec[]) {
+  return commands.filter((command) => !HIDDEN_SLASH_COMMANDS.has(command.name.toLowerCase()));
+}
 
 interface PendingCommandSelection {
   sessionId: string;
@@ -126,7 +131,6 @@ interface PendingCommandSelection {
 export default function Chat() {
   const setTab = useStore((state) => state.setTab);
   const setError = useStore((state) => state.setError);
-  const refreshTeam = useStore((state) => state.refreshTeam);
   const projects = useStore((state) => state.projects);
   const currentProject = useStore((state) => state.currentProject);
   const projectBusy = useStore((state) => state.projectBusy);
@@ -248,7 +252,9 @@ export default function Chat() {
   useEffect(() => {
     refreshStatus();
     if (!isTauri()) return;
-    chatCommandSpecs().then(setDesktopCommands).catch(() => setDesktopCommands(FALLBACK_SLASH_COMMANDS));
+    chatCommandSpecs()
+      .then((commands) => setDesktopCommands(visibleDesktopCommands(commands)))
+      .catch(() => setDesktopCommands(FALLBACK_SLASH_COMMANDS));
     skillsList().then(setSkills).catch(() => undefined);
     projectChatStarters().then(setStarters).catch(() => undefined);
   }, [currentProject?.id, refreshStatus]);
@@ -310,6 +316,16 @@ export default function Chat() {
     const trimmed = text.trim();
     if (!trimmed.startsWith("/")) return false;
     const commandName = trimmed.slice(1).split(/\s+/)[0]?.toLowerCase() ?? "";
+    if (HIDDEN_SLASH_COMMANDS.has(commandName)) {
+      patchTurns(session.id, (turns) => [
+        ...turns,
+        userTurn(text, []),
+        assistantTextTurn("This desktop command is no longer available."),
+      ]);
+      updateSession(session.id, (item) => ({ ...item, draft: "", draftAttachments: [] }));
+      setEditingTurnId(null);
+      return true;
+    }
     const isKnownSkill = skills.some((skill) => skill.name.toLowerCase() === commandName);
     if (attached.length > 0 && !isKnownSkill) return false;
 
@@ -445,10 +461,6 @@ export default function Chat() {
     }
   }, [beginRun]);
 
-  const openTeamView = useCallback(() => {
-    void refreshTeam().finally(() => setTab("teams"));
-  }, [refreshTeam, setTab]);
-
   const exportCurrentChat = useCallback(async () => {
     const session = currentSessionRef.current;
     if (!session || busyRef.current || exporting || session.turns.length === 0) return;
@@ -568,7 +580,6 @@ export default function Chat() {
           onEdit={edit}
           onRetry={retry}
           onContinue={continueStopped}
-          onOpenTeam={openTeamView}
         />
         {pendingCommandSelection && pendingCommandSelection.sessionId === currentId && (
           <CommandSelection

@@ -1,18 +1,14 @@
 import { create } from "zustand";
-import type { DesktopProject, RunEvent, TeamSnapshot, WorkflowRun } from "./types";
+import type { DesktopProject } from "./types";
 import {
   isTauri,
-  onRunEvent,
   projectAdd,
   projectsGet,
   projectsReorder,
   projectSetCurrent,
   stateDir as fetchStateDir,
-  teamList,
-  workflowList,
 } from "./api/tauri";
 
-const MAX_EVENTS = 500;
 const PREVIEW_PROJECT: DesktopProject = {
   id: "default",
   name: "ARIS Desktop Workspace",
@@ -23,9 +19,7 @@ const PREVIEW_PROJECT: DesktopProject = {
 
 export type Tab =
   | "chat"
-  | "studio"
-  | "monitor"
-  | "teams"
+  | "literature"
   | "settings"
   | "skills"
   | "sessions";
@@ -35,18 +29,11 @@ interface AppState {
   setTab: (tab: Tab) => void;
 
   stateDir: string;
-  runs: WorkflowRun[];
-  selectedRunId: string | null;
-  team: TeamSnapshot | null;
-  events: RunEvent[];
   error: string | null;
   projects: DesktopProject[];
   currentProject: DesktopProject | null;
   projectBusy: boolean;
 
-  selectRun: (id: string | null) => void;
-  refreshRuns: () => Promise<void>;
-  refreshTeam: () => Promise<void>;
   setError: (message: string | null) => void;
   addProject: (path: string) => Promise<void>;
   switchProject: (id: string) => Promise<void>;
@@ -61,16 +48,11 @@ export const useStore = create<AppState>((set, get) => ({
   setTab: (tab) => set({ tab }),
 
   stateDir: "",
-  runs: [],
-  selectedRunId: null,
-  team: null,
-  events: [],
   error: null,
   projects: [],
   currentProject: null,
   projectBusy: false,
 
-  selectRun: (id) => set({ selectedRunId: id }),
   setError: (message) => set({ error: message }),
   addProject: async (path) => {
     set({ projectBusy: true, error: null });
@@ -79,13 +61,8 @@ export const useStore = create<AppState>((set, get) => ({
       set({
         projects: view.projects,
         currentProject: view.currentProject,
-        runs: [],
-        selectedRunId: null,
-        team: null,
-        events: [],
       });
       set({ stateDir: await fetchStateDir() });
-      await Promise.all([get().refreshRuns(), get().refreshTeam()]);
     } catch (error) {
       set({ error: String(error) });
       throw error;
@@ -101,13 +78,8 @@ export const useStore = create<AppState>((set, get) => ({
       set({
         projects: view.projects,
         currentProject: view.currentProject,
-        runs: [],
-        selectedRunId: null,
-        team: null,
-        events: [],
       });
       set({ stateDir: await fetchStateDir() });
-      await Promise.all([get().refreshRuns(), get().refreshTeam()]);
     } catch (error) {
       set({ error: String(error) });
       throw error;
@@ -151,34 +123,6 @@ export const useStore = create<AppState>((set, get) => ({
     }
   },
 
-  refreshRuns: async () => {
-    try {
-      const out = await workflowList();
-      set((s) => {
-        const runs = out.runs ?? [];
-        const stillExists = runs.some((r) => r.runId === s.selectedRunId);
-        return {
-          runs,
-          selectedRunId: stillExists
-            ? s.selectedRunId
-            : (runs[0]?.runId ?? null),
-        };
-      });
-    } catch (err) {
-      set({ error: String(err) });
-    }
-  },
-
-  refreshTeam: async () => {
-    try {
-      const snapshot = await teamList(null, true, true);
-      set({ team: snapshot });
-    } catch (err) {
-      // A missing team is not an error worth surfacing loudly.
-      set({ team: null });
-    }
-  },
-
   init: () => {
     // Plain-browser preview (no Tauri backend): render the static UI only.
     if (!isTauri()) {
@@ -190,36 +134,6 @@ export const useStore = create<AppState>((set, get) => ({
       return () => {};
     }
 
-    let disposed = false;
-    let unlisten: (() => void) | null = null;
-    let refreshTimer: number | null = null;
-    let refreshInFlight = false;
-    let refreshQueued = false;
-    const runRefresh = async () => {
-      if (disposed) return;
-      if (refreshInFlight) {
-        refreshQueued = true;
-        return;
-      }
-      refreshInFlight = true;
-      await Promise.all([get().refreshRuns(), get().refreshTeam()]);
-      refreshInFlight = false;
-      if (refreshQueued) {
-        refreshQueued = false;
-        scheduleRefresh();
-      }
-    };
-    const scheduleRefresh = () => {
-      if (disposed) return;
-      refreshQueued = true;
-      if (refreshTimer !== null || refreshInFlight) return;
-      refreshTimer = window.setTimeout(() => {
-        refreshTimer = null;
-        refreshQueued = false;
-        void runRefresh();
-      }, 120);
-    };
-
     fetchStateDir()
       .then((dir) => set({ stateDir: dir }))
       .catch(() => undefined);
@@ -227,27 +141,6 @@ export const useStore = create<AppState>((set, get) => ({
       .then((view) => set({ projects: view.projects, currentProject: view.currentProject }))
       .catch((error) => set({ error: String(error) }));
 
-    onRunEvent((event) => {
-      set((s) => ({
-        events: [...s.events, event].slice(-MAX_EVENTS),
-      }));
-      // Coalesce bursts while keeping the event timeline live.
-      scheduleRefresh();
-    }).then((fn) => {
-      if (disposed) fn();
-      else unlisten = fn;
-    });
-
-    void runRefresh();
-    const poll = window.setInterval(() => {
-      scheduleRefresh();
-    }, 3000);
-
-    return () => {
-      disposed = true;
-      if (unlisten) unlisten();
-      if (refreshTimer !== null) window.clearTimeout(refreshTimer);
-      window.clearInterval(poll);
-    };
+    return () => {};
   },
 }));

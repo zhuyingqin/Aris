@@ -153,7 +153,6 @@ describe("Chat interaction helpers", () => {
         onEdit={() => undefined}
         onRetry={() => undefined}
         onContinue={() => undefined}
-        onOpenTeam={() => undefined}
       />,
     );
 

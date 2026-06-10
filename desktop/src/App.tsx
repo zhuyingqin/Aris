@@ -2,44 +2,33 @@ import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } f
 import { open } from "@tauri-apps/plugin-dialog";
 import { useStore, type Tab } from "./store";
 import Chat from "./chat/Chat";
-import Studio from "./studio/Studio";
-import Monitor from "./monitor/Monitor";
-import TeamView from "./teams/TeamView";
+import Literature from "./literature/Literature";
 import Settings from "./settings/Settings";
 import Skills from "./skills/Skills";
 import Sessions from "./sessions/Sessions";
 import arisIcon from "./assets/aris-icon.svg";
 
 interface NavItem {
-  id: Tab;
+  id: string;
   label: string;
   icon: string;
 }
 const NAV_GROUPS: { group: string; items: NavItem[] }[] = [
   {
     group: "Build",
-    items: [
-      { id: "chat", label: "Chat", icon: "💬" },
-      { id: "studio", label: "Workflow Studio", icon: "🧩" },
-    ],
-  },
-  {
-    group: "Operate",
-    items: [
-      { id: "monitor", label: "Run Monitor", icon: "📈" },
-      { id: "teams", label: "Team", icon: "👥" },
-    ],
+    items: [{ id: "chat", label: "Chat", icon: "C" }],
   },
   {
     group: "Library",
     items: [
-      { id: "skills", label: "Skills", icon: "📚" },
-      { id: "sessions", label: "Sessions", icon: "🗂️" },
+      { id: "literature", label: "Literature", icon: "P" },
+      { id: "skills", label: "Skills", icon: "K" },
+      { id: "sessions", label: "Sessions", icon: "S" },
     ],
   },
   {
     group: "System",
-    items: [{ id: "settings", label: "Settings", icon: "⚙️" }],
+    items: [{ id: "settings", label: "Settings", icon: "*" }],
   },
 ];
 
@@ -249,7 +238,7 @@ export default function App() {
           <img className="brand-mark" src={arisIcon} alt="" />
           <span className="brand-text">
             ARIS
-            <small>Team · Workflow · Chat</small>
+            <small>Chat</small>
           </span>
         </div>
         {NAV_GROUPS.map((g) => (
@@ -260,7 +249,7 @@ export default function App() {
                 key={t.id}
                 className={`nav-item${tab === t.id ? " active" : ""}`}
                 onClick={() => {
-                  setTab(t.id);
+                  setTab(t.id as Tab);
                   setMobileNavOpen(false);
                 }}
               >
@@ -382,9 +371,7 @@ export default function App() {
         <div hidden={tab !== "chat"}>
           <Chat />
         </div>
-        {tab === "studio" && <Studio />}
-        {tab === "monitor" && <Monitor />}
-        {tab === "teams" && <TeamView />}
+        {tab === "literature" && <Literature />}
         {tab === "skills" && <Skills />}
         {tab === "sessions" && <Sessions />}
         {tab === "settings" && <Settings />}

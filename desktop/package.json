@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.2.1",
   "type": "module",
-  "description": "ARIS Studio — desktop UI for designing and monitoring agent teams & workflows",
+  "description": "ARIS Studio - desktop UI for Chat, literature, skills, sessions, and settings",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
@@ -21,7 +21,6 @@
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-markdown": "^10.1.0",
-    "reactflow": "^11.11.4",
     "rehype-highlight": "^7.0.2",
     "remark-gfm": "^4.0.1",
     "zustand": "^4.5.5"
