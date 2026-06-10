@@ -2,6 +2,7 @@ mod commands;
 mod config;
 mod engine;
 mod files;
+mod literature;
 mod process;
 mod projects;
 mod sessions;
@@ -51,6 +52,10 @@ pub fn run() {
             sessions::session_get,
             sessions::chat_ui_sessions_load,
             sessions::chat_ui_sessions_save,
+            literature::literature_load,
+            literature::literature_save,
+            literature::literature_search,
+            literature::literature_download_pdf,
             engine::chat_status,
             engine::chat_command_specs,
             engine::chat_run_command,

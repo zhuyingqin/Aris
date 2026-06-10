@@ -92,6 +92,19 @@ export const chatUiSessionsLoad = <T>() => invoke<T[]>("chat_ui_sessions_load");
 export const chatUiSessionsSave = <T>(sessions: T[]) =>
   invoke<void>("chat_ui_sessions_save", { sessions });
 
+// ── Literature library ────────────────────────────────────────────────────────
+
+export const literatureLoad = <T>() => invoke<T>("literature_load");
+export const literatureSave = <T>(library: T) =>
+  invoke<void>("literature_save", { library });
+export const literatureSearch = <T>(
+  query: string,
+  sources: string[],
+  maxResults?: number,
+) => invoke<T>("literature_search", { query, sources, maxResults: maxResults ?? null });
+export const literatureDownloadPdf = <T>(url: string, fileName: string) =>
+  invoke<T>("literature_download_pdf", { url, fileName });
+
 // ── File browser ─────────────────────────────────────────────────────────────
 
 export const fileSearch = (pattern: string, root?: string) =>

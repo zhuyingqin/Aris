@@ -1,30 +1,37 @@
-export type PaperFit = "high" | "medium" | "low";
+// Shared shapes for the literature library. The on-disk form of
+// `LiteratureLibrary` is `papers/library.json` inside the active project —
+// the same folder the `/arxiv` skill writes PDFs into.
 
 export type PaperStage =
-  | "candidate"
+  | "inbox"
   | "screened"
-  | "important"
+  | "shortlist"
   | "downloaded"
-  | "reading"
-  | "rejected";
+  | "read"
+  | "excluded";
 
-export type PdfStatus = "none" | "queued" | "downloaded";
+export type PaperFit = "high" | "medium" | "low";
 
-export type DetailTab = "metadata" | "reader" | "agent" | "evidence";
+export type PdfStatus = "none" | "queued" | "downloading" | "downloaded" | "failed";
 
-export interface LiteratureSearch {
-  id: string;
-  label: string;
-  query: string;
-  source: string;
-  count: number;
+export type DetailTab = "metadata" | "agent" | "evidence";
+
+export interface PaperPdf {
+  status: PdfStatus;
+  /** Direct download URL when the source exposes one. */
+  url?: string;
+  /** Path relative to the project root, e.g. `papers/2602.01491.pdf`. */
+  path?: string;
+  bytes?: number;
+  error?: string;
 }
 
-export interface LiteratureCollection {
-  id: string;
-  label: string;
-  kind: "library" | "collection" | "search" | "smart";
-  count: number;
+/** Agent screening outcome (M3 fills this in; imports may carry it too). */
+export interface AgentVerdict {
+  fit: PaperFit;
+  score: number;
+  rationale: string;
+  decidedAt: string;
 }
 
 export interface EvidenceNote {
@@ -35,22 +42,84 @@ export interface EvidenceNote {
 }
 
 export interface LiteraturePaper {
+  /** Stable id: `arxiv:<id>`, `doi:<doi>` or `title:<normalized>`. */
   id: string;
   title: string;
-  authors: string;
-  year: number;
+  authors: string[];
+  year?: number;
   venue: string;
-  doi: string;
+  doi?: string;
+  arxivId?: string;
+  url?: string;
   abstract: string;
-  collectionIds: string[];
   tags: string[];
-  fit: PaperFit;
-  score: number;
+  collectionIds: string[];
+  /** Saved searches that surfaced this paper. */
+  searchIds: string[];
   stage: PaperStage;
-  pdfStatus: PdfStatus;
+  starred: boolean;
+  unread: boolean;
   source: string;
+  citedBy?: number;
   addedAt: string;
-  agentSummary: string;
-  agentDecision: string;
+  pdf: PaperPdf;
+  verdict?: AgentVerdict;
+  agentSummary?: string;
   evidence: EvidenceNote[];
 }
+
+export interface LiteratureSearch {
+  id: string;
+  query: string;
+  sources: string[];
+  ranAt: string;
+  resultCount: number;
+  newCount: number;
+}
+
+export interface LiteratureCollection {
+  id: string;
+  label: string;
+}
+
+export interface LiteratureLibrary {
+  version: 1;
+  papers: LiteraturePaper[];
+  searches: LiteratureSearch[];
+  collections: LiteratureCollection[];
+}
+
+/** One row returned by the `literature_search` Tauri command. */
+export interface RemotePaper {
+  id: string;
+  title: string;
+  authors: string[];
+  year?: number | null;
+  venue: string;
+  doi?: string | null;
+  arxivId?: string | null;
+  abstract: string;
+  url?: string | null;
+  pdfUrl?: string | null;
+  source: string;
+  published?: string | null;
+  citedBy?: number | null;
+}
+
+export interface LiteratureSearchResult {
+  papers: RemotePaper[];
+  warnings: string[];
+}
+
+export interface PdfDownloadResult {
+  path: string;
+  relativePath: string;
+  bytes: number;
+}
+
+export const emptyLibrary = (): LiteratureLibrary => ({
+  version: 1,
+  papers: [],
+  searches: [],
+  collections: [],
+});

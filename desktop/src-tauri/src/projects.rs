@@ -254,6 +254,16 @@ fn ensure_switch_allowed(chat: &ChatState) -> Result<(), String> {
     Ok(())
 }
 
+/// Absolute path of the active project — the root the literature library
+/// (`papers/`) lives under.
+pub fn current_project_path(projects: &ProjectState) -> Result<PathBuf, String> {
+    let registry = projects
+        .registry
+        .lock()
+        .map_err(|_| "project state poisoned".to_string())?;
+    current_project(&registry).map(|project| PathBuf::from(project.path))
+}
+
 pub fn init(projects: &ProjectState) -> Result<(), String> {
     let mut registry = projects
         .registry
