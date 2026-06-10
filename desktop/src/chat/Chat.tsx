@@ -271,6 +271,17 @@ export default function Chat() {
     setPendingCommandSelection(null);
   }, [currentId]);
 
+  // One-shot composer prefill from other views (e.g. Literature → /arxiv).
+  const pendingChatInput = useStore((state) => state.pendingChatInput);
+  const setPendingChatInput = useStore((state) => state.setPendingChatInput);
+  useEffect(() => {
+    const session = currentSessionRef.current;
+    if (!pendingChatInput || !session) return;
+    setDraft(session.id, pendingChatInput);
+    setPendingChatInput(null);
+    focusComposer();
+  }, [pendingChatInput, setDraft, setPendingChatInput, focusComposer]);
+
   const setAttachments = (next: ChatAttachment[]) => {
     if (!currentSession) return;
     updateSession(currentSession.id, (session) => ({ ...session, draftAttachments: next }));

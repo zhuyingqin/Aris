@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { LiteratureLibrary, LiteraturePaper } from "./literatureTypes";
@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   literatureSave: vi.fn(),
   literatureSearch: vi.fn(),
   literatureDownloadPdf: vi.fn(),
+  onChatDone: vi.fn(),
 }));
 
 vi.mock("../api/tauri", () => ({
@@ -18,6 +19,7 @@ vi.mock("../api/tauri", () => ({
   literatureSave: mocks.literatureSave,
   literatureSearch: mocks.literatureSearch,
   literatureDownloadPdf: mocks.literatureDownloadPdf,
+  onChatDone: mocks.onChatDone,
   projectAdd: vi.fn(),
   projectsGet: vi.fn(),
   projectsReorder: vi.fn(),
@@ -27,6 +29,9 @@ vi.mock("../api/tauri", () => ({
 
 import Literature from "./Literature";
 import { resetLiteratureStore } from "./literatureStore";
+import { useStore } from "../store";
+
+let chatDoneHandler: ((text: string) => void) | null = null;
 
 const fixturePaper: LiteraturePaper = {
   id: "arxiv:1111.00001",
@@ -58,6 +63,12 @@ const fixtureLibrary = (): LiteratureLibrary => ({
 
 beforeEach(() => {
   resetLiteratureStore();
+  useStore.setState({ tab: "literature", pendingChatInput: null });
+  chatDoneHandler = null;
+  mocks.onChatDone.mockReset().mockImplementation((handler: (text: string) => void) => {
+    chatDoneHandler = handler;
+    return Promise.resolve(() => {});
+  });
   mocks.literatureLoad.mockReset().mockResolvedValue(fixtureLibrary());
   mocks.literatureSave.mockReset().mockResolvedValue(undefined);
   mocks.literatureSearch.mockReset().mockResolvedValue({
@@ -126,7 +137,7 @@ describe("Literature library", () => {
       screen.getByLabelText("Remote search query"),
       "retrieval agents",
     );
-    await user.click(screen.getByRole("button", { name: "Search" }));
+    await user.click(screen.getByRole("button", { name: "Quick lookup" }));
 
     expect(
       await screen.findAllByText("Deep Retrieval Agents for Literature Triage"),
@@ -160,6 +171,48 @@ describe("Literature library", () => {
     );
     expect(screen.getByText("1 paper · 1 PDF")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Downloaded 1" })).toBeTruthy();
+  });
+
+  it("dispatches the selected literature skill to Chat for agent search", async () => {
+    const user = userEvent.setup();
+    render(<Literature />);
+    await screen.findAllByText("Persisted Paper on Grounded Reading");
+
+    await user.type(
+      screen.getByLabelText("Remote search query"),
+      "retrieval agents",
+    );
+    await user.click(screen.getByRole("button", { name: "Agent search" }));
+    expect(useStore.getState().pendingChatInput).toBe('/arxiv "retrieval agents" - max: 20');
+    expect(useStore.getState().tab).toBe("chat");
+
+    useStore.setState({ tab: "literature", pendingChatInput: null });
+    await user.selectOptions(
+      screen.getByLabelText("Literature skill"),
+      "research-lit",
+    );
+    await user.click(screen.getByRole("button", { name: "Agent search" }));
+    expect(useStore.getState().pendingChatInput).toBe('/research-lit "retrieval agents"');
+  });
+
+  it("reloads the library after a chat turn ends (skill upserts land)", async () => {
+    render(<Literature />);
+    await screen.findAllByText("Persisted Paper on Grounded Reading");
+    expect(mocks.literatureLoad).toHaveBeenCalledTimes(1);
+
+    const updated = fixtureLibrary();
+    updated.papers[0].title = "Persisted Paper on Grounded Reading (v2)";
+    mocks.literatureLoad.mockResolvedValue(updated);
+    await act(async () => {
+      chatDoneHandler?.("done");
+    });
+
+    await waitFor(() =>
+      expect(mocks.literatureLoad).toHaveBeenCalledTimes(2),
+    );
+    expect(
+      (await screen.findAllByText("Persisted Paper on Grounded Reading (v2)")).length,
+    ).toBeGreaterThan(0);
   });
 
   it("batch-moves selected papers along the pipeline", async () => {

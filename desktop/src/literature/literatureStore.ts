@@ -5,6 +5,7 @@ import {
   literatureLoad,
   literatureSave,
   literatureSearch,
+  onChatDone,
 } from "../api/tauri";
 import {
   emptyLibrary,
@@ -202,6 +203,9 @@ interface LiteratureState {
   error: string | null;
 
   load: (projectId: string) => Promise<void>;
+  /** Reload the library when a chat turn ends — literature skills may have
+   * upserted papers through the kernel tools. Returns a teardown fn. */
+  watchAgentActivity: () => () => void;
   runSearch: (query: string, sources: string[]) => Promise<void>;
   setStage: (ids: string[], stage: PaperStage) => void;
   toggleStar: (id: string) => void;
@@ -273,6 +277,28 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
       } catch (error) {
         set({ error: `failed to load library: ${String(error)}` });
       }
+    },
+
+    watchAgentActivity: () => {
+      if (!isTauri()) return () => {};
+      let disposed = false;
+      let unlisten: (() => void) | null = null;
+      void onChatDone(() => {
+        if (disposed) return;
+        // A pending UI save means fresh local edits; let them win this round.
+        if (persistTimer) return;
+        const projectId = get().loadedProjectId;
+        if (!projectId) return;
+        set({ loaded: false });
+        void get().load(projectId);
+      }).then((teardown) => {
+        if (disposed) teardown();
+        else unlisten = teardown;
+      });
+      return () => {
+        disposed = true;
+        if (unlisten) unlisten();
+      };
     },
 
     runSearch: async (query, sources) => {

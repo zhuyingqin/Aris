@@ -20,6 +20,7 @@ use runtime::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+pub mod literature;
 mod team_state;
 mod workflow_state;
 
@@ -209,6 +210,67 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 "additionalProperties": false
             }),
             required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
+            name: "LiteratureSearch",
+            description: "Search scholarly metadata on arXiv and Crossref without a shell. Returns normalised, deduplicated records (title, authors, year, venue, DOI, abstract, pdfUrl). Used by literature skills (/arxiv, /research-lit) when bash/python is unavailable. Follow up with LiteratureLibraryUpsert to record results.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "minLength": 2 },
+                    "sources": {
+                        "type": "array",
+                        "items": { "type": "string", "enum": ["arxiv", "crossref"] },
+                        "description": "Sources to query. Empty or omitted means all sources."
+                    },
+                    "maxResults": { "type": "integer", "minimum": 1, "maximum": 50 }
+                },
+                "required": ["query"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
+            name: "LiteratureLibraryUpsert",
+            description: "Record literature search results in the project's shared library (papers/library.json — the same library the desktop Literature view and the /arxiv skill use). New papers land in the inbox stage; re-discovered papers only get metadata gaps filled, never losing user stage/stars/tags/notes. Pass the `papers` array exactly as returned by LiteratureSearch.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "papers": {
+                        "type": "array",
+                        "items": { "type": "object" },
+                        "description": "Records in the LiteratureSearch output shape."
+                    },
+                    "search": {
+                        "type": "object",
+                        "properties": {
+                            "query": { "type": "string" },
+                            "sources": { "type": "array", "items": { "type": "string" } }
+                        },
+                        "required": ["query"],
+                        "additionalProperties": false,
+                        "description": "Optional provenance: records this run as a saved search."
+                    }
+                },
+                "required": ["papers"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::WorkspaceWrite,
+        },
+        ToolSpec {
+            name: "LiteraturePdfDownload",
+            description: "Download a paper PDF into the project's papers/ directory (verifies the response is a real PDF). When paperId is given, the paper's pdf status and stage are updated in papers/library.json.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "url": { "type": "string", "format": "uri" },
+                    "fileName": { "type": "string", "description": "Target file name, e.g. the arXiv id. Sanitised; .pdf is appended when missing." },
+                    "paperId": { "type": "string", "description": "Library paper id (e.g. arxiv:2602.01491) to mark as downloaded." }
+                },
+                "required": ["url", "fileName"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::WorkspaceWrite,
         },
         ToolSpec {
             name: "TodoWrite",
@@ -678,6 +740,12 @@ pub fn execute_tool(name: &str, input: &Value) -> Result<String, String> {
         "grep_search" => from_value::<GrepSearchInput>(input).and_then(run_grep_search),
         "WebFetch" => from_value::<WebFetchInput>(input).and_then(run_web_fetch),
         "WebSearch" => from_value::<WebSearchInput>(input).and_then(run_web_search),
+        "LiteratureSearch" => from_value::<literature::LiteratureSearchInput>(input)
+            .and_then(literature::run_literature_search),
+        "LiteratureLibraryUpsert" => from_value::<literature::LiteratureLibraryUpsertInput>(input)
+            .and_then(literature::run_literature_library_upsert),
+        "LiteraturePdfDownload" => from_value::<literature::LiteraturePdfDownloadInput>(input)
+            .and_then(literature::run_literature_pdf_download),
         "TodoWrite" => from_value::<TodoWriteInput>(input).and_then(run_todo_write),
         "LlmReview" => from_value::<LlmReviewInput>(input).and_then(run_llm_review),
         "Skill" => from_value::<SkillInput>(input).and_then(run_skill),

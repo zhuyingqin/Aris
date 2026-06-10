@@ -28,6 +28,10 @@ interface AppState {
   tab: Tab;
   setTab: (tab: Tab) => void;
 
+  /** One-shot composer prefill consumed by Chat (e.g. Literature → /arxiv). */
+  pendingChatInput: string | null;
+  setPendingChatInput: (value: string | null) => void;
+
   stateDir: string;
   error: string | null;
   projects: DesktopProject[];
@@ -46,6 +50,9 @@ interface AppState {
 export const useStore = create<AppState>((set, get) => ({
   tab: "chat",
   setTab: (tab) => set({ tab }),
+
+  pendingChatInput: null,
+  setPendingChatInput: (value) => set({ pendingChatInput: value }),
 
   stateDir: "",
   error: null,

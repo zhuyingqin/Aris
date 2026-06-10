@@ -9,10 +9,22 @@ import type {
 } from "./literatureTypes";
 import "./Literature.css";
 
-const SOURCES: Array<{ id: string; label: string }> = [
-  { id: "arxiv", label: "arXiv" },
-  { id: "crossref", label: "Crossref" },
+/** Skills the Agent search lane can dispatch to Chat. The skill stays the
+ * orchestration layer; results land here via the shared library. */
+const AGENT_SKILLS: Array<{ id: string; label: string; command: (query: string) => string }> = [
+  {
+    id: "arxiv",
+    label: "/arxiv — search + download",
+    command: (query) => `/arxiv "${query}" - max: 20`,
+  },
+  {
+    id: "research-lit",
+    label: "/research-lit — deep multi-source review",
+    command: (query) => `/research-lit "${query}"`,
+  },
 ];
+
+const QUICK_SOURCES = ["arxiv", "crossref"];
 
 const STAGES: Array<{ id: PaperStage; label: string }> = [
   { id: "inbox", label: "Inbox" },
@@ -97,12 +109,15 @@ function formatAuthors(authors: string[]) {
 
 export default function Literature() {
   const currentProject = useStore((s) => s.currentProject);
+  const setTab = useStore((s) => s.setTab);
+  const setPendingChatInput = useStore((s) => s.setPendingChatInput);
   const library = useLiteratureStore((s) => s.library);
   const loaded = useLiteratureStore((s) => s.loaded);
   const searching = useLiteratureStore((s) => s.searching);
   const lastSearch = useLiteratureStore((s) => s.lastSearch);
   const storeError = useLiteratureStore((s) => s.error);
   const load = useLiteratureStore((s) => s.load);
+  const watchAgentActivity = useLiteratureStore((s) => s.watchAgentActivity);
   const runSearch = useLiteratureStore((s) => s.runSearch);
   const setStage = useLiteratureStore((s) => s.setStage);
   const toggleStar = useLiteratureStore((s) => s.toggleStar);
@@ -112,7 +127,7 @@ export default function Literature() {
   const setError = useLiteratureStore((s) => s.setError);
 
   const [draftQuery, setDraftQuery] = useState("");
-  const [sources, setSources] = useState<string[]>(["arxiv", "crossref"]);
+  const [agentSkill, setAgentSkill] = useState(AGENT_SKILLS[0].id);
   const [view, setView] = useState("all");
   const [filter, setFilter] = useState("");
   const [sort, setSort] = useState<SortKey>("added");
@@ -125,6 +140,9 @@ export default function Literature() {
   useEffect(() => {
     void load(projectId);
   }, [load, projectId]);
+
+  // Pick up library changes written by literature skills running in Chat.
+  useEffect(() => watchAgentActivity(), [watchAgentActivity]);
 
   // Jump to the freshly created saved search after a remote search lands.
   const lastSearchId = lastSearch?.searchId ?? null;
@@ -163,16 +181,21 @@ export default function Literature() {
     [papers],
   );
 
-  const toggleSource = (id: string) =>
-    setSources((current) =>
-      current.includes(id)
-        ? current.filter((source) => source !== id)
-        : [...current, id],
-    );
+  /** Primary lane: dispatch the literature skill to Chat; the skill records
+   * results into papers/library.json, which this view reloads on chat-done. */
+  const submitAgentSearch = () => {
+    const trimmed = draftQuery.trim();
+    if (!trimmed) return;
+    const skill = AGENT_SKILLS.find((entry) => entry.id === agentSkill) ?? AGENT_SKILLS[0];
+    setPendingChatInput(skill.command(trimmed));
+    setTab("chat");
+  };
 
-  const submitSearch = () => {
-    if (!draftQuery.trim() || sources.length === 0 || searching) return;
-    void runSearch(draftQuery, sources);
+  /** Secondary lane: direct metadata lookup using the same kernel engine the
+   * skills call (LiteratureSearch tool) — instant, no LLM round trip. */
+  const submitQuickSearch = () => {
+    if (!draftQuery.trim() || searching) return;
+    void runSearch(draftQuery, QUICK_SOURCES);
   };
 
   const selectPaper = (paper: LiteraturePaper) => {
@@ -210,31 +233,39 @@ export default function Literature() {
           value={draftQuery}
           onChange={(event) => setDraftQuery(event.target.value)}
           onKeyDown={(event) => {
-            if (event.key === "Enter") submitSearch();
+            if (event.key === "Enter") submitAgentSearch();
           }}
-          placeholder="Search arXiv and Crossref…"
+          placeholder="Search the literature…"
           aria-label="Remote search query"
         />
-        <div className="lit-source-chips" role="group" aria-label="Search sources">
-          {SOURCES.map((source) => (
-            <button
-              type="button"
-              key={source.id}
-              className={`lit-chip${sources.includes(source.id) ? " active" : ""}`}
-              aria-pressed={sources.includes(source.id)}
-              onClick={() => toggleSource(source.id)}
-            >
-              {source.label}
-            </button>
+        <select
+          className="lit-skill-select"
+          value={agentSkill}
+          onChange={(event) => setAgentSkill(event.target.value)}
+          aria-label="Literature skill"
+        >
+          {AGENT_SKILLS.map((skill) => (
+            <option key={skill.id} value={skill.id}>
+              {skill.label}
+            </option>
           ))}
-        </div>
+        </select>
         <button
           type="button"
           className="primary"
-          onClick={submitSearch}
-          disabled={searching || !draftQuery.trim() || sources.length === 0}
+          onClick={submitAgentSearch}
+          disabled={!draftQuery.trim()}
+          title="Run the selected skill in Chat — it searches, downloads, and records results into this library"
         >
-          {searching ? "Searching…" : "Search"}
+          Agent search
+        </button>
+        <button
+          type="button"
+          onClick={submitQuickSearch}
+          disabled={searching || !draftQuery.trim()}
+          title="Instant arXiv + Crossref metadata lookup (the same engine the skills use), without the agent"
+        >
+          {searching ? "Searching…" : "Quick lookup"}
         </button>
       </div>
 
@@ -387,8 +418,10 @@ export default function Literature() {
               <div className="lit-empty-library">
                 <p>Your library is empty.</p>
                 <p className="dim">
-                  Search arXiv or Crossref above — results are saved to{" "}
-                  <code>papers/library.json</code> in this project.
+                  Agent search runs the <code>/arxiv</code> or{" "}
+                  <code>/research-lit</code> skill in Chat; everything it finds
+                  is recorded in <code>papers/library.json</code> and shows up
+                  here. Quick lookup queries arXiv + Crossref directly.
                 </p>
                 <div className="lit-example-queries">
                   {EXAMPLE_QUERIES.map((example) => (

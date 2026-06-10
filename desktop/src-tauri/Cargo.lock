@@ -78,7 +78,6 @@ dependencies = [
  "aris-executor",
  "commands",
  "reqwest 0.12.28",
- "roxmltree",
  "runtime",
  "serde",
  "serde_json",
@@ -4090,6 +4089,7 @@ version = "0.4.15"
 dependencies = [
  "api",
  "reqwest 0.12.28",
+ "roxmltree",
  "runtime",
  "serde",
  "serde_json",

@@ -23,9 +23,9 @@
   padding: 7px 10px;
 }
 
-.lit-source-chips {
-  display: flex;
-  gap: 4px;
+.lit-skill-select {
+  max-width: 240px;
+  font-size: 12px;
 }
 
 .lit-chip {
