@@ -106,7 +106,7 @@ pub fn library_path_at(base: &Path) -> PathBuf {
 }
 
 pub fn empty_library() -> Value {
-    json!({ "version": 1, "papers": [], "searches": [], "collections": [] })
+    json!({ "version": 1, "papers": [], "searches": [], "collections": [], "reviewTasks": [] })
 }
 
 pub fn library_load_at(base: &Path) -> Result<Value, String> {

@@ -69,6 +69,7 @@ const fixtureLibrary = (): LiteratureLibrary => ({
   papers: [structuredClone(fixturePaper)],
   searches: [],
   collections: [],
+  reviewTasks: [],
 });
 
 beforeEach(() => {
@@ -235,6 +236,7 @@ describe("Literature library", () => {
     expect(mocks.literatureSearch).toHaveBeenCalledWith(
       "retrieval agents",
       ["arxiv", "crossref"],
+      50,
     );
     // One of the two results matched the stored record: only one new paper.
     expect(screen.getByText(/2 results \/ 1 saved to Inbox/)).toBeTruthy();
@@ -245,6 +247,66 @@ describe("Literature library", () => {
     await waitFor(() => expect(mocks.literatureSave).toHaveBeenCalled(), {
       timeout: 2000,
     });
+  });
+
+  it("creates a review task, auto-screens on entry, and confirms queue decisions", async () => {
+    const user = userEvent.setup();
+    render(<Literature />);
+    await screen.findAllByText("Persisted Paper on Grounded Reading");
+
+    await user.type(screen.getByLabelText("Remote search query"), "retrieval agents");
+    await user.click(screen.getByRole("button", { name: "Search & save" }));
+    await screen.findAllByText("Deep Retrieval Agents for Literature Triage");
+
+    // The search creates a review task and offers it from a slim CTA.
+    await user.click(screen.getByRole("button", { name: "Start review" }));
+
+    // Entering the queue auto-screens the task's abstracts.
+    expect(screen.getByText("Review queue")).toBeTruthy();
+    expect(screen.getByText(/2 pending \/ 2 total/)).toBeTruthy();
+    // Criteria editor is collapsed by default, so the question input is hidden.
+    expect(screen.queryByLabelText("Review question")).toBeNull();
+    expect(
+      screen.getAllByText("Deep Retrieval Agents for Literature Triage").length,
+    ).toBeGreaterThan(0);
+    expect(screen.getByText(/Matched include criterion/)).toBeTruthy();
+
+    // Accept the agent's proposal on the first (include) paper.
+    await user.click(screen.getByRole("button", { name: "Accept" }));
+    expect(screen.getByRole("button", { name: "Shortlist 1" })).toBeTruthy();
+    expect(screen.getByText(/1 pending \/ 2 total/)).toBeTruthy();
+  });
+
+  it("edits criteria inside the queue and shows the review question", async () => {
+    const user = userEvent.setup();
+    render(<Literature />);
+    await screen.findAllByText("Persisted Paper on Grounded Reading");
+
+    await user.type(screen.getByLabelText("Remote search query"), "retrieval agents");
+    await user.click(screen.getByRole("button", { name: "Search & save" }));
+    await screen.findAllByText("Deep Retrieval Agents for Literature Triage");
+    await user.click(screen.getByRole("button", { name: "Start review" }));
+
+    await user.click(screen.getByRole("button", { name: "Edit criteria" }));
+    expect((screen.getByLabelText("Review question") as HTMLInputElement).value).toBe(
+      "retrieval agents",
+    );
+  });
+
+  it("excludes the current paper with the X key and advances the queue", async () => {
+    const user = userEvent.setup();
+    render(<Literature />);
+    await screen.findAllByText("Persisted Paper on Grounded Reading");
+
+    await user.type(screen.getByLabelText("Remote search query"), "retrieval agents");
+    await user.click(screen.getByRole("button", { name: "Search & save" }));
+    await screen.findAllByText("Deep Retrieval Agents for Literature Triage");
+    await user.click(screen.getByRole("button", { name: "Start review" }));
+    expect(screen.getByText(/2 pending \/ 2 total/)).toBeTruthy();
+
+    await user.keyboard("x");
+    expect(screen.getByText(/1 pending \/ 2 total/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Excluded 1" })).toBeTruthy();
   });
 
   it("downloads a PDF through the backend and records the local path", async () => {

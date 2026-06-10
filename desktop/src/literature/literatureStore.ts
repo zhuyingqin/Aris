@@ -13,15 +13,24 @@ import {
   emptyLibrary,
   type ActivityEntry,
   type ActivityLevel,
+  type CriterionKind,
+  type CriteriaSuggestion,
   type LiteratureLibrary,
   type LiteraturePaper,
+  type LiteratureReviewTask,
   type LiteratureSearchResult,
+  type PaperFit,
+  type PaperScreening,
   type PaperStage,
   type PdfDownloadResult,
   type RemotePaper,
+  type ScreeningCriterion,
+  type ScreeningDecision,
+  type ScreeningReason,
 } from "./literatureTypes";
 
 const MAX_ACTIVITY_ENTRIES = 200;
+const DEFAULT_SEARCH_LIMIT = 50;
 
 const PERSIST_DELAY_MS = 600;
 
@@ -90,6 +99,247 @@ const pdfFileName = (paper: LiteraturePaper) => {
   return `${normalizedTitle(paper.title).slice(0, 60) || "paper"}.pdf`;
 };
 
+const STOP_WORDS = new Set([
+  "about",
+  "addresses",
+  "and",
+  "are",
+  "based",
+  "clear",
+  "connection",
+  "directly",
+  "discuss",
+  "exclude",
+  "for",
+  "from",
+  "into",
+  "must",
+  "only",
+  "paper",
+  "papers",
+  "question",
+  "that",
+  "the",
+  "this",
+  "to",
+  "with",
+]);
+
+const unique = <T,>(values: T[]) => Array.from(new Set(values));
+
+const tokensFrom = (text: string) =>
+  unique(
+    text
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .map((token) => token.trim())
+      .filter((token) => token.length > 2 && !STOP_WORDS.has(token)),
+  );
+
+const draftCriteriaForQuery = (query: string): ScreeningCriterion[] => {
+  const now = isoNow();
+  const trimmed = query.trim();
+  return [
+    {
+      id: makeId("crit"),
+      kind: "include",
+      text: trimmed ? `Must directly discuss ${trimmed}` : "Must directly address the question",
+      createdAt: now,
+    },
+    {
+      id: makeId("crit"),
+      kind: "exclude",
+      text: "Exclude papers with no clear connection to the question",
+      createdAt: now,
+    },
+  ];
+};
+
+const reviewTaskFromQuery = (question: string, searchIds: string[]): LiteratureReviewTask => ({
+  id: makeId("task"),
+  question: question.trim() || "Untitled literature question",
+  criteria: draftCriteriaForQuery(question),
+  searchIds,
+  createdAt: isoNow(),
+  updatedAt: isoNow(),
+  suggestions: [],
+});
+
+const scoreToFit = (score: number): PaperFit => {
+  if (score >= 70) return "high";
+  if (score >= 45) return "medium";
+  return "low";
+};
+
+const stageForDecision = (decision: ScreeningDecision): PaperStage => {
+  if (decision === "include") return "shortlist";
+  if (decision === "exclude") return "excluded";
+  return "screened";
+};
+
+const paperSearchText = (paper: LiteraturePaper) =>
+  `${paper.title}\n${paper.abstract}\n${paper.venue}`.toLowerCase();
+
+const firstUsefulQuote = (paper: LiteraturePaper) => {
+  const abstract = paper.abstract.trim();
+  if (!abstract) return paper.title;
+  const sentence = abstract.match(/[^.!?]+[.!?]?/)?.[0]?.trim();
+  return (sentence || abstract).slice(0, 260);
+};
+
+const quoteForKeywords = (paper: LiteraturePaper, keywords: string[]) => {
+  const haystack = paper.abstract.trim() || paper.title;
+  const lower = haystack.toLowerCase();
+  const hit = keywords.find((keyword) => lower.includes(keyword));
+  if (!hit) return firstUsefulQuote(paper);
+  const index = lower.indexOf(hit);
+  const start = Math.max(0, index - 90);
+  const end = Math.min(haystack.length, index + hit.length + 140);
+  return haystack.slice(start, end).trim();
+};
+
+const makeReason = (
+  criterion: ScreeningCriterion,
+  paper: LiteraturePaper,
+  note: string,
+  keywords: string[],
+): ScreeningReason => ({
+  id: makeId("reason"),
+  criteriaId: criterion.id,
+  criteriaText: criterion.text,
+  note,
+  anchor: {
+    kind: paper.abstract.trim() ? "abstract" : "metadata",
+    quote: quoteForKeywords(paper, keywords),
+  },
+});
+
+const screenPaperForTask = (
+  paper: LiteraturePaper,
+  task: LiteratureReviewTask,
+): PaperScreening => {
+  const text = paperSearchText(paper);
+  const titleText = paper.title.toLowerCase();
+  let score = 38;
+  const reasons: ScreeningReason[] = [];
+  const includeCriteria = task.criteria.filter((criterion) => criterion.kind === "include");
+
+  for (const criterion of task.criteria) {
+    const keywords = tokensFrom(criterion.text);
+    const matches = keywords.filter((keyword) => text.includes(keyword));
+    if (criterion.kind === "include") {
+      score += matches.length * 11;
+      score += matches.filter((keyword) => titleText.includes(keyword)).length * 5;
+      if (matches.length > 0) {
+        reasons.push(
+          makeReason(
+            criterion,
+            paper,
+            `Matched include criterion through ${matches.slice(0, 3).join(", ")}.`,
+            matches,
+          ),
+        );
+      }
+    } else if (matches.length > 0) {
+      score -= matches.length * 13;
+      reasons.push(
+        makeReason(
+          criterion,
+          paper,
+          `Hit exclude criterion through ${matches.slice(0, 3).join(", ")}.`,
+          matches,
+        ),
+      );
+    }
+  }
+
+  score = Math.max(0, Math.min(100, Math.round(score)));
+  const decision: ScreeningDecision =
+    score >= 70 ? "include" : score <= 42 ? "exclude" : "maybe";
+  const boundary = decision === "include" ? 70 : decision === "exclude" ? 42 : 56;
+  const confidence =
+    decision === "maybe"
+      ? Math.max(20, Math.round(58 - Math.abs(score - boundary)))
+      : Math.min(95, Math.round(45 + Math.abs(score - boundary) * 1.6));
+
+  if (reasons.length === 0) {
+    const fallback = includeCriteria[0] ?? task.criteria[0];
+    reasons.push(
+      makeReason(
+        fallback ?? {
+          id: makeId("crit"),
+          kind: "include",
+          text: task.question,
+          createdAt: isoNow(),
+        },
+        paper,
+        "No strong abstract evidence matched the current include criteria.",
+        tokensFrom(task.question),
+      ),
+    );
+  }
+
+  return {
+    taskId: task.id,
+    decision,
+    score,
+    confidence,
+    reasons: reasons.slice(0, 3),
+    decidedAt: isoNow(),
+  };
+};
+
+const screeningToVerdict = (screening: PaperScreening) => ({
+  fit: scoreToFit(screening.score),
+  score: screening.score,
+  rationale: screening.reasons[0]?.note ?? "Screened against the active criteria.",
+  decidedAt: screening.decidedAt,
+});
+
+const topTermsFromPapers = (papers: LiteraturePaper[]) => {
+  const counts = new Map<string, number>();
+  for (const paper of papers) {
+    for (const token of tokensFrom(`${paper.title} ${paper.abstract}`).slice(0, 30)) {
+      counts.set(token, (counts.get(token) ?? 0) + 1);
+    }
+  }
+  return [...counts.entries()]
+    .filter(([, count]) => count >= Math.min(2, papers.length))
+    .sort((a, b) => b[1] - a[1])
+    .map(([token]) => token)
+    .slice(0, 4);
+};
+
+const maybeSuggestCriteria = (
+  library: LiteratureLibrary,
+  task: LiteratureReviewTask,
+): LiteratureReviewTask => {
+  const flippedIncluded = library.papers.filter((paper) => {
+    const screening = paper.screenings?.[task.id];
+    return screening?.flippedFrom && screening.decision === "include";
+  });
+  if (flippedIncluded.length < 2) return task;
+  const terms = topTermsFromPapers(flippedIncluded);
+  if (terms.length === 0) return task;
+  const text = `Include papers that discuss ${terms.join(", ")}`;
+  const seen = [
+    ...task.criteria.map((criterion) => criterion.text.toLowerCase()),
+    ...task.suggestions.map((suggestion) => suggestion.text.toLowerCase()),
+  ];
+  if (seen.some((entry) => entry === text.toLowerCase())) return task;
+  const suggestion: CriteriaSuggestion = {
+    id: makeId("sugg"),
+    text,
+    basisPaperIds: flippedIncluded.map((paper) => paper.id),
+    createdAt: isoNow(),
+  };
+  return {
+    ...task,
+    suggestions: [...task.suggestions, suggestion],
+    updatedAt: isoNow(),
+  };
+};
+
 const PREVIEW_LIBRARY: LiteratureLibrary = {
   version: 1,
   papers: [
@@ -106,7 +356,7 @@ const PREVIEW_LIBRARY: LiteratureLibrary = {
         "A system design for decomposing literature review work into retrieval, screening, reading, and evidence-grounded writing steps.",
       tags: ["agent", "review"],
       collectionIds: [],
-      searchIds: [],
+      searchIds: ["search-preview"],
       stage: "downloaded",
       starred: true,
       unread: false,
@@ -145,7 +395,7 @@ const PREVIEW_LIBRARY: LiteratureLibrary = {
         "An interface study on combining automatic PDF summarization with reader annotations and editable evidence snippets.",
       tags: ["pdf", "ux"],
       collectionIds: [],
-      searchIds: [],
+      searchIds: ["search-preview"],
       stage: "screened",
       starred: false,
       unread: true,
@@ -172,7 +422,7 @@ const PREVIEW_LIBRARY: LiteratureLibrary = {
       abstract: "A broad web automation benchmark focused on browser control and form completion.",
       tags: ["web"],
       collectionIds: [],
-      searchIds: [],
+      searchIds: ["search-preview"],
       stage: "inbox",
       starred: false,
       unread: true,
@@ -193,6 +443,30 @@ const PREVIEW_LIBRARY: LiteratureLibrary = {
     },
   ],
   collections: [{ id: "col-core", label: "Core review" }],
+  reviewTasks: [
+    {
+      id: "task-preview",
+      question: "agentic literature review",
+      criteria: [
+        {
+          id: "crit-preview-include",
+          kind: "include",
+          text: "Must directly discuss agentic literature review",
+          createdAt: "2026-06-09T08:00:00.000Z",
+        },
+        {
+          id: "crit-preview-exclude",
+          kind: "exclude",
+          text: "Exclude papers with no clear connection to the question",
+          createdAt: "2026-06-09T08:00:00.000Z",
+        },
+      ],
+      searchIds: ["search-preview"],
+      createdAt: "2026-06-09T08:00:00.000Z",
+      updatedAt: "2026-06-09T08:00:00.000Z",
+      suggestions: [],
+    },
+  ],
 };
 
 interface LiteratureState {
@@ -205,19 +479,34 @@ interface LiteratureState {
     resultCount: number;
     newCount: number;
     warnings: string[];
+    sourceCounts: Array<{ source: string; count: number }>;
   } | null;
   error: string | null;
   /** Terminal-style log narrating every library write and agent action. */
   activity: ActivityEntry[];
   activityOpen: boolean;
+  activeReviewTaskId: string | null;
 
   setActivityOpen: (open: boolean) => void;
   clearActivity: () => void;
+  setActiveReviewTask: (id: string | null) => void;
   load: (projectId: string, options?: { quiet?: boolean }) => Promise<void>;
   /** Reload the library when a chat turn ends — literature skills may have
    * upserted papers through the kernel tools. Returns a teardown fn. */
   watchAgentActivity: () => () => void;
   runSearch: (query: string, sources: string[]) => Promise<void>;
+  createReviewTask: (question: string, searchIds?: string[]) => string;
+  updateReviewQuestion: (taskId: string, question: string) => void;
+  updateCriterion: (taskId: string, criterionId: string, text: string) => void;
+  addCriterion: (taskId: string, kind: CriterionKind) => void;
+  removeCriterion: (taskId: string, criterionId: string) => void;
+  screenPapersForTask: (taskId: string, paperIds?: string[]) => void;
+  confirmScreening: (paperId: string, taskId: string) => void;
+  flipScreening: (paperId: string, taskId: string) => void;
+  /** Set an explicit decision (include/exclude/maybe) and confirm it. */
+  decideScreening: (paperId: string, taskId: string, decision: ScreeningDecision) => void;
+  acceptCriteriaSuggestion: (taskId: string, suggestionId: string) => void;
+  dismissCriteriaSuggestion: (taskId: string, suggestionId: string) => void;
   setStage: (ids: string[], stage: PaperStage) => void;
   toggleStar: (id: string) => void;
   markRead: (id: string) => void;
@@ -275,9 +564,11 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
     error: null,
     activity: [],
     activityOpen: false,
+    activeReviewTaskId: null,
 
     setActivityOpen: (open) => set({ activityOpen: open }),
     clearActivity: () => set({ activity: [] }),
+    setActiveReviewTask: (id) => set({ activeReviewTaskId: id }),
 
     load: async (projectId, options) => {
       // Drop any pending save: the backend already points at the new project,
@@ -287,20 +578,28 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
         persistTimer = null;
       }
       if (!isTauri()) {
-        set({ library: PREVIEW_LIBRARY, loaded: true, loadedProjectId: projectId });
+        set({
+          library: PREVIEW_LIBRARY,
+          loaded: true,
+          loadedProjectId: projectId,
+          activeReviewTaskId: PREVIEW_LIBRARY.reviewTasks[0]?.id ?? null,
+        });
         return;
       }
       try {
         const raw = await literatureLoad<Partial<LiteratureLibrary>>();
+        const reviewTasks = raw.reviewTasks ?? [];
         set({
           library: {
             version: 1,
             papers: raw.papers ?? [],
             searches: raw.searches ?? [],
             collections: raw.collections ?? [],
+            reviewTasks,
           },
           loaded: true,
           loadedProjectId: projectId,
+          activeReviewTaskId: get().activeReviewTaskId ?? reviewTasks[0]?.id ?? null,
         });
         if (!options?.quiet) {
           log("info", `Loaded ${raw.papers?.length ?? 0} papers from papers/library.json`);
@@ -422,7 +721,11 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
       set({ searching: true, error: null });
       log("info", `→ Searching arXiv + Crossref for "${trimmed}"`, { open: true });
       try {
-        const result = await literatureSearch<LiteratureSearchResult>(trimmed, sources);
+        const result = await literatureSearch<LiteratureSearchResult>(
+          trimmed,
+          sources,
+          DEFAULT_SEARCH_LIMIT,
+        );
         for (const entry of result.sourceCounts ?? []) {
           log("info", `· ${entry.source} returned ${entry.count} records`);
         }
@@ -430,6 +733,7 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
           log("warn", `! ${warning}`);
         }
         const searchId = makeId("search");
+        const reviewTask = reviewTaskFromQuery(trimmed, [searchId]);
         let newCount = 0;
         mutate((library) => {
           const papers = [...library.papers];
@@ -456,14 +760,17 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
               },
               ...library.searches,
             ],
+            reviewTasks: [reviewTask, ...library.reviewTasks],
           };
         });
         set({
+          activeReviewTaskId: reviewTask.id,
           lastSearch: {
             searchId,
             resultCount: result.papers.length,
             newCount,
             warnings: result.warnings,
+            sourceCounts: result.sourceCounts ?? [],
           },
         });
         const merged = result.papers.length - newCount;
@@ -471,12 +778,279 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
           "ok",
           `✓ ${newCount} new saved to Inbox · ${merged} already in library (metadata refreshed) → papers/library.json`,
         );
+        log("info", `Review task created: "${reviewTask.question}"`);
       } catch (error) {
         set({ error: `search failed: ${String(error)}` });
         log("error", `✗ Search failed: ${String(error)}`, { open: true });
       } finally {
         set({ searching: false });
       }
+    },
+
+    createReviewTask: (question, searchIds = []) => {
+      const reviewTask = reviewTaskFromQuery(question, searchIds);
+      mutate((library) => ({
+        ...library,
+        reviewTasks: [reviewTask, ...library.reviewTasks],
+      }));
+      set({ activeReviewTaskId: reviewTask.id });
+      log("info", `Review task created: "${reviewTask.question}"`);
+      return reviewTask.id;
+    },
+
+    updateReviewQuestion: (taskId, question) => {
+      mutate((library) => ({
+        ...library,
+        reviewTasks: library.reviewTasks.map((task) =>
+          task.id === taskId ? { ...task, question, updatedAt: isoNow() } : task,
+        ),
+      }));
+    },
+
+    updateCriterion: (taskId, criterionId, text) => {
+      mutate((library) => ({
+        ...library,
+        reviewTasks: library.reviewTasks.map((task) =>
+          task.id === taskId
+            ? {
+                ...task,
+                criteria: task.criteria.map((criterion) =>
+                  criterion.id === criterionId ? { ...criterion, text } : criterion,
+                ),
+                updatedAt: isoNow(),
+              }
+            : task,
+        ),
+      }));
+    },
+
+    addCriterion: (taskId, kind) => {
+      const criterion: ScreeningCriterion = {
+        id: makeId("crit"),
+        kind,
+        text: kind === "include" ? "Include papers that..." : "Exclude papers that...",
+        createdAt: isoNow(),
+      };
+      mutate((library) => ({
+        ...library,
+        reviewTasks: library.reviewTasks.map((task) =>
+          task.id === taskId
+            ? {
+                ...task,
+                criteria: [...task.criteria, criterion],
+                updatedAt: isoNow(),
+              }
+            : task,
+        ),
+      }));
+    },
+
+    removeCriterion: (taskId, criterionId) => {
+      mutate((library) => ({
+        ...library,
+        reviewTasks: library.reviewTasks.map((task) =>
+          task.id === taskId
+            ? {
+                ...task,
+                criteria: task.criteria.filter((criterion) => criterion.id !== criterionId),
+                updatedAt: isoNow(),
+              }
+            : task,
+        ),
+      }));
+    },
+
+    screenPapersForTask: (taskId, paperIds) => {
+      const task = get().library.reviewTasks.find((entry) => entry.id === taskId);
+      if (!task) return;
+      let screened = 0;
+      mutate((library) => ({
+        ...library,
+        papers: library.papers.map((paper) => {
+          const belongsToTask =
+            paperIds !== undefined
+              ? paperIds.includes(paper.id)
+              : task.searchIds.length === 0 ||
+                task.searchIds.some((searchId) => paper.searchIds.includes(searchId));
+          if (!belongsToTask || paper.screenings?.[taskId]?.userConfirmed) return paper;
+          const screening = screenPaperForTask(paper, task);
+          screened += 1;
+          return {
+            ...paper,
+            stage: paper.stage === "inbox" ? "screened" : paper.stage,
+            verdict: screeningToVerdict(screening),
+            screenings: {
+              ...(paper.screenings ?? {}),
+              [taskId]: screening,
+            },
+          };
+        }),
+      }));
+      log("ok", `Screened ${screened} abstracts against "${task.question}"`, { open: true });
+    },
+
+    confirmScreening: (paperId, taskId) => {
+      patchPapers([paperId], (paper) => {
+        const screening = paper.screenings?.[taskId];
+        if (!screening) return paper;
+        const confirmed = {
+          ...screening,
+          userConfirmed: true,
+          decidedAt: isoNow(),
+        };
+        return {
+          ...paper,
+          stage: stageForDecision(confirmed.decision),
+          verdict: screeningToVerdict(confirmed),
+          screenings: {
+            ...(paper.screenings ?? {}),
+            [taskId]: confirmed,
+          },
+        };
+      });
+    },
+
+    flipScreening: (paperId, taskId) => {
+      mutate((library) => {
+        const task = library.reviewTasks.find((entry) => entry.id === taskId);
+        if (!task) return library;
+        const papers = library.papers.map((paper) => {
+          if (paper.id !== paperId) return paper;
+          const current = paper.screenings?.[taskId] ?? screenPaperForTask(paper, task);
+          const decision: ScreeningDecision =
+            current.decision === "include" ? "exclude" : "include";
+          const flipped: PaperScreening = {
+            ...current,
+            decision,
+            userConfirmed: true,
+            flippedFrom: current.decision,
+            decidedAt: isoNow(),
+            reasons: [
+              {
+                id: makeId("reason"),
+                criteriaText: "Human review",
+                note: `Reviewer flipped the agent proposal from ${current.decision} to ${decision}.`,
+                anchor: current.reasons[0]?.anchor ?? {
+                  kind: paper.abstract.trim() ? "abstract" : "metadata",
+                  quote: firstUsefulQuote(paper),
+                },
+              },
+              ...current.reasons,
+            ].slice(0, 4),
+          };
+          return {
+            ...paper,
+            stage: stageForDecision(decision),
+            verdict: screeningToVerdict(flipped),
+            screenings: {
+              ...(paper.screenings ?? {}),
+              [taskId]: flipped,
+            },
+          };
+        });
+        const nextLibrary = { ...library, papers };
+        return {
+          ...nextLibrary,
+          reviewTasks: nextLibrary.reviewTasks.map((entry) =>
+            entry.id === taskId ? maybeSuggestCriteria(nextLibrary, entry) : entry,
+          ),
+        };
+      });
+    },
+
+    decideScreening: (paperId, taskId, decision) => {
+      mutate((library) => {
+        const task = library.reviewTasks.find((entry) => entry.id === taskId);
+        if (!task) return library;
+        const papers = library.papers.map((paper) => {
+          if (paper.id !== paperId) return paper;
+          const current = paper.screenings?.[taskId] ?? screenPaperForTask(paper, task);
+          // Agent's original proposal, regardless of prior user edits.
+          const agentOriginal = current.flippedFrom ?? current.decision;
+          const userChanged = decision !== agentOriginal;
+          const decided: PaperScreening = {
+            ...current,
+            decision,
+            userConfirmed: true,
+            flippedFrom: userChanged ? agentOriginal : undefined,
+            decidedAt: isoNow(),
+            reasons: userChanged
+              ? [
+                  {
+                    id: makeId("reason"),
+                    criteriaText: "Human review",
+                    note: `Reviewer set this to ${decision} (agent proposed ${agentOriginal}).`,
+                    anchor: current.reasons[0]?.anchor ?? {
+                      kind: paper.abstract.trim() ? "abstract" : "metadata",
+                      quote: firstUsefulQuote(paper),
+                    },
+                  },
+                  ...current.reasons,
+                ].slice(0, 4)
+              : current.reasons,
+          };
+          return {
+            ...paper,
+            stage: stageForDecision(decision),
+            verdict: screeningToVerdict(decided),
+            screenings: {
+              ...(paper.screenings ?? {}),
+              [taskId]: decided,
+            },
+          };
+        });
+        const nextLibrary = { ...library, papers };
+        return {
+          ...nextLibrary,
+          reviewTasks: nextLibrary.reviewTasks.map((entry) =>
+            entry.id === taskId ? maybeSuggestCriteria(nextLibrary, entry) : entry,
+          ),
+        };
+      });
+    },
+
+    acceptCriteriaSuggestion: (taskId, suggestionId) => {
+      mutate((library) => ({
+        ...library,
+        reviewTasks: library.reviewTasks.map((task) => {
+          if (task.id !== taskId) return task;
+          const suggestion = task.suggestions.find((entry) => entry.id === suggestionId);
+          if (!suggestion) return task;
+          const criterion: ScreeningCriterion = {
+            id: makeId("crit"),
+            kind: "include",
+            text: suggestion.text,
+            createdAt: isoNow(),
+          };
+          return {
+            ...task,
+            criteria: [...task.criteria, criterion],
+            suggestions: task.suggestions.map((entry) =>
+              entry.id === suggestionId ? { ...entry, accepted: true } : entry,
+            ),
+            updatedAt: isoNow(),
+          };
+        }),
+      }));
+    },
+
+    dismissCriteriaSuggestion: (taskId, suggestionId) => {
+      mutate((library) => ({
+        ...library,
+        reviewTasks: library.reviewTasks.map((task) =>
+          task.id === taskId
+            ? {
+                ...task,
+                suggestions: task.suggestions.map((suggestion) =>
+                  suggestion.id === suggestionId
+                    ? { ...suggestion, dismissed: true }
+                    : suggestion,
+                ),
+                updatedAt: isoNow(),
+              }
+            : task,
+        ),
+      }));
     },
 
     setStage: (ids, stage) => patchPapers(ids, (paper) => ({ ...paper, stage })),
@@ -571,4 +1145,5 @@ export const resetLiteratureStore = () =>
     error: null,
     activity: [],
     activityOpen: false,
+    activeReviewTaskId: null,
   });

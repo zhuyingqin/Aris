@@ -16,6 +16,12 @@ export type PdfStatus = "none" | "queued" | "downloading" | "downloaded" | "fail
 
 export type DetailTab = "metadata" | "agent" | "evidence";
 
+export type ScreeningDecision = "include" | "exclude" | "maybe";
+
+export type CriterionKind = "include" | "exclude";
+
+export type AnchorKind = "abstract" | "metadata" | "pdf";
+
 export interface PaperPdf {
   status: PdfStatus;
   /** Direct download URL when the source exposes one. */
@@ -32,6 +38,57 @@ export interface AgentVerdict {
   score: number;
   rationale: string;
   decidedAt: string;
+}
+
+export interface ScreeningCriterion {
+  id: string;
+  kind: CriterionKind;
+  text: string;
+  createdAt: string;
+}
+
+export interface CriteriaSuggestion {
+  id: string;
+  text: string;
+  basisPaperIds: string[];
+  createdAt: string;
+  accepted?: boolean;
+  dismissed?: boolean;
+}
+
+export interface LiteratureReviewTask {
+  id: string;
+  question: string;
+  criteria: ScreeningCriterion[];
+  searchIds: string[];
+  createdAt: string;
+  updatedAt: string;
+  suggestions: CriteriaSuggestion[];
+}
+
+export interface EvidenceAnchor {
+  kind: AnchorKind;
+  quote: string;
+  page?: number;
+}
+
+export interface ScreeningReason {
+  id: string;
+  criteriaId?: string;
+  criteriaText: string;
+  note: string;
+  anchor: EvidenceAnchor;
+}
+
+export interface PaperScreening {
+  taskId: string;
+  decision: ScreeningDecision;
+  score: number;
+  confidence: number;
+  reasons: ScreeningReason[];
+  decidedAt: string;
+  userConfirmed?: boolean;
+  flippedFrom?: ScreeningDecision;
 }
 
 export interface EvidenceNote {
@@ -64,6 +121,7 @@ export interface LiteraturePaper {
   addedAt: string;
   pdf: PaperPdf;
   verdict?: AgentVerdict;
+  screenings?: Record<string, PaperScreening>;
   agentSummary?: string;
   evidence: EvidenceNote[];
 }
@@ -87,6 +145,7 @@ export interface LiteratureLibrary {
   papers: LiteraturePaper[];
   searches: LiteratureSearch[];
   collections: LiteratureCollection[];
+  reviewTasks: LiteratureReviewTask[];
 }
 
 /** One row returned by the `literature_search` Tauri command. */
@@ -133,4 +192,5 @@ export const emptyLibrary = (): LiteratureLibrary => ({
   papers: [],
   searches: [],
   collections: [],
+  reviewTasks: [],
 });
