@@ -9,6 +9,7 @@ const MAX_FILE_SIZE: u64 = 512 * 1024;
 const ALLOWED_EXTS: &[&str] = &[
     "md", "py", "sh", "tex", "cls", "bst", "toml", "yaml", "yml", "json", "html",
 ];
+const SHARED_RESOURCE_DIRS: &[&str] = &["shared-references", "shared-governance"];
 /// Skill directory name prefixes to exclude from bundling. v0.4.12 changed
 /// from exact-match list to `starts_with` semantics so future variants like
 /// `skills-codex-foo/` are auto-excluded without code change.
@@ -76,14 +77,9 @@ fn main() {
                 continue;
             }
 
-            if name == "shared-references" {
-                // shared-references → key prefix "shared-references/", recursive
-                bundle_tree(
-                    &entry.path(),
-                    "shared-references",
-                    out_path,
-                    &mut resource_entries,
-                );
+            if SHARED_RESOURCE_DIRS.contains(&name.as_str()) {
+                // Shared resource dirs use key prefix "<dir>/", recursive.
+                bundle_tree(&entry.path(), &name, out_path, &mut resource_entries);
                 continue;
             }
 
@@ -140,7 +136,7 @@ fn main() {
 
     code.push_str(
         "/// Bundled helper files (`.py`, `.sh`, `.tex`, `.cls`, `.bst`, `.md`, configs) for skills.\n\
-         /// Keys use one of three namespaces:\n\
+         /// Keys use these namespaces:\n\
          /// - `tools/<rel>` — shared, cross-skill helpers (from assets/tools/)\n\
          /// - `skills/<name>/<rel>` — skill-local helpers and templates\n\
          /// - `shared-references/<rel>` — always-extracted reference docs\n\

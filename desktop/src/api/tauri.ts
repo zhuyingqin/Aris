@@ -104,6 +104,10 @@ export const literatureSearch = <T>(
 ) => invoke<T>("literature_search", { query, sources, maxResults: maxResults ?? null });
 export const literatureDownloadPdf = <T>(url: string, fileName: string) =>
   invoke<T>("literature_download_pdf", { url, fileName });
+export const literatureLlm = (system: string, prompt: string) =>
+  invoke<string>("literature_llm", { system, prompt });
+export const literaturePdfText = (relativePath: string) =>
+  invoke<string>("literature_pdf_text", { relativePath });
 
 // ── File browser ─────────────────────────────────────────────────────────────
 
@@ -142,6 +146,13 @@ export interface ChatContextMessage {
 export const chatSend = (sessionId: string, message: string | ChatSendRequest) => {
   const request = typeof message === "string" ? { text: message } : message;
   return invoke<string>("chat_send_rich", { sessionId, request });
+};
+
+/** Like chatSend but with bash allowed — used by Literature agent searches so
+ *  /research-lit can run Python paper-fetching helpers (arxiv, openalex, etc.). */
+export const literatureAgentSend = (sessionId: string, message: string | ChatSendRequest) => {
+  const request = typeof message === "string" ? { text: message } : message;
+  return invoke<string>("literature_agent_send_rich", { sessionId, request });
 };
 export const chatReset = (sessionId: string) =>
   invoke<void>("chat_reset", { sessionId });

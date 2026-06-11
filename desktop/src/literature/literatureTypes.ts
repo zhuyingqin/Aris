@@ -14,7 +14,7 @@ export type PaperFit = "high" | "medium" | "low";
 
 export type PdfStatus = "none" | "queued" | "downloading" | "downloaded" | "failed";
 
-export type DetailTab = "brief" | "metadata" | "agent" | "evidence";
+export type DetailTab = "overview" | "notes" | "evidence" | "files";
 
 export type ScreeningDecision = "include" | "exclude" | "maybe";
 
@@ -180,29 +180,6 @@ export interface LiteratureLibrary {
   collections: LiteratureCollection[];
   reviewTasks: LiteratureReviewTask[];
   projectFocus?: ProjectFocus;
-}
-
-/** One row returned by the `literature_search` Tauri command. */
-export interface RemotePaper {
-  id: string;
-  title: string;
-  authors: string[];
-  year?: number | null;
-  venue: string;
-  doi?: string | null;
-  arxivId?: string | null;
-  abstract: string;
-  url?: string | null;
-  pdfUrl?: string | null;
-  source: string;
-  published?: string | null;
-  citedBy?: number | null;
-}
-
-export interface LiteratureSearchResult {
-  papers: RemotePaper[];
-  warnings: string[];
-  sourceCounts?: Array<{ source: string; count: number }>;
 }
 
 export type ActivityLevel = "info" | "ok" | "warn" | "error";

@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
 const MAX_READ_FILE_CONTENT_CHARS: usize = 200_000;
+const READONLY_ROOTS_ENV: &str = "ARIS_READONLY_ROOTS";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TextFilePayload {
@@ -142,7 +143,7 @@ pub fn read_file(
     offset: Option<usize>,
     limit: Option<usize>,
 ) -> io::Result<ReadFileOutput> {
-    let absolute_path = normalize_path(path)?;
+    let absolute_path = normalize_read_path(path)?;
     let content = if is_pdf_path(&absolute_path) {
         extract_pdf_text(&absolute_path)?
     } else {
@@ -260,8 +261,9 @@ pub fn edit_file(
 pub fn glob_search(pattern: &str, path: Option<&str>) -> io::Result<GlobSearchOutput> {
     let started = Instant::now();
     let root = workspace_root()?;
+    let readable_roots = readable_roots(root.as_deref())?;
     let base_dir = path
-        .map(normalize_path)
+        .map(|path| normalize_search_base(path, root.as_deref(), &readable_roots))
         .transpose()?
         .unwrap_or(match root.as_ref() {
             Some(root) => root.clone(),
@@ -272,8 +274,8 @@ pub fn glob_search(pattern: &str, path: Option<&str>) -> io::Result<GlobSearchOu
     } else {
         base_dir.join(pattern)
     };
-    if let Some(root) = root.as_ref() {
-        ensure_within_workspace(&lexically_normalize(&search_path), root)?;
+    if root.is_some() {
+        ensure_glob_search_allowed(&search_path, &readable_roots)?;
     }
     let search_pattern = search_path.to_string_lossy().into_owned();
 
@@ -284,11 +286,11 @@ pub fn glob_search(pattern: &str, path: Option<&str>) -> io::Result<GlobSearchOu
         if !entry.is_file() {
             continue;
         }
-        if let Some(root) = root.as_ref() {
+        if root.is_some() {
             let Ok(canonical) = entry.canonicalize() else {
                 continue;
             };
-            if canonical.starts_with(root) {
+            if is_under_any_root(&canonical, &readable_roots) {
                 matches.push(canonical);
             }
         } else {
@@ -323,7 +325,7 @@ pub fn grep_search(input: &GrepSearchInput) -> io::Result<GrepSearchOutput> {
     let base_path = input
         .path
         .as_deref()
-        .map(normalize_path)
+        .map(normalize_read_path)
         .transpose()?
         .unwrap_or(match root.as_ref() {
             Some(root) => root.clone(),
@@ -1325,6 +1327,29 @@ fn normalize_path(path: &str) -> io::Result<PathBuf> {
     Ok(canonical)
 }
 
+fn normalize_read_path(path: &str) -> io::Result<PathBuf> {
+    let root = workspace_root()?;
+    let candidate = path_candidate(path, root.as_deref())?;
+    let canonical = candidate.canonicalize()?;
+    if root.is_some() {
+        ensure_readable_path(&canonical, &readable_roots(root.as_deref())?)?;
+    }
+    Ok(canonical)
+}
+
+fn normalize_search_base(
+    path: &str,
+    workspace_root: Option<&Path>,
+    readable_roots: &[PathBuf],
+) -> io::Result<PathBuf> {
+    let candidate = path_candidate(path, workspace_root)?;
+    let canonical = candidate.canonicalize()?;
+    if workspace_root.is_some() {
+        ensure_search_base_allowed(&canonical, readable_roots)?;
+    }
+    Ok(canonical)
+}
+
 fn normalize_path_allow_missing(path: &str) -> io::Result<PathBuf> {
     let root = workspace_root()?;
     let candidate = path_candidate(path, root.as_deref())?;
@@ -1346,6 +1371,29 @@ fn workspace_root() -> io::Result<Option<PathBuf>> {
     let root = PathBuf::from(trimmed);
     fs::create_dir_all(&root)?;
     Ok(Some(root.canonicalize()?))
+}
+
+fn readonly_roots() -> Vec<PathBuf> {
+    let Some(raw) = std::env::var_os(READONLY_ROOTS_ENV) else {
+        return Vec::new();
+    };
+    std::env::split_paths(&raw)
+        .filter_map(|path| {
+            if path.as_os_str().is_empty() || !path.exists() {
+                return None;
+            }
+            path.canonicalize().ok()
+        })
+        .collect()
+}
+
+fn readable_roots(workspace_root: Option<&Path>) -> io::Result<Vec<PathBuf>> {
+    let mut roots = Vec::new();
+    if let Some(root) = workspace_root {
+        roots.push(root.to_path_buf());
+    }
+    roots.extend(readonly_roots());
+    Ok(roots)
 }
 
 fn path_candidate(path: &str, workspace_root: Option<&Path>) -> io::Result<PathBuf> {
@@ -1371,6 +1419,62 @@ fn ensure_within_workspace(path: &Path, root: &Path) -> io::Result<()> {
             root.display()
         ),
     ))
+}
+
+fn ensure_readable_path(path: &Path, roots: &[PathBuf]) -> io::Result<()> {
+    if is_under_any_root(path, roots) {
+        return Ok(());
+    }
+    Err(io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        format!(
+            "path `{}` is outside the isolated workspace and read-only roots",
+            path.display()
+        ),
+    ))
+}
+
+fn ensure_search_base_allowed(base: &Path, roots: &[PathBuf]) -> io::Result<()> {
+    if roots
+        .iter()
+        .any(|root| base.starts_with(root) || root.starts_with(base))
+    {
+        return Ok(());
+    }
+    ensure_readable_path(base, roots)
+}
+
+fn ensure_glob_search_allowed(search_path: &Path, roots: &[PathBuf]) -> io::Result<()> {
+    let prefix = static_glob_prefix(search_path);
+    let base = if prefix.exists() {
+        prefix.canonicalize()?
+    } else {
+        lexically_normalize(&prefix)
+    };
+    ensure_search_base_allowed(&base, roots)
+}
+
+fn is_under_any_root(path: &Path, roots: &[PathBuf]) -> bool {
+    roots.iter().any(|root| path.starts_with(root))
+}
+
+fn static_glob_prefix(path: &Path) -> PathBuf {
+    let mut prefix = PathBuf::new();
+    for component in path.components() {
+        if matches!(component, Component::Normal(_)) {
+            let text = component.as_os_str().to_string_lossy();
+            if text.contains('*') || text.contains('?') || text.contains('[') || text.contains('{')
+            {
+                break;
+            }
+        }
+        prefix.push(component.as_os_str());
+    }
+    if prefix.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        prefix
+    }
 }
 
 fn canonicalize_allow_missing(candidate: &Path) -> io::Result<PathBuf> {
@@ -1430,7 +1534,7 @@ mod tests {
 
     use super::{
         display_path, edit_file, glob_search, grep_search, read_file, write_file, GrepSearchInput,
-        MAX_READ_FILE_CONTENT_CHARS,
+        MAX_READ_FILE_CONTENT_CHARS, READONLY_ROOTS_ENV,
     };
 
     struct EnvGuard {
@@ -1673,6 +1777,27 @@ end
     }
 
     #[test]
+    fn workspace_root_allows_readonly_root_reads_but_not_writes() {
+        let _lock = crate::test_env_lock();
+        let root = temp_path("workspace-root");
+        let readonly = temp_path("readonly-root");
+        let helper = readonly.join("skills").join("demo").join("helper.py");
+        std::fs::create_dir_all(&root).expect("workspace should be created");
+        std::fs::create_dir_all(helper.parent().unwrap()).expect("readonly helper dir");
+        std::fs::write(&helper, "print('ok')").expect("helper should be created");
+        let _workspace = EnvGuard::set("ARIS_WORKSPACE_ROOT", &root);
+        let _readonly = EnvGuard::set(READONLY_ROOTS_ENV, readonly.join("skills"));
+
+        let output = read_file(helper.to_string_lossy().as_ref(), None, None)
+            .expect("readonly root read should succeed");
+        assert_eq!(output.file.content, "print('ok')");
+
+        let err = write_file(helper.to_string_lossy().as_ref(), "print('edit')")
+            .expect_err("readonly root write should be blocked");
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+    }
+
+    #[test]
     fn workspace_root_blocks_parent_traversal_writes() {
         let _lock = crate::test_env_lock();
         let root = temp_path("workspace-root");
@@ -1700,5 +1825,33 @@ end
             .expect_err("outside glob should be blocked");
 
         assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+    }
+
+    #[test]
+    fn workspace_root_allows_glob_from_readonly_root_ancestor() {
+        let _lock = crate::test_env_lock();
+        let root = temp_path("workspace-root");
+        let config_root = temp_path("aris-config");
+        let skills_root = config_root.join("skills");
+        let script = skills_root
+            .join("scopus-search")
+            .join("scripts")
+            .join("scopus_search.py");
+        std::fs::create_dir_all(&root).expect("workspace should be created");
+        std::fs::create_dir_all(script.parent().unwrap()).expect("script dir");
+        std::fs::write(&script, "print('ok')").expect("script should be created");
+        std::fs::write(config_root.join("config.json"), "{\"secret\":true}")
+            .expect("config file should be created");
+        let _workspace = EnvGuard::set("ARIS_WORKSPACE_ROOT", &root);
+        let _readonly = EnvGuard::set(READONLY_ROOTS_ENV, &skills_root);
+
+        let globbed = glob_search(
+            "**/scopus_search.py",
+            Some(config_root.to_string_lossy().as_ref()),
+        )
+        .expect("glob from readonly ancestor should succeed");
+
+        assert_eq!(globbed.num_files, 1);
+        assert!(globbed.filenames[0].ends_with("skills/scopus-search/scripts/scopus_search.py"));
     }
 }

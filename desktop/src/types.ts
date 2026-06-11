@@ -216,6 +216,8 @@ export interface ConfigView {
   reviewerBaseUrl?: string | null;
   hasReviewerKey: boolean;
   reviewerKeyMasked?: string | null;
+  hasScopusKey: boolean;
+  scopusKeyMasked?: string | null;
   language?: string | null;
 }
 
@@ -228,6 +230,7 @@ export interface ConfigPatch {
   reviewerModel?: string;
   reviewerBaseUrl?: string;
   reviewerApiKey?: string;
+  scopusApiKey?: string;
   language?: string;
 }
 
@@ -298,6 +301,8 @@ export interface ChatStatus {
   model?: string | null;
   provider?: string | null;
   message?: string | null;
+  contextWindow?: number | null;
+  memoryFiles?: number | null;
 }
 
 // Ordered blocks within an assistant turn – rendered in arrival order so

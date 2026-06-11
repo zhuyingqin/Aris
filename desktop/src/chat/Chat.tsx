@@ -27,6 +27,55 @@ import { useChatStream } from "./useChatStream";
 const EMPTY_ASSISTANT_RESPONSE = "Model returned an empty response.";
 const IMAGE_UNSUPPORTED_MESSAGE = "(Image preview only. Vision input is not supported in desktop Chat yet.)";
 
+function estimateTokens(turns: ChatTurn[]): number {
+  let chars = 0;
+  for (const turn of turns) {
+    for (const block of turn.blocks) {
+      if (block.kind === "text") chars += block.text.length;
+      else if (block.kind === "tool") chars += block.input.length + (block.output?.length ?? 0);
+    }
+  }
+  return Math.round(chars / 3.5);
+}
+
+function ContextRing({ used, max }: { used: number; max: number }) {
+  const pct = max > 0 ? Math.min(1, used / max) : 0;
+  const radius = 9;
+  const circ = 2 * Math.PI * radius;
+  const dash = pct * circ;
+  const stroke = pct < 0.5 ? "var(--green)" : pct < 0.8 ? "var(--amber)" : "var(--red)";
+  const label = used === 0 ? "0%" : pct < 0.01 ? "<1%" : `${Math.round(pct * 100)}%`;
+  const usedK = used >= 1000 ? `${(used / 1000).toFixed(0)}k` : String(used);
+  const maxK = max >= 1000 ? `${(max / 1000).toFixed(0)}k` : String(max);
+  return (
+    <div className="ctx-ring" title={`Context window: ${label} used (${usedK} / ${maxK} tokens est.)`}>
+      <svg width="22" height="22" viewBox="0 0 22 22" aria-hidden="true">
+        <circle cx="11" cy="11" r={radius} fill="none" stroke="var(--border)" strokeWidth="2.5" />
+        {pct > 0 && (
+          <circle
+            cx="11" cy="11" r={radius}
+            fill="none" stroke={stroke} strokeWidth="2.5"
+            strokeDasharray={`${dash} ${circ}`}
+            strokeLinecap="round"
+            transform="rotate(-90 11 11)"
+          />
+        )}
+      </svg>
+      <span className="ctx-ring-label">{label}</span>
+    </div>
+  );
+}
+
+function MemoryBadge({ count }: { count: number }) {
+  if (count === 0) return null;
+  return (
+    <div className="mem-badge" title={`${count} memory file${count !== 1 ? "s" : ""} loaded`}>
+      <span className="mem-badge-icon">◆</span>
+      <span className="mem-badge-count">{count}</span>
+    </div>
+  );
+}
+
 function hasRenderableBlock(turn: ChatTurn) {
   return turn.blocks.some((block) => {
     if (block.kind === "text") return Boolean(block.text.trim());
@@ -141,6 +190,7 @@ export default function Chat() {
     currentId,
     currentSession,
     setCurrentId,
+    materializeCurrentSession,
     updateSession,
     patchTurns,
     newSession,
@@ -236,6 +286,7 @@ export default function Chat() {
   const currentChatBusy = busy && runningSessionId === currentId;
   const otherChatBusy = busy && runningSessionId !== null && runningSessionId !== currentId;
   const turns = currentSession?.turns ?? [];
+  const estimatedTokens = estimateTokens(turns);
   const input = currentSession?.draft ?? "";
   const attachments = currentSession?.draftAttachments ?? [];
   const busyRef = useRef(busy);
@@ -274,6 +325,8 @@ export default function Chat() {
   // One-shot composer prefill from other views (e.g. Literature → /arxiv).
   const pendingChatInput = useStore((state) => state.pendingChatInput);
   const setPendingChatInput = useStore((state) => state.setPendingChatInput);
+  const pendingChatRunInput = useStore((state) => state.pendingChatRunInput);
+  const setPendingChatRunInput = useStore((state) => state.setPendingChatRunInput);
   useEffect(() => {
     const session = currentSessionRef.current;
     if (!pendingChatInput || !session) return;
@@ -399,6 +452,15 @@ export default function Chat() {
     }
   }, [beginRun, patchTurns, refreshStatus, setError, setTab, skills, updateSession]);
 
+  useEffect(() => {
+    const text = pendingChatRunInput?.trim();
+    if (!text || !currentSession || busy) return;
+    setPendingChatRunInput(null);
+    const session = materializeCurrentSession();
+    if (!session) return;
+    void runSlashCommand(session, text, []);
+  }, [busy, currentSession, materializeCurrentSession, pendingChatRunInput, runSlashCommand, setPendingChatRunInput]);
+
   const selectCommandOption = useCallback(async (value: string) => {
     const pending = pendingCommandSelection;
     const session = currentSessionRef.current;
@@ -418,14 +480,16 @@ export default function Chat() {
     sendLock.current = true;
     try {
       if (!status?.ready && (!input.trim().startsWith("/") || attachments.length > 0)) return;
-      if (await runSlashCommand(currentSession, input, attachments)) return;
+      const session = materializeCurrentSession();
+      if (!session) return;
+      if (await runSlashCommand(session, input, attachments)) return;
       if (editingTurnId) {
-        const index = currentSession.turns.findIndex((turn) => turn.id === editingTurnId);
-        const prefix = index >= 0 ? currentSession.turns.slice(0, index) : currentSession.turns;
-        await beginRun(currentSession, prefix, input, attachments, true);
+        const index = session.turns.findIndex((turn) => turn.id === editingTurnId);
+        const prefix = index >= 0 ? session.turns.slice(0, index) : session.turns;
+        await beginRun(session, prefix, input, attachments, true);
         return;
       }
-      await beginRun(currentSession, currentSession.turns, input, attachments);
+      await beginRun(session, session.turns, input, attachments);
     } finally {
       sendLock.current = false;
     }
@@ -566,6 +630,12 @@ export default function Chat() {
               : <span className="chat-model chat-model-error">{status?.message ?? "Checking..."}</span>}
           </div>
           <div className="chat-head-actions">
+            {status?.ready && status.contextWindow != null && (
+              <ContextRing used={estimatedTokens} max={status.contextWindow} />
+            )}
+            {status?.memoryFiles != null && status.memoryFiles > 0 && (
+              <MemoryBadge count={status.memoryFiles} />
+            )}
             <button
               className="chat-export-btn"
               onClick={() => void exportCurrentChat()}

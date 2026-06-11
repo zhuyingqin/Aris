@@ -32,6 +32,10 @@ interface AppState {
   pendingChatInput: string | null;
   setPendingChatInput: (value: string | null) => void;
 
+  /** One-shot command handoff consumed and executed by Chat. */
+  pendingChatRunInput: string | null;
+  setPendingChatRunInput: (value: string | null) => void;
+
   stateDir: string;
   error: string | null;
   projects: DesktopProject[];
@@ -53,6 +57,9 @@ export const useStore = create<AppState>((set, get) => ({
 
   pendingChatInput: null,
   setPendingChatInput: (value) => set({ pendingChatInput: value }),
+
+  pendingChatRunInput: null,
+  setPendingChatRunInput: (value) => set({ pendingChatRunInput: value }),
 
   stateDir: "",
   error: null,

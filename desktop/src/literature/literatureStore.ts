@@ -2,9 +2,10 @@ import { create } from "zustand";
 import {
   isTauri,
   literatureDownloadPdf,
+  literatureLlm,
   literatureLoad,
+  literaturePdfText,
   literatureSave,
-  literatureSearch,
   onChatDone,
   onChatTool,
   onChatToolResult,
@@ -13,27 +14,25 @@ import {
   emptyLibrary,
   type ActivityEntry,
   type ActivityLevel,
+  type AnchorKind,
   type BriefSection,
   type CriterionKind,
   type CriteriaSuggestion,
   type LiteratureLibrary,
   type LiteraturePaper,
   type LiteratureReviewTask,
-  type LiteratureSearchResult,
   type PaperBrief,
   type PaperFit,
   type PaperScreening,
   type PaperStage,
   type PdfDownloadResult,
   type ProjectFocus,
-  type RemotePaper,
   type ScreeningCriterion,
   type ScreeningDecision,
   type ScreeningReason,
 } from "./literatureTypes";
 
 const MAX_ACTIVITY_ENTRIES = 200;
-const DEFAULT_SEARCH_LIMIT = 50;
 
 const PERSIST_DELAY_MS = 600;
 
@@ -46,55 +45,6 @@ const isoNow = () => new Date().toISOString();
 
 const normalizedTitle = (title: string) =>
   title.toLowerCase().replace(/[^a-z0-9]/g, "");
-
-const sameRecord = (paper: LiteraturePaper, remote: RemotePaper) =>
-  paper.id === remote.id ||
-  (Boolean(paper.doi) && paper.doi === (remote.doi ?? undefined)) ||
-  (Boolean(paper.arxivId) && paper.arxivId === (remote.arxivId ?? undefined)) ||
-  normalizedTitle(paper.title) === normalizedTitle(remote.title);
-
-const paperFromRemote = (remote: RemotePaper, searchId: string): LiteraturePaper => ({
-  id: remote.id,
-  title: remote.title,
-  authors: remote.authors,
-  year: remote.year ?? undefined,
-  venue: remote.venue,
-  doi: remote.doi ?? undefined,
-  arxivId: remote.arxivId ?? undefined,
-  url: remote.url ?? undefined,
-  abstract: remote.abstract,
-  tags: [],
-  collectionIds: [],
-  searchIds: [searchId],
-  stage: "inbox",
-  starred: false,
-  unread: true,
-  source: remote.source,
-  citedBy: remote.citedBy ?? undefined,
-  addedAt: isoNow(),
-  pdf: { status: "none", url: remote.pdfUrl ?? undefined },
-  evidence: [],
-});
-
-/** Fill gaps from a re-discovered record without touching user state. */
-const enrichFromRemote = (
-  paper: LiteraturePaper,
-  remote: RemotePaper,
-  searchId: string,
-): LiteraturePaper => ({
-  ...paper,
-  doi: paper.doi ?? remote.doi ?? undefined,
-  arxivId: paper.arxivId ?? remote.arxivId ?? undefined,
-  url: paper.url ?? remote.url ?? undefined,
-  year: paper.year ?? remote.year ?? undefined,
-  venue: paper.venue || remote.venue,
-  abstract: paper.abstract || remote.abstract,
-  citedBy: remote.citedBy ?? paper.citedBy,
-  pdf: { ...paper.pdf, url: paper.pdf.url ?? remote.pdfUrl ?? undefined },
-  searchIds: paper.searchIds.includes(searchId)
-    ? paper.searchIds
-    : [...paper.searchIds, searchId],
-});
 
 const pdfFileName = (paper: LiteraturePaper) => {
   if (paper.arxivId) return `${paper.arxivId.replace(/\//g, "-")}.pdf`;
@@ -408,23 +358,163 @@ const forYouSection = (paper: LiteraturePaper, focus?: ProjectFocus): BriefSecti
 
 const briefFromPaper = (paper: LiteraturePaper, focus?: ProjectFocus): PaperBrief => {
   const sentences = splitSentences(paper.abstract);
-  const fallback = (label: string) =>
+  const fallback = () =>
     abstractSection(
       sentences.length === 0
-        ? `No abstract on file — ${label} needs the full text.`
-        : `${label} not stated in the abstract — open the full text to confirm.`,
+        ? "暂无摘要，需查阅全文。"
+        : "摘要中未明确说明，请查阅全文确认。",
     );
   const problem = pickSentence(sentences, BRIEF_CUES.problem) ?? sentences[0];
   const method = pickSentence(sentences, BRIEF_CUES.method);
   const results = pickSentence(sentences, BRIEF_CUES.results, { preferNumbers: true });
   const limits = pickSentence(sentences, BRIEF_CUES.limits);
   return {
-    problem: problem ? abstractSection(problem) : fallback("Problem"),
-    method: method ? abstractSection(method) : fallback("Method"),
-    results: results ? abstractSection(results) : fallback("Results"),
-    limits: limits ? abstractSection(limits) : fallback("Limitations"),
+    problem: problem ? abstractSection(problem) : fallback(),
+    method: method ? abstractSection(method) : fallback(),
+    results: results ? abstractSection(results) : fallback(),
+    limits: limits ? abstractSection(limits) : fallback(),
     forYou: forYouSection(paper, focus),
     basis: "abstract",
+    generatedAt: isoNow(),
+  };
+};
+
+// ── Real LLM screening + Brief ──────────────────────────────────────────────
+// One-shot calls on the user's configured executor (literature_llm). Any
+// failure (no key, bad JSON, offline preview) degrades to the heuristic — the
+// queue/Brief UX absorbs imperfection either way.
+
+const clampScore = (value: unknown) =>
+  Math.max(0, Math.min(100, Math.round(Number(value) || 0)));
+
+const normalizeDecision = (value: unknown): ScreeningDecision => {
+  const text = String(value ?? "").toLowerCase();
+  if (text.includes("include")) return "include";
+  if (text.includes("exclude")) return "exclude";
+  return "maybe";
+};
+
+/** Pull a JSON value out of an LLM response that may wrap it in prose or a
+ * ```json fence. */
+const extractJson = (text: string): unknown => {
+  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  const body = (fenced ? fenced[1] : text).trim();
+  try {
+    return JSON.parse(body);
+  } catch {
+    // fall through to bracket scan
+  }
+  const start = body.search(/[[{]/);
+  if (start >= 0) {
+    const close = body[start] === "[" ? "]" : "}";
+    const end = body.lastIndexOf(close);
+    if (end > start) {
+      try {
+        return JSON.parse(body.slice(start, end + 1));
+      } catch {
+        // fall through to throw
+      }
+    }
+  }
+  throw new Error("model did not return JSON");
+};
+
+const SCREEN_SYSTEM =
+  "You are a careful literature screening assistant. For each paper decide whether it belongs in a researcher's review given their question and criteria, and quote the abstract as evidence. Respond with a single JSON array and nothing else.";
+
+const buildScreenPrompt = (papers: LiteraturePaper[], task: LiteratureReviewTask) => {
+  const include = task.criteria.filter((c) => c.kind === "include").map((c) => c.text);
+  const exclude = task.criteria.filter((c) => c.kind === "exclude").map((c) => c.text);
+  const list = papers
+    .map(
+      (paper, index) =>
+        `#${index}\nTitle: ${paper.title}\nAbstract: ${paper.abstract || "(no abstract provided)"}`,
+    )
+    .join("\n\n");
+  return `Research question: ${task.question}
+Include criteria: ${include.join(" | ") || "(none)"}
+Exclude criteria: ${exclude.join(" | ") || "(none)"}
+
+Papers:
+${list}
+
+Return a JSON array. One object per paper:
+{"index": <number>, "decision": "include" | "exclude" | "maybe", "score": <0-100 topical fit>, "confidence": <0-100>, "rationale": "<one sentence naming the criterion it meets or violates>", "quote": "<verbatim snippet copied from THIS paper's abstract, <=200 chars>"}`;
+};
+
+const llmScreen = async (papers: LiteraturePaper[], task: LiteratureReviewTask) => {
+  const text = await literatureLlm(SCREEN_SYSTEM, buildScreenPrompt(papers, task));
+  const parsed = extractJson(text);
+  if (!Array.isArray(parsed)) throw new Error("expected a JSON array of screenings");
+  const result = new Map<string, PaperScreening>();
+  for (const row of parsed as Array<Record<string, unknown>>) {
+    const paper = papers[Number(row.index)];
+    if (!paper) continue;
+    const quote = String(row.quote ?? "").trim() || firstUsefulQuote(paper);
+    result.set(paper.id, {
+      taskId: task.id,
+      decision: normalizeDecision(row.decision),
+      score: clampScore(row.score ?? 50),
+      confidence: clampScore(row.confidence ?? 60),
+      reasons: [
+        {
+          id: makeId("reason"),
+          criteriaText: "Agent judgment",
+          note: String(row.rationale ?? "").trim() || "Screened against the active criteria.",
+          anchor: { kind: paper.abstract.trim() ? "abstract" : "metadata", quote },
+        },
+      ],
+      decidedAt: isoNow(),
+    });
+  }
+  if (result.size === 0) throw new Error("no usable screening rows");
+  return result;
+};
+
+const BRIEF_SYSTEM =
+  "You are a precise research reading assistant. Produce a structured brief of a paper tailored to a specific researcher. Be concrete and include numbers from the paper in Results. Write all section values in Chinese. Respond with a single JSON object and nothing else.";
+
+const buildBriefPrompt = (
+  paper: LiteraturePaper,
+  focus: ProjectFocus | undefined,
+  fullText: string | undefined,
+) => {
+  const focusLine = focus?.question?.trim()
+    ? `Researcher focus: ${focus.question}${focus.scope ? ` (scope: ${focus.scope})` : ""}`
+    : "Researcher focus: (not provided)";
+  const body = fullText
+    ? `Full text (may be truncated):\n${fullText}`
+    : `Abstract:\n${paper.abstract || "(no abstract provided)"}`;
+  return `${focusLine}
+
+Title: ${paper.title}
+${body}
+
+Return a JSON object: {"problem": "...", "method": "...", "results": "...", "limits": "...", "forYou": "..."}.
+Each field is at most two sentences. "results" MUST include concrete numbers if the paper reports any. "limits" states the paper's own limitations or "Not stated". "forYou" relates the paper to the researcher focus, or says it is tangential.
+All values must be written in Chinese.`;
+};
+
+const llmBrief = async (
+  paper: LiteraturePaper,
+  focus: ProjectFocus | undefined,
+  fullText: string | undefined,
+): Promise<PaperBrief> => {
+  const text = await literatureLlm(BRIEF_SYSTEM, buildBriefPrompt(paper, focus, fullText));
+  const parsed = extractJson(text) as Record<string, unknown>;
+  if (!parsed || typeof parsed !== "object") throw new Error("expected a JSON object");
+  const source: AnchorKind = fullText ? "pdf" : "abstract";
+  const section = (value: unknown, fallback: string): BriefSection => ({
+    text: String(value ?? "").trim() || fallback,
+    source,
+  });
+  return {
+    problem: section(parsed.problem, "现有文本中未提及。"),
+    method: section(parsed.method, "现有文本中未提及。"),
+    results: section(parsed.results, "现有文本中未提及。"),
+    limits: section(parsed.limits, "未说明。"),
+    forYou: section(parsed.forYou, "与研究方向的关联尚不明确。"),
+    basis: fullText ? "fulltext" : "abstract",
     generatedAt: isoNow(),
   };
 };
@@ -568,29 +658,25 @@ interface LiteratureState {
   library: LiteratureLibrary;
   loaded: boolean;
   loadedProjectId: string | null;
-  searching: boolean;
-  lastSearch: {
-    searchId: string;
-    resultCount: number;
-    newCount: number;
-    warnings: string[];
-    sourceCounts: Array<{ source: string; count: number }>;
-  } | null;
   error: string | null;
+  /** True while the agent is screening abstracts for the active task. */
+  screening: boolean;
+  /** Paper id currently being briefed by the agent, if any. */
+  briefing: string | null;
   /** Terminal-style log narrating every library write and agent action. */
   activity: ActivityEntry[];
   activityOpen: boolean;
   activeReviewTaskId: string | null;
 
   setActivityOpen: (open: boolean) => void;
+  logActivity: (level: ActivityLevel, text: string) => void;
   clearActivity: () => void;
   setActiveReviewTask: (id: string | null) => void;
   load: (projectId: string, options?: { quiet?: boolean }) => Promise<void>;
   /** Reload the library when a chat turn ends — literature skills may have
    * upserted papers through the kernel tools. Returns a teardown fn. */
   watchAgentActivity: () => () => void;
-  runSearch: (query: string, sources: string[]) => Promise<void>;
-  createReviewTask: (question: string, searchIds?: string[]) => string;
+  createReviewTask: (question: string, searchIds?: string[]) => Promise<string>;
   updateReviewQuestion: (taskId: string, question: string) => void;
   updateCriterion: (taskId: string, criterionId: string, text: string) => void;
   addCriterion: (taskId: string, kind: CriterionKind) => void;
@@ -603,10 +689,12 @@ interface LiteratureState {
   acceptCriteriaSuggestion: (taskId: string, suggestionId: string) => void;
   dismissCriteriaSuggestion: (taskId: string, suggestionId: string) => void;
   setStage: (ids: string[], stage: PaperStage) => void;
+  deletePapers: (ids: string[]) => void;
   toggleStar: (id: string) => void;
   markRead: (id: string) => void;
   addTags: (ids: string[], tags: string[]) => void;
   addCollection: (label: string) => void;
+  removeCollection: (id: string) => void;
   assignCollection: (ids: string[], collectionId: string) => void;
   setProjectFocus: (patch: Partial<ProjectFocus>) => void;
   generateBrief: (paperId: string) => void;
@@ -656,15 +744,17 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
     library: emptyLibrary(),
     loaded: false,
     loadedProjectId: null,
-    searching: false,
-    lastSearch: null,
     error: null,
+    screening: false,
+    briefing: null,
     activity: [],
     activityOpen: false,
     activeReviewTaskId: null,
 
     setActivityOpen: (open) => set({ activityOpen: open }),
+    logActivity: (level, text) => log(level, text, { open: true }),
     clearActivity: () => set({ activity: [] }),
+
     setActiveReviewTask: (id) => set({ activeReviewTaskId: id }),
 
     load: async (projectId, options) => {
@@ -789,6 +879,29 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
             .load(projectId, { quiet: true })
             .then(() => {
               if (!touched) return;
+              const state = get();
+              const activeTask = state.library.reviewTasks.find(
+                (task) => task.id === state.activeReviewTaskId,
+              );
+              const matchingSearch =
+                activeTask && activeTask.searchIds.length === 0
+                  ? state.library.searches.find(
+                      (search) =>
+                        search.query.trim().toLowerCase() ===
+                        activeTask.question.trim().toLowerCase(),
+                    )
+                  : undefined;
+              if (activeTask && matchingSearch) {
+                mutate((library) => ({
+                  ...library,
+                  reviewTasks: library.reviewTasks.map((task) =>
+                    task.id === activeTask.id
+                      ? { ...task, searchIds: [matchingSearch.id], updatedAt: isoNow() }
+                      : task,
+                  ),
+                }));
+                log("info", `Linked review task to saved search: "${matchingSearch.query}"`);
+              }
               const delta = get().library.papers.length - before;
               log(
                 delta > 0 ? "ok" : "info",
@@ -806,86 +919,7 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
       };
     },
 
-    runSearch: async (query, sources) => {
-      const trimmed = query.trim();
-      if (!trimmed || get().searching) return;
-      if (!isTauri()) {
-        set({
-          error:
-            "remote search needs the desktop backend — run `npm run tauri dev` (browser preview shows sample data only)",
-        });
-        return;
-      }
-      set({ searching: true, error: null });
-      log("info", `→ Searching arXiv + Crossref for "${trimmed}"`, { open: true });
-      try {
-        const result = await literatureSearch<LiteratureSearchResult>(
-          trimmed,
-          sources,
-          DEFAULT_SEARCH_LIMIT,
-        );
-        for (const entry of result.sourceCounts ?? []) {
-          log("info", `· ${entry.source} returned ${entry.count} records`);
-        }
-        for (const warning of result.warnings) {
-          log("warn", `! ${warning}`);
-        }
-        const searchId = makeId("search");
-        const reviewTask = reviewTaskFromQuery(trimmed, [searchId]);
-        let newCount = 0;
-        mutate((library) => {
-          const papers = [...library.papers];
-          for (const remote of result.papers) {
-            const index = papers.findIndex((paper) => sameRecord(paper, remote));
-            if (index >= 0) {
-              papers[index] = enrichFromRemote(papers[index], remote, searchId);
-            } else {
-              papers.unshift(paperFromRemote(remote, searchId));
-              newCount += 1;
-            }
-          }
-          return {
-            ...library,
-            papers,
-            searches: [
-              {
-                id: searchId,
-                query: trimmed,
-                sources,
-                ranAt: isoNow(),
-                resultCount: result.papers.length,
-                newCount,
-              },
-              ...library.searches,
-            ],
-            reviewTasks: [reviewTask, ...library.reviewTasks],
-          };
-        });
-        set({
-          activeReviewTaskId: reviewTask.id,
-          lastSearch: {
-            searchId,
-            resultCount: result.papers.length,
-            newCount,
-            warnings: result.warnings,
-            sourceCounts: result.sourceCounts ?? [],
-          },
-        });
-        const merged = result.papers.length - newCount;
-        log(
-          "ok",
-          `✓ ${newCount} new saved to Inbox · ${merged} already in library (metadata refreshed) → papers/library.json`,
-        );
-        log("info", `Review task created: "${reviewTask.question}"`);
-      } catch (error) {
-        set({ error: `search failed: ${String(error)}` });
-        log("error", `✗ Search failed: ${String(error)}`, { open: true });
-      } finally {
-        set({ searching: false });
-      }
-    },
-
-    createReviewTask: (question, searchIds = []) => {
+    createReviewTask: async (question, searchIds = []) => {
       const reviewTask = reviewTaskFromQuery(question, searchIds);
       mutate((library) => ({
         ...library,
@@ -893,6 +927,18 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
       }));
       set({ activeReviewTaskId: reviewTask.id });
       log("info", `Review task created: "${reviewTask.question}"`);
+      if (isTauri()) {
+        if (persistTimer) {
+          clearTimeout(persistTimer);
+          persistTimer = null;
+        }
+        try {
+          await literatureSave(get().library);
+        } catch (error) {
+          set({ error: `failed to save review task: ${String(error)}` });
+          log("error", `Failed to save review task: ${String(error)}`, { open: true });
+        }
+      }
       return reviewTask.id;
     },
 
@@ -958,33 +1004,53 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
       }));
     },
 
-    screenPapersForTask: (taskId, paperIds) => {
+    screenPapersForTask: async (taskId, paperIds) => {
       const task = get().library.reviewTasks.find((entry) => entry.id === taskId);
       if (!task) return;
-      let screened = 0;
-      mutate((library) => ({
-        ...library,
-        papers: library.papers.map((paper) => {
-          const belongsToTask =
-            paperIds !== undefined
-              ? paperIds.includes(paper.id)
-              : task.searchIds.length === 0 ||
-                task.searchIds.some((searchId) => paper.searchIds.includes(searchId));
-          if (!belongsToTask || paper.screenings?.[taskId]?.userConfirmed) return paper;
-          const screening = screenPaperForTask(paper, task);
-          screened += 1;
-          return {
-            ...paper,
-            stage: paper.stage === "inbox" ? "screened" : paper.stage,
-            verdict: screeningToVerdict(screening),
-            screenings: {
-              ...(paper.screenings ?? {}),
-              [taskId]: screening,
-            },
-          };
-        }),
-      }));
-      log("ok", `Screened ${screened} abstracts against "${task.question}"`, { open: true });
+      const belongs = (paper: LiteraturePaper) =>
+        paperIds !== undefined
+          ? paperIds.includes(paper.id)
+          : task.searchIds.length === 0 ||
+            task.searchIds.some((searchId) => paper.searchIds.includes(searchId));
+      const candidates = get().library.papers.filter(
+        (paper) => belongs(paper) && !paper.screenings?.[taskId]?.userConfirmed,
+      );
+      if (candidates.length === 0) return;
+
+      set({ screening: true });
+      let llmResults: Map<string, PaperScreening> | null = null;
+      if (isTauri()) {
+        log("info", `→ Screening ${candidates.length} abstracts with the agent…`, { open: true });
+        try {
+          llmResults = await llmScreen(candidates, task);
+        } catch (error) {
+          log("warn", `! Agent screening unavailable (${String(error)}) — using keyword heuristic`);
+        }
+      }
+      try {
+        mutate((library) => ({
+          ...library,
+          papers: library.papers.map((paper) => {
+            if (!belongs(paper) || paper.screenings?.[taskId]?.userConfirmed) return paper;
+            const screening = llmResults?.get(paper.id) ?? screenPaperForTask(paper, task);
+            return {
+              ...paper,
+              stage: paper.stage === "inbox" ? "screened" : paper.stage,
+              verdict: screeningToVerdict(screening),
+              screenings: {
+                ...(paper.screenings ?? {}),
+                [taskId]: screening,
+              },
+            };
+          }),
+        }));
+        log(
+          "ok",
+          `Screened ${candidates.length} abstracts against "${task.question}" (${llmResults ? "agent" : "heuristic"})`,
+        );
+      } finally {
+        set({ screening: false });
+      }
     },
 
     confirmScreening: (paperId, taskId) => {
@@ -1153,6 +1219,27 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
 
     setStage: (ids, stage) => patchPapers(ids, (paper) => ({ ...paper, stage })),
 
+    deletePapers: (ids) => {
+      const targets = new Set(ids);
+      if (targets.size === 0) return;
+      mutate((library) => ({
+        ...library,
+        papers: library.papers.filter((paper) => !targets.has(paper.id)),
+        reviewTasks: library.reviewTasks.map((task) => ({
+          ...task,
+          suggestions: task.suggestions
+            .map((suggestion) => ({
+              ...suggestion,
+              basisPaperIds: suggestion.basisPaperIds.filter((id) => !targets.has(id)),
+            }))
+            .filter((suggestion) => suggestion.basisPaperIds.length > 0),
+        })),
+      }));
+      log("warn", `Deleted ${targets.size} ${targets.size === 1 ? "paper" : "papers"} from the library`, {
+        open: true,
+      });
+    },
+
     toggleStar: (id) =>
       patchPapers([id], (paper) => ({ ...paper, starred: !paper.starred })),
 
@@ -1174,6 +1261,17 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
       }));
     },
 
+    removeCollection: (id) => {
+      mutate((library) => ({
+        ...library,
+        collections: library.collections.filter((c) => c.id !== id),
+        papers: library.papers.map((p) => ({
+          ...p,
+          collectionIds: p.collectionIds.filter((cid) => cid !== id),
+        })),
+      }));
+    },
+
     assignCollection: (ids, collectionId) =>
       patchPapers(ids, (paper) => ({
         ...paper,
@@ -1189,16 +1287,40 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
       }));
     },
 
-    generateBrief: (paperId) => {
+    generateBrief: async (paperId) => {
       const focus = get().library.projectFocus;
       const paper = get().library.papers.find((entry) => entry.id === paperId);
       if (!paper) return;
-      patchPapers([paperId], (entry) => ({
-        ...entry,
-        brief: briefFromPaper(entry, focus),
-        unread: false,
-      }));
-      log("ok", `Brief generated from abstract: ${paper.title}`);
+      set({ briefing: paperId });
+      try {
+        let brief: PaperBrief | null = null;
+        if (isTauri()) {
+          let fullText: string | undefined;
+          if (paper.pdf.status === "downloaded" && paper.pdf.path) {
+            try {
+              fullText = await literaturePdfText(paper.pdf.path);
+            } catch {
+              // no readable PDF text — brief from the abstract
+            }
+          }
+          log("info", `→ Reading ${fullText ? "the full text" : "the abstract"} for a brief…`, {
+            open: true,
+          });
+          try {
+            brief = await llmBrief(paper, focus, fullText);
+            log("ok", `Brief written by the agent from ${fullText ? "the full text" : "the abstract"}: ${paper.title}`);
+          } catch (error) {
+            log("warn", `! Agent brief unavailable (${String(error)}) — keyword summary`);
+          }
+        }
+        if (!brief) {
+          brief = briefFromPaper(paper, focus);
+          log("ok", `Brief generated from the abstract (heuristic): ${paper.title}`);
+        }
+        patchPapers([paperId], (entry) => ({ ...entry, brief, unread: false }));
+      } finally {
+        set({ briefing: null });
+      }
     },
 
     downloadPdf: async (id) => {
@@ -1260,9 +1382,9 @@ export const resetLiteratureStore = () =>
     library: emptyLibrary(),
     loaded: false,
     loadedProjectId: null,
-    searching: false,
-    lastSearch: null,
     error: null,
+    screening: false,
+    briefing: null,
     activity: [],
     activityOpen: false,
     activeReviewTaskId: null,

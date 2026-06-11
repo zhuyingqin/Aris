@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useStore, type Tab } from "./store";
 import Chat from "./chat/Chat";
@@ -11,24 +11,66 @@ import arisIcon from "./assets/aris-icon.svg";
 interface NavItem {
   id: string;
   label: string;
-  icon: string;
+  icon: ReactNode;
 }
+
+const IC = (p: { d: string; extra?: string }) => (
+  <svg width="16" height="16" viewBox="0 0 16 16" fill="none"
+    stroke="currentColor" strokeWidth="1.45" strokeLinecap="round" strokeLinejoin="round"
+    aria-hidden="true">
+    <path d={p.d} />
+    {p.extra && <path d={p.extra} />}
+  </svg>
+);
+
 const NAV_GROUPS: { group: string; items: NavItem[] }[] = [
   {
     group: "Build",
-    items: [{ id: "chat", label: "Chat", icon: "C" }],
+    items: [{
+      id: "chat", label: "Chat",
+      icon: <IC d="M2 3a1 1 0 011-1h10a1 1 0 011 1v6.5a1 1 0 01-1 1H9.5L8 12l-1.5-1.5H3a1 1 0 01-1-1V3z" />,
+    }],
   },
   {
     group: "Library",
     items: [
-      { id: "literature", label: "Literature", icon: "P" },
-      { id: "skills", label: "Skills", icon: "K" },
-      { id: "sessions", label: "Sessions", icon: "S" },
+      {
+        id: "literature", label: "Literature",
+        icon: <IC
+          d="M8 13.5V4C7 2.5 4.5 2.5 2 3.5V13c2.5-1 5-1 6 .5z"
+          extra="M8 13.5V4c1-1.5 3.5-1.5 6-.5V13c-2.5-1-5-1-6 .5z"
+        />,
+      },
+      {
+        id: "skills", label: "Skills",
+        icon: <svg width="16" height="16" viewBox="0 0 16 16" fill="none"
+          stroke="currentColor" strokeWidth="1.45" strokeLinecap="round" strokeLinejoin="round"
+          aria-hidden="true">
+          <path d="M9 2L4 9h4.5L6 14l6-7H8L9 2z" />
+        </svg>,
+      },
+      {
+        id: "sessions", label: "Sessions",
+        icon: <svg width="16" height="16" viewBox="0 0 16 16" fill="none"
+          stroke="currentColor" strokeWidth="1.45" strokeLinecap="round" strokeLinejoin="round"
+          aria-hidden="true">
+          <circle cx="8" cy="8" r="5.5" />
+          <path d="M8 5.5V8l2 1.5" />
+        </svg>,
+      },
     ],
   },
   {
     group: "System",
-    items: [{ id: "settings", label: "Settings", icon: "*" }],
+    items: [{
+      id: "settings", label: "Settings",
+      icon: <svg width="16" height="16" viewBox="0 0 16 16" fill="none"
+        stroke="currentColor" strokeWidth="1.45" strokeLinecap="round" strokeLinejoin="round"
+        aria-hidden="true">
+        <circle cx="8" cy="8" r="2.3" />
+        <path d="M8 1.5V3M8 13v1.5M14.5 8H13M3 8H1.5M12.4 3.6l-1.1 1.1M4.7 11.3l-1.1 1.1M12.4 12.4l-1.1-1.1M4.7 4.7l-1.1-1.1" />
+      </svg>,
+    }],
   },
 ];
 

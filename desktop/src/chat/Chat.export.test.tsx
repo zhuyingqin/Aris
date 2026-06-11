@@ -48,7 +48,21 @@ vi.mock("./ChatComposer", () => ({
 }));
 
 vi.mock("./ChatSidebar", () => ({
-  default: () => <aside data-testid="chat-sidebar" />,
+  default: ({
+    sessions,
+    onOpen,
+  }: {
+    sessions: { id: string; title: string }[];
+    onOpen: (id: string) => void | Promise<void>;
+  }) => (
+    <aside data-testid="chat-sidebar">
+      {sessions.map((session) => (
+        <button key={session.id} onClick={() => void onOpen(session.id)}>
+          {session.title}
+        </button>
+      ))}
+    </aside>
+  ),
 }));
 
 import Chat from "./Chat";
@@ -88,6 +102,8 @@ describe("Chat export action", () => {
     apiMocks.chatUiSessionsSave.mockResolvedValue(undefined);
     useStore.setState({
       tab: "chat",
+      pendingChatInput: null,
+      pendingChatRunInput: null,
       error: null,
       projects: [defaultProject],
       currentProject: defaultProject,
@@ -113,6 +129,7 @@ describe("Chat export action", () => {
 
     render(<Chat />);
 
+    await userEvent.click(await screen.findByRole("button", { name: "Export test" }));
     const exportButton = await screen.findByRole("button", { name: "Export current chat" });
     expect((exportButton as HTMLButtonElement).disabled).toBe(false);
 
@@ -120,5 +137,31 @@ describe("Chat export action", () => {
 
     await waitFor(() => expect(apiMocks.chatRunCommand).toHaveBeenCalledWith(session.id, "/export"));
     expect(await screen.findByText("Exported conversation to C:\\Users\\wt\\chat.md")).toBeTruthy();
+  });
+
+  it("runs pending slash-command handoffs from other views", async () => {
+    const session = seedChatWithTurns();
+    apiMocks.chatRunCommand.mockResolvedValue({
+      handled: true,
+      message: "Agent search started",
+      prompt: null,
+      selection: null,
+      replaceTurns: false,
+      openSettings: false,
+      refreshStatus: false,
+    });
+    useStore.setState({ pendingChatRunInput: '/research-lit "retrieval agents"' });
+
+    render(<Chat />);
+
+    await waitFor(() =>
+      expect(apiMocks.chatRunCommand).toHaveBeenCalledWith(
+        expect.any(String),
+        '/research-lit "retrieval agents"',
+      ),
+    );
+    expect(apiMocks.chatRunCommand.mock.calls[0][0]).not.toBe(session.id);
+    expect(useStore.getState().pendingChatRunInput).toBeNull();
+    expect(await screen.findByText("Agent search started")).toBeTruthy();
   });
 });

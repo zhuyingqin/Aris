@@ -94,9 +94,25 @@ const DESKTOP_CHAT_BLOCKED_TOOLS: &[&str] = &[
     "EnterWorktree",
 ];
 
-fn desktop_chat_tool_allowed(tool_name: &str) -> bool {
-    !DESKTOP_CHAT_BLOCKED_TOOLS.contains(&tool_name)
-}
+// Literature agent sessions allow bash so /research-lit can run Python fetchers
+// (arxiv_fetch.py, openalex_fetch.py, etc.). Multi-agent and worktree tools
+// remain blocked — only the shell execution lane is opened.
+const LITERATURE_AGENT_BLOCKED_TOOLS: &[&str] = &[
+    "NotebookEdit",
+    "Config",
+    "Agent",
+    "AgentSupervisor",
+    "SpawnTeammate",
+    "SendMessage",
+    "ClaimTask",
+    "CompleteTask",
+    "WaitForTeammates",
+    "VerifyDeliverable",
+    "TeamControl",
+    "Workflow",
+    "EnterWorktree",
+];
+
 
 fn denied_tool_message(tool_name: &str) -> String {
     format!(
@@ -106,6 +122,7 @@ fn denied_tool_message(tool_name: &str) -> String {
 
 struct KernelToolExecutor {
     app: AppHandle,
+    blocked_tools: &'static [&'static str],
 }
 
 impl ToolExecutor for KernelToolExecutor {
@@ -119,7 +136,7 @@ impl ToolExecutor for KernelToolExecutor {
         tool_name: &str,
         input: &str,
     ) -> Result<String, ToolError> {
-        if !desktop_chat_tool_allowed(tool_name) {
+        if self.blocked_tools.contains(&tool_name) {
             let err = denied_tool_message(tool_name);
             let _ = self.app.emit(
                 "chat-tool-result",
@@ -130,11 +147,12 @@ impl ToolExecutor for KernelToolExecutor {
         let value: Value = serde_json::from_str(input).unwrap_or(Value::Null);
         match tools::execute_tool(tool_name, &value) {
             Ok(output) => {
+                let context_output = compact_tool_output_for_context(tool_name, output);
                 let _ = self.app.emit(
                     "chat-tool-result",
-                    json!({ "id": tool_use_id, "name": tool_name, "output": truncate(&output, 4000), "isError": false }),
+                    json!({ "id": tool_use_id, "name": tool_name, "output": truncate(&context_output, 4000), "isError": false }),
                 );
-                Ok(output)
+                Ok(context_output)
             }
             Err(err) => {
                 let _ = self.app.emit(
@@ -171,10 +189,10 @@ impl aris_executor::StreamObserver for DesktopStreamObserver {
     }
 }
 
-fn desktop_tool_specs() -> Vec<tools::ToolSpec> {
+fn tool_specs_for(blocked: &'static [&'static str]) -> Vec<tools::ToolSpec> {
     tools::mvp_tool_specs()
         .into_iter()
-        .filter(|spec| desktop_chat_tool_allowed(spec.name))
+        .filter(|spec| !blocked.contains(&spec.name))
         .collect()
 }
 
@@ -196,15 +214,78 @@ fn truncate(text: &str, max: usize) -> String {
     }
 }
 
-fn build_system_prompt(model: &str) -> Vec<String> {
+/// Compact a tool's raw output before it enters the LLM context so the
+/// conversation history doesn't overflow the model's context window.
+///
+/// - `Skill` — not touched: the LLM needs the full SKILL.md to execute correctly.
+/// - `LiteratureSearch` — abstracts trimmed to 250 chars, papers capped at 15.
+/// - Everything else — hard cap at 12,000 chars with a note if trimmed.
+fn compact_tool_output_for_context(tool_name: &str, output: String) -> String {
+    match tool_name {
+        "Skill" => output,
+        "LiteratureSearch" => compact_literature_search_output(output),
+        _ => {
+            const MAX: usize = 12_000;
+            if output.len() <= MAX {
+                output
+            } else {
+                let head: String = output.chars().take(MAX).collect();
+                format!(
+                    "{head}\n[…output truncated: {} chars total, first {} shown]",
+                    output.len(),
+                    MAX
+                )
+            }
+        }
+    }
+}
+
+fn compact_literature_search_output(output: String) -> String {
+    const MAX_ABSTRACT: usize = 250;
+    const MAX_PAPERS: usize = 15;
+
+    let Ok(mut root) = serde_json::from_str::<serde_json::Value>(&output) else {
+        return output;
+    };
+    let Some(papers) = root["papers"].as_array_mut() else {
+        return output;
+    };
+
+    let total = papers.len();
+    papers.truncate(MAX_PAPERS);
+    for paper in papers.iter_mut() {
+        if let Some(abs) = paper["abstract"].as_str() {
+            if abs.len() > MAX_ABSTRACT {
+                let short: String = abs.chars().take(MAX_ABSTRACT).collect();
+                paper["abstract"] = serde_json::Value::String(format!("{short}…"));
+            }
+        }
+    }
+    if total > MAX_PAPERS {
+        root["_note"] = serde_json::Value::String(format!(
+            "{} papers returned; showing first {} with abstracts trimmed to {} chars",
+            total, MAX_PAPERS, MAX_ABSTRACT
+        ));
+    }
+    serde_json::to_string_pretty(&root).unwrap_or(output)
+}
+
+fn build_system_prompt_inner(model: &str, bash_available: bool) -> Vec<String> {
     let workspace = std::env::var("ARIS_WORKSPACE_ROOT")
         .map(PathBuf::from)
         .or_else(|_| std::env::current_dir())
         .unwrap_or_else(|_| crate::state::workspace_dir());
-    let isolation = format!(
-        "Desktop isolation: this chat runs inside the ARIS desktop workspace at `{}`. Treat that directory as the only workspace. Do not request, infer, read, write, or search files outside it. Absolute paths outside this root are blocked by the runtime, and shell/REPL/notebook tools are unavailable in desktop Chat.",
-        workspace.display()
-    );
+    let isolation = if bash_available {
+        format!(
+            "Literature agent: this session runs inside the ARIS desktop workspace at `{}`. Bash is available for running paper-fetching helpers (e.g. arxiv_fetch.py, openalex_fetch.py, semantic_scholar_fetch.py) — use it to run the full /research-lit pipeline. Do not use bash to modify project files or run commands unrelated to literature search.",
+            workspace.display()
+        )
+    } else {
+        format!(
+            "Desktop isolation: this chat runs inside the ARIS desktop workspace at `{}`. Treat that directory as the only workspace. Do not request, infer, read, write, or search files outside it. Absolute paths outside this root are blocked by the runtime, and shell/REPL/notebook tools are unavailable in desktop Chat.",
+            workspace.display()
+        )
+    };
     let team_boundary = "Desktop Chat boundary: produce team plans in prose only. Do not spawn, control, wait for, or verify teammates from Chat; the Team view owns execution and supervision.".to_string();
     aris_chat::build_common_system_prompt(aris_chat::CommonSystemPromptOptions {
         workspace,
@@ -403,22 +484,51 @@ pub struct ChatStatus {
     model: Option<String>,
     provider: Option<String>,
     message: Option<String>,
+    context_window: Option<u64>,
+    memory_files: Option<usize>,
+}
+
+fn context_window_for_model(model: &str) -> u64 {
+    if model.starts_with("claude") {
+        if model.contains("haiku") {
+            return 200_000;
+        }
+        return 1_000_000;
+    }
+    if model.starts_with("MiniMax") || model.starts_with("minimax") {
+        return 1_000_000;
+    }
+    if model.starts_with("gemini-") {
+        return 1_000_000;
+    }
+    if model.starts_with("deepseek") {
+        return 64_000;
+    }
+    128_000
 }
 
 #[tauri::command]
 pub fn chat_status() -> ChatStatus {
+    let memory_files = status_context(None).ok().map(|ctx| ctx.memory_file_count);
     match resolve_executor() {
-        Ok((model, provider, _)) => ChatStatus {
-            ready: true,
-            model: Some(model),
-            provider: Some(provider),
-            message: None,
-        },
+        Ok((model, provider, _)) => {
+            let cw = context_window_for_model(&model);
+            ChatStatus {
+                ready: true,
+                model: Some(model),
+                provider: Some(provider),
+                message: None,
+                context_window: Some(cw),
+                memory_files,
+            }
+        }
         Err(message) => ChatStatus {
             ready: false,
             model: None,
             provider: None,
             message: Some(message),
+            context_window: None,
+            memory_files,
         },
     }
 }
@@ -725,11 +835,61 @@ pub async fn chat_send_rich(
     run_chat_turn(app, &state, session_id, user_message).await
 }
 
+/// Variant of `chat_send_rich` used by Literature agent searches.
+/// Bash is allowed so `/research-lit` can run Python paper-fetching helpers;
+/// multi-agent and worktree tools remain blocked.
+#[tauri::command]
+pub async fn literature_agent_send_rich(
+    app: AppHandle,
+    state: State<'_, ChatState>,
+    session_id: String,
+    request: ChatSendRequest,
+) -> Result<String, String> {
+    let user_message = user_message_from_request(request)?;
+    run_literature_chat_turn(app, &state, session_id, user_message).await
+}
+
 async fn run_chat_turn(
     app: AppHandle,
     state: &ChatState,
     session_id: String,
     user_message: ConversationMessage,
+) -> Result<String, String> {
+    run_chat_turn_with_context(
+        app,
+        state,
+        session_id,
+        user_message,
+        DESKTOP_CHAT_BLOCKED_TOOLS,
+        false,
+    )
+    .await
+}
+
+async fn run_literature_chat_turn(
+    app: AppHandle,
+    state: &ChatState,
+    session_id: String,
+    user_message: ConversationMessage,
+) -> Result<String, String> {
+    run_chat_turn_with_context(
+        app,
+        state,
+        session_id,
+        user_message,
+        LITERATURE_AGENT_BLOCKED_TOOLS,
+        true,
+    )
+    .await
+}
+
+async fn run_chat_turn_with_context(
+    app: AppHandle,
+    state: &ChatState,
+    session_id: String,
+    user_message: ConversationMessage,
+    blocked_tools: &'static [&'static str],
+    bash_available: bool,
 ) -> Result<String, String> {
     state
         .busy
@@ -744,15 +904,17 @@ async fn run_chat_turn(
 
     let worker_app = app.clone();
     let (text, updated): (String, Session) = tauri::async_runtime::spawn_blocking(move || {
-        // Clear any stale interrupt from a previous Stop so this turn starts clean.
         runtime::clear_interrupt();
-        let tool_specs = desktop_tool_specs();
+        let tool_specs = tool_specs_for(blocked_tools);
         let permission_policy = desktop_permission_policy(&tool_specs, permission_mode);
         let observer: Box<dyn aris_executor::StreamObserver> = Box::new(DesktopStreamObserver {
             app: worker_app.clone(),
         });
-        let executor = KernelToolExecutor { app: worker_app };
-        let system_prompt = build_system_prompt(&model);
+        let executor = KernelToolExecutor {
+            app: worker_app,
+            blocked_tools,
+        };
+        let system_prompt = build_system_prompt_inner(&model, bash_available);
         let mut runtime = aris_chat::build_conversation_runtime(
             session,
             executor_config,

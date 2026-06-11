@@ -303,6 +303,7 @@ export default function Settings() {
   const [view, setView] = useState<ConfigView | null>(null);
   const [form, setForm] = useState<ConfigPatch>({});
   const [execKey, setExecKey] = useState("");
+  const [scopusKey, setScopusKey] = useState("");
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [testState, setTestState] = useState<TestState>("idle");
   const [testResult, setTestResult] = useState<ConfigTestResult | null>(null);
@@ -320,6 +321,7 @@ export default function Settings() {
       language: v.language ?? "cn",
     });
     setExecKey("");
+    setScopusKey("");
   };
 
   useEffect(() => {
@@ -360,6 +362,7 @@ export default function Settings() {
   const buildPatch = () => {
     const patch: ConfigPatch = { ...form };
     if (execKey.trim()) patch.executorApiKey = execKey.trim();
+    if (scopusKey.trim()) patch.scopusApiKey = scopusKey.trim();
     return patch;
   };
 
@@ -535,6 +538,24 @@ export default function Settings() {
               ))}
             </div>
             </div>
+
+            <SecretPanel
+              title="Scopus API key / 文献检索密钥"
+              status={view.hasScopusKey
+                ? `Saved key: ${view.scopusKeyMasked ?? "configured"}`
+                : "No key saved — Scopus search stays off until one is added"}
+              help="Elsevier developer key (dev.elsevier.com). Enables the Scopus engine in Literature search; arXiv / Crossref / OpenAlex work without it."
+            >
+              <KeyInput
+                value={scopusKey}
+                placeholder={view.hasScopusKey ? "leave blank to keep, paste a new key to replace" : "paste your Elsevier API key"}
+                masked={view.scopusKeyMasked}
+                onChange={(value) => {
+                  clearTestOnSecretChange();
+                  setScopusKey(value);
+                }}
+              />
+            </SecretPanel>
 
             <Row label="Config file" hint="Shared by the desktop UI and CLI">
               <input className="st-readonly-input" value={view.configPath} readOnly />

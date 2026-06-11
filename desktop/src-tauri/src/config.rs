@@ -52,12 +52,15 @@ pub struct ConfigView {
     pub reviewer_base_url: Option<String>,
     pub has_reviewer_key: bool,
     pub reviewer_key_masked: Option<String>,
+    pub has_scopus_key: bool,
+    pub scopus_key_masked: Option<String>,
     pub language: Option<String>,
 }
 
 fn build_view(obj: &Map<String, Value>) -> ConfigView {
     let exec_key = get_str(obj, "executor_api_key").filter(|k| !k.is_empty());
     let rev_key = get_str(obj, "reviewer_api_key").filter(|k| !k.is_empty());
+    let scopus_key = get_str(obj, "scopus_api_key").filter(|k| !k.is_empty());
     ConfigView {
         config_path: state::config_path().display().to_string(),
         executor_provider: get_str(obj, "executor_provider"),
@@ -70,6 +73,8 @@ fn build_view(obj: &Map<String, Value>) -> ConfigView {
         reviewer_base_url: get_str(obj, "reviewer_base_url"),
         has_reviewer_key: rev_key.is_some(),
         reviewer_key_masked: rev_key.as_deref().map(mask),
+        has_scopus_key: scopus_key.is_some(),
+        scopus_key_masked: scopus_key.as_deref().map(mask),
         language: get_str(obj, "language"),
     }
 }
@@ -90,6 +95,7 @@ pub struct ConfigPatch {
     pub reviewer_model: Option<String>,
     pub reviewer_base_url: Option<String>,
     pub reviewer_api_key: Option<String>,
+    pub scopus_api_key: Option<String>,
     pub language: Option<String>,
 }
 
@@ -148,6 +154,7 @@ fn apply_patch(obj: &mut Map<String, Value>, patch: ConfigPatch) {
 
     set_secret(obj, "executor_api_key", patch.executor_api_key);
     set_secret(obj, "reviewer_api_key", patch.reviewer_api_key);
+    set_secret(obj, "scopus_api_key", patch.scopus_api_key);
 
     if reviewer_disabled {
         for key in [
@@ -225,6 +232,12 @@ fn apply_reviewer_environment_from(obj: &Map<String, Value>, force: bool) {
         force,
     );
     set_env_if_allowed("ARIS_LANGUAGE", get_non_empty(obj, "language"), force);
+    // Literature kernel tools (Scopus engine) read this from the environment.
+    set_env_if_allowed(
+        "SCOPUS_API_KEY",
+        get_non_empty(obj, "scopus_api_key"),
+        force,
+    );
 
     match provider.as_deref() {
         Some("gemini") => set_env_if_allowed("GEMINI_API_KEY", key, force),

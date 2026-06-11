@@ -5,8 +5,9 @@
 //! (ARIS desktop chat) — and the contract both CLI agents and the desktop
 //! Literature UI share: one `papers/library.json` per project.
 //!
-//! - `LiteratureSearch` — arXiv Atom + Crossref REST metadata search,
-//!   normalised into one record shape and deduplicated.
+//! - `LiteratureSearch` — arXiv Atom, Crossref REST, OpenAlex works and
+//!   Scopus Search API metadata search, normalised into one record shape and
+//!   deduplicated. Scopus needs `SCOPUS_API_KEY` (desktop Settings exports it).
 //! - `LiteratureLibraryUpsert` — merge search records into
 //!   `papers/library.json` without touching user state (stage, stars, tags,
 //!   verdicts survive re-discovery).
@@ -357,7 +358,10 @@ fn http_client() -> Result<reqwest::blocking::Client, String> {
         .map_err(|e| e.to_string())
 }
 
-/// Blocking remote metadata search. Empty `sources` means every source.
+/// Blocking remote metadata search. Empty `sources` means every available
+/// source — Scopus joins the default set only when `SCOPUS_API_KEY` is set,
+/// but an explicit `"scopus"` request always runs (and surfaces the missing
+/// key as a warning).
 pub fn search_remote(
     query: &str,
     sources: &[String],
@@ -367,36 +371,33 @@ pub fn search_remote(
     if query.is_empty() {
         return Err("search query is empty".to_string());
     }
-    let wants = |name: &str| {
-        sources.is_empty() || sources.iter().any(|source| source.eq_ignore_ascii_case(name))
-    };
+    let explicit = |name: &str| sources.iter().any(|source| source.eq_ignore_ascii_case(name));
+    let wants = |name: &str| sources.is_empty() || explicit(name);
     let client = http_client()?;
     let mut papers = Vec::new();
     let mut warnings = Vec::new();
     let mut source_counts = Vec::new();
-    if wants("arxiv") {
-        match search_arxiv(&client, query, limit) {
-            Ok(batch) => {
-                source_counts.push(SourceCount {
-                    source: "arXiv".to_string(),
-                    count: batch.len(),
-                });
-                papers.extend(batch);
-            }
-            Err(error) => warnings.push(format!("arXiv: {error}")),
+    let mut run = |label: &str, batch: Result<Vec<RemotePaper>, String>| match batch {
+        Ok(batch) => {
+            source_counts.push(SourceCount {
+                source: label.to_string(),
+                count: batch.len(),
+            });
+            papers.extend(batch);
         }
+        Err(error) => warnings.push(format!("{label}: {error}")),
+    };
+    if wants("arxiv") {
+        run("arXiv", search_arxiv(&client, query, limit));
     }
     if wants("crossref") {
-        match search_crossref(&client, query, limit) {
-            Ok(batch) => {
-                source_counts.push(SourceCount {
-                    source: "Crossref".to_string(),
-                    count: batch.len(),
-                });
-                papers.extend(batch);
-            }
-            Err(error) => warnings.push(format!("Crossref: {error}")),
-        }
+        run("Crossref", search_crossref(&client, query, limit));
+    }
+    if wants("openalex") {
+        run("OpenAlex", search_openalex(&client, query, limit));
+    }
+    if explicit("scopus") || (sources.is_empty() && scopus_api_key().is_ok()) {
+        run("Scopus", search_scopus(&client, query, limit));
     }
     if papers.is_empty() && !warnings.is_empty() {
         return Err(warnings.join("; "));
@@ -594,6 +595,307 @@ fn crossref_item_to_paper(item: &Value) -> Option<RemotePaper> {
         source: "Crossref".to_string(),
         published: None,
         cited_by: item["is-referenced-by-count"].as_u64(),
+    })
+}
+
+fn search_openalex(
+    client: &reqwest::blocking::Client,
+    query: &str,
+    limit: usize,
+) -> Result<Vec<RemotePaper>, String> {
+    let mut params: Vec<(&str, String)> = vec![
+        ("search", query.to_string()),
+        ("per-page", limit.to_string()),
+        (
+            "select",
+            "id,doi,title,publication_year,publication_date,authorships,primary_location,\
+             best_oa_location,open_access,cited_by_count,abstract_inverted_index"
+                .to_string(),
+        ),
+    ];
+    if let Ok(mailto) = std::env::var("OPENALEX_MAILTO") {
+        if !mailto.trim().is_empty() {
+            params.push(("mailto", mailto.trim().to_string()));
+        }
+    }
+    let body: Value = client
+        .get("https://api.openalex.org/works")
+        .query(&params)
+        .send()
+        .map_err(|e| e.to_string())?
+        .error_for_status()
+        .map_err(|e| e.to_string())?
+        .json()
+        .map_err(|e| e.to_string())?;
+    let results = body["results"].as_array().cloned().unwrap_or_default();
+    Ok(results.iter().filter_map(openalex_work_to_paper).collect())
+}
+
+/// OpenAlex returns abstracts as `{ word: [positions...] }` — flatten back
+/// into reading order.
+fn openalex_abstract(index: &Value) -> String {
+    let Some(map) = index.as_object() else {
+        return String::new();
+    };
+    let mut words: Vec<(u64, &str)> = Vec::new();
+    for (word, positions) in map {
+        if let Some(positions) = positions.as_array() {
+            for position in positions {
+                if let Some(position) = position.as_u64() {
+                    words.push((position, word.as_str()));
+                }
+            }
+        }
+    }
+    words.sort_by_key(|(position, _)| *position);
+    collapse_whitespace(
+        &words
+            .iter()
+            .map(|(_, word)| *word)
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
+}
+
+fn openalex_work_to_paper(work: &Value) -> Option<RemotePaper> {
+    let title = collapse_whitespace(work["title"].as_str()?);
+    if title.is_empty() {
+        return None;
+    }
+    let doi = work["doi"]
+        .as_str()
+        .map(|value| {
+            value
+                .trim()
+                .trim_start_matches("https://doi.org/")
+                .to_lowercase()
+        })
+        .filter(|value| !value.is_empty());
+    // arXiv-hosted works carry a DataCite DOI (10.48550/arxiv.<id>) or an
+    // arxiv.org landing page — recover the id so dedupe can match arXiv hits.
+    let arxiv_id = doi
+        .as_deref()
+        .and_then(|doi| doi.strip_prefix("10.48550/arxiv."))
+        .map(str::to_string)
+        .or_else(|| {
+            work["primary_location"]["landing_page_url"]
+                .as_str()
+                .and_then(|url| url.split("arxiv.org/abs/").nth(1))
+                .map(|id| strip_version(id.trim_end_matches('/')))
+        });
+    let authors: Vec<String> = work["authorships"]
+        .as_array()
+        .map(|list| {
+            list.iter()
+                .filter_map(|authorship| authorship["author"]["display_name"].as_str())
+                .map(collapse_whitespace)
+                .filter(|name| !name.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    let short_id = work["id"]
+        .as_str()
+        .and_then(|url| url.rsplit('/').next())
+        .map(str::to_string);
+    let id = short_id
+        .as_ref()
+        .map(|short| format!("openalex:{short}"))
+        .unwrap_or_else(|| format!("title:{}", normalized_title(&title)));
+    let url = work["doi"]
+        .as_str()
+        .map(str::to_string)
+        .or_else(|| {
+            work["primary_location"]["landing_page_url"]
+                .as_str()
+                .map(str::to_string)
+        })
+        .or_else(|| work["id"].as_str().map(str::to_string));
+    let pdf_url = [
+        &work["best_oa_location"]["pdf_url"],
+        &work["primary_location"]["pdf_url"],
+        &work["open_access"]["oa_url"],
+    ]
+    .into_iter()
+    .find_map(|value| value.as_str())
+    .map(str::to_string);
+    Some(RemotePaper {
+        id,
+        title,
+        authors,
+        year: work["publication_year"]
+            .as_u64()
+            .and_then(|year| u32::try_from(year).ok()),
+        venue: collapse_whitespace(
+            work["primary_location"]["source"]["display_name"]
+                .as_str()
+                .unwrap_or(""),
+        ),
+        doi,
+        arxiv_id,
+        summary: openalex_abstract(&work["abstract_inverted_index"]),
+        url,
+        pdf_url,
+        source: "OpenAlex".to_string(),
+        published: work["publication_date"].as_str().map(str::to_string),
+        cited_by: work["cited_by_count"].as_u64(),
+    })
+}
+
+/// Scopus caps `count` at 25 per request for most entitlements.
+const SCOPUS_PAGE_MAX: usize = 25;
+
+fn scopus_api_key() -> Result<String, String> {
+    std::env::var("SCOPUS_API_KEY")
+        .ok()
+        .map(|key| key.trim().to_string())
+        .filter(|key| !key.is_empty())
+        .ok_or_else(|| {
+            "SCOPUS_API_KEY is not set — add the Elsevier API key in Settings or the environment"
+                .to_string()
+        })
+}
+
+/// Bare keyword queries become `TITLE-ABS-KEY(...)`; queries that already use
+/// Scopus field codes pass through untouched.
+fn scopus_query(query: &str) -> String {
+    const FIELD_CODES: [&str; 9] = [
+        "TITLE-ABS-KEY(",
+        "TITLE(",
+        "ABS(",
+        "KEY(",
+        "AUTH(",
+        "ALL(",
+        "DOI(",
+        "SRCTITLE(",
+        "AFFIL(",
+    ];
+    let compact = collapse_whitespace(query);
+    let fielded = FIELD_CODES
+        .iter()
+        .any(|code| compact.replace(" (", "(").contains(code));
+    if fielded {
+        compact
+    } else {
+        format!("TITLE-ABS-KEY({compact})")
+    }
+}
+
+fn search_scopus(
+    client: &reqwest::blocking::Client,
+    query: &str,
+    limit: usize,
+) -> Result<Vec<RemotePaper>, String> {
+    let api_key = scopus_api_key()?;
+    let count = limit.min(SCOPUS_PAGE_MAX);
+    let query = scopus_query(query);
+    let request = |view: Option<&str>| {
+        let mut params: Vec<(&str, String)> = vec![
+            ("query", query.clone()),
+            ("count", count.to_string()),
+            ("start", "0".to_string()),
+        ];
+        if let Some(view) = view {
+            params.push(("view", view.to_string()));
+        }
+        client
+            .get("https://api.elsevier.com/content/search/scopus")
+            .header("X-ELS-APIKey", api_key.clone())
+            .header("Accept", "application/json")
+            .query(&params)
+            .send()
+    };
+    // COMPLETE view includes abstracts but needs extra entitlement — fall back
+    // to the STANDARD view (no abstracts) instead of failing the search.
+    let response = request(Some("COMPLETE")).map_err(|e| e.to_string())?;
+    let response = if matches!(response.status().as_u16(), 401 | 403) {
+        request(None).map_err(|e| e.to_string())?
+    } else {
+        response
+    };
+    let response = response.error_for_status().map_err(|e| {
+        format!("{e} (check the SCOPUS_API_KEY and its entitlements)")
+    })?;
+    let body: Value = response.json().map_err(|e| e.to_string())?;
+    let entries = body["search-results"]["entry"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    // An empty result set arrives as one `{ "error": "Result set was empty" }`
+    // entry — filter_map drops it because it has no title.
+    Ok(entries.iter().filter_map(scopus_entry_to_paper).collect())
+}
+
+fn scopus_entry_to_paper(entry: &Value) -> Option<RemotePaper> {
+    let title = collapse_whitespace(entry["dc:title"].as_str()?);
+    if title.is_empty() {
+        return None;
+    }
+    let scopus_id = entry["dc:identifier"]
+        .as_str()
+        .and_then(|raw| raw.rsplit(':').next())
+        .map(str::trim)
+        .filter(|id| !id.is_empty());
+    let doi = entry["prism:doi"]
+        .as_str()
+        .map(|value| value.trim().to_lowercase())
+        .filter(|value| !value.is_empty());
+    let mut authors: Vec<String> = entry["author"]
+        .as_array()
+        .map(|list| {
+            list.iter()
+                .filter_map(|author| {
+                    author["authname"]
+                        .as_str()
+                        .or_else(|| author["ce:indexed-name"].as_str())
+                })
+                .map(collapse_whitespace)
+                .filter(|name| !name.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    if authors.is_empty() {
+        if let Some(creator) = entry["dc:creator"].as_str() {
+            let creator = collapse_whitespace(creator);
+            if !creator.is_empty() {
+                authors.push(creator);
+            }
+        }
+    }
+    let cover_date = entry["prism:coverDate"].as_str().unwrap_or("").trim();
+    let year = cover_date.get(0..4).and_then(|year| year.parse().ok());
+    let cited_by = match &entry["citedby-count"] {
+        Value::String(value) => value.trim().parse().ok(),
+        value => value.as_u64(),
+    };
+    let url = entry["link"]
+        .as_array()
+        .and_then(|links| {
+            links
+                .iter()
+                .find(|link| link["@ref"].as_str() == Some("scopus"))
+                .and_then(|link| link["@href"].as_str())
+                .map(str::to_string)
+        })
+        .or_else(|| doi.as_ref().map(|doi| format!("https://doi.org/{doi}")));
+    let id = scopus_id
+        .map(|id| format!("scopus:{id}"))
+        .or_else(|| doi.as_ref().map(|doi| format!("doi:{doi}")))
+        .unwrap_or_else(|| format!("title:{}", normalized_title(&title)));
+    Some(RemotePaper {
+        id,
+        title,
+        authors,
+        year,
+        venue: collapse_whitespace(entry["prism:publicationName"].as_str().unwrap_or("")),
+        doi,
+        arxiv_id: None,
+        summary: strip_jats(entry["dc:description"].as_str().unwrap_or("")),
+        url,
+        // Scopus does not expose direct PDF links through the search API.
+        pdf_url: None,
+        source: "Scopus".to_string(),
+        published: (!cover_date.is_empty()).then(|| cover_date.to_string()),
+        cited_by,
     })
 }
 
@@ -906,6 +1208,121 @@ mod tests {
         assert_eq!(paper.summary, "An interface & annotation study.");
         assert_eq!(paper.pdf_url.as_deref(), Some("https://dl.acm.org/example.pdf"));
         assert_eq!(paper.cited_by, Some(12));
+    }
+
+    #[test]
+    fn maps_openalex_works_and_rebuilds_inverted_abstract() {
+        let work = json!({
+            "id": "https://openalex.org/W4399100000",
+            "doi": "https://doi.org/10.48550/arXiv.2602.01491",
+            "title": "Agentic Literature  Review: Planning and Synthesis",
+            "publication_year": 2026,
+            "publication_date": "2026-02-03",
+            "authorships": [
+                { "author": { "display_name": "Maya Rivera" } },
+                { "author": { "display_name": "Li Chen" } }
+            ],
+            "primary_location": {
+                "source": { "display_name": "arXiv" },
+                "landing_page_url": "https://arxiv.org/abs/2602.01491v2",
+                "pdf_url": null
+            },
+            "best_oa_location": { "pdf_url": "https://arxiv.org/pdf/2602.01491" },
+            "open_access": { "oa_url": "https://arxiv.org/abs/2602.01491" },
+            "cited_by_count": 31,
+            "abstract_inverted_index": {
+                "grounded": [4],
+                "A": [0],
+                "system": [1],
+                "for": [3],
+                "design": [2],
+                "review.": [5]
+            }
+        });
+        let paper = openalex_work_to_paper(&work).expect("work should map");
+        assert_eq!(paper.id, "openalex:W4399100000");
+        assert_eq!(paper.title, "Agentic Literature Review: Planning and Synthesis");
+        assert_eq!(paper.doi.as_deref(), Some("10.48550/arxiv.2602.01491"));
+        assert_eq!(paper.arxiv_id.as_deref(), Some("2602.01491"));
+        assert_eq!(paper.authors, vec!["Maya Rivera", "Li Chen"]);
+        assert_eq!(paper.year, Some(2026));
+        assert_eq!(paper.venue, "arXiv");
+        assert_eq!(paper.summary, "A system design for grounded review.");
+        assert_eq!(paper.url.as_deref(), Some("https://doi.org/10.48550/arXiv.2602.01491"));
+        assert_eq!(paper.pdf_url.as_deref(), Some("https://arxiv.org/pdf/2602.01491"));
+        assert_eq!(paper.cited_by, Some(31));
+        assert_eq!(paper.source, "OpenAlex");
+    }
+
+    #[test]
+    fn openalex_falls_back_to_landing_page_arxiv_id() {
+        let work = json!({
+            "id": "https://openalex.org/W123",
+            "title": "Paper",
+            "primary_location": {
+                "landing_page_url": "https://arxiv.org/abs/2409.01010v3"
+            }
+        });
+        let paper = openalex_work_to_paper(&work).expect("work should map");
+        assert_eq!(paper.arxiv_id.as_deref(), Some("2409.01010"));
+        assert!(paper.doi.is_none());
+    }
+
+    #[test]
+    fn maps_scopus_entries() {
+        let entry = json!({
+            "dc:identifier": "SCOPUS_ID:85190000001",
+            "eid": "2-s2.0-85190000001",
+            "dc:title": "Congestion Control  for Satellite Networks",
+            "dc:creator": "Iyer S.",
+            "author": [
+                { "authname": "Iyer S." },
+                { "authname": "Almeida P." }
+            ],
+            "prism:publicationName": "IEEE Transactions on Networking",
+            "prism:coverDate": "2025-04-01",
+            "prism:doi": "10.1109/Example.2025.42",
+            "dc:description": "We study congestion control &amp; queueing.",
+            "citedby-count": "17",
+            "link": [
+                { "@ref": "self", "@href": "https://api.elsevier.com/content/abstract/scopus_id/85190000001" },
+                { "@ref": "scopus", "@href": "https://www.scopus.com/inward/record.uri?eid=2-s2.0-85190000001" }
+            ]
+        });
+        let paper = scopus_entry_to_paper(&entry).expect("entry should map");
+        assert_eq!(paper.id, "scopus:85190000001");
+        assert_eq!(paper.title, "Congestion Control for Satellite Networks");
+        assert_eq!(paper.authors, vec!["Iyer S.", "Almeida P."]);
+        assert_eq!(paper.year, Some(2025));
+        assert_eq!(paper.venue, "IEEE Transactions on Networking");
+        assert_eq!(paper.doi.as_deref(), Some("10.1109/example.2025.42"));
+        assert_eq!(paper.summary, "We study congestion control & queueing.");
+        assert_eq!(paper.cited_by, Some(17));
+        assert_eq!(
+            paper.url.as_deref(),
+            Some("https://www.scopus.com/inward/record.uri?eid=2-s2.0-85190000001")
+        );
+        assert_eq!(paper.pdf_url, None);
+        assert_eq!(paper.source, "Scopus");
+    }
+
+    #[test]
+    fn scopus_empty_result_entry_is_dropped() {
+        let entry = json!({ "error": "Result set was empty" });
+        assert!(scopus_entry_to_paper(&entry).is_none());
+    }
+
+    #[test]
+    fn wraps_bare_scopus_queries_in_title_abs_key() {
+        assert_eq!(
+            scopus_query("satellite  congestion control"),
+            "TITLE-ABS-KEY(satellite congestion control)"
+        );
+        assert_eq!(
+            scopus_query("TITLE-ABS-KEY(\"semantic communication\") AND PUBYEAR > 2020"),
+            "TITLE-ABS-KEY(\"semantic communication\") AND PUBYEAR > 2020"
+        );
+        assert_eq!(scopus_query("AUTH(rivera) AND KEY(agents)"), "AUTH(rivera) AND KEY(agents)");
     }
 
     #[test]

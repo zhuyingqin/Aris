@@ -10,6 +10,10 @@ const mocks = vi.hoisted(() => ({
   literatureSave: vi.fn(),
   literatureSearch: vi.fn(),
   literatureDownloadPdf: vi.fn(),
+  literatureLlm: vi.fn(),
+  literaturePdfText: vi.fn(),
+  chatRunCommand: vi.fn(),
+  literatureAgentSend: vi.fn(),
   onChatDone: vi.fn(),
   onChatTool: vi.fn(),
   onChatToolResult: vi.fn(),
@@ -21,6 +25,10 @@ vi.mock("../api/tauri", () => ({
   literatureSave: mocks.literatureSave,
   literatureSearch: mocks.literatureSearch,
   literatureDownloadPdf: mocks.literatureDownloadPdf,
+  literatureLlm: mocks.literatureLlm,
+  literaturePdfText: mocks.literaturePdfText,
+  chatRunCommand: mocks.chatRunCommand,
+  literatureAgentSend: mocks.literatureAgentSend,
   onChatDone: mocks.onChatDone,
   onChatTool: mocks.onChatTool,
   onChatToolResult: mocks.onChatToolResult,
@@ -74,7 +82,7 @@ const fixtureLibrary = (): LiteratureLibrary => ({
 
 beforeEach(() => {
   resetLiteratureStore();
-  useStore.setState({ tab: "literature", pendingChatInput: null });
+  useStore.setState({ tab: "literature", pendingChatInput: null, pendingChatRunInput: null });
   chatDoneHandler = null;
   chatToolHandler = null;
   chatToolResultHandler = null;
@@ -148,6 +156,20 @@ beforeEach(() => {
     relativePath: "papers/1111.00001.pdf",
     bytes: 123456,
   });
+  // Default: no executor configured, so screening/brief fall back to the
+  // offline heuristic. Individual tests opt into the LLM path.
+  mocks.literatureLlm.mockReset().mockRejectedValue(new Error("no executor configured"));
+  mocks.literaturePdfText.mockReset().mockRejectedValue(new Error("no pdf text"));
+  mocks.chatRunCommand.mockReset().mockResolvedValue({
+    handled: true,
+    message: null,
+    prompt: "Expanded /research-lit prompt",
+    selection: null,
+    replaceTurns: false,
+    openSettings: false,
+    refreshStatus: false,
+  });
+  mocks.literatureAgentSend.mockReset().mockResolvedValue("done");
 });
 
 afterEach(() => {
@@ -161,7 +183,7 @@ describe("Literature library", () => {
 
     expect(await screen.findAllByText("Persisted Paper on Grounded Reading")).toBeTruthy();
     expect(mocks.literatureLoad).toHaveBeenCalled();
-    expect(screen.getByRole("button", { name: "Inbox 1" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "收件箱 1" })).toBeTruthy();
     expect(screen.getByText("1 paper · 0 PDFs")).toBeTruthy();
   });
 
@@ -169,28 +191,11 @@ describe("Literature library", () => {
     render(<Literature />);
     await screen.findAllByText("Persisted Paper on Grounded Reading");
 
-    expect(screen.getByRole("button", { name: "Inbox 1" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Shortlist 0" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "收件箱 1" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "候选 0" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Screened 0" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "Agent read 0" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "Excluded 0" })).toBeNull();
-  });
-
-  it("narrates the search lifecycle in the activity log", async () => {
-    const user = userEvent.setup();
-    render(<Literature />);
-    await screen.findAllByText("Persisted Paper on Grounded Reading");
-
-    await user.type(screen.getByLabelText("Remote search query"), "retrieval agents");
-    await user.click(screen.getByRole("button", { name: "Search & save" }));
-    await screen.findAllByText("Deep Retrieval Agents for Literature Triage");
-
-    const log = screen.getByRole("log", { name: "Literature activity log" });
-    expect(within(log).getByText(/Searching arXiv \+ Crossref for "retrieval agents"/)).toBeTruthy();
-    expect(within(log).getByText(/arXiv returned 2 records/)).toBeTruthy();
-    expect(
-      within(log).getByText(/1 new saved to Inbox · 1 already in library/),
-    ).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "已阅读 0" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "已排除 0" })).toBeNull();
   });
 
   it("logs literature tool calls made by the agent in Chat", async () => {
@@ -219,132 +224,38 @@ describe("Literature library", () => {
     ).toBeTruthy();
   });
 
-  it("runs a remote search, dedupes into the library, and persists", async () => {
-    const user = userEvent.setup();
-    render(<Literature />);
-    await screen.findAllByText("Persisted Paper on Grounded Reading");
-
-    await user.type(
-      screen.getByLabelText("Remote search query"),
-      "retrieval agents",
-    );
-    await user.click(screen.getByRole("button", { name: "Search & save" }));
-
-    expect(
-      await screen.findAllByText("Deep Retrieval Agents for Literature Triage"),
-    ).toBeTruthy();
-    expect(mocks.literatureSearch).toHaveBeenCalledWith(
-      "retrieval agents",
-      ["arxiv", "crossref"],
-      50,
-    );
-    // One of the two results matched the stored record: only one new paper.
-    expect(screen.getByText(/2 results \/ 1 saved to Inbox/)).toBeTruthy();
-    // The saved search shows up in the nav with both provenance hits.
-    expect(screen.getByRole("button", { name: "retrieval agents 2" })).toBeTruthy();
-    // The duplicate was enriched, not duplicated.
-    expect(screen.getByText("2 papers · 0 PDFs")).toBeTruthy();
-    await waitFor(() => expect(mocks.literatureSave).toHaveBeenCalled(), {
-      timeout: 2000,
-    });
-  });
-
-  it("creates a review task, auto-screens on entry, and confirms queue decisions", async () => {
-    const user = userEvent.setup();
-    render(<Literature />);
-    await screen.findAllByText("Persisted Paper on Grounded Reading");
-
-    await user.type(screen.getByLabelText("Remote search query"), "retrieval agents");
-    await user.click(screen.getByRole("button", { name: "Search & save" }));
-    await screen.findAllByText("Deep Retrieval Agents for Literature Triage");
-
-    // The search creates a review task and offers it from a slim CTA.
-    await user.click(screen.getByRole("button", { name: "Start review" }));
-
-    // Entering the queue auto-screens the task's abstracts.
-    expect(screen.getByText("Review queue")).toBeTruthy();
-    expect(screen.getByText(/2 pending \/ 2 total/)).toBeTruthy();
-    // Criteria editor is collapsed by default, so the question input is hidden.
-    expect(screen.queryByLabelText("Review question")).toBeNull();
-    expect(
-      screen.getAllByText("Deep Retrieval Agents for Literature Triage").length,
-    ).toBeGreaterThan(0);
-    expect(screen.getByText(/Matched include criterion/)).toBeTruthy();
-
-    // Accept the agent's proposal on the first (include) paper.
-    await user.click(screen.getByRole("button", { name: "Accept" }));
-    expect(screen.getByRole("button", { name: "Shortlist 1" })).toBeTruthy();
-    expect(screen.getByText(/1 pending \/ 2 total/)).toBeTruthy();
-  });
-
-  it("edits criteria inside the queue and shows the review question", async () => {
-    const user = userEvent.setup();
-    render(<Literature />);
-    await screen.findAllByText("Persisted Paper on Grounded Reading");
-
-    await user.type(screen.getByLabelText("Remote search query"), "retrieval agents");
-    await user.click(screen.getByRole("button", { name: "Search & save" }));
-    await screen.findAllByText("Deep Retrieval Agents for Literature Triage");
-    await user.click(screen.getByRole("button", { name: "Start review" }));
-
-    await user.click(screen.getByRole("button", { name: "Edit criteria" }));
-    expect((screen.getByLabelText("Review question") as HTMLInputElement).value).toBe(
-      "retrieval agents",
-    );
-  });
-
-  it("excludes the current paper with the X key and advances the queue", async () => {
-    const user = userEvent.setup();
-    render(<Literature />);
-    await screen.findAllByText("Persisted Paper on Grounded Reading");
-
-    await user.type(screen.getByLabelText("Remote search query"), "retrieval agents");
-    await user.click(screen.getByRole("button", { name: "Search & save" }));
-    await screen.findAllByText("Deep Retrieval Agents for Literature Triage");
-    await user.click(screen.getByRole("button", { name: "Start review" }));
-    expect(screen.getByText(/2 pending \/ 2 total/)).toBeTruthy();
-
-    await user.keyboard("x");
-    expect(screen.getByText(/1 pending \/ 2 total/)).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Excluded 1" })).toBeTruthy();
-  });
-
   it("downloads a PDF through the backend and records the local path", async () => {
     const user = userEvent.setup();
     render(<Literature />);
     await screen.findAllByText("Persisted Paper on Grounded Reading");
 
-    await user.click(screen.getByRole("button", { name: "Download PDF" }));
+    await user.click(screen.getByRole("button", { name: "下载 PDF" }));
 
-    expect(await screen.findByText("PDF saved")).toBeTruthy();
+    expect(await screen.findByText("PDF 已保存")).toBeTruthy();
     expect(mocks.literatureDownloadPdf).toHaveBeenCalledWith(
       "https://arxiv.org/pdf/1111.00001.pdf",
       "1111.00001.pdf",
     );
     expect(screen.getByText("1 paper · 1 PDF")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Downloaded 1" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "已下载 1" })).toBeTruthy();
   });
 
-  it("opens Chat with the selected literature skill", async () => {
+  it("deletes a paper from the library after confirmation", async () => {
     const user = userEvent.setup();
+    vi.spyOn(window, "confirm").mockReturnValue(true);
     render(<Literature />);
     await screen.findAllByText("Persisted Paper on Grounded Reading");
 
-    await user.type(
-      screen.getByLabelText("Remote search query"),
-      "retrieval agents",
-    );
-    await user.click(screen.getByRole("button", { name: "Open in Chat" }));
-    expect(useStore.getState().pendingChatInput).toBe('/arxiv "retrieval agents" - max: 20');
-    expect(useStore.getState().tab).toBe("chat");
+    await user.click(screen.getByRole("button", { name: "删除" }));
 
-    useStore.setState({ tab: "literature", pendingChatInput: null });
-    await user.selectOptions(
-      screen.getByLabelText("Literature skill"),
-      "research-lit",
-    );
-    await user.click(screen.getByRole("button", { name: "Open in Chat" }));
-    expect(useStore.getState().pendingChatInput).toBe('/research-lit "retrieval agents"');
+    expect(screen.getByText("论文库为空。")).toBeTruthy();
+    await waitFor(() => expect(mocks.literatureSave).toHaveBeenCalled(), {
+      timeout: 2000,
+    });
+    const saved = mocks.literatureSave.mock.calls[
+      mocks.literatureSave.mock.calls.length - 1
+    ]?.[0] as LiteratureLibrary;
+    expect(saved.papers).toHaveLength(0);
   });
 
   it("opens Chat from the selected paper detail", async () => {
@@ -352,7 +263,7 @@ describe("Literature library", () => {
     render(<Literature />);
     await screen.findAllByText("Persisted Paper on Grounded Reading");
 
-    await user.click(screen.getByRole("button", { name: "Ask Agent" }));
+    await user.click(screen.getByRole("button", { name: "问 Agent" }));
 
     expect(useStore.getState().pendingChatInput).toBe(
       '/research-lit "Persisted Paper on Grounded Reading"',
@@ -412,34 +323,36 @@ describe("Literature library", () => {
     render(<Literature />);
     await screen.findAllByText("Persisted Paper on Grounded Reading");
     // Brief is the default detail tab; generate from the abstract.
-    await user.click(screen.getByRole("button", { name: "Generate brief from abstract" }));
+    await user.click(screen.getByRole("button", { name: "从摘要生成简报" }));
 
+    // No executor configured → heuristic brief from the abstract.
+    expect(await screen.findByText(/staged pipeline for triage/)).toBeTruthy();
     const detail = document.querySelector(".lit-brief") as HTMLElement;
-    expect(detail).toBeTruthy();
-    expect(within(detail).getByText(/staged pipeline for triage/)).toBeTruthy();
     expect(within(detail).getByText(/0\.94 recall/)).toBeTruthy();
     expect(within(detail).getByText(/CS-only evaluation/)).toBeTruthy();
-    // For-you is grounded in the project focus.
-    expect(within(detail).getByText(/Overlaps your focus on/)).toBeTruthy();
     // Every line is provenance-tagged to the abstract.
-    expect(within(detail).getAllByText("[abstract]").length).toBe(5);
+    expect(within(detail).getAllByText("[abstract]").length).toBe(4);
   });
 
-  it("seeds a new search from a paper's stated limitation (upward loop)", async () => {
+  it("writes the brief with the real LLM when an executor is configured", async () => {
     const user = userEvent.setup();
-    const withAbstract = fixtureLibrary();
-    withAbstract.papers[0].abstract =
-      "We propose a method. However, evaluation covers CS corpora only.";
-    mocks.literatureLoad.mockResolvedValue(withAbstract);
-
+    mocks.literatureLlm.mockResolvedValue(
+      JSON.stringify({
+        problem: "Reviewers drown in papers.",
+        method: "A staged agentic pipeline.",
+        results: "Reaches 0.94 recall at 8x less reading.",
+        limits: "Evaluated on CS corpora only.",
+        forYou: "Direct precedent for your screening queue.",
+      }),
+    );
     render(<Literature />);
     await screen.findAllByText("Persisted Paper on Grounded Reading");
-    await user.click(screen.getByRole("button", { name: "Generate brief from abstract" }));
-    await user.click(screen.getByRole("button", { name: "Search this gap →" }));
+    await user.click(screen.getByRole("button", { name: "从摘要生成简报" }));
 
-    expect((screen.getByLabelText("Remote search query") as HTMLInputElement).value).toContain(
-      "CS corpora only",
-    );
+    expect(await screen.findByText("Reviewers drown in papers.")).toBeTruthy();
+    const detail = document.querySelector(".lit-brief") as HTMLElement;
+    expect(within(detail).getByText("A staged agentic pipeline.")).toBeTruthy();
+    expect(mocks.literatureLlm).toHaveBeenCalled();
   });
 
   it("batch-moves selected papers along the pipeline", async () => {
@@ -451,9 +364,9 @@ describe("Literature library", () => {
       screen.getByLabelText("Select Persisted Paper on Grounded Reading"),
     );
     const batchBar = screen.getByRole("toolbar", { name: "Batch actions" });
-    await user.click(within(batchBar).getByRole("button", { name: "Shortlist" }));
+    await user.click(within(batchBar).getByRole("button", { name: "候选" }));
 
-    expect(screen.getByRole("button", { name: "Shortlist 1" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Inbox 0" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "候选 1" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "收件箱 0" })).toBeTruthy();
   });
 });

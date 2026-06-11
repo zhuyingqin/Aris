@@ -213,15 +213,15 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "LiteratureSearch",
-            description: "Search scholarly metadata on arXiv and Crossref without a shell. Returns normalised, deduplicated records (title, authors, year, venue, DOI, abstract, pdfUrl). Used by literature skills (/arxiv, /research-lit) when bash/python is unavailable. Follow up with LiteratureLibraryUpsert to record results.",
+            description: "Search scholarly metadata on arXiv, Crossref, OpenAlex and Scopus without a shell. Returns normalised, deduplicated records (title, authors, year, venue, DOI, abstract, pdfUrl). Scopus requires SCOPUS_API_KEY (set via desktop Settings) and is skipped from the default source set when the key is missing. Used by literature skills (/arxiv, /research-lit) when bash/python is unavailable. Follow up with LiteratureLibraryUpsert to record results.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "query": { "type": "string", "minLength": 2 },
                     "sources": {
                         "type": "array",
-                        "items": { "type": "string", "enum": ["arxiv", "crossref"] },
-                        "description": "Sources to query. Empty or omitted means all sources."
+                        "items": { "type": "string", "enum": ["arxiv", "crossref", "openalex", "scopus"] },
+                        "description": "Sources to query. Empty or omitted means all available sources."
                     },
                     "maxResults": { "type": "integer", "minimum": 1, "maximum": 50 }
                 },

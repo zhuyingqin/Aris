@@ -174,9 +174,15 @@ textarea {
 }
 .nav-icon {
   width: 18px;
-  text-align: center;
-  font-size: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   flex-shrink: 0;
+  opacity: 0.75;
+}
+.nav-item.active .nav-icon,
+.nav-item:hover .nav-icon {
+  opacity: 1;
 }
 .app-title {
   font-weight: 600;
@@ -1956,6 +1962,44 @@ textarea {
   background: transparent;
   border-color: transparent;
   color: var(--text-dim);
+}
+
+.ctx-ring {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  cursor: default;
+  user-select: none;
+}
+
+.ctx-ring-label {
+  color: var(--text-dim);
+  font-size: 10px;
+  min-width: 22px;
+  text-align: left;
+}
+
+.mem-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 7px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: default;
+  user-select: none;
+}
+
+.mem-badge-icon {
+  color: var(--accent);
+  font-size: 7px;
+  line-height: 1;
+}
+
+.mem-badge-count {
+  color: var(--text-dim);
+  font-size: 11px;
 }
 
 .chat-scroll {

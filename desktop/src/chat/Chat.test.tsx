@@ -9,7 +9,16 @@ import ChatComposer, { attachmentFromFile, resizeComposerTextarea } from "./Chat
 import ChatMessage, { diffFromTool } from "./ChatMessage";
 import CommandSelection from "./CommandSelection";
 import { isNearBottom } from "./ChatThread";
-import { fuzzyScore, groupSessionsByProject, makeId, makeSession, migrateSession, transcriptFromTurn } from "./model";
+import {
+  CURRENT_KEY,
+  SESSIONS_KEY,
+  fuzzyScore,
+  groupSessionsByProject,
+  makeId,
+  makeSession,
+  migrateSession,
+  transcriptFromTurn,
+} from "./model";
 import { appendToolOutput } from "./useChatStream";
 import { useChatSessions } from "./useChatSessions";
 
@@ -161,6 +170,32 @@ describe("Chat interaction helpers", () => {
 });
 
 describe("useChatSessions", () => {
+  it("opens a blank new-chat home instead of restoring saved history on startup", async () => {
+    const old = makeSession("default");
+    old.id = "old-chat";
+    old.title = "Old chat";
+    old.createdAt = 1;
+    old.updatedAt = 1;
+    old.turns = [{ id: "old-turn", role: "user", blocks: [{ kind: "text", text: "old" }] }];
+    const recent = makeSession("default");
+    recent.id = "recent-chat";
+    recent.title = "Recent chat";
+    recent.createdAt = 2;
+    recent.updatedAt = 2;
+    recent.turns = [{ id: "recent-turn", role: "user", blocks: [{ kind: "text", text: "recent" }] }];
+    localStorage.setItem(SESSIONS_KEY, JSON.stringify([old, recent]));
+    localStorage.setItem(CURRENT_KEY, old.id);
+
+    const { result } = renderHook(() => useChatSessions());
+
+    await waitFor(() => expect(result.current.currentSession).not.toBeNull());
+    expect(result.current.currentSession?.turns).toHaveLength(0);
+    expect(result.current.currentId).not.toBe(old.id);
+    expect(result.current.currentId).not.toBe(recent.id);
+    expect(result.current.sessions.some((session) => session.id === old.id)).toBe(true);
+    expect(result.current.sessions.some((session) => session.id === recent.id)).toBe(true);
+  });
+
   it("retains a draft per session", async () => {
     const { result } = renderHook(() => useChatSessions());
     await waitFor(() => expect(result.current.currentSession).not.toBeNull());
