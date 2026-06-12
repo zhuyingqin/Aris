@@ -190,8 +190,10 @@ describe("useChatSessions", () => {
 
     await waitFor(() => expect(result.current.currentSession).not.toBeNull());
     expect(result.current.currentSession?.turns).toHaveLength(0);
+    expect(result.current.currentSession?.title).toBe("New chat");
     expect(result.current.currentId).not.toBe(old.id);
     expect(result.current.currentId).not.toBe(recent.id);
+    expect(result.current.sessions).toHaveLength(2);
     expect(result.current.sessions.some((session) => session.id === old.id)).toBe(true);
     expect(result.current.sessions.some((session) => session.id === recent.id)).toBe(true);
   });
@@ -199,9 +201,13 @@ describe("useChatSessions", () => {
   it("retains a draft per session", async () => {
     const { result } = renderHook(() => useChatSessions());
     await waitFor(() => expect(result.current.currentSession).not.toBeNull());
-    const first = result.current.currentId;
+    let first = "";
     const turn: ChatTurn = { id: makeId("turn"), role: "user", blocks: [{ kind: "text", text: "hello" }] };
 
+    act(() => {
+      first = result.current.materializeCurrentSession()?.id ?? "";
+    });
+    await waitFor(() => expect(result.current.currentId).toBe(first));
     act(() => {
       result.current.setDraft(first, "first draft");
       result.current.patchTurns(first, () => [turn]);
@@ -234,26 +240,32 @@ describe("useChatSessions", () => {
     expect(result.current.sessions).toHaveLength(count);
   });
 
-  it("preserves an unsent draft when New chat opens another session", async () => {
+  it("clears the transient home draft when New chat is pressed again", async () => {
     const { result } = renderHook(() => useChatSessions());
     await waitFor(() => expect(result.current.currentSession).not.toBeNull());
-    const first = result.current.currentId;
-    let second = "";
 
-    act(() => result.current.setDraft(first, "keep this draft"));
+    act(() => result.current.setDraft(result.current.currentId, "discard this draft"));
+    expect(result.current.currentSession?.draft).toBe("discard this draft");
     act(() => {
-      second = result.current.newSession();
-      result.current.setCurrentId(second);
+      result.current.newSession();
     });
 
-    expect(second).not.toBe(first);
-    expect(result.current.sessions.find((session) => session.id === first)?.draft).toBe("keep this draft");
+    expect(result.current.currentSession?.draft).toBe("");
+    expect(result.current.sessions).toHaveLength(0);
   });
 
   it("restores a removed session for delete undo", async () => {
     const { result } = renderHook(() => useChatSessions());
     await waitFor(() => expect(result.current.currentSession).not.toBeNull());
-    const id = result.current.currentId;
+    let id = "";
+    const turn: ChatTurn = { id: makeId("turn"), role: "user", blocks: [{ kind: "text", text: "hello" }] };
+    act(() => {
+      id = result.current.materializeCurrentSession()?.id ?? "";
+    });
+    act(() => {
+      result.current.patchTurns(id, () => [turn]);
+    });
+    await waitFor(() => expect(result.current.sessions.some((session) => session.id === id)).toBe(true));
     let removed = result.current.currentSession;
 
     act(() => {
@@ -272,7 +284,14 @@ describe("useChatSessions", () => {
       { initialProps: { projectId: "project-a" } },
     );
     await waitFor(() => expect(result.current.currentSession?.projectId).toBe("project-a"));
-    const first = result.current.currentId;
+    let first = "";
+    const turn: ChatTurn = { id: makeId("turn"), role: "user", blocks: [{ kind: "text", text: "project a" }] };
+    act(() => {
+      first = result.current.materializeCurrentSession()?.id ?? "";
+    });
+    act(() => {
+      result.current.patchTurns(first, () => [turn]);
+    });
 
     rerender({ projectId: "project-b" });
     await waitFor(() => expect(result.current.currentSession?.projectId).toBe("project-b"));

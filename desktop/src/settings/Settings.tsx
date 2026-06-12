@@ -99,6 +99,95 @@ const EXECUTOR_PROVIDERS: Record<string, ProviderMeta> = {
   },
 };
 
+const REVIEWER_MODELS: PresetOption[] = [
+  { label: "GPT-5.5", value: "gpt-5.5", hint: "OpenAI" },
+  { label: "GPT-5.4", value: "gpt-5.4", hint: "OpenAI" },
+  { label: "GPT-5.4 Mini", value: "gpt-5.4-mini", hint: "OpenAI" },
+  { label: "GPT-5.4 Nano", value: "gpt-5.4-nano", hint: "OpenAI" },
+  { label: "GPT-4o", value: "gpt-4o", hint: "OpenAI" },
+  { label: "Gemini 2.5 Pro", value: "gemini-2.5-pro", hint: "Google" },
+  { label: "Gemini 2.5 Flash", value: "gemini-2.5-flash", hint: "Google" },
+  { label: "GLM-5", value: "GLM-5", hint: "Zhipu" },
+  { label: "GLM-5 Turbo", value: "GLM-5-Turbo", hint: "Zhipu" },
+  { label: "MiniMax M3", value: "MiniMax-M3", hint: "MiniMax" },
+  { label: "MiniMax M2.7", value: "MiniMax-M2.7", hint: "MiniMax" },
+  { label: "MiniMax M2.7 Highspeed", value: "MiniMax-M2.7-highspeed", hint: "MiniMax" },
+  { label: "Kimi K2.5", value: "kimi-k2.5", hint: "Moonshot" },
+  { label: "DeepSeek V4 Pro", value: "deepseek-v4-pro", hint: "DeepSeek" },
+  { label: "Claude Sonnet 4.6", value: "claude-sonnet-4-6", hint: "Anthropic-compatible" },
+];
+
+const REVIEWER_PROVIDERS: Record<string, ProviderMeta> = {
+  "": {
+    label: "Disabled",
+    hint: "Use no separate review model",
+    defaultModel: "",
+  },
+  openai: {
+    label: "OpenAI-compatible",
+    hint: "OpenAI or compatible reviewer API",
+    defaultModel: "gpt-5.5",
+    defaultBaseUrl: "https://api.openai.com/v1",
+    models: REVIEWER_MODELS.filter((m) => ["OpenAI", "MiniMax", "Moonshot", "DeepSeek"].includes(m.hint ?? "")),
+    baseUrls: OPENAI_COMPAT_URLS,
+  },
+  gemini: {
+    label: "Gemini",
+    hint: "Google OpenAI-compatible endpoint",
+    defaultModel: "gemini-2.5-pro",
+    defaultBaseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
+    models: REVIEWER_MODELS.filter((m) => m.hint === "Google"),
+    baseUrls: OPENAI_COMPAT_URLS.filter((item) => item.label === "Gemini"),
+  },
+  glm: {
+    label: "GLM",
+    hint: "Zhipu reviewer API",
+    defaultModel: "GLM-5",
+    defaultBaseUrl: "https://open.bigmodel.cn/api/paas/v4",
+    models: REVIEWER_MODELS.filter((m) => m.hint === "Zhipu"),
+    baseUrls: OPENAI_COMPAT_URLS.filter((item) => item.label === "GLM"),
+  },
+  minimax: {
+    label: "MiniMax",
+    hint: "MiniMax reviewer API",
+    defaultModel: "MiniMax-M2.7",
+    defaultBaseUrl: "https://api.minimaxi.com/v1",
+    models: REVIEWER_MODELS.filter((m) => m.hint === "MiniMax"),
+    baseUrls: OPENAI_COMPAT_URLS.filter((item) => item.label === "MiniMax"),
+  },
+  kimi: {
+    label: "Kimi",
+    hint: "Moonshot reviewer API",
+    defaultModel: "kimi-k2.5",
+    defaultBaseUrl: "https://api.moonshot.cn/v1",
+    models: REVIEWER_MODELS.filter((m) => m.hint === "Moonshot"),
+    baseUrls: OPENAI_COMPAT_URLS.filter((item) => item.label === "Kimi"),
+  },
+  deepseek: {
+    label: "DeepSeek",
+    hint: "DeepSeek Anthropic-compatible reviewer",
+    defaultModel: "deepseek-v4-pro",
+    defaultBaseUrl: "https://api.deepseek.com/anthropic",
+    models: REVIEWER_MODELS.filter((m) => m.hint === "DeepSeek"),
+    baseUrls: ANTHROPIC_COMPAT_URLS.filter((item) => item.label === "DeepSeek"),
+  },
+  "anthropic-compat": {
+    label: "Anthropic-compat",
+    hint: "Claude-compatible reviewer/proxy",
+    defaultModel: "claude-sonnet-4-6",
+    defaultBaseUrl: "https://api.anthropic.com",
+    models: REVIEWER_MODELS.filter((m) => ["Anthropic-compatible", "MiniMax", "DeepSeek"].includes(m.hint ?? "")),
+    baseUrls: ANTHROPIC_COMPAT_URLS,
+  },
+  custom: {
+    label: "Custom",
+    hint: "Manual provider and endpoint",
+    defaultModel: "",
+    models: REVIEWER_MODELS,
+    baseUrls: [...OPENAI_COMPAT_URLS, ...ANTHROPIC_COMPAT_URLS.filter((item) => item.value)],
+  },
+};
+
 function normalizeExecutorProvider(provider: string | null | undefined, baseUrl: string | null | undefined): string {
   const current = provider || "anthropic";
   const lower = (baseUrl ?? "").trim().toLowerCase();
@@ -112,6 +201,15 @@ function normalizeExecutorProvider(provider: string | null | undefined, baseUrl:
     return "anthropic-compat";
   }
   return current;
+}
+
+function normalizeReviewerProvider(provider: string | null | undefined, baseUrl: string | null | undefined): string {
+  const current = provider || "";
+  const lower = (baseUrl ?? "").trim().toLowerCase();
+  if (current === "anthropic" || (current === "deepseek" && lower.includes("deepseek.com/anthropic"))) {
+    return current === "anthropic" ? "anthropic-compat" : "deepseek";
+  }
+  return current in REVIEWER_PROVIDERS ? current : "custom";
 }
 
 function Row({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
@@ -260,7 +358,7 @@ function LayerSection({
   children,
 }: {
   index: string;
-  tone: "executor" | "surface";
+  tone: "executor" | "reviewer" | "surface";
   title: string;
   subtitle: string;
   children: React.ReactNode;
@@ -303,6 +401,7 @@ export default function Settings() {
   const [view, setView] = useState<ConfigView | null>(null);
   const [form, setForm] = useState<ConfigPatch>({});
   const [execKey, setExecKey] = useState("");
+  const [reviewerKey, setReviewerKey] = useState("");
   const [scopusKey, setScopusKey] = useState("");
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [testState, setTestState] = useState<TestState>("idle");
@@ -313,14 +412,19 @@ export default function Settings() {
 
   const load = (v: ConfigView) => {
     const executorProvider = normalizeExecutorProvider(v.executorProvider, v.executorBaseUrl);
+    const reviewerProvider = normalizeReviewerProvider(v.reviewerProvider, v.reviewerBaseUrl);
     setView(v);
     setForm({
       executorProvider,
       executorModel: v.executorModel ?? "",
       executorBaseUrl: v.executorBaseUrl ?? "",
+      reviewerProvider,
+      reviewerModel: v.reviewerModel ?? "",
+      reviewerBaseUrl: v.reviewerBaseUrl ?? "",
       language: v.language ?? "cn",
     });
     setExecKey("");
+    setReviewerKey("");
     setScopusKey("");
   };
 
@@ -362,6 +466,7 @@ export default function Settings() {
   const buildPatch = () => {
     const patch: ConfigPatch = { ...form };
     if (execKey.trim()) patch.executorApiKey = execKey.trim();
+    if (reviewerKey.trim()) patch.reviewerApiKey = reviewerKey.trim();
     if (scopusKey.trim()) patch.scopusApiKey = scopusKey.trim();
     return patch;
   };
@@ -426,6 +531,12 @@ export default function Settings() {
   const execKeyStatus = view.hasExecutorKey
     ? `Saved key: ${view.executorKeyMasked ?? "configured"}`
     : "No key saved yet";
+  const reviewerProvider = form.reviewerProvider ?? "";
+  const reviewerMeta = REVIEWER_PROVIDERS[reviewerProvider] ?? REVIEWER_PROVIDERS.custom;
+  const reviewerEnabled = reviewerProvider !== "";
+  const reviewerKeyStatus = view.hasReviewerKey
+    ? `Saved key: ${view.reviewerKeyMasked ?? "configured"}`
+    : "No reviewer key saved yet";
 
   const chooseExecutorProvider = (provider: string) => {
     const meta = EXECUTOR_PROVIDERS[provider] ?? EXECUTOR_PROVIDERS.custom;
@@ -434,6 +545,25 @@ export default function Settings() {
       executorModel: provider === "custom" ? form.executorModel ?? "" : meta.defaultModel,
       executorBaseUrl: provider === "custom"
         ? form.executorBaseUrl ?? ""
+        : meta.defaultBaseUrl ?? meta.baseUrls?.[0]?.value ?? "",
+    });
+  };
+
+  const chooseReviewerProvider = (provider: string) => {
+    const meta = REVIEWER_PROVIDERS[provider] ?? REVIEWER_PROVIDERS.custom;
+    if (!provider) {
+      upd({
+        reviewerProvider: "",
+        reviewerModel: "",
+        reviewerBaseUrl: "",
+      });
+      return;
+    }
+    upd({
+      reviewerProvider: provider,
+      reviewerModel: provider === "custom" ? form.reviewerModel ?? "" : meta.defaultModel,
+      reviewerBaseUrl: provider === "custom"
+        ? form.reviewerBaseUrl ?? ""
         : meta.defaultBaseUrl ?? meta.baseUrls?.[0]?.value ?? "",
     });
   };
@@ -456,6 +586,7 @@ export default function Settings() {
         </div>
         <div className="st-architecture-strip" aria-label="ARIS runtime layers">
           <span>Executor</span>
+          <span>Reviewer</span>
           <span>UI / CLI</span>
         </div>
       </div>
@@ -515,6 +646,67 @@ export default function Settings() {
 
         <LayerSection
           index="02"
+          tone="reviewer"
+          title="Reviewer LLM layer"
+          subtitle="Optional second model used by LlmReview, verification and critique tools."
+        >
+            <div className="st-field-group">
+              <div className="st-field-label">Provider</div>
+              <ProviderSelect
+                value={reviewerProvider}
+                providers={REVIEWER_PROVIDERS}
+                onChange={chooseReviewerProvider}
+              />
+            </div>
+
+            {reviewerEnabled ? (
+              <>
+                <SecretPanel
+                  title="Reviewer API key"
+                  status={reviewerKeyStatus}
+                  help="Paste a new reviewer key here, then save. Leave it blank to keep the saved key."
+                >
+                  <KeyInput
+                    value={reviewerKey}
+                    placeholder={view.hasReviewerKey ? "leave blank to keep, paste a new key to replace" : "paste your reviewer API key"}
+                    masked={view.reviewerKeyMasked}
+                    onChange={(value) => {
+                      clearTestOnSecretChange();
+                      setReviewerKey(value);
+                    }}
+                  />
+                </SecretPanel>
+
+                <Row label="Model" hint="Model ID used by LlmReview">
+                  <PresetTextInput
+                    value={form.reviewerModel ?? ""}
+                    placeholder={reviewerMeta.defaultModel || "e.g. gpt-5.5"}
+                    options={reviewerMeta.models ?? REVIEWER_MODELS}
+                    onChange={(value) => upd({ reviewerModel: value })}
+                  />
+                </Row>
+
+                <Row label="Base URL" hint="Leave blank for provider default when supported">
+                  <PresetTextInput
+                    value={form.reviewerBaseUrl ?? ""}
+                    placeholder={reviewerMeta.defaultBaseUrl || "(provider default)"}
+                    options={reviewerMeta.baseUrls ?? OPENAI_COMPAT_URLS}
+                    onChange={(value) => upd({ reviewerBaseUrl: value })}
+                  />
+                </Row>
+              </>
+            ) : (
+              <div className="st-inline-state">
+                <div className="st-inline-state-title">Reviewer disabled</div>
+                <div className="st-inline-state-copy">
+                  Chat still works. Configure a provider here when you want LlmReview to use a separate second model.
+                </div>
+              </div>
+            )}
+        </LayerSection>
+
+        <LayerSection
+          index="03"
           tone="surface"
           title="UI / CLI calling layer"
           subtitle="Local presentation defaults and the persisted config location."

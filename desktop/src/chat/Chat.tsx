@@ -5,6 +5,7 @@ import {
   chatRunCommand,
   chatSetContext,
   chatStatus,
+  chatSuggestTitle,
   fileRead,
   isTauri,
   projectChatStarters,
@@ -19,7 +20,7 @@ import ChatComposer from "./ChatComposer";
 import CommandSelection from "./CommandSelection";
 import ChatSidebar from "./ChatSidebar";
 import ChatThread from "./ChatThread";
-import { makeId, textFromTurn, transcriptFromTurn } from "./model";
+import { makeId, textFromTurn, titleFromTurns, transcriptFromTurn } from "./model";
 import type { ChatSession } from "./types";
 import { useChatSessions } from "./useChatSessions";
 import { useChatStream } from "./useChatStream";
@@ -216,6 +217,7 @@ export default function Chat() {
   const [focusRequest, setFocusRequest] = useState(0);
   const [exporting, setExporting] = useState(false);
   const deleteTimers = useRef(new Map<string, { timer: number; projectId: string }>());
+  const titleRequests = useRef(new Set<string>());
   const sendLock = useRef(false);
   const commandSelectionLock = useRef(false);
   const currentSessionRef = useRef(currentSession);
@@ -249,25 +251,51 @@ export default function Chat() {
     });
   }, [patchTurns]);
 
+  const suggestTitle = useCallback((sessionId: string, nextTurns: ChatTurn[]) => {
+    if (!isTauri() || titleRequests.current.has(sessionId)) return;
+    const userTurns = nextTurns.filter((turn) => turn.role === "user");
+    const assistantTurns = nextTurns.filter((turn) => turn.role === "assistant");
+    if (userTurns.length !== 1 || assistantTurns.length !== 1) return;
+    const userText = textFromTurn(userTurns[0]).trim();
+    const assistantText = transcriptFromTurn(assistantTurns[0]).trim();
+    if (!userText || !assistantText) return;
+    titleRequests.current.add(sessionId);
+    void chatSuggestTitle(userText, assistantText)
+      .then((title) => {
+        const trimmed = title.trim();
+        if (!trimmed) return;
+        updateSession(sessionId, (session) => {
+          const fallback = titleFromTurns(session.turns);
+          if (session.title !== "New chat" && session.title !== fallback) return session;
+          return { ...session, title: trimmed };
+        });
+      })
+      .catch(() => undefined);
+  }, [updateSession]);
+
   const onComplete = useCallback((sessionId: string, reply: string) => {
-    patchAssistant(sessionId, (turn) => {
-      const hasText = turn.blocks.some((block) => block.kind === "text" && block.text.trim());
-      const nextBlocks = hasText
-        ? turn.blocks
-        : reply.trim()
-          ? [...turn.blocks, { kind: "text" as const, text: reply }]
-          : hasRenderableBlock(turn)
-            ? turn.blocks
-            : [{ kind: "text" as const, text: EMPTY_ASSISTANT_RESPONSE }];
-      return {
-        ...turn,
-        blocks: nextBlocks,
-        streaming: false,
-        error: undefined,
-        stopped: false,
-      };
-    });
-  }, [patchAssistant]);
+    patchAssistant(
+      sessionId,
+      (turn) => {
+        const hasText = turn.blocks.some((block) => block.kind === "text" && block.text.trim());
+        const nextBlocks = hasText
+          ? turn.blocks
+          : reply.trim()
+            ? [...turn.blocks, { kind: "text" as const, text: reply }]
+            : hasRenderableBlock(turn)
+              ? turn.blocks
+              : [{ kind: "text" as const, text: EMPTY_ASSISTANT_RESPONSE }];
+        return {
+          ...turn,
+          blocks: nextBlocks,
+          streaming: false,
+          error: undefined,
+          stopped: false,
+        };
+      },
+      (nextTurns) => suggestTitle(sessionId, nextTurns),
+    );
+  }, [patchAssistant, suggestTitle]);
 
   const onError = useCallback((sessionId: string, error: string, stopped: boolean) => {
     patchAssistant(

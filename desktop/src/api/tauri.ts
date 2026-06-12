@@ -125,6 +125,8 @@ export const chatCommandSpecs = () =>
   invoke<DesktopCommandSpec[]>("chat_command_specs");
 export const chatRunCommand = (sessionId: string, input: string) =>
   invoke<ChatCommandResult>("chat_run_command", { sessionId, input });
+export const chatSuggestTitle = (user: string, assistant: string) =>
+  invoke<string>("chat_suggest_title", { user, assistant });
 
 export interface ChatImageInput {
   name?: string;

@@ -533,6 +533,12 @@ textarea {
   --layer-soft: #112536;
   --layer-ring: rgba(97, 216, 255, 0.34);
 }
+.st-layer-reviewer {
+  --layer-color: #6ee7aa;
+  --layer-border: rgba(110, 231, 170, 0.58);
+  --layer-soft: #14251d;
+  --layer-ring: rgba(110, 231, 170, 0.34);
+}
 .st-layer-surface {
   --layer-color: #ffd166;
   --layer-border: rgba(255, 209, 102, 0.58);
@@ -2528,6 +2534,12 @@ textarea {
   position: relative;
   padding: 26px 24px 20px;
   background: var(--bg);
+  scrollbar-color: var(--border) var(--bg);
+}
+
+.chat-scroll::-webkit-scrollbar-track,
+.chat-scroll::-webkit-scrollbar-corner {
+  background: var(--bg);
 }
 
 .chat-thread {
@@ -2726,6 +2738,7 @@ textarea {
 }
 
 .chat-input-wrap {
+  right: 14px;
   background: linear-gradient(to bottom, transparent, var(--bg) 30%);
 }
 
@@ -3148,6 +3161,7 @@ textarea {
   }
 
   .chat-input-wrap {
+    right: 0;
     padding: 0 10px 10px;
   }
 

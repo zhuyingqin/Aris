@@ -11,6 +11,14 @@ function isStartedSession(session: ChatSession) {
   return session.turns.length > 0;
 }
 
+function isBlankSession(session: ChatSession) {
+  return (
+    session.turns.length === 0
+    && !session.draft.trim()
+    && session.draftAttachments.length === 0
+  );
+}
+
 function loadLocalSessions(): ChatSession[] {
   try {
     const raw = localStorage.getItem(SESSIONS_KEY) ?? localStorage.getItem("aris-chat-sessions");
@@ -160,11 +168,14 @@ export function useChatSessions(projectId = "default") {
   }, [homeSession, projectId, updateSession]);
 
   const newSession = useCallback(() => {
-    if (currentId === HOME_SESSION_ID) return HOME_SESSION_ID;
+    if (currentId === HOME_SESSION_ID) {
+      if (!isBlankSession(homeSession)) setHomeSession(makeHomeSession(projectId));
+      return HOME_SESSION_ID;
+    }
     setHomeSession(makeHomeSession(projectId));
     setCurrentId(HOME_SESSION_ID);
     return HOME_SESSION_ID;
-  }, [currentId, projectId]);
+  }, [currentId, homeSession, projectId]);
 
   const setDraft = useCallback((id: string, draft: string) => {
     updateSession(id, (session) => ({ ...session, draft }));

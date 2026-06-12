@@ -68,6 +68,7 @@ pub fn run() {
             engine::chat_send,
             engine::chat_send_rich,
             engine::literature_agent_send_rich,
+            engine::chat_suggest_title,
             engine::chat_reset,
             engine::chat_set_context,
             engine::chat_delete,

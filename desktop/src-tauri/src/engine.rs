@@ -189,6 +189,32 @@ impl aris_executor::StreamObserver for DesktopStreamObserver {
     }
 }
 
+struct SilentStreamObserver;
+
+impl aris_executor::StreamObserver for SilentStreamObserver {
+    fn on_text_delta(&mut self, _text: &str) -> Result<(), RuntimeError> {
+        Ok(())
+    }
+
+    fn on_thinking_delta(&mut self, _thinking: &str) -> Result<(), RuntimeError> {
+        Ok(())
+    }
+
+    fn on_tool_call(&mut self, _id: &str, _name: &str, _input: &str) -> Result<(), RuntimeError> {
+        Ok(())
+    }
+}
+
+struct NoToolsExecutor;
+
+impl ToolExecutor for NoToolsExecutor {
+    fn execute(&mut self, tool_name: &str, _input: &str) -> Result<String, ToolError> {
+        Err(ToolError::new(format!(
+            "tool `{tool_name}` is not available while generating chat titles"
+        )))
+    }
+}
+
 fn tool_specs_for(blocked: &'static [&'static str]) -> Vec<tools::ToolSpec> {
     tools::mvp_tool_specs()
         .into_iter()
@@ -847,6 +873,75 @@ pub async fn literature_agent_send_rich(
 ) -> Result<String, String> {
     let user_message = user_message_from_request(request)?;
     run_literature_chat_turn(app, &state, session_id, user_message).await
+}
+
+#[tauri::command]
+pub async fn chat_suggest_title(user: String, assistant: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || suggest_chat_title(&user, &assistant))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn suggest_chat_title(user: &str, assistant: &str) -> Result<String, String> {
+    crate::config::apply_reviewer_environment(true);
+    let (model, _provider, executor_config) = resolve_executor()?;
+    runtime::clear_interrupt();
+    let system = "Generate a concise title for a chat conversation. Output only the title. Use the conversation language. Keep it short: ideally 4 to 12 Chinese characters or 2 to 6 English words. Do not use quotes, labels, punctuation, or markdown.";
+    let prompt = format!(
+        "User message:\n{}\n\nAssistant reply:\n{}\n\nTitle:",
+        truncate_for_prompt(user, 1200),
+        truncate_for_prompt(assistant, 1200)
+    );
+    let observer: Box<dyn aris_executor::StreamObserver> = Box::new(SilentStreamObserver);
+    let mut runtime = aris_chat::build_conversation_runtime(
+        Session::new(),
+        executor_config,
+        model,
+        false,
+        Vec::new(),
+        observer,
+        NoToolsExecutor,
+        aris_chat::permission_policy_for_tools(Vec::new(), PermissionMode::ReadOnly),
+        vec![system.to_string()],
+        runtime::RuntimeFeatureConfig::default(),
+    )?;
+    let summary = runtime
+        .run_turn_message(ConversationMessage::user_text(prompt), None)
+        .map_err(|e| e.to_string())?;
+    let title = clean_generated_title(&aris_chat::final_assistant_text(&summary));
+    if title.is_empty() {
+        return Err("empty generated title".to_string());
+    }
+    Ok(title)
+}
+
+fn clean_generated_title(raw: &str) -> String {
+    let mut title = raw
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    for prefix in ["Title:", "title:", "TITLE:", "标题:", "标题："] {
+        if let Some(rest) = title.strip_prefix(prefix) {
+            title = rest.trim().to_string();
+            break;
+        }
+    }
+    title = title
+        .trim_matches(|ch: char| {
+            ch.is_whitespace()
+                || matches!(
+                    ch,
+                    '"' | '\'' | '`' | '*' | '#' | '[' | ']' | '(' | ')' | ':' | ';' | '.'
+                        | ',' | '!' | '?' | '-' | '_' | ' ' | '「' | '」' | '“' | '”'
+                        | '《' | '》' | '。' | '，' | '！' | '？' | '：' | '；'
+                )
+        })
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    title.chars().take(48).collect()
 }
 
 async fn run_chat_turn(
@@ -2443,5 +2538,12 @@ mod tests {
         let message = result.message.expect("message");
         assert!(message.contains("/research-lit"));
         assert!(message.contains("# Research Literature Review"));
+    }
+
+    #[test]
+    fn generated_chat_title_is_cleaned_for_sidebar() {
+        let title = clean_generated_title("标题：\"贝叶斯估计写作计划。\"\n\nextra");
+
+        assert_eq!(title, "贝叶斯估计写作计划");
     }
 }

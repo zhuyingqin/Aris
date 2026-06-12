@@ -12,6 +12,7 @@ const apiMocks = vi.hoisted(() => ({
   skillsList: vi.fn(() => Promise.resolve([])),
   projectChatStarters: vi.fn(() => Promise.resolve([])),
   chatRunCommand: vi.fn(),
+  chatSuggestTitle: vi.fn(() => Promise.resolve("Concise title")),
   chatSetContext: vi.fn(() => Promise.resolve()),
   chatDelete: vi.fn(() => Promise.resolve()),
   chatUiSessionsLoad: vi.fn(() => Promise.resolve([])),
@@ -44,7 +45,24 @@ vi.mock("./ChatThread", () => ({
 }));
 
 vi.mock("./ChatComposer", () => ({
-  default: () => <div data-testid="chat-composer" />,
+  default: ({
+    input,
+    onInputChange,
+    onSubmit,
+  }: {
+    input: string;
+    onInputChange: (value: string) => void;
+    onSubmit: () => void;
+  }) => (
+    <div data-testid="chat-composer">
+      <textarea
+        aria-label="Message ARIS"
+        value={input}
+        onChange={(event) => onInputChange(event.currentTarget.value)}
+      />
+      <button onClick={onSubmit}>Send message</button>
+    </div>
+  ),
 }));
 
 vi.mock("./ChatSidebar", () => ({
@@ -163,5 +181,23 @@ describe("Chat export action", () => {
     expect(apiMocks.chatRunCommand.mock.calls[0][0]).not.toBe(session.id);
     expect(useStore.getState().pendingChatRunInput).toBeNull();
     expect(await screen.findByText("Agent search started")).toBeTruthy();
+  });
+
+  it("uses the configured LLM to create a concise title after the first reply", async () => {
+    apiMocks.chatSend.mockResolvedValue("我会帮你组织成摘要、方法和实验三个部分。");
+    apiMocks.chatSuggestTitle.mockResolvedValue("贝叶斯写作计划");
+
+    render(<Chat />);
+
+    await userEvent.type(screen.getByRole("textbox", { name: "Message ARIS" }), "帮我写贝叶斯估计论文");
+    await userEvent.click(screen.getByRole("button", { name: "Send message" }));
+
+    await waitFor(() =>
+      expect(apiMocks.chatSuggestTitle).toHaveBeenCalledWith(
+        "帮我写贝叶斯估计论文",
+        expect.stringContaining("摘要"),
+      ),
+    );
+    expect(await screen.findAllByText("贝叶斯写作计划")).toHaveLength(2);
   });
 });
