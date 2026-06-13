@@ -361,73 +361,46 @@ impl McpServerManager {
         let mut discovered_tools = Vec::new();
 
         for server_name in server_names {
-            self.ensure_server_ready(&server_name).await?;
-            self.clear_routes_for_server(&server_name);
-
-            let mut cursor = None;
-            loop {
-                let request_id = self.take_request_id();
-                let response = {
-                    let server = self.server_mut(&server_name)?;
-                    let process = server.process.as_mut().ok_or_else(|| {
-                        McpServerManagerError::InvalidResponse {
-                            server_name: server_name.clone(),
-                            method: "tools/list",
-                            details: "server process missing after initialization".to_string(),
-                        }
-                    })?;
-                    process
-                        .list_tools(
-                            request_id,
-                            Some(McpListToolsParams {
-                                cursor: cursor.clone(),
-                            }),
-                        )
-                        .await?
-                };
-
-                if let Some(error) = response.error {
-                    return Err(McpServerManagerError::JsonRpc {
-                        server_name: server_name.clone(),
-                        method: "tools/list",
-                        error,
-                    });
-                }
-
-                let result =
-                    response
-                        .result
-                        .ok_or_else(|| McpServerManagerError::InvalidResponse {
-                            server_name: server_name.clone(),
-                            method: "tools/list",
-                            details: "missing result payload".to_string(),
-                        })?;
-
-                for tool in result.tools {
-                    let qualified_name = mcp_tool_name(&server_name, &tool.name);
-                    self.tool_index.insert(
-                        qualified_name.clone(),
-                        ToolRoute {
-                            server_name: server_name.clone(),
-                            raw_name: tool.name.clone(),
-                        },
-                    );
-                    discovered_tools.push(ManagedMcpTool {
-                        server_name: server_name.clone(),
-                        qualified_name,
-                        raw_name: tool.name.clone(),
-                        tool,
-                    });
-                }
-
-                match result.next_cursor {
-                    Some(next_cursor) => cursor = Some(next_cursor),
-                    None => break,
-                }
-            }
+            discovered_tools.extend(self.discover_server_tools(&server_name).await?);
         }
 
         Ok(discovered_tools)
+    }
+
+    pub async fn discover_tools_resilient(
+        &mut self,
+    ) -> (Vec<ManagedMcpTool>, Vec<(String, String)>) {
+        let server_names = self.servers.keys().cloned().collect::<Vec<_>>();
+        let mut discovered_tools = Vec::new();
+        let mut failures = Vec::new();
+
+        for server_name in server_names {
+            match self.discover_server_tools(&server_name).await {
+                Ok(tools) => discovered_tools.extend(tools),
+                Err(error) => failures.push((server_name, error.to_string())),
+            }
+        }
+
+        (discovered_tools, failures)
+    }
+
+    /// Restore routes from a prior discovery without starting MCP processes.
+    ///
+    /// The next tool call still initializes its server lazily. This lets chat
+    /// runtimes reuse stable tool metadata without paying `initialize` and
+    /// `tools/list` latency before every model turn.
+    pub fn preload_discovered_tools(&mut self, tools: &[ManagedMcpTool]) {
+        for managed in tools {
+            if self.servers.contains_key(&managed.server_name) {
+                self.tool_index.insert(
+                    managed.qualified_name.clone(),
+                    ToolRoute {
+                        server_name: managed.server_name.clone(),
+                        raw_name: managed.raw_name.clone(),
+                    },
+                );
+            }
+        }
     }
 
     pub async fn call_tool(
@@ -485,6 +458,78 @@ impl McpServerManager {
     fn clear_routes_for_server(&mut self, server_name: &str) {
         self.tool_index
             .retain(|_, route| route.server_name != server_name);
+    }
+
+    async fn discover_server_tools(
+        &mut self,
+        server_name: &str,
+    ) -> Result<Vec<ManagedMcpTool>, McpServerManagerError> {
+        self.clear_routes_for_server(server_name);
+        self.ensure_server_ready(server_name).await?;
+
+        let mut cursor = None;
+        let mut discovered_tools = Vec::new();
+        loop {
+            let request_id = self.take_request_id();
+            let response = {
+                let server = self.server_mut(server_name)?;
+                let process = server.process.as_mut().ok_or_else(|| {
+                    McpServerManagerError::InvalidResponse {
+                        server_name: server_name.to_string(),
+                        method: "tools/list",
+                        details: "server process missing after initialization".to_string(),
+                    }
+                })?;
+                process
+                    .list_tools(
+                        request_id,
+                        Some(McpListToolsParams {
+                            cursor: cursor.clone(),
+                        }),
+                    )
+                    .await?
+            };
+
+            if let Some(error) = response.error {
+                return Err(McpServerManagerError::JsonRpc {
+                    server_name: server_name.to_string(),
+                    method: "tools/list",
+                    error,
+                });
+            }
+
+            let result = response
+                .result
+                .ok_or_else(|| McpServerManagerError::InvalidResponse {
+                    server_name: server_name.to_string(),
+                    method: "tools/list",
+                    details: "missing result payload".to_string(),
+                })?;
+
+            for tool in result.tools {
+                let qualified_name = mcp_tool_name(server_name, &tool.name);
+                self.tool_index.insert(
+                    qualified_name.clone(),
+                    ToolRoute {
+                        server_name: server_name.to_string(),
+                        raw_name: tool.name.clone(),
+                    },
+                );
+                discovered_tools.push(ManagedMcpTool {
+                    server_name: server_name.to_string(),
+                    qualified_name,
+                    raw_name: tool.name.clone(),
+                    tool,
+                });
+            }
+
+            match result.next_cursor {
+                Some(next_cursor) => cursor = Some(next_cursor),
+                None => break,
+            }
+        }
+
+        Ok(discovered_tools)
     }
 
     fn server_mut(
@@ -594,6 +639,7 @@ pub struct McpStdioProcess {
     child: Child,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
+    framing: McpStdioFraming,
     /// v0.4.13 P1.D: per-server timeout override copied from the
     /// transport. `None` means fall through to
     /// `MCP_REQUEST_TIMEOUT_SECS` env / 300s default at request time.
@@ -601,6 +647,12 @@ pub struct McpStdioProcess {
     /// clamp + env-fallback logic stays centralised in
     /// `mcp_request_timeout`.
     request_timeout_override_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum McpStdioFraming {
+    JsonLines,
+    ContentLength,
 }
 
 impl McpStdioProcess {
@@ -627,6 +679,15 @@ impl McpStdioProcess {
             child,
             stdin,
             stdout: BufReader::new(stdout),
+            framing: if transport
+                .env
+                .get("ARIS_MCP_STDIO_FRAMING")
+                .is_some_and(|value| value.eq_ignore_ascii_case("content-length"))
+            {
+                McpStdioFraming::ContentLength
+            } else {
+                McpStdioFraming::JsonLines
+            },
             request_timeout_override_secs: transport.request_timeout_secs,
         })
     }
@@ -671,7 +732,20 @@ impl McpStdioProcess {
     }
 
     pub async fn read_frame(&mut self) -> io::Result<Vec<u8>> {
-        let mut content_length = None;
+        self.read_content_length_frame_after_header(None).await
+    }
+
+    async fn read_content_length_frame_after_header(
+        &mut self,
+        first_line: Option<String>,
+    ) -> io::Result<Vec<u8>> {
+        let mut content_length = first_line
+            .as_deref()
+            .and_then(|line| line.strip_prefix("Content-Length:"))
+            .map(str::trim)
+            .map(str::parse::<usize>)
+            .transpose()
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         loop {
             let mut line = String::new();
             let bytes_read = self.stdout.read_line(&mut line).await?;
@@ -701,14 +775,47 @@ impl McpStdioProcess {
         Ok(payload)
     }
 
+    async fn read_jsonrpc_payload(&mut self) -> io::Result<Vec<u8>> {
+        let mut line = String::new();
+        let bytes_read = self.stdout.read_line(&mut line).await?;
+        if bytes_read == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "MCP stdio stream closed while reading JSON-RPC message",
+            ));
+        }
+        if line.starts_with("Content-Length:") {
+            return self
+                .read_content_length_frame_after_header(Some(line))
+                .await;
+        }
+        let payload = line.trim_end_matches(['\r', '\n']).as_bytes().to_vec();
+        if payload.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "MCP stdio server returned an empty line",
+            ));
+        }
+        Ok(payload)
+    }
+
     pub async fn write_jsonrpc_message<T: Serialize>(&mut self, message: &T) -> io::Result<()> {
-        let body = serde_json::to_vec(message)
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        self.write_frame(&body).await
+        match self.framing {
+            McpStdioFraming::JsonLines => {
+                let body = serde_json::to_string(message)
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+                self.write_line(&body).await
+            }
+            McpStdioFraming::ContentLength => {
+                let body = serde_json::to_vec(message)
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+                self.write_frame(&body).await
+            }
+        }
     }
 
     pub async fn read_jsonrpc_message<T: DeserializeOwned>(&mut self) -> io::Result<T> {
-        let payload = self.read_frame().await?;
+        let payload = self.read_jsonrpc_payload().await?;
         serde_json::from_slice(&payload)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
     }
@@ -783,7 +890,7 @@ impl McpStdioProcess {
         let send_then_read = async {
             self.send_request(&request).await?;
             loop {
-                let payload = self.read_frame().await?;
+                let payload = self.read_jsonrpc_payload().await?;
                 let value: JsonValue = serde_json::from_slice(&payload)
                     .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
                 let frame_id = value.as_object().and_then(|object| object.get("id"));
@@ -1052,18 +1159,7 @@ mod tests {
         let script = [
             "#!/usr/bin/env python3",
             "import json, sys",
-            "header = b''",
-            r"while not header.endswith(b'\r\n\r\n'):",
-            "    chunk = sys.stdin.buffer.read(1)",
-            "    if not chunk:",
-            "        raise SystemExit(1)",
-            "    header += chunk",
-            "length = 0",
-            r"for line in header.decode().split('\r\n'):",
-            r"    if line.lower().startswith('content-length:'):",
-            r"        length = int(line.split(':', 1)[1].strip())",
-            "payload = sys.stdin.buffer.read(length)",
-            "request = json.loads(payload.decode())",
+            "request = json.loads(sys.stdin.buffer.readline().decode())",
             r"assert request['jsonrpc'] == '2.0'",
             r"assert request['method'] == 'initialize'",
             r"response = json.dumps({",
@@ -1074,8 +1170,8 @@ mod tests {
             r"        'capabilities': {'tools': {}},",
             r"        'serverInfo': {'name': 'fake-mcp', 'version': '0.1.0'}",
             r"    }",
-            r"}).encode()",
-            r"sys.stdout.buffer.write(f'Content-Length: {len(response)}\r\n\r\n'.encode() + response)",
+            r"})",
+            r"sys.stdout.write(response + '\n')",
             "sys.stdout.buffer.flush()",
             "",
         ]
@@ -1326,10 +1422,30 @@ mod tests {
 
     fn script_transport(script_path: &Path) -> crate::mcp_client::McpStdioTransport {
         crate::mcp_client::McpStdioTransport {
-            command: "python3".to_string(),
+            command: python_command().to_string(),
+            args: vec![script_path.to_string_lossy().into_owned()],
+            env: BTreeMap::from([(
+                "ARIS_MCP_STDIO_FRAMING".to_string(),
+                "content-length".to_string(),
+            )]),
+            request_timeout_secs: None,
+        }
+    }
+
+    fn standard_script_transport(script_path: &Path) -> crate::mcp_client::McpStdioTransport {
+        crate::mcp_client::McpStdioTransport {
+            command: python_command().to_string(),
             args: vec![script_path.to_string_lossy().into_owned()],
             env: BTreeMap::new(),
             request_timeout_secs: None,
+        }
+    }
+
+    fn python_command() -> &'static str {
+        if cfg!(windows) {
+            "python"
+        } else {
+            "python3"
         }
     }
 
@@ -1346,9 +1462,13 @@ mod tests {
         ScopedMcpServerConfig {
             scope: ConfigSource::Local,
             config: McpServerConfig::Stdio(McpStdioServerConfig {
-                command: "python3".to_string(),
+                command: python_command().to_string(),
                 args: vec![script_path.to_string_lossy().into_owned()],
                 env: BTreeMap::from([
+                    (
+                        "ARIS_MCP_STDIO_FRAMING".to_string(),
+                        "content-length".to_string(),
+                    ),
                     ("MCP_SERVER_LABEL".to_string(), label.to_string()),
                     (
                         "MCP_LOG_PATH".to_string(),
@@ -1403,14 +1523,14 @@ mod tests {
     }
 
     #[test]
-    fn round_trips_initialize_request_and_response_over_stdio_frames() {
+    fn round_trips_initialize_request_and_response_over_standard_json_lines() {
         let runtime = Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("runtime");
         runtime.block_on(async {
             let script_path = write_jsonrpc_script();
-            let transport = script_transport(&script_path);
+            let transport = standard_script_transport(&script_path);
             let mut process = McpStdioProcess::spawn(&transport).expect("spawn transport directly");
 
             let response = process
@@ -1450,14 +1570,14 @@ mod tests {
     }
 
     #[test]
-    fn write_jsonrpc_request_emits_content_length_frame() {
+    fn write_jsonrpc_request_emits_standard_json_line() {
         let runtime = Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("runtime");
         runtime.block_on(async {
             let script_path = write_jsonrpc_script();
-            let transport = script_transport(&script_path);
+            let transport = standard_script_transport(&script_path);
             let mut process = McpStdioProcess::spawn(&transport).expect("spawn transport directly");
             let request = JsonRpcRequest::new(
                 JsonRpcId::Number(7),
@@ -1668,6 +1788,48 @@ mod tests {
             assert_eq!(tools[0].qualified_name, mcp_tool_name("alpha", "echo"));
             assert_eq!(tools[0].tool.name, "echo");
             assert!(manager.unsupported_servers().is_empty());
+
+            manager.shutdown().await.expect("shutdown");
+            cleanup_script(&script_path);
+        });
+    }
+
+    #[test]
+    fn resilient_discovery_keeps_healthy_servers() {
+        let runtime = Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let script_path = write_manager_mcp_server_script();
+            let root = script_path.parent().expect("script parent");
+            let log_path = root.join("healthy.log");
+            let servers = BTreeMap::from([
+                (
+                    "broken".to_string(),
+                    ScopedMcpServerConfig {
+                        scope: ConfigSource::Local,
+                        config: McpServerConfig::Stdio(McpStdioServerConfig {
+                            command: "__aris_missing_mcp_command__".to_string(),
+                            args: Vec::new(),
+                            env: BTreeMap::new(),
+                            request_timeout_secs: Some(1),
+                        }),
+                    },
+                ),
+                (
+                    "healthy".to_string(),
+                    manager_server_config(&script_path, "healthy", &log_path),
+                ),
+            ]);
+            let mut manager = McpServerManager::from_servers(&servers);
+
+            let (tools, failures) = manager.discover_tools_resilient().await;
+
+            assert_eq!(tools.len(), 1);
+            assert_eq!(tools[0].server_name, "healthy");
+            assert_eq!(failures.len(), 1);
+            assert_eq!(failures[0].0, "broken");
 
             manager.shutdown().await.expect("shutdown");
             cleanup_script(&script_path);
@@ -2017,12 +2179,18 @@ mod tests {
         ScopedMcpServerConfig {
             scope: ConfigSource::Local,
             config: McpServerConfig::Stdio(McpStdioServerConfig {
-                command: "python3".to_string(),
+                command: python_command().to_string(),
                 args: vec![script_path.to_string_lossy().into_owned()],
-                env: BTreeMap::from([(
-                    "MCP_LOG_PATH".to_string(),
-                    log_path.to_string_lossy().into_owned(),
-                )]),
+                env: BTreeMap::from([
+                    (
+                        "ARIS_MCP_STDIO_FRAMING".to_string(),
+                        "content-length".to_string(),
+                    ),
+                    (
+                        "MCP_LOG_PATH".to_string(),
+                        log_path.to_string_lossy().into_owned(),
+                    ),
+                ]),
                 request_timeout_secs: None,
             }),
         }

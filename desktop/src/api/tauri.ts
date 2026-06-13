@@ -11,6 +11,10 @@ import type {
   ConfigTestResult,
   ConfigView,
   DesktopCommandSpec,
+  McpConfigView,
+  McpStdioServerInput,
+  McpTestResult,
+  PermissionModeView,
   ProjectView,
   RunEvent,
   SessionSummary,
@@ -80,6 +84,14 @@ export const configSet = (patch: ConfigPatch) =>
   invoke<ConfigView>("config_set", { patch });
 export const configTest = (patch: ConfigPatch) =>
   invoke<ConfigTestResult>("config_test", { patch });
+export const projectPermissionGet = () =>
+  invoke<PermissionModeView>("project_permission_get");
+export const projectPermissionSet = (mode: string) =>
+  invoke<PermissionModeView>("project_permission_set", { mode });
+export const mcpConfigGet = () => invoke<McpConfigView>("mcp_config_get");
+export const mcpConfigSet = (servers: McpStdioServerInput[]) =>
+  invoke<McpConfigView>("mcp_config_set", { servers });
+export const mcpConfigTest = () => invoke<McpTestResult>("mcp_config_test");
 
 export const skillsList = () => invoke<SkillMeta[]>("skills_list");
 export const skillView = (name: string) =>
@@ -116,11 +128,17 @@ export const fileSearch = (pattern: string, root?: string) =>
 
 export const fileRead = (path: string, limit?: number) =>
   invoke<string>("file_read", { path, limit: limit ?? null });
+export const fileOpen = (path: string) =>
+  invoke<void>("file_open", { path });
 export const projectChatStarters = () => invoke<string[]>("project_chat_starters");
 
 // ── Chat engine (P2) ──────────────────────────────────────────────────────────
 
 export const chatStatus = () => invoke<ChatStatus>("chat_status");
+export const chatPermissionGet = (sessionId: string) =>
+  invoke<PermissionModeView>("chat_permission_get", { sessionId });
+export const chatPermissionSet = (sessionId: string, mode: string) =>
+  invoke<PermissionModeView>("chat_permission_set", { sessionId, mode });
 export const chatCommandSpecs = () =>
   invoke<DesktopCommandSpec[]>("chat_command_specs");
 export const chatRunCommand = (sessionId: string, input: string) =>

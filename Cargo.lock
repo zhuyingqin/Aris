@@ -36,6 +36,7 @@ dependencies = [
  "aris-executor",
  "runtime",
  "serde_json",
+ "tokio",
  "tools",
 ]
 

@@ -20,6 +20,7 @@ const PREVIEW_PROJECT: DesktopProject = {
 export type Tab =
   | "chat"
   | "literature"
+  | "mcp"
   | "settings"
   | "skills"
   | "sessions";

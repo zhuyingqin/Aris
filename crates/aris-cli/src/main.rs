@@ -47,7 +47,7 @@ use runtime::{
     ProjectContext, RuntimeError, Session, TokenUsage, ToolError, ToolExecutor, UsageTracker,
 };
 use serde_json::json;
-use tools::{execute_tool, mvp_tool_specs, ToolSpec};
+use tools::{execute_tool, mvp_tool_specs};
 
 const DEFAULT_MODEL: &str = "claude-opus-4-7";
 const DEFAULT_OAUTH_CALLBACK_PORT: u16 = 4545;
@@ -508,6 +508,10 @@ fn normalize_allowed_tools(values: &[String]) -> Result<Option<AllowedToolSet>, 
             .filter(|token| !token.is_empty())
         {
             let normalized = normalize_tool_name(token);
+            if normalized.starts_with("mcp__") {
+                allowed.insert(token.trim().to_string());
+                continue;
+            }
             let canonical = name_map.get(&normalized).ok_or_else(|| {
                 format!(
                     "unsupported tool in --allowedTools: {token} (expected one of: {})",
@@ -4053,9 +4057,20 @@ fn build_runtime(
     ConversationRuntime<aris_executor::ExecutorClient, CliToolExecutor>,
     Box<dyn std::error::Error>,
 > {
-    let tool_specs = filter_tool_specs(allowed_tools.as_ref());
     let observer = cli_stream_observer(emit_output);
     let feature_config = build_runtime_feature_config()?;
+    let tool_specs = aris_chat::chat_tool_specs(filter_tool_specs(allowed_tools.as_ref()));
+    let mcp_bundle = aris_chat::attach_mcp_tools(
+        BuiltinCliToolExecutor::new(allowed_tools.clone()),
+        tool_specs,
+        &feature_config,
+        allowed_tools.as_ref(),
+    );
+    for warning in &mcp_bundle.warnings {
+        eprintln!("\x1b[33mwarning\x1b[0m: {warning}");
+    }
+    let permission_policy =
+        aris_chat::permission_policy_for_tools(mcp_bundle.tool_specs.clone(), permission_mode);
     let event_sink = build_event_sink(&feature_config);
     let executor_config = aris_chat::resolve_env_executor_config(|| {
         resolve_cli_auth_source().map_err(|error| error.to_string())
@@ -4066,10 +4081,10 @@ fn build_runtime(
         executor_config,
         model,
         enable_tools,
-        tool_specs,
+        mcp_bundle.tool_specs,
         observer,
-        CliToolExecutor::new(allowed_tools, emit_output),
-        permission_policy(permission_mode),
+        CliToolExecutor::new(mcp_bundle.executor, emit_output),
+        permission_policy,
         system_prompt,
         feature_config,
     )
@@ -4778,23 +4793,17 @@ fn response_to_events(
     Ok(events)
 }
 
-struct CliToolExecutor {
-    renderer: TerminalRenderer,
-    emit_output: bool,
+struct BuiltinCliToolExecutor {
     allowed_tools: Option<AllowedToolSet>,
 }
 
-impl CliToolExecutor {
-    fn new(allowed_tools: Option<AllowedToolSet>, emit_output: bool) -> Self {
-        Self {
-            renderer: TerminalRenderer::new(),
-            emit_output,
-            allowed_tools,
-        }
+impl BuiltinCliToolExecutor {
+    fn new(allowed_tools: Option<AllowedToolSet>) -> Self {
+        Self { allowed_tools }
     }
 }
 
-impl ToolExecutor for CliToolExecutor {
+impl ToolExecutor for BuiltinCliToolExecutor {
     fn execute(&mut self, tool_name: &str, input: &str) -> Result<String, ToolError> {
         if self
             .allowed_tools
@@ -4807,7 +4816,38 @@ impl ToolExecutor for CliToolExecutor {
         }
         let value = serde_json::from_str(input)
             .map_err(|error| ToolError::new(format!("invalid tool input JSON: {error}")))?;
-        match execute_tool(tool_name, &value) {
+        execute_tool(tool_name, &value).map_err(ToolError::new)
+    }
+}
+
+struct CliToolExecutor {
+    renderer: TerminalRenderer,
+    emit_output: bool,
+    inner: aris_chat::McpToolExecutor<BuiltinCliToolExecutor>,
+}
+
+impl CliToolExecutor {
+    fn new(inner: aris_chat::McpToolExecutor<BuiltinCliToolExecutor>, emit_output: bool) -> Self {
+        Self {
+            renderer: TerminalRenderer::new(),
+            emit_output,
+            inner,
+        }
+    }
+}
+
+impl ToolExecutor for CliToolExecutor {
+    fn execute(&mut self, tool_name: &str, input: &str) -> Result<String, ToolError> {
+        self.execute_with_id("", tool_name, input)
+    }
+
+    fn execute_with_id(
+        &mut self,
+        tool_use_id: &str,
+        tool_name: &str,
+        input: &str,
+    ) -> Result<String, ToolError> {
+        match self.inner.execute_with_id(tool_use_id, tool_name, input) {
             Ok(output) => {
                 if self.emit_output {
                     let markdown = format_tool_result(tool_name, &output, false);
@@ -4819,23 +4859,15 @@ impl ToolExecutor for CliToolExecutor {
             }
             Err(error) => {
                 if self.emit_output {
-                    let markdown = format_tool_result(tool_name, &error, true);
+                    let markdown = format_tool_result(tool_name, &error.to_string(), true);
                     self.renderer
                         .stream_markdown(&markdown, &mut io::stdout())
                         .map_err(|stream_error| ToolError::new(stream_error.to_string()))?;
                 }
-                Err(ToolError::new(error))
+                Err(error)
             }
         }
     }
-}
-
-fn permission_policy(mode: PermissionMode) -> runtime::PermissionPolicy {
-    aris_chat::permission_policy_for_tools(tool_permission_specs(), mode)
-}
-
-fn tool_permission_specs() -> Vec<ToolSpec> {
-    mvp_tool_specs()
 }
 
 #[cfg(test)]
@@ -5158,44 +5190,26 @@ fn run_doctor() -> Result<(), Box<dyn std::error::Error>> {
 
     // Check 5: Codex MCP in config
     print!("  Codex MCP:    ");
-    let home = runtime::home_dir();
-    let config_path = PathBuf::from(&home).join(".claude.json");
-    if config_path.exists() {
-        if let Ok(content) = fs::read_to_string(&config_path) {
-            if let Ok(config) = serde_json::from_str::<serde_json::Value>(&content) {
-                if config
-                    .get("mcpServers")
-                    .and_then(|s| s.as_object())
-                    .map_or(false, |s| s.contains_key("codex"))
-                {
-                    println!("OK (configured in ~/.claude.json)");
-                } else {
-                    println!("NOT CONFIGURED (edit ~/.claude.json by hand or via Claude Code's own `claude mcp add`)");
-                }
-            } else {
-                println!("ERROR (invalid ~/.claude.json)");
-            }
-        } else {
-            println!("ERROR (cannot read ~/.claude.json)");
-        }
+    let loaded_runtime_config = runtime::ConfigLoader::default_for(&cwd).load().ok();
+    if loaded_runtime_config
+        .as_ref()
+        .is_some_and(|config| config.mcp().get("codex").is_some())
+    {
+        println!("OK (configured)");
+    } else if loaded_runtime_config.is_some() {
+        println!("NOT CONFIGURED (add `codex` under mcpServers)");
     } else {
-        println!("NOT CONFIGURED (no ~/.claude.json)");
+        println!("ERROR (could not load MCP configuration)");
     }
 
-    // Check 6 (v0.4.14 M1/M2): MCP dispatch experimental warning.
-    // Surfaces only when mcpServers are actually configured so users
-    // who don't use MCP aren't bothered.
-    let mcp_server_count = runtime::ConfigLoader::default_for(&cwd)
-        .load()
-        .map(|rc| rc.mcp().servers().len())
-        .unwrap_or(0);
+    // Check 6: MCP dispatch status.
+    let mcp_server_count = loaded_runtime_config
+        .as_ref()
+        .map_or(0, |config| config.mcp().servers().len());
     if mcp_server_count > 0 {
         println!();
         println!(
-            "\x1b[33m⚠  MCP servers configured ({mcp_server_count}) but currently only stdio test/diagnostics.\x1b[0m"
-        );
-        println!(
-            "\x1b[33m   Full tool dispatch into LLM context lands in v0.4.16. (See README MCP section.)\x1b[0m"
+            "\x1b[32m✓  MCP stdio tool dispatch enabled ({mcp_server_count} configured).\x1b[0m"
         );
     }
 
@@ -5334,11 +5348,11 @@ mod tests {
         deploy_meta_opt_hooks_to, filter_tool_specs, format_compact_report, format_cost_report,
         format_model_report, format_model_switch_report, format_permissions_report,
         format_permissions_switch_report, format_resume_report, format_status_report,
-        format_tool_call_start, format_tool_result, normalize_permission_mode, parse_args,
-        parse_git_status_metadata, print_help_to, push_output_block, render_config_report,
-        render_memory_report, render_repl_help, resolve_model_alias, response_to_events,
-        resume_supported_slash_commands, status_context, CliAction, CliOutputFormat, SlashCommand,
-        StatusUsage, DEFAULT_MODEL,
+        format_tool_call_start, format_tool_result, normalize_allowed_tools,
+        normalize_permission_mode, parse_args, parse_git_status_metadata, print_help_to,
+        push_output_block, render_config_report, render_memory_report, render_repl_help,
+        resolve_model_alias, response_to_events, resume_supported_slash_commands, status_context,
+        CliAction, CliOutputFormat, SlashCommand, StatusUsage, DEFAULT_MODEL,
     };
     use api::{MessageResponse, OutputContentBlock, Usage};
     use runtime::{AssistantEvent, ContentBlock, ConversationMessage, MessageRole, PermissionMode};
@@ -5566,6 +5580,14 @@ mod tests {
     }
 
     #[test]
+    fn allowed_tools_accept_mcp_qualified_names() {
+        let allowed = normalize_allowed_tools(&["mcp__codex__codex-reply".to_string()])
+            .expect("MCP tool should be accepted")
+            .expect("allowlist");
+        assert!(allowed.contains("mcp__codex__codex-reply"));
+    }
+
+    #[test]
     fn shared_help_uses_resume_annotation_copy() {
         let help = commands::render_slash_command_help();
         assert!(help.contains("Slash commands"));
@@ -5773,7 +5795,7 @@ mod tests {
     fn status_context_reads_real_workspace_metadata() {
         let context = status_context(None).expect("status context should load");
         assert!(context.cwd.is_absolute());
-        assert_eq!(context.discovered_config_files, 5);
+        assert_eq!(context.discovered_config_files, 6);
         assert!(context.loaded_config_files <= context.discovered_config_files);
     }
 

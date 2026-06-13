@@ -240,6 +240,22 @@ describe("Literature library", () => {
     expect(screen.getByRole("button", { name: "已下载 1" })).toBeTruthy();
   });
 
+  it("hands papers without a direct PDF link to Playwright MCP", async () => {
+    const user = userEvent.setup();
+    const withoutDirectPdf = fixtureLibrary();
+    withoutDirectPdf.papers[0].pdf = { status: "none" };
+    mocks.literatureLoad.mockResolvedValue(withoutDirectPdf);
+
+    render(<Literature />);
+    await screen.findAllByText("Persisted Paper on Grounded Reading");
+    await user.click(screen.getByRole("button", { name: "下载 PDF" }));
+
+    expect(mocks.literatureDownloadPdf).not.toHaveBeenCalled();
+    expect(useStore.getState().pendingChatInput).toContain("Playwright MCP");
+    expect(useStore.getState().pendingChatInput).toContain("arxiv:1111.00001");
+    expect(useStore.getState().tab).toBe("chat");
+  });
+
   it("deletes a paper from the library after confirmation", async () => {
     const user = userEvent.setup();
     vi.spyOn(window, "confirm").mockReturnValue(true);

@@ -3,6 +3,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { useStore, type Tab } from "./store";
 import Chat from "./chat/Chat";
 import Literature from "./literature/Literature";
+import McpPage from "./mcp/McpPage";
 import Settings from "./settings/Settings";
 import Skills from "./skills/Skills";
 import Sessions from "./sessions/Sessions";
@@ -62,15 +63,21 @@ const NAV_GROUPS: { group: string; items: NavItem[] }[] = [
   },
   {
     group: "System",
-    items: [{
-      id: "settings", label: "Settings",
-      icon: <svg width="16" height="16" viewBox="0 0 16 16" fill="none"
-        stroke="currentColor" strokeWidth="1.45" strokeLinecap="round" strokeLinejoin="round"
-        aria-hidden="true">
-        <circle cx="8" cy="8" r="2.3" />
-        <path d="M8 1.5V3M8 13v1.5M14.5 8H13M3 8H1.5M12.4 3.6l-1.1 1.1M4.7 11.3l-1.1 1.1M12.4 12.4l-1.1-1.1M4.7 4.7l-1.1-1.1" />
-      </svg>,
-    }],
+    items: [
+      {
+        id: "mcp", label: "MCP",
+        icon: <IC d="M3 5.5h10M3 10.5h10M5 2.5v6M11 7.5v6" />,
+      },
+      {
+        id: "settings", label: "Settings",
+        icon: <svg width="16" height="16" viewBox="0 0 16 16" fill="none"
+          stroke="currentColor" strokeWidth="1.45" strokeLinecap="round" strokeLinejoin="round"
+          aria-hidden="true">
+          <circle cx="8" cy="8" r="2.3" />
+          <path d="M8 1.5V3M8 13v1.5M14.5 8H13M3 8H1.5M12.4 3.6l-1.1 1.1M4.7 11.3l-1.1 1.1M12.4 12.4l-1.1-1.1M4.7 4.7l-1.1-1.1" />
+        </svg>,
+      },
+    ],
   },
 ];
 
@@ -416,6 +423,7 @@ export default function App() {
         {tab === "literature" && <Literature />}
         {tab === "skills" && <Skills />}
         {tab === "sessions" && <Sessions />}
+        {tab === "mcp" && <McpPage />}
         {tab === "settings" && <Settings />}
 
         {error && (

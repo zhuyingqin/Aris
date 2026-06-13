@@ -1,5 +1,6 @@
 import { memo, useMemo, useState } from "react";
 import type { ChatBlock, ChatTurn } from "../types";
+import { fileOpen } from "../api/tauri";
 import MarkdownContent, { ThinkBlock } from "./MarkdownContent";
 import { textFromTurn } from "./model";
 
@@ -65,14 +66,43 @@ function ToolCall({ block }: { block: Extract<ChatBlock, { kind: "tool" }> }) {
   const running = block.output === undefined;
   const status = running ? "Running" : block.isError ? "Failed" : change ? "Modified file" : "Succeeded";
   const className = running ? "tool-running" : block.isError ? "tool-error" : change ? "tool-change" : "tool-done";
+  const toggle = () => {
+    if (!running) setOpen((value) => !value);
+  };
   return (
     <div className={`chat-tool ${className}`}>
-      <button className="chat-tool-header" onClick={() => setOpen((value) => !value)} disabled={running}>
+      <div
+        className="chat-tool-header"
+        role="button"
+        tabIndex={running ? -1 : 0}
+        aria-disabled={running}
+        onClick={toggle}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            toggle();
+          }
+        }}
+      >
         <span className="tool-status-icon">{running ? "◌" : block.isError ? "×" : change ? "±" : "✓"}</span>
         <span className="tool-status-label">{status}</span>
-        <span className="tool-name">{change?.path ?? block.name}</span>
+        {change ? (
+          <button
+            type="button"
+            className="tool-name tool-file-link"
+            title="Open generated file"
+            onClick={(event) => {
+              event.stopPropagation();
+              void fileOpen(change.path).catch((error) => console.error("Unable to open file", error));
+            }}
+          >
+            {change.path}
+          </button>
+        ) : (
+          <span className="tool-name">{block.name}</span>
+        )}
         {!running && <span className="tool-collapse-btn">{open ? "▾" : "▸"}</span>}
-      </button>
+      </div>
       {open && (
         <div className="chat-tool-body">
           {change ? (

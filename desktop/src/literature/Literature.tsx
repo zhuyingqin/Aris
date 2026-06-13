@@ -175,6 +175,33 @@ export default function Literature() {
     setTab("chat");
   };
 
+  const openBrowserDownload = (paper: LiteraturePaper) => {
+    const landingPage = paper.url
+      ?? (paper.doi ? `https://doi.org/${paper.doi}` : undefined)
+      ?? (paper.arxivId ? `https://arxiv.org/abs/${paper.arxivId}` : undefined)
+      ?? "unknown";
+    openAgentChat([
+      "Use the configured Playwright MCP browser tools to obtain the legitimate PDF for this library paper.",
+      `Paper id: ${paper.id}`,
+      `Title: ${paper.title}`,
+      `Landing page: ${landingPage}`,
+      `DOI: ${paper.doi ?? "unknown"}`,
+      "Reuse the browser tab/session I approve. Do not bypass paywalls or security interstitials.",
+      "If login, CAPTCHA, or user approval is needed, pause and ask me.",
+      "Download into papers/.browser-inbox, verify that the file is a PDF, then move it into papers/ with a stable filename and update only this record in papers/library.json.",
+    ].join("\n"));
+  };
+
+  const downloadOrBrowse = async (id: string) => {
+    const paper = library.papers.find((entry) => entry.id === id);
+    if (!paper) return;
+    if (!paper.pdf.url) {
+      openBrowserDownload(paper);
+      return;
+    }
+    await downloadPdf(id);
+  };
+
   const selectPaper = (paper: LiteraturePaper) => {
     setSelectedId(paper.id);
     if (paper.unread) markRead(paper.id);
@@ -352,14 +379,14 @@ export default function Literature() {
         onToggleChecked={toggleChecked}
         onToggleStar={toggleStar}
         onBrief={(p) => { selectPaper(p); setWorkspaceTab("overview"); }}
-        onPdf={downloadPdf}
+        onPdf={downloadOrBrowse}
         onAsk={(p) => openAgentChat(`/research-lit "${p.title}"`)}
         onShortlist={(p) => setStage([p.id], "shortlist")}
         onExclude={(p) => setStage([p.id], "excluded")}
         batchIds={batchIds}
         onBatchShortlist={() => runBatch((ids) => setStage(ids, "shortlist"))}
         onBatchExclude={() => runBatch((ids) => setStage(ids, "excluded"))}
-        onBatchDownload={() => runBatch((ids) => { for (const id of ids) void downloadPdf(id); })}
+        onBatchDownload={() => runBatch((ids) => { for (const id of ids) void downloadOrBrowse(id); })}
         onBatchDelete={() => confirmDeletePapers(batchIds)}
         onBatchClear={() => setChecked(new Set())}
       />
@@ -373,6 +400,16 @@ export default function Literature() {
       <div className="lit-workspace-header">
         <span className="lit-workspace-title">Paper Workspace</span>
         <div className="lit-workspace-header-btns">
+          <button
+            type="button"
+            className="lit-workspace-icon-btn"
+            title="Use Playwright MCP to get PDF"
+            aria-label="Use Playwright MCP to get PDF"
+            onClick={() => selectedPaper && openBrowserDownload(selectedPaper)}
+            disabled={!selectedPaper || selectedPaper.pdf.status === "downloaded"}
+          >
+            ◎
+          </button>
           <button
             type="button"
             className="lit-workspace-icon-btn"
@@ -436,7 +473,7 @@ export default function Literature() {
                 onToggleAbstract={() => setAbstractOpen((v) => !v)}
                 onGenerateBrief={generateBrief}
                 onShortlist={() => setStage([selectedPaper.id], "shortlist")}
-                onDownload={() => void downloadPdf(selectedPaper.id)}
+                onDownload={() => void downloadOrBrowse(selectedPaper.id)}
                 onAsk={() => openAgentChat(`/research-lit "${selectedPaper.title}"`)}
                 onViewEvidence={() => setWorkspaceTab("evidence")}
                 onDelete={() => {
@@ -458,7 +495,7 @@ export default function Literature() {
                 tagDraft={tagDraft}
                 onTagDraft={setTagDraft}
                 onAddTag={addTagToSelected}
-                onDownload={downloadPdf}
+                onDownload={downloadOrBrowse}
               />
             )}
           </div>
@@ -912,10 +949,16 @@ function WorkspaceOverview({
             className="lit-action-btn"
             aria-label="下载 PDF"
             onClick={onDownload}
-            disabled={paper.pdf.status === "downloaded" || paper.pdf.status === "downloading" || !paper.pdf.url}
+            disabled={paper.pdf.status === "downloaded" || paper.pdf.status === "downloading"}
             title={paper.pdf.status === "downloaded" ? paper.pdf.path : undefined}
           >
-            {paper.pdf.status === "downloaded" ? "PDF 已保存" : paper.pdf.status === "downloading" ? "下载中…" : "下载 PDF"}
+            {paper.pdf.status === "downloaded"
+              ? "PDF 已保存"
+              : paper.pdf.status === "downloading"
+                ? "下载中…"
+                : paper.pdf.url
+                  ? "下载 PDF"
+                  : "Playwright MCP 获取 PDF"}
           </button>
           <button type="button" className="lit-action-btn" aria-label="问 Agent" onClick={onAsk}>
             问 Agent
@@ -1060,10 +1103,14 @@ function WorkspaceFiles({
                   : "无直链"}
           </dd>
         </dl>
-        {paper.pdf.status !== "downloaded" && paper.pdf.url && (
+        {paper.pdf.status !== "downloaded" && (
           <button type="button" className="primary" onClick={() => void onDownload(paper.id)}
             disabled={paper.pdf.status === "downloading"}>
-            {paper.pdf.status === "downloading" ? "下载中…" : paper.pdf.status === "failed" ? "重试下载" : "下载 PDF"}
+            {paper.pdf.status === "downloading"
+              ? "下载中…"
+              : paper.pdf.url
+                ? paper.pdf.status === "failed" ? "重试下载" : "下载 PDF"
+                : "Playwright MCP 获取 PDF"}
           </button>
         )}
       </div>

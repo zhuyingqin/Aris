@@ -3,6 +3,7 @@ mod config;
 mod engine;
 mod files;
 mod literature;
+mod mcp;
 mod process;
 mod projects;
 mod sessions;
@@ -52,6 +53,9 @@ pub fn run() {
             config::config_get,
             config::config_set,
             config::config_test,
+            mcp::mcp_config_get,
+            mcp::mcp_config_set,
+            mcp::mcp_config_test,
             sessions::sessions_list,
             sessions::session_get,
             sessions::chat_ui_sessions_load,
@@ -63,6 +67,10 @@ pub fn run() {
             literature::literature_llm,
             literature::literature_pdf_text,
             engine::chat_status,
+            engine::chat_permission_get,
+            engine::chat_permission_set,
+            engine::project_permission_get,
+            engine::project_permission_set,
             engine::chat_command_specs,
             engine::chat_run_command,
             engine::chat_send,
@@ -75,6 +83,7 @@ pub fn run() {
             engine::chat_cancel,
             files::file_search,
             files::file_read,
+            files::file_open,
             files::project_chat_starters,
         ])
         .run(tauri::generate_context!())

@@ -71,6 +71,47 @@ describe("Chat interaction helpers", () => {
     expect(change?.diff).toContain("+new");
   });
 
+  it("renders generated file paths as openable links", () => {
+    render(
+      <ChatMessage
+        turn={{
+          id: "assistant-file",
+          role: "assistant",
+          blocks: [{
+            kind: "tool",
+            name: "write_file",
+            input: JSON.stringify({ path: "reports/result.md", content: "done" }),
+            output: "ok",
+          }],
+        }}
+        canRetry={false}
+        onEdit={() => undefined}
+        onRetry={() => undefined}
+        onContinue={() => undefined}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "reports/result.md" })).toBeTruthy();
+  });
+
+  it("renders assistant Markdown file references as local links", () => {
+    render(
+      <ChatMessage
+        turn={{
+          id: "assistant-link",
+          role: "assistant",
+          blocks: [{ kind: "text", text: "Open [the report](reports/result.md)." }],
+        }}
+        canRetry={false}
+        onEdit={() => undefined}
+        onRetry={() => undefined}
+        onContinue={() => undefined}
+      />,
+    );
+
+    expect(screen.getByRole("link", { name: "the report" }).getAttribute("title")).toBe("Open local file");
+  });
+
   it("omits dropped binary bodies without reading them into the renderer", async () => {
     const file = new File(["binary"], "archive.zip", { type: "application/zip" });
     const text = vi.fn();

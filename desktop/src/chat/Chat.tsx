@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   chatDelete,
   chatCommandSpecs,
+  chatPermissionGet,
+  chatPermissionSet,
   chatRunCommand,
   chatSetContext,
   chatStatus,
@@ -15,7 +17,7 @@ import {
   type ChatSendRequest,
 } from "../api/tauri";
 import { useStore } from "../store";
-import type { ChatAttachment, ChatCommandSelection, ChatStatus, DesktopCommandSpec, ChatTurn, SkillMeta } from "../types";
+import type { ChatAttachment, ChatCommandSelection, ChatStatus, DesktopCommandSpec, ChatTurn, PermissionModeView, SkillMeta } from "../types";
 import ChatComposer from "./ChatComposer";
 import CommandSelection from "./CommandSelection";
 import ChatSidebar from "./ChatSidebar";
@@ -202,6 +204,8 @@ export default function Chat() {
     restoreSession,
   } = useChatSessions(currentProject?.id ?? "default");
   const [status, setStatus] = useState<ChatStatus | null>(null);
+  const [permission, setPermission] = useState<PermissionModeView | null>(null);
+  const [permissionBusy, setPermissionBusy] = useState(false);
   const [skills, setSkills] = useState<SkillMeta[]>([]);
   const [desktopCommands, setDesktopCommands] = useState<DesktopCommandSpec[]>(FALLBACK_SLASH_COMMANDS);
   const [starters, setStarters] = useState([
@@ -330,13 +334,33 @@ export default function Chat() {
 
   useEffect(() => {
     refreshStatus();
-    if (!isTauri()) return;
+    if (!isTauri()) {
+      setPermission({ mode: "workspace-write", label: "Accept edits", description: "Read and edit workspace files" });
+      return;
+    }
+    chatPermissionGet(currentId).then(setPermission).catch(() => setPermission(null));
     chatCommandSpecs()
       .then((commands) => setDesktopCommands(visibleDesktopCommands(commands)))
       .catch(() => setDesktopCommands(FALLBACK_SLASH_COMMANDS));
     skillsList().then(setSkills).catch(() => undefined);
     projectChatStarters().then(setStarters).catch(() => undefined);
-  }, [currentProject?.id, refreshStatus]);
+  }, [currentId, currentProject?.id, refreshStatus]);
+
+  const changePermission = async (mode: string) => {
+    if (!isTauri()) {
+      const label = mode === "read-only" ? "Plan" : mode === "danger-full-access" ? "Don't ask" : "Accept edits";
+      setPermission({ mode, label, description: "" });
+      return;
+    }
+    setPermissionBusy(true);
+    try {
+      setPermission(await chatPermissionSet(currentId, mode));
+    } catch (error) {
+      setError(String(error));
+    } finally {
+      setPermissionBusy(false);
+    }
+  };
 
   useEffect(() => () => {
     deleteTimers.current.forEach(({ timer, projectId }, sessionId) => {
@@ -658,6 +682,19 @@ export default function Chat() {
               : <span className="chat-model chat-model-error">{status?.message ?? "Checking..."}</span>}
           </div>
           <div className="chat-head-actions">
+            <label className="chat-permission-control" title={permission?.description ?? "Active permission mode"}>
+              <span>Permission</span>
+              <select
+                aria-label="Chat permission mode"
+                value={permission?.mode ?? "workspace-write"}
+                disabled={permissionBusy || busy}
+                onChange={(event) => void changePermission(event.currentTarget.value)}
+              >
+                <option value="read-only">Plan</option>
+                <option value="workspace-write">Accept edits</option>
+                <option value="danger-full-access">Don't ask</option>
+              </select>
+            </label>
             {status?.ready && status.contextWindow != null && (
               <ContextRing used={estimatedTokens} max={status.contextWindow} />
             )}

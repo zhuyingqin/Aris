@@ -1,9 +1,12 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use api::AuthSource;
 use runtime::{
-    ContentBlock, PermissionMode, PermissionPolicy, PromptBuildError, Session, ToolExecutor,
-    TurnSummary,
+    scoped_mcp_config_hash, ContentBlock, ManagedMcpTool, McpServerManager, PermissionMode,
+    PermissionPolicy, PromptBuildError, Session, ToolError, ToolExecutor, TurnSummary,
 };
 use serde_json::{Map, Value};
 
@@ -92,10 +95,10 @@ pub fn language_preference_section(language: &str) -> String {
 #[must_use]
 pub fn llm_review_override_section() -> String {
     "IMPORTANT: When a skill instructs you to use `mcp__codex__codex` or `mcp__codex__codex-reply` \
-     for external LLM review, use the `LlmReview` tool instead. The LlmReview tool uses \
-     the user's configured reviewer from ARIS settings. Pass the full review prompt as \
-     the `prompt` parameter and omit the optional `model` field unless the user explicitly \
-     asks for a reviewer override."
+     for external LLM review, call that MCP tool when it is available. Otherwise use the \
+     `LlmReview` tool, which uses the user's configured reviewer from ARIS settings. Pass the \
+     full review prompt as the `prompt` parameter and omit the optional `model` field unless \
+     the user explicitly asks for a reviewer override."
         .to_string()
 }
 
@@ -159,9 +162,380 @@ pub fn max_tokens_for_model(model: &str) -> u32 {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct ChatToolSpec {
+    pub name: String,
+    pub description: String,
+    pub input_schema: Value,
+    pub required_permission: PermissionMode,
+}
+
+impl From<tools::ToolSpec> for ChatToolSpec {
+    fn from(spec: tools::ToolSpec) -> Self {
+        Self {
+            name: spec.name.to_string(),
+            description: spec.description.to_string(),
+            input_schema: spec.input_schema,
+            required_permission: spec.required_permission,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct McpToolExecutor<T> {
+    inner: T,
+    runtime: Option<tokio::runtime::Runtime>,
+    manager: Option<McpServerManager>,
+    tool_names: BTreeSet<String>,
+}
+
+impl<T> ToolExecutor for McpToolExecutor<T>
+where
+    T: ToolExecutor,
+{
+    fn execute(&mut self, tool_name: &str, input: &str) -> Result<String, ToolError> {
+        self.execute_with_id("", tool_name, input)
+    }
+
+    fn execute_with_id(
+        &mut self,
+        tool_use_id: &str,
+        tool_name: &str,
+        input: &str,
+    ) -> Result<String, ToolError> {
+        if tool_name == "ToolSearch" {
+            let output = self.inner.execute_with_id(tool_use_id, tool_name, input)?;
+            return Ok(merge_mcp_tool_search_results(
+                output,
+                input,
+                &self.tool_names,
+            ));
+        }
+        if !self.tool_names.contains(tool_name) {
+            return self.inner.execute_with_id(tool_use_id, tool_name, input);
+        }
+
+        let arguments = serde_json::from_str(input)
+            .map_err(|error| ToolError::new(format!("invalid MCP tool input JSON: {error}")))?;
+        let runtime = self
+            .runtime
+            .as_ref()
+            .ok_or_else(|| ToolError::new("MCP runtime is not available"))?;
+        let manager = self
+            .manager
+            .as_mut()
+            .ok_or_else(|| ToolError::new("MCP manager is not available"))?;
+        let response = runtime
+            .block_on(manager.call_tool(tool_name, Some(arguments)))
+            .map_err(|error| ToolError::new(error.to_string()))?;
+
+        if let Some(error) = response.error {
+            return Err(ToolError::new(format!(
+                "MCP tool `{tool_name}` failed: {} ({})",
+                error.message, error.code
+            )));
+        }
+        let result = response
+            .result
+            .ok_or_else(|| ToolError::new(format!("MCP tool `{tool_name}` returned no result")))?;
+        let output = serde_json::to_string(&result)
+            .map_err(|error| ToolError::new(format!("failed to encode MCP result: {error}")))?;
+        if result.is_error == Some(true) {
+            Err(ToolError::new(output))
+        } else {
+            Ok(output)
+        }
+    }
+}
+
+fn merge_mcp_tool_search_results(
+    output: String,
+    input: &str,
+    tool_names: &BTreeSet<String>,
+) -> String {
+    let Ok(input) = serde_json::from_str::<Value>(input) else {
+        return output;
+    };
+    let query = input
+        .get("query")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_lowercase();
+    let max_results = input
+        .get("max_results")
+        .and_then(Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .unwrap_or(5)
+        .max(1);
+    let mut matches = if let Some(selection) = query.strip_prefix("select:") {
+        let selected = selection
+            .split(',')
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .collect::<BTreeSet<_>>();
+        tool_names
+            .iter()
+            .filter(|name| selected.contains(name.to_lowercase().as_str()))
+            .cloned()
+            .collect::<Vec<_>>()
+    } else {
+        let terms = query
+            .split_whitespace()
+            .map(|term| term.trim_start_matches('+'))
+            .filter(|term| !term.is_empty())
+            .collect::<Vec<_>>();
+        tool_names
+            .iter()
+            .filter(|name| {
+                let lowered = name.to_lowercase();
+                terms.is_empty() || terms.iter().all(|term| lowered.contains(term))
+            })
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+
+    if matches.is_empty() {
+        return output;
+    }
+
+    let Ok(mut value) = serde_json::from_str::<Value>(&output) else {
+        return output;
+    };
+    let Some(object) = value.as_object_mut() else {
+        return output;
+    };
+    let existing = object
+        .entry("matches".to_string())
+        .or_insert_with(|| Value::Array(Vec::new()));
+    let Some(existing) = existing.as_array_mut() else {
+        return output;
+    };
+    matches.retain(|name| !existing.iter().any(|item| item.as_str() == Some(name)));
+    existing.extend(matches.into_iter().map(Value::String));
+    existing.truncate(max_results);
+    let total = object
+        .get("total_deferred_tools")
+        .and_then(Value::as_u64)
+        .unwrap_or_default()
+        .saturating_add(tool_names.len() as u64);
+    object.insert(
+        "total_deferred_tools".to_string(),
+        Value::Number(total.into()),
+    );
+    serde_json::to_string_pretty(&value).unwrap_or(output)
+}
+
+impl<T> Drop for McpToolExecutor<T> {
+    fn drop(&mut self) {
+        if let (Some(runtime), Some(manager)) = (self.runtime.as_ref(), self.manager.as_mut()) {
+            let _ = runtime.block_on(manager.shutdown());
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct McpToolBundle<T> {
+    pub executor: McpToolExecutor<T>,
+    pub tool_specs: Vec<ChatToolSpec>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Clone)]
+struct CachedMcpDiscovery {
+    discovered_at: Instant,
+    tools: Vec<ManagedMcpTool>,
+    failures: Vec<(String, String)>,
+}
+
+const MCP_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(15);
+const MCP_DISCOVERY_CACHE_TTL: Duration = Duration::from_secs(300);
+
+fn mcp_discovery_cache() -> &'static Mutex<BTreeMap<String, CachedMcpDiscovery>> {
+    static CACHE: OnceLock<Mutex<BTreeMap<String, CachedMcpDiscovery>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+fn mcp_discovery_cache_key(feature_config: &runtime::RuntimeFeatureConfig) -> String {
+    let cwd = std::env::current_dir()
+        .map(|path| path.display().to_string())
+        .unwrap_or_default();
+    let servers = feature_config
+        .mcp()
+        .servers()
+        .iter()
+        .map(|(name, config)| format!("{name}:{}", scoped_mcp_config_hash(config)))
+        .collect::<Vec<_>>()
+        .join("|");
+    format!("{cwd}|{servers}")
+}
+
+fn discover_mcp_tools_cached(
+    manager: &mut McpServerManager,
+    feature_config: &runtime::RuntimeFeatureConfig,
+    mcp_runtime: &tokio::runtime::Runtime,
+) -> (Vec<ManagedMcpTool>, Vec<(String, String)>) {
+    let cache_key = mcp_discovery_cache_key(feature_config);
+    let cached = mcp_discovery_cache()
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(&cache_key).cloned())
+        .filter(|entry| entry.discovered_at.elapsed() < MCP_DISCOVERY_CACHE_TTL);
+    if let Some(cached) = cached {
+        manager.preload_discovered_tools(&cached.tools);
+        return (cached.tools, cached.failures);
+    }
+
+    let discovery = mcp_runtime.block_on(async {
+        tokio::time::timeout(MCP_DISCOVERY_TIMEOUT, manager.discover_tools_resilient()).await
+    });
+    let (tools, failures) = match discovery {
+        Ok(result) => result,
+        Err(_) => {
+            let _ = mcp_runtime.block_on(manager.shutdown());
+            let failures = feature_config
+                .mcp()
+                .servers()
+                .keys()
+                .map(|name| {
+                    (
+                        name.clone(),
+                        format!(
+                            "tool discovery exceeded {}s; use the MCP page to test this server",
+                            MCP_DISCOVERY_TIMEOUT.as_secs()
+                        ),
+                    )
+                })
+                .collect();
+            (Vec::new(), failures)
+        }
+    };
+    if let Ok(mut cache) = mcp_discovery_cache().lock() {
+        cache.insert(
+            cache_key,
+            CachedMcpDiscovery {
+                discovered_at: Instant::now(),
+                tools: tools.clone(),
+                failures: failures.clone(),
+            },
+        );
+    }
+    (tools, failures)
+}
+
+pub fn clear_mcp_discovery_cache() {
+    if let Ok(mut cache) = mcp_discovery_cache().lock() {
+        cache.clear();
+    }
+}
+
+#[must_use]
+pub fn chat_tool_specs<S>(tool_specs: Vec<S>) -> Vec<ChatToolSpec>
+where
+    S: Into<ChatToolSpec>,
+{
+    tool_specs.into_iter().map(Into::into).collect()
+}
+
+pub fn attach_mcp_tools<T>(
+    inner: T,
+    mut tool_specs: Vec<ChatToolSpec>,
+    feature_config: &runtime::RuntimeFeatureConfig,
+    allowed_tools: Option<&BTreeSet<String>>,
+) -> McpToolBundle<T> {
+    let mut manager = McpServerManager::from_servers(feature_config.mcp().servers());
+    let mut warnings = manager
+        .unsupported_servers()
+        .iter()
+        .map(|server| {
+            format!(
+                "MCP server `{}` is unavailable: {}",
+                server.server_name, server.reason
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut tool_names = BTreeSet::new();
+
+    if feature_config.mcp().servers().is_empty() {
+        return McpToolBundle {
+            executor: McpToolExecutor {
+                inner,
+                runtime: None,
+                manager: None,
+                tool_names,
+            },
+            tool_specs,
+            warnings,
+        };
+    }
+
+    let mcp_runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            warnings.push(format!("could not start MCP runtime: {error}"));
+            return McpToolBundle {
+                executor: McpToolExecutor {
+                    inner,
+                    runtime: None,
+                    manager: None,
+                    tool_names,
+                },
+                tool_specs,
+                warnings,
+            };
+        }
+    };
+
+    let (discovered, failures) =
+        discover_mcp_tools_cached(&mut manager, feature_config, &mcp_runtime);
+    warnings.extend(
+        failures
+            .into_iter()
+            .map(|(server, error)| format!("could not discover MCP server `{server}`: {error}")),
+    );
+    for managed in discovered {
+        if allowed_tools.is_some_and(|allowed| !allowed.contains(&managed.qualified_name)) {
+            continue;
+        }
+        let description = managed.tool.description.unwrap_or_else(|| {
+            format!(
+                "MCP tool `{}` from server `{}`.",
+                managed.raw_name, managed.server_name
+            )
+        });
+        let input_schema = managed.tool.input_schema.unwrap_or_else(|| {
+            serde_json::json!({
+                "type": "object",
+                "additionalProperties": true
+            })
+        });
+        tool_names.insert(managed.qualified_name.clone());
+        tool_specs.push(ChatToolSpec {
+            name: managed.qualified_name,
+            description,
+            input_schema,
+            required_permission: PermissionMode::DangerFullAccess,
+        });
+    }
+
+    McpToolBundle {
+        executor: McpToolExecutor {
+            inner,
+            runtime: Some(mcp_runtime),
+            manager: Some(manager),
+            tool_names,
+        },
+        tool_specs,
+        warnings,
+    }
+}
+
 #[must_use]
 pub fn executor_tool_specs_for_tools(
-    tool_specs: Vec<tools::ToolSpec>,
+    tool_specs: Vec<ChatToolSpec>,
 ) -> Vec<aris_executor::ExecutorToolSpec> {
     tool_specs
         .into_iter()
@@ -173,7 +547,7 @@ pub fn executor_tool_specs_for_tools(
 
 #[must_use]
 pub fn permission_policy_for_tools(
-    tool_specs: Vec<tools::ToolSpec>,
+    tool_specs: Vec<ChatToolSpec>,
     active_mode: PermissionMode,
 ) -> PermissionPolicy {
     permission_policy_for_tools_with(tool_specs, active_mode, |spec| spec.required_permission)
@@ -181,12 +555,12 @@ pub fn permission_policy_for_tools(
 
 #[must_use]
 pub fn permission_policy_for_tools_with<F>(
-    tool_specs: Vec<tools::ToolSpec>,
+    tool_specs: Vec<ChatToolSpec>,
     active_mode: PermissionMode,
     mut required_mode: F,
 ) -> PermissionPolicy
 where
-    F: FnMut(&tools::ToolSpec) -> PermissionMode,
+    F: FnMut(&ChatToolSpec) -> PermissionMode,
 {
     tool_specs
         .into_iter()
@@ -337,7 +711,7 @@ pub fn build_conversation_runtime<T>(
     executor_config: ChatExecutorConfig,
     model: String,
     enable_tools: bool,
-    tool_specs: Vec<tools::ToolSpec>,
+    tool_specs: Vec<ChatToolSpec>,
     observer: Box<dyn aris_executor::StreamObserver>,
     tool_executor: T,
     permission_policy: PermissionPolicy,
@@ -386,13 +760,76 @@ pub fn final_assistant_text(summary: &TurnSummary) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
     use super::{
-        model_developer, permission_policy_for_tools, resolve_settings_executor_config,
-        ChatExecutorConfig,
+        attach_mcp_tools, chat_tool_specs, clear_mcp_discovery_cache,
+        merge_mcp_tool_search_results, model_developer, permission_policy_for_tools,
+        resolve_settings_executor_config, ChatExecutorConfig,
     };
     use api::AuthSource;
-    use runtime::PermissionMode;
+    use runtime::{
+        ConfigSource, McpServerConfig, McpStdioServerConfig, PermissionMode, RuntimeFeatureConfig,
+        ScopedMcpServerConfig, StaticToolExecutor, ToolExecutor,
+    };
     use serde_json::{json, Value};
+
+    fn temp_dir() -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be after epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("aris-chat-mcp-{nanos}"))
+    }
+
+    fn write_mcp_server_script(root: &Path) -> PathBuf {
+        fs::create_dir_all(root).expect("temp dir");
+        let script_path = root.join("fake-mcp.py");
+        let script = r#"import json, sys
+
+def read_message():
+    header = b''
+    while not header.endswith(b'\r\n\r\n'):
+        chunk = sys.stdin.buffer.read(1)
+        if not chunk:
+            return None
+        header += chunk
+    length = 0
+    for line in header.decode().split('\r\n'):
+        if line.lower().startswith('content-length:'):
+            length = int(line.split(':', 1)[1].strip())
+    return json.loads(sys.stdin.buffer.read(length).decode())
+
+def send(message):
+    payload = json.dumps(message).encode()
+    sys.stdout.buffer.write(f'Content-Length: {len(payload)}\r\n\r\n'.encode() + payload)
+    sys.stdout.buffer.flush()
+
+while True:
+    request = read_message()
+    if request is None:
+        break
+    if request['method'] == 'initialize':
+        send({'jsonrpc': '2.0', 'id': request['id'], 'result': {
+            'protocolVersion': request['params']['protocolVersion'],
+            'capabilities': {'tools': {}},
+            'serverInfo': {'name': 'chat-test', 'version': '1.0.0'}}})
+    elif request['method'] == 'tools/list':
+        send({'jsonrpc': '2.0', 'id': request['id'], 'result': {'tools': [{
+            'name': 'echo', 'description': 'Echo text',
+            'inputSchema': {'type': 'object', 'properties': {'text': {'type': 'string'}}}}]}})
+    elif request['method'] == 'tools/call':
+        text = (request['params'].get('arguments') or {}).get('text', '')
+        send({'jsonrpc': '2.0', 'id': request['id'], 'result': {
+            'content': [{'type': 'text', 'text': 'echo:' + text}],
+            'structuredContent': {'echoed': text}, 'isError': False}})
+"#;
+        fs::write(&script_path, script).expect("write fake MCP server");
+        script_path
+    }
 
     #[test]
     fn model_developer_routes_openai_compatible_names() {
@@ -492,10 +929,103 @@ mod tests {
             input_schema: Value::Null,
             required_permission: PermissionMode::WorkspaceWrite,
         };
-        let policy = permission_policy_for_tools(vec![spec], PermissionMode::ReadOnly);
+        let policy =
+            permission_policy_for_tools(chat_tool_specs(vec![spec]), PermissionMode::ReadOnly);
         assert_eq!(
             policy.required_mode_for("write_file"),
             PermissionMode::WorkspaceWrite
         );
+    }
+
+    #[test]
+    fn attaches_discovers_and_executes_mcp_tools() {
+        clear_mcp_discovery_cache();
+        let root = temp_dir();
+        let script = write_mcp_server_script(&root);
+        let python = if cfg!(windows) { "python" } else { "python3" };
+        let feature_config = RuntimeFeatureConfig::default().with_mcp_servers(BTreeMap::from([(
+            "test".to_string(),
+            ScopedMcpServerConfig {
+                scope: ConfigSource::Local,
+                config: McpServerConfig::Stdio(McpStdioServerConfig {
+                    command: python.to_string(),
+                    args: vec![script.to_string_lossy().into_owned()],
+                    env: BTreeMap::from([(
+                        "ARIS_MCP_STDIO_FRAMING".to_string(),
+                        "content-length".to_string(),
+                    )]),
+                    request_timeout_secs: Some(10),
+                }),
+            },
+        )]));
+
+        let inner = StaticToolExecutor::new().register("ToolSearch", |_| {
+            Ok(json!({
+                "matches": [],
+                "query": "test echo",
+                "normalized_query": "test echo",
+                "total_deferred_tools": 10,
+                "pending_mcp_servers": null
+            })
+            .to_string())
+        });
+        let mut bundle = attach_mcp_tools(inner, Vec::new(), &feature_config, None);
+        assert!(bundle.warnings.is_empty(), "{:?}", bundle.warnings);
+        assert_eq!(bundle.tool_specs.len(), 1);
+        assert_eq!(bundle.tool_specs[0].name, "mcp__test__echo");
+        assert_eq!(
+            bundle.tool_specs[0].required_permission,
+            PermissionMode::DangerFullAccess
+        );
+
+        let output = bundle
+            .executor
+            .execute("mcp__test__echo", r#"{"text":"hello"}"#)
+            .expect("execute MCP tool");
+        assert!(output.contains(r#""echoed":"hello""#), "{output}");
+        let search = bundle
+            .executor
+            .execute("ToolSearch", r#"{"query":"test echo","max_results":5}"#)
+            .expect("search MCP tools");
+        assert!(search.contains("mcp__test__echo"), "{search}");
+
+        drop(bundle);
+        fs::remove_file(&script).expect("remove MCP script after first discovery");
+
+        let cached = attach_mcp_tools(StaticToolExecutor::new(), Vec::new(), &feature_config, None);
+        assert!(cached.warnings.is_empty(), "{:?}", cached.warnings);
+        assert_eq!(cached.tool_specs[0].name, "mcp__test__echo");
+        drop(cached);
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn tool_search_results_include_discovered_mcp_tools() {
+        let names = BTreeSet::from([
+            "mcp__playwright__browser_navigate".to_string(),
+            "mcp__playwright__browser_click".to_string(),
+        ]);
+        let output = json!({
+            "matches": [],
+            "query": "playwright navigate",
+            "normalized_query": "playwright navigate",
+            "total_deferred_tools": 10,
+            "pending_mcp_servers": null
+        })
+        .to_string();
+
+        let merged = merge_mcp_tool_search_results(
+            output,
+            r#"{"query":"playwright navigate","max_results":5}"#,
+            &names,
+        );
+        let merged: Value = serde_json::from_str(&merged).expect("merged search output");
+
+        assert_eq!(
+            merged["matches"],
+            json!(["mcp__playwright__browser_navigate"])
+        );
+        assert_eq!(merged["total_deferred_tools"], 12);
     }
 }

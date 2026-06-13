@@ -250,6 +250,46 @@ export interface ConfigTestResult {
   reviewer?: ConfigTestDetail | null;
 }
 
+export interface PermissionModeView {
+  mode: "read-only" | "workspace-write" | "danger-full-access" | string;
+  label: string;
+  description: string;
+}
+
+export interface McpStdioServerInput {
+  name: string;
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+  requestTimeoutSecs?: number | null;
+}
+
+export interface McpServerSummary {
+  name: string;
+  source: string;
+  transport: string;
+  command?: string | null;
+}
+
+export interface McpConfigView {
+  projectPath: string;
+  servers: McpStdioServerInput[];
+  mergedServers: McpServerSummary[];
+}
+
+export interface McpServerTestResult {
+  name: string;
+  ok: boolean;
+  transport: string;
+  tools: string[];
+  message: string;
+}
+
+export interface McpTestResult {
+  ok: boolean;
+  servers: McpServerTestResult[];
+}
+
 export interface DesktopProject {
   id: string;
   name: string;

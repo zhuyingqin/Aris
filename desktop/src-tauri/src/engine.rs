@@ -26,8 +26,8 @@ use tauri::{AppHandle, Emitter, State};
 
 use runtime::{
     CompactionConfig, ConfigLoader, ConfigSource, ContentBlock, ConversationMessage, MessageRole,
-    PermissionMode, ProjectContext, RuntimeError, Session, TokenUsage, ToolError, ToolExecutor,
-    UsageTracker,
+    PermissionMode, ProjectContext, ResolvedPermissionMode, RuntimeError, Session, TokenUsage,
+    ToolError, ToolExecutor, UsageTracker,
 };
 
 /// Per-app chat sessions, keyed by the UI session id.
@@ -75,24 +75,9 @@ impl Drop for ChatBusyGuard<'_> {
 
 // ── Tool executor ─────────────────────────────────────────────────────────────
 
-const DESKTOP_CHAT_BLOCKED_TOOLS: &[&str] = &[
-    "bash",
-    "PowerShell",
-    "REPL",
-    "NotebookEdit",
-    "Config",
-    "Agent",
-    "AgentSupervisor",
-    "SpawnTeammate",
-    "SendMessage",
-    "ClaimTask",
-    "CompleteTask",
-    "WaitForTeammates",
-    "VerifyDeliverable",
-    "TeamControl",
-    "Workflow",
-    "EnterWorktree",
-];
+// Desktop Chat exposes the complete tool registry. Permission modes decide
+// what can run, matching Claude Code's plan / acceptEdits / dontAsk model.
+const DESKTOP_CHAT_BLOCKED_TOOLS: &[&str] = &[];
 
 // Literature agent sessions allow bash so /research-lit can run Python fetchers
 // (arxiv_fetch.py, openalex_fetch.py, etc.). Multi-agent and worktree tools
@@ -121,7 +106,6 @@ fn denied_tool_message(tool_name: &str) -> String {
 }
 
 struct KernelToolExecutor {
-    app: AppHandle,
     blocked_tools: &'static [&'static str],
 }
 
@@ -132,20 +116,38 @@ impl ToolExecutor for KernelToolExecutor {
 
     fn execute_with_id(
         &mut self,
-        tool_use_id: &str,
+        _tool_use_id: &str,
         tool_name: &str,
         input: &str,
     ) -> Result<String, ToolError> {
         if self.blocked_tools.contains(&tool_name) {
-            let err = denied_tool_message(tool_name);
-            let _ = self.app.emit(
-                "chat-tool-result",
-                json!({ "id": tool_use_id, "name": tool_name, "output": err, "isError": true }),
-            );
             return Err(ToolError::new(denied_tool_message(tool_name)));
         }
         let value: Value = serde_json::from_str(input).unwrap_or(Value::Null);
-        match tools::execute_tool(tool_name, &value) {
+        tools::execute_tool(tool_name, &value).map_err(ToolError::new)
+    }
+}
+
+struct DesktopToolExecutor<T> {
+    app: AppHandle,
+    inner: T,
+}
+
+impl<T> ToolExecutor for DesktopToolExecutor<T>
+where
+    T: ToolExecutor,
+{
+    fn execute(&mut self, tool_name: &str, input: &str) -> Result<String, ToolError> {
+        self.execute_with_id("", tool_name, input)
+    }
+
+    fn execute_with_id(
+        &mut self,
+        tool_use_id: &str,
+        tool_name: &str,
+        input: &str,
+    ) -> Result<String, ToolError> {
+        match self.inner.execute_with_id(tool_use_id, tool_name, input) {
             Ok(output) => {
                 let context_output = compact_tool_output_for_context(tool_name, output);
                 let _ = self.app.emit(
@@ -157,9 +159,9 @@ impl ToolExecutor for KernelToolExecutor {
             Err(err) => {
                 let _ = self.app.emit(
                     "chat-tool-result",
-                    json!({ "id": tool_use_id, "name": tool_name, "output": truncate(&err, 4000), "isError": true }),
+                    json!({ "id": tool_use_id, "name": tool_name, "output": truncate(&err.to_string(), 4000), "isError": true }),
                 );
-                Err(ToolError::new(err))
+                Err(err)
             }
         }
     }
@@ -222,11 +224,46 @@ fn tool_specs_for(blocked: &'static [&'static str]) -> Vec<tools::ToolSpec> {
         .collect()
 }
 
+fn mcp_runtime_status_prompt(
+    configured_servers: usize,
+    tool_specs: &[aris_chat::ChatToolSpec],
+    warnings: &[String],
+) -> Option<String> {
+    if configured_servers == 0 {
+        return None;
+    }
+    let tools = tool_specs
+        .iter()
+        .filter(|spec| spec.name.starts_with("mcp__"))
+        .map(|spec| spec.name.as_str())
+        .collect::<Vec<_>>();
+    let mut lines = vec![
+        "MCP runtime status for this Chat turn".to_string(),
+        format!("Configured servers: {configured_servers}"),
+        format!("Loaded MCP tools: {}", tools.len()),
+    ];
+    if tools.is_empty() {
+        lines.push("No MCP tools were loaded for this turn.".to_string());
+    } else {
+        lines.push(format!("Available MCP tools: {}", tools.join(", ")));
+        lines.push("ToolSearch includes these dynamic MCP tools.".to_string());
+    }
+    if !warnings.is_empty() {
+        lines.push("MCP startup warnings:".to_string());
+        lines.extend(warnings.iter().map(|warning| format!("- {warning}")));
+    }
+    Some(lines.join("\n"))
+}
+
+#[cfg(test)]
 fn desktop_permission_policy(
     tool_specs: &[tools::ToolSpec],
     active_mode: PermissionMode,
 ) -> runtime::PermissionPolicy {
-    aris_chat::permission_policy_for_tools(tool_specs.to_vec(), active_mode)
+    aris_chat::permission_policy_for_tools(
+        aris_chat::chat_tool_specs(tool_specs.to_vec()),
+        active_mode,
+    )
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -296,23 +333,23 @@ fn compact_literature_search_output(output: String) -> String {
     serde_json::to_string_pretty(&root).unwrap_or(output)
 }
 
-fn build_system_prompt_inner(model: &str, bash_available: bool) -> Vec<String> {
+fn build_system_prompt_inner(model: &str, full_tool_registry: bool) -> Vec<String> {
     let workspace = std::env::var("ARIS_WORKSPACE_ROOT")
         .map(PathBuf::from)
         .or_else(|_| std::env::current_dir())
         .unwrap_or_else(|_| crate::state::workspace_dir());
-    let isolation = if bash_available {
+    let access = if full_tool_registry {
         format!(
-            "Literature agent: this session runs inside the ARIS desktop workspace at `{}`. Bash is available for running paper-fetching helpers (e.g. arxiv_fetch.py, openalex_fetch.py, semantic_scholar_fetch.py) — use it to run the full /research-lit pipeline. Do not use bash to modify project files or run commands unrelated to literature search.",
+            "Desktop Chat runs in the ARIS workspace at `{}`. The complete tool registry, including shell and agent tools, is available when the active permission mode allows it. Respect the selected permission mode and keep generated project artifacts in this workspace unless the user explicitly requests another location.",
             workspace.display()
         )
     } else {
         format!(
-            "Desktop isolation: this chat runs inside the ARIS desktop workspace at `{}`. Treat that directory as the only workspace. Do not request, infer, read, write, or search files outside it. Absolute paths outside this root are blocked by the runtime, and shell/REPL/notebook tools are unavailable in desktop Chat.",
+            "Desktop Chat runs in the ARIS workspace at `{}`. Some tools are unavailable on this surface; use the available tools and respect the selected permission mode.",
             workspace.display()
         )
     };
-    let team_boundary = "Desktop Chat boundary: produce team plans in prose only. Do not spawn, control, wait for, or verify teammates from Chat; the Team view owns execution and supervision.".to_string();
+    let file_links = "When you create or modify files, include Markdown links to the relevant file paths in the final response so the desktop UI can open them directly.".to_string();
     aris_chat::build_common_system_prompt(aris_chat::CommonSystemPromptOptions {
         workspace,
         current_date: runtime::today_iso(),
@@ -323,9 +360,9 @@ fn build_system_prompt_inner(model: &str, bash_available: bool) -> Vec<String> {
         language: std::env::var("ARIS_LANGUAGE").unwrap_or_else(|_| "cn".to_string()),
         include_language_preference: true,
         include_team_orchestration: false,
-        extra_sections: vec![isolation.clone(), team_boundary],
+        extra_sections: vec![access.clone(), file_links],
     })
-    .unwrap_or_else(|_| vec![isolation])
+    .unwrap_or_else(|_| vec![access])
 }
 
 /// Read config.json and validate the executor is configured. Returns
@@ -343,6 +380,97 @@ fn validate_session_id(session_id: &str) -> Result<(), String> {
         return Err("invalid chat session id".to_string());
     }
     Ok(())
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PermissionModeView {
+    mode: String,
+    label: String,
+    description: String,
+}
+
+fn permission_mode_view(mode: PermissionMode) -> PermissionModeView {
+    let (label, description) = match mode {
+        PermissionMode::ReadOnly => ("Plan", "Inspect and search only"),
+        PermissionMode::WorkspaceWrite => ("Accept edits", "Read and edit workspace files"),
+        PermissionMode::DangerFullAccess => (
+            "Don't ask",
+            "Allow shell, agents, workflows, MCP, and all tools",
+        ),
+        PermissionMode::Prompt => ("Ask", "Ask before elevated tool calls"),
+        PermissionMode::Allow => ("Allow", "Allow the current tool call"),
+    };
+    PermissionModeView {
+        mode: mode.as_str().to_string(),
+        label: label.to_string(),
+        description: description.to_string(),
+    }
+}
+
+fn project_permission_path() -> Result<PathBuf, String> {
+    std::env::current_dir()
+        .map(|cwd| cwd.join(".claude").join("settings.local.json"))
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn chat_permission_get(
+    state: State<ChatState>,
+    session_id: String,
+) -> Result<PermissionModeView, String> {
+    validate_session_id(&session_id)?;
+    permission_mode_for(&state, &session_id).map(permission_mode_view)
+}
+
+#[tauri::command]
+pub fn chat_permission_set(
+    state: State<ChatState>,
+    session_id: String,
+    mode: String,
+) -> Result<PermissionModeView, String> {
+    validate_session_id(&session_id)?;
+    let mode = normalize_permission_mode(&mode)
+        .ok_or_else(|| format!("unsupported permission mode `{mode}`"))?;
+    set_permission_mode_for(&state, session_id, mode)?;
+    Ok(permission_mode_view(mode))
+}
+
+#[tauri::command]
+pub fn project_permission_get() -> PermissionModeView {
+    permission_mode_view(configured_default_permission_mode())
+}
+
+#[tauri::command]
+pub fn project_permission_set(mode: String) -> Result<PermissionModeView, String> {
+    let mode = normalize_permission_mode(&mode)
+        .ok_or_else(|| format!("unsupported permission mode `{mode}`"))?;
+    let path = project_permission_path()?;
+    let mut root = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+    let permissions = root
+        .entry("permissions".to_string())
+        .or_insert_with(|| json!({}));
+    let object = permissions
+        .as_object_mut()
+        .ok_or_else(|| format!("{}: permissions must be an object", path.display()))?;
+    let label = match mode {
+        PermissionMode::ReadOnly => "plan",
+        PermissionMode::WorkspaceWrite => "acceptEdits",
+        PermissionMode::DangerFullAccess => "dontAsk",
+        PermissionMode::Prompt | PermissionMode::Allow => "default",
+    };
+    object.insert("defaultMode".to_string(), Value::String(label.to_string()));
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let content =
+        serde_json::to_string_pretty(&Value::Object(root)).map_err(|error| error.to_string())?;
+    std::fs::write(&path, format!("{content}\n")).map_err(|error| error.to_string())?;
+    Ok(permission_mode_view(mode))
 }
 
 fn chat_session_path(session_id: &str) -> Result<PathBuf, String> {
@@ -485,7 +613,19 @@ fn permission_mode_for(state: &ChatState, session_id: &str) -> Result<Permission
         .map_err(|_| "chat state poisoned".to_string())?
         .get(session_id)
         .copied()
-        .unwrap_or(PermissionMode::WorkspaceWrite))
+        .unwrap_or_else(configured_default_permission_mode))
+}
+
+fn configured_default_permission_mode() -> PermissionMode {
+    let configured = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| ConfigLoader::default_for(&cwd).load().ok())
+        .and_then(|config| config.permission_mode());
+    match configured {
+        Some(ResolvedPermissionMode::ReadOnly) => PermissionMode::ReadOnly,
+        Some(ResolvedPermissionMode::WorkspaceWrite) | None => PermissionMode::WorkspaceWrite,
+        Some(ResolvedPermissionMode::DangerFullAccess) => PermissionMode::DangerFullAccess,
+    }
 }
 
 fn set_permission_mode_for(
@@ -956,7 +1096,7 @@ async fn run_chat_turn(
         session_id,
         user_message,
         DESKTOP_CHAT_BLOCKED_TOOLS,
-        false,
+        true,
     )
     .await
 }
@@ -973,7 +1113,7 @@ async fn run_literature_chat_turn(
         session_id,
         user_message,
         LITERATURE_AGENT_BLOCKED_TOOLS,
-        true,
+        false,
     )
     .await
 }
@@ -984,7 +1124,7 @@ async fn run_chat_turn_with_context(
     session_id: String,
     user_message: ConversationMessage,
     blocked_tools: &'static [&'static str],
-    bash_available: bool,
+    full_tool_registry: bool,
 ) -> Result<String, String> {
     state
         .busy
@@ -1000,27 +1140,54 @@ async fn run_chat_turn_with_context(
     let worker_app = app.clone();
     let (text, updated): (String, Session) = tauri::async_runtime::spawn_blocking(move || {
         runtime::clear_interrupt();
-        let tool_specs = tool_specs_for(blocked_tools);
-        let permission_policy = desktop_permission_policy(&tool_specs, permission_mode);
+        let feature_config = match std::env::current_dir()
+            .map_err(|error| error.to_string())
+            .and_then(|cwd| ConfigLoader::default_for(cwd).load().map_err(|error| error.to_string()))
+        {
+            Ok(config) => config.feature_config().clone(),
+            Err(error) => {
+                eprintln!("aris desktop: could not load settings: {error}");
+                runtime::RuntimeFeatureConfig::default()
+            }
+        };
+        let tool_specs = aris_chat::chat_tool_specs(tool_specs_for(blocked_tools));
+        let mcp_bundle = aris_chat::attach_mcp_tools(
+            KernelToolExecutor { blocked_tools },
+            tool_specs,
+            &feature_config,
+            None,
+        );
+        for warning in &mcp_bundle.warnings {
+            eprintln!("aris desktop: {warning}");
+        }
+        let permission_policy =
+            aris_chat::permission_policy_for_tools(mcp_bundle.tool_specs.clone(), permission_mode);
         let observer: Box<dyn aris_executor::StreamObserver> = Box::new(DesktopStreamObserver {
             app: worker_app.clone(),
         });
-        let executor = KernelToolExecutor {
+        let executor = DesktopToolExecutor {
             app: worker_app,
-            blocked_tools,
+            inner: mcp_bundle.executor,
         };
-        let system_prompt = build_system_prompt_inner(&model, bash_available);
+        let mut system_prompt = build_system_prompt_inner(&model, full_tool_registry);
+        if let Some(status) = mcp_runtime_status_prompt(
+            feature_config.mcp().servers().len(),
+            &mcp_bundle.tool_specs,
+            &mcp_bundle.warnings,
+        ) {
+            system_prompt.push(status);
+        }
         let mut runtime = aris_chat::build_conversation_runtime(
             session,
             executor_config,
             model,
             true,
-            tool_specs,
+            mcp_bundle.tool_specs,
             observer,
             executor,
             permission_policy,
             system_prompt,
-            runtime::RuntimeFeatureConfig::default(),
+            feature_config,
         )?;
         let summary = runtime
             .run_turn_message(user_message, None)
@@ -1370,26 +1537,26 @@ fn permissions_selection(current: &str) -> ChatCommandSelection {
         command: "permissions".to_string(),
         title: "Select permission mode".to_string(),
         subtitle: Some(
-            "Desktop chat still keeps shell and external process tools disabled.".to_string(),
+            "Claude Code-style levels control the complete desktop Chat tool registry.".to_string(),
         ),
         current: Some(current.to_string()),
         items: vec![
             selection_item(
                 "read-only",
-                "read-only",
-                "Read and search tools only",
+                "Plan / read-only",
+                "Inspect and search without changing files",
                 current,
             ),
             selection_item(
                 "workspace-write",
-                "workspace-write",
-                "Edit files inside the desktop workspace",
+                "Accept edits",
+                "Read and edit workspace files; higher-risk tools stay gated",
                 current,
             ),
             selection_item(
                 "danger-full-access",
-                "danger-full-access",
-                "Full desktop chat permission mode, with process tools still blocked",
+                "Don't ask",
+                "Allow shell, agents, workflows, and all other tools",
                 current,
             ),
         ],
@@ -1435,9 +1602,11 @@ fn handle_reviewer_command(model: Option<String>) -> Result<ChatCommandResult, S
 
 fn normalize_permission_mode(mode: &str) -> Option<PermissionMode> {
     match mode.trim() {
-        "read-only" => Some(PermissionMode::ReadOnly),
-        "workspace-write" => Some(PermissionMode::WorkspaceWrite),
-        "danger-full-access" => Some(PermissionMode::DangerFullAccess),
+        "default" | "plan" | "read-only" => Some(PermissionMode::ReadOnly),
+        "acceptEdits" | "auto" | "workspace-write" => Some(PermissionMode::WorkspaceWrite),
+        "dontAsk" | "bypassPermissions" | "danger-full-access" => {
+            Some(PermissionMode::DangerFullAccess)
+        }
         _ => None,
     }
 }
@@ -1455,7 +1624,7 @@ fn handle_permissions_command(
     };
     let next = normalize_permission_mode(mode).ok_or_else(|| {
         format!(
-            "unsupported permission mode '{mode}'. Use read-only, workspace-write, or danger-full-access."
+            "unsupported permission mode '{mode}'. Use plan/read-only, acceptEdits/workspace-write, or dontAsk/danger-full-access."
         )
     })?;
     if next == current {
@@ -1465,7 +1634,7 @@ fn handle_permissions_command(
     }
     set_permission_mode_for(state, session_id, next)?;
     Ok(ChatCommandResult::message(format!(
-        "Permissions updated\n  Previous mode    {}\n  Active mode      {}\n  Applies to       subsequent desktop chat tool calls\n  Note             shell and external process tools stay disabled in desktop Chat",
+        "Permissions updated\n  Previous mode    {}\n  Active mode      {}\n  Applies to       subsequent desktop chat tool calls\n  Note             higher modes unlock shell, agents, workflows, and other tools",
         current.as_str(),
         next.as_str()
     )))
@@ -1473,7 +1642,7 @@ fn handle_permissions_command(
 
 fn format_permissions_report(mode: &str) -> String {
     format!(
-        "Permissions\n  Active mode      {mode}\n  Surface          desktop Chat\n\nModes\n  read-only          available  Read/search tools only\n  workspace-write    available  Edit files inside the desktop workspace\n  danger-full-access available  Desktop chat still blocks shell/process tools\n\nUsage\n  Inspect current mode with /permissions\n  Switch modes with /permissions <mode>"
+        "Permissions\n  Active mode      {mode}\n  Surface          desktop Chat\n\nModes\n  plan / read-only              Inspect and search only\n  acceptEdits / workspace-write Read and edit workspace files\n  dontAsk / danger-full-access  Allow shell, agents, workflows, and all tools\n\nUsage\n  Inspect current mode with /permissions\n  Switch modes with /permissions <mode>\n  Project settings permissions.defaultMode supplies the session default"
     )
 }
 
@@ -2545,5 +2714,71 @@ mod tests {
         let title = clean_generated_title("标题：\"贝叶斯估计写作计划。\"\n\nextra");
 
         assert_eq!(title, "贝叶斯估计写作计划");
+    }
+
+    #[test]
+    fn desktop_chat_exposes_tools_and_lets_permission_mode_gate_them() {
+        let specs = tool_specs_for(DESKTOP_CHAT_BLOCKED_TOOLS);
+        assert!(specs.iter().any(|spec| spec.name == "bash"));
+        assert!(specs.iter().any(|spec| spec.name == "Agent"));
+        assert!(specs.iter().any(|spec| spec.name == "Workflow"));
+
+        let workspace = desktop_permission_policy(&specs, PermissionMode::WorkspaceWrite);
+        assert!(matches!(
+            workspace.authorize("bash", r#"{"command":"echo hi"}"#, None),
+            runtime::PermissionOutcome::Deny { .. }
+        ));
+
+        let unrestricted = desktop_permission_policy(&specs, PermissionMode::DangerFullAccess);
+        assert_eq!(
+            unrestricted.authorize("bash", r#"{"command":"echo hi"}"#, None),
+            runtime::PermissionOutcome::Allow
+        );
+    }
+
+    #[test]
+    fn desktop_permission_aliases_match_claude_code_settings() {
+        assert_eq!(
+            normalize_permission_mode("plan"),
+            Some(PermissionMode::ReadOnly)
+        );
+        assert_eq!(
+            normalize_permission_mode("acceptEdits"),
+            Some(PermissionMode::WorkspaceWrite)
+        );
+        assert_eq!(
+            normalize_permission_mode("dontAsk"),
+            Some(PermissionMode::DangerFullAccess)
+        );
+    }
+
+    #[test]
+    fn desktop_prompt_requests_links_for_generated_files() {
+        let prompt = build_system_prompt_inner("test-model", true).join("\n");
+
+        assert!(prompt.contains("complete tool registry"));
+        assert!(prompt.contains("include Markdown links"));
+    }
+
+    #[test]
+    fn desktop_prompt_reports_loaded_mcp_tools_and_failures() {
+        let tools = vec![aris_chat::ChatToolSpec {
+            name: "mcp__playwright__browser_navigate".to_string(),
+            description: "navigate".to_string(),
+            input_schema: serde_json::json!({"type": "object"}),
+            required_permission: PermissionMode::DangerFullAccess,
+        }];
+        let loaded = mcp_runtime_status_prompt(1, &tools, &[]).expect("status");
+        assert!(loaded.contains("mcp__playwright__browser_navigate"));
+        assert!(loaded.contains("ToolSearch includes"));
+
+        let failed = mcp_runtime_status_prompt(
+            1,
+            &[],
+            &["could not discover MCP server `playwright`: failed".to_string()],
+        )
+        .expect("failure status");
+        assert!(failed.contains("No MCP tools were loaded"));
+        assert!(failed.contains("could not discover MCP server `playwright`"));
     }
 }

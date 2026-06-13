@@ -1,4 +1,66 @@
+use std::path::{Path, PathBuf};
+
 use serde_json::json;
+
+fn strip_location_suffix(path: &str) -> &str {
+    let Some((candidate, suffix)) = path.rsplit_once(':') else {
+        return path;
+    };
+    if !suffix.chars().all(|ch| ch.is_ascii_digit()) {
+        return path;
+    }
+    let Some((without_line, line)) = candidate.rsplit_once(':') else {
+        return candidate;
+    };
+    if line.chars().all(|ch| ch.is_ascii_digit()) {
+        without_line
+    } else {
+        candidate
+    }
+}
+
+fn resolve_open_path(path: &str) -> Result<PathBuf, String> {
+    let raw = path.trim().trim_matches(|ch| matches!(ch, '`' | '<' | '>'));
+    if raw.is_empty() {
+        return Err("file path is empty".to_string());
+    }
+
+    let resolve = |candidate: &str| {
+        let path = Path::new(candidate);
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            crate::state::workspace_dir().join(path)
+        }
+    };
+    let direct = resolve(raw);
+    let target = if direct.exists() {
+        direct
+    } else {
+        resolve(strip_location_suffix(raw))
+    };
+    if !target.exists() {
+        return Err(format!("file does not exist: {}", target.display()));
+    }
+    target.canonicalize().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn file_open(path: String) -> Result<(), String> {
+    let target = resolve_open_path(&path)?;
+    #[cfg(target_os = "windows")]
+    let mut command = crate::process::hidden_command("explorer.exe");
+    #[cfg(target_os = "macos")]
+    let mut command = crate::process::hidden_command("open");
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut command = crate::process::hidden_command("xdg-open");
+
+    command
+        .arg(target)
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
 
 /// Search files by glob pattern. Requires a non-empty query to avoid
 /// scanning the whole tree. Returns up to 50 matching paths.
@@ -59,7 +121,7 @@ mod tests {
     use std::ffi::OsString;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use super::file_read;
+    use super::{file_read, strip_location_suffix};
 
     struct EnvGuard {
         key: &'static str,
@@ -121,5 +183,15 @@ mod tests {
         assert!(output.len() < 210_000);
         assert!(output.contains("[read_file truncated:"));
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn local_file_links_may_include_line_and_column_locations() {
+        assert_eq!(strip_location_suffix("src/main.rs:42"), "src/main.rs");
+        assert_eq!(strip_location_suffix("src/main.rs:42:7"), "src/main.rs");
+        assert_eq!(
+            strip_location_suffix(r"C:\Project\src\main.rs:42"),
+            r"C:\Project\src\main.rs"
+        );
     }
 }

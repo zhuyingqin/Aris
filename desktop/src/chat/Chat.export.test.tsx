@@ -8,6 +8,8 @@ import type { ChatTurn, DesktopProject } from "../types";
 const apiMocks = vi.hoisted(() => ({
   isTauri: vi.fn(() => true),
   chatStatus: vi.fn(() => Promise.resolve({ ready: true, model: "MiniMax-M3", provider: "anthropic-compat" })),
+  chatPermissionGet: vi.fn(() => Promise.resolve({ mode: "workspace-write", label: "Accept edits", description: "Read and edit workspace files" })),
+  chatPermissionSet: vi.fn((_sessionId: string, mode: string) => Promise.resolve({ mode, label: mode, description: "" })),
   chatCommandSpecs: vi.fn(() => Promise.resolve([])),
   skillsList: vi.fn(() => Promise.resolve([])),
   projectChatStarters: vi.fn(() => Promise.resolve([])),
@@ -113,6 +115,7 @@ describe("Chat export action", () => {
     vi.clearAllMocks();
     apiMocks.isTauri.mockReturnValue(true);
     apiMocks.chatStatus.mockResolvedValue({ ready: true, model: "MiniMax-M3", provider: "anthropic-compat" });
+    apiMocks.chatPermissionGet.mockResolvedValue({ mode: "workspace-write", label: "Accept edits", description: "Read and edit workspace files" });
     apiMocks.chatCommandSpecs.mockResolvedValue([]);
     apiMocks.skillsList.mockResolvedValue([]);
     apiMocks.projectChatStarters.mockResolvedValue([]);
