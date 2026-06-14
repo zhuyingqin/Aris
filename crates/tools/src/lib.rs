@@ -6,9 +6,9 @@ use std::time::{Duration, Instant};
 use runtime::BUNDLED_SKILLS;
 
 use api::{
-    read_base_url, AnthropicClient, ContentBlockDelta, ImageSource, InputContentBlock, InputMessage,
-    MessageRequest, MessageResponse, OutputContentBlock, StreamEvent as ApiStreamEvent, ToolChoice,
-    ToolDefinition, ToolResultContentBlock,
+    read_base_url, AnthropicClient, ContentBlockDelta, ImageSource, InputContentBlock,
+    InputMessage, MessageRequest, MessageResponse, OutputContentBlock,
+    StreamEvent as ApiStreamEvent, ToolChoice, ToolDefinition, ToolResultContentBlock,
 };
 use reqwest::blocking::Client;
 use runtime::{
@@ -171,6 +171,65 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                     "multiline": { "type": "boolean" }
                 },
                 "required": ["pattern"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
+            name: "memory",
+            description: "Manage compact, durable hot memory. Save stable facts and user preferences here; use session_search for task history and Skills for reusable procedures.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["add", "replace", "remove", "list", "pending"]
+                    },
+                    "target": {
+                        "type": "string",
+                        "enum": ["memory", "user"],
+                        "description": "Use user for identity/preferences; memory for stable environment and project facts."
+                    },
+                    "content": { "type": "string" },
+                    "old_text": { "type": "string" },
+                    "scope": {
+                        "type": "string",
+                        "enum": ["global", "project"],
+                        "description": "Global applies everywhere; project applies only to the active workspace."
+                    },
+                    "source": {
+                        "type": "string",
+                        "description": "Short provenance label. Defaults to assistant_tool."
+                    },
+                    "expires_at": {
+                        "type": "string",
+                        "description": "Optional expiry date in YYYY-MM-DD format."
+                    },
+                },
+                "required": ["action"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::WorkspaceWrite,
+        },
+        ToolSpec {
+            name: "session_search",
+            description: "Search or browse persisted conversation history. Use this for prior task progress, completed work, decisions, and past discussions instead of saving temporary history to hot memory.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string" },
+                    "session_id": {
+                        "type": "string",
+                        "description": "Read a specific session by id."
+                    },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 20 },
+                    "window": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 30,
+                        "description": "Messages before and after each search hit."
+                    }
+                },
                 "additionalProperties": false
             }),
             required_permission: PermissionMode::ReadOnly,
@@ -738,6 +797,8 @@ pub fn execute_tool(name: &str, input: &Value) -> Result<String, String> {
         "edit_file" => from_value::<EditFileInput>(input).and_then(run_edit_file),
         "glob_search" => from_value::<GlobSearchInputValue>(input).and_then(run_glob_search),
         "grep_search" => from_value::<GrepSearchInput>(input).and_then(run_grep_search),
+        "memory" => from_value::<MemoryInput>(input).and_then(run_memory),
+        "session_search" => from_value::<SessionSearchInput>(input).and_then(run_session_search),
         "WebFetch" => from_value::<WebFetchInput>(input).and_then(run_web_fetch),
         "WebSearch" => from_value::<WebSearchInput>(input).and_then(run_web_search),
         "LiteratureSearch" => from_value::<literature::LiteratureSearchInput>(input)
@@ -828,6 +889,80 @@ fn run_glob_search(input: GlobSearchInputValue) -> Result<String, String> {
 #[allow(clippy::needless_pass_by_value)]
 fn run_grep_search(input: GrepSearchInput) -> Result<String, String> {
     to_pretty_json(grep_search(&input).map_err(io_to_string)?)
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn run_memory(input: MemoryInput) -> Result<String, String> {
+    use runtime::HotMemoryTarget;
+
+    let workspace = std::env::var("ARIS_WORKSPACE_ROOT")
+        .map(PathBuf::from)
+        .or_else(|_| std::env::current_dir())
+        .unwrap_or_else(|_| PathBuf::from("."));
+    let project_scope = runtime::project_scope(&workspace);
+    let scope = match input.scope.as_deref().unwrap_or("project") {
+        "global" => "global".to_string(),
+        "project" => project_scope.clone(),
+        other => return Err(format!("unsupported memory scope `{other}`")),
+    };
+    let source = input.source.as_deref().unwrap_or("assistant_tool");
+    let target = input
+        .target
+        .as_deref()
+        .unwrap_or("memory")
+        .parse::<HotMemoryTarget>()?;
+
+    if matches!(input.action.as_str(), "add" | "replace" | "remove")
+        && runtime::memory_write_approval_enabled()
+    {
+        let pending = runtime::new_pending_write(
+            &input.action,
+            target,
+            input.content,
+            input.old_text,
+            source,
+            &scope,
+            input.expires_at,
+        );
+        return to_pretty_json(runtime::stage_memory_write(pending)?);
+    }
+
+    match input.action.as_str() {
+        "add" => to_pretty_json(runtime::add_hot_memory(
+            target,
+            input.content.as_deref().unwrap_or_default(),
+            source,
+            &scope,
+            input.expires_at.as_deref(),
+        )?),
+        "replace" => to_pretty_json(runtime::replace_hot_memory(
+            target,
+            input.old_text.as_deref().unwrap_or_default(),
+            input.content.as_deref().unwrap_or_default(),
+            source,
+            &scope,
+            input.expires_at.as_deref(),
+        )?),
+        "remove" => to_pretty_json(runtime::remove_hot_memory(
+            target,
+            input.old_text.as_deref().unwrap_or_default(),
+            &scope,
+        )?),
+        "list" => to_pretty_json(runtime::load_hot_memory(&workspace)?),
+        "pending" => to_pretty_json(runtime::list_pending_for_scope(&project_scope)?),
+        other => Err(format!("unsupported memory action `{other}`")),
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn run_session_search(input: SessionSearchInput) -> Result<String, String> {
+    to_pretty_json(runtime::search_sessions(
+        &runtime::sessions_dir_from_env(),
+        input.query.as_deref(),
+        input.session_id.as_deref(),
+        input.limit.unwrap_or(3).clamp(1, 20),
+        input.window.unwrap_or(5).clamp(1, 30),
+    )?)
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -977,6 +1112,25 @@ struct WebSearchInput {
     query: String,
     allowed_domains: Option<Vec<String>>,
     blocked_domains: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MemoryInput {
+    action: String,
+    target: Option<String>,
+    content: Option<String>,
+    old_text: Option<String>,
+    scope: Option<String>,
+    source: Option<String>,
+    expires_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SessionSearchInput {
+    query: Option<String>,
+    session_id: Option<String>,
+    limit: Option<usize>,
+    window: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3009,7 +3163,14 @@ fn deferred_tool_specs() -> Vec<ToolSpec> {
         .filter(|spec| {
             !matches!(
                 spec.name,
-                "bash" | "read_file" | "write_file" | "edit_file" | "glob_search" | "grep_search"
+                "bash"
+                    | "read_file"
+                    | "write_file"
+                    | "edit_file"
+                    | "glob_search"
+                    | "grep_search"
+                    | "memory"
+                    | "session_search"
             )
         })
         .collect()
@@ -3794,12 +3955,12 @@ fn command_exists(command: &str) -> bool {
 
     #[cfg(not(windows))]
     {
-    runtime::hidden_command("sh")
-        .arg("-lc")
-        .arg(format!("command -v {command} >/dev/null 2>&1"))
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
+        runtime::hidden_command("sh")
+            .arg("-lc")
+            .arg(format!("command -v {command} >/dev/null 2>&1"))
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
     }
 }
 
@@ -4505,8 +4666,8 @@ mod tests {
 
     use super::team_state;
     use super::{
-        agent_permission_policy, allowed_tools_for_subagent, execute_agent_with_spawn,
-        discover_skills, execute_tool, final_assistant_text, mvp_tool_specs,
+        agent_permission_policy, allowed_tools_for_subagent, discover_skills,
+        execute_agent_with_spawn, execute_tool, final_assistant_text, mvp_tool_specs,
         persist_agent_terminal_state, resolve_anthropic_compat_reviewer_model,
         resolve_reviewer_model, route_openai_compat_model, run_llm_review, skill_markdown,
         AgentInput, AgentJob, LlmReviewInput, SubagentToolExecutor,
@@ -4567,6 +4728,8 @@ mod tests {
         assert!(names.contains(&"WebFetch"));
         assert!(names.contains(&"WebSearch"));
         assert!(names.contains(&"TodoWrite"));
+        assert!(names.contains(&"memory"));
+        assert!(names.contains(&"session_search"));
         assert!(names.contains(&"Skill"));
         assert!(names.contains(&"Agent"));
         assert!(names.contains(&"SpawnTeammate"));
@@ -4585,6 +4748,69 @@ mod tests {
         assert!(names.contains(&"StructuredOutput"));
         assert!(names.contains(&"REPL"));
         assert!(names.contains(&"PowerShell"));
+    }
+
+    #[test]
+    fn memory_and_session_search_tools_round_trip() {
+        let _lock = env_lock().lock().expect("env lock");
+        let root = temp_path("memory-tools");
+        let workspace = root.join("workspace");
+        let sessions = root.join("sessions");
+        fs::create_dir_all(&workspace).expect("workspace");
+        fs::create_dir_all(&sessions).expect("sessions");
+        let _home = EnvGuard::set("HOME", &root);
+        let _profile = EnvGuard::set("USERPROFILE", &root);
+        let _workspace = EnvGuard::set("ARIS_WORKSPACE_ROOT", &workspace);
+        let _sessions = EnvGuard::set("ARIS_SESSIONS_DIR", &sessions);
+        let _project = EnvGuard::set("ARIS_DESKTOP_PROJECT_ID", "project-test");
+        let _approval = EnvGuard::set("ARIS_MEMORY_WRITE_APPROVAL", "false");
+
+        execute_tool(
+            "memory",
+            &json!({
+                "action": "add",
+                "target": "user",
+                "content": "User prefers focused answers.",
+                "scope": "global",
+                "source": "test"
+            }),
+        )
+        .expect("memory add");
+        let listed = execute_tool("memory", &json!({ "action": "list" })).expect("memory list");
+        assert!(listed.contains("User prefers focused answers."));
+
+        std::env::set_var("ARIS_MEMORY_WRITE_APPROVAL", "true");
+        let staged = execute_tool(
+            "memory",
+            &json!({
+                "action": "add",
+                "content": "This write requires user approval."
+            }),
+        )
+        .expect("stage memory write");
+        assert!(staged.contains("This write requires user approval."));
+        let listed = execute_tool("memory", &json!({ "action": "list" })).expect("memory list");
+        assert!(!listed.contains("This write requires user approval."));
+        assert!(execute_tool("memory", &json!({ "action": "approve" })).is_err());
+
+        let mut session = Session::new();
+        session
+            .messages
+            .push(runtime::ConversationMessage::user_text(
+                "Decision: use FTS5 indexing.",
+            ));
+        session
+            .save_to_path(sessions.join("tool-session.json"))
+            .expect("save session");
+        let search = execute_tool(
+            "session_search",
+            &json!({ "query": "FTS5 indexing", "limit": 3 }),
+        )
+        .expect("session search");
+        assert!(search.contains("tool-session"));
+        assert!(search.contains("FTS5 indexing"));
+
+        fs::remove_dir_all(root).expect("remove root");
     }
 
     #[test]
@@ -6306,10 +6532,7 @@ printf 'pwsh:%s' "$1"
         .expect("PowerShell background should succeed");
 
         let output: serde_json::Value = serde_json::from_str(&result).expect("json");
-        assert!(output["stdout"]
-            .as_str()
-            .expect("stdout")
-            .contains("hello"));
+        assert!(output["stdout"].as_str().expect("stdout").contains("hello"));
         assert!(output["stderr"].as_str().expect("stderr").is_empty());
 
         let background_output: serde_json::Value = serde_json::from_str(&background).expect("json");

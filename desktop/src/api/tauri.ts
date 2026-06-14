@@ -114,12 +114,50 @@ export const literatureSearch = <T>(
   sources: string[],
   maxResults?: number,
 ) => invoke<T>("literature_search", { query, sources, maxResults: maxResults ?? null });
+export const literatureLibraryUpsert = <T>(
+  papers: unknown[],
+  query: string,
+  sources: string[],
+) => invoke<T>("literature_library_upsert", { papers, query, sources });
 export const literatureDownloadPdf = <T>(url: string, fileName: string) =>
   invoke<T>("literature_download_pdf", { url, fileName });
+export const literatureImportPdf = <T>(sourcePath: string, fileName: string) =>
+  invoke<T>("literature_import_pdf", { sourcePath, fileName });
 export const literatureLlm = (system: string, prompt: string) =>
   invoke<string>("literature_llm", { system, prompt });
+export const literatureReviewLlm = (system: string, prompt: string) =>
+  invoke<string>("literature_review_llm", { system, prompt });
+export interface LiteratureVisionImage {
+  page: number;
+  mimeType: "image/jpeg" | "image/png" | "image/webp";
+  data: string;
+  fingerprint: string;
+}
+export const literatureLlmVision = (
+  system: string,
+  prompt: string,
+  images: LiteratureVisionImage[],
+) => invoke<string>("literature_llm_vision", { system, prompt, images });
 export const literaturePdfText = (relativePath: string) =>
-  invoke<string>("literature_pdf_text", { relativePath });
+  invoke<{
+    text: string;
+    pages: Array<{ page: number; text: string; source: "embedded" | "ocr" | "empty" }>;
+    totalCharacters: number;
+    extractedCharacters: number;
+    truncated: boolean;
+    ocrUsed: boolean;
+    missingPages: number[];
+    warnings: string[];
+  }>(
+    "literature_pdf_text",
+    { relativePath },
+  );
+export const literaturePdfBytes = (relativePath: string) =>
+  invoke<number[]>("literature_pdf_bytes", { relativePath });
+export const literatureImageOcr = (image: number[]) =>
+  invoke<string>("literature_image_ocr", { image });
+export const literaturePdfOpen = (relativePath: string) =>
+  invoke<void>("literature_pdf_open", { relativePath });
 
 // ── File browser ─────────────────────────────────────────────────────────────
 
@@ -182,24 +220,34 @@ export const chatSetContext = (
 ) => invoke<void>("chat_set_context", { sessionId, messages });
 export const chatDelete = (sessionId: string, projectId?: string) =>
   invoke<void>("chat_delete", { sessionId, projectId: projectId ?? null });
-export const chatCancel = () => invoke<void>("chat_cancel");
+export const chatCancel = (sessionId: string) => invoke<void>("chat_cancel", { sessionId });
 
-export const onChatDelta = (handler: (text: string) => void) =>
-  listen<string>("chat-delta", (e) => handler(e.payload));
-export const onChatThinkingDelta = (handler: (thinking: string) => void) =>
-  listen<string>("chat-thinking-delta", (e) => handler(e.payload));
+export interface ChatTextEvent {
+  sessionId: string;
+  text: string;
+}
+
+export interface ChatThinkingEvent {
+  sessionId: string;
+  thinking: string;
+}
+
+export const onChatDelta = (handler: (event: ChatTextEvent) => void) =>
+  listen<ChatTextEvent>("chat-delta", (e) => handler(e.payload));
+export const onChatThinkingDelta = (handler: (event: ChatThinkingEvent) => void) =>
+  listen<ChatThinkingEvent>("chat-thinking-delta", (e) => handler(e.payload));
 export const onChatTool = (
-  handler: (t: { id?: string; name: string; input: string }) => void,
-) => listen<{ id?: string; name: string; input: string }>("chat-tool", (e) => handler(e.payload));
+  handler: (t: { sessionId: string; id?: string; name: string; input: string }) => void,
+) => listen<{ sessionId: string; id?: string; name: string; input: string }>("chat-tool", (e) => handler(e.payload));
 export const onChatToolResult = (
-  handler: (t: { id?: string; name: string; output: string; isError: boolean }) => void,
+  handler: (t: { sessionId: string; id?: string; name: string; output: string; isError: boolean }) => void,
 ) =>
-  listen<{ id?: string; name: string; output: string; isError: boolean }>(
+  listen<{ sessionId: string; id?: string; name: string; output: string; isError: boolean }>(
     "chat-tool-result",
     (e) => handler(e.payload),
   );
-export const onChatDone = (handler: (text: string) => void) =>
-  listen<string>("chat-done", (e) => handler(e.payload));
+export const onChatDone = (handler: (event: ChatTextEvent) => void) =>
+  listen<ChatTextEvent>("chat-done", (e) => handler(e.payload));
 
 // ── Live events ───────────────────────────────────────────────────────────────
 

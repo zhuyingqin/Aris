@@ -123,6 +123,9 @@ impl Session {
             let _ = fs::remove_file(path);
         }
         fs::rename(&tmp_path, path)?;
+        if crate::session_index::should_index_session_path(path) {
+            let _ = crate::session_index::index_session(path, self);
+        }
         Ok(())
     }
 

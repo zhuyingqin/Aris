@@ -9,9 +9,16 @@ const mocks = vi.hoisted(() => ({
   literatureLoad: vi.fn(),
   literatureSave: vi.fn(),
   literatureSearch: vi.fn(),
+  literatureLibraryUpsert: vi.fn(),
   literatureDownloadPdf: vi.fn(),
+  literatureImportPdf: vi.fn(),
   literatureLlm: vi.fn(),
+  literatureReviewLlm: vi.fn(),
+  literatureLlmVision: vi.fn(),
+  literaturePdfOpen: vi.fn(),
   literaturePdfText: vi.fn(),
+  literaturePdfImages: vi.fn(),
+  literaturePdfBytes: vi.fn(),
   chatRunCommand: vi.fn(),
   literatureAgentSend: vi.fn(),
   onChatDone: vi.fn(),
@@ -24,9 +31,15 @@ vi.mock("../api/tauri", () => ({
   literatureLoad: mocks.literatureLoad,
   literatureSave: mocks.literatureSave,
   literatureSearch: mocks.literatureSearch,
+  literatureLibraryUpsert: mocks.literatureLibraryUpsert,
   literatureDownloadPdf: mocks.literatureDownloadPdf,
+  literatureImportPdf: mocks.literatureImportPdf,
   literatureLlm: mocks.literatureLlm,
+  literatureReviewLlm: mocks.literatureReviewLlm,
+  literatureLlmVision: mocks.literatureLlmVision,
+  literaturePdfOpen: mocks.literaturePdfOpen,
   literaturePdfText: mocks.literaturePdfText,
+  literaturePdfBytes: mocks.literaturePdfBytes,
   chatRunCommand: mocks.chatRunCommand,
   literatureAgentSend: mocks.literatureAgentSend,
   onChatDone: mocks.onChatDone,
@@ -39,8 +52,17 @@ vi.mock("../api/tauri", () => ({
   stateDir: vi.fn(),
 }));
 
+vi.mock("./pdfExtraction", () => ({
+  extractPdfTextByPage: mocks.literaturePdfText,
+  extractPdfPageImages: mocks.literaturePdfImages,
+}));
+
+vi.mock("@tauri-apps/plugin-dialog", () => ({
+  open: vi.fn(),
+}));
+
 import Literature from "./Literature";
-import { resetLiteratureStore } from "./literatureStore";
+import { resetLiteratureStore, useLiteratureStore } from "./literatureStore";
 import { useStore } from "../store";
 
 let chatDoneHandler: ((text: string) => void) | null = null;
@@ -70,6 +92,8 @@ const fixturePaper: LiteraturePaper = {
   addedAt: "2026-06-01T00:00:00.000Z",
   pdf: { status: "none", url: "https://arxiv.org/pdf/1111.00001.pdf" },
   evidence: [],
+  answerChains: [],
+  pdfAnnotations: [],
 };
 
 const fixtureLibrary = (): LiteratureLibrary => ({
@@ -156,10 +180,27 @@ beforeEach(() => {
     relativePath: "papers/1111.00001.pdf",
     bytes: 123456,
   });
+  mocks.literatureImportPdf.mockReset().mockResolvedValue({
+    path: "C:/project/papers/1111.00001.pdf",
+    relativePath: "papers/1111.00001.pdf",
+    bytes: 654321,
+  });
+  mocks.literatureLibraryUpsert.mockReset().mockResolvedValue({
+    searchId: "search-new",
+    added: 1,
+    merged: 1,
+    total: 2,
+    libraryPath: "papers/library.json",
+  });
   // Default: no executor configured, so screening/brief fall back to the
   // offline heuristic. Individual tests opt into the LLM path.
   mocks.literatureLlm.mockReset().mockRejectedValue(new Error("no executor configured"));
+  mocks.literatureReviewLlm.mockReset().mockRejectedValue(new Error("no reviewer configured"));
+  mocks.literatureLlmVision.mockReset().mockRejectedValue(new Error("no vision executor configured"));
+  mocks.literaturePdfOpen.mockReset().mockResolvedValue(undefined);
   mocks.literaturePdfText.mockReset().mockRejectedValue(new Error("no pdf text"));
+  mocks.literaturePdfImages.mockReset().mockRejectedValue(new Error("no pdf page images"));
+  mocks.literaturePdfBytes.mockReset().mockRejectedValue(new Error("no pdf bytes"));
   mocks.chatRunCommand.mockReset().mockResolvedValue({
     handled: true,
     message: null,
@@ -198,6 +239,47 @@ describe("Literature library", () => {
     expect(screen.queryByRole("button", { name: "已排除 0" })).toBeNull();
   });
 
+  it("normalizes legacy records and clearly shows a missing abstract", async () => {
+    const legacy = fixtureLibrary();
+    const paper = legacy.papers[0] as Partial<LiteraturePaper>;
+    delete paper.abstract;
+    delete paper.tags;
+    delete paper.evidence;
+    delete paper.pdf;
+    mocks.literatureLoad.mockResolvedValue(legacy);
+
+    render(<Literature />);
+
+    expect(await screen.findByText("当前元数据源未提供摘要。可尝试重新检索或从论文页面补充元数据。")).toBeTruthy();
+    expect(screen.getByText("缺失")).toBeTruthy();
+  });
+
+  it("allows the paper workspace selection to be cleared", async () => {
+    const user = userEvent.setup();
+    render(<Literature />);
+    await screen.findAllByText("Persisted Paper on Grounded Reading");
+
+    await user.click(screen.getByRole("button", { name: "清除选择" }));
+
+    expect(screen.getByText("Select a paper to open it here.")).toBeTruthy();
+  });
+
+  it("assigns and removes a paper from a collection in the Files tab", async () => {
+    const user = userEvent.setup();
+    const withCollection = fixtureLibrary();
+    withCollection.collections = [{ id: "core", label: "Core review" }];
+    mocks.literatureLoad.mockResolvedValue(withCollection);
+    render(<Literature />);
+    await screen.findAllByText("Persisted Paper on Grounded Reading");
+
+    await user.click(screen.getByRole("tab", { name: "文件" }));
+    await user.click(screen.getByRole("button", { name: "+ Core review" }));
+    expect(screen.getByRole("button", { name: "✓ Core review" }).getAttribute("aria-pressed")).toBe("true");
+
+    await user.click(screen.getByRole("button", { name: "✓ Core review" }));
+    expect(screen.getByRole("button", { name: "+ Core review" }).getAttribute("aria-pressed")).toBe("false");
+  });
+
   it("logs literature tool calls made by the agent in Chat", async () => {
     render(<Literature />);
     await screen.findAllByText("Persisted Paper on Grounded Reading");
@@ -231,13 +313,146 @@ describe("Literature library", () => {
 
     await user.click(screen.getByRole("button", { name: "下载 PDF" }));
 
-    expect(await screen.findByText("PDF 已保存")).toBeTruthy();
     expect(mocks.literatureDownloadPdf).toHaveBeenCalledWith(
       "https://arxiv.org/pdf/1111.00001.pdf",
       "1111.00001.pdf",
     );
     expect(screen.getByText("1 paper · 1 PDF")).toBeTruthy();
     expect(screen.getByRole("button", { name: "已下载 1" })).toBeTruthy();
+  });
+
+  it("imports a user-selected PDF into the paper record", async () => {
+    useLiteratureStore.setState({ library: fixtureLibrary(), loaded: true });
+
+    await act(async () => {
+      await useLiteratureStore.getState().uploadPdf(
+        fixturePaper.id,
+        "C:/Users/researcher/selected.pdf",
+      );
+    });
+
+    expect(mocks.literatureImportPdf).toHaveBeenCalledWith(
+      "C:/Users/researcher/selected.pdf",
+      "1111.00001.pdf",
+    );
+    expect(useLiteratureStore.getState().library.papers[0].pdf).toMatchObject({
+      status: "downloaded",
+      path: "papers/1111.00001.pdf",
+      bytes: 654321,
+    });
+  });
+
+  it("uses the configured Review LLM for agent screening", async () => {
+    const library = fixtureLibrary();
+    library.reviewTasks = [{
+      id: "task-review",
+      question: "Which papers ground claims?",
+      criteria: [{
+        id: "criterion-1",
+        kind: "include",
+        text: "Must discuss grounded claims",
+        createdAt: "2026-06-01T00:00:00.000Z",
+      }],
+      searchIds: [],
+      createdAt: "2026-06-01T00:00:00.000Z",
+      updatedAt: "2026-06-01T00:00:00.000Z",
+      suggestions: [],
+    }];
+    useLiteratureStore.setState({ library, loaded: true });
+    mocks.literatureReviewLlm.mockResolvedValue(JSON.stringify([{
+      index: 0,
+      decision: "include",
+      score: 91,
+      confidence: 88,
+      rationale: "It directly discusses grounded reading.",
+      quote: "A previously saved record loaded from papers/library.json.",
+    }]));
+
+    await act(async () => {
+      await useLiteratureStore.getState().screenPapersForTask("task-review");
+    });
+
+    expect(mocks.literatureReviewLlm).toHaveBeenCalledOnce();
+    expect(mocks.literatureLlm).not.toHaveBeenCalled();
+    expect(useLiteratureStore.getState().library.papers[0].verdict?.score).toBe(91);
+  });
+
+  it("creates and edits a colored PDF annotation", () => {
+    useLiteratureStore.setState({ library: fixtureLibrary(), loaded: true });
+
+    act(() => {
+      useLiteratureStore.getState().addPdfAnnotation(fixturePaper.id, {
+        page: 2,
+        quote: "用户标注",
+        note: "",
+        kind: "note",
+        color: "purple",
+        rects: [{ left: 0.1, top: 0.2, width: 0.3, height: 0.08 }],
+      });
+    });
+    const annotation = useLiteratureStore.getState().library.papers[0].pdfAnnotations[0];
+    act(() => {
+      useLiteratureStore.getState().updatePdfAnnotation(fixturePaper.id, annotation.id, {
+        quote: "修改后的核心内容",
+        note: "修改后的备注",
+        color: "green",
+      });
+    });
+
+    expect(useLiteratureStore.getState().library.papers[0].pdfAnnotations[0]).toMatchObject({
+      quote: "修改后的核心内容",
+      note: "修改后的备注",
+      color: "green",
+      kind: "note",
+    });
+  });
+
+  it("opens an already downloaded PDF in the embedded reader", async () => {
+    const user = userEvent.setup();
+    const downloaded = fixtureLibrary();
+    downloaded.papers[0].pdf = { status: "downloaded", path: "papers/1111.00001.pdf" };
+    mocks.literatureLoad.mockResolvedValue(downloaded);
+
+    render(<Literature />);
+    await screen.findAllByText("Persisted Paper on Grounded Reading");
+    await user.click(screen.getAllByRole("button", { name: "打开 PDF" })[0]);
+
+    // Opening a downloaded PDF takes over the body with the immersive reading
+    // shell (full-width reader + a back button), not the cramped side panel.
+    expect(screen.getByRole("button", { name: "‹ 返回" })).toBeTruthy();
+    expect(mocks.literaturePdfOpen).not.toHaveBeenCalled();
+    expect(mocks.literatureDownloadPdf).not.toHaveBeenCalled();
+  });
+
+  it("runs a remote search and persists it as a saved search", async () => {
+    const user = userEvent.setup();
+    render(<Literature />);
+    await screen.findAllByText("Persisted Paper on Grounded Reading");
+
+    await user.type(screen.getByLabelText("远程文献检索"), "grounded agents");
+    await user.click(screen.getByRole("button", { name: "检索并保存" }));
+
+    await waitFor(() =>
+      expect(mocks.literatureSearch).toHaveBeenCalledWith(
+        "grounded agents",
+        ["arxiv", "crossref", "openalex"],
+        20,
+      ),
+    );
+    expect(mocks.literatureLibraryUpsert).toHaveBeenCalled();
+  });
+
+  it("creates and edits a review task from the visible workflow panel", async () => {
+    const user = userEvent.setup();
+    render(<Literature />);
+    await screen.findAllByText("Persisted Paper on Grounded Reading");
+
+    await user.click(screen.getByRole("button", { name: "新建审查" }));
+    await user.type(screen.getByLabelText("审查问题"), "Which agents ground claims?");
+    await user.click(screen.getByRole("button", { name: "创建任务" }));
+
+    expect(await screen.findByLabelText("当前审查问题")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "按标准筛选论文" })).toBeTruthy();
   });
 
   it("hands papers without a direct PDF link to Playwright MCP", async () => {
@@ -323,52 +538,389 @@ describe("Literature library", () => {
     ).toBeGreaterThan(0);
   });
 
-  it("generates a structured abstract brief with source tags", async () => {
+  it("does not silently fall back to the abstract when full-text extraction fails", async () => {
     const user = userEvent.setup();
-    const withAbstract = fixtureLibrary();
-    withAbstract.papers[0].abstract =
+    const downloaded = fixtureLibrary();
+    downloaded.papers[0].abstract =
       "Screening is hard. We propose a staged pipeline for triage. It reaches 0.94 recall at 8x less reading time. A limitation is the CS-only evaluation.";
-    withAbstract.projectFocus = {
+    downloaded.papers[0].pdf = { status: "downloaded", path: "papers/1111.00001.pdf" };
+    downloaded.projectFocus = {
       question: "agent screening of literature",
       motivation: "",
       scope: "screening, triage",
       currentAssumptions: "",
     };
-    mocks.literatureLoad.mockResolvedValue(withAbstract);
+    mocks.literatureLoad.mockResolvedValue(downloaded);
 
     render(<Literature />);
     await screen.findAllByText("Persisted Paper on Grounded Reading");
-    // Brief is the default detail tab; generate from the abstract.
-    await user.click(screen.getByRole("button", { name: "从摘要生成简报" }));
+    await user.click(screen.getByRole("button", { name: "从完整全文生成简报" }));
 
-    // No executor configured → heuristic brief from the abstract.
-    expect(await screen.findByText(/staged pipeline for triage/)).toBeTruthy();
-    const detail = document.querySelector(".lit-brief") as HTMLElement;
-    expect(within(detail).getByText(/0\.94 recall/)).toBeTruthy();
-    expect(within(detail).getByText(/CS-only evaluation/)).toBeTruthy();
-    // Every line is provenance-tagged to the abstract.
-    expect(within(detail).getAllByText("[abstract]").length).toBe(4);
+    expect((await screen.findAllByText(/全文简报生成失败/)).length).toBeGreaterThan(0);
+    expect(mocks.literatureLlm).not.toHaveBeenCalled();
+    expect(document.querySelector(".lit-brief")).toBeNull();
+  });
+
+  it("refuses to present a truncated extraction as a full-text brief", async () => {
+    const user = userEvent.setup();
+    const downloaded = fixtureLibrary();
+    downloaded.papers[0].pdf = { status: "downloaded", path: "papers/1111.00001.pdf" };
+    mocks.literatureLoad.mockResolvedValue(downloaded);
+    mocks.literaturePdfText.mockResolvedValue({
+      text: "Partial text",
+      pages: [{ page: 1, text: "Partial text", source: "embedded" }],
+      totalCharacters: 300000,
+      extractedCharacters: 200000,
+      truncated: true,
+      ocrUsed: false,
+      missingPages: [2],
+      warnings: [],
+    });
+
+    render(<Literature />);
+    await screen.findAllByText("Persisted Paper on Grounded Reading");
+    await user.click(screen.getByRole("button", { name: "从完整全文生成简报" }));
+
+    expect((await screen.findAllByText(/PDF 全文不完整/)).length).toBeGreaterThan(0);
+    expect(mocks.literatureLlm).not.toHaveBeenCalled();
   });
 
   it("writes the brief with the real LLM when an executor is configured", async () => {
     const user = userEvent.setup();
+    const downloaded = fixtureLibrary();
+    downloaded.papers[0].pdf = { status: "downloaded", path: "papers/1111.00001.pdf" };
+    mocks.literatureLoad.mockResolvedValue(downloaded);
+    mocks.literaturePdfText.mockResolvedValue({
+      text: "[[PAGE 1]]\nComplete paper text with methods, results, and limitations.",
+      pages: [{
+        page: 1,
+        text: "Complete paper text with methods, results, and limitations.",
+        source: "embedded",
+      }],
+      totalCharacters: 59,
+      extractedCharacters: 59,
+      truncated: false,
+      ocrUsed: false,
+      missingPages: [],
+      warnings: [],
+    });
     mocks.literatureLlm.mockResolvedValue(
       JSON.stringify({
-        problem: "Reviewers drown in papers.",
-        method: "A staged agentic pipeline.",
-        results: "Reaches 0.94 recall at 8x less reading.",
-        limits: "Evaluated on CS corpora only.",
-        forYou: "Direct precedent for your screening queue.",
+        problem: {
+          text: "Reviewers drown in papers.",
+          page: 1,
+          quote: "Complete paper text with methods, results, and limitations.",
+        },
+        method: {
+          text: "A staged agentic pipeline.",
+          page: 1,
+          quote: "Complete paper text with methods, results, and limitations.",
+        },
+        results: {
+          text: "Reaches 0.94 recall at 8x less reading.",
+          page: 1,
+          quote: "Complete paper text with methods, results, and limitations.",
+        },
+        limits: {
+          text: "Evaluated on CS corpora only.",
+          page: 1,
+          quote: "Complete paper text with methods, results, and limitations.",
+        },
+        forYou: {
+          text: "Direct precedent for your screening queue.",
+          page: 1,
+          quote: "Complete paper text with methods, results, and limitations.",
+        },
       }),
     );
     render(<Literature />);
     await screen.findAllByText("Persisted Paper on Grounded Reading");
-    await user.click(screen.getByRole("button", { name: "从摘要生成简报" }));
+    await user.click(screen.getByRole("button", { name: "从完整全文生成简报" }));
 
     expect(await screen.findByText("Reviewers drown in papers.")).toBeTruthy();
     const detail = document.querySelector(".lit-brief") as HTMLElement;
     expect(within(detail).getByText("A staged agentic pipeline.")).toBeTruthy();
     expect(mocks.literatureLlm).toHaveBeenCalled();
+    expect(within(detail).getAllByText("[pdf p.1]").length).toBe(5);
+    expect(useLiteratureStore.getState().library.papers[0].pdfAnnotations).toHaveLength(5);
+  });
+
+  it("rejects brief page anchors that are not present in the extracted PDF", async () => {
+    const downloaded = fixtureLibrary();
+    downloaded.papers[0].pdf = { status: "downloaded", path: "papers/1111.00001.pdf" };
+    mocks.literatureLoad.mockResolvedValue(downloaded);
+    mocks.literaturePdfText.mockResolvedValue({
+      text: "[[PAGE 1]]\nOnly page one is available.",
+      pages: [{ page: 1, text: "Only page one is available.", source: "embedded" }],
+      totalCharacters: 27,
+      extractedCharacters: 27,
+      truncated: false,
+      ocrUsed: false,
+      missingPages: [],
+      warnings: [],
+    });
+    mocks.literatureLlm.mockResolvedValue(
+      JSON.stringify({
+        problem: { text: "Unsupported page.", page: 99 },
+        method: { text: "Unsupported page.", page: 99 },
+        results: { text: "Unsupported page.", page: 99 },
+        limits: { text: "Unsupported page.", page: 99 },
+        forYou: { text: "Unsupported page.", page: 99 },
+      }),
+    );
+
+    render(<Literature />);
+    await screen.findAllByText("Persisted Paper on Grounded Reading");
+    await act(async () => {
+      await useLiteratureStore.getState().generateBrief(downloaded.papers[0].id);
+    });
+
+    expect(useLiteratureStore.getState().library.papers[0].brief).toBeUndefined();
+    expect(useLiteratureStore.getState().error).toContain("valid PDF page anchor");
+  });
+
+  it("saves only visual evidence tied to supplied page images", async () => {
+    const downloaded = fixtureLibrary();
+    downloaded.papers[0].pdf = { status: "downloaded", path: "papers/1111.00001.pdf" };
+    mocks.literatureLoad.mockResolvedValue(downloaded);
+    mocks.literaturePdfImages.mockResolvedValue({
+      pages: [{
+        page: 1,
+        mimeType: "image/jpeg",
+        data: "ZmFrZQ==",
+        byteLength: 4,
+        fingerprint: "sha256:page-1",
+      }],
+      totalPages: 1,
+      totalBytes: 4,
+    });
+    mocks.literatureLlmVision.mockResolvedValue(
+      JSON.stringify([
+        {
+          page: 1,
+          quote: "Exact grounded evidence appears here.",
+          note: "Visible on the rendered page.",
+          role: "result",
+        },
+        { page: 99, quote: "Wrong page evidence.", note: "Invalid.", role: "result" },
+      ]),
+    );
+    mocks.literatureLlm.mockResolvedValue("[]");
+
+    render(<Literature />);
+    await screen.findAllByText("Persisted Paper on Grounded Reading");
+    await act(async () => {
+      await useLiteratureStore.getState().generateAnswerChains(downloaded.papers[0].id);
+    });
+
+    expect(useLiteratureStore.getState().library.papers[0].evidence).toEqual([
+      expect.objectContaining({
+        page: 1,
+        quote: "Exact grounded evidence appears here.",
+        source: "vision",
+        imageFingerprint: "sha256:page-1",
+      }),
+    ]);
+    expect(mocks.literatureLlmVision).toHaveBeenCalledTimes(1);
+    expect(mocks.literatureLlmVision.mock.calls[0][0]).toContain(
+      "Write every evidence explanation in Chinese",
+    );
+    expect(mocks.literatureLlmVision.mock.calls[0][1]).toContain(
+      "Write every note in Chinese",
+    );
+  });
+
+  it("reads every rendered page-image batch before building answer chains", async () => {
+    const downloaded = fixtureLibrary();
+    downloaded.papers[0].pdf = { status: "downloaded", path: "papers/1111.00001.pdf" };
+    mocks.literatureLoad.mockResolvedValue(downloaded);
+    const pages = Array.from({ length: 5 }, (_, index) => ({
+      page: index + 1,
+      mimeType: "image/jpeg" as const,
+      data: `cGFnZS0${index + 1}=`,
+      byteLength: 6,
+      fingerprint: `sha256:page-${index + 1}`,
+    }));
+    mocks.literaturePdfImages.mockResolvedValue({
+      pages,
+      totalPages: pages.length,
+      totalBytes: 30,
+    });
+    mocks.literatureLlmVision.mockImplementation(
+      (_system: string, _prompt: string, batch: typeof pages) =>
+        Promise.resolve(JSON.stringify(batch.map((page) => ({
+          page: page.page,
+          quote: `Visible evidence on page ${page.page}.`,
+          note: `Observed page ${page.page}.`,
+          role: "result",
+        })))),
+    );
+    mocks.literatureLlm.mockImplementation((_system: string, prompt: string) => {
+      const evidenceId = prompt.match(/"id":"([^"]+)"/)?.[1];
+      return Promise.resolve(JSON.stringify([{
+        question: "What was observed?",
+        answer: "The visual reader covered the paper.",
+        supports: [{ evidenceId, role: "result" }],
+      }]));
+    });
+
+    render(<Literature />);
+    await screen.findAllByText("Persisted Paper on Grounded Reading");
+    await act(async () => {
+      await useLiteratureStore.getState().generateAnswerChains(downloaded.papers[0].id);
+    });
+
+    expect(mocks.literatureLlmVision).toHaveBeenCalledTimes(2);
+    expect(mocks.literatureLlmVision.mock.calls.flatMap((call) => call[2])).toHaveLength(5);
+    expect(mocks.literatureLlm.mock.calls[0][0]).toContain(
+      "Write every question and final answer in Chinese",
+    );
+    expect(mocks.literatureLlm.mock.calls[0][1]).toContain(
+      "All question and answer values must be written in Chinese",
+    );
+  });
+
+  it("builds question-answer chains only from visual evidence ids", async () => {
+    const downloaded = fixtureLibrary();
+    downloaded.papers[0].pdf = { status: "downloaded", path: "papers/1111.00001.pdf" };
+    mocks.literatureLoad.mockResolvedValue(downloaded);
+    mocks.literaturePdfImages.mockResolvedValue({
+      pages: [{
+        page: 1,
+        mimeType: "image/jpeg",
+        data: "ZmFrZQ==",
+        byteLength: 4,
+        fingerprint: "sha256:page-1",
+      }],
+      totalPages: 1,
+      totalBytes: 4,
+    });
+    mocks.literatureLlmVision.mockResolvedValue(
+      JSON.stringify([
+        {
+          page: 1,
+          quote: "A staged pipeline reaches 0.94 recall.",
+          note: "Main quantitative result.",
+          role: "result",
+        },
+      ]),
+    );
+    mocks.literatureLlm.mockImplementation((_system: string, prompt: string) => {
+      const evidenceId = prompt.match(/"id":"([^"]+)"/)?.[1];
+      return Promise.resolve(JSON.stringify([
+        {
+          question: "What is the main result?",
+          answer: "The staged pipeline reaches 0.94 recall.",
+          supports: [
+            { evidenceId, role: "result" },
+            { evidenceId: "missing-evidence", role: "result" },
+          ],
+        },
+      ]));
+    });
+
+    render(<Literature />);
+    await screen.findAllByText("Persisted Paper on Grounded Reading");
+    await act(async () => {
+      await useLiteratureStore.getState().generateAnswerChains(downloaded.papers[0].id);
+    });
+
+    const paper = useLiteratureStore.getState().library.papers[0];
+    expect(paper.answerChains).toHaveLength(1);
+    expect(paper.answerChains[0].basis).toBe("vision");
+    expect(paper.answerChains[0].supports).toHaveLength(1);
+    expect(paper.pdfAnnotations.filter((item) => item.kind === "answer-support")).toEqual([
+      expect.objectContaining({
+        kind: "answer-support",
+        page: 1,
+        quote: "A staged pipeline reaches 0.94 recall.",
+        source: "vision",
+        imageFingerprint: "sha256:page-1",
+        evidenceId: paper.evidence[0].id,
+      }),
+    ]);
+
+    act(() => {
+      useLiteratureStore.getState().updateAnswerChain(paper.id, paper.answerChains[0].id, {
+        answer: "A human-revised answer.",
+        reviewStatus: "accepted",
+      });
+    });
+    const reviewed = useLiteratureStore.getState().library.papers[0];
+    expect(reviewed.answerChains[0].reviewStatus).toBe("accepted");
+    expect(
+      reviewed.pdfAnnotations.find((item) => item.kind === "answer-support")?.note,
+    ).toContain("A human-revised answer.");
+  });
+
+  it("deletes evidence and removes its linked answer-chain support", async () => {
+    const user = userEvent.setup();
+    const library = fixtureLibrary();
+    library.papers[0].evidence = [{
+      id: "evidence-1",
+      page: 3,
+      quote: "The visual result reaches 0.94 recall.",
+      note: "结果：主要定量结果。",
+      source: "vision",
+      imageFingerprint: "sha256:page-3",
+    }];
+    library.papers[0].answerChains = [{
+      id: "chain-1",
+      question: "主要结果是什么？",
+      answer: "该方法达到 0.94 召回率。",
+      supports: [{ annotationId: "support-1", role: "result" }],
+      basis: "vision",
+      reviewStatus: "unreviewed",
+      createdAt: "2026-06-01T00:00:00.000Z",
+    }];
+    library.papers[0].pdfAnnotations = [
+      {
+        id: "evidence-mark-1",
+        page: 3,
+        quote: "The visual result reaches 0.94 recall.",
+        note: "结果：主要定量结果。",
+        kind: "evidence",
+        source: "vision",
+        imageFingerprint: "sha256:page-3",
+        sourceId: "evidence-1",
+        createdAt: "2026-06-01T00:00:00.000Z",
+      },
+      {
+        id: "support-1",
+        page: 3,
+        quote: "The visual result reaches 0.94 recall.",
+        note: "结果：该方法达到 0.94 召回率。",
+        kind: "answer-support",
+        source: "vision",
+        imageFingerprint: "sha256:page-3",
+        sourceId: "chain-1",
+        createdAt: "2026-06-01T00:00:00.000Z",
+      },
+    ];
+    mocks.literatureLoad.mockResolvedValue(library);
+
+    render(<Literature />);
+    await screen.findAllByText("Persisted Paper on Grounded Reading");
+    await user.click(screen.getByRole("tab", { name: "证据" }));
+    expect(
+      screen.getByRole("heading", { name: "从中文结论回到 PDF 原始证据" }),
+    ).toBeTruthy();
+    expect(screen.getByRole("region", { name: "问答结论" })).toBeTruthy();
+    expect(screen.getByRole("region", { name: "原文证据" })).toBeTruthy();
+    expect(screen.queryByLabelText("问题 1")).toBeNull();
+    await user.click(screen.getByRole("button", { name: "编辑问题 1" }));
+    expect(screen.getByLabelText("问题 1").tagName).toBe("TEXTAREA");
+    await user.tab();
+    expect(screen.getByText("中文说明")).toBeTruthy();
+    expect(screen.getAllByText("原文摘录").length).toBeGreaterThan(0);
+    await user.click(await screen.findByRole("button", { name: /删除证据/ }));
+
+    const paper = useLiteratureStore.getState().library.papers[0];
+    expect(paper.evidence).toEqual([]);
+    expect(paper.answerChains).toEqual([]);
+    expect(paper.pdfAnnotations).toEqual([]);
+    const activity = useLiteratureStore.getState().activity;
+    expect(activity[activity.length - 1]?.text).toContain("已删除第 3 页证据");
   });
 
   it("batch-moves selected papers along the pipeline", async () => {

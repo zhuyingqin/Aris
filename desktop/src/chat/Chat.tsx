@@ -72,7 +72,7 @@ function ContextRing({ used, max }: { used: number; max: number }) {
 function MemoryBadge({ count }: { count: number }) {
   if (count === 0) return null;
   return (
-    <div className="mem-badge" title={`${count} memory file${count !== 1 ? "s" : ""} loaded`}>
+    <div className="mem-badge" title={`${count} active memory item${count !== 1 ? "s" : ""} loaded`}>
       <span className="mem-badge-icon">◆</span>
       <span className="mem-badge-count">{count}</span>
     </div>
@@ -222,7 +222,7 @@ export default function Chat() {
   const [exporting, setExporting] = useState(false);
   const deleteTimers = useRef(new Map<string, { timer: number; projectId: string }>());
   const titleRequests = useRef(new Set<string>());
-  const sendLock = useRef(false);
+  const sendLocks = useRef(new Set<string>());
   const commandSelectionLock = useRef(false);
   const currentSessionRef = useRef(currentSession);
   currentSessionRef.current = currentSession;
@@ -314,15 +314,14 @@ export default function Chat() {
     );
   }, [patchAssistant, syncBackendContext]);
 
-  const { busy, run, stop, runningSessionId } = useChatStream({ patchAssistant, onComplete, onError });
-  const currentChatBusy = busy && runningSessionId === currentId;
-  const otherChatBusy = busy && runningSessionId !== null && runningSessionId !== currentId;
+  const { run, stop, runningSessionIds } = useChatStream({ patchAssistant, onComplete, onError });
+  const currentChatBusy = runningSessionIds.has(currentId);
   const turns = currentSession?.turns ?? [];
   const estimatedTokens = estimateTokens(turns);
   const input = currentSession?.draft ?? "";
   const attachments = currentSession?.draftAttachments ?? [];
-  const busyRef = useRef(busy);
-  busyRef.current = busy;
+  const runningSessionIdsRef = useRef(runningSessionIds);
+  runningSessionIdsRef.current = runningSessionIds;
 
   const refreshStatus = useCallback(() => {
     if (!isTauri()) {
@@ -506,17 +505,17 @@ export default function Chat() {
 
   useEffect(() => {
     const text = pendingChatRunInput?.trim();
-    if (!text || !currentSession || busy) return;
+    if (!text || !currentSession || currentChatBusy) return;
     setPendingChatRunInput(null);
     const session = materializeCurrentSession();
     if (!session) return;
     void runSlashCommand(session, text, []);
-  }, [busy, currentSession, materializeCurrentSession, pendingChatRunInput, runSlashCommand, setPendingChatRunInput]);
+  }, [currentChatBusy, currentSession, materializeCurrentSession, pendingChatRunInput, runSlashCommand, setPendingChatRunInput]);
 
   const selectCommandOption = useCallback(async (value: string) => {
     const pending = pendingCommandSelection;
     const session = currentSessionRef.current;
-    if (!pending || !session || session.id !== pending.sessionId || busyRef.current || commandSelectionLock.current) return;
+    if (!pending || !session || session.id !== pending.sessionId || runningSessionIdsRef.current.has(session.id) || commandSelectionLock.current) return;
     commandSelectionLock.current = true;
     setPendingCommandSelection(null);
     focusComposer();
@@ -528,8 +527,9 @@ export default function Chat() {
   }, [focusComposer, pendingCommandSelection, runSlashCommand]);
 
   const send = async () => {
-    if (sendLock.current || !currentSession || busy || (!input.trim() && attachments.length === 0)) return;
-    sendLock.current = true;
+    if (!currentSession || sendLocks.current.has(currentSession.id) || currentChatBusy || (!input.trim() && attachments.length === 0)) return;
+    const sessionId = currentSession.id;
+    sendLocks.current.add(sessionId);
     try {
       if (!status?.ready && (!input.trim().startsWith("/") || attachments.length > 0)) return;
       const session = materializeCurrentSession();
@@ -543,18 +543,18 @@ export default function Chat() {
       }
       await beginRun(session, session.turns, input, attachments);
     } finally {
-      sendLock.current = false;
+      sendLocks.current.delete(sessionId);
     }
   };
 
   const retry = useCallback(async (assistant: ChatTurn) => {
     const session = currentSessionRef.current;
-    if (!session || busyRef.current || sendLock.current) return;
+    if (!session || runningSessionIdsRef.current.has(session.id) || sendLocks.current.has(session.id)) return;
     const assistantIndex = session.turns.findIndex((turn) => turn.id === assistant.id);
     const userIndex = assistantIndex - 1;
     const previousUser = session.turns[userIndex];
     if (userIndex < 0 || previousUser?.role !== "user") return;
-    sendLock.current = true;
+    sendLocks.current.add(session.id);
     try {
       await beginRun(
         session,
@@ -564,13 +564,13 @@ export default function Chat() {
         true,
       );
     } finally {
-      sendLock.current = false;
+      sendLocks.current.delete(session.id);
     }
   }, [beginRun]);
 
   const edit = useCallback((turn: ChatTurn) => {
     const session = currentSessionRef.current;
-    if (!session || busyRef.current) return;
+    if (!session || runningSessionIdsRef.current.has(session.id)) return;
     setDraft(session.id, textFromTurn(turn));
     updateSession(session.id, (item) => ({ ...item, draftAttachments: turn.attachments ?? [] }));
     setEditingTurnId(turn.id);
@@ -579,18 +579,18 @@ export default function Chat() {
 
   const continueStopped = useCallback(async () => {
     const session = currentSessionRef.current;
-    if (!session || busyRef.current || sendLock.current) return;
-    sendLock.current = true;
+    if (!session || runningSessionIdsRef.current.has(session.id) || sendLocks.current.has(session.id)) return;
+    sendLocks.current.add(session.id);
     try {
       await beginRun(session, session.turns, "Continue from where you stopped.", [], true);
     } finally {
-      sendLock.current = false;
+      sendLocks.current.delete(session.id);
     }
   }, [beginRun]);
 
   const exportCurrentChat = useCallback(async () => {
     const session = currentSessionRef.current;
-    if (!session || busyRef.current || exporting || session.turns.length === 0) return;
+    if (!session || runningSessionIdsRef.current.has(session.id) || exporting || session.turns.length === 0) return;
     setExporting(true);
     try {
       if (!isTauri()) {
@@ -687,7 +687,7 @@ export default function Chat() {
               <select
                 aria-label="Chat permission mode"
                 value={permission?.mode ?? "workspace-write"}
-                disabled={permissionBusy || busy}
+                disabled={permissionBusy || currentChatBusy}
                 onChange={(event) => void changePermission(event.currentTarget.value)}
               >
                 <option value="read-only">Plan</option>
@@ -704,7 +704,7 @@ export default function Chat() {
             <button
               className="chat-export-btn"
               onClick={() => void exportCurrentChat()}
-              disabled={busy || exporting || turns.length === 0}
+              disabled={currentChatBusy || exporting || turns.length === 0}
               title="Export current chat"
               aria-label="Export current chat"
             >
@@ -744,7 +744,6 @@ export default function Chat() {
           skills={skills}
           attachments={attachments}
           busy={currentChatBusy}
-          sendBlocked={otherChatBusy}
           ready={Boolean(status?.ready)}
           editing={Boolean(editingTurnId)}
           focusRequest={focusRequest}
@@ -754,7 +753,7 @@ export default function Chat() {
           }}
           onAttachmentsChange={setAttachments}
           onSubmit={() => void send()}
-          onStop={() => void stop()}
+          onStop={() => void stop(currentId)}
           onCancelEdit={() => setEditingTurnId(null)}
           onHeightChange={setComposerHeight}
         />

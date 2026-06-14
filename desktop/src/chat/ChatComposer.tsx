@@ -178,7 +178,6 @@ interface Props {
   skills: SkillMeta[];
   attachments: ChatAttachment[];
   busy: boolean;
-  sendBlocked?: boolean;
   ready: boolean;
   editing: boolean;
   onInputChange: (value: string) => void;
@@ -196,7 +195,6 @@ export default function ChatComposer({
   skills,
   attachments,
   busy,
-  sendBlocked = false,
   ready,
   editing,
   onInputChange,
@@ -267,7 +265,6 @@ export default function ChatComposer({
   const activeItems = pickerMode === "skill" ? slashItems : fileItems;
   const isCommandInput = input.trim().startsWith("/");
   const canSubmit = !busy
-    && !sendBlocked
     && (ready || (isCommandInput && attachments.length === 0))
     && (input.trim().length > 0 || attachments.length > 0);
 
@@ -519,7 +516,7 @@ export default function ChatComposer({
           ref={textareaRef}
           value={input}
           disabled={busy}
-          placeholder={sendBlocked ? "Another chat is running; draft here" : ready ? "Message ARIS" : "Configure an API key, or type /help"}
+          placeholder={ready ? "Message ARIS" : "Configure an API key, or type /help"}
           onChange={(event) => {
             onInputChange(event.target.value);
             updatePicker(event.target.value, event.target.selectionStart ?? event.target.value.length);
@@ -600,7 +597,6 @@ export default function ChatComposer({
               className="chat-send-btn"
               onClick={onSubmit}
               disabled={!canSubmit}
-              title={sendBlocked ? "Wait for the running chat to finish before sending" : undefined}
               aria-label={editing ? "Resend edited message" : "Send message"}
             >
               ↑

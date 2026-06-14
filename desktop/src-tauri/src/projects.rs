@@ -188,7 +188,9 @@ fn activate(registry: &mut ProjectRegistry, id: &str) -> Result<(), String> {
             .ok_or_else(|| "project not found".to_string())?;
         (project.id.clone(), PathBuf::from(&project.path))
     };
-    if !path.is_dir() {
+    // The default workspace is created on first launch by apply_project_environment.
+    // User-added projects must already exist — if they've been deleted, return an error.
+    if project_id != "default" && !path.is_dir() {
         return Err(format!(
             "project directory does not exist: {}",
             path.display()

@@ -20,21 +20,18 @@ interface StreamHandlers {
 }
 
 export function useChatStream({ patchAssistant, onComplete, onError }: StreamHandlers) {
-  const [busy, setBusy] = useState(false);
-  const [runningSessionId, setRunningSessionId] = useState<string | null>(null);
-  const busyRef = useRef(false);
-  const runningSession = useRef<string | null>(null);
-  const stopRequested = useRef(false);
-  const queue = useRef<{ kind: "text" | "thinking"; delta: string }[]>([]);
-  const flushTimer = useRef<number | null>(null);
+  const [runningSessionIds, setRunningSessionIds] = useState<Set<string>>(() => new Set());
+  const runningSessions = useRef(new Set<string>());
+  const stopRequested = useRef(new Set<string>());
+  const queues = useRef(new Map<string, Array<{ kind: "text" | "thinking"; delta: string }>>());
+  const flushTimers = useRef(new Map<string, number>());
 
-  const flush = useCallback(() => {
-    if (flushTimer.current !== null) window.clearTimeout(flushTimer.current);
-    flushTimer.current = null;
-    const sessionId = runningSession.current;
-    if (!sessionId) return;
-    const pending = queue.current;
-    queue.current = [];
+  const flush = useCallback((sessionId: string) => {
+    const timer = flushTimers.current.get(sessionId);
+    if (timer !== undefined) window.clearTimeout(timer);
+    flushTimers.current.delete(sessionId);
+    const pending = queues.current.get(sessionId) ?? [];
+    queues.current.delete(sessionId);
     if (pending.length === 0) return;
     patchAssistant(sessionId, (turn) => {
       let blocks = turn.blocks;
@@ -47,35 +44,39 @@ export function useChatStream({ patchAssistant, onComplete, onError }: StreamHan
     });
   }, [patchAssistant]);
 
-  const scheduleFlush = useCallback(() => {
-    if (flushTimer.current !== null) return;
-    flushTimer.current = window.setTimeout(flush, 70);
+  const scheduleFlush = useCallback((sessionId: string) => {
+    if (flushTimers.current.has(sessionId)) return;
+    flushTimers.current.set(sessionId, window.setTimeout(() => flush(sessionId), 70));
   }, [flush]);
+
+  const enqueue = useCallback((
+    sessionId: string,
+    event: { kind: "text" | "thinking"; delta: string },
+  ) => {
+    const queue = queues.current.get(sessionId) ?? [];
+    queue.push(event);
+    queues.current.set(sessionId, queue);
+    scheduleFlush(sessionId);
+  }, [scheduleFlush]);
 
   useEffect(() => {
     if (!isTauri()) return;
     const unlisteners = [
-      onChatDelta((text) => {
-        queue.current.push({ kind: "text", delta: text });
-        scheduleFlush();
+      onChatDelta(({ sessionId, text }) => {
+        enqueue(sessionId, { kind: "text", delta: text });
       }),
-      onChatThinkingDelta((thinking) => {
-        queue.current.push({ kind: "thinking", delta: thinking });
-        scheduleFlush();
+      onChatThinkingDelta(({ sessionId, thinking }) => {
+        enqueue(sessionId, { kind: "thinking", delta: thinking });
       }),
       onChatTool((tool) => {
-        flush();
-        const sessionId = runningSession.current;
-        if (!sessionId) return;
-        patchAssistant(sessionId, (turn) => ({
+        flush(tool.sessionId);
+        patchAssistant(tool.sessionId, (turn) => ({
           ...turn,
           blocks: [...turn.blocks, { kind: "tool", id: tool.id, name: tool.name, input: tool.input }],
         }));
       }),
       onChatToolResult((result) => {
-        const sessionId = runningSession.current;
-        if (!sessionId) return;
-        patchAssistant(sessionId, (turn) => {
+        patchAssistant(result.sessionId, (turn) => {
           const blocks = appendToolOutput(
             turn.blocks,
             result.id,
@@ -86,51 +87,54 @@ export function useChatStream({ patchAssistant, onComplete, onError }: StreamHan
           return { ...turn, blocks };
         });
       }),
-      onChatDone(() => flush()),
+      onChatDone(({ sessionId }) => flush(sessionId)),
     ];
     return () => {
       unlisteners.forEach((promise) => promise.then((unlisten) => unlisten()).catch(() => undefined));
-      if (flushTimer.current !== null) window.clearTimeout(flushTimer.current);
+      flushTimers.current.forEach((timer) => window.clearTimeout(timer));
+      flushTimers.current.clear();
     };
-  }, [flush, patchAssistant, scheduleFlush]);
+  }, [enqueue, flush, patchAssistant]);
 
   const run = useCallback(async (sessionId: string, message: string | ChatSendRequest) => {
-    if (busyRef.current) return false;
-    busyRef.current = true;
-    runningSession.current = sessionId;
-    setRunningSessionId(sessionId);
-    stopRequested.current = false;
-    setBusy(true);
+    if (runningSessions.current.has(sessionId)) return false;
+    runningSessions.current.add(sessionId);
+    setRunningSessionIds(new Set(runningSessions.current));
+    stopRequested.current.delete(sessionId);
     try {
       const reply = await chatSend(sessionId, message);
-      flush();
+      flush(sessionId);
       onComplete(sessionId, reply);
       return true;
     } catch (error) {
-      flush();
-      onError(sessionId, String(error), stopRequested.current);
+      flush(sessionId);
+      onError(sessionId, String(error), stopRequested.current.has(sessionId));
       return false;
     } finally {
-      runningSession.current = null;
-      setRunningSessionId(null);
-      stopRequested.current = false;
-      busyRef.current = false;
-      setBusy(false);
+      runningSessions.current.delete(sessionId);
+      stopRequested.current.delete(sessionId);
+      setRunningSessionIds(new Set(runningSessions.current));
     }
   }, [flush, onComplete, onError]);
 
-  const stop = useCallback(async () => {
-    if (stopRequested.current) return;
-    stopRequested.current = true;
+  const stop = useCallback(async (sessionId: string) => {
+    if (stopRequested.current.has(sessionId)) return;
+    stopRequested.current.add(sessionId);
     try {
-      await chatCancel();
+      await chatCancel(sessionId);
     } catch (error) {
-      stopRequested.current = false;
+      stopRequested.current.delete(sessionId);
       throw error;
     }
   }, []);
 
-  return { busy, run, stop, runningSessionId };
+  return {
+    busy: runningSessionIds.size > 0,
+    runningSessionIds,
+    isRunning: (sessionId: string) => runningSessionIds.has(sessionId),
+    run,
+    stop,
+  };
 }
 
 export function appendToolOutput(

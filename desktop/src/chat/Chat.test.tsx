@@ -371,12 +371,10 @@ const SKILLS: SkillMeta[] = [
 function ComposerHarness({
   commands = [],
   skills = SKILLS,
-  sendBlocked = false,
   onSubmit = () => undefined,
 }: {
   commands?: DesktopCommandSpec[];
   skills?: SkillMeta[];
-  sendBlocked?: boolean;
   onSubmit?: () => void;
 }) {
   const [input, setInput] = useState("");
@@ -388,7 +386,6 @@ function ComposerHarness({
       skills={skills}
       attachments={attachments}
       busy={false}
-      sendBlocked={sendBlocked}
       ready
       editing={false}
       onInputChange={setInput}
@@ -402,10 +399,10 @@ function ComposerHarness({
 }
 
 describe("ChatComposer picker keyboard operation", () => {
-  it("keeps the draft editable while another chat is running", async () => {
+  it("allows a second chat to submit while another chat is running", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn();
-    render(<ComposerHarness sendBlocked onSubmit={onSubmit} />);
+    render(<ComposerHarness onSubmit={onSubmit} />);
     const textbox = screen.getByRole("textbox") as HTMLTextAreaElement;
 
     await user.type(textbox, "draft for later");
@@ -413,9 +410,9 @@ describe("ChatComposer picker keyboard operation", () => {
     expect(textbox.disabled).toBe(false);
     expect(textbox.value).toBe("draft for later");
     const sendButton = screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement;
-    expect(sendButton.disabled).toBe(true);
+    expect(sendButton.disabled).toBe(false);
     await user.keyboard("{Enter}");
-    expect(onSubmit).not.toHaveBeenCalled();
+    expect(onSubmit).toHaveBeenCalledOnce();
   });
 
   it("selects a fuzzy-matched slash skill with Enter", async () => {

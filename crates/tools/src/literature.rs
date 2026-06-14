@@ -84,7 +84,9 @@ pub fn run_literature_search(input: LiteratureSearchInput) -> Result<String, Str
     .map_err(|e| e.to_string())
 }
 
-pub fn run_literature_library_upsert(input: LiteratureLibraryUpsertInput) -> Result<String, String> {
+pub fn run_literature_library_upsert(
+    input: LiteratureLibraryUpsertInput,
+) -> Result<String, String> {
     let base = workspace_base()?;
     let stats = library_upsert_at(&base, &input.papers, input.search.as_ref())?;
     serde_json::to_string_pretty(&stats).map_err(|e| e.to_string())
@@ -92,7 +94,12 @@ pub fn run_literature_library_upsert(input: LiteratureLibraryUpsertInput) -> Res
 
 pub fn run_literature_pdf_download(input: LiteraturePdfDownloadInput) -> Result<String, String> {
     let base = workspace_base()?;
-    let result = download_pdf_at(&base, &input.url, &input.file_name, input.paper_id.as_deref())?;
+    let result = download_pdf_at(
+        &base,
+        &input.url,
+        &input.file_name,
+        input.paper_id.as_deref(),
+    )?;
     serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
 }
 
@@ -112,11 +119,28 @@ pub fn empty_library() -> Value {
 
 pub fn library_load_at(base: &Path) -> Result<Value, String> {
     let path = library_path_at(base);
+    let backup = path.with_extension("json.bak");
     if !path.exists() {
-        return Ok(empty_library());
+        return if backup.exists() {
+            read_library_json(&backup)
+        } else {
+            Ok(empty_library())
+        };
     }
-    let raw = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    serde_json::from_str(&raw).map_err(|e| format!("library.json is not valid JSON: {e}"))
+    match read_library_json(&path) {
+        Ok(library) => Ok(library),
+        Err(primary_error) if backup.exists() => {
+            read_library_json(&backup).map_err(|backup_error| {
+                format!("{primary_error}; backup recovery failed: {backup_error}")
+            })
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn read_library_json(path: &Path) -> Result<Value, String> {
+    let raw = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    serde_json::from_str(&raw).map_err(|e| format!("{} is not valid JSON: {e}", path.display()))
 }
 
 pub fn library_save_at(base: &Path, library: &Value) -> Result<(), String> {
@@ -128,12 +152,21 @@ pub fn library_save_at(base: &Path, library: &Value) -> Result<(), String> {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     let tmp = path.with_extension("json.tmp");
+    let backup = path.with_extension("json.bak");
     let data = serde_json::to_vec_pretty(library).map_err(|e| e.to_string())?;
     std::fs::write(&tmp, data).map_err(|e| e.to_string())?;
-    if path.exists() {
+    let had_existing = path.exists();
+    if had_existing {
+        std::fs::copy(&path, &backup).map_err(|e| e.to_string())?;
         std::fs::remove_file(&path).map_err(|e| e.to_string())?;
     }
-    std::fs::rename(tmp, path).map_err(|e| e.to_string())
+    if let Err(error) = std::fs::rename(&tmp, &path) {
+        if had_existing {
+            let _ = std::fs::copy(&backup, &path);
+        }
+        return Err(format!("failed to replace library.json: {error}"));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Serialize)]
@@ -226,8 +259,8 @@ fn record_title(record: &Value) -> String {
 }
 
 fn same_record(paper: &Value, record: &Value) -> bool {
-    let id_match = !record_str(record, "id").is_empty()
-        && record_str(paper, "id") == record_str(record, "id");
+    let id_match =
+        !record_str(record, "id").is_empty() && record_str(paper, "id") == record_str(record, "id");
     let doi_match = !record_str(record, "doi").is_empty()
         && record_str(paper, "doi").eq_ignore_ascii_case(record_str(record, "doi"));
     let arxiv_match = !record_str(record, "arxivId").is_empty()
@@ -270,7 +303,9 @@ fn paper_from_record(record: &Value, search_id: Option<&str>) -> Value {
 fn enrich_paper(paper: &mut Value, record: &Value, search_id: Option<&str>) {
     let fill = |paper: &mut Value, key: &str, value: Option<Value>| {
         let missing = paper[key].is_null()
-            || paper[key].as_str().is_some_and(|value| value.trim().is_empty());
+            || paper[key]
+                .as_str()
+                .is_some_and(|value| value.trim().is_empty());
         if missing {
             if let Some(value) = value {
                 paper[key] = value;
@@ -278,15 +313,40 @@ fn enrich_paper(paper: &mut Value, record: &Value, search_id: Option<&str>) {
         }
     };
     fill(paper, "doi", record["doi"].as_str().map(Value::from));
-    fill(paper, "arxivId", record["arxivId"].as_str().map(Value::from));
+    fill(
+        paper,
+        "arxivId",
+        record["arxivId"].as_str().map(Value::from),
+    );
     fill(paper, "url", record["url"].as_str().map(Value::from));
     fill(paper, "year", record["year"].as_u64().map(Value::from));
-    fill(paper, "venue", non_empty(record_str(record, "venue")).map(Value::from));
+    fill(
+        paper,
+        "venue",
+        non_empty(record_str(record, "venue")).map(Value::from),
+    );
     fill(
         paper,
         "abstract",
         non_empty(record_str(record, "abstract")).map(Value::from),
     );
+    if paper["authors"].as_array().is_none_or(Vec::is_empty) {
+        if let Some(authors) = record["authors"]
+            .as_array()
+            .filter(|authors| !authors.is_empty())
+        {
+            paper["authors"] = Value::Array(authors.clone());
+        }
+    }
+    let incoming_source = record_str(record, "source").to_string();
+    let existing_source = record_str(paper, "source").to_string();
+    if existing_source.is_empty() {
+        if !incoming_source.is_empty() {
+            paper["source"] = Value::from(incoming_source);
+        }
+    } else if !incoming_source.is_empty() && !existing_source.contains(&incoming_source) {
+        paper["source"] = Value::from(format!("{existing_source} + {incoming_source}"));
+    }
     if let Some(cited_by) = record["citedBy"].as_u64() {
         paper["citedBy"] = Value::from(cited_by);
     }
@@ -371,7 +431,11 @@ pub fn search_remote(
     if query.is_empty() {
         return Err("search query is empty".to_string());
     }
-    let explicit = |name: &str| sources.iter().any(|source| source.eq_ignore_ascii_case(name));
+    let explicit = |name: &str| {
+        sources
+            .iter()
+            .any(|source| source.eq_ignore_ascii_case(name))
+    };
     let wants = |name: &str| sources.is_empty() || explicit(name);
     let client = http_client()?;
     let mut papers = Vec::new();
@@ -530,7 +594,10 @@ fn search_crossref(
         .map_err(|e| e.to_string())?
         .json()
         .map_err(|e| e.to_string())?;
-    let items = body["message"]["items"].as_array().cloned().unwrap_or_default();
+    let items = body["message"]["items"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
     Ok(items.iter().filter_map(crossref_item_to_paper).collect())
 }
 
@@ -812,9 +879,9 @@ fn search_scopus(
     } else {
         response
     };
-    let response = response.error_for_status().map_err(|e| {
-        format!("{e} (check the SCOPUS_API_KEY and its entitlements)")
-    })?;
+    let response = response
+        .error_for_status()
+        .map_err(|e| format!("{e} (check the SCOPUS_API_KEY and its entitlements)"))?;
     let body: Value = response.json().map_err(|e| e.to_string())?;
     let entries = body["search-results"]["entry"]
         .as_array()
@@ -978,8 +1045,7 @@ pub fn download_pdf_at(
     }
     if !bytes.starts_with(b"%PDF") {
         return Err(
-            "the URL did not return a PDF (the publisher may not expose a direct link)"
-                .to_string(),
+            "the URL did not return a PDF (the publisher may not expose a direct link)".to_string(),
         );
     }
 
@@ -1134,7 +1200,7 @@ mod tests {
         json!({
             "id": id,
             "title": title,
-            "authors": ["A. One"],
+            "authors": [],
             "year": 2026,
             "venue": "arXiv",
             "doi": null,
@@ -1171,13 +1237,19 @@ mod tests {
         let paper = &papers[0];
         assert_eq!(paper.id, "arxiv:2602.01491");
         assert_eq!(paper.arxiv_id.as_deref(), Some("2602.01491"));
-        assert_eq!(paper.title, "Agentic Literature Review: Planning and Synthesis");
+        assert_eq!(
+            paper.title,
+            "Agentic Literature Review: Planning and Synthesis"
+        );
         assert_eq!(paper.summary, "A system design for grounded review work.");
         assert_eq!(paper.authors, vec!["Maya Rivera", "Li Chen"]);
         assert_eq!(paper.year, Some(2026));
         assert_eq!(paper.published.as_deref(), Some("2026-02-03"));
         assert_eq!(paper.doi.as_deref(), Some("10.48550/arxiv.2602.01491"));
-        assert_eq!(paper.pdf_url.as_deref(), Some("http://arxiv.org/pdf/2602.01491v2"));
+        assert_eq!(
+            paper.pdf_url.as_deref(),
+            Some("http://arxiv.org/pdf/2602.01491v2")
+        );
         assert_eq!(paper.venue, "arXiv");
     }
 
@@ -1206,7 +1278,10 @@ mod tests {
         assert_eq!(paper.year, Some(2025));
         assert_eq!(paper.venue, "CHI Late Breaking Work");
         assert_eq!(paper.summary, "An interface & annotation study.");
-        assert_eq!(paper.pdf_url.as_deref(), Some("https://dl.acm.org/example.pdf"));
+        assert_eq!(
+            paper.pdf_url.as_deref(),
+            Some("https://dl.acm.org/example.pdf")
+        );
         assert_eq!(paper.cited_by, Some(12));
     }
 
@@ -1241,15 +1316,24 @@ mod tests {
         });
         let paper = openalex_work_to_paper(&work).expect("work should map");
         assert_eq!(paper.id, "openalex:W4399100000");
-        assert_eq!(paper.title, "Agentic Literature Review: Planning and Synthesis");
+        assert_eq!(
+            paper.title,
+            "Agentic Literature Review: Planning and Synthesis"
+        );
         assert_eq!(paper.doi.as_deref(), Some("10.48550/arxiv.2602.01491"));
         assert_eq!(paper.arxiv_id.as_deref(), Some("2602.01491"));
         assert_eq!(paper.authors, vec!["Maya Rivera", "Li Chen"]);
         assert_eq!(paper.year, Some(2026));
         assert_eq!(paper.venue, "arXiv");
         assert_eq!(paper.summary, "A system design for grounded review.");
-        assert_eq!(paper.url.as_deref(), Some("https://doi.org/10.48550/arXiv.2602.01491"));
-        assert_eq!(paper.pdf_url.as_deref(), Some("https://arxiv.org/pdf/2602.01491"));
+        assert_eq!(
+            paper.url.as_deref(),
+            Some("https://doi.org/10.48550/arXiv.2602.01491")
+        );
+        assert_eq!(
+            paper.pdf_url.as_deref(),
+            Some("https://arxiv.org/pdf/2602.01491")
+        );
         assert_eq!(paper.cited_by, Some(31));
         assert_eq!(paper.source, "OpenAlex");
     }
@@ -1322,7 +1406,10 @@ mod tests {
             scopus_query("TITLE-ABS-KEY(\"semantic communication\") AND PUBYEAR > 2020"),
             "TITLE-ABS-KEY(\"semantic communication\") AND PUBYEAR > 2020"
         );
-        assert_eq!(scopus_query("AUTH(rivera) AND KEY(agents)"), "AUTH(rivera) AND KEY(agents)");
+        assert_eq!(
+            scopus_query("AUTH(rivera) AND KEY(agents)"),
+            "AUTH(rivera) AND KEY(agents)"
+        );
     }
 
     #[test]
@@ -1364,7 +1451,10 @@ mod tests {
         assert_eq!(paper.venue, "TMLR");
         assert_eq!(paper.cited_by, Some(31));
         assert_eq!(paper.source, "arXiv + Crossref");
-        assert_eq!(paper.pdf_url.as_deref(), Some("https://arxiv.org/pdf/2602.01491.pdf"));
+        assert_eq!(
+            paper.pdf_url.as_deref(),
+            Some("https://arxiv.org/pdf/2602.01491.pdf")
+        );
     }
 
     #[test]
@@ -1393,6 +1483,35 @@ mod tests {
     }
 
     #[test]
+    fn library_save_keeps_the_previous_version_as_a_backup() {
+        let base = temp_base("save-backup");
+        let mut first = empty_library();
+        first["projectFocus"] = json!({ "question": "first" });
+        library_save_at(&base, &first).expect("save first version");
+
+        let mut second = empty_library();
+        second["projectFocus"] = json!({ "question": "second" });
+        library_save_at(&base, &second).expect("save second version");
+
+        let backup_path = library_path_at(&base).with_extension("json.bak");
+        let backup: Value = serde_json::from_str(
+            &std::fs::read_to_string(backup_path).expect("backup should exist"),
+        )
+        .expect("backup should be valid JSON");
+        assert_eq!(backup["projectFocus"]["question"], "first");
+        assert_eq!(
+            library_load_at(&base).expect("current library")["projectFocus"]["question"],
+            "second"
+        );
+        std::fs::write(library_path_at(&base), "{broken").expect("corrupt current library");
+        assert_eq!(
+            library_load_at(&base).expect("recover backup")["projectFocus"]["question"],
+            "first"
+        );
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
     fn upsert_enriches_existing_papers_without_touching_user_state() {
         let base = temp_base("upsert-merge");
         let mut library = empty_library();
@@ -1416,8 +1535,10 @@ mod tests {
         library_save_at(&base, &library).expect("seed library");
 
         let mut incoming = record("arxiv:1111.00001", "Paper One");
+        incoming["authors"] = json!(["A. One"]);
         incoming["doi"] = Value::from("10.1234/abc");
         incoming["citedBy"] = Value::from(7);
+        incoming["source"] = Value::from("OpenAlex");
         let stats = library_upsert_at(&base, &[incoming], None).expect("upsert should work");
         assert_eq!(stats.added, 0);
         assert_eq!(stats.merged, 1);
@@ -1428,6 +1549,8 @@ mod tests {
         assert_eq!(paper["stage"], "shortlist");
         assert_eq!(paper["starred"], true);
         assert_eq!(paper["tags"], json!(["keeper"]));
+        assert_eq!(paper["authors"], json!(["A. One"]));
+        assert_eq!(paper["source"], "arXiv + OpenAlex");
         assert_eq!(paper["doi"], "10.1234/abc");
         assert_eq!(paper["citedBy"], 7);
         assert_eq!(paper["abstract"], "An abstract.");

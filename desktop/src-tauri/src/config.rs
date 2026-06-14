@@ -55,6 +55,7 @@ pub struct ConfigView {
     pub has_scopus_key: bool,
     pub scopus_key_masked: Option<String>,
     pub language: Option<String>,
+    pub memory_write_approval: bool,
 }
 
 fn build_view(obj: &Map<String, Value>) -> ConfigView {
@@ -76,6 +77,10 @@ fn build_view(obj: &Map<String, Value>) -> ConfigView {
         has_scopus_key: scopus_key.is_some(),
         scopus_key_masked: scopus_key.as_deref().map(mask),
         language: get_str(obj, "language"),
+        memory_write_approval: obj
+            .get("memory_write_approval")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
     }
 }
 
@@ -97,6 +102,7 @@ pub struct ConfigPatch {
     pub reviewer_api_key: Option<String>,
     pub scopus_api_key: Option<String>,
     pub language: Option<String>,
+    pub memory_write_approval: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -151,6 +157,9 @@ fn apply_patch(obj: &mut Map<String, Value>, patch: ConfigPatch) {
     set_or_clear(obj, "reviewer_model", patch.reviewer_model);
     set_or_clear(obj, "reviewer_base_url", patch.reviewer_base_url);
     set_or_clear(obj, "language", patch.language);
+    if let Some(enabled) = patch.memory_write_approval {
+        obj.insert("memory_write_approval".to_string(), Value::Bool(enabled));
+    }
 
     set_secret(obj, "executor_api_key", patch.executor_api_key);
     set_secret(obj, "reviewer_api_key", patch.reviewer_api_key);
@@ -232,6 +241,16 @@ fn apply_reviewer_environment_from(obj: &Map<String, Value>, force: bool) {
         force,
     );
     set_env_if_allowed("ARIS_LANGUAGE", get_non_empty(obj, "language"), force);
+    if force || std::env::var("ARIS_MEMORY_WRITE_APPROVAL").is_err() {
+        let enabled = obj
+            .get("memory_write_approval")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        std::env::set_var(
+            "ARIS_MEMORY_WRITE_APPROVAL",
+            if enabled { "true" } else { "false" },
+        );
+    }
     // Literature kernel tools (Scopus engine) read this from the environment.
     set_env_if_allowed(
         "SCOPUS_API_KEY",
@@ -254,6 +273,25 @@ fn apply_reviewer_environment_from(obj: &Map<String, Value>, force: bool) {
         }
         _ => {}
     }
+}
+
+pub(crate) fn set_memory_write_approval(enabled: bool) -> Result<(), String> {
+    let mut obj = load_object();
+    obj.insert("memory_write_approval".to_string(), Value::Bool(enabled));
+    let path = state::config_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    std::fs::write(
+        path,
+        serde_json::to_string_pretty(&Value::Object(obj)).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    std::env::set_var(
+        "ARIS_MEMORY_WRITE_APPROVAL",
+        if enabled { "true" } else { "false" },
+    );
+    Ok(())
 }
 
 fn normalized_base_url(value: Option<String>, default_value: &str) -> String {

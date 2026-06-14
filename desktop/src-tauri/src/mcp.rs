@@ -77,7 +77,10 @@ fn parse_project_stdio_servers(root: &Map<String, Value>) -> Vec<McpStdioServerI
         .iter()
         .filter_map(|(name, value)| {
             let object = value.as_object()?;
-            let server_type = object.get("type").and_then(Value::as_str).unwrap_or("stdio");
+            let server_type = object
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or("stdio");
             if server_type != "stdio" {
                 return None;
             }
@@ -100,9 +103,7 @@ fn parse_project_stdio_servers(root: &Map<String, Value>) -> Vec<McpStdioServerI
                     items
                         .iter()
                         .filter_map(|(key, value)| {
-                            value
-                                .as_str()
-                                .map(|value| (key.clone(), value.to_string()))
+                            value.as_str().map(|value| (key.clone(), value.to_string()))
                         })
                         .collect()
                 })
@@ -234,7 +235,8 @@ pub fn mcp_config_set(servers: Vec<McpStdioServerInput>) -> Result<McpConfigView
     }
     root.insert("mcpServers".to_string(), Value::Object(existing));
 
-    let json = serde_json::to_string_pretty(&Value::Object(root)).map_err(|error| error.to_string())?;
+    let json =
+        serde_json::to_string_pretty(&Value::Object(root)).map_err(|error| error.to_string())?;
     std::fs::write(&path, format!("{json}\n")).map_err(|error| error.to_string())?;
     aris_chat::clear_mcp_discovery_cache();
     mcp_config_get()

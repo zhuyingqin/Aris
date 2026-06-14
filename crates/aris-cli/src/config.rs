@@ -62,6 +62,9 @@ pub struct ArisConfig {
     /// Meta-logging level: "off", "metadata", or "content"
     #[serde(default)]
     pub meta_logging: Option<String>,
+    /// Require explicit approval before hot-memory writes are committed.
+    #[serde(default)]
+    pub memory_write_approval: Option<bool>,
 }
 
 impl ArisConfig {
@@ -291,6 +294,15 @@ impl ArisConfig {
         if force || std::env::var("ARIS_META_LOGGING").is_err() {
             if let Some(level) = &self.meta_logging {
                 std::env::set_var("ARIS_META_LOGGING", level);
+            }
+        }
+
+        if force || std::env::var("ARIS_MEMORY_WRITE_APPROVAL").is_err() {
+            if let Some(enabled) = self.memory_write_approval {
+                std::env::set_var(
+                    "ARIS_MEMORY_WRITE_APPROVAL",
+                    if enabled { "true" } else { "false" },
+                );
             }
         }
     }

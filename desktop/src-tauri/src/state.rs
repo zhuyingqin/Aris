@@ -12,6 +12,8 @@ const DESKTOP_ALLOWED_AGENT_TOOLS: &[&str] = &[
     "LiteratureLibraryUpsert",
     "LiteraturePdfDownload",
     "TodoWrite",
+    "memory",
+    "session_search",
     "LlmReview",
     "Skill",
     "ToolSearch",
@@ -97,6 +99,7 @@ pub fn apply_project_environment(workspace: &PathBuf, project_id: &str) -> io::R
         migrate_legacy_desktop_dirs(workspace, &project_runtime)?;
     }
     std::fs::create_dir_all(workspace)?;
+    std::fs::create_dir_all(workspace.join("papers"))?;
     std::fs::create_dir_all(&run_state)?;
     std::fs::create_dir_all(&sessions)?;
     std::fs::create_dir_all(&agent_store)?;

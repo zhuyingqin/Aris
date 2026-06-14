@@ -14,13 +14,14 @@ export type PaperFit = "high" | "medium" | "low";
 
 export type PdfStatus = "none" | "queued" | "downloading" | "downloaded" | "failed";
 
-export type DetailTab = "overview" | "notes" | "evidence" | "files";
+export type DetailTab = "overview" | "reader" | "notes" | "evidence" | "files";
 
 export type ScreeningDecision = "include" | "exclude" | "maybe";
 
 export type CriterionKind = "include" | "exclude";
 
 export type AnchorKind = "abstract" | "metadata" | "pdf";
+export type EvidenceSource = "text" | "vision";
 
 /** Project-level reference frame for the Agent's "for you" judgment — what
  * makes a Brief tailored rather than a generic summary. Stored at the top of
@@ -34,16 +35,18 @@ export interface ProjectFocus {
 
 export type BriefField = "problem" | "method" | "results" | "limits" | "forYou";
 
-/** One Brief section. `source` records where the claim came from so the
- * "no anchor, no claim" rule holds — `abstract` at M2.b, page-anchored `pdf`
- * at M3.b. */
+/** One Brief section. New Briefs require extracted PDF full text; `abstract`
+ * remains for legacy records and abstract-only screening evidence. */
 export interface BriefSection {
   text: string;
   source: AnchorKind;
+  page?: number;
+  /** Verbatim supporting sentence used for PDF highlighting. */
+  quote?: string;
 }
 
-/** A 5-section structured read of a paper — a 5-minute replacement for a
- * 30-minute skim. M2.b generates these from the abstract. */
+/** A 5-section structured read generated from extracted full text. The
+ * `abstract` basis is retained only so older saved records stay readable. */
 export interface PaperBrief {
   problem: BriefSection;
   method: BriefSection;
@@ -128,6 +131,53 @@ export interface EvidenceNote {
   page: number;
   quote: string;
   note: string;
+  /** `vision` means the LLM read the rendered PDF page image directly. */
+  source?: EvidenceSource;
+  /** Fingerprint of the exact rendered page image used by the visual reader. */
+  imageFingerprint?: string;
+}
+
+export type PdfAnnotationKind = "core" | "evidence" | "answer-support" | "note";
+export type PdfAnnotationColor = "yellow" | "green" | "blue" | "red" | "purple";
+
+export interface PdfAnnotationRect {
+  /** Normalized coordinates relative to the rendered PDF page. */
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
+
+export interface PdfAnnotation {
+  id: string;
+  page: number;
+  quote: string;
+  note: string;
+  kind: PdfAnnotationKind;
+  color?: PdfAnnotationColor;
+  rects?: PdfAnnotationRect[];
+  source?: EvidenceSource;
+  imageFingerprint?: string;
+  /** Id of the Brief section, evidence item, or answer chain that created it. */
+  sourceId?: string;
+  /** Evidence item that directly grounds an answer-support annotation. */
+  evidenceId?: string;
+  createdAt: string;
+}
+
+export interface AnswerChainSupport {
+  annotationId: string;
+  role: string;
+}
+
+export interface ReadingAnswerChain {
+  id: string;
+  question: string;
+  answer: string;
+  supports: AnswerChainSupport[];
+  basis?: EvidenceSource;
+  reviewStatus: "unreviewed" | "accepted" | "rejected";
+  createdAt: string;
 }
 
 export interface LiteraturePaper {
@@ -157,6 +207,10 @@ export interface LiteraturePaper {
   brief?: PaperBrief;
   agentSummary?: string;
   evidence: EvidenceNote[];
+  /** Generated question -> final answer -> verified PDF support chains. */
+  answerChains: ReadingAnswerChain[];
+  /** Persistent highlights and notes rendered inside the embedded PDF reader. */
+  pdfAnnotations: PdfAnnotation[];
 }
 
 export interface LiteratureSearch {
@@ -196,6 +250,36 @@ export interface PdfDownloadResult {
   path: string;
   relativePath: string;
   bytes: number;
+}
+
+export interface RemoteLiteraturePaper {
+  id: string;
+  title: string;
+  authors: string[];
+  year?: number;
+  venue: string;
+  doi?: string;
+  arxivId?: string;
+  abstract: string;
+  url?: string;
+  pdfUrl?: string;
+  source: string;
+  published?: string;
+  citedBy?: number;
+}
+
+export interface LiteratureSearchResult {
+  papers: RemoteLiteraturePaper[];
+  warnings: string[];
+  sourceCounts: Array<{ source: string; count: number }>;
+}
+
+export interface LiteratureUpsertResult {
+  searchId?: string;
+  added: number;
+  merged: number;
+  total: number;
+  libraryPath: string;
 }
 
 export const emptyLibrary = (): LiteratureLibrary => ({

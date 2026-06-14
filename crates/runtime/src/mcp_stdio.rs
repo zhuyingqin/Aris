@@ -1100,6 +1100,7 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use serde_json::json;
@@ -1120,11 +1121,16 @@ mod tests {
     };
 
     fn temp_dir() -> PathBuf {
+        static NEXT_TEMP_DIR: AtomicU64 = AtomicU64::new(0);
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("time should be after epoch")
             .as_nanos();
-        std::env::temp_dir().join(format!("runtime-mcp-stdio-{nanos}"))
+        let sequence = NEXT_TEMP_DIR.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "runtime-mcp-stdio-{}-{nanos}-{sequence}",
+            std::process::id()
+        ))
     }
 
     fn make_executable(script_path: &Path) {
@@ -1142,10 +1148,10 @@ mod tests {
     fn write_echo_script() -> PathBuf {
         let root = temp_dir();
         fs::create_dir_all(&root).expect("temp dir");
-        let script_path = root.join("echo-mcp.sh");
+        let script_path = root.join("echo-mcp.py");
         fs::write(
             &script_path,
-            "#!/bin/sh\nprintf 'READY:%s\\n' \"$MCP_TEST_TOKEN\"\nIFS= read -r line\nprintf 'ECHO:%s\\n' \"$line\"\n",
+            "import os, sys\nready = f\"READY:{os.environ.get('MCP_TEST_TOKEN', '')}\\n\".encode()\nsys.stdout.buffer.write(ready)\nsys.stdout.buffer.flush()\nline = sys.stdin.buffer.readline().rstrip(b'\\r\\n').decode()\nsys.stdout.buffer.write(f\"ECHO:{line}\\n\".encode())\nsys.stdout.buffer.flush()\n",
         )
         .expect("write script");
         make_executable(&script_path);
@@ -1411,7 +1417,7 @@ mod tests {
         let config = ScopedMcpServerConfig {
             scope: ConfigSource::Local,
             config: McpServerConfig::Stdio(McpStdioServerConfig {
-                command: "/bin/sh".to_string(),
+                command: python_command().to_string(),
                 args: vec![script_path.to_string_lossy().into_owned()],
                 env: BTreeMap::from([("MCP_TEST_TOKEN".to_string(), "secret-value".to_string())]),
                 request_timeout_secs: None,
@@ -1612,7 +1618,7 @@ mod tests {
         runtime.block_on(async {
             let script_path = write_echo_script();
             let transport = crate::mcp_client::McpStdioTransport {
-                command: "/bin/sh".to_string(),
+                command: python_command().to_string(),
                 args: vec![script_path.to_string_lossy().into_owned()],
                 env: BTreeMap::from([("MCP_TEST_TOKEN".to_string(), "direct-secret".to_string())]),
                 request_timeout_secs: None,

@@ -422,6 +422,7 @@ export default function Settings() {
       reviewerModel: v.reviewerModel ?? "",
       reviewerBaseUrl: v.reviewerBaseUrl ?? "",
       language: v.language ?? "cn",
+      memoryWriteApproval: v.memoryWriteApproval,
     });
     setExecKey("");
     setReviewerKey("");
@@ -605,6 +606,22 @@ export default function Settings() {
                 providers={EXECUTOR_PROVIDERS}
                 onChange={chooseExecutorProvider}
               />
+            </div>
+
+            <div className="st-field-group">
+              <div className="st-field-label">Memory write approval</div>
+              <button
+                type="button"
+                className={`st-lang-card${form.memoryWriteApproval ? " active" : ""}`}
+                onClick={() => upd({ memoryWriteApproval: !form.memoryWriteApproval })}
+              >
+                <span className="st-lang-label">
+                  {form.memoryWriteApproval ? "Approval required" : "Automatic writes allowed"}
+                </span>
+                <span className="st-lang-sub">
+                  Review agent-proposed hot-memory writes before they become persistent.
+                </span>
+              </button>
             </div>
 
             <SecretPanel

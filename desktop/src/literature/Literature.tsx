@@ -1,11 +1,17 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { useStore } from "../store";
+import MathText from "./MathText";
+import PdfReader from "./PdfReader";
 import { useLiteratureStore } from "./literatureStore";
 import {
   type DetailTab,
+  type LiteratureLibrary,
   type LiteraturePaper,
+  type LiteratureReviewTask,
   type PaperFit,
   type PaperStage,
+  type ScreeningDecision,
 } from "./literatureTypes";
 import "./Literature.css";
 
@@ -49,6 +55,15 @@ const FIT_LABELS: Record<PaperFit, string> = {
   high: "高",
   medium: "中",
   low: "低",
+};
+
+const EVIDENCE_ROLE_LABELS: Record<string, string> = {
+  premise: "前提",
+  method: "方法",
+  result: "结果",
+  limitation: "局限",
+  support: "支撑",
+  evidence: "证据",
 };
 
 function matchesView(paper: LiteraturePaper, view: string) {
@@ -114,6 +129,10 @@ export default function Literature() {
   const library = useLiteratureStore((s) => s.library);
   const loaded = useLiteratureStore((s) => s.loaded);
   const briefing = useLiteratureStore((s) => s.briefing);
+  const searching = useLiteratureStore((s) => s.searching);
+  const screening = useLiteratureStore((s) => s.screening);
+  const generatingAnswerChains = useLiteratureStore((s) => s.generatingAnswerChains);
+  const activeReviewTaskId = useLiteratureStore((s) => s.activeReviewTaskId);
   const storeError = useLiteratureStore((s) => s.error);
   const load = useLiteratureStore((s) => s.load);
   const watchAgentActivity = useLiteratureStore((s) => s.watchAgentActivity);
@@ -124,8 +143,28 @@ export default function Literature() {
   const addTags = useLiteratureStore((s) => s.addTags);
   const addCollection = useLiteratureStore((s) => s.addCollection);
   const removeCollection = useLiteratureStore((s) => s.removeCollection);
+  const toggleCollection = useLiteratureStore((s) => s.toggleCollection);
+  const runRemoteSearch = useLiteratureStore((s) => s.runRemoteSearch);
+  const setActiveReviewTask = useLiteratureStore((s) => s.setActiveReviewTask);
+  const createReviewTask = useLiteratureStore((s) => s.createReviewTask);
+  const updateReviewQuestion = useLiteratureStore((s) => s.updateReviewQuestion);
+  const updateCriterion = useLiteratureStore((s) => s.updateCriterion);
+  const addCriterion = useLiteratureStore((s) => s.addCriterion);
+  const removeCriterion = useLiteratureStore((s) => s.removeCriterion);
+  const screenPapersForTask = useLiteratureStore((s) => s.screenPapersForTask);
+  const decideScreening = useLiteratureStore((s) => s.decideScreening);
+  const acceptCriteriaSuggestion = useLiteratureStore((s) => s.acceptCriteriaSuggestion);
+  const dismissCriteriaSuggestion = useLiteratureStore((s) => s.dismissCriteriaSuggestion);
   const generateBrief = useLiteratureStore((s) => s.generateBrief);
+  const generateAnswerChains = useLiteratureStore((s) => s.generateAnswerChains);
+  const deleteEvidence = useLiteratureStore((s) => s.deleteEvidence);
+  const updateAnswerChain = useLiteratureStore((s) => s.updateAnswerChain);
+  const addPdfAnnotation = useLiteratureStore((s) => s.addPdfAnnotation);
+  const updatePdfAnnotation = useLiteratureStore((s) => s.updatePdfAnnotation);
+  const deletePdfAnnotation = useLiteratureStore((s) => s.deletePdfAnnotation);
   const downloadPdf = useLiteratureStore((s) => s.downloadPdf);
+  const uploadPdf = useLiteratureStore((s) => s.uploadPdf);
+  const openPdf = useLiteratureStore((s) => s.openPdf);
   const setError = useLiteratureStore((s) => s.setError);
 
   const [view, setView] = useState("all");
@@ -133,14 +172,24 @@ export default function Literature() {
   const [sort, setSort] = useState<SortKey>("added");
   const [checked, setChecked] = useState<Set<string>>(new Set());
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectionCleared, setSelectionCleared] = useState(false);
   const [workspaceTab, setWorkspaceTab] = useState<DetailTab>("overview");
   const [tagDraft, setTagDraft] = useState("");
-  const [abstractOpen, setAbstractOpen] = useState(false);
+  const [abstractOpen, setAbstractOpen] = useState(true);
   const [colInput, setColInput] = useState("");
   const [colAdding, setColAdding] = useState(false);
+  const [remoteQuery, setRemoteQuery] = useState("");
+  const [remoteSources, setRemoteSources] = useState(["arxiv", "crossref", "openalex"]);
+  const [reviewQuestion, setReviewQuestion] = useState("");
+  const [readerPage, setReaderPage] = useState(1);
+  const [readerAnnotationId, setReaderAnnotationId] = useState<string | null>(null);
+  const [reviewPanelOpen, setReviewPanelOpen] = useState(false);
 
   const projectId = currentProject?.id ?? "default";
   useEffect(() => {
+    setSelectedId(null);
+    setSelectionCleared(false);
+    setChecked(new Set());
     void load(projectId);
   }, [load, projectId]);
 
@@ -156,8 +205,15 @@ export default function Literature() {
     );
   }, [filter, papers, sort, view]);
 
-  const selectedPaper =
-    visiblePapers.find((p) => p.id === selectedId) ?? visiblePapers[0] ?? null;
+  const selectedPaper = selectedId
+    ? visiblePapers.find((p) => p.id === selectedId) ?? null
+    : selectionCleared
+      ? null
+      : visiblePapers[0] ?? null;
+
+  useEffect(() => {
+    setAbstractOpen(true);
+  }, [selectedPaper?.id]);
 
   const stageCounts = useMemo(() => {
     const counts = new Map<PaperStage, number>();
@@ -195,6 +251,13 @@ export default function Literature() {
   const downloadOrBrowse = async (id: string) => {
     const paper = library.papers.find((entry) => entry.id === id);
     if (!paper) return;
+    if (paper.pdf.status === "downloaded" && paper.pdf.path) {
+      setSelectedId(id);
+      setSelectionCleared(false);
+      setReaderPage(1);
+      setWorkspaceTab("reader");
+      return;
+    }
     if (!paper.pdf.url) {
       openBrowserDownload(paper);
       return;
@@ -202,8 +265,17 @@ export default function Literature() {
     await downloadPdf(id);
   };
 
+  const uploadSelectedPdf = async (id: string) => {
+    const selected = await openDialog({
+      multiple: false,
+      filters: [{ name: "PDF", extensions: ["pdf"] }],
+    });
+    if (typeof selected === "string") await uploadPdf(id, selected);
+  };
+
   const selectPaper = (paper: LiteraturePaper) => {
     setSelectedId(paper.id);
+    setSelectionCleared(false);
     if (paper.unread) markRead(paper.id);
   };
 
@@ -232,7 +304,10 @@ export default function Literature() {
       for (const id of ids) next.delete(id);
       return next;
     });
-    if (selectedId && ids.includes(selectedId)) setSelectedId(null);
+    if (selectedId && ids.includes(selectedId)) {
+      setSelectedId(null);
+      setSelectionCleared(false);
+    }
   };
 
   const addTagToSelected = () => {
@@ -346,6 +421,37 @@ export default function Literature() {
         )}
       </NavSection>
 
+      <NavSection title="保存的搜索" defaultOpen>
+        {library.searches.map((search) => (
+          <NavItem
+            key={search.id}
+            label={search.query}
+            icon="⌕"
+            count={papers.filter((paper) => paper.searchIds.includes(search.id)).length}
+            active={view === `search:${search.id}`}
+            onClick={() => setView(`search:${search.id}`)}
+          />
+        ))}
+        {library.searches.length === 0 && <div className="lit-col-empty">暂无保存搜索</div>}
+      </NavSection>
+
+      <NavSection title="审查任务" defaultOpen>
+        {library.reviewTasks.map((task) => (
+          <NavItem
+            key={task.id}
+            label={task.question}
+            icon="✓"
+            count={task.searchIds.length}
+            active={activeReviewTaskId === task.id}
+            onClick={() => {
+              setActiveReviewTask(task.id);
+              setReviewPanelOpen(true);
+            }}
+          />
+        ))}
+        {library.reviewTasks.length === 0 && <div className="lit-col-empty">暂无审查任务</div>}
+      </NavSection>
+
     </aside>
   );
 
@@ -358,6 +464,9 @@ export default function Literature() {
     if (view.startsWith("col:")) {
       const col = library.collections.find((c) => `col:${c.id}` === view);
       return col?.label ?? "分类";
+    }
+    if (view.startsWith("search:")) {
+      return library.searches.find((search) => `search:${search.id}` === view)?.query ?? "保存的搜索";
     }
     return "论文";
   })();
@@ -403,10 +512,10 @@ export default function Literature() {
           <button
             type="button"
             className="lit-workspace-icon-btn"
-            title="Use Playwright MCP to get PDF"
-            aria-label="Use Playwright MCP to get PDF"
-            onClick={() => selectedPaper && openBrowserDownload(selectedPaper)}
-            disabled={!selectedPaper || selectedPaper.pdf.status === "downloaded"}
+            title={selectedPaper?.pdf.status === "downloaded" ? "打开 PDF" : "获取 PDF"}
+            aria-label={selectedPaper?.pdf.status === "downloaded" ? "打开 PDF" : "获取 PDF"}
+            onClick={() => selectedPaper && void downloadOrBrowse(selectedPaper.id)}
+            disabled={!selectedPaper || selectedPaper.pdf.status === "downloading"}
           >
             ◎
           </button>
@@ -414,6 +523,7 @@ export default function Literature() {
             type="button"
             className="lit-workspace-icon-btn"
             title="Open in chat"
+            aria-label="在聊天中打开"
             onClick={() => selectedPaper && openAgentChat(`/research-lit "${selectedPaper.title}"`)}
             disabled={!selectedPaper}
           >
@@ -423,7 +533,11 @@ export default function Literature() {
             type="button"
             className="lit-workspace-icon-btn"
             title="Clear selection"
-            onClick={() => setSelectedId(null)}
+            aria-label="清除选择"
+            onClick={() => {
+              setSelectedId(null);
+              setSelectionCleared(true);
+            }}
             disabled={!selectedPaper}
           >
             ✕
@@ -446,7 +560,8 @@ export default function Literature() {
             {(
               [
                 { id: "overview", label: "概览" },
-                { id: "notes", label: "笔记" },
+                { id: "reader", label: "PDF 阅读器" },
+                { id: "notes", label: "Review LLM 判断" },
                 { id: "evidence", label: "证据" },
                 { id: "files", label: "文件" },
               ] as Array<{ id: DetailTab; label: string }>
@@ -476,6 +591,11 @@ export default function Literature() {
                 onDownload={() => void downloadOrBrowse(selectedPaper.id)}
                 onAsk={() => openAgentChat(`/research-lit "${selectedPaper.title}"`)}
                 onViewEvidence={() => setWorkspaceTab("evidence")}
+                onOpenAnnotation={(page, annotationId) => {
+                  setReaderPage(page);
+                  setReaderAnnotationId(annotationId);
+                  setWorkspaceTab("reader");
+                }}
                 onDelete={() => {
                   if (window.confirm(`Delete "${selectedPaper.title}" from your library?`)) {
                     deletePapers([selectedPaper.id]);
@@ -483,11 +603,46 @@ export default function Literature() {
                 }}
               />
             )}
+            {/* PDF reading opens as the full-bleed reading shell (see render
+                root); the workspace only handles the not-yet-downloaded case. */}
+            {workspaceTab === "reader" && !selectedPaper.pdf.path && (
+              <div className="lit-workspace-empty-content">
+                <p>请先下载 PDF，再在应用内阅读。</p>
+                <button type="button" className="primary" onClick={() => void downloadOrBrowse(selectedPaper.id)}>
+                  获取 PDF
+                </button>
+                <button type="button" onClick={() => void uploadSelectedPdf(selectedPaper.id)}>
+                  上传本地 PDF
+                </button>
+              </div>
+            )}
             {workspaceTab === "notes" && (
-              <WorkspaceNotes paper={selectedPaper} />
+              <WorkspaceNotes
+                paper={selectedPaper}
+                task={library.reviewTasks.find((task) => task.id === activeReviewTaskId)}
+                onDecide={(decision) => {
+                  if (activeReviewTaskId) {
+                    decideScreening(selectedPaper.id, activeReviewTaskId, decision);
+                  }
+                }}
+              />
             )}
             {workspaceTab === "evidence" && (
-              <WorkspaceEvidence paper={selectedPaper} />
+              <WorkspaceEvidence
+                paper={selectedPaper}
+                generatingChains={generatingAnswerChains === selectedPaper.id}
+                onDownload={() => void downloadOrBrowse(selectedPaper.id)}
+                onGenerateChains={() => void generateAnswerChains(selectedPaper.id)}
+                onDeleteEvidence={(evidenceId) => deleteEvidence(selectedPaper.id, evidenceId)}
+                onUpdateChain={(chainId, patch) =>
+                  updateAnswerChain(selectedPaper.id, chainId, patch)
+                }
+                onOpenPage={(page, annotationId) => {
+                  setReaderPage(page);
+                  setReaderAnnotationId(annotationId ?? null);
+                  setWorkspaceTab("reader");
+                }}
+              />
             )}
             {workspaceTab === "files" && (
               <WorkspaceFiles
@@ -496,6 +651,11 @@ export default function Literature() {
                 onTagDraft={setTagDraft}
                 onAddTag={addTagToSelected}
                 onDownload={downloadOrBrowse}
+                onUpload={() => void uploadSelectedPdf(selectedPaper.id)}
+                collections={library.collections}
+                onToggleCollection={(collectionId) =>
+                  toggleCollection(selectedPaper.id, collectionId)
+                }
               />
             )}
           </div>
@@ -536,11 +696,114 @@ export default function Literature() {
         </div>
       )}
 
-      <div className="lit-body">
-        {sidebar}
-        {mainArea}
-        {workspace}
-      </div>
+      <SearchStrip
+        query={remoteQuery}
+        sources={remoteSources}
+        searching={searching}
+        onQueryChange={setRemoteQuery}
+        onToggleSource={(source) =>
+          setRemoteSources((current) =>
+            current.includes(source)
+              ? current.filter((entry) => entry !== source)
+              : [...current, source],
+          )
+        }
+        onSearch={() => void runRemoteSearch(remoteQuery, remoteSources)}
+        onCreateReview={() => {
+          setReviewQuestion(remoteQuery);
+          setReviewPanelOpen(true);
+        }}
+      />
+
+      {reviewPanelOpen && (
+        <ReviewWorkflowPanel
+          tasks={library.reviewTasks}
+          activeTaskId={activeReviewTaskId}
+          questionDraft={reviewQuestion}
+          screening={screening}
+          onQuestionDraft={setReviewQuestion}
+          onSelectTask={setActiveReviewTask}
+          onCreate={async () => {
+            const matchingSearch = library.searches.find(
+              (search) => search.query.trim().toLowerCase() === reviewQuestion.trim().toLowerCase(),
+            );
+            await createReviewTask(reviewQuestion, matchingSearch ? [matchingSearch.id] : []);
+            setReviewQuestion("");
+          }}
+          onUpdateQuestion={updateReviewQuestion}
+          onUpdateCriterion={updateCriterion}
+          onAddCriterion={addCriterion}
+          onRemoveCriterion={removeCriterion}
+          onScreen={(taskId) => void screenPapersForTask(taskId)}
+          onAcceptSuggestion={acceptCriteriaSuggestion}
+          onDismissSuggestion={dismissCriteriaSuggestion}
+          onClose={() => setReviewPanelOpen(false)}
+        />
+      )}
+
+      {selectedPaper && workspaceTab === "reader" && selectedPaper.pdf.path ? (
+        <div className="lit-reading-shell">
+          <div className="lit-reading-bar">
+            <button
+              type="button"
+              className="lit-reading-back"
+              onClick={() => setWorkspaceTab("overview")}
+            >
+              ‹ 返回
+            </button>
+            <div className="lit-reading-title-wrap">
+              <div className="lit-reading-title">{selectedPaper.title}</div>
+              <div className="lit-reading-sub">
+                {formatAuthors(selectedPaper.authors)}
+                {selectedPaper.year ? ` · ${selectedPaper.year}` : ""}
+                {selectedPaper.venue ? ` · ${selectedPaper.venue}` : ""}
+              </div>
+            </div>
+            <div className="lit-reading-tabs" role="tablist">
+              {(
+                [
+                  { id: "overview", label: "概览" },
+                  { id: "notes", label: "Review LLM 判断" },
+                  { id: "evidence", label: "证据" },
+                  { id: "files", label: "文件" },
+                ] as Array<{ id: DetailTab; label: string }>
+              ).map((t) => (
+                <button
+                  key={t.id}
+                  type="button"
+                  role="tab"
+                  className="lit-reading-tab"
+                  onClick={() => setWorkspaceTab(t.id)}
+                >
+                  {t.label}
+                </button>
+              ))}
+            </div>
+          </div>
+          <PdfReader
+            relativePath={selectedPaper.pdf.path}
+            initialPage={readerPage}
+            annotations={selectedPaper.pdfAnnotations}
+            focusedAnnotationId={readerAnnotationId}
+            onOpenExternal={() => void openPdf(selectedPaper.id)}
+            onAddAnnotation={(page, data) =>
+              addPdfAnnotation(selectedPaper.id, { page, ...data })
+            }
+            onUpdateAnnotation={(annotationId, patch) =>
+              updatePdfAnnotation(selectedPaper.id, annotationId, patch)
+            }
+            onDeleteAnnotation={(annotationId) =>
+              deletePdfAnnotation(selectedPaper.id, annotationId)
+            }
+          />
+        </div>
+      ) : (
+        <div className="lit-body">
+          {sidebar}
+          {mainArea}
+          {workspace}
+        </div>
+      )}
 
       <ActivityDrawer />
 
@@ -560,6 +823,210 @@ export default function Literature() {
 // ──────────────────────────────────────────────────────────────────────────────
 // Paper list
 // ──────────────────────────────────────────────────────────────────────────────
+
+const REMOTE_SOURCES = ["arxiv", "crossref", "openalex", "scopus"];
+
+function SearchStrip({
+  query,
+  sources,
+  searching,
+  onQueryChange,
+  onToggleSource,
+  onSearch,
+  onCreateReview,
+}: {
+  query: string;
+  sources: string[];
+  searching: boolean;
+  onQueryChange: (query: string) => void;
+  onToggleSource: (source: string) => void;
+  onSearch: () => void;
+  onCreateReview: () => void;
+}) {
+  return (
+    <div className="lit-search-strip">
+      <input
+        className="lit-strip-input"
+        value={query}
+        onChange={(event) => onQueryChange(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") onSearch();
+        }}
+        placeholder="检索 arXiv、Crossref、OpenAlex、Scopus…"
+        aria-label="远程文献检索"
+      />
+      <div className="lit-source-picker" aria-label="检索来源">
+        {REMOTE_SOURCES.map((source) => (
+          <button
+            type="button"
+            key={source}
+            className={`lit-chip lit-source-chip${sources.includes(source) ? " active" : ""}`}
+            aria-pressed={sources.includes(source)}
+            onClick={() => onToggleSource(source)}
+          >
+            {source}
+          </button>
+        ))}
+      </div>
+      <button type="button" onClick={onCreateReview}>
+        新建审查
+      </button>
+      <button
+        type="button"
+        className="primary"
+        onClick={onSearch}
+        disabled={searching || !query.trim() || sources.length === 0}
+      >
+        {searching ? "检索中…" : "检索并保存"}
+      </button>
+    </div>
+  );
+}
+
+function ReviewWorkflowPanel({
+  tasks,
+  activeTaskId,
+  questionDraft,
+  screening,
+  onQuestionDraft,
+  onSelectTask,
+  onCreate,
+  onUpdateQuestion,
+  onUpdateCriterion,
+  onAddCriterion,
+  onRemoveCriterion,
+  onScreen,
+  onAcceptSuggestion,
+  onDismissSuggestion,
+  onClose,
+}: {
+  tasks: LiteratureReviewTask[];
+  activeTaskId: string | null;
+  questionDraft: string;
+  screening: boolean;
+  onQuestionDraft: (question: string) => void;
+  onSelectTask: (id: string | null) => void;
+  onCreate: () => Promise<void>;
+  onUpdateQuestion: (taskId: string, question: string) => void;
+  onUpdateCriterion: (taskId: string, criterionId: string, text: string) => void;
+  onAddCriterion: (taskId: string, kind: "include" | "exclude") => void;
+  onRemoveCriterion: (taskId: string, criterionId: string) => void;
+  onScreen: (taskId: string) => void;
+  onAcceptSuggestion: (taskId: string, suggestionId: string) => void;
+  onDismissSuggestion: (taskId: string, suggestionId: string) => void;
+  onClose: () => void;
+}) {
+  const active = tasks.find((task) => task.id === activeTaskId) ?? null;
+  return (
+    <section className="lit-review-panel" aria-label="文献审查工作流">
+      <div className="lit-review-panel-head">
+        <strong>审查任务</strong>
+        <select
+          value={activeTaskId ?? ""}
+          onChange={(event) => onSelectTask(event.target.value || null)}
+          aria-label="选择审查任务"
+        >
+          <option value="">新任务</option>
+          {tasks.map((task) => (
+            <option value={task.id} key={task.id}>{task.question}</option>
+          ))}
+        </select>
+        <button type="button" onClick={onClose} aria-label="关闭审查工作流">关闭</button>
+      </div>
+      {!active ? (
+        <div className="lit-review-create">
+          <input
+            value={questionDraft}
+            onChange={(event) => onQuestionDraft(event.target.value)}
+            placeholder="输入系统综述或审查问题"
+            aria-label="审查问题"
+          />
+          <button
+            type="button"
+            className="primary"
+            disabled={!questionDraft.trim()}
+            onClick={() => void onCreate()}
+          >
+            创建任务
+          </button>
+        </div>
+      ) : (
+        <div className="lit-criteria-editor">
+          <input
+            className="lit-question-input"
+            value={active.question}
+            onChange={(event) => onUpdateQuestion(active.id, event.target.value)}
+            aria-label="当前审查问题"
+          />
+          <div className="lit-criteria-grid">
+            {(["include", "exclude"] as const).map((kind) => (
+              <div className="lit-criteria-column" key={kind}>
+                <div className="lit-criteria-head">
+                  <span>{kind === "include" ? "纳入标准" : "排除标准"}</span>
+                  <button type="button" onClick={() => onAddCriterion(active.id, kind)}>添加</button>
+                </div>
+                {active.criteria.filter((criterion) => criterion.kind === kind).map((criterion) => (
+                  <div className="lit-criterion-row" key={criterion.id}>
+                    <input
+                      value={criterion.text}
+                      onChange={(event) =>
+                        onUpdateCriterion(active.id, criterion.id, event.target.value)
+                      }
+                    />
+                    <button
+                      type="button"
+                      onClick={() => onRemoveCriterion(active.id, criterion.id)}
+                      aria-label={`删除标准 ${criterion.text}`}
+                    >
+                      删除
+                    </button>
+                  </div>
+                ))}
+              </div>
+            ))}
+          </div>
+          <div className="lit-criteria-editor-actions">
+            <button
+              type="button"
+              className="primary"
+              disabled={screening}
+              onClick={() => onScreen(active.id)}
+            >
+              {screening ? "筛选中…" : "按标准筛选论文"}
+            </button>
+            <span className="dim">
+              关联 {active.searchIds.length} 个保存搜索 · {active.criteria.length} 条标准
+            </span>
+          </div>
+          {active.suggestions.some((suggestion) => !suggestion.accepted && !suggestion.dismissed) && (
+            <div className="lit-review-suggestions">
+              <strong>根据人工改判生成的标准建议</strong>
+              {active.suggestions
+                .filter((suggestion) => !suggestion.accepted && !suggestion.dismissed)
+                .map((suggestion) => (
+                  <div className="lit-review-suggestion" key={suggestion.id}>
+                    <span>{suggestion.text}</span>
+                    <button
+                      type="button"
+                      onClick={() => onAcceptSuggestion(active.id, suggestion.id)}
+                    >
+                      接受
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onDismissSuggestion(active.id, suggestion.id)}
+                    >
+                      忽略
+                    </button>
+                  </div>
+                ))}
+            </div>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
 
 function PaperList({
   papers,
@@ -781,7 +1248,7 @@ function PaperCard({
             onClick={onPdf}
             disabled={paper.pdf.status === "downloading"}
           >
-            ⬇ PDF
+            {paper.pdf.status === "downloaded" ? "打开 PDF" : "获取 PDF"}
           </button>
           <button type="button" className="lit-card-btn" onClick={onAsk}>
             ✦ Ask
@@ -820,6 +1287,7 @@ function WorkspaceOverview({
   onDownload,
   onAsk,
   onViewEvidence,
+  onOpenAnnotation,
   onDelete,
 }: {
   paper: LiteraturePaper;
@@ -831,6 +1299,7 @@ function WorkspaceOverview({
   onDownload: () => void;
   onAsk: () => void;
   onViewEvidence: () => void;
+  onOpenAnnotation: (page: number, annotationId: string) => void;
   onDelete: () => void;
 }) {
   const fit = paper.verdict?.fit;
@@ -865,24 +1334,25 @@ function WorkspaceOverview({
       </div>
 
       {/* 摘要 */}
-      {paper.abstract && (
-        <div className="lit-section">
-          <button type="button" className="lit-abstract-toggle" onClick={onToggleAbstract}>
-            <div className="lit-section-heading">
-              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                <rect x="2" y="3" width="12" height="1.5" rx=".75" fill="currentColor" />
-                <rect x="2" y="7" width="10" height="1.5" rx=".75" fill="currentColor" />
-                <rect x="2" y="11" width="8" height="1.5" rx=".75" fill="currentColor" />
-              </svg>
-              <span>摘要</span>
-            </div>
-            <span className="lit-toggle-caret" aria-hidden="true">{abstractOpen ? "▾" : "▸"}</span>
-          </button>
-          {abstractOpen && (
-            <p className="lit-abstract-text">{paper.abstract}</p>
-          )}
-        </div>
-      )}
+      <div className="lit-section">
+        <button type="button" className="lit-abstract-toggle" onClick={onToggleAbstract}>
+          <div className="lit-section-heading">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <rect x="2" y="3" width="12" height="1.5" rx=".75" fill="currentColor" />
+              <rect x="2" y="7" width="10" height="1.5" rx=".75" fill="currentColor" />
+              <rect x="2" y="11" width="8" height="1.5" rx=".75" fill="currentColor" />
+            </svg>
+            <span>摘要</span>
+            {!paper.abstract && <span className="lit-section-badge">缺失</span>}
+          </div>
+          <span className="lit-toggle-caret" aria-hidden="true">{abstractOpen ? "▾" : "▸"}</span>
+        </button>
+        {abstractOpen && (
+          <p className={`lit-abstract-text${paper.abstract ? "" : " missing"}`}>
+            {paper.abstract || "当前元数据源未提供摘要。可尝试重新检索或从论文页面补充元数据。"}
+          </p>
+        )}
+      </div>
 
       {/* 结构化简报 */}
       <div className="lit-section">
@@ -895,17 +1365,41 @@ function WorkspaceOverview({
           <span>结构化简报</span>
         </div>
         {paper.brief ? (
-          <BriefColumns brief={paper.brief} />
+          <>
+            <BriefColumns
+              brief={paper.brief}
+              annotations={paper.pdfAnnotations}
+              onOpenAnnotation={onOpenAnnotation}
+            />
+            <div className={`lit-brief-status ${paper.brief.basis}`}>
+              <span>
+                {paper.brief.basis === "fulltext"
+                  ? "该简报基于完整提取的 PDF 全文。"
+                  : "该旧简报仅基于摘要，不应视为全文结论。"}
+              </span>
+              <button
+                type="button"
+                onClick={() => paper.pdf.status === "downloaded" ? onGenerateBrief(paper.id) : onDownload()}
+                disabled={briefing}
+              >
+                {paper.pdf.status === "downloaded" ? "重新从完整全文生成" : "获取 PDF"}
+              </button>
+            </div>
+          </>
         ) : (
           <div className="lit-brief-generate">
-            <p>暂无简报 — {paper.pdf.status === "downloaded" ? "PDF 已下载" : "仅有摘要"}。</p>
+            <p>
+              {paper.pdf.status === "downloaded"
+                ? "PDF 已下载。简报将严格基于完整提取的全文生成。"
+                : "请先获取 PDF；系统不会用摘要冒充全文简报。"}
+            </p>
             <button
               type="button"
               className="primary"
-              onClick={() => onGenerateBrief(paper.id)}
+              onClick={() => paper.pdf.status === "downloaded" ? onGenerateBrief(paper.id) : onDownload()}
               disabled={briefing}
             >
-              {briefing ? "读取中…" : paper.pdf.status === "downloaded" ? "从全文生成简报" : "从摘要生成简报"}
+              {briefing ? "读取完整全文中…" : paper.pdf.status === "downloaded" ? "从完整全文生成简报" : "获取 PDF"}
             </button>
           </div>
         )}
@@ -947,13 +1441,13 @@ function WorkspaceOverview({
           <button
             type="button"
             className="lit-action-btn"
-            aria-label="下载 PDF"
+            aria-label={paper.pdf.status === "downloaded" ? "打开 PDF" : "下载 PDF"}
             onClick={onDownload}
-            disabled={paper.pdf.status === "downloaded" || paper.pdf.status === "downloading"}
+            disabled={paper.pdf.status === "downloading"}
             title={paper.pdf.status === "downloaded" ? paper.pdf.path : undefined}
           >
             {paper.pdf.status === "downloaded"
-              ? "PDF 已保存"
+              ? "打开 PDF"
               : paper.pdf.status === "downloading"
                 ? "下载中…"
                 : paper.pdf.url
@@ -964,7 +1458,7 @@ function WorkspaceOverview({
             问 Agent
           </button>
           <button type="button" className="lit-action-btn" onClick={onViewEvidence}>
-            提取证据
+            查看证据
           </button>
           <button type="button" className="lit-action-btn danger" aria-label="删除" onClick={onDelete}>
             删除
@@ -979,26 +1473,48 @@ function WorkspaceOverview({
 // Brief columns (5-section horizontal layout)
 // ──────────────────────────────────────────────────────────────────────────────
 
-const BRIEF_COLS: Array<{ key: "problem" | "method" | "results" | "limits"; label: string; cls: string }> = [
+const BRIEF_COLS: Array<{ key: "problem" | "method" | "results" | "limits" | "forYou"; label: string; cls: string }> = [
   { key: "problem", label: "问题", cls: "brief-col-problem" },
   { key: "method", label: "方法", cls: "brief-col-method" },
   { key: "results", label: "结果", cls: "brief-col-results" },
   { key: "limits", label: "局限性", cls: "brief-col-limits" },
+  { key: "forYou", label: "与你的研究", cls: "brief-col-foryou" },
 ];
 
-function BriefColumns({ brief }: { brief: NonNullable<LiteraturePaper["brief"]> }) {
+function BriefColumns({
+  brief,
+  annotations,
+  onOpenAnnotation,
+}: {
+  brief: NonNullable<LiteraturePaper["brief"]>;
+  annotations: LiteraturePaper["pdfAnnotations"];
+  onOpenAnnotation: (page: number, annotationId: string) => void;
+}) {
+  const fallbackSource = brief.basis === "fulltext" ? "pdf" : "abstract";
   return (
     <div className="lit-brief lit-brief-cols">
       {BRIEF_COLS.map(({ key, label, cls }) => {
-        const section = brief[key];
+        const section = brief[key] ?? { text: "该字段在旧简报中缺失，请重新生成。", source: fallbackSource };
+        const annotation = annotations.find((entry) => entry.sourceId === `brief:${key}`);
         return (
           <div key={key} className={`lit-brief-col ${cls}`}>
             <div className="lit-brief-col-header">
               {label}
               {" "}
-              <span className={`lit-src src-${section.source}`}>[{section.source}]</span>
+              <span className={`lit-src src-${section.source}`}>
+                [{section.source}{section.page ? ` p.${section.page}` : ""}]
+              </span>
             </div>
             <div className="lit-brief-col-body">{section.text}</div>
+            {annotation && (
+              <button
+                type="button"
+                className="lit-brief-open-core"
+                onClick={() => onOpenAnnotation(annotation.page, annotation.id)}
+              >
+                在 PDF 中查看核心句
+              </button>
+            )}
           </div>
         );
       })}
@@ -1011,13 +1527,50 @@ function BriefColumns({ brief }: { brief: NonNullable<LiteraturePaper["brief"]> 
 // Workspace — Notes tab
 // ──────────────────────────────────────────────────────────────────────────────
 
-function WorkspaceNotes({ paper }: { paper: LiteraturePaper }) {
+function WorkspaceNotes({
+  paper,
+  task,
+  onDecide,
+}: {
+  paper: LiteraturePaper;
+  task?: LiteratureReviewTask;
+  onDecide: (decision: ScreeningDecision) => void;
+}) {
+  const screening = task ? paper.screenings?.[task.id] : undefined;
   return (
     <div className="lit-workspace-scroll">
+      {task && (
+        <div className="lit-section">
+          <div className="lit-section-heading">
+            <span>当前审查任务</span>
+            {screening && <span className="lit-section-badge">{screening.decision}</span>}
+          </div>
+          <p className="lit-note-text">{task.question}</p>
+          <div className="lit-screening-decisions" role="group" aria-label="人工审查决定">
+            {(["include", "maybe", "exclude"] as const).map((decision) => (
+              <button
+                type="button"
+                key={decision}
+                className={screening?.decision === decision ? "active" : ""}
+                onClick={() => onDecide(decision)}
+              >
+                {decision === "include" ? "纳入" : decision === "exclude" ? "排除" : "待定"}
+              </button>
+            ))}
+          </div>
+          {screening?.reasons.map((reason) => (
+            <div className="lit-reason" key={reason.id}>
+              <div>{reason.criteriaText}</div>
+              <blockquote>{reason.anchor.quote}</blockquote>
+              <span>{reason.note}</span>
+            </div>
+          ))}
+        </div>
+      )}
       {paper.verdict && (
         <div className="lit-section">
           <div className="lit-section-heading">
-            <span>Agent 判断</span>
+            <span>Review LLM 判断</span>
             <span className={`lit-fit fit-${paper.verdict.fit}`}>
               {FIT_LABELS[paper.verdict.fit]} · {paper.verdict.score}
             </span>
@@ -1031,8 +1584,8 @@ function WorkspaceNotes({ paper }: { paper: LiteraturePaper }) {
           <p className="lit-note-text">{paper.agentSummary}</p>
         </div>
       )}
-      {!paper.verdict && !paper.agentSummary && (
-        <div className="lit-workspace-empty-content">暂无笔记。</div>
+      {!task && !paper.verdict && !paper.agentSummary && (
+        <div className="lit-workspace-empty-content">暂无 Review LLM 判断。</div>
       )}
     </div>
   );
@@ -1042,21 +1595,264 @@ function WorkspaceNotes({ paper }: { paper: LiteraturePaper }) {
 // Workspace — Evidence tab
 // ──────────────────────────────────────────────────────────────────────────────
 
-function WorkspaceEvidence({ paper }: { paper: LiteraturePaper }) {
+function WorkspaceEvidence({
+  paper,
+  generatingChains,
+  onGenerateChains,
+  onDeleteEvidence,
+  onUpdateChain,
+  onOpenPage,
+  onDownload,
+}: {
+  paper: LiteraturePaper;
+  generatingChains: boolean;
+  onGenerateChains: () => void;
+  onDeleteEvidence: (evidenceId: string) => void;
+  onUpdateChain: (
+    chainId: string,
+    patch: Partial<Pick<LiteraturePaper["answerChains"][number], "question" | "answer" | "reviewStatus">>,
+  ) => void;
+  onOpenPage: (page: number, annotationId?: string) => void;
+  onDownload: () => void;
+}) {
+  const annotations = new Map(paper.pdfAnnotations.map((annotation) => [annotation.id, annotation]));
   return (
-    <div className="lit-workspace-scroll">
+    <div className="lit-workspace-scroll lit-evidence-workspace" lang="zh-CN">
+      <header className="lit-section lit-evidence-intro">
+        <div className="lit-evidence-intro-head">
+          <div>
+            <span className="lit-evidence-eyebrow">证据阅读</span>
+            <h3>从中文结论回到 PDF 原始证据</h3>
+          </div>
+          <span className="lit-evidence-total">{paper.evidence.length} 条证据</span>
+        </div>
+        <p>
+          先阅读中文问题与结论，再通过支撑卡片或原文摘录回到 PDF 核验。
+        </p>
+        <div className="lit-evidence-summary">
+          <span>问答结论 <strong>{paper.answerChains.length}</strong></span>
+          <span>原文摘录 <strong>{paper.evidence.length}</strong></span>
+          <span>视觉证据 <strong>{paper.evidence.filter((item) => item.source === "vision").length}</strong></span>
+        </div>
+        <button
+          type="button"
+          className="primary"
+          onClick={paper.pdf.status === "downloaded" ? onGenerateChains : onDownload}
+          disabled={generatingChains}
+        >
+          {generatingChains
+            ? "正在逐页视觉读取并构建链条…"
+            : paper.pdf.status === "downloaded"
+              ? paper.answerChains.length > 0 ? "重新生成证据链" : "生成证据链"
+              : "获取 PDF"}
+        </button>
+      </header>
+
+      {paper.answerChains.length > 0 && (
+        <section className="lit-evidence-group" aria-label="问答结论">
+          <div className="lit-evidence-group-heading">
+            <div>
+              <span>问答结论</span>
+              <p>每条结论均可回溯到下方 PDF 支撑。</p>
+            </div>
+            <strong>{paper.answerChains.length}</strong>
+          </div>
+          {paper.answerChains.map((chain, index) => (
+            <article className="lit-answer-chain" key={chain.id}>
+              <div className="lit-answer-chain-head">
+                <div className="lit-answer-chain-number">
+                  <span>问答 {String(index + 1).padStart(2, "0")}</span>
+                  {chain.basis === "vision" && <em>视觉构建</em>}
+                </div>
+                <div className="lit-answer-chain-review" role="group" aria-label={`复核状态 ${index + 1}`}>
+                  {([
+                    ["unreviewed", "待复核"],
+                    ["accepted", "已确认"],
+                    ["rejected", "已驳回"],
+                  ] as const).map(([status, label]) => (
+                    <button
+                      type="button"
+                      key={status}
+                      className={chain.reviewStatus === status ? "active" : ""}
+                      onClick={() => onUpdateChain(chain.id, { reviewStatus: status })}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <EditableMathField
+                label="研究问题"
+                value={chain.question}
+                rows={2}
+                ariaLabel={`问题 ${index + 1}`}
+                onSave={(value) => onUpdateChain(chain.id, { question: value })}
+              />
+              <EditableMathField
+                label="中文结论"
+                value={chain.answer}
+                rows={4}
+                ariaLabel={`最终答案 ${index + 1}`}
+                className="conclusion"
+                onSave={(value) => onUpdateChain(chain.id, { answer: value })}
+              />
+              <div className="lit-answer-chain-supports">
+                <div className="lit-answer-chain-supports-head">
+                  <span>证据支撑</span>
+                  <strong>{chain.supports.length}</strong>
+                </div>
+                {chain.supports.map((support) => {
+                  const annotation = annotations.get(support.annotationId);
+                  if (!annotation) return null;
+                  return (
+                    <button
+                      type="button"
+                      key={support.annotationId}
+                      onClick={() => onOpenPage(annotation.page, annotation.id)}
+                    >
+                      <span className="lit-answer-support-meta">
+                        <strong>{EVIDENCE_ROLE_LABELS[support.role] ?? support.role}</strong>
+                        <span>第 {annotation.page} 页</span>
+                        {annotation.source === "vision" && <span>视觉页证据</span>}
+                      </span>
+                      <MathText text={annotation.quote} className="lit-answer-support-quote" />
+                      <span className="lit-answer-support-open">在 PDF 中核验</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </article>
+          ))}
+        </section>
+      )}
+
       {paper.evidence.length === 0 ? (
         <div className="lit-workspace-empty-content">
-          暂无提取的证据。Agent 读取 PDF 后，引文将以页码锚点显示在此。
+          <p>
+            {paper.pdf.status === "downloaded"
+              ? "暂无提取的证据。可让视觉模型逐页读取 PDF 截图并提取带页码证据。"
+              : "暂无提取的证据。请先获取 PDF，避免仅凭摘要生成证据。"}
+          </p>
+          <button
+            type="button"
+            className="primary"
+            onClick={paper.pdf.status === "downloaded" ? onGenerateChains : onDownload}
+            disabled={generatingChains}
+          >
+            {generatingChains
+              ? "逐页视觉读取并构建证据链中…"
+              : paper.pdf.status === "downloaded"
+                ? "生成证据链"
+                : "获取 PDF"}
+          </button>
         </div>
       ) : (
-        paper.evidence.map((item) => (
-          <div className="lit-section lit-evidence-item" key={item.id}>
-            <div className="lit-evidence-page-label">第 {item.page} 页</div>
-            <blockquote className="lit-evidence-quote">"{item.quote}"</blockquote>
-            <p className="lit-evidence-note">{item.note}</p>
+        <section className="lit-evidence-group" aria-label="原文证据">
+          <div className="lit-evidence-group-heading">
+            <div>
+              <span>原文证据</span>
+              <p>中文说明用于快速阅读，原文摘录用于核验。</p>
+            </div>
+            <strong>{paper.evidence.length}</strong>
           </div>
-        ))
+          {paper.evidence.map((item, index) => (
+            <article className="lit-evidence-card" key={item.id}>
+              <div className="lit-evidence-card-head">
+                <div className="lit-evidence-card-meta">
+                  <span>证据 {String(index + 1).padStart(2, "0")}</span>
+                  <em>第 {item.page} 页</em>
+                  <em>{item.source === "vision" ? "视觉页证据" : "文本证据"}</em>
+                </div>
+                <div className="lit-evidence-card-actions">
+                  <button
+                    type="button"
+                    className="lit-evidence-open"
+                    onClick={() =>
+                      onOpenPage(
+                        item.page,
+                        paper.pdfAnnotations.find((annotation) => annotation.sourceId === item.id)?.id,
+                      )
+                    }
+                  >
+                    打开原页
+                  </button>
+                  <button
+                    type="button"
+                    className="lit-evidence-delete"
+                    aria-label={`删除证据：${item.quote.slice(0, 30)}`}
+                    onClick={() => onDeleteEvidence(item.id)}
+                  >
+                    删除
+                  </button>
+                </div>
+              </div>
+              <div className="lit-evidence-explanation">
+                <span>中文说明</span>
+                <p><MathText text={item.note} /></p>
+              </div>
+              <div className="lit-evidence-source">
+                <span>原文摘录</span>
+                <blockquote><MathText text={item.quote} /></blockquote>
+              </div>
+            </article>
+          ))}
+        </section>
+      )}
+    </div>
+  );
+}
+
+function EditableMathField({
+  label,
+  value,
+  rows,
+  ariaLabel,
+  className = "",
+  onSave,
+}: {
+  label: string;
+  value: string;
+  rows: number;
+  ariaLabel: string;
+  className?: string;
+  onSave: (value: string) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(value);
+
+  useEffect(() => {
+    if (!editing) setDraft(value);
+  }, [editing, value]);
+
+  const save = () => {
+    const next = draft.trim();
+    if (next && next !== value) onSave(next);
+    setEditing(false);
+  };
+
+  return (
+    <div className={`lit-answer-chain-field ${className}`.trim()}>
+      <div className="lit-answer-chain-field-head">
+        <span>{label}</span>
+        {!editing && (
+          <button type="button" aria-label={`编辑${ariaLabel}`} onClick={() => setEditing(true)}>
+            编辑
+          </button>
+        )}
+      </div>
+      {editing ? (
+        <textarea
+          autoFocus
+          rows={rows}
+          value={draft}
+          aria-label={ariaLabel}
+          onChange={(event) => setDraft(event.target.value)}
+          onBlur={save}
+        />
+      ) : (
+        <div className="lit-answer-chain-rendered">
+          <MathText text={value} />
+        </div>
       )}
     </div>
   );
@@ -1072,12 +1868,18 @@ function WorkspaceFiles({
   onTagDraft,
   onAddTag,
   onDownload,
+  onUpload,
+  collections,
+  onToggleCollection,
 }: {
   paper: LiteraturePaper;
   tagDraft: string;
   onTagDraft: (v: string) => void;
   onAddTag: () => void;
   onDownload: (id: string) => Promise<void>;
+  onUpload: () => void;
+  collections: LiteratureLibrary["collections"];
+  onToggleCollection: (collectionId: string) => void;
 }) {
   return (
     <div className="lit-workspace-scroll">
@@ -1103,16 +1905,17 @@ function WorkspaceFiles({
                   : "无直链"}
           </dd>
         </dl>
-        {paper.pdf.status !== "downloaded" && (
-          <button type="button" className="primary" onClick={() => void onDownload(paper.id)}
-            disabled={paper.pdf.status === "downloading"}>
-            {paper.pdf.status === "downloading"
+        <button type="button" className="primary" onClick={() => void onDownload(paper.id)}
+          disabled={paper.pdf.status === "downloading"}>
+          {paper.pdf.status === "downloaded"
+            ? "打开 PDF"
+            : paper.pdf.status === "downloading"
               ? "下载中…"
               : paper.pdf.url
                 ? paper.pdf.status === "failed" ? "重试下载" : "下载 PDF"
                 : "Playwright MCP 获取 PDF"}
-          </button>
-        )}
+        </button>
+        <button type="button" onClick={onUpload}>上传本地 PDF</button>
       </div>
 
       <div className="lit-section">
@@ -1134,6 +1937,31 @@ function WorkspaceFiles({
             aria-label="添加标签"
           />
         </div>
+      </div>
+
+      <div className="lit-section">
+        <div className="lit-section-heading"><span>分类</span></div>
+        {collections.length > 0 ? (
+          <div className="lit-collection-toggles">
+            {collections.map((collection) => {
+              const assigned = paper.collectionIds.includes(collection.id);
+              return (
+                <button
+                  type="button"
+                  key={collection.id}
+                  className={`lit-collection-toggle${assigned ? " active" : ""}`}
+                  aria-pressed={assigned}
+                  onClick={() => onToggleCollection(collection.id)}
+                >
+                  {assigned ? "✓ " : "+ "}
+                  {collection.label}
+                </button>
+              );
+            })}
+          </div>
+        ) : (
+          <p className="lit-note-text">尚未创建分类。</p>
+        )}
       </div>
     </div>
   );

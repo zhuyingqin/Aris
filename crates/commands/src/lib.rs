@@ -128,8 +128,8 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
     },
     SlashCommandSpec {
         name: "memory",
-        summary: "Inspect loaded Claude instruction memory files",
-        argument_hint: None,
+        summary: "Inspect or approve persistent hot memory",
+        argument_hint: Some("[pending|approve <id>|reject <id>|approval on|off]"),
         resume_supported: true,
     },
     SlashCommandSpec {
@@ -201,7 +201,7 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
     SlashCommandSpec {
         name: "session",
         summary: "List, switch, or inspect managed local sessions",
-        argument_hint: Some("[list|switch <session-id>|timeline [session-id]]"),
+        argument_hint: Some("[list|search <query>|switch <session-id>|timeline [session-id]]"),
         resume_supported: false,
     },
     SlashCommandSpec {
@@ -267,7 +267,10 @@ pub enum SlashCommand {
     Config {
         section: Option<String>,
     },
-    Memory,
+    Memory {
+        action: Option<String>,
+        target: Option<String>,
+    },
     Init,
     Diff,
     Version,
@@ -357,7 +360,10 @@ impl SlashCommand {
             "config" => Self::Config {
                 section: parts.next().map(ToOwned::to_owned),
             },
-            "memory" => Self::Memory,
+            "memory" => Self::Memory {
+                action: parts.next().map(ToOwned::to_owned),
+                target: parts.next().map(ToOwned::to_owned),
+            },
             "init" => Self::Init,
             "diff" => Self::Diff,
             "version" => Self::Version,
@@ -375,10 +381,14 @@ impl SlashCommand {
             "export" => Self::Export {
                 path: parts.next().map(ToOwned::to_owned),
             },
-            "session" => Self::Session {
-                action: parts.next().map(ToOwned::to_owned),
-                target: parts.next().map(ToOwned::to_owned),
-            },
+            "session" => {
+                let action = parts.next().map(ToOwned::to_owned);
+                let target = {
+                    let rest = parts.collect::<Vec<_>>().join(" ");
+                    (!rest.is_empty()).then_some(rest)
+                };
+                Self::Session { action, target }
+            }
             "team" => Self::Team {
                 action: parts.next().map(ToOwned::to_owned),
                 target: parts.next().map(ToOwned::to_owned),
@@ -493,7 +503,7 @@ pub fn handle_slash_command(
         | SlashCommand::Cost
         | SlashCommand::Resume { .. }
         | SlashCommand::Config { .. }
-        | SlashCommand::Memory
+        | SlashCommand::Memory { .. }
         | SlashCommand::Init
         | SlashCommand::Diff
         | SlashCommand::Version
@@ -754,7 +764,20 @@ mod tests {
                 section: Some("env".to_string())
             })
         );
-        assert_eq!(SlashCommand::parse("/memory"), Some(SlashCommand::Memory));
+        assert_eq!(
+            SlashCommand::parse("/memory"),
+            Some(SlashCommand::Memory {
+                action: None,
+                target: None
+            })
+        );
+        assert_eq!(
+            SlashCommand::parse("/memory approve mem-1"),
+            Some(SlashCommand::Memory {
+                action: Some("approve".to_string()),
+                target: Some("mem-1".to_string())
+            })
+        );
         assert_eq!(SlashCommand::parse("/init"), Some(SlashCommand::Init));
         assert_eq!(SlashCommand::parse("/diff"), Some(SlashCommand::Diff));
         assert_eq!(SlashCommand::parse("/version"), Some(SlashCommand::Version));
@@ -813,7 +836,8 @@ mod tests {
         assert!(help.contains("/diff"));
         assert!(help.contains("/version"));
         assert!(help.contains("/export [file]"));
-        assert!(help.contains("/session [list|switch <session-id>|timeline [session-id]]"));
+        assert!(help
+            .contains("/session [list|search <query>|switch <session-id>|timeline [session-id]]"));
         assert!(help.contains("/team [list|raw|events|messages|supervisor] [team-id]"));
         assert!(help.contains(
             "/workflows [list|inspect|pause|resume|stop|restart|save|discover|start|allow-once|always|deny|inject]"

@@ -143,6 +143,79 @@
   padding: 6px 14px;
 }
 
+.lit-review-panel {
+  flex-shrink: 0;
+  max-height: 42%;
+  overflow-y: auto;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-1);
+}
+
+.lit-review-panel-head,
+.lit-review-create {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+}
+
+.lit-review-panel-head strong {
+  font-size: 12px;
+}
+
+.lit-review-panel-head select {
+  flex: 1;
+  min-width: 0;
+}
+
+.lit-review-panel-head button {
+  margin-left: auto;
+}
+
+.lit-review-create input {
+  flex: 1;
+  min-width: 0;
+}
+
+.lit-review-suggestions {
+  display: grid;
+  gap: 6px;
+  margin-top: 10px;
+  padding-top: 9px;
+  border-top: 1px solid var(--border);
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.lit-review-suggestion {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.lit-review-suggestion span {
+  flex: 1;
+  min-width: 0;
+  color: var(--text);
+}
+
+.lit-screening-decisions {
+  display: flex;
+  gap: 6px;
+  margin: 10px 0;
+}
+
+.lit-screening-decisions button {
+  flex: 1;
+  font-size: 11px;
+}
+
+.lit-screening-decisions button.active {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
 /* ── Search source picker (arXiv / Crossref / OpenAlex / Scopus) ───────────── */
 
 .lit-source-picker {
@@ -1319,6 +1392,14 @@
   line-height: 1.6;
 }
 
+.lit-abstract-text.missing {
+  padding: 9px 10px;
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+  background: var(--bg-1);
+  font-style: italic;
+}
+
 /* Structured brief columns */
 
 .lit-brief {
@@ -1411,6 +1492,24 @@
   color: var(--text-dim);
   font-size: 12px;
   margin: 0 0 10px;
+}
+
+.lit-brief-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 7px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.lit-brief-status.abstract {
+  border-color: color-mix(in srgb, var(--amber) 45%, var(--border));
+  background: color-mix(in srgb, var(--amber) 8%, transparent);
 }
 
 /* Evidence snippets */
@@ -1506,6 +1605,25 @@
   line-height: 1.6;
 }
 
+.lit-collection-toggles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.lit-collection-toggle {
+  padding: 4px 8px;
+  border-radius: 999px;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.lit-collection-toggle.active {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent);
+}
+
 .lit-verdict-text {
   margin: 6px 0 0;
   font-size: 12px;
@@ -1557,33 +1675,1032 @@
   font-size: 11px;
 }
 
-.lit-evidence-item {
+/* ── Immersive reading shell (full-bleed PDF takeover) ─────────────────────── */
+
+.lit-reading-shell {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  background: var(--bg);
+}
+
+.lit-reading-bar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 9px 14px;
   border-bottom: 1px solid var(--border);
+  background: var(--bg-1);
+  flex-shrink: 0;
 }
 
-.lit-evidence-page-label {
+.lit-reading-back {
+  flex-shrink: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
   color: var(--text-dim);
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.5px;
-  text-transform: uppercase;
-  margin-bottom: 5px;
+  font-size: 12px;
+  padding: 5px 11px;
+  cursor: pointer;
 }
 
-.lit-evidence-quote {
-  margin: 0 0 7px;
-  padding-left: 10px;
-  border-left: 2px solid var(--amber);
+.lit-reading-back:hover {
+  color: var(--text);
+  background: var(--bg-2);
+  border-color: var(--text-dim);
+}
+
+.lit-reading-title-wrap {
+  flex: 1;
+  min-width: 0;
+}
+
+.lit-reading-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text);
+  line-height: 1.3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lit-reading-sub {
+  font-size: 11px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lit-reading-tabs {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.lit-reading-tab {
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 12px;
+  padding: 5px 10px;
+  cursor: pointer;
+}
+
+.lit-reading-tab:hover {
+  color: var(--text);
+  background: var(--bg-2);
+  border-color: transparent;
+}
+
+/* ── PDF reader (continuous scroll) ────────────────────────────────────────── */
+
+.lit-pdf-reader {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1;
+  background: var(--bg);
+}
+
+.lit-pdf-reader-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 300px;
+  flex: 1;
+  min-height: 0;
+}
+
+.lit-pdf-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 14px;
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-1);
+  flex-shrink: 0;
+}
+
+.lit-pdf-pager,
+.lit-pdf-zoom {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.lit-pdf-toolbar-right {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.lit-pdf-toolbar button {
+  font-size: 12px;
+  padding: 4px 9px;
+}
+
+.lit-pdf-toolbar button.active {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.lit-pdf-pager > button,
+.lit-pdf-zoom > button {
+  min-width: 26px;
+  font-size: 14px;
+  line-height: 1;
+  padding: 3px 6px;
+}
+
+.lit-pdf-page-input {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.lit-pdf-page-input input {
+  width: 48px;
+  font-size: 12px;
+  padding: 4px 6px;
+  text-align: center;
+}
+
+.lit-pdf-zoom-value {
+  min-width: 44px;
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.lit-pdf-scroll {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 18px 16px;
+  background: color-mix(in srgb, var(--bg) 82%, black);
+}
+
+.lit-pdf-page-slot {
+  position: relative;
+  margin: 0 auto 18px;
+  background: white;
+  box-shadow: 0 5px 24px rgb(0 0 0 / 28%);
+}
+
+.lit-pdf-page-slot canvas {
+  display: block;
+  max-width: none;
+}
+
+/* ── Text layer (pdfjs) — transparent text for native selection ─────────────── */
+
+.lit-pdf-text-layer {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  line-height: 1;
+  user-select: text;
+  cursor: text;
+  z-index: 2;
+  /* Suppress forced dark mode from inverting transparent text */
+  forced-color-adjust: none;
+}
+
+.lit-pdf-text-layer span,
+.lit-pdf-text-layer br {
+  color: transparent !important;
+  position: absolute;
+  white-space: pre;
+  cursor: text;
+  transform-origin: 0% 0%;
+}
+
+.lit-pdf-text-layer ::selection {
+  background: rgba(0, 100, 255, 0.25);
+  color: transparent;
+}
+
+.lit-pdf-highlight-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 1;
+}
+
+/* ── Selection popup — floating annotation creation ─────────────────────────── */
+
+.lit-pdf-select-popup {
+  width: 272px;
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 8px 32px rgb(0 0 0 / 22%), 0 2px 8px rgb(0 0 0 / 12%);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.lit-pdf-select-popup-quote {
   color: var(--text);
   font-size: 12px;
   line-height: 1.5;
+  max-height: 72px;
+  overflow: hidden;
+  border-left: 3px solid var(--border);
+  padding-left: 8px;
+  font-style: italic;
 }
 
-.lit-evidence-note {
-  margin: 0;
+.lit-pdf-select-popup-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.lit-pdf-select-popup-colors {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.lit-pdf-color-swatch {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  padding: 0;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: transform 0.1s, box-shadow 0.1s;
+}
+
+.lit-pdf-color-swatch:hover {
+  transform: scale(1.15);
+  box-shadow: 0 0 0 2px var(--border);
+}
+
+.lit-pdf-color-swatch.active {
+  box-shadow: 0 0 0 2px var(--text);
+}
+
+.lit-pdf-select-popup-kind {
+  flex: 1;
+  font-size: 11px;
+  padding: 4px 6px;
+}
+
+.lit-pdf-select-popup-note {
+  width: 100%;
+  font-size: 12px;
+  line-height: 1.4;
+  resize: vertical;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg);
+  color: var(--text);
+  padding: 6px 8px;
+}
+
+.lit-pdf-select-popup-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 7px;
+}
+
+.lit-pdf-select-popup-actions button {
+  font-size: 12px;
+  padding: 5px 12px;
+}
+
+.lit-pdf-select-popup-save {
+  background: var(--accent);
+  color: white;
+  border-color: transparent;
+}
+
+.lit-pdf-select-popup-save:hover {
+  background: color-mix(in srgb, var(--accent) 85%, black);
+  border-color: transparent;
+}
+
+/* Arrow pointing down toward the selection */
+.lit-pdf-select-popup-arrow {
+  position: absolute;
+  bottom: -7px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 12px;
+  height: 12px;
+  background: var(--bg-1);
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  rotate: 45deg;
+}
+
+/* ── Annotation sidebar improvements ────────────────────────────────────────── */
+
+.lit-pdf-annotation-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  margin-bottom: 5px;
+}
+
+.lit-pdf-annotation-kind-badge {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
+.lit-pdf-annotation-page-badge {
+  flex: 1;
+  font-size: 10px;
+  color: var(--text-dim);
+  font-family: ui-monospace, "Cascadia Code", monospace;
+}
+
+.lit-pdf-annotation-delete {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.1s, color 0.1s;
+}
+
+.lit-pdf-annotation-card:hover .lit-pdf-annotation-delete {
+  opacity: 1;
+}
+
+.lit-pdf-annotation-delete:hover {
+  color: var(--red);
+  background: color-mix(in srgb, var(--red) 12%, transparent);
+}
+
+/* Subtle hint shown below the toolbar when a doc is loaded */
+.lit-pdf-tip {
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 11px;
+  padding: 4px 0 0;
+  margin-bottom: -10px;
+}
+
+.lit-pdf-highlight-layer.annotating {
+  pointer-events: auto;
+  cursor: crosshair;
+  touch-action: none;
+}
+
+.lit-pdf-highlight {
+  position: absolute;
+  border-radius: 2px;
+  background: rgb(255 213 79 / 36%);
+  box-shadow: inset 0 -2px rgb(255 180 0 / 65%);
+  mix-blend-mode: multiply;
+}
+
+.lit-pdf-highlight.kind-evidence {
+  background: rgb(77 208 225 / 30%);
+  box-shadow: inset 0 -2px rgb(0 172 193 / 60%);
+}
+
+.lit-pdf-highlight.kind-answer-support {
+  background: rgb(129 199 132 / 32%);
+  box-shadow: inset 0 -2px rgb(56 142 60 / 65%);
+}
+
+.lit-pdf-highlight.focused {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  background: rgb(255 235 59 / 55%);
+}
+
+.lit-pdf-highlight.color-green {
+  background: rgb(129 199 132 / 36%);
+  box-shadow: inset 0 -2px rgb(56 142 60 / 65%);
+}
+
+.lit-pdf-highlight.color-blue {
+  background: rgb(79 195 247 / 34%);
+  box-shadow: inset 0 -2px rgb(2 136 209 / 65%);
+}
+
+.lit-pdf-highlight.color-red {
+  background: rgb(239 83 80 / 30%);
+  box-shadow: inset 0 -2px rgb(198 40 40 / 65%);
+}
+
+.lit-pdf-highlight.color-purple {
+  background: rgb(186 104 200 / 32%);
+  box-shadow: inset 0 -2px rgb(123 31 162 / 65%);
+}
+
+.lit-pdf-highlight.draft {
+  outline: 1px dashed rgb(0 0 0 / 55%);
+}
+
+.lit-pdf-color-control,
+.lit-pdf-color-control select {
+  font-size: 11px;
+}
+
+.lit-pdf-color-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-dim);
+}
+
+.lit-pdf-annotations {
+  min-width: 0;
+  overflow: auto;
+  border-left: 1px solid var(--border);
+  background: var(--bg-1);
+  padding: 10px;
+}
+
+.lit-pdf-annotations-head {
+  margin-bottom: 8px;
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.lit-pdf-annotations-empty {
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.lit-pdf-annotation-card {
+  margin-bottom: 9px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--amber);
+  border-radius: 7px;
+  background: var(--bg);
+  padding: 8px;
+}
+
+.lit-pdf-annotation-card.kind-evidence {
+  border-left-color: #4ecece;
+}
+
+.lit-pdf-annotation-card.kind-answer-support {
+  border-left-color: var(--green);
+}
+
+.lit-pdf-annotation-card.kind-note {
+  border-left-color: var(--accent);
+}
+
+.lit-pdf-annotation-card.focused {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+.lit-pdf-annotation-card > span {
+  color: var(--text-dim);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.lit-pdf-annotation-card blockquote {
+  margin: 6px 0;
+  color: var(--text);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.lit-pdf-annotation-card textarea {
+  width: 100%;
+  min-height: 58px;
+  resize: vertical;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.lit-pdf-annotation-field {
+  display: grid;
+  gap: 4px;
+  margin-top: 7px;
+}
+
+.lit-pdf-annotation-field > span,
+.lit-pdf-annotation-options span {
+  color: var(--text-dim);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.lit-pdf-annotation-options {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 7px;
+  margin-top: 7px;
+}
+
+.lit-pdf-annotation-options label {
+  display: grid;
+  gap: 4px;
+}
+
+.lit-pdf-annotation-options select {
+  width: 100%;
+  font-size: 11px;
+}
+
+.lit-pdf-state {
   color: var(--text-dim);
   font-size: 12px;
-  line-height: 1.5;
+  padding: 18px;
+}
+
+.lit-evidence-workspace {
+  font-family: "Microsoft YaHei UI", "PingFang SC", "Noto Sans CJK SC", "Segoe UI", sans-serif;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+.lit-evidence-intro {
+  padding: 18px 16px;
+  background:
+    linear-gradient(145deg, color-mix(in srgb, var(--accent) 10%, transparent), transparent 55%),
+    var(--bg-1);
+}
+
+.lit-evidence-intro-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.lit-evidence-eyebrow {
+  display: block;
+  margin-bottom: 5px;
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.lit-evidence-intro h3 {
+  margin: 0;
+  color: var(--text);
+  font-size: 16px;
+  line-height: 1.45;
+}
+
+.lit-evidence-intro > p {
+  margin: 9px 0 12px;
+  color: var(--text-dim);
+  font-size: 13px;
+  line-height: 1.75;
+}
+
+.lit-evidence-total {
+  flex-shrink: 0;
+  border: 1px solid color-mix(in srgb, var(--accent) 32%, var(--border));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 700;
+  padding: 4px 8px;
+}
+
+.lit-evidence-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-bottom: 13px;
+}
+
+.lit-evidence-summary span {
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--bg-3) 74%, transparent);
+  color: var(--text-dim);
+  font-size: 11px;
+  padding: 5px 8px;
+}
+
+.lit-evidence-summary strong {
+  margin-left: 4px;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.lit-evidence-intro > button {
+  font-size: 12px;
+  padding: 7px 12px;
+}
+
+.lit-evidence-group {
+  display: grid;
+  gap: 12px;
+  padding: 17px 14px 18px;
+  border-bottom: 1px solid var(--border);
+}
+
+.lit-evidence-group-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 2px;
+}
+
+.lit-evidence-group-heading span {
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.lit-evidence-group-heading p {
+  margin: 4px 0 0;
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.lit-evidence-group-heading > strong {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 24px;
+  height: 24px;
+  border-radius: 999px;
+  background: var(--bg-3);
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.lit-answer-chain,
+.lit-evidence-card {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-1);
+  box-shadow: 0 8px 22px rgb(0 0 0 / 10%);
+}
+
+.lit-answer-chain {
+  padding: 13px;
+  border-top: 3px solid color-mix(in srgb, var(--green) 72%, var(--border));
+}
+
+.lit-answer-chain-head,
+.lit-evidence-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.lit-answer-chain-number,
+.lit-evidence-card-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.lit-answer-chain-number > span,
+.lit-evidence-card-meta > span {
+  color: var(--green);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+}
+
+.lit-answer-chain-number em,
+.lit-evidence-card-meta em {
+  border-radius: 999px;
+  background: var(--bg-3);
+  color: var(--text-dim);
+  font-size: 10px;
+  font-style: normal;
+  padding: 2px 6px;
+}
+
+.lit-answer-chain-field {
+  display: grid;
+  gap: 5px;
+  margin-top: 13px;
+}
+
+.lit-answer-chain-field-head > span,
+.lit-answer-chain-supports-head > span,
+.lit-evidence-explanation > span,
+.lit-evidence-source > span {
+  color: var(--text-dim);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.lit-answer-chain-field-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.lit-answer-chain-field-head button {
+  border: 0;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 10px;
+  padding: 1px 3px;
+}
+
+.lit-answer-chain-field-head button:hover {
+  background: transparent;
+  color: var(--accent);
+}
+
+.lit-answer-chain-field textarea {
+  width: 100%;
+  min-height: 0;
+  resize: vertical;
+  overflow-wrap: anywhere;
+  border-color: transparent;
+  background: color-mix(in srgb, var(--bg) 72%, transparent);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 1.75;
+  padding: 9px 10px;
+}
+
+.lit-answer-chain-field textarea:focus {
+  border-color: color-mix(in srgb, var(--accent) 58%, var(--border));
+  outline: 0;
+}
+
+.lit-answer-chain-rendered {
+  min-height: 54px;
+  overflow-wrap: anywhere;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--bg) 72%, transparent);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 1.75;
+  padding: 9px 10px;
+}
+
+.lit-answer-chain-field.conclusion textarea {
+  min-height: 102px;
+  border-left: 3px solid color-mix(in srgb, var(--green) 64%, var(--border));
+  background: color-mix(in srgb, var(--green) 5%, var(--bg));
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.8;
+}
+
+.lit-answer-chain-field.conclusion .lit-answer-chain-rendered {
+  min-height: 102px;
+  border-left: 3px solid color-mix(in srgb, var(--green) 64%, var(--border));
+  background: color-mix(in srgb, var(--green) 5%, var(--bg));
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.8;
+}
+
+.lit-answer-chain-review {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 4px;
+}
+
+.lit-answer-chain-review button {
+  padding: 3px 6px;
+  color: var(--text-dim);
+  font-size: 10px;
+}
+
+.lit-answer-chain-review button.active {
+  border-color: color-mix(in srgb, var(--accent) 60%, var(--border));
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent);
+}
+
+.lit-answer-chain-supports {
+  display: grid;
+  gap: 7px;
+  margin-top: 13px;
+}
+
+.lit-answer-chain-supports-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.lit-answer-chain-supports-head strong {
+  color: var(--text-dim);
+  font-size: 10px;
+}
+
+.lit-answer-chain-supports > button {
+  display: grid;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
+  overflow: visible;
+  white-space: normal;
+  border-color: color-mix(in srgb, var(--green) 22%, var(--border));
+  background: color-mix(in srgb, var(--green) 5%, var(--bg));
+  padding: 10px;
+  text-align: left;
+}
+
+.lit-answer-support-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.lit-answer-support-meta strong,
+.lit-answer-support-meta span {
+  border-radius: 999px;
+  background: var(--bg-3);
+  color: var(--text-dim);
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 6px;
+}
+
+.lit-answer-support-meta strong {
+  background: color-mix(in srgb, var(--green) 14%, transparent);
+  color: var(--green);
+}
+
+.lit-answer-support-quote {
+  display: block;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.lit-answer-support-open {
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.lit-evidence-card {
+  overflow: hidden;
+}
+
+.lit-evidence-card-head {
+  padding: 11px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.lit-evidence-card-meta > span {
+  color: var(--amber);
+}
+
+.lit-evidence-card-actions {
+  display: flex;
+  flex-shrink: 0;
+  gap: 4px;
+}
+
+.lit-evidence-card-actions button {
+  border: 0;
+  background: transparent;
+  font-size: 10px;
+  padding: 2px 4px;
+}
+
+.lit-evidence-open {
+  color: var(--accent);
+}
+
+.lit-evidence-delete {
+  color: var(--text-dim);
+}
+
+.lit-evidence-delete:hover {
+  background: transparent;
+  color: var(--danger, #e05);
+}
+
+.lit-evidence-explanation,
+.lit-evidence-source {
+  padding: 12px;
+}
+
+.lit-evidence-explanation {
+  background: color-mix(in srgb, var(--accent) 4%, var(--bg-1));
+}
+
+.lit-evidence-explanation p {
+  margin: 6px 0 0;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.8;
+}
+
+.lit-evidence-source {
+  border-top: 1px solid var(--border);
+}
+
+.lit-evidence-source blockquote {
+  margin: 7px 0 0;
+  padding: 8px 10px;
+  overflow-wrap: anywhere;
+  border-left: 3px solid color-mix(in srgb, var(--amber) 66%, var(--border));
+  border-radius: 0 6px 6px 0;
+  background: color-mix(in srgb, var(--amber) 5%, var(--bg));
+  color: color-mix(in srgb, var(--text) 86%, var(--text-dim));
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.lit-math-text {
+  white-space: pre-wrap;
+}
+
+.lit-math-formula {
+  max-width: 100%;
+  color: var(--text);
+}
+
+.lit-math-formula.display {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  padding: 4px 0;
+  text-align: center;
+}
+
+.lit-math-formula.display .katex-display {
+  margin: 0;
+  overflow: visible;
+}
+
+.lit-math-formula .katex {
+  font-size: 1.08em;
+}
+
+.lit-math-fallback {
+  color: var(--text);
+  font-family: "Cambria Math", "STIX Two Math", serif;
+}
+
+.lit-brief-open-core {
+  margin: 8px 8px 8px;
+  padding: 3px 6px;
+  font-size: 10px;
+}
+
+@media (max-width: 1180px) {
+  .lit-pdf-reader-body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .lit-pdf-annotations {
+    max-height: 220px;
+    border-top: 1px solid var(--border);
+    border-left: 0;
+  }
+}
+
+.lit-pdf-state.error {
+  color: var(--red);
 }
 
 /* ── Files tab specific ─────────────────────────────────────────────────────── */

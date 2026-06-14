@@ -348,7 +348,7 @@ struct CachedMcpDiscovery {
     failures: Vec<(String, String)>,
 }
 
-const MCP_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(15);
+const MCP_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(45);
 const MCP_DISCOVERY_CACHE_TTL: Duration = Duration::from_secs(300);
 
 fn mcp_discovery_cache() -> &'static Mutex<BTreeMap<String, CachedMcpDiscovery>> {

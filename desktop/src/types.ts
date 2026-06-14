@@ -219,6 +219,7 @@ export interface ConfigView {
   hasScopusKey: boolean;
   scopusKeyMasked?: string | null;
   language?: string | null;
+  memoryWriteApproval: boolean;
 }
 
 export interface ConfigPatch {
@@ -232,6 +233,7 @@ export interface ConfigPatch {
   reviewerApiKey?: string;
   scopusApiKey?: string;
   language?: string;
+  memoryWriteApproval?: boolean;
 }
 
 export interface ConfigTestDetail {

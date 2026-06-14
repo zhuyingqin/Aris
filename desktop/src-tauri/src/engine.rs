@@ -11,6 +11,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
+        Arc,
         Mutex,
     },
     time::{SystemTime, UNIX_EPOCH},
@@ -34,7 +35,7 @@ use runtime::{
 pub struct ChatState {
     sessions: Mutex<HashMap<String, Session>>,
     permission_modes: Mutex<HashMap<String, PermissionMode>>,
-    busy: AtomicBool,
+    running_turns: Mutex<HashMap<String, Arc<AtomicBool>>>,
 }
 
 impl Default for ChatState {
@@ -42,14 +43,17 @@ impl Default for ChatState {
         Self {
             sessions: Mutex::new(HashMap::new()),
             permission_modes: Mutex::new(HashMap::new()),
-            busy: AtomicBool::new(false),
+            running_turns: Mutex::new(HashMap::new()),
         }
     }
 }
 
 impl ChatState {
     pub fn is_busy(&self) -> bool {
-        self.busy.load(Ordering::SeqCst)
+        self.running_turns
+            .lock()
+            .map(|running| !running.is_empty())
+            .unwrap_or(true)
     }
 
     pub fn clear(&self) -> Result<(), String> {
@@ -65,11 +69,16 @@ impl ChatState {
     }
 }
 
-struct ChatBusyGuard<'a>(&'a AtomicBool);
+struct ChatBusyGuard<'a> {
+    running_turns: &'a Mutex<HashMap<String, Arc<AtomicBool>>>,
+    session_id: String,
+}
 
 impl Drop for ChatBusyGuard<'_> {
     fn drop(&mut self) {
-        self.0.store(false, Ordering::SeqCst);
+        if let Ok(mut running) = self.running_turns.lock() {
+            running.remove(&self.session_id);
+        }
     }
 }
 
@@ -97,7 +106,6 @@ const LITERATURE_AGENT_BLOCKED_TOOLS: &[&str] = &[
     "Workflow",
     "EnterWorktree",
 ];
-
 
 fn denied_tool_message(tool_name: &str) -> String {
     format!(
@@ -130,6 +138,8 @@ impl ToolExecutor for KernelToolExecutor {
 
 struct DesktopToolExecutor<T> {
     app: AppHandle,
+    session_id: String,
+    cancelled: Arc<AtomicBool>,
     inner: T,
 }
 
@@ -147,19 +157,22 @@ where
         tool_name: &str,
         input: &str,
     ) -> Result<String, ToolError> {
+        if self.cancelled.load(Ordering::SeqCst) {
+            return Err(ToolError::new("interrupted by user"));
+        }
         match self.inner.execute_with_id(tool_use_id, tool_name, input) {
             Ok(output) => {
                 let context_output = compact_tool_output_for_context(tool_name, output);
                 let _ = self.app.emit(
                     "chat-tool-result",
-                    json!({ "id": tool_use_id, "name": tool_name, "output": truncate(&context_output, 4000), "isError": false }),
+                    json!({ "sessionId": self.session_id, "id": tool_use_id, "name": tool_name, "output": truncate(&context_output, 4000), "isError": false }),
                 );
                 Ok(context_output)
             }
             Err(err) => {
                 let _ = self.app.emit(
                     "chat-tool-result",
-                    json!({ "id": tool_use_id, "name": tool_name, "output": truncate(&err.to_string(), 4000), "isError": true }),
+                    json!({ "sessionId": self.session_id, "id": tool_use_id, "name": tool_name, "output": truncate(&err.to_string(), 4000), "isError": true }),
                 );
                 Err(err)
             }
@@ -169,23 +182,34 @@ where
 
 struct DesktopStreamObserver {
     app: AppHandle,
+    session_id: String,
+    cancelled: Arc<AtomicBool>,
 }
 
 impl aris_executor::StreamObserver for DesktopStreamObserver {
     fn on_text_delta(&mut self, text: &str) -> Result<(), RuntimeError> {
-        let _ = self.app.emit("chat-delta", text);
+        if self.cancelled.load(Ordering::SeqCst) {
+            return Err(RuntimeError::new("interrupted by user"));
+        }
+        let _ = self.app.emit("chat-delta", json!({ "sessionId": self.session_id, "text": text }));
         Ok(())
     }
 
     fn on_thinking_delta(&mut self, thinking: &str) -> Result<(), RuntimeError> {
-        let _ = self.app.emit("chat-thinking-delta", thinking);
+        if self.cancelled.load(Ordering::SeqCst) {
+            return Err(RuntimeError::new("interrupted by user"));
+        }
+        let _ = self.app.emit(
+            "chat-thinking-delta",
+            json!({ "sessionId": self.session_id, "thinking": thinking }),
+        );
         Ok(())
     }
 
     fn on_tool_call(&mut self, id: &str, name: &str, input: &str) -> Result<(), RuntimeError> {
         let _ = self.app.emit(
             "chat-tool",
-            json!({ "id": id, "name": name, "input": input }),
+            json!({ "sessionId": self.session_id, "id": id, "name": name, "input": input }),
         );
         Ok(())
     }
@@ -350,6 +374,9 @@ fn build_system_prompt_inner(model: &str, full_tool_registry: bool) -> Vec<Strin
         )
     };
     let file_links = "When you create or modify files, include Markdown links to the relevant file paths in the final response so the desktop UI can open them directly.".to_string();
+    runtime::migrate_legacy_knowledge_memory();
+    let hot_memory = runtime::render_hot_memory_prompt(&workspace).unwrap_or_default();
+    let knowledge_memory = runtime::render_knowledge_memory_prompt();
     aris_chat::build_common_system_prompt(aris_chat::CommonSystemPromptOptions {
         workspace,
         current_date: runtime::today_iso(),
@@ -360,7 +387,7 @@ fn build_system_prompt_inner(model: &str, full_tool_registry: bool) -> Vec<Strin
         language: std::env::var("ARIS_LANGUAGE").unwrap_or_else(|_| "cn".to_string()),
         include_language_preference: true,
         include_team_orchestration: false,
-        extra_sections: vec![access.clone(), file_links],
+        extra_sections: vec![access.clone(), file_links, hot_memory, knowledge_memory],
     })
     .unwrap_or_else(|_| vec![access])
 }
@@ -908,7 +935,9 @@ pub fn chat_run_command(
         SlashCommand::Config { section } => Ok(ChatCommandResult::message(render_config_report(
             section.as_deref(),
         )?)),
-        SlashCommand::Memory => Ok(ChatCommandResult::message(render_memory_report()?)),
+        SlashCommand::Memory { action, target } => Ok(ChatCommandResult::message(
+            handle_memory_command(action.as_deref(), target.as_deref())?,
+        )),
         SlashCommand::Init => Ok(ChatCommandResult::message(init_desktop_repo()?)),
         SlashCommand::Diff => Ok(ChatCommandResult::message(render_diff_report()?)),
         SlashCommand::Version => Ok(ChatCommandResult::message(render_version_report())),
@@ -1073,9 +1102,35 @@ fn clean_generated_title(raw: &str) -> String {
             ch.is_whitespace()
                 || matches!(
                     ch,
-                    '"' | '\'' | '`' | '*' | '#' | '[' | ']' | '(' | ')' | ':' | ';' | '.'
-                        | ',' | '!' | '?' | '-' | '_' | ' ' | '「' | '」' | '“' | '”'
-                        | '《' | '》' | '。' | '，' | '！' | '？' | '：' | '；'
+                    '"' | '\''
+                        | '`'
+                        | '*'
+                        | '#'
+                        | '['
+                        | ']'
+                        | '('
+                        | ')'
+                        | ':'
+                        | ';'
+                        | '.'
+                        | ','
+                        | '!'
+                        | '?'
+                        | '-'
+                        | '_'
+                        | ' '
+                        | '「'
+                        | '」'
+                        | '“'
+                        | '”'
+                        | '《'
+                        | '》'
+                        | '。'
+                        | '，'
+                        | '！'
+                        | '？'
+                        | '：'
+                        | '；'
                 )
         })
         .split_whitespace()
@@ -1126,24 +1181,38 @@ async fn run_chat_turn_with_context(
     blocked_tools: &'static [&'static str],
     full_tool_registry: bool,
 ) -> Result<String, String> {
-    state
-        .busy
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .map_err(|_| "another chat turn is already running".to_string())?;
-    let _busy = ChatBusyGuard(&state.busy);
+    validate_session_id(&session_id)?;
+    let cancelled = Arc::new(AtomicBool::new(false));
+    {
+        let mut running = state
+            .running_turns
+            .lock()
+            .map_err(|_| "chat state poisoned".to_string())?;
+        if running.contains_key(&session_id) {
+            return Err("this chat already has a running turn".to_string());
+        }
+        running.insert(session_id.clone(), cancelled.clone());
+    }
+    let _busy = ChatBusyGuard {
+        running_turns: &state.running_turns,
+        session_id: session_id.clone(),
+    };
     crate::config::apply_reviewer_environment(true);
     let (model, _provider, executor_config) = resolve_executor()?;
-    validate_session_id(&session_id)?;
     let session = get_cached_or_disk_session(&state, &session_id)?;
     let permission_mode = permission_mode_for(&state, &session_id)?;
 
     let worker_app = app.clone();
+    let worker_session_id = session_id.clone();
+    let worker_cancelled = cancelled.clone();
     let (text, updated): (String, Session) = tauri::async_runtime::spawn_blocking(move || {
-        runtime::clear_interrupt();
         let feature_config = match std::env::current_dir()
             .map_err(|error| error.to_string())
-            .and_then(|cwd| ConfigLoader::default_for(cwd).load().map_err(|error| error.to_string()))
-        {
+            .and_then(|cwd| {
+                ConfigLoader::default_for(cwd)
+                    .load()
+                    .map_err(|error| error.to_string())
+            }) {
             Ok(config) => config.feature_config().clone(),
             Err(error) => {
                 eprintln!("aris desktop: could not load settings: {error}");
@@ -1164,9 +1233,13 @@ async fn run_chat_turn_with_context(
             aris_chat::permission_policy_for_tools(mcp_bundle.tool_specs.clone(), permission_mode);
         let observer: Box<dyn aris_executor::StreamObserver> = Box::new(DesktopStreamObserver {
             app: worker_app.clone(),
+            session_id: worker_session_id.clone(),
+            cancelled: worker_cancelled.clone(),
         });
         let executor = DesktopToolExecutor {
             app: worker_app,
+            session_id: worker_session_id,
+            cancelled: worker_cancelled,
             inner: mcp_bundle.executor,
         };
         let mut system_prompt = build_system_prompt_inner(&model, full_tool_registry);
@@ -1198,8 +1271,11 @@ async fn run_chat_turn_with_context(
     .await
     .map_err(|e| e.to_string())??;
 
-    store_chat_session(state, session_id, updated)?;
-    let _ = app.emit("chat-done", &text);
+    store_chat_session(state, session_id.clone(), updated)?;
+    let _ = app.emit(
+        "chat-done",
+        json!({ "sessionId": session_id, "text": &text }),
+    );
     Ok(text)
 }
 
@@ -1284,8 +1360,16 @@ pub fn chat_delete(
 /// which both streaming loops and `run_turn`'s iteration boundary check, so a
 /// long single response or a multi-step tool loop both unwind to an error.
 #[tauri::command]
-pub fn chat_cancel() {
-    runtime::set_interrupt();
+pub fn chat_cancel(state: State<ChatState>, session_id: String) -> Result<(), String> {
+    validate_session_id(&session_id)?;
+    let running = state
+        .running_turns
+        .lock()
+        .map_err(|_| "chat state poisoned".to_string())?;
+    if let Some(cancelled) = running.get(&session_id) {
+        cancelled.store(true, Ordering::SeqCst);
+    }
+    Ok(())
 }
 
 // ---- Desktop slash command helpers ---------------------------------------
@@ -1879,8 +1963,18 @@ fn handle_session_command(
             let session = Session::load_from_path(&path).map_err(|e| e.to_string())?;
             Ok(ChatCommandResult::message(render_simple_timeline(&id, &path, &session)))
         }
+        Some("search") => Ok(ChatCommandResult::message(
+            serde_json::to_string_pretty(&runtime::search_sessions(
+                &crate::state::sessions_dir(),
+                target,
+                None,
+                5,
+                5,
+            )?)
+            .map_err(|error| error.to_string())?,
+        )),
         Some(other) => Ok(ChatCommandResult::message(format!(
-            "Unknown /session action '{other}'. Use /session list, /session switch <session-id>, or /session timeline [session-id]."
+            "Unknown /session action '{other}'. Use /session list, /session search <query>, /session switch <session-id>, or /session timeline [session-id]."
         ))),
     }
 }
@@ -1995,6 +2089,10 @@ fn status_context(session_path: Option<&Path>) -> Result<StatusContext, String> 
     let runtime_config = loader.load().map_err(|e| e.to_string())?;
     let project_context = ProjectContext::discover_with_git(&cwd, &runtime::today_iso())
         .map_err(|e| e.to_string())?;
+    let hot_memory_count = runtime::load_hot_memory(&cwd)
+        .map(|memory| memory.memory.len() + memory.user.len())
+        .unwrap_or_default();
+    let knowledge_memory_count = runtime::load_knowledge_memory_catalog().len();
     let (project_root, git_branch) =
         parse_git_status_metadata(project_context.git_status.as_deref());
     Ok(StatusContext {
@@ -2002,7 +2100,7 @@ fn status_context(session_path: Option<&Path>) -> Result<StatusContext, String> 
         session_path: session_path.map(Path::to_path_buf),
         loaded_config_files: runtime_config.loaded_entries().len(),
         discovered_config_files,
-        memory_file_count: project_context.instruction_files.len(),
+        memory_file_count: hot_memory_count + knowledge_memory_count,
         project_root,
         git_branch,
     })
@@ -2162,35 +2260,85 @@ fn render_config_report(section: Option<&str>) -> Result<String, String> {
 
 fn render_memory_report() -> Result<String, String> {
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
-    let project_context =
-        ProjectContext::discover(&cwd, &runtime::today_iso()).map_err(|e| e.to_string())?;
-    let mut lines = vec![format!(
-        "Memory\n  Working directory {}\n  Instruction files {}",
-        cwd.display(),
-        project_context.instruction_files.len()
-    )];
-    lines.push("Discovered files".to_string());
-    if project_context.instruction_files.is_empty() {
-        lines.push(
-            "  No CLAUDE instruction files discovered in the current directory ancestry."
-                .to_string(),
-        );
-    } else {
-        for (index, file) in project_context.instruction_files.iter().enumerate() {
-            let preview = file.content.lines().next().unwrap_or("").trim();
-            lines.push(format!("  {}. {}", index + 1, file.path.display()));
-            lines.push(format!(
-                "     lines={} preview={}",
-                file.content.lines().count(),
-                if preview.is_empty() {
-                    "<empty>"
-                } else {
-                    preview
-                }
-            ));
-        }
+    let hot = runtime::load_hot_memory(&cwd)?;
+    let knowledge = runtime::load_knowledge_memory_catalog();
+    let mut lines = vec![
+        "Memory".to_string(),
+        format!("  Working directory {}", cwd.display()),
+        format!("  Project scope     {}", hot.project_scope),
+        format!(
+            "  Hot memory        memory={}/{} chars, user={}/{} chars",
+            hot.memory_chars, hot.memory_limit, hot.user_chars, hot.user_limit
+        ),
+        format!("  Pending writes    {}", hot.pending_count),
+        format!(
+            "  Write approval    {}",
+            runtime::memory_write_approval_enabled()
+        ),
+        format!("  Knowledge files   {}", knowledge.len()),
+        "Hot entries".to_string(),
+    ];
+    for entry in hot.user.iter().chain(hot.memory.iter()) {
+        lines.push(format!(
+            "  [{}] {} scope={} source={} expires={}",
+            entry.id,
+            entry.content,
+            entry.scope,
+            entry.source,
+            entry.expires_at.as_deref().unwrap_or("never")
+        ));
+    }
+    if hot.user.is_empty() && hot.memory.is_empty() {
+        lines.push("  No active hot-memory entries.".to_string());
+    }
+    lines.push("Knowledge catalog".to_string());
+    for entry in knowledge {
+        lines.push(format!(
+            "  {} - {} ({})",
+            entry.name,
+            entry.description,
+            entry.path.display()
+        ));
     }
     Ok(lines.join("\n"))
+}
+
+fn handle_memory_command(action: Option<&str>, target: Option<&str>) -> Result<String, String> {
+    match action {
+        None | Some("show") => render_memory_report(),
+        Some("pending") => {
+            let scope = runtime::project_scope(
+                &std::env::current_dir().map_err(|error| error.to_string())?,
+            );
+            serde_json::to_string_pretty(&runtime::list_pending_for_scope(&scope)?)
+                .map_err(|error| error.to_string())
+        }
+        Some("approve") => {
+            let id = target.ok_or_else(|| "Usage: /memory approve <id>".to_string())?;
+            serde_json::to_string_pretty(&runtime::approve_pending(id)?)
+                .map_err(|error| error.to_string())
+        }
+        Some("reject") => {
+            let id = target.ok_or_else(|| "Usage: /memory reject <id>".to_string())?;
+            runtime::reject_pending(id)?;
+            Ok(format!("Rejected pending memory write {id}."))
+        }
+        Some("approval") => {
+            let enabled = match target {
+                Some("on") => true,
+                Some("off") => false,
+                _ => return Err("Usage: /memory approval on|off".to_string()),
+            };
+            crate::config::set_memory_write_approval(enabled)?;
+            Ok(format!(
+                "Memory write approval is now {}.",
+                if enabled { "on" } else { "off" }
+            ))
+        }
+        Some(other) => Err(format!(
+            "Unknown /memory action `{other}`. Use show, pending, approve, reject, or approval."
+        )),
+    }
 }
 
 fn init_desktop_repo() -> Result<String, String> {

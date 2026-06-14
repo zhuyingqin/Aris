@@ -340,7 +340,10 @@ mod tests {
 
     #[cfg(windows)]
     fn shell_snippet(script: &str) -> String {
-        script.replace('\'', "\"")
+        script
+            .replace("printf '", "echo ")
+            .replace("'; exit ", " & exit /b ")
+            .replace('\'', "")
     }
 
     #[cfg(not(windows))]

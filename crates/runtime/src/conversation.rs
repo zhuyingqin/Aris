@@ -224,9 +224,7 @@ where
             })
             .collect::<Vec<_>>()
             .join("\n");
-        self.session
-            .messages
-            .push(user_message);
+        self.session.messages.push(user_message);
 
         // Emit user prompt event
         let is_slash = user_text.trim_start().starts_with('/');
@@ -985,7 +983,10 @@ mod tests {
 
     #[cfg(windows)]
     fn shell_snippet(script: &str) -> String {
-        script.replace('\'', "\"")
+        script
+            .replace("printf '", "echo ")
+            .replace("'; exit ", " & exit /b ")
+            .replace('\'', "")
     }
 
     #[cfg(not(windows))]

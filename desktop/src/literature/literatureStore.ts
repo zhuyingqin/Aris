@@ -2,10 +2,15 @@ import { create } from "zustand";
 import {
   isTauri,
   literatureDownloadPdf,
+  literatureImportPdf,
+  literatureLibraryUpsert,
   literatureLlm,
+  literatureReviewLlm,
+  literatureLlmVision,
   literatureLoad,
-  literaturePdfText,
+  literaturePdfOpen,
   literatureSave,
+  literatureSearch,
   onChatDone,
   onChatTool,
   onChatToolResult,
@@ -21,16 +26,26 @@ import {
   type LiteratureLibrary,
   type LiteraturePaper,
   type LiteratureReviewTask,
+  type LiteratureSearchResult,
+  type LiteratureUpsertResult,
+  type PdfAnnotation,
   type PaperBrief,
   type PaperFit,
   type PaperScreening,
   type PaperStage,
   type PdfDownloadResult,
   type ProjectFocus,
+  type ReadingAnswerChain,
   type ScreeningCriterion,
   type ScreeningDecision,
   type ScreeningReason,
 } from "./literatureTypes";
+import {
+  extractPdfPageImages,
+  extractPdfTextByPage,
+  type PdfExtraction,
+  type PdfPageImage,
+} from "./pdfExtraction";
 
 const MAX_ACTIVITY_ENTRIES = 200;
 
@@ -42,6 +57,72 @@ const makeId = (prefix: string) =>
   `${prefix}-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
 
 const isoNow = () => new Date().toISOString();
+
+const PAPER_STAGES = new Set<PaperStage>([
+  "inbox",
+  "screened",
+  "shortlist",
+  "downloaded",
+  "read",
+  "excluded",
+]);
+
+const PDF_STATUSES = new Set(["none", "queued", "downloading", "downloaded", "failed"]);
+
+const normalizePaper = (paper: Partial<LiteraturePaper>, index: number): LiteraturePaper => {
+  const pdf = paper.pdf && typeof paper.pdf === "object" ? paper.pdf : { status: "none" as const };
+  return {
+    ...paper,
+    id: typeof paper.id === "string" && paper.id.trim() ? paper.id : `paper:${index}`,
+    title: typeof paper.title === "string" && paper.title.trim() ? paper.title : "Untitled paper",
+    authors: Array.isArray(paper.authors) ? paper.authors.filter((value) => typeof value === "string") : [],
+    venue: typeof paper.venue === "string" ? paper.venue : "",
+    abstract: typeof paper.abstract === "string" ? paper.abstract : "",
+    tags: Array.isArray(paper.tags) ? paper.tags.filter((value) => typeof value === "string") : [],
+    collectionIds: Array.isArray(paper.collectionIds)
+      ? paper.collectionIds.filter((value) => typeof value === "string")
+      : [],
+    searchIds: Array.isArray(paper.searchIds)
+      ? paper.searchIds.filter((value) => typeof value === "string")
+      : [],
+    stage: PAPER_STAGES.has(paper.stage as PaperStage) ? paper.stage as PaperStage : "inbox",
+    starred: paper.starred === true,
+    unread: paper.unread !== false,
+    source: typeof paper.source === "string" ? paper.source : "",
+    addedAt: typeof paper.addedAt === "string" ? paper.addedAt : isoNow(),
+    pdf: {
+      ...pdf,
+      status: PDF_STATUSES.has(pdf.status) ? pdf.status : "none",
+    },
+    evidence: Array.isArray(paper.evidence) ? paper.evidence : [],
+    answerChains: Array.isArray(paper.answerChains)
+      ? paper.answerChains.map((chain) => ({
+          ...chain,
+          reviewStatus:
+            chain.reviewStatus === "accepted" || chain.reviewStatus === "rejected"
+              ? chain.reviewStatus
+              : "unreviewed",
+        }))
+      : [],
+    pdfAnnotations: Array.isArray(paper.pdfAnnotations) ? paper.pdfAnnotations : [],
+  };
+};
+
+const normalizeLibrary = (raw: Partial<LiteratureLibrary>): LiteratureLibrary => ({
+  version: 1,
+  papers: Array.isArray(raw.papers) ? raw.papers.map(normalizePaper) : [],
+  searches: Array.isArray(raw.searches) ? raw.searches : [],
+  collections: Array.isArray(raw.collections) ? raw.collections : [],
+  reviewTasks: Array.isArray(raw.reviewTasks)
+    ? raw.reviewTasks.map((task) => ({
+        ...task,
+        criteria: Array.isArray(task.criteria) ? task.criteria : [],
+        searchIds: Array.isArray(task.searchIds) ? task.searchIds : [],
+        suggestions: Array.isArray(task.suggestions) ? task.suggestions : [],
+      }))
+    : [],
+  projectFocus: raw.projectFocus,
+});
 
 const normalizedTitle = (title: string) =>
   title.toLowerCase().replace(/[^a-z0-9]/g, "");
@@ -293,11 +374,9 @@ const maybeSuggestCriteria = (
   };
 };
 
-// ── Abstract Brief (M2.b) ───────────────────────────────────────────────────
-// Heuristic, deterministic, offline — the same "agent drafts, human verifies"
-// stance as the screener. A real LLM read is a clean later swap behind
-// `generateBrief`. Every section is tagged with its source so the
-// no-anchor-no-claim rule holds.
+// ── Legacy abstract Brief helper ─────────────────────────────────────────────
+// Retained only for compatibility tests and old records. Production Brief
+// generation below requires a complete, non-truncated PDF extraction.
 
 const emptyFocus = (): ProjectFocus => ({
   question: "",
@@ -381,8 +460,8 @@ const briefFromPaper = (paper: LiteraturePaper, focus?: ProjectFocus): PaperBrie
 
 // ── Real LLM screening + Brief ──────────────────────────────────────────────
 // One-shot calls on the user's configured executor (literature_llm). Any
-// failure (no key, bad JSON, offline preview) degrades to the heuristic — the
-// queue/Brief UX absorbs imperfection either way.
+// Screening may degrade to its keyword heuristic. Brief generation does not:
+// incomplete extraction or model failure is surfaced to the user.
 
 const clampScore = (value: unknown) =>
   Math.max(0, Math.min(100, Math.round(Number(value) || 0)));
@@ -394,8 +473,50 @@ const normalizeDecision = (value: unknown): ScreeningDecision => {
   return "maybe";
 };
 
+/** Recover the complete top-level objects from a JSON array body that failed
+ * to parse whole — typically because the model truncated mid-array or appended
+ * stray prose. Scans for brace-balanced `{...}` spans (respecting strings and
+ * escapes) and keeps the ones that parse, so a partial answer-chain still
+ * yields its finished items instead of throwing the whole call away. */
+const salvageJsonObjects = (body: string): unknown[] => {
+  const objects: unknown[] = [];
+  let depth = 0;
+  let startIndex = -1;
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < body.length; i += 1) {
+    const ch = body[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+    } else if (ch === "{") {
+      if (depth === 0) startIndex = i;
+      depth += 1;
+    } else if (ch === "}") {
+      if (depth > 0) {
+        depth -= 1;
+        if (depth === 0 && startIndex >= 0) {
+          try {
+            objects.push(JSON.parse(body.slice(startIndex, i + 1)));
+          } catch {
+            // skip a malformed span and keep scanning for intact ones
+          }
+          startIndex = -1;
+        }
+      }
+    }
+  }
+  return objects;
+};
+
 /** Pull a JSON value out of an LLM response that may wrap it in prose or a
- * ```json fence. */
+ * ```json fence. Falls back to a bracket scan, then to object-level salvage
+ * for truncated arrays before giving up. */
 const extractJson = (text: string): unknown => {
   const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
   const body = (fenced ? fenced[1] : text).trim();
@@ -412,11 +533,50 @@ const extractJson = (text: string): unknown => {
       try {
         return JSON.parse(body.slice(start, end + 1));
       } catch {
-        // fall through to throw
+        // fall through to salvage
       }
+    }
+    // Truncated or prose-littered array: recover the intact objects.
+    if (body[start] === "[") {
+      const salvaged = salvageJsonObjects(body.slice(start));
+      if (salvaged.length > 0) return salvaged;
     }
   }
   throw new Error("model did not return JSON");
+};
+
+/** Run a literature LLM call and parse its JSON. If the first reply can't be
+ * parsed (prose preamble, thinking leak, truncation), retry exactly once with
+ * an explicit "raw JSON only" instruction before surfacing the error. The
+ * retry only costs a call when the request would have failed anyway. */
+const literatureLlmJson = async (system: string, prompt: string): Promise<unknown> => {
+  const text = await literatureLlm(system, prompt);
+  try {
+    return extractJson(text);
+  } catch {
+    const repaired = await literatureLlm(
+      system,
+      `${prompt}
+
+Your previous reply could not be parsed. Return ONLY the raw JSON value — no prose, no explanation, no markdown fences, no thinking. Your reply must start with "[" or "{" and contain nothing else.`,
+    );
+    return extractJson(repaired);
+  }
+};
+
+const literatureReviewLlmJson = async (system: string, prompt: string): Promise<unknown> => {
+  const text = await literatureReviewLlm(system, prompt);
+  try {
+    return extractJson(text);
+  } catch {
+    const repaired = await literatureReviewLlm(
+      system,
+      `${prompt}
+
+Your previous reply could not be parsed. Return ONLY the raw JSON value. Do not include prose, markdown fences, or reasoning.`,
+    );
+    return extractJson(repaired);
+  }
 };
 
 const SCREEN_SYSTEM =
@@ -443,8 +603,7 @@ Return a JSON array. One object per paper:
 };
 
 const llmScreen = async (papers: LiteraturePaper[], task: LiteratureReviewTask) => {
-  const text = await literatureLlm(SCREEN_SYSTEM, buildScreenPrompt(papers, task));
-  const parsed = extractJson(text);
+  const parsed = await literatureReviewLlmJson(SCREEN_SYSTEM, buildScreenPrompt(papers, task));
   if (!Array.isArray(parsed)) throw new Error("expected a JSON array of screenings");
   const result = new Map<string, PaperScreening>();
   for (const row of parsed as Array<Record<string, unknown>>) {
@@ -459,7 +618,7 @@ const llmScreen = async (papers: LiteraturePaper[], task: LiteratureReviewTask) 
       reasons: [
         {
           id: makeId("reason"),
-          criteriaText: "Agent judgment",
+          criteriaText: "Review LLM judgment",
           note: String(row.rationale ?? "").trim() || "Screened against the active criteria.",
           anchor: { kind: paper.abstract.trim() ? "abstract" : "metadata", quote },
         },
@@ -472,52 +631,309 @@ const llmScreen = async (papers: LiteraturePaper[], task: LiteratureReviewTask) 
 };
 
 const BRIEF_SYSTEM =
-  "You are a precise research reading assistant. Produce a structured brief of a paper tailored to a specific researcher. Be concrete and include numbers from the paper in Results. Write all section values in Chinese. Respond with a single JSON object and nothing else.";
+  "You are a precise research reading assistant. Produce a structured brief based only on the complete extracted full text supplied by the user. Every claim must cite the page that supports it. Be concrete and include numbers from the paper in Results. Write all section values in Chinese. Respond with a single JSON object and nothing else.";
+
+const normalizeAnchorText = (text: string) =>
+  text.normalize("NFKC").replace(/\s+/g, " ").trim();
+
+const readablePageMap = (extraction: PdfExtraction) =>
+  new Map(
+    extraction.pages
+      .filter((page) => page.text.trim().length > 0)
+      .map((page) => [page.page, normalizeAnchorText(page.text)]),
+  );
 
 const buildBriefPrompt = (
   paper: LiteraturePaper,
   focus: ProjectFocus | undefined,
-  fullText: string | undefined,
+  fullText: string,
 ) => {
   const focusLine = focus?.question?.trim()
     ? `Researcher focus: ${focus.question}${focus.scope ? ` (scope: ${focus.scope})` : ""}`
     : "Researcher focus: (not provided)";
-  const body = fullText
-    ? `Full text (may be truncated):\n${fullText}`
-    : `Abstract:\n${paper.abstract || "(no abstract provided)"}`;
   return `${focusLine}
 
 Title: ${paper.title}
-${body}
+Complete extracted full text:
+${fullText}
 
-Return a JSON object: {"problem": "...", "method": "...", "results": "...", "limits": "...", "forYou": "..."}.
-Each field is at most two sentences. "results" MUST include concrete numbers if the paper reports any. "limits" states the paper's own limitations or "Not stated". "forYou" relates the paper to the researcher focus, or says it is tangential.
+Return a JSON object: {"problem": {"text": "...", "page": 1, "quote": "verbatim supporting sentence"}, "method": {"text": "...", "page": 2, "quote": "verbatim supporting sentence"}, "results": {"text": "...", "page": 3, "quote": "verbatim supporting sentence"}, "limits": {"text": "...", "page": 4, "quote": "verbatim supporting sentence"}, "forYou": {"text": "...", "page": 5, "quote": "verbatim supporting sentence"}}.
+Each field is at most two sentences and MUST cite one valid page number and one verbatim supporting sentence copied from that same [[PAGE N]] page. "results" MUST include concrete numbers if the paper reports any. "limits" states the paper's own limitations or "Not stated". "forYou" relates the paper to the researcher focus, or says it is tangential.
 All values must be written in Chinese.`;
 };
 
 const llmBrief = async (
   paper: LiteraturePaper,
   focus: ProjectFocus | undefined,
-  fullText: string | undefined,
+  extraction: PdfExtraction,
 ): Promise<PaperBrief> => {
-  const text = await literatureLlm(BRIEF_SYSTEM, buildBriefPrompt(paper, focus, fullText));
-  const parsed = extractJson(text) as Record<string, unknown>;
+  const parsed = await literatureLlmJson(
+    BRIEF_SYSTEM,
+    buildBriefPrompt(paper, focus, extraction.text),
+  ) as Record<string, unknown>;
   if (!parsed || typeof parsed !== "object") throw new Error("expected a JSON object");
-  const source: AnchorKind = fullText ? "pdf" : "abstract";
-  const section = (value: unknown, fallback: string): BriefSection => ({
-    text: String(value ?? "").trim() || fallback,
-    source,
-  });
+  const source: AnchorKind = "pdf";
+  const pageText = readablePageMap(extraction);
+  // The four factual sections (problem/method/results/limits) describe the
+  // paper itself, so the iron rule applies: page + verbatim quote, no
+  // exceptions. `forYou` is different — it relates the paper to the
+  // researcher's *project focus*, a synthesis judgment that often has no
+  // verbatim sentence in the paper. For it we keep the anchor best-effort:
+  // attach page+quote when they genuinely verify, otherwise pass the text
+  // through unanchored instead of failing the whole brief.
+  const section = (
+    field: string,
+    value: unknown,
+    relational = false,
+  ): BriefSection => {
+    const record = value && typeof value === "object" ? value as Record<string, unknown> : null;
+    const sectionText = String(record?.text ?? "").trim();
+    const rawPage = Number(record?.page);
+    const quote = String(record?.quote ?? "").trim();
+    const normalizedQuote = normalizeAnchorText(quote);
+    if (!sectionText) throw new Error(`brief section "${field}" is missing text`);
+    const pageValid = Number.isInteger(rawPage) && pageText.has(rawPage);
+    const quoteValid =
+      pageValid
+      && normalizedQuote.length >= 8
+      && !!pageText.get(rawPage)?.includes(normalizedQuote);
+    if (relational) {
+      // Keep the anchor only when it fully verifies; never reject.
+      return quoteValid
+        ? { text: sectionText, source, page: rawPage, quote }
+        : { text: sectionText, source: "metadata" };
+    }
+    if (!pageValid) {
+      throw new Error(`brief section "${field}" has no valid PDF page anchor`);
+    }
+    if (!quoteValid) {
+      throw new Error(`brief section "${field}" has no verifiable PDF quote`);
+    }
+    return {
+      text: sectionText,
+      source,
+      page: rawPage,
+      quote,
+    };
+  };
   return {
-    problem: section(parsed.problem, "现有文本中未提及。"),
-    method: section(parsed.method, "现有文本中未提及。"),
-    results: section(parsed.results, "现有文本中未提及。"),
-    limits: section(parsed.limits, "未说明。"),
-    forYou: section(parsed.forYou, "与研究方向的关联尚不明确。"),
-    basis: fullText ? "fulltext" : "abstract",
+    problem: section("problem", parsed.problem),
+    method: section("method", parsed.method),
+    results: section("results", parsed.results),
+    limits: section("limits", parsed.limits),
+    forYou: section("forYou", parsed.forYou, true),
+    basis: "fulltext",
     generatedAt: isoNow(),
   };
 };
+
+const VISUAL_EVIDENCE_SYSTEM =
+  "You are a rigorous visual paper reader. Read every supplied PDF page image directly, including figures, tables, formulas, captions, and body text. Extract only evidence visibly supported by those images. Write every evidence explanation in Chinese while preserving quotes as faithful visible transcriptions in their source language. Return a JSON array and nothing else.";
+
+const ANSWER_CHAIN_SYSTEM =
+  "You build question-to-final-answer chains only from visual evidence previously read directly from PDF page images. Write every question and final answer in Chinese. Return a JSON array and nothing else.";
+
+const EVIDENCE_ROLE_LABELS: Record<string, string> = {
+  premise: "前提",
+  method: "方法",
+  result: "结果",
+  limitation: "局限",
+  support: "支撑",
+  evidence: "证据",
+};
+
+const evidenceRoleLabel = (role: string) => EVIDENCE_ROLE_LABELS[role] ?? role;
+
+const literatureVisionLlmJson = async (
+  system: string,
+  prompt: string,
+  images: PdfPageImage[],
+): Promise<unknown> => {
+  const text = await literatureLlmVision(system, prompt, images);
+  try {
+    return extractJson(text);
+  } catch {
+    const repaired = await literatureLlmVision(
+      system,
+      `${prompt}
+
+Your previous reply could not be parsed. Return ONLY the raw JSON array with no prose, markdown fences, or thinking.`,
+      images,
+    );
+    return extractJson(repaired);
+  }
+};
+
+type VisualEvidence = LiteraturePaper["evidence"][number] & { source: "vision"; imageFingerprint: string };
+
+const imageBatches = (pages: PdfPageImage[], size = 4) => {
+  const batches: PdfPageImage[][] = [];
+  for (let offset = 0; offset < pages.length; offset += size) {
+    batches.push(pages.slice(offset, offset + size));
+  }
+  return batches;
+};
+
+const spreadLimit = <T,>(values: T[], limit: number) => {
+  if (values.length <= limit) return values;
+  return Array.from({ length: limit }, (_, index) =>
+    values[Math.floor(index * values.length / limit)],
+  );
+};
+
+const llmVisualEvidence = async (
+  paper: LiteraturePaper,
+  question: string,
+  pages: PdfPageImage[],
+): Promise<VisualEvidence[]> => {
+  const evidence: VisualEvidence[] = [];
+  for (const batch of imageBatches(pages)) {
+    const allowed = new Map(batch.map((page) => [page.page, page]));
+    const parsed = await literatureVisionLlmJson(
+      VISUAL_EVIDENCE_SYSTEM,
+      `Paper: ${paper.title}
+Research question: ${question || "(identify the paper's most important claims and findings)"}
+Pages in this batch: ${batch.map((page) => page.page).join(", ")}
+
+Read every attached page image. Return up to 6 high-value evidence items from this batch:
+[{"page": 1, "quote": "short faithful transcription or exact visible figure/table value", "note": "why this visually observed evidence matters", "role": "premise|method|result|limitation"}]
+The page must be one of the supplied page images. Do not infer content that is not visible.
+Write every note in Chinese. Preserve each quote as a faithful transcription in the source language visible on the page. Transcribe mathematical expressions as LaTeX wrapped in $...$ or $$...$$ instead of flattening them into plain Unicode text. Keep role as one of premise|method|result|limitation.`,
+      batch,
+    );
+    if (!Array.isArray(parsed)) throw new Error("expected a JSON array of visual evidence");
+    for (const item of parsed as Array<Record<string, unknown>>) {
+      const page = Number(item.page);
+      const quote = String(item.quote ?? "").trim();
+      const note = String(item.note ?? "").trim();
+      const role = String(item.role ?? "evidence").trim() || "evidence";
+      const pageImage = allowed.get(page);
+      if (!Number.isInteger(page) || !pageImage || quote.length < 8 || !note) continue;
+      evidence.push({
+        id: makeId("evidence"),
+        page,
+        quote: quote.slice(0, 360),
+        note: `${evidenceRoleLabel(role)}：${note}`,
+        source: "vision",
+        imageFingerprint: pageImage.fingerprint,
+      });
+    }
+  }
+  const deduped = evidence.filter(
+    (item, index, all) =>
+      all.findIndex(
+        (candidate) =>
+          candidate.page === item.page
+          && normalizeAnchorText(candidate.quote) === normalizeAnchorText(item.quote),
+      ) === index,
+  );
+  if (deduped.length === 0) throw new Error("model returned no visual evidence");
+  return spreadLimit(deduped, 24);
+};
+
+const llmAnswerChainsFromVisualEvidence = async (
+  paper: LiteraturePaper,
+  focus: ProjectFocus | undefined,
+  evidence: VisualEvidence[],
+): Promise<{ chains: ReadingAnswerChain[]; annotations: PdfAnnotation[] }> => {
+  const evidencePayload = evidence.map((item) => ({
+    id: item.id,
+    page: item.page,
+    quote: item.quote,
+    note: item.note,
+    imageFingerprint: item.imageFingerprint,
+  }));
+  const parsed = await literatureLlmJson(
+    ANSWER_CHAIN_SYSTEM,
+    `Paper: ${paper.title}
+Research focus: ${focus?.question?.trim() || "(generate the most important paper-reading questions)"}
+
+Visual evidence read from all PDF page-image batches:
+${JSON.stringify(evidencePayload)}
+
+Generate 3-4 critical questions and final answers. Use only the supplied visual evidence.
+Return ONLY:
+[{"question": "...", "answer": "...", "supports": [{"evidenceId": "evidence-id", "role": "premise|method|result|limitation"}]}]
+Each answer requires at least one support and may use at most 3 supports.
+All question and answer values must be written in Chinese. Keep support role as one of premise|method|result|limitation.`,
+  );
+  if (!Array.isArray(parsed)) throw new Error("expected a JSON array of answer chains");
+  const evidenceById = new Map(evidence.map((item) => [item.id, item]));
+  const chains: ReadingAnswerChain[] = [];
+  const annotations: PdfAnnotation[] = [];
+
+  for (const row of parsed as Array<Record<string, unknown>>) {
+    const question = String(row.question ?? "").trim();
+    const answer = String(row.answer ?? "").trim();
+    if (!question || !answer || !Array.isArray(row.supports)) continue;
+    const chainId = makeId("chain");
+    const supports = row.supports
+      .map((support) => support as Record<string, unknown>)
+      .map((support) => {
+        const evidenceId = String(support.evidenceId ?? "").trim();
+        const role = String(support.role ?? "support").trim() || "support";
+        const visual = evidenceById.get(evidenceId);
+        if (!visual) return null;
+        const annotation: PdfAnnotation = {
+          id: makeId("annotation"),
+          page: visual.page,
+          quote: visual.quote,
+          note: `${evidenceRoleLabel(role)}：${answer}`,
+          kind: "answer-support",
+          source: "vision",
+          imageFingerprint: visual.imageFingerprint,
+          sourceId: chainId,
+          evidenceId: visual.id,
+          createdAt: isoNow(),
+        };
+        annotations.push(annotation);
+        return { annotationId: annotation.id, role };
+      })
+      .filter((support): support is NonNullable<typeof support> => support !== null);
+    if (supports.length === 0) continue;
+    chains.push({
+      id: chainId,
+      question,
+      answer,
+      supports,
+      basis: "vision",
+      reviewStatus: "unreviewed",
+      createdAt: isoNow(),
+    });
+  }
+  if (chains.length === 0) throw new Error("model returned no verifiable answer chains");
+  return { chains, annotations };
+};
+
+const briefAnnotations = (brief: PaperBrief): PdfAnnotation[] =>
+  (["problem", "method", "results", "limits", "forYou"] as const)
+    .map((field) => {
+      const section = brief[field];
+      if (!section.page || !section.quote) return null;
+      return {
+        id: makeId("annotation"),
+        page: section.page,
+        quote: section.quote,
+        note: `${field}: ${section.text}`,
+        kind: "core" as const,
+        sourceId: `brief:${field}`,
+        createdAt: isoNow(),
+      };
+    })
+    .filter((annotation): annotation is NonNullable<typeof annotation> => annotation !== null);
+
+const evidenceAnnotations = (evidence: LiteraturePaper["evidence"]): PdfAnnotation[] =>
+  evidence.map((item) => ({
+    id: makeId("annotation"),
+    page: item.page,
+    quote: item.quote,
+    note: item.note,
+    kind: "evidence",
+    source: item.source,
+    imageFingerprint: item.imageFingerprint,
+    sourceId: item.id,
+    createdAt: isoNow(),
+  }));
 
 const PREVIEW_LIBRARY: LiteratureLibrary = {
   version: 1,
@@ -558,7 +974,38 @@ const PREVIEW_LIBRARY: LiteratureLibrary = {
           id: "ev-1",
           page: 3,
           quote: "Screening decisions are recorded before full-text extraction.",
-          note: "Supports the staged UI: metadata first, PDF later.",
+          note: "方法：该证据说明系统先记录筛选决策，再进入全文提取；状态变换满足 X̂_T(t)=M_T Z_T(t)。",
+        },
+      ],
+      answerChains: [
+        {
+          id: "chain-preview",
+          question: "论文如何保证文献综合过程有证据支撑？",
+          answer: "论文将筛选与全文阅读分离，并在综合前记录可核验的证据。",
+          supports: [{ annotationId: "annotation-answer-preview", role: "method" }],
+          reviewStatus: "unreviewed",
+          createdAt: "2026-06-09T08:15:00.000Z",
+        },
+      ],
+      pdfAnnotations: [
+        {
+          id: "annotation-evidence-preview",
+          page: 3,
+          quote: "Screening decisions are recorded before full-text extraction.",
+          note: "方法：该证据说明系统先记录筛选决策，再进入全文提取；状态变换满足 X̂_T(t)=M_T Z_T(t)。",
+          kind: "evidence",
+          sourceId: "ev-1",
+          createdAt: "2026-06-09T08:15:00.000Z",
+        },
+        {
+          id: "annotation-answer-preview",
+          page: 3,
+          quote: "Screening decisions are recorded before full-text extraction.",
+          note: "方法：论文在全文提取前记录筛选决策。",
+          kind: "answer-support",
+          sourceId: "chain-preview",
+          evidenceId: "ev-1",
+          createdAt: "2026-06-09T08:15:00.000Z",
         },
       ],
     },
@@ -589,6 +1036,8 @@ const PREVIEW_LIBRARY: LiteratureLibrary = {
         decidedAt: "2026-06-08T15:20:00.000Z",
       },
       evidence: [],
+      answerChains: [],
+      pdfAnnotations: [],
     },
     {
       id: "arxiv:2409.01010",
@@ -609,6 +1058,8 @@ const PREVIEW_LIBRARY: LiteratureLibrary = {
       addedAt: "2026-06-07T11:00:00.000Z",
       pdf: { status: "none", url: "https://arxiv.org/pdf/2409.01010.pdf" },
       evidence: [],
+      answerChains: [],
+      pdfAnnotations: [],
     },
   ],
   searches: [
@@ -661,6 +1112,8 @@ interface LiteratureState {
   error: string | null;
   /** True while the agent is screening abstracts for the active task. */
   screening: boolean;
+  searching: boolean;
+  generatingAnswerChains: string | null;
   /** Paper id currently being briefed by the agent, if any. */
   briefing: string | null;
   /** Terminal-style log narrating every library write and agent action. */
@@ -672,6 +1125,7 @@ interface LiteratureState {
   logActivity: (level: ActivityLevel, text: string) => void;
   clearActivity: () => void;
   setActiveReviewTask: (id: string | null) => void;
+  runRemoteSearch: (query: string, sources: string[], maxResults?: number) => Promise<void>;
   load: (projectId: string, options?: { quiet?: boolean }) => Promise<void>;
   /** Reload the library when a chat turn ends — literature skills may have
    * upserted papers through the kernel tools. Returns a teardown fn. */
@@ -696,9 +1150,26 @@ interface LiteratureState {
   addCollection: (label: string) => void;
   removeCollection: (id: string) => void;
   assignCollection: (ids: string[], collectionId: string) => void;
+  toggleCollection: (paperId: string, collectionId: string) => void;
   setProjectFocus: (patch: Partial<ProjectFocus>) => void;
-  generateBrief: (paperId: string) => void;
+  generateBrief: (paperId: string) => Promise<void>;
+  generateAnswerChains: (paperId: string) => Promise<void>;
+  deleteEvidence: (paperId: string, evidenceId: string) => void;
+  updateAnswerChain: (
+    paperId: string,
+    chainId: string,
+    patch: Partial<Pick<ReadingAnswerChain, "question" | "answer" | "reviewStatus">>,
+  ) => void;
+  addPdfAnnotation: (paperId: string, annotation: Omit<PdfAnnotation, "id" | "createdAt">) => void;
+  updatePdfAnnotation: (
+    paperId: string,
+    annotationId: string,
+    patch: Partial<Pick<PdfAnnotation, "quote" | "note" | "kind" | "color">>,
+  ) => void;
+  deletePdfAnnotation: (paperId: string, annotationId: string) => void;
   downloadPdf: (id: string) => Promise<void>;
+  uploadPdf: (id: string, sourcePath: string) => Promise<void>;
+  openPdf: (id: string) => Promise<void>;
   setError: (message: string | null) => void;
 }
 
@@ -746,6 +1217,8 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
     loadedProjectId: null,
     error: null,
     screening: false,
+    searching: false,
+    generatingAnswerChains: null,
     briefing: null,
     activity: [],
     activityOpen: false,
@@ -756,6 +1229,44 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
     clearActivity: () => set({ activity: [] }),
 
     setActiveReviewTask: (id) => set({ activeReviewTaskId: id }),
+
+    runRemoteSearch: async (query, sources, maxResults = 20) => {
+      const trimmed = query.trim();
+      if (!trimmed) {
+        set({ error: "请输入检索问题或关键词。" });
+        return;
+      }
+      if (!isTauri()) {
+        set({ error: "远程文献检索需要桌面后端。" });
+        return;
+      }
+      set({ searching: true, error: null });
+      log("info", `正在检索：${trimmed}`, { open: true });
+      try {
+        const result = await literatureSearch<LiteratureSearchResult>(
+          trimmed,
+          sources,
+          maxResults,
+        );
+        const stats = await literatureLibraryUpsert<LiteratureUpsertResult>(
+          result.papers,
+          trimmed,
+          sources,
+        );
+        await get().load(get().loadedProjectId ?? "default", { quiet: true });
+        log(
+          "ok",
+          `检索完成：${result.papers.length} 条结果，新增 ${stats.added}，合并 ${stats.merged}`,
+        );
+        for (const warning of result.warnings) log("warn", warning);
+      } catch (error) {
+        const message = `远程检索失败：${String(error)}`;
+        set({ error: message });
+        log("error", message, { open: true });
+      } finally {
+        set({ searching: false });
+      }
+    },
 
     load: async (projectId, options) => {
       // Drop any pending save: the backend already points at the new project,
@@ -774,20 +1285,17 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
         return;
       }
       try {
-        const raw = await literatureLoad<Partial<LiteratureLibrary>>();
-        const reviewTasks = raw.reviewTasks ?? [];
+        const raw = normalizeLibrary(await literatureLoad<Partial<LiteratureLibrary>>());
+        const reviewTasks = raw.reviewTasks;
+        const currentTaskId = get().activeReviewTaskId;
         set({
-          library: {
-            version: 1,
-            papers: raw.papers ?? [],
-            searches: raw.searches ?? [],
-            collections: raw.collections ?? [],
-            reviewTasks,
-            projectFocus: raw.projectFocus,
-          },
+          library: raw,
           loaded: true,
           loadedProjectId: projectId,
-          activeReviewTaskId: get().activeReviewTaskId ?? reviewTasks[0]?.id ?? null,
+          activeReviewTaskId:
+            reviewTasks.some((task) => task.id === currentTaskId)
+              ? currentTaskId
+              : reviewTasks[0]?.id ?? null,
         });
         if (!options?.quiet) {
           log("info", `Loaded ${raw.papers?.length ?? 0} papers from papers/library.json`);
@@ -1020,11 +1528,11 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
       set({ screening: true });
       let llmResults: Map<string, PaperScreening> | null = null;
       if (isTauri()) {
-        log("info", `→ Screening ${candidates.length} abstracts with the agent…`, { open: true });
+        log("info", `Review LLM is screening ${candidates.length} abstracts with ARIS research-review standards`, { open: true });
         try {
           llmResults = await llmScreen(candidates, task);
         } catch (error) {
-          log("warn", `! Agent screening unavailable (${String(error)}) — using keyword heuristic`);
+          log("warn", `Review LLM unavailable (${String(error)}); using keyword heuristic`);
         }
       }
       try {
@@ -1046,7 +1554,7 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
         }));
         log(
           "ok",
-          `Screened ${candidates.length} abstracts against "${task.question}" (${llmResults ? "agent" : "heuristic"})`,
+          `Screened ${candidates.length} abstracts against "${task.question}" (${llmResults ? "Review LLM" : "heuristic"})`,
         );
       } finally {
         set({ screening: false });
@@ -1280,6 +1788,14 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
           : [...paper.collectionIds, collectionId],
       })),
 
+    toggleCollection: (paperId, collectionId) =>
+      patchPapers([paperId], (paper) => ({
+        ...paper,
+        collectionIds: paper.collectionIds.includes(collectionId)
+          ? paper.collectionIds.filter((id) => id !== collectionId)
+          : [...paper.collectionIds, collectionId],
+      })),
+
     setProjectFocus: (patch) => {
       mutate((library) => ({
         ...library,
@@ -1291,37 +1807,194 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
       const focus = get().library.projectFocus;
       const paper = get().library.papers.find((entry) => entry.id === paperId);
       if (!paper) return;
+      if (paper.pdf.status !== "downloaded" || !paper.pdf.path) {
+        const message = "请先下载 PDF；全文简报不会从摘要生成。";
+        set({ error: message });
+        log("warn", message, { open: true });
+        return;
+      }
+      if (!isTauri()) {
+        set({ error: "全文简报需要桌面后端读取 PDF。" });
+        return;
+      }
       set({ briefing: paperId });
       try {
-        let brief: PaperBrief | null = null;
-        if (isTauri()) {
-          let fullText: string | undefined;
-          if (paper.pdf.status === "downloaded" && paper.pdf.path) {
-            try {
-              fullText = await literaturePdfText(paper.pdf.path);
-            } catch {
-              // no readable PDF text — brief from the abstract
-            }
-          }
-          log("info", `→ Reading ${fullText ? "the full text" : "the abstract"} for a brief…`, {
-            open: true,
-          });
-          try {
-            brief = await llmBrief(paper, focus, fullText);
-            log("ok", `Brief written by the agent from ${fullText ? "the full text" : "the abstract"}: ${paper.title}`);
-          } catch (error) {
-            log("warn", `! Agent brief unavailable (${String(error)}) — keyword summary`);
-          }
+        log("info", `正在提取完整 PDF 文本：${paper.title}`, { open: true });
+        const extraction = await extractPdfTextByPage(paper.pdf.path);
+        if (extraction.truncated) {
+          const missingPages = extraction.missingPages ?? [];
+          throw new Error(
+            `PDF 全文不完整${missingPages.length > 0 ? `（无法读取第 ${missingPages.join("、")} 页）` : ""}，已停止生成以避免不完整简报。`,
+          );
         }
-        if (!brief) {
-          brief = briefFromPaper(paper, focus);
-          log("ok", `Brief generated from the abstract (heuristic): ${paper.title}`);
-        }
-        patchPapers([paperId], (entry) => ({ ...entry, brief, unread: false }));
+        log("info", `已读取完整全文（${extraction.totalCharacters} 字符），正在生成简报…`);
+        const brief = await llmBrief(paper, focus, extraction);
+        const annotations = briefAnnotations(brief);
+        patchPapers([paperId], (entry) => ({
+          ...entry,
+          brief,
+          unread: false,
+          pdfAnnotations: [
+            ...entry.pdfAnnotations.filter((annotation) => annotation.kind !== "core"),
+            ...annotations,
+          ],
+        }));
+        log("ok", `全文简报已生成：${paper.title}`);
+      } catch (error) {
+        const message = `全文简报生成失败：${String(error)}`;
+        set({ error: message });
+        log("error", message, { open: true });
       } finally {
         set({ briefing: null });
       }
     },
+
+    generateAnswerChains: async (paperId) => {
+      const paper = get().library.papers.find((entry) => entry.id === paperId);
+      if (!paper?.pdf.path || paper.pdf.status !== "downloaded") {
+        set({ error: "请先下载 PDF，再生成问题-答案-证据链。" });
+        return;
+      }
+      if (!isTauri()) {
+        set({ error: "问题-答案-证据链需要桌面后端读取 PDF。" });
+        return;
+      }
+      set({ generatingAnswerChains: paperId, error: null });
+      try {
+        log("info", `正在逐页读取 PDF 图片并构建统一证据链：${paper.title}`, {
+          open: true,
+        });
+        const extraction = await extractPdfPageImages(paper.pdf.path);
+        const evidence = await llmVisualEvidence(
+          paper,
+          get().library.projectFocus?.question ?? "",
+          extraction.pages,
+        );
+        const evidenceMarks = evidenceAnnotations(evidence);
+        patchPapers([paperId], (entry) => ({
+          ...entry,
+          evidence,
+          pdfAnnotations: [
+            ...entry.pdfAnnotations.filter((annotation) => annotation.kind !== "evidence"),
+            ...evidenceMarks,
+          ],
+        }));
+        const result = await llmAnswerChainsFromVisualEvidence(
+          paper,
+          get().library.projectFocus,
+          evidence,
+        );
+        patchPapers([paperId], (entry) => ({
+          ...entry,
+          answerChains: result.chains,
+          pdfAnnotations: [
+            ...entry.pdfAnnotations.filter((annotation) => annotation.kind !== "answer-support"),
+            ...result.annotations,
+          ],
+        }));
+        log(
+          "ok",
+          `已读取全部 ${extraction.totalPages} 页，生成 ${evidence.length} 条视觉证据和 ${result.chains.length} 条问答证据链`,
+        );
+      } catch (error) {
+        const message = `问题-答案-证据链生成失败：${String(error)}`;
+        set({ error: message });
+        log("error", message, { open: true });
+      } finally {
+        set({ generatingAnswerChains: null });
+      }
+    },
+
+    addPdfAnnotation: (paperId, annotation) =>
+      patchPapers([paperId], (paper) => ({
+        ...paper,
+        pdfAnnotations: [
+          ...paper.pdfAnnotations,
+          { ...annotation, id: makeId("annotation"), createdAt: isoNow() },
+        ],
+      })),
+
+    updatePdfAnnotation: (paperId, annotationId, patch) =>
+      patchPapers([paperId], (paper) => ({
+        ...paper,
+        pdfAnnotations: paper.pdfAnnotations.map((annotation) =>
+          annotation.id === annotationId ? { ...annotation, ...patch } : annotation,
+        ),
+      })),
+
+    deletePdfAnnotation: (paperId, annotationId) =>
+      patchPapers([paperId], (paper) => ({
+        ...paper,
+        pdfAnnotations: paper.pdfAnnotations.filter((a) => a.id !== annotationId),
+      })),
+
+    deleteEvidence: (paperId, evidenceId) => {
+      const paper = get().library.papers.find((entry) => entry.id === paperId);
+      const evidence = paper?.evidence.find((entry) => entry.id === evidenceId);
+      if (!evidence) return;
+
+      patchPapers([paperId], (entry) => {
+        const fallbackMatchesEvidence = (annotation: PdfAnnotation) =>
+          !annotation.evidenceId
+          && annotation.page === evidence.page
+          && normalizeAnchorText(annotation.quote) === normalizeAnchorText(evidence.quote)
+          && (!evidence.imageFingerprint
+            || annotation.imageFingerprint === evidence.imageFingerprint);
+        const removedSupportIds = new Set(
+          entry.pdfAnnotations
+            .filter(
+              (annotation) =>
+                annotation.kind === "answer-support"
+                && (annotation.evidenceId === evidenceId || fallbackMatchesEvidence(annotation)),
+            )
+            .map((annotation) => annotation.id),
+        );
+        const answerChains = entry.answerChains
+          .map((chain) => ({
+            ...chain,
+            supports: chain.supports.filter(
+              (support) => !removedSupportIds.has(support.annotationId),
+            ),
+          }))
+          .filter((chain) => chain.supports.length > 0);
+
+        return {
+          ...entry,
+          evidence: entry.evidence.filter((item) => item.id !== evidenceId),
+          answerChains,
+          pdfAnnotations: entry.pdfAnnotations.filter(
+            (annotation) =>
+              !(annotation.kind === "evidence" && annotation.sourceId === evidenceId)
+              && !removedSupportIds.has(annotation.id),
+          ),
+        };
+      });
+      log("info", `已删除第 ${evidence.page} 页证据，并清理关联问答链支撑。`);
+    },
+
+    updateAnswerChain: (paperId, chainId, patch) =>
+      patchPapers([paperId], (paper) => {
+        const chain = paper.answerChains.find((entry) => entry.id === chainId);
+        const roles = new Map(
+          chain?.supports.map((support) => [support.annotationId, support.role]) ?? [],
+        );
+        return {
+          ...paper,
+          answerChains: paper.answerChains.map((entry) =>
+            entry.id === chainId ? { ...entry, ...patch } : entry,
+          ),
+          pdfAnnotations: patch.answer
+            ? paper.pdfAnnotations.map((annotation) =>
+                annotation.sourceId === chainId
+                  ? {
+                      ...annotation,
+                      note: `${roles.get(annotation.id) ?? "support"}: ${patch.answer}`,
+                    }
+                  : annotation,
+              )
+            : paper.pdfAnnotations,
+        };
+      }),
 
     downloadPdf: async (id) => {
       const paper = get().library.papers.find((entry) => entry.id === id);
@@ -1369,6 +2042,57 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
       }
     },
 
+    uploadPdf: async (id, sourcePath) => {
+      const paper = get().library.papers.find((entry) => entry.id === id);
+      if (!paper || !sourcePath.trim()) return;
+      if (!isTauri()) {
+        set({ error: "上传 PDF 需要桌面后端。" });
+        return;
+      }
+      try {
+        const saved = await literatureImportPdf<PdfDownloadResult>(sourcePath, pdfFileName(paper));
+        patchPapers([id], (entry) => ({
+          ...entry,
+          stage:
+            entry.stage === "inbox" || entry.stage === "screened" || entry.stage === "shortlist"
+              ? "downloaded"
+              : entry.stage,
+          pdf: {
+            ...entry.pdf,
+            status: "downloaded",
+            path: saved.relativePath,
+            bytes: saved.bytes,
+            error: undefined,
+          },
+        }));
+        log("ok", `已导入用户 PDF：${saved.relativePath}`);
+      } catch (error) {
+        const message = `PDF 导入失败：${String(error)}`;
+        set({ error: message });
+        log("error", message, { open: true });
+      }
+    },
+
+    openPdf: async (id) => {
+      const paper = get().library.papers.find((entry) => entry.id === id);
+      if (!paper?.pdf.path || paper.pdf.status !== "downloaded") {
+        set({ error: "这篇论文还没有可打开的本地 PDF。" });
+        return;
+      }
+      if (!isTauri()) {
+        set({ error: "打开 PDF 需要桌面后端。" });
+        return;
+      }
+      try {
+        await literaturePdfOpen(paper.pdf.path);
+        log("ok", `已打开 PDF：${paper.pdf.path}`);
+      } catch (error) {
+        const message = `打开 PDF 失败：${String(error)}`;
+        set({ error: message });
+        log("error", message, { open: true });
+      }
+    },
+
     setError: (message) => set({ error: message }),
   };
 });
@@ -1384,6 +2108,8 @@ export const resetLiteratureStore = () =>
     loadedProjectId: null,
     error: null,
     screening: false,
+    searching: false,
+    generatingAnswerChains: null,
     briefing: null,
     activity: [],
     activityOpen: false,

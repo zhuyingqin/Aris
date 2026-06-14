@@ -1,7 +1,6 @@
 mod config;
 mod init;
 mod input;
-mod memories;
 mod meta_optimize;
 mod openai_compat;
 mod openai_executor;
@@ -1077,7 +1076,7 @@ fn run_resume_command(
             session: session.clone(),
             message: Some(render_config_report(section.as_deref())?),
         }),
-        SlashCommand::Memory => Ok(ResumeCommandOutcome {
+        SlashCommand::Memory { .. } => Ok(ResumeCommandOutcome {
             session: session.clone(),
             message: Some(render_memory_report()?),
         }),
@@ -1652,8 +1651,8 @@ impl LiveCli {
                 Self::print_config(section.as_deref())?;
                 false
             }
-            SlashCommand::Memory => {
-                Self::print_memory()?;
+            SlashCommand::Memory { action, target } => {
+                Self::handle_memory(action.as_deref(), target.as_deref())?;
                 false
             }
             SlashCommand::Init => {
@@ -2362,6 +2361,60 @@ impl LiveCli {
         Ok(())
     }
 
+    fn handle_memory(
+        action: Option<&str>,
+        target: Option<&str>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        match action {
+            None | Some("show") => Self::print_memory(),
+            Some("pending") => {
+                let scope = runtime::project_scope(&std::env::current_dir()?);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&runtime::list_pending_for_scope(&scope)?)?
+                );
+                Ok(())
+            }
+            Some("approve") => {
+                let id = target.ok_or("Usage: /memory approve <id>")?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&runtime::approve_pending(id)?)?
+                );
+                Ok(())
+            }
+            Some("reject") => {
+                let id = target.ok_or("Usage: /memory reject <id>")?;
+                runtime::reject_pending(id)?;
+                println!("Rejected pending memory write {id}.");
+                Ok(())
+            }
+            Some("approval") => {
+                let enabled = match target {
+                    Some("on") => true,
+                    Some("off") => false,
+                    _ => return Err("Usage: /memory approval on|off".into()),
+                };
+                let mut config = config::ArisConfig::load();
+                config.memory_write_approval = Some(enabled);
+                config.save()?;
+                std::env::set_var(
+                    "ARIS_MEMORY_WRITE_APPROVAL",
+                    if enabled { "true" } else { "false" },
+                );
+                println!(
+                    "Memory write approval is now {}.",
+                    if enabled { "on" } else { "off" }
+                );
+                Ok(())
+            }
+            Some(other) => Err(format!(
+                "Unknown /memory action `{other}`. Use show, pending, approve, reject, or approval."
+            )
+            .into()),
+        }
+    }
+
     fn print_diff() -> Result<(), Box<dyn std::error::Error>> {
         println!("{}", render_diff_report()?);
         Ok(())
@@ -2440,9 +2493,14 @@ impl LiveCli {
                 );
                 Ok(false)
             }
+            Some("search") => {
+                let result = runtime::search_sessions(&sessions_dir()?, target, None, 5, 5)?;
+                println!("{}", serde_json::to_string_pretty(&result)?);
+                Ok(false)
+            }
             Some(other) => {
                 println!(
-                    "Unknown /session action '{other}'. Use /session list, /session switch <session-id>, or /session timeline [session-id]."
+                    "Unknown /session action '{other}'. Use /session list, /session search <query>, /session switch <session-id>, or /session timeline [session-id]."
                 );
                 Ok(false)
             }
@@ -3041,6 +3099,10 @@ fn status_context(
     let discovered_config_files = loader.discover().len();
     let runtime_config = loader.load()?;
     let project_context = ProjectContext::discover_with_git(&cwd, &runtime::today_iso())?;
+    let hot_memory_count = runtime::load_hot_memory(&cwd)
+        .map(|memory| memory.memory.len() + memory.user.len())
+        .unwrap_or_default();
+    let knowledge_memory_count = runtime::load_knowledge_memory_catalog().len();
     let (project_root, git_branch) =
         parse_git_status_metadata(project_context.git_status.as_deref());
     Ok(StatusContext {
@@ -3048,7 +3110,7 @@ fn status_context(
         session_path: session_path.map(Path::to_path_buf),
         loaded_config_files: runtime_config.loaded_entries().len(),
         discovered_config_files,
-        memory_file_count: project_context.instruction_files.len(),
+        memory_file_count: hot_memory_count + knowledge_memory_count,
         project_root,
         git_branch,
     })
@@ -3189,36 +3251,45 @@ fn render_config_report(section: Option<&str>) -> Result<String, Box<dyn std::er
 
 fn render_memory_report() -> Result<String, Box<dyn std::error::Error>> {
     let cwd = env::current_dir()?;
-    let project_context = ProjectContext::discover(&cwd, &runtime::today_iso())?;
-    let mut lines = vec![format!(
-        "Memory
-  Working directory {}
-  Instruction files {}",
-        cwd.display(),
-        project_context.instruction_files.len()
-    )];
-    if project_context.instruction_files.is_empty() {
-        lines.push("Discovered files".to_string());
-        lines.push(
-            "  No CLAUDE instruction files discovered in the current directory ancestry."
-                .to_string(),
-        );
-    } else {
-        lines.push("Discovered files".to_string());
-        for (index, file) in project_context.instruction_files.iter().enumerate() {
-            let preview = file.content.lines().next().unwrap_or("").trim();
-            let preview = if preview.is_empty() {
-                "<empty>"
-            } else {
-                preview
-            };
-            lines.push(format!("  {}. {}", index + 1, file.path.display(),));
-            lines.push(format!(
-                "     lines={} preview={}",
-                file.content.lines().count(),
-                preview
-            ));
-        }
+    let hot = runtime::load_hot_memory(&cwd)?;
+    let knowledge = runtime::load_knowledge_memory_catalog();
+    let mut lines = vec![
+        "Memory".to_string(),
+        format!("  Working directory {}", cwd.display()),
+        format!("  Project scope     {}", hot.project_scope),
+        format!(
+            "  Hot memory        memory={}/{} chars, user={}/{} chars",
+            hot.memory_chars, hot.memory_limit, hot.user_chars, hot.user_limit
+        ),
+        format!("  Pending writes    {}", hot.pending_count),
+        format!(
+            "  Write approval    {}",
+            runtime::memory_write_approval_enabled()
+        ),
+        format!("  Knowledge files   {}", knowledge.len()),
+        "Hot entries".to_string(),
+    ];
+    for entry in hot.user.iter().chain(hot.memory.iter()) {
+        lines.push(format!(
+            "  [{}] {} scope={} source={} expires={}",
+            entry.id,
+            entry.content,
+            entry.scope,
+            entry.source,
+            entry.expires_at.as_deref().unwrap_or("never")
+        ));
+    }
+    if hot.user.is_empty() && hot.memory.is_empty() {
+        lines.push("  No active hot-memory entries.".to_string());
+    }
+    lines.push("Knowledge catalog".to_string());
+    for entry in knowledge {
+        lines.push(format!(
+            "  {} - {} ({})",
+            entry.name,
+            entry.description,
+            entry.path.display()
+        ));
     }
     Ok(lines.join(
         "
@@ -3809,7 +3880,10 @@ fn render_export_text(session: &Session) -> String {
             match block {
                 ContentBlock::Text { text } => lines.push(text.clone()),
                 ContentBlock::Image { media_type, data } => {
-                    lines.push(format!("[image media_type={media_type} bytes={}]", data.len()));
+                    lines.push(format!(
+                        "[image media_type={media_type} bytes={}]",
+                        data.len()
+                    ));
                 }
                 ContentBlock::ToolUse { id, name, input } => {
                     lines.push(format!("[tool_use id={id} name={name}] {input}"));
@@ -3890,8 +3964,9 @@ fn resolve_export_path(
 }
 
 fn build_system_prompt(model_id: Option<&str>) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let workspace = env::current_dir()?;
     let options = aris_chat::CommonSystemPromptOptions {
-        workspace: env::current_dir()?,
+        workspace: workspace.clone(),
         current_date: runtime::today_iso(),
         os_name: env::consts::OS.to_string(),
         os_version: "unknown".to_string(),
@@ -3921,39 +3996,9 @@ fn build_system_prompt(model_id: Option<&str>) -> Result<Vec<String>, Box<dyn st
         prompt.push("User language preference is English. Always respond in English unless the user explicitly writes in another language.".to_string());
     }
 
-    // ARIS persistent memory (multi-file index system)
-    memories::migrate_legacy_memory();
-    let mem_entries = memories::load_memory_catalog();
-    let mem_dir = memories::memories_dir();
-    if !mem_entries.is_empty() {
-        let catalog = memories::render_memory_catalog(&mem_entries);
-        prompt.push(format!(
-            "# ARIS Persistent Memory\n\
-             You have {} memories from previous sessions. \
-             Below is the catalog (name + description + path). \
-             Use the read_file tool to load a specific memory when relevant.\n\n\
-             {catalog}\n\n\
-             To save new memories, use write_file to create .md files in {dir} \
-             with YAML frontmatter (---\\nname: ...\\ndescription: ...\\n---).\n\
-             When the user says \"remember this\" or you learn important context, save it.",
-            mem_entries.len(),
-            dir = mem_dir.display(),
-        ));
-    } else {
-        prompt.push(format!(
-            "# ARIS Persistent Memory\n\
-             Memory directory: {dir}\n\
-             No memories yet. When the user says \"remember this\" or you learn important context, \
-             create .md files in {dir} with frontmatter:\n\
-             ---\n\
-             name: Memory Title\n\
-             description: One-line summary for catalog\n\
-             ---\n\
-             (content here)\n\
-             This memory persists across sessions.",
-            dir = mem_dir.display(),
-        ));
-    }
+    runtime::migrate_legacy_knowledge_memory();
+    prompt.push(runtime::render_hot_memory_prompt(&workspace)?);
+    prompt.push(runtime::render_knowledge_memory_prompt());
 
     // ARIS persistent tasks (uses TodoWrite tool, stored as JSON)
     let tasks_path = aris_tasks_path();
@@ -5611,7 +5656,8 @@ mod tests {
         assert!(help.contains("/diff"));
         assert!(help.contains("/version"));
         assert!(help.contains("/export [file]"));
-        assert!(help.contains("/session [list|switch <session-id>|timeline [session-id]]"));
+        assert!(help
+            .contains("/session [list|search <query>|switch <session-id>|timeline [session-id]]"));
         assert!(help.contains("/exit"));
     }
 
@@ -5769,8 +5815,8 @@ mod tests {
         let report = render_memory_report().expect("memory report should render");
         assert!(report.contains("Memory"));
         assert!(report.contains("Working directory"));
-        assert!(report.contains("Instruction files"));
-        assert!(report.contains("Discovered files"));
+        assert!(report.contains("Hot memory"));
+        assert!(report.contains("Knowledge catalog"));
     }
 
     #[test]
@@ -5847,7 +5893,13 @@ mod tests {
                 section: Some("env".to_string())
             })
         );
-        assert_eq!(SlashCommand::parse("/memory"), Some(SlashCommand::Memory));
+        assert_eq!(
+            SlashCommand::parse("/memory"),
+            Some(SlashCommand::Memory {
+                action: None,
+                target: None
+            })
+        );
         assert_eq!(SlashCommand::parse("/init"), Some(SlashCommand::Init));
     }
 
