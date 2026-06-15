@@ -11,8 +11,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc,
-        Mutex,
+        Arc, Mutex,
     },
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -37,6 +36,8 @@ pub struct ChatState {
     permission_modes: Mutex<HashMap<String, PermissionMode>>,
     running_turns: Mutex<HashMap<String, Arc<AtomicBool>>>,
 }
+
+const MAX_CACHED_CHAT_SESSIONS: usize = 4;
 
 impl Default for ChatState {
     fn default() -> Self {
@@ -191,7 +192,10 @@ impl aris_executor::StreamObserver for DesktopStreamObserver {
         if self.cancelled.load(Ordering::SeqCst) {
             return Err(RuntimeError::new("interrupted by user"));
         }
-        let _ = self.app.emit("chat-delta", json!({ "sessionId": self.session_id, "text": text }));
+        let _ = self.app.emit(
+            "chat-delta",
+            json!({ "sessionId": self.session_id, "text": text }),
+        );
         Ok(())
     }
 
@@ -625,11 +629,25 @@ fn store_chat_session(
     session: Session,
 ) -> Result<(), String> {
     save_chat_session(&session_id, &session)?;
-    state
+    cache_chat_session(state, session_id, session)
+}
+
+fn cache_chat_session(
+    state: &ChatState,
+    session_id: String,
+    session: Session,
+) -> Result<(), String> {
+    let mut sessions = state
         .sessions
         .lock()
-        .map_err(|_| "chat state poisoned".to_string())?
-        .insert(session_id, session);
+        .map_err(|_| "chat state poisoned".to_string())?;
+    sessions.insert(session_id.clone(), session);
+    while sessions.len() > MAX_CACHED_CHAT_SESSIONS {
+        let Some(evict) = sessions.keys().find(|key| *key != &session_id).cloned() else {
+            break;
+        };
+        sessions.remove(&evict);
+    }
     Ok(())
 }
 
@@ -2928,5 +2946,17 @@ mod tests {
         .expect("failure status");
         assert!(failed.contains("No MCP tools were loaded"));
         assert!(failed.contains("could not discover MCP server `playwright`"));
+    }
+
+    #[test]
+    fn chat_session_cache_stays_bounded() {
+        let state = ChatState::default();
+        for index in 0..20 {
+            cache_chat_session(&state, format!("session-{index}"), Session::new())
+                .expect("cache session");
+        }
+        let sessions = state.sessions.lock().expect("chat state");
+        assert_eq!(sessions.len(), MAX_CACHED_CHAT_SESSIONS);
+        assert!(sessions.contains_key("session-19"));
     }
 }

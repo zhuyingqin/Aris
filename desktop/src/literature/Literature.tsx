@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { literatureLlm } from "../api/tauri";
 import { useStore } from "../store";
 import MathText from "./MathText";
 import PdfReader from "./PdfReader";
@@ -795,6 +796,7 @@ export default function Literature() {
             onDeleteAnnotation={(annotationId) =>
               deletePdfAnnotation(selectedPaper.id, annotationId)
             }
+            onRunAi={(system, prompt) => literatureLlm(system, prompt)}
           />
         </div>
       ) : (

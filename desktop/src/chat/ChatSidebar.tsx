@@ -10,6 +10,7 @@ interface Props {
   open: boolean;
   busy: boolean;
   onClose: () => void;
+  onDesktopCollapse: () => void;
   onNew: () => void;
   onOpen: (id: string) => void | Promise<void>;
   onRename: (id: string, title: string) => void;
@@ -43,6 +44,7 @@ export default function ChatSidebar({
   open,
   busy,
   onClose,
+  onDesktopCollapse,
   onNew,
   onOpen,
   onRename,
@@ -215,6 +217,14 @@ export default function ChatSidebar({
         <button className="chat-new-btn" onClick={onNew} disabled={busy}>
           <span className="chat-new-icon">+</span>
           <span>New chat</span>
+        </button>
+        <button
+          className="chat-sidebar-desktop-collapse"
+          onClick={onDesktopCollapse}
+          title="Collapse sidebar"
+          aria-label="Collapse chat sidebar"
+        >
+          ‹
         </button>
         <button className="chat-sidebar-close" onClick={onClose} aria-label="Close chat sidebar">×</button>
       </div>

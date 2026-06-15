@@ -12,6 +12,7 @@ import type {
   PdfAnnotationColor,
   PdfAnnotationKind,
   PdfAnnotationRect,
+  PdfAnnotationStyle,
 } from "./literatureTypes";
 
 const workerSrc = new URL("pdfjs-dist/build/pdf.worker.min.mjs", import.meta.url).toString();
@@ -34,6 +35,28 @@ const COLOR_SWATCHES: { key: PdfAnnotationColor; hex: string; label: string }[] 
   { key: "red", hex: "#ef5350", label: "红色" },
   { key: "purple", hex: "#ba68c8", label: "紫色" },
 ];
+const STYLE_OPTIONS: { key: PdfAnnotationStyle; label: string; glyph: string }[] = [
+  { key: "highlight", label: "高亮", glyph: "A" },
+  { key: "underline", label: "下划线", glyph: "A" },
+  { key: "strikethrough", label: "删除线", glyph: "A" },
+];
+
+/** Selection-driven AI actions. List-shaped so explain/summarize/ask can be
+ * appended later without touching the popover wiring. */
+interface AiAction {
+  key: string;
+  label: string;
+  system: string;
+}
+const AI_ACTIONS: AiAction[] = [
+  {
+    key: "translate",
+    label: "翻译",
+    system:
+      "你是严谨的学术译者。把用户提供的文本翻译成流畅、自然的中文，" +
+      "保留专业术语、数学符号与引用标记（如 [1]）。只输出译文，不要任何前言或解释。",
+  },
+];
 
 interface PendingAnnotation {
   page: number;
@@ -41,6 +64,7 @@ interface PendingAnnotation {
   rects: PdfAnnotationRect[];
   anchorX: number;
   anchorY: number;
+  anchorBottomY: number;
 }
 
 interface PdfReaderProps {
@@ -57,13 +81,16 @@ interface PdfReaderProps {
       color: PdfAnnotationColor;
       kind: PdfAnnotationKind;
       note: string;
+      style: PdfAnnotationStyle;
     },
   ) => void;
   onUpdateAnnotation: (
     annotationId: string,
-    patch: Partial<Pick<PdfAnnotation, "quote" | "note" | "kind" | "color">>,
+    patch: Partial<Pick<PdfAnnotation, "quote" | "note" | "kind" | "color" | "style">>,
   ) => void;
   onDeleteAnnotation: (annotationId: string) => void;
+  /** One-shot LLM call (reuses the literature Chat backend). */
+  onRunAi: (system: string, prompt: string) => Promise<string>;
 }
 
 interface HighlightBox {
@@ -74,6 +101,14 @@ interface HighlightBox {
   height: number;
   kind: PdfAnnotation["kind"];
   color?: PdfAnnotationColor;
+  style: PdfAnnotationStyle;
+}
+
+/** Screen-space anchor for a floating popover, in fixed (viewport) coordinates. */
+interface HighlightAnchor {
+  x: number;
+  y: number;
+  bottom: number;
 }
 
 const EMPTY_ANNOTATIONS: PdfAnnotation[] = [];
@@ -123,6 +158,7 @@ const highlightBoxesForPage = async (
       annotationId: annotation.id,
       kind: annotation.kind,
       color: annotation.color,
+      style: annotation.style ?? "highlight",
       left: rect.left * viewport.width,
       top: rect.top * viewport.height,
       width: rect.width * viewport.width,
@@ -141,6 +177,7 @@ const highlightBoxesForPage = async (
         annotationId: annotation.id,
         kind: annotation.kind,
         color: annotation.color,
+        style: annotation.style ?? "highlight",
         ...segment,
       });
     }
@@ -159,6 +196,7 @@ function PdfPage({
   hoveredAnnotationId,
   onMeasured,
   onHighlightHover,
+  onHighlightActivate,
 }: {
   pdf: PDFDocumentProxy;
   page: number;
@@ -169,6 +207,7 @@ function PdfPage({
   hoveredAnnotationId?: string | null;
   onMeasured: (page: number, baseHeight: number) => void;
   onHighlightHover: (annotationId: string | null) => void;
+  onHighlightActivate: (annotationId: string, anchor: HighlightAnchor) => void;
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const textLayerRef = useRef<HTMLDivElement | null>(null);
@@ -209,22 +248,25 @@ function PdfPage({
         await renderTask.promise;
         if (disposed) return;
 
-        // Text layer for selection — rendered transparently over the canvas
+        // Text layer for selection — rendered transparently over the canvas.
+        // pdf.js v5 replaced the `renderTextLayer` function with a `TextLayer`
+        // class; spans are positioned in %, scaled by --total-scale-factor.
         const textLayerDiv = textLayerRef.current;
         if (textLayerDiv) {
           textLayerDiv.innerHTML = "";
+          textLayerDiv.style.setProperty("--total-scale-factor", String(zoom));
           const pdfjs = await import("pdfjs-dist");
-          if (!disposed && "renderTextLayer" in pdfjs && typeof pdfjs.renderTextLayer === "function") {
+          if (!disposed && "TextLayer" in pdfjs && typeof pdfjs.TextLayer === "function") {
             const textContent = await pdfPage.getTextContent();
             if (!disposed) {
               try {
-                const textTask = pdfjs.renderTextLayer({
+                const textLayer = new pdfjs.TextLayer({
                   textContentSource: textContent,
                   container: textLayerDiv,
                   viewport,
                 });
-                textTaskRef.current = textTask;
-                await textTask.promise;
+                textTaskRef.current = textLayer;
+                await textLayer.render();
               } catch {
                 // Text layer failure is non-fatal — the canvas still shows the PDF.
               }
@@ -251,27 +293,53 @@ function PdfPage({
     };
   }, [pdf, page, zoom, active, annotations, onMeasured]);
 
-  // Detect when the cursor hovers over a highlight rect, reported up to the parent.
-  const onMouseMove = useCallback(
+  // Shared hit-test: which highlight box (if any) sits under the pointer.
+  const findBoxAt = useCallback(
     (e: React.MouseEvent<HTMLDivElement>) => {
       const rect = e.currentTarget.getBoundingClientRect();
       const px = e.clientX - rect.left;
       const py = e.clientY - rect.top;
-      const hit = boxes.find(
-        (box) =>
-          px >= box.left &&
-          px <= box.left + box.width &&
-          py >= box.top &&
-          py <= box.top + box.height,
+      const box = boxes.find(
+        (candidate) =>
+          px >= candidate.left &&
+          px <= candidate.left + candidate.width &&
+          py >= candidate.top &&
+          py <= candidate.top + candidate.height,
       );
-      onHighlightHover(hit?.annotationId ?? null);
+      return { rect, box };
     },
-    [boxes, onHighlightHover],
+    [boxes],
+  );
+
+  // Detect when the cursor hovers over a highlight rect, reported up to the parent.
+  const onMouseMove = useCallback(
+    (e: React.MouseEvent<HTMLDivElement>) => {
+      onHighlightHover(findBoxAt(e).box?.annotationId ?? null);
+    },
+    [findBoxAt, onHighlightHover],
   );
 
   const onMouseLeave = useCallback(() => {
     onHighlightHover(null);
   }, [onHighlightHover]);
+
+  // Click on an existing highlight → open its floating popover, anchored on the
+  // highlight's screen position. Ignored while a text selection is active so a
+  // drag-to-select gesture still creates a new annotation.
+  const onClick = useCallback(
+    (e: React.MouseEvent<HTMLDivElement>) => {
+      const selection = window.getSelection();
+      if (selection && !selection.isCollapsed) return;
+      const { rect, box } = findBoxAt(e);
+      if (!box) return;
+      onHighlightActivate(box.annotationId, {
+        x: rect.left + box.left + box.width / 2,
+        y: rect.top + box.top,
+        bottom: rect.top + box.top + box.height,
+      });
+    },
+    [findBoxAt, onHighlightActivate],
+  );
 
   return (
     <>
@@ -282,13 +350,14 @@ function PdfPage({
         className="lit-pdf-text-layer"
         onMouseMove={onMouseMove}
         onMouseLeave={onMouseLeave}
+        onClick={onClick}
       />
       {/* Highlight overlays — pointer-events: none so text selection still works */}
       <div className="lit-pdf-highlight-layer" aria-hidden="true">
         {boxes.map((box, index) => (
           <span
             key={`${box.annotationId}:${index}`}
-            className={`lit-pdf-highlight kind-${box.kind} color-${box.color ?? "yellow"}${
+            className={`lit-pdf-highlight kind-${box.kind} color-${box.color ?? "yellow"} style-${box.style}${
               focusedAnnotationId === box.annotationId || hoveredAnnotationId === box.annotationId
                 ? " focused"
                 : ""
@@ -301,79 +370,367 @@ function PdfPage({
   );
 }
 
-/** Floating popup that appears above selected text for creating a new annotation. */
-function SelectionPopup({
+interface AiState {
+  action: AiAction;
+  status: "loading" | "done" | "error";
+  text: string;
+}
+
+/** Compact toolbar shown next to a text selection. */
+function QuickSelectionPopup({
   pending,
-  onConfirm,
+  onQuickHighlight,
+  onSaveNote,
+  onRunAi,
   onCancel,
 }: {
   pending: PendingAnnotation;
-  onConfirm: (color: PdfAnnotationColor, kind: PdfAnnotationKind, note: string) => void;
+  onQuickHighlight: (color: PdfAnnotationColor, style: PdfAnnotationStyle) => void;
+  onSaveNote: (
+    color: PdfAnnotationColor,
+    kind: PdfAnnotationKind,
+    note: string,
+    style: PdfAnnotationStyle,
+  ) => void;
+  onRunAi: (system: string, prompt: string) => Promise<string>;
   onCancel: () => void;
 }) {
   const [color, setColor] = useState<PdfAnnotationColor>("yellow");
   const [kind, setKind] = useState<PdfAnnotationKind>("note");
   const [note, setNote] = useState("");
+  const [style, setStyle] = useState<PdfAnnotationStyle>("highlight");
+  const [showDetails, setShowDetails] = useState(false);
+  const [ai, setAi] = useState<AiState | null>(null);
+  const styleVerb =
+    style === "underline" ? "下划线" : style === "strikethrough" ? "删除线" : "高亮";
 
-  const left = Math.min(window.innerWidth - 272, Math.max(8, pending.anchorX - 136));
-  const top = pending.anchorY - 8;
+  const runAi = useCallback(
+    (action: AiAction) => {
+      setAi({ action, status: "loading", text: "" });
+      onRunAi(action.system, pending.quote)
+        .then((text) => setAi({ action, status: "done", text: text.trim() }))
+        .catch((reason) => setAi({ action, status: "error", text: String(reason) }));
+    },
+    [onRunAi, pending.quote],
+  );
+
+  const aiActive = ai !== null;
+  const popupWidth = aiActive ? 360 : showDetails ? 320 : 300;
+  const left = Math.min(window.innerWidth - popupWidth - 8, Math.max(8, pending.anchorX - popupWidth / 2));
+  const placeBelow = aiActive ? true : pending.anchorY < (showDetails ? 320 : 72);
+  const top = aiActive
+    ? Math.max(8, Math.min(pending.anchorBottomY + 8, window.innerHeight - 438))
+    : placeBelow
+      ? pending.anchorBottomY + 8
+      : pending.anchorY - 8;
 
   return (
     <div
-      className="lit-pdf-select-popup"
-      style={{ position: "fixed", left, top, transform: "translateY(-100%)", zIndex: 1000 }}
+      className={`lit-pdf-select-popup${showDetails ? " expanded" : ""}${aiActive ? " ai" : ""}`}
+      style={{
+        position: "fixed",
+        left,
+        top,
+        width: popupWidth,
+        transform: aiActive || placeBelow ? undefined : "translateY(-100%)",
+        zIndex: 1000,
+      }}
+      role="toolbar"
+      aria-label="选区操作"
     >
-      <div className="lit-pdf-select-popup-quote">
-        {pending.quote.length > 140 ? `${pending.quote.slice(0, 140)}…` : pending.quote}
-      </div>
-      <div className="lit-pdf-select-popup-row">
-        <div className="lit-pdf-select-popup-colors">
-          {COLOR_SWATCHES.map(({ key, hex, label }) => (
-            <button
-              key={key}
-              type="button"
-              className={`lit-pdf-color-swatch${color === key ? " active" : ""}`}
-              style={{ background: hex }}
-              aria-label={label}
-              aria-pressed={color === key}
-              onClick={() => setColor(key)}
-            />
-          ))}
+      {aiActive ? (
+        <div className="lit-pdf-ai-panel">
+          <div className="lit-pdf-ai-head">
+            <button type="button" className="lit-pdf-ai-back" aria-label="返回标记" onClick={() => setAi(null)}>
+              ‹ 返回
+            </button>
+            <span className="lit-pdf-ai-title">{ai.action.label}</span>
+            <button type="button" className="lit-pdf-popup-close" aria-label="关闭" onClick={onCancel}>
+              ×
+            </button>
+          </div>
+          <div className="lit-pdf-ai-body">
+            {ai.status === "loading" && (
+              <div className="lit-pdf-ai-loading">
+                <span className="lit-search-spinner" aria-hidden="true" />
+                正在{ai.action.label}…
+              </div>
+            )}
+            {ai.status === "error" && <div className="lit-pdf-ai-error">出错了：{ai.text}</div>}
+            {ai.status === "done" && <div className="lit-pdf-ai-result">{ai.text}</div>}
+          </div>
+          <div className="lit-pdf-ai-actions">
+            {ai.status === "error" && (
+              <button type="button" onClick={() => runAi(ai.action)}>
+                重试
+              </button>
+            )}
+            {ai.status === "done" && (
+              <>
+                <button type="button" onClick={() => void navigator.clipboard?.writeText(ai.text)}>
+                  复制
+                </button>
+                <button
+                  type="button"
+                  className="lit-pdf-select-popup-save"
+                  onClick={() => onSaveNote("blue", "note", `【${ai.action.label}】\n${ai.text}`, "highlight")}
+                >
+                  保存到标注
+                </button>
+              </>
+            )}
+          </div>
         </div>
-        <select
-          className="lit-pdf-select-popup-kind"
-          value={kind}
-          onChange={(e) => setKind(e.target.value as PdfAnnotationKind)}
-          aria-label="标注类型"
-        >
-          {(Object.keys(KIND_LABELS) as PdfAnnotationKind[]).map((k) => (
-            <option key={k} value={k}>
-              {KIND_LABELS[k]}
-            </option>
-          ))}
-        </select>
+      ) : (
+        <>
+          <div className="lit-pdf-select-popup-row">
+            <div className="lit-pdf-style-seg" role="group" aria-label="标记样式">
+              {STYLE_OPTIONS.map(({ key, label, glyph }) => (
+                <button
+                  key={key}
+                  type="button"
+                  className={`lit-pdf-style-btn style-${key}${style === key ? " active" : ""}`}
+                  aria-label={label}
+                  aria-pressed={style === key}
+                  title={label}
+                  onClick={() => setStyle(key)}
+                >
+                  {glyph}
+                </button>
+              ))}
+            </div>
+            <div className="lit-pdf-select-popup-colors">
+              {COLOR_SWATCHES.map(({ key, hex, label }) => (
+                <button
+                  key={key}
+                  type="button"
+                  className={`lit-pdf-color-swatch${color === key ? " active" : ""}`}
+                  style={{ background: hex }}
+                  aria-label={`用${label}${styleVerb}`}
+                  aria-pressed={color === key}
+                  title={`用${label}${styleVerb}`}
+                  onClick={() => {
+                    setColor(key);
+                    if (!showDetails) onQuickHighlight(key, style);
+                  }}
+                />
+              ))}
+            </div>
+            <button
+              type="button"
+              className="lit-pdf-select-popup-note-toggle"
+              aria-expanded={showDetails}
+              onClick={() => setShowDetails((value) => !value)}
+            >
+              加备注
+            </button>
+            <button type="button" className="lit-pdf-popup-close" aria-label="取消选区" onClick={onCancel}>
+              ×
+            </button>
+          </div>
+          <div className="lit-pdf-select-popup-ai-row">
+            {AI_ACTIONS.map((action) => (
+              <button
+                key={action.key}
+                type="button"
+                className="lit-pdf-ai-btn"
+                onClick={() => runAi(action)}
+              >
+                ✦ {action.label}
+              </button>
+            ))}
+          </div>
+          {showDetails && (
+            <div className="lit-pdf-select-popup-details">
+              <div className="lit-pdf-select-popup-quote">
+                {pending.quote.length > 140 ? `${pending.quote.slice(0, 140)}…` : pending.quote}
+              </div>
+              <select
+                className="lit-pdf-select-popup-kind"
+                value={kind}
+                onChange={(event) => setKind(event.target.value as PdfAnnotationKind)}
+                aria-label="标注类型"
+              >
+                {(Object.keys(KIND_LABELS) as PdfAnnotationKind[]).map((value) => (
+                  <option key={value} value={value}>
+                    {KIND_LABELS[value]}
+                  </option>
+                ))}
+              </select>
+              <textarea
+                className="lit-pdf-select-popup-note"
+                placeholder="添加备注（可选）"
+                value={note}
+                onChange={(event) => setNote(event.target.value)}
+                rows={3}
+                aria-label="标注备注"
+                autoFocus
+              />
+              <button
+                type="button"
+                className="lit-pdf-select-popup-save"
+                onClick={() => onSaveNote(color, kind, note, style)}
+              >
+                保存备注
+              </button>
+            </div>
+          )}
+          <div className={`lit-pdf-select-popup-arrow${placeBelow ? " below" : ""}`} />
+        </>
+      )}
+    </div>
+  );
+}
+
+/** Floating popover shown when an existing highlight is clicked — quick edit / delete. */
+function HighlightPopover({
+  annotation,
+  anchor,
+  onEdit,
+  onDelete,
+  onClose,
+}: {
+  annotation: PdfAnnotation;
+  anchor: HighlightAnchor;
+  onEdit: () => void;
+  onDelete: () => void;
+  onClose: () => void;
+}) {
+  const width = 240;
+  const left = Math.min(window.innerWidth - width - 8, Math.max(8, anchor.x - width / 2));
+  const placeBelow = anchor.y < 140;
+  const top = placeBelow ? anchor.bottom + 8 : anchor.y - 8;
+
+  return (
+    <div
+      className="lit-pdf-highlight-popover"
+      style={{
+        position: "fixed",
+        left,
+        top,
+        width,
+        transform: placeBelow ? undefined : "translateY(-100%)",
+        zIndex: 1000,
+      }}
+      role="dialog"
+      aria-label="高亮操作"
+    >
+      <div className="lit-pdf-highlight-popover-head">
+        <span className="lit-pdf-annotation-kind-badge">{KIND_LABELS[annotation.kind]}</span>
+        <span className="lit-pdf-highlight-popover-page">第 {annotation.page} 页</span>
+        <button type="button" className="lit-pdf-popup-close" aria-label="关闭" onClick={onClose}>
+          ×
+        </button>
       </div>
+      <blockquote className="lit-pdf-highlight-popover-quote">
+        {annotation.quote.length > 120 ? `${annotation.quote.slice(0, 120)}…` : annotation.quote}
+      </blockquote>
+      <p className={`lit-pdf-highlight-popover-note${annotation.note ? "" : " empty"}`}>
+        {annotation.note || "无备注"}
+      </p>
+      <div className="lit-pdf-highlight-popover-actions">
+        <button type="button" className="danger" onClick={onDelete}>
+          删除
+        </button>
+        <button type="button" onClick={onEdit}>
+          编辑
+        </button>
+      </div>
+      <div className={`lit-pdf-select-popup-arrow${placeBelow ? " below" : ""}`} />
+    </div>
+  );
+}
+
+interface AnnotationEditorAnchor {
+  x: number;
+  y: number;
+}
+
+function AnnotationEditor({
+  annotation,
+  anchor,
+  onUpdate,
+  onDelete,
+  onClose,
+}: {
+  annotation: PdfAnnotation;
+  anchor: AnnotationEditorAnchor;
+  onUpdate: (patch: Partial<Pick<PdfAnnotation, "note" | "kind" | "color" | "style">>) => void;
+  onDelete: () => void;
+  onClose: () => void;
+}) {
+  const width = 286;
+  const left = Math.min(window.innerWidth - width - 8, Math.max(8, anchor.x - width));
+  const top = Math.max(8, Math.min(window.innerHeight - 340, anchor.y));
+
+  return (
+    <div
+      className="lit-pdf-annotation-editor"
+      style={{ position: "fixed", left, top, zIndex: 1000 }}
+      role="dialog"
+      aria-label="编辑标注"
+    >
+      <div className="lit-pdf-annotation-editor-head">
+        <span>第 {annotation.page} 页</span>
+        <button type="button" className="lit-pdf-popup-close" aria-label="关闭标注编辑器" onClick={onClose}>
+          ×
+        </button>
+      </div>
+      <blockquote>{annotation.quote}</blockquote>
+      <div className="lit-pdf-annotation-editor-colors" aria-label="标注颜色">
+        {COLOR_SWATCHES.map(({ key, hex, label }) => (
+          <button
+            key={key}
+            type="button"
+            className={`lit-pdf-color-swatch${(annotation.color ?? "yellow") === key ? " active" : ""}`}
+            style={{ background: hex }}
+            aria-label={`设为${label}`}
+            aria-pressed={(annotation.color ?? "yellow") === key}
+            onClick={() => onUpdate({ color: key })}
+          />
+        ))}
+      </div>
+      <div className="lit-pdf-style-seg" role="group" aria-label="标记样式">
+        {STYLE_OPTIONS.map(({ key, label, glyph }) => (
+          <button
+            key={key}
+            type="button"
+            className={`lit-pdf-style-btn style-${key}${(annotation.style ?? "highlight") === key ? " active" : ""}`}
+            aria-label={`设为${label}`}
+            aria-pressed={(annotation.style ?? "highlight") === key}
+            title={label}
+            onClick={() => onUpdate({ style: key })}
+          >
+            {glyph}
+          </button>
+        ))}
+      </div>
+      <select
+        value={annotation.kind}
+        aria-label="标注类型"
+        onChange={(event) => onUpdate({ kind: event.target.value as PdfAnnotationKind })}
+      >
+        {(Object.keys(KIND_LABELS) as PdfAnnotationKind[]).map((value) => (
+          <option key={value} value={value}>
+            {KIND_LABELS[value]}
+          </option>
+        ))}
+      </select>
       <textarea
-        className="lit-pdf-select-popup-note"
-        placeholder="备注（可选）"
-        value={note}
-        onChange={(e) => setNote(e.target.value)}
-        rows={2}
+        defaultValue={annotation.note}
         aria-label="标注备注"
+        placeholder="添加备注"
+        rows={4}
+        onBlur={(event) => onUpdate({ note: event.target.value })}
       />
-      <div className="lit-pdf-select-popup-actions">
-        <button type="button" onClick={onCancel}>
-          取消
+      <div className="lit-pdf-annotation-editor-actions">
+        <button type="button" className="danger" onClick={onDelete}>
+          删除
         </button>
-        <button
-          type="button"
-          className="lit-pdf-select-popup-save"
-          onClick={() => onConfirm(color, kind, note)}
-        >
-          保存标注
+        <button type="button" onClick={onClose}>
+          完成
         </button>
       </div>
-      <div className="lit-pdf-select-popup-arrow" />
     </div>
   );
 }
@@ -387,6 +744,7 @@ export default function PdfReader({
   onAddAnnotation,
   onUpdateAnnotation,
   onDeleteAnnotation,
+  onRunAi,
 }: PdfReaderProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const slotRefs = useRef<Array<HTMLDivElement | null>>([]);
@@ -400,11 +758,14 @@ export default function PdfReader({
   const [containerWidth, setContainerWidth] = useState(0);
   const [zoomLevel, setZoomLevel] = useState(1.2);
   const [fitWidth, setFitWidth] = useState(true);
-  const [showAnnotations, setShowAnnotations] = useState(true);
+  const [showAnnotations, setShowAnnotations] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [pendingAnnotation, setPendingAnnotation] = useState<PendingAnnotation | null>(null);
   const [hoveredAnnotationId, setHoveredAnnotationId] = useState<string | null>(null);
+  const [editingAnnotationId, setEditingAnnotationId] = useState<string | null>(null);
+  const [editorAnchor, setEditorAnchor] = useState<AnnotationEditorAnchor | null>(null);
+  const [activeHighlight, setActiveHighlight] = useState<{ id: string; anchor: HighlightAnchor } | null>(null);
 
   const annotationsByPage = useMemo(() => {
     const map = new Map<number, PdfAnnotation[]>();
@@ -423,7 +784,19 @@ export default function PdfReader({
     return zoomLevel;
   }, [fitWidth, baseSize, containerWidth, zoomLevel]);
 
-  const effectiveHighlightId = focusedAnnotationId ?? hoveredAnnotationId;
+  const effectiveHighlightId = focusedAnnotationId ?? hoveredAnnotationId ?? editingAnnotationId;
+  const editingAnnotation = annotations.find((annotation) => annotation.id === editingAnnotationId) ?? null;
+  const activeHighlightAnnotation = activeHighlight
+    ? annotations.find((annotation) => annotation.id === activeHighlight.id) ?? null
+    : null;
+
+  // Clicking an existing highlight opens its quick popover — clear any other floating UI.
+  const handleHighlightActivate = useCallback((annotationId: string, anchor: HighlightAnchor) => {
+    setPendingAnnotation(null);
+    setEditingAnnotationId(null);
+    setEditorAnchor(null);
+    setActiveHighlight({ id: annotationId, anchor });
+  }, []);
 
   const onMeasured = useCallback((page: number, baseHeight: number) => {
     setPageBaseHeights((prev) =>
@@ -564,7 +937,7 @@ export default function PdfReader({
     const card = sidebarRef.current.querySelector(
       `[data-annotation-id="${effectiveHighlightId}"]`,
     );
-    card?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    card?.scrollIntoView?.({ behavior: "smooth", block: "nearest" });
   }, [effectiveHighlightId]);
 
   // ── Text selection → pending annotation ──────────────────────────────────────
@@ -602,12 +975,15 @@ export default function PdfReader({
       if (rects.length === 0) return;
 
       const boundingRect = range.getBoundingClientRect();
+      // Selecting any text in the PDF immediately surfaces the marking toolbar —
+      // no separate "highlighter mode" to enable first.
       setPendingAnnotation({
         page,
         quote,
         rects,
         anchorX: boundingRect.left + boundingRect.width / 2,
         anchorY: boundingRect.top,
+        anchorBottomY: boundingRect.bottom,
       });
     };
 
@@ -629,8 +1005,49 @@ export default function PdfReader({
     return () => window.removeEventListener("mousedown", onDown, true);
   }, [pendingAnnotation]);
 
+  useEffect(() => {
+    if (!editingAnnotationId) return;
+    const onDown = (event: MouseEvent) => {
+      const editor = globalThis.document?.querySelector(".lit-pdf-annotation-editor");
+      const annotationItem = (event.target as Element | null)?.closest?.(".lit-pdf-annotation-item");
+      if (editor && !editor.contains(event.target as Node) && !annotationItem) {
+        setEditingAnnotationId(null);
+        setEditorAnchor(null);
+      }
+    };
+    window.addEventListener("mousedown", onDown, true);
+    return () => window.removeEventListener("mousedown", onDown, true);
+  }, [editingAnnotationId]);
+
+  // ── Dismiss highlight popover on click outside ───────────────────────────────
+  useEffect(() => {
+    if (!activeHighlight) return;
+    const onDown = (event: MouseEvent) => {
+      const popover = globalThis.document?.querySelector(".lit-pdf-highlight-popover");
+      if (popover && !popover.contains(event.target as Node)) {
+        setActiveHighlight(null);
+      }
+    };
+    window.addEventListener("mousedown", onDown, true);
+    return () => window.removeEventListener("mousedown", onDown, true);
+  }, [activeHighlight]);
+
+  // ── Escape closes any floating UI and clears the selection ───────────────────
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      setActiveHighlight(null);
+      setPendingAnnotation(null);
+      setEditingAnnotationId(null);
+      setEditorAnchor(null);
+      window.getSelection()?.removeAllRanges();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
   const handleConfirmAnnotation = useCallback(
-    (color: PdfAnnotationColor, kind: PdfAnnotationKind, note: string) => {
+    (color: PdfAnnotationColor, kind: PdfAnnotationKind, note: string, style: PdfAnnotationStyle) => {
       if (!pendingAnnotation) return;
       onAddAnnotation(pendingAnnotation.page, {
         quote: pendingAnnotation.quote,
@@ -638,6 +1055,7 @@ export default function PdfReader({
         color,
         kind,
         note,
+        style,
       });
       setPendingAnnotation(null);
       window.getSelection()?.removeAllRanges();
@@ -729,7 +1147,9 @@ export default function PdfReader({
           {loading && <div className="lit-pdf-state">正在加载 PDF…</div>}
           {error && <div className="lit-pdf-state error">PDF 加载失败：{error}</div>}
           {!loading && !error && document && (
-            <div className="lit-pdf-tip">选中文字后可创建标注</div>
+            <div className="lit-pdf-tip">
+              选中文字即可标记 · 点击高亮可编辑或删除
+            </div>
           )}
           {document && baseSize
             ? Array.from({ length: numPages }, (_, index) => {
@@ -755,6 +1175,7 @@ export default function PdfReader({
                         hoveredAnnotationId={hoveredAnnotationId}
                         onMeasured={onMeasured}
                         onHighlightHover={setHoveredAnnotationId}
+                        onHighlightActivate={handleHighlightActivate}
                       />
                     )}
                   </div>
@@ -764,13 +1185,32 @@ export default function PdfReader({
         </div>
 
         {pendingAnnotation && (
-          <SelectionPopup
+          <QuickSelectionPopup
             pending={pendingAnnotation}
-            onConfirm={handleConfirmAnnotation}
+            onQuickHighlight={(color, style) => handleConfirmAnnotation(color, "note", "", style)}
+            onSaveNote={handleConfirmAnnotation}
+            onRunAi={onRunAi}
             onCancel={() => {
               setPendingAnnotation(null);
               window.getSelection()?.removeAllRanges();
             }}
+          />
+        )}
+
+        {activeHighlight && activeHighlightAnnotation && (
+          <HighlightPopover
+            annotation={activeHighlightAnnotation}
+            anchor={activeHighlight.anchor}
+            onEdit={() => {
+              setEditingAnnotationId(activeHighlight.id);
+              setEditorAnchor({ x: activeHighlight.anchor.x + 143, y: activeHighlight.anchor.bottom });
+              setActiveHighlight(null);
+            }}
+            onDelete={() => {
+              onDeleteAnnotation(activeHighlight.id);
+              setActiveHighlight(null);
+            }}
+            onClose={() => setActiveHighlight(null)}
           />
         )}
 
@@ -793,79 +1233,53 @@ export default function PdfReader({
                   className={`lit-pdf-annotation-card kind-${annotation.kind}${
                     effectiveHighlightId === annotation.id ? " focused" : ""
                   }`}
+                  role="button"
+                  tabIndex={0}
+                  onClick={(event) => {
+                    const rect = event.currentTarget.getBoundingClientRect();
+                    setEditingAnnotationId(annotation.id);
+                    setEditorAnchor({ x: rect.left, y: rect.top });
+                    scrollToPage(annotation.page);
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key !== "Enter" && event.key !== " ") return;
+                    event.preventDefault();
+                    const rect = event.currentTarget.getBoundingClientRect();
+                    setEditingAnnotationId(annotation.id);
+                    setEditorAnchor({ x: rect.left, y: rect.top });
+                    scrollToPage(annotation.page);
+                  }}
                 >
                   <div className="lit-pdf-annotation-card-header">
                     <span className="lit-pdf-annotation-kind-badge">
                       {KIND_LABELS[annotation.kind]}
                     </span>
                     <span className="lit-pdf-annotation-page-badge">第 {annotation.page} 页</span>
-                    <button
-                      type="button"
-                      className="lit-pdf-annotation-delete"
-                      aria-label="删除标注"
-                      onClick={() => onDeleteAnnotation(annotation.id)}
-                    >
-                      ×
-                    </button>
                   </div>
-                  <label className="lit-pdf-annotation-field">
-                    <span>原文</span>
-                    <textarea
-                      defaultValue={annotation.quote}
-                      rows={3}
-                      onBlur={(e) => onUpdateAnnotation(annotation.id, { quote: e.target.value })}
-                    />
-                  </label>
-                  <div className="lit-pdf-annotation-options">
-                    <label>
-                      <span>类型</span>
-                      <select
-                        aria-label="标注类型"
-                        value={annotation.kind}
-                        onChange={(e) =>
-                          onUpdateAnnotation(annotation.id, {
-                            kind: e.target.value as PdfAnnotationKind,
-                          })
-                        }
-                      >
-                        {(Object.keys(KIND_LABELS) as PdfAnnotationKind[]).map((k) => (
-                          <option key={k} value={k}>
-                            {KIND_LABELS[k]}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                    <label>
-                      <span>颜色</span>
-                      <select
-                        aria-label="标注颜色"
-                        value={annotation.color ?? "yellow"}
-                        onChange={(e) =>
-                          onUpdateAnnotation(annotation.id, {
-                            color: e.target.value as PdfAnnotationColor,
-                          })
-                        }
-                      >
-                        {COLOR_SWATCHES.map(({ key, label }) => (
-                          <option key={key} value={key}>
-                            {label}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                  </div>
-                  <label className="lit-pdf-annotation-field">
-                    <span>备注</span>
-                    <textarea
-                      defaultValue={annotation.note}
-                      aria-label={`备注：${annotation.quote.slice(0, 30)}`}
-                      onBlur={(e) => onUpdateAnnotation(annotation.id, { note: e.target.value })}
-                    />
-                  </label>
+                  <p className="lit-pdf-annotation-summary">{annotation.quote}</p>
+                  {annotation.note && (
+                    <p className="lit-pdf-annotation-note-preview">{annotation.note}</p>
+                  )}
                 </article>
               ))
             )}
           </aside>
+        )}
+        {editingAnnotation && editorAnchor && (
+          <AnnotationEditor
+            annotation={editingAnnotation}
+            anchor={editorAnchor}
+            onUpdate={(patch) => onUpdateAnnotation(editingAnnotation.id, patch)}
+            onDelete={() => {
+              onDeleteAnnotation(editingAnnotation.id);
+              setEditingAnnotationId(null);
+              setEditorAnchor(null);
+            }}
+            onClose={() => {
+              setEditingAnnotationId(null);
+              setEditorAnchor(null);
+            }}
+          />
         )}
       </div>
     </div>

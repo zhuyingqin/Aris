@@ -63,6 +63,17 @@ pub struct NoopStreamObserver;
 
 impl StreamObserver for NoopStreamObserver {}
 
+fn push_text_event(events: &mut Vec<AssistantEvent>, text: String) {
+    if text.is_empty() {
+        return;
+    }
+    if let Some(AssistantEvent::TextDelta(existing)) = events.last_mut() {
+        existing.push_str(&text);
+    } else {
+        events.push(AssistantEvent::TextDelta(text));
+    }
+}
+
 pub enum ExecutorClient {
     Anthropic(AnthropicRuntimeClient),
     OpenAI(OpenAIRuntimeClient),
@@ -160,21 +171,40 @@ impl ApiClient for AnthropicRuntimeClient {
         let client = &self.client;
         let observer = &mut self.observer;
         self.runtime.block_on(async {
+            // Tag a "model unavailable on this account" failure (404
+            // not_found_error from the initial POST) so the CLI can fall back
+            // from the default Opus 4.8 to 4.7.
             let mut stream = client
                 .stream_message(&message_request)
                 .await
-                .map_err(|error| RuntimeError::new(error.to_string()))?;
+                .map_err(|error| {
+                    if error.is_model_unavailable() {
+                        RuntimeError::model_unavailable(error.to_string())
+                    } else {
+                        RuntimeError::new(error.to_string())
+                    }
+                })?;
             let mut events = Vec::new();
             let mut pending_tool: Option<(String, String, String)> = None;
             let mut pending_thinking: Option<(String, String)> = None;
             let mut saw_stop = false;
+            let mut stop_reason: Option<String> = None;
             let mut start_usage: Option<api::Usage> = None;
 
-            while let Some(event) = stream
-                .next_event()
-                .await
-                .map_err(|error| RuntimeError::new(error.to_string()))?
-            {
+            loop {
+                let event = match stream.next_event().await {
+                    Ok(Some(event)) => event,
+                    Ok(None) => break,
+                    Err(_error)
+                        if !events.is_empty()
+                            || pending_tool.is_some()
+                            || pending_thinking.is_some() =>
+                    {
+                        stop_reason = Some("stream_error_after_partial_output".to_string());
+                        break;
+                    }
+                    Err(error) => return Err(RuntimeError::new(error.to_string())),
+                };
                 if runtime::is_interrupted() {
                     runtime::clear_interrupt();
                     return Err(RuntimeError::new("interrupted by user"));
@@ -209,7 +239,7 @@ impl ApiClient for AnthropicRuntimeClient {
                         ContentBlockDelta::TextDelta { text } => {
                             if !text.is_empty() {
                                 observer.on_text_delta(&text)?;
-                                events.push(AssistantEvent::TextDelta(text));
+                                push_text_event(&mut events, text);
                             }
                         }
                         ContentBlockDelta::InputJsonDelta { partial_json } => {
@@ -244,6 +274,11 @@ impl ApiClient for AnthropicRuntimeClient {
                         }
                     }
                     ApiStreamEvent::MessageDelta(delta) => {
+                        if let Some(reason) =
+                            delta.delta.stop_reason.filter(|value| !value.is_empty())
+                        {
+                            stop_reason = Some(reason);
+                        }
                         let start = start_usage.as_ref();
                         events.push(AssistantEvent::Usage(TokenUsage {
                             input_tokens: start
@@ -276,14 +311,24 @@ impl ApiClient for AnthropicRuntimeClient {
                 }
             }
 
-            if !saw_stop
-                && events.iter().any(|event| {
-                    matches!(event, AssistantEvent::TextDelta(text) if !text.is_empty())
-                        || matches!(event, AssistantEvent::ToolUse { .. })
-                })
-            {
+            let has_partial_output = events.iter().any(|event| {
+                matches!(event, AssistantEvent::TextDelta(text) if !text.is_empty())
+                    || matches!(event, AssistantEvent::ToolUse { .. })
+            }) || pending_tool.is_some()
+                || pending_thinking.is_some();
+            if !saw_stop && has_partial_output {
+                if stop_reason.is_none() {
+                    stop_reason = Some("stream_truncated".to_string());
+                }
                 observer.on_message_stop()?;
                 events.push(AssistantEvent::MessageStop);
+            }
+            if let Some(reason) = stop_reason {
+                let insert_at = events
+                    .iter()
+                    .position(|event| matches!(event, AssistantEvent::MessageStop))
+                    .unwrap_or(events.len());
+                events.insert(insert_at, AssistantEvent::StopReason(reason));
             }
 
             if events
@@ -315,7 +360,7 @@ fn push_output_block(
         OutputContentBlock::Text { text } => {
             if !text.is_empty() {
                 observer.on_text_delta(&text)?;
-                events.push(AssistantEvent::TextDelta(text));
+                push_text_event(events, text);
             }
         }
         OutputContentBlock::ToolUse { id, name, input } => {
@@ -352,7 +397,7 @@ fn response_to_events(
             OutputContentBlock::Text { text } => {
                 if !text.is_empty() {
                     observer.on_text_delta(&text)?;
-                    events.push(AssistantEvent::TextDelta(text));
+                    push_text_event(&mut events, text);
                 }
             }
             OutputContentBlock::ToolUse { id, name, input } => {
@@ -383,6 +428,9 @@ fn response_to_events(
         }
     }
     observer.on_message_stop()?;
+    if let Some(reason) = response.stop_reason.filter(|value| !value.is_empty()) {
+        events.push(AssistantEvent::StopReason(reason));
+    }
     events.push(AssistantEvent::MessageStop);
     Ok(events)
 }
@@ -442,9 +490,9 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use api::{InputContentBlock, MessageResponse, OutputContentBlock, Usage};
-    use runtime::{ContentBlock, ConversationMessage, RuntimeError};
+    use runtime::{AssistantEvent, ContentBlock, ConversationMessage, RuntimeError};
 
-    use super::{convert_messages, response_to_events, StreamObserver};
+    use super::{convert_messages, push_text_event, response_to_events, StreamObserver};
 
     struct RecordingObserver {
         deltas: Arc<Mutex<Vec<String>>>,
@@ -526,6 +574,20 @@ mod tests {
                 if source.kind == "base64"
                     && source.media_type == "image/png"
                     && source.data == "ZmFrZQ=="
+        ));
+    }
+
+    #[test]
+    fn coalesces_large_streams_into_one_text_event() {
+        let mut events = Vec::new();
+        for _ in 0..100_000 {
+            push_text_event(&mut events, "x".to_string());
+        }
+
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            &events[0],
+            AssistantEvent::TextDelta(text) if text.len() == 100_000
         ));
     }
 }

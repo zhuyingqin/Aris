@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
 import {
   chatDelete,
   chatCommandSpecs,
@@ -214,6 +214,14 @@ export default function Chat() {
     "Run the relevant tests and fix any failures.",
   ]);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [chatSidebarWidth, setChatSidebarWidth] = useState<number>(() => {
+    const v = Number(localStorage.getItem("aris-chat-sidebar-w"));
+    return v >= 150 && v <= 400 ? v : 218;
+  });
+  const [chatSidebarCollapsed, setChatSidebarCollapsed] = useState<boolean>(
+    () => localStorage.getItem("aris-chat-sidebar-collapsed") === "true",
+  );
+  const chatSidebarResizeRef = useRef<{ startX: number; startWidth: number } | null>(null);
   const [composerHeight, setComposerHeight] = useState(120);
   const [editingTurnId, setEditingTurnId] = useState<string | null>(null);
   const [deleted, setDeleted] = useState<ChatSession | null>(null);
@@ -641,8 +649,34 @@ export default function Chat() {
     setDeleted(null);
   };
 
+  const onChatSidebarResizeStart = (e: ReactPointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0 || chatSidebarCollapsed) return;
+    chatSidebarResizeRef.current = { startX: e.clientX, startWidth: chatSidebarWidth };
+    e.currentTarget.setPointerCapture(e.pointerId);
+  };
+  const onChatSidebarResizeMove = (e: ReactPointerEvent<HTMLDivElement>) => {
+    if (!chatSidebarResizeRef.current) return;
+    const w = Math.max(150, Math.min(400, chatSidebarResizeRef.current.startWidth + (e.clientX - chatSidebarResizeRef.current.startX)));
+    setChatSidebarWidth(w);
+  };
+  const onChatSidebarResizeEnd = (e: ReactPointerEvent<HTMLDivElement>) => {
+    if (!chatSidebarResizeRef.current) return;
+    const w = Math.max(150, Math.min(400, chatSidebarResizeRef.current.startWidth + (e.clientX - chatSidebarResizeRef.current.startX)));
+    chatSidebarResizeRef.current = null;
+    setChatSidebarWidth(w);
+    localStorage.setItem("aris-chat-sidebar-w", String(w));
+  };
+  const toggleChatSidebar = () => {
+    const next = !chatSidebarCollapsed;
+    setChatSidebarCollapsed(next);
+    localStorage.setItem("aris-chat-sidebar-collapsed", String(next));
+  };
+
   return (
-    <div className="chat-root">
+    <div
+      className={`chat-root${chatSidebarCollapsed ? " chat-sidebar-collapsed" : ""}`}
+      style={{ "--chat-sidebar-w": chatSidebarCollapsed ? "0px" : `${chatSidebarWidth}px` } as CSSProperties}
+    >
       <ChatSidebar
         sessions={allSessions}
         projects={projects}
@@ -650,6 +684,7 @@ export default function Chat() {
         open={sidebarOpen}
         busy={projectBusy}
         onClose={() => setSidebarOpen(false)}
+        onDesktopCollapse={toggleChatSidebar}
         onNew={() => {
           setEditingTurnId(null);
           setCurrentId(newSession());
@@ -672,9 +707,25 @@ export default function Chat() {
         onDelete={deleteSession}
         onReorderProjects={reorderProjects}
       />
+      <div
+        className="chat-sidebar-resize-handle"
+        onPointerDown={onChatSidebarResizeStart}
+        onPointerMove={onChatSidebarResizeMove}
+        onPointerUp={onChatSidebarResizeEnd}
+        onPointerCancel={onChatSidebarResizeEnd}
+      />
       <main className={`chat${turns.length === 0 ? " chat-empty" : ""}`}>
         <header className="chat-head">
-          <button className="chat-sidebar-toggle" onClick={() => setSidebarOpen((open) => !open)} aria-label="Toggle chat sidebar">☰</button>
+          <button
+            className="chat-sidebar-toggle"
+            onClick={() => {
+              if (chatSidebarCollapsed) toggleChatSidebar();
+              else setSidebarOpen((open) => !open);
+            }}
+            aria-label="Toggle chat sidebar"
+          >
+            ☰
+          </button>
           <div className="chat-thread-heading">
             <span className="chat-thread-title">{currentSession?.title ?? "New chat"}</span>
             {status?.ready

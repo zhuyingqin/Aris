@@ -48,7 +48,8 @@ use runtime::{
 use serde_json::json;
 use tools::{execute_tool, mvp_tool_specs};
 
-const DEFAULT_MODEL: &str = "claude-opus-4-7";
+const DEFAULT_MODEL: &str = "claude-opus-4-8";
+const DEFAULT_MODEL_FALLBACK: &str = "claude-opus-4-7";
 const DEFAULT_OAUTH_CALLBACK_PORT: u16 = 4545;
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const BUILD_TARGET: Option<&str> = option_env!("TARGET");
@@ -469,7 +470,7 @@ fn resolve_model_alias(model: &str) -> &str {
         return model;
     }
     match model {
-        "opus" => "claude-opus-4-7",
+        "opus" => "claude-opus-4-8",
         "sonnet" => "claude-sonnet-4-6",
         "haiku" => "claude-haiku-4-5-20251001",
         _ => model,
@@ -1230,6 +1231,10 @@ struct LiveCli {
     session: SessionHandle,
     /// Plan mode state: stores original permissions/tools before entering plan mode.
     plan_mode: Option<PlanModeState>,
+    /// Set once we've fallen back from DEFAULT_MODEL (Opus 4.8) to
+    /// DEFAULT_MODEL_FALLBACK (4.7) because 4.8 was unavailable. Latches the
+    /// fallback for the session and prevents a retry loop.
+    model_fell_back: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1297,6 +1302,7 @@ impl LiveCli {
             runtime,
             session,
             plan_mode: None,
+            model_fell_back: false,
         };
         cli.persist_session()?;
         Ok(cli)
@@ -1492,46 +1498,91 @@ impl LiveCli {
     }
 
     fn run_turn(&mut self, input: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let mut spinner = Spinner::new();
         let mut stdout = io::stdout();
-        spinner.tick(
-            "\x1b[38;5;74m●\x1b[0m \x1b[2mThinking...\x1b[0m",
-            TerminalRenderer::new().color_theme(),
-            &mut stdout,
-        )?;
-        // Clear the spinner row before streaming starts. The spinner and
-        // model output share the same terminal row; clearing at finish time
-        // erases short one-line answers.
-        execute!(stdout, MoveToColumn(0), Clear(ClearType::CurrentLine))?;
-        stdout.flush()?;
-        let mut permission_prompter = CliPermissionPrompter::new(self.permission_mode);
-        let result = self.runtime.run_turn(input, Some(&mut permission_prompter));
-        match result {
-            Ok(summary) => {
-                spinner.finish_after_stream(
-                    "\x1b[38;5;74m●\x1b[0m \x1b[2mDone\x1b[0m",
-                    TerminalRenderer::new().color_theme(),
-                    &mut stdout,
-                )?;
-                println!();
-                if let Some(event) = summary.auto_compaction {
-                    println!(
-                        "{}",
-                        format_auto_compaction_notice(event.removed_message_count)
-                    );
+        // Snapshot the session BEFORE the turn. ConversationRuntime::run_turn
+        // appends the user message before the API call, so a failed attempt
+        // leaves `input` in the session. If we fall back, we rebuild from THIS
+        // pre-turn snapshot so the retry appends `input` exactly once.
+        let pre_turn_session = self.runtime.session().clone();
+        loop {
+            let mut spinner = Spinner::new();
+            spinner.tick(
+                "\x1b[38;5;74m●\x1b[0m \x1b[2mThinking...\x1b[0m",
+                TerminalRenderer::new().color_theme(),
+                &mut stdout,
+            )?;
+            execute!(stdout, MoveToColumn(0), Clear(ClearType::CurrentLine))?;
+            stdout.flush()?;
+            let mut permission_prompter = CliPermissionPrompter::new(self.permission_mode);
+            let result = self.runtime.run_turn(input, Some(&mut permission_prompter));
+            match result {
+                Ok(summary) => {
+                    spinner.finish_after_stream(
+                        "\x1b[38;5;74m●\x1b[0m \x1b[2mDone\x1b[0m",
+                        TerminalRenderer::new().color_theme(),
+                        &mut stdout,
+                    )?;
+                    println!();
+                    if let Some(event) = summary.auto_compaction {
+                        println!(
+                            "{}",
+                            format_auto_compaction_notice(event.removed_message_count)
+                        );
+                    }
+                    self.persist_session()?;
+                    return Ok(());
                 }
-                self.persist_session()?;
-                Ok(())
-            }
-            Err(error) => {
-                spinner.fail(
-                    "\x1b[38;5;203m●\x1b[0m \x1b[1;31mRequest failed\x1b[0m",
-                    TerminalRenderer::new().color_theme(),
-                    &mut stdout,
-                )?;
-                Err(Box::new(error))
+                Err(error) => {
+                    // If the default Opus 4.8 is unavailable on this account,
+                    // fall back to 4.7 — rebuilding runtime and system prompt
+                    // so the model identity stays coherent — and retry once.
+                    if self.fall_back_default_model_if_needed(&error)? {
+                        spinner.finish(
+                            "\x1b[33m●\x1b[0m \x1b[2mretrying with the fallback model…\x1b[0m",
+                            TerminalRenderer::new().color_theme(),
+                            &mut stdout,
+                        )?;
+                        self.runtime = build_runtime(
+                            pre_turn_session.clone(),
+                            self.model.clone(),
+                            self.system_prompt.clone(),
+                            true,
+                            true,
+                            self.allowed_tools.clone(),
+                            self.permission_mode,
+                        )?;
+                        continue;
+                    }
+                    spinner.fail(
+                        "\x1b[38;5;203m●\x1b[0m \x1b[1;31mRequest failed\x1b[0m",
+                        TerminalRenderer::new().color_theme(),
+                        &mut stdout,
+                    )?;
+                    return Err(Box::new(error));
+                }
             }
         }
+    }
+
+    /// When `error` is "model unavailable on this account" and we're still on
+    /// DEFAULT_MODEL (Opus 4.8), switch to DEFAULT_MODEL_FALLBACK (4.7),
+    /// rebuild the system prompt, warn once, and return `true` so the caller
+    /// rebuilds its runtime and retries. Returns `false` otherwise.
+    fn fall_back_default_model_if_needed(
+        &mut self,
+        error: &RuntimeError,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
+        if !error.is_model_unavailable() || self.model != DEFAULT_MODEL || self.model_fell_back {
+            return Ok(false);
+        }
+        self.model_fell_back = true;
+        self.model = DEFAULT_MODEL_FALLBACK.to_string();
+        self.system_prompt = build_system_prompt(Some(&self.model))?;
+        eprintln!(
+            "\x1b[33mwarning:\x1b[0m {DEFAULT_MODEL} is not available on this account; \
+             falling back to {DEFAULT_MODEL_FALLBACK} for this session."
+        );
+        Ok(true)
     }
 
     fn run_turn_with_output(
@@ -1546,19 +1597,34 @@ impl LiveCli {
     }
 
     fn run_prompt_json(&mut self, input: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let session = self.runtime.session().clone();
-        let mut runtime = build_runtime(
-            session,
-            self.model.clone(),
-            self.system_prompt.clone(),
-            true,
-            false,
-            self.allowed_tools.clone(),
-            self.permission_mode,
-        )?;
-        let mut permission_prompter = CliPermissionPrompter::new(self.permission_mode);
-        let summary = runtime.run_turn(input, Some(&mut permission_prompter))?;
-        self.runtime = runtime;
+        // Same default-model fallback as the text path. On a "model unavailable"
+        // failure we switch to 4.7, rebuild from the new model + system prompt,
+        // and retry once.
+        let summary = loop {
+            let session = self.runtime.session().clone();
+            let mut runtime = build_runtime(
+                session,
+                self.model.clone(),
+                self.system_prompt.clone(),
+                true,
+                false,
+                self.allowed_tools.clone(),
+                self.permission_mode,
+            )?;
+            let mut permission_prompter = CliPermissionPrompter::new(self.permission_mode);
+            match runtime.run_turn(input, Some(&mut permission_prompter)) {
+                Ok(summary) => {
+                    self.runtime = runtime;
+                    break summary;
+                }
+                Err(error) => {
+                    if self.fall_back_default_model_if_needed(&error)? {
+                        continue;
+                    }
+                    return Err(Box::new(error));
+                }
+            }
+        };
         self.persist_session()?;
         println!(
             "{}",
@@ -1796,8 +1862,8 @@ impl LiveCli {
                     // Anthropic mode
                     vec![
                         (
-                            "claude-opus-4-7",
-                            "Opus 4.7 · Most capable for complex work",
+                            "claude-opus-4-8",
+                            "Opus 4.8 · Most capable for complex work",
                         ),
                         ("claude-sonnet-4-6", "Sonnet 4.6 · Best for everyday tasks"),
                         (
@@ -5468,7 +5534,7 @@ mod tests {
             parse_args(&args).expect("args should parse"),
             CliAction::Prompt {
                 prompt: "explain this".to_string(),
-                model: "claude-opus-4-7".to_string(),
+                model: "claude-opus-4-8".to_string(),
                 output_format: CliOutputFormat::Text,
                 allowed_tools: None,
                 permission_mode: PermissionMode::DangerFullAccess,
@@ -5478,7 +5544,7 @@ mod tests {
 
     #[test]
     fn resolves_known_model_aliases() {
-        assert_eq!(resolve_model_alias("opus"), "claude-opus-4-7");
+        assert_eq!(resolve_model_alias("opus"), "claude-opus-4-8");
         assert_eq!(resolve_model_alias("sonnet"), "claude-sonnet-4-6");
         assert_eq!(resolve_model_alias("haiku"), "claude-haiku-4-5-20251001");
         assert_eq!(resolve_model_alias("claude-opus"), "claude-opus");

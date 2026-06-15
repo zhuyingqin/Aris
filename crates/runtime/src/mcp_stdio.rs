@@ -626,6 +626,22 @@ impl McpServerManager {
                 });
             }
 
+            // Send the spec-mandated notifications/initialized notification
+            // so the server knows the client is ready to receive tool calls.
+            // Some servers (e.g. newer Codex) withhold tool routing until
+            // they see it. Errors are ignored — the server will fail on the
+            // next real request if it is down. (RW1 fix)
+            {
+                let server = self.server_mut(server_name)?;
+                if let Some(process) = server.process.as_mut() {
+                    let notification = serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "method": "notifications/initialized"
+                    });
+                    let _ = process.write_jsonrpc_message(&notification).await;
+                }
+            }
+
             let server = self.server_mut(server_name)?;
             server.initialized = true;
         }
@@ -896,15 +912,19 @@ impl McpStdioProcess {
                 let frame_id = value.as_object().and_then(|object| object.get("id"));
                 match frame_id {
                     None | Some(JsonValue::Null) => {
-                        // Notification — no id at all, or explicit
-                        // null. Log to stderr (best-effort) and keep
-                        // reading.
-                        let method = value
-                            .as_object()
-                            .and_then(|object| object.get("method"))
-                            .and_then(JsonValue::as_str)
-                            .unwrap_or("?");
-                        eprintln!("aris mcp: notification skipped: method={method}");
+                        // Notification — no id at all, or explicit null.
+                        // Servers like Codex emit dozens-to-hundreds of
+                        // notifications per call; logging every one floods
+                        // stderr. Only log when ARIS_MCP_STDERR is set
+                        // (BUG A fix: gate behind debug flag).
+                        if std::env::var_os("ARIS_MCP_STDERR").is_some() {
+                            let method = value
+                                .as_object()
+                                .and_then(|object| object.get("method"))
+                                .and_then(JsonValue::as_str)
+                                .unwrap_or("?");
+                            eprintln!("aris mcp: notification skipped: method={method}");
+                        }
                         continue;
                     }
                     Some(_) => {
@@ -1219,6 +1239,8 @@ mod tests {
             "    request = read_message()",
             "    if request is None:",
             "        break",
+            "    if 'id' not in request:",
+            "        continue  # notifications have no id — skip silently",
             "    method = request['method']",
             "    if method == 'initialize':",
             "        send_message({",
@@ -1352,6 +1374,8 @@ mod tests {
             "    request = read_message()",
             "    if request is None:",
             "        break",
+            "    if 'id' not in request:",
+            "        continue  # notifications have no id — skip silently",
             "    method = request['method']",
             "    log(method)",
             "    if method == 'initialize':",
@@ -2138,6 +2162,8 @@ mod tests {
             "    request = read_message()",
             "    if request is None:",
             "        break",
+            "    if 'id' not in request:",
+            "        continue  # notifications have no id — skip silently",
             "    method = request['method']",
             "    log(method)",
             "    if method == 'initialize':",

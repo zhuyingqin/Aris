@@ -162,6 +162,42 @@ pub fn max_tokens_for_model(model: &str) -> u32 {
     }
 }
 
+/// Token budget at which the conversation should start compacting, per model
+/// family. This must sit comfortably below the model's *guaranteed* usable
+/// context window, leaving headroom for the system prompt + tool schemas
+/// (which `estimate_session_tokens` does not count) and for output.
+///
+/// The previous flat ~100k starved large-window models: MiniMax and Gemini
+/// expose ~1M-token windows, so compacting at 100k discarded ~90% of usable
+/// context. Budgets are intentionally explicit per family (like
+/// `max_tokens_for_model`) so the safety margin is easy to reason about.
+#[must_use]
+pub fn context_compaction_threshold_for_model(model: &str) -> usize {
+    let m = model.to_ascii_lowercase();
+    if m.contains("minimax") || m.contains("gemini") {
+        // ~1M window → compact near the top, reserving ~150k for prompt+output.
+        850_000
+    } else if m.contains("gpt-5") || m.contains("gpt-4.1") {
+        // ~400k window.
+        340_000
+    } else if m.contains("kimi") || m.contains("moonshot") || m.contains("qwen") {
+        // ~256k window.
+        200_000
+    } else if m.contains("deepseek") {
+        // ~64k window — small, so the fixed prompt/output reserve bites harder.
+        40_000
+    } else if m.contains("claude") || m.contains("glm") {
+        // Claude Opus negotiates the 1M beta, but Sonnet / API-key paths are
+        // 200k; stay safe against that 200k floor. GLM is ~200k.
+        160_000
+    } else if m.contains("gpt") || m.contains("o1") || m.contains("o3") || m.contains("o4") {
+        // Older GPT / o-series ~128–200k.
+        160_000
+    } else {
+        100_000
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ChatToolSpec {
     pub name: String,
@@ -722,6 +758,7 @@ where
     T: ToolExecutor,
 {
     let executor_tool_specs = executor_tool_specs_for_tools(tool_specs);
+    let context_compaction_threshold = context_compaction_threshold_for_model(&model);
     let client = build_executor_client(
         executor_config,
         model,
@@ -736,6 +773,12 @@ where
         permission_policy,
         system_prompt,
         feature_config,
+    )
+    .with_context_compaction_estimated_tokens_threshold(context_compaction_threshold)
+    // Use the same model-derived budget for the real-token (API usage) signal
+    // so both triggers agree; clamp to u32 for the threshold field.
+    .with_auto_compaction_input_tokens_threshold(
+        u32::try_from(context_compaction_threshold).unwrap_or(u32::MAX),
     ))
 }
 
@@ -767,8 +810,8 @@ mod tests {
 
     use super::{
         attach_mcp_tools, chat_tool_specs, clear_mcp_discovery_cache,
-        merge_mcp_tool_search_results, model_developer, permission_policy_for_tools,
-        resolve_settings_executor_config, ChatExecutorConfig,
+        context_compaction_threshold_for_model, merge_mcp_tool_search_results, model_developer,
+        permission_policy_for_tools, resolve_settings_executor_config, ChatExecutorConfig,
     };
     use api::AuthSource;
     use runtime::{
@@ -776,6 +819,30 @@ mod tests {
         ScopedMcpServerConfig, StaticToolExecutor, ToolExecutor,
     };
     use serde_json::{json, Value};
+
+    #[test]
+    fn context_budget_scales_with_model_window() {
+        // Large-window models get large budgets — the whole point of the fix.
+        assert_eq!(
+            context_compaction_threshold_for_model("MiniMax-Text-01"),
+            850_000
+        );
+        assert_eq!(
+            context_compaction_threshold_for_model("gemini-2.5-pro"),
+            850_000
+        );
+        assert_eq!(context_compaction_threshold_for_model("gpt-5"), 340_000);
+        // Small-window models stay conservative.
+        assert_eq!(
+            context_compaction_threshold_for_model("deepseek-chat"),
+            40_000
+        );
+        // Claude stays safe against the 200k floor (Opus 1M beta notwithstanding).
+        assert_eq!(
+            context_compaction_threshold_for_model("claude-opus-4-8"),
+            160_000
+        );
+    }
 
     fn temp_dir() -> PathBuf {
         let nanos = SystemTime::now()

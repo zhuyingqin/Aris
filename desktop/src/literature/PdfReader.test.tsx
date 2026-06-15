@@ -11,56 +11,199 @@ vi.mock("../api/tauri", () => ({
 
 import PdfReader from "./PdfReader";
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+});
 
-describe("PdfReader annotations", () => {
-  it("renders toolbar and edits annotation quote, note, kind, and color via the sidebar", () => {
-    const annotation: PdfAnnotation = {
-      id: "annotation-1",
-      page: 1,
-      quote: "Original core",
-      note: "Original note",
-      kind: "note",
-      color: "purple",
-      rects: [{ left: 0.1, top: 0.2, width: 0.3, height: 0.1 }],
-      createdAt: "2026-06-13T00:00:00.000Z",
-    };
+const annotation: PdfAnnotation = {
+  id: "annotation-1",
+  page: 1,
+  quote: "Original core",
+  note: "Original note",
+  kind: "note",
+  color: "purple",
+  rects: [{ left: 0.1, top: 0.2, width: 0.3, height: 0.1 }],
+  createdAt: "2026-06-13T00:00:00.000Z",
+};
+
+const renderReader = (overrides: {
+  onAddAnnotation?: ReturnType<typeof vi.fn>;
+  onUpdateAnnotation?: ReturnType<typeof vi.fn>;
+  onDeleteAnnotation?: ReturnType<typeof vi.fn>;
+  onRunAi?: ReturnType<typeof vi.fn>;
+} = {}) => {
+  const handlers = {
+    onAddAnnotation: overrides.onAddAnnotation ?? vi.fn(),
+    onUpdateAnnotation: overrides.onUpdateAnnotation ?? vi.fn(),
+    onDeleteAnnotation: overrides.onDeleteAnnotation ?? vi.fn(),
+    onRunAi: overrides.onRunAi ?? vi.fn().mockResolvedValue(""),
+  };
+  const result = render(
+    <PdfReader
+      relativePath="papers/test.pdf"
+      annotations={[annotation]}
+      onOpenExternal={() => undefined}
+      {...handlers}
+    />,
+  );
+  return { ...result, ...handlers };
+};
+
+const mockTextSelection = () => {
+  const scroll = document.querySelector(".lit-pdf-scroll");
+  if (!(scroll instanceof HTMLElement)) throw new Error("PDF scroll container not found");
+
+  const page = document.createElement("div");
+  page.dataset.page = "2";
+  const span = document.createElement("span");
+  span.textContent = "Selected research text";
+  page.append(span);
+  scroll.append(page);
+
+  vi.spyOn(page, "getBoundingClientRect").mockReturnValue({
+    left: 100,
+    top: 100,
+    right: 500,
+    bottom: 700,
+    width: 400,
+    height: 600,
+    x: 100,
+    y: 100,
+    toJSON: () => ({}),
+  });
+
+  const removeAllRanges = vi.fn();
+  const range = {
+    commonAncestorContainer: span.firstChild,
+    getClientRects: () => [
+      {
+        left: 140,
+        top: 180,
+        right: 340,
+        bottom: 200,
+        width: 200,
+        height: 20,
+      },
+    ],
+    getBoundingClientRect: () => ({
+      left: 140,
+      top: 180,
+      right: 340,
+      bottom: 200,
+      width: 200,
+      height: 20,
+    }),
+  };
+  vi.spyOn(window, "getSelection").mockReturnValue({
+    isCollapsed: false,
+    rangeCount: 1,
+    getRangeAt: () => range,
+    toString: () => "Selected research text",
+    removeAllRanges,
+  } as unknown as Selection);
+
+  return { scroll, removeAllRanges };
+};
+
+describe("PdfReader annotation interactions", () => {
+  it("keeps the sidebar compact and edits an annotation in an on-demand popover", () => {
     const onUpdateAnnotation = vi.fn();
-    render(
-      <PdfReader
-        relativePath="papers/test.pdf"
-        annotations={[annotation]}
-        onOpenExternal={() => undefined}
-        onAddAnnotation={() => undefined}
-        onUpdateAnnotation={onUpdateAnnotation}
-        onDeleteAnnotation={() => undefined}
-      />,
-    );
+    const onDeleteAnnotation = vi.fn();
+    renderReader({ onUpdateAnnotation, onDeleteAnnotation });
 
-    // Toolbar should have zoom controls and sidebar toggle
-    expect(screen.getByRole("button", { name: "系统阅读器" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "适应宽度" })).toBeTruthy();
+    expect(screen.queryByText("Original core")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /标注/ }));
 
-    // Sidebar annotation editing still works
-    expect(screen.getByRole("combobox", { name: "标注颜色" })).toBeTruthy();
+    const summary = screen.getByText("Original core");
+    const item = summary.closest("article");
+    expect(item).toBeTruthy();
+    fireEvent.click(item!);
 
-    const core = screen.getByDisplayValue("Original core");
-    fireEvent.change(core, { target: { value: "Updated core" } });
-    fireEvent.blur(core);
-    expect(onUpdateAnnotation).toHaveBeenCalledWith("annotation-1", { quote: "Updated core" });
-
-    const note = screen.getByDisplayValue("Original note");
-    fireEvent.change(note, { target: { value: "Updated note" } });
-    fireEvent.blur(note);
-    expect(onUpdateAnnotation).toHaveBeenCalledWith("annotation-1", { note: "Updated note" });
-
+    expect(screen.getByRole("dialog", { name: "编辑标注" })).toBeTruthy();
     fireEvent.change(screen.getByRole("combobox", { name: "标注类型" }), {
       target: { value: "core" },
     });
-    fireEvent.change(screen.getByRole("combobox", { name: "标注颜色" }), {
-      target: { value: "green" },
-    });
+    fireEvent.click(screen.getByRole("button", { name: "设为黄色" }));
+
+    const note = screen.getByRole("textbox", { name: "标注备注" });
+    fireEvent.change(note, { target: { value: "Updated note" } });
+    fireEvent.blur(note);
+
     expect(onUpdateAnnotation).toHaveBeenCalledWith("annotation-1", { kind: "core" });
-    expect(onUpdateAnnotation).toHaveBeenCalledWith("annotation-1", { color: "green" });
+    expect(onUpdateAnnotation).toHaveBeenCalledWith("annotation-1", { color: "yellow" });
+    expect(onUpdateAnnotation).toHaveBeenCalledWith("annotation-1", { note: "Updated note" });
+
+    fireEvent.click(screen.getByRole("button", { name: "删除" }));
+    expect(onDeleteAnnotation).toHaveBeenCalledWith("annotation-1");
+  });
+
+  it("shows a compact selection toolbar and creates a highlight with one color click", () => {
+    const onAddAnnotation = vi.fn();
+    renderReader({ onAddAnnotation });
+    const { scroll } = mockTextSelection();
+
+    fireEvent.mouseUp(scroll);
+    expect(screen.getByRole("toolbar", { name: "选区操作" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "用黄色高亮" }));
+
+    expect(onAddAnnotation).toHaveBeenCalledWith(2, {
+      quote: "Selected research text",
+      rects: [{ left: 0.1, top: 0.13333333333333333, width: 0.5, height: 0.03333333333333333 }],
+      color: "yellow",
+      kind: "note",
+      note: "",
+      style: "highlight",
+    });
+  });
+
+  it("creates an underline mark when the underline style is selected before a color", () => {
+    const onAddAnnotation = vi.fn();
+    renderReader({ onAddAnnotation });
+    const { scroll } = mockTextSelection();
+
+    fireEvent.mouseUp(scroll);
+    fireEvent.click(screen.getByRole("button", { name: "下划线" }));
+    fireEvent.click(screen.getByRole("button", { name: "用绿色下划线" }));
+
+    expect(onAddAnnotation).toHaveBeenCalledWith(
+      2,
+      expect.objectContaining({ color: "green", style: "underline", kind: "note" }),
+    );
+  });
+
+  it("surfaces the marking toolbar on selection with no mode toggle to enable first", () => {
+    renderReader();
+    // The old "滑动标记" prerequisite is gone — selecting text is enough.
+    expect(screen.queryByRole("button", { name: "滑动标记" })).toBeNull();
+
+    const { scroll } = mockTextSelection();
+    fireEvent.mouseUp(scroll);
+
+    expect(screen.getByRole("toolbar", { name: "选区操作" })).toBeTruthy();
+  });
+
+  it("runs the translate AI action and saves the result as a highlight + note", async () => {
+    const onRunAi = vi.fn().mockResolvedValue("这是译文。");
+    const onAddAnnotation = vi.fn();
+    renderReader({ onRunAi, onAddAnnotation });
+    const { scroll } = mockTextSelection();
+
+    fireEvent.mouseUp(scroll);
+    fireEvent.click(screen.getByRole("button", { name: /翻译/ }));
+
+    expect(onRunAi).toHaveBeenCalledWith(expect.any(String), "Selected research text");
+    const result = await screen.findByText("这是译文。");
+    expect(result).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "保存到标注" }));
+    expect(onAddAnnotation).toHaveBeenCalledWith(
+      2,
+      expect.objectContaining({
+        color: "blue",
+        style: "highlight",
+        note: expect.stringContaining("这是译文。"),
+      }),
+    );
   });
 });

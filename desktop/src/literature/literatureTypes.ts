@@ -139,6 +139,8 @@ export interface EvidenceNote {
 
 export type PdfAnnotationKind = "core" | "evidence" | "answer-support" | "note";
 export type PdfAnnotationColor = "yellow" | "green" | "blue" | "red" | "purple";
+/** Visual treatment of a mark. Absent = "highlight" (back-compat with older records). */
+export type PdfAnnotationStyle = "highlight" | "underline" | "strikethrough";
 
 export interface PdfAnnotationRect {
   /** Normalized coordinates relative to the rendered PDF page. */
@@ -155,6 +157,7 @@ export interface PdfAnnotation {
   note: string;
   kind: PdfAnnotationKind;
   color?: PdfAnnotationColor;
+  style?: PdfAnnotationStyle;
   rects?: PdfAnnotationRect[];
   source?: EvidenceSource;
   imageFingerprint?: string;

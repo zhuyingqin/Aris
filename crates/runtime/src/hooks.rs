@@ -281,12 +281,78 @@ impl CommandWithStdin {
     }
 
     fn output_with_stdin(&mut self, stdin: &[u8]) -> std::io::Result<std::process::Output> {
+        use std::io::Read;
         let mut child = self.command.spawn()?;
+
+        // Write stdin then close it (EOF signal to the hook).
         if let Some(mut child_stdin) = child.stdin.take() {
             use std::io::Write;
-            child_stdin.write_all(stdin)?;
+            // Ignore write errors — the process may have exited already.
+            let _ = child_stdin.write_all(stdin);
         }
-        child.wait_with_output()
+
+        // Drain stdout/stderr in background threads so the hook process
+        // never blocks waiting for us to read its pipe (pipe-full deadlock).
+        let stdout_reader = child.stdout.take().map(|mut out| {
+            std::thread::spawn(move || {
+                let mut buf = Vec::new();
+                let _ = out.read_to_end(&mut buf);
+                buf
+            })
+        });
+        let stderr_reader = child.stderr.take().map(|mut err| {
+            std::thread::spawn(move || {
+                let mut buf = Vec::new();
+                let _ = err.read_to_end(&mut buf);
+                buf
+            })
+        });
+
+        // Wait for the child with a deadline. A hook that hangs forever would
+        // otherwise stall the entire agent. Default: 30 s. Override via
+        // ARIS_HOOK_TIMEOUT_SECS (0 = disable). (BUG C fix)
+        let timeout = hook_timeout();
+        let deadline = std::time::Instant::now() + timeout;
+        let status = loop {
+            match child.try_wait()? {
+                Some(status) => break status,
+                None if std::time::Instant::now() >= deadline => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        format!(
+                            "hook timed out after {}s (set ARIS_HOOK_TIMEOUT_SECS to override, 0 to disable)",
+                            timeout.as_secs()
+                        ),
+                    ));
+                }
+                None => std::thread::sleep(std::time::Duration::from_millis(50)),
+            }
+        };
+
+        let stdout = stdout_reader.and_then(|h| h.join().ok()).unwrap_or_default();
+        let stderr = stderr_reader.and_then(|h| h.join().ok()).unwrap_or_default();
+
+        Ok(std::process::Output { status, stdout, stderr })
+    }
+}
+
+fn hook_timeout() -> std::time::Duration {
+    const DEFAULT_SECS: u64 = 30;
+    const MIN_SECS: u64 = 1;
+    const MAX_SECS: u64 = 600;
+
+    let raw = std::env::var("ARIS_HOOK_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_SECS);
+
+    if raw == 0 {
+        // 0 = disabled; use an effectively infinite duration
+        std::time::Duration::from_secs(u64::MAX / 2)
+    } else {
+        std::time::Duration::from_secs(raw.clamp(MIN_SECS, MAX_SECS))
     }
 }
 

@@ -1164,7 +1164,7 @@ interface LiteratureState {
   updatePdfAnnotation: (
     paperId: string,
     annotationId: string,
-    patch: Partial<Pick<PdfAnnotation, "quote" | "note" | "kind" | "color">>,
+    patch: Partial<Pick<PdfAnnotation, "quote" | "note" | "kind" | "color" | "style">>,
   ) => void;
   deletePdfAnnotation: (paperId: string, annotationId: string) => void;
   downloadPdf: (id: string) => Promise<void>;

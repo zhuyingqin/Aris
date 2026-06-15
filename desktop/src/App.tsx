@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useStore, type Tab } from "./store";
 import Chat from "./chat/Chat";
@@ -119,6 +119,14 @@ export default function App() {
   const [theme, setTheme] = useState<"dark" | "light">(
     () => (localStorage.getItem("aris-theme") === "light" ? "light" : "dark"),
   );
+  const [sidebarWidth, setSidebarWidth] = useState<number>(() => {
+    const v = Number(localStorage.getItem("aris-sidebar-w"));
+    return v >= 140 && v <= 400 ? v : 192;
+  });
+  const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(
+    () => localStorage.getItem("aris-sidebar-collapsed") === "true",
+  );
+  const sidebarResizeDragRef = useRef<{ startX: number; startWidth: number } | null>(null);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [projectMenuOpen, setProjectMenuOpen] = useState(false);
   const [draggedProjectId, setDraggedProjectId] = useState<string | null>(null);
@@ -241,6 +249,29 @@ export default function App() {
     setProjectOrderPreview(null);
   };
 
+  const onSidebarResizeStart = (e: ReactPointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0) return;
+    sidebarResizeDragRef.current = { startX: e.clientX, startWidth: sidebarWidth };
+    e.currentTarget.setPointerCapture(e.pointerId);
+  };
+  const onSidebarResizeMove = (e: ReactPointerEvent<HTMLDivElement>) => {
+    if (!sidebarResizeDragRef.current) return;
+    const w = Math.max(140, Math.min(400, sidebarResizeDragRef.current.startWidth + (e.clientX - sidebarResizeDragRef.current.startX)));
+    setSidebarWidth(w);
+  };
+  const onSidebarResizeEnd = (e: ReactPointerEvent<HTMLDivElement>) => {
+    if (!sidebarResizeDragRef.current) return;
+    const w = Math.max(140, Math.min(400, sidebarResizeDragRef.current.startWidth + (e.clientX - sidebarResizeDragRef.current.startX)));
+    sidebarResizeDragRef.current = null;
+    setSidebarWidth(w);
+    localStorage.setItem("aris-sidebar-w", String(w));
+  };
+  const toggleSidebar = () => {
+    const next = !sidebarCollapsed;
+    setSidebarCollapsed(next);
+    localStorage.setItem("aris-sidebar-collapsed", String(next));
+  };
+
   useEffect(() => init(), [init]);
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -281,14 +312,25 @@ export default function App() {
     .filter((project): project is NonNullable<typeof project> => Boolean(project));
 
   return (
-    <div className="app">
-      <aside className={`sidebar${mobileNavOpen ? " mobile-open" : ""}`}>
+    <div
+      className={`app${sidebarCollapsed ? " sidebar-collapsed" : ""}`}
+      style={{ "--app-sidebar-w": sidebarCollapsed ? "0px" : `${sidebarWidth}px` } as CSSProperties}
+    >
+      <aside className={`sidebar${mobileNavOpen ? " mobile-open" : ""}${sidebarCollapsed ? " sidebar-collapsed" : ""}`}>
         <div className="brand">
           <img className="brand-mark" src={arisIcon} alt="" />
           <span className="brand-text">
             ARIS
             <small>Chat</small>
           </span>
+          <button
+            className="sidebar-collapse-btn"
+            onClick={toggleSidebar}
+            title="Collapse sidebar"
+            aria-label="Collapse navigation sidebar"
+          >
+            ‹
+          </button>
         </div>
         {NAV_GROUPS.map((g) => (
           <div className="nav-group" key={g.group}>
@@ -308,6 +350,13 @@ export default function App() {
             ))}
           </div>
         ))}
+        <div
+          className="sidebar-resize-handle"
+          onPointerDown={onSidebarResizeStart}
+          onPointerMove={onSidebarResizeMove}
+          onPointerUp={onSidebarResizeEnd}
+          onPointerCancel={onSidebarResizeEnd}
+        />
       </aside>
       {mobileNavOpen && (
         <button
@@ -327,6 +376,16 @@ export default function App() {
           >
             Menu
           </button>
+          {sidebarCollapsed && (
+            <button
+              className="sidebar-expand-btn"
+              onClick={toggleSidebar}
+              title="Expand sidebar"
+              aria-label="Expand navigation sidebar"
+            >
+              ›
+            </button>
+          )}
           <div className="app-title">{LABELS[tab]}</div>
         </div>
         <div className="app-head-actions">

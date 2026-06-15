@@ -2343,7 +2343,11 @@ pub fn render_skill_discovery_section() -> Option<String> {
     Some(lines.join("\n"))
 }
 
-const DEFAULT_AGENT_MODEL: &str = "claude-opus-4-7";
+const DEFAULT_AGENT_MODEL: &str = "claude-opus-4-8";
+/// Subagent fallback when DEFAULT_AGENT_MODEL is unavailable on the account
+/// (404 not_found). Mirrors the main session's DEFAULT_MODEL_FALLBACK so a
+/// user without Opus 4.8 access doesn't hit hard subagent failures.
+const DEFAULT_AGENT_MODEL_FALLBACK: &str = "claude-opus-4-7";
 const DEFAULT_AGENT_MAX_ITERATIONS: usize = 32;
 
 /// Subagent system date — use the same dynamic today as the main runtime
@@ -2844,6 +2848,9 @@ struct AnthropicRuntimeClient {
     client: AnthropicClient,
     model: String,
     allowed_tools: BTreeSet<String>,
+    /// Latches the subagent's Opus 4.8 → 4.7 fallback so it warns once and
+    /// never re-probes on subsequent turns.
+    model_fell_back: bool,
 }
 
 impl AnthropicRuntimeClient {
@@ -2856,6 +2863,7 @@ impl AnthropicRuntimeClient {
             client,
             model,
             allowed_tools,
+            model_fell_back: false,
         })
     }
 }
@@ -2870,7 +2878,7 @@ impl ApiClient for AnthropicRuntimeClient {
                 input_schema: spec.input_schema,
             })
             .collect::<Vec<_>>();
-        let message_request = MessageRequest {
+        let mut message_request = MessageRequest {
             model: self.model.clone(),
             max_tokens: 32_000,
             messages: convert_messages(&request.messages),
@@ -2885,20 +2893,45 @@ impl ApiClient for AnthropicRuntimeClient {
         };
 
         self.runtime.block_on(async {
-            let mut stream = self
-                .client
-                .stream_message(&message_request)
-                .await
-                .map_err(|error| RuntimeError::new(error.to_string()))?;
+            // Subagent default-model fallback: if DEFAULT_AGENT_MODEL (Opus
+            // 4.8) is unavailable (404 not_found), fall back to 4.7 and retry
+            // once so background Agent tasks don't hard-fail for non-4.8 users.
+            let mut stream = match self.client.stream_message(&message_request).await {
+                Ok(stream) => stream,
+                Err(error)
+                    if error.is_model_unavailable()
+                        && message_request.model == DEFAULT_AGENT_MODEL
+                        && !self.model_fell_back =>
+                {
+                    self.model_fell_back = true;
+                    self.model = DEFAULT_AGENT_MODEL_FALLBACK.to_string();
+                    message_request.model = DEFAULT_AGENT_MODEL_FALLBACK.to_string();
+                    eprintln!(
+                        "\x1b[33mwarning:\x1b[0m {DEFAULT_AGENT_MODEL} is not available on this \
+                         account; subagent falling back to {DEFAULT_AGENT_MODEL_FALLBACK}."
+                    );
+                    self.client
+                        .stream_message(&message_request)
+                        .await
+                        .map_err(|error| RuntimeError::new(error.to_string()))?
+                }
+                Err(error) => return Err(RuntimeError::new(error.to_string())),
+            };
             let mut events = Vec::new();
             let mut pending_tool: Option<(String, String, String)> = None;
             let mut saw_stop = false;
+            let mut stop_reason: Option<String> = None;
 
-            while let Some(event) = stream
-                .next_event()
-                .await
-                .map_err(|error| RuntimeError::new(error.to_string()))?
-            {
+            loop {
+                let event = match stream.next_event().await {
+                    Ok(Some(event)) => event,
+                    Ok(None) => break,
+                    Err(_error) if !events.is_empty() || pending_tool.is_some() => {
+                        stop_reason = Some("stream_error_after_partial_output".to_string());
+                        break;
+                    }
+                    Err(error) => return Err(RuntimeError::new(error.to_string())),
+                };
                 match event {
                     ApiStreamEvent::MessageStart(start) => {
                         for block in start.message.content {
@@ -2916,7 +2949,7 @@ impl ApiClient for AnthropicRuntimeClient {
                     ApiStreamEvent::ContentBlockDelta(delta) => match delta.delta {
                         ContentBlockDelta::TextDelta { text } => {
                             if !text.is_empty() {
-                                events.push(AssistantEvent::TextDelta(text));
+                                push_subagent_text_event(&mut events, text);
                             }
                         }
                         ContentBlockDelta::InputJsonDelta { partial_json } => {
@@ -2933,6 +2966,11 @@ impl ApiClient for AnthropicRuntimeClient {
                         }
                     }
                     ApiStreamEvent::MessageDelta(delta) => {
+                        if let Some(reason) =
+                            delta.delta.stop_reason.filter(|value| !value.is_empty())
+                        {
+                            stop_reason = Some(reason);
+                        }
                         events.push(AssistantEvent::Usage(TokenUsage {
                             input_tokens: delta.usage.input_tokens,
                             output_tokens: delta.usage.output_tokens,
@@ -2956,13 +2994,22 @@ impl ApiClient for AnthropicRuntimeClient {
                 }
             }
 
-            if !saw_stop
-                && events.iter().any(|event| {
-                    matches!(event, AssistantEvent::TextDelta(text) if !text.is_empty())
-                        || matches!(event, AssistantEvent::ToolUse { .. })
-                })
-            {
+            let has_partial_output = events.iter().any(|event| {
+                matches!(event, AssistantEvent::TextDelta(text) if !text.is_empty())
+                    || matches!(event, AssistantEvent::ToolUse { .. })
+            }) || pending_tool.is_some();
+            if !saw_stop && has_partial_output {
+                if stop_reason.is_none() {
+                    stop_reason = Some("stream_truncated".to_string());
+                }
                 events.push(AssistantEvent::MessageStop);
+            }
+            if let Some(reason) = stop_reason {
+                let insert_at = events
+                    .iter()
+                    .position(|event| matches!(event, AssistantEvent::MessageStop))
+                    .unwrap_or(events.len());
+                events.insert(insert_at, AssistantEvent::StopReason(reason));
             }
 
             if events
@@ -3075,7 +3122,7 @@ fn push_output_block(
     match block {
         OutputContentBlock::Text { text } => {
             if !text.is_empty() {
-                events.push(AssistantEvent::TextDelta(text));
+                push_subagent_text_event(events, text);
             }
         }
         OutputContentBlock::ToolUse { id, name, input } => {
@@ -3101,6 +3148,14 @@ fn push_output_block(
     }
 }
 
+fn push_subagent_text_event(events: &mut Vec<AssistantEvent>, text: String) {
+    if let Some(AssistantEvent::TextDelta(existing)) = events.last_mut() {
+        existing.push_str(&text);
+    } else if !text.is_empty() {
+        events.push(AssistantEvent::TextDelta(text));
+    }
+}
+
 fn response_to_events(response: MessageResponse) -> Vec<AssistantEvent> {
     let mut events = Vec::new();
     let mut pending_tool = None;
@@ -3118,6 +3173,9 @@ fn response_to_events(response: MessageResponse) -> Vec<AssistantEvent> {
         cache_creation_input_tokens: response.usage.cache_creation_input_tokens,
         cache_read_input_tokens: response.usage.cache_read_input_tokens,
     }));
+    if let Some(reason) = response.stop_reason.filter(|value| !value.is_empty()) {
+        events.push(AssistantEvent::StopReason(reason));
+    }
     events.push(AssistantEvent::MessageStop);
     events
 }

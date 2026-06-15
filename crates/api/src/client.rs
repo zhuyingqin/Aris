@@ -783,6 +783,23 @@ fn event_is_meaningful_content(event: &StreamEvent) -> bool {
     }
 }
 
+/// CL2 — a stream is "terminal" when either:
+///   - a `MessageStop` event arrives (normal Anthropic), or
+///   - a `MessageDelta` carries a non-empty `stop_reason` (some
+///     Anthropic-compat proxies send stop_reason on MessageDelta and then
+///     close the connection without emitting MessageStop; without this
+///     check their clean EOF looks like a premature abort and triggers an
+///     unnecessary retry).
+fn event_signals_terminal(event: &StreamEvent) -> bool {
+    match event {
+        StreamEvent::MessageStop(_) => true,
+        StreamEvent::MessageDelta(e) => {
+            e.delta.stop_reason.as_deref().is_some_and(|s| !s.is_empty())
+        }
+        _ => false,
+    }
+}
+
 /// v0.4.13 codex round-1 #3 — extracted retry-trigger truth table so it
 /// can be unit-tested in isolation without mocking a `reqwest::Response`.
 ///
@@ -838,7 +855,12 @@ impl MessageStream {
                     });
                 }
                 // Track terminal signal + meaningful-content flag + counter.
-                if matches!(event, StreamEvent::MessageStop(_)) {
+                // CL2: MessageStop OR a MessageDelta with non-empty stop_reason
+                // both mark the stream as terminal. Anthropic-compat proxies
+                // sometimes send stop_reason on a MessageDelta without a
+                // following MessageStop; without this, clean EOF is misclassified
+                // as premature and triggers an unnecessary retry.
+                if event_signals_terminal(&event) {
                     self.observed_terminal = true;
                 }
                 if event_is_meaningful_content(&event) {
@@ -880,7 +902,7 @@ impl MessageStream {
                 let remaining = finish_result?;
                 self.pending.extend(remaining);
                 if let Some(event) = self.pending.pop_front() {
-                    if matches!(event, StreamEvent::MessageStop(_)) {
+                    if event_signals_terminal(&event) {
                         self.observed_terminal = true;
                     }
                     if event_is_meaningful_content(&event) {

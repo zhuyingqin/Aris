@@ -1770,7 +1770,7 @@
 
 .lit-pdf-reader-body {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 300px;
+  grid-template-columns: minmax(0, 1fr) 248px;
   flex: 1;
   min-height: 0;
 }
@@ -1886,6 +1886,19 @@
   transform-origin: 0% 0%;
 }
 
+/* pdf.js v5 sizes each span from its --font-height scaled by --total-scale-factor,
+   and may stretch / rotate via --scale-x / --rotate. Without these rules the
+   spans collapse and no text is selectable. */
+.lit-pdf-text-layer span {
+  font-size: calc(var(--font-height, 1px) * var(--total-scale-factor, 1));
+  transform: rotate(var(--rotate, 0deg)) scaleX(var(--scale-x, 1));
+}
+
+.lit-pdf-text-layer span.markedContent {
+  top: 0;
+  height: 0;
+}
+
 .lit-pdf-text-layer ::selection {
   background: rgba(0, 100, 255, 0.25);
   color: transparent;
@@ -1901,15 +1914,19 @@
 /* ── Selection popup — floating annotation creation ─────────────────────────── */
 
 .lit-pdf-select-popup {
-  width: 272px;
+  width: 244px;
   background: var(--bg-1);
   border: 1px solid var(--border);
   border-radius: 10px;
   box-shadow: 0 8px 32px rgb(0 0 0 / 22%), 0 2px 8px rgb(0 0 0 / 12%);
-  padding: 12px;
+  padding: 7px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
+}
+
+.lit-pdf-select-popup.expanded {
+  width: 280px;
 }
 
 .lit-pdf-select-popup-quote {
@@ -1927,6 +1944,31 @@
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.lit-pdf-select-popup-note-toggle {
+  margin-left: auto;
+  padding: 3px 7px;
+  white-space: nowrap;
+  font-size: 11px;
+}
+
+.lit-pdf-popup-close {
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 16px;
+  line-height: 1;
+}
+
+.lit-pdf-select-popup-details {
+  display: grid;
+  gap: 8px;
+  padding-top: 7px;
+  border-top: 1px solid var(--border);
 }
 
 .lit-pdf-select-popup-colors {
@@ -1995,6 +2037,11 @@
   border-color: transparent;
 }
 
+.lit-pdf-select-popup-details .lit-pdf-select-popup-save {
+  justify-self: end;
+  padding: 5px 12px;
+}
+
 /* Arrow pointing down toward the selection */
 .lit-pdf-select-popup-arrow {
   position: absolute;
@@ -2007,6 +2054,201 @@
   border-right: 1px solid var(--border);
   border-bottom: 1px solid var(--border);
   rotate: 45deg;
+}
+
+.lit-pdf-select-popup-arrow.below {
+  top: -7px;
+  bottom: auto;
+  border: 0;
+  border-top: 1px solid var(--border);
+  border-left: 1px solid var(--border);
+}
+
+/* ── Selection AI actions (translate, …) ────────────────────────────────────── */
+
+.lit-pdf-select-popup-ai-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding-top: 7px;
+  border-top: 1px solid var(--border);
+}
+
+.lit-pdf-ai-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.lit-pdf-ai-btn:hover {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  color: var(--accent);
+}
+
+.lit-pdf-ai-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.lit-pdf-ai-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.lit-pdf-ai-back {
+  border: 0;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 12px;
+  padding: 2px 4px;
+  cursor: pointer;
+}
+
+.lit-pdf-ai-back:hover {
+  color: var(--text);
+  background: transparent;
+  border-color: transparent;
+}
+
+.lit-pdf-ai-title {
+  flex: 1;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.lit-pdf-ai-body {
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.lit-pdf-ai-loading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-dim);
+  font-size: 12px;
+  padding: 6px 0;
+}
+
+.lit-pdf-ai-error {
+  color: var(--red);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.lit-pdf-ai-result {
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+
+.lit-pdf-ai-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 7px;
+  padding-top: 7px;
+  border-top: 1px solid var(--border);
+}
+
+.lit-pdf-ai-actions button {
+  font-size: 12px;
+  padding: 4px 12px;
+}
+
+.lit-pdf-annotation-note-preview {
+  display: -webkit-box;
+  margin: 4px 0 0;
+  overflow: hidden;
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+/* ── Highlight popover — quick edit / delete on an existing highlight ────────── */
+
+.lit-pdf-highlight-popover {
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 8px 32px rgb(0 0 0 / 22%), 0 2px 8px rgb(0 0 0 / 12%);
+  padding: 9px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.lit-pdf-highlight-popover-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.lit-pdf-highlight-popover-page {
+  flex: 1;
+  font-size: 10px;
+  color: var(--text-dim);
+  font-family: ui-monospace, "Cascadia Code", monospace;
+}
+
+.lit-pdf-highlight-popover-quote {
+  margin: 0;
+  padding-left: 8px;
+  border-left: 3px solid var(--border);
+  color: var(--text);
+  font-size: 11px;
+  line-height: 1.5;
+  max-height: 60px;
+  overflow: hidden;
+}
+
+.lit-pdf-highlight-popover-note {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text);
+  line-height: 1.5;
+}
+
+.lit-pdf-highlight-popover-note.empty {
+  color: var(--text-dim);
+  font-style: italic;
+}
+
+.lit-pdf-highlight-popover-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 7px;
+  margin-top: 1px;
+}
+
+.lit-pdf-highlight-popover-actions button {
+  font-size: 12px;
+  padding: 4px 12px;
+}
+
+.lit-pdf-highlight-popover-actions .danger {
+  margin-right: auto;
+  color: var(--red);
+  border-color: color-mix(in srgb, var(--red) 30%, var(--border));
+}
+
+.lit-pdf-highlight-popover-actions .danger:hover {
+  background: color-mix(in srgb, var(--red) 12%, transparent);
+  border-color: color-mix(in srgb, var(--red) 50%, var(--border));
 }
 
 /* ── Annotation sidebar improvements ────────────────────────────────────────── */
@@ -2074,52 +2316,122 @@
   touch-action: none;
 }
 
+/* Color hue lives in --hl-fill / --hl-line so highlight, underline and
+   strikethrough styles can all draw from the same per-color palette. */
 .lit-pdf-highlight {
+  --hl-fill: rgb(255 213 79 / 36%);
+  --hl-line: rgb(255 180 0 / 72%);
   position: absolute;
   border-radius: 2px;
-  background: rgb(255 213 79 / 36%);
-  box-shadow: inset 0 -2px rgb(255 180 0 / 65%);
+  background: var(--hl-fill);
+  box-shadow: inset 0 -2px var(--hl-line);
   mix-blend-mode: multiply;
 }
 
 .lit-pdf-highlight.kind-evidence {
-  background: rgb(77 208 225 / 30%);
-  box-shadow: inset 0 -2px rgb(0 172 193 / 60%);
+  --hl-fill: rgb(77 208 225 / 30%);
+  --hl-line: rgb(0 172 193 / 70%);
 }
 
 .lit-pdf-highlight.kind-answer-support {
-  background: rgb(129 199 132 / 32%);
-  box-shadow: inset 0 -2px rgb(56 142 60 / 65%);
+  --hl-fill: rgb(129 199 132 / 32%);
+  --hl-line: rgb(56 142 60 / 72%);
+}
+
+.lit-pdf-highlight.color-green {
+  --hl-fill: rgb(129 199 132 / 36%);
+  --hl-line: rgb(56 142 60 / 72%);
+}
+
+.lit-pdf-highlight.color-blue {
+  --hl-fill: rgb(79 195 247 / 34%);
+  --hl-line: rgb(2 136 209 / 72%);
+}
+
+.lit-pdf-highlight.color-red {
+  --hl-fill: rgb(239 83 80 / 30%);
+  --hl-line: rgb(198 40 40 / 72%);
+}
+
+.lit-pdf-highlight.color-purple {
+  --hl-fill: rgb(186 104 200 / 32%);
+  --hl-line: rgb(123 31 162 / 72%);
+}
+
+/* Underline — no fill, a colored rule along the baseline */
+.lit-pdf-highlight.style-underline {
+  background: transparent;
+  box-shadow: none;
+  border-bottom: 2px solid var(--hl-line);
+}
+
+/* Strikethrough — no fill, a colored rule through the middle */
+.lit-pdf-highlight.style-strikethrough {
+  background: linear-gradient(
+    transparent calc(50% - 1px),
+    var(--hl-line) calc(50% - 1px),
+    var(--hl-line) calc(50% + 1px),
+    transparent calc(50% + 1px)
+  );
+  box-shadow: none;
 }
 
 .lit-pdf-highlight.focused {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
-  background: rgb(255 235 59 / 55%);
-}
-
-.lit-pdf-highlight.color-green {
-  background: rgb(129 199 132 / 36%);
-  box-shadow: inset 0 -2px rgb(56 142 60 / 65%);
-}
-
-.lit-pdf-highlight.color-blue {
-  background: rgb(79 195 247 / 34%);
-  box-shadow: inset 0 -2px rgb(2 136 209 / 65%);
-}
-
-.lit-pdf-highlight.color-red {
-  background: rgb(239 83 80 / 30%);
-  box-shadow: inset 0 -2px rgb(198 40 40 / 65%);
-}
-
-.lit-pdf-highlight.color-purple {
-  background: rgb(186 104 200 / 32%);
-  box-shadow: inset 0 -2px rgb(123 31 162 / 65%);
 }
 
 .lit-pdf-highlight.draft {
   outline: 1px dashed rgb(0 0 0 / 55%);
+}
+
+/* ── Marking-style segmented control (highlight / underline / strikethrough) ── */
+
+.lit-pdf-style-seg {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+  padding-right: 7px;
+  border-right: 1px solid var(--border);
+}
+
+.lit-pdf-style-btn {
+  width: 24px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.lit-pdf-style-btn:hover {
+  background-color: var(--bg-2);
+}
+
+.lit-pdf-style-btn.active {
+  border-color: var(--accent);
+  background-color: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.lit-pdf-style-btn.style-highlight {
+  background-image: linear-gradient(transparent 58%, rgb(255 213 79 / 80%) 58%);
+}
+
+.lit-pdf-style-btn.style-underline {
+  text-decoration: underline;
+  text-decoration-thickness: 2px;
+  text-underline-offset: 2px;
+}
+
+.lit-pdf-style-btn.style-strikethrough {
+  text-decoration: line-through;
+  text-decoration-thickness: 2px;
 }
 
 .lit-pdf-color-control,
@@ -2139,7 +2451,7 @@
   overflow: auto;
   border-left: 1px solid var(--border);
   background: var(--bg-1);
-  padding: 10px;
+  padding: 8px;
 }
 
 .lit-pdf-annotations-head {
@@ -2156,12 +2468,19 @@
 }
 
 .lit-pdf-annotation-card {
-  margin-bottom: 9px;
+  margin-bottom: 6px;
   border: 1px solid var(--border);
   border-left: 3px solid var(--amber);
   border-radius: 7px;
   background: var(--bg);
-  padding: 8px;
+  padding: 7px 8px;
+  cursor: pointer;
+  transition: border-color 0.12s, background 0.12s;
+}
+
+.lit-pdf-annotation-card:hover {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  background: color-mix(in srgb, var(--accent) 5%, var(--bg));
 }
 
 .lit-pdf-annotation-card.kind-evidence {
@@ -2192,6 +2511,23 @@
   color: var(--text);
   font-size: 11px;
   line-height: 1.45;
+}
+
+.lit-pdf-annotation-summary {
+  display: -webkit-box;
+  margin: 5px 0 0;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 11px;
+  line-height: 1.45;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+.lit-pdf-annotation-card .lit-pdf-annotation-field,
+.lit-pdf-annotation-card .lit-pdf-annotation-options,
+.lit-pdf-annotation-card .lit-pdf-annotation-delete {
+  display: none;
 }
 
 .lit-pdf-annotation-card textarea {
@@ -2230,6 +2566,72 @@
 .lit-pdf-annotation-options select {
   width: 100%;
   font-size: 11px;
+}
+
+.lit-pdf-annotation-editor {
+  width: 286px;
+  display: grid;
+  gap: 9px;
+  padding: 11px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-1);
+  box-shadow: 0 12px 36px rgb(0 0 0 / 28%), 0 2px 8px rgb(0 0 0 / 14%);
+}
+
+.lit-pdf-annotation-editor-head,
+.lit-pdf-annotation-editor-actions,
+.lit-pdf-annotation-editor-colors {
+  display: flex;
+  align-items: center;
+}
+
+.lit-pdf-annotation-editor-head {
+  justify-content: space-between;
+  color: var(--text-dim);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.lit-pdf-annotation-editor blockquote {
+  max-height: 74px;
+  margin: 0;
+  overflow: auto;
+  padding-left: 8px;
+  border-left: 3px solid var(--border);
+  color: var(--text);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.lit-pdf-annotation-editor-colors {
+  gap: 7px;
+}
+
+.lit-pdf-annotation-editor select,
+.lit-pdf-annotation-editor textarea {
+  width: 100%;
+  font-size: 11px;
+}
+
+.lit-pdf-annotation-editor textarea {
+  min-height: 68px;
+  resize: vertical;
+}
+
+.lit-pdf-annotation-editor-actions {
+  justify-content: flex-end;
+  gap: 7px;
+}
+
+.lit-pdf-annotation-editor-actions button {
+  padding: 4px 9px;
+  font-size: 11px;
+}
+
+.lit-pdf-annotation-editor-actions .danger {
+  margin-right: auto;
+  color: var(--red);
 }
 
 .lit-pdf-state {

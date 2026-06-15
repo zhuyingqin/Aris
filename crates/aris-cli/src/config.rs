@@ -431,7 +431,7 @@ pub fn run_interactive_setup() -> io::Result<ArisConfig> {
             "ANTHROPIC_API_KEY",
             "Anthropic API key",
             None,
-            "claude-opus-4-7",
+            "claude-opus-4-8",
         ),
     };
 

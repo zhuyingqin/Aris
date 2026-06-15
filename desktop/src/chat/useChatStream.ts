@@ -54,7 +54,9 @@ export function useChatStream({ patchAssistant, onComplete, onError }: StreamHan
     event: { kind: "text" | "thinking"; delta: string },
   ) => {
     const queue = queues.current.get(sessionId) ?? [];
-    queue.push(event);
+    const last = queue[queue.length - 1];
+    if (last?.kind === event.kind) last.delta += event.delta;
+    else queue.push(event);
     queues.current.set(sessionId, queue);
     scheduleFlush(sessionId);
   }, [scheduleFlush]);
@@ -93,6 +95,7 @@ export function useChatStream({ patchAssistant, onComplete, onError }: StreamHan
       unlisteners.forEach((promise) => promise.then((unlisten) => unlisten()).catch(() => undefined));
       flushTimers.current.forEach((timer) => window.clearTimeout(timer));
       flushTimers.current.clear();
+      queues.current.clear();
     };
   }, [enqueue, flush, patchAssistant]);
 
