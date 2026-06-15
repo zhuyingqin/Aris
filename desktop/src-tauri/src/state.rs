@@ -1,4 +1,4 @@
-use std::{io, path::PathBuf};
+use std::{env, io, path::PathBuf};
 
 const DESKTOP_ALLOWED_AGENT_TOOLS: &[&str] = &[
     "read_file",
@@ -8,7 +8,12 @@ const DESKTOP_ALLOWED_AGENT_TOOLS: &[&str] = &[
     "grep_search",
     "WebFetch",
     "WebSearch",
+    "LiteratureSearch",
+    "LiteratureLibraryUpsert",
+    "LiteraturePdfDownload",
     "TodoWrite",
+    "memory",
+    "session_search",
     "LlmReview",
     "Skill",
     "ToolSearch",
@@ -43,6 +48,26 @@ pub fn runtime_dir() -> PathBuf {
         .join("desktop-runtime")
 }
 
+pub fn config_dir() -> PathBuf {
+    PathBuf::from(runtime::home_dir())
+        .join(".config")
+        .join("aris")
+}
+
+pub fn skills_dir() -> PathBuf {
+    config_dir().join("skills")
+}
+
+pub fn apply_bundle_cache_environment() {
+    let report = runtime::extract_bundle();
+    if let Some(dir) = &report.used_dir {
+        let dir_str = dir.display().to_string().replace('\\', "/");
+        env::set_var("ARIS_CACHE_DIR", dir_str);
+    } else {
+        env::remove_var("ARIS_CACHE_DIR");
+    }
+}
+
 pub fn project_runtime_dir(project_id: &str) -> PathBuf {
     if project_id == "default" {
         runtime_dir()
@@ -74,11 +99,13 @@ pub fn apply_project_environment(workspace: &PathBuf, project_id: &str) -> io::R
         migrate_legacy_desktop_dirs(workspace, &project_runtime)?;
     }
     std::fs::create_dir_all(workspace)?;
+    std::fs::create_dir_all(workspace.join("papers"))?;
     std::fs::create_dir_all(&run_state)?;
     std::fs::create_dir_all(&sessions)?;
     std::fs::create_dir_all(&agent_store)?;
     std::fs::create_dir_all(&workflows)?;
     std::fs::create_dir_all(&user_workflows)?;
+    configure_readonly_roots()?;
 
     std::env::set_var("ARIS_WORKSPACE_ROOT", workspace);
     std::env::set_var("ARIS_DESKTOP_PROJECT_ID", project_id);
@@ -91,6 +118,30 @@ pub fn apply_project_environment(workspace: &PathBuf, project_id: &str) -> io::R
     std::env::set_var("CLAWD_TODO_STORE", project_runtime.join("tasks.json"));
     std::env::set_var("ARIS_ALLOWED_TOOLS", DESKTOP_ALLOWED_AGENT_TOOLS.join(","));
     std::env::set_current_dir(workspace)
+}
+
+fn configure_readonly_roots() -> io::Result<()> {
+    let user_skills = skills_dir();
+    std::fs::create_dir_all(&user_skills)?;
+    let mut roots = vec![user_skills];
+    if let Some(cache_dir) =
+        runtime::extraction_report().and_then(|report| report.used_dir.as_ref())
+    {
+        roots.push(cache_dir.join("skills"));
+    }
+    roots.retain(|path| path.exists());
+    if roots.is_empty() {
+        env::remove_var("ARIS_READONLY_ROOTS");
+        return Ok(());
+    }
+    let joined = env::join_paths(&roots).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("invalid read-only root path: {error}"),
+        )
+    })?;
+    env::set_var("ARIS_READONLY_ROOTS", joined);
+    Ok(())
 }
 
 fn migrate_legacy_desktop_dirs(workspace: &PathBuf, runtime: &PathBuf) -> io::Result<()> {

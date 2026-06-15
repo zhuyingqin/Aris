@@ -11,6 +11,10 @@ import type {
   ConfigTestResult,
   ConfigView,
   DesktopCommandSpec,
+  McpConfigView,
+  McpStdioServerInput,
+  McpTestResult,
+  PermissionModeView,
   ProjectView,
   RunEvent,
   SessionSummary,
@@ -70,6 +74,8 @@ export const projectAdd = (path: string) =>
   invoke<ProjectView>("project_add", { path });
 export const projectSetCurrent = (id: string) =>
   invoke<ProjectView>("project_set_current", { id });
+export const projectsReorder = (projectIds: string[]) =>
+  invoke<ProjectView>("projects_reorder", { projectIds });
 
 // ── Settings / Skills / Sessions (P1) ─────────────────────────────────────────
 
@@ -78,6 +84,14 @@ export const configSet = (patch: ConfigPatch) =>
   invoke<ConfigView>("config_set", { patch });
 export const configTest = (patch: ConfigPatch) =>
   invoke<ConfigTestResult>("config_test", { patch });
+export const projectPermissionGet = () =>
+  invoke<PermissionModeView>("project_permission_get");
+export const projectPermissionSet = (mode: string) =>
+  invoke<PermissionModeView>("project_permission_set", { mode });
+export const mcpConfigGet = () => invoke<McpConfigView>("mcp_config_get");
+export const mcpConfigSet = (servers: McpStdioServerInput[]) =>
+  invoke<McpConfigView>("mcp_config_set", { servers });
+export const mcpConfigTest = () => invoke<McpTestResult>("mcp_config_test");
 
 export const skillsList = () => invoke<SkillMeta[]>("skills_list");
 export const skillView = (name: string) =>
@@ -90,6 +104,61 @@ export const chatUiSessionsLoad = <T>() => invoke<T[]>("chat_ui_sessions_load");
 export const chatUiSessionsSave = <T>(sessions: T[]) =>
   invoke<void>("chat_ui_sessions_save", { sessions });
 
+// ── Literature library ────────────────────────────────────────────────────────
+
+export const literatureLoad = <T>() => invoke<T>("literature_load");
+export const literatureSave = <T>(library: T) =>
+  invoke<void>("literature_save", { library });
+export const literatureSearch = <T>(
+  query: string,
+  sources: string[],
+  maxResults?: number,
+) => invoke<T>("literature_search", { query, sources, maxResults: maxResults ?? null });
+export const literatureLibraryUpsert = <T>(
+  papers: unknown[],
+  query: string,
+  sources: string[],
+) => invoke<T>("literature_library_upsert", { papers, query, sources });
+export const literatureDownloadPdf = <T>(url: string, fileName: string) =>
+  invoke<T>("literature_download_pdf", { url, fileName });
+export const literatureImportPdf = <T>(sourcePath: string, fileName: string) =>
+  invoke<T>("literature_import_pdf", { sourcePath, fileName });
+export const literatureLlm = (system: string, prompt: string) =>
+  invoke<string>("literature_llm", { system, prompt });
+export const literatureReviewLlm = (system: string, prompt: string) =>
+  invoke<string>("literature_review_llm", { system, prompt });
+export interface LiteratureVisionImage {
+  page: number;
+  mimeType: "image/jpeg" | "image/png" | "image/webp";
+  data: string;
+  fingerprint: string;
+}
+export const literatureLlmVision = (
+  system: string,
+  prompt: string,
+  images: LiteratureVisionImage[],
+) => invoke<string>("literature_llm_vision", { system, prompt, images });
+export const literaturePdfText = (relativePath: string) =>
+  invoke<{
+    text: string;
+    pages: Array<{ page: number; text: string; source: "embedded" | "ocr" | "empty" }>;
+    totalCharacters: number;
+    extractedCharacters: number;
+    truncated: boolean;
+    ocrUsed: boolean;
+    missingPages: number[];
+    warnings: string[];
+  }>(
+    "literature_pdf_text",
+    { relativePath },
+  );
+export const literaturePdfBytes = (relativePath: string) =>
+  invoke<number[]>("literature_pdf_bytes", { relativePath });
+export const literatureImageOcr = (image: number[]) =>
+  invoke<string>("literature_image_ocr", { image });
+export const literaturePdfOpen = (relativePath: string) =>
+  invoke<void>("literature_pdf_open", { relativePath });
+
 // ── File browser ─────────────────────────────────────────────────────────────
 
 export const fileSearch = (pattern: string, root?: string) =>
@@ -97,43 +166,88 @@ export const fileSearch = (pattern: string, root?: string) =>
 
 export const fileRead = (path: string, limit?: number) =>
   invoke<string>("file_read", { path, limit: limit ?? null });
+export const fileOpen = (path: string) =>
+  invoke<void>("file_open", { path });
 export const projectChatStarters = () => invoke<string[]>("project_chat_starters");
 
 // ── Chat engine (P2) ──────────────────────────────────────────────────────────
 
 export const chatStatus = () => invoke<ChatStatus>("chat_status");
+export const chatPermissionGet = (sessionId: string) =>
+  invoke<PermissionModeView>("chat_permission_get", { sessionId });
+export const chatPermissionSet = (sessionId: string, mode: string) =>
+  invoke<PermissionModeView>("chat_permission_set", { sessionId, mode });
 export const chatCommandSpecs = () =>
   invoke<DesktopCommandSpec[]>("chat_command_specs");
 export const chatRunCommand = (sessionId: string, input: string) =>
   invoke<ChatCommandResult>("chat_run_command", { sessionId, input });
-export const chatSend = (sessionId: string, message: string) =>
-  invoke<string>("chat_send", { sessionId, message });
+export const chatSuggestTitle = (user: string, assistant: string) =>
+  invoke<string>("chat_suggest_title", { user, assistant });
+
+export interface ChatImageInput {
+  name?: string;
+  mimeType: string;
+  data: string;
+}
+
+export interface ChatSendRequest {
+  text: string;
+  images?: ChatImageInput[];
+}
+
+export interface ChatContextMessage {
+  role: "user" | "assistant";
+  text: string;
+  images?: ChatImageInput[];
+}
+
+export const chatSend = (sessionId: string, message: string | ChatSendRequest) => {
+  const request = typeof message === "string" ? { text: message } : message;
+  return invoke<string>("chat_send_rich", { sessionId, request });
+};
+
+/** Like chatSend but with bash allowed — used by Literature agent searches so
+ *  /research-lit can run Python paper-fetching helpers (arxiv, openalex, etc.). */
+export const literatureAgentSend = (sessionId: string, message: string | ChatSendRequest) => {
+  const request = typeof message === "string" ? { text: message } : message;
+  return invoke<string>("literature_agent_send_rich", { sessionId, request });
+};
 export const chatReset = (sessionId: string) =>
   invoke<void>("chat_reset", { sessionId });
 export const chatSetContext = (
   sessionId: string,
-  messages: { role: "user" | "assistant"; text: string }[],
+  messages: ChatContextMessage[],
 ) => invoke<void>("chat_set_context", { sessionId, messages });
 export const chatDelete = (sessionId: string, projectId?: string) =>
   invoke<void>("chat_delete", { sessionId, projectId: projectId ?? null });
-export const chatCancel = () => invoke<void>("chat_cancel");
+export const chatCancel = (sessionId: string) => invoke<void>("chat_cancel", { sessionId });
 
-export const onChatDelta = (handler: (text: string) => void) =>
-  listen<string>("chat-delta", (e) => handler(e.payload));
-export const onChatThinkingDelta = (handler: (thinking: string) => void) =>
-  listen<string>("chat-thinking-delta", (e) => handler(e.payload));
+export interface ChatTextEvent {
+  sessionId: string;
+  text: string;
+}
+
+export interface ChatThinkingEvent {
+  sessionId: string;
+  thinking: string;
+}
+
+export const onChatDelta = (handler: (event: ChatTextEvent) => void) =>
+  listen<ChatTextEvent>("chat-delta", (e) => handler(e.payload));
+export const onChatThinkingDelta = (handler: (event: ChatThinkingEvent) => void) =>
+  listen<ChatThinkingEvent>("chat-thinking-delta", (e) => handler(e.payload));
 export const onChatTool = (
-  handler: (t: { id?: string; name: string; input: string }) => void,
-) => listen<{ id?: string; name: string; input: string }>("chat-tool", (e) => handler(e.payload));
+  handler: (t: { sessionId: string; id?: string; name: string; input: string }) => void,
+) => listen<{ sessionId: string; id?: string; name: string; input: string }>("chat-tool", (e) => handler(e.payload));
 export const onChatToolResult = (
-  handler: (t: { id?: string; name: string; output: string; isError: boolean }) => void,
+  handler: (t: { sessionId: string; id?: string; name: string; output: string; isError: boolean }) => void,
 ) =>
-  listen<{ id?: string; name: string; output: string; isError: boolean }>(
+  listen<{ sessionId: string; id?: string; name: string; output: string; isError: boolean }>(
     "chat-tool-result",
     (e) => handler(e.payload),
   );
-export const onChatDone = (handler: (text: string) => void) =>
-  listen<string>("chat-done", (e) => handler(e.payload));
+export const onChatDone = (handler: (event: ChatTextEvent) => void) =>
+  listen<ChatTextEvent>("chat-done", (e) => handler(e.payload));
 
 // ── Live events ───────────────────────────────────────────────────────────────
 

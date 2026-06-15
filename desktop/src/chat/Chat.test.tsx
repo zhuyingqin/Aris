@@ -9,7 +9,16 @@ import ChatComposer, { attachmentFromFile, resizeComposerTextarea } from "./Chat
 import ChatMessage, { diffFromTool } from "./ChatMessage";
 import CommandSelection from "./CommandSelection";
 import { isNearBottom } from "./ChatThread";
-import { groupSessionsByProject, makeId, makeSession, migrateSession, transcriptFromTurn } from "./model";
+import {
+  CURRENT_KEY,
+  SESSIONS_KEY,
+  fuzzyScore,
+  groupSessionsByProject,
+  makeId,
+  makeSession,
+  migrateSession,
+  transcriptFromTurn,
+} from "./model";
 import { appendToolOutput } from "./useChatStream";
 import { useChatSessions } from "./useChatSessions";
 
@@ -62,6 +71,47 @@ describe("Chat interaction helpers", () => {
     expect(change?.diff).toContain("+new");
   });
 
+  it("renders generated file paths as openable links", () => {
+    render(
+      <ChatMessage
+        turn={{
+          id: "assistant-file",
+          role: "assistant",
+          blocks: [{
+            kind: "tool",
+            name: "write_file",
+            input: JSON.stringify({ path: "reports/result.md", content: "done" }),
+            output: "ok",
+          }],
+        }}
+        canRetry={false}
+        onEdit={() => undefined}
+        onRetry={() => undefined}
+        onContinue={() => undefined}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "reports/result.md" })).toBeTruthy();
+  });
+
+  it("renders assistant Markdown file references as local links", () => {
+    render(
+      <ChatMessage
+        turn={{
+          id: "assistant-link",
+          role: "assistant",
+          blocks: [{ kind: "text", text: "Open [the report](reports/result.md)." }],
+        }}
+        canRetry={false}
+        onEdit={() => undefined}
+        onRetry={() => undefined}
+        onContinue={() => undefined}
+      />,
+    );
+
+    expect(screen.getByRole("link", { name: "the report" }).getAttribute("title")).toBe("Open local file");
+  });
+
   it("omits dropped binary bodies without reading them into the renderer", async () => {
     const file = new File(["binary"], "archive.zip", { type: "application/zip" });
     const text = vi.fn();
@@ -93,6 +143,15 @@ describe("Chat interaction helpers", () => {
     expect(attachment.preview).toMatch(/^data:image\/png;base64,/);
     expect(attachment.content).toContain("Vision input is not supported");
     expect(attachment.content).not.toMatch(/^data:/);
+  });
+
+  it("scores direct slash-style abbreviations above weak subsequence matches", () => {
+    const literature = fuzzyScore("lit", "research-lit literature paper search");
+    const weak = fuzzyScore("lit", "utility cleanup");
+
+    expect(literature).not.toBeNull();
+    expect(weak).not.toBeNull();
+    expect(literature ?? 999).toBeLessThan(weak ?? 999);
   });
 
   it("matches tool results by call id before tool name", () => {
@@ -144,7 +203,6 @@ describe("Chat interaction helpers", () => {
         onEdit={() => undefined}
         onRetry={() => undefined}
         onContinue={() => undefined}
-        onOpenTeam={() => undefined}
       />,
     );
 
@@ -153,12 +211,44 @@ describe("Chat interaction helpers", () => {
 });
 
 describe("useChatSessions", () => {
+  it("opens a blank new-chat home instead of restoring saved history on startup", async () => {
+    const old = makeSession("default");
+    old.id = "old-chat";
+    old.title = "Old chat";
+    old.createdAt = 1;
+    old.updatedAt = 1;
+    old.turns = [{ id: "old-turn", role: "user", blocks: [{ kind: "text", text: "old" }] }];
+    const recent = makeSession("default");
+    recent.id = "recent-chat";
+    recent.title = "Recent chat";
+    recent.createdAt = 2;
+    recent.updatedAt = 2;
+    recent.turns = [{ id: "recent-turn", role: "user", blocks: [{ kind: "text", text: "recent" }] }];
+    localStorage.setItem(SESSIONS_KEY, JSON.stringify([old, recent]));
+    localStorage.setItem(CURRENT_KEY, old.id);
+
+    const { result } = renderHook(() => useChatSessions());
+
+    await waitFor(() => expect(result.current.currentSession).not.toBeNull());
+    expect(result.current.currentSession?.turns).toHaveLength(0);
+    expect(result.current.currentSession?.title).toBe("New chat");
+    expect(result.current.currentId).not.toBe(old.id);
+    expect(result.current.currentId).not.toBe(recent.id);
+    expect(result.current.sessions).toHaveLength(2);
+    expect(result.current.sessions.some((session) => session.id === old.id)).toBe(true);
+    expect(result.current.sessions.some((session) => session.id === recent.id)).toBe(true);
+  });
+
   it("retains a draft per session", async () => {
     const { result } = renderHook(() => useChatSessions());
     await waitFor(() => expect(result.current.currentSession).not.toBeNull());
-    const first = result.current.currentId;
+    let first = "";
     const turn: ChatTurn = { id: makeId("turn"), role: "user", blocks: [{ kind: "text", text: "hello" }] };
 
+    act(() => {
+      first = result.current.materializeCurrentSession()?.id ?? "";
+    });
+    await waitFor(() => expect(result.current.currentId).toBe(first));
     act(() => {
       result.current.setDraft(first, "first draft");
       result.current.patchTurns(first, () => [turn]);
@@ -191,26 +281,32 @@ describe("useChatSessions", () => {
     expect(result.current.sessions).toHaveLength(count);
   });
 
-  it("preserves an unsent draft when New chat opens another session", async () => {
+  it("clears the transient home draft when New chat is pressed again", async () => {
     const { result } = renderHook(() => useChatSessions());
     await waitFor(() => expect(result.current.currentSession).not.toBeNull());
-    const first = result.current.currentId;
-    let second = "";
 
-    act(() => result.current.setDraft(first, "keep this draft"));
+    act(() => result.current.setDraft(result.current.currentId, "discard this draft"));
+    expect(result.current.currentSession?.draft).toBe("discard this draft");
     act(() => {
-      second = result.current.newSession();
-      result.current.setCurrentId(second);
+      result.current.newSession();
     });
 
-    expect(second).not.toBe(first);
-    expect(result.current.sessions.find((session) => session.id === first)?.draft).toBe("keep this draft");
+    expect(result.current.currentSession?.draft).toBe("");
+    expect(result.current.sessions).toHaveLength(0);
   });
 
   it("restores a removed session for delete undo", async () => {
     const { result } = renderHook(() => useChatSessions());
     await waitFor(() => expect(result.current.currentSession).not.toBeNull());
-    const id = result.current.currentId;
+    let id = "";
+    const turn: ChatTurn = { id: makeId("turn"), role: "user", blocks: [{ kind: "text", text: "hello" }] };
+    act(() => {
+      id = result.current.materializeCurrentSession()?.id ?? "";
+    });
+    act(() => {
+      result.current.patchTurns(id, () => [turn]);
+    });
+    await waitFor(() => expect(result.current.sessions.some((session) => session.id === id)).toBe(true));
     let removed = result.current.currentSession;
 
     act(() => {
@@ -229,7 +325,14 @@ describe("useChatSessions", () => {
       { initialProps: { projectId: "project-a" } },
     );
     await waitFor(() => expect(result.current.currentSession?.projectId).toBe("project-a"));
-    const first = result.current.currentId;
+    let first = "";
+    const turn: ChatTurn = { id: makeId("turn"), role: "user", blocks: [{ kind: "text", text: "project a" }] };
+    act(() => {
+      first = result.current.materializeCurrentSession()?.id ?? "";
+    });
+    act(() => {
+      result.current.patchTurns(first, () => [turn]);
+    });
 
     rerender({ projectId: "project-b" });
     await waitFor(() => expect(result.current.currentSession?.projectId).toBe("project-b"));
@@ -296,6 +399,22 @@ function ComposerHarness({
 }
 
 describe("ChatComposer picker keyboard operation", () => {
+  it("allows a second chat to submit while another chat is running", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn();
+    render(<ComposerHarness onSubmit={onSubmit} />);
+    const textbox = screen.getByRole("textbox") as HTMLTextAreaElement;
+
+    await user.type(textbox, "draft for later");
+
+    expect(textbox.disabled).toBe(false);
+    expect(textbox.value).toBe("draft for later");
+    const sendButton = screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement;
+    expect(sendButton.disabled).toBe(false);
+    await user.keyboard("{Enter}");
+    expect(onSubmit).toHaveBeenCalledOnce();
+  });
+
   it("selects a fuzzy-matched slash skill with Enter", async () => {
     const user = userEvent.setup();
     render(<ComposerHarness />);
@@ -305,6 +424,27 @@ describe("ChatComposer picker keyboard operation", () => {
     await user.keyboard("{Enter}");
 
     expect((textbox as HTMLTextAreaElement).value).toBe("/paper-plan ");
+  });
+
+  it("surfaces literature skills for /lit", async () => {
+    const user = userEvent.setup();
+    render(
+      <ComposerHarness
+        skills={[
+          { name: "utility-cleanup", description: "General maintenance helpers", path: "utility-cleanup/SKILL.md" },
+          { name: "research-lit", description: "Search and analyze research papers", path: "research-lit/SKILL.md" },
+          { name: "comm-lit-review", description: "Communications-domain literature review", path: "comm-lit-review/SKILL.md" },
+        ]}
+      />,
+    );
+    const textbox = screen.getByRole("textbox");
+
+    await user.type(textbox, "/lit");
+
+    const picker = screen.getByRole("listbox");
+    const names = within(picker).getAllByText(/^\/.+/).map((item) => item.textContent);
+    expect(names.slice(0, 2)).toEqual(["/comm-lit-review", "/research-lit"]);
+    expect(within(picker).getByText("/research-lit")).toBeTruthy();
   });
 
   it("submits an exact built-in slash command with Enter", async () => {
@@ -401,6 +541,24 @@ describe("ChatComposer picker keyboard operation", () => {
 
     expect((textbox as HTMLTextAreaElement).value).toBe("");
     expect(screen.getByText("Chat.tsx")).toBeTruthy();
+  });
+
+  it("attaches an uploaded image with a preview", async () => {
+    const user = userEvent.setup();
+    render(<ComposerHarness />);
+
+    const fileInput = screen.getByTestId("chat-file-input") as HTMLInputElement;
+    const clickInput = vi.spyOn(fileInput, "click");
+    await user.click(screen.getByRole("button", { name: "Attach files" }));
+    expect(clickInput).toHaveBeenCalledOnce();
+
+    const file = new File(["fake-png"], "shot.png", { type: "image/png" });
+    await user.upload(fileInput, file);
+
+    expect(await screen.findByText("shot.png")).toBeTruthy();
+    const preview = await screen.findByRole("img", { name: "shot.png" });
+    expect((preview as HTMLImageElement).src).toMatch(/^data:image\/png;base64,/);
+    expect(screen.getByRole("button", { name: "Remove shot.png" })).toBeTruthy();
   });
 });
 

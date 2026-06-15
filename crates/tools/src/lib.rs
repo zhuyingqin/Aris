@@ -6,9 +6,9 @@ use std::time::{Duration, Instant};
 use runtime::BUNDLED_SKILLS;
 
 use api::{
-    read_base_url, AnthropicClient, ContentBlockDelta, InputContentBlock, InputMessage,
-    MessageRequest, MessageResponse, OutputContentBlock, StreamEvent as ApiStreamEvent, ToolChoice,
-    ToolDefinition, ToolResultContentBlock,
+    read_base_url, AnthropicClient, ContentBlockDelta, ImageSource, InputContentBlock,
+    InputMessage, MessageRequest, MessageResponse, OutputContentBlock,
+    StreamEvent as ApiStreamEvent, ToolChoice, ToolDefinition, ToolResultContentBlock,
 };
 use reqwest::blocking::Client;
 use runtime::{
@@ -20,6 +20,7 @@ use runtime::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+pub mod literature;
 mod team_state;
 mod workflow_state;
 
@@ -175,6 +176,65 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             required_permission: PermissionMode::ReadOnly,
         },
         ToolSpec {
+            name: "memory",
+            description: "Manage compact, durable hot memory. Save stable facts and user preferences here; use session_search for task history and Skills for reusable procedures.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["add", "replace", "remove", "list", "pending"]
+                    },
+                    "target": {
+                        "type": "string",
+                        "enum": ["memory", "user"],
+                        "description": "Use user for identity/preferences; memory for stable environment and project facts."
+                    },
+                    "content": { "type": "string" },
+                    "old_text": { "type": "string" },
+                    "scope": {
+                        "type": "string",
+                        "enum": ["global", "project"],
+                        "description": "Global applies everywhere; project applies only to the active workspace."
+                    },
+                    "source": {
+                        "type": "string",
+                        "description": "Short provenance label. Defaults to assistant_tool."
+                    },
+                    "expires_at": {
+                        "type": "string",
+                        "description": "Optional expiry date in YYYY-MM-DD format."
+                    },
+                },
+                "required": ["action"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::WorkspaceWrite,
+        },
+        ToolSpec {
+            name: "session_search",
+            description: "Search or browse persisted conversation history. Use this for prior task progress, completed work, decisions, and past discussions instead of saving temporary history to hot memory.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string" },
+                    "session_id": {
+                        "type": "string",
+                        "description": "Read a specific session by id."
+                    },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 20 },
+                    "window": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 30,
+                        "description": "Messages before and after each search hit."
+                    }
+                },
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
             name: "WebFetch",
             description:
                 "Fetch a URL, convert it into readable text, and answer a prompt about it.",
@@ -209,6 +269,67 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 "additionalProperties": false
             }),
             required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
+            name: "LiteratureSearch",
+            description: "Search scholarly metadata on arXiv, Crossref, OpenAlex and Scopus without a shell. Returns normalised, deduplicated records (title, authors, year, venue, DOI, abstract, pdfUrl). Scopus requires SCOPUS_API_KEY (set via desktop Settings) and is skipped from the default source set when the key is missing. Used by literature skills (/arxiv, /research-lit) when bash/python is unavailable. Follow up with LiteratureLibraryUpsert to record results.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "minLength": 2 },
+                    "sources": {
+                        "type": "array",
+                        "items": { "type": "string", "enum": ["arxiv", "crossref", "openalex", "scopus"] },
+                        "description": "Sources to query. Empty or omitted means all available sources."
+                    },
+                    "maxResults": { "type": "integer", "minimum": 1, "maximum": 50 }
+                },
+                "required": ["query"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
+            name: "LiteratureLibraryUpsert",
+            description: "Record literature search results in the project's shared library (papers/library.json — the same library the desktop Literature view and the /arxiv skill use). New papers land in the inbox stage; re-discovered papers only get metadata gaps filled, never losing user stage/stars/tags/notes. Pass the `papers` array exactly as returned by LiteratureSearch.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "papers": {
+                        "type": "array",
+                        "items": { "type": "object" },
+                        "description": "Records in the LiteratureSearch output shape."
+                    },
+                    "search": {
+                        "type": "object",
+                        "properties": {
+                            "query": { "type": "string" },
+                            "sources": { "type": "array", "items": { "type": "string" } }
+                        },
+                        "required": ["query"],
+                        "additionalProperties": false,
+                        "description": "Optional provenance: records this run as a saved search."
+                    }
+                },
+                "required": ["papers"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::WorkspaceWrite,
+        },
+        ToolSpec {
+            name: "LiteraturePdfDownload",
+            description: "Download a paper PDF into the project's papers/ directory (verifies the response is a real PDF). When paperId is given, the paper's pdf status and stage are updated in papers/library.json.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "url": { "type": "string", "format": "uri" },
+                    "fileName": { "type": "string", "description": "Target file name, e.g. the arXiv id. Sanitised; .pdf is appended when missing." },
+                    "paperId": { "type": "string", "description": "Library paper id (e.g. arxiv:2602.01491) to mark as downloaded." }
+                },
+                "required": ["url", "fileName"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::WorkspaceWrite,
         },
         ToolSpec {
             name: "TodoWrite",
@@ -676,8 +797,16 @@ pub fn execute_tool(name: &str, input: &Value) -> Result<String, String> {
         "edit_file" => from_value::<EditFileInput>(input).and_then(run_edit_file),
         "glob_search" => from_value::<GlobSearchInputValue>(input).and_then(run_glob_search),
         "grep_search" => from_value::<GrepSearchInput>(input).and_then(run_grep_search),
+        "memory" => from_value::<MemoryInput>(input).and_then(run_memory),
+        "session_search" => from_value::<SessionSearchInput>(input).and_then(run_session_search),
         "WebFetch" => from_value::<WebFetchInput>(input).and_then(run_web_fetch),
         "WebSearch" => from_value::<WebSearchInput>(input).and_then(run_web_search),
+        "LiteratureSearch" => from_value::<literature::LiteratureSearchInput>(input)
+            .and_then(literature::run_literature_search),
+        "LiteratureLibraryUpsert" => from_value::<literature::LiteratureLibraryUpsertInput>(input)
+            .and_then(literature::run_literature_library_upsert),
+        "LiteraturePdfDownload" => from_value::<literature::LiteraturePdfDownloadInput>(input)
+            .and_then(literature::run_literature_pdf_download),
         "TodoWrite" => from_value::<TodoWriteInput>(input).and_then(run_todo_write),
         "LlmReview" => from_value::<LlmReviewInput>(input).and_then(run_llm_review),
         "Skill" => from_value::<SkillInput>(input).and_then(run_skill),
@@ -760,6 +889,80 @@ fn run_glob_search(input: GlobSearchInputValue) -> Result<String, String> {
 #[allow(clippy::needless_pass_by_value)]
 fn run_grep_search(input: GrepSearchInput) -> Result<String, String> {
     to_pretty_json(grep_search(&input).map_err(io_to_string)?)
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn run_memory(input: MemoryInput) -> Result<String, String> {
+    use runtime::HotMemoryTarget;
+
+    let workspace = std::env::var("ARIS_WORKSPACE_ROOT")
+        .map(PathBuf::from)
+        .or_else(|_| std::env::current_dir())
+        .unwrap_or_else(|_| PathBuf::from("."));
+    let project_scope = runtime::project_scope(&workspace);
+    let scope = match input.scope.as_deref().unwrap_or("project") {
+        "global" => "global".to_string(),
+        "project" => project_scope.clone(),
+        other => return Err(format!("unsupported memory scope `{other}`")),
+    };
+    let source = input.source.as_deref().unwrap_or("assistant_tool");
+    let target = input
+        .target
+        .as_deref()
+        .unwrap_or("memory")
+        .parse::<HotMemoryTarget>()?;
+
+    if matches!(input.action.as_str(), "add" | "replace" | "remove")
+        && runtime::memory_write_approval_enabled()
+    {
+        let pending = runtime::new_pending_write(
+            &input.action,
+            target,
+            input.content,
+            input.old_text,
+            source,
+            &scope,
+            input.expires_at,
+        );
+        return to_pretty_json(runtime::stage_memory_write(pending)?);
+    }
+
+    match input.action.as_str() {
+        "add" => to_pretty_json(runtime::add_hot_memory(
+            target,
+            input.content.as_deref().unwrap_or_default(),
+            source,
+            &scope,
+            input.expires_at.as_deref(),
+        )?),
+        "replace" => to_pretty_json(runtime::replace_hot_memory(
+            target,
+            input.old_text.as_deref().unwrap_or_default(),
+            input.content.as_deref().unwrap_or_default(),
+            source,
+            &scope,
+            input.expires_at.as_deref(),
+        )?),
+        "remove" => to_pretty_json(runtime::remove_hot_memory(
+            target,
+            input.old_text.as_deref().unwrap_or_default(),
+            &scope,
+        )?),
+        "list" => to_pretty_json(runtime::load_hot_memory(&workspace)?),
+        "pending" => to_pretty_json(runtime::list_pending_for_scope(&project_scope)?),
+        other => Err(format!("unsupported memory action `{other}`")),
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn run_session_search(input: SessionSearchInput) -> Result<String, String> {
+    to_pretty_json(runtime::search_sessions(
+        &runtime::sessions_dir_from_env(),
+        input.query.as_deref(),
+        input.session_id.as_deref(),
+        input.limit.unwrap_or(3).clamp(1, 20),
+        input.window.unwrap_or(5).clamp(1, 30),
+    )?)
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -909,6 +1112,25 @@ struct WebSearchInput {
     query: String,
     allowed_domains: Option<Vec<String>>,
     blocked_domains: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MemoryInput {
+    action: String,
+    target: Option<String>,
+    content: Option<String>,
+    old_text: Option<String>,
+    scope: Option<String>,
+    source: Option<String>,
+    expires_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SessionSearchInput {
+    query: Option<String>,
+    session_id: Option<String>,
+    limit: Option<usize>,
+    window: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1687,7 +1909,7 @@ fn execute_skill(input: SkillInput) -> Result<SkillOutput, String> {
         );
         return Ok(SkillOutput {
             skill: input.skill,
-            path: skill_path.display().to_string(),
+            path: forward_slash(&skill_path.display().to_string()),
             args: input.args,
             description,
             prompt,
@@ -2121,7 +2343,11 @@ pub fn render_skill_discovery_section() -> Option<String> {
     Some(lines.join("\n"))
 }
 
-const DEFAULT_AGENT_MODEL: &str = "claude-opus-4-7";
+const DEFAULT_AGENT_MODEL: &str = "claude-opus-4-8";
+/// Subagent fallback when DEFAULT_AGENT_MODEL is unavailable on the account
+/// (404 not_found). Mirrors the main session's DEFAULT_MODEL_FALLBACK so a
+/// user without Opus 4.8 access doesn't hit hard subagent failures.
+const DEFAULT_AGENT_MODEL_FALLBACK: &str = "claude-opus-4-7";
 const DEFAULT_AGENT_MAX_ITERATIONS: usize = 32;
 
 /// Subagent system date — use the same dynamic today as the main runtime
@@ -2622,6 +2848,9 @@ struct AnthropicRuntimeClient {
     client: AnthropicClient,
     model: String,
     allowed_tools: BTreeSet<String>,
+    /// Latches the subagent's Opus 4.8 → 4.7 fallback so it warns once and
+    /// never re-probes on subsequent turns.
+    model_fell_back: bool,
 }
 
 impl AnthropicRuntimeClient {
@@ -2634,6 +2863,7 @@ impl AnthropicRuntimeClient {
             client,
             model,
             allowed_tools,
+            model_fell_back: false,
         })
     }
 }
@@ -2648,7 +2878,7 @@ impl ApiClient for AnthropicRuntimeClient {
                 input_schema: spec.input_schema,
             })
             .collect::<Vec<_>>();
-        let message_request = MessageRequest {
+        let mut message_request = MessageRequest {
             model: self.model.clone(),
             max_tokens: 32_000,
             messages: convert_messages(&request.messages),
@@ -2663,20 +2893,45 @@ impl ApiClient for AnthropicRuntimeClient {
         };
 
         self.runtime.block_on(async {
-            let mut stream = self
-                .client
-                .stream_message(&message_request)
-                .await
-                .map_err(|error| RuntimeError::new(error.to_string()))?;
+            // Subagent default-model fallback: if DEFAULT_AGENT_MODEL (Opus
+            // 4.8) is unavailable (404 not_found), fall back to 4.7 and retry
+            // once so background Agent tasks don't hard-fail for non-4.8 users.
+            let mut stream = match self.client.stream_message(&message_request).await {
+                Ok(stream) => stream,
+                Err(error)
+                    if error.is_model_unavailable()
+                        && message_request.model == DEFAULT_AGENT_MODEL
+                        && !self.model_fell_back =>
+                {
+                    self.model_fell_back = true;
+                    self.model = DEFAULT_AGENT_MODEL_FALLBACK.to_string();
+                    message_request.model = DEFAULT_AGENT_MODEL_FALLBACK.to_string();
+                    eprintln!(
+                        "\x1b[33mwarning:\x1b[0m {DEFAULT_AGENT_MODEL} is not available on this \
+                         account; subagent falling back to {DEFAULT_AGENT_MODEL_FALLBACK}."
+                    );
+                    self.client
+                        .stream_message(&message_request)
+                        .await
+                        .map_err(|error| RuntimeError::new(error.to_string()))?
+                }
+                Err(error) => return Err(RuntimeError::new(error.to_string())),
+            };
             let mut events = Vec::new();
             let mut pending_tool: Option<(String, String, String)> = None;
             let mut saw_stop = false;
+            let mut stop_reason: Option<String> = None;
 
-            while let Some(event) = stream
-                .next_event()
-                .await
-                .map_err(|error| RuntimeError::new(error.to_string()))?
-            {
+            loop {
+                let event = match stream.next_event().await {
+                    Ok(Some(event)) => event,
+                    Ok(None) => break,
+                    Err(_error) if !events.is_empty() || pending_tool.is_some() => {
+                        stop_reason = Some("stream_error_after_partial_output".to_string());
+                        break;
+                    }
+                    Err(error) => return Err(RuntimeError::new(error.to_string())),
+                };
                 match event {
                     ApiStreamEvent::MessageStart(start) => {
                         for block in start.message.content {
@@ -2694,7 +2949,7 @@ impl ApiClient for AnthropicRuntimeClient {
                     ApiStreamEvent::ContentBlockDelta(delta) => match delta.delta {
                         ContentBlockDelta::TextDelta { text } => {
                             if !text.is_empty() {
-                                events.push(AssistantEvent::TextDelta(text));
+                                push_subagent_text_event(&mut events, text);
                             }
                         }
                         ContentBlockDelta::InputJsonDelta { partial_json } => {
@@ -2711,6 +2966,11 @@ impl ApiClient for AnthropicRuntimeClient {
                         }
                     }
                     ApiStreamEvent::MessageDelta(delta) => {
+                        if let Some(reason) =
+                            delta.delta.stop_reason.filter(|value| !value.is_empty())
+                        {
+                            stop_reason = Some(reason);
+                        }
                         events.push(AssistantEvent::Usage(TokenUsage {
                             input_tokens: delta.usage.input_tokens,
                             output_tokens: delta.usage.output_tokens,
@@ -2734,13 +2994,22 @@ impl ApiClient for AnthropicRuntimeClient {
                 }
             }
 
-            if !saw_stop
-                && events.iter().any(|event| {
-                    matches!(event, AssistantEvent::TextDelta(text) if !text.is_empty())
-                        || matches!(event, AssistantEvent::ToolUse { .. })
-                })
-            {
+            let has_partial_output = events.iter().any(|event| {
+                matches!(event, AssistantEvent::TextDelta(text) if !text.is_empty())
+                    || matches!(event, AssistantEvent::ToolUse { .. })
+            }) || pending_tool.is_some();
+            if !saw_stop && has_partial_output {
+                if stop_reason.is_none() {
+                    stop_reason = Some("stream_truncated".to_string());
+                }
                 events.push(AssistantEvent::MessageStop);
+            }
+            if let Some(reason) = stop_reason {
+                let insert_at = events
+                    .iter()
+                    .position(|event| matches!(event, AssistantEvent::MessageStop))
+                    .unwrap_or(events.len());
+                events.insert(insert_at, AssistantEvent::StopReason(reason));
             }
 
             if events
@@ -2806,6 +3075,9 @@ fn convert_messages(messages: &[ConversationMessage]) -> Vec<InputMessage> {
                 .iter()
                 .map(|block| match block {
                     ContentBlock::Text { text } => InputContentBlock::Text { text: text.clone() },
+                    ContentBlock::Image { media_type, data } => InputContentBlock::Image {
+                        source: ImageSource::base64(media_type.clone(), data.clone()),
+                    },
                     ContentBlock::ToolUse { id, name, input } => InputContentBlock::ToolUse {
                         id: id.clone(),
                         name: name.clone(),
@@ -2850,7 +3122,7 @@ fn push_output_block(
     match block {
         OutputContentBlock::Text { text } => {
             if !text.is_empty() {
-                events.push(AssistantEvent::TextDelta(text));
+                push_subagent_text_event(events, text);
             }
         }
         OutputContentBlock::ToolUse { id, name, input } => {
@@ -2876,6 +3148,14 @@ fn push_output_block(
     }
 }
 
+fn push_subagent_text_event(events: &mut Vec<AssistantEvent>, text: String) {
+    if let Some(AssistantEvent::TextDelta(existing)) = events.last_mut() {
+        existing.push_str(&text);
+    } else if !text.is_empty() {
+        events.push(AssistantEvent::TextDelta(text));
+    }
+}
+
 fn response_to_events(response: MessageResponse) -> Vec<AssistantEvent> {
     let mut events = Vec::new();
     let mut pending_tool = None;
@@ -2893,6 +3173,9 @@ fn response_to_events(response: MessageResponse) -> Vec<AssistantEvent> {
         cache_creation_input_tokens: response.usage.cache_creation_input_tokens,
         cache_read_input_tokens: response.usage.cache_read_input_tokens,
     }));
+    if let Some(reason) = response.stop_reason.filter(|value| !value.is_empty()) {
+        events.push(AssistantEvent::StopReason(reason));
+    }
     events.push(AssistantEvent::MessageStop);
     events
 }
@@ -2938,7 +3221,14 @@ fn deferred_tool_specs() -> Vec<ToolSpec> {
         .filter(|spec| {
             !matches!(
                 spec.name,
-                "bash" | "read_file" | "write_file" | "edit_file" | "glob_search" | "grep_search"
+                "bash"
+                    | "read_file"
+                    | "write_file"
+                    | "edit_file"
+                    | "glob_search"
+                    | "grep_search"
+                    | "memory"
+                    | "session_search"
             )
         })
         .collect()
@@ -3710,12 +4000,26 @@ fn detect_powershell_shell() -> std::io::Result<&'static str> {
 }
 
 fn command_exists(command: &str) -> bool {
-    runtime::hidden_command("sh")
-        .arg("-lc")
-        .arg(format!("command -v {command} >/dev/null 2>&1"))
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
+    #[cfg(windows)]
+    {
+        return runtime::hidden_command("where.exe")
+            .arg(command)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+    }
+
+    #[cfg(not(windows))]
+    {
+        runtime::hidden_command("sh")
+            .arg("-lc")
+            .arg(format!("command -v {command} >/dev/null 2>&1"))
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    }
 }
 
 #[allow(clippy::too_many_lines)]
@@ -4047,12 +4351,22 @@ fn run_llm_review(input: LlmReviewInput) -> Result<String, String> {
     let env_reviewer_model = std::env::var("ARIS_REVIEWER_MODEL")
         .ok()
         .filter(|s| !s.is_empty());
-    let configured_model = env_reviewer_model.as_deref().unwrap_or("gpt-5.5");
 
     // Check for user-configured reviewer provider and base URL
     let reviewer_provider = std::env::var("ARIS_REVIEWER_PROVIDER")
         .ok()
         .filter(|s| !s.is_empty());
+    if matches!(
+        reviewer_provider.as_deref(),
+        Some("none" | "disabled" | "off")
+    ) {
+        return Err(
+            "LlmReview: reviewer is disabled in ARIS settings. Configure a reviewer before using LlmReview."
+                .to_string(),
+        );
+    }
+
+    let configured_model = env_reviewer_model.as_deref().unwrap_or("gpt-5.5");
     let custom_base_url = std::env::var("ARIS_REVIEWER_BASE_URL")
         .ok()
         .filter(|s| !s.is_empty());
@@ -4410,10 +4724,11 @@ mod tests {
 
     use super::team_state;
     use super::{
-        agent_permission_policy, allowed_tools_for_subagent, execute_agent_with_spawn,
-        execute_tool, final_assistant_text, mvp_tool_specs, persist_agent_terminal_state,
-        resolve_anthropic_compat_reviewer_model, resolve_reviewer_model, route_openai_compat_model,
-        AgentInput, AgentJob, SubagentToolExecutor,
+        agent_permission_policy, allowed_tools_for_subagent, discover_skills,
+        execute_agent_with_spawn, execute_tool, final_assistant_text, mvp_tool_specs,
+        persist_agent_terminal_state, resolve_anthropic_compat_reviewer_model,
+        resolve_reviewer_model, route_openai_compat_model, run_llm_review, skill_markdown,
+        AgentInput, AgentJob, LlmReviewInput, SubagentToolExecutor,
     };
     use runtime::{ApiRequest, AssistantEvent, ConversationRuntime, RuntimeError, Session};
     use serde_json::json;
@@ -4471,6 +4786,8 @@ mod tests {
         assert!(names.contains(&"WebFetch"));
         assert!(names.contains(&"WebSearch"));
         assert!(names.contains(&"TodoWrite"));
+        assert!(names.contains(&"memory"));
+        assert!(names.contains(&"session_search"));
         assert!(names.contains(&"Skill"));
         assert!(names.contains(&"Agent"));
         assert!(names.contains(&"SpawnTeammate"));
@@ -4489,6 +4806,69 @@ mod tests {
         assert!(names.contains(&"StructuredOutput"));
         assert!(names.contains(&"REPL"));
         assert!(names.contains(&"PowerShell"));
+    }
+
+    #[test]
+    fn memory_and_session_search_tools_round_trip() {
+        let _lock = env_lock().lock().expect("env lock");
+        let root = temp_path("memory-tools");
+        let workspace = root.join("workspace");
+        let sessions = root.join("sessions");
+        fs::create_dir_all(&workspace).expect("workspace");
+        fs::create_dir_all(&sessions).expect("sessions");
+        let _home = EnvGuard::set("HOME", &root);
+        let _profile = EnvGuard::set("USERPROFILE", &root);
+        let _workspace = EnvGuard::set("ARIS_WORKSPACE_ROOT", &workspace);
+        let _sessions = EnvGuard::set("ARIS_SESSIONS_DIR", &sessions);
+        let _project = EnvGuard::set("ARIS_DESKTOP_PROJECT_ID", "project-test");
+        let _approval = EnvGuard::set("ARIS_MEMORY_WRITE_APPROVAL", "false");
+
+        execute_tool(
+            "memory",
+            &json!({
+                "action": "add",
+                "target": "user",
+                "content": "User prefers focused answers.",
+                "scope": "global",
+                "source": "test"
+            }),
+        )
+        .expect("memory add");
+        let listed = execute_tool("memory", &json!({ "action": "list" })).expect("memory list");
+        assert!(listed.contains("User prefers focused answers."));
+
+        std::env::set_var("ARIS_MEMORY_WRITE_APPROVAL", "true");
+        let staged = execute_tool(
+            "memory",
+            &json!({
+                "action": "add",
+                "content": "This write requires user approval."
+            }),
+        )
+        .expect("stage memory write");
+        assert!(staged.contains("This write requires user approval."));
+        let listed = execute_tool("memory", &json!({ "action": "list" })).expect("memory list");
+        assert!(!listed.contains("This write requires user approval."));
+        assert!(execute_tool("memory", &json!({ "action": "approve" })).is_err());
+
+        let mut session = Session::new();
+        session
+            .messages
+            .push(runtime::ConversationMessage::user_text(
+                "Decision: use FTS5 indexing.",
+            ));
+        session
+            .save_to_path(sessions.join("tool-session.json"))
+            .expect("save session");
+        let search = execute_tool(
+            "session_search",
+            &json!({ "query": "FTS5 indexing", "limit": 3 }),
+        )
+        .expect("session search");
+        assert!(search.contains("tool-session"));
+        assert!(search.contains("FTS5 indexing"));
+
+        fs::remove_dir_all(root).expect("remove root");
     }
 
     #[test]
@@ -4779,20 +5159,21 @@ mod tests {
         .expect("write SKILL.md");
 
         // Point HOME to temp dir so ~/.claude/skills/ resolves there
-        let _guard = env_lock();
-        let original_home = std::env::var("HOME").ok();
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let claude_skills = tmp
             .parent()
             .unwrap()
             .join("claude-home")
             .join(".claude")
             .join("skills");
+        let _home_guard = EnvGuard::set("HOME", claude_skills.parent().unwrap().parent().unwrap());
         fs::create_dir_all(&claude_skills).expect("create claude skills dir");
         // Copy the skill into the claude skills dir
         let target_skill = claude_skills.join("test-skill");
         fs::create_dir_all(&target_skill).expect("create target skill dir");
         fs::copy(skill_dir.join("SKILL.md"), target_skill.join("SKILL.md")).expect("copy skill");
-        std::env::set_var("HOME", claude_skills.parent().unwrap().parent().unwrap());
 
         let result = execute_tool(
             "Skill",
@@ -4831,11 +5212,49 @@ mod tests {
             .ends_with("/test-skill/SKILL.md"));
 
         // Cleanup
-        if let Some(home) = original_home {
-            std::env::set_var("HOME", home);
-        }
         let _ = fs::remove_dir_all(&tmp);
         let _ = fs::remove_dir_all(claude_skills.parent().unwrap().parent().unwrap());
+    }
+
+    #[test]
+    fn bundled_skill_is_discoverable_and_invokable() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = temp_path("bundled-skill-home");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).expect("create isolated home");
+        let _home = EnvGuard::set("HOME", &tmp);
+        let _userprofile = EnvGuard::set("USERPROFILE", &tmp);
+        let _codex_home = EnvGuard::unset("CODEX_HOME");
+
+        let skills = discover_skills();
+        assert!(
+            skills.iter().any(|skill| skill.name == "research-lit"),
+            "research-lit should be listed among bundled skills"
+        );
+
+        let markdown = skill_markdown("research-lit").expect("bundled skill markdown");
+        assert!(markdown.contains("# Research Literature Review"));
+
+        let result = execute_tool(
+            "Skill",
+            &json!({
+                "skill": "research-lit",
+                "args": "reservoir computing"
+            }),
+        )
+        .expect("bundled Skill should load");
+        let output: serde_json::Value = serde_json::from_str(&result).expect("valid json");
+        assert_eq!(output["skill"], "research-lit");
+        assert_eq!(output["path"], "<bundled:research-lit>");
+        assert_eq!(output["args"], "reservoir computing");
+        assert!(output["prompt"]
+            .as_str()
+            .expect("prompt")
+            .contains("# Research Literature Review"));
+
+        let _ = fs::remove_dir_all(&tmp);
     }
 
     #[test]
@@ -6098,6 +6517,7 @@ mod tests {
         assert!(output["stdout"].as_str().expect("stdout").contains('2'));
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn powershell_runs_via_stub_shell() {
         let _guard = env_lock()
@@ -6146,6 +6566,31 @@ printf 'pwsh:%s' "$1"
 
         let output: serde_json::Value = serde_json::from_str(&result).expect("json");
         assert_eq!(output["stdout"], "pwsh:Write-Output hello");
+        assert!(output["stderr"].as_str().expect("stderr").is_empty());
+
+        let background_output: serde_json::Value = serde_json::from_str(&background).expect("json");
+        assert!(background_output["backgroundTaskId"].as_str().is_some());
+        assert_eq!(background_output["backgroundedByUser"], true);
+        assert_eq!(background_output["assistantAutoBackgrounded"], false);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn powershell_runs_via_system_shell() {
+        let result = execute_tool(
+            "PowerShell",
+            &json!({"command": "Write-Output hello", "timeout": 1000}),
+        )
+        .expect("PowerShell should succeed");
+
+        let background = execute_tool(
+            "PowerShell",
+            &json!({"command": "Write-Output hello", "run_in_background": true}),
+        )
+        .expect("PowerShell background should succeed");
+
+        let output: serde_json::Value = serde_json::from_str(&result).expect("json");
+        assert!(output["stdout"].as_str().expect("stdout").contains("hello"));
         assert!(output["stderr"].as_str().expect("stderr").is_empty());
 
         let background_output: serde_json::Value = serde_json::from_str(&background).expect("json");
@@ -6440,6 +6885,22 @@ printf 'pwsh:%s' "$1"
             Some("deepseek"),
         );
         assert_eq!(model, "deepseek-chat");
+    }
+
+    #[test]
+    fn llm_review_disabled_reviewer_does_not_fall_back_to_gpt() {
+        let _g = env_lock_reviewer().lock().unwrap();
+        let _snap = ReviewerEnvSnapshot::capture_and_clear();
+        std::env::set_var("ARIS_REVIEWER_PROVIDER", "none");
+
+        let error = run_llm_review(LlmReviewInput {
+            prompt: "ping".to_string(),
+            model: None,
+        })
+        .expect_err("disabled reviewer should stop before default model routing");
+
+        assert!(error.contains("reviewer is disabled"));
+        assert!(!error.contains("gpt-5.5"));
     }
 
     #[test]

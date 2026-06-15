@@ -1,6 +1,7 @@
 use std::env;
 use std::io;
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -242,8 +243,16 @@ fn prepare_command(
     }
 
     if cfg!(windows) {
-        let mut prepared = hidden_command("cmd");
-        prepared.arg("/C").arg(command).current_dir(cwd);
+        let launcher = windows_shell_launcher();
+        if launcher.posix {
+            prepare_sandbox_dirs(cwd);
+        }
+        let mut prepared = hidden_command(&launcher.program);
+        prepared.args(launcher.args).arg(command).current_dir(cwd);
+        if launcher.posix {
+            prepared.env("HOME", cwd.join(".sandbox-home"));
+            prepared.env("TMPDIR", cwd.join(".sandbox-tmp"));
+        }
         return prepared;
     }
 
@@ -275,8 +284,16 @@ fn prepare_tokio_command(
     }
 
     if cfg!(windows) {
-        let mut prepared = hidden_tokio_command("cmd");
-        prepared.arg("/C").arg(command).current_dir(cwd);
+        let launcher = windows_shell_launcher();
+        if launcher.posix {
+            prepare_sandbox_dirs(cwd);
+        }
+        let mut prepared = hidden_tokio_command(&launcher.program);
+        prepared.args(launcher.args).arg(command).current_dir(cwd);
+        if launcher.posix {
+            prepared.env("HOME", cwd.join(".sandbox-home"));
+            prepared.env("TMPDIR", cwd.join(".sandbox-tmp"));
+        }
         return prepared;
     }
 
@@ -292,6 +309,61 @@ fn prepare_tokio_command(
 fn prepare_sandbox_dirs(cwd: &std::path::Path) {
     let _ = std::fs::create_dir_all(cwd.join(".sandbox-home"));
     let _ = std::fs::create_dir_all(cwd.join(".sandbox-tmp"));
+}
+
+#[derive(Clone)]
+struct WindowsShellLauncher {
+    program: String,
+    args: &'static [&'static str],
+    posix: bool,
+}
+
+fn windows_shell_launcher() -> WindowsShellLauncher {
+    if let Some(program) = detect_windows_posix_shell() {
+        WindowsShellLauncher {
+            program,
+            args: &["-c"],
+            posix: true,
+        }
+    } else {
+        WindowsShellLauncher {
+            program: String::from("cmd"),
+            args: &["/C"],
+            posix: false,
+        }
+    }
+}
+
+fn detect_windows_posix_shell() -> Option<String> {
+    static DETECTED: OnceLock<Option<String>> = OnceLock::new();
+    DETECTED
+        .get_or_init(|| {
+            let candidates = [
+                String::from("bash"),
+                String::from("sh"),
+                String::from(r"C:\Program Files\Git\bin\bash.exe"),
+                String::from(r"C:\Program Files\Git\usr\bin\bash.exe"),
+                String::from(r"C:\msys64\usr\bin\bash.exe"),
+                String::from(r"C:\cygwin64\bin\bash.exe"),
+            ];
+            candidates
+                .into_iter()
+                .find(|candidate| usable_posix_shell(candidate))
+        })
+        .clone()
+}
+
+fn usable_posix_shell(candidate: &str) -> bool {
+    const MARKER: &str = "__aris_posix_shell__";
+    let Ok(output) = hidden_command(candidate)
+        .arg("-c")
+        .arg(format!("printf {MARKER}"))
+        .env("HOME", env::temp_dir())
+        .output()
+    else {
+        return false;
+    };
+    output.status.success() && String::from_utf8_lossy(&output.stdout) == MARKER
 }
 
 /// Check for dangerous bash command patterns. Returns rejection reason or None.

@@ -123,17 +123,59 @@ export function appendThinkingDelta(blocks: ChatBlock[], delta: string): ChatBlo
   return copy;
 }
 
-export function fuzzyMatch(query: string, value: string): boolean {
-  const needle = query.trim().toLowerCase();
-  if (!needle) return true;
-  const haystack = value.toLowerCase();
-  if (haystack.includes(needle)) return true;
+function normalizeSearchText(value: string): string {
+  return value.toLowerCase().normalize("NFKD");
+}
+
+function compactSearchText(value: string): string {
+  return value.replace(/[^a-z0-9]+/g, "");
+}
+
+function searchTokens(value: string): string[] {
+  return value.split(/[^a-z0-9]+/).filter(Boolean);
+}
+
+function subsequenceScore(needle: string, haystack: string): number | null {
   let index = 0;
-  for (const char of haystack) {
-    if (char === needle[index]) index += 1;
-    if (index === needle.length) return true;
+  let first = -1;
+  let last = -1;
+  let gaps = 0;
+  for (let i = 0; i < haystack.length; i += 1) {
+    if (haystack[i] !== needle[index]) continue;
+    if (first < 0) first = i;
+    if (last >= 0) gaps += i - last - 1;
+    last = i;
+    index += 1;
+    if (index === needle.length) return 80 + first + gaps;
   }
-  return false;
+  return null;
+}
+
+export function fuzzyScore(query: string, value: string): number | null {
+  const needle = compactSearchText(normalizeSearchText(query.trim()));
+  if (!needle) return 0;
+  const haystack = normalizeSearchText(value);
+  const compactHaystack = compactSearchText(haystack);
+  if (!compactHaystack) return null;
+
+  const tokens = searchTokens(haystack);
+  const exactToken = tokens.findIndex((token) => token === needle);
+  if (exactToken >= 0) return exactToken;
+
+  const prefixToken = tokens.findIndex((token) => token.startsWith(needle));
+  if (prefixToken >= 0) return 10 + prefixToken;
+
+  const contiguous = compactHaystack.indexOf(needle);
+  if (contiguous >= 0) return 30 + contiguous;
+
+  const acronym = tokens.map((token) => token[0]).join("");
+  if (acronym.startsWith(needle)) return 45;
+
+  return subsequenceScore(needle, compactHaystack);
+}
+
+export function fuzzyMatch(query: string, value: string): boolean {
+  return fuzzyScore(query, value) !== null;
 }
 
 export type SessionGroup = { id: string; label: string; sessions: ChatSession[] };

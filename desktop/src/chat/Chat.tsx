@@ -1,28 +1,83 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
 import {
   chatDelete,
   chatCommandSpecs,
+  chatPermissionGet,
+  chatPermissionSet,
   chatRunCommand,
   chatSetContext,
   chatStatus,
+  chatSuggestTitle,
   fileRead,
   isTauri,
   projectChatStarters,
   skillsList,
+  type ChatContextMessage,
+  type ChatImageInput,
+  type ChatSendRequest,
 } from "../api/tauri";
 import { useStore } from "../store";
-import type { ChatAttachment, ChatCommandSelection, ChatStatus, DesktopCommandSpec, ChatTurn, SkillMeta } from "../types";
+import type { ChatAttachment, ChatCommandSelection, ChatStatus, DesktopCommandSpec, ChatTurn, PermissionModeView, SkillMeta } from "../types";
 import ChatComposer from "./ChatComposer";
 import CommandSelection from "./CommandSelection";
 import ChatSidebar from "./ChatSidebar";
 import ChatThread from "./ChatThread";
-import { makeId, textFromTurn, transcriptFromTurn } from "./model";
+import { makeId, textFromTurn, titleFromTurns, transcriptFromTurn } from "./model";
 import type { ChatSession } from "./types";
 import { useChatSessions } from "./useChatSessions";
 import { useChatStream } from "./useChatStream";
 
 const EMPTY_ASSISTANT_RESPONSE = "Model returned an empty response.";
 const IMAGE_UNSUPPORTED_MESSAGE = "(Image preview only. Vision input is not supported in desktop Chat yet.)";
+
+function estimateTokens(turns: ChatTurn[]): number {
+  let chars = 0;
+  for (const turn of turns) {
+    for (const block of turn.blocks) {
+      if (block.kind === "text") chars += block.text.length;
+      else if (block.kind === "tool") chars += block.input.length + (block.output?.length ?? 0);
+    }
+  }
+  return Math.round(chars / 3.5);
+}
+
+function ContextRing({ used, max }: { used: number; max: number }) {
+  const pct = max > 0 ? Math.min(1, used / max) : 0;
+  const radius = 9;
+  const circ = 2 * Math.PI * radius;
+  const dash = pct * circ;
+  const stroke = pct < 0.5 ? "var(--green)" : pct < 0.8 ? "var(--amber)" : "var(--red)";
+  const label = used === 0 ? "0%" : pct < 0.01 ? "<1%" : `${Math.round(pct * 100)}%`;
+  const usedK = used >= 1000 ? `${(used / 1000).toFixed(0)}k` : String(used);
+  const maxK = max >= 1000 ? `${(max / 1000).toFixed(0)}k` : String(max);
+  return (
+    <div className="ctx-ring" title={`Context window: ${label} used (${usedK} / ${maxK} tokens est.)`}>
+      <svg width="22" height="22" viewBox="0 0 22 22" aria-hidden="true">
+        <circle cx="11" cy="11" r={radius} fill="none" stroke="var(--border)" strokeWidth="2.5" />
+        {pct > 0 && (
+          <circle
+            cx="11" cy="11" r={radius}
+            fill="none" stroke={stroke} strokeWidth="2.5"
+            strokeDasharray={`${dash} ${circ}`}
+            strokeLinecap="round"
+            transform="rotate(-90 11 11)"
+          />
+        )}
+      </svg>
+      <span className="ctx-ring-label">{label}</span>
+    </div>
+  );
+}
+
+function MemoryBadge({ count }: { count: number }) {
+  if (count === 0) return null;
+  return (
+    <div className="mem-badge" title={`${count} active memory item${count !== 1 ? "s" : ""} loaded`}>
+      <span className="mem-badge-icon">◆</span>
+      <span className="mem-badge-count">{count}</span>
+    </div>
+  );
+}
 
 function hasRenderableBlock(turn: ChatTurn) {
   return turn.blocks.some((block) => {
@@ -32,9 +87,31 @@ function hasRenderableBlock(turn: ChatTurn) {
   });
 }
 
-async function outgoingMessage(text: string, attachments: ChatAttachment[]) {
+function mimeTypeFromDataUrl(value: string): string | null {
+  const match = /^data:([^;,]+);base64,/.exec(value);
+  return match?.[1] ?? null;
+}
+
+function imageInputFromAttachment(attachment: ChatAttachment): ChatImageInput | null {
+  if (attachment.kind !== "image" || !attachment.preview) return null;
+  return {
+    name: attachment.name,
+    mimeType: attachment.mimeType || mimeTypeFromDataUrl(attachment.preview) || "image/png",
+    data: attachment.preview,
+  };
+}
+
+async function outgoingMessage(text: string, attachments: ChatAttachment[]): Promise<ChatSendRequest> {
   const sections = [text.trim()];
+  const images: ChatImageInput[] = [];
   for (const attachment of attachments) {
+    if (attachment.kind === "image") {
+      sections.push(`[Attached image: ${attachment.name}]`);
+      const image = imageInputFromAttachment(attachment);
+      if (image) images.push(image);
+      else sections.push(attachment.content ?? IMAGE_UNSUPPORTED_MESSAGE);
+      continue;
+    }
     let content = attachment.content;
     if (!content && attachment.path) {
       try {
@@ -44,22 +121,28 @@ async function outgoingMessage(text: string, attachments: ChatAttachment[]) {
       }
     }
     sections.push(
-      attachment.kind === "image"
-        ? `[Attached image: ${attachment.name}]\n${content ?? IMAGE_UNSUPPORTED_MESSAGE}`
-        : `[Attached file: ${attachment.path ?? attachment.name}]\n\`\`\`\n${content ?? ""}\n\`\`\``,
+      `[Attached file: ${attachment.path ?? attachment.name}]\n\`\`\`\n${content ?? ""}\n\`\`\``,
     );
   }
-  return sections.filter(Boolean).join("\n\n");
+  return {
+    text: sections.filter(Boolean).join("\n\n"),
+    images,
+  };
 }
 
 async function contextForRetry(turns: ChatTurn[]) {
-  const messages: { role: "user" | "assistant"; text: string }[] = [];
+  const messages: ChatContextMessage[] = [];
   for (const turn of turns) {
     if (turn.streaming || turn.error) continue;
-    const text = turn.role === "user"
-      ? await outgoingMessage(textFromTurn(turn), turn.attachments ?? [])
-      : transcriptFromTurn(turn);
-    if (text.trim()) messages.push({ role: turn.role, text });
+    if (turn.role === "user") {
+      const message = await outgoingMessage(textFromTurn(turn), turn.attachments ?? []);
+      if (message.text.trim() || (message.images?.length ?? 0) > 0) {
+        messages.push({ role: "user", text: message.text, images: message.images });
+      }
+    } else {
+      const text = transcriptFromTurn(turn);
+      if (text.trim()) messages.push({ role: "assistant", text });
+    }
   }
   return messages;
 }
@@ -86,6 +169,11 @@ const FALLBACK_SLASH_COMMANDS: DesktopCommandSpec[] = [
   { name: "model", description: "Show or switch the executor model", argumentHint: "[model]" },
   { name: "permissions", description: "Show or switch the active permission mode", argumentHint: "[mode]" },
 ];
+const HIDDEN_SLASH_COMMANDS = new Set(["team", "teams", "workflow", "workflows"]);
+
+function visibleDesktopCommands(commands: DesktopCommandSpec[]) {
+  return commands.filter((command) => !HIDDEN_SLASH_COMMANDS.has(command.name.toLowerCase()));
+}
 
 interface PendingCommandSelection {
   sessionId: string;
@@ -95,16 +183,17 @@ interface PendingCommandSelection {
 export default function Chat() {
   const setTab = useStore((state) => state.setTab);
   const setError = useStore((state) => state.setError);
-  const refreshTeam = useStore((state) => state.refreshTeam);
   const projects = useStore((state) => state.projects);
   const currentProject = useStore((state) => state.currentProject);
   const projectBusy = useStore((state) => state.projectBusy);
   const switchProject = useStore((state) => state.switchProject);
+  const reorderProjects = useStore((state) => state.reorderProjects);
   const {
     allSessions,
     currentId,
     currentSession,
     setCurrentId,
+    materializeCurrentSession,
     updateSession,
     patchTurns,
     newSession,
@@ -115,6 +204,8 @@ export default function Chat() {
     restoreSession,
   } = useChatSessions(currentProject?.id ?? "default");
   const [status, setStatus] = useState<ChatStatus | null>(null);
+  const [permission, setPermission] = useState<PermissionModeView | null>(null);
+  const [permissionBusy, setPermissionBusy] = useState(false);
   const [skills, setSkills] = useState<SkillMeta[]>([]);
   const [desktopCommands, setDesktopCommands] = useState<DesktopCommandSpec[]>(FALLBACK_SLASH_COMMANDS);
   const [starters, setStarters] = useState([
@@ -123,13 +214,23 @@ export default function Chat() {
     "Run the relevant tests and fix any failures.",
   ]);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [chatSidebarWidth, setChatSidebarWidth] = useState<number>(() => {
+    const v = Number(localStorage.getItem("aris-chat-sidebar-w"));
+    return v >= 150 && v <= 400 ? v : 218;
+  });
+  const [chatSidebarCollapsed, setChatSidebarCollapsed] = useState<boolean>(
+    () => localStorage.getItem("aris-chat-sidebar-collapsed") === "true",
+  );
+  const chatSidebarResizeRef = useRef<{ startX: number; startWidth: number } | null>(null);
   const [composerHeight, setComposerHeight] = useState(120);
   const [editingTurnId, setEditingTurnId] = useState<string | null>(null);
   const [deleted, setDeleted] = useState<ChatSession | null>(null);
   const [pendingCommandSelection, setPendingCommandSelection] = useState<PendingCommandSelection | null>(null);
   const [focusRequest, setFocusRequest] = useState(0);
+  const [exporting, setExporting] = useState(false);
   const deleteTimers = useRef(new Map<string, { timer: number; projectId: string }>());
-  const sendLock = useRef(false);
+  const titleRequests = useRef(new Set<string>());
+  const sendLocks = useRef(new Set<string>());
   const commandSelectionLock = useRef(false);
   const currentSessionRef = useRef(currentSession);
   currentSessionRef.current = currentSession;
@@ -162,25 +263,51 @@ export default function Chat() {
     });
   }, [patchTurns]);
 
+  const suggestTitle = useCallback((sessionId: string, nextTurns: ChatTurn[]) => {
+    if (!isTauri() || titleRequests.current.has(sessionId)) return;
+    const userTurns = nextTurns.filter((turn) => turn.role === "user");
+    const assistantTurns = nextTurns.filter((turn) => turn.role === "assistant");
+    if (userTurns.length !== 1 || assistantTurns.length !== 1) return;
+    const userText = textFromTurn(userTurns[0]).trim();
+    const assistantText = transcriptFromTurn(assistantTurns[0]).trim();
+    if (!userText || !assistantText) return;
+    titleRequests.current.add(sessionId);
+    void chatSuggestTitle(userText, assistantText)
+      .then((title) => {
+        const trimmed = title.trim();
+        if (!trimmed) return;
+        updateSession(sessionId, (session) => {
+          const fallback = titleFromTurns(session.turns);
+          if (session.title !== "New chat" && session.title !== fallback) return session;
+          return { ...session, title: trimmed };
+        });
+      })
+      .catch(() => undefined);
+  }, [updateSession]);
+
   const onComplete = useCallback((sessionId: string, reply: string) => {
-    patchAssistant(sessionId, (turn) => {
-      const hasText = turn.blocks.some((block) => block.kind === "text" && block.text.trim());
-      const nextBlocks = hasText
-        ? turn.blocks
-        : reply.trim()
-          ? [...turn.blocks, { kind: "text" as const, text: reply }]
-          : hasRenderableBlock(turn)
-            ? turn.blocks
-            : [{ kind: "text" as const, text: EMPTY_ASSISTANT_RESPONSE }];
-      return {
-        ...turn,
-        blocks: nextBlocks,
-        streaming: false,
-        error: undefined,
-        stopped: false,
-      };
-    });
-  }, [patchAssistant]);
+    patchAssistant(
+      sessionId,
+      (turn) => {
+        const hasText = turn.blocks.some((block) => block.kind === "text" && block.text.trim());
+        const nextBlocks = hasText
+          ? turn.blocks
+          : reply.trim()
+            ? [...turn.blocks, { kind: "text" as const, text: reply }]
+            : hasRenderableBlock(turn)
+              ? turn.blocks
+              : [{ kind: "text" as const, text: EMPTY_ASSISTANT_RESPONSE }];
+        return {
+          ...turn,
+          blocks: nextBlocks,
+          streaming: false,
+          error: undefined,
+          stopped: false,
+        };
+      },
+      (nextTurns) => suggestTitle(sessionId, nextTurns),
+    );
+  }, [patchAssistant, suggestTitle]);
 
   const onError = useCallback((sessionId: string, error: string, stopped: boolean) => {
     patchAssistant(
@@ -195,12 +322,14 @@ export default function Chat() {
     );
   }, [patchAssistant, syncBackendContext]);
 
-  const { busy, run, stop } = useChatStream({ patchAssistant, onComplete, onError });
+  const { run, stop, runningSessionIds } = useChatStream({ patchAssistant, onComplete, onError });
+  const currentChatBusy = runningSessionIds.has(currentId);
   const turns = currentSession?.turns ?? [];
+  const estimatedTokens = estimateTokens(turns);
   const input = currentSession?.draft ?? "";
   const attachments = currentSession?.draftAttachments ?? [];
-  const busyRef = useRef(busy);
-  busyRef.current = busy;
+  const runningSessionIdsRef = useRef(runningSessionIds);
+  runningSessionIdsRef.current = runningSessionIds;
 
   const refreshStatus = useCallback(() => {
     if (!isTauri()) {
@@ -212,11 +341,33 @@ export default function Chat() {
 
   useEffect(() => {
     refreshStatus();
-    if (!isTauri()) return;
-    chatCommandSpecs().then(setDesktopCommands).catch(() => setDesktopCommands(FALLBACK_SLASH_COMMANDS));
+    if (!isTauri()) {
+      setPermission({ mode: "workspace-write", label: "Accept edits", description: "Read and edit workspace files" });
+      return;
+    }
+    chatPermissionGet(currentId).then(setPermission).catch(() => setPermission(null));
+    chatCommandSpecs()
+      .then((commands) => setDesktopCommands(visibleDesktopCommands(commands)))
+      .catch(() => setDesktopCommands(FALLBACK_SLASH_COMMANDS));
     skillsList().then(setSkills).catch(() => undefined);
     projectChatStarters().then(setStarters).catch(() => undefined);
-  }, [currentProject?.id, refreshStatus]);
+  }, [currentId, currentProject?.id, refreshStatus]);
+
+  const changePermission = async (mode: string) => {
+    if (!isTauri()) {
+      const label = mode === "read-only" ? "Plan" : mode === "danger-full-access" ? "Don't ask" : "Accept edits";
+      setPermission({ mode, label, description: "" });
+      return;
+    }
+    setPermissionBusy(true);
+    try {
+      setPermission(await chatPermissionSet(currentId, mode));
+    } catch (error) {
+      setError(String(error));
+    } finally {
+      setPermissionBusy(false);
+    }
+  };
 
   useEffect(() => () => {
     deleteTimers.current.forEach(({ timer, projectId }, sessionId) => {
@@ -230,6 +381,19 @@ export default function Chat() {
     setPendingCommandSelection(null);
   }, [currentId]);
 
+  // One-shot composer prefill from other views (e.g. Literature → /arxiv).
+  const pendingChatInput = useStore((state) => state.pendingChatInput);
+  const setPendingChatInput = useStore((state) => state.setPendingChatInput);
+  const pendingChatRunInput = useStore((state) => state.pendingChatRunInput);
+  const setPendingChatRunInput = useStore((state) => state.setPendingChatRunInput);
+  useEffect(() => {
+    const session = currentSessionRef.current;
+    if (!pendingChatInput || !session) return;
+    setDraft(session.id, pendingChatInput);
+    setPendingChatInput(null);
+    focusComposer();
+  }, [pendingChatInput, setDraft, setPendingChatInput, focusComposer]);
+
   const setAttachments = (next: ChatAttachment[]) => {
     if (!currentSession) return;
     updateSession(currentSession.id, (session) => ({ ...session, draftAttachments: next }));
@@ -241,9 +405,11 @@ export default function Chat() {
     text: string,
     attached: ChatAttachment[],
     resetContext = false,
-    promptOverride?: string,
+    promptOverride?: string | ChatSendRequest,
   ) => {
-    const prompt = promptOverride ?? (await outgoingMessage(text, attached));
+    const prompt = typeof promptOverride === "string"
+      ? { text: promptOverride }
+      : promptOverride ?? (await outgoingMessage(text, attached));
     if (!isTauri()) {
       patchTurns(session.id, () => [
         ...prefix,
@@ -273,6 +439,16 @@ export default function Chat() {
     const trimmed = text.trim();
     if (!trimmed.startsWith("/")) return false;
     const commandName = trimmed.slice(1).split(/\s+/)[0]?.toLowerCase() ?? "";
+    if (HIDDEN_SLASH_COMMANDS.has(commandName)) {
+      patchTurns(session.id, (turns) => [
+        ...turns,
+        userTurn(text, []),
+        assistantTextTurn("This desktop command is no longer available."),
+      ]);
+      updateSession(session.id, (item) => ({ ...item, draft: "", draftAttachments: [] }));
+      setEditingTurnId(null);
+      return true;
+    }
     const isKnownSkill = skills.some((skill) => skill.name.toLowerCase() === commandName);
     if (attached.length > 0 && !isKnownSkill) return false;
 
@@ -302,7 +478,7 @@ export default function Chat() {
       if (result.prompt) {
         const prompt = attached.length > 0
           ? await outgoingMessage(result.prompt, attached)
-          : result.prompt;
+          : { text: result.prompt };
         await beginRun(
           session,
           result.replaceTurns ? [] : session.turns,
@@ -335,10 +511,19 @@ export default function Chat() {
     }
   }, [beginRun, patchTurns, refreshStatus, setError, setTab, skills, updateSession]);
 
+  useEffect(() => {
+    const text = pendingChatRunInput?.trim();
+    if (!text || !currentSession || currentChatBusy) return;
+    setPendingChatRunInput(null);
+    const session = materializeCurrentSession();
+    if (!session) return;
+    void runSlashCommand(session, text, []);
+  }, [currentChatBusy, currentSession, materializeCurrentSession, pendingChatRunInput, runSlashCommand, setPendingChatRunInput]);
+
   const selectCommandOption = useCallback(async (value: string) => {
     const pending = pendingCommandSelection;
     const session = currentSessionRef.current;
-    if (!pending || !session || session.id !== pending.sessionId || busyRef.current || commandSelectionLock.current) return;
+    if (!pending || !session || session.id !== pending.sessionId || runningSessionIdsRef.current.has(session.id) || commandSelectionLock.current) return;
     commandSelectionLock.current = true;
     setPendingCommandSelection(null);
     focusComposer();
@@ -350,31 +535,34 @@ export default function Chat() {
   }, [focusComposer, pendingCommandSelection, runSlashCommand]);
 
   const send = async () => {
-    if (sendLock.current || !currentSession || busy || (!input.trim() && attachments.length === 0)) return;
-    sendLock.current = true;
+    if (!currentSession || sendLocks.current.has(currentSession.id) || currentChatBusy || (!input.trim() && attachments.length === 0)) return;
+    const sessionId = currentSession.id;
+    sendLocks.current.add(sessionId);
     try {
       if (!status?.ready && (!input.trim().startsWith("/") || attachments.length > 0)) return;
-      if (await runSlashCommand(currentSession, input, attachments)) return;
+      const session = materializeCurrentSession();
+      if (!session) return;
+      if (await runSlashCommand(session, input, attachments)) return;
       if (editingTurnId) {
-        const index = currentSession.turns.findIndex((turn) => turn.id === editingTurnId);
-        const prefix = index >= 0 ? currentSession.turns.slice(0, index) : currentSession.turns;
-        await beginRun(currentSession, prefix, input, attachments, true);
+        const index = session.turns.findIndex((turn) => turn.id === editingTurnId);
+        const prefix = index >= 0 ? session.turns.slice(0, index) : session.turns;
+        await beginRun(session, prefix, input, attachments, true);
         return;
       }
-      await beginRun(currentSession, currentSession.turns, input, attachments);
+      await beginRun(session, session.turns, input, attachments);
     } finally {
-      sendLock.current = false;
+      sendLocks.current.delete(sessionId);
     }
   };
 
   const retry = useCallback(async (assistant: ChatTurn) => {
     const session = currentSessionRef.current;
-    if (!session || busyRef.current || sendLock.current) return;
+    if (!session || runningSessionIdsRef.current.has(session.id) || sendLocks.current.has(session.id)) return;
     const assistantIndex = session.turns.findIndex((turn) => turn.id === assistant.id);
     const userIndex = assistantIndex - 1;
     const previousUser = session.turns[userIndex];
     if (userIndex < 0 || previousUser?.role !== "user") return;
-    sendLock.current = true;
+    sendLocks.current.add(session.id);
     try {
       await beginRun(
         session,
@@ -384,13 +572,13 @@ export default function Chat() {
         true,
       );
     } finally {
-      sendLock.current = false;
+      sendLocks.current.delete(session.id);
     }
   }, [beginRun]);
 
   const edit = useCallback((turn: ChatTurn) => {
     const session = currentSessionRef.current;
-    if (!session || busyRef.current) return;
+    if (!session || runningSessionIdsRef.current.has(session.id)) return;
     setDraft(session.id, textFromTurn(turn));
     updateSession(session.id, (item) => ({ ...item, draftAttachments: turn.attachments ?? [] }));
     setEditingTurnId(turn.id);
@@ -399,18 +587,46 @@ export default function Chat() {
 
   const continueStopped = useCallback(async () => {
     const session = currentSessionRef.current;
-    if (!session || busyRef.current || sendLock.current) return;
-    sendLock.current = true;
+    if (!session || runningSessionIdsRef.current.has(session.id) || sendLocks.current.has(session.id)) return;
+    sendLocks.current.add(session.id);
     try {
       await beginRun(session, session.turns, "Continue from where you stopped.", [], true);
     } finally {
-      sendLock.current = false;
+      sendLocks.current.delete(session.id);
     }
   }, [beginRun]);
 
-  const openTeamView = useCallback(() => {
-    void refreshTeam().finally(() => setTab("teams"));
-  }, [refreshTeam, setTab]);
+  const exportCurrentChat = useCallback(async () => {
+    const session = currentSessionRef.current;
+    if (!session || runningSessionIdsRef.current.has(session.id) || exporting || session.turns.length === 0) return;
+    setExporting(true);
+    try {
+      if (!isTauri()) {
+        patchTurns(session.id, (turns) => [
+          ...turns,
+          assistantTextTurn("Export is available in the Tauri app."),
+        ]);
+        return;
+      }
+      const result = await chatRunCommand(session.id, "/export");
+      if (!result.handled) return;
+      if (result.openSettings) setTab("settings");
+      if (result.refreshStatus) refreshStatus();
+      patchTurns(session.id, (turns) => [
+        ...turns,
+        assistantTextTurn(result.message ?? "Export complete."),
+      ]);
+    } catch (error) {
+      const message = String(error);
+      setError(message);
+      patchTurns(session.id, (turns) => [
+        ...turns,
+        assistantTextTurn(`Export failed: ${message}`),
+      ]);
+    } finally {
+      setExporting(false);
+    }
+  }, [exporting, patchTurns, refreshStatus, setError, setTab]);
 
   const deleteSession = (id: string) => {
     const removed = removeSession(id);
@@ -433,15 +649,42 @@ export default function Chat() {
     setDeleted(null);
   };
 
+  const onChatSidebarResizeStart = (e: ReactPointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0 || chatSidebarCollapsed) return;
+    chatSidebarResizeRef.current = { startX: e.clientX, startWidth: chatSidebarWidth };
+    e.currentTarget.setPointerCapture(e.pointerId);
+  };
+  const onChatSidebarResizeMove = (e: ReactPointerEvent<HTMLDivElement>) => {
+    if (!chatSidebarResizeRef.current) return;
+    const w = Math.max(150, Math.min(400, chatSidebarResizeRef.current.startWidth + (e.clientX - chatSidebarResizeRef.current.startX)));
+    setChatSidebarWidth(w);
+  };
+  const onChatSidebarResizeEnd = (e: ReactPointerEvent<HTMLDivElement>) => {
+    if (!chatSidebarResizeRef.current) return;
+    const w = Math.max(150, Math.min(400, chatSidebarResizeRef.current.startWidth + (e.clientX - chatSidebarResizeRef.current.startX)));
+    chatSidebarResizeRef.current = null;
+    setChatSidebarWidth(w);
+    localStorage.setItem("aris-chat-sidebar-w", String(w));
+  };
+  const toggleChatSidebar = () => {
+    const next = !chatSidebarCollapsed;
+    setChatSidebarCollapsed(next);
+    localStorage.setItem("aris-chat-sidebar-collapsed", String(next));
+  };
+
   return (
-    <div className="chat-root">
+    <div
+      className={`chat-root${chatSidebarCollapsed ? " chat-sidebar-collapsed" : ""}`}
+      style={{ "--chat-sidebar-w": chatSidebarCollapsed ? "0px" : `${chatSidebarWidth}px` } as CSSProperties}
+    >
       <ChatSidebar
         sessions={allSessions}
         projects={projects}
         currentId={currentId}
         open={sidebarOpen}
-        busy={busy || projectBusy}
+        busy={projectBusy}
         onClose={() => setSidebarOpen(false)}
+        onDesktopCollapse={toggleChatSidebar}
         onNew={() => {
           setEditingTurnId(null);
           setCurrentId(newSession());
@@ -462,17 +705,64 @@ export default function Chat() {
         onRename={renameSession}
         onTogglePinned={togglePinned}
         onDelete={deleteSession}
+        onReorderProjects={reorderProjects}
+      />
+      <div
+        className="chat-sidebar-resize-handle"
+        onPointerDown={onChatSidebarResizeStart}
+        onPointerMove={onChatSidebarResizeMove}
+        onPointerUp={onChatSidebarResizeEnd}
+        onPointerCancel={onChatSidebarResizeEnd}
       />
       <main className={`chat${turns.length === 0 ? " chat-empty" : ""}`}>
         <header className="chat-head">
-          <button className="chat-sidebar-toggle" onClick={() => setSidebarOpen((open) => !open)} aria-label="Toggle chat sidebar">☰</button>
+          <button
+            className="chat-sidebar-toggle"
+            onClick={() => {
+              if (chatSidebarCollapsed) toggleChatSidebar();
+              else setSidebarOpen((open) => !open);
+            }}
+            aria-label="Toggle chat sidebar"
+          >
+            ☰
+          </button>
           <div className="chat-thread-heading">
             <span className="chat-thread-title">{currentSession?.title ?? "New chat"}</span>
             {status?.ready
               ? <span className="chat-model">{status.model} · {status.provider}</span>
               : <span className="chat-model chat-model-error">{status?.message ?? "Checking..."}</span>}
           </div>
-          {!status?.ready && <button onClick={() => setTab("settings")}>Settings</button>}
+          <div className="chat-head-actions">
+            <label className="chat-permission-control" title={permission?.description ?? "Active permission mode"}>
+              <span>Permission</span>
+              <select
+                aria-label="Chat permission mode"
+                value={permission?.mode ?? "workspace-write"}
+                disabled={permissionBusy || currentChatBusy}
+                onChange={(event) => void changePermission(event.currentTarget.value)}
+              >
+                <option value="read-only">Plan</option>
+                <option value="workspace-write">Accept edits</option>
+                <option value="danger-full-access">Don't ask</option>
+              </select>
+            </label>
+            {status?.ready && status.contextWindow != null && (
+              <ContextRing used={estimatedTokens} max={status.contextWindow} />
+            )}
+            {status?.memoryFiles != null && status.memoryFiles > 0 && (
+              <MemoryBadge count={status.memoryFiles} />
+            )}
+            <button
+              className="chat-export-btn"
+              onClick={() => void exportCurrentChat()}
+              disabled={currentChatBusy || exporting || turns.length === 0}
+              title="Export current chat"
+              aria-label="Export current chat"
+            >
+              {exporting ? "Exporting" : "Export"}
+            </button>
+            {!status?.ready && <button onClick={() => setTab("settings")}>Settings</button>}
+          </div>
         </header>
         <ChatThread
           sessionId={currentId}
@@ -487,7 +777,6 @@ export default function Chat() {
           onEdit={edit}
           onRetry={retry}
           onContinue={continueStopped}
-          onOpenTeam={openTeamView}
         />
         {pendingCommandSelection && pendingCommandSelection.sessionId === currentId && (
           <CommandSelection
@@ -505,7 +794,7 @@ export default function Chat() {
           commands={desktopCommands}
           skills={skills}
           attachments={attachments}
-          busy={busy}
+          busy={currentChatBusy}
           ready={Boolean(status?.ready)}
           editing={Boolean(editingTurnId)}
           focusRequest={focusRequest}
@@ -515,7 +804,7 @@ export default function Chat() {
           }}
           onAttachmentsChange={setAttachments}
           onSubmit={() => void send()}
-          onStop={() => void stop()}
+          onStop={() => void stop(currentId)}
           onCancelEdit={() => setEditingTurnId(null)}
           onHeightChange={setComposerHeight}
         />

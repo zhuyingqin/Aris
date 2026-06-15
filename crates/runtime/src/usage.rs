@@ -87,15 +87,37 @@ pub fn pricing_for_model(model: &str) -> Option<ModelPricing> {
         });
     }
     if m.contains("opus") {
+        // Deprecated Opus 4.0 / 4.1 keep the legacy $15/$75 tier.
+        // Use `has_word` with "opus-" prefix for boundary safety: a future
+        // "opus-4-10" must NOT be mis-classified as 4.1.
+        // Also match the dated 4.0 form and the bare "claude-opus-4" alias.
+        let legacy_opus = has_word(&m, "opus-4-0")    // claude-opus-4-0 alias (4.0)
+            || has_word(&m, "opus-4-1")               // claude-opus-4-1[-date] (4.1)
+            || m.contains("opus-4-2025")              // claude-opus-4-20250514 (dated 4.0)
+            || m.ends_with("opus-4");                 // bare claude-opus-4 (4.0)
+        if legacy_opus {
+            return Some(ModelPricing {
+                input_cost_per_million: 15.0,
+                output_cost_per_million: 75.0,
+                cache_creation_cost_per_million: 18.75,
+                cache_read_cost_per_million: 1.5,
+            });
+        }
+        // Current Opus 4.5–4.8 — corrected pricing (verified 2026-06).
         return Some(ModelPricing {
-            input_cost_per_million: 15.0,
-            output_cost_per_million: 75.0,
-            cache_creation_cost_per_million: 18.75,
-            cache_read_cost_per_million: 1.5,
+            input_cost_per_million: 5.0,
+            output_cost_per_million: 25.0,
+            cache_creation_cost_per_million: 6.25,
+            cache_read_cost_per_million: 0.5,
         });
     }
     if m.contains("sonnet") {
-        return Some(ModelPricing::default_sonnet_tier());
+        return Some(ModelPricing {
+            input_cost_per_million: 3.0,
+            output_cost_per_million: 15.0,
+            cache_creation_cost_per_million: 3.75,
+            cache_read_cost_per_million: 0.3,
+        });
     }
 
     // ── OpenAI families ──────────────────────────────────────────
@@ -311,6 +333,18 @@ impl TokenUsage {
             + self.cache_read_input_tokens
     }
 
+    /// Real size of the prompt that was sent — i.e. how full the context
+    /// window currently is. Cached tokens (read + creation) still occupy the
+    /// window, so they count alongside fresh input. This is the signal to
+    /// compare against the model's context window when deciding to compact;
+    /// it excludes `output_tokens`, which are generated, not prompt.
+    #[must_use]
+    pub fn prompt_tokens(self) -> u32 {
+        self.input_tokens
+            .saturating_add(self.cache_creation_input_tokens)
+            .saturating_add(self.cache_read_input_tokens)
+    }
+
     #[must_use]
     pub fn estimate_cost_usd(self) -> UsageCostEstimate {
         self.estimate_cost_usd_with_pricing(ModelPricing::default_sonnet_tier())
@@ -439,6 +473,14 @@ mod tests {
     use super::{format_usd, pricing_for_model, TokenUsage, UsageTracker};
     use crate::session::{ContentBlock, ConversationMessage, MessageRole, Session};
 
+    fn assert_pricing(model: &str, input: f64, output: f64, cache_create: f64, cache_read: f64) {
+        let p = pricing_for_model(model).unwrap_or_else(|| panic!("no pricing for {model}"));
+        assert_eq!(p.input_cost_per_million, input, "input for {model}");
+        assert_eq!(p.output_cost_per_million, output, "output for {model}");
+        assert_eq!(p.cache_creation_cost_per_million, cache_create, "cache_create for {model}");
+        assert_eq!(p.cache_read_cost_per_million, cache_read, "cache_read for {model}");
+    }
+
     #[test]
     fn tracks_true_cumulative_usage() {
         let mut tracker = UsageTracker::new();
@@ -476,9 +518,9 @@ mod tests {
         assert_eq!(format_usd(cost.input_cost_usd), "$15.0000");
         assert_eq!(format_usd(cost.output_cost_usd), "$37.5000");
         let lines = usage.summary_lines_for_model("usage", Some("claude-sonnet-4-20250514"));
-        assert!(lines[0].contains("estimated_cost=$54.6750"));
+        assert!(lines[0].contains("estimated_cost=$10.9350"));
         assert!(lines[0].contains("model=claude-sonnet-4-20250514"));
-        assert!(lines[1].contains("cache_read=$0.3000"));
+        assert!(lines[1].contains("cache_read=$0.0600"));
     }
 
     #[test]
@@ -495,7 +537,7 @@ mod tests {
         let haiku_cost = usage.estimate_cost_usd_with_pricing(haiku);
         let opus_cost = usage.estimate_cost_usd_with_pricing(opus);
         assert_eq!(format_usd(haiku_cost.total_cost_usd()), "$3.5000");
-        assert_eq!(format_usd(opus_cost.total_cost_usd()), "$52.5000");
+        assert_eq!(format_usd(opus_cost.total_cost_usd()), "$17.5000");
     }
 
     #[test]
@@ -587,5 +629,30 @@ mod tests {
             pricing_for_model("kimiclone-foo").is_some(),
             "kimiclone-foo starts with `kimi` so the provider_match prefix branch fires"
         );
+    }
+
+    /// Current Opus (4.5–4.8) is $5/$25 — NOT the old $15/$75 deprecated tier.
+    #[test]
+    fn price_opus() {
+        assert_pricing("claude-opus-4-8", 5.0, 25.0, 6.25, 0.5);
+        assert_pricing("claude-opus-4-7", 5.0, 25.0, 6.25, 0.5);
+        assert_pricing("claude-opus-4-5", 5.0, 25.0, 6.25, 0.5);
+    }
+
+    /// Deprecated Opus 4.0 / 4.1 keep the legacy $15/$75 tier. Locks the
+    /// tier split so a current-minor (4.5+) never falls into legacy and a
+    /// legacy id never falls into current. `has_word` boundary handling means
+    /// `opus-4-1` matches 4.1 but NOT a future `opus-4-10`.
+    #[test]
+    fn price_opus_legacy() {
+        assert_pricing("claude-opus-4-1", 15.0, 75.0, 18.75, 1.5);
+        assert_pricing("claude-opus-4-20250514", 15.0, 75.0, 18.75, 1.5);
+    }
+
+    /// Sonnet 4.x is $3/$15 — NOT the deprecated $15/$75 Opus tier.
+    #[test]
+    fn price_sonnet() {
+        assert_pricing("claude-sonnet-4-6", 3.0, 15.0, 3.75, 0.30);
+        assert_pricing("claude-sonnet-4-20250514", 3.0, 15.0, 3.75, 0.30);
     }
 }

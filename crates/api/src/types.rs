@@ -130,6 +130,9 @@ pub enum InputContentBlock {
     Text {
         text: String,
     },
+    Image {
+        source: ImageSource,
+    },
     ToolUse {
         id: String,
         name: String,
@@ -151,6 +154,25 @@ pub enum InputContentBlock {
         #[serde(default)]
         signature: String,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ImageSource {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub media_type: String,
+    pub data: String,
+}
+
+impl ImageSource {
+    #[must_use]
+    pub fn base64(media_type: impl Into<String>, data: impl Into<String>) -> Self {
+        Self {
+            kind: "base64".to_string(),
+            media_type: media_type.into(),
+            data: data.into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

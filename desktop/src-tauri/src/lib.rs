@@ -2,6 +2,8 @@ mod commands;
 mod config;
 mod engine;
 mod files;
+mod literature;
+mod mcp;
 mod process;
 mod projects;
 mod sessions;
@@ -17,6 +19,10 @@ pub fn run() {
         .manage(engine::ChatState::default())
         .manage(projects::ProjectState::default())
         .setup(|app| {
+            state::apply_bundle_cache_environment();
+            // Export config-held keys (e.g. SCOPUS_API_KEY) before any
+            // literature search runs; force=false keeps real env vars intact.
+            config::apply_reviewer_environment(false);
             projects::init(&app.state::<projects::ProjectState>())
                 .map_err(std::io::Error::other)?;
             if let Some(window) = app.get_webview_window("main") {
@@ -43,23 +49,48 @@ pub fn run() {
             projects::projects_get,
             projects::project_add,
             projects::project_set_current,
+            projects::projects_reorder,
             config::config_get,
             config::config_set,
             config::config_test,
+            mcp::mcp_config_get,
+            mcp::mcp_config_set,
+            mcp::mcp_config_test,
             sessions::sessions_list,
             sessions::session_get,
             sessions::chat_ui_sessions_load,
             sessions::chat_ui_sessions_save,
+            literature::literature_load,
+            literature::literature_save,
+            literature::literature_search,
+            literature::literature_library_upsert,
+            literature::literature_download_pdf,
+            literature::literature_llm,
+            literature::literature_review_llm,
+            literature::literature_llm_vision,
+            literature::literature_pdf_text,
+            literature::literature_pdf_bytes,
+            literature::literature_import_pdf,
+            literature::literature_image_ocr,
+            literature::literature_pdf_open,
             engine::chat_status,
+            engine::chat_permission_get,
+            engine::chat_permission_set,
+            engine::project_permission_get,
+            engine::project_permission_set,
             engine::chat_command_specs,
             engine::chat_run_command,
             engine::chat_send,
+            engine::chat_send_rich,
+            engine::literature_agent_send_rich,
+            engine::chat_suggest_title,
             engine::chat_reset,
             engine::chat_set_context,
             engine::chat_delete,
             engine::chat_cancel,
             files::file_search,
             files::file_read,
+            files::file_open,
             files::project_chat_starters,
         ])
         .run(tauri::generate_context!())

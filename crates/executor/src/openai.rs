@@ -9,7 +9,7 @@ use runtime::{
 };
 use serde_json::{json, Value};
 
-use crate::{ExecutorToolSpec, StreamObserver};
+use crate::{push_text_event, ExecutorToolSpec, StreamObserver};
 
 const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 
@@ -266,11 +266,29 @@ fn choice_finish_reason(choice: &Value) -> Option<&str> {
 /// incrementally across chunks: `id` is overwritten whenever the field is
 /// present, a non-empty `name` is retained, and `arguments` concatenate.
 fn accumulate_tool_call(pending: &mut Vec<(String, String, String)>, tc: &Value) {
-    let idx = tc.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
+    let incoming_id = tc
+        .get("id")
+        .and_then(|i| i.as_str())
+        .filter(|s| !s.is_empty());
+
+    // OE6: when `index` is missing but `id` is present, merge into the slot
+    // that already carries that id (covers compat providers that send id-only
+    // continuation deltas). Fall back to slot 0 only when neither is present.
+    let idx = if let Some(raw_idx) = tc.get("index").and_then(|i| i.as_u64()) {
+        raw_idx as usize
+    } else if let Some(id) = incoming_id {
+        pending
+            .iter()
+            .position(|(slot_id, _, _)| slot_id == id)
+            .unwrap_or(0)
+    } else {
+        0
+    };
+
     while pending.len() <= idx {
         pending.push((String::new(), String::new(), String::new()));
     }
-    if let Some(id) = tc.get("id").and_then(|i| i.as_str()) {
+    if let Some(id) = incoming_id {
         pending[idx].0 = id.to_string();
     }
     if let Some(func) = tc.get("function") {
@@ -747,10 +765,10 @@ on a compatible third-party proxy, or use Claude/another provider as executor an
                                 done = false;
                                 continue;
                             }
-                            return Err(RuntimeError::new(format!(
-                                "OpenAI stream idle timeout ({}s, retries exhausted or partial output already emitted)",
-                                dur.as_secs()
-                            )));
+                            events.push(AssistantEvent::StopReason(
+                                "stream_error_after_partial_output".to_string(),
+                            ));
+                            break;
                         }
                     },
                     None => chunk_future.await,
@@ -790,15 +808,14 @@ on a compatible third-party proxy, or use Claude/another provider as executor an
                                 continue;
                             }
                             StreamEofAction::Truncated => {
-                                // Returning Err prevents `Ensure MessageStop`
-                                // below from synthesizing success out of a
-                                // half-finished response.
-                                return Err(RuntimeError::new(
-                                    "OpenAI stream ended prematurely without [DONE] sentinel \
-                                     or finish_reason (retries exhausted or partial output \
-                                     already emitted)"
-                                        .to_string(),
+                                // Preserve partial progress and let the runtime
+                                // request an automatic continuation. Returning
+                                // an error here discarded the already-streamed
+                                // output and stopped the whole task.
+                                events.push(AssistantEvent::StopReason(
+                                    "stream_truncated".to_string(),
                                 ));
+                                break;
                             }
                         }
                     }
@@ -823,7 +840,13 @@ on a compatible third-party proxy, or use Claude/another provider as executor an
                             done = false;
                             continue;
                         }
-                        return Err(RuntimeError::new(error.to_string()));
+                        if nothing_emitted_yet(&events, &pending_tools, &current_reasoning) {
+                            return Err(RuntimeError::new(error.to_string()));
+                        }
+                        events.push(AssistantEvent::StopReason(
+                            "stream_error_after_partial_output".to_string(),
+                        ));
+                        break;
                     }
                 };
                 let text = String::from_utf8_lossy(&chunk);
@@ -939,7 +962,7 @@ on a compatible third-party proxy, or use Claude/another provider as executor an
                             if let Some(content) = delta.get("content").and_then(|c| c.as_str()) {
                                 if !content.is_empty() {
                                     observer.on_text_delta(content)?;
-                                    events.push(AssistantEvent::TextDelta(content.to_string()));
+                                    push_text_event(&mut events, content.to_string());
                                 }
                             }
 
@@ -965,12 +988,19 @@ on a compatible third-party proxy, or use Claude/another provider as executor an
                         // prints the tool-call start line; the fallback
                         // drain does not).
                         if let Some(reason) = finish_reason {
-                            if reason == "length" || reason == "content_filter" {
+                            events.push(AssistantEvent::StopReason(reason.to_string()));
+                            let truncated = matches!(
+                                reason,
+                                "length" | "max_output" | "max_output_tokens"
+                            );
+                            if truncated || reason == "content_filter" {
                                 eprintln!(
                                     "\x1b[33m  OpenAI stream finished with reason='{reason}' — output may be truncated or filtered\x1b[0m"
                                 );
                             }
-                            flush_pending_tools(&mut pending_tools, observer, &mut events)?;
+                            if !truncated {
+                                flush_pending_tools(&mut pending_tools, observer, &mut events)?;
+                            }
                         }
                     }
                 }
@@ -985,11 +1015,23 @@ on a compatible third-party proxy, or use Claude/another provider as executor an
                 .iter()
                 .any(|e| matches!(e, AssistantEvent::MessageStop))
             {
-                // Flush any leftover tools
-                for (id, name, input) in pending_tools.drain(..) {
-                    if !name.is_empty() {
-                        observer.on_tool_call(&id, &name, &input)?;
-                        events.push(AssistantEvent::ToolUse { id, name, input });
+                let truncated = events.iter().any(|event| {
+                    matches!(
+                        event,
+                        AssistantEvent::StopReason(reason)
+                            if matches!(
+                                reason.as_str(),
+                                "stream_truncated" | "stream_error_after_partial_output"
+                            )
+                    )
+                });
+                // Never execute a tool call whose JSON may have been cut off.
+                if !truncated {
+                    for (id, name, input) in pending_tools.drain(..) {
+                        if !name.is_empty() {
+                            observer.on_tool_call(&id, &name, &input)?;
+                            events.push(AssistantEvent::ToolUse { id, name, input });
+                        }
                     }
                 }
                 observer.on_message_stop()?;
@@ -1080,15 +1122,7 @@ fn convert_messages_openai(
                 // Already handled above
             }
             MessageRole::User => {
-                let text = message
-                    .blocks
-                    .iter()
-                    .filter_map(|b| match b {
-                        ContentBlock::Text { text } => Some(text.as_str()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
+                let content = openai_user_content(&message.blocks);
 
                 // Also emit tool_result blocks as separate "tool" role messages
                 for block in &message.blocks {
@@ -1106,10 +1140,10 @@ fn convert_messages_openai(
                     }
                 }
 
-                if !text.is_empty() {
+                if let Some(content) = content {
                     result.push(json!({
                         "role": "user",
-                        "content": text,
+                        "content": content,
                     }));
                 }
             }
@@ -1150,6 +1184,7 @@ fn convert_messages_openai(
                             }));
                         }
                         ContentBlock::ToolResult { .. } => {}
+                        ContentBlock::Image { .. } => {}
                         ContentBlock::Thinking { .. } => {}
                     }
                 }
@@ -1174,6 +1209,41 @@ fn convert_messages_openai(
     }
 
     result
+}
+
+fn openai_user_content(blocks: &[ContentBlock]) -> Option<Value> {
+    let has_image = blocks
+        .iter()
+        .any(|block| matches!(block, ContentBlock::Image { .. }));
+    if !has_image {
+        let text = blocks
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        return (!text.is_empty()).then(|| json!(text));
+    }
+
+    let content = blocks
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } if !text.is_empty() => Some(json!({
+                "type": "text",
+                "text": text,
+            })),
+            ContentBlock::Image { media_type, data } => Some(json!({
+                "type": "image_url",
+                "image_url": {
+                    "url": format!("data:{media_type};base64,{data}"),
+                },
+            })),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    (!content.is_empty()).then(|| json!(content))
 }
 
 fn convert_tool_spec_openai(spec: &ExecutorToolSpec) -> Value {
@@ -1282,6 +1352,31 @@ mod tests {
             .unwrap_or("")
             .contains("compaction summary"));
         assert_eq!(result[1]["role"], "user");
+    }
+
+    #[test]
+    fn convert_messages_maps_images_to_openai_image_url_blocks() {
+        let messages = vec![ConversationMessage::user_blocks(vec![
+            ContentBlock::Text {
+                text: "describe this".into(),
+            },
+            ContentBlock::Image {
+                media_type: "image/png".into(),
+                data: "ZmFrZQ==".into(),
+            },
+        ])];
+
+        let result = convert_messages_openai(&messages, None, &std::collections::HashMap::new());
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0]["role"], "user");
+        assert_eq!(result[0]["content"][0]["type"], "text");
+        assert_eq!(result[0]["content"][0]["text"], "describe this");
+        assert_eq!(result[0]["content"][1]["type"], "image_url");
+        assert_eq!(
+            result[0]["content"][1]["image_url"]["url"],
+            "data:image/png;base64,ZmFrZQ=="
+        );
     }
 
     // v0.4.13 regression — v0.4.12 P1.B promoted the o-series detector

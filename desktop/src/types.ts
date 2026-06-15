@@ -216,7 +216,10 @@ export interface ConfigView {
   reviewerBaseUrl?: string | null;
   hasReviewerKey: boolean;
   reviewerKeyMasked?: string | null;
+  hasScopusKey: boolean;
+  scopusKeyMasked?: string | null;
   language?: string | null;
+  memoryWriteApproval: boolean;
 }
 
 export interface ConfigPatch {
@@ -228,7 +231,9 @@ export interface ConfigPatch {
   reviewerModel?: string;
   reviewerBaseUrl?: string;
   reviewerApiKey?: string;
+  scopusApiKey?: string;
   language?: string;
+  memoryWriteApproval?: boolean;
 }
 
 export interface ConfigTestDetail {
@@ -245,6 +250,46 @@ export interface ConfigTestResult {
   message: string;
   executor: ConfigTestDetail;
   reviewer?: ConfigTestDetail | null;
+}
+
+export interface PermissionModeView {
+  mode: "read-only" | "workspace-write" | "danger-full-access" | string;
+  label: string;
+  description: string;
+}
+
+export interface McpStdioServerInput {
+  name: string;
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+  requestTimeoutSecs?: number | null;
+}
+
+export interface McpServerSummary {
+  name: string;
+  source: string;
+  transport: string;
+  command?: string | null;
+}
+
+export interface McpConfigView {
+  projectPath: string;
+  servers: McpStdioServerInput[];
+  mergedServers: McpServerSummary[];
+}
+
+export interface McpServerTestResult {
+  name: string;
+  ok: boolean;
+  transport: string;
+  tools: string[];
+  message: string;
+}
+
+export interface McpTestResult {
+  ok: boolean;
+  servers: McpServerTestResult[];
 }
 
 export interface DesktopProject {
@@ -298,6 +343,8 @@ export interface ChatStatus {
   model?: string | null;
   provider?: string | null;
   message?: string | null;
+  contextWindow?: number | null;
+  memoryFiles?: number | null;
 }
 
 // Ordered blocks within an assistant turn – rendered in arrival order so

@@ -1,4 +1,5 @@
 target/
+target-codex-build/
 .omx/
 .clawd-agents/
 .claude/
@@ -17,3 +18,7 @@ dist/
 .sandbox-tmp/
 .DS_Store
 .claude/sessions/
+
+# Local scratch (browser profiles, screenshots, dev logs)
+.codex/
+.tmp-edge-agent-os/

@@ -3,6 +3,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
 import "highlight.js/styles/github-dark.css";
+import { fileOpen } from "../api/tauri";
 
 interface Segment {
   kind: "text" | "think";
@@ -76,6 +77,43 @@ function CodeBlock({ className, children }: { className?: string; children?: Rea
   );
 }
 
+function isExternalHref(href: string): boolean {
+  return href.startsWith("#") || /^(https?:|mailto:)/i.test(href);
+}
+
+function decodeLocalHref(href: string): string {
+  try {
+    return decodeURIComponent(href);
+  } catch {
+    return href;
+  }
+}
+
+function MarkdownLink({
+  href,
+  children,
+}: {
+  href?: string;
+  children?: React.ReactNode;
+}) {
+  if (!href || isExternalHref(href)) {
+    return <a href={href} target="_blank" rel="noreferrer" className="md-link">{children}</a>;
+  }
+  return (
+    <a
+      href={href}
+      className="md-link md-local-link"
+      title="Open local file"
+      onClick={(event) => {
+        event.preventDefault();
+        void fileOpen(decodeLocalHref(href)).catch((error) => console.error("Unable to open file", error));
+      }}
+    >
+      {children}
+    </a>
+  );
+}
+
 export const ThinkBlock = memo(function ThinkBlock({
   content,
   streaming = false,
@@ -120,7 +158,7 @@ function MarkdownContent({ text, streaming = false }: { text: string; streaming?
                   : <code className="md-inline-code" {...props}>{children}</code>;
               },
               a({ href, children }) {
-                return <a href={href} target="_blank" rel="noreferrer" className="md-link">{children}</a>;
+                return <MarkdownLink href={href}>{children}</MarkdownLink>;
               },
             }}
           >

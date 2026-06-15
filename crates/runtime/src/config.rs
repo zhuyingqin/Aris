@@ -231,6 +231,10 @@ impl ConfigLoader {
             },
             ConfigEntry {
                 source: ConfigSource::Project,
+                path: self.cwd.join(".mcp.json"),
+            },
+            ConfigEntry {
+                source: ConfigSource::Project,
                 path: self.cwd.join(".claude").join("settings.json"),
             },
             ConfigEntry {
@@ -343,6 +347,12 @@ impl RuntimeConfig {
 }
 
 impl RuntimeFeatureConfig {
+    #[must_use]
+    pub fn with_mcp_servers(mut self, servers: BTreeMap<String, ScopedMcpServerConfig>) -> Self {
+        self.mcp = McpConfigCollection { servers };
+        self
+    }
+
     #[must_use]
     pub fn with_hooks(mut self, hooks: RuntimeHookConfig) -> Self {
         self.hooks = hooks;
@@ -971,6 +981,11 @@ mod tests {
         )
         .expect("write project compat config");
         fs::write(
+            cwd.join(".mcp.json"),
+            r#"{"mcpServers":{"shared-project":{"command":"uvx","args":["shared-project"]}}}"#,
+        )
+        .expect("write shared project MCP config");
+        fs::write(
             cwd.join(".claude").join("settings.json"),
             r#"{"env":{"C":"3"},"hooks":{"PostToolUse":["project"]},"mcpServers":{"project":{"command":"uvx","args":["project"]}}}"#,
         )
@@ -986,7 +1001,7 @@ mod tests {
             .expect("config should load");
 
         assert_eq!(CLAUDE_CODE_SETTINGS_SCHEMA_NAME, "SettingsSchema");
-        assert_eq!(loaded.loaded_entries().len(), 5);
+        assert_eq!(loaded.loaded_entries().len(), 6);
         assert_eq!(loaded.loaded_entries()[0].source, ConfigSource::User);
         assert_eq!(
             loaded.get("model"),
@@ -1018,6 +1033,7 @@ mod tests {
         assert_eq!(loaded.hooks().pre_tool_use(), &["base".to_string()]);
         assert_eq!(loaded.hooks().post_tool_use(), &["project".to_string()]);
         assert!(loaded.mcp().get("home").is_some());
+        assert!(loaded.mcp().get("shared-project").is_some());
         assert!(loaded.mcp().get("project").is_some());
 
         fs::remove_dir_all(root).expect("cleanup temp dir");

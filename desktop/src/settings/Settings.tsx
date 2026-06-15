@@ -99,73 +99,94 @@ const EXECUTOR_PROVIDERS: Record<string, ProviderMeta> = {
   },
 };
 
+const REVIEWER_MODELS: PresetOption[] = [
+  { label: "GPT-5.5", value: "gpt-5.5", hint: "OpenAI" },
+  { label: "GPT-5.4", value: "gpt-5.4", hint: "OpenAI" },
+  { label: "GPT-5.4 Mini", value: "gpt-5.4-mini", hint: "OpenAI" },
+  { label: "GPT-5.4 Nano", value: "gpt-5.4-nano", hint: "OpenAI" },
+  { label: "GPT-4o", value: "gpt-4o", hint: "OpenAI" },
+  { label: "Gemini 2.5 Pro", value: "gemini-2.5-pro", hint: "Google" },
+  { label: "Gemini 2.5 Flash", value: "gemini-2.5-flash", hint: "Google" },
+  { label: "GLM-5", value: "GLM-5", hint: "Zhipu" },
+  { label: "GLM-5 Turbo", value: "GLM-5-Turbo", hint: "Zhipu" },
+  { label: "MiniMax M3", value: "MiniMax-M3", hint: "MiniMax" },
+  { label: "MiniMax M2.7", value: "MiniMax-M2.7", hint: "MiniMax" },
+  { label: "MiniMax M2.7 Highspeed", value: "MiniMax-M2.7-highspeed", hint: "MiniMax" },
+  { label: "Kimi K2.5", value: "kimi-k2.5", hint: "Moonshot" },
+  { label: "DeepSeek V4 Pro", value: "deepseek-v4-pro", hint: "DeepSeek" },
+  { label: "Claude Sonnet 4.6", value: "claude-sonnet-4-6", hint: "Anthropic-compatible" },
+];
+
 const REVIEWER_PROVIDERS: Record<string, ProviderMeta> = {
-  "": { label: "None", hint: "Disable reviewer", defaultModel: "" },
+  "": {
+    label: "Disabled",
+    hint: "Use no separate review model",
+    defaultModel: "",
+  },
   openai: {
     label: "OpenAI-compatible",
-    hint: "GPT, MiniMax, DeepSeek…",
+    hint: "OpenAI or compatible reviewer API",
     defaultModel: "gpt-5.5",
-    models: EXECUTOR_MODELS.filter((m) => m.hint !== "Anthropic"),
+    defaultBaseUrl: "https://api.openai.com/v1",
+    models: REVIEWER_MODELS.filter((m) => ["OpenAI", "MiniMax", "Moonshot", "DeepSeek"].includes(m.hint ?? "")),
     baseUrls: OPENAI_COMPAT_URLS,
-  },
-  minimax: {
-    label: "MiniMax",
-    hint: "MiniMax native API",
-    defaultModel: "MiniMax-M2.7",
-    models: EXECUTOR_MODELS.filter((m) => m.value.startsWith("MiniMax")),
-    baseUrls: OPENAI_COMPAT_URLS.filter((u) => u.label === "MiniMax"),
   },
   gemini: {
     label: "Gemini",
-    hint: "Google Gemini",
+    hint: "Google OpenAI-compatible endpoint",
     defaultModel: "gemini-2.5-pro",
-    models: EXECUTOR_MODELS.filter((m) => m.value.includes("gemini")),
-    baseUrls: OPENAI_COMPAT_URLS.filter((u) => u.label === "Gemini"),
+    defaultBaseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
+    models: REVIEWER_MODELS.filter((m) => m.hint === "Google"),
+    baseUrls: OPENAI_COMPAT_URLS.filter((item) => item.label === "Gemini"),
   },
   glm: {
     label: "GLM",
-    hint: "Zhipu GLM",
+    hint: "Zhipu reviewer API",
     defaultModel: "GLM-5",
-    models: EXECUTOR_MODELS.filter((m) => m.value.includes("GLM")),
-    baseUrls: OPENAI_COMPAT_URLS.filter((u) => u.label === "GLM"),
+    defaultBaseUrl: "https://open.bigmodel.cn/api/paas/v4",
+    models: REVIEWER_MODELS.filter((m) => m.hint === "Zhipu"),
+    baseUrls: OPENAI_COMPAT_URLS.filter((item) => item.label === "GLM"),
+  },
+  minimax: {
+    label: "MiniMax",
+    hint: "MiniMax reviewer API",
+    defaultModel: "MiniMax-M2.7",
+    defaultBaseUrl: "https://api.minimaxi.com/v1",
+    models: REVIEWER_MODELS.filter((m) => m.hint === "MiniMax"),
+    baseUrls: OPENAI_COMPAT_URLS.filter((item) => item.label === "MiniMax"),
   },
   kimi: {
     label: "Kimi",
-    hint: "Moonshot Kimi",
+    hint: "Moonshot reviewer API",
     defaultModel: "kimi-k2.5",
-    models: EXECUTOR_MODELS.filter((m) => m.value.includes("kimi")),
-    baseUrls: OPENAI_COMPAT_URLS.filter((u) => u.label === "Kimi"),
-  },
-  "anthropic-compat": {
-    label: "Anthropic-compat",
-    hint: "Claude via proxy",
-    defaultModel: "claude-sonnet-4-6",
-    models: [
-      { label: "Claude Sonnet 4.6", value: "claude-sonnet-4-6", hint: "Claude proxy" },
-      { label: "DeepSeek V4 Pro", value: "deepseek-v4-pro", hint: "DeepSeek" },
-    ],
-    baseUrls: ANTHROPIC_COMPAT_URLS,
+    defaultBaseUrl: "https://api.moonshot.cn/v1",
+    models: REVIEWER_MODELS.filter((m) => m.hint === "Moonshot"),
+    baseUrls: OPENAI_COMPAT_URLS.filter((item) => item.label === "Kimi"),
   },
   deepseek: {
     label: "DeepSeek",
-    hint: "DeepSeek models",
+    hint: "DeepSeek Anthropic-compatible reviewer",
     defaultModel: "deepseek-v4-pro",
-    models: EXECUTOR_MODELS.filter((m) => m.value.includes("deepseek")),
-    baseUrls: [
-      { label: "Anthropic-compatible", value: "https://api.deepseek.com/anthropic", hint: "Thinking-capable reviewer" },
-      { label: "OpenAI-compatible", value: "https://api.deepseek.com/v1", hint: "OpenAI-compatible reviewer" },
-    ],
+    defaultBaseUrl: "https://api.deepseek.com/anthropic",
+    models: REVIEWER_MODELS.filter((m) => m.hint === "DeepSeek"),
+    baseUrls: ANTHROPIC_COMPAT_URLS.filter((item) => item.label === "DeepSeek"),
+  },
+  "anthropic-compat": {
+    label: "Anthropic-compat",
+    hint: "Claude-compatible reviewer/proxy",
+    defaultModel: "claude-sonnet-4-6",
+    defaultBaseUrl: "https://api.anthropic.com",
+    models: REVIEWER_MODELS.filter((m) => ["Anthropic-compatible", "MiniMax", "DeepSeek"].includes(m.hint ?? "")),
+    baseUrls: ANTHROPIC_COMPAT_URLS,
   },
   custom: {
     label: "Custom",
-    hint: "Any provider",
+    hint: "Manual provider and endpoint",
     defaultModel: "",
-    models: EXECUTOR_MODELS,
+    models: REVIEWER_MODELS,
     baseUrls: [...OPENAI_COMPAT_URLS, ...ANTHROPIC_COMPAT_URLS.filter((item) => item.value)],
   },
 };
-
-// ── Sub-components ────────────────────────────────────────────────────────────
 
 function normalizeExecutorProvider(provider: string | null | undefined, baseUrl: string | null | undefined): string {
   const current = provider || "anthropic";
@@ -180,6 +201,15 @@ function normalizeExecutorProvider(provider: string | null | undefined, baseUrl:
     return "anthropic-compat";
   }
   return current;
+}
+
+function normalizeReviewerProvider(provider: string | null | undefined, baseUrl: string | null | undefined): string {
+  const current = provider || "";
+  const lower = (baseUrl ?? "").trim().toLowerCase();
+  if (current === "anthropic" || (current === "deepseek" && lower.includes("deepseek.com/anthropic"))) {
+    return current === "anthropic" ? "anthropic-compat" : "deepseek";
+  }
+  return current in REVIEWER_PROVIDERS ? current : "custom";
 }
 
 function Row({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
@@ -328,7 +358,7 @@ function LayerSection({
   children,
 }: {
   index: string;
-  tone: "executor" | "team" | "surface";
+  tone: "executor" | "reviewer" | "surface";
   title: string;
   subtitle: string;
   children: React.ReactNode;
@@ -371,7 +401,8 @@ export default function Settings() {
   const [view, setView] = useState<ConfigView | null>(null);
   const [form, setForm] = useState<ConfigPatch>({});
   const [execKey, setExecKey] = useState("");
-  const [revKey, setRevKey] = useState("");
+  const [reviewerKey, setReviewerKey] = useState("");
+  const [scopusKey, setScopusKey] = useState("");
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [testState, setTestState] = useState<TestState>("idle");
   const [testResult, setTestResult] = useState<ConfigTestResult | null>(null);
@@ -381,18 +412,21 @@ export default function Settings() {
 
   const load = (v: ConfigView) => {
     const executorProvider = normalizeExecutorProvider(v.executorProvider, v.executorBaseUrl);
+    const reviewerProvider = normalizeReviewerProvider(v.reviewerProvider, v.reviewerBaseUrl);
     setView(v);
     setForm({
       executorProvider,
       executorModel: v.executorModel ?? "",
       executorBaseUrl: v.executorBaseUrl ?? "",
-      reviewerProvider: v.reviewerProvider ?? "",
+      reviewerProvider,
       reviewerModel: v.reviewerModel ?? "",
       reviewerBaseUrl: v.reviewerBaseUrl ?? "",
       language: v.language ?? "cn",
+      memoryWriteApproval: v.memoryWriteApproval,
     });
     setExecKey("");
-    setRevKey("");
+    setReviewerKey("");
+    setScopusKey("");
   };
 
   useEffect(() => {
@@ -433,7 +467,8 @@ export default function Settings() {
   const buildPatch = () => {
     const patch: ConfigPatch = { ...form };
     if (execKey.trim()) patch.executorApiKey = execKey.trim();
-    if (revKey.trim()) patch.reviewerApiKey = revKey.trim();
+    if (reviewerKey.trim()) patch.reviewerApiKey = reviewerKey.trim();
+    if (scopusKey.trim()) patch.scopusApiKey = scopusKey.trim();
     return patch;
   };
 
@@ -493,13 +528,14 @@ export default function Settings() {
   };
 
   const execProvider = form.executorProvider ?? "anthropic";
-  const revProvider = form.reviewerProvider ?? "";
   const execMeta = EXECUTOR_PROVIDERS[execProvider] ?? EXECUTOR_PROVIDERS.custom;
-  const revMeta = REVIEWER_PROVIDERS[revProvider] ?? REVIEWER_PROVIDERS.custom;
   const execKeyStatus = view.hasExecutorKey
     ? `Saved key: ${view.executorKeyMasked ?? "configured"}`
     : "No key saved yet";
-  const revKeyStatus = view.hasReviewerKey
+  const reviewerProvider = form.reviewerProvider ?? "";
+  const reviewerMeta = REVIEWER_PROVIDERS[reviewerProvider] ?? REVIEWER_PROVIDERS.custom;
+  const reviewerEnabled = reviewerProvider !== "";
+  const reviewerKeyStatus = view.hasReviewerKey
     ? `Saved key: ${view.reviewerKeyMasked ?? "configured"}`
     : "No reviewer key saved yet";
 
@@ -516,6 +552,14 @@ export default function Settings() {
 
   const chooseReviewerProvider = (provider: string) => {
     const meta = REVIEWER_PROVIDERS[provider] ?? REVIEWER_PROVIDERS.custom;
+    if (!provider) {
+      upd({
+        reviewerProvider: "",
+        reviewerModel: "",
+        reviewerBaseUrl: "",
+      });
+      return;
+    }
     upd({
       reviewerProvider: provider,
       reviewerModel: provider === "custom" ? form.reviewerModel ?? "" : meta.defaultModel,
@@ -539,11 +583,11 @@ export default function Settings() {
       <div className="st-architecture">
         <div className="st-architecture-copy">
           <div className="st-eyebrow">Runtime settings</div>
-          <div className="st-architecture-title">Three-layer configuration</div>
+          <div className="st-architecture-title">Desktop configuration</div>
         </div>
         <div className="st-architecture-strip" aria-label="ARIS runtime layers">
           <span>Executor</span>
-          <span>Team state machine</span>
+          <span>Reviewer</span>
           <span>UI / CLI</span>
         </div>
       </div>
@@ -553,7 +597,7 @@ export default function Settings() {
           index="01"
           tone="executor"
           title="Unified executor layer"
-          subtitle="Provider, model and credentials shared by chat, workflow and CLI calls."
+          subtitle="Provider, model and credentials shared by chat and CLI calls."
         >
             <div className="st-field-group">
               <div className="st-field-label">Provider</div>
@@ -562,6 +606,22 @@ export default function Settings() {
                 providers={EXECUTOR_PROVIDERS}
                 onChange={chooseExecutorProvider}
               />
+            </div>
+
+            <div className="st-field-group">
+              <div className="st-field-label">Memory write approval</div>
+              <button
+                type="button"
+                className={`st-lang-card${form.memoryWriteApproval ? " active" : ""}`}
+                onClick={() => upd({ memoryWriteApproval: !form.memoryWriteApproval })}
+              >
+                <span className="st-lang-label">
+                  {form.memoryWriteApproval ? "Approval required" : "Automatic writes allowed"}
+                </span>
+                <span className="st-lang-sub">
+                  Review agent-proposed hot-memory writes before they become persistent.
+                </span>
+              </button>
             </div>
 
             <SecretPanel
@@ -603,60 +663,62 @@ export default function Settings() {
 
         <LayerSection
           index="02"
-          tone="team"
-          title="Team state machine layer"
-          subtitle="Reviewer configuration used by team verification gates."
+          tone="reviewer"
+          title="Reviewer LLM layer"
+          subtitle="Optional second model used by LlmReview, verification and critique tools."
         >
             <div className="st-field-group">
               <div className="st-field-label">Provider</div>
               <ProviderSelect
-                value={revProvider}
+                value={reviewerProvider}
                 providers={REVIEWER_PROVIDERS}
                 onChange={chooseReviewerProvider}
               />
             </div>
 
-            {revProvider === "" ? (
-              <div className="st-inline-state">
-                <span className="st-inline-state-title">Reviewer disabled</span>
-                <span className="st-inline-state-copy">Team verification will stay in manual judgment mode.</span>
-              </div>
-            ) : (
+            {reviewerEnabled ? (
               <>
                 <SecretPanel
-                  title="Reviewer API key / 密钥"
-                  status={revKeyStatus}
-                  help="Used only for team verification reviews. Leave blank to keep the saved reviewer key."
+                  title="Reviewer API key"
+                  status={reviewerKeyStatus}
+                  help="Paste a new reviewer key here, then save. Leave it blank to keep the saved key."
                 >
                   <KeyInput
-                    value={revKey}
-                    placeholder={view.hasReviewerKey ? "leave blank to keep, paste a new key to replace" : "paste reviewer API key"}
+                    value={reviewerKey}
+                    placeholder={view.hasReviewerKey ? "leave blank to keep, paste a new key to replace" : "paste your reviewer API key"}
                     masked={view.reviewerKeyMasked}
                     onChange={(value) => {
                       clearTestOnSecretChange();
-                      setRevKey(value);
+                      setReviewerKey(value);
                     }}
                   />
                 </SecretPanel>
 
-                <Row label="Model" hint="Model ID for reviewer">
+                <Row label="Model" hint="Model ID used by LlmReview">
                   <PresetTextInput
                     value={form.reviewerModel ?? ""}
-                    placeholder={REVIEWER_PROVIDERS[revProvider]?.defaultModel || "model ID"}
-                    options={revMeta.models ?? EXECUTOR_MODELS}
+                    placeholder={reviewerMeta.defaultModel || "e.g. gpt-5.5"}
+                    options={reviewerMeta.models ?? REVIEWER_MODELS}
                     onChange={(value) => upd({ reviewerModel: value })}
                   />
                 </Row>
 
-                <Row label="Base URL" hint="Leave blank for official endpoint">
+                <Row label="Base URL" hint="Leave blank for provider default when supported">
                   <PresetTextInput
                     value={form.reviewerBaseUrl ?? ""}
-                    placeholder="(official default)"
-                    options={revMeta.baseUrls ?? OPENAI_COMPAT_URLS}
+                    placeholder={reviewerMeta.defaultBaseUrl || "(provider default)"}
+                    options={reviewerMeta.baseUrls ?? OPENAI_COMPAT_URLS}
                     onChange={(value) => upd({ reviewerBaseUrl: value })}
                   />
                 </Row>
               </>
+            ) : (
+              <div className="st-inline-state">
+                <div className="st-inline-state-title">Reviewer disabled</div>
+                <div className="st-inline-state-copy">
+                  Chat still works. Configure a provider here when you want LlmReview to use a separate second model.
+                </div>
+              </div>
             )}
         </LayerSection>
 
@@ -685,6 +747,24 @@ export default function Settings() {
               ))}
             </div>
             </div>
+
+            <SecretPanel
+              title="Scopus API key / 文献检索密钥"
+              status={view.hasScopusKey
+                ? `Saved key: ${view.scopusKeyMasked ?? "configured"}`
+                : "No key saved — Scopus search stays off until one is added"}
+              help="Elsevier developer key (dev.elsevier.com). Enables the Scopus engine in Literature search; arXiv / Crossref / OpenAlex work without it."
+            >
+              <KeyInput
+                value={scopusKey}
+                placeholder={view.hasScopusKey ? "leave blank to keep, paste a new key to replace" : "paste your Elsevier API key"}
+                masked={view.scopusKeyMasked}
+                onChange={(value) => {
+                  clearTestOnSecretChange();
+                  setScopusKey(value);
+                }}
+              />
+            </SecretPanel>
 
             <Row label="Config file" hint="Shared by the desktop UI and CLI">
               <input className="st-readonly-input" value={view.configPath} readOnly />

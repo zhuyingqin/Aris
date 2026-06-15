@@ -12,6 +12,9 @@ use regex::RegexBuilder;
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
+const MAX_READ_FILE_CONTENT_CHARS: usize = 200_000;
+const READONLY_ROOTS_ENV: &str = "ARIS_READONLY_ROOTS";
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TextFilePayload {
     #[serde(rename = "filePath")]
@@ -23,6 +26,9 @@ pub struct TextFilePayload {
     pub start_line: usize,
     #[serde(rename = "totalLines")]
     pub total_lines: usize,
+    #[serde(rename = "totalChars")]
+    pub total_chars: usize,
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -137,7 +143,7 @@ pub fn read_file(
     offset: Option<usize>,
     limit: Option<usize>,
 ) -> io::Result<ReadFileOutput> {
-    let absolute_path = normalize_path(path)?;
+    let absolute_path = normalize_read_path(path)?;
     let content = if is_pdf_path(&absolute_path) {
         extract_pdf_text(&absolute_path)?
     } else {
@@ -158,17 +164,36 @@ fn read_text_payload(
         start_index.saturating_add(limit).min(lines.len())
     });
     let selected = lines[start_index..end_index].join("\n");
+    let total_chars = content.chars().count();
+    let (content, truncated) = truncate_read_content(selected);
 
     ReadFileOutput {
         kind: String::from("text"),
         file: TextFilePayload {
-            file_path: absolute_path.to_string_lossy().into_owned(),
-            content: selected,
+            file_path: display_path(&absolute_path),
+            content,
             num_lines: end_index.saturating_sub(start_index),
             start_line: start_index.saturating_add(1),
             total_lines: lines.len(),
+            total_chars,
+            truncated,
         },
     }
+}
+
+fn truncate_read_content(content: String) -> (String, bool) {
+    if content.chars().count() <= MAX_READ_FILE_CONTENT_CHARS {
+        return (content, false);
+    }
+
+    let mut truncated = content
+        .chars()
+        .take(MAX_READ_FILE_CONTENT_CHARS)
+        .collect::<String>();
+    truncated.push_str(
+        "\n\n[read_file truncated: selected content exceeded 200000 characters. Use a narrower offset/limit window or grep_search.]",
+    );
+    (truncated, true)
 }
 
 pub fn write_file(path: &str, content: &str) -> io::Result<WriteFileOutput> {
@@ -185,7 +210,7 @@ pub fn write_file(path: &str, content: &str) -> io::Result<WriteFileOutput> {
         } else {
             String::from("create")
         },
-        file_path: absolute_path.to_string_lossy().into_owned(),
+        file_path: display_path(&absolute_path),
         content: content.to_owned(),
         structured_patch: make_patch(original_file.as_deref().unwrap_or(""), content),
         original_file,
@@ -222,7 +247,7 @@ pub fn edit_file(
     fs::write(&absolute_path, &updated)?;
 
     Ok(EditFileOutput {
-        file_path: absolute_path.to_string_lossy().into_owned(),
+        file_path: display_path(&absolute_path),
         old_string: old_string.to_owned(),
         new_string: new_string.to_owned(),
         original_file: original_file.clone(),
@@ -236,8 +261,9 @@ pub fn edit_file(
 pub fn glob_search(pattern: &str, path: Option<&str>) -> io::Result<GlobSearchOutput> {
     let started = Instant::now();
     let root = workspace_root()?;
+    let readable_roots = readable_roots(root.as_deref())?;
     let base_dir = path
-        .map(normalize_path)
+        .map(|path| normalize_search_base(path, root.as_deref(), &readable_roots))
         .transpose()?
         .unwrap_or(match root.as_ref() {
             Some(root) => root.clone(),
@@ -248,8 +274,8 @@ pub fn glob_search(pattern: &str, path: Option<&str>) -> io::Result<GlobSearchOu
     } else {
         base_dir.join(pattern)
     };
-    if let Some(root) = root.as_ref() {
-        ensure_within_workspace(&lexically_normalize(&search_path), root)?;
+    if root.is_some() {
+        ensure_glob_search_allowed(&search_path, &readable_roots)?;
     }
     let search_pattern = search_path.to_string_lossy().into_owned();
 
@@ -260,11 +286,11 @@ pub fn glob_search(pattern: &str, path: Option<&str>) -> io::Result<GlobSearchOu
         if !entry.is_file() {
             continue;
         }
-        if let Some(root) = root.as_ref() {
+        if root.is_some() {
             let Ok(canonical) = entry.canonicalize() else {
                 continue;
             };
-            if canonical.starts_with(root) {
+            if is_under_any_root(&canonical, &readable_roots) {
                 matches.push(canonical);
             }
         } else {
@@ -283,7 +309,7 @@ pub fn glob_search(pattern: &str, path: Option<&str>) -> io::Result<GlobSearchOu
     let filenames = matches
         .into_iter()
         .take(100)
-        .map(|path| path.to_string_lossy().into_owned())
+        .map(|path| display_path(&path))
         .collect::<Vec<_>>();
 
     Ok(GlobSearchOutput {
@@ -299,7 +325,7 @@ pub fn grep_search(input: &GrepSearchInput) -> io::Result<GrepSearchOutput> {
     let base_path = input
         .path
         .as_deref()
-        .map(normalize_path)
+        .map(normalize_read_path)
         .transpose()?
         .unwrap_or(match root.as_ref() {
             Some(root) => root.clone(),
@@ -341,7 +367,7 @@ pub fn grep_search(input: &GrepSearchInput) -> io::Result<GrepSearchOutput> {
         if output_mode == "count" {
             let count = regex.find_iter(&file_contents).count();
             if count > 0 {
-                filenames.push(file_path.to_string_lossy().into_owned());
+                filenames.push(display_path(&file_path));
                 total_matches += count;
             }
             continue;
@@ -360,16 +386,16 @@ pub fn grep_search(input: &GrepSearchInput) -> io::Result<GrepSearchOutput> {
             continue;
         }
 
-        filenames.push(file_path.to_string_lossy().into_owned());
+        filenames.push(display_path(&file_path));
         if output_mode == "content" {
             for index in matched_lines {
                 let start = index.saturating_sub(input.before.unwrap_or(context));
                 let end = (index + input.after.unwrap_or(context) + 1).min(lines.len());
                 for (current, line) in lines.iter().enumerate().take(end).skip(start) {
                     let prefix = if input.line_numbers.unwrap_or(true) {
-                        format!("{}:{}:", file_path.to_string_lossy(), current + 1)
+                        format!("{}:{}:", display_path(&file_path), current + 1)
                     } else {
-                        format!("{}:", file_path.to_string_lossy())
+                        format!("{}:", display_path(&file_path))
                     };
                     content_lines.push(format!("{prefix}{line}"));
                 }
@@ -420,6 +446,10 @@ fn collect_search_files(base_path: &Path) -> io::Result<Vec<PathBuf>> {
         }
     }
     Ok(files)
+}
+
+fn display_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
 }
 
 fn matches_optional_filters(
@@ -1297,6 +1327,29 @@ fn normalize_path(path: &str) -> io::Result<PathBuf> {
     Ok(canonical)
 }
 
+fn normalize_read_path(path: &str) -> io::Result<PathBuf> {
+    let root = workspace_root()?;
+    let candidate = path_candidate(path, root.as_deref())?;
+    let canonical = candidate.canonicalize()?;
+    if root.is_some() {
+        ensure_readable_path(&canonical, &readable_roots(root.as_deref())?)?;
+    }
+    Ok(canonical)
+}
+
+fn normalize_search_base(
+    path: &str,
+    workspace_root: Option<&Path>,
+    readable_roots: &[PathBuf],
+) -> io::Result<PathBuf> {
+    let candidate = path_candidate(path, workspace_root)?;
+    let canonical = candidate.canonicalize()?;
+    if workspace_root.is_some() {
+        ensure_search_base_allowed(&canonical, readable_roots)?;
+    }
+    Ok(canonical)
+}
+
 fn normalize_path_allow_missing(path: &str) -> io::Result<PathBuf> {
     let root = workspace_root()?;
     let candidate = path_candidate(path, root.as_deref())?;
@@ -1318,6 +1371,29 @@ fn workspace_root() -> io::Result<Option<PathBuf>> {
     let root = PathBuf::from(trimmed);
     fs::create_dir_all(&root)?;
     Ok(Some(root.canonicalize()?))
+}
+
+fn readonly_roots() -> Vec<PathBuf> {
+    let Some(raw) = std::env::var_os(READONLY_ROOTS_ENV) else {
+        return Vec::new();
+    };
+    std::env::split_paths(&raw)
+        .filter_map(|path| {
+            if path.as_os_str().is_empty() || !path.exists() {
+                return None;
+            }
+            path.canonicalize().ok()
+        })
+        .collect()
+}
+
+fn readable_roots(workspace_root: Option<&Path>) -> io::Result<Vec<PathBuf>> {
+    let mut roots = Vec::new();
+    if let Some(root) = workspace_root {
+        roots.push(root.to_path_buf());
+    }
+    roots.extend(readonly_roots());
+    Ok(roots)
 }
 
 fn path_candidate(path: &str, workspace_root: Option<&Path>) -> io::Result<PathBuf> {
@@ -1343,6 +1419,62 @@ fn ensure_within_workspace(path: &Path, root: &Path) -> io::Result<()> {
             root.display()
         ),
     ))
+}
+
+fn ensure_readable_path(path: &Path, roots: &[PathBuf]) -> io::Result<()> {
+    if is_under_any_root(path, roots) {
+        return Ok(());
+    }
+    Err(io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        format!(
+            "path `{}` is outside the isolated workspace and read-only roots",
+            path.display()
+        ),
+    ))
+}
+
+fn ensure_search_base_allowed(base: &Path, roots: &[PathBuf]) -> io::Result<()> {
+    if roots
+        .iter()
+        .any(|root| base.starts_with(root) || root.starts_with(base))
+    {
+        return Ok(());
+    }
+    ensure_readable_path(base, roots)
+}
+
+fn ensure_glob_search_allowed(search_path: &Path, roots: &[PathBuf]) -> io::Result<()> {
+    let prefix = static_glob_prefix(search_path);
+    let base = if prefix.exists() {
+        prefix.canonicalize()?
+    } else {
+        lexically_normalize(&prefix)
+    };
+    ensure_search_base_allowed(&base, roots)
+}
+
+fn is_under_any_root(path: &Path, roots: &[PathBuf]) -> bool {
+    roots.iter().any(|root| path.starts_with(root))
+}
+
+fn static_glob_prefix(path: &Path) -> PathBuf {
+    let mut prefix = PathBuf::new();
+    for component in path.components() {
+        if matches!(component, Component::Normal(_)) {
+            let text = component.as_os_str().to_string_lossy();
+            if text.contains('*') || text.contains('?') || text.contains('[') || text.contains('{')
+            {
+                break;
+            }
+        }
+        prefix.push(component.as_os_str());
+    }
+    if prefix.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        prefix
+    }
 }
 
 fn canonicalize_allow_missing(candidate: &Path) -> io::Result<PathBuf> {
@@ -1396,12 +1528,14 @@ fn lexically_normalize(path: &Path) -> PathBuf {
 mod tests {
     use std::ffi::{OsStr, OsString};
     use std::io::Write;
-    use std::path::Path;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use flate2::{write::ZlibEncoder, Compression};
 
-    use super::{edit_file, glob_search, grep_search, read_file, write_file, GrepSearchInput};
+    use super::{
+        display_path, edit_file, glob_search, grep_search, read_file, write_file, GrepSearchInput,
+        MAX_READ_FILE_CONTENT_CHARS, READONLY_ROOTS_ENV,
+    };
 
     struct EnvGuard {
         key: &'static str,
@@ -1477,6 +1611,44 @@ mod tests {
         let read_output = read_file(path.to_string_lossy().as_ref(), Some(1), Some(1))
             .expect("read should succeed");
         assert_eq!(read_output.file.content, "two");
+    }
+
+    #[test]
+    fn reads_large_file_with_line_window() {
+        let _lock = crate::test_env_lock();
+        let _env = EnvGuard::unset("ARIS_WORKSPACE_ROOT");
+        let path = temp_path("large-window.txt");
+        let content = (1..=6_000)
+            .map(|line| format!("line-{line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(&path, content).expect("large file should be written");
+
+        let output = read_file(path.to_string_lossy().as_ref(), Some(4_999), Some(3))
+            .expect("large file window should read");
+
+        assert_eq!(output.file.content, "line-5000\nline-5001\nline-5002");
+        assert_eq!(output.file.start_line, 5_000);
+        assert_eq!(output.file.total_lines, 6_000);
+        assert!(!output.file.truncated);
+    }
+
+    #[test]
+    fn read_file_truncates_very_long_single_line() {
+        let _lock = crate::test_env_lock();
+        let _env = EnvGuard::unset("ARIS_WORKSPACE_ROOT");
+        let path = temp_path("long-single-line.json");
+        let content = "x".repeat(MAX_READ_FILE_CONTENT_CHARS + 128);
+        std::fs::write(&path, &content).expect("long line file should be written");
+
+        let output = read_file(path.to_string_lossy().as_ref(), None, Some(1))
+            .expect("long single-line file should read with truncation");
+
+        assert_eq!(output.file.total_lines, 1);
+        assert_eq!(output.file.total_chars, MAX_READ_FILE_CONTENT_CHARS + 128);
+        assert!(output.file.truncated);
+        assert!(output.file.content.len() < content.len());
+        assert!(output.file.content.contains("[read_file truncated:"));
     }
 
     #[test]
@@ -1585,7 +1757,8 @@ end
             read_file("notes/demo.txt", None, None).expect("read inside workspace should succeed");
 
         assert_eq!(output.file.content, "inside");
-        assert!(Path::new(&output.file.file_path).starts_with(root.canonicalize().unwrap()));
+        let canonical_root = display_path(&root.canonicalize().unwrap());
+        assert!(output.file.file_path.starts_with(&canonical_root));
     }
 
     #[test]
@@ -1600,6 +1773,27 @@ end
         let err = read_file(outside.to_string_lossy().as_ref(), None, None)
             .expect_err("outside read should be blocked");
 
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+    }
+
+    #[test]
+    fn workspace_root_allows_readonly_root_reads_but_not_writes() {
+        let _lock = crate::test_env_lock();
+        let root = temp_path("workspace-root");
+        let readonly = temp_path("readonly-root");
+        let helper = readonly.join("skills").join("demo").join("helper.py");
+        std::fs::create_dir_all(&root).expect("workspace should be created");
+        std::fs::create_dir_all(helper.parent().unwrap()).expect("readonly helper dir");
+        std::fs::write(&helper, "print('ok')").expect("helper should be created");
+        let _workspace = EnvGuard::set("ARIS_WORKSPACE_ROOT", &root);
+        let _readonly = EnvGuard::set(READONLY_ROOTS_ENV, readonly.join("skills"));
+
+        let output = read_file(helper.to_string_lossy().as_ref(), None, None)
+            .expect("readonly root read should succeed");
+        assert_eq!(output.file.content, "print('ok')");
+
+        let err = write_file(helper.to_string_lossy().as_ref(), "print('edit')")
+            .expect_err("readonly root write should be blocked");
         assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
     }
 
@@ -1631,5 +1825,33 @@ end
             .expect_err("outside glob should be blocked");
 
         assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+    }
+
+    #[test]
+    fn workspace_root_allows_glob_from_readonly_root_ancestor() {
+        let _lock = crate::test_env_lock();
+        let root = temp_path("workspace-root");
+        let config_root = temp_path("aris-config");
+        let skills_root = config_root.join("skills");
+        let script = skills_root
+            .join("scopus-search")
+            .join("scripts")
+            .join("scopus_search.py");
+        std::fs::create_dir_all(&root).expect("workspace should be created");
+        std::fs::create_dir_all(script.parent().unwrap()).expect("script dir");
+        std::fs::write(&script, "print('ok')").expect("script should be created");
+        std::fs::write(config_root.join("config.json"), "{\"secret\":true}")
+            .expect("config file should be created");
+        let _workspace = EnvGuard::set("ARIS_WORKSPACE_ROOT", &root);
+        let _readonly = EnvGuard::set(READONLY_ROOTS_ENV, &skills_root);
+
+        let globbed = glob_search(
+            "**/scopus_search.py",
+            Some(config_root.to_string_lossy().as_ref()),
+        )
+        .expect("glob from readonly ancestor should succeed");
+
+        assert_eq!(globbed.num_files, 1);
+        assert!(globbed.filenames[0].ends_with("skills/scopus-search/scripts/scopus_search.py"));
     }
 }

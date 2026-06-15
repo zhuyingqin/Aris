@@ -52,12 +52,16 @@ pub struct ConfigView {
     pub reviewer_base_url: Option<String>,
     pub has_reviewer_key: bool,
     pub reviewer_key_masked: Option<String>,
+    pub has_scopus_key: bool,
+    pub scopus_key_masked: Option<String>,
     pub language: Option<String>,
+    pub memory_write_approval: bool,
 }
 
 fn build_view(obj: &Map<String, Value>) -> ConfigView {
     let exec_key = get_str(obj, "executor_api_key").filter(|k| !k.is_empty());
     let rev_key = get_str(obj, "reviewer_api_key").filter(|k| !k.is_empty());
+    let scopus_key = get_str(obj, "scopus_api_key").filter(|k| !k.is_empty());
     ConfigView {
         config_path: state::config_path().display().to_string(),
         executor_provider: get_str(obj, "executor_provider"),
@@ -70,7 +74,13 @@ fn build_view(obj: &Map<String, Value>) -> ConfigView {
         reviewer_base_url: get_str(obj, "reviewer_base_url"),
         has_reviewer_key: rev_key.is_some(),
         reviewer_key_masked: rev_key.as_deref().map(mask),
+        has_scopus_key: scopus_key.is_some(),
+        scopus_key_masked: scopus_key.as_deref().map(mask),
         language: get_str(obj, "language"),
+        memory_write_approval: obj
+            .get("memory_write_approval")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
     }
 }
 
@@ -90,7 +100,9 @@ pub struct ConfigPatch {
     pub reviewer_model: Option<String>,
     pub reviewer_base_url: Option<String>,
     pub reviewer_api_key: Option<String>,
+    pub scopus_api_key: Option<String>,
     pub language: Option<String>,
+    pub memory_write_approval: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -145,9 +157,13 @@ fn apply_patch(obj: &mut Map<String, Value>, patch: ConfigPatch) {
     set_or_clear(obj, "reviewer_model", patch.reviewer_model);
     set_or_clear(obj, "reviewer_base_url", patch.reviewer_base_url);
     set_or_clear(obj, "language", patch.language);
+    if let Some(enabled) = patch.memory_write_approval {
+        obj.insert("memory_write_approval".to_string(), Value::Bool(enabled));
+    }
 
     set_secret(obj, "executor_api_key", patch.executor_api_key);
     set_secret(obj, "reviewer_api_key", patch.reviewer_api_key);
+    set_secret(obj, "scopus_api_key", patch.scopus_api_key);
 
     if reviewer_disabled {
         for key in [
@@ -210,14 +226,37 @@ fn apply_reviewer_environment_from(obj: &Map<String, Value>, force: bool) {
     let provider = get_non_empty(obj, "reviewer_provider");
     let key = get_non_empty(obj, "reviewer_api_key");
 
+    if force && provider.is_none() {
+        std::env::set_var("ARIS_REVIEWER_PROVIDER", "none");
+    }
     set_env_if_allowed("ARIS_REVIEWER_PROVIDER", provider.clone(), force);
-    set_env_if_allowed("ARIS_REVIEWER_MODEL", get_non_empty(obj, "reviewer_model"), force);
+    set_env_if_allowed(
+        "ARIS_REVIEWER_MODEL",
+        get_non_empty(obj, "reviewer_model"),
+        force,
+    );
     set_env_if_allowed(
         "ARIS_REVIEWER_BASE_URL",
         get_non_empty(obj, "reviewer_base_url"),
         force,
     );
     set_env_if_allowed("ARIS_LANGUAGE", get_non_empty(obj, "language"), force);
+    if force || std::env::var("ARIS_MEMORY_WRITE_APPROVAL").is_err() {
+        let enabled = obj
+            .get("memory_write_approval")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        std::env::set_var(
+            "ARIS_MEMORY_WRITE_APPROVAL",
+            if enabled { "true" } else { "false" },
+        );
+    }
+    // Literature kernel tools (Scopus engine) read this from the environment.
+    set_env_if_allowed(
+        "SCOPUS_API_KEY",
+        get_non_empty(obj, "scopus_api_key"),
+        force,
+    );
 
     match provider.as_deref() {
         Some("gemini") => set_env_if_allowed("GEMINI_API_KEY", key, force),
@@ -234,6 +273,25 @@ fn apply_reviewer_environment_from(obj: &Map<String, Value>, force: bool) {
         }
         _ => {}
     }
+}
+
+pub(crate) fn set_memory_write_approval(enabled: bool) -> Result<(), String> {
+    let mut obj = load_object();
+    obj.insert("memory_write_approval".to_string(), Value::Bool(enabled));
+    let path = state::config_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    std::fs::write(
+        path,
+        serde_json::to_string_pretty(&Value::Object(obj)).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    std::env::set_var(
+        "ARIS_MEMORY_WRITE_APPROVAL",
+        if enabled { "true" } else { "false" },
+    );
+    Ok(())
 }
 
 fn normalized_base_url(value: Option<String>, default_value: &str) -> String {
@@ -523,7 +581,7 @@ mod tests {
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
-    fn forced_reviewer_environment_clears_stale_aris_values() {
+    fn forced_reviewer_environment_marks_reviewer_disabled_after_clearing() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         std::env::set_var("ARIS_REVIEWER_PROVIDER", "openai");
         std::env::set_var("ARIS_REVIEWER_MODEL", "gpt-5.5");
@@ -532,10 +590,14 @@ mod tests {
 
         apply_reviewer_environment_from(&Map::new(), true);
 
-        assert!(std::env::var("ARIS_REVIEWER_PROVIDER").is_err());
+        assert_eq!(
+            std::env::var("ARIS_REVIEWER_PROVIDER").as_deref(),
+            Ok("none")
+        );
         assert!(std::env::var("ARIS_REVIEWER_MODEL").is_err());
         assert!(std::env::var("ARIS_REVIEWER_BASE_URL").is_err());
         assert!(std::env::var("ARIS_REVIEWER_AUTH_TOKEN").is_err());
+        std::env::remove_var("ARIS_REVIEWER_PROVIDER");
     }
 
     #[test]
@@ -546,7 +608,10 @@ mod tests {
         std::env::set_var("ARIS_REVIEWER_AUTH_TOKEN", "old-token");
 
         let mut obj = Map::new();
-        obj.insert("reviewer_provider".to_string(), Value::String("deepseek".to_string()));
+        obj.insert(
+            "reviewer_provider".to_string(),
+            Value::String("deepseek".to_string()),
+        );
         obj.insert(
             "reviewer_model".to_string(),
             Value::String("deepseek-v4-pro".to_string()),
@@ -555,11 +620,17 @@ mod tests {
             "reviewer_base_url".to_string(),
             Value::String("https://api.deepseek.com/anthropic".to_string()),
         );
-        obj.insert("reviewer_api_key".to_string(), Value::String("new-token".to_string()));
+        obj.insert(
+            "reviewer_api_key".to_string(),
+            Value::String("new-token".to_string()),
+        );
 
         apply_reviewer_environment_from(&obj, true);
 
-        assert_eq!(std::env::var("ARIS_REVIEWER_PROVIDER").as_deref(), Ok("deepseek"));
+        assert_eq!(
+            std::env::var("ARIS_REVIEWER_PROVIDER").as_deref(),
+            Ok("deepseek")
+        );
         assert_eq!(
             std::env::var("ARIS_REVIEWER_MODEL").as_deref(),
             Ok("deepseek-v4-pro")

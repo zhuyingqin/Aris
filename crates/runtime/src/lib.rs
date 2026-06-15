@@ -10,10 +10,13 @@ mod conversation;
 pub mod event_sink;
 mod file_ops;
 mod hooks;
+mod hot_memory;
 mod json;
+mod knowledge_memory;
 mod mcp;
 mod mcp_client;
 mod mcp_stdio;
+mod memory_provider;
 mod oauth;
 mod permissions;
 mod process;
@@ -21,6 +24,7 @@ mod prompt;
 mod remote;
 pub mod sandbox;
 mod session;
+mod session_index;
 mod usage;
 
 pub use bash::{execute_bash, BashCommandInput, BashCommandOutput};
@@ -51,6 +55,16 @@ pub use file_ops::{
     WriteFileOutput,
 };
 pub use hooks::{HookEvent, HookRunResult, HookRunner};
+pub use hot_memory::{
+    add_hot_memory, approve_pending, hot_memory_dir, knowledge_memory_dir, list_pending,
+    list_pending_for_scope, load_hot_memory, memory_write_approval_enabled, new_pending_write,
+    project_scope, reject_pending, remove_hot_memory, render_hot_memory_prompt, replace_hot_memory,
+    stage_memory_write, HotMemoryEntry, HotMemorySnapshot, HotMemoryTarget, PendingMemoryWrite,
+};
+pub use knowledge_memory::{
+    load_knowledge_memory_catalog, migrate_legacy_knowledge_memory, render_knowledge_memory_prompt,
+    KnowledgeMemoryEntry,
+};
 pub use mcp::{
     mcp_server_signature, mcp_tool_name, mcp_tool_prefix, normalize_name_for_mcp,
     scoped_mcp_config_hash, unwrap_ccr_proxy_url,
@@ -67,6 +81,7 @@ pub use mcp_stdio::{
     McpResourceContents, McpServerManager, McpServerManagerError, McpStdioProcess, McpTool,
     McpToolCallContent, McpToolCallParams, McpToolCallResult, UnsupportedMcpServer,
 };
+pub use memory_provider::{MemoryProvider, MemoryProviderContext, MemoryProviderManager};
 pub use oauth::{
     clear_oauth_credentials, code_challenge_s256, credentials_path, generate_pkce_pair,
     generate_state, load_oauth_credentials, loopback_redirect_uri, parse_oauth_callback_query,
@@ -89,6 +104,10 @@ pub use remote::{
     DEFAULT_SESSION_TOKEN_PATH, DEFAULT_SYSTEM_CA_BUNDLE, NO_PROXY_HOSTS, UPSTREAM_PROXY_ENV_KEYS,
 };
 pub use session::{ContentBlock, ConversationMessage, MessageRole, Session, SessionError};
+pub use session_index::{
+    index_session, search_sessions, sessions_dir_from_env, sync_sessions_dir, SessionBrowseEntry,
+    SessionSearchHit, SessionSearchMessage, SessionSearchResult,
+};
 pub use usage::{
     format_usd, pricing_for_model, ModelPricing, TokenUsage, UsageCostEstimate, UsageTracker,
 };

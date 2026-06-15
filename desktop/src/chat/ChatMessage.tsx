@@ -1,23 +1,10 @@
 import { memo, useMemo, useState } from "react";
 import type { ChatBlock, ChatTurn } from "../types";
+import { fileOpen } from "../api/tauri";
 import MarkdownContent, { ThinkBlock } from "./MarkdownContent";
 import { textFromTurn } from "./model";
 
 const FILE_WRITE_TOOLS = new Set(["write_file", "edit_file", "str_replace_based_edit_tool"]);
-const TEAM_HANDOFF_TOOLS = new Set([
-  "PlanTeam",
-  "SpawnTeammate",
-  "WaitForTeammates",
-  "VerifyDeliverable",
-  "TeamControl",
-]);
-const TEAM_HANDOFF_MARKERS = [
-  "PlanTeam",
-  "SpawnTeammate",
-  "teamDesign",
-  "Agent Team",
-  "successCriteria",
-];
 
 interface FileChange {
   path: string;
@@ -79,14 +66,43 @@ function ToolCall({ block }: { block: Extract<ChatBlock, { kind: "tool" }> }) {
   const running = block.output === undefined;
   const status = running ? "Running" : block.isError ? "Failed" : change ? "Modified file" : "Succeeded";
   const className = running ? "tool-running" : block.isError ? "tool-error" : change ? "tool-change" : "tool-done";
+  const toggle = () => {
+    if (!running) setOpen((value) => !value);
+  };
   return (
     <div className={`chat-tool ${className}`}>
-      <button className="chat-tool-header" onClick={() => setOpen((value) => !value)} disabled={running}>
+      <div
+        className="chat-tool-header"
+        role="button"
+        tabIndex={running ? -1 : 0}
+        aria-disabled={running}
+        onClick={toggle}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            toggle();
+          }
+        }}
+      >
         <span className="tool-status-icon">{running ? "◌" : block.isError ? "×" : change ? "±" : "✓"}</span>
         <span className="tool-status-label">{status}</span>
-        <span className="tool-name">{change?.path ?? block.name}</span>
+        {change ? (
+          <button
+            type="button"
+            className="tool-name tool-file-link"
+            title="Open generated file"
+            onClick={(event) => {
+              event.stopPropagation();
+              void fileOpen(change.path).catch((error) => console.error("Unable to open file", error));
+            }}
+          >
+            {change.path}
+          </button>
+        ) : (
+          <span className="tool-name">{block.name}</span>
+        )}
         {!running && <span className="tool-collapse-btn">{open ? "▾" : "▸"}</span>}
-      </button>
+      </div>
       {open && (
         <div className="chat-tool-body">
           {change ? (
@@ -111,28 +127,17 @@ function hasRenderableContent(turn: ChatTurn): boolean {
   });
 }
 
-function hasTeamHandoff(turn: ChatTurn): boolean {
-  if (turn.role !== "assistant") return false;
-  return turn.blocks.some((block) => {
-    if (block.kind === "tool") return TEAM_HANDOFF_TOOLS.has(block.name);
-    if (block.kind !== "text") return false;
-    return TEAM_HANDOFF_MARKERS.some((marker) => block.text.includes(marker));
-  });
-}
-
 interface Props {
   turn: ChatTurn;
   canRetry: boolean;
   onEdit: (turn: ChatTurn) => void;
   onRetry: (turn: ChatTurn) => void;
   onContinue: () => void;
-  onOpenTeam: () => void;
 }
 
-function ChatMessage({ turn, canRetry, onEdit, onRetry, onContinue, onOpenTeam }: Props) {
+function ChatMessage({ turn, canRetry, onEdit, onRetry, onContinue }: Props) {
   const text = textFromTurn(turn);
   const hasContent = hasRenderableContent(turn);
-  const showTeamHandoff = hasTeamHandoff(turn) && !turn.streaming;
   return (
     <article className={`chat-turn chat-${turn.role}${turn.error ? " chat-turn-error" : ""}`}>
       {turn.role === "user" && turn.attachments && turn.attachments.length > 0 && (
@@ -156,15 +161,6 @@ function ChatMessage({ turn, canRetry, onEdit, onRetry, onContinue, onOpenTeam }
       })}
       {!turn.streaming && !turn.error && !hasContent && turn.role === "assistant" && (
         <div className="chat-empty-response">Model returned an empty response.</div>
-      )}
-      {showTeamHandoff && (
-        <div className="chat-team-handoff">
-          <div>
-            <strong>Team handoff available</strong>
-            <span>Open the Team view to inspect or continue the team workflow.</span>
-          </div>
-          <button onClick={onOpenTeam}>Open Team</button>
-        </div>
       )}
       {turn.streaming && <span className="chat-inline-cursor">▌</span>}
       {turn.error && (

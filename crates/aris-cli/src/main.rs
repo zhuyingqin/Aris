@@ -1,7 +1,6 @@
 mod config;
 mod init;
 mod input;
-mod memories;
 mod meta_optimize;
 mod openai_compat;
 mod openai_executor;
@@ -20,7 +19,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use api::{resolve_startup_auth_source, AnthropicClient, AuthSource};
 #[cfg(test)]
 use api::{
-    InputContentBlock, InputMessage, MessageResponse, OutputContentBlock, ToolResultContentBlock,
+    ImageSource, InputContentBlock, InputMessage, MessageResponse, OutputContentBlock,
+    ToolResultContentBlock,
 };
 
 use commands::{
@@ -46,9 +46,10 @@ use runtime::{
     ProjectContext, RuntimeError, Session, TokenUsage, ToolError, ToolExecutor, UsageTracker,
 };
 use serde_json::json;
-use tools::{execute_tool, mvp_tool_specs, ToolSpec};
+use tools::{execute_tool, mvp_tool_specs};
 
-const DEFAULT_MODEL: &str = "claude-opus-4-7";
+const DEFAULT_MODEL: &str = "claude-opus-4-8";
+const DEFAULT_MODEL_FALLBACK: &str = "claude-opus-4-7";
 const DEFAULT_OAUTH_CALLBACK_PORT: u16 = 4545;
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const BUILD_TARGET: Option<&str> = option_env!("TARGET");
@@ -469,7 +470,7 @@ fn resolve_model_alias(model: &str) -> &str {
         return model;
     }
     match model {
-        "opus" => "claude-opus-4-7",
+        "opus" => "claude-opus-4-8",
         "sonnet" => "claude-sonnet-4-6",
         "haiku" => "claude-haiku-4-5-20251001",
         _ => model,
@@ -507,6 +508,10 @@ fn normalize_allowed_tools(values: &[String]) -> Result<Option<AllowedToolSet>, 
             .filter(|token| !token.is_empty())
         {
             let normalized = normalize_tool_name(token);
+            if normalized.starts_with("mcp__") {
+                allowed.insert(token.trim().to_string());
+                continue;
+            }
             let canonical = name_map.get(&normalized).ok_or_else(|| {
                 format!(
                     "unsupported tool in --allowedTools: {token} (expected one of: {})",
@@ -1072,7 +1077,7 @@ fn run_resume_command(
             session: session.clone(),
             message: Some(render_config_report(section.as_deref())?),
         }),
-        SlashCommand::Memory => Ok(ResumeCommandOutcome {
+        SlashCommand::Memory { .. } => Ok(ResumeCommandOutcome {
             session: session.clone(),
             message: Some(render_memory_report()?),
         }),
@@ -1226,6 +1231,10 @@ struct LiveCli {
     session: SessionHandle,
     /// Plan mode state: stores original permissions/tools before entering plan mode.
     plan_mode: Option<PlanModeState>,
+    /// Set once we've fallen back from DEFAULT_MODEL (Opus 4.8) to
+    /// DEFAULT_MODEL_FALLBACK (4.7) because 4.8 was unavailable. Latches the
+    /// fallback for the session and prevents a retry loop.
+    model_fell_back: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1293,6 +1302,7 @@ impl LiveCli {
             runtime,
             session,
             plan_mode: None,
+            model_fell_back: false,
         };
         cli.persist_session()?;
         Ok(cli)
@@ -1488,46 +1498,91 @@ impl LiveCli {
     }
 
     fn run_turn(&mut self, input: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let mut spinner = Spinner::new();
         let mut stdout = io::stdout();
-        spinner.tick(
-            "\x1b[38;5;74m●\x1b[0m \x1b[2mThinking...\x1b[0m",
-            TerminalRenderer::new().color_theme(),
-            &mut stdout,
-        )?;
-        // Clear the spinner row before streaming starts. The spinner and
-        // model output share the same terminal row; clearing at finish time
-        // erases short one-line answers.
-        execute!(stdout, MoveToColumn(0), Clear(ClearType::CurrentLine))?;
-        stdout.flush()?;
-        let mut permission_prompter = CliPermissionPrompter::new(self.permission_mode);
-        let result = self.runtime.run_turn(input, Some(&mut permission_prompter));
-        match result {
-            Ok(summary) => {
-                spinner.finish_after_stream(
-                    "\x1b[38;5;74m●\x1b[0m \x1b[2mDone\x1b[0m",
-                    TerminalRenderer::new().color_theme(),
-                    &mut stdout,
-                )?;
-                println!();
-                if let Some(event) = summary.auto_compaction {
-                    println!(
-                        "{}",
-                        format_auto_compaction_notice(event.removed_message_count)
-                    );
+        // Snapshot the session BEFORE the turn. ConversationRuntime::run_turn
+        // appends the user message before the API call, so a failed attempt
+        // leaves `input` in the session. If we fall back, we rebuild from THIS
+        // pre-turn snapshot so the retry appends `input` exactly once.
+        let pre_turn_session = self.runtime.session().clone();
+        loop {
+            let mut spinner = Spinner::new();
+            spinner.tick(
+                "\x1b[38;5;74m●\x1b[0m \x1b[2mThinking...\x1b[0m",
+                TerminalRenderer::new().color_theme(),
+                &mut stdout,
+            )?;
+            execute!(stdout, MoveToColumn(0), Clear(ClearType::CurrentLine))?;
+            stdout.flush()?;
+            let mut permission_prompter = CliPermissionPrompter::new(self.permission_mode);
+            let result = self.runtime.run_turn(input, Some(&mut permission_prompter));
+            match result {
+                Ok(summary) => {
+                    spinner.finish_after_stream(
+                        "\x1b[38;5;74m●\x1b[0m \x1b[2mDone\x1b[0m",
+                        TerminalRenderer::new().color_theme(),
+                        &mut stdout,
+                    )?;
+                    println!();
+                    if let Some(event) = summary.auto_compaction {
+                        println!(
+                            "{}",
+                            format_auto_compaction_notice(event.removed_message_count)
+                        );
+                    }
+                    self.persist_session()?;
+                    return Ok(());
                 }
-                self.persist_session()?;
-                Ok(())
-            }
-            Err(error) => {
-                spinner.fail(
-                    "\x1b[38;5;203m●\x1b[0m \x1b[1;31mRequest failed\x1b[0m",
-                    TerminalRenderer::new().color_theme(),
-                    &mut stdout,
-                )?;
-                Err(Box::new(error))
+                Err(error) => {
+                    // If the default Opus 4.8 is unavailable on this account,
+                    // fall back to 4.7 — rebuilding runtime and system prompt
+                    // so the model identity stays coherent — and retry once.
+                    if self.fall_back_default_model_if_needed(&error)? {
+                        spinner.finish(
+                            "\x1b[33m●\x1b[0m \x1b[2mretrying with the fallback model…\x1b[0m",
+                            TerminalRenderer::new().color_theme(),
+                            &mut stdout,
+                        )?;
+                        self.runtime = build_runtime(
+                            pre_turn_session.clone(),
+                            self.model.clone(),
+                            self.system_prompt.clone(),
+                            true,
+                            true,
+                            self.allowed_tools.clone(),
+                            self.permission_mode,
+                        )?;
+                        continue;
+                    }
+                    spinner.fail(
+                        "\x1b[38;5;203m●\x1b[0m \x1b[1;31mRequest failed\x1b[0m",
+                        TerminalRenderer::new().color_theme(),
+                        &mut stdout,
+                    )?;
+                    return Err(Box::new(error));
+                }
             }
         }
+    }
+
+    /// When `error` is "model unavailable on this account" and we're still on
+    /// DEFAULT_MODEL (Opus 4.8), switch to DEFAULT_MODEL_FALLBACK (4.7),
+    /// rebuild the system prompt, warn once, and return `true` so the caller
+    /// rebuilds its runtime and retries. Returns `false` otherwise.
+    fn fall_back_default_model_if_needed(
+        &mut self,
+        error: &RuntimeError,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
+        if !error.is_model_unavailable() || self.model != DEFAULT_MODEL || self.model_fell_back {
+            return Ok(false);
+        }
+        self.model_fell_back = true;
+        self.model = DEFAULT_MODEL_FALLBACK.to_string();
+        self.system_prompt = build_system_prompt(Some(&self.model))?;
+        eprintln!(
+            "\x1b[33mwarning:\x1b[0m {DEFAULT_MODEL} is not available on this account; \
+             falling back to {DEFAULT_MODEL_FALLBACK} for this session."
+        );
+        Ok(true)
     }
 
     fn run_turn_with_output(
@@ -1542,19 +1597,34 @@ impl LiveCli {
     }
 
     fn run_prompt_json(&mut self, input: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let session = self.runtime.session().clone();
-        let mut runtime = build_runtime(
-            session,
-            self.model.clone(),
-            self.system_prompt.clone(),
-            true,
-            false,
-            self.allowed_tools.clone(),
-            self.permission_mode,
-        )?;
-        let mut permission_prompter = CliPermissionPrompter::new(self.permission_mode);
-        let summary = runtime.run_turn(input, Some(&mut permission_prompter))?;
-        self.runtime = runtime;
+        // Same default-model fallback as the text path. On a "model unavailable"
+        // failure we switch to 4.7, rebuild from the new model + system prompt,
+        // and retry once.
+        let summary = loop {
+            let session = self.runtime.session().clone();
+            let mut runtime = build_runtime(
+                session,
+                self.model.clone(),
+                self.system_prompt.clone(),
+                true,
+                false,
+                self.allowed_tools.clone(),
+                self.permission_mode,
+            )?;
+            let mut permission_prompter = CliPermissionPrompter::new(self.permission_mode);
+            match runtime.run_turn(input, Some(&mut permission_prompter)) {
+                Ok(summary) => {
+                    self.runtime = runtime;
+                    break summary;
+                }
+                Err(error) => {
+                    if self.fall_back_default_model_if_needed(&error)? {
+                        continue;
+                    }
+                    return Err(Box::new(error));
+                }
+            }
+        };
         self.persist_session()?;
         println!(
             "{}",
@@ -1647,8 +1717,8 @@ impl LiveCli {
                 Self::print_config(section.as_deref())?;
                 false
             }
-            SlashCommand::Memory => {
-                Self::print_memory()?;
+            SlashCommand::Memory { action, target } => {
+                Self::handle_memory(action.as_deref(), target.as_deref())?;
                 false
             }
             SlashCommand::Init => {
@@ -1792,8 +1862,8 @@ impl LiveCli {
                     // Anthropic mode
                     vec![
                         (
-                            "claude-opus-4-7",
-                            "Opus 4.7 · Most capable for complex work",
+                            "claude-opus-4-8",
+                            "Opus 4.8 · Most capable for complex work",
                         ),
                         ("claude-sonnet-4-6", "Sonnet 4.6 · Best for everyday tasks"),
                         (
@@ -2357,6 +2427,60 @@ impl LiveCli {
         Ok(())
     }
 
+    fn handle_memory(
+        action: Option<&str>,
+        target: Option<&str>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        match action {
+            None | Some("show") => Self::print_memory(),
+            Some("pending") => {
+                let scope = runtime::project_scope(&std::env::current_dir()?);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&runtime::list_pending_for_scope(&scope)?)?
+                );
+                Ok(())
+            }
+            Some("approve") => {
+                let id = target.ok_or("Usage: /memory approve <id>")?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&runtime::approve_pending(id)?)?
+                );
+                Ok(())
+            }
+            Some("reject") => {
+                let id = target.ok_or("Usage: /memory reject <id>")?;
+                runtime::reject_pending(id)?;
+                println!("Rejected pending memory write {id}.");
+                Ok(())
+            }
+            Some("approval") => {
+                let enabled = match target {
+                    Some("on") => true,
+                    Some("off") => false,
+                    _ => return Err("Usage: /memory approval on|off".into()),
+                };
+                let mut config = config::ArisConfig::load();
+                config.memory_write_approval = Some(enabled);
+                config.save()?;
+                std::env::set_var(
+                    "ARIS_MEMORY_WRITE_APPROVAL",
+                    if enabled { "true" } else { "false" },
+                );
+                println!(
+                    "Memory write approval is now {}.",
+                    if enabled { "on" } else { "off" }
+                );
+                Ok(())
+            }
+            Some(other) => Err(format!(
+                "Unknown /memory action `{other}`. Use show, pending, approve, reject, or approval."
+            )
+            .into()),
+        }
+    }
+
     fn print_diff() -> Result<(), Box<dyn std::error::Error>> {
         println!("{}", render_diff_report()?);
         Ok(())
@@ -2435,9 +2559,14 @@ impl LiveCli {
                 );
                 Ok(false)
             }
+            Some("search") => {
+                let result = runtime::search_sessions(&sessions_dir()?, target, None, 5, 5)?;
+                println!("{}", serde_json::to_string_pretty(&result)?);
+                Ok(false)
+            }
             Some(other) => {
                 println!(
-                    "Unknown /session action '{other}'. Use /session list, /session switch <session-id>, or /session timeline [session-id]."
+                    "Unknown /session action '{other}'. Use /session list, /session search <query>, /session switch <session-id>, or /session timeline [session-id]."
                 );
                 Ok(false)
             }
@@ -3036,6 +3165,10 @@ fn status_context(
     let discovered_config_files = loader.discover().len();
     let runtime_config = loader.load()?;
     let project_context = ProjectContext::discover_with_git(&cwd, &runtime::today_iso())?;
+    let hot_memory_count = runtime::load_hot_memory(&cwd)
+        .map(|memory| memory.memory.len() + memory.user.len())
+        .unwrap_or_default();
+    let knowledge_memory_count = runtime::load_knowledge_memory_catalog().len();
     let (project_root, git_branch) =
         parse_git_status_metadata(project_context.git_status.as_deref());
     Ok(StatusContext {
@@ -3043,7 +3176,7 @@ fn status_context(
         session_path: session_path.map(Path::to_path_buf),
         loaded_config_files: runtime_config.loaded_entries().len(),
         discovered_config_files,
-        memory_file_count: project_context.instruction_files.len(),
+        memory_file_count: hot_memory_count + knowledge_memory_count,
         project_root,
         git_branch,
     })
@@ -3184,36 +3317,45 @@ fn render_config_report(section: Option<&str>) -> Result<String, Box<dyn std::er
 
 fn render_memory_report() -> Result<String, Box<dyn std::error::Error>> {
     let cwd = env::current_dir()?;
-    let project_context = ProjectContext::discover(&cwd, &runtime::today_iso())?;
-    let mut lines = vec![format!(
-        "Memory
-  Working directory {}
-  Instruction files {}",
-        cwd.display(),
-        project_context.instruction_files.len()
-    )];
-    if project_context.instruction_files.is_empty() {
-        lines.push("Discovered files".to_string());
-        lines.push(
-            "  No CLAUDE instruction files discovered in the current directory ancestry."
-                .to_string(),
-        );
-    } else {
-        lines.push("Discovered files".to_string());
-        for (index, file) in project_context.instruction_files.iter().enumerate() {
-            let preview = file.content.lines().next().unwrap_or("").trim();
-            let preview = if preview.is_empty() {
-                "<empty>"
-            } else {
-                preview
-            };
-            lines.push(format!("  {}. {}", index + 1, file.path.display(),));
-            lines.push(format!(
-                "     lines={} preview={}",
-                file.content.lines().count(),
-                preview
-            ));
-        }
+    let hot = runtime::load_hot_memory(&cwd)?;
+    let knowledge = runtime::load_knowledge_memory_catalog();
+    let mut lines = vec![
+        "Memory".to_string(),
+        format!("  Working directory {}", cwd.display()),
+        format!("  Project scope     {}", hot.project_scope),
+        format!(
+            "  Hot memory        memory={}/{} chars, user={}/{} chars",
+            hot.memory_chars, hot.memory_limit, hot.user_chars, hot.user_limit
+        ),
+        format!("  Pending writes    {}", hot.pending_count),
+        format!(
+            "  Write approval    {}",
+            runtime::memory_write_approval_enabled()
+        ),
+        format!("  Knowledge files   {}", knowledge.len()),
+        "Hot entries".to_string(),
+    ];
+    for entry in hot.user.iter().chain(hot.memory.iter()) {
+        lines.push(format!(
+            "  [{}] {} scope={} source={} expires={}",
+            entry.id,
+            entry.content,
+            entry.scope,
+            entry.source,
+            entry.expires_at.as_deref().unwrap_or("never")
+        ));
+    }
+    if hot.user.is_empty() && hot.memory.is_empty() {
+        lines.push("  No active hot-memory entries.".to_string());
+    }
+    lines.push("Knowledge catalog".to_string());
+    for entry in knowledge {
+        lines.push(format!(
+            "  {} - {} ({})",
+            entry.name,
+            entry.description,
+            entry.path.display()
+        ));
     }
     Ok(lines.join(
         "
@@ -3803,6 +3945,12 @@ fn render_export_text(session: &Session) -> String {
         for block in &message.blocks {
             match block {
                 ContentBlock::Text { text } => lines.push(text.clone()),
+                ContentBlock::Image { media_type, data } => {
+                    lines.push(format!(
+                        "[image media_type={media_type} bytes={}]",
+                        data.len()
+                    ));
+                }
                 ContentBlock::ToolUse { id, name, input } => {
                     lines.push(format!("[tool_use id={id} name={name}] {input}"));
                 }
@@ -3833,6 +3981,7 @@ fn default_export_filename(session: &Session) -> String {
         .find_map(|message| match message.role {
             MessageRole::User => message.blocks.iter().find_map(|block| match block {
                 ContentBlock::Text { text } => Some(text.as_str()),
+                ContentBlock::Image { .. } => None,
                 _ => None,
             }),
             _ => None,
@@ -3881,8 +4030,9 @@ fn resolve_export_path(
 }
 
 fn build_system_prompt(model_id: Option<&str>) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let workspace = env::current_dir()?;
     let options = aris_chat::CommonSystemPromptOptions {
-        workspace: env::current_dir()?,
+        workspace: workspace.clone(),
         current_date: runtime::today_iso(),
         os_name: env::consts::OS.to_string(),
         os_version: "unknown".to_string(),
@@ -3912,39 +4062,9 @@ fn build_system_prompt(model_id: Option<&str>) -> Result<Vec<String>, Box<dyn st
         prompt.push("User language preference is English. Always respond in English unless the user explicitly writes in another language.".to_string());
     }
 
-    // ARIS persistent memory (multi-file index system)
-    memories::migrate_legacy_memory();
-    let mem_entries = memories::load_memory_catalog();
-    let mem_dir = memories::memories_dir();
-    if !mem_entries.is_empty() {
-        let catalog = memories::render_memory_catalog(&mem_entries);
-        prompt.push(format!(
-            "# ARIS Persistent Memory\n\
-             You have {} memories from previous sessions. \
-             Below is the catalog (name + description + path). \
-             Use the read_file tool to load a specific memory when relevant.\n\n\
-             {catalog}\n\n\
-             To save new memories, use write_file to create .md files in {dir} \
-             with YAML frontmatter (---\\nname: ...\\ndescription: ...\\n---).\n\
-             When the user says \"remember this\" or you learn important context, save it.",
-            mem_entries.len(),
-            dir = mem_dir.display(),
-        ));
-    } else {
-        prompt.push(format!(
-            "# ARIS Persistent Memory\n\
-             Memory directory: {dir}\n\
-             No memories yet. When the user says \"remember this\" or you learn important context, \
-             create .md files in {dir} with frontmatter:\n\
-             ---\n\
-             name: Memory Title\n\
-             description: One-line summary for catalog\n\
-             ---\n\
-             (content here)\n\
-             This memory persists across sessions.",
-            dir = mem_dir.display(),
-        ));
-    }
+    runtime::migrate_legacy_knowledge_memory();
+    prompt.push(runtime::render_hot_memory_prompt(&workspace)?);
+    prompt.push(runtime::render_knowledge_memory_prompt());
 
     // ARIS persistent tasks (uses TodoWrite tool, stored as JSON)
     let tasks_path = aris_tasks_path();
@@ -4048,9 +4168,20 @@ fn build_runtime(
     ConversationRuntime<aris_executor::ExecutorClient, CliToolExecutor>,
     Box<dyn std::error::Error>,
 > {
-    let tool_specs = filter_tool_specs(allowed_tools.as_ref());
     let observer = cli_stream_observer(emit_output);
     let feature_config = build_runtime_feature_config()?;
+    let tool_specs = aris_chat::chat_tool_specs(filter_tool_specs(allowed_tools.as_ref()));
+    let mcp_bundle = aris_chat::attach_mcp_tools(
+        BuiltinCliToolExecutor::new(allowed_tools.clone()),
+        tool_specs,
+        &feature_config,
+        allowed_tools.as_ref(),
+    );
+    for warning in &mcp_bundle.warnings {
+        eprintln!("\x1b[33mwarning\x1b[0m: {warning}");
+    }
+    let permission_policy =
+        aris_chat::permission_policy_for_tools(mcp_bundle.tool_specs.clone(), permission_mode);
     let event_sink = build_event_sink(&feature_config);
     let executor_config = aris_chat::resolve_env_executor_config(|| {
         resolve_cli_auth_source().map_err(|error| error.to_string())
@@ -4061,10 +4192,10 @@ fn build_runtime(
         executor_config,
         model,
         enable_tools,
-        tool_specs,
+        mcp_bundle.tool_specs,
         observer,
-        CliToolExecutor::new(allowed_tools, emit_output),
-        permission_policy(permission_mode),
+        CliToolExecutor::new(mcp_bundle.executor, emit_output),
+        permission_policy,
         system_prompt,
         feature_config,
     )
@@ -4773,23 +4904,17 @@ fn response_to_events(
     Ok(events)
 }
 
-struct CliToolExecutor {
-    renderer: TerminalRenderer,
-    emit_output: bool,
+struct BuiltinCliToolExecutor {
     allowed_tools: Option<AllowedToolSet>,
 }
 
-impl CliToolExecutor {
-    fn new(allowed_tools: Option<AllowedToolSet>, emit_output: bool) -> Self {
-        Self {
-            renderer: TerminalRenderer::new(),
-            emit_output,
-            allowed_tools,
-        }
+impl BuiltinCliToolExecutor {
+    fn new(allowed_tools: Option<AllowedToolSet>) -> Self {
+        Self { allowed_tools }
     }
 }
 
-impl ToolExecutor for CliToolExecutor {
+impl ToolExecutor for BuiltinCliToolExecutor {
     fn execute(&mut self, tool_name: &str, input: &str) -> Result<String, ToolError> {
         if self
             .allowed_tools
@@ -4802,7 +4927,38 @@ impl ToolExecutor for CliToolExecutor {
         }
         let value = serde_json::from_str(input)
             .map_err(|error| ToolError::new(format!("invalid tool input JSON: {error}")))?;
-        match execute_tool(tool_name, &value) {
+        execute_tool(tool_name, &value).map_err(ToolError::new)
+    }
+}
+
+struct CliToolExecutor {
+    renderer: TerminalRenderer,
+    emit_output: bool,
+    inner: aris_chat::McpToolExecutor<BuiltinCliToolExecutor>,
+}
+
+impl CliToolExecutor {
+    fn new(inner: aris_chat::McpToolExecutor<BuiltinCliToolExecutor>, emit_output: bool) -> Self {
+        Self {
+            renderer: TerminalRenderer::new(),
+            emit_output,
+            inner,
+        }
+    }
+}
+
+impl ToolExecutor for CliToolExecutor {
+    fn execute(&mut self, tool_name: &str, input: &str) -> Result<String, ToolError> {
+        self.execute_with_id("", tool_name, input)
+    }
+
+    fn execute_with_id(
+        &mut self,
+        tool_use_id: &str,
+        tool_name: &str,
+        input: &str,
+    ) -> Result<String, ToolError> {
+        match self.inner.execute_with_id(tool_use_id, tool_name, input) {
             Ok(output) => {
                 if self.emit_output {
                     let markdown = format_tool_result(tool_name, &output, false);
@@ -4814,23 +4970,15 @@ impl ToolExecutor for CliToolExecutor {
             }
             Err(error) => {
                 if self.emit_output {
-                    let markdown = format_tool_result(tool_name, &error, true);
+                    let markdown = format_tool_result(tool_name, &error.to_string(), true);
                     self.renderer
                         .stream_markdown(&markdown, &mut io::stdout())
                         .map_err(|stream_error| ToolError::new(stream_error.to_string()))?;
                 }
-                Err(ToolError::new(error))
+                Err(error)
             }
         }
     }
-}
-
-fn permission_policy(mode: PermissionMode) -> runtime::PermissionPolicy {
-    aris_chat::permission_policy_for_tools(tool_permission_specs(), mode)
-}
-
-fn tool_permission_specs() -> Vec<ToolSpec> {
-    mvp_tool_specs()
 }
 
 #[cfg(test)]
@@ -4847,6 +4995,9 @@ fn convert_messages(messages: &[ConversationMessage]) -> Vec<InputMessage> {
                 .iter()
                 .map(|block| match block {
                     ContentBlock::Text { text } => InputContentBlock::Text { text: text.clone() },
+                    ContentBlock::Image { media_type, data } => InputContentBlock::Image {
+                        source: ImageSource::base64(media_type.clone(), data.clone()),
+                    },
                     ContentBlock::ToolUse { id, name, input } => InputContentBlock::ToolUse {
                         id: id.clone(),
                         name: name.clone(),
@@ -5150,44 +5301,26 @@ fn run_doctor() -> Result<(), Box<dyn std::error::Error>> {
 
     // Check 5: Codex MCP in config
     print!("  Codex MCP:    ");
-    let home = runtime::home_dir();
-    let config_path = PathBuf::from(&home).join(".claude.json");
-    if config_path.exists() {
-        if let Ok(content) = fs::read_to_string(&config_path) {
-            if let Ok(config) = serde_json::from_str::<serde_json::Value>(&content) {
-                if config
-                    .get("mcpServers")
-                    .and_then(|s| s.as_object())
-                    .map_or(false, |s| s.contains_key("codex"))
-                {
-                    println!("OK (configured in ~/.claude.json)");
-                } else {
-                    println!("NOT CONFIGURED (edit ~/.claude.json by hand or via Claude Code's own `claude mcp add`)");
-                }
-            } else {
-                println!("ERROR (invalid ~/.claude.json)");
-            }
-        } else {
-            println!("ERROR (cannot read ~/.claude.json)");
-        }
+    let loaded_runtime_config = runtime::ConfigLoader::default_for(&cwd).load().ok();
+    if loaded_runtime_config
+        .as_ref()
+        .is_some_and(|config| config.mcp().get("codex").is_some())
+    {
+        println!("OK (configured)");
+    } else if loaded_runtime_config.is_some() {
+        println!("NOT CONFIGURED (add `codex` under mcpServers)");
     } else {
-        println!("NOT CONFIGURED (no ~/.claude.json)");
+        println!("ERROR (could not load MCP configuration)");
     }
 
-    // Check 6 (v0.4.14 M1/M2): MCP dispatch experimental warning.
-    // Surfaces only when mcpServers are actually configured so users
-    // who don't use MCP aren't bothered.
-    let mcp_server_count = runtime::ConfigLoader::default_for(&cwd)
-        .load()
-        .map(|rc| rc.mcp().servers().len())
-        .unwrap_or(0);
+    // Check 6: MCP dispatch status.
+    let mcp_server_count = loaded_runtime_config
+        .as_ref()
+        .map_or(0, |config| config.mcp().servers().len());
     if mcp_server_count > 0 {
         println!();
         println!(
-            "\x1b[33m⚠  MCP servers configured ({mcp_server_count}) but currently only stdio test/diagnostics.\x1b[0m"
-        );
-        println!(
-            "\x1b[33m   Full tool dispatch into LLM context lands in v0.4.16. (See README MCP section.)\x1b[0m"
+            "\x1b[32m✓  MCP stdio tool dispatch enabled ({mcp_server_count} configured).\x1b[0m"
         );
     }
 
@@ -5326,11 +5459,11 @@ mod tests {
         deploy_meta_opt_hooks_to, filter_tool_specs, format_compact_report, format_cost_report,
         format_model_report, format_model_switch_report, format_permissions_report,
         format_permissions_switch_report, format_resume_report, format_status_report,
-        format_tool_call_start, format_tool_result, normalize_permission_mode, parse_args,
-        parse_git_status_metadata, print_help_to, push_output_block, render_config_report,
-        render_memory_report, render_repl_help, resolve_model_alias, response_to_events,
-        resume_supported_slash_commands, status_context, CliAction, CliOutputFormat, SlashCommand,
-        StatusUsage, DEFAULT_MODEL,
+        format_tool_call_start, format_tool_result, normalize_allowed_tools,
+        normalize_permission_mode, parse_args, parse_git_status_metadata, print_help_to,
+        push_output_block, render_config_report, render_memory_report, render_repl_help,
+        resolve_model_alias, response_to_events, resume_supported_slash_commands, status_context,
+        CliAction, CliOutputFormat, SlashCommand, StatusUsage, DEFAULT_MODEL,
     };
     use api::{MessageResponse, OutputContentBlock, Usage};
     use runtime::{AssistantEvent, ContentBlock, ConversationMessage, MessageRole, PermissionMode};
@@ -5401,7 +5534,7 @@ mod tests {
             parse_args(&args).expect("args should parse"),
             CliAction::Prompt {
                 prompt: "explain this".to_string(),
-                model: "claude-opus-4-7".to_string(),
+                model: "claude-opus-4-8".to_string(),
                 output_format: CliOutputFormat::Text,
                 allowed_tools: None,
                 permission_mode: PermissionMode::DangerFullAccess,
@@ -5411,7 +5544,7 @@ mod tests {
 
     #[test]
     fn resolves_known_model_aliases() {
-        assert_eq!(resolve_model_alias("opus"), "claude-opus-4-7");
+        assert_eq!(resolve_model_alias("opus"), "claude-opus-4-8");
         assert_eq!(resolve_model_alias("sonnet"), "claude-sonnet-4-6");
         assert_eq!(resolve_model_alias("haiku"), "claude-haiku-4-5-20251001");
         assert_eq!(resolve_model_alias("claude-opus"), "claude-opus");
@@ -5558,6 +5691,14 @@ mod tests {
     }
 
     #[test]
+    fn allowed_tools_accept_mcp_qualified_names() {
+        let allowed = normalize_allowed_tools(&["mcp__codex__codex-reply".to_string()])
+            .expect("MCP tool should be accepted")
+            .expect("allowlist");
+        assert!(allowed.contains("mcp__codex__codex-reply"));
+    }
+
+    #[test]
     fn shared_help_uses_resume_annotation_copy() {
         let help = commands::render_slash_command_help();
         assert!(help.contains("Slash commands"));
@@ -5581,7 +5722,8 @@ mod tests {
         assert!(help.contains("/diff"));
         assert!(help.contains("/version"));
         assert!(help.contains("/export [file]"));
-        assert!(help.contains("/session [list|switch <session-id>|timeline [session-id]]"));
+        assert!(help
+            .contains("/session [list|search <query>|switch <session-id>|timeline [session-id]]"));
         assert!(help.contains("/exit"));
     }
 
@@ -5739,8 +5881,8 @@ mod tests {
         let report = render_memory_report().expect("memory report should render");
         assert!(report.contains("Memory"));
         assert!(report.contains("Working directory"));
-        assert!(report.contains("Instruction files"));
-        assert!(report.contains("Discovered files"));
+        assert!(report.contains("Hot memory"));
+        assert!(report.contains("Knowledge catalog"));
     }
 
     #[test]
@@ -5765,7 +5907,7 @@ mod tests {
     fn status_context_reads_real_workspace_metadata() {
         let context = status_context(None).expect("status context should load");
         assert!(context.cwd.is_absolute());
-        assert_eq!(context.discovered_config_files, 5);
+        assert_eq!(context.discovered_config_files, 6);
         assert!(context.loaded_config_files <= context.discovered_config_files);
     }
 
@@ -5817,7 +5959,13 @@ mod tests {
                 section: Some("env".to_string())
             })
         );
-        assert_eq!(SlashCommand::parse("/memory"), Some(SlashCommand::Memory));
+        assert_eq!(
+            SlashCommand::parse("/memory"),
+            Some(SlashCommand::Memory {
+                action: None,
+                target: None
+            })
+        );
         assert_eq!(SlashCommand::parse("/init"), Some(SlashCommand::Init));
     }
 

@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { fileSearch, isTauri } from "../api/tauri";
 import type { ChatAttachment, DesktopCommandSpec, SkillMeta } from "../types";
-import { fuzzyMatch, makeId } from "./model";
+import { fuzzyMatch, fuzzyScore, makeId } from "./model";
 
 const RECENT_SKILLS_KEY = "aris-chat-recent-skills";
 const RECENT_FILES_KEY = "aris-chat-recent-files";
@@ -41,6 +41,66 @@ function isExactDesktopCommand(input: string, command: DesktopCommandSpec | unde
 type SlashPickerItem =
   | { kind: "command"; command: DesktopCommandSpec; group: "System commands" }
   | { kind: "skill"; skill: SkillMeta; group: "Recent skills" | "All skills" };
+type SkillSlashPickerItem = Extract<SlashPickerItem, { kind: "skill" }>;
+
+interface RankedSlashItem {
+  item: SlashPickerItem;
+  label: string;
+  score: number;
+  index: number;
+}
+
+interface RankedSkillSlashItem extends Omit<RankedSlashItem, "item"> {
+  item: SkillSlashPickerItem;
+}
+
+function slashSearchAliases(text: string): string {
+  const lower = text.toLowerCase();
+  const tokens = new Set(lower.split(/[^a-z0-9]+/).filter(Boolean));
+  const aliases: string[] = [];
+  if (tokens.has("lit") || lower.includes("literature")) {
+    aliases.push("literature related work papers paper search survey bibliography references");
+  }
+  if (tokens.has("fig") || lower.includes("figure") || lower.includes("plot")) {
+    aliases.push("figure plot chart visualization diagram illustration");
+  }
+  if (tokens.has("exp") || lower.includes("experiment")) {
+    aliases.push("experiment evaluation benchmark result ablation training");
+  }
+  if (tokens.has("rev") || lower.includes("review")) {
+    aliases.push("review audit critique reviewer feedback rebuttal");
+  }
+  if (tokens.has("pdf") || lower.includes("paper")) {
+    aliases.push("pdf manuscript latex compile paper writing");
+  }
+  return aliases.join(" ");
+}
+
+function slashSearchText(name: string, description?: string | null): string {
+  const base = `${name} ${description ?? ""}`;
+  return `${base} ${slashSearchAliases(base)}`;
+}
+
+function rankSlashItem(
+  query: string,
+  label: string,
+  searchText: string,
+  item: SlashPickerItem,
+  index: number,
+): RankedSlashItem | null {
+  const score = fuzzyScore(query, searchText);
+  return score === null ? null : { item, label, score, index };
+}
+
+function compareRankedSlashItems(left: RankedSlashItem, right: RankedSlashItem): number {
+  return left.score - right.score
+    || left.label.localeCompare(right.label)
+    || left.index - right.index;
+}
+
+function isRankedSkillSlashItem(item: RankedSlashItem | null): item is RankedSkillSlashItem {
+  return Boolean(item) && item?.item.kind === "skill";
+}
 
 export function resizeComposerTextarea(textarea: HTMLTextAreaElement) {
   textarea.style.height = "0px";
@@ -148,6 +208,7 @@ export default function ChatComposer({
   const wrapRef = useRef<HTMLDivElement>(null);
   const pickerScrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const activePickerItemRef = useRef<HTMLButtonElement | null>(null);
   const [pickerMode, setPickerMode] = useState<"skill" | "file" | null>(null);
   const [pickerIndex, setPickerIndex] = useState(0);
@@ -160,21 +221,41 @@ export default function ChatComposer({
 
   const slashItems = useMemo<SlashPickerItem[]>(() => {
     const commandMatches = commands
-      .filter((command) => fuzzyMatch(pickerQuery, `${command.name} ${command.description ?? ""}`))
-      .map((command) => ({ kind: "command" as const, command, group: "System commands" as const }));
+      .map((command, index) => rankSlashItem(
+        pickerQuery,
+        command.name,
+        slashSearchText(command.name, command.description),
+        { kind: "command" as const, command, group: "System commands" as const },
+        index,
+      ))
+      .filter((item): item is RankedSlashItem => Boolean(item))
+      .sort(compareRankedSlashItems)
+      .map(({ item }) => item);
     const commandNames = new Set(commands.map((command) => command.name.toLowerCase()));
-    const filteredSkills = skills.filter((skill) => (
-      !commandNames.has(skill.name.toLowerCase())
-      && fuzzyMatch(pickerQuery, `${skill.name} ${skill.description ?? ""}`)
-    ));
+    const filteredSkills = skills
+      .map((skill, index) => {
+        if (commandNames.has(skill.name.toLowerCase())) return null;
+        return rankSlashItem(
+          pickerQuery,
+          skill.name,
+          slashSearchText(skill.name, skill.description),
+          { kind: "skill" as const, skill, group: "All skills" as const },
+          index,
+        );
+      })
+      .filter(isRankedSkillSlashItem)
+      .sort(compareRankedSlashItems);
     const recent = recentSkills
-      .map((name) => filteredSkills.find((skill) => skill.name === name))
-      .filter((skill): skill is SkillMeta => Boolean(skill))
-      .map((skill) => ({ kind: "skill" as const, skill, group: "Recent skills" as const }));
+      .map((name) => filteredSkills.find(({ item }) => item.skill.name === name))
+      .filter((match): match is RankedSkillSlashItem => Boolean(match))
+      .map(({ item }) => ({
+        ...item,
+        group: "Recent skills" as const,
+      }));
     const recentNames = new Set(recent.map((item) => item.skill.name));
     const rest = filteredSkills
-      .filter((skill) => !recentNames.has(skill.name))
-      .map((skill) => ({ kind: "skill" as const, skill, group: "All skills" as const }));
+      .map(({ item }) => item)
+      .filter((item) => !recentNames.has(item.skill.name));
     return [...commandMatches, ...recent, ...rest];
   }, [commands, pickerQuery, recentSkills, skills]);
   const fileItems = useMemo(
@@ -388,17 +469,38 @@ export default function ChatComposer({
       )}
       <div className="chat-input">
         {dragging && <div className="chat-drop-overlay">Drop files to attach</div>}
+        <input
+          ref={fileInputRef}
+          className="chat-file-input"
+          data-testid="chat-file-input"
+          type="file"
+          multiple
+          accept="image/*,.pdf,.txt,.md,.json,.csv,.ts,.tsx,.js,.jsx,.py,.rs,.go,.java,.c,.cc,.cpp,.h,.hpp,.html,.css,.xml,.yaml,.yml,.toml,.sh,.sql,.svg"
+          onChange={(event) => {
+            const files = Array.from(event.currentTarget.files ?? []);
+            event.currentTarget.value = "";
+            if (files.length > 0) void addFiles(files);
+          }}
+        />
         {attachments.length > 0 && (
           <div className="chat-attachments">
             {attachments.map((attachment) => (
-              <span className="chat-attachment" key={attachment.id}>
-                {attachment.preview && <img src={attachment.preview} alt="" />}
-                <span>{attachment.name}</span>
+              <span
+                className={`chat-attachment ${attachment.kind === "image" ? "is-image" : "is-file"}`}
+                key={attachment.id}
+              >
+                {attachment.preview ? (
+                  <img src={attachment.preview} alt={attachment.name} />
+                ) : (
+                  <span className="chat-attachment-file-icon" aria-hidden="true" />
+                )}
+                <span className="chat-attachment-name">{attachment.name}</span>
                 <button
+                  type="button"
                   onClick={() => onAttachmentsChange(attachments.filter((item) => item.id !== attachment.id))}
                   aria-label={`Remove ${attachment.name}`}
                 >
-                  ×
+                  x
                 </button>
               </span>
             ))}
@@ -455,7 +557,7 @@ export default function ChatComposer({
                   && isExactDesktopCommand(input, activeSlashItem.command)
                 ) {
                   setPickerMode(null);
-                  onSubmit();
+                  if (canSubmit) onSubmit();
                   return;
                 }
                 if (activeItems.length > 0) {
@@ -466,15 +568,27 @@ export default function ChatComposer({
             }
             if (event.key === "Enter" && !event.shiftKey) {
               event.preventDefault();
-              onSubmit();
+              if (canSubmit) onSubmit();
             }
           }}
         />
         <div className="chat-input-footer">
-          <div className="chat-input-hints">
-            <span><kbd>/</kbd> Commands and skills</span>
-            <span><kbd>@</kbd> Files</span>
-            <span className="chat-input-shortcut">Drop files · Paste images · Shift+Enter newline</span>
+          <div className="chat-input-left">
+            <button
+              type="button"
+              className="chat-upload-btn"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={busy}
+              title="Attach files"
+              aria-label="Attach files"
+            >
+              +
+            </button>
+            <div className="chat-input-hints">
+              <span><kbd>/</kbd> Commands and skills</span>
+              <span><kbd>@</kbd> Files</span>
+              <span className="chat-input-shortcut">Drop files · Paste images · Shift+Enter newline</span>
+            </div>
           </div>
           {busy ? (
             <button className="chat-send-btn chat-stop-btn" onClick={onStop} aria-label="Stop response">■</button>

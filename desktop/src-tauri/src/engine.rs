@@ -11,7 +11,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
-        Mutex,
+        Arc, Mutex,
     },
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -26,30 +26,35 @@ use tauri::{AppHandle, Emitter, State};
 
 use runtime::{
     CompactionConfig, ConfigLoader, ConfigSource, ContentBlock, ConversationMessage, MessageRole,
-    PermissionMode, ProjectContext, RuntimeError, Session, TokenUsage, ToolError, ToolExecutor,
-    UsageTracker,
+    PermissionMode, ProjectContext, ResolvedPermissionMode, RuntimeError, Session, TokenUsage,
+    ToolError, ToolExecutor, UsageTracker,
 };
 
 /// Per-app chat sessions, keyed by the UI session id.
 pub struct ChatState {
     sessions: Mutex<HashMap<String, Session>>,
     permission_modes: Mutex<HashMap<String, PermissionMode>>,
-    busy: AtomicBool,
+    running_turns: Mutex<HashMap<String, Arc<AtomicBool>>>,
 }
+
+const MAX_CACHED_CHAT_SESSIONS: usize = 4;
 
 impl Default for ChatState {
     fn default() -> Self {
         Self {
             sessions: Mutex::new(HashMap::new()),
             permission_modes: Mutex::new(HashMap::new()),
-            busy: AtomicBool::new(false),
+            running_turns: Mutex::new(HashMap::new()),
         }
     }
 }
 
 impl ChatState {
     pub fn is_busy(&self) -> bool {
-        self.busy.load(Ordering::SeqCst)
+        self.running_turns
+            .lock()
+            .map(|running| !running.is_empty())
+            .unwrap_or(true)
     }
 
     pub fn clear(&self) -> Result<(), String> {
@@ -65,20 +70,29 @@ impl ChatState {
     }
 }
 
-struct ChatBusyGuard<'a>(&'a AtomicBool);
+struct ChatBusyGuard<'a> {
+    running_turns: &'a Mutex<HashMap<String, Arc<AtomicBool>>>,
+    session_id: String,
+}
 
 impl Drop for ChatBusyGuard<'_> {
     fn drop(&mut self) {
-        self.0.store(false, Ordering::SeqCst);
+        if let Ok(mut running) = self.running_turns.lock() {
+            running.remove(&self.session_id);
+        }
     }
 }
 
 // ── Tool executor ─────────────────────────────────────────────────────────────
 
-const DESKTOP_CHAT_BLOCKED_TOOLS: &[&str] = &[
-    "bash",
-    "PowerShell",
-    "REPL",
+// Desktop Chat exposes the complete tool registry. Permission modes decide
+// what can run, matching Claude Code's plan / acceptEdits / dontAsk model.
+const DESKTOP_CHAT_BLOCKED_TOOLS: &[&str] = &[];
+
+// Literature agent sessions allow bash so /research-lit can run Python fetchers
+// (arxiv_fetch.py, openalex_fetch.py, etc.). Multi-agent and worktree tools
+// remain blocked — only the shell execution lane is opened.
+const LITERATURE_AGENT_BLOCKED_TOOLS: &[&str] = &[
     "NotebookEdit",
     "Config",
     "Agent",
@@ -94,10 +108,6 @@ const DESKTOP_CHAT_BLOCKED_TOOLS: &[&str] = &[
     "EnterWorktree",
 ];
 
-fn desktop_chat_tool_allowed(tool_name: &str) -> bool {
-    !DESKTOP_CHAT_BLOCKED_TOOLS.contains(&tool_name)
-}
-
 fn denied_tool_message(tool_name: &str) -> String {
     format!(
         "tool `{tool_name}` is disabled in desktop Chat because it can escape the isolated ARIS workspace"
@@ -105,10 +115,39 @@ fn denied_tool_message(tool_name: &str) -> String {
 }
 
 struct KernelToolExecutor {
-    app: AppHandle,
+    blocked_tools: &'static [&'static str],
 }
 
 impl ToolExecutor for KernelToolExecutor {
+    fn execute(&mut self, tool_name: &str, input: &str) -> Result<String, ToolError> {
+        self.execute_with_id("", tool_name, input)
+    }
+
+    fn execute_with_id(
+        &mut self,
+        _tool_use_id: &str,
+        tool_name: &str,
+        input: &str,
+    ) -> Result<String, ToolError> {
+        if self.blocked_tools.contains(&tool_name) {
+            return Err(ToolError::new(denied_tool_message(tool_name)));
+        }
+        let value: Value = serde_json::from_str(input).unwrap_or(Value::Null);
+        tools::execute_tool(tool_name, &value).map_err(ToolError::new)
+    }
+}
+
+struct DesktopToolExecutor<T> {
+    app: AppHandle,
+    session_id: String,
+    cancelled: Arc<AtomicBool>,
+    inner: T,
+}
+
+impl<T> ToolExecutor for DesktopToolExecutor<T>
+where
+    T: ToolExecutor,
+{
     fn execute(&mut self, tool_name: &str, input: &str) -> Result<String, ToolError> {
         self.execute_with_id("", tool_name, input)
     }
@@ -119,29 +158,24 @@ impl ToolExecutor for KernelToolExecutor {
         tool_name: &str,
         input: &str,
     ) -> Result<String, ToolError> {
-        if !desktop_chat_tool_allowed(tool_name) {
-            let err = denied_tool_message(tool_name);
-            let _ = self.app.emit(
-                "chat-tool-result",
-                json!({ "id": tool_use_id, "name": tool_name, "output": err, "isError": true }),
-            );
-            return Err(ToolError::new(denied_tool_message(tool_name)));
+        if self.cancelled.load(Ordering::SeqCst) {
+            return Err(ToolError::new("interrupted by user"));
         }
-        let value: Value = serde_json::from_str(input).unwrap_or(Value::Null);
-        match tools::execute_tool(tool_name, &value) {
+        match self.inner.execute_with_id(tool_use_id, tool_name, input) {
             Ok(output) => {
+                let context_output = compact_tool_output_for_context(tool_name, output);
                 let _ = self.app.emit(
                     "chat-tool-result",
-                    json!({ "id": tool_use_id, "name": tool_name, "output": truncate(&output, 4000), "isError": false }),
+                    json!({ "sessionId": self.session_id, "id": tool_use_id, "name": tool_name, "output": truncate(&context_output, 4000), "isError": false }),
                 );
-                Ok(output)
+                Ok(context_output)
             }
             Err(err) => {
                 let _ = self.app.emit(
                     "chat-tool-result",
-                    json!({ "id": tool_use_id, "name": tool_name, "output": truncate(&err, 4000), "isError": true }),
+                    json!({ "sessionId": self.session_id, "id": tool_use_id, "name": tool_name, "output": truncate(&err.to_string(), 4000), "isError": true }),
                 );
-                Err(ToolError::new(err))
+                Err(err)
             }
         }
     }
@@ -149,40 +183,115 @@ impl ToolExecutor for KernelToolExecutor {
 
 struct DesktopStreamObserver {
     app: AppHandle,
+    session_id: String,
+    cancelled: Arc<AtomicBool>,
 }
 
 impl aris_executor::StreamObserver for DesktopStreamObserver {
     fn on_text_delta(&mut self, text: &str) -> Result<(), RuntimeError> {
-        let _ = self.app.emit("chat-delta", text);
+        if self.cancelled.load(Ordering::SeqCst) {
+            return Err(RuntimeError::new("interrupted by user"));
+        }
+        let _ = self.app.emit(
+            "chat-delta",
+            json!({ "sessionId": self.session_id, "text": text }),
+        );
         Ok(())
     }
 
     fn on_thinking_delta(&mut self, thinking: &str) -> Result<(), RuntimeError> {
-        let _ = self.app.emit("chat-thinking-delta", thinking);
+        if self.cancelled.load(Ordering::SeqCst) {
+            return Err(RuntimeError::new("interrupted by user"));
+        }
+        let _ = self.app.emit(
+            "chat-thinking-delta",
+            json!({ "sessionId": self.session_id, "thinking": thinking }),
+        );
         Ok(())
     }
 
     fn on_tool_call(&mut self, id: &str, name: &str, input: &str) -> Result<(), RuntimeError> {
         let _ = self.app.emit(
             "chat-tool",
-            json!({ "id": id, "name": name, "input": input }),
+            json!({ "sessionId": self.session_id, "id": id, "name": name, "input": input }),
         );
         Ok(())
     }
 }
 
-fn desktop_tool_specs() -> Vec<tools::ToolSpec> {
+struct SilentStreamObserver;
+
+impl aris_executor::StreamObserver for SilentStreamObserver {
+    fn on_text_delta(&mut self, _text: &str) -> Result<(), RuntimeError> {
+        Ok(())
+    }
+
+    fn on_thinking_delta(&mut self, _thinking: &str) -> Result<(), RuntimeError> {
+        Ok(())
+    }
+
+    fn on_tool_call(&mut self, _id: &str, _name: &str, _input: &str) -> Result<(), RuntimeError> {
+        Ok(())
+    }
+}
+
+struct NoToolsExecutor;
+
+impl ToolExecutor for NoToolsExecutor {
+    fn execute(&mut self, tool_name: &str, _input: &str) -> Result<String, ToolError> {
+        Err(ToolError::new(format!(
+            "tool `{tool_name}` is not available while generating chat titles"
+        )))
+    }
+}
+
+fn tool_specs_for(blocked: &'static [&'static str]) -> Vec<tools::ToolSpec> {
     tools::mvp_tool_specs()
         .into_iter()
-        .filter(|spec| desktop_chat_tool_allowed(spec.name))
+        .filter(|spec| !blocked.contains(&spec.name))
         .collect()
 }
 
+fn mcp_runtime_status_prompt(
+    configured_servers: usize,
+    tool_specs: &[aris_chat::ChatToolSpec],
+    warnings: &[String],
+) -> Option<String> {
+    if configured_servers == 0 {
+        return None;
+    }
+    let tools = tool_specs
+        .iter()
+        .filter(|spec| spec.name.starts_with("mcp__"))
+        .map(|spec| spec.name.as_str())
+        .collect::<Vec<_>>();
+    let mut lines = vec![
+        "MCP runtime status for this Chat turn".to_string(),
+        format!("Configured servers: {configured_servers}"),
+        format!("Loaded MCP tools: {}", tools.len()),
+    ];
+    if tools.is_empty() {
+        lines.push("No MCP tools were loaded for this turn.".to_string());
+    } else {
+        lines.push(format!("Available MCP tools: {}", tools.join(", ")));
+        lines.push("ToolSearch includes these dynamic MCP tools.".to_string());
+    }
+    if !warnings.is_empty() {
+        lines.push("MCP startup warnings:".to_string());
+        lines.extend(warnings.iter().map(|warning| format!("- {warning}")));
+    }
+    Some(lines.join("\n"))
+}
+
+#[cfg(test)]
 fn desktop_permission_policy(
     tool_specs: &[tools::ToolSpec],
     active_mode: PermissionMode,
 ) -> runtime::PermissionPolicy {
-    aris_chat::permission_policy_for_tools(tool_specs.to_vec(), active_mode)
+    aris_chat::permission_policy_for_tools(
+        aris_chat::chat_tool_specs(tool_specs.to_vec()),
+        active_mode,
+    )
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -196,16 +305,82 @@ fn truncate(text: &str, max: usize) -> String {
     }
 }
 
-fn build_system_prompt(model: &str) -> Vec<String> {
+/// Compact a tool's raw output before it enters the LLM context so the
+/// conversation history doesn't overflow the model's context window.
+///
+/// - `Skill` — not touched: the LLM needs the full SKILL.md to execute correctly.
+/// - `LiteratureSearch` — abstracts trimmed to 250 chars, papers capped at 15.
+/// - Everything else — hard cap at 12,000 chars with a note if trimmed.
+fn compact_tool_output_for_context(tool_name: &str, output: String) -> String {
+    match tool_name {
+        "Skill" => output,
+        "LiteratureSearch" => compact_literature_search_output(output),
+        _ => {
+            const MAX: usize = 12_000;
+            if output.len() <= MAX {
+                output
+            } else {
+                let head: String = output.chars().take(MAX).collect();
+                format!(
+                    "{head}\n[…output truncated: {} chars total, first {} shown]",
+                    output.len(),
+                    MAX
+                )
+            }
+        }
+    }
+}
+
+fn compact_literature_search_output(output: String) -> String {
+    const MAX_ABSTRACT: usize = 250;
+    const MAX_PAPERS: usize = 15;
+
+    let Ok(mut root) = serde_json::from_str::<serde_json::Value>(&output) else {
+        return output;
+    };
+    let Some(papers) = root["papers"].as_array_mut() else {
+        return output;
+    };
+
+    let total = papers.len();
+    papers.truncate(MAX_PAPERS);
+    for paper in papers.iter_mut() {
+        if let Some(abs) = paper["abstract"].as_str() {
+            if abs.len() > MAX_ABSTRACT {
+                let short: String = abs.chars().take(MAX_ABSTRACT).collect();
+                paper["abstract"] = serde_json::Value::String(format!("{short}…"));
+            }
+        }
+    }
+    if total > MAX_PAPERS {
+        root["_note"] = serde_json::Value::String(format!(
+            "{} papers returned; showing first {} with abstracts trimmed to {} chars",
+            total, MAX_PAPERS, MAX_ABSTRACT
+        ));
+    }
+    serde_json::to_string_pretty(&root).unwrap_or(output)
+}
+
+fn build_system_prompt_inner(model: &str, full_tool_registry: bool) -> Vec<String> {
     let workspace = std::env::var("ARIS_WORKSPACE_ROOT")
         .map(PathBuf::from)
         .or_else(|_| std::env::current_dir())
         .unwrap_or_else(|_| crate::state::workspace_dir());
-    let isolation = format!(
-        "Desktop isolation: this chat runs inside the ARIS desktop workspace at `{}`. Treat that directory as the only workspace. Do not request, infer, read, write, or search files outside it. Absolute paths outside this root are blocked by the runtime, and shell/REPL/notebook tools are unavailable in desktop Chat.",
-        workspace.display()
-    );
-    let team_boundary = "Desktop Chat boundary: produce team plans in prose only. Do not spawn, control, wait for, or verify teammates from Chat; the Team view owns execution and supervision.".to_string();
+    let access = if full_tool_registry {
+        format!(
+            "Desktop Chat runs in the ARIS workspace at `{}`. The complete tool registry, including shell and agent tools, is available when the active permission mode allows it. Respect the selected permission mode and keep generated project artifacts in this workspace unless the user explicitly requests another location.",
+            workspace.display()
+        )
+    } else {
+        format!(
+            "Desktop Chat runs in the ARIS workspace at `{}`. Some tools are unavailable on this surface; use the available tools and respect the selected permission mode.",
+            workspace.display()
+        )
+    };
+    let file_links = "When you create or modify files, include Markdown links to the relevant file paths in the final response so the desktop UI can open them directly.".to_string();
+    runtime::migrate_legacy_knowledge_memory();
+    let hot_memory = runtime::render_hot_memory_prompt(&workspace).unwrap_or_default();
+    let knowledge_memory = runtime::render_knowledge_memory_prompt();
     aris_chat::build_common_system_prompt(aris_chat::CommonSystemPromptOptions {
         workspace,
         current_date: runtime::today_iso(),
@@ -216,9 +391,9 @@ fn build_system_prompt(model: &str) -> Vec<String> {
         language: std::env::var("ARIS_LANGUAGE").unwrap_or_else(|_| "cn".to_string()),
         include_language_preference: true,
         include_team_orchestration: false,
-        extra_sections: vec![isolation.clone(), team_boundary],
+        extra_sections: vec![access.clone(), file_links, hot_memory, knowledge_memory],
     })
-    .unwrap_or_else(|_| vec![isolation])
+    .unwrap_or_else(|_| vec![access])
 }
 
 /// Read config.json and validate the executor is configured. Returns
@@ -236,6 +411,97 @@ fn validate_session_id(session_id: &str) -> Result<(), String> {
         return Err("invalid chat session id".to_string());
     }
     Ok(())
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PermissionModeView {
+    mode: String,
+    label: String,
+    description: String,
+}
+
+fn permission_mode_view(mode: PermissionMode) -> PermissionModeView {
+    let (label, description) = match mode {
+        PermissionMode::ReadOnly => ("Plan", "Inspect and search only"),
+        PermissionMode::WorkspaceWrite => ("Accept edits", "Read and edit workspace files"),
+        PermissionMode::DangerFullAccess => (
+            "Don't ask",
+            "Allow shell, agents, workflows, MCP, and all tools",
+        ),
+        PermissionMode::Prompt => ("Ask", "Ask before elevated tool calls"),
+        PermissionMode::Allow => ("Allow", "Allow the current tool call"),
+    };
+    PermissionModeView {
+        mode: mode.as_str().to_string(),
+        label: label.to_string(),
+        description: description.to_string(),
+    }
+}
+
+fn project_permission_path() -> Result<PathBuf, String> {
+    std::env::current_dir()
+        .map(|cwd| cwd.join(".claude").join("settings.local.json"))
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn chat_permission_get(
+    state: State<ChatState>,
+    session_id: String,
+) -> Result<PermissionModeView, String> {
+    validate_session_id(&session_id)?;
+    permission_mode_for(&state, &session_id).map(permission_mode_view)
+}
+
+#[tauri::command]
+pub fn chat_permission_set(
+    state: State<ChatState>,
+    session_id: String,
+    mode: String,
+) -> Result<PermissionModeView, String> {
+    validate_session_id(&session_id)?;
+    let mode = normalize_permission_mode(&mode)
+        .ok_or_else(|| format!("unsupported permission mode `{mode}`"))?;
+    set_permission_mode_for(&state, session_id, mode)?;
+    Ok(permission_mode_view(mode))
+}
+
+#[tauri::command]
+pub fn project_permission_get() -> PermissionModeView {
+    permission_mode_view(configured_default_permission_mode())
+}
+
+#[tauri::command]
+pub fn project_permission_set(mode: String) -> Result<PermissionModeView, String> {
+    let mode = normalize_permission_mode(&mode)
+        .ok_or_else(|| format!("unsupported permission mode `{mode}`"))?;
+    let path = project_permission_path()?;
+    let mut root = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+    let permissions = root
+        .entry("permissions".to_string())
+        .or_insert_with(|| json!({}));
+    let object = permissions
+        .as_object_mut()
+        .ok_or_else(|| format!("{}: permissions must be an object", path.display()))?;
+    let label = match mode {
+        PermissionMode::ReadOnly => "plan",
+        PermissionMode::WorkspaceWrite => "acceptEdits",
+        PermissionMode::DangerFullAccess => "dontAsk",
+        PermissionMode::Prompt | PermissionMode::Allow => "default",
+    };
+    object.insert("defaultMode".to_string(), Value::String(label.to_string()));
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let content =
+        serde_json::to_string_pretty(&Value::Object(root)).map_err(|error| error.to_string())?;
+    std::fs::write(&path, format!("{content}\n")).map_err(|error| error.to_string())?;
+    Ok(permission_mode_view(mode))
 }
 
 fn chat_session_path(session_id: &str) -> Result<PathBuf, String> {
@@ -258,6 +524,93 @@ fn save_chat_session(session_id: &str, session: &Session) -> Result<(), String> 
         .map_err(|e| e.to_string())
 }
 
+const MAX_CHAT_IMAGE_BASE64_CHARS: usize = 12 * 1024 * 1024;
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatImageInput {
+    name: Option<String>,
+    mime_type: String,
+    data: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatSendRequest {
+    text: String,
+    #[serde(default)]
+    images: Vec<ChatImageInput>,
+}
+
+fn split_data_url(value: &str) -> Option<(&str, &str)> {
+    let rest = value.strip_prefix("data:")?;
+    let (metadata, data) = rest.split_once(',')?;
+    if !metadata
+        .split(';')
+        .any(|part| part.eq_ignore_ascii_case("base64"))
+    {
+        return None;
+    }
+    let media_type = metadata.split(';').next().unwrap_or_default();
+    Some((media_type, data))
+}
+
+fn image_block_from_input(input: ChatImageInput) -> Result<ContentBlock, String> {
+    let declared_media_type = input.mime_type.trim();
+    let (media_type, data) = match split_data_url(input.data.trim()) {
+        Some((url_media_type, data)) => {
+            let media_type = if declared_media_type.is_empty() {
+                url_media_type
+            } else {
+                declared_media_type
+            };
+            (media_type, data.trim())
+        }
+        None => (declared_media_type, input.data.trim()),
+    };
+
+    if !media_type.starts_with("image/") {
+        return Err(format!(
+            "attached image {} has unsupported media type `{}`",
+            input.name.unwrap_or_else(|| "<unnamed>".to_string()),
+            media_type
+        ));
+    }
+    if data.is_empty() {
+        return Err("attached image data is empty".to_string());
+    }
+    if data.len() > MAX_CHAT_IMAGE_BASE64_CHARS {
+        return Err(format!(
+            "attached image is too large for model input ({} MB base64 limit)",
+            MAX_CHAT_IMAGE_BASE64_CHARS / 1024 / 1024
+        ));
+    }
+
+    Ok(ContentBlock::Image {
+        media_type: media_type.to_string(),
+        data: data.to_string(),
+    })
+}
+
+fn user_message_from_request(request: ChatSendRequest) -> Result<ConversationMessage, String> {
+    let mut blocks = Vec::new();
+    let text = request.text.trim();
+    if !text.is_empty() {
+        blocks.push(ContentBlock::Text {
+            text: text.to_string(),
+        });
+    }
+    for image in request.images {
+        blocks.push(image_block_from_input(image)?);
+    }
+    if blocks.is_empty() {
+        blocks.push(ContentBlock::Text {
+            text: "Attached context".to_string(),
+        });
+    }
+    Ok(ConversationMessage::user_blocks(blocks))
+}
+
 fn get_cached_or_disk_session(state: &ChatState, session_id: &str) -> Result<Session, String> {
     let cached = state
         .sessions
@@ -276,11 +629,25 @@ fn store_chat_session(
     session: Session,
 ) -> Result<(), String> {
     save_chat_session(&session_id, &session)?;
-    state
+    cache_chat_session(state, session_id, session)
+}
+
+fn cache_chat_session(
+    state: &ChatState,
+    session_id: String,
+    session: Session,
+) -> Result<(), String> {
+    let mut sessions = state
         .sessions
         .lock()
-        .map_err(|_| "chat state poisoned".to_string())?
-        .insert(session_id, session);
+        .map_err(|_| "chat state poisoned".to_string())?;
+    sessions.insert(session_id.clone(), session);
+    while sessions.len() > MAX_CACHED_CHAT_SESSIONS {
+        let Some(evict) = sessions.keys().find(|key| *key != &session_id).cloned() else {
+            break;
+        };
+        sessions.remove(&evict);
+    }
     Ok(())
 }
 
@@ -291,7 +658,19 @@ fn permission_mode_for(state: &ChatState, session_id: &str) -> Result<Permission
         .map_err(|_| "chat state poisoned".to_string())?
         .get(session_id)
         .copied()
-        .unwrap_or(PermissionMode::WorkspaceWrite))
+        .unwrap_or_else(configured_default_permission_mode))
+}
+
+fn configured_default_permission_mode() -> PermissionMode {
+    let configured = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| ConfigLoader::default_for(&cwd).load().ok())
+        .and_then(|config| config.permission_mode());
+    match configured {
+        Some(ResolvedPermissionMode::ReadOnly) => PermissionMode::ReadOnly,
+        Some(ResolvedPermissionMode::WorkspaceWrite) | None => PermissionMode::WorkspaceWrite,
+        Some(ResolvedPermissionMode::DangerFullAccess) => PermissionMode::DangerFullAccess,
+    }
 }
 
 fn set_permission_mode_for(
@@ -316,22 +695,51 @@ pub struct ChatStatus {
     model: Option<String>,
     provider: Option<String>,
     message: Option<String>,
+    context_window: Option<u64>,
+    memory_files: Option<usize>,
+}
+
+fn context_window_for_model(model: &str) -> u64 {
+    if model.starts_with("claude") {
+        if model.contains("haiku") {
+            return 200_000;
+        }
+        return 1_000_000;
+    }
+    if model.starts_with("MiniMax") || model.starts_with("minimax") {
+        return 1_000_000;
+    }
+    if model.starts_with("gemini-") {
+        return 1_000_000;
+    }
+    if model.starts_with("deepseek") {
+        return 64_000;
+    }
+    128_000
 }
 
 #[tauri::command]
 pub fn chat_status() -> ChatStatus {
+    let memory_files = status_context(None).ok().map(|ctx| ctx.memory_file_count);
     match resolve_executor() {
-        Ok((model, provider, _)) => ChatStatus {
-            ready: true,
-            model: Some(model),
-            provider: Some(provider),
-            message: None,
-        },
+        Ok((model, provider, _)) => {
+            let cw = context_window_for_model(&model);
+            ChatStatus {
+                ready: true,
+                model: Some(model),
+                provider: Some(provider),
+                message: None,
+                context_window: Some(cw),
+                memory_files,
+            }
+        }
         Err(message) => ChatStatus {
             ready: false,
             model: None,
             provider: None,
             message: Some(message),
+            context_window: None,
+            memory_files,
         },
     }
 }
@@ -545,7 +953,9 @@ pub fn chat_run_command(
         SlashCommand::Config { section } => Ok(ChatCommandResult::message(render_config_report(
             section.as_deref(),
         )?)),
-        SlashCommand::Memory => Ok(ChatCommandResult::message(render_memory_report()?)),
+        SlashCommand::Memory { action, target } => Ok(ChatCommandResult::message(
+            handle_memory_command(action.as_deref(), target.as_deref())?,
+        )),
         SlashCommand::Init => Ok(ChatCommandResult::message(init_desktop_repo()?)),
         SlashCommand::Diff => Ok(ChatCommandResult::message(render_diff_report()?)),
         SlashCommand::Version => Ok(ChatCommandResult::message(render_version_report())),
@@ -623,49 +1033,267 @@ pub async fn chat_send(
     session_id: String,
     message: String,
 ) -> Result<String, String> {
-    state
-        .busy
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .map_err(|_| "another chat turn is already running".to_string())?;
-    let _busy = ChatBusyGuard(&state.busy);
+    let user_message = ConversationMessage::user_text(message);
+    run_chat_turn(app, &state, session_id, user_message).await
+}
+
+#[tauri::command]
+pub async fn chat_send_rich(
+    app: AppHandle,
+    state: State<'_, ChatState>,
+    session_id: String,
+    request: ChatSendRequest,
+) -> Result<String, String> {
+    let user_message = user_message_from_request(request)?;
+    run_chat_turn(app, &state, session_id, user_message).await
+}
+
+/// Variant of `chat_send_rich` used by Literature agent searches.
+/// Bash is allowed so `/research-lit` can run Python paper-fetching helpers;
+/// multi-agent and worktree tools remain blocked.
+#[tauri::command]
+pub async fn literature_agent_send_rich(
+    app: AppHandle,
+    state: State<'_, ChatState>,
+    session_id: String,
+    request: ChatSendRequest,
+) -> Result<String, String> {
+    let user_message = user_message_from_request(request)?;
+    run_literature_chat_turn(app, &state, session_id, user_message).await
+}
+
+#[tauri::command]
+pub async fn chat_suggest_title(user: String, assistant: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || suggest_chat_title(&user, &assistant))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn suggest_chat_title(user: &str, assistant: &str) -> Result<String, String> {
     crate::config::apply_reviewer_environment(true);
     let (model, _provider, executor_config) = resolve_executor()?;
+    runtime::clear_interrupt();
+    let system = "Generate a concise title for a chat conversation. Output only the title. Use the conversation language. Keep it short: ideally 4 to 12 Chinese characters or 2 to 6 English words. Do not use quotes, labels, punctuation, or markdown.";
+    let prompt = format!(
+        "User message:\n{}\n\nAssistant reply:\n{}\n\nTitle:",
+        truncate_for_prompt(user, 1200),
+        truncate_for_prompt(assistant, 1200)
+    );
+    let observer: Box<dyn aris_executor::StreamObserver> = Box::new(SilentStreamObserver);
+    let mut runtime = aris_chat::build_conversation_runtime(
+        Session::new(),
+        executor_config,
+        model,
+        false,
+        Vec::new(),
+        observer,
+        NoToolsExecutor,
+        aris_chat::permission_policy_for_tools(Vec::new(), PermissionMode::ReadOnly),
+        vec![system.to_string()],
+        runtime::RuntimeFeatureConfig::default(),
+    )?;
+    let summary = runtime
+        .run_turn_message(ConversationMessage::user_text(prompt), None)
+        .map_err(|e| e.to_string())?;
+    let title = clean_generated_title(&aris_chat::final_assistant_text(&summary));
+    if title.is_empty() {
+        return Err("empty generated title".to_string());
+    }
+    Ok(title)
+}
+
+fn clean_generated_title(raw: &str) -> String {
+    let mut title = raw
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    for prefix in ["Title:", "title:", "TITLE:", "标题:", "标题："] {
+        if let Some(rest) = title.strip_prefix(prefix) {
+            title = rest.trim().to_string();
+            break;
+        }
+    }
+    title = title
+        .trim_matches(|ch: char| {
+            ch.is_whitespace()
+                || matches!(
+                    ch,
+                    '"' | '\''
+                        | '`'
+                        | '*'
+                        | '#'
+                        | '['
+                        | ']'
+                        | '('
+                        | ')'
+                        | ':'
+                        | ';'
+                        | '.'
+                        | ','
+                        | '!'
+                        | '?'
+                        | '-'
+                        | '_'
+                        | ' '
+                        | '「'
+                        | '」'
+                        | '“'
+                        | '”'
+                        | '《'
+                        | '》'
+                        | '。'
+                        | '，'
+                        | '！'
+                        | '？'
+                        | '：'
+                        | '；'
+                )
+        })
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    title.chars().take(48).collect()
+}
+
+async fn run_chat_turn(
+    app: AppHandle,
+    state: &ChatState,
+    session_id: String,
+    user_message: ConversationMessage,
+) -> Result<String, String> {
+    run_chat_turn_with_context(
+        app,
+        state,
+        session_id,
+        user_message,
+        DESKTOP_CHAT_BLOCKED_TOOLS,
+        true,
+    )
+    .await
+}
+
+async fn run_literature_chat_turn(
+    app: AppHandle,
+    state: &ChatState,
+    session_id: String,
+    user_message: ConversationMessage,
+) -> Result<String, String> {
+    run_chat_turn_with_context(
+        app,
+        state,
+        session_id,
+        user_message,
+        LITERATURE_AGENT_BLOCKED_TOOLS,
+        false,
+    )
+    .await
+}
+
+async fn run_chat_turn_with_context(
+    app: AppHandle,
+    state: &ChatState,
+    session_id: String,
+    user_message: ConversationMessage,
+    blocked_tools: &'static [&'static str],
+    full_tool_registry: bool,
+) -> Result<String, String> {
     validate_session_id(&session_id)?;
+    let cancelled = Arc::new(AtomicBool::new(false));
+    {
+        let mut running = state
+            .running_turns
+            .lock()
+            .map_err(|_| "chat state poisoned".to_string())?;
+        if running.contains_key(&session_id) {
+            return Err("this chat already has a running turn".to_string());
+        }
+        running.insert(session_id.clone(), cancelled.clone());
+    }
+    let _busy = ChatBusyGuard {
+        running_turns: &state.running_turns,
+        session_id: session_id.clone(),
+    };
+    crate::config::apply_reviewer_environment(true);
+    let (model, _provider, executor_config) = resolve_executor()?;
     let session = get_cached_or_disk_session(&state, &session_id)?;
     let permission_mode = permission_mode_for(&state, &session_id)?;
 
     let worker_app = app.clone();
+    let worker_session_id = session_id.clone();
+    let worker_cancelled = cancelled.clone();
     let (text, updated): (String, Session) = tauri::async_runtime::spawn_blocking(move || {
-        // Clear any stale interrupt from a previous Stop so this turn starts clean.
-        runtime::clear_interrupt();
-        let tool_specs = desktop_tool_specs();
-        let permission_policy = desktop_permission_policy(&tool_specs, permission_mode);
+        let feature_config = match std::env::current_dir()
+            .map_err(|error| error.to_string())
+            .and_then(|cwd| {
+                ConfigLoader::default_for(cwd)
+                    .load()
+                    .map_err(|error| error.to_string())
+            }) {
+            Ok(config) => config.feature_config().clone(),
+            Err(error) => {
+                eprintln!("aris desktop: could not load settings: {error}");
+                runtime::RuntimeFeatureConfig::default()
+            }
+        };
+        let tool_specs = aris_chat::chat_tool_specs(tool_specs_for(blocked_tools));
+        let mcp_bundle = aris_chat::attach_mcp_tools(
+            KernelToolExecutor { blocked_tools },
+            tool_specs,
+            &feature_config,
+            None,
+        );
+        for warning in &mcp_bundle.warnings {
+            eprintln!("aris desktop: {warning}");
+        }
+        let permission_policy =
+            aris_chat::permission_policy_for_tools(mcp_bundle.tool_specs.clone(), permission_mode);
         let observer: Box<dyn aris_executor::StreamObserver> = Box::new(DesktopStreamObserver {
             app: worker_app.clone(),
+            session_id: worker_session_id.clone(),
+            cancelled: worker_cancelled.clone(),
         });
-        let executor = KernelToolExecutor { app: worker_app };
-        let system_prompt = build_system_prompt(&model);
+        let executor = DesktopToolExecutor {
+            app: worker_app,
+            session_id: worker_session_id,
+            cancelled: worker_cancelled,
+            inner: mcp_bundle.executor,
+        };
+        let mut system_prompt = build_system_prompt_inner(&model, full_tool_registry);
+        if let Some(status) = mcp_runtime_status_prompt(
+            feature_config.mcp().servers().len(),
+            &mcp_bundle.tool_specs,
+            &mcp_bundle.warnings,
+        ) {
+            system_prompt.push(status);
+        }
         let mut runtime = aris_chat::build_conversation_runtime(
             session,
             executor_config,
             model,
             true,
-            tool_specs,
+            mcp_bundle.tool_specs,
             observer,
             executor,
             permission_policy,
             system_prompt,
-            runtime::RuntimeFeatureConfig::default(),
+            feature_config,
         )?;
-        let summary = runtime.run_turn(message, None).map_err(|e| e.to_string())?;
+        let summary = runtime
+            .run_turn_message(user_message, None)
+            .map_err(|e| e.to_string())?;
         let text = aris_chat::final_assistant_text(&summary);
         Ok::<(String, Session), String>((text, runtime.into_session()))
     })
     .await
     .map_err(|e| e.to_string())??;
 
-    store_chat_session(&state, session_id, updated)?;
-    let _ = app.emit("chat-done", &text);
+    store_chat_session(state, session_id.clone(), updated)?;
+    let _ = app.emit(
+        "chat-done",
+        json!({ "sessionId": session_id, "text": &text }),
+    );
     Ok(text)
 }
 
@@ -681,6 +1309,8 @@ pub fn chat_reset(state: State<ChatState>, session_id: String) -> Result<(), Str
 pub struct ChatContextMessage {
     role: String,
     text: String,
+    #[serde(default)]
+    images: Vec<ChatImageInput>,
 }
 
 #[tauri::command]
@@ -695,7 +1325,10 @@ pub fn chat_set_context(
         match message.role.as_str() {
             "user" => session
                 .messages
-                .push(ConversationMessage::user_text(message.text)),
+                .push(user_message_from_request(ChatSendRequest {
+                    text: message.text,
+                    images: message.images,
+                })?),
             "assistant" => {
                 session
                     .messages
@@ -745,8 +1378,16 @@ pub fn chat_delete(
 /// which both streaming loops and `run_turn`'s iteration boundary check, so a
 /// long single response or a multi-step tool loop both unwind to an error.
 #[tauri::command]
-pub fn chat_cancel() {
-    runtime::set_interrupt();
+pub fn chat_cancel(state: State<ChatState>, session_id: String) -> Result<(), String> {
+    validate_session_id(&session_id)?;
+    let running = state
+        .running_turns
+        .lock()
+        .map_err(|_| "chat state poisoned".to_string())?;
+    if let Some(cancelled) = running.get(&session_id) {
+        cancelled.store(true, Ordering::SeqCst);
+    }
+    Ok(())
 }
 
 // ---- Desktop slash command helpers ---------------------------------------
@@ -998,26 +1639,26 @@ fn permissions_selection(current: &str) -> ChatCommandSelection {
         command: "permissions".to_string(),
         title: "Select permission mode".to_string(),
         subtitle: Some(
-            "Desktop chat still keeps shell and external process tools disabled.".to_string(),
+            "Claude Code-style levels control the complete desktop Chat tool registry.".to_string(),
         ),
         current: Some(current.to_string()),
         items: vec![
             selection_item(
                 "read-only",
-                "read-only",
-                "Read and search tools only",
+                "Plan / read-only",
+                "Inspect and search without changing files",
                 current,
             ),
             selection_item(
                 "workspace-write",
-                "workspace-write",
-                "Edit files inside the desktop workspace",
+                "Accept edits",
+                "Read and edit workspace files; higher-risk tools stay gated",
                 current,
             ),
             selection_item(
                 "danger-full-access",
-                "danger-full-access",
-                "Full desktop chat permission mode, with process tools still blocked",
+                "Don't ask",
+                "Allow shell, agents, workflows, and all other tools",
                 current,
             ),
         ],
@@ -1063,9 +1704,11 @@ fn handle_reviewer_command(model: Option<String>) -> Result<ChatCommandResult, S
 
 fn normalize_permission_mode(mode: &str) -> Option<PermissionMode> {
     match mode.trim() {
-        "read-only" => Some(PermissionMode::ReadOnly),
-        "workspace-write" => Some(PermissionMode::WorkspaceWrite),
-        "danger-full-access" => Some(PermissionMode::DangerFullAccess),
+        "default" | "plan" | "read-only" => Some(PermissionMode::ReadOnly),
+        "acceptEdits" | "auto" | "workspace-write" => Some(PermissionMode::WorkspaceWrite),
+        "dontAsk" | "bypassPermissions" | "danger-full-access" => {
+            Some(PermissionMode::DangerFullAccess)
+        }
         _ => None,
     }
 }
@@ -1083,7 +1726,7 @@ fn handle_permissions_command(
     };
     let next = normalize_permission_mode(mode).ok_or_else(|| {
         format!(
-            "unsupported permission mode '{mode}'. Use read-only, workspace-write, or danger-full-access."
+            "unsupported permission mode '{mode}'. Use plan/read-only, acceptEdits/workspace-write, or dontAsk/danger-full-access."
         )
     })?;
     if next == current {
@@ -1093,7 +1736,7 @@ fn handle_permissions_command(
     }
     set_permission_mode_for(state, session_id, next)?;
     Ok(ChatCommandResult::message(format!(
-        "Permissions updated\n  Previous mode    {}\n  Active mode      {}\n  Applies to       subsequent desktop chat tool calls\n  Note             shell and external process tools stay disabled in desktop Chat",
+        "Permissions updated\n  Previous mode    {}\n  Active mode      {}\n  Applies to       subsequent desktop chat tool calls\n  Note             higher modes unlock shell, agents, workflows, and other tools",
         current.as_str(),
         next.as_str()
     )))
@@ -1101,7 +1744,7 @@ fn handle_permissions_command(
 
 fn format_permissions_report(mode: &str) -> String {
     format!(
-        "Permissions\n  Active mode      {mode}\n  Surface          desktop Chat\n\nModes\n  read-only          available  Read/search tools only\n  workspace-write    available  Edit files inside the desktop workspace\n  danger-full-access available  Desktop chat still blocks shell/process tools\n\nUsage\n  Inspect current mode with /permissions\n  Switch modes with /permissions <mode>"
+        "Permissions\n  Active mode      {mode}\n  Surface          desktop Chat\n\nModes\n  plan / read-only              Inspect and search only\n  acceptEdits / workspace-write Read and edit workspace files\n  dontAsk / danger-full-access  Allow shell, agents, workflows, and all tools\n\nUsage\n  Inspect current mode with /permissions\n  Switch modes with /permissions <mode>\n  Project settings permissions.defaultMode supplies the session default"
     )
 }
 
@@ -1338,8 +1981,18 @@ fn handle_session_command(
             let session = Session::load_from_path(&path).map_err(|e| e.to_string())?;
             Ok(ChatCommandResult::message(render_simple_timeline(&id, &path, &session)))
         }
+        Some("search") => Ok(ChatCommandResult::message(
+            serde_json::to_string_pretty(&runtime::search_sessions(
+                &crate::state::sessions_dir(),
+                target,
+                None,
+                5,
+                5,
+            )?)
+            .map_err(|error| error.to_string())?,
+        )),
         Some(other) => Ok(ChatCommandResult::message(format!(
-            "Unknown /session action '{other}'. Use /session list, /session switch <session-id>, or /session timeline [session-id]."
+            "Unknown /session action '{other}'. Use /session list, /session search <query>, /session switch <session-id>, or /session timeline [session-id]."
         ))),
     }
 }
@@ -1454,6 +2107,10 @@ fn status_context(session_path: Option<&Path>) -> Result<StatusContext, String> 
     let runtime_config = loader.load().map_err(|e| e.to_string())?;
     let project_context = ProjectContext::discover_with_git(&cwd, &runtime::today_iso())
         .map_err(|e| e.to_string())?;
+    let hot_memory_count = runtime::load_hot_memory(&cwd)
+        .map(|memory| memory.memory.len() + memory.user.len())
+        .unwrap_or_default();
+    let knowledge_memory_count = runtime::load_knowledge_memory_catalog().len();
     let (project_root, git_branch) =
         parse_git_status_metadata(project_context.git_status.as_deref());
     Ok(StatusContext {
@@ -1461,7 +2118,7 @@ fn status_context(session_path: Option<&Path>) -> Result<StatusContext, String> 
         session_path: session_path.map(Path::to_path_buf),
         loaded_config_files: runtime_config.loaded_entries().len(),
         discovered_config_files,
-        memory_file_count: project_context.instruction_files.len(),
+        memory_file_count: hot_memory_count + knowledge_memory_count,
         project_root,
         git_branch,
     })
@@ -1621,35 +2278,85 @@ fn render_config_report(section: Option<&str>) -> Result<String, String> {
 
 fn render_memory_report() -> Result<String, String> {
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
-    let project_context =
-        ProjectContext::discover(&cwd, &runtime::today_iso()).map_err(|e| e.to_string())?;
-    let mut lines = vec![format!(
-        "Memory\n  Working directory {}\n  Instruction files {}",
-        cwd.display(),
-        project_context.instruction_files.len()
-    )];
-    lines.push("Discovered files".to_string());
-    if project_context.instruction_files.is_empty() {
-        lines.push(
-            "  No CLAUDE instruction files discovered in the current directory ancestry."
-                .to_string(),
-        );
-    } else {
-        for (index, file) in project_context.instruction_files.iter().enumerate() {
-            let preview = file.content.lines().next().unwrap_or("").trim();
-            lines.push(format!("  {}. {}", index + 1, file.path.display()));
-            lines.push(format!(
-                "     lines={} preview={}",
-                file.content.lines().count(),
-                if preview.is_empty() {
-                    "<empty>"
-                } else {
-                    preview
-                }
-            ));
-        }
+    let hot = runtime::load_hot_memory(&cwd)?;
+    let knowledge = runtime::load_knowledge_memory_catalog();
+    let mut lines = vec![
+        "Memory".to_string(),
+        format!("  Working directory {}", cwd.display()),
+        format!("  Project scope     {}", hot.project_scope),
+        format!(
+            "  Hot memory        memory={}/{} chars, user={}/{} chars",
+            hot.memory_chars, hot.memory_limit, hot.user_chars, hot.user_limit
+        ),
+        format!("  Pending writes    {}", hot.pending_count),
+        format!(
+            "  Write approval    {}",
+            runtime::memory_write_approval_enabled()
+        ),
+        format!("  Knowledge files   {}", knowledge.len()),
+        "Hot entries".to_string(),
+    ];
+    for entry in hot.user.iter().chain(hot.memory.iter()) {
+        lines.push(format!(
+            "  [{}] {} scope={} source={} expires={}",
+            entry.id,
+            entry.content,
+            entry.scope,
+            entry.source,
+            entry.expires_at.as_deref().unwrap_or("never")
+        ));
+    }
+    if hot.user.is_empty() && hot.memory.is_empty() {
+        lines.push("  No active hot-memory entries.".to_string());
+    }
+    lines.push("Knowledge catalog".to_string());
+    for entry in knowledge {
+        lines.push(format!(
+            "  {} - {} ({})",
+            entry.name,
+            entry.description,
+            entry.path.display()
+        ));
     }
     Ok(lines.join("\n"))
+}
+
+fn handle_memory_command(action: Option<&str>, target: Option<&str>) -> Result<String, String> {
+    match action {
+        None | Some("show") => render_memory_report(),
+        Some("pending") => {
+            let scope = runtime::project_scope(
+                &std::env::current_dir().map_err(|error| error.to_string())?,
+            );
+            serde_json::to_string_pretty(&runtime::list_pending_for_scope(&scope)?)
+                .map_err(|error| error.to_string())
+        }
+        Some("approve") => {
+            let id = target.ok_or_else(|| "Usage: /memory approve <id>".to_string())?;
+            serde_json::to_string_pretty(&runtime::approve_pending(id)?)
+                .map_err(|error| error.to_string())
+        }
+        Some("reject") => {
+            let id = target.ok_or_else(|| "Usage: /memory reject <id>".to_string())?;
+            runtime::reject_pending(id)?;
+            Ok(format!("Rejected pending memory write {id}."))
+        }
+        Some("approval") => {
+            let enabled = match target {
+                Some("on") => true,
+                Some("off") => false,
+                _ => return Err("Usage: /memory approval on|off".to_string()),
+            };
+            crate::config::set_memory_write_approval(enabled)?;
+            Ok(format!(
+                "Memory write approval is now {}.",
+                if enabled { "on" } else { "off" }
+            ))
+        }
+        Some(other) => Err(format!(
+            "Unknown /memory action `{other}`. Use show, pending, approve, reject, or approval."
+        )),
+    }
 }
 
 fn init_desktop_repo() -> Result<String, String> {
@@ -1964,6 +2671,7 @@ fn render_simple_timeline(id: &str, path: &Path, session: &Session) -> String {
             .iter()
             .find_map(|block| match block {
                 ContentBlock::Text { text } => Some(text.as_str()),
+                ContentBlock::Image { media_type, .. } => Some(media_type.as_str()),
                 ContentBlock::ToolUse { name, .. } => Some(name.as_str()),
                 ContentBlock::ToolResult { tool_name, .. } => Some(tool_name.as_str()),
                 ContentBlock::Thinking { thinking, .. } => Some(thinking.as_str()),
@@ -2009,6 +2717,12 @@ fn render_export_text(session: &Session) -> String {
         for block in &message.blocks {
             match block {
                 ContentBlock::Text { text } => lines.push(text.clone()),
+                ContentBlock::Image { media_type, data } => {
+                    lines.push(format!(
+                        "[image media_type={media_type} bytes={}]",
+                        data.len()
+                    ));
+                }
                 ContentBlock::ToolUse { id, name, input } => {
                     lines.push(format!("[tool_use id={id} name={name}] {input}"));
                 }
@@ -2087,4 +2801,162 @@ fn indent_block(value: &str, spaces: usize) -> String {
         .map(|line| format!("{indent}{line}"))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rich_chat_request_maps_data_url_to_image_block() {
+        let message = user_message_from_request(ChatSendRequest {
+            text: "look".to_string(),
+            images: vec![ChatImageInput {
+                name: Some("shot.png".to_string()),
+                mime_type: "image/png".to_string(),
+                data: "data:image/png;base64,ZmFrZQ==".to_string(),
+            }],
+        })
+        .expect("rich request should parse");
+
+        assert!(matches!(
+            &message.blocks[0],
+            ContentBlock::Text { text } if text == "look"
+        ));
+        assert!(matches!(
+            &message.blocks[1],
+            ContentBlock::Image { media_type, data }
+                if media_type == "image/png" && data == "ZmFrZQ=="
+        ));
+    }
+
+    #[test]
+    fn rich_chat_request_rejects_non_image_media_type() {
+        let error = user_message_from_request(ChatSendRequest {
+            text: String::new(),
+            images: vec![ChatImageInput {
+                name: Some("note.txt".to_string()),
+                mime_type: "text/plain".to_string(),
+                data: "ZmFrZQ==".to_string(),
+            }],
+        })
+        .expect_err("non-image upload should be rejected");
+
+        assert!(error.contains("unsupported media type"));
+    }
+
+    #[test]
+    fn skill_prompt_routes_named_skill_to_skill_tool() {
+        let prompt = skill_prompt("research-lit", "reservoir computing");
+
+        assert!(prompt.contains("Use the Skill tool"));
+        assert!(prompt.contains("\"research-lit\""));
+        assert!(prompt.contains("reservoir computing"));
+    }
+
+    #[test]
+    fn skills_command_lists_bundled_skills() {
+        let result = handle_skills_command(Some("list"), None).expect("skills list");
+
+        assert!(result.handled);
+        let message = result.message.expect("message");
+        assert!(message.contains("Available skills"));
+        assert!(message.contains("/research-lit"));
+    }
+
+    #[test]
+    fn skills_command_shows_bundled_skill_markdown() {
+        let result =
+            handle_skills_command(Some("show"), Some("research-lit")).expect("skills show");
+
+        assert!(result.handled);
+        let message = result.message.expect("message");
+        assert!(message.contains("/research-lit"));
+        assert!(message.contains("# Research Literature Review"));
+    }
+
+    #[test]
+    fn generated_chat_title_is_cleaned_for_sidebar() {
+        let title = clean_generated_title("标题：\"贝叶斯估计写作计划。\"\n\nextra");
+
+        assert_eq!(title, "贝叶斯估计写作计划");
+    }
+
+    #[test]
+    fn desktop_chat_exposes_tools_and_lets_permission_mode_gate_them() {
+        let specs = tool_specs_for(DESKTOP_CHAT_BLOCKED_TOOLS);
+        assert!(specs.iter().any(|spec| spec.name == "bash"));
+        assert!(specs.iter().any(|spec| spec.name == "Agent"));
+        assert!(specs.iter().any(|spec| spec.name == "Workflow"));
+
+        let workspace = desktop_permission_policy(&specs, PermissionMode::WorkspaceWrite);
+        assert!(matches!(
+            workspace.authorize("bash", r#"{"command":"echo hi"}"#, None),
+            runtime::PermissionOutcome::Deny { .. }
+        ));
+
+        let unrestricted = desktop_permission_policy(&specs, PermissionMode::DangerFullAccess);
+        assert_eq!(
+            unrestricted.authorize("bash", r#"{"command":"echo hi"}"#, None),
+            runtime::PermissionOutcome::Allow
+        );
+    }
+
+    #[test]
+    fn desktop_permission_aliases_match_claude_code_settings() {
+        assert_eq!(
+            normalize_permission_mode("plan"),
+            Some(PermissionMode::ReadOnly)
+        );
+        assert_eq!(
+            normalize_permission_mode("acceptEdits"),
+            Some(PermissionMode::WorkspaceWrite)
+        );
+        assert_eq!(
+            normalize_permission_mode("dontAsk"),
+            Some(PermissionMode::DangerFullAccess)
+        );
+    }
+
+    #[test]
+    fn desktop_prompt_requests_links_for_generated_files() {
+        let prompt = build_system_prompt_inner("test-model", true).join("\n");
+
+        assert!(prompt.contains("complete tool registry"));
+        assert!(prompt.contains("include Markdown links"));
+    }
+
+    #[test]
+    fn desktop_prompt_reports_loaded_mcp_tools_and_failures() {
+        let tools = vec![aris_chat::ChatToolSpec {
+            name: "mcp__playwright__browser_navigate".to_string(),
+            description: "navigate".to_string(),
+            input_schema: serde_json::json!({"type": "object"}),
+            required_permission: PermissionMode::DangerFullAccess,
+        }];
+        let loaded = mcp_runtime_status_prompt(1, &tools, &[]).expect("status");
+        assert!(loaded.contains("mcp__playwright__browser_navigate"));
+        assert!(loaded.contains("ToolSearch includes"));
+
+        let failed = mcp_runtime_status_prompt(
+            1,
+            &[],
+            &["could not discover MCP server `playwright`: failed".to_string()],
+        )
+        .expect("failure status");
+        assert!(failed.contains("No MCP tools were loaded"));
+        assert!(failed.contains("could not discover MCP server `playwright`"));
+    }
+
+    #[test]
+    fn chat_session_cache_stays_bounded() {
+        let state = ChatState::default();
+        for index in 0..20 {
+            cache_chat_session(&state, format!("session-{index}"), Session::new())
+                .expect("cache session");
+        }
+        let sessions = state.sessions.lock().expect("chat state");
+        assert_eq!(sessions.len(), MAX_CACHED_CHAT_SESSIONS);
+        assert!(sessions.contains_key("session-19"));
+    }
 }

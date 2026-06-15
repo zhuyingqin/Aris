@@ -19,6 +19,10 @@ pub enum ContentBlock {
     Text {
         text: String,
     },
+    Image {
+        media_type: String,
+        data: String,
+    },
     ToolUse {
         id: String,
         name: String,
@@ -119,6 +123,9 @@ impl Session {
             let _ = fs::remove_file(path);
         }
         fs::rename(&tmp_path, path)?;
+        if crate::session_index::should_index_session_path(path) {
+            let _ = crate::session_index::index_session(path, self);
+        }
         Ok(())
     }
 
@@ -179,6 +186,15 @@ impl ConversationMessage {
         Self {
             role: MessageRole::User,
             blocks: vec![ContentBlock::Text { text: text.into() }],
+            usage: None,
+        }
+    }
+
+    #[must_use]
+    pub fn user_blocks(blocks: Vec<ContentBlock>) -> Self {
+        Self {
+            role: MessageRole::User,
+            blocks,
             usage: None,
         }
     }
@@ -289,6 +305,14 @@ impl ContentBlock {
                 object.insert("type".to_string(), JsonValue::String("text".to_string()));
                 object.insert("text".to_string(), JsonValue::String(text.clone()));
             }
+            Self::Image { media_type, data } => {
+                object.insert("type".to_string(), JsonValue::String("image".to_string()));
+                object.insert(
+                    "media_type".to_string(),
+                    JsonValue::String(media_type.clone()),
+                );
+                object.insert("data".to_string(), JsonValue::String(data.clone()));
+            }
             Self::ToolUse { id, name, input } => {
                 object.insert(
                     "type".to_string(),
@@ -348,6 +372,10 @@ impl ContentBlock {
         {
             "text" => Ok(Self::Text {
                 text: required_string(object, "text")?,
+            }),
+            "image" => Ok(Self::Image {
+                media_type: required_string(object, "media_type")?,
+                data: required_string(object, "data")?,
             }),
             "tool_use" => Ok(Self::ToolUse {
                 id: required_string(object, "id")?,
@@ -461,9 +489,15 @@ mod tests {
     #[test]
     fn persists_and_restores_session_json() {
         let mut session = Session::new();
-        session
-            .messages
-            .push(ConversationMessage::user_text("hello"));
+        session.messages.push(ConversationMessage::user_blocks(vec![
+            ContentBlock::Text {
+                text: "hello".to_string(),
+            },
+            ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: "ZmFrZQ==".to_string(),
+            },
+        ]));
         session
             .messages
             .push(ConversationMessage::assistant_with_usage(
@@ -498,6 +532,11 @@ mod tests {
         fs::remove_file(&path).expect("temp file should be removable");
 
         assert_eq!(restored, session);
+        assert!(matches!(
+            &restored.messages[0].blocks[1],
+            ContentBlock::Image { media_type, data }
+                if media_type == "image/png" && data == "ZmFrZQ=="
+        ));
         assert_eq!(restored.messages[2].role, MessageRole::Tool);
         assert_eq!(
             restored.messages[1].usage.expect("usage").total_tokens(),

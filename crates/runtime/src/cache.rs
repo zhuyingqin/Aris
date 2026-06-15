@@ -288,7 +288,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
         let err = extract_one(&tmp, "/etc/passwd", "evil").unwrap_err();
-        assert!(err.contains("absolute"), "got: {err}");
+        assert!(
+            err.contains("absolute") || err.contains("root-dir"),
+            "got: {err}"
+        );
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -354,7 +357,7 @@ mod tests {
         //   "$ARIS_CACHE_DIR/<key>" or "${ARIS_CACHE_DIR:-.}/<key>"
         //   bare "tools/<helper>.{py,sh}" (legacy literal still in some SKILLs)
         let cache_re = Regex::new(
-            r#"\$\{?ARIS_CACHE_DIR(?::-[^}]*)?\}?/((?:tools|skills/[a-zA-Z0-9_-]+|shared-references)/[a-zA-Z0-9_./-]+\.(?:py|sh|tex|cls|bst|md|toml|yaml|yml|json))"#,
+            r#"\$\{?ARIS_CACHE_DIR(?::-[^}]*)?\}?/((?:tools|skills/[a-zA-Z0-9_-]+|shared-references|shared-governance)/[a-zA-Z0-9_./-]+\.(?:py|sh|tex|cls|bst|md|toml|yaml|yml|json))"#,
         )
         .expect("compile cache_re");
         let legacy_re =

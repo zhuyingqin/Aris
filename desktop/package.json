@@ -1,9 +1,9 @@
 {
   "name": "aris-studio",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.3.0",
   "type": "module",
-  "description": "ARIS Studio — desktop UI for designing and monitoring agent teams & workflows",
+  "description": "ARIS Studio - desktop UI for Chat, literature, skills, sessions, and settings",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
@@ -18,10 +18,11 @@
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-dialog": "^2.7.1",
     "highlight.js": "^11.11.1",
+    "katex": "^0.17.0",
+    "pdfjs-dist": "^5.7.284",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-markdown": "^10.1.0",
-    "reactflow": "^11.11.4",
     "rehype-highlight": "^7.0.2",
     "remark-gfm": "^4.0.1",
     "zustand": "^4.5.5"
