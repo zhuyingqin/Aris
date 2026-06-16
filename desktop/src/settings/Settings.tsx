@@ -366,10 +366,6 @@ export default function Settings() {
       memoryWriteApproval: v.memoryWriteApproval,
     });
     setExecKey(""); setReviewerKey(""); setScopusKey("");
-    // Keep store's executor/reviewer model in sync with the backend truth so that
-    // changes made via Advanced Config are immediately reflected on the cards.
-    if (v.executorModel != null) setExecutor(executorProviderId, v.executorModel);
-    if (v.reviewerModel != null) setReviewer(reviewerProviderId, v.reviewerModel);
   };
 
   const loadBridge = (v: ImBridgeView) => {
