@@ -1782,15 +1782,10 @@ textarea {
     grid-template-columns: 1fr;
     gap: 8px;
   }
-  .sp-bridge-grid,
-  .sp-bridge-paths {
+  .sp-bridge-form .sp-detail-row2 {
     grid-template-columns: 1fr;
   }
-  .sp-bridge-grid .st-row {
-    grid-template-columns: 1fr;
-  }
-  .sp-bridge-section .sp-section-head,
-  .sp-bridge-actions {
+  .sp-bridge-section .sp-section-head {
     align-items: stretch;
     flex-direction: column;
   }
@@ -2150,65 +2145,88 @@ textarea {
 .sp-bridge-status.running .sp-bridge-dot {
   background: var(--green);
 }
-.sp-bridge-body {
-  padding: 14px;
+/* Bridge form — same visual rhythm as sp-detail-form but inlined in list view */
+.sp-bridge-form {
+  padding: 14px 16px 16px;
   display: flex;
   flex-direction: column;
-  gap: 13px;
+  gap: 14px;
 }
-.sp-bridge-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px 18px;
-}
-.sp-bridge-grid .st-row {
-  grid-template-columns: 132px minmax(0, 1fr);
-}
-.sp-bridge-toggle {
+
+/* Toggle buttons (Channel, Tool permission, Images) */
+.sp-toggle-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 8px 12px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 0.1s, background 0.1s;
   width: 100%;
-  max-width: 320px;
-  min-height: 40px;
 }
-.sp-bridge-toggle.danger.active {
+.sp-toggle-btn:hover { border-color: var(--accent); }
+.sp-toggle-btn.active {
+  border-color: color-mix(in srgb, var(--accent) 60%, transparent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+.sp-toggle-btn.sp-toggle-danger.active {
   border-color: rgba(239, 68, 68, 0.6);
-  background: rgba(239, 68, 68, 0.1);
-  box-shadow: 0 0 0 1px rgba(239, 68, 68, 0.18) inset;
+  background: rgba(239, 68, 68, 0.08);
 }
-.sp-bridge-inline {
+.sp-toggle-main {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+.sp-toggle-sub {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.sp-toggle-btn-sm {
+  flex-direction: row;
+  align-items: center;
+  width: auto;
+  padding: 0 12px;
+  height: 32px;
+}
+.sp-toggle-btn-sm .sp-toggle-main { font-size: 12px; }
+
+/* Inline hint after a field label */
+.sp-field-hint-inline {
+  margin-left: 6px;
+  font-size: 10px;
+  font-weight: 400;
+  color: var(--text-dim);
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+/* Image row: toggle + size input side-by-side */
+.sp-bridge-img-row {
   display: flex;
   align-items: center;
   gap: 8px;
 }
-.sp-bridge-inline input {
-  max-width: 90px;
+.sp-input-sm {
+  width: 72px !important;
+  text-align: right;
+}
+.sp-bridge-size-wrap {
+  display: flex;
+  align-items: center;
+  gap: 4px;
 }
 .sp-bridge-unit {
   color: var(--text-dim);
   font-size: 12px;
+  white-space: nowrap;
 }
-.sp-bridge-paths {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
-}
-.sp-bridge-paths label {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  min-width: 0;
-}
-.sp-bridge-paths span {
-  color: var(--text-dim);
-  font-size: 10px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.6px;
-}
-.sp-bridge-paths input {
-  width: 100%;
-  max-width: none;
-  min-height: 32px;
-}
+
+/* Bridge notices */
 .sp-bridge-notice {
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -2218,12 +2236,8 @@ textarea {
   font-size: 12px;
   line-height: 1.45;
 }
-.sp-bridge-notice.ok {
-  border-color: rgba(110, 231, 170, 0.42);
-}
-.sp-bridge-notice.failed {
-  border-color: rgba(239, 68, 68, 0.5);
-}
+.sp-bridge-notice.ok  { border-color: rgba(110, 231, 170, 0.42); }
+.sp-bridge-notice.failed { border-color: rgba(239, 68, 68, 0.5); }
 .sp-bridge-notice pre {
   margin: 8px 0 0;
   max-height: 220px;
@@ -2232,19 +2246,6 @@ textarea {
   font-size: 11px;
   line-height: 1.45;
   white-space: pre-wrap;
-}
-.sp-bridge-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-.sp-bridge-actions .st-test-btn,
-.sp-bridge-actions .st-save-btn {
-  min-width: 96px;
-}
-.sp-bridge-start {
-  background: var(--green);
-  border-color: var(--green);
 }
 
 /* Role badges */
@@ -2377,6 +2378,16 @@ textarea {
   color: var(--text-dim);
   margin-top: 2px;
   line-height: 1.4;
+}
+.sp-auth-json-collapsed {
+  padding: 8px 12px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  font-size: 12px;
+  color: var(--text-dim);
+  font-style: italic;
+  margin-top: 4px;
 }
 .sp-input {
   height: 32px;

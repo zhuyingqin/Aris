@@ -165,11 +165,9 @@ function suggestModels(url: string): string[] {
 // ── Sub-components ────────────────────────────────────────────────────────────
 
 function KeyInput({ value, placeholder, masked, onChange }: { value: string; placeholder: string; masked: string | null | undefined; onChange: (v: string) => void }) {
-  const [show, setShow] = useState(false);
   return (
     <div className="st-key-wrap" data-has-saved-secret={Boolean(masked)}>
-      <input type={show ? "text" : "password"} value={value} placeholder={placeholder} onChange={(e) => onChange(e.target.value)} className="st-key-input" spellCheck={false} />
-      <button className="st-key-eye" onClick={() => setShow((v) => !v)} type="button">{show ? "Hide" : "Show"}</button>
+      <input type="password" value={value} placeholder={placeholder} onChange={(e) => onChange(e.target.value)} className="st-key-input" spellCheck={false} autoComplete="off" />
     </div>
   );
 }
@@ -351,7 +349,7 @@ export default function Settings() {
   const [detailId, setDetailId] = useState<string | "new" | null>(null);
   const [form, setForm] = useState<Partial<ProviderEntry>>({});
   const [detailApiKey, setDetailApiKey] = useState("");
-  const [showDetailKey, setShowDetailKey] = useState(false);
+  const [showAuthJson, setShowAuthJson] = useState(false);
   const [detailApplying, setDetailApplying] = useState<"exec" | "review" | null>(null);
   const [formatError, setFormatError] = useState("");
 
@@ -368,6 +366,10 @@ export default function Settings() {
       memoryWriteApproval: v.memoryWriteApproval,
     });
     setExecKey(""); setReviewerKey(""); setScopusKey("");
+    // Keep store's executor/reviewer model in sync with the backend truth so that
+    // changes made via Advanced Config are immediately reflected on the cards.
+    if (v.executorModel != null) setExecutor(executorProviderId, v.executorModel);
+    if (v.reviewerModel != null) setReviewer(reviewerProviderId, v.reviewerModel);
   };
 
   const loadBridge = (v: ImBridgeView) => {
@@ -610,7 +612,7 @@ export default function Settings() {
   const openDetail = (id: string | "new") => {
     if (id === "new") setForm({ name: "", url: "", notes: "", authJson: "", configToml: "" });
     else { const p = providers.find((pr) => pr.id === id); if (p) setForm({ ...p }); }
-    setDetailId(id); setDetailApiKey(""); setShowDetailKey(false); setFormatError("");
+    setDetailId(id); setDetailApiKey(""); setShowAuthJson(false); setFormatError("");
   };
   const closeDetail = () => { setDetailId(null); setForm({}); };
 
@@ -682,8 +684,7 @@ export default function Settings() {
           <div className="sp-field">
             <label className="sp-field-label">API Key（本次会话，不持久化）</label>
             <div className="sp-key-wrap">
-              <input type={showDetailKey ? "text" : "password"} className="sp-input sp-key-input" value={detailApiKey} onChange={(e) => setDetailApiKey(e.target.value)} placeholder="首次配置时粘贴 Key；已有 Key 则留空直接应用" spellCheck={false} />
-              <button className="sp-key-eye" type="button" onClick={() => setShowDetailKey((v) => !v)}>{showDetailKey ? "隐藏" : "显示"}</button>
+              <input type="password" className="sp-input sp-key-input" value={detailApiKey} onChange={(e) => setDetailApiKey(e.target.value)} placeholder="首次配置时粘贴 Key；已有 Key 则留空直接应用" spellCheck={false} autoComplete="off" />
             </div>
           </div>
           <div className="sp-field">
@@ -691,10 +692,20 @@ export default function Settings() {
               <label className="sp-field-label">auth.json（JSON）</label>
               <div className="sp-field-head-right">
                 {formatError && <span className="sp-format-err">{formatError}</span>}
-                <button className="sp-format-btn" type="button" onClick={formatJson}>格式化</button>
+                {showAuthJson && <button className="sp-format-btn" type="button" onClick={formatJson}>格式化</button>}
+                <button className="sp-format-btn" type="button" onClick={() => setShowAuthJson((v) => !v)}>
+                  {showAuthJson ? "收起" : "展开（含敏感数据）"}
+                </button>
               </div>
             </div>
-            <textarea className="sp-code-editor" value={form.authJson ?? ""} onChange={(e) => setForm((f) => ({ ...f, authJson: e.target.value }))} placeholder={'{\n  "OPENAI_API_KEY": null,\n  "auth_mode": "chatgpt",\n  "tokens": {}\n}'} spellCheck={false} rows={10} />
+            {showAuthJson && (
+              <textarea className="sp-code-editor" value={form.authJson ?? ""} onChange={(e) => setForm((f) => ({ ...f, authJson: e.target.value }))} placeholder={'{\n  "OPENAI_API_KEY": null,\n  "auth_mode": "chatgpt",\n  "tokens": {}\n}'} spellCheck={false} rows={10} />
+            )}
+            {!showAuthJson && (form.authJson?.trim()) && (
+              <div className="sp-auth-json-collapsed">
+                {form.authJson.trim().length} 字节 · 点击「展开」查看或编辑
+              </div>
+            )}
             <div className="sp-field-hint">Codex auth.json — access_token 可作为 API Key 自动提取</div>
           </div>
           <div className="sp-field">
@@ -797,134 +808,102 @@ export default function Settings() {
         <div className="sp-section-head">
           <div>
             <div className="sp-section-title">Aris QQ Bot</div>
-            <div className="sp-section-sub">QQ private chat bridge that sends messages to Aris in this workspace.</div>
+            <div className="sp-section-sub">QQ 私信桥接，将消息转发给此工作区中的 Aris</div>
           </div>
           <div className={`sp-bridge-status${bridgeRunning ? " running" : ""}`}>
             <span className="sp-bridge-dot" />
-            <span>{bridgeRunning ? `Running${bridgeView?.pid ? ` · ${bridgeView.pid}` : ""}` : (bridgeView?.statusMessage ?? "Not loaded")}</span>
+            <span>{bridgeRunning ? `运行中${bridgeView?.pid ? ` · PID ${bridgeView.pid}` : ""}` : (bridgeView?.statusMessage ?? "未加载")}</span>
           </div>
         </div>
-        <div className="sp-bridge-body">
-          <div className="sp-bridge-grid">
-            <div className="st-row">
-              <div className="st-row-label"><span className="st-label">Channel</span></div>
-              <div className="st-row-control">
+        <div className="sp-bridge-form">
+          <div className="sp-detail-row2">
+            <div className="sp-field">
+              <label className="sp-field-label">频道</label>
+              <button
+                type="button"
+                className={`sp-toggle-btn${bridgeEnabled ? " active" : ""}`}
+                onClick={() => updateBridgeForm({ enabled: !bridgeEnabled })}
+              >
+                <span className="sp-toggle-main">{bridgeEnabled ? "QQ 已启用" : "QQ 已禁用"}</span>
+                <span className="sp-toggle-sub">C2C 私聊</span>
+              </button>
+            </div>
+            <div className="sp-field">
+              <label className="sp-field-label">工具权限</label>
+              <button
+                type="button"
+                className={`sp-toggle-btn${bridgeForm.autoApprove ? " active sp-toggle-danger" : ""}`}
+                onClick={() => updateBridgeForm({ autoApprove: !bridgeForm.autoApprove })}
+              >
+                <span className="sp-toggle-main">{bridgeForm.autoApprove ? "完全访问" : "工作区写入"}</span>
+                <span className="sp-toggle-sub">{bridgeForm.autoApprove ? "仅限受信任会话" : "读取并编辑项目文件"}</span>
+              </button>
+            </div>
+          </div>
+          <div className="sp-detail-row2">
+            <div className="sp-field">
+              <label className="sp-field-label">QQ App ID</label>
+              <input className="sp-input" value={bridgeForm.qqAppId ?? ""} onChange={(e) => updateBridgeForm({ qqAppId: e.currentTarget.value })} spellCheck={false} />
+            </div>
+            <div className="sp-field">
+              <label className="sp-field-label">
+                QQ App Secret
+                {bridgeView?.hasQqAppSecret && <span className="sp-field-hint-inline">{bridgeView.qqAppSecretMasked ?? "已配置"}</span>}
+              </label>
+              <input
+                type="password"
+                className="sp-input"
+                value={bridgeSecret}
+                onChange={(e) => { setBridgeNotice(null); setBridgeSecret(e.target.value); }}
+                placeholder={bridgeView?.hasQqAppSecret ? "留空保留已有 Secret" : "粘贴 App Secret"}
+                spellCheck={false}
+                autoComplete="off"
+              />
+            </div>
+          </div>
+          <div className="sp-field">
+            <label className="sp-field-label">
+              允许的 OpenID
+              <span className="sp-field-hint-inline">逗号分隔的 user_openid</span>
+            </label>
+            <input className="sp-input" value={bridgeForm.qqAllowedUsers ?? ""} onChange={(e) => updateBridgeForm({ qqAllowedUsers: e.currentTarget.value })} spellCheck={false} />
+          </div>
+          <div className="sp-detail-row2">
+            <div className="sp-field">
+              <label className="sp-field-label">图片</label>
+              <div className="sp-bridge-img-row">
                 <button
                   type="button"
-                  className={`st-lang-card sp-bridge-toggle${bridgeEnabled ? " active" : ""}`}
-                  onClick={() => updateBridgeForm({ enabled: !bridgeEnabled })}
-                >
-                  <span className="st-lang-label">{bridgeEnabled ? "QQ enabled" : "QQ disabled"}</span>
-                  <span className="st-lang-sub">C2C private chat</span>
-                </button>
-              </div>
-            </div>
-            <div className="st-row">
-              <div className="st-row-label">
-                <span className="st-label">Aris executable</span>
-                <span className="st-hint">Auto-detected if left blank</span>
-              </div>
-              <div className="st-row-control">
-                <input
-                  value={bridgeForm.arisPath ?? ""}
-                  onChange={(e) => updateBridgeForm({ arisPath: e.currentTarget.value, runtime: "aris" })}
-                  placeholder="target/debug/aris.exe or aris in PATH"
-                  spellCheck={false}
-                />
-              </div>
-            </div>
-            <div className="st-row">
-              <div className="st-row-label"><span className="st-label">Workdir</span></div>
-              <div className="st-row-control">
-                <input
-                  value={bridgeForm.defaultWorkdir ?? ""}
-                  onChange={(e) => updateBridgeForm({ defaultWorkdir: e.currentTarget.value })}
-                  spellCheck={false}
-                />
-              </div>
-            </div>
-            <div className="st-row">
-              <div className="st-row-label"><span className="st-label">QQ App ID</span></div>
-              <div className="st-row-control">
-                <input
-                  value={bridgeForm.qqAppId ?? ""}
-                  onChange={(e) => updateBridgeForm({ qqAppId: e.currentTarget.value })}
-                  spellCheck={false}
-                />
-              </div>
-            </div>
-            <div className="st-row">
-              <div className="st-row-label">
-                <span className="st-label">QQ App Secret</span>
-                <span className="st-hint">{bridgeView?.hasQqAppSecret ? `Saved: ${bridgeView.qqAppSecretMasked ?? "configured"}` : "No secret"}</span>
-              </div>
-              <div className="st-row-control">
-                <KeyInput
-                  value={bridgeSecret}
-                  placeholder={bridgeView?.hasQqAppSecret ? "leave blank to keep" : "paste App Secret"}
-                  masked={bridgeView?.qqAppSecretMasked}
-                  onChange={(value) => { setBridgeNotice(null); setBridgeSecret(value); }}
-                />
-              </div>
-            </div>
-            <div className="st-row">
-              <div className="st-row-label">
-                <span className="st-label">Allowed OpenIDs</span>
-                <span className="st-hint">Comma-separated user_openid values</span>
-              </div>
-              <div className="st-row-control">
-                <input
-                  value={bridgeForm.qqAllowedUsers ?? ""}
-                  onChange={(e) => updateBridgeForm({ qqAllowedUsers: e.currentTarget.value })}
-                  spellCheck={false}
-                />
-              </div>
-            </div>
-            <div className="st-row">
-              <div className="st-row-label"><span className="st-label">Images</span></div>
-              <div className="st-row-control sp-bridge-inline">
-                <button
-                  type="button"
-                  className={`st-lang-card sp-bridge-toggle${(bridgeForm.qqImageEnabled ?? true) ? " active" : ""}`}
+                  className={`sp-toggle-btn sp-toggle-btn-sm${(bridgeForm.qqImageEnabled ?? true) ? " active" : ""}`}
                   onClick={() => updateBridgeForm({ qqImageEnabled: !(bridgeForm.qqImageEnabled ?? true) })}
                 >
-                  <span className="st-lang-label">{(bridgeForm.qqImageEnabled ?? true) ? "Enabled" : "Disabled"}</span>
+                  <span className="sp-toggle-main">{(bridgeForm.qqImageEnabled ?? true) ? "已启用" : "已禁用"}</span>
                 </button>
-                <input
-                  type="number"
-                  min={1}
-                  max={100}
-                  value={bridgeForm.qqMaxImageSize ?? 20}
-                  onChange={(e) => updateBridgeForm({ qqMaxImageSize: Math.max(1, Number(e.currentTarget.value) || 1) })}
-                  aria-label="QQ max image size MB"
-                />
-                <span className="sp-bridge-unit">MB</span>
+                <div className="sp-bridge-size-wrap">
+                  <input type="number" min={1} max={100} className="sp-input sp-input-sm" value={bridgeForm.qqMaxImageSize ?? 20} onChange={(e) => updateBridgeForm({ qqMaxImageSize: Math.max(1, Number(e.currentTarget.value) || 1) })} aria-label="QQ 最大图片大小 MB" />
+                  <span className="sp-bridge-unit">MB</span>
+                </div>
               </div>
             </div>
-            <div className="st-row">
-              <div className="st-row-label"><span className="st-label">Tool permission</span></div>
-              <div className="st-row-control">
-                <button
-                  type="button"
-                  className={`st-lang-card sp-bridge-toggle${bridgeForm.autoApprove ? " active danger" : ""}`}
-                  onClick={() => updateBridgeForm({ autoApprove: !bridgeForm.autoApprove })}
-                >
-                  <span className="st-lang-label">{bridgeForm.autoApprove ? "Full access" : "Workspace write"}</span>
-                  <span className="st-lang-sub">{bridgeForm.autoApprove ? "Trusted chats only" : "Read and edit project files"}</span>
-                </button>
-              </div>
+            <div className="sp-field">
+              <label className="sp-field-label">
+                Aris 可执行路径
+                <span className="sp-field-hint-inline">留空自动检测</span>
+              </label>
+              <input className="sp-input" value={bridgeForm.arisPath ?? ""} onChange={(e) => updateBridgeForm({ arisPath: e.currentTarget.value, runtime: "aris" })} placeholder="target/debug/aris.exe 或 PATH 中的 aris" spellCheck={false} />
             </div>
           </div>
-          <div className="sp-bridge-paths">
-            <label>
-              <span>Config</span>
-              <input className="st-readonly-input" value={bridgeView?.configPath ?? ""} readOnly />
-            </label>
-            <label>
-              <span>Bridge</span>
-              <input className="st-readonly-input" value={bridgeView?.skillDir ?? "Not found"} readOnly />
-            </label>
+          <div className="sp-detail-row2">
+            <div className="sp-field">
+              <label className="sp-field-label">工作目录</label>
+              <input className="sp-input" value={bridgeForm.defaultWorkdir ?? ""} onChange={(e) => updateBridgeForm({ defaultWorkdir: e.currentTarget.value })} spellCheck={false} />
+            </div>
+            <div className="sp-field">
+              <label className="sp-field-label">配置文件</label>
+              <input className="sp-input" value={bridgeView?.configPath ?? ""} readOnly />
+            </div>
           </div>
+
           {bridgeNotice && (
             <div className={`sp-bridge-notice${bridgeNotice.ok ? " ok" : " failed"}`}>
               <strong>{bridgeNotice.message}</strong>
@@ -934,24 +913,25 @@ export default function Settings() {
           {!bridgeNotice && showBridgeLog && bridgeView?.recentLog && (
             <div className="sp-bridge-notice ok"><pre>{bridgeView.recentLog}</pre></div>
           )}
-          <div className="sp-bridge-actions">
-            <button className="st-test-btn" type="button" onClick={() => void testBridge()} disabled={Boolean(bridgeBusy)}>
-              {bridgeBusy === "testing" ? "Testing..." : "Test QQ"}
+
+          <div className="sp-detail-actions">
+            <button className="sp-btn sp-btn-primary" type="button" onClick={() => void startBridge()} disabled={Boolean(bridgeBusy) || !bridgeEnabled}>
+              {bridgeBusy === "starting" ? "启动中…" : "启动"}
             </button>
-            <button className="st-save-btn" type="button" onClick={() => void saveBridge()} disabled={Boolean(bridgeBusy)}>
-              {bridgeBusy === "saving" ? "Saving..." : "Save Aris QQ Bot"}
+            <button className="sp-btn sp-btn-exec" type="button" onClick={() => void saveBridge()} disabled={Boolean(bridgeBusy)}>
+              {bridgeBusy === "saving" ? "保存中…" : "保存"}
             </button>
-            <button className="st-save-btn sp-bridge-start" type="button" onClick={() => void startBridge()} disabled={Boolean(bridgeBusy) || !bridgeEnabled}>
-              {bridgeBusy === "starting" ? "Starting..." : "Start"}
+            <button className="sp-btn" type="button" onClick={() => void testBridge()} disabled={Boolean(bridgeBusy)} style={{ background: "var(--bg-2)", border: "1px solid var(--border)", color: "var(--text)" }}>
+              {bridgeBusy === "testing" ? "测试中…" : "测试 QQ"}
             </button>
-            <button className="st-test-btn" type="button" onClick={() => void stopBridge()} disabled={Boolean(bridgeBusy) || !bridgeRunning}>
-              {bridgeBusy === "stopping" ? "Stopping..." : "Stop"}
+            <button className="sp-btn sp-btn-danger" type="button" onClick={() => void stopBridge()} disabled={Boolean(bridgeBusy) || !bridgeRunning} style={{ marginLeft: 0 }}>
+              {bridgeBusy === "stopping" ? "停止中…" : "停止"}
             </button>
-            <button className="st-test-btn" type="button" onClick={() => void loadBridgeLogs()} disabled={Boolean(bridgeBusy)}>
-              {bridgeBusy === "logs" ? "Loading..." : "Logs"}
+            <button className="sp-btn" type="button" onClick={() => void loadBridgeLogs()} disabled={Boolean(bridgeBusy)} style={{ background: "var(--bg-2)", border: "1px solid var(--border)", color: "var(--text)" }}>
+              {bridgeBusy === "logs" ? "加载中…" : "日志"}
             </button>
-            <button className="st-test-btn" type="button" onClick={() => void refreshBridge()} disabled={Boolean(bridgeBusy)}>
-              {bridgeBusyLabel ?? "Refresh"}
+            <button className="sp-btn" type="button" onClick={() => void refreshBridge()} disabled={Boolean(bridgeBusy)} style={{ background: "var(--bg-2)", border: "1px solid var(--border)", color: "var(--text)" }}>
+              {bridgeBusyLabel ?? "刷新"}
             </button>
           </div>
         </div>
