@@ -3077,6 +3077,19 @@ textarea {
   border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
   background: color-mix(in srgb, var(--accent) 8%, transparent);
 }
+.chat-permission-card .chat-tool-header {
+  cursor: default;
+}
+.chat-permission-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 0 10px 10px;
+}
+.chat-permission-actions button {
+  min-height: 28px;
+  padding: 4px 10px;
+}
 .tool-detail {
   max-height: 220px;
   overflow-y: auto;

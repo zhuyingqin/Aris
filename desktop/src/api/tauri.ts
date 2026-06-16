@@ -171,12 +171,14 @@ export const projectChatStarters = () => invoke<string[]>("project_chat_starters
 export const chatStatus = () => invoke<ChatStatus>("chat_status");
 export const chatModelOptions = () =>
   invoke<ChatModelOptions>("chat_model_options");
-export const chatModelSet = (model: string) =>
-  invoke<ChatStatus>("chat_model_set", { model });
+export const chatModelSet = (model: string, persist = true) =>
+  invoke<ChatStatus>("chat_model_set", { model, persist });
 export const chatPermissionGet = (sessionId: string) =>
   invoke<PermissionModeView>("chat_permission_get", { sessionId });
 export const chatPermissionSet = (sessionId: string, mode: string) =>
   invoke<PermissionModeView>("chat_permission_set", { sessionId, mode });
+export const chatPermissionRespond = (promptId: string, allow: boolean) =>
+  invoke<void>("chat_permission_respond", { promptId, allow });
 export const chatCommandSpecs = () =>
   invoke<DesktopCommandSpec[]>("chat_command_specs");
 export const chatRunCommand = (sessionId: string, input: string) =>
@@ -193,6 +195,7 @@ export interface ChatImageInput {
 export interface ChatSendRequest {
   text: string;
   images?: ChatImageInput[];
+  model?: string | null;
 }
 
 export interface ChatContextMessage {
@@ -236,6 +239,21 @@ export interface ChatThinkingEvent {
   thinking: string;
 }
 
+export interface ChatPermissionRequestEvent {
+  sessionId: string;
+  promptId: string;
+  toolName: string;
+  input: string;
+  currentMode: string;
+  requiredMode: string;
+}
+
+export interface ChatPermissionResolvedEvent {
+  sessionId: string;
+  promptId: string;
+  decision: "allow" | "deny";
+}
+
 export const onChatDelta = (handler: (event: ChatTextEvent) => void) =>
   listen<ChatTextEvent>("chat-delta", (e) => handler(e.payload));
 export const onChatThinkingDelta = (handler: (event: ChatThinkingEvent) => void) =>
@@ -250,6 +268,10 @@ export const onChatToolResult = (
     "chat-tool-result",
     (e) => handler(e.payload),
   );
+export const onChatPermissionRequest = (handler: (event: ChatPermissionRequestEvent) => void) =>
+  listen<ChatPermissionRequestEvent>("chat-permission-request", (e) => handler(e.payload));
+export const onChatPermissionResolved = (handler: (event: ChatPermissionResolvedEvent) => void) =>
+  listen<ChatPermissionResolvedEvent>("chat-permission-resolved", (e) => handler(e.payload));
 export const onChatDone = (handler: (event: ChatTextEvent) => void) =>
   listen<ChatTextEvent>("chat-done", (e) => handler(e.payload));
 

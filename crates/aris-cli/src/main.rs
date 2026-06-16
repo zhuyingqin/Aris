@@ -228,12 +228,22 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         } => resume_session(&session_path, &commands),
         CliAction::Prompt {
             prompt,
-            model,
+            mut model,
             output_format,
             allowed_tools,
             permission_mode,
-        } => LiveCli::new(model, true, allowed_tools, permission_mode)?
-            .run_turn_with_output(&prompt, output_format)?,
+        } => {
+            // Match REPL behavior: when the caller did not pass --model, use
+            // the saved executor model from ~/.config/aris/config.json.
+            if model == DEFAULT_MODEL {
+                model = saved_config
+                    .executor_model()
+                    .map(|m| resolve_model_alias(m).to_string())
+                    .unwrap_or(model);
+            }
+            LiveCli::new(model, true, allowed_tools, permission_mode)?
+                .run_turn_with_output(&prompt, output_format)?;
+        }
         CliAction::Login => run_login()?,
         CliAction::Logout => run_logout()?,
         CliAction::Init => run_init()?,

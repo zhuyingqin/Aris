@@ -14,6 +14,7 @@ export function makeSession(projectId = "default"): ChatSession {
     id: makeId("chat"),
     projectId,
     title: "New chat",
+    model: null,
     turns: [],
     draft: "",
     draftAttachments: [],
@@ -57,6 +58,7 @@ export function migrateSession(raw: Partial<ChatSession>, fallbackProjectId = "d
     id: raw.id || makeId("chat"),
     projectId: raw.projectId || fallbackProjectId,
     title: raw.title || "New chat",
+    model: typeof raw.model === "string" && raw.model.trim() ? raw.model : null,
     turns: Array.isArray(raw.turns)
       ? raw.turns.map((turn) => migrateTurn(turn as Partial<ChatTurn> & Record<string, unknown>))
       : [],

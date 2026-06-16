@@ -53,10 +53,7 @@ pub fn knowledge_upsert(
 
 /// The ONLY path that confirms a knowledge point. Invoked by the review UI.
 #[tauri::command]
-pub fn knowledge_confirm(
-    projects_state: State<ProjectState>,
-    kp_id: String,
-) -> Result<(), String> {
+pub fn knowledge_confirm(projects_state: State<ProjectState>, kp_id: String) -> Result<(), String> {
     tools::knowledge::knowledge_confirm_at(&project_base(&projects_state)?, &kp_id)
 }
 

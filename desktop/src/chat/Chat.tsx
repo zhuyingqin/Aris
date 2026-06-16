@@ -5,6 +5,7 @@ import {
   chatModelOptions,
   chatModelSet,
   chatPermissionGet,
+  chatPermissionRespond,
   chatPermissionSet,
   chatRunCommand,
   chatSetContext,
@@ -327,16 +328,17 @@ export default function Chat() {
   const runningSessionIdsRef = useRef(runningSessionIds);
   runningSessionIdsRef.current = runningSessionIds;
 
-  const refreshStatus = useCallback(() => {
+  const refreshStatus = useCallback((model?: string | null) => {
     if (!isTauri()) {
       setStatus({ ready: true, model: "Preview", provider: "Browser" });
       return;
     }
-    chatStatus().then(setStatus).catch((error) => setStatus({ ready: false, message: String(error) }));
+    const request = model ? chatModelSet(model, false) : chatStatus();
+    request.then(setStatus).catch((error) => setStatus({ ready: false, message: String(error) }));
   }, []);
 
   useEffect(() => {
-    refreshStatus();
+    refreshStatus(currentSession?.model ?? null);
     if (!isTauri()) {
       setPermission({ mode: "workspace-write", label: "Accept edits", description: "Read and edit workspace files" });
       return;
@@ -348,7 +350,9 @@ export default function Chat() {
       .catch(() => setDesktopCommands(FALLBACK_SLASH_COMMANDS));
     skillsList().then(setSkills).catch(() => undefined);
     projectChatStarters().then(setStarters).catch(() => undefined);
-  }, [currentId, currentProject?.id, refreshStatus]);
+  }, [currentId, currentProject?.id, currentSession?.model, refreshStatus]);
+
+  const activeModel = currentSession?.model || status?.model || null;
 
   // Options for the header model dropdown — the verified models from Settings,
   // plus the active model so the select never renders blank (e.g. a custom id,
@@ -359,21 +363,32 @@ export default function Chat() {
       label: option.label,
       description: option.description ?? null,
     }));
-    const current = status?.model;
+    const current = activeModel;
     if (current && !items.some((item) => item.value === current)) {
       items.unshift({ value: current, label: current, description: null });
     }
     return items;
-  }, [modelOptions, status?.model]);
+  }, [activeModel, modelOptions]);
 
   // Only meaningful to switch when there is more than the running model on offer.
   const canSwitchModel = modelSelectOptions.length > 1;
 
   const changeModel = async (model: string) => {
-    if (!isTauri() || !model || model === status?.model) return;
+    if (!model || model === activeModel || !currentSession) return;
+    if (!isTauri()) {
+      updateSession(currentSession.id, (session) => ({ ...session, model, updatedAt: Date.now() }));
+      setStatus({ ready: true, model, provider: "Browser" });
+      return;
+    }
     setModelBusy(true);
     try {
-      setStatus(await chatModelSet(model));
+      const nextStatus = await chatModelSet(model, false);
+      setStatus(nextStatus);
+      updateSession(currentSession.id, (session) => ({
+        ...session,
+        model: nextStatus.model ?? model,
+        updatedAt: Date.now(),
+      }));
     } catch (error) {
       setError(String(error));
     } finally {
@@ -383,7 +398,7 @@ export default function Chat() {
 
   const changePermission = async (mode: string) => {
     if (!isTauri()) {
-      const label = mode === "read-only" ? "Plan" : mode === "danger-full-access" ? "Don't ask" : "Accept edits";
+      const label = mode === "read-only" ? "Plan" : mode === "danger-full-access" ? "Don't ask" : mode === "prompt" ? "Ask" : "Accept edits";
       setPermission({ mode, label, description: "" });
       return;
     }
@@ -396,6 +411,15 @@ export default function Chat() {
       setPermissionBusy(false);
     }
   };
+
+  const respondPermission = useCallback(async (promptId: string, allow: boolean) => {
+    if (!isTauri()) return;
+    try {
+      await chatPermissionRespond(promptId, allow);
+    } catch (error) {
+      setError(String(error));
+    }
+  }, [setError]);
 
   useEffect(() => () => {
     deleteTimers.current.forEach(({ timer, projectId }, sessionId) => {
@@ -438,6 +462,8 @@ export default function Chat() {
     const prompt = typeof promptOverride === "string"
       ? { text: promptOverride }
       : promptOverride ?? (await outgoingMessage(text, attached));
+    const selectedModel = session.model || status?.model || undefined;
+    const request = selectedModel ? { ...prompt, model: selectedModel } : prompt;
     if (!isTauri()) {
       patchTurns(session.id, () => [
         ...prefix,
@@ -456,8 +482,8 @@ export default function Chat() {
     patchTurns(session.id, () => [...prefix, userTurn(text, attached), assistantTurn()]);
     updateSession(session.id, (item) => ({ ...item, draft: "", draftAttachments: [] }));
     setEditingTurnId(null);
-    await run(session.id, prompt);
-  }, [patchTurns, run, updateSession]);
+    await run(session.id, request);
+  }, [patchTurns, run, status?.model, updateSession]);
 
   const runSlashCommand = useCallback(async (
     session: ChatSession,
@@ -497,7 +523,7 @@ export default function Chat() {
       const result = await chatRunCommand(session.id, text);
       if (!result.handled) return false;
       if (result.openSettings) setTab("settings");
-      if (result.refreshStatus) refreshStatus();
+      if (result.refreshStatus) refreshStatus(session.model ?? null);
       if (result.selection) {
         setPendingCommandSelection({ sessionId: session.id, selection: result.selection });
         setEditingTurnId(null);
@@ -643,7 +669,7 @@ export default function Chat() {
       const result = await chatRunCommand(session.id, "/export");
       if (!result.handled) return;
       if (result.openSettings) setTab("settings");
-      if (result.refreshStatus) refreshStatus();
+      if (result.refreshStatus) refreshStatus(session.model ?? null);
       patchTurns(session.id, (turns) => [
         ...turns,
         assistantTextTurn(result.message ?? "Export complete."),
@@ -827,6 +853,7 @@ export default function Chat() {
           onEdit={edit}
           onRetry={retry}
           onContinue={continueStopped}
+          onPermissionRespond={(promptId, allow) => void respondPermission(promptId, allow)}
         />
         {pendingCommandSelection && pendingCommandSelection.sessionId === currentId && (
           <CommandSelection
@@ -851,7 +878,7 @@ export default function Chat() {
           permission={permission}
           permissionBusy={permissionBusy}
           onPermissionChange={(mode) => void changePermission(mode)}
-          modelName={status?.ready ? (status.model ?? null) : null}
+          modelName={status?.ready ? activeModel : null}
           modelOptions={modelSelectOptions}
           modelBusy={modelBusy}
           canSwitchModel={canSwitchModel}

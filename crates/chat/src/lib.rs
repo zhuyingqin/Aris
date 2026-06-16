@@ -175,7 +175,7 @@ pub fn max_tokens_for_model(model: &str) -> u32 {
 #[must_use]
 pub fn context_compaction_threshold_for_model(model: &str) -> usize {
     let m = model.to_ascii_lowercase();
-    if m.contains("minimax") || m.contains("gemini") {
+    if m.contains("minimax") || m.contains("gemini") || m.contains("deepseek-v4") {
         // ~1M window → compact near the top, reserving ~150k for prompt+output.
         850_000
     } else if m.contains("gpt-5") || m.contains("gpt-4.1") {
@@ -855,6 +855,10 @@ mod tests {
             850_000
         );
         assert_eq!(context_compaction_threshold_for_model("gpt-5"), 340_000);
+        assert_eq!(
+            context_compaction_threshold_for_model("deepseek-v4-pro"),
+            850_000
+        );
         // Small-window models stay conservative.
         assert_eq!(
             context_compaction_threshold_for_model("deepseek-chat"),

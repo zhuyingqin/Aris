@@ -162,6 +162,46 @@ function ToolCall({ block }: { block: Extract<ChatBlock, { kind: "tool" }> }) {
   );
 }
 
+function PermissionCall({
+  block,
+  onPermissionRespond,
+}: {
+  block: Extract<ChatBlock, { kind: "permission" }>;
+  onPermissionRespond: (promptId: string, allow: boolean) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const pending = !block.status || block.status === "pending";
+  const status = block.status === "allowed" ? "Continued" : block.status === "skipped" ? "Skipped" : "Waiting";
+  return (
+    <div className={`chat-tool chat-permission-card ${pending ? "tool-running" : block.status === "skipped" ? "tool-error" : "tool-done"}`}>
+      <div className="chat-tool-header">
+        <span className="tool-status-icon">{pending ? "?" : block.status === "skipped" ? "!" : "✓"}</span>
+        <span className="tool-status-label">{status}</span>
+        <span className="tool-name">{block.toolName}</span>
+        <span className="tool-status-label">{block.currentMode} → {block.requiredMode}</span>
+      </div>
+      <div className="chat-permission-actions">
+        <button type="button" disabled={!pending} onClick={() => onPermissionRespond(block.id, true)}>
+          Continue
+        </button>
+        <button type="button" disabled={!pending} onClick={() => onPermissionRespond(block.id, false)}>
+          Skip
+        </button>
+        {block.input && (
+          <button type="button" onClick={() => setOpen((value) => !value)}>
+            {open ? "Hide input" : "Show input"}
+          </button>
+        )}
+      </div>
+      {open && block.input && (
+        <div className="chat-tool-body">
+          <pre className="md-view tool-detail">{block.input}</pre>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function hasRenderableContent(turn: ChatTurn): boolean {
   return turn.blocks.some((block) => {
     if (block.kind === "text") return Boolean(block.text.trim());
@@ -176,9 +216,10 @@ interface Props {
   onEdit: (turn: ChatTurn) => void;
   onRetry: (turn: ChatTurn) => void;
   onContinue: () => void;
+  onPermissionRespond?: (promptId: string, allow: boolean) => void;
 }
 
-function ChatMessage({ turn, canRetry, onEdit, onRetry, onContinue }: Props) {
+function ChatMessage({ turn, canRetry, onEdit, onRetry, onContinue, onPermissionRespond = () => undefined }: Props) {
   const text = textFromTurn(turn);
   const hasContent = hasRenderableContent(turn);
   return (
@@ -199,6 +240,9 @@ function ChatMessage({ turn, canRetry, onEdit, onRetry, onContinue }: Props) {
           return block.thinking
             ? <ThinkBlock key={index} content={block.thinking} streaming={Boolean(turn.streaming && index === turn.blocks.length - 1)} />
             : null;
+        }
+        if (block.kind === "permission") {
+          return <PermissionCall key={block.id} block={block} onPermissionRespond={onPermissionRespond} />;
         }
         return <ToolCall key={block.id ?? index} block={block} />;
       })}

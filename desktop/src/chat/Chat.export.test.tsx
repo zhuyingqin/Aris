@@ -10,6 +10,7 @@ const apiMocks = vi.hoisted(() => ({
   chatStatus: vi.fn(() => Promise.resolve({ ready: true, model: "MiniMax-M3", provider: "anthropic-compat" })),
   chatPermissionGet: vi.fn(() => Promise.resolve({ mode: "workspace-write", label: "Accept edits", description: "Read and edit workspace files" })),
   chatPermissionSet: vi.fn((_sessionId: string, mode: string) => Promise.resolve({ mode, label: mode, description: "" })),
+  chatPermissionRespond: vi.fn(() => Promise.resolve()),
   chatCommandSpecs: vi.fn(() => Promise.resolve([])),
   skillsList: vi.fn(() => Promise.resolve([])),
   projectChatStarters: vi.fn(() => Promise.resolve([])),
@@ -28,6 +29,8 @@ const apiMocks = vi.hoisted(() => ({
   onChatThinkingDelta: vi.fn(() => Promise.resolve(() => undefined)),
   onChatTool: vi.fn(() => Promise.resolve(() => undefined)),
   onChatToolResult: vi.fn(() => Promise.resolve(() => undefined)),
+  onChatPermissionRequest: vi.fn(() => Promise.resolve(() => undefined)),
+  onChatPermissionResolved: vi.fn(() => Promise.resolve(() => undefined)),
   onChatDone: vi.fn(() => Promise.resolve(() => undefined)),
 }));
 

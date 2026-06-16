@@ -137,6 +137,7 @@ pub fn run() {
             engine::chat_model_set,
             engine::chat_permission_get,
             engine::chat_permission_set,
+            engine::chat_permission_respond,
             engine::project_permission_get,
             engine::project_permission_set,
             engine::chat_command_specs,
@@ -155,6 +156,11 @@ pub fn run() {
             files::file_open,
             files::project_chat_starters,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running ARIS Studio");
+        .build(tauri::generate_context!())
+        .expect("error while building ARIS Studio")
+        .run(|_app_handle, event| {
+            if matches!(event, tauri::RunEvent::ExitRequested { .. }) {
+                im_bridge::stop_on_app_exit();
+            }
+        });
 }

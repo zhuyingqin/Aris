@@ -10,6 +10,8 @@ const mocks = vi.hoisted(() => ({
   onChatThinkingDelta: vi.fn(),
   onChatTool: vi.fn(),
   onChatToolResult: vi.fn(),
+  onChatPermissionRequest: vi.fn(),
+  onChatPermissionResolved: vi.fn(),
   onChatDone: vi.fn(),
 }));
 
@@ -21,6 +23,8 @@ vi.mock("../api/tauri", () => ({
   onChatThinkingDelta: mocks.onChatThinkingDelta,
   onChatTool: mocks.onChatTool,
   onChatToolResult: mocks.onChatToolResult,
+  onChatPermissionRequest: mocks.onChatPermissionRequest,
+  onChatPermissionResolved: mocks.onChatPermissionResolved,
   onChatDone: mocks.onChatDone,
 }));
 
@@ -47,6 +51,8 @@ describe("useChatStream concurrent sessions", () => {
       mocks.onChatThinkingDelta,
       mocks.onChatTool,
       mocks.onChatToolResult,
+      mocks.onChatPermissionRequest,
+      mocks.onChatPermissionResolved,
     ]) {
       listener.mockReturnValue(Promise.resolve(() => undefined));
     }
@@ -104,6 +110,8 @@ describe("useChatStream concurrent sessions", () => {
       mocks.onChatThinkingDelta,
       mocks.onChatTool,
       mocks.onChatToolResult,
+      mocks.onChatPermissionRequest,
+      mocks.onChatPermissionResolved,
     ]) {
       listener.mockReturnValue(Promise.resolve(() => undefined));
     }

@@ -527,6 +527,16 @@ fn run_daemon(command_name: &str, log_lines: Option<u32>) -> Result<String, Stri
     }
 }
 
+pub(crate) fn stop_on_app_exit() {
+    if find_daemon_path().is_none() {
+        return;
+    }
+
+    if let Err(error) = run_daemon("stop", None) {
+        eprintln!("failed to stop Aris QQ bridge on exit: {error}");
+    }
+}
+
 #[tauri::command]
 pub fn im_bridge_get(projects: State<ProjectState>) -> ImBridgeView {
     build_view(&projects)

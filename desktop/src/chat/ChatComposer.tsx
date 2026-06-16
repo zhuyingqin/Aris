@@ -175,6 +175,7 @@ export async function attachmentFromFile(file: File): Promise<ChatAttachment> {
 const PERMISSION_OPTIONS = [
   { value: "read-only", label: "Plan" },
   { value: "workspace-write", label: "Accept edits" },
+  { value: "prompt", label: "Ask" },
   { value: "danger-full-access", label: "Bypass permissions" },
 ];
 
@@ -696,8 +697,8 @@ export default function ChatComposer({
                 <button
                   className="chat-pill chat-model-pill"
                   onClick={() => { if (canSwitchModel) setModelMenuOpen((v) => !v); }}
-                  disabled={modelBusy || busy || !canSwitchModel}
-                  title={canSwitchModel ? "Switch model" : "Active model"}
+                  disabled={modelBusy || !canSwitchModel}
+                  title={canSwitchModel ? (busy ? "Switch model for the next turn" : "Switch model") : "Active model"}
                 >
                   {modelName}
                   {canSwitchModel && <span className="chat-pill-chevron">▾</span>}

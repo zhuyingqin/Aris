@@ -6,6 +6,8 @@ import {
   onChatDelta,
   onChatDone,
   onChatThinkingDelta,
+  onChatPermissionRequest,
+  onChatPermissionResolved,
   onChatTool,
   onChatToolResult,
 } from "../api/tauri";
@@ -88,6 +90,39 @@ export function useChatStream({ patchAssistant, onComplete, onError }: StreamHan
           );
           return { ...turn, blocks };
         });
+      }),
+      onChatPermissionRequest((request) => {
+        flush(request.sessionId);
+        patchAssistant(request.sessionId, (turn) => {
+          if (turn.blocks.some((block) => block.kind === "permission" && block.id === request.promptId)) {
+            return turn;
+          }
+          return {
+            ...turn,
+            blocks: [
+              ...turn.blocks,
+              {
+                kind: "permission",
+                id: request.promptId,
+                toolName: request.toolName,
+                input: request.input,
+                currentMode: request.currentMode,
+                requiredMode: request.requiredMode,
+                status: "pending",
+              },
+            ],
+          };
+        });
+      }),
+      onChatPermissionResolved((event) => {
+        patchAssistant(event.sessionId, (turn) => ({
+          ...turn,
+          blocks: turn.blocks.map((block) => (
+            block.kind === "permission" && block.id === event.promptId
+              ? { ...block, status: event.decision === "allow" ? "allowed" : "skipped" }
+              : block
+          )),
+        }));
       }),
       onChatDone(({ sessionId }) => flush(sessionId)),
     ];

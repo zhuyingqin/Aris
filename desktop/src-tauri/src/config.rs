@@ -156,9 +156,15 @@ fn write_verified(obj: &mut Map<String, Value>, list: &[VerifiedExecutor]) {
         .iter()
         .map(|entry| {
             let mut item = Map::new();
-            item.insert("provider".to_string(), Value::String(entry.provider.clone()));
+            item.insert(
+                "provider".to_string(),
+                Value::String(entry.provider.clone()),
+            );
             item.insert("model".to_string(), Value::String(entry.model.clone()));
-            item.insert("base_url".to_string(), Value::String(entry.base_url.clone()));
+            item.insert(
+                "base_url".to_string(),
+                Value::String(entry.base_url.clone()),
+            );
             item.insert("api_key".to_string(), Value::String(entry.api_key.clone()));
             Value::Object(item)
         })
@@ -217,17 +223,61 @@ pub(crate) fn verified_executor_summaries() -> Vec<(String, String, String)> {
         .collect()
 }
 
-/// Restore the full executor config of a verified model. Returns `Ok(false)`
-/// when no verified entry matches the model id (caller decides how to react).
-pub(crate) fn switch_to_verified_executor(model: &str) -> Result<bool, String> {
-    let model = model.trim();
-    let mut obj = load_object();
-    let Some(entry) = read_verified(&obj)
-        .into_iter()
-        .find(|item| item.model == model)
-    else {
-        return Ok(false);
-    };
+const DEEPSEEK_EXECUTOR_MODEL: &str = "deepseek-v4-pro";
+const DEEPSEEK_ANTHROPIC_BASE_URL: &str = "https://api.deepseek.com/anthropic";
+
+fn value_contains(obj: &Map<String, Value>, key: &str, needle: &str) -> bool {
+    obj.get(key)
+        .and_then(Value::as_str)
+        .map(|value| value.to_ascii_lowercase().contains(needle))
+        .unwrap_or(false)
+}
+
+fn config_has_deepseek_executor(obj: &Map<String, Value>) -> bool {
+    value_contains(obj, "executor_provider", "deepseek")
+        || value_contains(obj, "executor_model", "deepseek")
+        || value_contains(obj, "executor_base_url", "deepseek")
+}
+
+fn config_has_deepseek_reviewer(obj: &Map<String, Value>) -> bool {
+    value_contains(obj, "reviewer_provider", "deepseek")
+        || value_contains(obj, "reviewer_model", "deepseek")
+        || value_contains(obj, "reviewer_base_url", "deepseek")
+}
+
+fn deepseek_executor_key(obj: &Map<String, Value>) -> Option<String> {
+    if config_has_deepseek_executor(obj) {
+        if let Some(key) = get_non_empty(obj, "executor_api_key") {
+            return Some(key);
+        }
+    }
+    if config_has_deepseek_reviewer(obj) {
+        if let Some(key) = get_non_empty(obj, "reviewer_api_key") {
+            return Some(key);
+        }
+    }
+    std::env::var("DEEPSEEK_API_KEY")
+        .ok()
+        .filter(|key| !key.trim().is_empty())
+}
+
+fn apply_deepseek_executor(obj: &mut Map<String, Value>, key: String) {
+    obj.insert(
+        "executor_provider".to_string(),
+        Value::String("anthropic-compat".to_string()),
+    );
+    obj.insert(
+        "executor_model".to_string(),
+        Value::String(DEEPSEEK_EXECUTOR_MODEL.to_string()),
+    );
+    obj.insert(
+        "executor_base_url".to_string(),
+        Value::String(DEEPSEEK_ANTHROPIC_BASE_URL.to_string()),
+    );
+    obj.insert("executor_api_key".to_string(), Value::String(key));
+}
+
+fn apply_verified_executor(obj: &mut Map<String, Value>, entry: VerifiedExecutor) {
     obj.insert(
         "executor_provider".to_string(),
         Value::String(entry.provider),
@@ -242,7 +292,90 @@ pub(crate) fn switch_to_verified_executor(model: &str) -> Result<bool, String> {
         );
     }
     obj.insert("executor_api_key".to_string(), Value::String(entry.api_key));
+}
+
+/// Return a config object with `model` selected as executor, without saving it.
+/// The model must be the current executor, a verified executor, or a built-in
+/// preset backed by an already configured key.
+pub(crate) fn executor_object_for_model(model: &str) -> Result<Option<Map<String, Value>>, String> {
+    let model = model.trim();
+    if model.is_empty() {
+        return Err("model id must not be empty".to_string());
+    }
+    let mut obj = load_object();
+    if get_non_empty(&obj, "executor_model").as_deref() == Some(model) {
+        return Ok(Some(obj));
+    }
+    if let Some(entry) = read_verified(&obj)
+        .into_iter()
+        .find(|item| item.model == model)
+    {
+        apply_verified_executor(&mut obj, entry);
+        return Ok(Some(obj));
+    }
+    if model == DEEPSEEK_EXECUTOR_MODEL {
+        let Some(key) = deepseek_executor_key(&obj) else {
+            return Err(
+                "DeepSeek API key is not configured. Add DeepSeek in Settings first.".to_string(),
+            );
+        };
+        apply_deepseek_executor(&mut obj, key);
+        return Ok(Some(obj));
+    }
+    Ok(None)
+}
+
+/// Built-in executor choices backed by keys already present in config/env.
+/// Keys are never returned to the frontend.
+pub(crate) fn builtin_executor_summaries() -> Vec<(String, String, String)> {
+    let obj = load_object();
+    let mut out = Vec::new();
+    if deepseek_executor_key(&obj).is_some() {
+        out.push((
+            "anthropic-compat".to_string(),
+            DEEPSEEK_EXECUTOR_MODEL.to_string(),
+            DEEPSEEK_ANTHROPIC_BASE_URL.to_string(),
+        ));
+    }
+    out
+}
+
+/// Restore the full executor config of a verified model. Returns `Ok(false)`
+/// when no verified entry matches the model id (caller decides how to react).
+pub(crate) fn switch_to_verified_executor(model: &str) -> Result<bool, String> {
+    let model = model.trim();
+    let mut obj = load_object();
+    let Some(entry) = read_verified(&obj)
+        .into_iter()
+        .find(|item| item.model == model)
+    else {
+        return Ok(false);
+    };
+    apply_verified_executor(&mut obj, entry);
     save_object(&obj)?;
+    Ok(true)
+}
+
+/// Switch to a built-in executor preset when a usable key already exists.
+pub(crate) fn switch_to_builtin_executor(model: &str) -> Result<bool, String> {
+    let model = model.trim();
+    if model != DEEPSEEK_EXECUTOR_MODEL {
+        return Ok(false);
+    }
+    let mut obj = load_object();
+    let Some(key) = deepseek_executor_key(&obj) else {
+        return Err(
+            "DeepSeek API key is not configured. Add DeepSeek in Settings first.".to_string(),
+        );
+    };
+    apply_deepseek_executor(&mut obj, key.clone());
+    save_object(&obj)?;
+    let _ = record_verified_executor(
+        "anthropic-compat",
+        DEEPSEEK_EXECUTOR_MODEL,
+        Some(DEEPSEEK_ANTHROPIC_BASE_URL),
+        &key,
+    );
     Ok(true)
 }
 
@@ -712,7 +845,8 @@ pub async fn config_test(patch: ConfigPatch) -> Result<ConfigTestResult, String>
     if executor.ok {
         if let (Some(provider), Some(model)) = (executor.provider.clone(), executor.model.clone()) {
             if let Some(key) = get_non_empty(&obj, "executor_api_key") {
-                let _ = record_verified_executor(&provider, &model, executor.base_url.as_deref(), &key);
+                let _ =
+                    record_verified_executor(&provider, &model, executor.base_url.as_deref(), &key);
             }
         }
     }
@@ -736,8 +870,8 @@ pub async fn config_test(patch: ConfigPatch) -> Result<ConfigTestResult, String>
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_reviewer_environment_from, read_verified, upsert_verified, write_verified,
-        VerifiedExecutor,
+        apply_reviewer_environment_from, deepseek_executor_key, read_verified, upsert_verified,
+        write_verified, VerifiedExecutor,
     };
     use serde_json::{Map, Value};
     use std::sync::Mutex;
@@ -755,7 +889,12 @@ mod tests {
 
     #[test]
     fn upsert_refreshes_key_without_duplicating_same_endpoint() {
-        let mut list = vec![entry("openai", "MiniMax-M3", "https://api.minimaxi.com/v1", "k1")];
+        let mut list = vec![entry(
+            "openai",
+            "MiniMax-M3",
+            "https://api.minimaxi.com/v1",
+            "k1",
+        )];
         // Same (provider, model, base_url) → update key in place.
         upsert_verified(
             &mut list,
@@ -800,6 +939,31 @@ mod tests {
         let parsed = read_verified(&obj);
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].model, "gpt-5.5");
+    }
+
+    #[test]
+    fn deepseek_executor_key_can_reuse_reviewer_key() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        std::env::remove_var("DEEPSEEK_API_KEY");
+
+        let mut obj = Map::new();
+        obj.insert(
+            "reviewer_provider".to_string(),
+            Value::String("deepseek".to_string()),
+        );
+        obj.insert(
+            "reviewer_model".to_string(),
+            Value::String("deepseek-v4-pro".to_string()),
+        );
+        obj.insert(
+            "reviewer_api_key".to_string(),
+            Value::String("reviewer-token".to_string()),
+        );
+
+        assert_eq!(
+            deepseek_executor_key(&obj).as_deref(),
+            Some("reviewer-token")
+        );
     }
 
     #[test]

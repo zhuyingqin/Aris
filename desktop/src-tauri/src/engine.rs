@@ -3,17 +3,18 @@
 //! The provider executor lives in `aris-executor`; this module only adapts it
 //! to Tauri events and UI-facing commands.
 //! Streaming surface (Tauri events): `chat-delta`, `chat-thinking-delta`,
-//! `chat-tool`, `chat-tool-result`, `chat-done`.
+//! `chat-tool`, `chat-tool-result`, `chat-permission-request`, `chat-done`.
 
 use std::{
     collections::HashMap,
     fs,
     path::{Path, PathBuf},
+    sync::mpsc::{self, RecvTimeoutError, Sender},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
     },
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use aris_commands::{
@@ -26,8 +27,9 @@ use tauri::{AppHandle, Emitter, State};
 
 use runtime::{
     CompactionConfig, ConfigLoader, ConfigSource, ContentBlock, ConversationMessage, MessageRole,
-    PermissionMode, ProjectContext, ResolvedPermissionMode, RuntimeError, Session, TokenUsage,
-    ToolError, ToolExecutor, UsageTracker,
+    PermissionMode, PermissionPromptDecision, PermissionPrompter, PermissionRequest,
+    ProjectContext, ResolvedPermissionMode, RuntimeError, Session, TokenUsage, ToolError,
+    ToolExecutor, UsageTracker,
 };
 
 /// Per-app chat sessions, keyed by the UI session id.
@@ -35,6 +37,7 @@ pub struct ChatState {
     sessions: Mutex<HashMap<String, Session>>,
     permission_modes: Mutex<HashMap<String, PermissionMode>>,
     running_turns: Mutex<HashMap<String, Arc<AtomicBool>>>,
+    permission_prompts: Arc<Mutex<HashMap<String, Sender<PermissionPromptDecision>>>>,
 }
 
 const MAX_CACHED_CHAT_SESSIONS: usize = 4;
@@ -45,6 +48,7 @@ impl Default for ChatState {
             sessions: Mutex::new(HashMap::new()),
             permission_modes: Mutex::new(HashMap::new()),
             running_turns: Mutex::new(HashMap::new()),
+            permission_prompts: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -216,6 +220,112 @@ impl aris_executor::StreamObserver for DesktopStreamObserver {
             json!({ "sessionId": self.session_id, "id": id, "name": name, "input": input }),
         );
         Ok(())
+    }
+}
+
+type PermissionPromptRegistry = Arc<Mutex<HashMap<String, Sender<PermissionPromptDecision>>>>;
+
+fn next_permission_prompt_id() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    format!("perm-{nanos}")
+}
+
+struct DesktopPermissionPrompter {
+    app: AppHandle,
+    session_id: String,
+    prompts: PermissionPromptRegistry,
+    cancelled: Arc<AtomicBool>,
+}
+
+impl DesktopPermissionPrompter {
+    fn emit_resolved(&self, prompt_id: &str, decision: &str) {
+        let _ = self.app.emit(
+            "chat-permission-resolved",
+            json!({ "sessionId": self.session_id, "promptId": prompt_id, "decision": decision }),
+        );
+    }
+
+    fn emit_skipped_tool_result(&self, request: &PermissionRequest, reason: &str) {
+        let _ = self.app.emit(
+            "chat-tool-result",
+            json!({
+                "sessionId": self.session_id,
+                "name": &request.tool_name,
+                "output": truncate(reason, 4000),
+                "isError": true
+            }),
+        );
+    }
+}
+
+impl PermissionPrompter for DesktopPermissionPrompter {
+    fn decide(&mut self, request: &PermissionRequest) -> PermissionPromptDecision {
+        let prompt_id = next_permission_prompt_id();
+        let (tx, rx) = mpsc::channel();
+        if let Ok(mut prompts) = self.prompts.lock() {
+            prompts.insert(prompt_id.clone(), tx);
+        } else {
+            return PermissionPromptDecision::Deny {
+                reason: "permission prompt registry is unavailable".to_string(),
+            };
+        }
+        let emitted = self
+            .app
+            .emit(
+                "chat-permission-request",
+                json!({
+                    "sessionId": self.session_id,
+                    "promptId": prompt_id,
+                    "toolName": &request.tool_name,
+                    "input": truncate(&request.input, 4000),
+                    "currentMode": request.current_mode.as_str(),
+                    "requiredMode": request.required_mode.as_str()
+                }),
+            )
+            .is_ok();
+        if !emitted {
+            if let Ok(mut prompts) = self.prompts.lock() {
+                prompts.remove(&prompt_id);
+            }
+            return PermissionPromptDecision::Deny {
+                reason: "permission prompt could not be shown".to_string(),
+            };
+        }
+
+        loop {
+            match rx.recv_timeout(Duration::from_millis(200)) {
+                Ok(decision) => {
+                    match &decision {
+                        PermissionPromptDecision::Allow => self.emit_resolved(&prompt_id, "allow"),
+                        PermissionPromptDecision::Deny { reason } => {
+                            self.emit_resolved(&prompt_id, "deny");
+                            self.emit_skipped_tool_result(request, reason);
+                        }
+                    }
+                    return decision;
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    if self.cancelled.load(Ordering::SeqCst) || runtime::is_interrupted() {
+                        if let Ok(mut prompts) = self.prompts.lock() {
+                            prompts.remove(&prompt_id);
+                        }
+                        let reason = "interrupted by user".to_string();
+                        self.emit_resolved(&prompt_id, "deny");
+                        self.emit_skipped_tool_result(request, &reason);
+                        return PermissionPromptDecision::Deny { reason };
+                    }
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    let reason = "permission prompt was dismissed".to_string();
+                    self.emit_resolved(&prompt_id, "deny");
+                    self.emit_skipped_tool_result(request, &reason);
+                    return PermissionPromptDecision::Deny { reason };
+                }
+            }
+        }
     }
 }
 
@@ -402,6 +512,24 @@ fn resolve_executor() -> Result<(String, String, aris_chat::ChatExecutorConfig),
     aris_chat::resolve_settings_executor_config(&crate::config::load_object())
 }
 
+fn resolve_executor_for_model(
+    model_override: Option<&str>,
+) -> Result<(String, String, aris_chat::ChatExecutorConfig), String> {
+    let Some(model) = model_override
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return resolve_executor();
+    };
+    let Some(obj) = crate::config::executor_object_for_model(model)? else {
+        return Err(
+            "Only models verified in Settings can be selected. Test this model in Settings first."
+                .to_string(),
+        );
+    };
+    aris_chat::resolve_settings_executor_config(&obj)
+}
+
 fn validate_session_id(session_id: &str) -> Result<(), String> {
     if session_id.is_empty()
         || session_id.contains('/')
@@ -465,6 +593,30 @@ pub fn chat_permission_set(
         .ok_or_else(|| format!("unsupported permission mode `{mode}`"))?;
     set_permission_mode_for(&state, session_id, mode)?;
     Ok(permission_mode_view(mode))
+}
+
+#[tauri::command]
+pub fn chat_permission_respond(
+    state: State<ChatState>,
+    prompt_id: String,
+    allow: bool,
+) -> Result<(), String> {
+    let sender = state
+        .permission_prompts
+        .lock()
+        .map_err(|_| "chat permission state poisoned".to_string())?
+        .remove(&prompt_id)
+        .ok_or_else(|| "permission prompt is no longer active".to_string())?;
+    let decision = if allow {
+        PermissionPromptDecision::Allow
+    } else {
+        PermissionPromptDecision::Deny {
+            reason: "skipped by user".to_string(),
+        }
+    };
+    sender
+        .send(decision)
+        .map_err(|_| "permission prompt is no longer waiting".to_string())
 }
 
 #[tauri::command]
@@ -540,6 +692,7 @@ pub struct ChatSendRequest {
     text: String,
     #[serde(default)]
     images: Vec<ChatImageInput>,
+    model: Option<String>,
 }
 
 fn split_data_url(value: &str) -> Option<(&str, &str)> {
@@ -712,27 +865,33 @@ fn context_window_for_model(model: &str) -> u64 {
     if model.starts_with("gemini-") {
         return 1_000_000;
     }
+    if model.starts_with("deepseek-v4") {
+        return 1_000_000;
+    }
     if model.starts_with("deepseek") {
         return 64_000;
     }
     128_000
 }
 
+fn chat_status_for(model: String, provider: String) -> ChatStatus {
+    let memory_files = status_context(None).ok().map(|ctx| ctx.memory_file_count);
+    let cw = context_window_for_model(&model);
+    ChatStatus {
+        ready: true,
+        model: Some(model),
+        provider: Some(provider),
+        message: None,
+        context_window: Some(cw),
+        memory_files,
+    }
+}
+
 #[tauri::command]
 pub fn chat_status() -> ChatStatus {
     let memory_files = status_context(None).ok().map(|ctx| ctx.memory_file_count);
     match resolve_executor() {
-        Ok((model, provider, _)) => {
-            let cw = context_window_for_model(&model);
-            ChatStatus {
-                ready: true,
-                model: Some(model),
-                provider: Some(provider),
-                message: None,
-                context_window: Some(cw),
-                memory_files,
-            }
-        }
+        Ok((model, provider, _)) => chat_status_for(model, provider),
         Err(message) => ChatStatus {
             ready: false,
             model: None,
@@ -787,6 +946,21 @@ pub fn chat_model_options() -> ChatModelOptions {
             description: Some(description),
         });
     }
+    for (entry_provider, model, base_url) in crate::config::builtin_executor_summaries() {
+        if model.trim().is_empty() || !seen.insert(model.clone()) {
+            continue;
+        }
+        let description = if base_url.is_empty() {
+            entry_provider
+        } else {
+            format!("{entry_provider} via {base_url}")
+        };
+        options.push(ChatModelOption {
+            value: model.clone(),
+            label: model,
+            description: Some(description),
+        });
+    }
     // Surface the running model even if it predates the registry, so the select
     // is never blank or stuck on a value that isn't an option.
     if !current.trim().is_empty() && seen.insert(current.clone()) {
@@ -812,23 +986,31 @@ pub fn chat_model_options() -> ChatModelOptions {
 /// header updates immediately. Refuses models that have not been verified in
 /// Settings (the active model is allowed as a no-op).
 #[tauri::command]
-pub fn chat_model_set(model: String) -> Result<ChatStatus, String> {
+pub fn chat_model_set(model: String, persist: Option<bool>) -> Result<ChatStatus, String> {
     let trimmed = model.trim();
     if trimmed.is_empty() {
         return Err("model id must not be empty".to_string());
     }
-    let switched = crate::config::switch_to_verified_executor(trimmed)?;
-    if !switched {
-        let current = config_string("executor_model")
-            .unwrap_or_else(|| aris_chat::DEFAULT_MODEL.to_string());
-        if trimmed != current {
-            return Err(
-                "Only models verified in Settings can be selected. Test this model in Settings first."
-                    .to_string(),
-            );
-        }
+    if persist == Some(false) {
+        let (model, provider, _) = resolve_executor_for_model(Some(trimmed))?;
+        return Ok(chat_status_for(model, provider));
     }
-    Ok(chat_status())
+    let switched = crate::config::switch_to_verified_executor(trimmed)?;
+    if switched {
+        return Ok(chat_status());
+    }
+    let current =
+        config_string("executor_model").unwrap_or_else(|| aris_chat::DEFAULT_MODEL.to_string());
+    if trimmed == current {
+        return Ok(chat_status());
+    }
+    if crate::config::switch_to_builtin_executor(trimmed)? {
+        return Ok(chat_status());
+    }
+    Err(
+        "Only models verified in Settings can be selected. Test this model in Settings first."
+            .to_string(),
+    )
 }
 
 #[derive(Serialize)]
@@ -1121,7 +1303,7 @@ pub async fn chat_send(
     message: String,
 ) -> Result<String, String> {
     let user_message = ConversationMessage::user_text(message);
-    run_chat_turn(app, &state, session_id, user_message).await
+    run_chat_turn(app, &state, session_id, user_message, None).await
 }
 
 #[tauri::command]
@@ -1131,8 +1313,9 @@ pub async fn chat_send_rich(
     session_id: String,
     request: ChatSendRequest,
 ) -> Result<String, String> {
+    let model_override = request.model.clone();
     let user_message = user_message_from_request(request)?;
-    run_chat_turn(app, &state, session_id, user_message).await
+    run_chat_turn(app, &state, session_id, user_message, model_override).await
 }
 
 /// Variant of `chat_send_rich` used by Literature agent searches.
@@ -1264,12 +1447,14 @@ async fn run_chat_turn(
     state: &ChatState,
     session_id: String,
     user_message: ConversationMessage,
+    model_override: Option<String>,
 ) -> Result<String, String> {
     run_chat_turn_with_context(
         app,
         state,
         session_id,
         user_message,
+        model_override,
         DESKTOP_CHAT_BLOCKED_TOOLS,
         true,
     )
@@ -1287,6 +1472,7 @@ async fn run_literature_chat_turn(
         state,
         session_id,
         user_message,
+        None,
         LITERATURE_AGENT_BLOCKED_TOOLS,
         false,
     )
@@ -1298,6 +1484,7 @@ async fn run_chat_turn_with_context(
     state: &ChatState,
     session_id: String,
     user_message: ConversationMessage,
+    model_override: Option<String>,
     blocked_tools: &'static [&'static str],
     full_tool_registry: bool,
 ) -> Result<String, String> {
@@ -1319,9 +1506,11 @@ async fn run_chat_turn_with_context(
         session_id: session_id.clone(),
     };
     crate::config::apply_reviewer_environment(true);
-    let (model, _provider, executor_config) = resolve_executor()?;
+    let (model, _provider, executor_config) =
+        resolve_executor_for_model(model_override.as_deref())?;
     let session = get_cached_or_disk_session(&state, &session_id)?;
     let permission_mode = permission_mode_for(&state, &session_id)?;
+    let permission_prompts = state.permission_prompts.clone();
 
     let worker_app = app.clone();
     let worker_session_id = session_id.clone();
@@ -1358,10 +1547,16 @@ async fn run_chat_turn_with_context(
             cancelled: worker_cancelled.clone(),
         });
         let executor = DesktopToolExecutor {
+            app: worker_app.clone(),
+            session_id: worker_session_id.clone(),
+            cancelled: worker_cancelled.clone(),
+            inner: mcp_bundle.executor,
+        };
+        let mut permission_prompter = DesktopPermissionPrompter {
             app: worker_app,
             session_id: worker_session_id,
+            prompts: permission_prompts,
             cancelled: worker_cancelled,
-            inner: mcp_bundle.executor,
         };
         let mut system_prompt = build_system_prompt_inner(&model, full_tool_registry);
         if let Some(status) = mcp_runtime_status_prompt(
@@ -1384,7 +1579,7 @@ async fn run_chat_turn_with_context(
             feature_config,
         )?;
         let summary = runtime
-            .run_turn_message(user_message, None)
+            .run_turn_message(user_message, Some(&mut permission_prompter))
             .map_err(|e| e.to_string())?;
         let text = aris_chat::final_assistant_text(&summary);
         Ok::<(String, Session), String>((text, runtime.into_session()))
@@ -1431,6 +1626,7 @@ pub fn chat_set_context(
                 .push(user_message_from_request(ChatSendRequest {
                     text: message.text,
                     images: message.images,
+                    model: None,
                 })?),
             "assistant" => {
                 session
@@ -1760,6 +1956,12 @@ fn permissions_selection(current: &str) -> ChatCommandSelection {
                 current,
             ),
             selection_item(
+                "prompt",
+                "Ask",
+                "Ask before tool calls that need approval",
+                current,
+            ),
+            selection_item(
                 "danger-full-access",
                 "Don't ask",
                 "Allow shell, agents, workflows, and all other tools",
@@ -1813,6 +2015,7 @@ fn normalize_permission_mode(mode: &str) -> Option<PermissionMode> {
         "dontAsk" | "bypassPermissions" | "danger-full-access" => {
             Some(PermissionMode::DangerFullAccess)
         }
+        "ask" | "prompt" => Some(PermissionMode::Prompt),
         _ => None,
     }
 }
@@ -1830,7 +2033,7 @@ fn handle_permissions_command(
     };
     let next = normalize_permission_mode(mode).ok_or_else(|| {
         format!(
-            "unsupported permission mode '{mode}'. Use plan/read-only, acceptEdits/workspace-write, or dontAsk/danger-full-access."
+            "unsupported permission mode '{mode}'. Use plan/read-only, acceptEdits/workspace-write, ask/prompt, or dontAsk/danger-full-access."
         )
     })?;
     if next == current {
@@ -1840,7 +2043,7 @@ fn handle_permissions_command(
     }
     set_permission_mode_for(state, session_id, next)?;
     Ok(ChatCommandResult::message(format!(
-        "Permissions updated\n  Previous mode    {}\n  Active mode      {}\n  Applies to       subsequent desktop chat tool calls\n  Note             higher modes unlock shell, agents, workflows, and other tools",
+        "Permissions updated\n  Previous mode    {}\n  Active mode      {}\n  Applies to       subsequent desktop chat tool calls\n  Note             ask/prompt will show Continue/Skip approvals for gated tools",
         current.as_str(),
         next.as_str()
     )))
@@ -1848,7 +2051,7 @@ fn handle_permissions_command(
 
 fn format_permissions_report(mode: &str) -> String {
     format!(
-        "Permissions\n  Active mode      {mode}\n  Surface          desktop Chat\n\nModes\n  plan / read-only              Inspect and search only\n  acceptEdits / workspace-write Read and edit workspace files\n  dontAsk / danger-full-access  Allow shell, agents, workflows, and all tools\n\nUsage\n  Inspect current mode with /permissions\n  Switch modes with /permissions <mode>\n  Project settings permissions.defaultMode supplies the session default"
+        "Permissions\n  Active mode      {mode}\n  Surface          desktop Chat\n\nModes\n  plan / read-only              Inspect and search only\n  acceptEdits / workspace-write Read and edit workspace files\n  ask / prompt                  Ask before gated tool calls\n  dontAsk / danger-full-access  Allow shell, agents, workflows, and all tools\n\nUsage\n  Inspect current mode with /permissions\n  Switch modes with /permissions <mode>\n  Project settings permissions.defaultMode supplies the session default"
     )
 }
 
@@ -2920,6 +3123,7 @@ mod tests {
                 mime_type: "image/png".to_string(),
                 data: "data:image/png;base64,ZmFrZQ==".to_string(),
             }],
+            model: None,
         })
         .expect("rich request should parse");
 
@@ -2943,6 +3147,7 @@ mod tests {
                 mime_type: "text/plain".to_string(),
                 data: "ZmFrZQ==".to_string(),
             }],
+            model: None,
         })
         .expect_err("non-image upload should be rejected");
 
@@ -3019,6 +3224,14 @@ mod tests {
         assert_eq!(
             normalize_permission_mode("dontAsk"),
             Some(PermissionMode::DangerFullAccess)
+        );
+        assert_eq!(
+            normalize_permission_mode("ask"),
+            Some(PermissionMode::Prompt)
+        );
+        assert_eq!(
+            normalize_permission_mode("prompt"),
+            Some(PermissionMode::Prompt)
         );
     }
 

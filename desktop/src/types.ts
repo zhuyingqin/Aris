@@ -260,6 +260,15 @@ export type ChatBlock =
   | { kind: "text"; text: string }
   | { kind: "thinking"; thinking: string }
   | {
+      kind: "permission";
+      id: string;
+      toolName: string;
+      input: string;
+      currentMode: string;
+      requiredMode: string;
+      status?: "pending" | "allowed" | "skipped";
+    }
+  | {
       kind: "tool";
       id?: string;
       name: string;
