@@ -22,6 +22,7 @@ const apiMocks = vi.hoisted(() => ({
   fileRead: vi.fn(() => Promise.resolve("")),
   fileSearch: vi.fn(() => Promise.resolve([])),
   chatSend: vi.fn(() => Promise.resolve("")),
+  chatModelOptions: vi.fn(() => Promise.resolve({ provider: "anthropic-compat", current: "MiniMax-M3", options: [{ value: "MiniMax-M3", label: "MiniMax-M3", description: null }] })),
   chatCancel: vi.fn(() => Promise.resolve()),
   onChatDelta: vi.fn(() => Promise.resolve(() => undefined)),
   onChatThinkingDelta: vi.fn(() => Promise.resolve(() => undefined)),

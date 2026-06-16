@@ -20,9 +20,9 @@ const PREVIEW_PROJECT: DesktopProject = {
 export type Tab =
   | "chat"
   | "literature"
-  | "mcp"
+  | "studio"
+  | "extensions"
   | "settings"
-  | "skills"
   | "sessions";
 
 interface AppState {
@@ -36,6 +36,10 @@ interface AppState {
   /** One-shot command handoff consumed and executed by Chat. */
   pendingChatRunInput: string | null;
   setPendingChatRunInput: (value: string | null) => void;
+
+  /** One-shot deep link consumed by Studio after switching tabs. */
+  pendingStudioArtifactId: string | null;
+  setPendingStudioArtifactId: (value: string | null) => void;
 
   stateDir: string;
   error: string | null;
@@ -61,6 +65,9 @@ export const useStore = create<AppState>((set, get) => ({
 
   pendingChatRunInput: null,
   setPendingChatRunInput: (value) => set({ pendingChatRunInput: value }),
+
+  pendingStudioArtifactId: null,
+  setPendingStudioArtifactId: (value) => set({ pendingStudioArtifactId: value }),
 
   stateDir: "",
   error: null,

@@ -21,6 +21,7 @@ import {
 } from "./model";
 import { appendToolOutput } from "./useChatStream";
 import { useChatSessions } from "./useChatSessions";
+import { useStore } from "../store";
 
 class ResizeObserverMock {
   observe() {}
@@ -30,6 +31,7 @@ class ResizeObserverMock {
 
 beforeEach(() => {
   localStorage.clear();
+  useStore.setState({ tab: "chat", pendingStudioArtifactId: null });
   vi.stubGlobal("ResizeObserver", ResizeObserverMock);
   Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
     configurable: true,
@@ -110,6 +112,39 @@ describe("Chat interaction helpers", () => {
     );
 
     expect(screen.getByRole("link", { name: "the report" }).getAttribute("title")).toBe("Open local file");
+  });
+
+  it("renders a direct Studio entry after artifact registration", async () => {
+    const user = userEvent.setup();
+    render(
+      <ChatMessage
+        turn={{
+          id: "assistant-studio",
+          role: "assistant",
+          blocks: [{
+            kind: "tool",
+            name: "StudioLibraryUpsert",
+            input: "{}",
+            output: JSON.stringify({
+              studioLinks: [{
+                id: "web:irl-demo",
+                title: "IRL demo",
+                href: "studio/artifact/web%3Airl-demo",
+              }],
+            }),
+          }],
+        }}
+        canRetry={false}
+        onEdit={() => undefined}
+        onRetry={() => undefined}
+        onContinue={() => undefined}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Open IRL demo in Studio" }));
+
+    expect(useStore.getState().tab).toBe("studio");
+    expect(useStore.getState().pendingStudioArtifactId).toBe("web:irl-demo");
   });
 
   it("omits dropped binary bodies without reading them into the renderer", async () => {

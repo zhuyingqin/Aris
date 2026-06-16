@@ -11,6 +11,7 @@ const DESKTOP_ALLOWED_AGENT_TOOLS: &[&str] = &[
     "LiteratureSearch",
     "LiteratureLibraryUpsert",
     "LiteraturePdfDownload",
+    "StudioLibraryUpsert",
     "TodoWrite",
     "memory",
     "session_search",

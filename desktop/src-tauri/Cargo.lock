@@ -4161,6 +4161,7 @@ dependencies = [
  "reqwest 0.12.28",
  "roxmltree",
  "runtime",
+ "rusqlite",
  "serde",
  "serde_json",
  "tokio",

@@ -866,6 +866,8 @@ impl McpStdioProcess {
     ///   fills) also unblocks the caller.
     /// * After a successful read, the response id must equal the
     ///   request id.
+    /// * A process-wide interrupt immediately kills the child and returns
+    ///   `Interrupted`, so a hung tool call cannot pin the conversation.
     /// * On *any* failure mode (timeout, I/O error during
     ///   send/read, id mismatch) we `kill().await` the child so the
     ///   stdio pipes are flushed and the next call respawns from a
@@ -936,17 +938,29 @@ impl McpStdioProcess {
             }
         };
 
-        let response: JsonRpcResponse<TResult> = match tokio::time::timeout(timeout, send_then_read)
-            .await
-        {
-            Ok(Ok(response)) => response,
-            Ok(Err(error)) => {
+        let request_result = tokio::select! {
+            response = tokio::time::timeout(timeout, send_then_read) => Some(response),
+            () = wait_for_interrupt() => None,
+        };
+
+        let response: JsonRpcResponse<TResult> = match request_result {
+            None => {
+                // Keep the global flag set so the conversation loop unwinds
+                // instead of treating cancellation as an ordinary tool error.
+                let _ = self.child.kill().await;
+                return Err(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "MCP request interrupted by user",
+                ));
+            }
+            Some(Ok(Ok(response))) => response,
+            Some(Ok(Err(error))) => {
                 // I/O error during send or read. Stdio buffer is now
                 // ambiguous — kill so the next call respawns cleanly.
                 let _ = self.child.kill().await;
                 return Err(error);
             }
-            Err(_elapsed) => {
+            Some(Err(_elapsed)) => {
                 let _ = self.child.kill().await;
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
@@ -1038,6 +1052,19 @@ impl McpStdioProcess {
     }
 }
 
+async fn wait_for_interrupt() {
+    wait_for_interrupt_flag(&crate::INTERRUPTED).await;
+}
+
+async fn wait_for_interrupt_flag(flag: &std::sync::atomic::AtomicBool) {
+    loop {
+        if flag.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
 pub fn spawn_mcp_stdio_process(bootstrap: &McpClientBootstrap) -> io::Result<McpStdioProcess> {
     match &bootstrap.transport {
         McpClientTransport::Stdio(transport) => McpStdioProcess::spawn(transport),
@@ -1120,7 +1147,7 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use serde_json::json;
@@ -1134,10 +1161,11 @@ mod tests {
     use crate::mcp_client::McpClientBootstrap;
 
     use super::{
-        mcp_request_timeout, spawn_mcp_stdio_process, JsonRpcId, JsonRpcRequest, JsonRpcResponse,
-        McpInitializeClientInfo, McpInitializeParams, McpInitializeResult, McpInitializeServerInfo,
-        McpListToolsResult, McpReadResourceParams, McpReadResourceResult, McpServerManager,
-        McpServerManagerError, McpStdioProcess, McpTool, McpToolCallParams,
+        mcp_request_timeout, spawn_mcp_stdio_process, wait_for_interrupt_flag, JsonRpcId,
+        JsonRpcRequest, JsonRpcResponse, McpInitializeClientInfo, McpInitializeParams,
+        McpInitializeResult, McpInitializeServerInfo, McpListToolsResult, McpReadResourceParams,
+        McpReadResourceResult, McpServerManager, McpServerManagerError, McpStdioProcess, McpTool,
+        McpToolCallParams,
     };
 
     fn temp_dir() -> PathBuf {
@@ -2312,6 +2340,29 @@ mod tests {
 
             let _ = process.wait().await;
             cleanup_script(&script_path);
+        });
+    }
+
+    #[test]
+    fn interrupt_wait_returns_after_flag_is_set() {
+        let runtime = Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let flag = AtomicBool::new(false);
+            let set_flag = async {
+                tokio::time::sleep(std::time::Duration::from_millis(75)).await;
+                flag.store(true, Ordering::SeqCst);
+            };
+
+            let started = std::time::Instant::now();
+            tokio::join!(wait_for_interrupt_flag(&flag), set_flag);
+
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(1),
+                "interrupt polling returned too slowly"
+            );
         });
     }
 

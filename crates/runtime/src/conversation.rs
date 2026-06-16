@@ -1834,4 +1834,64 @@ mod tests {
         assert!(runtime.estimated_tokens() < 5_000);
         assert!(runtime.session().messages.len() < 20);
     }
+
+    /// Regression: if the Anthropic executor receives `stop_reason: "end_turn"`
+    /// in a MessageDelta but the stream drops before the MessageStop event, the
+    /// executor now always overrides the stop_reason to "stream_truncated". This
+    /// ensures the conversation loop triggers a continuation instead of silently
+    /// returning partial output.
+    #[test]
+    fn stream_truncated_after_end_turn_triggers_continuation() {
+        struct PartialThenComplete {
+            calls: usize,
+        }
+
+        impl ApiClient for PartialThenComplete {
+            fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+                self.calls += 1;
+                match self.calls {
+                    1 => Ok(vec![
+                        // Simulates what the fixed executor emits when the
+                        // stream carries MessageDelta(stop_reason: "end_turn")
+                        // but drops before MessageStop arrives.
+                        AssistantEvent::TextDelta("half".to_string()),
+                        AssistantEvent::StopReason("stream_truncated".to_string()),
+                        AssistantEvent::MessageStop,
+                    ]),
+                    2 => {
+                        assert!(request.messages.iter().any(|m| {
+                            m.role == MessageRole::User
+                                && m.blocks.iter().any(|b| {
+                                    matches!(b, ContentBlock::Text { text }
+                                        if text.contains("Continue the unfinished task"))
+                                })
+                        }));
+                        Ok(vec![
+                            AssistantEvent::TextDelta("-done".to_string()),
+                            AssistantEvent::StopReason("end_turn".to_string()),
+                            AssistantEvent::MessageStop,
+                        ])
+                    }
+                    _ => Err(RuntimeError::new("unexpected extra call")),
+                }
+            }
+        }
+
+        let mut runtime = ConversationRuntime::new(
+            Session::new(),
+            PartialThenComplete { calls: 0 },
+            StaticToolExecutor::new(),
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            vec!["system".to_string()],
+        );
+
+        let summary = runtime
+            .run_turn("write something", None)
+            .expect("should continue after stream truncation");
+        assert_eq!(summary.iterations, 2, "must have sent a continuation turn");
+        let last_text = summary.assistant_messages.last().unwrap().blocks.iter().find_map(|b| {
+            if let ContentBlock::Text { text } = b { Some(text.as_str()) } else { None }
+        }).unwrap_or("");
+        assert_eq!(last_text, "-done");
+    }
 }

@@ -746,6 +746,93 @@ pub fn chat_status() -> ChatStatus {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ChatModelOption {
+    value: String,
+    label: String,
+    description: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatModelOptions {
+    provider: String,
+    current: String,
+    options: Vec<ChatModelOption>,
+}
+
+/// Models offered by the Chat header dropdown — only executors that have passed
+/// the Settings "Test" (the verified registry), so the dropdown never offers a
+/// model that would fail because its endpoint/key isn't configured. The active
+/// model is always included so the select reflects what is actually running.
+#[tauri::command]
+pub fn chat_model_options() -> ChatModelOptions {
+    let provider = config_string("executor_provider").unwrap_or_else(|| "anthropic".to_string());
+    let current =
+        config_string("executor_model").unwrap_or_else(|| aris_chat::DEFAULT_MODEL.to_string());
+
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut options: Vec<ChatModelOption> = Vec::new();
+    for (entry_provider, model, base_url) in crate::config::verified_executor_summaries() {
+        if model.trim().is_empty() || !seen.insert(model.clone()) {
+            continue;
+        }
+        let description = if base_url.is_empty() {
+            entry_provider
+        } else {
+            format!("{entry_provider} · {base_url}")
+        };
+        options.push(ChatModelOption {
+            value: model.clone(),
+            label: model,
+            description: Some(description),
+        });
+    }
+    // Surface the running model even if it predates the registry, so the select
+    // is never blank or stuck on a value that isn't an option.
+    if !current.trim().is_empty() && seen.insert(current.clone()) {
+        options.insert(
+            0,
+            ChatModelOption {
+                value: current.clone(),
+                label: current.clone(),
+                description: Some(format!("{provider} · current")),
+            },
+        );
+    }
+
+    ChatModelOptions {
+        provider,
+        current,
+        options,
+    }
+}
+
+/// Switch the executor to a verified model silently (no transcript turns),
+/// restoring its full provider/base-URL/key, and return refreshed status so the
+/// header updates immediately. Refuses models that have not been verified in
+/// Settings (the active model is allowed as a no-op).
+#[tauri::command]
+pub fn chat_model_set(model: String) -> Result<ChatStatus, String> {
+    let trimmed = model.trim();
+    if trimmed.is_empty() {
+        return Err("model id must not be empty".to_string());
+    }
+    let switched = crate::config::switch_to_verified_executor(trimmed)?;
+    if !switched {
+        let current = config_string("executor_model")
+            .unwrap_or_else(|| aris_chat::DEFAULT_MODEL.to_string());
+        if trimmed != current {
+            return Err(
+                "Only models verified in Settings can be selected. Test this model in Settings first."
+                    .to_string(),
+            );
+        }
+    }
+    Ok(chat_status())
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ChatCommandSpec {
     name: String,
     description: String,
@@ -1062,6 +1149,21 @@ pub async fn literature_agent_send_rich(
     run_literature_chat_turn(app, &state, session_id, user_message).await
 }
 
+/// Variant used by Studio review revisions. It intentionally shares
+/// Literature's restricted bash lane so an existing result can be modified
+/// from page-specific feedback, while multi-agent and worktree tools remain
+/// blocked.
+#[tauri::command]
+pub async fn studio_agent_send_rich(
+    app: AppHandle,
+    state: State<'_, ChatState>,
+    session_id: String,
+    request: ChatSendRequest,
+) -> Result<String, String> {
+    let user_message = user_message_from_request(request)?;
+    run_literature_chat_turn(app, &state, session_id, user_message).await
+}
+
 #[tauri::command]
 pub async fn chat_suggest_title(user: String, assistant: String) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || suggest_chat_title(&user, &assistant))
@@ -1200,6 +1302,7 @@ async fn run_chat_turn_with_context(
     full_tool_registry: bool,
 ) -> Result<String, String> {
     validate_session_id(&session_id)?;
+    runtime::clear_interrupt();
     let cancelled = Arc::new(AtomicBool::new(false));
     {
         let mut running = state
@@ -1386,6 +1489,7 @@ pub fn chat_cancel(state: State<ChatState>, session_id: String) -> Result<(), St
         .map_err(|_| "chat state poisoned".to_string())?;
     if let Some(cancelled) = running.get(&session_id) {
         cancelled.store(true, Ordering::SeqCst);
+        runtime::set_interrupt();
     }
     Ok(())
 }

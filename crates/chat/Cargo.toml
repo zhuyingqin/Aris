@@ -10,7 +10,7 @@ api = { path = "../api" }
 aris-executor = { path = "../executor" }
 runtime = { path = "../runtime" }
 serde_json = "1"
-tokio = { version = "1", features = ["rt", "time"] }
+tokio = { version = "1", features = ["macros", "rt", "time"] }
 tools = { path = "../tools" }
 
 [lints]

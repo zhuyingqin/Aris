@@ -89,6 +89,163 @@ pub fn config_get() -> ConfigView {
     build_view(&load_object())
 }
 
+fn save_object(obj: &Map<String, Value>) -> Result<(), String> {
+    let path = state::config_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let json =
+        serde_json::to_string_pretty(&Value::Object(obj.clone())).map_err(|e| e.to_string())?;
+    std::fs::write(&path, json).map_err(|e| e.to_string())
+}
+
+// ── Verified executor registry ──────────────────────────────────────────────
+//
+// Every executor config that passes the Settings "Test" is recorded here so the
+// Chat header dropdown can offer only models known to actually work. An entry
+// carries everything needed to *use* that model — provider, model id, base URL
+// and the key that passed — because verified models can live on different
+// endpoints with different keys, and switching must restore the full config.
+
+#[derive(Clone)]
+pub(crate) struct VerifiedExecutor {
+    pub provider: String,
+    pub model: String,
+    /// Empty string means "provider default endpoint".
+    pub base_url: String,
+    pub api_key: String,
+}
+
+fn parse_verified(value: &Value) -> Option<VerifiedExecutor> {
+    let obj = value.as_object()?;
+    let model = obj.get("model").and_then(Value::as_str)?.trim().to_string();
+    if model.is_empty() {
+        return None;
+    }
+    Some(VerifiedExecutor {
+        provider: obj
+            .get("provider")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string(),
+        model,
+        base_url: obj
+            .get("base_url")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string(),
+        api_key: obj
+            .get("api_key")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+    })
+}
+
+fn read_verified(obj: &Map<String, Value>) -> Vec<VerifiedExecutor> {
+    obj.get("verified_executors")
+        .and_then(Value::as_array)
+        .map(|arr| arr.iter().filter_map(parse_verified).collect())
+        .unwrap_or_default()
+}
+
+fn write_verified(obj: &mut Map<String, Value>, list: &[VerifiedExecutor]) {
+    let arr = list
+        .iter()
+        .map(|entry| {
+            let mut item = Map::new();
+            item.insert("provider".to_string(), Value::String(entry.provider.clone()));
+            item.insert("model".to_string(), Value::String(entry.model.clone()));
+            item.insert("base_url".to_string(), Value::String(entry.base_url.clone()));
+            item.insert("api_key".to_string(), Value::String(entry.api_key.clone()));
+            Value::Object(item)
+        })
+        .collect();
+    obj.insert("verified_executors".to_string(), Value::Array(arr));
+}
+
+/// Insert or update by `(provider, model, base_url)`; re-verifying refreshes the
+/// stored key without creating a duplicate entry.
+fn upsert_verified(list: &mut Vec<VerifiedExecutor>, entry: VerifiedExecutor) {
+    if let Some(existing) = list.iter_mut().find(|item| {
+        item.provider == entry.provider
+            && item.model == entry.model
+            && item.base_url == entry.base_url
+    }) {
+        existing.api_key = entry.api_key;
+    } else {
+        list.push(entry);
+    }
+}
+
+/// Record a verified executor after a successful Settings test. No-op if the
+/// model id or key is empty (an entry without a key could not be switched to).
+pub(crate) fn record_verified_executor(
+    provider: &str,
+    model: &str,
+    base_url: Option<&str>,
+    api_key: &str,
+) -> Result<(), String> {
+    let model = model.trim();
+    let api_key = api_key.trim();
+    if model.is_empty() || api_key.is_empty() {
+        return Ok(());
+    }
+    let mut obj = load_object();
+    let mut list = read_verified(&obj);
+    upsert_verified(
+        &mut list,
+        VerifiedExecutor {
+            provider: provider.trim().to_string(),
+            model: model.to_string(),
+            base_url: base_url.unwrap_or("").trim().to_string(),
+            api_key: api_key.to_string(),
+        },
+    );
+    write_verified(&mut obj, &list);
+    save_object(&obj)
+}
+
+/// `(provider, model, base_url)` for each verified executor — keys are never
+/// returned to the frontend.
+pub(crate) fn verified_executor_summaries() -> Vec<(String, String, String)> {
+    read_verified(&load_object())
+        .into_iter()
+        .map(|entry| (entry.provider, entry.model, entry.base_url))
+        .collect()
+}
+
+/// Restore the full executor config of a verified model. Returns `Ok(false)`
+/// when no verified entry matches the model id (caller decides how to react).
+pub(crate) fn switch_to_verified_executor(model: &str) -> Result<bool, String> {
+    let model = model.trim();
+    let mut obj = load_object();
+    let Some(entry) = read_verified(&obj)
+        .into_iter()
+        .find(|item| item.model == model)
+    else {
+        return Ok(false);
+    };
+    obj.insert(
+        "executor_provider".to_string(),
+        Value::String(entry.provider),
+    );
+    obj.insert("executor_model".to_string(), Value::String(entry.model));
+    if entry.base_url.is_empty() {
+        obj.remove("executor_base_url");
+    } else {
+        obj.insert(
+            "executor_base_url".to_string(),
+            Value::String(entry.base_url),
+        );
+    }
+    obj.insert("executor_api_key".to_string(), Value::String(entry.api_key));
+    save_object(&obj)?;
+    Ok(true)
+}
+
 #[derive(Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ConfigPatch {
@@ -181,14 +338,7 @@ fn apply_patch(obj: &mut Map<String, Value>, patch: ConfigPatch) {
 pub fn config_set(patch: ConfigPatch) -> Result<ConfigView, String> {
     let mut obj = load_object();
     apply_patch(&mut obj, patch);
-
-    let path = state::config_path();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    let json =
-        serde_json::to_string_pretty(&Value::Object(obj.clone())).map_err(|e| e.to_string())?;
-    std::fs::write(&path, json).map_err(|e| e.to_string())?;
+    save_object(&obj)?;
     apply_reviewer_environment_from(&obj, true);
     Ok(build_view(&obj))
 }
@@ -556,6 +706,17 @@ pub async fn config_test(patch: ConfigPatch) -> Result<ConfigTestResult, String>
         },
     };
 
+    // Record any executor that passes so the Chat header dropdown can offer it.
+    // Persists into the saved config without committing the rest of the unsaved
+    // form — only the verified registry is touched.
+    if executor.ok {
+        if let (Some(provider), Some(model)) = (executor.provider.clone(), executor.model.clone()) {
+            if let Some(key) = get_non_empty(&obj, "executor_api_key") {
+                let _ = record_verified_executor(&provider, &model, executor.base_url.as_deref(), &key);
+            }
+        }
+    }
+
     let reviewer = test_reviewer(&obj).await;
     let reviewer_ok = reviewer.as_ref().map(|detail| detail.ok).unwrap_or(true);
     let ok = executor.ok && reviewer_ok;
@@ -574,11 +735,72 @@ pub async fn config_test(patch: ConfigPatch) -> Result<ConfigTestResult, String>
 
 #[cfg(test)]
 mod tests {
-    use super::apply_reviewer_environment_from;
+    use super::{
+        apply_reviewer_environment_from, read_verified, upsert_verified, write_verified,
+        VerifiedExecutor,
+    };
     use serde_json::{Map, Value};
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn entry(provider: &str, model: &str, base_url: &str, key: &str) -> VerifiedExecutor {
+        VerifiedExecutor {
+            provider: provider.to_string(),
+            model: model.to_string(),
+            base_url: base_url.to_string(),
+            api_key: key.to_string(),
+        }
+    }
+
+    #[test]
+    fn upsert_refreshes_key_without_duplicating_same_endpoint() {
+        let mut list = vec![entry("openai", "MiniMax-M3", "https://api.minimaxi.com/v1", "k1")];
+        // Same (provider, model, base_url) → update key in place.
+        upsert_verified(
+            &mut list,
+            entry("openai", "MiniMax-M3", "https://api.minimaxi.com/v1", "k2"),
+        );
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].api_key, "k2");
+
+        // Same model id, different endpoint → distinct entry.
+        upsert_verified(
+            &mut list,
+            entry("openai", "MiniMax-M3", "https://other.example/v1", "k3"),
+        );
+        assert_eq!(list.len(), 2);
+    }
+
+    #[test]
+    fn verified_registry_round_trips_through_json() {
+        let mut obj = Map::new();
+        let list = vec![
+            entry("anthropic", "claude-opus-4-7", "", "ka"),
+            entry("openai", "gpt-5.5", "https://api.openai.com/v1", "kb"),
+        ];
+        write_verified(&mut obj, &list);
+        let parsed = read_verified(&obj);
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].model, "claude-opus-4-7");
+        assert_eq!(parsed[0].base_url, "");
+        assert_eq!(parsed[1].api_key, "kb");
+    }
+
+    #[test]
+    fn read_verified_skips_entries_without_a_model() {
+        let mut obj = Map::new();
+        obj.insert(
+            "verified_executors".to_string(),
+            Value::Array(vec![
+                serde_json::json!({ "provider": "openai", "base_url": "x", "api_key": "k" }),
+                serde_json::json!({ "provider": "openai", "model": "gpt-5.5", "api_key": "k" }),
+            ]),
+        );
+        let parsed = read_verified(&obj);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].model, "gpt-5.5");
+    }
 
     #[test]
     fn forced_reviewer_environment_marks_reviewer_disabled_after_clearing() {

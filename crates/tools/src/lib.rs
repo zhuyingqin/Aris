@@ -20,7 +20,9 @@ use runtime::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+pub mod knowledge;
 pub mod literature;
+pub mod studio;
 mod team_state;
 mod workflow_state;
 
@@ -327,6 +329,93 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                     "paperId": { "type": "string", "description": "Library paper id (e.g. arxiv:2602.01491) to mark as downloaded." }
                 },
                 "required": ["url", "fileName"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::WorkspaceWrite,
+        },
+        ToolSpec {
+            name: "KnowledgeSearch",
+            description: "Search the project's confirmed knowledge base (papers/knowledge.db) BEFORE re-searching literature or answering from memory. Returns user-confirmed knowledge points — each with its original question, answer, condensed statement, supporting evidence (paperId, page, quote, stable anchor ids) and 1-hop relations to other points. Cite evidence as [paperId p.PAGE] so the user can jump to the exact PDF page. Only confirmed knowledge is returned; if nothing matches, fall back to literature search.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "minLength": 1 },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 50 }
+                },
+                "required": ["query"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
+            name: "KnowledgeUpsert",
+            description: "Propose knowledge points into the project knowledge base (papers/knowledge.db). Points are always recorded as DRAFTS — this tool cannot confirm them. Confirmation happens only through the user's review UI ('AI generates, human filters'). Every point must keep its original question and answer plus a condensed statement, and carry at least one evidence anchor (paperId + page + quote). Drafts are not retrievable until the user confirms them.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "points": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": { "type": "string" },
+                                "question": { "type": "string" },
+                                "answer": { "type": "string" },
+                                "statement": { "type": "string" },
+                                "kind": { "type": "string" },
+                                "sourcePaperId": { "type": "string" },
+                                "evidence": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "paperId": { "type": "string" },
+                                            "page": { "type": "integer" },
+                                            "quote": { "type": "string" },
+                                            "role": { "type": "string" },
+                                            "annotationId": { "type": "string" },
+                                            "evidenceId": { "type": "string" }
+                                        },
+                                        "required": ["paperId"],
+                                        "additionalProperties": false
+                                    }
+                                },
+                                "relations": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "dstId": { "type": "string" },
+                                            "kind": { "type": "string" }
+                                        },
+                                        "required": ["dstId", "kind"],
+                                        "additionalProperties": false
+                                    }
+                                }
+                            },
+                            "required": ["question", "answer", "statement"],
+                            "additionalProperties": false
+                        }
+                    }
+                },
+                "required": ["points"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::WorkspaceWrite,
+        },
+        ToolSpec {
+            name: "StudioLibraryUpsert",
+            description: "Record externally generated slide decks, posters, and interactive HTML pages in the project's shared Studio review index (studio/library.json). Existing user title, pinned state, notes, and page-specific review feedback are preserved when generated metadata is refreshed. The result returns studioLinks; include the relevant link in the final response so the user can jump directly to the generated artifact in Studio.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "artifacts": {
+                        "type": "array",
+                        "items": { "type": "object" },
+                        "description": "Generated artifact records with kind (slides, poster, or web) and at least one result path (pdfPath, pptxPath, svgPath, texPath, or htmlPath). Use htmlPath for interactive web artifacts."
+                    }
+                },
+                "required": ["artifacts"],
                 "additionalProperties": false
             }),
             required_permission: PermissionMode::WorkspaceWrite,
@@ -807,6 +896,12 @@ pub fn execute_tool(name: &str, input: &Value) -> Result<String, String> {
             .and_then(literature::run_literature_library_upsert),
         "LiteraturePdfDownload" => from_value::<literature::LiteraturePdfDownloadInput>(input)
             .and_then(literature::run_literature_pdf_download),
+        "KnowledgeSearch" => from_value::<knowledge::KnowledgeSearchInput>(input)
+            .and_then(knowledge::run_knowledge_search),
+        "KnowledgeUpsert" => from_value::<knowledge::KnowledgeUpsertInput>(input)
+            .and_then(knowledge::run_knowledge_upsert),
+        "StudioLibraryUpsert" => from_value::<studio::StudioLibraryUpsertInput>(input)
+            .and_then(studio::run_studio_library_upsert),
         "TodoWrite" => from_value::<TodoWriteInput>(input).and_then(run_todo_write),
         "LlmReview" => from_value::<LlmReviewInput>(input).and_then(run_llm_review),
         "Skill" => from_value::<SkillInput>(input).and_then(run_skill),

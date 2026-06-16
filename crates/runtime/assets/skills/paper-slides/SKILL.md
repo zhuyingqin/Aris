@@ -269,7 +269,15 @@ Create `slides/main.tex` using beamer.
 
 % Packages
 \usepackage{graphicx,amsmath,booktabs}
+\usepackage{adjustbox}
 \graphicspath{{figures/}}
+
+% Safe TikZ wrapper: scales to fit column/page without absolute-coord overflow.
+% Usage: \fittikz{\begin{tikzpicture}...\end{tikzpicture}}
+% Inside \column{}: respects \linewidth (= column width, NOT \textwidth).
+% At page level: caps height at 0.65\textheight so content below is not pushed off.
+\newcommand{\fittikz}[1]{%
+  \adjustbox{max width=\linewidth, max totalheight=0.65\textheight}{#1}}
 
 % Speaker notes (if enabled)
 % \setbeameroption{show notes on second screen=right}
@@ -334,6 +342,16 @@ ln -sf ../paper/figures/*.png slides/figures/ 2>/dev/null
 - Frame numbers in bottom-right
 - Clean white background (no gradients, no decorative elements)
 
+**TikZ safety rules — violations produce `Overfull \hbox` / `\vbox` in the log (treated as blockers)**:
+
+| Rule | Why |
+|------|-----|
+| Every TikZ inside `\column{}` **must** use `\fittikz{}` or `\resizebox{\linewidth}{!}{}` | Absolute node coords routinely exceed the ~7.6 cm column width; `\linewidth` = column width, not `\textwidth` |
+| Full-width TikZ outside columns: `\resizebox{0.90\textwidth}{!}{}` | 0.95 clips on some viewers; leave a 5% margin for frame borders |
+| Label nodes near a nested `tikzpicture`: use named-node anchors (`[above=4pt of nodename]`) **not** hardcoded `(x,y)` in the outer picture | Inner node coordinates live in the inner coordinate system; outer-(x,y) labels silently land off-slide |
+| Never use `\large` or larger font inside `tabular` `p{}` columns | Fixed column width + larger font forces extra row height → vertical overflow |
+| Per-frame content budget: secbar 0.4 cm + frametitle 0.7 cm + footline 0.4 cm = 1.5 cm overhead → available ≈ **6.5 cm**; if content exceeds this, split the frame | Exceeding available height overflows `\vbox` silently — nothing is clipped in the source, only in the output PDF |
+
 ### Phase 4: Compile Slides
 
 ```bash
@@ -344,6 +362,29 @@ cd slides && latexmk -$ENGINE -interaction=nonstopmode main.tex
 1. Parse error log
 2. Fix: missing package, undefined command, file not found, overfull boxes
 3. Recompile
+
+**Mandatory layout audit** (run after every successful compile — overfull boxes are blockers, not warnings):
+
+```bash
+cd slides
+HBOX=$(grep -c "Overfull \\\\hbox" main.log 2>/dev/null || echo 0)
+VBOX=$(grep -c "Overfull \\\\vbox" main.log 2>/dev/null || echo 0)
+TOTAL=$((HBOX + VBOX))
+if [ "$TOTAL" -gt 0 ]; then
+  echo "❌ Layout errors: ${HBOX} horizontal overflow(s), ${VBOX} vertical overflow(s)"
+  echo "--- Overfull lines ---"
+  grep -n "Overfull" main.log | head -30
+  echo "Fix these before proceeding to Phase 5."
+  # Loop back to error handling: parse which frame/line, apply TikZ safety rules
+fi
+echo "✅ Layout clean: 0 overfull boxes."
+```
+
+**Common fixes for overfull boxes** (in priority order):
+- `\hbox` in a `\column`: wrap the TikZ with `\fittikz{}` or `\resizebox{\linewidth}{!}{}`
+- `\hbox` at page level: wrap with `\resizebox{0.90\textwidth}{!}{}`
+- `\vbox` on a frame: split the frame into two, or remove the `secbar` / footer if slide is plain
+- `\hbox` in a tabular: remove `\large`/`\Large` from inside `p{}` columns
 
 **Verification**:
 ```bash
@@ -613,6 +654,9 @@ needed (re-run `/paper-slides` instead).
 - **Opening hook matters**: Never start with "In this paper, we..." — start with the problem or a provocative question.
 - **Font size minimums**: Title ≥28pt, body ≥20pt, footnotes ≥14pt.
 - **Feishu notifications are optional.** If `~/.claude/feishu.json` exists, send notifications. If absent, skip.
+- **TikZ in columns: always use `\fittikz{}`**. Absolute node distances (e.g., `right=1cm of`, `minimum width=2.2cm`) inside `\column{0.5\textwidth}` routinely sum to >7.6 cm and overflow. No exceptions.
+- **`\linewidth` ≠ `\textwidth` inside columns.** Use `\linewidth` for anything that must fit within a `\column`; `\textwidth` spans the full slide width.
+- **Overfull boxes = blocker.** Any `Overfull \hbox` or `Overfull \vbox` in the compile log must be resolved before Phase 5. The mandatory audit in Phase 4 enforces this.
 
 ## Parameter Pass-Through
 

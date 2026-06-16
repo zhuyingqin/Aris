@@ -6,11 +6,16 @@ export const isTauri = (): boolean =>
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 import type {
   ChatCommandResult,
+  ChatModelOptions,
   ChatStatus,
   ConfigPatch,
   ConfigTestResult,
   ConfigView,
   DesktopCommandSpec,
+  ImBridgeActionResult,
+  ImBridgePatch,
+  ImBridgeTestResult,
+  ImBridgeView,
   McpConfigView,
   McpStdioServerInput,
   McpTestResult,
@@ -20,53 +25,11 @@ import type {
   SessionSummary,
   SessionTranscript,
   SkillMeta,
-  TeamSnapshot,
-  WorkflowApproval,
-  WorkflowControlAction,
-  WorkflowOutput,
 } from "../types";
 
 // ── Workflow commands ─────────────────────────────────────────────────────────
 
-export const workflowPlan = (script: string) =>
-  invoke<WorkflowOutput>("workflow_plan", { script });
-
-export const workflowList = () => invoke<WorkflowOutput>("workflow_list");
-
-export const workflowInspect = (id: string) =>
-  invoke<WorkflowOutput>("workflow_inspect", { id });
-
-export interface StartReq {
-  script: string;
-  approval: WorkflowApproval;
-  name?: string;
-  saveAs?: string;
-  maxConcurrency?: number;
-  maxAgents?: number;
-}
-
-export const workflowStart = (req: StartReq) =>
-  invoke<WorkflowOutput>("workflow_start", { req });
-
-export const workflowControl = (id: string, action: WorkflowControlAction) =>
-  invoke<WorkflowOutput>("workflow_control", { id, action });
-
-export const workflowSave = (name: string, script: string) =>
-  invoke<WorkflowOutput>("workflow_save", { name, script });
-
-export const workflowDiscover = () =>
-  invoke<WorkflowOutput>("workflow_discover");
-
 // ── Team / agent commands ─────────────────────────────────────────────────────
-
-export const teamList = (
-  team: string | null,
-  messages: boolean,
-  events: boolean,
-) => invoke<TeamSnapshot>("team_list", { team, messages, events });
-
-export const agentSupervisor = (action: string, agent?: string) =>
-  invoke<unknown>("agent_supervisor", { action, agent: agent ?? null });
 
 export const stateDir = () => invoke<string>("state_dir");
 export const projectsGet = () => invoke<ProjectView>("projects_get");
@@ -84,6 +47,17 @@ export const configSet = (patch: ConfigPatch) =>
   invoke<ConfigView>("config_set", { patch });
 export const configTest = (patch: ConfigPatch) =>
   invoke<ConfigTestResult>("config_test", { patch });
+export const imBridgeGet = () => invoke<ImBridgeView>("im_bridge_get");
+export const imBridgeSet = (patch: ImBridgePatch) =>
+  invoke<ImBridgeView>("im_bridge_set", { patch });
+export const imBridgeTestQq = (patch: ImBridgePatch) =>
+  invoke<ImBridgeTestResult>("im_bridge_test_qq", { patch });
+export const imBridgeStart = () =>
+  invoke<ImBridgeActionResult>("im_bridge_start");
+export const imBridgeStop = () =>
+  invoke<ImBridgeActionResult>("im_bridge_stop");
+export const imBridgeLogs = () =>
+  invoke<ImBridgeActionResult>("im_bridge_logs");
 export const projectPermissionGet = () =>
   invoke<PermissionModeView>("project_permission_get");
 export const projectPermissionSet = (mode: string) =>
@@ -159,6 +133,28 @@ export const literatureImageOcr = (image: number[]) =>
 export const literaturePdfOpen = (relativePath: string) =>
   invoke<void>("literature_pdf_open", { relativePath });
 
+// ── Studio artifacts ──────────────────────────────────────────────────────────
+
+export const studioLoad = <T>() => invoke<T>("studio_load");
+export const studioSave = <T>(library: T) =>
+  invoke<void>("studio_save", { library });
+export const studioHtml = (relativePath: string) =>
+  invoke<string>("studio_html", { relativePath });
+
+// ── Knowledge base ────────────────────────────────────────────────────────────
+
+export const knowledgeLoad = <T>() => invoke<T>("knowledge_load");
+export const knowledgeSearch = <T>(query: string, limit?: number) =>
+  invoke<T>("knowledge_search", { query, limit: limit ?? null });
+export const knowledgeUpsert = <T>(points: unknown[]) =>
+  invoke<T>("knowledge_upsert", { points });
+export const knowledgeConfirm = (kpId: string) =>
+  invoke<void>("knowledge_confirm", { kpId });
+export const knowledgeReject = (kpId: string) =>
+  invoke<boolean>("knowledge_reject", { kpId });
+export const knowledgeGenerate = <T>(paperId: string) =>
+  invoke<T>("knowledge_generate", { paperId });
+
 // ── File browser ─────────────────────────────────────────────────────────────
 
 export const fileSearch = (pattern: string, root?: string) =>
@@ -173,6 +169,10 @@ export const projectChatStarters = () => invoke<string[]>("project_chat_starters
 // ── Chat engine (P2) ──────────────────────────────────────────────────────────
 
 export const chatStatus = () => invoke<ChatStatus>("chat_status");
+export const chatModelOptions = () =>
+  invoke<ChatModelOptions>("chat_model_options");
+export const chatModelSet = (model: string) =>
+  invoke<ChatStatus>("chat_model_set", { model });
 export const chatPermissionGet = (sessionId: string) =>
   invoke<PermissionModeView>("chat_permission_get", { sessionId });
 export const chatPermissionSet = (sessionId: string, mode: string) =>
@@ -211,6 +211,10 @@ export const chatSend = (sessionId: string, message: string | ChatSendRequest) =
 export const literatureAgentSend = (sessionId: string, message: string | ChatSendRequest) => {
   const request = typeof message === "string" ? { text: message } : message;
   return invoke<string>("literature_agent_send_rich", { sessionId, request });
+};
+export const studioAgentSend = (sessionId: string, message: string | ChatSendRequest) => {
+  const request = typeof message === "string" ? { text: message } : message;
+  return invoke<string>("studio_agent_send_rich", { sessionId, request });
 };
 export const chatReset = (sessionId: string) =>
   invoke<void>("chat_reset", { sessionId });

@@ -2,18 +2,62 @@ mod commands;
 mod config;
 mod engine;
 mod files;
+mod im_bridge;
+mod knowledge;
 mod literature;
 mod mcp;
 mod process;
 mod projects;
 mod sessions;
 mod state;
+mod studio;
 mod watcher;
 
 use tauri::{image::Image, Manager};
 
+/// Extend the process PATH with common user-installed tool directories so that
+/// MCP stdio servers (node, npx, uvx, python, etc.) can be found when the app
+/// is launched from a desktop shortcut on Windows, which does not inherit the
+/// full shell PATH.
+#[cfg(windows)]
+fn augment_path_for_mcp() {
+    let home = runtime::home_dir();
+    let candidates = [
+        // Node.js via nvm-windows
+        format!("{home}\\AppData\\Roaming\\nvm\\current"),
+        // npm global prefix
+        format!("{home}\\AppData\\Roaming\\npm"),
+        // Node.js system-wide installer default
+        "C:\\Program Files\\nodejs".to_string(),
+        // uv / uvx (installed via `pip install uv` or standalone installer)
+        format!("{home}\\AppData\\Local\\uv\\bin"),
+        format!("{home}\\AppData\\Roaming\\uv\\bin"),
+        // pipx
+        format!("{home}\\AppData\\Local\\Packages\\PythonSoftwareFoundation.Python.3.12_qbz5n2kfra8p0\\LocalCache\\local-packages\\Python312\\Scripts"),
+        // Python Launcher / standard Python installs
+        format!("{home}\\AppData\\Local\\Programs\\Python\\Python312"),
+        format!("{home}\\AppData\\Local\\Programs\\Python\\Python311"),
+        format!("{home}\\AppData\\Local\\Programs\\Python\\Python310"),
+        // Scoop shims
+        format!("{home}\\scoop\\shims"),
+    ];
+    let existing = std::env::var("PATH").unwrap_or_default();
+    let mut extras: Vec<String> = candidates
+        .into_iter()
+        .filter(|p| std::path::Path::new(p).exists() && !existing.contains(p.as_str()))
+        .collect();
+    if !extras.is_empty() {
+        extras.push(existing);
+        std::env::set_var("PATH", extras.join(";"));
+    }
+}
+
+#[cfg(not(windows))]
+fn augment_path_for_mcp() {}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    augment_path_for_mcp();
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(engine::ChatState::default())
@@ -53,6 +97,12 @@ pub fn run() {
             config::config_get,
             config::config_set,
             config::config_test,
+            im_bridge::im_bridge_get,
+            im_bridge::im_bridge_set,
+            im_bridge::im_bridge_test_qq,
+            im_bridge::im_bridge_start,
+            im_bridge::im_bridge_stop,
+            im_bridge::im_bridge_logs,
             mcp::mcp_config_get,
             mcp::mcp_config_set,
             mcp::mcp_config_test,
@@ -73,7 +123,18 @@ pub fn run() {
             literature::literature_import_pdf,
             literature::literature_image_ocr,
             literature::literature_pdf_open,
+            studio::studio_load,
+            studio::studio_save,
+            studio::studio_html,
+            knowledge::knowledge_load,
+            knowledge::knowledge_search,
+            knowledge::knowledge_upsert,
+            knowledge::knowledge_confirm,
+            knowledge::knowledge_reject,
+            knowledge::knowledge_generate,
             engine::chat_status,
+            engine::chat_model_options,
+            engine::chat_model_set,
             engine::chat_permission_get,
             engine::chat_permission_set,
             engine::project_permission_get,
@@ -83,6 +144,7 @@ pub fn run() {
             engine::chat_send,
             engine::chat_send_rich,
             engine::literature_agent_send_rich,
+            engine::studio_agent_send_rich,
             engine::chat_suggest_title,
             engine::chat_reset,
             engine::chat_set_context,

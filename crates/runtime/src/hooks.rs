@@ -331,10 +331,18 @@ impl CommandWithStdin {
             }
         };
 
-        let stdout = stdout_reader.and_then(|h| h.join().ok()).unwrap_or_default();
-        let stderr = stderr_reader.and_then(|h| h.join().ok()).unwrap_or_default();
+        let stdout = stdout_reader
+            .and_then(|h| h.join().ok())
+            .unwrap_or_default();
+        let stderr = stderr_reader
+            .and_then(|h| h.join().ok())
+            .unwrap_or_default();
 
-        Ok(std::process::Output { status, stdout, stderr })
+        Ok(std::process::Output {
+            status,
+            stdout,
+            stderr,
+        })
     }
 }
 

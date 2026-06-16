@@ -317,9 +317,11 @@ impl ApiClient for AnthropicRuntimeClient {
             }) || pending_tool.is_some()
                 || pending_thinking.is_some();
             if !saw_stop && has_partial_output {
-                if stop_reason.is_none() {
-                    stop_reason = Some("stream_truncated".to_string());
-                }
+                // MessageStop was never received: the stream was cut short regardless
+                // of any stop_reason already recorded from a MessageDelta event.
+                // Always mark as truncated so the conversation loop sends a
+                // continuation prompt instead of silently returning partial output.
+                stop_reason = Some("stream_truncated".to_string());
                 observer.on_message_stop()?;
                 events.push(AssistantEvent::MessageStop);
             }

@@ -331,6 +331,30 @@ dependencies:
 - **CJK + math**: with `xelatex`, use `\usepackage[fontset=fandol]{ctex}` or
   set EA fonts explicitly. Mixed Chinese-English in titles needs the EA font
   hint or characters fall back to Latin.
+- **TikZ inside `\column` — horizontal overflow (`Overfull \hbox`)**: absolute
+  node positions (e.g., `minimum width=2.2cm`, `right=1cm of`, fixed x-coords)
+  sum up to more than the ~7.6 cm available in a `\column{0.5\textwidth}` on
+  16:9 beamer. Diagnosis: look for lines matching `Overfull \\hbox` in `.log`.
+  Fix: wrap the tikzpicture with
+  `\resizebox{\linewidth}{!}{\begin{tikzpicture}...\end{tikzpicture}}` or
+  define `\fittikz` via `adjustbox` (`\adjustbox{max width=\linewidth}{...}`).
+  Use `\linewidth`, not `\textwidth` — inside a column, `\linewidth` = column width.
+- **Nested tikzpicture label mismatch**: placing `\node at (x,y)` in an *outer*
+  tikzpicture to label a node inside an *inner* tikzpicture (pattern:
+  `\node at (-4.5,0){\begin{tikzpicture}...\end{tikzpicture}};` followed by
+  `\node at (-1.75,-3.5){label}`) requires manually computing the inner node's
+  outer-coordinate projection, which is almost always wrong. Symptom: label
+  appears in the wrong position or is clipped off-slide. Fix: move the label
+  inside the inner tikzpicture and use a named-node anchor:
+  `\node[below=4pt of <inner-node-name>, font=\scriptsize]{label};`
+- **Full-width TikZ — horizontal overflow**: use `\resizebox{0.90\textwidth}{!}{}`
+  not `0.95` — frame borders consume the extra 5% and clip the diagram on some
+  PDF viewers. Apply to timelines, pipeline diagrams, and any TikZ placed
+  outside `columns` environments.
+- **`\large` / `\Large` inside `p{}` tabular cells — vertical overflow
+  (`Overfull \vbox`)**: `p{Xcm}` fixes the column *width*; a larger font
+  increases row *height*, pushing the table below the frame boundary. Fix:
+  remove the outer `\large` / change it to `\normalsize` or `\small`.
 
 ### Phase 3: PPTX-Side Polish
 

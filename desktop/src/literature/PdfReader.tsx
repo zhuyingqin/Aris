@@ -70,6 +70,8 @@ interface PendingAnnotation {
 interface PdfReaderProps {
   relativePath: string;
   initialPage?: number;
+  /** Change this value to request another jump even when initialPage is unchanged. */
+  pageRequestKey?: string | number;
   annotations: PdfAnnotation[];
   focusedAnnotationId?: string | null;
   onOpenExternal: () => void;
@@ -91,6 +93,12 @@ interface PdfReaderProps {
   onDeleteAnnotation: (annotationId: string) => void;
   /** One-shot LLM call (reuses the literature Chat backend). */
   onRunAi: (system: string, prompt: string) => Promise<string>;
+  /** Hide annotation and AI affordances when used as a read-only preview. */
+  readOnly?: boolean;
+  /** Report the visible page so review surfaces can attach page-level notes. */
+  onPageChange?: (page: number) => void;
+  /** Report the page count after the PDF is loaded. */
+  onDocumentLoaded?: (pageCount: number) => void;
 }
 
 interface HighlightBox {
@@ -738,6 +746,7 @@ function AnnotationEditor({
 export default function PdfReader({
   relativePath,
   initialPage = 1,
+  pageRequestKey,
   annotations,
   focusedAnnotationId,
   onOpenExternal,
@@ -745,6 +754,9 @@ export default function PdfReader({
   onUpdateAnnotation,
   onDeleteAnnotation,
   onRunAi,
+  readOnly = false,
+  onPageChange,
+  onDocumentLoaded,
 }: PdfReaderProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const slotRefs = useRef<Array<HTMLDivElement | null>>([]);
@@ -789,6 +801,7 @@ export default function PdfReader({
   const activeHighlightAnnotation = activeHighlight
     ? annotations.find((annotation) => annotation.id === activeHighlight.id) ?? null
     : null;
+  const annotationsVisible = showAnnotations && !readOnly;
 
   // Clicking an existing highlight opens its quick popover — clear any other floating UI.
   const handleHighlightActivate = useCallback((annotationId: string, anchor: HighlightAnchor) => {
@@ -858,6 +871,14 @@ export default function PdfReader({
     };
   }, [relativePath]);
 
+  useEffect(() => {
+    if (numPages > 0) onDocumentLoaded?.(numPages);
+  }, [numPages, onDocumentLoaded]);
+
+  useEffect(() => {
+    if (numPages > 0) onPageChange?.(currentPage);
+  }, [currentPage, numPages, onPageChange]);
+
   // ── Container width for fit-to-width ─────────────────────────────────────────
   useEffect(() => {
     const container = containerRef.current;
@@ -923,7 +944,7 @@ export default function PdfReader({
   // ── Jump to page / focused annotation ────────────────────────────────────────
   useEffect(() => {
     if (document) scrollToPage(Math.max(1, initialPage));
-  }, [document, initialPage, scrollToPage]);
+  }, [document, initialPage, pageRequestKey, scrollToPage]);
 
   useEffect(() => {
     if (!document || !focusedAnnotationId) return;
@@ -944,6 +965,7 @@ export default function PdfReader({
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
+    if (readOnly) return;
 
     const onMouseUp = () => {
       if (pendingAnnotation) return;
@@ -989,7 +1011,7 @@ export default function PdfReader({
 
     container.addEventListener("mouseup", onMouseUp);
     return () => container.removeEventListener("mouseup", onMouseUp);
-  }, [pendingAnnotation]);
+  }, [pendingAnnotation, readOnly]);
 
   // ── Dismiss selection popup on click outside ──────────────────────────────────
   useEffect(() => {
@@ -1128,21 +1150,23 @@ export default function PdfReader({
         </div>
 
         <div className="lit-pdf-toolbar-right">
-          <button
-            type="button"
-            className={showAnnotations ? "active" : ""}
-            onClick={() => setShowAnnotations((v) => !v)}
-            title="切换标注侧栏"
-          >
-            标注{annotations.length > 0 ? ` · ${annotations.length}` : ""}
-          </button>
+          {!readOnly && (
+            <button
+              type="button"
+              className={annotationsVisible ? "active" : ""}
+              onClick={() => setShowAnnotations((v) => !v)}
+              title="切换标注侧栏"
+            >
+              标注{annotations.length > 0 ? ` · ${annotations.length}` : ""}
+            </button>
+          )}
           <button type="button" onClick={onOpenExternal}>
             系统阅读器
           </button>
         </div>
       </div>
 
-      <div className="lit-pdf-reader-body">
+      <div className={`lit-pdf-reader-body${annotationsVisible ? " with-annotations" : ""}`}>
         <div className="lit-pdf-scroll" ref={containerRef}>
           {loading && <div className="lit-pdf-state">正在加载 PDF…</div>}
           {error && <div className="lit-pdf-state error">PDF 加载失败：{error}</div>}
@@ -1214,7 +1238,7 @@ export default function PdfReader({
           />
         )}
 
-        {showAnnotations && (
+        {annotationsVisible && (
           <aside
             ref={sidebarRef}
             className="lit-pdf-annotations"

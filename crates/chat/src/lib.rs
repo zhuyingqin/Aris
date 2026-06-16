@@ -5,8 +5,9 @@ use std::time::{Duration, Instant};
 
 use api::AuthSource;
 use runtime::{
-    scoped_mcp_config_hash, ContentBlock, ManagedMcpTool, McpServerManager, PermissionMode,
-    PermissionPolicy, PromptBuildError, Session, ToolError, ToolExecutor, TurnSummary,
+    is_interrupted, scoped_mcp_config_hash, ContentBlock, ManagedMcpTool, McpServerManager,
+    PermissionMode, PermissionPolicy, PromptBuildError, Session, ToolError, ToolExecutor,
+    TurnSummary,
 };
 use serde_json::{Map, Value};
 
@@ -251,6 +252,12 @@ where
             return self.inner.execute_with_id(tool_use_id, tool_name, input);
         }
 
+        // Respect the global interrupt flag before committing to a potentially
+        // long-running MCP call (e.g. a hanging Playwright browser session).
+        if is_interrupted() {
+            return Err(ToolError::new("interrupted by user"));
+        }
+
         let arguments = serde_json::from_str(input)
             .map_err(|error| ToolError::new(format!("invalid MCP tool input JSON: {error}")))?;
         let runtime = self
@@ -261,9 +268,25 @@ where
             .manager
             .as_mut()
             .ok_or_else(|| ToolError::new("MCP manager is not available"))?;
+        // Use select! so that clicking Stop (which sets the global interrupt flag)
+        // cancels a hanging MCP call within ~200 ms rather than waiting for the
+        // full per-server request timeout (default 300 s).
         let response = runtime
-            .block_on(manager.call_tool(tool_name, Some(arguments)))
-            .map_err(|error| ToolError::new(error.to_string()))?;
+            .block_on(async {
+                tokio::select! {
+                    result = manager.call_tool(tool_name, Some(arguments)) => {
+                        result.map_err(|error| ToolError::new(error.to_string()))
+                    }
+                    _ = async {
+                        loop {
+                            tokio::time::sleep(Duration::from_millis(200)).await;
+                            if is_interrupted() { break; }
+                        }
+                    } => {
+                        Err(ToolError::new("interrupted by user"))
+                    }
+                }
+            })?;
 
         if let Some(error) = response.error {
             return Err(ToolError::new(format!(

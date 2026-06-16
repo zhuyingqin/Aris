@@ -3,12 +3,36 @@ import type { ChatBlock, ChatTurn } from "../types";
 import { fileOpen } from "../api/tauri";
 import MarkdownContent, { ThinkBlock } from "./MarkdownContent";
 import { textFromTurn } from "./model";
+import { useStore } from "../store";
 
 const FILE_WRITE_TOOLS = new Set(["write_file", "edit_file", "str_replace_based_edit_tool"]);
 
 interface FileChange {
   path: string;
   diff: string;
+}
+
+interface StudioLink {
+  id: string;
+  title: string;
+  href: string;
+}
+
+function studioLinksFromTool(block: Extract<ChatBlock, { kind: "tool" }>): StudioLink[] {
+  if (block.name !== "StudioLibraryUpsert" || block.isError || !block.output) return [];
+  try {
+    const output = JSON.parse(block.output) as { studioLinks?: unknown };
+    if (!Array.isArray(output.studioLinks)) return [];
+    return output.studioLinks.filter((link): link is StudioLink => {
+      if (!link || typeof link !== "object") return false;
+      const value = link as Partial<StudioLink>;
+      return typeof value.id === "string"
+        && typeof value.title === "string"
+        && typeof value.href === "string";
+    });
+  } catch {
+    return [];
+  }
 }
 
 function parseInput(input: string): Record<string, unknown> {
@@ -63,6 +87,9 @@ function CopyButton({ text }: { text: string }) {
 function ToolCall({ block }: { block: Extract<ChatBlock, { kind: "tool" }> }) {
   const [open, setOpen] = useState(false);
   const change = useMemo(() => diffFromTool(block), [block]);
+  const studioLinks = useMemo(() => studioLinksFromTool(block), [block]);
+  const setTab = useStore((state) => state.setTab);
+  const setPendingStudioArtifactId = useStore((state) => state.setPendingStudioArtifactId);
   const running = block.output === undefined;
   const status = running ? "Running" : block.isError ? "Failed" : change ? "Modified file" : "Succeeded";
   const className = running ? "tool-running" : block.isError ? "tool-error" : change ? "tool-change" : "tool-done";
@@ -103,6 +130,22 @@ function ToolCall({ block }: { block: Extract<ChatBlock, { kind: "tool" }> }) {
         )}
         {!running && <span className="tool-collapse-btn">{open ? "▾" : "▸"}</span>}
       </div>
+      {studioLinks.length > 0 && (
+        <div className="chat-tool-studio-links">
+          {studioLinks.map((link) => (
+            <button
+              key={link.id}
+              type="button"
+              onClick={() => {
+                setPendingStudioArtifactId(link.id);
+                setTab("studio");
+              }}
+            >
+              Open {link.title} in Studio
+            </button>
+          ))}
+        </div>
+      )}
       {open && (
         <div className="chat-tool-body">
           {change ? (

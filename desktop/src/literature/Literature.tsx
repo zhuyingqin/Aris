@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { literatureLlm } from "../api/tauri";
 import { useStore } from "../store";
+import Knowledge from "../knowledge/KnowledgeReview";
 import MathText from "./MathText";
 import PdfReader from "./PdfReader";
 import { useLiteratureStore } from "./literatureStore";
@@ -17,6 +18,7 @@ import {
 import "./Literature.css";
 
 type SortKey = "added" | "fit" | "year" | "title" | "citations";
+type LiteraturePageView = "library" | "graph";
 
 const TAG_COLORS = ["amber", "blue", "green", "purple", "accent"];
 function tagColorClass(tag: string): string {
@@ -169,6 +171,7 @@ export default function Literature() {
   const setError = useLiteratureStore((s) => s.setError);
 
   const [view, setView] = useState("all");
+  const [pageView, setPageView] = useState<LiteraturePageView>("library");
   const [filter, setFilter] = useState("");
   const [sort, setSort] = useState<SortKey>("added");
   const [checked, setChecked] = useState<Set<string>>(new Set());
@@ -564,6 +567,7 @@ export default function Literature() {
                 { id: "reader", label: "PDF 阅读器" },
                 { id: "notes", label: "Review LLM 判断" },
                 { id: "evidence", label: "证据" },
+                { id: "knowledge", label: "知识点" },
                 { id: "files", label: "文件" },
               ] as Array<{ id: DetailTab; label: string }>
             ).map((t) => (
@@ -645,6 +649,7 @@ export default function Literature() {
                 }}
               />
             )}
+            {workspaceTab === "knowledge" && <Knowledge mode="paper" initialPaperId={selectedPaper.id} />}
             {workspaceTab === "files" && (
               <WorkspaceFiles
                 paper={selectedPaper}
@@ -676,14 +681,23 @@ export default function Literature() {
     <div className="lit-page">
       {/* Header */}
       <header className="lit-header">
-        <div className="lit-header-title">
-          <div className="lit-header-name">Literature Workflow</div>
-          <div className="lit-header-sub">Screen, understand, and convert papers into evidence.</div>
-        </div>
-
-        <div className="lit-workspace-label">
-          {currentProject ? currentProject.name : "ARIS Desktop Workspace"}
-          <span className="lit-workspace-caret">▾</span>
+        <div className="lit-mode-switch" role="tablist" aria-label="文献视图切换">
+          {([
+            { id: "library", label: "文献库", icon: "☰" },
+            { id: "graph", label: "知识图谱", icon: "⌘" },
+          ] as Array<{ id: LiteraturePageView; label: string; icon: string }>).map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              role="tab"
+              aria-selected={pageView === item.id}
+              className={`lit-mode-tab${pageView === item.id ? " active" : ""}`}
+              onClick={() => setPageView(item.id)}
+            >
+              <span aria-hidden="true">{item.icon}</span>
+              {item.label}
+            </button>
+          ))}
         </div>
       </header>
 
@@ -697,26 +711,28 @@ export default function Literature() {
         </div>
       )}
 
-      <SearchStrip
-        query={remoteQuery}
-        sources={remoteSources}
-        searching={searching}
-        onQueryChange={setRemoteQuery}
-        onToggleSource={(source) =>
-          setRemoteSources((current) =>
-            current.includes(source)
-              ? current.filter((entry) => entry !== source)
-              : [...current, source],
-          )
-        }
-        onSearch={() => void runRemoteSearch(remoteQuery, remoteSources)}
-        onCreateReview={() => {
-          setReviewQuestion(remoteQuery);
-          setReviewPanelOpen(true);
-        }}
-      />
+      {pageView === "library" && (
+        <SearchStrip
+          query={remoteQuery}
+          sources={remoteSources}
+          searching={searching}
+          onQueryChange={setRemoteQuery}
+          onToggleSource={(source) =>
+            setRemoteSources((current) =>
+              current.includes(source)
+                ? current.filter((entry) => entry !== source)
+                : [...current, source],
+            )
+          }
+          onSearch={() => void runRemoteSearch(remoteQuery, remoteSources)}
+          onCreateReview={() => {
+            setReviewQuestion(remoteQuery);
+            setReviewPanelOpen(true);
+          }}
+        />
+      )}
 
-      {reviewPanelOpen && (
+      {pageView === "library" && reviewPanelOpen && (
         <ReviewWorkflowPanel
           tasks={library.reviewTasks}
           activeTaskId={activeReviewTaskId}
@@ -742,7 +758,11 @@ export default function Literature() {
         />
       )}
 
-      {selectedPaper && workspaceTab === "reader" && selectedPaper.pdf.path ? (
+      {pageView === "graph" ? (
+        <div className="lit-knowledge-shell">
+          <Knowledge mode="globalGraph" />
+        </div>
+      ) : selectedPaper && workspaceTab === "reader" && selectedPaper.pdf.path ? (
         <div className="lit-reading-shell">
           <div className="lit-reading-bar">
             <button
@@ -766,6 +786,7 @@ export default function Literature() {
                   { id: "overview", label: "概览" },
                   { id: "notes", label: "Review LLM 判断" },
                   { id: "evidence", label: "证据" },
+                  { id: "knowledge", label: "知识点" },
                   { id: "files", label: "文件" },
                 ] as Array<{ id: DetailTab; label: string }>
               ).map((t) => (

@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { fileSearch, isTauri } from "../api/tauri";
-import type { ChatAttachment, DesktopCommandSpec, SkillMeta } from "../types";
+import type { ChatAttachment, DesktopCommandSpec, PermissionModeView, SkillMeta } from "../types";
 import { fuzzyMatch, fuzzyScore, makeId } from "./model";
 
 const RECENT_SKILLS_KEY = "aris-chat-recent-skills";
@@ -172,6 +172,40 @@ export async function attachmentFromFile(file: File): Promise<ChatAttachment> {
   };
 }
 
+const PERMISSION_OPTIONS = [
+  { value: "read-only", label: "Plan" },
+  { value: "workspace-write", label: "Accept edits" },
+  { value: "danger-full-access", label: "Bypass permissions" },
+];
+
+function ContextRing({ used, max }: { used: number; max: number }) {
+  const pct = max > 0 ? Math.min(1, used / max) : 0;
+  const radius = 9;
+  const circ = 2 * Math.PI * radius;
+  const dash = pct * circ;
+  const stroke = pct < 0.5 ? "var(--green)" : pct < 0.8 ? "var(--amber)" : "var(--red)";
+  const label = used === 0 ? "0%" : pct < 0.01 ? "<1%" : `${Math.round(pct * 100)}%`;
+  const usedK = used >= 1000 ? `${(used / 1000).toFixed(0)}k` : String(used);
+  const maxK = max >= 1000 ? `${(max / 1000).toFixed(0)}k` : String(max);
+  return (
+    <div className="ctx-ring" title={`Context window: ${label} used (${usedK} / ${maxK} tokens est.)`}>
+      <svg width="22" height="22" viewBox="0 0 22 22" aria-hidden="true">
+        <circle cx="11" cy="11" r={radius} fill="none" stroke="var(--border)" strokeWidth="2.5" />
+        {pct > 0 && (
+          <circle
+            cx="11" cy="11" r={radius}
+            fill="none" stroke={stroke} strokeWidth="2.5"
+            strokeDasharray={`${dash} ${circ}`}
+            strokeLinecap="round"
+            transform="rotate(-90 11 11)"
+          />
+        )}
+      </svg>
+      <span className="ctx-ring-label">{label}</span>
+    </div>
+  );
+}
+
 interface Props {
   input: string;
   commands: DesktopCommandSpec[];
@@ -187,6 +221,16 @@ interface Props {
   onCancelEdit: () => void;
   onHeightChange: (height: number) => void;
   focusRequest?: number;
+  permission?: PermissionModeView | null;
+  permissionBusy?: boolean;
+  onPermissionChange?: (mode: string) => void;
+  modelName?: string | null;
+  modelOptions?: { value: string; label: string }[];
+  modelBusy?: boolean;
+  canSwitchModel?: boolean;
+  onModelChange?: (model: string) => void;
+  contextUsed?: number;
+  contextMax?: number | null;
 }
 
 export default function ChatComposer({
@@ -204,6 +248,16 @@ export default function ChatComposer({
   onCancelEdit,
   onHeightChange,
   focusRequest = 0,
+  permission,
+  permissionBusy,
+  onPermissionChange,
+  modelName,
+  modelOptions,
+  modelBusy,
+  canSwitchModel,
+  onModelChange,
+  contextUsed,
+  contextMax,
 }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const pickerScrollRef = useRef<HTMLDivElement>(null);
@@ -215,6 +269,10 @@ export default function ChatComposer({
   const [pickerQuery, setPickerQuery] = useState("");
   const [fileResults, setFileResults] = useState<string[]>([]);
   const [dragging, setDragging] = useState(false);
+  const [permMenuOpen, setPermMenuOpen] = useState(false);
+  const [modelMenuOpen, setModelMenuOpen] = useState(false);
+  const permMenuRef = useRef<HTMLDivElement>(null);
+  const modelMenuRef = useRef<HTMLDivElement>(null);
   const fileSearchVersion = useRef(0);
   const recentSkills = loadRecent(RECENT_SKILLS_KEY);
   const recentFiles = loadRecent(RECENT_FILES_KEY);
@@ -304,6 +362,20 @@ export default function ChatComposer({
     observer.observe(wrapRef.current);
     return () => observer.disconnect();
   }, [onHeightChange]);
+
+  useEffect(() => {
+    if (!permMenuOpen && !modelMenuOpen) return;
+    const handler = (e: MouseEvent) => {
+      if (permMenuOpen && permMenuRef.current && !permMenuRef.current.contains(e.target as Node)) {
+        setPermMenuOpen(false);
+      }
+      if (modelMenuOpen && modelMenuRef.current && !modelMenuRef.current.contains(e.target as Node)) {
+        setModelMenuOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [permMenuOpen, modelMenuOpen]);
 
   useEffect(() => {
     const version = ++fileSearchVersion.current;
@@ -573,7 +645,37 @@ export default function ChatComposer({
           }}
         />
         <div className="chat-input-footer">
-          <div className="chat-input-left">
+          <div className="chat-footer-left">
+            {permission != null && onPermissionChange && (
+              <div className="chat-pill-wrap" ref={permMenuRef}>
+                <button
+                  className={`chat-pill chat-perm-pill chat-perm-${permission.mode}`}
+                  onClick={() => setPermMenuOpen((v) => !v)}
+                  disabled={permissionBusy || busy}
+                  title={permission.description ?? "Permission mode"}
+                >
+                  {permission.label}
+                  <span className="chat-pill-chevron">▾</span>
+                </button>
+                {permMenuOpen && (
+                  <div className="chat-pill-menu" role="menu">
+                    {PERMISSION_OPTIONS.map((opt) => (
+                      <button
+                        key={opt.value}
+                        className={`chat-pill-menu-item${permission.mode === opt.value ? " active" : ""}`}
+                        role="menuitem"
+                        onClick={() => {
+                          void onPermissionChange(opt.value);
+                          setPermMenuOpen(false);
+                        }}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
             <button
               type="button"
               className="chat-upload-btn"
@@ -584,24 +686,54 @@ export default function ChatComposer({
             >
               +
             </button>
-            <div className="chat-input-hints">
-              <span><kbd>/</kbd> Commands and skills</span>
-              <span><kbd>@</kbd> Files</span>
-              <span className="chat-input-shortcut">Drop files · Paste images · Shift+Enter newline</span>
-            </div>
           </div>
-          {busy ? (
-            <button className="chat-send-btn chat-stop-btn" onClick={onStop} aria-label="Stop response">■</button>
-          ) : (
-            <button
-              className="chat-send-btn"
-              onClick={onSubmit}
-              disabled={!canSubmit}
-              aria-label={editing ? "Resend edited message" : "Send message"}
-            >
-              ↑
-            </button>
-          )}
+          <div className="chat-footer-right">
+            {contextMax != null && contextMax > 0 && (
+              <ContextRing used={contextUsed ?? 0} max={contextMax} />
+            )}
+            {modelName && (
+              <div className="chat-pill-wrap" ref={modelMenuRef}>
+                <button
+                  className="chat-pill chat-model-pill"
+                  onClick={() => { if (canSwitchModel) setModelMenuOpen((v) => !v); }}
+                  disabled={modelBusy || busy || !canSwitchModel}
+                  title={canSwitchModel ? "Switch model" : "Active model"}
+                >
+                  {modelName}
+                  {canSwitchModel && <span className="chat-pill-chevron">▾</span>}
+                </button>
+                {modelMenuOpen && modelOptions && modelOptions.length > 0 && (
+                  <div className="chat-pill-menu chat-pill-menu-right" role="menu">
+                    {modelOptions.map((opt) => (
+                      <button
+                        key={opt.value}
+                        className={`chat-pill-menu-item${modelName === opt.value ? " active" : ""}`}
+                        role="menuitem"
+                        onClick={() => {
+                          void onModelChange?.(opt.value);
+                          setModelMenuOpen(false);
+                        }}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+            {busy ? (
+              <button className="chat-send-btn chat-stop-btn" onClick={onStop} aria-label="Stop response">■</button>
+            ) : (
+              <button
+                className="chat-send-btn"
+                onClick={onSubmit}
+                disabled={!canSubmit}
+                aria-label={editing ? "Resend edited message" : "Send message"}
+              >
+                ↑
+              </button>
+            )}
+          </div>
         </div>
       </div>
     </div>

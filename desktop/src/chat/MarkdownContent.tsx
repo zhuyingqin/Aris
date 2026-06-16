@@ -4,6 +4,7 @@ import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
 import "highlight.js/styles/github-dark.css";
 import { fileOpen } from "../api/tauri";
+import { useStore } from "../store";
 
 interface Segment {
   kind: "text" | "think";
@@ -89,6 +90,14 @@ function decodeLocalHref(href: string): string {
   }
 }
 
+export function studioArtifactIdFromHref(href: string): string | null {
+  const normalized = href.replace(/^\.\//, "");
+  const prefix = "studio/artifact/";
+  if (!normalized.startsWith(prefix)) return null;
+  const encoded = normalized.slice(prefix.length).split(/[?#]/, 1)[0];
+  return encoded ? decodeLocalHref(encoded) : null;
+}
+
 function MarkdownLink({
   href,
   children,
@@ -96,6 +105,25 @@ function MarkdownLink({
   href?: string;
   children?: React.ReactNode;
 }) {
+  const setTab = useStore((state) => state.setTab);
+  const setPendingStudioArtifactId = useStore((state) => state.setPendingStudioArtifactId);
+  const studioArtifactId = href ? studioArtifactIdFromHref(href) : null;
+  if (studioArtifactId) {
+    return (
+      <a
+        href={href}
+        className="md-link md-studio-link"
+        title="Open result in Studio"
+        onClick={(event) => {
+          event.preventDefault();
+          setPendingStudioArtifactId(studioArtifactId);
+          setTab("studio");
+        }}
+      >
+        {children}
+      </a>
+    );
+  }
   if (!href || isExternalHref(href)) {
     return <a href={href} target="_blank" rel="noreferrer" className="md-link">{children}</a>;
   }

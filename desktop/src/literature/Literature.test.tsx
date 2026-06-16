@@ -19,6 +19,12 @@ const mocks = vi.hoisted(() => ({
   literaturePdfText: vi.fn(),
   literaturePdfImages: vi.fn(),
   literaturePdfBytes: vi.fn(),
+  knowledgeLoad: vi.fn(),
+  knowledgeSearch: vi.fn(),
+  knowledgeUpsert: vi.fn(),
+  knowledgeConfirm: vi.fn(),
+  knowledgeReject: vi.fn(),
+  knowledgeGenerate: vi.fn(),
   chatRunCommand: vi.fn(),
   literatureAgentSend: vi.fn(),
   onChatDone: vi.fn(),
@@ -40,6 +46,12 @@ vi.mock("../api/tauri", () => ({
   literaturePdfOpen: mocks.literaturePdfOpen,
   literaturePdfText: mocks.literaturePdfText,
   literaturePdfBytes: mocks.literaturePdfBytes,
+  knowledgeLoad: mocks.knowledgeLoad,
+  knowledgeSearch: mocks.knowledgeSearch,
+  knowledgeUpsert: mocks.knowledgeUpsert,
+  knowledgeConfirm: mocks.knowledgeConfirm,
+  knowledgeReject: mocks.knowledgeReject,
+  knowledgeGenerate: mocks.knowledgeGenerate,
   chatRunCommand: mocks.chatRunCommand,
   literatureAgentSend: mocks.literatureAgentSend,
   onChatDone: mocks.onChatDone,
@@ -63,6 +75,7 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 
 import Literature from "./Literature";
 import { resetLiteratureStore, useLiteratureStore } from "./literatureStore";
+import { resetKnowledgeStore } from "../knowledge/knowledgeStore";
 import { useStore } from "../store";
 
 let chatDoneHandler: ((text: string) => void) | null = null;
@@ -106,6 +119,7 @@ const fixtureLibrary = (): LiteratureLibrary => ({
 
 beforeEach(() => {
   resetLiteratureStore();
+  resetKnowledgeStore();
   useStore.setState({ tab: "literature", pendingChatInput: null, pendingChatRunInput: null });
   chatDoneHandler = null;
   chatToolHandler = null;
@@ -201,6 +215,12 @@ beforeEach(() => {
   mocks.literaturePdfText.mockReset().mockRejectedValue(new Error("no pdf text"));
   mocks.literaturePdfImages.mockReset().mockRejectedValue(new Error("no pdf page images"));
   mocks.literaturePdfBytes.mockReset().mockRejectedValue(new Error("no pdf bytes"));
+  mocks.knowledgeLoad.mockReset().mockResolvedValue({ points: [] });
+  mocks.knowledgeSearch.mockReset().mockResolvedValue({ results: [] });
+  mocks.knowledgeUpsert.mockReset().mockResolvedValue({ ids: [] });
+  mocks.knowledgeConfirm.mockReset().mockResolvedValue(undefined);
+  mocks.knowledgeReject.mockReset().mockResolvedValue(true);
+  mocks.knowledgeGenerate.mockReset().mockResolvedValue({ candidates: [] });
   mocks.chatRunCommand.mockReset().mockResolvedValue({
     handled: true,
     message: null,
@@ -252,6 +272,37 @@ describe("Literature library", () => {
 
     expect(await screen.findByText("当前元数据源未提供摘要。可尝试重新检索或从论文页面补充元数据。")).toBeTruthy();
     expect(screen.getByText("缺失")).toBeTruthy();
+  });
+
+  it("opens the global knowledge graph from the Literature-level switch", async () => {
+    const user = userEvent.setup();
+    const withEvidence = fixtureLibrary();
+    withEvidence.papers[0].evidence = [{
+      id: "ev-graph",
+      page: 2,
+      quote: "grounded graph quote",
+      note: "Global graph evidence node.",
+      source: "text",
+    }];
+    mocks.literatureLoad.mockResolvedValue(withEvidence);
+
+    render(<Literature />);
+    await screen.findAllByText("Persisted Paper on Grounded Reading");
+
+    expect(screen.queryByText("Literature Workflow")).toBeNull();
+    expect(screen.queryByText("Screen, understand, and convert papers into evidence.")).toBeNull();
+    expect(screen.queryByRole("tab", { name: "知识库" })).toBeNull();
+    expect(screen.getByRole("tab", { name: "知识点" })).toBeTruthy();
+
+    await user.click(screen.getByRole("tab", { name: "知识图谱" }));
+
+    const graph = await screen.findByLabelText("知识图谱");
+    expect(within(graph).queryByText("Global graph evidence node.")).toBeNull();
+    expect(screen.queryByRole("button", { name: /生成知识点/ })).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "显示知识节点" }));
+    expect(within(graph).getByText("Global graph evidence node.")).toBeTruthy();
+    expect(screen.queryByText("Paper Workspace")).toBeNull();
   });
 
   it("allows the paper workspace selection to be cleared", async () => {

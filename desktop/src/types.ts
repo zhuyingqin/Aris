@@ -1,94 +1,4 @@
-// TypeScript mirrors of the JSON shapes emitted by crates/tools.
-// Source of truth: crates/tools/src/workflow_state.rs + team_state.rs.
-
-export type WorkflowRunStatus =
-  | "approval_required"
-  | "running"
-  | "paused"
-  | "stopped"
-  | "completed"
-  | "failed";
-
-export type WorkflowPhaseStatus =
-  | "pending"
-  | "running"
-  | "waiting"
-  | "completed"
-  | "failed";
-
-export type WorkflowApproval = "allow_once" | "always" | "deny";
-
-export type WorkflowControlAction = "pause" | "resume" | "stop" | "restart";
-
-export interface WorkflowPhase {
-  phaseId: string;
-  name: string;
-  status: WorkflowPhaseStatus;
-  agentIds: string[];
-}
-
-export interface WorkflowAgentRun {
-  agentId: string;
-  name: string;
-  description: string;
-  status: string;
-}
-
-export interface WorkflowCacheEntry {
-  key: string;
-  value: string;
-  createdAt: number;
-}
-
-export interface WorkflowRun {
-  version: number;
-  runId: string;
-  name: string;
-  leadSession: string;
-  status: WorkflowRunStatus;
-  scriptPath: string;
-  savedScriptPath?: string | null;
-  maxConcurrency: number;
-  maxAgents: number;
-  phases: WorkflowPhase[];
-  agents: WorkflowAgentRun[];
-  result?: string | null;
-  completedCache: WorkflowCacheEntry[];
-  createdAt: number;
-  updatedAt: number;
-}
-
-export interface WorkflowAgentSpec {
-  description: string;
-  prompt: string;
-  subagentType?: string | null;
-  name?: string | null;
-  model?: string | null;
-}
-
-export interface WorkflowPlan {
-  phases: string[];
-  agents: WorkflowAgentSpec[];
-  waits: number;
-  finalResult?: string | null;
-  rawScript: string;
-}
-
-export interface SavedWorkflow {
-  name: string;
-  path: string;
-  scope: string;
-}
-
-export interface WorkflowOutput {
-  stateDir: string;
-  action: string;
-  run?: WorkflowRun | null;
-  runs: WorkflowRun[];
-  plan?: WorkflowPlan | null;
-  savedWorkflows: SavedWorkflow[];
-  message?: string | null;
-}
+// Shared JSON shapes used by the desktop frontend.
 
 export interface DesktopCommandSpec {
   name: string;
@@ -135,71 +45,6 @@ export interface RunEvent {
   messageId?: string | null;
   workflowRunId?: string | null;
   payload: unknown;
-}
-
-export interface MailboxMessage {
-  messageId: string;
-  teamId?: string;
-  from: string;
-  to: string;
-  subject?: string | null;
-  body: string;
-  taskId?: string | null;
-  status?: string;
-  createdAt?: number;
-}
-
-export interface TaskVerification {
-  status: "passed" | "failed" | "needs_judgment";
-  reviewer?: string | null;
-  summary?: string;
-  verifiedAt?: number;
-}
-
-export interface TeamTask {
-  taskId: string;
-  teamId?: string;
-  title: string;
-  body?: string;
-  status?: string;
-  claimedBy?: string | null;
-  dependencies?: string[];
-  result?: string | null;
-  verification?: TaskVerification | null;
-  createdAt?: number;
-  updatedAt?: number;
-}
-
-export interface AgentManifestView {
-  agentId: string;
-  name: string;
-  description: string;
-  subagentType?: string | null;
-  model?: string | null;
-  status: string;
-  outputFile: string;
-  manifestFile: string;
-  createdAt: string;
-  startedAt?: string | null;
-  completedAt?: string | null;
-  error?: string | null;
-  usage?: unknown;
-}
-
-export interface TeamState {
-  teamId?: string;
-  name?: string;
-  members?: unknown[];
-  [key: string]: unknown;
-}
-
-export interface TeamSnapshot {
-  stateDir: string;
-  team: TeamState;
-  tasks: TeamTask[];
-  mailbox: MailboxMessage[];
-  agents: AgentManifestView[];
-  events: RunEvent[];
 }
 
 // ── Settings / Skills / Sessions (P1) ─────────────────────────────────────────
@@ -250,6 +95,56 @@ export interface ConfigTestResult {
   message: string;
   executor: ConfigTestDetail;
   reviewer?: ConfigTestDetail | null;
+}
+
+export interface ImBridgeView {
+  configPath: string;
+  skillDir?: string | null;
+  daemonPath?: string | null;
+  configured: boolean;
+  running: boolean;
+  pid?: number | null;
+  channels: string[];
+  runtime: string;
+  enabled: boolean;
+  defaultWorkdir: string;
+  arisPath: string;
+  qqAppId: string;
+  hasQqAppSecret: boolean;
+  qqAppSecretMasked?: string | null;
+  qqAllowedUsers: string;
+  qqImageEnabled: boolean;
+  qqMaxImageSize: number;
+  autoApprove: boolean;
+  statusMessage: string;
+  recentLog?: string | null;
+}
+
+export interface ImBridgePatch {
+  enabled?: boolean;
+  runtime?: string;
+  defaultWorkdir?: string;
+  arisPath?: string;
+  qqAppId?: string;
+  qqAppSecret?: string;
+  qqAllowedUsers?: string;
+  qqImageEnabled?: boolean;
+  qqMaxImageSize?: number;
+  autoApprove?: boolean;
+}
+
+export interface ImBridgeTestResult {
+  ok: boolean;
+  tokenOk: boolean;
+  gatewayOk: boolean;
+  message: string;
+}
+
+export interface ImBridgeActionResult {
+  ok: boolean;
+  message: string;
+  output: string;
+  view: ImBridgeView;
 }
 
 export interface PermissionModeView {
@@ -345,6 +240,18 @@ export interface ChatStatus {
   message?: string | null;
   contextWindow?: number | null;
   memoryFiles?: number | null;
+}
+
+export interface ChatModelOption {
+  value: string;
+  label: string;
+  description?: string | null;
+}
+
+export interface ChatModelOptions {
+  provider: string;
+  current: string;
+  options: ChatModelOption[];
 }
 
 // Ordered blocks within an assistant turn – rendered in arrival order so
