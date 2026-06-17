@@ -2,8 +2,8 @@
 //!
 //! Operates on the raw JSON object (snake_case keys, matching aris-cli's
 //! `ArisConfig`) so unmodelled fields (e.g. `meta_logging`) survive a round trip,
-//! and so the schema can't drift. API keys are never returned to the frontend —
-//! only a masked preview + a "has key" flag.
+//! and so the schema can't drift. API keys are masked in the normal view; raw
+//! values are exposed only through the explicit, allow-listed reveal command.
 
 use api::AuthSource;
 use serde::{Deserialize, Serialize};
@@ -49,6 +49,7 @@ pub struct VerifiedSummary {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConfigView {
+    pub app_version: String,
     pub config_path: String,
     pub executor_provider: Option<String>,
     pub executor_model: Option<String>,
@@ -75,6 +76,7 @@ fn build_view(obj: &Map<String, Value>) -> ConfigView {
     let rev_key = get_str(obj, "reviewer_api_key").filter(|k| !k.is_empty());
     let scopus_key = get_str(obj, "scopus_api_key").filter(|k| !k.is_empty());
     ConfigView {
+        app_version: env!("CARGO_PKG_VERSION").to_string(),
         config_path: state::config_path().display().to_string(),
         executor_provider: get_str(obj, "executor_provider"),
         executor_model: get_str(obj, "executor_model"),
@@ -107,6 +109,17 @@ fn build_view(obj: &Map<String, Value>) -> ConfigView {
 #[tauri::command]
 pub fn config_get() -> ConfigView {
     build_view(&load_object())
+}
+
+#[tauri::command]
+pub fn config_secret_get(kind: String) -> Result<Option<String>, String> {
+    let key = match kind.as_str() {
+        "executorApiKey" | "executor_api_key" => "executor_api_key",
+        "reviewerApiKey" | "reviewer_api_key" => "reviewer_api_key",
+        "scopusApiKey" | "scopus_api_key" => "scopus_api_key",
+        _ => return Err(format!("Unsupported secret field: {kind}")),
+    };
+    Ok(get_non_empty(&load_object(), key))
 }
 
 fn save_object(obj: &Map<String, Value>) -> Result<(), String> {

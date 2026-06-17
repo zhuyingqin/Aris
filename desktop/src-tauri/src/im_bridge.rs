@@ -90,9 +90,13 @@ fn skill_dir_candidates() -> Vec<PathBuf> {
     let home = PathBuf::from(runtime::home_dir());
     vec![
         home.join(".codex").join("skills").join("claude-to-im"),
-        home.join(".codex").join("skills").join("Claude-to-IM-skill"),
+        home.join(".codex")
+            .join("skills")
+            .join("Claude-to-IM-skill"),
         home.join(".claude").join("skills").join("claude-to-im"),
-        home.join(".claude").join("skills").join("Claude-to-IM-skill"),
+        home.join(".claude")
+            .join("skills")
+            .join("Claude-to-IM-skill"),
     ]
 }
 
@@ -126,8 +130,16 @@ fn aris_executable_name() -> &'static str {
 }
 
 fn push_aris_candidates(root: &Path, out: &mut Vec<PathBuf>) {
-    out.push(root.join("target").join("release").join(aris_executable_name()));
-    out.push(root.join("target").join("debug").join(aris_executable_name()));
+    out.push(
+        root.join("target")
+            .join("release")
+            .join(aris_executable_name()),
+    );
+    out.push(
+        root.join("target")
+            .join("debug")
+            .join(aris_executable_name()),
+    );
 }
 
 fn aris_path_candidates(workdir: &str) -> Vec<PathBuf> {
@@ -252,7 +264,9 @@ fn mask_secret(value: &str) -> String {
 fn redact(text: &str, map: &BTreeMap<String, String>) -> String {
     let mut out = text.to_string();
     for (key, value) in map {
-        if value.len() > 3 && (key.contains("SECRET") || key.contains("TOKEN") || key.contains("KEY")) {
+        if value.len() > 3
+            && (key.contains("SECRET") || key.contains("TOKEN") || key.contains("KEY"))
+        {
             out = out.replace(value, &mask_secret(value));
         }
     }
@@ -472,10 +486,7 @@ fn build_view(projects: &ProjectState) -> ImBridgeView {
             .get("CTI_QQ_APP_SECRET")
             .filter(|value| !value.trim().is_empty())
             .map(|value| mask_secret(value)),
-        qq_allowed_users: map
-            .get("CTI_QQ_ALLOWED_USERS")
-            .cloned()
-            .unwrap_or_default(),
+        qq_allowed_users: map.get("CTI_QQ_ALLOWED_USERS").cloned().unwrap_or_default(),
         qq_image_enabled: bool_value(&map, "CTI_QQ_IMAGE_ENABLED", true),
         qq_max_image_size: u32_value(&map, "CTI_QQ_MAX_IMAGE_SIZE", 20),
         auto_approve: bool_value(&map, "CTI_AUTO_APPROVE", false),
@@ -540,6 +551,18 @@ pub(crate) fn stop_on_app_exit() {
 #[tauri::command]
 pub fn im_bridge_get(projects: State<ProjectState>) -> ImBridgeView {
     build_view(&projects)
+}
+
+#[tauri::command]
+pub fn im_bridge_secret_get(kind: String) -> Result<Option<String>, String> {
+    let key = match kind.as_str() {
+        "qqAppSecret" | "qq_app_secret" => "CTI_QQ_APP_SECRET",
+        _ => return Err(format!("Unsupported IM bridge secret field: {kind}")),
+    };
+    Ok(read_env_map()
+        .get(key)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty()))
 }
 
 #[tauri::command]

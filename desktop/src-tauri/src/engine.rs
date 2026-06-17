@@ -148,6 +148,12 @@ struct DesktopToolExecutor<T> {
     inner: T,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ToolOutputArtifact {
+    path: String,
+    bytes: u64,
+}
+
 impl<T> ToolExecutor for DesktopToolExecutor<T>
 where
     T: ToolExecutor,
@@ -167,10 +173,13 @@ where
         }
         match self.inner.execute_with_id(tool_use_id, tool_name, input) {
             Ok(output) => {
-                let context_output = compact_tool_output_for_context(tool_name, output);
+                let artifact = persist_tool_output_if_large(tool_use_id, tool_name, &output);
+                let context_output =
+                    compact_tool_output_for_context(tool_name, output, artifact.as_ref());
+                let ui_output = tool_output_for_ui(&context_output, artifact.as_ref());
                 let _ = self.app.emit(
                     "chat-tool-result",
-                    json!({ "sessionId": self.session_id, "id": tool_use_id, "name": tool_name, "output": truncate(&context_output, 4000), "isError": false }),
+                    json!({ "sessionId": self.session_id, "id": tool_use_id, "name": tool_name, "output": ui_output, "isError": false }),
                 );
                 Ok(context_output)
             }
@@ -411,34 +420,263 @@ fn truncate(text: &str, max: usize) -> String {
         text.to_string()
     } else {
         let head: String = text.chars().take(max).collect();
-        format!("{head}… (+{} more chars)", text.chars().count() - max)
+        format!("{head}...(+{} more chars)", text.chars().count() - max)
     }
 }
 
-/// Compact a tool's raw output before it enters the LLM context so the
-/// conversation history doesn't overflow the model's context window.
-///
-/// - `Skill` — not touched: the LLM needs the full SKILL.md to execute correctly.
-/// - `LiteratureSearch` — abstracts trimmed to 250 chars, papers capped at 15.
-/// - Everything else — hard cap at 12,000 chars with a note if trimmed.
-fn compact_tool_output_for_context(tool_name: &str, output: String) -> String {
+const MAX_CONTEXT_TOOL_OUTPUT_CHARS: usize = 64_000;
+const MAX_UI_TOOL_OUTPUT_CHARS: usize = 64_000;
+const TOOL_OUTPUT_ARTIFACT_THRESHOLD_CHARS: usize = 64_000;
+const SHELL_STREAM_CONTEXT_CHARS: usize = 48_000;
+
+fn compact_tool_output_for_context(
+    tool_name: &str,
+    output: String,
+    artifact: Option<&ToolOutputArtifact>,
+) -> String {
     match tool_name {
         "Skill" => output,
-        "LiteratureSearch" => compact_literature_search_output(output),
-        _ => {
-            const MAX: usize = 12_000;
-            if output.len() <= MAX {
-                output
-            } else {
-                let head: String = output.chars().take(MAX).collect();
-                format!(
-                    "{head}\n[…output truncated: {} chars total, first {} shown]",
-                    output.len(),
-                    MAX
+        "LiteratureSearch" => compact_text_output_for_limit(
+            compact_literature_search_output(output),
+            artifact,
+            MAX_CONTEXT_TOOL_OUTPUT_CHARS,
+            "tool output",
+        ),
+        "bash" | "PowerShell" => {
+            if output.chars().count() <= MAX_CONTEXT_TOOL_OUTPUT_CHARS && artifact.is_none() {
+                return output;
+            }
+            compact_shell_json_tool_output(&output, artifact).unwrap_or_else(|| {
+                compact_text_output_for_limit(
+                    output,
+                    artifact,
+                    MAX_CONTEXT_TOOL_OUTPUT_CHARS,
+                    "tool output",
                 )
+            })
+        }
+        _ => compact_text_output_for_limit(
+            output,
+            artifact,
+            MAX_CONTEXT_TOOL_OUTPUT_CHARS,
+            "tool output",
+        ),
+    }
+}
+
+fn tool_output_for_ui(output: &str, artifact: Option<&ToolOutputArtifact>) -> String {
+    compact_text_output_for_limit(
+        output.to_string(),
+        artifact,
+        MAX_UI_TOOL_OUTPUT_CHARS,
+        "tool output preview",
+    )
+}
+
+fn persist_tool_output_if_large(
+    tool_use_id: &str,
+    tool_name: &str,
+    output: &str,
+) -> Option<ToolOutputArtifact> {
+    if output.chars().count() <= TOOL_OUTPUT_ARTIFACT_THRESHOLD_CHARS {
+        return None;
+    }
+    let dir = crate::state::workspace_dir().join(".aris").join("tool-output");
+    if let Err(error) = fs::create_dir_all(&dir) {
+        eprintln!("aris desktop: could not create tool-output dir: {error}");
+        return None;
+    }
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default();
+    let name = sanitize_output_file_component(tool_name);
+    let id = if tool_use_id.trim().is_empty() {
+        "tool".to_string()
+    } else {
+        sanitize_output_file_component(tool_use_id)
+    };
+    let path = dir.join(format!("{millis}-{name}-{id}.txt"));
+    if let Err(error) = fs::write(&path, output.as_bytes()) {
+        eprintln!("aris desktop: could not persist tool output: {error}");
+        return None;
+    }
+    Some(ToolOutputArtifact {
+        path: path.display().to_string(),
+        bytes: output.len() as u64,
+    })
+}
+
+fn sanitize_output_file_component(value: &str) -> String {
+    let mut out = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    while out.contains("__") {
+        out = out.replace("__", "_");
+    }
+    let trimmed = out.trim_matches('_');
+    let compact = if trimmed.is_empty() { "tool" } else { trimmed };
+    compact.chars().take(48).collect()
+}
+
+fn compact_shell_json_tool_output(
+    output: &str,
+    artifact: Option<&ToolOutputArtifact>,
+) -> Option<String> {
+    let mut base = serde_json::from_str::<serde_json::Value>(output).ok()?;
+    insert_output_artifact_fields(&mut base, artifact);
+
+    for stream_limit in [SHELL_STREAM_CONTEXT_CHARS, 24_000, 12_000, 4_000] {
+        let mut candidate = base.clone();
+        let truncated = compact_shell_stream_fields(&mut candidate, stream_limit, artifact);
+        if truncated {
+            if let Some(object) = candidate.as_object_mut() {
+                object.insert("truncatedForContext".to_string(), serde_json::Value::Bool(true));
             }
         }
+        let rendered = serde_json::to_string_pretty(&candidate).ok()?;
+        if rendered.chars().count() <= MAX_CONTEXT_TOOL_OUTPUT_CHARS {
+            return Some(rendered);
+        }
     }
+    None
+}
+
+fn insert_output_artifact_fields(
+    value: &mut serde_json::Value,
+    artifact: Option<&ToolOutputArtifact>,
+) {
+    let Some(artifact) = artifact else {
+        return;
+    };
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+    object.insert(
+        "persistedOutputPath".to_string(),
+        serde_json::Value::String(artifact.path.clone()),
+    );
+    object.insert("persistedOutputSize".to_string(), json!(artifact.bytes));
+    if !object
+        .get("rawOutputPath")
+        .is_some_and(|value| !value.is_null())
+    {
+        object.insert(
+            "rawOutputPath".to_string(),
+            serde_json::Value::String(artifact.path.clone()),
+        );
+    }
+}
+
+fn compact_shell_stream_fields(
+    value: &mut serde_json::Value,
+    max_stream_chars: usize,
+    artifact: Option<&ToolOutputArtifact>,
+) -> bool {
+    let mut truncated = false;
+    for key in ["stdout", "stderr"] {
+        truncated |= compact_json_string_field(value, key, max_stream_chars, artifact);
+    }
+    truncated
+}
+
+fn compact_json_string_field(
+    value: &mut serde_json::Value,
+    key: &str,
+    max_chars: usize,
+    artifact: Option<&ToolOutputArtifact>,
+) -> bool {
+    let Some(object) = value.as_object_mut() else {
+        return false;
+    };
+    let Some(current) = object
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned)
+    else {
+        return false;
+    };
+    let (next, truncated) = compact_stream_text(&current, max_chars, key, artifact);
+    if truncated {
+        object.insert(key.to_string(), serde_json::Value::String(next));
+    }
+    truncated
+}
+
+fn compact_stream_text(
+    value: &str,
+    max_chars: usize,
+    stream_name: &str,
+    artifact: Option<&ToolOutputArtifact>,
+) -> (String, bool) {
+    let total = value.chars().count();
+    if total <= max_chars {
+        return (value.to_string(), false);
+    }
+    let marker = format!(
+        "\n\n[ARIS truncated {stream_name}: {total} chars total. {}]\n\n",
+        full_output_note(artifact)
+    );
+    (compact_edges(value, max_chars, &marker), true)
+}
+
+fn compact_text_output_for_limit(
+    output: String,
+    artifact: Option<&ToolOutputArtifact>,
+    max_chars: usize,
+    label: &str,
+) -> String {
+    let total = output.chars().count();
+    if total <= max_chars {
+        return output;
+    }
+    let marker = format!(
+        "\n\n[ARIS truncated this {label}: {total} chars total. {}]\n\n",
+        full_output_note(artifact)
+    );
+    compact_edges(&output, max_chars, &marker)
+}
+
+fn compact_edges(value: &str, max_chars: usize, marker: &str) -> String {
+    let marker_chars = marker.chars().count();
+    let available = max_chars.saturating_sub(marker_chars);
+    if available == 0 {
+        return marker.to_string();
+    }
+    let head_chars = available.saturating_mul(3) / 4;
+    let tail_chars = available.saturating_sub(head_chars);
+    let head = value.chars().take(head_chars).collect::<String>();
+    let tail = value
+        .chars()
+        .rev()
+        .take(tail_chars)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect::<String>();
+    format!("{head}{marker}{tail}")
+}
+
+fn full_output_note(artifact: Option<&ToolOutputArtifact>) -> String {
+    artifact.map_or_else(
+        || {
+            "Use a narrower command, pagination, or redirect output to a file to inspect omitted content."
+                .to_string()
+        },
+        |artifact| {
+            format!(
+                "Full output saved to {} ({} bytes).",
+                artifact.path, artifact.bytes
+            )
+        },
+    )
 }
 
 fn compact_literature_search_output(output: String) -> String {
@@ -625,7 +863,10 @@ pub fn project_permission_get() -> PermissionModeView {
 }
 
 #[tauri::command]
-pub fn project_permission_set(mode: String) -> Result<PermissionModeView, String> {
+pub fn project_permission_set(
+    state: State<ChatState>,
+    mode: String,
+) -> Result<PermissionModeView, String> {
     let mode = normalize_permission_mode(&mode)
         .ok_or_else(|| format!("unsupported permission mode `{mode}`"))?;
     let path = project_permission_path()?;
@@ -653,6 +894,7 @@ pub fn project_permission_set(mode: String) -> Result<PermissionModeView, String
     let content =
         serde_json::to_string_pretty(&Value::Object(root)).map_err(|error| error.to_string())?;
     std::fs::write(&path, format!("{content}\n")).map_err(|error| error.to_string())?;
+    sync_permission_modes_to_project_default(&state, mode)?;
     Ok(permission_mode_view(mode))
 }
 
@@ -815,14 +1057,23 @@ fn permission_mode_for(state: &ChatState, session_id: &str) -> Result<Permission
 }
 
 fn configured_default_permission_mode() -> PermissionMode {
-    let configured = std::env::current_dir()
+    std::env::current_dir()
         .ok()
-        .and_then(|cwd| ConfigLoader::default_for(&cwd).load().ok())
+        .as_deref()
+        .map(configured_default_permission_mode_for)
+        .unwrap_or(PermissionMode::DangerFullAccess)
+}
+
+fn configured_default_permission_mode_for(cwd: &Path) -> PermissionMode {
+    let configured = ConfigLoader::default_for(cwd)
+        .load()
+        .ok()
         .and_then(|config| config.permission_mode());
     match configured {
         Some(ResolvedPermissionMode::ReadOnly) => PermissionMode::ReadOnly,
-        Some(ResolvedPermissionMode::WorkspaceWrite) | None => PermissionMode::WorkspaceWrite,
+        Some(ResolvedPermissionMode::WorkspaceWrite) => PermissionMode::WorkspaceWrite,
         Some(ResolvedPermissionMode::DangerFullAccess) => PermissionMode::DangerFullAccess,
+        None => PermissionMode::DangerFullAccess,
     }
 }
 
@@ -836,6 +1087,20 @@ fn set_permission_mode_for(
         .lock()
         .map_err(|_| "chat state poisoned".to_string())?
         .insert(session_id, mode);
+    Ok(())
+}
+
+fn sync_permission_modes_to_project_default(
+    state: &ChatState,
+    mode: PermissionMode,
+) -> Result<(), String> {
+    let mut modes = state
+        .permission_modes
+        .lock()
+        .map_err(|_| "chat state poisoned".to_string())?;
+    for cached_mode in modes.values_mut() {
+        *cached_mode = mode;
+    }
     Ok(())
 }
 
@@ -3221,6 +3486,64 @@ mod tests {
     }
 
     #[test]
+    fn ui_keeps_moderate_tool_output_intact() {
+        let output = "x".repeat(10_000);
+        let rendered = tool_output_for_ui(&output, None);
+
+        assert_eq!(rendered, output);
+        assert!(!rendered.contains("ARIS truncated"));
+    }
+
+    #[test]
+    fn shell_output_under_context_limit_stays_intact() {
+        let raw = serde_json::to_string_pretty(&json!({
+            "stdout": "x".repeat(20_000),
+            "stderr": "",
+            "rawOutputPath": null,
+            "interrupted": false
+        }))
+        .expect("json");
+
+        let compacted = compact_tool_output_for_context("bash", raw.clone(), None);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&compacted).expect("tool result remains json");
+
+        assert_eq!(compacted, raw);
+        assert_eq!(parsed["stdout"].as_str().unwrap().chars().count(), 20_000);
+        assert!(!compacted.contains("ARIS truncated"));
+    }
+
+    #[test]
+    fn huge_shell_output_preserves_json_and_full_output_path() {
+        let stdout = format!("start{}end", "x".repeat(90_000));
+        let raw = serde_json::to_string_pretty(&json!({
+            "stdout": stdout,
+            "stderr": "",
+            "rawOutputPath": null,
+            "interrupted": false
+        }))
+        .expect("json");
+        let artifact = ToolOutputArtifact {
+            path: "C:\\tmp\\aris-output.txt".to_string(),
+            bytes: raw.len() as u64,
+        };
+
+        let compacted = compact_tool_output_for_context("bash", raw, Some(&artifact));
+        let parsed: serde_json::Value =
+            serde_json::from_str(&compacted).expect("compacted tool result remains json");
+        let compacted_stdout = parsed["stdout"].as_str().expect("stdout string");
+
+        assert!(compacted.chars().count() <= MAX_CONTEXT_TOOL_OUTPUT_CHARS);
+        assert!(compacted_stdout.starts_with("start"));
+        assert!(compacted_stdout.ends_with("end"));
+        assert!(compacted_stdout.contains("ARIS truncated stdout"));
+        assert_eq!(parsed["persistedOutputPath"], artifact.path);
+        assert_eq!(parsed["rawOutputPath"], artifact.path);
+        assert_eq!(parsed["persistedOutputSize"], artifact.bytes);
+        assert_eq!(parsed["truncatedForContext"], true);
+    }
+
+    #[test]
     fn desktop_permission_aliases_match_claude_code_settings() {
         assert_eq!(
             normalize_permission_mode("plan"),
@@ -3241,6 +3564,40 @@ mod tests {
         assert_eq!(
             normalize_permission_mode("prompt"),
             Some(PermissionMode::Prompt)
+        );
+    }
+
+    #[test]
+    fn desktop_permission_defaults_to_dont_ask_without_config() {
+        let dir = std::env::temp_dir().join(format!(
+            "aris-permission-default-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).expect("temp dir");
+
+        assert_eq!(
+            configured_default_permission_mode_for(&dir),
+            PermissionMode::DangerFullAccess
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn project_permission_sync_replaces_stale_session_modes() {
+        let state = ChatState::default();
+        set_permission_mode_for(&state, "chat-a".to_string(), PermissionMode::WorkspaceWrite)
+            .expect("set initial permission");
+
+        sync_permission_modes_to_project_default(&state, PermissionMode::DangerFullAccess)
+            .expect("sync permission");
+
+        assert_eq!(
+            permission_mode_for(&state, "chat-a").expect("permission mode"),
+            PermissionMode::DangerFullAccess
         );
     }
 

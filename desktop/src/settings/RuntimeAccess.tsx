@@ -21,6 +21,14 @@ const PERMISSIONS = [
   { mode: "danger-full-access", label: "Don't ask", description: "Allow shell, agents, workflows, and MCP" },
 ];
 
+const isWindows =
+  typeof navigator !== "undefined" && /win/i.test(navigator.userAgent);
+
+const playwrightArgs = () => [
+  isWindows ? "--browser=msedge" : "--browser=chrome",
+  "--caps=pdf",
+];
+
 const PRESETS: Record<string, McpStdioServerInput> = {
   codex: {
     name: "codex",
@@ -35,6 +43,13 @@ const PRESETS: Record<string, McpStdioServerInput> = {
     args: ["mcp", "serve"],
     env: {},
     requestTimeoutSecs: 300,
+  },
+  playwright: {
+    name: "playwright",
+    command: isWindows ? "cmd" : "aris-playwright-mcp",
+    args: isWindows ? ["/c", "aris-playwright-mcp.cmd", ...playwrightArgs()] : playwrightArgs(),
+    env: {},
+    requestTimeoutSecs: 900,
   },
   custom: {
     name: "server",
@@ -179,6 +194,7 @@ export default function RuntimeAccess() {
           <div className="st-mcp-actions">
             <button type="button" onClick={() => addPreset("codex")}>+ Codex</button>
             <button type="button" onClick={() => addPreset("claude")}>+ Claude Code</button>
+            <button type="button" onClick={() => addPreset("playwright")}>+ Playwright</button>
             <button type="button" onClick={() => addPreset("custom")}>+ Custom</button>
           </div>
         </div>
@@ -186,7 +202,7 @@ export default function RuntimeAccess() {
         {servers.length === 0 ? (
           <div className="st-inline-state">
             <div className="st-inline-state-title">No project MCP servers</div>
-            <div className="st-inline-state-copy">Add Codex, Claude Code, or a custom STDIO server.</div>
+            <div className="st-inline-state-copy">Add Codex, Claude Code, Playwright, or a custom STDIO server.</div>
           </div>
         ) : (
           <div className="st-mcp-list">

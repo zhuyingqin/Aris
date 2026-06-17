@@ -10,6 +10,8 @@ target-codex-build/
 # Build artifacts
 target/
 dist/
+desktop/src-tauri/resources/mcp/
+desktop/src-tauri/resources/node/
 
 # Tool caches
 .clawd-*

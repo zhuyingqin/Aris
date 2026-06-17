@@ -86,9 +86,17 @@ npm run tauri build
 首次启动会打开 **Settings**，在这里配置：
 
 - **Executor** 与 **Reviewer** —— provider、model、base URL、API key
-- **语言** 与对当前模型配置的 **连通性检查**
+- **Scopus API key**、**语言**、**记忆写入审批** 与对当前模型配置的 **连通性检查**
 
-配置保存在本地 `~/.config/aris/config.json`。API key 在 UI 中脱敏 —— Tauri 后端在本地读写，不会把原始密钥返回前端。
+配置保存在本地 `~/.config/aris/config.json`。API key 默认在 UI 中脱敏；在本机 Settings 里点击“显示”可以临时查看明文，普通配置视图仍只返回 masked preview。
+
+### MCP 与 Playwright
+
+ARIS 桌面端从当前项目的 `.mcp.json` 读取 MCP 服务器，并在 **Extensions → Plugins** 与
+**Settings → Permissions & MCP** 中提供配置入口。Windows 安装包会内置
+`aris-playwright-mcp` launcher、vendored `@playwright/mcp` 和 Node runtime，因此用户添加
+Playwright 预设时不需要自己安装 Node.js / npm。默认预设使用 Microsoft Edge
+（`--browser=msedge`）并启用 PDF 工具（`--caps=pdf`）；如需自定义浏览器参数，可在 MCP 页面编辑。
 
 ---
 
@@ -175,6 +183,26 @@ npm run tauri build
 ```
 
 用 `ARIS_WORKSPACE_ROOT` 可覆盖默认 workspace root。
+
+`config.json` 与 Settings 页使用同一组 snake_case 字段：
+
+```json
+{
+  "executor_provider": "anthropic | anthropic-compat | openai | custom",
+  "executor_model": "claude-opus-4-7",
+  "executor_base_url": "https://api.example.com/v1",
+  "executor_api_key": "sk-...",
+  "reviewer_provider": "openai | gemini | glm | minimax | kimi | deepseek | anthropic-compat | custom",
+  "reviewer_model": "gpt-5.5",
+  "reviewer_base_url": "https://api.openai.com/v1",
+  "reviewer_api_key": "sk-...",
+  "scopus_api_key": "...",
+  "language": "cn | en",
+  "memory_write_approval": false
+}
+```
+
+Desktop 还会维护 `verified_executors`，用于在 Chat 顶部模型下拉里恢复已经测试通过的 provider/model/base URL/key 组合。
 
 ---
 

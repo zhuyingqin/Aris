@@ -66,6 +66,11 @@ const emptyDraft = (): McpStdioServerInput => ({
 const isWindows =
   typeof navigator !== "undefined" && /win/i.test(navigator.userAgent);
 
+const playwrightArgs = () => [
+  isWindows ? "--browser=msedge" : "--browser=chrome",
+  "--caps=pdf",
+];
+
 interface CatalogItem {
   id: string;
   name: string;
@@ -101,6 +106,19 @@ const MCP_CATALOG: CatalogItem[] = [
       name: "claude",
       command: "claude",
       args: ["mcp", "serve"],
+      env: {},
+      requestTimeoutSecs: 900,
+    }),
+  },
+  {
+    id: "playwright",
+    name: "Playwright",
+    description: "Browser automation via ARIS bundled Playwright MCP.",
+    glyph: "P",
+    build: () => ({
+      name: "playwright",
+      command: isWindows ? "cmd" : "aris-playwright-mcp",
+      args: isWindows ? ["/c", "aris-playwright-mcp.cmd", ...playwrightArgs()] : playwrightArgs(),
       env: {},
       requestTimeoutSecs: 900,
     }),

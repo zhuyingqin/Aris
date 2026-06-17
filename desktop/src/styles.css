@@ -726,6 +726,12 @@ textarea {
   line-height: 1;
 }
 .st-key-eye:hover { border-color: var(--accent); background: var(--bg-2); }
+.st-key-error {
+  grid-column: 1 / -1;
+  color: var(--red);
+  font-size: var(--st-small);
+  line-height: 1.35;
+}
 .st-key-badge {
   display: inline-flex;
   align-items: center;
@@ -1782,6 +1788,16 @@ textarea {
     grid-template-columns: 1fr;
     gap: 8px;
   }
+  .sp-secret-grid {
+    grid-template-columns: 1fr;
+  }
+  .sp-secret-row {
+    grid-template-columns: 1fr auto;
+  }
+  .sp-secret-label,
+  .sp-secret-error {
+    grid-column: 1 / -1;
+  }
   .sp-bridge-form .sp-detail-row2 {
     grid-template-columns: 1fr;
   }
@@ -2575,10 +2591,72 @@ textarea {
   background: color-mix(in srgb, var(--green) 20%, transparent);
   color: var(--green);
 }
+.sp-status-tag-version {
+  background: color-mix(in srgb, var(--amber) 20%, transparent);
+  color: var(--amber);
+}
+.sp-status-version {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
 .sp-status-model { color: var(--text); font-weight: 600; }
 .sp-status-url { color: var(--text-dim); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sp-status-key { color: var(--green); font-size: 10px; }
 .sp-status-empty { color: var(--text-dim); font-style: italic; font-size: 11px; }
+
+.sp-secret-panel {
+  margin: 12px 20px 0;
+  padding: 12px 14px 14px;
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  flex-shrink: 0;
+}
+.sp-secret-head {
+  margin-bottom: 10px;
+}
+.sp-secret-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(260px, 1fr));
+  gap: 8px;
+}
+.sp-secret-row {
+  display: grid;
+  grid-template-columns: 130px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.sp-secret-label {
+  color: var(--text-dim);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.35;
+}
+.sp-secret-value {
+  width: 100%;
+  min-width: 0;
+  font-family: ui-monospace, "Cascadia Code", monospace;
+  font-size: 12px;
+  letter-spacing: 0;
+}
+.sp-secret-btn {
+  min-width: 54px;
+  min-height: 32px;
+  padding: 4px 9px;
+  background: var(--bg-2);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 700;
+}
+.sp-secret-btn:hover {
+  border-color: var(--accent);
+}
+.sp-secret-error {
+  grid-column: 2 / -1;
+  color: var(--red);
+  font-size: 12px;
+}
 
 /* ── Settings: card wrap + click-zone + inline expand ────────────────────── */
 .sp-card-wrap { display: flex; flex-direction: column; }

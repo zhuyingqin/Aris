@@ -9,12 +9,14 @@ import type {
   ChatModelOptions,
   ChatStatus,
   ConfigPatch,
+  ConfigSecretKind,
   ConfigTestDetail,
   ConfigTestResult,
   ConfigView,
   DesktopCommandSpec,
   ImBridgeActionResult,
   ImBridgePatch,
+  ImBridgeSecretKind,
   ImBridgeTestResult,
   ImBridgeView,
   McpConfigView,
@@ -45,6 +47,8 @@ export const projectsReorder = (projectIds: string[]) =>
 // ── Settings / Skills / Sessions (P1) ─────────────────────────────────────────
 
 export const configGet = () => invoke<ConfigView>("config_get");
+export const configSecretGet = (kind: ConfigSecretKind) =>
+  invoke<string | null>("config_secret_get", { kind });
 export const configSet = (patch: ConfigPatch) =>
   invoke<ConfigView>("config_set", { patch });
 export const configTest = (patch: ConfigPatch) =>
@@ -54,6 +58,8 @@ export const providerTest = (input: { baseUrl: string; model?: string; apiKey?: 
 export const scheduledTasksList = () =>
   invoke<ScheduledTask[]>("scheduled_tasks_list");
 export const imBridgeGet = () => invoke<ImBridgeView>("im_bridge_get");
+export const imBridgeSecretGet = (kind: ImBridgeSecretKind) =>
+  invoke<string | null>("im_bridge_secret_get", { kind });
 export const imBridgeSet = (patch: ImBridgePatch) =>
   invoke<ImBridgeView>("im_bridge_set", { patch });
 export const imBridgeTestQq = (patch: ImBridgePatch) =>

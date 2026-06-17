@@ -50,6 +50,7 @@ export interface RunEvent {
 // ── Settings / Skills / Sessions (P1) ─────────────────────────────────────────
 
 export interface ConfigView {
+  appVersion: string;
   configPath: string;
   executorProvider?: string | null;
   executorModel?: string | null;
@@ -67,6 +68,10 @@ export interface ConfigView {
   memoryWriteApproval: boolean;
   verifiedExecutors?: { provider: string; model: string; baseUrl: string }[];
 }
+
+export type ConfigSecretKind = "executorApiKey" | "reviewerApiKey" | "scopusApiKey";
+
+export type ImBridgeSecretKind = "qqAppSecret";
 
 export interface ScheduledTask {
   id: string;

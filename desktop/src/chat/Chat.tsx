@@ -340,7 +340,7 @@ export default function Chat() {
   useEffect(() => {
     refreshStatus(currentSession?.model ?? null);
     if (!isTauri()) {
-      setPermission({ mode: "workspace-write", label: "Accept edits", description: "Read and edit workspace files" });
+      setPermission({ mode: "danger-full-access", label: "Don't ask", description: "Allow shell, agents, workflows, and MCP" });
       return;
     }
     chatPermissionGet(currentId).then(setPermission).catch(() => setPermission(null));

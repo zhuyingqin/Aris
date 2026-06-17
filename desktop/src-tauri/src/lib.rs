@@ -14,7 +14,24 @@ mod state;
 mod studio;
 mod watcher;
 
+use std::path::PathBuf;
 use tauri::{image::Image, Manager};
+
+fn prepend_existing_path_entries(paths: impl IntoIterator<Item = PathBuf>) {
+    let existing = std::env::var_os("PATH").unwrap_or_default();
+    let existing_paths = std::env::split_paths(&existing).collect::<Vec<_>>();
+    let mut extras = paths
+        .into_iter()
+        .filter(|path| path.exists() && !existing_paths.iter().any(|item| item == path))
+        .collect::<Vec<_>>();
+    if extras.is_empty() {
+        return;
+    }
+    extras.extend(existing_paths);
+    if let Ok(joined) = std::env::join_paths(extras) {
+        std::env::set_var("PATH", joined);
+    }
+}
 
 /// Extend the process PATH with common user-installed tool directories so that
 /// MCP stdio servers (node, npx, uvx, python, etc.) can be found when the app
@@ -42,19 +59,19 @@ fn augment_path_for_mcp() {
         // Scoop shims
         format!("{home}\\scoop\\shims"),
     ];
-    let existing = std::env::var("PATH").unwrap_or_default();
-    let mut extras: Vec<String> = candidates
-        .into_iter()
-        .filter(|p| std::path::Path::new(p).exists() && !existing.contains(p.as_str()))
-        .collect();
-    if !extras.is_empty() {
-        extras.push(existing);
-        std::env::set_var("PATH", extras.join(";"));
-    }
+    prepend_existing_path_entries(candidates.into_iter().map(PathBuf::from));
 }
 
 #[cfg(not(windows))]
 fn augment_path_for_mcp() {}
+
+fn augment_resource_path_for_mcp(app: &tauri::App) {
+    let Ok(resource_dir) = app.path().resource_dir() else {
+        return;
+    };
+    prepend_existing_path_entries([resource_dir.join("bin"), resource_dir.join("node")]);
+    std::env::set_var("ARIS_RESOURCE_DIR", &resource_dir);
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -64,6 +81,7 @@ pub fn run() {
         .manage(engine::ChatState::default())
         .manage(projects::ProjectState::default())
         .setup(|app| {
+            augment_resource_path_for_mcp(app);
             state::apply_bundle_cache_environment();
             // Export config-held keys (e.g. SCOPUS_API_KEY) before any
             // literature search runs; force=false keeps real env vars intact.
@@ -96,11 +114,13 @@ pub fn run() {
             projects::project_set_current,
             projects::projects_reorder,
             config::config_get,
+            config::config_secret_get,
             config::config_set,
             config::config_test,
             config::provider_test,
             scheduled::scheduled_tasks_list,
             im_bridge::im_bridge_get,
+            im_bridge::im_bridge_secret_get,
             im_bridge::im_bridge_set,
             im_bridge::im_bridge_test_qq,
             im_bridge::im_bridge_start,

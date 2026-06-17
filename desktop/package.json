@@ -8,6 +8,8 @@
     "dev": "vite",
     "build": "vite build",
     "build:cli": "node scripts/build-cli-resource.cjs",
+    "build:playwright-mcp": "node scripts/build-playwright-mcp-resource.cjs",
+    "build:resources": "npm run build:playwright-mcp",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",

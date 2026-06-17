@@ -7,7 +7,7 @@
     "frontendDist": "../dist",
     "devUrl": "http://127.0.0.1:1420",
     "beforeDevCommand": "npm run dev",
-    "beforeBuildCommand": "npm run build"
+    "beforeBuildCommand": "npm run build:resources && npm run build"
   },
   "app": {
     "windows": [
@@ -40,6 +40,7 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
+    "resources": ["resources/**/*"],
     "publisher": "ARIS",
     "category": "DeveloperTool",
     "shortDescription": "Design & monitor agent teams and workflows; chat with ARIS.",

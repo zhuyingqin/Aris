@@ -1,11 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import {
   configGet,
+  configSecretGet,
   configSet,
   configTest,
   providerTest,
   imBridgeGet,
   imBridgeLogs,
+  imBridgeSecretGet,
   imBridgeSet,
   imBridgeStart,
   imBridgeStop,
@@ -16,6 +18,7 @@ import { useStore } from "../store";
 import { useProvidersStore, type ProviderEntry } from "./providersStore";
 import type {
   ConfigPatch,
+  ConfigSecretKind,
   ConfigTestResult,
   ConfigView,
   ImBridgePatch,
@@ -165,10 +168,146 @@ function suggestModels(url: string): string[] {
 
 // ── Sub-components ────────────────────────────────────────────────────────────
 
-function KeyInput({ value, placeholder, masked, onChange }: { value: string; placeholder: string; masked: string | null | undefined; onChange: (v: string) => void }) {
+function KeyInput({
+  value,
+  placeholder,
+  masked,
+  secretKind,
+  loadSecret,
+  onChange,
+}: {
+  value: string;
+  placeholder: string;
+  masked: string | null | undefined;
+  secretKind?: ConfigSecretKind;
+  loadSecret?: () => Promise<string | null>;
+  onChange: (v: string) => void;
+}) {
+  const [visible, setVisible] = useState(false);
+  const [savedSecret, setSavedSecret] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [revealError, setRevealError] = useState("");
+  const canRevealSaved = Boolean(masked && (secretKind || loadSecret));
+  const displayValue = value || savedSecret;
+
+  useEffect(() => {
+    setVisible(false);
+    setSavedSecret("");
+    setRevealError("");
+  }, [secretKind, masked]);
+
+  const toggleVisible = async () => {
+    setRevealError("");
+    if (visible) {
+      setVisible(false);
+      return;
+    }
+    if (!value && canRevealSaved && !savedSecret) {
+      setLoading(true);
+      try {
+        const secret = loadSecret ? await loadSecret() : secretKind ? await configSecretGet(secretKind) : null;
+        if (secret) setSavedSecret(secret);
+        else setRevealError("没有可显示的已保存密钥");
+      } catch (err) {
+        setRevealError(String(err));
+      } finally {
+        setLoading(false);
+      }
+    }
+    setVisible(true);
+  };
+
   return (
     <div className="st-key-wrap" data-has-saved-secret={Boolean(masked)}>
-      <input type="password" value={value} placeholder={placeholder} onChange={(e) => onChange(e.target.value)} className="st-key-input" spellCheck={false} autoComplete="off" />
+      <input
+        type={visible ? "text" : "password"}
+        value={displayValue}
+        placeholder={placeholder}
+        onChange={(e) => {
+          if (savedSecret) setSavedSecret("");
+          onChange(e.target.value);
+        }}
+        className="st-key-input"
+        spellCheck={false}
+        autoComplete="off"
+      />
+      <button
+        type="button"
+        className="st-key-eye"
+        onClick={() => void toggleVisible()}
+        disabled={loading || (!value && !canRevealSaved)}
+        title={revealError || (visible ? "隐藏密钥" : "显示密钥")}
+      >
+        {loading ? "…" : visible ? "隐藏" : "显示"}
+      </button>
+      {revealError && <span className="st-key-error">{revealError}</span>}
+    </div>
+  );
+}
+
+function SecretReveal({
+  label,
+  masked,
+  available,
+  loadSecret,
+}: {
+  label: string;
+  masked: string | null | undefined;
+  available: boolean;
+  loadSecret: () => Promise<string | null>;
+}) {
+  const [visible, setVisible] = useState(false);
+  const [secret, setSecret] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    setVisible(false);
+    setSecret("");
+    setError("");
+  }, [masked, available]);
+
+  const reveal = async () => {
+    setError("");
+    if (visible) {
+      setVisible(false);
+      return;
+    }
+    setLoading(true);
+    try {
+      const next = await loadSecret();
+      if (next) {
+        setSecret(next);
+        setVisible(true);
+      } else {
+        setError("未找到已保存的密钥");
+      }
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="sp-secret-row">
+      <div className="sp-secret-label">{label}</div>
+      <input
+        className="sp-secret-value"
+        value={visible ? secret : available ? (masked ?? "已配置") : "未配置"}
+        readOnly
+        type="text"
+      />
+      <button
+        className="sp-secret-btn"
+        type="button"
+        onClick={() => void reveal()}
+        disabled={!available || loading}
+        title={error || (visible ? "隐藏密钥" : "显示密钥")}
+      >
+        {loading ? "…" : visible ? "隐藏" : "显示"}
+      </button>
+      {error && <div className="sp-secret-error">{error}</div>}
     </div>
   );
 }
@@ -811,14 +950,12 @@ export default function Settings() {
                 QQ App Secret
                 {bridgeView.hasQqAppSecret && <span className="sp-field-hint-inline">{bridgeView.qqAppSecretMasked ?? "已配置"}</span>}
               </label>
-              <input
-                type="password"
-                className="sp-input"
+              <KeyInput
                 value={bridgeSecret}
-                onChange={(e) => { setBridgeNotice(null); setBridgeSecret(e.target.value); }}
                 placeholder={bridgeView.hasQqAppSecret ? "留空保留已有 Secret" : "粘贴 App Secret"}
-                spellCheck={false}
-                autoComplete="off"
+                masked={bridgeView.qqAppSecretMasked}
+                loadSecret={() => imBridgeSecretGet("qqAppSecret")}
+                onChange={(value) => { setBridgeNotice(null); setBridgeSecret(value); }}
               />
             </div>
           </div>
@@ -934,10 +1071,32 @@ export default function Settings() {
             <input className="sp-input" value={form.url ?? ""} onChange={(e) => setForm((f) => ({ ...f, url: e.target.value }))} placeholder="https://api.deepseek.com/v1" spellCheck={false} />
           </div>
           <div className="sp-field">
-            <label className="sp-field-label">API Key（本次会话，不持久化）</label>
-            <div className="sp-key-wrap">
-              <input type="password" className="sp-input sp-key-input" value={detailApiKey} onChange={(e) => setDetailApiKey(e.target.value)} placeholder="首次配置时粘贴 Key；已有 Key 则留空直接应用" spellCheck={false} autoComplete="off" />
-            </div>
+            <label className="sp-field-label">
+              API Key
+              {(isExec || isReview) && (
+                <span className="sp-field-hint-inline">
+                  {isExec && configView?.hasExecutorKey ? `执行器已保存: ${configView.executorKeyMasked ?? "已配置"}` : null}
+                  {isReview && configView?.hasReviewerKey ? `审阅已保存: ${configView.reviewerKeyMasked ?? "已配置"}` : null}
+                </span>
+              )}
+            </label>
+            {isExec && configView && (
+              <SecretReveal
+                label="执行器已保存密钥"
+                available={configView.hasExecutorKey}
+                masked={configView.executorKeyMasked}
+                loadSecret={() => configSecretGet("executorApiKey")}
+              />
+            )}
+            {isReview && configView && (
+              <SecretReveal
+                label="审阅已保存密钥"
+                available={configView.hasReviewerKey}
+                masked={configView.reviewerKeyMasked}
+                loadSecret={() => configSecretGet("reviewerApiKey")}
+              />
+            )}
+            <KeyInput value={detailApiKey} placeholder="粘贴新 Key 以更新；留空则保留现有密钥" masked={null} onChange={setDetailApiKey} />
           </div>
           <div className="sp-field">
             <div className="sp-field-head">
@@ -1016,6 +1175,11 @@ export default function Settings() {
             ? <><span className="sp-status-model">{configView.reviewerModel}</span>{configView.reviewerBaseUrl && <span className="sp-status-url"> · {configView.reviewerBaseUrl}</span>}{configView.hasReviewerKey && <span className="sp-status-key"> ●</span>}</>
             : <span className="sp-status-empty">未配置</span>}
         </div>
+        <div className="sp-status-sep" />
+        <div className="sp-status-slot sp-status-version">
+          <span className="sp-status-tag sp-status-tag-version">版本</span>
+          <span className="sp-status-model">ARIS Studio v{configView.appVersion}</span>
+        </div>
       </div>
 
       {/* Provider list */}
@@ -1079,7 +1243,7 @@ export default function Settings() {
               <div className="sp-adv-rows">
                 <div className="st-row"><div className="st-row-label"><span className="st-label">Model</span></div><div className="st-row-control"><PresetTextInput value={advForm.executorModel ?? ""} placeholder={EXECUTOR_PROVIDERS[advExecProvider]?.defaultModel || "e.g. claude-sonnet-4-6"} options={advExecMeta.models ?? EXECUTOR_MODELS} onChange={(v) => { resetOpState(); setAdvForm((f) => ({ ...f, executorModel: v })); }} /></div></div>
                 <div className="st-row"><div className="st-row-label"><span className="st-label">Base URL</span></div><div className="st-row-control"><PresetTextInput value={advForm.executorBaseUrl ?? ""} placeholder={EXECUTOR_PROVIDERS[advExecProvider]?.defaultBaseUrl || "(official default)"} options={advExecMeta.baseUrls ?? OPENAI_COMPAT_URLS} onChange={(v) => { resetOpState(); setAdvForm((f) => ({ ...f, executorBaseUrl: v })); }} /></div></div>
-                <div className="st-row"><div className="st-row-label"><span className="st-label">API Key</span><span className="st-hint">{configView.hasExecutorKey ? `Saved: ${configView.executorKeyMasked ?? "configured"}` : "No key"}</span></div><div className="st-row-control"><KeyInput value={execKey} placeholder={configView.hasExecutorKey ? "leave blank to keep" : "paste API key"} masked={configView.executorKeyMasked} onChange={(v) => { resetOpState(); setExecKey(v); }} /></div></div>
+                <div className="st-row"><div className="st-row-label"><span className="st-label">API Key</span><span className="st-hint">{configView.hasExecutorKey ? `Saved: ${configView.executorKeyMasked ?? "configured"}` : "No key"}</span></div><div className="st-row-control"><KeyInput value={execKey} placeholder={configView.hasExecutorKey ? "leave blank to keep" : "paste API key"} masked={configView.executorKeyMasked} secretKind="executorApiKey" onChange={(v) => { resetOpState(); setExecKey(v); }} /></div></div>
                 <div className="st-row"><div className="st-row-label"><span className="st-label">Memory writes</span></div><div className="st-row-control"><button type="button" className={`st-lang-card${advForm.memoryWriteApproval ? " active" : ""}`} onClick={() => { resetOpState(); setAdvForm((f) => ({ ...f, memoryWriteApproval: !f.memoryWriteApproval })); }}><span className="st-lang-label">{advForm.memoryWriteApproval ? "Approval required" : "Automatic writes allowed"}</span></button></div></div>
               </div>
             </div>
@@ -1100,7 +1264,7 @@ export default function Settings() {
                 <div className="sp-adv-rows">
                   <div className="st-row"><div className="st-row-label"><span className="st-label">Model</span></div><div className="st-row-control"><PresetTextInput value={advForm.reviewerModel ?? ""} placeholder={advReviewerMeta.defaultModel || "e.g. gpt-5.5"} options={advReviewerMeta.models ?? REVIEWER_MODELS} onChange={(v) => { resetOpState(); setAdvForm((f) => ({ ...f, reviewerModel: v })); }} /></div></div>
                   <div className="st-row"><div className="st-row-label"><span className="st-label">Base URL</span></div><div className="st-row-control"><PresetTextInput value={advForm.reviewerBaseUrl ?? ""} placeholder={advReviewerMeta.defaultBaseUrl || "(provider default)"} options={advReviewerMeta.baseUrls ?? OPENAI_COMPAT_URLS} onChange={(v) => { resetOpState(); setAdvForm((f) => ({ ...f, reviewerBaseUrl: v })); }} /></div></div>
-                  <div className="st-row"><div className="st-row-label"><span className="st-label">API Key</span><span className="st-hint">{configView.hasReviewerKey ? `Saved: ${configView.reviewerKeyMasked ?? "configured"}` : "No key"}</span></div><div className="st-row-control"><KeyInput value={reviewerKey} placeholder={configView.hasReviewerKey ? "leave blank to keep" : "paste reviewer key"} masked={configView.reviewerKeyMasked} onChange={(v) => { resetOpState(); setReviewerKey(v); }} /></div></div>
+                  <div className="st-row"><div className="st-row-label"><span className="st-label">API Key</span><span className="st-hint">{configView.hasReviewerKey ? `Saved: ${configView.reviewerKeyMasked ?? "configured"}` : "No key"}</span></div><div className="st-row-control"><KeyInput value={reviewerKey} placeholder={configView.hasReviewerKey ? "leave blank to keep" : "paste reviewer key"} masked={configView.reviewerKeyMasked} secretKind="reviewerApiKey" onChange={(v) => { resetOpState(); setReviewerKey(v); }} /></div></div>
                 </div>
               )}
             </div>
@@ -1108,7 +1272,7 @@ export default function Settings() {
               <div className="sp-adv-section-title">其他</div>
               <div className="sp-adv-rows">
                 <div className="st-row"><div className="st-row-label"><span className="st-label">语言</span></div><div className="st-row-control"><div className="st-lang-grid">{[{ value: "cn", label: "中文" }, { value: "en", label: "English" }].map((l) => <button key={l.value} type="button" className={`st-lang-card${advForm.language === l.value ? " active" : ""}`} onClick={() => { resetOpState(); setAdvForm((f) => ({ ...f, language: l.value })); }}><span className="st-lang-label">{l.label}</span></button>)}</div></div></div>
-                <div className="st-row"><div className="st-row-label"><span className="st-label">Scopus Key</span><span className="st-hint">{configView.hasScopusKey ? `Saved: ${configView.scopusKeyMasked ?? "configured"}` : "No key"}</span></div><div className="st-row-control"><KeyInput value={scopusKey} placeholder={configView.hasScopusKey ? "leave blank to keep" : "paste Elsevier key"} masked={configView.scopusKeyMasked} onChange={(v) => { resetOpState(); setScopusKey(v); }} /></div></div>
+                <div className="st-row"><div className="st-row-label"><span className="st-label">Scopus Key</span><span className="st-hint">{configView.hasScopusKey ? `Saved: ${configView.scopusKeyMasked ?? "configured"}` : "No key"}</span></div><div className="st-row-control"><KeyInput value={scopusKey} placeholder={configView.hasScopusKey ? "leave blank to keep" : "paste Elsevier key"} masked={configView.scopusKeyMasked} secretKind="scopusApiKey" onChange={(v) => { resetOpState(); setScopusKey(v); }} /></div></div>
                 <div className="st-row"><div className="st-row-label"><span className="st-label">Config file</span></div><div className="st-row-control"><input className="st-readonly-input" value={configView.configPath} readOnly /></div></div>
               </div>
             </div>
