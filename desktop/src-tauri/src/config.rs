@@ -40,6 +40,14 @@ fn mask(key: &str) -> String {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct VerifiedSummary {
+    pub provider: String,
+    pub model: String,
+    pub base_url: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ConfigView {
     pub config_path: String,
     pub executor_provider: Option<String>,
@@ -56,6 +64,10 @@ pub struct ConfigView {
     pub scopus_key_masked: Option<String>,
     pub language: Option<String>,
     pub memory_write_approval: bool,
+    /// Providers that passed a connection test — surfaced so the Settings list
+    /// can show every configured provider (not just the executor/reviewer
+    /// slots). Keys are never included.
+    pub verified_executors: Vec<VerifiedSummary>,
 }
 
 fn build_view(obj: &Map<String, Value>) -> ConfigView {
@@ -81,6 +93,14 @@ fn build_view(obj: &Map<String, Value>) -> ConfigView {
             .get("memory_write_approval")
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        verified_executors: read_verified(obj)
+            .into_iter()
+            .map(|entry| VerifiedSummary {
+                provider: entry.provider,
+                model: entry.model,
+                base_url: entry.base_url,
+            })
+            .collect(),
     }
 }
 
@@ -797,6 +817,113 @@ async fn test_reviewer(obj: &Map<String, Value>) -> Option<ConfigTestDetail> {
         openai_default_base(&provider, &model),
     );
     Some(test_openai_compat("Reviewer", provider, model, base_url, key).await)
+}
+
+/// Per-provider connection test for the Settings provider cards. The API key is
+/// optional: when omitted (the common case — saved keys are never sent to the
+/// frontend) it is resolved from the saved config by matching the base URL
+/// against the executor / reviewer slots and the verified-executor registry.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderTestInput {
+    pub base_url: String,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub api_key: Option<String>,
+}
+
+fn norm_url(url: &str) -> String {
+    url.trim().trim_end_matches('/').to_ascii_lowercase()
+}
+
+fn url_host(url: &str) -> String {
+    let lower = url.trim().to_ascii_lowercase();
+    let after_scheme = lower.split("://").last().unwrap_or(&lower);
+    after_scheme.split('/').next().unwrap_or("").to_string()
+}
+
+/// Find a usable key for `base_url`: exact base-URL match first, then a
+/// host-level fallback (keys are vendor-wide, so a host match is safe enough).
+fn resolve_saved_key(obj: &Map<String, Value>, base_url: &str) -> Option<String> {
+    let target = norm_url(base_url);
+    let target_host = url_host(base_url);
+    let mut candidates: Vec<(String, String)> = Vec::new();
+    if let (Some(url), Some(key)) = (
+        get_non_empty(obj, "executor_base_url"),
+        get_non_empty(obj, "executor_api_key"),
+    ) {
+        candidates.push((url, key));
+    }
+    if let (Some(url), Some(key)) = (
+        get_non_empty(obj, "reviewer_base_url"),
+        get_non_empty(obj, "reviewer_api_key"),
+    ) {
+        candidates.push((url, key));
+    }
+    for entry in read_verified(obj) {
+        if !entry.base_url.is_empty() {
+            candidates.push((entry.base_url, entry.api_key));
+        }
+    }
+    if let Some((_, key)) = candidates.iter().find(|(url, _)| norm_url(url) == target) {
+        return Some(key.clone());
+    }
+    if !target_host.is_empty() {
+        if let Some((_, key)) = candidates
+            .iter()
+            .find(|(url, _)| url_host(url) == target_host)
+        {
+            return Some(key.clone());
+        }
+    }
+    None
+}
+
+fn is_anthropic_url(base_url: &str) -> bool {
+    let lower = base_url.to_ascii_lowercase();
+    lower.contains("anthropic") || lower.contains("newcli.com") || lower.contains("modelscope.cn")
+}
+
+#[tauri::command]
+pub async fn provider_test(input: ProviderTestInput) -> Result<ConfigTestDetail, String> {
+    let base_url = input.base_url.trim().to_string();
+    if base_url.is_empty() {
+        return Err("Base URL is required to test this provider.".to_string());
+    }
+    let obj = load_object();
+    let key = input
+        .api_key
+        .map(|key| key.trim().to_string())
+        .filter(|key| !key.is_empty())
+        .or_else(|| resolve_saved_key(&obj, &base_url));
+    let Some(key) = key else {
+        return Err(
+            "No API key found for this provider. Open it to paste a key, or set it as executor / reviewer first."
+                .to_string(),
+        );
+    };
+    let model = input
+        .model
+        .map(|model| model.trim().to_string())
+        .filter(|model| !model.is_empty())
+        .unwrap_or_else(|| "gpt-5.5".to_string());
+
+    if is_anthropic_url(&base_url) {
+        let normalized = normalized_base_url(Some(base_url), "https://api.anthropic.com");
+        let auth = if normalized
+            .to_ascii_lowercase()
+            .contains("api.anthropic.com")
+        {
+            AuthSource::ApiKey(key)
+        } else {
+            AuthSource::BearerToken(key)
+        };
+        Ok(test_anthropic("Provider", "anthropic".to_string(), model, normalized, auth).await)
+    } else {
+        let normalized = normalized_base_url(Some(base_url), "https://api.openai.com/v1");
+        Ok(test_openai_compat("Provider", "openai".to_string(), model, normalized, key).await)
+    }
 }
 
 #[tauri::command]

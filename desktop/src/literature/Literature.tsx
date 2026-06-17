@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { literatureLlm } from "../api/tauri";
 import { useStore } from "../store";
@@ -132,7 +132,6 @@ export default function Literature() {
   const library = useLiteratureStore((s) => s.library);
   const loaded = useLiteratureStore((s) => s.loaded);
   const briefing = useLiteratureStore((s) => s.briefing);
-  const searching = useLiteratureStore((s) => s.searching);
   const screening = useLiteratureStore((s) => s.screening);
   const generatingAnswerChains = useLiteratureStore((s) => s.generatingAnswerChains);
   const activeReviewTaskId = useLiteratureStore((s) => s.activeReviewTaskId);
@@ -147,7 +146,6 @@ export default function Literature() {
   const addCollection = useLiteratureStore((s) => s.addCollection);
   const removeCollection = useLiteratureStore((s) => s.removeCollection);
   const toggleCollection = useLiteratureStore((s) => s.toggleCollection);
-  const runRemoteSearch = useLiteratureStore((s) => s.runRemoteSearch);
   const setActiveReviewTask = useLiteratureStore((s) => s.setActiveReviewTask);
   const createReviewTask = useLiteratureStore((s) => s.createReviewTask);
   const updateReviewQuestion = useLiteratureStore((s) => s.updateReviewQuestion);
@@ -177,17 +175,40 @@ export default function Literature() {
   const [checked, setChecked] = useState<Set<string>>(new Set());
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [selectionCleared, setSelectionCleared] = useState(false);
-  const [workspaceTab, setWorkspaceTab] = useState<DetailTab>("overview");
+  const [workspaceTab, setWorkspaceTab] = useState<DetailTab>("info");
   const [tagDraft, setTagDraft] = useState("");
   const [abstractOpen, setAbstractOpen] = useState(true);
   const [colInput, setColInput] = useState("");
-  const [colAdding, setColAdding] = useState(false);
-  const [remoteQuery, setRemoteQuery] = useState("");
-  const [remoteSources, setRemoteSources] = useState(["arxiv", "crossref", "openalex"]);
+  const [colAddingParentId, setColAddingParentId] = useState<string | null>(null);
+  const [expandedCols, setExpandedCols] = useState<Set<string>>(new Set());
   const [reviewQuestion, setReviewQuestion] = useState("");
   const [readerPage, setReaderPage] = useState(1);
   const [readerAnnotationId, setReaderAnnotationId] = useState<string | null>(null);
   const [reviewPanelOpen, setReviewPanelOpen] = useState(false);
+  const [panelWidths, setPanelWidths] = useState({ sidebar: 220, workspace: 300 });
+  const panelDragRef = useRef<{ panel: "sidebar" | "workspace"; startX: number; startW: number } | null>(null);
+
+  const startPanelResize = (panel: "sidebar" | "workspace", e: { clientX: number; preventDefault(): void }) => {
+    e.preventDefault();
+    panelDragRef.current = { panel, startX: e.clientX, startW: panelWidths[panel] };
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    const onMove = (ev: MouseEvent) => {
+      if (!panelDragRef.current) return;
+      const delta = ev.clientX - panelDragRef.current.startX;
+      const newW = Math.max(120, panelDragRef.current.startW + (panel === "sidebar" ? delta : -delta));
+      setPanelWidths((prev) => ({ ...prev, [panelDragRef.current!.panel]: newW }));
+    };
+    const onUp = () => {
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      panelDragRef.current = null;
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  };
 
   const projectId = currentProject?.id ?? "default";
   useEffect(() => {
@@ -203,11 +224,20 @@ export default function Literature() {
 
   const visiblePapers = useMemo(() => {
     const needle = filter.trim().toLowerCase();
+    let viewFilter: (p: LiteraturePaper) => boolean;
+    if (view.startsWith("col:")) {
+      const colId = view.slice(4);
+      const childIds = library.collections.filter((c) => c.parentId === colId).map((c) => c.id);
+      const allIds = new Set([colId, ...childIds]);
+      viewFilter = (p) => p.collectionIds.some((id) => allIds.has(id));
+    } else {
+      viewFilter = (p) => matchesView(p, view);
+    }
     return sortPapers(
-      papers.filter((p) => matchesView(p, view) && matchesQuery(p, needle)),
+      papers.filter((p) => viewFilter(p) && matchesQuery(p, needle)),
       sort,
     );
-  }, [filter, papers, sort, view]);
+  }, [filter, library.collections, papers, sort, view]);
 
   const selectedPaper = selectedId
     ? visiblePapers.find((p) => p.id === selectedId) ?? null
@@ -323,12 +353,19 @@ export default function Literature() {
 
   // ── Sidebar ────────────────────────────────────────────────────────────────
 
-  const submitColInput = () => {
+  const submitColInput = (parentId?: string) => {
     const trimmed = colInput.trim();
-    if (trimmed) addCollection(trimmed);
+    if (trimmed) addCollection(trimmed, parentId);
     setColInput("");
-    setColAdding(false);
+    setColAddingParentId(null);
   };
+
+  const toggleColExpand = (id: string) =>
+    setExpandedCols((prev) => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
 
   const sidebar = (
     <aside className="lit-sidebar">
@@ -376,12 +413,12 @@ export default function Literature() {
           <button
             type="button"
             className="lit-section-icon-btn"
-            onClick={() => setColAdding(true)}
-            title="新建分类"
+            onClick={() => { setColAddingParentId(""); setColInput(""); }}
+            title="新建一级分类"
           >+</button>
         }
       >
-        {colAdding && (
+        {colAddingParentId === "" && (
           <div className="lit-col-input-row">
             <input
               autoFocus
@@ -391,36 +428,113 @@ export default function Literature() {
               onChange={(e) => setColInput(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === "Enter") submitColInput();
-                if (e.key === "Escape") { setColInput(""); setColAdding(false); }
+                if (e.key === "Escape") { setColInput(""); setColAddingParentId(null); }
               }}
             />
-            <button type="button" className="lit-col-confirm-btn" onClick={submitColInput} title="确认">✓</button>
-            <button type="button" className="lit-col-cancel-btn" onClick={() => { setColInput(""); setColAdding(false); }} title="取消">✕</button>
+            <button type="button" className="lit-col-confirm-btn" onClick={() => submitColInput()} title="确认">✓</button>
+            <button type="button" className="lit-col-cancel-btn" onClick={() => { setColInput(""); setColAddingParentId(null); }} title="取消">✕</button>
           </div>
         )}
-        {library.collections.map((col) => (
-          <div key={col.id} className="lit-col-row">
-            <NavItem
-              label={col.label}
-              icon="▤"
-              count={papers.filter((p) => p.collectionIds.includes(col.id)).length}
-              active={view === `col:${col.id}`}
-              onClick={() => setView(`col:${col.id}`)}
-            />
-            <button
-              type="button"
-              className="lit-col-delete-btn"
-              onClick={() => {
-                if (window.confirm(`删除分类"${col.label}"？（论文不会被删除）`)) {
-                  removeCollection(col.id);
-                  if (view === `col:${col.id}`) setView("all");
-                }
-              }}
-              aria-label={`删除 ${col.label}`}
-            >×</button>
-          </div>
-        ))}
-        {library.collections.length === 0 && !colAdding && (
+
+        {library.collections.filter((c) => !c.parentId).map((col) => {
+          const children = library.collections.filter((c) => c.parentId === col.id);
+          const isExpanded = expandedCols.has(col.id);
+          const parentCount = papers.filter((p) => {
+            const childIds = children.map((c) => c.id);
+            return p.collectionIds.includes(col.id) || childIds.some((id) => p.collectionIds.includes(id));
+          }).length;
+          return (
+            <div key={col.id} className="lit-col-group">
+              <div className="lit-col-row">
+                <button
+                  type="button"
+                  className="lit-col-toggle"
+                  onClick={() => toggleColExpand(col.id)}
+                  aria-label={isExpanded ? "折叠" : "展开"}
+                >
+                  {children.length > 0 ? (isExpanded ? "▾" : "▸") : ""}
+                </button>
+                <NavItem
+                  label={col.label}
+                  icon="▤"
+                  count={parentCount}
+                  active={view === `col:${col.id}`}
+                  onClick={() => setView(`col:${col.id}`)}
+                />
+                <button
+                  type="button"
+                  className="lit-col-add-sub-btn"
+                  title="添加子分类"
+                  onClick={() => {
+                    setColAddingParentId(col.id);
+                    setColInput("");
+                    setExpandedCols((prev) => { const n = new Set(prev); n.add(col.id); return n; });
+                  }}
+                >+</button>
+                <button
+                  type="button"
+                  className="lit-col-delete-btn"
+                  onClick={() => {
+                    const msg = children.length > 0
+                      ? `删除分类"${col.label}"及其 ${children.length} 个子分类？（论文不会被删除）`
+                      : `删除分类"${col.label}"？（论文不会被删除）`;
+                    if (window.confirm(msg)) {
+                      removeCollection(col.id);
+                      if (view === `col:${col.id}` || children.some((c) => view === `col:${c.id}`)) setView("all");
+                    }
+                  }}
+                  aria-label={`删除 ${col.label}`}
+                >×</button>
+              </div>
+
+              {isExpanded && (
+                <>
+                  {children.map((child) => (
+                    <div key={child.id} className="lit-col-row lit-col-child-row">
+                      <NavItem
+                        label={child.label}
+                        icon="◦"
+                        count={papers.filter((p) => p.collectionIds.includes(child.id)).length}
+                        active={view === `col:${child.id}`}
+                        onClick={() => setView(`col:${child.id}`)}
+                      />
+                      <button
+                        type="button"
+                        className="lit-col-delete-btn"
+                        onClick={() => {
+                          if (window.confirm(`删除子分类"${child.label}"？（论文不会被删除）`)) {
+                            removeCollection(child.id);
+                            if (view === `col:${child.id}`) setView(`col:${col.id}`);
+                          }
+                        }}
+                        aria-label={`删除 ${child.label}`}
+                      >×</button>
+                    </div>
+                  ))}
+                  {colAddingParentId === col.id && (
+                    <div className="lit-col-input-row lit-col-child-input-row">
+                      <input
+                        autoFocus
+                        className="lit-col-input"
+                        value={colInput}
+                        placeholder="子分类名称…"
+                        onChange={(e) => setColInput(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") submitColInput(col.id);
+                          if (e.key === "Escape") { setColInput(""); setColAddingParentId(null); }
+                        }}
+                      />
+                      <button type="button" className="lit-col-confirm-btn" onClick={() => submitColInput(col.id)}>✓</button>
+                      <button type="button" className="lit-col-cancel-btn" onClick={() => { setColInput(""); setColAddingParentId(null); }}>✕</button>
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          );
+        })}
+
+        {library.collections.filter((c) => !c.parentId).length === 0 && colAddingParentId === null && (
           <div className="lit-col-empty">暂无分类</div>
         )}
       </NavSection>
@@ -477,7 +591,7 @@ export default function Literature() {
 
   const mainArea = (
     <div className="lit-main">
-      <PaperList
+      <PaperTable
         papers={visiblePapers}
         libraryCount={papers.length}
         loaded={loaded}
@@ -491,11 +605,6 @@ export default function Literature() {
         onSelectPaper={selectPaper}
         onToggleChecked={toggleChecked}
         onToggleStar={toggleStar}
-        onBrief={(p) => { selectPaper(p); setWorkspaceTab("overview"); }}
-        onPdf={downloadOrBrowse}
-        onAsk={(p) => openAgentChat(`/research-lit "${p.title}"`)}
-        onShortlist={(p) => setStage([p.id], "shortlist")}
-        onExclude={(p) => setStage([p.id], "excluded")}
         batchIds={batchIds}
         onBatchShortlist={() => runBatch((ids) => setStage(ids, "shortlist"))}
         onBatchExclude={() => runBatch((ids) => setStage(ids, "excluded"))}
@@ -506,68 +615,53 @@ export default function Literature() {
     </div>
   );
 
-  // ── Workspace ──────────────────────────────────────────────────────────────
+  // ── Info panel (Zotero-style right panel) ─────────────────────────────────
 
   const workspace = (
     <section className="lit-workspace">
-      <div className="lit-workspace-header">
-        <span className="lit-workspace-title">Paper Workspace</span>
-        <div className="lit-workspace-header-btns">
-          <button
-            type="button"
-            className="lit-workspace-icon-btn"
-            title={selectedPaper?.pdf.status === "downloaded" ? "打开 PDF" : "获取 PDF"}
-            aria-label={selectedPaper?.pdf.status === "downloaded" ? "打开 PDF" : "获取 PDF"}
-            onClick={() => selectedPaper && void downloadOrBrowse(selectedPaper.id)}
-            disabled={!selectedPaper || selectedPaper.pdf.status === "downloading"}
-          >
-            ◎
-          </button>
-          <button
-            type="button"
-            className="lit-workspace-icon-btn"
-            title="Open in chat"
-            aria-label="在聊天中打开"
-            onClick={() => selectedPaper && openAgentChat(`/research-lit "${selectedPaper.title}"`)}
-            disabled={!selectedPaper}
-          >
-            ↗
-          </button>
-          <button
-            type="button"
-            className="lit-workspace-icon-btn"
-            title="Clear selection"
-            aria-label="清除选择"
-            onClick={() => {
-              setSelectedId(null);
-              setSelectionCleared(true);
-            }}
-            disabled={!selectedPaper}
-          >
-            ✕
-          </button>
-        </div>
-      </div>
-
       {selectedPaper ? (
         <>
-          <div className="lit-workspace-meta">
-            <div className="lit-workspace-paper-title">{selectedPaper.title}</div>
-            <div className="lit-workspace-paper-sub">
-              {formatAuthors(selectedPaper.authors)}
-              {selectedPaper.year ? ` · ${selectedPaper.year}` : ""}
-              {selectedPaper.venue ? ` · ${selectedPaper.venue}` : ""}
+          {/* Zotero-style title header */}
+          <div className="lit-info-header">
+            <div className="lit-info-title-block">
+              <div className="lit-info-paper-title">{selectedPaper.title}</div>
+              <div className="lit-info-paper-sub">
+                {formatAuthors(selectedPaper.authors)}
+                {selectedPaper.year ? ` · ${selectedPaper.year}` : ""}
+                {selectedPaper.venue ? ` · ${selectedPaper.venue}` : ""}
+              </div>
+            </div>
+            <div className="lit-workspace-header-btns">
+              <button
+                type="button"
+                className="lit-workspace-icon-btn"
+                title={selectedPaper.pdf.status === "downloaded" ? "打开 PDF" : "获取 PDF"}
+                onClick={() => void downloadOrBrowse(selectedPaper.id)}
+                disabled={selectedPaper.pdf.status === "downloading"}
+              >◎</button>
+              <button
+                type="button"
+                className="lit-workspace-icon-btn"
+                title="Open in chat"
+                onClick={() => openAgentChat(`/research-lit "${selectedPaper.title}"`)}
+              >↗</button>
+              <button
+                type="button"
+                className="lit-workspace-icon-btn"
+                title="Clear selection"
+                onClick={() => { setSelectedId(null); setSelectionCleared(true); }}
+              >✕</button>
             </div>
           </div>
 
           <div className="lit-workspace-tabs" role="tablist">
             {(
               [
-                { id: "overview", label: "概览" },
-                { id: "reader", label: "PDF 阅读器" },
-                { id: "notes", label: "Review LLM 判断" },
+                { id: "info", label: "信息" },
+                { id: "overview", label: "简报" },
+                { id: "reader", label: "PDF" },
                 { id: "evidence", label: "证据" },
-                { id: "knowledge", label: "知识点" },
+                { id: "notes", label: "Review" },
                 { id: "files", label: "文件" },
               ] as Array<{ id: DetailTab; label: string }>
             ).map((t) => (
@@ -585,6 +679,26 @@ export default function Literature() {
           </div>
 
           <div className="lit-workspace-content">
+            {workspaceTab === "info" && (
+              <InfoTab
+                paper={selectedPaper}
+                collections={library.collections}
+                tagDraft={tagDraft}
+                onTagDraft={setTagDraft}
+                onAddTag={addTagToSelected}
+                onOpenReader={() => void downloadOrBrowse(selectedPaper.id)}
+                onAsk={() => openAgentChat(`/research-lit "${selectedPaper.title}"`)}
+                onViewEvidence={() => setWorkspaceTab("evidence")}
+                onViewOverview={() => setWorkspaceTab("overview")}
+                onShortlist={() => setStage([selectedPaper.id], "shortlist")}
+                onToggleCollection={(colId) => toggleCollection(selectedPaper.id, colId)}
+                onDelete={() => {
+                  if (window.confirm(`Delete "${selectedPaper.title}" from your library?`)) {
+                    deletePapers([selectedPaper.id]);
+                  }
+                }}
+              />
+            )}
             {workspaceTab === "overview" && (
               <WorkspaceOverview
                 paper={selectedPaper}
@@ -608,8 +722,6 @@ export default function Literature() {
                 }}
               />
             )}
-            {/* PDF reading opens as the full-bleed reading shell (see render
-                root); the workspace only handles the not-yet-downloaded case. */}
             {workspaceTab === "reader" && !selectedPaper.pdf.path && (
               <div className="lit-workspace-empty-content">
                 <p>请先下载 PDF，再在应用内阅读。</p>
@@ -649,7 +761,6 @@ export default function Literature() {
                 }}
               />
             )}
-            {workspaceTab === "knowledge" && <Knowledge mode="paper" initialPaperId={selectedPaper.id} />}
             {workspaceTab === "files" && (
               <WorkspaceFiles
                 paper={selectedPaper}
@@ -711,27 +822,6 @@ export default function Literature() {
         </div>
       )}
 
-      {pageView === "library" && (
-        <SearchStrip
-          query={remoteQuery}
-          sources={remoteSources}
-          searching={searching}
-          onQueryChange={setRemoteQuery}
-          onToggleSource={(source) =>
-            setRemoteSources((current) =>
-              current.includes(source)
-                ? current.filter((entry) => entry !== source)
-                : [...current, source],
-            )
-          }
-          onSearch={() => void runRemoteSearch(remoteQuery, remoteSources)}
-          onCreateReview={() => {
-            setReviewQuestion(remoteQuery);
-            setReviewPanelOpen(true);
-          }}
-        />
-      )}
-
       {pageView === "library" && reviewPanelOpen && (
         <ReviewWorkflowPanel
           tasks={library.reviewTasks}
@@ -783,10 +873,10 @@ export default function Literature() {
             <div className="lit-reading-tabs" role="tablist">
               {(
                 [
-                  { id: "overview", label: "概览" },
-                  { id: "notes", label: "Review LLM 判断" },
+                  { id: "info", label: "信息" },
+                  { id: "overview", label: "简报" },
                   { id: "evidence", label: "证据" },
-                  { id: "knowledge", label: "知识点" },
+                  { id: "notes", label: "Review" },
                   { id: "files", label: "文件" },
                 ] as Array<{ id: DetailTab; label: string }>
               ).map((t) => (
@@ -821,9 +911,25 @@ export default function Literature() {
           />
         </div>
       ) : (
-        <div className="lit-body">
+        <div
+          className="lit-body"
+          style={
+            {
+              "--lit-sidebar-w": `${panelWidths.sidebar}px`,
+              "--lit-workspace-w": `${panelWidths.workspace}px`,
+            } as React.CSSProperties
+          }
+        >
           {sidebar}
+          <div
+            className="lit-panel-divider"
+            onMouseDown={(e) => startPanelResize("sidebar", e)}
+          />
           {mainArea}
+          <div
+            className="lit-panel-divider"
+            onMouseDown={(e) => startPanelResize("workspace", e)}
+          />
           {workspace}
         </div>
       )}
@@ -846,65 +952,6 @@ export default function Literature() {
 // ──────────────────────────────────────────────────────────────────────────────
 // Paper list
 // ──────────────────────────────────────────────────────────────────────────────
-
-const REMOTE_SOURCES = ["arxiv", "crossref", "openalex", "scopus"];
-
-function SearchStrip({
-  query,
-  sources,
-  searching,
-  onQueryChange,
-  onToggleSource,
-  onSearch,
-  onCreateReview,
-}: {
-  query: string;
-  sources: string[];
-  searching: boolean;
-  onQueryChange: (query: string) => void;
-  onToggleSource: (source: string) => void;
-  onSearch: () => void;
-  onCreateReview: () => void;
-}) {
-  return (
-    <div className="lit-search-strip">
-      <input
-        className="lit-strip-input"
-        value={query}
-        onChange={(event) => onQueryChange(event.target.value)}
-        onKeyDown={(event) => {
-          if (event.key === "Enter") onSearch();
-        }}
-        placeholder="检索 arXiv、Crossref、OpenAlex、Scopus…"
-        aria-label="远程文献检索"
-      />
-      <div className="lit-source-picker" aria-label="检索来源">
-        {REMOTE_SOURCES.map((source) => (
-          <button
-            type="button"
-            key={source}
-            className={`lit-chip lit-source-chip${sources.includes(source) ? " active" : ""}`}
-            aria-pressed={sources.includes(source)}
-            onClick={() => onToggleSource(source)}
-          >
-            {source}
-          </button>
-        ))}
-      </div>
-      <button type="button" onClick={onCreateReview}>
-        新建审查
-      </button>
-      <button
-        type="button"
-        className="primary"
-        onClick={onSearch}
-        disabled={searching || !query.trim() || sources.length === 0}
-      >
-        {searching ? "检索中…" : "检索并保存"}
-      </button>
-    </div>
-  );
-}
 
 function ReviewWorkflowPanel({
   tasks,
@@ -1051,7 +1098,7 @@ function ReviewWorkflowPanel({
   );
 }
 
-function PaperList({
+function PaperTable({
   papers,
   libraryCount,
   loaded,
@@ -1065,11 +1112,6 @@ function PaperList({
   onSelectPaper,
   onToggleChecked,
   onToggleStar,
-  onBrief,
-  onPdf,
-  onAsk,
-  onShortlist,
-  onExclude,
   batchIds,
   onBatchShortlist,
   onBatchExclude,
@@ -1090,11 +1132,6 @@ function PaperList({
   onSelectPaper: (p: LiteraturePaper) => void;
   onToggleChecked: (id: string) => void;
   onToggleStar: (id: string) => void;
-  onBrief: (p: LiteraturePaper) => void;
-  onPdf: (id: string) => Promise<void>;
-  onAsk: (p: LiteraturePaper) => void;
-  onShortlist: (p: LiteraturePaper) => void;
-  onExclude: (p: LiteraturePaper) => void;
   batchIds: string[];
   onBatchShortlist: () => void;
   onBatchExclude: () => void;
@@ -1102,6 +1139,31 @@ function PaperList({
   onBatchDelete: () => void;
   onBatchClear: () => void;
 }) {
+  const [colWidths, setColWidths] = useState({ venue: 160, year: 52, tags: 130 });
+  const dragRef = useRef<{ col: keyof typeof colWidths; startX: number; startW: number } | null>(null);
+
+  const startResize = (col: keyof typeof colWidths, e: { clientX: number; preventDefault(): void; stopPropagation(): void }, dir: 1 | -1 = 1) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragRef.current = { col, startX: e.clientX, startW: colWidths[col] };
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    const onMove = (ev: MouseEvent) => {
+      if (!dragRef.current) return;
+      const newW = Math.max(40, dragRef.current.startW + dir * (ev.clientX - dragRef.current.startX));
+      setColWidths((prev) => ({ ...prev, [dragRef.current!.col]: newW }));
+    };
+    const onUp = () => {
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      dragRef.current = null;
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  };
+
   return (
     <>
       <div className="lit-review-toolbar">
@@ -1128,34 +1190,65 @@ function PaperList({
         </select>
       </div>
 
-      <div className="lit-card-list">
-        {loaded && libraryCount === 0 && (
+      <div className="lit-table-wrap">
+        {loaded && libraryCount === 0 ? (
           <div className="lit-empty-state">
             <p>论文库为空。</p>
             <p className="dim">通过 Chat 中的 Agent 导入论文。</p>
           </div>
-        )}
-        {loaded && libraryCount > 0 && papers.length === 0 && (
+        ) : loaded && libraryCount > 0 && papers.length === 0 ? (
           <div className="lit-empty-state">
             <p className="dim">没有符合当前筛选条件的论文。</p>
           </div>
+        ) : (
+          <table className="lit-table" role="grid">
+            <colgroup>
+              <col style={{ width: 32 }} />
+              <col style={{ width: 22 }} />
+              <col />
+              <col style={{ width: colWidths.venue }} />
+              <col style={{ width: colWidths.year }} />
+              <col style={{ width: colWidths.tags }} />
+              <col style={{ width: 30 }} />
+            </colgroup>
+            <thead>
+              <tr className="lit-thead-row">
+                <th className="lit-th lit-th-check" />
+                <th className="lit-th lit-th-stage" />
+                <th className="lit-th lit-th-title">
+                  标题
+                  <div className="lit-col-resize" onMouseDown={(e) => startResize("venue", e, -1)} />
+                </th>
+                <th className="lit-th lit-th-venue">
+                  出版物
+                  <div className="lit-col-resize" onMouseDown={(e) => startResize("venue", e)} />
+                </th>
+                <th className="lit-th lit-th-year">
+                  年份
+                  <div className="lit-col-resize" onMouseDown={(e) => startResize("year", e)} />
+                </th>
+                <th className="lit-th lit-th-tags">
+                  #标签
+                  <div className="lit-col-resize" onMouseDown={(e) => startResize("tags", e)} />
+                </th>
+                <th className="lit-th lit-th-star" />
+              </tr>
+            </thead>
+            <tbody>
+              {papers.map((paper) => (
+                <PaperRow
+                  key={paper.id}
+                  paper={paper}
+                  selected={selectedId === paper.id}
+                  checked={checked.has(paper.id)}
+                  onSelect={() => onSelectPaper(paper)}
+                  onToggleChecked={() => onToggleChecked(paper.id)}
+                  onToggleStar={() => onToggleStar(paper.id)}
+                />
+              ))}
+            </tbody>
+          </table>
         )}
-        {papers.map((paper) => (
-          <PaperCard
-            key={paper.id}
-            paper={paper}
-            selected={selectedId === paper.id}
-            checked={checked.has(paper.id)}
-            onSelect={() => onSelectPaper(paper)}
-            onToggleChecked={() => onToggleChecked(paper.id)}
-            onToggleStar={() => onToggleStar(paper.id)}
-            onBrief={() => onBrief(paper)}
-            onPdf={() => void onPdf(paper.id)}
-            onAsk={() => onAsk(paper)}
-            onShortlist={() => onShortlist(paper)}
-            onExclude={() => onExclude(paper)}
-          />
-        ))}
       </div>
 
       {batchIds.length > 0 && (
@@ -1173,21 +1266,16 @@ function PaperList({
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Paper card
+// Paper row (Zotero-style table row)
 // ──────────────────────────────────────────────────────────────────────────────
 
-function PaperCard({
+function PaperRow({
   paper,
   selected,
   checked,
   onSelect,
   onToggleChecked,
   onToggleStar,
-  onBrief,
-  onPdf,
-  onAsk,
-  onShortlist,
-  onExclude,
 }: {
   paper: LiteraturePaper;
   selected: boolean;
@@ -1195,100 +1283,60 @@ function PaperCard({
   onSelect: () => void;
   onToggleChecked: () => void;
   onToggleStar: () => void;
-  onBrief: () => void;
-  onPdf: () => void;
-  onAsk: () => void;
-  onShortlist: () => void;
-  onExclude: () => void;
 }) {
-  const whyRelevant = paper.verdict?.rationale || paper.agentSummary;
-
   return (
-    <div
-      className={`lit-card${selected ? " active" : ""}${paper.stage === "excluded" ? " excluded" : ""}`}
+    <tr
+      className={`lit-row${selected ? " active" : ""}${paper.stage === "excluded" ? " excluded" : ""}`}
       onClick={onSelect}
       onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onSelect(); } }}
-      role="button"
       tabIndex={0}
+      role="row"
+      aria-selected={selected}
     >
-      <input
-        type="checkbox"
-        className="lit-card-check"
-        checked={checked}
-        aria-label={`Select ${paper.title}`}
-        onClick={(e) => e.stopPropagation()}
-        onChange={onToggleChecked}
-      />
-
-      <div className="lit-card-body">
-        <div className="lit-card-title-row">
-          <div className={`lit-card-title${paper.unread ? " unread" : ""}`}>
-            {paper.title}
-          </div>
-          <button
-            type="button"
-            className={`lit-card-star${paper.starred ? " starred" : ""}`}
-            onClick={(e) => { e.stopPropagation(); onToggleStar(); }}
-            aria-label={paper.starred ? "Unstar" : "Star"}
-          >
-            {paper.starred ? "★" : "☆"}
-          </button>
-        </div>
-
-        <div className="lit-card-meta">
+      <td className="lit-row-check" onClick={(e) => e.stopPropagation()}>
+        <input
+          type="checkbox"
+          checked={checked}
+          aria-label={`Select ${paper.title}`}
+          onChange={onToggleChecked}
+        />
+      </td>
+      <td className="lit-row-stage">
+        <span className={`lit-stage-dot ${paper.stage}`} title={STAGE_LABELS[paper.stage]} />
+      </td>
+      <td className="lit-row-title-cell">
+        <div className={`lit-row-title${paper.unread ? " unread" : ""}`}>{paper.title}</div>
+        <div className="lit-row-authors">
           {formatAuthors(paper.authors)}
-          {paper.year ? ` · ${paper.year}` : ""}
-          {paper.venue ? ` · ${paper.venue}` : ""}
           {paper.pdf.status === "downloaded" && (
-            <span className="lit-pdf-badge" title={paper.pdf.path}>PDF</span>
+            <span className="lit-pdf-badge" title={paper.pdf.path ?? ""}>PDF</span>
+          )}
+          {paper.evidence.length > 0 && (
+            <span className="lit-row-evidence-badge" title="有提取证据">证</span>
           )}
         </div>
-
-        {whyRelevant && (
-          <div className="lit-card-why">
-            <span className="lit-card-why-label">Why relevant: </span>
-            {whyRelevant.length > 150 ? `${whyRelevant.slice(0, 150)}…` : whyRelevant}
-          </div>
+      </td>
+      <td className="lit-row-venue" title={paper.venue}>{paper.venue || "—"}</td>
+      <td className="lit-row-year">{paper.year ?? "—"}</td>
+      <td className="lit-row-tags">
+        {paper.tags.slice(0, 2).map((tag) => (
+          <span key={tag} className={`lit-tag ${tagColorClass(tag)}`}>{tag}</span>
+        ))}
+        {paper.tags.length > 2 && (
+          <span className="lit-row-tag-more">+{paper.tags.length - 2}</span>
         )}
-
-        {paper.tags.length > 0 && (
-          <div className="lit-card-tags">
-            {paper.tags.slice(0, 5).map((tag) => (
-              <span key={tag} className={`lit-tag ${tagColorClass(tag)}`}>
-                {tag}
-              </span>
-            ))}
-          </div>
-        )}
-
-        <div className="lit-card-actions" onClick={(e) => e.stopPropagation()}>
-          <button type="button" className="lit-card-btn" onClick={onBrief}>
-            ◫ Brief
-          </button>
-          <button
-            type="button"
-            className="lit-card-btn"
-            onClick={onPdf}
-            disabled={paper.pdf.status === "downloading"}
-          >
-            {paper.pdf.status === "downloaded" ? "打开 PDF" : "获取 PDF"}
-          </button>
-          <button type="button" className="lit-card-btn" onClick={onAsk}>
-            ✦ Ask
-          </button>
-          {paper.stage !== "shortlist" && paper.stage !== "downloaded" && paper.stage !== "read" && (
-            <button type="button" className="lit-card-btn" onClick={onShortlist}>
-              ☆ Shortlist
-            </button>
-          )}
-          {paper.stage !== "excluded" && (
-            <button type="button" className="lit-card-btn danger" onClick={onExclude}>
-              ⊘ Exclude
-            </button>
-          )}
-        </div>
-      </div>
-    </div>
+      </td>
+      <td className="lit-row-star" onClick={(e) => e.stopPropagation()}>
+        <button
+          type="button"
+          className={`lit-card-star${paper.starred ? " starred" : ""}`}
+          onClick={(e) => { e.stopPropagation(); onToggleStar(); }}
+          aria-label={paper.starred ? "Unstar" : "Star"}
+        >
+          {paper.starred ? "★" : "☆"}
+        </button>
+      </td>
+    </tr>
   );
 }
 
@@ -2047,6 +2095,161 @@ function formatLogTime(at: string) {
   const d = new Date(at);
   if (Number.isNaN(d.getTime())) return "";
   return d.toLocaleTimeString(undefined, { hour12: false });
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Info tab — Zotero-style metadata panel
+// ──────────────────────────────────────────────────────────────────────────────
+
+function InfoTab({
+  paper,
+  collections,
+  tagDraft,
+  onTagDraft,
+  onAddTag,
+  onOpenReader,
+  onAsk,
+  onViewEvidence,
+  onViewOverview,
+  onShortlist,
+  onToggleCollection,
+  onDelete,
+}: {
+  paper: LiteraturePaper;
+  collections: LiteratureLibrary["collections"];
+  tagDraft: string;
+  onTagDraft: (v: string) => void;
+  onAddTag: () => void;
+  onOpenReader: () => void;
+  onAsk: () => void;
+  onViewEvidence: () => void;
+  onViewOverview: () => void;
+  onShortlist: () => void;
+  onToggleCollection: (colId: string) => void;
+  onDelete: () => void;
+}) {
+  const fit = paper.verdict?.fit;
+  return (
+    <div className="lip-panel">
+      {(fit || paper.starred) && (
+        <div className="lip-badges">
+          {fit && (
+            <span className={`lit-relevance-badge relevance-${fit}`}>
+              {FIT_LABELS[fit]}{paper.verdict?.score !== undefined ? ` · ${paper.verdict.score}` : ""}
+            </span>
+          )}
+          {paper.starred && <span className="lip-star-badge">★ 已收藏</span>}
+        </div>
+      )}
+
+      <div className="lip-section">
+        <div className="lip-section-head">信息</div>
+        <dl className="lip-meta">
+          <dt>条目类型</dt><dd>期刊文章</dd>
+          {paper.authors.map((author, i) => (
+            <Fragment key={i}>
+              <dt>{i === 0 ? "作者" : ""}</dt>
+              <dd>{author}</dd>
+            </Fragment>
+          ))}
+          {paper.venue && <><dt>出版物</dt><dd>{paper.venue}</dd></>}
+          {paper.year && <><dt>日期</dt><dd>{paper.year}</dd></>}
+          {paper.citedBy !== undefined && <><dt>引用数</dt><dd>{paper.citedBy}</dd></>}
+          {paper.doi && (
+            <>
+              <dt>DOI</dt>
+              <dd><a href={`https://doi.org/${paper.doi}`} target="_blank" rel="noreferrer">{paper.doi}</a></dd>
+            </>
+          )}
+          {paper.arxivId && (
+            <>
+              <dt>arXiv</dt>
+              <dd><a href={`https://arxiv.org/abs/${paper.arxivId}`} target="_blank" rel="noreferrer">{paper.arxivId}</a></dd>
+            </>
+          )}
+          <dt>来源</dt><dd>{paper.source}</dd>
+          <dt>阶段</dt><dd>{STAGE_LABELS[paper.stage]}</dd>
+          <dt>添加时间</dt><dd>{paper.addedAt.slice(0, 10)}</dd>
+          <dt>PDF</dt>
+          <dd>
+            {paper.pdf.status === "downloaded" ? "已下载"
+              : paper.pdf.status === "downloading" ? "下载中…"
+              : paper.pdf.status === "failed" ? "失败"
+              : paper.pdf.url ? "有直链" : "无直链"}
+          </dd>
+        </dl>
+      </div>
+
+      <div className="lip-section">
+        <div className="lip-section-head">摘要</div>
+        <p className={`lip-abstract${paper.abstract ? "" : " lip-abstract-missing"}`}>
+          {paper.abstract || "暂无摘要。"}
+        </p>
+      </div>
+
+      {paper.verdict?.rationale && (
+        <div className="lip-section">
+          <div className="lip-section-head">AI 相关性理由</div>
+          <p className="lip-abstract">{paper.verdict.rationale}</p>
+        </div>
+      )}
+
+      <div className="lip-section">
+        <div className="lip-section-head">标签</div>
+        <div className="lip-tags">
+          {paper.tags.map((tag) => (
+            <span key={tag} className={`lit-tag ${tagColorClass(tag)}`}>{tag}</span>
+          ))}
+          <input
+            value={tagDraft}
+            onChange={(e) => onTagDraft(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") onAddTag(); }}
+            placeholder="添加标签…"
+            className="lip-tag-input"
+            aria-label="添加标签"
+          />
+        </div>
+      </div>
+
+      {collections.length > 0 && (
+        <div className="lip-section">
+          <div className="lip-section-head">分类</div>
+          <div className="lip-tags">
+            {collections.map((col) => {
+              const assigned = paper.collectionIds.includes(col.id);
+              return (
+                <button
+                  key={col.id}
+                  type="button"
+                  className={`lit-collection-toggle${assigned ? " active" : ""}`}
+                  aria-pressed={assigned}
+                  onClick={() => onToggleCollection(col.id)}
+                >
+                  {assigned ? "✓ " : "+ "}{col.label}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      <div className="lip-section lip-actions-section">
+        <button type="button" className="lit-action-btn" onClick={onOpenReader}
+                disabled={paper.pdf.status === "downloading"}>
+          {paper.pdf.status === "downloaded" ? "打开 PDF"
+            : paper.pdf.status === "downloading" ? "下载中…"
+            : paper.pdf.url ? "下载 PDF" : "获取 PDF"}
+        </button>
+        <button type="button" className="lit-action-btn" onClick={onViewOverview}>简报</button>
+        <button type="button" className="lit-action-btn" onClick={onViewEvidence}>查看证据</button>
+        <button type="button" className="lit-action-btn" onClick={onAsk}>问 Agent</button>
+        {paper.stage !== "shortlist" && paper.stage !== "downloaded" && paper.stage !== "read" && (
+          <button type="button" className="lit-action-btn starred" onClick={onShortlist}>加入候选</button>
+        )}
+        <button type="button" className="lit-action-btn danger" onClick={onDelete}>删除</button>
+      </div>
+    </div>
+  );
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

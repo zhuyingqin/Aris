@@ -1690,6 +1690,15 @@ pub fn chat_cancel(state: State<ChatState>, session_id: String) -> Result<(), St
     Ok(())
 }
 
+pub(crate) fn cancel_all_running_turns(state: &ChatState) {
+    if let Ok(running) = state.running_turns.lock() {
+        for cancelled in running.values() {
+            cancelled.store(true, Ordering::SeqCst);
+        }
+    }
+    runtime::set_interrupt();
+}
+
 // ---- Desktop slash command helpers ---------------------------------------
 
 #[derive(Debug, Clone)]

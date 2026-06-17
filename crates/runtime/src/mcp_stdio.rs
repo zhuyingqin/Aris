@@ -656,6 +656,7 @@ pub struct McpStdioProcess {
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
     framing: McpStdioFraming,
+    _process_guard: Option<crate::ManagedProcessGuard>,
     /// v0.4.13 P1.D: per-server timeout override copied from the
     /// transport. `None` means fall through to
     /// `MCP_REQUEST_TIMEOUT_SECS` env / 300s default at request time.
@@ -680,8 +681,16 @@ impl McpStdioProcess {
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
         apply_env(&mut command, &transport.env);
+        crate::configure_managed_tokio_command(&mut command);
 
         let mut child = command.spawn()?;
+        let process_guard = child.id().map(|pid| {
+            crate::register_managed_process(
+                pid,
+                format!("mcp stdio: {}", transport.command),
+                crate::ManagedProcessKind::Mcp,
+            )
+        });
         let stdin = child
             .stdin
             .take()
@@ -704,6 +713,7 @@ impl McpStdioProcess {
             } else {
                 McpStdioFraming::JsonLines
             },
+            _process_guard: process_guard,
             request_timeout_override_secs: transport.request_timeout_secs,
         })
     }
@@ -947,7 +957,7 @@ impl McpStdioProcess {
             None => {
                 // Keep the global flag set so the conversation loop unwinds
                 // instead of treating cancellation as an ordinary tool error.
-                let _ = self.child.kill().await;
+                let _ = self.terminate().await;
                 return Err(io::Error::new(
                     io::ErrorKind::Interrupted,
                     "MCP request interrupted by user",
@@ -957,11 +967,11 @@ impl McpStdioProcess {
             Some(Ok(Err(error))) => {
                 // I/O error during send or read. Stdio buffer is now
                 // ambiguous — kill so the next call respawns cleanly.
-                let _ = self.child.kill().await;
+                let _ = self.terminate().await;
                 return Err(error);
             }
             Some(Err(_elapsed)) => {
-                let _ = self.child.kill().await;
+                let _ = self.terminate().await;
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
                     format!(
@@ -975,7 +985,7 @@ impl McpStdioProcess {
         if response.id != id {
             // Correlation mismatch: server is desynced or buggy. Treat
             // as fatal for this connection so we respawn cleanly.
-            let _ = self.child.kill().await;
+            let _ = self.terminate().await;
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
@@ -1036,7 +1046,14 @@ impl McpStdioProcess {
     }
 
     pub async fn terminate(&mut self) -> io::Result<()> {
-        self.child.kill().await
+        if let Some(pid) = self.child.id() {
+            crate::terminate_managed_process_tree(pid);
+        }
+        match self.child.kill().await {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::InvalidInput => Ok(()),
+            Err(error) => Err(error),
+        }
     }
 
     pub async fn wait(&mut self) -> io::Result<std::process::ExitStatus> {
@@ -1045,7 +1062,7 @@ impl McpStdioProcess {
 
     async fn shutdown(&mut self) -> io::Result<()> {
         if self.child.try_wait()?.is_none() {
-            self.child.kill().await?;
+            self.terminate().await?;
         }
         let _ = self.child.wait().await?;
         Ok(())

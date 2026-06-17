@@ -9,6 +9,7 @@ import type {
   ChatModelOptions,
   ChatStatus,
   ConfigPatch,
+  ConfigTestDetail,
   ConfigTestResult,
   ConfigView,
   DesktopCommandSpec,
@@ -22,6 +23,7 @@ import type {
   PermissionModeView,
   ProjectView,
   RunEvent,
+  ScheduledTask,
   SessionSummary,
   SessionTranscript,
   SkillMeta,
@@ -47,6 +49,10 @@ export const configSet = (patch: ConfigPatch) =>
   invoke<ConfigView>("config_set", { patch });
 export const configTest = (patch: ConfigPatch) =>
   invoke<ConfigTestResult>("config_test", { patch });
+export const providerTest = (input: { baseUrl: string; model?: string; apiKey?: string }) =>
+  invoke<ConfigTestDetail>("provider_test", { input });
+export const scheduledTasksList = () =>
+  invoke<ScheduledTask[]>("scheduled_tasks_list");
 export const imBridgeGet = () => invoke<ImBridgeView>("im_bridge_get");
 export const imBridgeSet = (patch: ImBridgePatch) =>
   invoke<ImBridgeView>("im_bridge_set", { patch });

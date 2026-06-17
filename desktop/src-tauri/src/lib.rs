@@ -8,6 +8,7 @@ mod literature;
 mod mcp;
 mod process;
 mod projects;
+mod scheduled;
 mod sessions;
 mod state;
 mod studio;
@@ -97,6 +98,8 @@ pub fn run() {
             config::config_get,
             config::config_set,
             config::config_test,
+            config::provider_test,
+            scheduled::scheduled_tasks_list,
             im_bridge::im_bridge_get,
             im_bridge::im_bridge_set,
             im_bridge::im_bridge_test_qq,
@@ -158,8 +161,11 @@ pub fn run() {
         ])
         .build(tauri::generate_context!())
         .expect("error while building ARIS Studio")
-        .run(|_app_handle, event| {
+        .run(|app_handle, event| {
             if matches!(event, tauri::RunEvent::ExitRequested { .. }) {
+                let chat_state = app_handle.state::<engine::ChatState>();
+                engine::cancel_all_running_turns(chat_state.inner());
+                runtime::terminate_all_managed_processes();
                 im_bridge::stop_on_app_exit();
             }
         });

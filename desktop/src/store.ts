@@ -23,7 +23,8 @@ export type Tab =
   | "studio"
   | "extensions"
   | "settings"
-  | "sessions";
+  | "sessions"
+  | "scheduled";
 
 interface AppState {
   tab: Tab;

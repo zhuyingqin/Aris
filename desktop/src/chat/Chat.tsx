@@ -841,6 +841,7 @@ export default function Chat() {
           </div>
         </header>
         <ChatThread
+          key={currentId}
           sessionId={currentId}
           turns={turns}
           composerHeight={composerHeight}

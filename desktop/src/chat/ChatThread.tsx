@@ -32,6 +32,12 @@ export default function ChatThread({
 }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [following, setFollowing] = useState(true);
+  // True while the initial scroll for a session is still settling. Dynamic row
+  // measurement means the first scroll lands on *estimated* offsets, then rows
+  // measure and the total size shifts; during that window we ignore the
+  // reflow-driven onScroll events that would otherwise flip `following` off and
+  // leave the scrollbar stranded mid-thread.
+  const settlingRef = useRef(false);
   const virtualizer = useVirtualizer({
     count: turns.length,
     getScrollElement: () => scrollRef.current,
@@ -46,15 +52,32 @@ export default function ChatThread({
     setFollowing(true);
   };
 
+  // Land at the latest message when a conversation opens, re-pinning across a few
+  // frames so the scrollbar converges as rows measure instead of jumping around.
   useEffect(() => {
     setFollowing(true);
-    window.requestAnimationFrame(() => scrollToBottom());
+    settlingRef.current = true;
+    let frame = 0;
+    let raf = window.requestAnimationFrame(function settle() {
+      scrollToBottom();
+      frame += 1;
+      if (frame < 5) {
+        raf = window.requestAnimationFrame(settle);
+      } else {
+        settlingRef.current = false;
+      }
+    });
+    return () => {
+      window.cancelAnimationFrame(raf);
+      settlingRef.current = false;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
 
   useEffect(() => {
     if (!following) return;
-    window.requestAnimationFrame(() => scrollToBottom());
+    const raf = window.requestAnimationFrame(() => scrollToBottom());
+    return () => window.cancelAnimationFrame(raf);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [turns, composerHeight, following]);
 
@@ -63,7 +86,10 @@ export default function ChatThread({
       <div
         className="chat-scroll"
         ref={scrollRef}
-        onScroll={(event) => setFollowing(isNearBottom(event.currentTarget))}
+        onScroll={(event) => {
+          if (settlingRef.current) return;
+          setFollowing(isNearBottom(event.currentTarget));
+        }}
         style={{ paddingBottom: composerHeight + 24 }}
       >
         {turns.length === 0 ? (

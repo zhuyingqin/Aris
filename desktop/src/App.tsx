@@ -7,6 +7,7 @@ import Studio from "./studio/Studio";
 import Extensions from "./extensions/Extensions";
 import Settings from "./settings/Settings";
 import Sessions from "./sessions/Sessions";
+import ScheduledTasks from "./scheduled/ScheduledTasks";
 import arisIcon from "./assets/aris-icon.svg";
 
 interface NavItem {
@@ -479,6 +480,7 @@ export default function App() {
         {tab === "studio" && <Studio />}
         {tab === "extensions" && <Extensions />}
         {tab === "sessions" && <Sessions />}
+        {tab === "scheduled" && <ScheduledTasks />}
         {tab === "settings" && <Settings />}
 
         {error && (

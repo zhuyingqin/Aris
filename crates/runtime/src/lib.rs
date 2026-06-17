@@ -20,6 +20,7 @@ mod memory_provider;
 mod oauth;
 mod permissions;
 mod process;
+mod process_registry;
 mod prompt;
 mod remote;
 pub mod sandbox;
@@ -94,6 +95,12 @@ pub use permissions::{
     PermissionPrompter, PermissionRequest,
 };
 pub use process::{hidden_command, hidden_tokio_command, hide_window};
+pub use process_registry::{
+    configure_managed_tokio_command, managed_processes_snapshot, register_managed_process,
+    run_managed_command, spawn_managed_background, terminate_all_managed_processes,
+    terminate_managed_process_tree, unregister_managed_process, ManagedCommandOutput,
+    ManagedProcessGuard, ManagedProcessInfo, ManagedProcessKind,
+};
 pub use prompt::{
     load_system_prompt, prepend_bullets, team_orchestration_section, ContextFile, ProjectContext,
     PromptBuildError, SystemPromptBuilder, SYSTEM_PROMPT_DYNAMIC_BOUNDARY,

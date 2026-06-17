@@ -3,6 +3,7 @@ import {
   configGet,
   configSet,
   configTest,
+  providerTest,
   imBridgeGet,
   imBridgeLogs,
   imBridgeSet,
@@ -217,6 +218,25 @@ function ProviderCard({
   const defaultModel = extractModelFromToml(provider.configToml) || suggestions[0] || "";
   const [model, setModel] = useState(defaultModel);
   const [applying, setApplying] = useState(false);
+  const [testState, setTestState] = useState<"idle" | "testing" | "ok" | "fail">("idle");
+  const [testMsg, setTestMsg] = useState("");
+
+  const handleTest = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (testState === "testing") return;
+    setTestState("testing");
+    setTestMsg("");
+    try {
+      const apiKey = extractKeyFromAuthJson(provider.authJson);
+      const m = extractModelFromToml(provider.configToml) || suggestions[0] || "";
+      const detail = await providerTest({ baseUrl: provider.url, model: m, apiKey });
+      setTestState(detail.ok ? "ok" : "fail");
+      setTestMsg(detail.message);
+    } catch (err) {
+      setTestState("fail");
+      setTestMsg(String(err));
+    }
+  };
 
   const toggleRole = (role: "exec" | "review", e: React.MouseEvent) => {
     e.stopPropagation();
@@ -267,6 +287,13 @@ function ProviderCard({
             type="button"
             onClick={(e) => toggleRole("review", e)}
           >审</button>
+          <button
+            className={`sp-card-btn sp-card-btn-test sp-test-${testState}`}
+            title={testMsg || "测试连接"}
+            type="button"
+            disabled={testState === "testing"}
+            onClick={(e) => void handleTest(e)}
+          >{testState === "testing" ? "⋯" : testState === "ok" ? "✓" : testState === "fail" ? "✕" : "测"}</button>
           <button className="sp-card-btn" title="编辑" type="button" onClick={(e) => { e.stopPropagation(); onEdit(); }}>✎</button>
           <button className="sp-card-btn sp-card-btn-danger" title="删除" type="button" onClick={(e) => { e.stopPropagation(); onDelete(); }}>✕</button>
         </div>
@@ -314,6 +341,69 @@ function ProviderCard({
   );
 }
 
+function BridgeCard({
+  running,
+  enabled,
+  status,
+  pid,
+  hasSecret,
+  busy,
+  onOpen,
+  onStart,
+  onStop,
+  onTest,
+  onLogs,
+}: {
+  running: boolean;
+  enabled: boolean;
+  status: string;
+  pid?: number | null;
+  hasSecret: boolean;
+  busy: boolean;
+  onOpen: () => void;
+  onStart: () => void;
+  onStop: () => void;
+  onTest: () => void;
+  onLogs: () => void;
+}) {
+  const runtimeText = running
+    ? `运行中${pid ? ` · PID ${pid}` : ""}`
+    : status || "未加载";
+  return (
+    <div className="sp-card-wrap">
+      <div className="sp-card sp-bridge-card">
+        <div className="sp-card-click-zone" role="button" tabIndex={0} onClick={onOpen} onKeyDown={(e) => e.key === "Enter" && onOpen()}>
+          <div className="sp-card-icon sp-card-icon-qq" aria-hidden="true">Q</div>
+          <div className="sp-card-body">
+            <div className="sp-card-name">
+              Aris QQ Bot
+              <span className="sp-role-badge sp-role-qq">QQ</span>
+              <span className={`sp-role-badge ${running ? "sp-role-running" : "sp-role-muted"}`}>
+                {running ? "运行中" : enabled ? "已启用" : "已禁用"}
+              </span>
+              {hasSecret && <span className="sp-role-badge sp-role-secret">已配置密钥</span>}
+            </div>
+            <div className="sp-card-url">QQ 私信桥接 · C2C 私聊</div>
+            <div className="sp-card-notes">{runtimeText}</div>
+          </div>
+        </div>
+        <div className="sp-card-actions" onClick={(e) => e.stopPropagation()}>
+          <button
+            className="sp-card-btn"
+            title={running ? "停止 QQ Bot" : "启动 QQ Bot"}
+            type="button"
+            disabled={busy || (!running && !enabled)}
+            onClick={() => (running ? onStop() : onStart())}
+          >{running ? "停" : "启"}</button>
+          <button className="sp-card-btn sp-card-btn-test" title="测试 QQ 配置" type="button" disabled={busy} onClick={onTest}>测</button>
+          <button className="sp-card-btn" title="查看日志" type="button" disabled={busy} onClick={onLogs}>志</button>
+          <button className="sp-card-btn" title="编辑" type="button" onClick={onOpen}>✎</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 type SaveState = "idle" | "saving" | "saved" | "error";
@@ -338,6 +428,7 @@ export default function Settings() {
   const [bridgeBusy, setBridgeBusy] = useState<BridgeBusy>(null);
   const [bridgeNotice, setBridgeNotice] = useState<BridgeNotice | null>(null);
   const [showBridgeLog, setShowBridgeLog] = useState(false);
+  const [bridgeDetailOpen, setBridgeDetailOpen] = useState(false);
   const operationVersion = useRef(0);
   const activeOp = useRef<{ kind: "save" | "test"; version: number } | null>(null);
   const savedTimer = useRef<number | null>(null);
@@ -401,27 +492,36 @@ export default function Settings() {
   useEffect(() => {
     if (!configView || didAutoPopulate.current) return;
     didAutoPopulate.current = true;
-    if (providers.length > 0) return; // user already has a list — don't touch it
+
+    const norm = (u: string) => u.trim().replace(/\/+$/, "").toLowerCase();
+    // base URLs already represented by a card — dedup across this whole pass so
+    // re-opening Settings never duplicates, and existing cards are reused.
+    const seen = new Set(providers.map((p) => norm(p.url)).filter(Boolean));
+
+    // Add a card for `url` (with its model) if none exists yet; returns the id of
+    // the matching card (existing or freshly added), or null when url is blank.
+    const ensureCard = (url: string, model: string | null | undefined): string | null => {
+      const u = url.trim();
+      if (!u) return null;
+      const key = norm(u);
+      const existing = providers.find((p) => norm(p.url) === key);
+      if (existing) return existing.id;
+      if (seen.has(key)) return null; // added earlier in this pass
+      seen.add(key);
+      const toml = model ? `model = "${model}"` : "";
+      return add({ name: guessProviderName(u), url: u, notes: "", authJson: "", configToml: toml });
+    };
 
     const execUrl = configView.executorBaseUrl?.trim() ?? "";
     const reviewUrl = configView.reviewerBaseUrl?.trim() ?? "";
-    if (!execUrl && !reviewUrl) return;
 
-    let execId: string | null = null;
-    let reviewId: string | null = null;
+    const execId = configView.hasExecutorKey ? ensureCard(execUrl, configView.executorModel) : null;
+    const reviewId = configView.hasReviewerKey ? ensureCard(reviewUrl, configView.reviewerModel) : null;
 
-    if (configView.hasExecutorKey && execUrl) {
-      const toml = configView.executorModel ? `model = "${configView.executorModel}"` : "";
-      execId = add({ name: guessProviderName(execUrl), url: execUrl, notes: "", authJson: "", configToml: toml });
-    }
-
-    if (configView.hasReviewerKey && reviewUrl) {
-      if (reviewUrl === execUrl && execId) {
-        reviewId = execId;
-      } else {
-        const toml = configView.reviewerModel ? `model = "${configView.reviewerModel}"` : "";
-        reviewId = add({ name: guessProviderName(reviewUrl), url: reviewUrl, notes: "", authJson: "", configToml: toml });
-      }
+    // Every verified provider becomes a card too — this is what surfaces the
+    // extra providers (e.g. gpt-5.5) that aren't in the executor/reviewer slots.
+    for (const ve of configView.verifiedExecutors ?? []) {
+      ensureCard(ve.baseUrl, ve.model);
     }
 
     if (execId) setExecutor(execId, configView.executorModel ?? "");
@@ -644,8 +744,164 @@ export default function Settings() {
     catch { setFormatError("无效 JSON，请检查格式"); }
   };
 
+  const bridgeRunning = bridgeView?.running ?? false;
+  const bridgeEnabled = bridgeForm.enabled ?? bridgeView?.enabled ?? true;
+  const bridgeBusyLabel = bridgeBusy === "saving"
+    ? "保存中…"
+    : bridgeBusy === "testing"
+      ? "测试中…"
+      : bridgeBusy === "starting"
+        ? "启动中…"
+        : bridgeBusy === "stopping"
+          ? "停止中…"
+          : bridgeBusy === "logs"
+            ? "加载中…"
+            : null;
+
   // ── Non-Tauri placeholder ───────────────────────────────────────────────────
   if (!isTauri()) return <div className="board"><div className="empty">Settings need the Tauri backend.</div></div>;
+
+  if (bridgeDetailOpen) {
+    if (!bridgeView) return <div className="board"><div className="empty">Loading QQ settings…</div></div>;
+    return (
+      <div className="st-page sp-detail-page">
+        <div className="sp-detail-head">
+          <button className="sp-back-btn" onClick={() => setBridgeDetailOpen(false)} type="button">← 返回</button>
+          <div className="sp-detail-title">Aris QQ Bot</div>
+          <div className="sp-detail-badges">
+            <span className="sp-role-badge sp-role-qq">QQ</span>
+            <span className={`sp-role-badge ${bridgeRunning ? "sp-role-running" : "sp-role-muted"}`}>
+              {bridgeRunning ? "运行中" : bridgeEnabled ? "已启用" : "已禁用"}
+            </span>
+          </div>
+        </div>
+        <div className="sp-detail-form">
+          <div className="sp-detail-row2">
+            <div className="sp-field">
+              <label className="sp-field-label">频道</label>
+              <button
+                type="button"
+                className={`sp-toggle-btn${bridgeEnabled ? " active" : ""}`}
+                onClick={() => updateBridgeForm({ enabled: !bridgeEnabled })}
+              >
+                <span className="sp-toggle-main">{bridgeEnabled ? "QQ 已启用" : "QQ 已禁用"}</span>
+                <span className="sp-toggle-sub">C2C 私聊</span>
+              </button>
+            </div>
+            <div className="sp-field">
+              <label className="sp-field-label">工具权限</label>
+              <button
+                type="button"
+                className={`sp-toggle-btn${bridgeForm.autoApprove ? " active sp-toggle-danger" : ""}`}
+                onClick={() => updateBridgeForm({ autoApprove: !bridgeForm.autoApprove })}
+              >
+                <span className="sp-toggle-main">{bridgeForm.autoApprove ? "完全访问" : "工作区写入"}</span>
+                <span className="sp-toggle-sub">{bridgeForm.autoApprove ? "仅限受信任会话" : "读取并编辑项目文件"}</span>
+              </button>
+            </div>
+          </div>
+
+          <div className="sp-detail-row2">
+            <div className="sp-field">
+              <label className="sp-field-label">QQ App ID</label>
+              <input className="sp-input" value={bridgeForm.qqAppId ?? ""} onChange={(e) => updateBridgeForm({ qqAppId: e.currentTarget.value })} spellCheck={false} />
+            </div>
+            <div className="sp-field">
+              <label className="sp-field-label">
+                QQ App Secret
+                {bridgeView.hasQqAppSecret && <span className="sp-field-hint-inline">{bridgeView.qqAppSecretMasked ?? "已配置"}</span>}
+              </label>
+              <input
+                type="password"
+                className="sp-input"
+                value={bridgeSecret}
+                onChange={(e) => { setBridgeNotice(null); setBridgeSecret(e.target.value); }}
+                placeholder={bridgeView.hasQqAppSecret ? "留空保留已有 Secret" : "粘贴 App Secret"}
+                spellCheck={false}
+                autoComplete="off"
+              />
+            </div>
+          </div>
+
+          <div className="sp-field">
+            <label className="sp-field-label">
+              允许的 OpenID
+              <span className="sp-field-hint-inline">逗号分隔的 user_openid</span>
+            </label>
+            <input className="sp-input" value={bridgeForm.qqAllowedUsers ?? ""} onChange={(e) => updateBridgeForm({ qqAllowedUsers: e.currentTarget.value })} spellCheck={false} />
+          </div>
+
+          <div className="sp-detail-row2">
+            <div className="sp-field">
+              <label className="sp-field-label">图片</label>
+              <div className="sp-bridge-img-row">
+                <button
+                  type="button"
+                  className={`sp-toggle-btn sp-toggle-btn-sm${(bridgeForm.qqImageEnabled ?? true) ? " active" : ""}`}
+                  onClick={() => updateBridgeForm({ qqImageEnabled: !(bridgeForm.qqImageEnabled ?? true) })}
+                >
+                  <span className="sp-toggle-main">{(bridgeForm.qqImageEnabled ?? true) ? "已启用" : "已禁用"}</span>
+                </button>
+                <div className="sp-bridge-size-wrap">
+                  <input type="number" min={1} max={100} className="sp-input sp-input-sm" value={bridgeForm.qqMaxImageSize ?? 20} onChange={(e) => updateBridgeForm({ qqMaxImageSize: Math.max(1, Number(e.currentTarget.value) || 1) })} aria-label="QQ 最大图片大小 MB" />
+                  <span className="sp-bridge-unit">MB</span>
+                </div>
+              </div>
+            </div>
+            <div className="sp-field">
+              <label className="sp-field-label">
+                Aris 可执行路径
+                <span className="sp-field-hint-inline">留空自动检测</span>
+              </label>
+              <input className="sp-input" value={bridgeForm.arisPath ?? ""} onChange={(e) => updateBridgeForm({ arisPath: e.currentTarget.value, runtime: "aris" })} placeholder="target/debug/aris.exe 或 PATH 中的 aris" spellCheck={false} />
+            </div>
+          </div>
+
+          <div className="sp-detail-row2">
+            <div className="sp-field">
+              <label className="sp-field-label">工作目录</label>
+              <input className="sp-input" value={bridgeForm.defaultWorkdir ?? ""} onChange={(e) => updateBridgeForm({ defaultWorkdir: e.currentTarget.value })} spellCheck={false} />
+            </div>
+            <div className="sp-field">
+              <label className="sp-field-label">配置文件</label>
+              <input className="sp-input" value={bridgeView.configPath ?? ""} readOnly />
+            </div>
+          </div>
+
+          {bridgeNotice && (
+            <div className={`sp-bridge-notice${bridgeNotice.ok ? " ok" : " failed"}`}>
+              <strong>{bridgeNotice.message}</strong>
+              {bridgeNotice.output && <pre>{bridgeNotice.output}</pre>}
+            </div>
+          )}
+          {!bridgeNotice && showBridgeLog && bridgeView.recentLog && (
+            <div className="sp-bridge-notice ok"><pre>{bridgeView.recentLog}</pre></div>
+          )}
+
+          <div className="sp-detail-actions">
+            <button className="sp-btn sp-btn-primary" type="button" onClick={() => void startBridge()} disabled={Boolean(bridgeBusy) || !bridgeEnabled}>
+              {bridgeBusy === "starting" ? "启动中…" : "启动"}
+            </button>
+            <button className="sp-btn sp-btn-exec" type="button" onClick={() => void saveBridge()} disabled={Boolean(bridgeBusy)}>
+              {bridgeBusy === "saving" ? "保存中…" : "保存"}
+            </button>
+            <button className="sp-btn sp-btn-secondary" type="button" onClick={() => void testBridge()} disabled={Boolean(bridgeBusy)}>
+              {bridgeBusy === "testing" ? "测试中…" : "测试 QQ"}
+            </button>
+            <button className="sp-btn sp-btn-danger" type="button" onClick={() => void stopBridge()} disabled={Boolean(bridgeBusy) || !bridgeRunning}>
+              {bridgeBusy === "stopping" ? "停止中…" : "停止"}
+            </button>
+            <button className="sp-btn sp-btn-secondary" type="button" onClick={() => void loadBridgeLogs()} disabled={Boolean(bridgeBusy)}>
+              {bridgeBusy === "logs" ? "加载中…" : "日志"}
+            </button>
+            <button className="sp-btn sp-btn-secondary" type="button" onClick={() => void refreshBridge()} disabled={Boolean(bridgeBusy)}>
+              {bridgeBusyLabel ?? "刷新"}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   // ── Detail view ─────────────────────────────────────────────────────────────
   if (detailId !== null) {
@@ -743,20 +999,6 @@ export default function Settings() {
     if (!prov) { setAdvForm((f) => ({ ...f, reviewerProvider: "", reviewerModel: "", reviewerBaseUrl: "" })); return; }
     setAdvForm((f) => ({ ...f, reviewerProvider: prov, reviewerModel: prov === "custom" ? (f.reviewerModel ?? "") : meta.defaultModel, reviewerBaseUrl: prov === "custom" ? (f.reviewerBaseUrl ?? "") : (meta.defaultBaseUrl ?? meta.baseUrls?.[0]?.value ?? "") }));
   };
-  const bridgeRunning = bridgeView?.running ?? false;
-  const bridgeEnabled = bridgeForm.enabled ?? bridgeView?.enabled ?? true;
-  const bridgeBusyLabel = bridgeBusy === "saving"
-    ? "Saving..."
-    : bridgeBusy === "testing"
-      ? "Testing..."
-      : bridgeBusy === "starting"
-        ? "Starting..."
-        : bridgeBusy === "stopping"
-          ? "Stopping..."
-          : bridgeBusy === "logs"
-            ? "Loading..."
-            : null;
-
   return (
     <div className="st-page sp-list-page">
       {/* Status bar */}
@@ -783,153 +1025,33 @@ export default function Settings() {
           <button className="sp-add-btn" onClick={() => openDetail("new")} type="button">+ 添加</button>
         </div>
         <div className="sp-card-list">
-          {providers.length === 0
-            ? <div className="sp-empty-list">暂无供应商。点击「+ 添加」新建，或展开下方「高级配置」手动填写。</div>
-            : [...providers].sort((a, b) => a.order - b.order).map((p) => (
-                <ProviderCard
-                  key={p.id}
-                  provider={p}
-                  isExecutor={executorProviderId === p.id}
-                  isReviewer={reviewerProviderId === p.id}
-                  onEdit={() => openDetail(p.id)}
-                  onDelete={() => remove(p.id)}
-                  onApplyRole={(role, model) => applyFromCard(p, role, model)}
-                />
-              ))}
-        </div>
-      </div>
-
-      {/* Aris QQ Bot bridge */}
-      <div className="sp-bridge-section">
-        <div className="sp-section-head">
-          <div>
-            <div className="sp-section-title">Aris QQ Bot</div>
-            <div className="sp-section-sub">QQ 私信桥接，将消息转发给此工作区中的 Aris</div>
-          </div>
-          <div className={`sp-bridge-status${bridgeRunning ? " running" : ""}`}>
-            <span className="sp-bridge-dot" />
-            <span>{bridgeRunning ? `运行中${bridgeView?.pid ? ` · PID ${bridgeView.pid}` : ""}` : (bridgeView?.statusMessage ?? "未加载")}</span>
-          </div>
-        </div>
-        <div className="sp-bridge-form">
-          <div className="sp-detail-row2">
-            <div className="sp-field">
-              <label className="sp-field-label">频道</label>
-              <button
-                type="button"
-                className={`sp-toggle-btn${bridgeEnabled ? " active" : ""}`}
-                onClick={() => updateBridgeForm({ enabled: !bridgeEnabled })}
-              >
-                <span className="sp-toggle-main">{bridgeEnabled ? "QQ 已启用" : "QQ 已禁用"}</span>
-                <span className="sp-toggle-sub">C2C 私聊</span>
-              </button>
-            </div>
-            <div className="sp-field">
-              <label className="sp-field-label">工具权限</label>
-              <button
-                type="button"
-                className={`sp-toggle-btn${bridgeForm.autoApprove ? " active sp-toggle-danger" : ""}`}
-                onClick={() => updateBridgeForm({ autoApprove: !bridgeForm.autoApprove })}
-              >
-                <span className="sp-toggle-main">{bridgeForm.autoApprove ? "完全访问" : "工作区写入"}</span>
-                <span className="sp-toggle-sub">{bridgeForm.autoApprove ? "仅限受信任会话" : "读取并编辑项目文件"}</span>
-              </button>
-            </div>
-          </div>
-          <div className="sp-detail-row2">
-            <div className="sp-field">
-              <label className="sp-field-label">QQ App ID</label>
-              <input className="sp-input" value={bridgeForm.qqAppId ?? ""} onChange={(e) => updateBridgeForm({ qqAppId: e.currentTarget.value })} spellCheck={false} />
-            </div>
-            <div className="sp-field">
-              <label className="sp-field-label">
-                QQ App Secret
-                {bridgeView?.hasQqAppSecret && <span className="sp-field-hint-inline">{bridgeView.qqAppSecretMasked ?? "已配置"}</span>}
-              </label>
-              <input
-                type="password"
-                className="sp-input"
-                value={bridgeSecret}
-                onChange={(e) => { setBridgeNotice(null); setBridgeSecret(e.target.value); }}
-                placeholder={bridgeView?.hasQqAppSecret ? "留空保留已有 Secret" : "粘贴 App Secret"}
-                spellCheck={false}
-                autoComplete="off"
-              />
-            </div>
-          </div>
-          <div className="sp-field">
-            <label className="sp-field-label">
-              允许的 OpenID
-              <span className="sp-field-hint-inline">逗号分隔的 user_openid</span>
-            </label>
-            <input className="sp-input" value={bridgeForm.qqAllowedUsers ?? ""} onChange={(e) => updateBridgeForm({ qqAllowedUsers: e.currentTarget.value })} spellCheck={false} />
-          </div>
-          <div className="sp-detail-row2">
-            <div className="sp-field">
-              <label className="sp-field-label">图片</label>
-              <div className="sp-bridge-img-row">
-                <button
-                  type="button"
-                  className={`sp-toggle-btn sp-toggle-btn-sm${(bridgeForm.qqImageEnabled ?? true) ? " active" : ""}`}
-                  onClick={() => updateBridgeForm({ qqImageEnabled: !(bridgeForm.qqImageEnabled ?? true) })}
-                >
-                  <span className="sp-toggle-main">{(bridgeForm.qqImageEnabled ?? true) ? "已启用" : "已禁用"}</span>
-                </button>
-                <div className="sp-bridge-size-wrap">
-                  <input type="number" min={1} max={100} className="sp-input sp-input-sm" value={bridgeForm.qqMaxImageSize ?? 20} onChange={(e) => updateBridgeForm({ qqMaxImageSize: Math.max(1, Number(e.currentTarget.value) || 1) })} aria-label="QQ 最大图片大小 MB" />
-                  <span className="sp-bridge-unit">MB</span>
-                </div>
-              </div>
-            </div>
-            <div className="sp-field">
-              <label className="sp-field-label">
-                Aris 可执行路径
-                <span className="sp-field-hint-inline">留空自动检测</span>
-              </label>
-              <input className="sp-input" value={bridgeForm.arisPath ?? ""} onChange={(e) => updateBridgeForm({ arisPath: e.currentTarget.value, runtime: "aris" })} placeholder="target/debug/aris.exe 或 PATH 中的 aris" spellCheck={false} />
-            </div>
-          </div>
-          <div className="sp-detail-row2">
-            <div className="sp-field">
-              <label className="sp-field-label">工作目录</label>
-              <input className="sp-input" value={bridgeForm.defaultWorkdir ?? ""} onChange={(e) => updateBridgeForm({ defaultWorkdir: e.currentTarget.value })} spellCheck={false} />
-            </div>
-            <div className="sp-field">
-              <label className="sp-field-label">配置文件</label>
-              <input className="sp-input" value={bridgeView?.configPath ?? ""} readOnly />
-            </div>
-          </div>
-
-          {bridgeNotice && (
-            <div className={`sp-bridge-notice${bridgeNotice.ok ? " ok" : " failed"}`}>
-              <strong>{bridgeNotice.message}</strong>
-              {bridgeNotice.output && <pre>{bridgeNotice.output}</pre>}
-            </div>
+          {providers.length === 0 && (
+            <div className="sp-empty-list">暂无供应商。点击「+ 添加」新建，或展开下方「高级配置」手动填写。</div>
           )}
-          {!bridgeNotice && showBridgeLog && bridgeView?.recentLog && (
-            <div className="sp-bridge-notice ok"><pre>{bridgeView.recentLog}</pre></div>
-          )}
-
-          <div className="sp-detail-actions">
-            <button className="sp-btn sp-btn-primary" type="button" onClick={() => void startBridge()} disabled={Boolean(bridgeBusy) || !bridgeEnabled}>
-              {bridgeBusy === "starting" ? "启动中…" : "启动"}
-            </button>
-            <button className="sp-btn sp-btn-exec" type="button" onClick={() => void saveBridge()} disabled={Boolean(bridgeBusy)}>
-              {bridgeBusy === "saving" ? "保存中…" : "保存"}
-            </button>
-            <button className="sp-btn" type="button" onClick={() => void testBridge()} disabled={Boolean(bridgeBusy)} style={{ background: "var(--bg-2)", border: "1px solid var(--border)", color: "var(--text)" }}>
-              {bridgeBusy === "testing" ? "测试中…" : "测试 QQ"}
-            </button>
-            <button className="sp-btn sp-btn-danger" type="button" onClick={() => void stopBridge()} disabled={Boolean(bridgeBusy) || !bridgeRunning} style={{ marginLeft: 0 }}>
-              {bridgeBusy === "stopping" ? "停止中…" : "停止"}
-            </button>
-            <button className="sp-btn" type="button" onClick={() => void loadBridgeLogs()} disabled={Boolean(bridgeBusy)} style={{ background: "var(--bg-2)", border: "1px solid var(--border)", color: "var(--text)" }}>
-              {bridgeBusy === "logs" ? "加载中…" : "日志"}
-            </button>
-            <button className="sp-btn" type="button" onClick={() => void refreshBridge()} disabled={Boolean(bridgeBusy)} style={{ background: "var(--bg-2)", border: "1px solid var(--border)", color: "var(--text)" }}>
-              {bridgeBusyLabel ?? "刷新"}
-            </button>
-          </div>
+          {[...providers].sort((a, b) => a.order - b.order).map((p) => (
+            <ProviderCard
+              key={p.id}
+              provider={p}
+              isExecutor={executorProviderId === p.id}
+              isReviewer={reviewerProviderId === p.id}
+              onEdit={() => openDetail(p.id)}
+              onDelete={() => remove(p.id)}
+              onApplyRole={(role, model) => applyFromCard(p, role, model)}
+            />
+          ))}
+          <BridgeCard
+            running={bridgeRunning}
+            enabled={bridgeEnabled}
+            status={bridgeView?.statusMessage ?? "未加载"}
+            pid={bridgeView?.pid}
+            hasSecret={Boolean(bridgeView?.hasQqAppSecret)}
+            busy={Boolean(bridgeBusy)}
+            onOpen={() => setBridgeDetailOpen(true)}
+            onStart={() => void startBridge()}
+            onStop={() => void stopBridge()}
+            onTest={() => void testBridge()}
+            onLogs={() => void loadBridgeLogs()}
+          />
         </div>
       </div>
 
@@ -990,28 +1112,26 @@ export default function Settings() {
                 <div className="st-row"><div className="st-row-label"><span className="st-label">Config file</span></div><div className="st-row-control"><input className="st-readonly-input" value={configView.configPath} readOnly /></div></div>
               </div>
             </div>
+            {testResult && (
+              <div className={`st-test-panel${testResult.ok ? " ok" : " failed"}`}>
+                <div className="st-test-summary">{testResult.message}</div>
+                <div className="st-test-grid">
+                  <TestDetail detail={testResult.executor} />
+                  {testResult.reviewer && <TestDetail detail={testResult.reviewer} />}
+                </div>
+              </div>
+            )}
+            <div className="sp-detail-actions sp-advanced-actions">
+              <button className="sp-btn sp-btn-secondary" onClick={test} disabled={testState === "testing" || saveState === "saving"} type="button">
+                {testState === "testing" ? "测试中…" : "测试高级配置"}
+              </button>
+              <button className="sp-btn sp-btn-primary" onClick={save} disabled={saveState === "saving" || testState === "testing"} type="button">
+                {saveState === "saving" ? "保存中…" : saveState === "saved" ? "已保存" : "保存高级配置"}
+              </button>
+              {saveState === "saved" && <span className="st-save-info">已保存。下一次对话时生效。</span>}
+            </div>
           </div>
         )}
-      </div>
-
-      {testResult && (
-        <div className={`st-test-panel${testResult.ok ? " ok" : " failed"}`}>
-          <div className="st-test-summary">{testResult.message}</div>
-          <div className="st-test-grid">
-            <TestDetail detail={testResult.executor} />
-            {testResult.reviewer && <TestDetail detail={testResult.reviewer} />}
-          </div>
-        </div>
-      )}
-      <div className="st-save-bar">
-        <button className={`st-test-btn${testState === "testing" ? " testing" : ""}`} onClick={test} disabled={testState === "testing" || saveState === "saving"} type="button">
-          {testState === "testing" ? "Testing…" : "Test current settings"}
-        </button>
-        <button className={`st-save-btn${saveState === "saving" ? " saving" : ""}`} onClick={save} disabled={saveState === "saving" || testState === "testing"} type="button">
-          {saveState === "saving" ? "Saving…" : saveState === "saved" ? "Saved" : "Save settings"}
-        </button>
-        {saveState === "saved" && <span className="st-save-info">已保存。下一次对话时生效。</span>}
-        {testState === "passed" && saveState !== "saving" && saveState !== "saved" && <span className="st-save-info">测试通过，请点击「Save settings」使配置生效。</span>}
       </div>
     </div>
   );

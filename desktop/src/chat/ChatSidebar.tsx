@@ -1,5 +1,15 @@
-import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type MouseEvent as ReactMouseEvent,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
+import { createPortal } from "react-dom";
 import type { DesktopProject } from "../types";
+import { useStore } from "../store";
 import { fuzzyMatch, groupSessionsByProject } from "./model";
 import type { ChatSession } from "./types";
 
@@ -37,6 +47,16 @@ function sameProjectOrder(left: string[], right: string[]) {
   return left.length === right.length && left.every((id, index) => id === right[index]);
 }
 
+type SessionMenuAnchor = {
+  id: string;
+  rect: Pick<DOMRect, "top" | "right" | "bottom" | "left">;
+};
+
+type SessionMenuPosition = {
+  top: number;
+  left: number;
+};
+
 export default function ChatSidebar({
   sessions,
   projects,
@@ -57,10 +77,12 @@ export default function ChatSidebar({
   const [renameValue, setRenameValue] = useState("");
   const [draggedProjectId, setDraggedProjectId] = useState<string | null>(null);
   const [projectOrderPreview, setProjectOrderPreview] = useState<string[] | null>(null);
-  const [openMenuId, setOpenMenuId] = useState<string | null>(null);
+  const [openMenu, setOpenMenu] = useState<SessionMenuAnchor | null>(null);
+  const [menuPosition, setMenuPosition] = useState<SessionMenuPosition | null>(null);
   const [unreadIds, setUnreadIds] = useState<Set<string>>(new Set());
-  const [scheduledOpen, setScheduledOpen] = useState(false);
+  const setTab = useStore((s) => s.setTab);
   const sessionListRef = useRef<HTMLDivElement | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
   const groupRefs = useRef(new Map<string, HTMLElement>());
   const projectOrderPreviewRef = useRef<string[] | null>(null);
   const projectDragRef = useRef<{
@@ -70,6 +92,7 @@ export default function ChatSidebar({
     startY: number;
     moved: boolean;
   } | null>(null);
+  const openMenuId = openMenu?.id ?? null;
   const groups = useMemo(
     () => groupSessionsByProject(
       sessions.filter((session) => fuzzyMatch(query, session.title)),
@@ -96,12 +119,49 @@ export default function ChatSidebar({
     const handler = (e: MouseEvent) => {
       const target = e.target as HTMLElement;
       if (!target.closest(".chat-session-menu") && !target.closest(".chat-session-menu-btn")) {
-        setOpenMenuId(null);
+        setOpenMenu(null);
       }
     };
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
   }, [openMenuId]);
+
+  useEffect(() => {
+    if (!openMenuId) return;
+    const closeMenu = () => setOpenMenu(null);
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") closeMenu();
+    };
+    window.addEventListener("resize", closeMenu);
+    window.addEventListener("scroll", closeMenu, true);
+    document.addEventListener("keydown", handleKey);
+    return () => {
+      window.removeEventListener("resize", closeMenu);
+      window.removeEventListener("scroll", closeMenu, true);
+      document.removeEventListener("keydown", handleKey);
+    };
+  }, [openMenuId]);
+
+  useLayoutEffect(() => {
+    if (!openMenu || !menuRef.current) {
+      setMenuPosition(null);
+      return;
+    }
+    const menuRect = menuRef.current.getBoundingClientRect();
+    const margin = 8;
+    const gap = 4;
+    const maxLeft = Math.max(margin, window.innerWidth - menuRect.width - margin);
+    const left = Math.min(Math.max(margin, openMenu.rect.right - menuRect.width), maxLeft);
+    const belowTop = openMenu.rect.bottom + gap;
+    const aboveTop = openMenu.rect.top - menuRect.height - gap;
+    const fitsBelow = belowTop + menuRect.height <= window.innerHeight - margin;
+    const top = fitsBelow ? belowTop : Math.max(margin, aboveTop);
+    setMenuPosition((current) => (
+      current && Math.abs(current.top - top) < 0.5 && Math.abs(current.left - left) < 0.5
+        ? current
+        : { top, left }
+    ));
+  }, [openMenu]);
 
   const setGroupRef = (id: string) => (element: HTMLElement | null) => {
     if (element) groupRefs.current.set(id, element);
@@ -246,6 +306,41 @@ export default function ChatSidebar({
     onClose();
   };
 
+  const toggleSessionMenu = (
+    event: ReactMouseEvent<HTMLButtonElement>,
+    id: string,
+  ) => {
+    event.stopPropagation();
+    const rect = event.currentTarget.getBoundingClientRect();
+    setMenuPosition(null);
+    setOpenMenu((current) => (
+      current?.id === id
+        ? null
+        : {
+          id,
+          rect: {
+            top: rect.top,
+            right: rect.right,
+            bottom: rect.bottom,
+            left: rect.left,
+          },
+        }
+    ));
+  };
+
+  const closeSessionMenu = () => {
+    setOpenMenu(null);
+    setMenuPosition(null);
+  };
+
+  const menuStyle = openMenu
+    ? {
+      top: menuPosition?.top ?? openMenu.rect.bottom + 4,
+      left: menuPosition?.left ?? openMenu.rect.left,
+      visibility: menuPosition ? "visible" : "hidden",
+    } as const
+    : undefined;
+
   return (
     <aside className={`chat-sidebar${open ? " open" : ""}`} aria-label="Chat sessions">
       <div className="chat-sidebar-head">
@@ -265,17 +360,12 @@ export default function ChatSidebar({
           <button className="chat-sidebar-close" onClick={onClose} aria-label="Close chat sidebar">×</button>
         </div>
         <button
-          className={`chat-scheduled-btn${scheduledOpen ? " active" : ""}`}
-          onClick={() => setScheduledOpen((v) => !v)}
+          className="chat-scheduled-btn"
+          onClick={() => setTab("scheduled")}
         >
           <span className="chat-scheduled-icon">⚡</span>
           <span>定时任务</span>
         </button>
-        {scheduledOpen && (
-          <div className="chat-scheduled-panel">
-            <div className="chat-scheduled-empty">暂无定时任务</div>
-          </div>
-        )}
       </div>
       <div className="chat-session-search">
         <input
@@ -343,25 +433,27 @@ export default function ChatSidebar({
                 )}
                 <button
                   className="chat-session-menu-btn"
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    setOpenMenuId((prev) => prev === session.id ? null : session.id);
-                  }}
+                  onClick={(event) => toggleSessionMenu(event, session.id)}
                   aria-label="Session options"
                   aria-haspopup="true"
                   aria-expanded={openMenuId === session.id}
                 >
                   ···
                 </button>
-                {openMenuId === session.id && (
-                  <div className="chat-session-menu" role="menu">
+                {openMenuId === session.id && createPortal(
+                  <div
+                    ref={menuRef}
+                    className="chat-session-menu"
+                    role="menu"
+                    style={menuStyle}
+                  >
                     <button
                       role="menuitem"
                       className={session.pinned ? "active" : ""}
                       onClick={(event) => {
                         event.stopPropagation();
                         onTogglePinned(session.id);
-                        setOpenMenuId(null);
+                        closeSessionMenu();
                       }}
                     >
                       {session.pinned ? "取消置顶" : "置顶"}
@@ -372,7 +464,7 @@ export default function ChatSidebar({
                       onClick={(event) => {
                         event.stopPropagation();
                         toggleUnread(session.id);
-                        setOpenMenuId(null);
+                        closeSessionMenu();
                       }}
                     >
                       {unreadIds.has(session.id) ? "标为已读" : "标为未读"}
@@ -383,7 +475,7 @@ export default function ChatSidebar({
                       onClick={(event) => {
                         event.stopPropagation();
                         beginRename(session);
-                        setOpenMenuId(null);
+                        closeSessionMenu();
                       }}
                     >
                       重命名
@@ -396,13 +488,14 @@ export default function ChatSidebar({
                       onClick={(event) => {
                         event.stopPropagation();
                         onDelete(session.id);
-                        setOpenMenuId(null);
+                        closeSessionMenu();
                       }}
                     >
                       删除
                       <span className="chat-session-menu-key">D</span>
                     </button>
-                  </div>
+                  </div>,
+                  document.body,
                 )}
               </div>
             ))}

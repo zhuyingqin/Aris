@@ -3778,22 +3778,40 @@ fn execute_repl(input: ReplInput) -> Result<ReplOutput, String> {
     if input.code.trim().is_empty() {
         return Err(String::from("code must not be empty"));
     }
-    let _ = input.timeout_ms;
     let runtime = resolve_repl_runtime(&input.language)?;
     let started = Instant::now();
-    let output = runtime::hidden_command(runtime.program)
-        .args(runtime.args)
-        .arg(&input.code)
-        .output()
-        .map_err(|error| error.to_string())?;
+    let mut command = runtime::hidden_command(runtime.program);
+    command.args(runtime.args).arg(&input.code);
+    let output = runtime::run_managed_command(
+        &mut command,
+        format!(
+            "REPL {}: {}",
+            input.language,
+            truncate_process_label(&input.code)
+        ),
+        input.timeout_ms.map(Duration::from_millis),
+        true,
+    )
+    .map_err(|error| error.to_string())?;
 
     Ok(ReplOutput {
         language: input.language,
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        stderr: repl_stderr(&output),
         exit_code: output.status.code().unwrap_or(1),
         duration_ms: started.elapsed().as_millis(),
     })
+}
+
+fn repl_stderr(output: &runtime::ManagedCommandOutput) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    if output.timed_out {
+        append_process_status_message(stderr, "REPL exceeded timeout")
+    } else if output.interrupted {
+        append_process_status_message(stderr, "REPL interrupted by user")
+    } else {
+        stderr
+    }
 }
 
 struct ReplRuntime {
@@ -4125,22 +4143,26 @@ fn execute_shell_command(
     run_in_background: Option<bool>,
 ) -> std::io::Result<runtime::BashCommandOutput> {
     if run_in_background.unwrap_or(false) {
-        let child = runtime::hidden_command(shell)
+        let mut process = runtime::hidden_command(shell);
+        process
             .arg("-NoProfile")
             .arg("-NonInteractive")
             .arg("-Command")
             .arg(command)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()?;
+            .stderr(std::process::Stdio::null());
+        let pid = runtime::spawn_managed_background(
+            &mut process,
+            format!("PowerShell background: {}", truncate_process_label(command)),
+        )?;
         return Ok(runtime::BashCommandOutput {
             stdout: String::new(),
             stderr: String::new(),
             raw_output_path: None,
             interrupted: false,
             is_image: None,
-            background_task_id: Some(child.id().to_string()),
+            background_task_id: Some(pid.to_string()),
             backgrounded_by_user: Some(true),
             assistant_auto_backgrounded: Some(false),
             dangerously_disable_sandbox: None,
@@ -4163,72 +4185,62 @@ fn execute_shell_command(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
 
-    if let Some(timeout_ms) = timeout {
-        let mut child = process.spawn()?;
-        let started = Instant::now();
-        loop {
-            if let Some(status) = child.try_wait()? {
-                let output = child.wait_with_output()?;
-                return Ok(runtime::BashCommandOutput {
-                    stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-                    stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-                    raw_output_path: None,
-                    interrupted: false,
-                    is_image: None,
-                    background_task_id: None,
-                    backgrounded_by_user: None,
-                    assistant_auto_backgrounded: None,
-                    dangerously_disable_sandbox: None,
-                    return_code_interpretation: status
-                        .code()
-                        .filter(|code| *code != 0)
-                        .map(|code| format!("exit_code:{code}")),
-                    no_output_expected: Some(output.stdout.is_empty() && output.stderr.is_empty()),
-                    structured_content: None,
-                    persisted_output_path: None,
-                    persisted_output_size: None,
-                    sandbox_status: None,
-                });
-            }
-            if started.elapsed() >= Duration::from_millis(timeout_ms) {
-                let _ = child.kill();
-                let output = child.wait_with_output()?;
-                let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-                let stderr = if stderr.trim().is_empty() {
-                    format!("Command exceeded timeout of {timeout_ms} ms")
-                } else {
-                    format!(
-                        "{}
-Command exceeded timeout of {timeout_ms} ms",
-                        stderr.trim_end()
-                    )
-                };
-                return Ok(runtime::BashCommandOutput {
-                    stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-                    stderr,
-                    raw_output_path: None,
-                    interrupted: true,
-                    is_image: None,
-                    background_task_id: None,
-                    backgrounded_by_user: None,
-                    assistant_auto_backgrounded: None,
-                    dangerously_disable_sandbox: None,
-                    return_code_interpretation: Some(String::from("timeout")),
-                    no_output_expected: Some(false),
-                    structured_content: None,
-                    persisted_output_path: None,
-                    persisted_output_size: None,
-                    sandbox_status: None,
-                });
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
+    let output = runtime::run_managed_command(
+        &mut process,
+        format!("PowerShell: {}", truncate_process_label(command)),
+        timeout.map(Duration::from_millis),
+        true,
+    )?;
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    if output.timed_out {
+        return Ok(runtime::BashCommandOutput {
+            stdout,
+            stderr: append_process_status_message(
+                stderr,
+                &format!(
+                    "Command exceeded timeout of {} ms",
+                    timeout.unwrap_or_default()
+                ),
+            ),
+            raw_output_path: None,
+            interrupted: true,
+            is_image: None,
+            background_task_id: None,
+            backgrounded_by_user: None,
+            assistant_auto_backgrounded: None,
+            dangerously_disable_sandbox: None,
+            return_code_interpretation: Some(String::from("timeout")),
+            no_output_expected: Some(false),
+            structured_content: None,
+            persisted_output_path: None,
+            persisted_output_size: None,
+            sandbox_status: None,
+        });
+    }
+    if output.interrupted {
+        return Ok(runtime::BashCommandOutput {
+            stdout,
+            stderr: append_process_status_message(stderr, "Command interrupted by user"),
+            raw_output_path: None,
+            interrupted: true,
+            is_image: None,
+            background_task_id: None,
+            backgrounded_by_user: None,
+            assistant_auto_backgrounded: None,
+            dangerously_disable_sandbox: None,
+            return_code_interpretation: Some(String::from("interrupted")),
+            no_output_expected: Some(false),
+            structured_content: None,
+            persisted_output_path: None,
+            persisted_output_size: None,
+            sandbox_status: None,
+        });
     }
 
-    let output = process.output()?;
     Ok(runtime::BashCommandOutput {
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        stdout,
+        stderr,
         raw_output_path: None,
         interrupted: false,
         is_image: None,
@@ -4247,6 +4259,24 @@ Command exceeded timeout of {timeout_ms} ms",
         persisted_output_size: None,
         sandbox_status: None,
     })
+}
+
+fn append_process_status_message(stderr: String, message: &str) -> String {
+    if stderr.trim().is_empty() {
+        message.to_string()
+    } else {
+        format!("{}\n{message}", stderr.trim_end())
+    }
+}
+
+fn truncate_process_label(value: &str) -> String {
+    const MAX: usize = 120;
+    if value.chars().count() <= MAX {
+        value.to_string()
+    } else {
+        let head = value.chars().take(MAX).collect::<String>();
+        format!("{head}...")
+    }
 }
 
 fn resolve_cell_index(

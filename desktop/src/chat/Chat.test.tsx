@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChatAttachment, ChatCommandSelection, ChatTurn, DesktopCommandSpec, DesktopProject, SkillMeta } from "../types";
 import ChatComposer, { attachmentFromFile, resizeComposerTextarea } from "./ChatComposer";
 import ChatMessage, { diffFromTool } from "./ChatMessage";
+import ChatSidebar from "./ChatSidebar";
 import CommandSelection from "./CommandSelection";
 import { isNearBottom } from "./ChatThread";
 import {
@@ -395,6 +396,70 @@ describe("project chat grouping", () => {
 
     expect(groups.map((group) => group.label)).toEqual(["Alpha", "Beta"]);
     expect(groups[0].sessions[0].projectId).toBe("project-a");
+  });
+});
+
+describe("ChatSidebar session menu", () => {
+  const projects: DesktopProject[] = [
+    { id: "project-a", name: "Alpha", path: "C:/Alpha", addedAt: 1, lastOpenedAt: 2 },
+  ];
+
+  function renderSidebar() {
+    const session = { ...makeSession("project-a"), id: "chat-a", title: "Alpha chat" };
+    render(
+      <ChatSidebar
+        sessions={[session]}
+        projects={projects}
+        currentId="chat-a"
+        open
+        busy={false}
+        onClose={() => undefined}
+        onDesktopCollapse={() => undefined}
+        onNew={() => undefined}
+        onOpen={() => undefined}
+        onRename={() => undefined}
+        onTogglePinned={() => undefined}
+        onDelete={() => undefined}
+        onReorderProjects={async () => undefined}
+      />,
+    );
+  }
+
+  it("keeps the session menu inside the viewport when the anchor is near the bottom", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal("innerWidth", 300);
+    vi.stubGlobal("innerHeight", 600);
+    const rect = (top: number, right: number, bottom: number, left: number) => ({
+      top,
+      right,
+      bottom,
+      left,
+      width: right - left,
+      height: bottom - top,
+      x: left,
+      y: top,
+      toJSON: () => undefined,
+    });
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      const element = this;
+      if (element.classList.contains("chat-session-menu-btn")) {
+        return rect(560, 280, 584, 256) as DOMRect;
+      }
+      if (element.classList.contains("chat-session-menu")) {
+        return rect(0, 180, 170, 0) as DOMRect;
+      }
+      return rect(0, 0, 0, 0) as DOMRect;
+    });
+
+    renderSidebar();
+    await user.click(screen.getByRole("button", { name: "Session options" }));
+
+    const menu = await screen.findByRole("menu");
+    await waitFor(() => expect(menu.style.visibility).toBe("visible"));
+
+    expect(menu.parentElement).toBe(document.body);
+    expect(Number(menu.style.top.replace("px", ""))).toBeLessThan(560);
+    expect(Number(menu.style.left.replace("px", ""))).toBeGreaterThanOrEqual(8);
   });
 });
 

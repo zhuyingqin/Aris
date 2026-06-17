@@ -1147,7 +1147,7 @@ interface LiteratureState {
   toggleStar: (id: string) => void;
   markRead: (id: string) => void;
   addTags: (ids: string[], tags: string[]) => void;
-  addCollection: (label: string) => void;
+  addCollection: (label: string, parentId?: string) => void;
   removeCollection: (id: string) => void;
   assignCollection: (ids: string[], collectionId: string) => void;
   toggleCollection: (paperId: string, collectionId: string) => void;
@@ -1760,24 +1760,31 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
         tags: Array.from(new Set([...paper.tags, ...tags])).sort(),
       })),
 
-    addCollection: (label) => {
+    addCollection: (label, parentId) => {
       const trimmed = label.trim();
       if (!trimmed) return;
       mutate((library) => ({
         ...library,
-        collections: [...library.collections, { id: makeId("col"), label: trimmed }],
+        collections: [
+          ...library.collections,
+          { id: makeId("col"), label: trimmed, ...(parentId ? { parentId } : {}) },
+        ],
       }));
     },
 
     removeCollection: (id) => {
-      mutate((library) => ({
-        ...library,
-        collections: library.collections.filter((c) => c.id !== id),
-        papers: library.papers.map((p) => ({
-          ...p,
-          collectionIds: p.collectionIds.filter((cid) => cid !== id),
-        })),
-      }));
+      mutate((library) => {
+        const childIds = library.collections.filter((c) => c.parentId === id).map((c) => c.id);
+        const toRemove = new Set([id, ...childIds]);
+        return {
+          ...library,
+          collections: library.collections.filter((c) => !toRemove.has(c.id)),
+          papers: library.papers.map((p) => ({
+            ...p,
+            collectionIds: p.collectionIds.filter((cid) => !toRemove.has(cid)),
+          })),
+        };
+      });
     },
 
     assignCollection: (ids, collectionId) =>

@@ -65,6 +65,17 @@ export interface ConfigView {
   scopusKeyMasked?: string | null;
   language?: string | null;
   memoryWriteApproval: boolean;
+  verifiedExecutors?: { provider: string; model: string; baseUrl: string }[];
+}
+
+export interface ScheduledTask {
+  id: string;
+  title: string;
+  scheduleLabel?: string;
+  status?: string; // "active" | "paused"
+  sessionId?: string | null;
+  createdAt?: string | null;
+  nextRun?: string | null;
 }
 
 export interface ConfigPatch {
