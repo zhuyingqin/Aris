@@ -31,22 +31,6 @@ export interface ChatCommandResult {
   refreshStatus: boolean;
 }
 
-// ── Team / Agents ────────────────────────────────────────────────────────────
-
-export interface RunEvent {
-  version: number;
-  eventId: string;
-  ts: number;
-  kind: string;
-  teamId?: string | null;
-  sessionId?: string | null;
-  agentId?: string | null;
-  taskId?: string | null;
-  messageId?: string | null;
-  workflowRunId?: string | null;
-  payload: unknown;
-}
-
 // ── Settings / Skills / Sessions (P1) ─────────────────────────────────────────
 
 export interface ConfigView {
@@ -161,6 +145,170 @@ export interface ImBridgeActionResult {
   message: string;
   output: string;
   view: ImBridgeView;
+}
+
+// ── Mail (Gmail API + Microsoft Graph) ───────────────────────────────────────
+
+export type MailProvider = "gmail" | "outlook" | "imap";
+
+export interface MailAccount {
+  id: string;
+  provider: MailProvider;
+  email: string;
+  displayName: string;
+  connected: boolean;
+}
+
+export interface MailFolder {
+  id: string;
+  name: string;
+  /** inbox | sent | drafts | trash | spam | archive | starred | important |
+   *  promotions | social | updates | forums | custom */
+  kind: string;
+  unreadCount: number;
+}
+
+export interface MailMessageSummary {
+  id: string;
+  threadId: string;
+  from: string;
+  fromName: string;
+  to: string;
+  subject: string;
+  snippet: string;
+  date: string;
+  unread: boolean;
+  starred: boolean;
+  hasAttachments: boolean;
+  labels: string[];
+}
+
+export interface MailMessageList {
+  messages: MailMessageSummary[];
+  nextPageToken?: string | null;
+}
+
+export interface MailAttachment {
+  id: string;
+  filename: string;
+  mimeType: string;
+  size: number;
+}
+
+export interface MailMessageFull {
+  id: string;
+  threadId: string;
+  from: string;
+  fromName: string;
+  to: string;
+  cc: string;
+  subject: string;
+  date: string;
+  unread: boolean;
+  starred: boolean;
+  labels: string[];
+  bodyHtml?: string | null;
+  bodyText: string;
+  attachments: MailAttachment[];
+}
+
+export interface MailModifyPatch {
+  unread?: boolean;
+  starred?: boolean;
+  archive?: boolean;
+  trash?: boolean;
+  moveTo?: string;
+}
+
+export interface MailDraft {
+  to: string;
+  cc?: string;
+  bcc?: string;
+  subject: string;
+  body: string;
+}
+
+export interface MailOauthConfigView {
+  gmailClientId: string;
+  gmailHasSecret: boolean;
+  outlookConfigured: boolean;
+  outlookUsesBundledClient: boolean;
+  outlookClientId: string;
+}
+
+export interface MailOauthConfigPatch {
+  gmailClientId?: string;
+  gmailClientSecret?: string;
+  outlookClientId?: string;
+}
+
+export type MailSocketSecurity = "tls" | "starttls" | "none";
+
+export interface GenericMailAccountInput {
+  email: string;
+  displayName?: string;
+  imapHost: string;
+  imapPort: number;
+  imapSecurity: MailSocketSecurity;
+  imapUsername: string;
+  imapPassword: string;
+  smtpEnabled: boolean;
+  smtpHost?: string;
+  smtpPort?: number;
+  smtpSecurity?: MailSocketSecurity;
+  smtpUsername?: string;
+  smtpPassword?: string;
+}
+
+export interface GenericMailTestResult {
+  ok: boolean;
+  imapOk: boolean;
+  smtpOk: boolean;
+  message: string;
+}
+
+export interface MailAutoconfigResult {
+  source: string;
+  displayName: string;
+  imapHost: string;
+  imapPort: number;
+  imapSecurity: MailSocketSecurity;
+  imapUsername: string;
+  smtpEnabled: boolean;
+  smtpHost: string;
+  smtpPort: number;
+  smtpSecurity: MailSocketSecurity;
+  smtpUsername: string;
+  notes: string[];
+}
+
+export interface ConnectorPluginView {
+  id: string;
+  connectorId: string;
+  provider: MailProvider | string;
+  version: string;
+  displayName: string;
+  shortDescription: string;
+  longDescription: string;
+  developerName: string;
+  category: string;
+  capabilities: string[];
+  websiteUrl?: string | null;
+  privacyPolicyUrl?: string | null;
+  termsOfServiceUrl?: string | null;
+  brandColor?: string | null;
+  required: boolean;
+  installed: boolean;
+  connected: boolean;
+  connectedAccounts: string[];
+  transport: string;
+  statusMessage: string;
+}
+
+export interface ConnectorActionResult {
+  ok: boolean;
+  message: string;
+  plugin: ConnectorPluginView;
 }
 
 export interface PermissionModeView {
@@ -292,6 +440,23 @@ export type ChatBlock =
       output?: string;
       isError?: boolean;
     };
+
+// A single step of a TodoWrite plan, surfaced as the floating workflow box.
+export type ChatTodoStatus = "pending" | "in_progress" | "completed";
+
+export interface ChatTodoItem {
+  content: string;
+  activeForm: string;
+  status: ChatTodoStatus;
+}
+
+export type ChatFileChangeStatus = "added" | "modified" | "deleted" | "renamed";
+
+export interface ChatFileChange {
+  path: string;
+  status: ChatFileChangeStatus;
+  sourceTool?: string;
+}
 
 export interface ChatAttachment {
   id: string;

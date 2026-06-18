@@ -5,17 +5,15 @@ use std::time::{Duration, Instant};
 // Bundled skills are compiled into the runtime crate and re-exported
 use runtime::BUNDLED_SKILLS;
 
-use api::{
-    read_base_url, AnthropicClient, ContentBlockDelta, ImageSource, InputContentBlock,
-    InputMessage, MessageRequest, MessageResponse, OutputContentBlock,
-    StreamEvent as ApiStreamEvent, ToolChoice, ToolDefinition, ToolResultContentBlock,
+use api::{read_base_url, read_send_betas, AuthSource};
+use aris_executor::{
+    AnthropicRuntimeClient as SharedAnthropicRuntimeClient, ExecutorToolSpec, NoopStreamObserver,
 };
 use reqwest::blocking::Client;
 use runtime::{
     edit_file, execute_bash, glob_search, grep_search, load_system_prompt, read_file, write_file,
-    ApiClient, ApiRequest, AssistantEvent, BashCommandInput, ContentBlock, ConversationMessage,
-    ConversationRuntime, GrepSearchInput, MessageRole, PermissionMode, PermissionPolicy,
-    RuntimeError, Session, TokenUsage, ToolError, ToolExecutor,
+    ApiClient, ApiRequest, AssistantEvent, BashCommandInput, ConversationRuntime, GrepSearchInput,
+    PermissionMode, PermissionPolicy, RuntimeError, Session, ToolError, ToolExecutor,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -2723,14 +2721,14 @@ fn run_agent_job(job: &AgentJob) -> Result<(), String> {
 
 fn build_agent_runtime(
     job: &AgentJob,
-) -> Result<ConversationRuntime<AnthropicRuntimeClient, SubagentToolExecutor>, String> {
+) -> Result<ConversationRuntime<SubagentRuntimeClient, SubagentToolExecutor>, String> {
     let model = job
         .manifest
         .model
         .clone()
         .unwrap_or_else(|| DEFAULT_AGENT_MODEL.to_string());
     let allowed_tools = job.allowed_tools.clone();
-    let api_client = AnthropicRuntimeClient::new(model, allowed_tools.clone())?;
+    let api_client = SubagentRuntimeClient::new(model, allowed_tools.clone())?;
     let tool_executor = SubagentToolExecutor::new(allowed_tools);
     Ok(ConversationRuntime::new(
         Session::new(),
@@ -2938,193 +2936,92 @@ fn format_agent_terminal_output(status: &str, result: Option<&str>, error: Optio
     sections.join("")
 }
 
-struct AnthropicRuntimeClient {
-    runtime: tokio::runtime::Runtime,
-    client: AnthropicClient,
+struct SubagentRuntimeClient {
+    auth: AuthSource,
+    base_url: String,
+    send_betas: bool,
     model: String,
     allowed_tools: BTreeSet<String>,
-    /// Latches the subagent's Opus 4.8 → 4.7 fallback so it warns once and
+    inner: SharedAnthropicRuntimeClient,
+    /// Latches the subagent's Opus 4.8 to 4.7 fallback so it warns once and
     /// never re-probes on subsequent turns.
     model_fell_back: bool,
 }
 
-impl AnthropicRuntimeClient {
+impl SubagentRuntimeClient {
     fn new(model: String, allowed_tools: BTreeSet<String>) -> Result<Self, String> {
-        let client = AnthropicClient::from_env()
-            .map_err(|error| error.to_string())?
-            .with_base_url(read_base_url());
+        let auth = AuthSource::from_env_or_saved().map_err(|error| error.to_string())?;
+        let base_url = read_base_url();
+        let send_betas = read_send_betas();
+        let inner =
+            build_subagent_executor(auth.clone(), &base_url, send_betas, &model, &allowed_tools)?;
         Ok(Self {
-            runtime: tokio::runtime::Runtime::new().map_err(|error| error.to_string())?,
-            client,
+            auth,
+            base_url,
+            send_betas,
             model,
             allowed_tools,
+            inner,
             model_fell_back: false,
         })
     }
+
+    fn rebuild_inner(&mut self) -> Result<(), String> {
+        self.inner = build_subagent_executor(
+            self.auth.clone(),
+            &self.base_url,
+            self.send_betas,
+            &self.model,
+            &self.allowed_tools,
+        )?;
+        Ok(())
+    }
 }
 
-impl ApiClient for AnthropicRuntimeClient {
+impl ApiClient for SubagentRuntimeClient {
     fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
-        let tools = tool_specs_for_allowed_tools(Some(&self.allowed_tools))
-            .into_iter()
-            .map(|spec| ToolDefinition {
-                name: spec.name.to_string(),
-                description: Some(spec.description.to_string()),
-                input_schema: spec.input_schema,
-            })
-            .collect::<Vec<_>>();
-        let mut message_request = MessageRequest {
-            model: self.model.clone(),
-            max_tokens: 32_000,
-            messages: convert_messages(&request.messages),
-            system: if request.system_prompt.is_empty() {
-                None
-            } else {
-                Some(serde_json::json!(request.system_prompt.join("\n\n")))
-            },
-            tools: (!tools.is_empty()).then_some(tools),
-            tool_choice: (!self.allowed_tools.is_empty()).then_some(ToolChoice::Auto),
-            stream: true,
-        };
-
-        self.runtime.block_on(async {
-            // Subagent default-model fallback: if DEFAULT_AGENT_MODEL (Opus
-            // 4.8) is unavailable (404 not_found), fall back to 4.7 and retry
-            // once so background Agent tasks don't hard-fail for non-4.8 users.
-            let mut stream = match self.client.stream_message(&message_request).await {
-                Ok(stream) => stream,
-                Err(error)
-                    if error.is_model_unavailable()
-                        && message_request.model == DEFAULT_AGENT_MODEL
-                        && !self.model_fell_back =>
-                {
-                    self.model_fell_back = true;
-                    self.model = DEFAULT_AGENT_MODEL_FALLBACK.to_string();
-                    message_request.model = DEFAULT_AGENT_MODEL_FALLBACK.to_string();
-                    eprintln!(
-                        "\x1b[33mwarning:\x1b[0m {DEFAULT_AGENT_MODEL} is not available on this \
-                         account; subagent falling back to {DEFAULT_AGENT_MODEL_FALLBACK}."
-                    );
-                    self.client
-                        .stream_message(&message_request)
-                        .await
-                        .map_err(|error| RuntimeError::new(error.to_string()))?
-                }
-                Err(error) => return Err(RuntimeError::new(error.to_string())),
-            };
-            let mut events = Vec::new();
-            let mut pending_tool: Option<(String, String, String)> = None;
-            let mut saw_stop = false;
-            let mut stop_reason: Option<String> = None;
-
-            loop {
-                let event = match stream.next_event().await {
-                    Ok(Some(event)) => event,
-                    Ok(None) => break,
-                    Err(_error) if !events.is_empty() || pending_tool.is_some() => {
-                        stop_reason = Some("stream_error_after_partial_output".to_string());
-                        break;
-                    }
-                    Err(error) => return Err(RuntimeError::new(error.to_string())),
-                };
-                match event {
-                    ApiStreamEvent::MessageStart(start) => {
-                        for block in start.message.content {
-                            push_output_block(block, &mut events, &mut pending_tool, true);
-                        }
-                    }
-                    ApiStreamEvent::ContentBlockStart(start) => {
-                        push_output_block(
-                            start.content_block,
-                            &mut events,
-                            &mut pending_tool,
-                            true,
-                        );
-                    }
-                    ApiStreamEvent::ContentBlockDelta(delta) => match delta.delta {
-                        ContentBlockDelta::TextDelta { text } => {
-                            if !text.is_empty() {
-                                push_subagent_text_event(&mut events, text);
-                            }
-                        }
-                        ContentBlockDelta::InputJsonDelta { partial_json } => {
-                            if let Some((_, _, input)) = &mut pending_tool {
-                                input.push_str(&partial_json);
-                            }
-                        }
-                        ContentBlockDelta::ThinkingDelta { .. } => {}
-                        ContentBlockDelta::SignatureDelta { .. } => {}
-                    },
-                    ApiStreamEvent::ContentBlockStop(_) => {
-                        if let Some((id, name, input)) = pending_tool.take() {
-                            events.push(AssistantEvent::ToolUse { id, name, input });
-                        }
-                    }
-                    ApiStreamEvent::MessageDelta(delta) => {
-                        if let Some(reason) =
-                            delta.delta.stop_reason.filter(|value| !value.is_empty())
-                        {
-                            stop_reason = Some(reason);
-                        }
-                        events.push(AssistantEvent::Usage(TokenUsage {
-                            input_tokens: delta.usage.input_tokens,
-                            output_tokens: delta.usage.output_tokens,
-                            cache_creation_input_tokens: 0,
-                            cache_read_input_tokens: 0,
-                        }));
-                    }
-                    ApiStreamEvent::MessageStop(_) => {
-                        saw_stop = true;
-                        events.push(AssistantEvent::MessageStop);
-                    }
-                    ApiStreamEvent::Error(e) => {
-                        let msg = e
-                            .error
-                            .get("message")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("stream error")
-                            .to_string();
-                        return Err(RuntimeError::new(msg));
-                    }
-                }
-            }
-
-            let has_partial_output = events.iter().any(|event| {
-                matches!(event, AssistantEvent::TextDelta(text) if !text.is_empty())
-                    || matches!(event, AssistantEvent::ToolUse { .. })
-            }) || pending_tool.is_some();
-            if !saw_stop && has_partial_output {
-                if stop_reason.is_none() {
-                    stop_reason = Some("stream_truncated".to_string());
-                }
-                events.push(AssistantEvent::MessageStop);
-            }
-            if let Some(reason) = stop_reason {
-                let insert_at = events
-                    .iter()
-                    .position(|event| matches!(event, AssistantEvent::MessageStop))
-                    .unwrap_or(events.len());
-                events.insert(insert_at, AssistantEvent::StopReason(reason));
-            }
-
-            if events
-                .iter()
-                .any(|event| matches!(event, AssistantEvent::MessageStop))
+        match self.inner.stream(request.clone()) {
+            Ok(events) => Ok(events),
+            Err(error)
+                if error.is_model_unavailable()
+                    && self.model == DEFAULT_AGENT_MODEL
+                    && !self.model_fell_back =>
             {
-                return Ok(events);
+                self.model_fell_back = true;
+                self.model = DEFAULT_AGENT_MODEL_FALLBACK.to_string();
+                eprintln!(
+                    "\x1b[33mwarning:\x1b[0m {DEFAULT_AGENT_MODEL} is not available on this \
+                     account; subagent falling back to {DEFAULT_AGENT_MODEL_FALLBACK}."
+                );
+                self.rebuild_inner().map_err(RuntimeError::new)?;
+                self.inner.stream(request)
             }
-
-            let response = self
-                .client
-                .send_message(&MessageRequest {
-                    stream: false,
-                    ..message_request.clone()
-                })
-                .await
-                .map_err(|error| RuntimeError::new(error.to_string()))?;
-            Ok(response_to_events(response))
-        })
+            Err(error) => Err(error),
+        }
     }
+}
+
+fn build_subagent_executor(
+    auth: AuthSource,
+    base_url: &str,
+    send_betas: bool,
+    model: &str,
+    allowed_tools: &BTreeSet<String>,
+) -> Result<SharedAnthropicRuntimeClient, String> {
+    let tool_specs = tool_specs_for_allowed_tools(Some(allowed_tools))
+        .into_iter()
+        .map(|spec| ExecutorToolSpec::new(spec.name, spec.description, spec.input_schema))
+        .collect::<Vec<_>>();
+    SharedAnthropicRuntimeClient::new(
+        auth,
+        base_url.to_string(),
+        send_betas,
+        model.to_string(),
+        !tool_specs.is_empty(),
+        tool_specs,
+        32_000,
+        Box::new(NoopStreamObserver),
+    )
 }
 
 struct SubagentToolExecutor {
@@ -3157,140 +3054,8 @@ fn tool_specs_for_allowed_tools(allowed_tools: Option<&BTreeSet<String>>) -> Vec
         .collect()
 }
 
-fn convert_messages(messages: &[ConversationMessage]) -> Vec<InputMessage> {
-    messages
-        .iter()
-        .filter_map(|message| {
-            let role = match message.role {
-                MessageRole::System | MessageRole::User | MessageRole::Tool => "user",
-                MessageRole::Assistant => "assistant",
-            };
-            let content = message
-                .blocks
-                .iter()
-                .map(|block| match block {
-                    ContentBlock::Text { text } => InputContentBlock::Text { text: text.clone() },
-                    ContentBlock::Image { media_type, data } => InputContentBlock::Image {
-                        source: ImageSource::base64(media_type.clone(), data.clone()),
-                    },
-                    ContentBlock::ToolUse { id, name, input } => InputContentBlock::ToolUse {
-                        id: id.clone(),
-                        name: name.clone(),
-                        input: serde_json::from_str(input)
-                            .unwrap_or_else(|_| serde_json::json!({ "raw": input })),
-                    },
-                    ContentBlock::ToolResult {
-                        tool_use_id,
-                        output,
-                        is_error,
-                        ..
-                    } => InputContentBlock::ToolResult {
-                        tool_use_id: tool_use_id.clone(),
-                        content: vec![ToolResultContentBlock::Text {
-                            text: output.clone(),
-                        }],
-                        is_error: *is_error,
-                    },
-                    ContentBlock::Thinking {
-                        thinking,
-                        signature,
-                    } => InputContentBlock::Thinking {
-                        thinking: thinking.clone(),
-                        signature: signature.clone(),
-                    },
-                })
-                .collect::<Vec<_>>();
-            (!content.is_empty()).then(|| InputMessage {
-                role: role.to_string(),
-                content,
-            })
-        })
-        .collect()
-}
-
-fn push_output_block(
-    block: OutputContentBlock,
-    events: &mut Vec<AssistantEvent>,
-    pending_tool: &mut Option<(String, String, String)>,
-    streaming_tool_input: bool,
-) {
-    match block {
-        OutputContentBlock::Text { text } => {
-            if !text.is_empty() {
-                push_subagent_text_event(events, text);
-            }
-        }
-        OutputContentBlock::ToolUse { id, name, input } => {
-            let initial_input = if streaming_tool_input
-                && input.is_object()
-                && input.as_object().is_some_and(serde_json::Map::is_empty)
-            {
-                String::new()
-            } else {
-                input.to_string()
-            };
-            *pending_tool = Some((id, name, initial_input));
-        }
-        OutputContentBlock::Thinking {
-            thinking,
-            signature,
-        } => {
-            events.push(AssistantEvent::Thinking {
-                thinking,
-                signature,
-            });
-        }
-    }
-}
-
-fn push_subagent_text_event(events: &mut Vec<AssistantEvent>, text: String) {
-    if let Some(AssistantEvent::TextDelta(existing)) = events.last_mut() {
-        existing.push_str(&text);
-    } else if !text.is_empty() {
-        events.push(AssistantEvent::TextDelta(text));
-    }
-}
-
-fn response_to_events(response: MessageResponse) -> Vec<AssistantEvent> {
-    let mut events = Vec::new();
-    let mut pending_tool = None;
-
-    for block in response.content {
-        push_output_block(block, &mut events, &mut pending_tool, false);
-        if let Some((id, name, input)) = pending_tool.take() {
-            events.push(AssistantEvent::ToolUse { id, name, input });
-        }
-    }
-
-    events.push(AssistantEvent::Usage(TokenUsage {
-        input_tokens: response.usage.input_tokens,
-        output_tokens: response.usage.output_tokens,
-        cache_creation_input_tokens: response.usage.cache_creation_input_tokens,
-        cache_read_input_tokens: response.usage.cache_read_input_tokens,
-    }));
-    if let Some(reason) = response.stop_reason.filter(|value| !value.is_empty()) {
-        events.push(AssistantEvent::StopReason(reason));
-    }
-    events.push(AssistantEvent::MessageStop);
-    events
-}
-
 fn final_assistant_text(summary: &runtime::TurnSummary) -> String {
-    summary
-        .assistant_messages
-        .last()
-        .map(|message| {
-            message
-                .blocks
-                .iter()
-                .filter_map(|block| match block {
-                    ContentBlock::Text { text } => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("")
-        })
-        .unwrap_or_default()
+    runtime::assistant_text_from_turn_summary(summary)
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -4524,15 +4289,7 @@ fn run_llm_review(input: LlmReviewInput) -> Result<String, String> {
         let base = custom_base_url.ok_or_else(|| {
             "LlmReview: ARIS_REVIEWER_BASE_URL not set (needed for custom reviewer)".to_string()
         })?;
-        let trimmed = base.trim_end_matches('/');
-        let url = if trimmed.ends_with("/chat/completions") {
-            trimmed.to_string()
-        } else if trimmed.ends_with("/v1") {
-            format!("{trimmed}/chat/completions")
-        } else {
-            format!("{trimmed}/v1/chat/completions")
-        };
-        return call_openai_compat_reviewer(&key, &url, model, &input.prompt);
+        return call_openai_compat_reviewer(&key, &base, model, &input.prompt);
     }
 
     // Anthropic-compatible reviewer mode (e.g., Claude via proxy, DeepSeek).
@@ -4562,8 +4319,7 @@ fn run_llm_review(input: LlmReviewInput) -> Result<String, String> {
             "https://api.anthropic.com"
         };
         let base = custom_base_url.unwrap_or_else(|| default_base.to_string());
-        let endpoint = format!("{}/v1/messages", base.trim_end_matches('/'));
-        return call_anthropic_compat_reviewer(&key, &endpoint, model, &input.prompt);
+        return call_anthropic_compat_reviewer(&key, &base, model, &input.prompt);
     }
 
     // OpenAI-compat path: resolve model with fallback, then route to its endpoint.
@@ -4593,206 +4349,72 @@ fn run_llm_review(input: LlmReviewInput) -> Result<String, String> {
     call_openai_compat_reviewer(&key, &base_url, model, &input.prompt)
 }
 
-/// Returns true if this reqwest error is a transient network-level failure
-/// worth retrying (connection reset, timeout, DNS hiccup, etc.).
-/// HTTP 4xx/5xx responses are NOT retried here — those come back as Ok(response).
-fn is_transient_network_error(err: &reqwest::Error) -> bool {
-    err.is_timeout() || err.is_connect() || err.is_request() || err.is_body()
-}
-
-/// Build a fresh blocking HTTP client. Each retry attempt gets its own pool
-/// so we never reuse a broken TCP/TLS connection that caused the last failure.
-fn fresh_reviewer_client() -> reqwest::blocking::Client {
-    reqwest::blocking::Client::builder()
-        .pool_max_idle_per_host(0) // no connection pooling between calls
-        .connect_timeout(std::time::Duration::from_secs(15))
-        .timeout(std::time::Duration::from_secs(180))
-        .build()
-        .unwrap_or_else(|_| reqwest::blocking::Client::new())
-}
-
-/// Format a reqwest error with its full source chain so we can see what actually failed
-/// (DNS? TLS? connection reset?) instead of just "error sending request".
-fn describe_reqwest_error(err: &reqwest::Error) -> String {
-    let mut parts: Vec<String> = vec![err.to_string()];
-    let mut src: Option<&(dyn std::error::Error + 'static)> = std::error::Error::source(err);
-    let mut depth = 0;
-    while let Some(s) = src {
-        parts.push(format!("  caused by: {s}"));
-        src = s.source();
-        depth += 1;
-        if depth > 6 {
-            break;
-        }
+// Reviewer settings historically stored full endpoint URLs. The shared
+// executor expects provider base URLs and appends the concrete route itself.
+fn openai_executor_base_url(base_url_or_endpoint: &str) -> String {
+    let trimmed = base_url_or_endpoint.trim().trim_end_matches('/');
+    if let Some(base) = trimmed.strip_suffix("/chat/completions") {
+        base.trim_end_matches('/').to_string()
+    } else if trimmed.ends_with("/v1") || trimmed.ends_with("/openai") {
+        trimmed.to_string()
+    } else {
+        format!("{trimmed}/v1")
     }
-    parts.join("\n")
 }
 
-/// Send a reviewer request with retry on transient network errors AND HTTP 429/5xx.
-/// Up to 4 attempts total, exponential backoff (1s, 2s, 4s). Aborts early on Ctrl+C.
-/// Respects Retry-After header when present.
-fn send_reviewer_request_with_retry(
-    build: impl Fn() -> reqwest::blocking::RequestBuilder,
-) -> Result<reqwest::blocking::Response, String> {
-    const MAX_ATTEMPTS: u32 = 4;
-    let mut last_err: Option<String> = None;
-    for attempt in 1..=MAX_ATTEMPTS {
-        if runtime::is_interrupted() {
-            runtime::clear_interrupt();
-            return Err("LlmReview interrupted by user".to_string());
-        }
-        match build().send() {
-            Ok(resp) => {
-                let status = resp.status();
-                if status.is_success() {
-                    return Ok(resp);
-                }
-                let retryable = status.as_u16() == 429 || status.is_server_error();
-                if !retryable || attempt == MAX_ATTEMPTS {
-                    let body = resp.text().unwrap_or_default();
-                    return Err(format!("LlmReview API error {status}: {body}"));
-                }
-                let retry_after = resp
-                    .headers()
-                    .get("retry-after")
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|s| s.parse::<u64>().ok());
-                let body = resp.text().unwrap_or_default();
-                let preview: String = body.chars().take(160).collect();
-                let backoff_ms = if let Some(secs) = retry_after {
-                    (secs * 1000).min(10_000)
-                } else {
-                    (1u64 << (attempt - 1)) * 1000
-                };
-                eprintln!(
-                    "\x1b[33m  LlmReview {status} (attempt {attempt}/{MAX_ATTEMPTS}), retrying in {backoff_ms}ms: {preview}\x1b[0m"
-                );
-                let deadline =
-                    std::time::Instant::now() + std::time::Duration::from_millis(backoff_ms);
-                while std::time::Instant::now() < deadline {
-                    if runtime::is_interrupted() {
-                        runtime::clear_interrupt();
-                        return Err("LlmReview interrupted by user".to_string());
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(100));
-                }
-            }
-            Err(e) => {
-                let transient = is_transient_network_error(&e);
-                let detail = describe_reqwest_error(&e);
-                last_err = Some(format!("LlmReview request failed: {detail}"));
-                if !transient || attempt == MAX_ATTEMPTS {
-                    break;
-                }
-                let backoff_ms: u64 = (1u64 << (attempt - 1)) * 1000;
-                eprintln!(
-                    "\x1b[33m  LlmReview transient error (attempt {attempt}/{MAX_ATTEMPTS}), retrying in {backoff_ms}ms:\n{detail}\x1b[0m"
-                );
-                let deadline =
-                    std::time::Instant::now() + std::time::Duration::from_millis(backoff_ms);
-                while std::time::Instant::now() < deadline {
-                    if runtime::is_interrupted() {
-                        runtime::clear_interrupt();
-                        return Err("LlmReview interrupted by user".to_string());
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(100));
-                }
-            }
-        }
+fn anthropic_executor_base_url(base_url_or_endpoint: &str) -> String {
+    let trimmed = base_url_or_endpoint.trim().trim_end_matches('/');
+    if let Some(base) = trimmed.strip_suffix("/v1/messages") {
+        base.trim_end_matches('/').to_string()
+    } else if let Some(base) = trimmed.strip_suffix("/v1") {
+        base.trim_end_matches('/').to_string()
+    } else {
+        trimmed.to_string()
     }
-    Err(last_err.unwrap_or_else(|| "LlmReview request failed: unknown".to_string()))
 }
 
-/// Whether this reviewer model accepts an OpenAI-style `reasoning_effort`
-/// request field. Mirrors the allow-list in `aris-cli/openai_executor.rs`
-/// so reviewer and executor agree on which models route through which API
-/// shape.
-///
-/// v0.4.12 P1.B: uses [`reviewer_word_match`] so provider-prefixed names
-/// (`openai/o3-mini`, `proxy:o4`) are recognised — `starts_with` was the
-/// prior gate and missed those.
-#[must_use]
-fn reviewer_supports_reasoning_effort(model: &str) -> bool {
-    let m = model.to_ascii_lowercase();
-    reviewer_word_match(&m, "o1")
-        || reviewer_word_match(&m, "o3")
-        || reviewer_word_match(&m, "o4")
-        || m.contains("gpt-5.5")
-        || m.contains("gpt-5.6")
-        || m.contains("reasoner")
-        || m.contains("thinking")
-}
-
-/// v0.4.12 P1.B — word-boundary match (boundary = `-_/:` + start/end).
-/// Mirrors `runtime::usage::has_word` and `openai_executor::word_match`
-/// so reviewer capability detection stays consistent with executor +
-/// pricing table.
-fn reviewer_word_match(haystack: &str, needle: &str) -> bool {
-    let bytes = haystack.as_bytes();
-    let nbytes = needle.as_bytes();
-    if nbytes.is_empty() || bytes.len() < nbytes.len() {
-        return false;
+fn run_reviewer_turn(
+    client: aris_executor::ExecutorClient,
+    prompt: &str,
+) -> Result<String, String> {
+    runtime::clear_interrupt();
+    let mut runtime = ConversationRuntime::new(
+        Session::new(),
+        client,
+        SubagentToolExecutor::new(BTreeSet::new()),
+        PermissionPolicy::new(PermissionMode::ReadOnly),
+        Vec::new(),
+    );
+    let summary = runtime
+        .run_turn(prompt.to_string(), None)
+        .map_err(|error| format!("LlmReview request failed: {error}"))?;
+    let text = final_assistant_text(&summary).trim().to_string();
+    if text.is_empty() {
+        Err("LlmReview: empty reviewer response".to_string())
+    } else {
+        Ok(text)
     }
-    let is_boundary = |b: u8| matches!(b, b'-' | b'_' | b'/' | b':');
-    let mut i = 0;
-    while i + nbytes.len() <= bytes.len() {
-        if &bytes[i..i + nbytes.len()] == nbytes {
-            let before_ok = i == 0 || is_boundary(bytes[i - 1]);
-            let after_idx = i + nbytes.len();
-            let after_ok = after_idx == bytes.len() || is_boundary(bytes[after_idx]);
-            if before_ok && after_ok {
-                return true;
-            }
-        }
-        i += 1;
-    }
-    false
-}
-
-/// Effort tier for reasoning-capable reviewer calls. Reads
-/// `ARIS_REASONING_EFFORT` and falls back to `xhigh`.
-#[must_use]
-fn reviewer_reasoning_effort() -> String {
-    std::env::var("ARIS_REASONING_EFFORT")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "xhigh".to_string())
 }
 
 fn call_anthropic_compat_reviewer(
     api_key: &str,
-    endpoint: &str,
+    base_url: &str,
     model: &str,
     prompt: &str,
 ) -> Result<String, String> {
-    let body = serde_json::json!({
-        "model": model,
-        "max_tokens": 8192,
-        "messages": [{"role": "user", "content": prompt}]
-    });
-
-    // Build a fresh client per request to avoid reusing a broken connection pool.
-    let response = send_reviewer_request_with_retry(|| {
-        fresh_reviewer_client()
-            .post(endpoint)
-            .bearer_auth(api_key)
-            .header("anthropic-version", "2023-06-01")
-            .header("content-type", "application/json")
-            .json(&body)
-    })?;
-
-    let json: serde_json::Value = response
-        .json()
-        .map_err(|e| format!("LlmReview response parse failed: {e}"))?;
-
-    // Anthropic format: content[0].text
-    json.get("content")
-        .and_then(|c| c.get(0))
-        .and_then(|b| b.get("text"))
-        .and_then(|t| t.as_str())
-        .map(ToOwned::to_owned)
-        .ok_or_else(|| format!("LlmReview: unexpected response format: {json}"))
+    let client = SharedAnthropicRuntimeClient::new(
+        AuthSource::BearerToken(api_key.to_string()),
+        anthropic_executor_base_url(base_url),
+        false,
+        model.to_string(),
+        false,
+        Vec::new(),
+        8192,
+        Box::new(NoopStreamObserver),
+    )
+    .map(aris_executor::ExecutorClient::Anthropic)
+    .map_err(|error| format!("LlmReview executor setup failed: {error}"))?;
+    run_reviewer_turn(client, prompt)
 }
 
 fn call_openai_compat_reviewer(
@@ -4801,38 +4423,19 @@ fn call_openai_compat_reviewer(
     model: &str,
     prompt: &str,
 ) -> Result<String, String> {
-    let mut body = serde_json::json!({
-        "model": model,
-        "messages": [{"role": "user", "content": prompt}]
-    });
-
-    // Reasoning-capable models (o1/o3/o4 family, gpt-5.5+, thinking variants)
-    // accept an explicit `reasoning_effort` field; older OpenAI-compat
-    // models reject it, so gate on an allow-list. Default tier is `xhigh`,
-    // overridable via `ARIS_REASONING_EFFORT`.
-    if reviewer_supports_reasoning_effort(model) {
-        body["reasoning_effort"] = serde_json::json!(reviewer_reasoning_effort());
-    }
-
-    // Build a fresh client per request to avoid reusing a broken connection pool.
-    let response = send_reviewer_request_with_retry(|| {
-        fresh_reviewer_client()
-            .post(base_url)
-            .bearer_auth(api_key)
-            .json(&body)
-    })?;
-
-    let json: serde_json::Value = response
-        .json()
-        .map_err(|e| format!("LlmReview response parse failed: {e}"))?;
-
-    json.get("choices")
-        .and_then(|c| c.get(0))
-        .and_then(|c| c.get("message"))
-        .and_then(|m| m.get("content"))
-        .and_then(|c| c.as_str())
-        .map(ToOwned::to_owned)
-        .ok_or_else(|| format!("LlmReview: unexpected response format: {json}"))
+    let client = aris_executor::OpenAIRuntimeClient::new(
+        aris_executor::OpenAIExecutorConfig {
+            api_key: api_key.to_string(),
+            base_url: openai_executor_base_url(base_url),
+        },
+        model.to_string(),
+        false,
+        Vec::new(),
+        Box::new(NoopStreamObserver),
+    )
+    .map(aris_executor::ExecutorClient::OpenAI)
+    .map_err(|error| format!("LlmReview executor setup failed: {error}"))?;
+    run_reviewer_turn(client, prompt)
 }
 
 #[cfg(test)]
@@ -4855,7 +4458,10 @@ mod tests {
         resolve_reviewer_model, route_openai_compat_model, run_llm_review, skill_markdown,
         AgentInput, AgentJob, LlmReviewInput, SubagentToolExecutor,
     };
-    use runtime::{ApiRequest, AssistantEvent, ConversationRuntime, RuntimeError, Session};
+    use runtime::{
+        ApiRequest, AssistantEvent, ContentBlock, ConversationMessage, ConversationRuntime,
+        RuntimeError, Session, TokenUsage, TurnSummary,
+    };
     use serde_json::json;
 
     fn env_lock() -> &'static Mutex<()> {
@@ -6144,6 +5750,36 @@ mod tests {
     }
 
     #[test]
+    fn final_assistant_text_keeps_all_nonempty_text_iterations() {
+        let summary = TurnSummary {
+            assistant_messages: vec![
+                ConversationMessage::assistant(vec![
+                    ContentBlock::Text {
+                        text: "Preparing review.".to_string(),
+                    },
+                    ContentBlock::ToolUse {
+                        id: "tool-1".to_string(),
+                        name: "read_file".to_string(),
+                        input: "{}".to_string(),
+                    },
+                ]),
+                ConversationMessage::assistant(vec![ContentBlock::Text {
+                    text: "Review complete.".to_string(),
+                }]),
+            ],
+            tool_results: Vec::new(),
+            iterations: 2,
+            usage: TokenUsage::default(),
+            auto_compaction: None,
+        };
+
+        assert_eq!(
+            final_assistant_text(&summary),
+            "Preparing review.\n\nReview complete."
+        );
+    }
+
+    #[test]
     fn agent_rejects_blank_required_fields() {
         let missing_description = execute_tool(
             "Agent",
@@ -7049,16 +6685,35 @@ printf 'pwsh:%s' "$1"
         std::env::remove_var("ARIS_REVIEWER_PROVIDER");
     }
 
-    // v0.4.13 regression — v0.4.12 P1.B introduced reviewer_word_match,
-    // a copy of runtime::usage::has_word so the reviewer crate stays
-    // consistent with the executor + pricing word-boundary detection.
-    // Lock down provider-prefix and digit-suffix boundary cases so a
-    // future divergence between the three copies surfaces here.
     #[test]
-    fn reviewer_word_match_provider_prefix() {
-        assert!(super::reviewer_word_match("openai/o3-mini", "o3"));
-        assert!(super::reviewer_word_match("proxy:o4-preview", "o4"));
-        // Digit-suffix collision — "o32-mini" must NOT count as an o3 model.
-        assert!(!super::reviewer_word_match("o32-mini", "o3"));
+    fn llm_review_openai_urls_are_normalized_for_shared_executor() {
+        assert_eq!(
+            super::openai_executor_base_url("https://api.openai.com/v1/chat/completions"),
+            "https://api.openai.com/v1"
+        );
+        assert_eq!(
+            super::openai_executor_base_url("https://proxy.example.com/openai"),
+            "https://proxy.example.com/openai"
+        );
+        assert_eq!(
+            super::openai_executor_base_url("https://proxy.example.com"),
+            "https://proxy.example.com/v1"
+        );
+    }
+
+    #[test]
+    fn llm_review_anthropic_urls_are_normalized_for_shared_executor() {
+        assert_eq!(
+            super::anthropic_executor_base_url("https://api.anthropic.com/v1/messages"),
+            "https://api.anthropic.com"
+        );
+        assert_eq!(
+            super::anthropic_executor_base_url("https://api.anthropic.com/v1"),
+            "https://api.anthropic.com"
+        );
+        assert_eq!(
+            super::anthropic_executor_base_url("https://api.deepseek.com/anthropic"),
+            "https://api.deepseek.com/anthropic"
+        );
     }
 }

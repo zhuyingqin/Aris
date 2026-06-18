@@ -1,0 +1,27 @@
+{
+  "name": "gmail",
+  "version": "0.1.0",
+  "description": "Work with Gmail through an ARIS connector.",
+  "author": {
+    "name": "ARIS",
+    "url": "https://github.com/wanshuiyin/Auto-claude-code-research-in-sleep"
+  },
+  "homepage": "https://workspace.google.com/products/gmail/",
+  "license": "MIT",
+  "keywords": ["gmail", "email", "google"],
+  "skills": "./skills/",
+  "apps": "./.app.json",
+  "interface": {
+    "displayName": "Gmail",
+    "shortDescription": "Read, triage, and draft Gmail messages",
+    "longDescription": "Use Gmail to summarize inbox activity, draft replies, and organize email threads through a connected Gmail account.",
+    "developerName": "ARIS",
+    "category": "Productivity",
+    "capabilities": ["Interactive", "Write"],
+    "websiteURL": "https://workspace.google.com/products/gmail/",
+    "privacyPolicyURL": "https://policies.google.com/privacy",
+    "termsOfServiceURL": "https://policies.google.com/terms",
+    "defaultPrompt": ["Summarize inbox, draft replies, or process email threads"],
+    "brandColor": "#EA4335"
+  }
+}

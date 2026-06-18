@@ -17,10 +17,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use aris_commands::{
-    plan_team_command, plan_workflows_command, render_slash_command_help, slash_command_specs,
-    SlashCommand, TeamCommandPlan, WorkflowCommandPlan,
-};
+use aris_commands::{slash_command_specs, SlashCommand};
 use serde::Serialize;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, State};
@@ -89,28 +86,41 @@ impl Drop for ChatBusyGuard<'_> {
 
 // ── Tool executor ─────────────────────────────────────────────────────────────
 
-// Desktop Chat exposes the complete tool registry. Permission modes decide
-// what can run, matching Claude Code's plan / acceptEdits / dontAsk model.
-const DESKTOP_CHAT_BLOCKED_TOOLS: &[&str] = &[];
-
-// Literature agent sessions allow bash so /research-lit can run Python fetchers
-// (arxiv_fetch.py, openalex_fetch.py, etc.). Multi-agent and worktree tools
-// remain blocked — only the shell execution lane is opened.
-const LITERATURE_AGENT_BLOCKED_TOOLS: &[&str] = &[
-    "NotebookEdit",
-    "Config",
-    "Agent",
+// Team/workflow orchestration is intentionally disabled in desktop Chat for now:
+// the prompt section is off, slash commands are disabled, and the UI has no live
+// team monitor. Keep these tools out of the model-visible registry until the
+// full desktop workflow surface is rebuilt.
+const TEAM_WORKFLOW_BLOCKED_TOOLS: &[&str] = &[
     "AgentSupervisor",
     "SpawnTeammate",
     "SendMessage",
     "ClaimTask",
     "CompleteTask",
+    "ListTeam",
     "WaitForTeammates",
     "VerifyDeliverable",
     "TeamControl",
     "Workflow",
     "EnterWorktree",
 ];
+
+const DESKTOP_CHAT_EXTRA_BLOCKED_TOOLS: &[&str] = &[];
+
+// Literature agent sessions allow bash so /research-lit can run Python fetchers
+// (arxiv_fetch.py, openalex_fetch.py, etc.). Multi-agent and worktree tools
+// remain blocked — only the shell execution lane is opened.
+const LITERATURE_AGENT_EXTRA_BLOCKED_TOOLS: &[&str] = &["NotebookEdit", "Config", "Agent"];
+
+const DISABLED_DESKTOP_SLASH_COMMANDS: &[&str] = &["team", "workflows"];
+const DESKTOP_COMMAND_DISABLED_MESSAGE: &str = "This desktop command is disabled in this build.";
+
+fn is_blocked_tool(tool_name: &str, extra_blocked_tools: &'static [&'static str]) -> bool {
+    TEAM_WORKFLOW_BLOCKED_TOOLS.contains(&tool_name) || extra_blocked_tools.contains(&tool_name)
+}
+
+fn is_disabled_desktop_slash_command(command_name: &str) -> bool {
+    DISABLED_DESKTOP_SLASH_COMMANDS.contains(&command_name)
+}
 
 fn denied_tool_message(tool_name: &str) -> String {
     format!(
@@ -119,7 +129,7 @@ fn denied_tool_message(tool_name: &str) -> String {
 }
 
 struct KernelToolExecutor {
-    blocked_tools: &'static [&'static str],
+    extra_blocked_tools: &'static [&'static str],
 }
 
 impl ToolExecutor for KernelToolExecutor {
@@ -133,10 +143,13 @@ impl ToolExecutor for KernelToolExecutor {
         tool_name: &str,
         input: &str,
     ) -> Result<String, ToolError> {
-        if self.blocked_tools.contains(&tool_name) {
+        if is_blocked_tool(tool_name, self.extra_blocked_tools) {
             return Err(ToolError::new(denied_tool_message(tool_name)));
         }
         let value: Value = serde_json::from_str(input).unwrap_or(Value::Null);
+        if crate::mail::is_mail_tool(tool_name) {
+            return crate::mail::execute_mail_tool(tool_name, &value).map_err(ToolError::new);
+        }
         tools::execute_tool(tool_name, &value).map_err(ToolError::new)
     }
 }
@@ -364,11 +377,17 @@ impl ToolExecutor for NoToolsExecutor {
     }
 }
 
-fn tool_specs_for(blocked: &'static [&'static str]) -> Vec<tools::ToolSpec> {
-    tools::mvp_tool_specs()
+fn tool_specs_for(extra_blocked_tools: &'static [&'static str]) -> Vec<tools::ToolSpec> {
+    let mut specs = tools::mvp_tool_specs()
         .into_iter()
-        .filter(|spec| !blocked.contains(&spec.name))
-        .collect()
+        .filter(|spec| !is_blocked_tool(spec.name, extra_blocked_tools))
+        .collect::<Vec<_>>();
+    specs.extend(
+        crate::mail::mail_tool_specs()
+            .into_iter()
+            .filter(|spec| !is_blocked_tool(spec.name, extra_blocked_tools)),
+    );
+    specs
 }
 
 fn mcp_runtime_status_prompt(
@@ -481,7 +500,9 @@ fn persist_tool_output_if_large(
     if output.chars().count() <= TOOL_OUTPUT_ARTIFACT_THRESHOLD_CHARS {
         return None;
     }
-    let dir = crate::state::workspace_dir().join(".aris").join("tool-output");
+    let dir = crate::state::workspace_dir()
+        .join(".aris")
+        .join("tool-output");
     if let Err(error) = fs::create_dir_all(&dir) {
         eprintln!("aris desktop: could not create tool-output dir: {error}");
         return None;
@@ -538,7 +559,10 @@ fn compact_shell_json_tool_output(
         let truncated = compact_shell_stream_fields(&mut candidate, stream_limit, artifact);
         if truncated {
             if let Some(object) = candidate.as_object_mut() {
-                object.insert("truncatedForContext".to_string(), serde_json::Value::Bool(true));
+                object.insert(
+                    "truncatedForContext".to_string(),
+                    serde_json::Value::Bool(true),
+                );
             }
         }
         let rendered = serde_json::to_string_pretty(&candidate).ok()?;
@@ -716,7 +740,7 @@ fn build_system_prompt_inner(model: &str, full_tool_registry: bool) -> Vec<Strin
         .unwrap_or_else(|_| crate::state::workspace_dir());
     let access = if full_tool_registry {
         format!(
-            "Desktop Chat runs in the ARIS workspace at `{}`. The complete tool registry, including shell and agent tools, is available when the active permission mode allows it. Respect the selected permission mode and keep generated project artifacts in this workspace unless the user explicitly requests another location.",
+            "Desktop Chat runs in the ARIS workspace at `{}`. The desktop tool registry, including shell, MCP, and single-agent tools, is available when the active permission mode allows it. Team/Workflow orchestration tools are disabled on this surface. Respect the selected permission mode and keep generated project artifacts in this workspace unless the user explicitly requests another location.",
             workspace.display()
         )
     } else {
@@ -791,10 +815,12 @@ fn permission_mode_view(mode: PermissionMode) -> PermissionModeView {
     let (label, description) = match mode {
         PermissionMode::ReadOnly => ("Plan", "Inspect and search only"),
         PermissionMode::WorkspaceWrite => ("Accept edits", "Read and edit workspace files"),
-        PermissionMode::DangerFullAccess => (
-            "Don't ask",
-            "Allow shell, agents, workflows, MCP, and all tools",
-        ),
+        PermissionMode::DangerFullAccess => {
+            (
+                "Auto-approve",
+                "Auto-approve shell, MCP, and available agent tools; does not grant OS administrator rights",
+            )
+        }
         PermissionMode::Prompt => ("Ask", "Ask before elevated tool calls"),
         PermissionMode::Allow => ("Allow", "Allow the current tool call"),
     };
@@ -1392,6 +1418,7 @@ impl ChatCommandResult {
 pub fn chat_command_specs() -> Vec<ChatCommandSpec> {
     slash_command_specs()
         .iter()
+        .filter(|spec| !is_disabled_desktop_slash_command(spec.name))
         .map(|spec| ChatCommandSpec {
             name: spec.name.to_string(),
             description: spec.summary.to_string(),
@@ -1497,11 +1524,8 @@ pub fn chat_run_command(
         SlashCommand::Session { action, target } => {
             handle_session_command(&session_id, action.as_deref(), target.as_deref())
         }
-        SlashCommand::Team { action, target } => {
-            handle_team_command(action.as_deref(), target.as_deref())
-        }
-        SlashCommand::Workflows { action, target } => {
-            handle_workflows_command(&state, session_id, action.as_deref(), target.as_deref())
+        SlashCommand::Team { .. } | SlashCommand::Workflows { .. } => {
+            Ok(ChatCommandResult::message(DESKTOP_COMMAND_DISABLED_MESSAGE))
         }
         SlashCommand::Bughunter { scope } => Ok(ChatCommandResult::prompt(bughunter_prompt(
             scope.as_deref(),
@@ -1553,7 +1577,7 @@ pub fn chat_run_command(
             } else {
                 Ok(ChatCommandResult::message(format!(
                     "unknown slash command: /{name}\n\n{}",
-                    render_slash_command_help()
+                    render_desktop_slash_command_help()
                 )))
             }
         }
@@ -1623,7 +1647,7 @@ fn suggest_chat_title(user: &str, assistant: &str) -> Result<String, String> {
     crate::config::apply_reviewer_environment(true);
     let (model, _provider, executor_config) = resolve_executor()?;
     runtime::clear_interrupt();
-    let system = "Generate a concise title for a chat conversation. Output only the title. Use the conversation language. Keep it short: ideally 4 to 12 Chinese characters or 2 to 6 English words. Do not use quotes, labels, punctuation, or markdown.";
+    let system = "Generate a concrete sidebar title for this chat. Output only the title. Use the conversation language and specific nouns from the user's request. Keep it short: ideally 4 to 12 Chinese characters or 2 to 6 English words. Do not write generic summaries such as 'the user asked'. Do not include reasoning, <think> tags, labels, quotes, punctuation, or markdown.";
     let prompt = format!(
         "User message:\n{}\n\nAssistant reply:\n{}\n\nTitle:",
         truncate_for_prompt(user, 1200),
@@ -1652,8 +1676,70 @@ fn suggest_chat_title(user: &str, assistant: &str) -> Result<String, String> {
     Ok(title)
 }
 
+fn strip_reasoning_markup(raw: &str) -> String {
+    let mut output = String::with_capacity(raw.len());
+    let mut rest = raw;
+    loop {
+        let lower = rest.to_ascii_lowercase();
+        let Some(start) = lower.find("<think") else {
+            output.push_str(rest);
+            break;
+        };
+        output.push_str(&rest[..start]);
+        let Some(open_end) = lower[start..].find('>') else {
+            break;
+        };
+        let body_start = start + open_end + 1;
+        let remaining = &lower[body_start..];
+        let close = [
+            ("</think>", remaining.find("</think>")),
+            ("</thinking>", remaining.find("</thinking>")),
+        ]
+        .into_iter()
+        .filter_map(|(tag, index)| index.map(|index| (index, tag.len())))
+        .min_by_key(|(index, _)| *index);
+        let Some((close_start, close_len)) = close else {
+            break;
+        };
+        rest = &rest[body_start + close_start + close_len..];
+    }
+    output
+}
+
+fn is_unusable_generated_title(title: &str) -> bool {
+    let normalized = title.split_whitespace().collect::<Vec<_>>().join(" ");
+    let lower = normalized.to_ascii_lowercase();
+    lower.is_empty()
+        || matches!(
+            lower.as_str(),
+            "new chat"
+                | "untitled"
+                | "no title"
+                | "no subject"
+                | "(no subject)"
+                | "无标题"
+                | "无主题"
+        )
+        || lower.starts_with("<think")
+        || lower.contains("</think")
+        || lower.starts_with("the user asked")
+        || lower.starts_with("the user asks")
+        || lower.starts_with("the user requested")
+        || lower.starts_with("the user wants")
+        || lower.starts_with("the user wanted")
+        || lower.starts_with("user asked")
+        || lower.starts_with("user asks")
+        || lower.starts_with("user requested")
+        || lower.starts_with("user wants")
+        || lower.starts_with("chat title")
+        || lower.starts_with("chat summary")
+        || lower.starts_with("conversation title")
+        || lower.starts_with("conversation summary")
+}
+
 fn clean_generated_title(raw: &str) -> String {
-    let mut title = raw
+    let stripped = strip_reasoning_markup(raw);
+    let mut title = stripped
         .lines()
         .find(|line| !line.trim().is_empty())
         .unwrap_or("")
@@ -1704,7 +1790,12 @@ fn clean_generated_title(raw: &str) -> String {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
-    title.chars().take(48).collect()
+    let title = title.chars().take(48).collect::<String>();
+    if is_unusable_generated_title(&title) {
+        String::new()
+    } else {
+        title
+    }
 }
 
 async fn run_chat_turn(
@@ -1720,7 +1811,7 @@ async fn run_chat_turn(
         session_id,
         user_message,
         model_override,
-        DESKTOP_CHAT_BLOCKED_TOOLS,
+        DESKTOP_CHAT_EXTRA_BLOCKED_TOOLS,
         true,
     )
     .await
@@ -1738,7 +1829,7 @@ async fn run_literature_chat_turn(
         session_id,
         user_message,
         None,
-        LITERATURE_AGENT_BLOCKED_TOOLS,
+        LITERATURE_AGENT_EXTRA_BLOCKED_TOOLS,
         false,
     )
     .await
@@ -1750,7 +1841,7 @@ async fn run_chat_turn_with_context(
     session_id: String,
     user_message: ConversationMessage,
     model_override: Option<String>,
-    blocked_tools: &'static [&'static str],
+    extra_blocked_tools: &'static [&'static str],
     full_tool_registry: bool,
 ) -> Result<String, String> {
     validate_session_id(&session_id)?;
@@ -1794,9 +1885,11 @@ async fn run_chat_turn_with_context(
                 runtime::RuntimeFeatureConfig::default()
             }
         };
-        let tool_specs = aris_chat::chat_tool_specs(tool_specs_for(blocked_tools));
+        let tool_specs = aris_chat::chat_tool_specs(tool_specs_for(extra_blocked_tools));
         let mcp_bundle = aris_chat::attach_mcp_tools(
-            KernelToolExecutor { blocked_tools },
+            KernelToolExecutor {
+                extra_blocked_tools,
+            },
             tool_specs,
             &feature_config,
             None,
@@ -2213,7 +2306,8 @@ fn permissions_selection(current: &str) -> ChatCommandSelection {
         command: "permissions".to_string(),
         title: "Select permission mode".to_string(),
         subtitle: Some(
-            "Claude Code-style levels control the complete desktop Chat tool registry.".to_string(),
+            "Claude Code-style levels control the available desktop Chat tool registry."
+                .to_string(),
         ),
         current: Some(current.to_string()),
         items: vec![
@@ -2237,8 +2331,8 @@ fn permissions_selection(current: &str) -> ChatCommandSelection {
             ),
             selection_item(
                 "danger-full-access",
-                "Don't ask",
-                "Allow shell, agents, workflows, and all other tools",
+                "Auto-approve",
+                "Auto-approve shell, MCP, and available agent tools; no OS administrator elevation",
                 current,
             ),
         ],
@@ -2317,7 +2411,7 @@ fn handle_permissions_command(
     }
     set_permission_mode_for(state, session_id, next)?;
     Ok(ChatCommandResult::message(format!(
-        "Permissions updated\n  Previous mode    {}\n  Active mode      {}\n  Applies to       subsequent desktop chat tool calls\n  Note             ask/prompt will show Continue/Skip approvals for gated tools",
+        "Permissions updated\n  Previous mode    {}\n  Active mode      {}\n  Applies to       subsequent desktop chat tool calls\n  Note             ask/prompt will show Continue/Skip approvals for gated tools; danger-full-access does not grant OS administrator rights",
         current.as_str(),
         next.as_str()
     )))
@@ -2325,7 +2419,7 @@ fn handle_permissions_command(
 
 fn format_permissions_report(mode: &str) -> String {
     format!(
-        "Permissions\n  Active mode      {mode}\n  Surface          desktop Chat\n\nModes\n  plan / read-only              Inspect and search only\n  acceptEdits / workspace-write Read and edit workspace files\n  ask / prompt                  Ask before gated tool calls\n  dontAsk / danger-full-access  Allow shell, agents, workflows, and all tools\n\nUsage\n  Inspect current mode with /permissions\n  Switch modes with /permissions <mode>\n  Project settings permissions.defaultMode supplies the session default"
+        "Permissions\n  Active mode      {mode}\n  Surface          desktop Chat\n\nModes\n  plan / read-only              Inspect and search only\n  acceptEdits / workspace-write Read and edit workspace files\n  ask / prompt                  Ask before gated tool calls\n  dontAsk / danger-full-access  Auto-approve shell, MCP, and available agent tools\n\nBoundary\n  These modes gate ARIS tool calls only. They do not grant Windows administrator rights; shell commands still run with the current ARIS process/user privileges.\n\nUsage\n  Inspect current mode with /permissions\n  Switch modes with /permissions <mode>\n  Project settings permissions.defaultMode supplies the session default"
     )
 }
 
@@ -2578,59 +2672,6 @@ fn handle_session_command(
     }
 }
 
-fn handle_team_command(
-    action: Option<&str>,
-    target: Option<&str>,
-) -> Result<ChatCommandResult, String> {
-    match plan_team_command(action, target) {
-        TeamCommandPlan::RenderTeamView { team_id } => {
-            tools::render_team_view(team_id.as_deref()).map(ChatCommandResult::message)
-        }
-        TeamCommandPlan::Tool { name, input } => {
-            tools::execute_tool(name, &input).map(ChatCommandResult::message)
-        }
-        TeamCommandPlan::Message(message) => Ok(ChatCommandResult::message(message)),
-    }
-}
-
-fn handle_workflows_command(
-    state: &ChatState,
-    session_id: String,
-    action: Option<&str>,
-    target: Option<&str>,
-) -> Result<ChatCommandResult, String> {
-    match plan_workflows_command(action, target) {
-        WorkflowCommandPlan::Tool { input } => {
-            tools::execute_tool("Workflow", &input).map(ChatCommandResult::message)
-        }
-        WorkflowCommandPlan::Inject { run_id } => {
-            let output =
-                tools::execute_tool("Workflow", &json!({ "action": "inspect", "runId": run_id }))?;
-            let value: Value = serde_json::from_str(&output).map_err(|e| e.to_string())?;
-            let result = value
-                .get("run")
-                .and_then(|run| run.get("result"))
-                .and_then(Value::as_str)
-                .filter(|value| !value.trim().is_empty())
-                .ok_or_else(|| format!("workflow {run_id} has no completed result to inject"))?;
-            let text = format!(
-                "# Workflow Result\n\nRun `{run_id}` completed in the background.\n\n{result}"
-            );
-            let mut session = get_cached_or_disk_session(state, &session_id)?;
-            session
-                .messages
-                .push(ConversationMessage::assistant(vec![ContentBlock::Text {
-                    text,
-                }]));
-            store_chat_session(state, session_id, session)?;
-            Ok(ChatCommandResult::message(format!(
-                "Workflow\n  Result           injected\n  Run              {run_id}"
-            )))
-        }
-        WorkflowCommandPlan::Message(message) => Ok(ChatCommandResult::message(message)),
-    }
-}
-
 fn handle_commit_command(session: &Session) -> Result<ChatCommandResult, String> {
     let status = git_output(&["status", "--short"])?;
     if status.trim().is_empty() {
@@ -2671,12 +2712,35 @@ fn issue_draft_prompt(session: &Session, context: Option<&str>) -> String {
     )
 }
 
+fn render_desktop_slash_command_help() -> String {
+    let mut lines = vec![
+        "Slash commands".to_string(),
+        "  [resume] means the command also works with --resume SESSION.json".to_string(),
+    ];
+    for spec in slash_command_specs()
+        .iter()
+        .filter(|spec| !is_disabled_desktop_slash_command(spec.name))
+    {
+        let name = match spec.argument_hint {
+            Some(argument_hint) => format!("/{} {}", spec.name, argument_hint),
+            None => format!("/{}", spec.name),
+        };
+        let resume = if spec.resume_supported {
+            " [resume]"
+        } else {
+            ""
+        };
+        lines.push(format!("  {name:<20} {}{}", spec.summary, resume));
+    }
+    lines.join("\n")
+}
+
 fn render_desktop_repl_help() -> String {
     [
         "Desktop Chat commands".to_string(),
         "  Type slash commands in the chat input. Commands are executed by the desktop app, not by the CLI binary.".to_string(),
         String::new(),
-        render_slash_command_help(),
+        render_desktop_slash_command_help(),
     ]
     .join("\n")
 }
@@ -3466,11 +3530,29 @@ mod tests {
     }
 
     #[test]
-    fn desktop_chat_exposes_tools_and_lets_permission_mode_gate_them() {
-        let specs = tool_specs_for(DESKTOP_CHAT_BLOCKED_TOOLS);
+    fn generated_chat_title_skips_reasoning_markup() {
+        let title = clean_generated_title(
+            "<think>\nThe user asked me to choose a title.\n</think>\nTitle: chemistry slides",
+        );
+
+        assert_eq!(title, "chemistry slides");
+        assert_eq!(
+            clean_generated_title("<think>The user asked me to choose"),
+            ""
+        );
+        assert_eq!(clean_generated_title("The user asked for help"), "");
+        assert_eq!(clean_generated_title("Untitled"), "");
+        assert_eq!(clean_generated_title("无主题"), "");
+    }
+
+    #[test]
+    fn desktop_chat_hides_team_workflow_tools_and_lets_permission_mode_gate_them() {
+        let specs = tool_specs_for(DESKTOP_CHAT_EXTRA_BLOCKED_TOOLS);
         assert!(specs.iter().any(|spec| spec.name == "bash"));
         assert!(specs.iter().any(|spec| spec.name == "Agent"));
-        assert!(specs.iter().any(|spec| spec.name == "Workflow"));
+        assert!(!specs.iter().any(|spec| spec.name == "Workflow"));
+        assert!(!specs.iter().any(|spec| spec.name == "ListTeam"));
+        assert!(!specs.iter().any(|spec| spec.name == "AgentSupervisor"));
 
         let workspace = desktop_permission_policy(&specs, PermissionMode::WorkspaceWrite);
         assert!(matches!(

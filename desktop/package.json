@@ -1,7 +1,7 @@
 {
   "name": "aris-studio",
   "private": true,
-  "version": "0.3.2",
+  "version": "0.3.3",
   "type": "module",
   "description": "ARIS Studio - desktop UI for Chat, literature, skills, sessions, and settings",
   "scripts": {

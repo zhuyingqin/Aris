@@ -244,6 +244,8 @@ function ChatMessage({ turn, canRetry, onEdit, onRetry, onContinue, onPermission
         if (block.kind === "permission") {
           return <PermissionCall key={block.id} block={block} onPermissionRespond={onPermissionRespond} />;
         }
+        // TodoWrite plans are surfaced by the floating workflow box, not inline.
+        if (block.kind === "tool" && block.name === "TodoWrite") return null;
         return <ToolCall key={block.id ?? index} block={block} />;
       })}
       {!turn.streaming && !turn.error && !hasContent && turn.role === "assistant" && (

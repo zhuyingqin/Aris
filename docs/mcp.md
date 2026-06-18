@@ -9,9 +9,15 @@ ARIS CLI and Desktop Chat load Claude Code-compatible MCP configuration from:
 - `<project>/.claude/settings.json`
 - `<project>/.claude/settings.local.json`
 
-ARIS currently executes STDIO MCP servers. Discovered tools are exposed to the
-model as `mcp__<server>__<tool>` and require the `dontAsk` /
-`danger-full-access` permission mode.
+ARIS currently executes STDIO MCP servers. The config parser recognizes remote
+HTTP/SSE MCP entries, but `McpServerManager` does not execute those transports
+yet. Discovered STDIO tools are exposed to the model as
+`mcp__<server>__<tool>` and require the `dontAsk` / `danger-full-access`
+permission mode.
+
+For mail and workspace integrations, see [mail-mcp.md](mail-mcp.md). The target
+direction is provider-owned MCP first, with direct provider APIs kept as
+fallback paths while remote MCP OAuth support is implemented.
 
 ## Codex and Claude Code
 

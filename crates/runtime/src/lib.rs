@@ -43,8 +43,9 @@ pub use config::{
     ScopedMcpServerConfig, CLAUDE_CODE_SETTINGS_SCHEMA_NAME,
 };
 pub use conversation::{
-    auto_compaction_threshold_from_env, ApiClient, ApiRequest, AssistantEvent, AutoCompactionEvent,
-    ConversationRuntime, RuntimeError, StaticToolExecutor, ToolError, ToolExecutor, TurnSummary,
+    assistant_text_from_turn_summary, auto_compaction_threshold_from_env, ApiClient, ApiRequest,
+    AssistantEvent, AutoCompactionEvent, ConversationRuntime, RuntimeError, StaticToolExecutor,
+    ToolError, ToolExecutor, TurnSummary,
 };
 pub use event_sink::{
     now_iso8601, today_iso, EventSink, EventType, JsonlEventSink, MetaLoggingLevel, NoopEventSink,

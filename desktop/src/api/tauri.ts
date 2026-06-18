@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { listen } from "@tauri-apps/api/event";
 
 /** True only inside the Tauri webview; false in a plain browser (vite preview). */
 export const isTauri = (): boolean =>
@@ -8,6 +8,8 @@ import type {
   ChatCommandResult,
   ChatModelOptions,
   ChatStatus,
+  ConnectorActionResult,
+  ConnectorPluginView,
   ConfigPatch,
   ConfigSecretKind,
   ConfigTestDetail,
@@ -19,21 +21,27 @@ import type {
   ImBridgeSecretKind,
   ImBridgeTestResult,
   ImBridgeView,
+  GenericMailAccountInput,
+  GenericMailTestResult,
+  MailAccount,
+  MailAutoconfigResult,
+  MailDraft,
+  MailFolder,
+  MailMessageFull,
+  MailMessageList,
+  MailModifyPatch,
+  MailOauthConfigPatch,
+  MailOauthConfigView,
   McpConfigView,
   McpStdioServerInput,
   McpTestResult,
   PermissionModeView,
   ProjectView,
-  RunEvent,
   ScheduledTask,
   SessionSummary,
   SessionTranscript,
   SkillMeta,
 } from "../types";
-
-// ── Workflow commands ─────────────────────────────────────────────────────────
-
-// ── Team / agent commands ─────────────────────────────────────────────────────
 
 export const stateDir = () => invoke<string>("state_dir");
 export const projectsGet = () => invoke<ProjectView>("projects_get");
@@ -78,6 +86,54 @@ export const mcpConfigGet = () => invoke<McpConfigView>("mcp_config_get");
 export const mcpConfigSet = (servers: McpStdioServerInput[]) =>
   invoke<McpConfigView>("mcp_config_set", { servers });
 export const mcpConfigTest = () => invoke<McpTestResult>("mcp_config_test");
+
+// ── Codex-style connectors ───────────────────────────────────────────────────
+
+export const connectorPluginsList = () =>
+  invoke<ConnectorPluginView[]>("connector_plugins_list");
+export const connectorConnect = (id: string) =>
+  invoke<ConnectorActionResult>("connector_connect", { id });
+
+// ── Mail (Gmail API + Microsoft Graph) ────────────────────────────────────────
+
+export const mailAccountsGet = () => invoke<MailAccount[]>("mail_accounts_get");
+export const mailOauthConfigGet = () =>
+  invoke<MailOauthConfigView>("mail_oauth_config_get");
+export const mailOauthConfigSet = (patch: MailOauthConfigPatch) =>
+  invoke<MailOauthConfigView>("mail_oauth_config_set", { patch });
+export const mailConnect = (provider: "gmail" | "outlook") =>
+  invoke<MailAccount>("mail_connect", { provider });
+export const mailAutoconfig = (email: string) =>
+  invoke<MailAutoconfigResult>("mail_autoconfig", { email });
+export const mailGenericTest = (input: GenericMailAccountInput) =>
+  invoke<GenericMailTestResult>("mail_generic_test", { input });
+export const mailGenericConnect = (input: GenericMailAccountInput) =>
+  invoke<MailAccount>("mail_generic_connect", { input });
+export const mailDisconnect = (accountId: string) =>
+  invoke<MailAccount[]>("mail_disconnect", { accountId });
+export const mailFolders = (accountId: string) =>
+  invoke<MailFolder[]>("mail_folders", { accountId });
+export const mailList = (
+  accountId: string,
+  folder: string,
+  query: string,
+  pageToken?: string | null,
+) =>
+  invoke<MailMessageList>("mail_list", {
+    accountId,
+    folder,
+    query,
+    pageToken: pageToken ?? null,
+  });
+export const mailRead = (accountId: string, messageId: string) =>
+  invoke<MailMessageFull>("mail_read", { accountId, messageId });
+export const mailModify = (
+  accountId: string,
+  messageId: string,
+  patch: MailModifyPatch,
+) => invoke<void>("mail_modify", { accountId, messageId, patch });
+export const mailSend = (accountId: string, draft: MailDraft) =>
+  invoke<void>("mail_send", { accountId, draft });
 
 export const skillsList = () => invoke<SkillMeta[]>("skills_list");
 export const skillView = (name: string) =>
@@ -286,10 +342,3 @@ export const onChatPermissionResolved = (handler: (event: ChatPermissionResolved
   listen<ChatPermissionResolvedEvent>("chat-permission-resolved", (e) => handler(e.payload));
 export const onChatDone = (handler: (event: ChatTextEvent) => void) =>
   listen<ChatTextEvent>("chat-done", (e) => handler(e.payload));
-
-// ── Live events ───────────────────────────────────────────────────────────────
-
-export const onRunEvent = (
-  handler: (event: RunEvent) => void,
-): Promise<UnlistenFn> =>
-  listen<RunEvent>("run-event", (e) => handler(e.payload));

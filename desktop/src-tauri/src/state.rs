@@ -21,12 +21,6 @@ const DESKTOP_ALLOWED_AGENT_TOOLS: &[&str] = &[
     "Sleep",
     "SendUserMessage",
     "StructuredOutput",
-    "SendMessage",
-    "ClaimTask",
-    "CompleteTask",
-    "ListTeam",
-    "WaitForTeammates",
-    "VerifyDeliverable",
 ];
 
 pub fn default_workspace_dir() -> PathBuf {

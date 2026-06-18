@@ -150,13 +150,41 @@ export const ThinkBlock = memo(function ThinkBlock({
   streaming?: boolean;
 }) {
   const [open, setOpen] = useState(streaming);
+  const [elapsedSec, setElapsedSec] = useState(0);
+  const startRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (!streaming) {
+      if (startRef.current !== null) {
+        setElapsedSec(Math.round((Date.now() - startRef.current) / 1000));
+        startRef.current = null;
+      }
+      return;
+    }
+    startRef.current = Date.now();
+    setElapsedSec(0);
+    const id = window.setInterval(() => {
+      setElapsedSec(Math.round((Date.now() - startRef.current!) / 1000));
+    }, 1000);
+    return () => window.clearInterval(id);
+  }, [streaming]);
+
   const preview = content.slice(0, 80).replace(/\s+/g, " ");
+  const label = streaming
+    ? `正在思考${elapsedSec > 0 ? ` · ${elapsedSec}s` : ""}`
+    : elapsedSec > 0
+      ? `已处理 ${elapsedSec}s`
+      : "已思考";
+
   return (
-    <div className="md-think">
+    <div className={`md-think${streaming ? " md-think-active" : ""}`}>
       <button className="md-think-toggle" onClick={() => setOpen((value) => !value)}>
         <span className="md-think-icon">{open ? "▾" : "▸"}</span>
-        <span className="md-think-label">Thinking</span>
-        {!open && <span className="md-think-preview">{preview}{content.length > 80 ? "..." : ""}</span>}
+        {streaming && <span className="md-think-spinner" aria-hidden="true" />}
+        <span className="md-think-label">{label}</span>
+        {!streaming && !open && content && (
+          <span className="md-think-preview">{preview}{content.length > 80 ? "..." : ""}</span>
+        )}
       </button>
       {open && <div className="md-think-body"><ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown></div>}
     </div>

@@ -11,6 +11,7 @@ import {
   chatSetContext,
   chatStatus,
   chatSuggestTitle,
+  fileOpen,
   fileRead,
   isTauri,
   projectChatStarters,
@@ -21,12 +22,13 @@ import {
 } from "../api/tauri";
 import { useStore } from "../store";
 import type { ChatAttachment, ChatCommandSelection, ChatModelOption, ChatStatus, DesktopCommandSpec, ChatTurn, PermissionModeView, SkillMeta } from "../types";
-import ChatComposer from "./ChatComposer";
+import ChatComposer, { attachmentFromFile } from "./ChatComposer";
 import CommandSelection from "./CommandSelection";
 import ChatSidebar from "./ChatSidebar";
 import ChatThread from "./ChatThread";
 import FilePathMenu from "./FilePathMenu";
-import { makeId, textFromTurn, titleFromTurns, transcriptFromTurn } from "./model";
+import { cleanChatTitle, latestFileChangesFromTurns, latestTodosFromTurns, makeId, textFromTurn, titleFromTurns, transcriptFromTurn } from "./model";
+import WorkflowFlow from "./WorkflowFlow";
 import type { ChatSession } from "./types";
 import { useChatSessions } from "./useChatSessions";
 import { useChatStream } from "./useChatStream";
@@ -163,10 +165,10 @@ const FALLBACK_SLASH_COMMANDS: DesktopCommandSpec[] = [
   { name: "model", description: "Show or switch the executor model", argumentHint: "[model]" },
   { name: "permissions", description: "Show or switch the active permission mode", argumentHint: "[mode]" },
 ];
-const HIDDEN_SLASH_COMMANDS = new Set(["team", "teams", "workflow", "workflows"]);
+const DISABLED_DESKTOP_COMMANDS = new Set(["team", "teams", "workflow", "workflows"]);
 
 function visibleDesktopCommands(commands: DesktopCommandSpec[]) {
-  return commands.filter((command) => !HIDDEN_SLASH_COMMANDS.has(command.name.toLowerCase()));
+  return commands.filter((command) => !DISABLED_DESKTOP_COMMANDS.has(command.name.toLowerCase()));
 }
 
 interface PendingCommandSelection {
@@ -224,6 +226,7 @@ export default function Chat() {
   const [pendingCommandSelection, setPendingCommandSelection] = useState<PendingCommandSelection | null>(null);
   const [focusRequest, setFocusRequest] = useState(0);
   const [exporting, setExporting] = useState(false);
+  const [chatDragging, setChatDragging] = useState(false);
   const [fileMenu, setFileMenu] = useState<{ x: number; y: number; path: string } | null>(null);
   const deleteTimers = useRef(new Map<string, { timer: number; projectId: string }>());
   const titleRequests = useRef(new Set<string>());
@@ -271,11 +274,12 @@ export default function Chat() {
     titleRequests.current.add(sessionId);
     void chatSuggestTitle(userText, assistantText)
       .then((title) => {
-        const trimmed = title.trim();
+        const trimmed = cleanChatTitle(title);
         if (!trimmed) return;
         updateSession(sessionId, (session) => {
           const fallback = titleFromTurns(session.turns);
-          if (session.title !== "New chat" && session.title !== fallback) return session;
+          const current = cleanChatTitle(session.title);
+          if (current && session.title !== "New chat" && session.title !== fallback) return session;
           return { ...session, title: trimmed };
         });
       })
@@ -323,6 +327,11 @@ export default function Chat() {
   const currentChatBusy = runningSessionIds.has(currentId);
   const turns = currentSession?.turns ?? [];
   const estimatedTokens = estimateTokens(turns);
+  const workflowTodos = useMemo(() => latestTodosFromTurns(turns), [turns]);
+  const workflowFileChanges = useMemo(
+    () => latestFileChangesFromTurns(turns, currentProject?.path),
+    [currentProject?.path, turns],
+  );
   const input = currentSession?.draft ?? "";
   const attachments = currentSession?.draftAttachments ?? [];
   const runningSessionIdsRef = useRef(runningSessionIds);
@@ -340,7 +349,7 @@ export default function Chat() {
   useEffect(() => {
     refreshStatus(currentSession?.model ?? null);
     if (!isTauri()) {
-      setPermission({ mode: "danger-full-access", label: "Don't ask", description: "Allow shell, agents, workflows, and MCP" });
+      setPermission({ mode: "danger-full-access", label: "Auto-approve", description: "Auto-approve tool calls; no OS administrator elevation" });
       return;
     }
     chatPermissionGet(currentId).then(setPermission).catch(() => setPermission(null));
@@ -398,7 +407,7 @@ export default function Chat() {
 
   const changePermission = async (mode: string) => {
     if (!isTauri()) {
-      const label = mode === "read-only" ? "Plan" : mode === "danger-full-access" ? "Don't ask" : mode === "prompt" ? "Ask" : "Accept edits";
+      const label = mode === "read-only" ? "Plan" : mode === "danger-full-access" ? "Auto-approve" : mode === "prompt" ? "Ask" : "Accept edits";
       setPermission({ mode, label, description: "" });
       return;
     }
@@ -451,6 +460,19 @@ export default function Chat() {
     updateSession(currentSession.id, (session) => ({ ...session, draftAttachments: next }));
   };
 
+  const addFilesToChat = useCallback(async (files: File[]) => {
+    if (!currentSession || files.length === 0) return;
+    const sessionId = currentSession.id;
+    const next = await Promise.all(
+      files.slice(0, 20).map(async (file) => {
+        try { return await attachmentFromFile(file); }
+        catch { return { id: makeId("att"), kind: "file" as const, name: file.name, mimeType: file.type || "application/octet-stream", content: "(File content could not be read.)" }; }
+      }),
+    );
+    updateSession(sessionId, (s) => ({ ...s, draftAttachments: [...(s.draftAttachments ?? []), ...next] }));
+    focusComposer();
+  }, [currentSession, focusComposer, updateSession]);
+
   const beginRun = useCallback(async (
     session: ChatSession,
     prefix: ChatTurn[],
@@ -493,11 +515,11 @@ export default function Chat() {
     const trimmed = text.trim();
     if (!trimmed.startsWith("/")) return false;
     const commandName = trimmed.slice(1).split(/\s+/)[0]?.toLowerCase() ?? "";
-    if (HIDDEN_SLASH_COMMANDS.has(commandName)) {
+    if (DISABLED_DESKTOP_COMMANDS.has(commandName)) {
       patchTurns(session.id, (turns) => [
         ...turns,
         userTurn(text, []),
-        assistantTextTurn("This desktop command is no longer available."),
+        assistantTextTurn("This desktop command is disabled in this build."),
       ]);
       updateSession(session.id, (item) => ({ ...item, draft: "", draftAttachments: [] }));
       setEditingTurnId(null);
@@ -700,6 +722,11 @@ export default function Chat() {
     }
   }, []);
 
+  const openWorkflowFile = useCallback((path: string) => {
+    if (!isTauri()) return;
+    void fileOpen(path).catch((error) => setError(String(error)));
+  }, [setError]);
+
   const attachFileFromMenu = useCallback(async (path: string, content: string) => {
     const session = currentSessionRef.current;
     if (!session) return;
@@ -806,7 +833,31 @@ export default function Chat() {
       <main
         className={`chat${turns.length === 0 ? " chat-empty" : ""}`}
         onContextMenu={handleChatContextMenu}
+        onDragEnter={(e) => { e.preventDefault(); setChatDragging(true); }}
+        onDragOver={(e) => e.preventDefault()}
+        onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) setChatDragging(false); }}
+        onDrop={(e) => { e.preventDefault(); setChatDragging(false); void addFilesToChat(Array.from(e.dataTransfer.files)); }}
       >
+        {chatDragging && (
+          <div
+            className="chat-drop-full"
+            onDragOver={(e) => e.preventDefault()}
+            onDragLeave={(e) => {
+              if (!(e.currentTarget.parentElement?.contains(e.relatedTarget as Node) ?? false)) {
+                setChatDragging(false);
+              }
+            }}
+            onDrop={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              setChatDragging(false);
+              void addFilesToChat(Array.from(e.dataTransfer.files));
+            }}
+          >
+            <span className="chat-drop-full-icon">📎</span>
+            <span>拖放文件以附加</span>
+          </div>
+        )}
         <header className="chat-head">
           <button
             className="chat-sidebar-toggle"
@@ -856,6 +907,15 @@ export default function Chat() {
           onContinue={continueStopped}
           onPermissionRespond={(promptId, allow) => void respondPermission(promptId, allow)}
         />
+        {(workflowTodos.length > 0 || workflowFileChanges.length > 0) && !pendingCommandSelection && (
+          <WorkflowFlow
+            todos={workflowTodos}
+            fileChanges={workflowFileChanges}
+            bottomOffset={composerHeight + 14}
+            active={currentChatBusy}
+            onOpenFile={openWorkflowFile}
+          />
+        )}
         {pendingCommandSelection && pendingCommandSelection.sessionId === currentId && (
           <CommandSelection
             selection={pendingCommandSelection.selection}

@@ -13,11 +13,13 @@ import { isNearBottom } from "./ChatThread";
 import {
   CURRENT_KEY,
   SESSIONS_KEY,
+  cleanChatTitle,
   fuzzyScore,
   groupSessionsByProject,
   makeId,
   makeSession,
   migrateSession,
+  titleFromTurns,
   transcriptFromTurn,
 } from "./model";
 import { appendToolOutput } from "./useChatStream";
@@ -386,6 +388,52 @@ describe("project chat grouping", () => {
 
   it("migrates legacy chats to the default project", () => {
     expect(migrateSession({ title: "Legacy" }).projectId).toBe("default");
+  });
+
+  it("cleans generated titles before showing them in the sidebar", () => {
+    expect(cleanChatTitle(
+      "<think>\nThe user asked me to pick a title.\n</think>\nTitle: Chemistry Slides",
+    )).toBe("Chemistry Slides");
+    expect(cleanChatTitle("<think>The user asked me to pick a title")).toBe("");
+    expect(cleanChatTitle("The user asked for help")).toBe("");
+    expect(cleanChatTitle("Untitled")).toBe("");
+    expect(cleanChatTitle("无主题")).toBe("");
+  });
+
+  it("falls back to the first user request when a stored title is unusable", () => {
+    const turns: ChatTurn[] = [
+      { id: "turn-user", role: "user", blocks: [{ kind: "text", text: "选择化学论文 slides 制作" }] },
+      { id: "turn-assistant", role: "assistant", blocks: [{ kind: "text", text: "可以。" }] },
+    ];
+
+    expect(titleFromTurns(turns)).toBe("选择化学论文 slides 制作");
+    expect(migrateSession({ title: "<think>The user asked me", turns }).title)
+      .toBe("选择化学论文 slides 制作");
+    expect(migrateSession({ title: "The user asked for help", turns }).title)
+      .toBe("选择化学论文 slides 制作");
+    expect(migrateSession({ title: "无主题", turns }).title)
+      .toBe("选择化学论文 slides 制作");
+  });
+
+  it("uses attached file context when the first user turn has no typed title", () => {
+    const attachment: ChatAttachment = {
+      id: "att-report",
+      kind: "file",
+      name: "analysis-report.md",
+      path: "docs/analysis-report.md",
+    };
+    const turns: ChatTurn[] = [
+      {
+        id: "turn-user",
+        role: "user",
+        blocks: [{ kind: "text", text: "Attached context" }],
+        attachments: [attachment],
+      },
+      { id: "turn-assistant", role: "assistant", blocks: [{ kind: "text", text: "收到。" }] },
+    ];
+
+    expect(titleFromTurns(turns)).toBe("docs/analysis-report.md");
+    expect(migrateSession({ title: "Untitled", turns }).title).toBe("docs/analysis-report.md");
   });
 
   it("groups chats by project instead of date", () => {

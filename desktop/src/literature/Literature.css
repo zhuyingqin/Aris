@@ -3,48 +3,11 @@
    ══════════════════════════════════════════════════════════════════════════════ */
 
 .lit-page {
-  --lit-scrollbar-size: 8px;
-  --lit-scrollbar-thumb: color-mix(in srgb, var(--text-dim) 42%, transparent);
-  --lit-scrollbar-thumb-hover: color-mix(in srgb, var(--text-dim) 68%, transparent);
   display: flex;
   flex-direction: column;
   height: 100%;
   min-width: 0;
   overflow: hidden;
-}
-
-.lit-page,
-.lit-page * {
-  scrollbar-color: var(--lit-scrollbar-thumb) transparent;
-  scrollbar-width: thin;
-}
-
-.lit-page::-webkit-scrollbar,
-.lit-page *::-webkit-scrollbar {
-  width: var(--lit-scrollbar-size);
-  height: var(--lit-scrollbar-size);
-}
-
-.lit-page::-webkit-scrollbar-track,
-.lit-page *::-webkit-scrollbar-track,
-.lit-page::-webkit-scrollbar-corner,
-.lit-page *::-webkit-scrollbar-corner {
-  background: transparent;
-}
-
-.lit-page::-webkit-scrollbar-thumb,
-.lit-page *::-webkit-scrollbar-thumb {
-  min-height: 32px;
-  border: 2px solid transparent;
-  border-radius: 999px;
-  background: var(--lit-scrollbar-thumb);
-  background-clip: padding-box;
-}
-
-.lit-page::-webkit-scrollbar-thumb:hover,
-.lit-page *::-webkit-scrollbar-thumb:hover {
-  background: var(--lit-scrollbar-thumb-hover);
-  background-clip: padding-box;
 }
 
 /* ── Header ─────────────────────────────────────────────────────────────────── */

@@ -16,6 +16,7 @@ import {
 } from "../api/tauri";
 import { useStore } from "../store";
 import { useProvidersStore, type ProviderEntry } from "./providersStore";
+import MailSettings, { MailSettingsDetail } from "./MailSettings";
 import type {
   ConfigPatch,
   ConfigSecretKind,
@@ -568,6 +569,7 @@ export default function Settings() {
   const [bridgeNotice, setBridgeNotice] = useState<BridgeNotice | null>(null);
   const [showBridgeLog, setShowBridgeLog] = useState(false);
   const [bridgeDetailOpen, setBridgeDetailOpen] = useState(false);
+  const [mailDetailOpen, setMailDetailOpen] = useState(false);
   const operationVersion = useRef(0);
   const activeOp = useRef<{ kind: "save" | "test"; version: number } | null>(null);
   const savedTimer = useRef<number | null>(null);
@@ -934,8 +936,8 @@ export default function Settings() {
                 className={`sp-toggle-btn${bridgeForm.autoApprove ? " active sp-toggle-danger" : ""}`}
                 onClick={() => updateBridgeForm({ autoApprove: !bridgeForm.autoApprove })}
               >
-                <span className="sp-toggle-main">{bridgeForm.autoApprove ? "完全访问" : "工作区写入"}</span>
-                <span className="sp-toggle-sub">{bridgeForm.autoApprove ? "仅限受信任会话" : "读取并编辑项目文件"}</span>
+                <span className="sp-toggle-main">{bridgeForm.autoApprove ? "自动批准工具" : "工作区写入"}</span>
+                <span className="sp-toggle-sub">{bridgeForm.autoApprove ? "不提升系统管理员权限" : "读取并编辑项目文件"}</span>
               </button>
             </div>
           </div>
@@ -1036,6 +1038,21 @@ export default function Settings() {
             </button>
           </div>
         </div>
+      </div>
+    );
+  }
+
+  if (mailDetailOpen) {
+    return (
+      <div className="st-page sp-detail-page">
+        <div className="sp-detail-head">
+          <button className="sp-back-btn" onClick={() => setMailDetailOpen(false)} type="button">← 返回</button>
+          <div className="sp-detail-title">邮箱</div>
+          <div className="sp-detail-badges">
+            <span className="sp-role-badge sp-role-mail">IMAP/SMTP</span>
+          </div>
+        </div>
+        <MailSettingsDetail />
       </div>
     );
   }
@@ -1182,10 +1199,13 @@ export default function Settings() {
         </div>
       </div>
 
-      {/* Provider list */}
+      {/* Model providers */}
       <div className="sp-providers-section">
         <div className="sp-section-head">
-          <div className="sp-section-title">供应商</div>
+          <div className="sp-section-head-text">
+            <div className="sp-section-title">模型供应商</div>
+            <div className="sp-section-sub">执行器与审阅所用的 LLM 接入点</div>
+          </div>
           <button className="sp-add-btn" onClick={() => openDetail("new")} type="button">+ 添加</button>
         </div>
         <div className="sp-card-list">
@@ -1203,23 +1223,10 @@ export default function Settings() {
               onApplyRole={(role, model) => applyFromCard(p, role, model)}
             />
           ))}
-          <BridgeCard
-            running={bridgeRunning}
-            enabled={bridgeEnabled}
-            status={bridgeView?.statusMessage ?? "未加载"}
-            pid={bridgeView?.pid}
-            hasSecret={Boolean(bridgeView?.hasQqAppSecret)}
-            busy={Boolean(bridgeBusy)}
-            onOpen={() => setBridgeDetailOpen(true)}
-            onStart={() => void startBridge()}
-            onStop={() => void stopBridge()}
-            onTest={() => void testBridge()}
-            onLogs={() => void loadBridgeLogs()}
-          />
         </div>
       </div>
 
-      {/* Advanced (collapsible) */}
+      {/* Advanced model config (collapsible) — belongs to providers above */}
       <div className="sp-advanced-wrap">
         <button className="sp-advanced-toggle" type="button" onClick={() => setShowAdvanced((v) => !v)} aria-expanded={showAdvanced}>
           <span>{showAdvanced ? "▾" : "▸"} 高级配置</span>
@@ -1296,6 +1303,32 @@ export default function Settings() {
             </div>
           </div>
         )}
+      </div>
+
+      {/* Integrations — IM bridges, kept separate from LLM providers */}
+      <div className="sp-providers-section">
+        <div className="sp-section-head">
+          <div className="sp-section-head-text">
+            <div className="sp-section-title">集成</div>
+            <div className="sp-section-sub">即时通讯桥接，将 Aris 接入外部聊天平台</div>
+          </div>
+        </div>
+        <div className="sp-card-list">
+          <BridgeCard
+            running={bridgeRunning}
+            enabled={bridgeEnabled}
+            status={bridgeView?.statusMessage ?? "未加载"}
+            pid={bridgeView?.pid}
+            hasSecret={Boolean(bridgeView?.hasQqAppSecret)}
+            busy={Boolean(bridgeBusy)}
+            onOpen={() => setBridgeDetailOpen(true)}
+            onStart={() => void startBridge()}
+            onStop={() => void stopBridge()}
+            onTest={() => void testBridge()}
+            onLogs={() => void loadBridgeLogs()}
+          />
+          <MailSettings onOpen={() => setMailDetailOpen(true)} />
+        </div>
       </div>
     </div>
   );

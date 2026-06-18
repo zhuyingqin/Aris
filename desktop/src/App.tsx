@@ -4,6 +4,7 @@ import { useStore, type Tab } from "./store";
 import Chat from "./chat/Chat";
 import Literature from "./literature/Literature";
 import Studio from "./studio/Studio";
+import Mail from "./mail/Mail";
 import Extensions from "./extensions/Extensions";
 import Settings from "./settings/Settings";
 import Sessions from "./sessions/Sessions";
@@ -46,6 +47,10 @@ const NAV_GROUPS: { group: string; items: NavItem[] }[] = [
       {
         id: "studio", label: "Studio",
         icon: <IC d="M2.5 3.5h11v7h-11zM5 13h6M8 10.5V13" />,
+      },
+      {
+        id: "mail", label: "Mail",
+        icon: <IC d="M2 4.5h12v7H2zM2.5 5l5.5 4 5.5-4" />,
       },
       {
         id: "sessions", label: "Sessions",
@@ -478,6 +483,7 @@ export default function App() {
         </div>
         {tab === "literature" && <Literature />}
         {tab === "studio" && <Studio />}
+        {tab === "mail" && <Mail />}
         {tab === "extensions" && <Extensions />}
         {tab === "sessions" && <Sessions />}
         {tab === "scheduled" && <ScheduledTasks />}

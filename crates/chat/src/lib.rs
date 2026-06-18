@@ -5,9 +5,8 @@ use std::time::{Duration, Instant};
 
 use api::AuthSource;
 use runtime::{
-    is_interrupted, scoped_mcp_config_hash, ContentBlock, ManagedMcpTool, McpServerManager,
-    PermissionMode, PermissionPolicy, PromptBuildError, Session, ToolError, ToolExecutor,
-    TurnSummary,
+    is_interrupted, scoped_mcp_config_hash, ManagedMcpTool, McpServerManager, PermissionMode,
+    PermissionPolicy, PromptBuildError, Session, ToolError, ToolExecutor, TurnSummary,
 };
 use serde_json::{Map, Value};
 
@@ -271,22 +270,21 @@ where
         // Use select! so that clicking Stop (which sets the global interrupt flag)
         // cancels a hanging MCP call within ~200 ms rather than waiting for the
         // full per-server request timeout (default 300 s).
-        let response = runtime
-            .block_on(async {
-                tokio::select! {
-                    result = manager.call_tool(tool_name, Some(arguments)) => {
-                        result.map_err(|error| ToolError::new(error.to_string()))
-                    }
-                    _ = async {
-                        loop {
-                            tokio::time::sleep(Duration::from_millis(200)).await;
-                            if is_interrupted() { break; }
-                        }
-                    } => {
-                        Err(ToolError::new("interrupted by user"))
-                    }
+        let response = runtime.block_on(async {
+            tokio::select! {
+                result = manager.call_tool(tool_name, Some(arguments)) => {
+                    result.map_err(|error| ToolError::new(error.to_string()))
                 }
-            })?;
+                _ = async {
+                    loop {
+                        tokio::time::sleep(Duration::from_millis(200)).await;
+                        if is_interrupted() { break; }
+                    }
+                } => {
+                    Err(ToolError::new("interrupted by user"))
+                }
+            }
+        })?;
 
         if let Some(error) = response.error {
             return Err(ToolError::new(format!(
@@ -807,21 +805,7 @@ where
 
 #[must_use]
 pub fn final_assistant_text(summary: &TurnSummary) -> String {
-    summary
-        .assistant_messages
-        .last()
-        .map(|message| {
-            message
-                .blocks
-                .iter()
-                .filter_map(|block| match block {
-                    ContentBlock::Text { text } => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("")
-        })
-        .unwrap_or_default()
+    runtime::assistant_text_from_turn_summary(summary)
 }
 
 #[cfg(test)]
@@ -833,13 +817,15 @@ mod tests {
 
     use super::{
         attach_mcp_tools, chat_tool_specs, clear_mcp_discovery_cache,
-        context_compaction_threshold_for_model, merge_mcp_tool_search_results, model_developer,
-        permission_policy_for_tools, resolve_settings_executor_config, ChatExecutorConfig,
+        context_compaction_threshold_for_model, final_assistant_text,
+        merge_mcp_tool_search_results, model_developer, permission_policy_for_tools,
+        resolve_settings_executor_config, ChatExecutorConfig,
     };
     use api::AuthSource;
     use runtime::{
-        ConfigSource, McpServerConfig, McpStdioServerConfig, PermissionMode, RuntimeFeatureConfig,
-        ScopedMcpServerConfig, StaticToolExecutor, ToolExecutor,
+        ConfigSource, ContentBlock, ConversationMessage, McpServerConfig, McpStdioServerConfig,
+        PermissionMode, RuntimeFeatureConfig, ScopedMcpServerConfig, StaticToolExecutor,
+        TokenUsage, ToolExecutor, TurnSummary,
     };
     use serde_json::{json, Value};
 
@@ -931,6 +917,42 @@ while True:
         assert_eq!(model_developer("deepseek-v4-pro"), "DeepSeek");
         assert_eq!(model_developer("gemini-2.5-pro"), "Google");
         assert_eq!(model_developer("moonshot-v1"), "Moonshot");
+    }
+
+    #[test]
+    fn final_assistant_text_keeps_text_from_all_model_iterations() {
+        let summary = TurnSummary {
+            assistant_messages: vec![
+                ConversationMessage::assistant(vec![
+                    ContentBlock::Text {
+                        text: "Checking files.".to_string(),
+                    },
+                    ContentBlock::ToolUse {
+                        id: "tool-1".to_string(),
+                        name: "read_file".to_string(),
+                        input: "{}".to_string(),
+                    },
+                ]),
+                ConversationMessage::assistant(vec![
+                    ContentBlock::Thinking {
+                        thinking: "private reasoning".to_string(),
+                        signature: String::new(),
+                    },
+                    ContentBlock::Text {
+                        text: "Fix complete.".to_string(),
+                    },
+                ]),
+            ],
+            tool_results: Vec::new(),
+            iterations: 2,
+            usage: TokenUsage::default(),
+            auto_compaction: None,
+        };
+
+        assert_eq!(
+            final_assistant_text(&summary),
+            "Checking files.\n\nFix complete."
+        );
     }
 
     #[test]

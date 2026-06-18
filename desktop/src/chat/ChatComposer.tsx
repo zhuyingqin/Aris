@@ -176,7 +176,7 @@ const PERMISSION_OPTIONS = [
   { value: "read-only", label: "Plan" },
   { value: "workspace-write", label: "Accept edits" },
   { value: "prompt", label: "Ask" },
-  { value: "danger-full-access", label: "Bypass permissions" },
+  { value: "danger-full-access", label: "Auto-approve" },
 ];
 
 function ContextRing({ used, max }: { used: number; max: number }) {
@@ -490,6 +490,7 @@ export default function ChatComposer({
       }}
       onDrop={(event) => {
         event.preventDefault();
+        event.stopPropagation();
         setDragging(false);
         void addFiles(Array.from(event.dataTransfer.files));
       }}
@@ -595,10 +596,10 @@ export default function ChatComposer({
             updatePicker(event.target.value, event.target.selectionStart ?? event.target.value.length);
           }}
           onPaste={(event) => {
-            const images = Array.from(event.clipboardData.files).filter((file) => file.type.startsWith("image/"));
-            if (images.length > 0) {
+            const files = Array.from(event.clipboardData.files);
+            if (files.length > 0) {
               event.preventDefault();
-              void addFiles(images);
+              void addFiles(files);
             }
           }}
           onKeyDown={(event) => {

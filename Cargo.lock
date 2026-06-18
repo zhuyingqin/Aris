@@ -1574,6 +1574,7 @@ name = "tools"
 version = "0.4.15"
 dependencies = [
  "api",
+ "aris-executor",
  "reqwest",
  "roxmltree",
  "runtime",

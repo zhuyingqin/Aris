@@ -18,7 +18,7 @@ import type {
 const PERMISSIONS = [
   { mode: "read-only", label: "Plan", description: "Inspect and search only" },
   { mode: "workspace-write", label: "Accept edits", description: "Read and edit workspace files" },
-  { mode: "danger-full-access", label: "Don't ask", description: "Allow shell, agents, workflows, and MCP" },
+  { mode: "danger-full-access", label: "Auto-approve", description: "Auto-approve shell, agents, workflows, and MCP; no OS admin elevation" },
 ];
 
 const isWindows =
@@ -182,7 +182,7 @@ export default function RuntimeAccess() {
             ))}
           </div>
           <div className="st-access-note">
-            New chats use this project default. The Chat header can override it for the active session.
+            New chats use this project default. The Chat header can override it for the active session. Auto-approve gates ARIS tools only and does not grant administrator rights.
           </div>
         </div>
 

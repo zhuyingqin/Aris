@@ -1,10 +1,12 @@
 mod commands;
 mod config;
+mod connectors;
 mod engine;
 mod files;
 mod im_bridge;
 mod knowledge;
 mod literature;
+mod mail;
 mod mcp;
 mod process;
 mod projects;
@@ -97,15 +99,6 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            commands::workflow_plan,
-            commands::workflow_list,
-            commands::workflow_inspect,
-            commands::workflow_start,
-            commands::workflow_control,
-            commands::workflow_save,
-            commands::workflow_discover,
-            commands::team_list,
-            commands::agent_supervisor,
             commands::skills_list,
             commands::skill_view,
             commands::state_dir,
@@ -118,6 +111,8 @@ pub fn run() {
             config::config_set,
             config::config_test,
             config::provider_test,
+            connectors::connector_plugins_list,
+            connectors::connector_connect,
             scheduled::scheduled_tasks_list,
             im_bridge::im_bridge_get,
             im_bridge::im_bridge_secret_get,
@@ -129,6 +124,19 @@ pub fn run() {
             mcp::mcp_config_get,
             mcp::mcp_config_set,
             mcp::mcp_config_test,
+            mail::mail_accounts_get,
+            mail::mail_oauth_config_get,
+            mail::mail_oauth_config_set,
+            mail::mail_connect,
+            mail::mail_autoconfig,
+            mail::mail_generic_test,
+            mail::mail_generic_connect,
+            mail::mail_disconnect,
+            mail::mail_folders,
+            mail::mail_list,
+            mail::mail_read,
+            mail::mail_modify,
+            mail::mail_send,
             sessions::sessions_list,
             sessions::session_get,
             sessions::chat_ui_sessions_load,
