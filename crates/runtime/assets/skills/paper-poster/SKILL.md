@@ -352,10 +352,18 @@ Similarly, `\rowcolor` in tables should use 15% intensity: `\rowcolor{primary!15
 
 1. **Check prerequisites**:
    ```bash
-   which pdflatex && which latexmk
+   command -v pdflatex >/dev/null && command -v latexmk >/dev/null
+   if [ -n "${ARIS_TECTONIC:-}" ] && [ -f "$ARIS_TECTONIC" ]; then
+     echo "Bundled Tectonic available: $ARIS_TECTONIC"
+   elif command -v tectonic >/dev/null; then
+     echo "Tectonic available: $(command -v tectonic)"
+   fi
    ```
 
-   **If LaTeX is NOT installed**, try in order:
+   Prefer `latexmk` when it is available. If system LaTeX is missing, use
+   `ARIS_TECTONIC` or `tectonic` before asking the user to install TeX Live.
+
+   **If neither system LaTeX nor Tectonic is installed**, try in order:
    ```bash
    # Option 1: brew cask (requires sudo — may fail in non-interactive shells)
    brew install --cask mactex-no-gui
@@ -677,7 +685,20 @@ Compile now?
 ### Phase 4: Compile Poster
 
 ```bash
-cd poster && latexmk -pdf -interaction=nonstopmode main.tex
+cd poster
+if command -v latexmk >/dev/null; then
+  latexmk -pdf -interaction=nonstopmode main.tex
+else
+  TECTONIC_BIN="${ARIS_TECTONIC:-}"
+  if [ -z "$TECTONIC_BIN" ] || [ ! -f "$TECTONIC_BIN" ]; then
+    TECTONIC_BIN="$(command -v tectonic || true)"
+  fi
+  if [ -z "$TECTONIC_BIN" ]; then
+    echo "No LaTeX engine found. Install TeX Live/MacTeX or use ARIS Desktop's bundled Tectonic."
+    exit 127
+  fi
+  "$TECTONIC_BIN" --keep-logs --keep-intermediates main.tex
+fi
 ```
 
 > ⚠️ If using user-directory TeX Live, prepend PATH: `export PATH="$HOME/texlive/YYYY/bin/universal-darwin:$PATH"`

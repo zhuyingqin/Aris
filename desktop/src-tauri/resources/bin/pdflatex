@@ -1,0 +1,68 @@
+#!/usr/bin/env sh
+set -eu
+
+DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+SELF="$DIR/pdflatex"
+
+find_real_pdflatex() {
+  OLD_IFS=$IFS
+  IFS=:
+  for dir in $PATH; do
+    [ -n "$dir" ] || dir=.
+    for name in pdflatex pdflatex.exe pdflatex.cmd pdflatex.bat; do
+      candidate="$dir/$name"
+      if [ -f "$candidate" ] && [ "$candidate" != "$SELF" ]; then
+        case "$candidate" in
+          "$DIR/"*) ;;
+          *) printf '%s\n' "$candidate"; IFS=$OLD_IFS; return 0 ;;
+        esac
+      fi
+    done
+  done
+  IFS=$OLD_IFS
+  return 1
+}
+
+if real=$(find_real_pdflatex); then
+  exec "$real" "$@"
+fi
+
+entry=""
+jobname=""
+inline=""
+for arg in "$@"; do
+  case "$arg" in
+    -jobname=*) jobname=${arg#-jobname=} ;;
+    *.tex) entry=$arg ;;
+    *"\\documentclass"*) inline=$arg ;;
+  esac
+done
+
+if [ -z "$entry" ] && [ -n "$inline" ]; then
+  entry="${jobname:-texput}.tex"
+  printf '%s\n' "$inline" > "$entry"
+fi
+
+if [ -z "$entry" ]; then
+  if [ -f main.tex ]; then
+    entry=main.tex
+  else
+    echo "pdflatex fallback could not find a .tex entrypoint." >&2
+    exit 2
+  fi
+fi
+
+TECTONIC_BIN=${ARIS_TECTONIC:-}
+if [ -z "$TECTONIC_BIN" ]; then
+  if [ -f "$DIR/tectonic.exe" ]; then
+    TECTONIC_BIN="$DIR/tectonic.exe"
+  else
+    TECTONIC_BIN="$DIR/tectonic"
+  fi
+fi
+if [ ! -f "$TECTONIC_BIN" ]; then
+  echo "pdflatex fallback requires tectonic in resources/bin or ARIS_TECTONIC." >&2
+  exit 127
+fi
+
+exec "$TECTONIC_BIN" --keep-logs --keep-intermediates "$entry"
