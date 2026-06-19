@@ -1046,8 +1046,13 @@ impl McpStdioProcess {
     }
 
     pub async fn terminate(&mut self) -> io::Result<()> {
-        if let Some(pid) = self.child.id() {
-            crate::terminate_managed_process_tree(pid);
+        // For stdio MCP servers, closing stdin is the safest shutdown signal:
+        // well-behaved servers exit their read loop on EOF. Avoid sending a
+        // negative-pid process-group signal here; hosted Linux runners have
+        // cancelled the entire job when this test path tears down quickly.
+        let _ = self.stdin.shutdown().await;
+        if let Ok(Some(_)) = self.child.try_wait() {
+            return Ok(());
         }
         match self.child.kill().await {
             Ok(()) => Ok(()),
