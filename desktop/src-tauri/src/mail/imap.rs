@@ -245,7 +245,11 @@ fn imap_error(response: &[u8]) -> String {
         .find(|line| !line.trim().is_empty())
         .unwrap_or(text.trim());
     let lower = final_line.to_ascii_lowercase();
-    if lower.contains("authenticate failed")
+    if lower.contains("unsafe login") || lower.contains("kefu@188.com") {
+        format!(
+            "网易邮箱拒绝了本次 IMAP 访问：{final_line}. 请在 126/163/yeah/188 邮箱网页版设置中开启 IMAP/SMTP 服务，并使用“客户端授权码/应用专用密码”作为这里的密码，不要使用网页登录密码。如果已经使用授权码仍然失败，说明网易风控认为当前客户端或登录环境不安全，需要先完成网页端安全验证，或按服务器提示联系 kefu@188.com。"
+        )
+    } else if lower.contains("authenticate failed")
         || lower.contains("authenticationfailed")
         || lower.contains("login failed")
     {
@@ -296,6 +300,11 @@ impl ImapClient {
             imap_quote(username),
             imap_quote(password)
         ))?;
+        Ok(())
+    }
+
+    fn identify(&mut self, address: &str) -> Result<(), String> {
+        self.command(&imap_id_command(address))?;
         Ok(())
     }
 
@@ -358,11 +367,26 @@ fn connect_imap(
             client
         }
     };
+    if let Err(error) = client.identify(&config.identity.email) {
+        eprintln!("mail imap: ID command failed ({error}); continuing without IMAP ID");
+    }
     client.login(&incoming.username, &incoming.password)?;
     if let Some(folder) = folder {
         client.select(folder, readonly)?;
     }
     Ok(client)
+}
+
+fn imap_id_command(address: &str) -> String {
+    let address = address.trim();
+    let address = if address.is_empty() { "unknown" } else { address };
+    format!(
+        "ID (\"name\" {} \"version\" {} \"vendor\" {} \"address\" {})",
+        imap_quote("ARIS Mail"),
+        imap_quote(env!("CARGO_PKG_VERSION")),
+        imap_quote("ARIS"),
+        imap_quote(address),
+    )
 }
 
 fn imap_quote(value: &str) -> String {
@@ -1649,6 +1673,35 @@ fn build_message(identity: &MailIdentityConfig, draft: &MailDraft) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn imap_error_explains_netease_unsafe_login() {
+        let message = imap_error(
+            b"* BYE\r\nA0002 NO EXAMINE Unsafe Login. Please contact kefu@188.com for help\r\n",
+        );
+
+        assert!(message.contains("网易邮箱拒绝"));
+        assert!(message.contains("IMAP/SMTP"));
+        assert!(message.contains("授权码"));
+        assert!(message.contains("kefu@188.com"));
+    }
+
+    #[test]
+    fn imap_id_command_includes_client_identity() {
+        let command = imap_id_command("owner@example.com");
+
+        assert!(command.contains("\"name\" \"ARIS Mail\""));
+        assert!(command.contains(&format!("\"version\" \"{}\"", env!("CARGO_PKG_VERSION"))));
+        assert!(command.contains("\"vendor\" \"ARIS\""));
+        assert!(command.contains("\"address\" \"owner@example.com\""));
+    }
+
+    #[test]
+    fn imap_id_command_quotes_contact_address() {
+        let command = imap_id_command("owner\"ops@example.com");
+
+        assert!(command.contains("\"address\" \"owner\\\"ops@example.com\""));
+    }
 
     #[test]
     fn parse_uidvalidity_reads_bracketed_value() {

@@ -542,19 +542,18 @@ fn render_available_skills() -> Option<String> {
 
 fn skill_search_roots() -> Vec<PathBuf> {
     let mut roots = Vec::new();
-    let home = crate::home_dir();
     // ARIS user skills (highest priority)
-    roots.push(
-        PathBuf::from(&home)
-            .join(".config")
-            .join("aris")
-            .join("skills"),
-    );
-    // Claude Code user skills
-    roots.push(PathBuf::from(&home).join(".claude").join("skills"));
-    // Project-level skills
+    roots.push(crate::aris_user_skills_dir());
+    // ARIS project-level skills
     if let Ok(cwd) = std::env::current_dir() {
-        roots.push(cwd.join(".claude").join("skills"));
+        roots.push(crate::aris_project_skills_dir(&cwd));
+    }
+    // Legacy Claude Code skills are opt-in compatibility only.
+    if crate::legacy_claude_skills_enabled() {
+        roots.push(crate::claude_user_skills_dir());
+        if let Ok(cwd) = std::env::current_dir() {
+            roots.push(crate::claude_project_skills_dir(&cwd));
+        }
     }
     roots
 }

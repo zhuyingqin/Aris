@@ -1886,13 +1886,14 @@ async fn run_chat_turn_with_context(
             }
         };
         let tool_specs = aris_chat::chat_tool_specs(tool_specs_for(extra_blocked_tools));
-        let mcp_bundle = aris_chat::attach_mcp_tools(
+        let mcp_bundle = aris_chat::attach_mcp_tools_with_cancel(
             KernelToolExecutor {
                 extra_blocked_tools,
             },
             tool_specs,
             &feature_config,
             None,
+            Some(worker_cancelled.clone()),
         );
         for warning in &mcp_bundle.warnings {
             eprintln!("aris desktop: {warning}");
@@ -2031,9 +2032,9 @@ pub fn chat_delete(
     Ok(())
 }
 
-/// Request the in-flight chat turn to stop. Sets the runtime interrupt flag,
-/// which both streaming loops and `run_turn`'s iteration boundary check, so a
-/// long single response or a multi-step tool loop both unwind to an error.
+/// Request the in-flight chat turn to stop. This only marks the selected UI
+/// session as cancelled; app shutdown uses `cancel_all_running_turns` when a
+/// process-wide stop is intended.
 #[tauri::command]
 pub fn chat_cancel(state: State<ChatState>, session_id: String) -> Result<(), String> {
     validate_session_id(&session_id)?;
@@ -2043,7 +2044,6 @@ pub fn chat_cancel(state: State<ChatState>, session_id: String) -> Result<(), St
         .map_err(|_| "chat state poisoned".to_string())?;
     if let Some(cancelled) = running.get(&session_id) {
         cancelled.store(true, Ordering::SeqCst);
-        runtime::set_interrupt();
     }
     Ok(())
 }

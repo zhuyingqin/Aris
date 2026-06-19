@@ -137,7 +137,7 @@
 | `runtime::bash` | `crates/runtime/src/bash.rs` | — | 修改中,功能在用 |
 | 79 个 skills | `desktop/src-tauri/resources/skills/**` | — | 实际被 `/<skill>` 调用,全部保留 |
 | 49 个 MCP resource | `desktop/src-tauri/resources/mcp/**` | — | 后台启动,保留 |
-| Mail / IM Bridge | `desktop/src-tauri/src/{mail,im_bridge}.rs` | — | 全部接通,保留 |
+| Mail | `desktop/src-tauri/src/mail/*` | — | 全部接通,保留 |
 | 知识库 / 知识图谱 | `crates/knowledge/*` | — | UI 已接通,保留 |
 
 ---

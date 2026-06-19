@@ -52,9 +52,9 @@ pub use event_sink::{
     RuntimeEvent,
 };
 pub use file_ops::{
-    edit_file, glob_search, grep_search, read_file, write_file, EditFileOutput, GlobSearchOutput,
-    GrepSearchInput, GrepSearchOutput, ReadFileOutput, StructuredPatchHunk, TextFilePayload,
-    WriteFileOutput,
+    edit_file, glob_search, grep_search, read_file, write_file, EditFileOutput, FileChange,
+    GlobSearchOutput, GrepSearchInput, GrepSearchOutput, ReadFileOutput, StructuredPatchHunk,
+    TextFilePayload, WriteFileOutput,
 };
 pub use hooks::{HookEvent, HookRunResult, HookRunner};
 pub use hot_memory::{
@@ -126,6 +126,54 @@ pub fn home_dir() -> String {
     std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .unwrap_or_else(|_| ".".into())
+}
+
+pub const ARIS_ENABLE_CLAUDE_SKILLS_ENV: &str = "ARIS_ENABLE_CLAUDE_SKILLS";
+
+/// ARIS user-level skills directory.
+#[must_use]
+pub fn aris_user_skills_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(home_dir())
+        .join(".config")
+        .join("aris")
+        .join("skills")
+}
+
+/// ARIS project-level skills directory.
+#[must_use]
+pub fn aris_project_skills_dir(cwd: impl AsRef<std::path::Path>) -> std::path::PathBuf {
+    cwd.as_ref().join(".aris").join("skills")
+}
+
+/// Legacy Claude Code user-level skills directory.
+#[must_use]
+pub fn claude_user_skills_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(home_dir())
+        .join(".claude")
+        .join("skills")
+}
+
+/// Legacy Claude Code project-level skills directory.
+#[must_use]
+pub fn claude_project_skills_dir(cwd: impl AsRef<std::path::Path>) -> std::path::PathBuf {
+    cwd.as_ref().join(".claude").join("skills")
+}
+
+/// Whether ARIS should include legacy Claude Code skills in discovery.
+///
+/// ARIS keeps this as an explicit compatibility bridge so Claude Code skills do
+/// not silently become part of the default ARIS skill namespace.
+#[must_use]
+pub fn legacy_claude_skills_enabled() -> bool {
+    std::env::var(ARIS_ENABLE_CLAUDE_SKILLS_ENV)
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
 }
 
 /// Global interrupt flag set by SIGINT handler. Streaming loops check this

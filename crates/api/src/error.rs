@@ -39,9 +39,7 @@ impl ApiError {
     pub fn is_model_unavailable(&self) -> bool {
         match self {
             Self::Api {
-                status,
-                error_type,
-                ..
+                status, error_type, ..
             } => status.as_u16() == 404 && error_type.as_deref() == Some("not_found_error"),
             Self::RetriesExhausted { last_error, .. } => last_error.is_model_unavailable(),
             _ => false,
@@ -168,9 +166,17 @@ mod tests {
     #[test]
     fn model_unavailable_only_on_404_not_found() {
         assert!(api(reqwest::StatusCode::NOT_FOUND, Some("not_found_error")).is_model_unavailable());
-        assert!(!api(reqwest::StatusCode::NOT_FOUND, Some("rate_limit_error")).is_model_unavailable());
-        assert!(!api(reqwest::StatusCode::BAD_REQUEST, Some("not_found_error")).is_model_unavailable());
-        assert!(!api(reqwest::StatusCode::TOO_MANY_REQUESTS, Some("not_found_error")).is_model_unavailable());
+        assert!(
+            !api(reqwest::StatusCode::NOT_FOUND, Some("rate_limit_error")).is_model_unavailable()
+        );
+        assert!(
+            !api(reqwest::StatusCode::BAD_REQUEST, Some("not_found_error")).is_model_unavailable()
+        );
+        assert!(!api(
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+            Some("not_found_error")
+        )
+        .is_model_unavailable());
         assert!(!ApiError::MissingApiKey.is_model_unavailable());
     }
 

@@ -3,7 +3,6 @@ mod config;
 mod connectors;
 mod engine;
 mod files;
-mod im_bridge;
 mod knowledge;
 mod literature;
 mod mail;
@@ -75,6 +74,24 @@ fn augment_resource_path_for_mcp(app: &tauri::App) {
     std::env::set_var("ARIS_RESOURCE_DIR", &resource_dir);
 }
 
+/// Point Tectonic's on-demand package cache at a user-writable directory. The
+/// bundled `tectonic.exe` lives under the read-only install directory on
+/// Windows, so its CTAN package downloads must land elsewhere. Mirrors the
+/// `~/.config/aris/cache` layout used for the extracted skill bundle.
+fn configure_tectonic_environment() {
+    if std::env::var_os("TECTONIC_CACHE_DIR").is_some() {
+        return;
+    }
+    let cache = PathBuf::from(runtime::home_dir())
+        .join(".config")
+        .join("aris")
+        .join("cache")
+        .join("tectonic");
+    if std::fs::create_dir_all(&cache).is_ok() {
+        std::env::set_var("TECTONIC_CACHE_DIR", &cache);
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     augment_path_for_mcp();
@@ -84,6 +101,7 @@ pub fn run() {
         .manage(projects::ProjectState::default())
         .setup(|app| {
             augment_resource_path_for_mcp(app);
+            configure_tectonic_environment();
             state::apply_bundle_cache_environment();
             // Export config-held keys (e.g. SCOPUS_API_KEY) before any
             // literature search runs; force=false keeps real env vars intact.
@@ -102,6 +120,7 @@ pub fn run() {
             commands::skills_list,
             commands::skill_view,
             commands::state_dir,
+            commands::open_external_url,
             projects::projects_get,
             projects::project_add,
             projects::project_set_current,
@@ -114,13 +133,6 @@ pub fn run() {
             connectors::connector_plugins_list,
             connectors::connector_connect,
             scheduled::scheduled_tasks_list,
-            im_bridge::im_bridge_get,
-            im_bridge::im_bridge_secret_get,
-            im_bridge::im_bridge_set,
-            im_bridge::im_bridge_test_qq,
-            im_bridge::im_bridge_start,
-            im_bridge::im_bridge_stop,
-            im_bridge::im_bridge_logs,
             mcp::mcp_config_get,
             mcp::mcp_config_set,
             mcp::mcp_config_test,
@@ -194,7 +206,6 @@ pub fn run() {
                 let chat_state = app_handle.state::<engine::ChatState>();
                 engine::cancel_all_running_turns(chat_state.inner());
                 runtime::terminate_all_managed_processes();
-                im_bridge::stop_on_app_exit();
             }
         });
 }

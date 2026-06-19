@@ -793,9 +793,11 @@ fn event_is_meaningful_content(event: &StreamEvent) -> bool {
 fn event_signals_terminal(event: &StreamEvent) -> bool {
     match event {
         StreamEvent::MessageStop(_) => true,
-        StreamEvent::MessageDelta(e) => {
-            e.delta.stop_reason.as_deref().is_some_and(|s| !s.is_empty())
-        }
+        StreamEvent::MessageDelta(e) => e
+            .delta
+            .stop_reason
+            .as_deref()
+            .is_some_and(|s| !s.is_empty()),
         _ => false,
     }
 }

@@ -3,11 +3,10 @@
 //! secrets: they are written to disk but never serialized into the
 //! frontend-facing view types in `model.rs`.
 //!
-//! Mirrors the file-per-config approach of `im_bridge.rs`, but uses JSON since
-//! the shape is nested. A process-wide lock serializes read-modify-write cycles
-//! so concurrent token refreshes can't clobber each other. Writes use a same-dir
-//! temp file plus OS-level replace so Windows never deletes the live config
-//! before the new file is committed.
+//! Uses a process-wide lock to serialize read-modify-write cycles so concurrent
+//! token refreshes can't clobber each other. Writes use a same-dir temp file
+//! plus OS-level replace so Windows never deletes the live config before the
+//! new file is committed.
 
 use std::path::PathBuf;
 use std::sync::Mutex;

@@ -55,8 +55,6 @@ export interface ConfigView {
 
 export type ConfigSecretKind = "executorApiKey" | "reviewerApiKey" | "scopusApiKey";
 
-export type ImBridgeSecretKind = "qqAppSecret";
-
 export interface ScheduledTask {
   id: string;
   title: string;
@@ -95,56 +93,6 @@ export interface ConfigTestResult {
   message: string;
   executor: ConfigTestDetail;
   reviewer?: ConfigTestDetail | null;
-}
-
-export interface ImBridgeView {
-  configPath: string;
-  skillDir?: string | null;
-  daemonPath?: string | null;
-  configured: boolean;
-  running: boolean;
-  pid?: number | null;
-  channels: string[];
-  runtime: string;
-  enabled: boolean;
-  defaultWorkdir: string;
-  arisPath: string;
-  qqAppId: string;
-  hasQqAppSecret: boolean;
-  qqAppSecretMasked?: string | null;
-  qqAllowedUsers: string;
-  qqImageEnabled: boolean;
-  qqMaxImageSize: number;
-  autoApprove: boolean;
-  statusMessage: string;
-  recentLog?: string | null;
-}
-
-export interface ImBridgePatch {
-  enabled?: boolean;
-  runtime?: string;
-  defaultWorkdir?: string;
-  arisPath?: string;
-  qqAppId?: string;
-  qqAppSecret?: string;
-  qqAllowedUsers?: string;
-  qqImageEnabled?: boolean;
-  qqMaxImageSize?: number;
-  autoApprove?: boolean;
-}
-
-export interface ImBridgeTestResult {
-  ok: boolean;
-  tokenOk: boolean;
-  gatewayOk: boolean;
-  message: string;
-}
-
-export interface ImBridgeActionResult {
-  ok: boolean;
-  message: string;
-  output: string;
-  view: ImBridgeView;
 }
 
 // ── Mail (Gmail API + Microsoft Graph) ───────────────────────────────────────

@@ -4,6 +4,11 @@ import { listen } from "@tauri-apps/api/event";
 /** True only inside the Tauri webview; false in a plain browser (vite preview). */
 export const isTauri = (): boolean =>
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+export const openExternalUrl = (url: string) => {
+  if (isTauri()) return invoke<void>("open_external_url", { url });
+  window.open(url, "_blank", "noopener,noreferrer");
+  return Promise.resolve();
+};
 import type {
   ChatCommandResult,
   ChatModelOptions,
@@ -16,11 +21,6 @@ import type {
   ConfigTestResult,
   ConfigView,
   DesktopCommandSpec,
-  ImBridgeActionResult,
-  ImBridgePatch,
-  ImBridgeSecretKind,
-  ImBridgeTestResult,
-  ImBridgeView,
   GenericMailAccountInput,
   GenericMailTestResult,
   MailAccount,
@@ -65,19 +65,6 @@ export const providerTest = (input: { baseUrl: string; model?: string; apiKey?: 
   invoke<ConfigTestDetail>("provider_test", { input });
 export const scheduledTasksList = () =>
   invoke<ScheduledTask[]>("scheduled_tasks_list");
-export const imBridgeGet = () => invoke<ImBridgeView>("im_bridge_get");
-export const imBridgeSecretGet = (kind: ImBridgeSecretKind) =>
-  invoke<string | null>("im_bridge_secret_get", { kind });
-export const imBridgeSet = (patch: ImBridgePatch) =>
-  invoke<ImBridgeView>("im_bridge_set", { patch });
-export const imBridgeTestQq = (patch: ImBridgePatch) =>
-  invoke<ImBridgeTestResult>("im_bridge_test_qq", { patch });
-export const imBridgeStart = () =>
-  invoke<ImBridgeActionResult>("im_bridge_start");
-export const imBridgeStop = () =>
-  invoke<ImBridgeActionResult>("im_bridge_stop");
-export const imBridgeLogs = () =>
-  invoke<ImBridgeActionResult>("im_bridge_logs");
 export const projectPermissionGet = () =>
   invoke<PermissionModeView>("project_permission_get");
 export const projectPermissionSet = (mode: string) =>

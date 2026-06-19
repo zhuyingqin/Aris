@@ -6,6 +6,7 @@
 //! behind backend adapters. Adding IMAP, SMTP, JMAP, or hosted connectors should
 //! mean registering another backend, not rewriting the mailbox UI.
 
+use super::cache;
 use super::gmail;
 use super::graph;
 use super::imap;
@@ -206,17 +207,64 @@ pub fn list(
     page_token: Option<&str>,
 ) -> Result<MailMessageList, String> {
     let session = resolve(account_id)?;
-    backend(session.provider).list(session.tool_token(), folder, query, page_token)
+    let result =
+        backend(session.provider).list(session.tool_token(), folder, query, page_token)?;
+    // Background-prefetch bodies for the visible page so the next click is
+    // instant. Search results are skipped — they shift on every refresh and
+    // prefetching them would mostly waste quota on results the user won't
+    // re-open.
+    if query.trim().is_empty() {
+        let ids: Vec<String> = result.messages.iter().map(|m| m.id.clone()).collect();
+        prefetch_bodies(account_id.to_string(), ids);
+    }
+    Ok(result)
+}
+
+/// Fire-and-forget warm-up of the per-message body cache for `message_ids`.
+/// Runs on a dedicated OS thread so `list` returns without waiting on IMAP
+/// fetches. Each id is checked against the cache first, so repeated calls
+/// (folder switches, paging) do no duplicate work.
+fn prefetch_bodies(account_id: String, message_ids: Vec<String>) {
+    std::thread::spawn(move || {
+        for message_id in message_ids {
+            if cache::load_message(&account_id, &message_id).is_some() {
+                continue;
+            }
+            let Ok(session) = resolve(&account_id) else {
+                continue;
+            };
+            let backend = backend(session.provider);
+            let Ok(message) = backend.read(session.tool_token(), &message_id) else {
+                continue;
+            };
+            let _ = cache::save_message(&account_id, &message_id, &message);
+        }
+    });
 }
 
 pub fn read(account_id: &str, message_id: &str) -> Result<MailMessageFull, String> {
+    if let Some(message) = cache::load_message(account_id, message_id) {
+        return Ok(message);
+    }
     let session = resolve(account_id)?;
-    backend(session.provider).read(session.tool_token(), message_id)
+    let message = backend(session.provider).read(session.tool_token(), message_id)?;
+    let _ = cache::save_message(account_id, message_id, &message);
+    Ok(message)
 }
 
 pub fn modify(account_id: &str, message_id: &str, patch: &MailModifyPatch) -> Result<(), String> {
     let session = resolve(account_id)?;
-    backend(session.provider).modify(session.tool_token(), message_id, patch)
+    backend(session.provider).modify(session.tool_token(), message_id, patch)?;
+    if let Some(mut message) = cache::load_message(account_id, message_id) {
+        if let Some(unread) = patch.unread {
+            message.unread = unread;
+        }
+        if let Some(starred) = patch.starred {
+            message.starred = starred;
+        }
+        let _ = cache::save_message(account_id, message_id, &message);
+    }
+    Ok(())
 }
 
 pub fn send(account_id: &str, draft: &MailDraft) -> Result<(), String> {

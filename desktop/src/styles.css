@@ -3393,6 +3393,23 @@ textarea {
   font-size: 9px;
   color: var(--text-dim);
 }
+.tool-group-count {
+  flex-shrink: 0;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--bg-2);
+  color: var(--text-dim);
+  font-family: ui-monospace, "Cascadia Code", monospace;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.tool-running .tool-group-count {
+  background: color-mix(in srgb, var(--amber) 18%, transparent);
+  color: var(--amber);
+}
+.chat-tool-group-body {
+  gap: 4px;
+}
 .chat-tool-body {
   padding: 0 10px 10px;
   display: flex;
@@ -4584,6 +4601,9 @@ textarea {
   font-size: 12.5px;
   color: var(--text-dim);
   font-style: italic;
+  max-height: 220px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 .md-think-body p { margin: 4px 0; }
 
@@ -5208,8 +5228,6 @@ textarea {
 .chat-turn {
   position: relative;
   padding-bottom: 24px;
-  content-visibility: auto;
-  contain-intrinsic-size: 180px;
 }
 
 .chat-message-actions {

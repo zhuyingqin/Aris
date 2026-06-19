@@ -107,7 +107,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "write_file",
-            description: "Write a text file in the workspace.",
+            description: "Write a complete text file in the workspace. Prefer edit_file for localized edits; use shell scripts only for justified bulk mechanical rewrites.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -121,7 +121,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "edit_file",
-            description: "Replace text in a workspace file.",
+            description: "Replace text directly in a workspace file. Use this for small and medium edits instead of generating helper scripts; it returns Codex-style structured file changes.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -2194,32 +2194,28 @@ fn skill_search_roots() -> Vec<std::path::PathBuf> {
     let mut roots = Vec::new();
 
     // 1. ~/.config/aris/skills/ (ARIS user-level, highest priority)
-    let home = runtime::home_dir();
-    roots.push(
-        std::path::PathBuf::from(&home)
-            .join(".config")
-            .join("aris")
-            .join("skills"),
-    );
+    roots.push(runtime::aris_user_skills_dir());
 
-    // 2. ~/.claude/skills/ (Claude Code compat, user-level)
-    roots.push(
-        std::path::PathBuf::from(&home)
-            .join(".claude")
-            .join("skills"),
-    );
-
-    // 3. Project-level .claude/skills/
+    // 2. Project-level .aris/skills/
     if let Ok(cwd) = std::env::current_dir() {
-        roots.push(cwd.join(".claude").join("skills"));
+        roots.push(runtime::aris_project_skills_dir(&cwd));
     }
 
-    // 3. CODEX_HOME/skills (legacy compat)
+    // 3. Legacy Claude Code skills are opt-in compatibility only.
+    if runtime::legacy_claude_skills_enabled() {
+        roots.push(runtime::claude_user_skills_dir());
+
+        if let Ok(cwd) = std::env::current_dir() {
+            roots.push(runtime::claude_project_skills_dir(&cwd));
+        }
+    }
+
+    // 4. CODEX_HOME/skills (explicit legacy compat)
     if let Ok(codex_home) = std::env::var("CODEX_HOME") {
         roots.push(std::path::PathBuf::from(codex_home).join("skills"));
     }
 
-    // 4. ARIS bundled share/skills/ (next to binary)
+    // 5. ARIS bundled share/skills/ (next to binary)
     if let Ok(exe) = std::env::current_exe() {
         if let Some(bin_dir) = exe.parent() {
             let share_skills = bin_dir
@@ -2305,7 +2301,7 @@ pub fn discover_skills() -> Vec<SkillMeta> {
                 continue;
             }
             let name = entry.file_name().to_string_lossy().to_string();
-            // First-found wins (user > project > codex > bundled)
+            // First-found wins (ARIS user > ARIS project > explicit compat > bundled)
             if seen.contains(&name) {
                 continue;
             }
@@ -2336,7 +2332,7 @@ pub fn discover_skills() -> Vec<SkillMeta> {
 }
 
 /// Return the raw `SKILL.md` markdown for a skill by name, resolving filesystem
-/// skills first (user > project > codex roots) and falling back to the bundled
+/// skills first (ARIS user > ARIS project > explicit compat roots) and falling back to the bundled
 /// copy. Used by external UIs (e.g. the desktop app) to preview a skill without
 /// executing it. Returns `None` if no skill of that name exists.
 pub fn skill_markdown(name: &str) -> Option<String> {
@@ -4889,20 +4885,19 @@ mod tests {
         )
         .expect("write SKILL.md");
 
-        // Point HOME to temp dir so ~/.claude/skills/ resolves there
+        // Point HOME/USERPROFILE to temp dir so ~/.config/aris/skills resolves there.
         let _guard = env_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let claude_skills = tmp
-            .parent()
-            .unwrap()
-            .join("claude-home")
-            .join(".claude")
-            .join("skills");
-        let _home_guard = EnvGuard::set("HOME", claude_skills.parent().unwrap().parent().unwrap());
-        fs::create_dir_all(&claude_skills).expect("create claude skills dir");
-        // Copy the skill into the claude skills dir
-        let target_skill = claude_skills.join("test-skill");
+        let aris_home = tmp.parent().unwrap().join("aris-home");
+        let aris_skills = aris_home.join(".config").join("aris").join("skills");
+        let _home_guard = EnvGuard::set("HOME", &aris_home);
+        let _userprofile_guard = EnvGuard::set("USERPROFILE", &aris_home);
+        let _claude_compat_guard = EnvGuard::unset("ARIS_ENABLE_CLAUDE_SKILLS");
+        fs::create_dir_all(&aris_skills).expect("create aris skills dir");
+
+        // Copy the skill into the ARIS skills dir.
+        let target_skill = aris_skills.join("test-skill");
         fs::create_dir_all(&target_skill).expect("create target skill dir");
         fs::copy(skill_dir.join("SKILL.md"), target_skill.join("SKILL.md")).expect("copy skill");
 
@@ -4944,7 +4939,56 @@ mod tests {
 
         // Cleanup
         let _ = fs::remove_dir_all(&tmp);
-        let _ = fs::remove_dir_all(claude_skills.parent().unwrap().parent().unwrap());
+        let _ = fs::remove_dir_all(&aris_home);
+    }
+
+    #[test]
+    fn claude_skills_require_explicit_compat_flag() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = temp_path("legacy-claude-skills");
+        let home = tmp.join("home");
+        let claude_skills = home.join(".claude").join("skills");
+        let _home_guard = EnvGuard::set("HOME", &home);
+        let _userprofile_guard = EnvGuard::set("USERPROFILE", &home);
+        let _codex_home_guard = EnvGuard::unset("CODEX_HOME");
+        let _claude_compat_guard = EnvGuard::unset("ARIS_ENABLE_CLAUDE_SKILLS");
+        fs::create_dir_all(&claude_skills).expect("create claude skills dir");
+        let target_skill = claude_skills.join("legacy-claude-only");
+        fs::create_dir_all(&target_skill).expect("create target skill dir");
+        fs::write(
+            target_skill.join("SKILL.md"),
+            "---\nname: legacy-claude-only\ndescription: \"Legacy Claude skill\"\n---\n\n# Legacy Claude Skill\n",
+        )
+        .expect("write legacy skill");
+
+        assert!(
+            skill_markdown("legacy-claude-only").is_none(),
+            "Claude Code skills should not be visible by default"
+        );
+
+        let _claude_compat_enabled = EnvGuard::set("ARIS_ENABLE_CLAUDE_SKILLS", "1");
+        let markdown = skill_markdown("legacy-claude-only")
+            .expect("legacy Claude skill should load when compat is enabled");
+        assert!(markdown.contains("# Legacy Claude Skill"));
+
+        let result = execute_tool(
+            "Skill",
+            &json!({
+                "skill": "legacy-claude-only"
+            }),
+        )
+        .expect("legacy Claude skill should execute when compat is enabled");
+        let output: serde_json::Value = serde_json::from_str(&result).expect("valid json");
+        let expected_path = target_skill
+            .join("SKILL.md")
+            .display()
+            .to_string()
+            .replace('\\', "/");
+        assert_eq!(output["path"].as_str().expect("path"), expected_path);
+
+        let _ = fs::remove_dir_all(&tmp);
     }
 
     #[test]
@@ -5981,6 +6025,11 @@ mod tests {
         let write_create_output: serde_json::Value =
             serde_json::from_str(&write_create).expect("json");
         assert_eq!(write_create_output["type"], "create");
+        let write_create_path = write_create_output["filePath"].as_str().expect("file path");
+        assert_eq!(
+            write_create_output["changes"][write_create_path]["type"],
+            "add"
+        );
         assert!(root.join("nested/demo.txt").exists());
 
         let write_update = execute_tool(
@@ -5992,6 +6041,17 @@ mod tests {
             serde_json::from_str(&write_update).expect("json");
         assert_eq!(write_update_output["type"], "update");
         assert_eq!(write_update_output["originalFile"], "alpha\nbeta\nalpha\n");
+        let write_update_path = write_update_output["filePath"].as_str().expect("file path");
+        assert_eq!(
+            write_update_output["changes"][write_update_path]["type"],
+            "update"
+        );
+        assert!(
+            write_update_output["changes"][write_update_path]["unified_diff"]
+                .as_str()
+                .expect("unified diff")
+                .contains("+gamma")
+        );
 
         let read_full = execute_tool("read_file", &json!({ "path": "nested/demo.txt" }))
             .expect("read full should succeed");
@@ -6029,6 +6089,11 @@ mod tests {
         .expect("single edit should succeed");
         let edit_once_output: serde_json::Value = serde_json::from_str(&edit_once).expect("json");
         assert_eq!(edit_once_output["replaceAll"], false);
+        let edit_once_path = edit_once_output["filePath"].as_str().expect("file path");
+        assert_eq!(
+            edit_once_output["changes"][edit_once_path]["type"],
+            "update"
+        );
         assert_eq!(
             fs::read_to_string(root.join("nested/demo.txt")).expect("read file"),
             "omega\nbeta\ngamma\n"

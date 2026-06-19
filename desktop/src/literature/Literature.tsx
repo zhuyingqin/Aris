@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { literatureLlm } from "../api/tauri";
 import { useStore } from "../store";
@@ -140,6 +140,7 @@ export default function Literature() {
   const watchAgentActivity = useLiteratureStore((s) => s.watchAgentActivity);
   const setStage = useLiteratureStore((s) => s.setStage);
   const deletePapers = useLiteratureStore((s) => s.deletePapers);
+  const runRemoteSearch = useLiteratureStore((s) => s.runRemoteSearch);
   const toggleStar = useLiteratureStore((s) => s.toggleStar);
   const markRead = useLiteratureStore((s) => s.markRead);
   const addTags = useLiteratureStore((s) => s.addTags);
@@ -176,6 +177,8 @@ export default function Literature() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [selectionCleared, setSelectionCleared] = useState(false);
   const [workspaceTab, setWorkspaceTab] = useState<DetailTab>("info");
+  const [remoteSearchQuery, setRemoteSearchQuery] = useState("");
+  const [remoteSearching, setRemoteSearching] = useState(false);
   const [tagDraft, setTagDraft] = useState("");
   const [abstractOpen, setAbstractOpen] = useState(true);
   const [colInput, setColInput] = useState("");
@@ -263,6 +266,19 @@ export default function Literature() {
   const openAgentChat = (input: string) => {
     setPendingChatInput(input);
     setTab("chat");
+  };
+
+  const submitRemoteSearch = async (event: FormEvent) => {
+    event.preventDefault();
+    const query = remoteSearchQuery.trim();
+    if (!query || remoteSearching) return;
+    setRemoteSearching(true);
+    try {
+      await runRemoteSearch(query, ["arxiv", "crossref", "openalex"], 20);
+      setRemoteSearchQuery("");
+    } finally {
+      setRemoteSearching(false);
+    }
   };
 
   const openBrowserDownload = (paper: LiteraturePaper) => {
@@ -649,6 +665,7 @@ export default function Literature() {
                 type="button"
                 className="lit-workspace-icon-btn"
                 title="Clear selection"
+                aria-label="清除选择"
                 onClick={() => { setSelectedId(null); setSelectionCleared(true); }}
               >✕</button>
             </div>
@@ -811,6 +828,31 @@ export default function Literature() {
           ))}
         </div>
       </header>
+
+      {pageView === "library" && (
+        <form className="lit-search-strip" onSubmit={submitRemoteSearch}>
+          <input
+            className="lit-strip-input"
+            aria-label="远程文献检索"
+            placeholder="检索 arXiv / Crossref / OpenAlex"
+            value={remoteSearchQuery}
+            onChange={(event) => setRemoteSearchQuery(event.target.value)}
+          />
+          <button type="submit" className="primary" disabled={!remoteSearchQuery.trim() || remoteSearching}>
+            {remoteSearching ? "检索中…" : "检索并保存"}
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setActiveReviewTask(null);
+              setReviewQuestion("");
+              setReviewPanelOpen(true);
+            }}
+          >
+            新建审查
+          </button>
+        </form>
+      )}
 
       {/* Error banner */}
       {storeError && (

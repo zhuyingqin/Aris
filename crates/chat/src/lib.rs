@@ -1,6 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex, OnceLock,
+};
 use std::time::{Duration, Instant};
 
 use api::AuthSource;
@@ -223,6 +226,7 @@ pub struct McpToolExecutor<T> {
     runtime: Option<tokio::runtime::Runtime>,
     manager: Option<McpServerManager>,
     tool_names: BTreeSet<String>,
+    cancel_flag: Option<Arc<AtomicBool>>,
 }
 
 impl<T> ToolExecutor for McpToolExecutor<T>
@@ -251,9 +255,9 @@ where
             return self.inner.execute_with_id(tool_use_id, tool_name, input);
         }
 
-        // Respect the global interrupt flag before committing to a potentially
-        // long-running MCP call (e.g. a hanging Playwright browser session).
-        if is_interrupted() {
+        // Respect the process-wide interrupt (CLI Ctrl+C) and, in desktop Chat,
+        // the per-session cancellation flag before committing to a long MCP call.
+        if self.is_cancelled() {
             return Err(ToolError::new("interrupted by user"));
         }
 
@@ -267,24 +271,32 @@ where
             .manager
             .as_mut()
             .ok_or_else(|| ToolError::new("MCP manager is not available"))?;
-        // Use select! so that clicking Stop (which sets the global interrupt flag)
-        // cancels a hanging MCP call within ~200 ms rather than waiting for the
-        // full per-server request timeout (default 300 s).
-        let response = runtime.block_on(async {
+        // Use select! so Stop/Ctrl+C cancels a hanging MCP call quickly rather
+        // than waiting for the full per-server request timeout (default 300 s).
+        enum McpCallOutcome<T> {
+            Response(Result<T, ToolError>),
+            Cancelled,
+        }
+        let cancel_flag = self.cancel_flag.clone();
+        let outcome = runtime.block_on(async {
             tokio::select! {
                 result = manager.call_tool(tool_name, Some(arguments)) => {
-                    result.map_err(|error| ToolError::new(error.to_string()))
+                    McpCallOutcome::Response(result.map_err(|error| ToolError::new(error.to_string())))
                 }
-                _ = async {
-                    loop {
-                        tokio::time::sleep(Duration::from_millis(200)).await;
-                        if is_interrupted() { break; }
-                    }
-                } => {
-                    Err(ToolError::new("interrupted by user"))
-                }
+                () = wait_for_mcp_cancel(cancel_flag) => McpCallOutcome::Cancelled,
             }
-        })?;
+        });
+        let response = match outcome {
+            McpCallOutcome::Response(result) => result?,
+            McpCallOutcome::Cancelled => {
+                if let (Some(runtime), Some(manager)) =
+                    (self.runtime.as_ref(), self.manager.as_mut())
+                {
+                    let _ = runtime.block_on(manager.shutdown());
+                }
+                return Err(ToolError::new("interrupted by user"));
+            }
+        };
 
         if let Some(error) = response.error {
             return Err(ToolError::new(format!(
@@ -302,6 +314,29 @@ where
         } else {
             Ok(output)
         }
+    }
+}
+
+impl<T> McpToolExecutor<T> {
+    fn is_cancelled(&self) -> bool {
+        is_interrupted()
+            || self
+                .cancel_flag
+                .as_ref()
+                .is_some_and(|flag| flag.load(Ordering::SeqCst))
+    }
+}
+
+async fn wait_for_mcp_cancel(cancel_flag: Option<Arc<AtomicBool>>) {
+    loop {
+        if is_interrupted()
+            || cancel_flag
+                .as_ref()
+                .is_some_and(|flag| flag.load(Ordering::SeqCst))
+        {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -496,9 +531,19 @@ where
 
 pub fn attach_mcp_tools<T>(
     inner: T,
+    tool_specs: Vec<ChatToolSpec>,
+    feature_config: &runtime::RuntimeFeatureConfig,
+    allowed_tools: Option<&BTreeSet<String>>,
+) -> McpToolBundle<T> {
+    attach_mcp_tools_with_cancel(inner, tool_specs, feature_config, allowed_tools, None)
+}
+
+pub fn attach_mcp_tools_with_cancel<T>(
+    inner: T,
     mut tool_specs: Vec<ChatToolSpec>,
     feature_config: &runtime::RuntimeFeatureConfig,
     allowed_tools: Option<&BTreeSet<String>>,
+    cancel_flag: Option<Arc<AtomicBool>>,
 ) -> McpToolBundle<T> {
     let mut manager = McpServerManager::from_servers(feature_config.mcp().servers());
     let mut warnings = manager
@@ -520,6 +565,7 @@ pub fn attach_mcp_tools<T>(
                 runtime: None,
                 manager: None,
                 tool_names,
+                cancel_flag,
             },
             tool_specs,
             warnings,
@@ -539,6 +585,7 @@ pub fn attach_mcp_tools<T>(
                     runtime: None,
                     manager: None,
                     tool_names,
+                    cancel_flag,
                 },
                 tool_specs,
                 warnings,
@@ -584,6 +631,7 @@ pub fn attach_mcp_tools<T>(
             runtime: Some(mcp_runtime),
             manager: Some(manager),
             tool_names,
+            cancel_flag,
         },
         tool_specs,
         warnings,

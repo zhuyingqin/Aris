@@ -326,7 +326,9 @@ pub fn knowledge_upsert_at(
         }
     }
     let total: i64 = transaction
-        .query_row("SELECT COUNT(*) FROM knowledge_points", [], |row| row.get(0))
+        .query_row("SELECT COUNT(*) FROM knowledge_points", [], |row| {
+            row.get(0)
+        })
         .map_err(|e| e.to_string())?;
     transaction.commit().map_err(|e| e.to_string())?;
     Ok(UpsertStats {
@@ -369,7 +371,10 @@ pub fn knowledge_delete_at(base: &Path, kp_id: &str) -> Result<bool, String> {
         .execute("DELETE FROM kp_evidence WHERE kp_id=?1", [kp_id])
         .map_err(|e| e.to_string())?;
     transaction
-        .execute("DELETE FROM kp_relations WHERE src_id=?1 OR dst_id=?1", [kp_id])
+        .execute(
+            "DELETE FROM kp_relations WHERE src_id=?1 OR dst_id=?1",
+            [kp_id],
+        )
         .map_err(|e| e.to_string())?;
     transaction
         .execute("DELETE FROM kp_versions WHERE kp_id=?1", [kp_id])
@@ -401,10 +406,7 @@ fn effective_status(
     }
 }
 
-fn load_existing_point(
-    connection: &Connection,
-    id: &str,
-) -> Result<Option<ExistingPoint>, String> {
+fn load_existing_point(connection: &Connection, id: &str) -> Result<Option<ExistingPoint>, String> {
     connection
         .query_row(
             "SELECT status, version, created_at, confirmed_at, question, answer, statement
@@ -435,11 +437,9 @@ fn replace_evidence(
         .execute("DELETE FROM kp_evidence WHERE kp_id=?1", [kp_id])
         .map_err(|e| e.to_string())?;
     for item in evidence {
-        let quote_hash = (!item.quote.trim().is_empty()).then(|| stable_hash(&normalize(&item.quote)));
-        let content_hash = item
-            .content_hash
-            .clone()
-            .or_else(|| quote_hash.clone());
+        let quote_hash =
+            (!item.quote.trim().is_empty()).then(|| stable_hash(&normalize(&item.quote)));
+        let content_hash = item.content_hash.clone().or_else(|| quote_hash.clone());
         connection
             .execute(
                 "INSERT INTO kp_evidence(
@@ -506,7 +506,13 @@ fn derive_chunks_for_point(connection: &Connection, kp_id: &str) -> Result<(), S
         .query_row(
             "SELECT question, answer, statement FROM knowledge_points WHERE id=?1",
             [kp_id],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)),
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
         )
         .optional()
         .map_err(|e| e.to_string())?
@@ -860,7 +866,11 @@ fn derive_point_id(point: &KnowledgePointInput) -> String {
 }
 
 fn normalize(value: &str) -> String {
-    value.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+    value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
 }
 
 fn stable_hash(value: &str) -> String {
@@ -929,8 +939,8 @@ mod tests {
             "It improves throughput by 32% under congestion.",
             "The scheme improves throughput by 32% under congestion.",
         );
-        let stats = knowledge_upsert_at(&base, &[input.clone_for_test()], false)
-            .expect("upsert draft");
+        let stats =
+            knowledge_upsert_at(&base, &[input.clone_for_test()], false).expect("upsert draft");
         assert_eq!(stats.added, 1);
         let id = derive_point_id(&input);
 

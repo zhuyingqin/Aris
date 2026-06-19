@@ -1,5 +1,19 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type UIEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type FormEvent,
+  type PointerEvent as ReactPointerEvent,
+  type UIEvent,
+} from "react";
 import arisIcon from "../assets/aris-icon.svg";
+import avatarManBlue from "../assets/mail/avatar-man-blue-shirt.png";
+import avatarWomanBlazer from "../assets/mail/avatar-woman-navy-blazer.png";
+import avatarManNavy from "../assets/mail/avatar-man-navy-sweater.png";
+import avatarWomanPeach from "../assets/mail/avatar-woman-peach.png";
 import {
   mailAccountsGet,
   mailFolders,
@@ -166,6 +180,8 @@ const AVATAR_COLORS = [
   "#9333ea",
   "#0284c7",
 ];
+
+const AVATAR_IMAGES = [avatarManBlue, avatarWomanBlazer, avatarManNavy, avatarWomanPeach];
 
 interface ComposeState {
   to: string;
@@ -378,8 +394,86 @@ function formatDate(raw: string): string {
   });
 }
 
+/** Epoch ms for chronological sorting; unparseable dates sink to the bottom. */
+function messageTime(message: MailMessageSummary): number {
+  const ms = Date.parse(message.date);
+  return Number.isNaN(ms) ? 0 : ms;
+}
+
+const PANE_MIN = 220;
+const PANE_MAX = 480;
+
+function clampPane(value: number): number {
+  return Math.min(PANE_MAX, Math.max(PANE_MIN, value));
+}
+
+function readStoredWidth(key: string, fallback: number): number {
+  if (typeof localStorage === "undefined") return fallback;
+  const raw = Number(localStorage.getItem(key));
+  return Number.isFinite(raw) && raw > 0 ? clampPane(raw) : fallback;
+}
+
+/**
+ * Thin draggable divider between workspace panes. Adjusts a pixel width
+ * anchored at drag start; `invert` is used for the right-hand assistant pane,
+ * where dragging left should *grow* it.
+ */
+function PaneResizer({
+  value,
+  invert = false,
+  onChange,
+  className = "",
+  label,
+}: {
+  value: number;
+  invert?: boolean;
+  onChange: (next: number) => void;
+  className?: string;
+  label: string;
+}) {
+  const drag = useRef<{ startX: number; startValue: number } | null>(null);
+
+  const onPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    drag.current = { startX: event.clientX, startValue: value };
+    event.currentTarget.setPointerCapture(event.pointerId);
+    document.body.classList.add("am-resizing");
+  };
+  const onPointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!drag.current) return;
+    const delta = event.clientX - drag.current.startX;
+    onChange(clampPane(drag.current.startValue + (invert ? -delta : delta)));
+  };
+  const onPointerEnd = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!drag.current) return;
+    drag.current = null;
+    event.currentTarget.releasePointerCapture?.(event.pointerId);
+    document.body.classList.remove("am-resizing");
+  };
+
+  return (
+    <div
+      className={`am-pane-resizer ${className}`.trim()}
+      role="separator"
+      aria-orientation="vertical"
+      aria-label={label}
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={onPointerEnd}
+      onPointerCancel={onPointerEnd}
+    />
+  );
+}
+
 function folderMeta(folder: MailFolder): { label: string; icon: IconName } {
   const raw = folder.name.replace(/^\[Gmail\][\\/]?/i, "").trim();
+  // User-created labels (Gmail surfaces these with kind "custom") keep their
+  // own name. Only system folders get normalized to localized labels —
+  // otherwise distinct user labels like "归档", "工作归档", "Archive" all
+  // collapse onto a single "已归档" entry in the sidebar.
+  if (folder.kind === "custom") {
+    return { label: raw || folder.name, icon: "label" };
+  }
   const key = `${folder.kind} ${raw}`.toLowerCase();
   if (/inbox|收件/.test(key)) return { label: "收件箱", icon: "inbox" };
   if (/sent|已发送|发件/.test(key)) return { label: "已发送", icon: "send" };
@@ -400,9 +494,41 @@ function avatarColor(seed: string): string {
   return AVATAR_COLORS[Math.abs(hash) % AVATAR_COLORS.length];
 }
 
+function avatarImage(seed: string): string {
+  let hash = 0;
+  for (let i = 0; i < seed.length; i += 1) {
+    hash = (hash * 31 + seed.charCodeAt(i)) | 0;
+  }
+  return AVATAR_IMAGES[Math.abs(hash) % AVATAR_IMAGES.length];
+}
+
 function initial(name: string, email: string): string {
   const source = (name || email || "?").trim();
   return source.charAt(0).toUpperCase();
+}
+
+/** Round avatar that shows a deterministic photo with an initial fallback. */
+function Avatar({
+  seed,
+  label,
+  className,
+  title,
+}: {
+  seed: string;
+  label: string;
+  className?: string;
+  title?: string;
+}) {
+  return (
+    <span
+      className={`am-avatar am-avatar-image${className ? ` ${className}` : ""}`}
+      style={{ background: avatarColor(seed) }}
+      title={title}
+    >
+      <span>{label}</span>
+      <img src={avatarImage(seed)} alt="" />
+    </span>
+  );
 }
 
 function initialsFromAccount(account?: MailAccount): string {
@@ -534,7 +660,18 @@ export default function Mail() {
   const [compose, setCompose] = useState<ComposeState | null>(null);
   const [sending, setSending] = useState(false);
   const [assistantOpen, setAssistantOpen] = useState(() => MAIL_VIEW_CACHE.assistantOpen);
+  const [listWidth, setListWidth] = useState(() => readStoredWidth("aris-mail-list-width", 300));
+  const [assistantWidth, setAssistantWidth] = useState(() =>
+    readStoredWidth("aris-mail-assistant-width", 260),
+  );
   const listLoadingRef = useRef(false);
+
+  useEffect(() => {
+    localStorage.setItem("aris-mail-list-width", String(listWidth));
+  }, [listWidth]);
+  useEffect(() => {
+    localStorage.setItem("aris-mail-assistant-width", String(assistantWidth));
+  }, [assistantWidth]);
 
   const connected = useMemo(() => accounts.filter((account) => account.connected), [accounts]);
   const activeAccount = connected.find((account) => account.id === accountId) ?? connected[0];
@@ -545,6 +682,13 @@ export default function Mail() {
   const activeFolder = useMemo(
     () => sortedFolders.find((item) => item.id === folder),
     [folder, sortedFolders],
+  );
+  // Providers (and pagination across pages) don't guarantee a chronological
+  // list, and the shown date is the sender's Date header. Sort newest-first by
+  // that same displayed date so the visible order matches the visible times.
+  const sortedMessages = useMemo(
+    () => [...messages].sort((a, b) => messageTime(b) - messageTime(a)),
+    [messages],
   );
 
   const fail = useCallback((e: unknown) => setError(String(e)), []);
@@ -906,12 +1050,10 @@ export default function Mail() {
         </div>
 
         <div className="am-account">
-          <span
-            className="am-avatar"
-            style={{ background: avatarColor(activeAccount?.email ?? "") }}
-          >
-            {initialsFromAccount(activeAccount)}
-          </span>
+          <Avatar
+            seed={activeAccount?.email ?? ""}
+            label={initialsFromAccount(activeAccount)}
+          />
           <div>
             <strong>{activeAccount?.displayName || activeAccount?.email}</strong>
             <small>{activeAccount?.email}</small>
@@ -961,17 +1103,24 @@ export default function Mail() {
             <button title="帮助" aria-label="帮助">
               <Icon name="help" />
             </button>
-            <span
-              className="am-avatar small"
-              style={{ background: avatarColor(activeAccount?.email ?? "") }}
+            <Avatar
+              className="small"
+              seed={activeAccount?.email ?? ""}
+              label={initialsFromAccount(activeAccount)}
               title={activeAccount?.email}
-            >
-              {initialsFromAccount(activeAccount)}
-            </span>
+            />
           </div>
         </header>
 
-        <div className={`am-workspace${assistantOpen ? "" : " assistant-closed"}`}>
+        <div
+          className={`am-workspace${assistantOpen ? "" : " assistant-closed"}`}
+          style={
+            {
+              "--am-list-width": `${listWidth}px`,
+              "--am-assistant-width": `${assistantWidth}px`,
+            } as CSSProperties
+          }
+        >
           <section className="am-list-pane">
             <div className="am-list-tabs">
               <button className="active">{activeFolder ? folderMeta(activeFolder).label : "邮件"}</button>
@@ -985,7 +1134,7 @@ export default function Mail() {
             {error && <div className="am-error inline">{error}</div>}
 
             <div className="am-message-list" onScroll={handleMessageListScroll}>
-              {messages.map((message) => (
+              {sortedMessages.map((message) => (
                 <MessageRow
                   key={message.id}
                   message={message}
@@ -1012,6 +1161,12 @@ export default function Mail() {
             </div>
           </section>
 
+          <PaneResizer
+            value={listWidth}
+            onChange={setListWidth}
+            label="调整邮件列表宽度"
+          />
+
           <ReadingView
             open={open}
             loading={loadingMessage}
@@ -1025,12 +1180,21 @@ export default function Mail() {
           />
 
           {assistantOpen && (
-            <AssistantPanel
-              open={open}
-              onClose={() => setAssistantOpen(false)}
-              onCompose={setCompose}
-              onPatch={applyMessagePatch}
-            />
+            <>
+              <PaneResizer
+                className="am-assistant-resizer"
+                value={assistantWidth}
+                invert
+                onChange={setAssistantWidth}
+                label="调整邮件助手宽度"
+              />
+              <AssistantPanel
+                open={open}
+                onClose={() => setAssistantOpen(false)}
+                onCompose={setCompose}
+                onPatch={applyMessagePatch}
+              />
+            </>
           )}
         </div>
       </section>
@@ -1207,9 +1371,10 @@ function ReadingView({
         </div>
 
         <div className="am-sender">
-          <span className="am-avatar" style={{ background: avatarColor(open.from || open.fromName) }}>
-            {initial(open.fromName, open.from)}
-          </span>
+          <Avatar
+            seed={open.from || open.fromName}
+            label={initial(open.fromName, open.from)}
+          />
           <div>
             <strong>{open.fromName || open.from}</strong>
             {open.fromName && <span>&lt;{open.from}&gt;</span>}

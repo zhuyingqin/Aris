@@ -5,13 +5,6 @@ import {
   configSet,
   configTest,
   providerTest,
-  imBridgeGet,
-  imBridgeLogs,
-  imBridgeSecretGet,
-  imBridgeSet,
-  imBridgeStart,
-  imBridgeStop,
-  imBridgeTestQq,
   isTauri,
 } from "../api/tauri";
 import { useStore } from "../store";
@@ -22,9 +15,6 @@ import type {
   ConfigSecretKind,
   ConfigTestResult,
   ConfigView,
-  ImBridgePatch,
-  ImBridgeTestResult,
-  ImBridgeView,
 } from "../types";
 
 // ── Provider / model presets ──────────────────────────────────────────────────
@@ -481,75 +471,10 @@ function ProviderCard({
   );
 }
 
-function BridgeCard({
-  running,
-  enabled,
-  status,
-  pid,
-  hasSecret,
-  busy,
-  onOpen,
-  onStart,
-  onStop,
-  onTest,
-  onLogs,
-}: {
-  running: boolean;
-  enabled: boolean;
-  status: string;
-  pid?: number | null;
-  hasSecret: boolean;
-  busy: boolean;
-  onOpen: () => void;
-  onStart: () => void;
-  onStop: () => void;
-  onTest: () => void;
-  onLogs: () => void;
-}) {
-  const runtimeText = running
-    ? `运行中${pid ? ` · PID ${pid}` : ""}`
-    : status || "未加载";
-  return (
-    <div className="sp-card-wrap">
-      <div className="sp-card sp-bridge-card">
-        <div className="sp-card-click-zone" role="button" tabIndex={0} onClick={onOpen} onKeyDown={(e) => e.key === "Enter" && onOpen()}>
-          <div className="sp-card-icon sp-card-icon-qq" aria-hidden="true">Q</div>
-          <div className="sp-card-body">
-            <div className="sp-card-name">
-              Aris QQ Bot
-              <span className="sp-role-badge sp-role-qq">QQ</span>
-              <span className={`sp-role-badge ${running ? "sp-role-running" : "sp-role-muted"}`}>
-                {running ? "运行中" : enabled ? "已启用" : "已禁用"}
-              </span>
-              {hasSecret && <span className="sp-role-badge sp-role-secret">已配置密钥</span>}
-            </div>
-            <div className="sp-card-url">QQ 私信桥接 · C2C 私聊</div>
-            <div className="sp-card-notes">{runtimeText}</div>
-          </div>
-        </div>
-        <div className="sp-card-actions" onClick={(e) => e.stopPropagation()}>
-          <button
-            className="sp-card-btn"
-            title={running ? "停止 QQ Bot" : "启动 QQ Bot"}
-            type="button"
-            disabled={busy || (!running && !enabled)}
-            onClick={() => (running ? onStop() : onStart())}
-          >{running ? "停" : "启"}</button>
-          <button className="sp-card-btn sp-card-btn-test" title="测试 QQ 配置" type="button" disabled={busy} onClick={onTest}>测</button>
-          <button className="sp-card-btn" title="查看日志" type="button" disabled={busy} onClick={onLogs}>志</button>
-          <button className="sp-card-btn" title="编辑" type="button" onClick={onOpen}>✎</button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 type SaveState = "idle" | "saving" | "saved" | "error";
 type TestState = "idle" | "testing" | "passed" | "failed";
-type BridgeBusy = "saving" | "testing" | "starting" | "stopping" | "logs" | null;
-type BridgeNotice = { ok: boolean; message: string; output?: string | null };
 
 export default function Settings() {
   const setError = useStore((s) => s.setError);
@@ -562,13 +487,6 @@ export default function Settings() {
   const [testState, setTestState] = useState<TestState>("idle");
   const [testResult, setTestResult] = useState<ConfigTestResult | null>(null);
   const [showAdvanced, setShowAdvanced] = useState(false);
-  const [bridgeView, setBridgeView] = useState<ImBridgeView | null>(null);
-  const [bridgeForm, setBridgeForm] = useState<ImBridgePatch>({});
-  const [bridgeSecret, setBridgeSecret] = useState("");
-  const [bridgeBusy, setBridgeBusy] = useState<BridgeBusy>(null);
-  const [bridgeNotice, setBridgeNotice] = useState<BridgeNotice | null>(null);
-  const [showBridgeLog, setShowBridgeLog] = useState(false);
-  const [bridgeDetailOpen, setBridgeDetailOpen] = useState(false);
   const [mailDetailOpen, setMailDetailOpen] = useState(false);
   const operationVersion = useRef(0);
   const activeOp = useRef<{ kind: "save" | "test"; version: number } | null>(null);
@@ -600,26 +518,9 @@ export default function Settings() {
     setExecKey(""); setReviewerKey(""); setScopusKey("");
   };
 
-  const loadBridge = (v: ImBridgeView) => {
-    setBridgeView(v);
-    setBridgeForm({
-      enabled: v.enabled,
-      runtime: "aris",
-      defaultWorkdir: v.defaultWorkdir,
-      arisPath: v.arisPath,
-      qqAppId: v.qqAppId,
-      qqAllowedUsers: v.qqAllowedUsers,
-      qqImageEnabled: v.qqImageEnabled,
-      qqMaxImageSize: v.qqMaxImageSize,
-      autoApprove: v.autoApprove,
-    });
-    setBridgeSecret("");
-  };
-
   useEffect(() => {
     if (!isTauri()) return;
     configGet().then(loadConfig).catch((e) => setError(String(e)));
-    imBridgeGet().then(loadBridge).catch((e) => setError(String(e)));
   }, [setError]);
   useEffect(() => () => {
     operationVersion.current += 1;
@@ -682,113 +583,6 @@ export default function Settings() {
     if (reviewerKey.trim()) patch.reviewerApiKey = reviewerKey.trim();
     if (scopusKey.trim()) patch.scopusApiKey = scopusKey.trim();
     return patch;
-  };
-
-  const updateBridgeForm = (patch: ImBridgePatch) => {
-    setBridgeNotice(null);
-    setBridgeForm((current) => ({ ...current, ...patch }));
-  };
-
-  const buildBridgePatch = () => {
-    const patch: ImBridgePatch = { ...bridgeForm, runtime: "aris" };
-    if (bridgeSecret.trim()) patch.qqAppSecret = bridgeSecret.trim();
-    return patch;
-  };
-
-  const saveBridge = async () => {
-    if (bridgeBusy) return;
-    setBridgeBusy("saving");
-    setBridgeNotice(null);
-    try {
-      const next = await imBridgeSet(buildBridgePatch());
-      loadBridge(next);
-      setBridgeNotice({ ok: true, message: "Aris QQ Bot settings saved." });
-    } catch (e) {
-      setError(String(e));
-      setBridgeNotice({ ok: false, message: String(e) });
-    } finally {
-      setBridgeBusy(null);
-    }
-  };
-
-  const testBridge = async () => {
-    if (bridgeBusy) return;
-    setBridgeBusy("testing");
-    setBridgeNotice(null);
-    try {
-      const result: ImBridgeTestResult = await imBridgeTestQq(buildBridgePatch());
-      setBridgeNotice({ ok: result.ok, message: result.message });
-    } catch (e) {
-      setError(String(e));
-      setBridgeNotice({ ok: false, message: String(e) });
-    } finally {
-      setBridgeBusy(null);
-    }
-  };
-
-  const startBridge = async () => {
-    if (bridgeBusy) return;
-    setBridgeBusy("starting");
-    setBridgeNotice(null);
-    try {
-      const saved = await imBridgeSet(buildBridgePatch());
-      loadBridge(saved);
-      const result = await imBridgeStart();
-      loadBridge(result.view);
-      setBridgeNotice({ ok: result.ok, message: result.message, output: result.output || result.view.statusMessage });
-    } catch (e) {
-      setError(String(e));
-      setBridgeNotice({ ok: false, message: String(e) });
-    } finally {
-      setBridgeBusy(null);
-    }
-  };
-
-  const stopBridge = async () => {
-    if (bridgeBusy) return;
-    setBridgeBusy("stopping");
-    setBridgeNotice(null);
-    try {
-      const result = await imBridgeStop();
-      loadBridge(result.view);
-      setBridgeNotice({ ok: result.ok, message: result.message, output: result.output || result.view.statusMessage });
-    } catch (e) {
-      setError(String(e));
-      setBridgeNotice({ ok: false, message: String(e) });
-    } finally {
-      setBridgeBusy(null);
-    }
-  };
-
-  const loadBridgeLogs = async () => {
-    if (bridgeBusy) return;
-    setBridgeBusy("logs");
-    setBridgeNotice(null);
-    try {
-      const result = await imBridgeLogs();
-      loadBridge(result.view);
-      setShowBridgeLog(true);
-      setBridgeNotice({ ok: result.ok, message: result.message, output: result.output });
-    } catch (e) {
-      setError(String(e));
-      setBridgeNotice({ ok: false, message: String(e) });
-    } finally {
-      setBridgeBusy(null);
-    }
-  };
-
-  const refreshBridge = async () => {
-    if (bridgeBusy) return;
-    setBridgeBusy("logs");
-    setBridgeNotice(null);
-    try {
-      loadBridge(await imBridgeGet());
-    } catch (e) {
-      setError(String(e));
-      setBridgeNotice({ ok: false, message: String(e) });
-    } finally {
-      setBridgeBusy(null);
-    }
   };
 
   const save = async () => {
@@ -885,162 +679,8 @@ export default function Settings() {
     catch { setFormatError("无效 JSON，请检查格式"); }
   };
 
-  const bridgeRunning = bridgeView?.running ?? false;
-  const bridgeEnabled = bridgeForm.enabled ?? bridgeView?.enabled ?? true;
-  const bridgeBusyLabel = bridgeBusy === "saving"
-    ? "保存中…"
-    : bridgeBusy === "testing"
-      ? "测试中…"
-      : bridgeBusy === "starting"
-        ? "启动中…"
-        : bridgeBusy === "stopping"
-          ? "停止中…"
-          : bridgeBusy === "logs"
-            ? "加载中…"
-            : null;
-
   // ── Non-Tauri placeholder ───────────────────────────────────────────────────
   if (!isTauri()) return <div className="board"><div className="empty">Settings need the Tauri backend.</div></div>;
-
-  if (bridgeDetailOpen) {
-    if (!bridgeView) return <div className="board"><div className="empty">Loading QQ settings…</div></div>;
-    return (
-      <div className="st-page sp-detail-page">
-        <div className="sp-detail-head">
-          <button className="sp-back-btn" onClick={() => setBridgeDetailOpen(false)} type="button">← 返回</button>
-          <div className="sp-detail-title">Aris QQ Bot</div>
-          <div className="sp-detail-badges">
-            <span className="sp-role-badge sp-role-qq">QQ</span>
-            <span className={`sp-role-badge ${bridgeRunning ? "sp-role-running" : "sp-role-muted"}`}>
-              {bridgeRunning ? "运行中" : bridgeEnabled ? "已启用" : "已禁用"}
-            </span>
-          </div>
-        </div>
-        <div className="sp-detail-form">
-          <div className="sp-detail-row2">
-            <div className="sp-field">
-              <label className="sp-field-label">频道</label>
-              <button
-                type="button"
-                className={`sp-toggle-btn${bridgeEnabled ? " active" : ""}`}
-                onClick={() => updateBridgeForm({ enabled: !bridgeEnabled })}
-              >
-                <span className="sp-toggle-main">{bridgeEnabled ? "QQ 已启用" : "QQ 已禁用"}</span>
-                <span className="sp-toggle-sub">C2C 私聊</span>
-              </button>
-            </div>
-            <div className="sp-field">
-              <label className="sp-field-label">工具权限</label>
-              <button
-                type="button"
-                className={`sp-toggle-btn${bridgeForm.autoApprove ? " active sp-toggle-danger" : ""}`}
-                onClick={() => updateBridgeForm({ autoApprove: !bridgeForm.autoApprove })}
-              >
-                <span className="sp-toggle-main">{bridgeForm.autoApprove ? "自动批准工具" : "工作区写入"}</span>
-                <span className="sp-toggle-sub">{bridgeForm.autoApprove ? "不提升系统管理员权限" : "读取并编辑项目文件"}</span>
-              </button>
-            </div>
-          </div>
-
-          <div className="sp-detail-row2">
-            <div className="sp-field">
-              <label className="sp-field-label">QQ App ID</label>
-              <input className="sp-input" value={bridgeForm.qqAppId ?? ""} onChange={(e) => updateBridgeForm({ qqAppId: e.currentTarget.value })} spellCheck={false} />
-            </div>
-            <div className="sp-field">
-              <label className="sp-field-label">
-                QQ App Secret
-                {bridgeView.hasQqAppSecret && <span className="sp-field-hint-inline">{bridgeView.qqAppSecretMasked ?? "已配置"}</span>}
-              </label>
-              <KeyInput
-                value={bridgeSecret}
-                placeholder={bridgeView.hasQqAppSecret ? "留空保留已有 Secret" : "粘贴 App Secret"}
-                masked={bridgeView.qqAppSecretMasked}
-                loadSecret={() => imBridgeSecretGet("qqAppSecret")}
-                onChange={(value) => { setBridgeNotice(null); setBridgeSecret(value); }}
-              />
-            </div>
-          </div>
-
-          <div className="sp-field">
-            <label className="sp-field-label">
-              允许的 OpenID
-              <span className="sp-field-hint-inline">逗号分隔的 user_openid</span>
-            </label>
-            <input className="sp-input" value={bridgeForm.qqAllowedUsers ?? ""} onChange={(e) => updateBridgeForm({ qqAllowedUsers: e.currentTarget.value })} spellCheck={false} />
-          </div>
-
-          <div className="sp-detail-row2">
-            <div className="sp-field">
-              <label className="sp-field-label">图片</label>
-              <div className="sp-bridge-img-row">
-                <button
-                  type="button"
-                  className={`sp-toggle-btn sp-toggle-btn-sm${(bridgeForm.qqImageEnabled ?? true) ? " active" : ""}`}
-                  onClick={() => updateBridgeForm({ qqImageEnabled: !(bridgeForm.qqImageEnabled ?? true) })}
-                >
-                  <span className="sp-toggle-main">{(bridgeForm.qqImageEnabled ?? true) ? "已启用" : "已禁用"}</span>
-                </button>
-                <div className="sp-bridge-size-wrap">
-                  <input type="number" min={1} max={100} className="sp-input sp-input-sm" value={bridgeForm.qqMaxImageSize ?? 20} onChange={(e) => updateBridgeForm({ qqMaxImageSize: Math.max(1, Number(e.currentTarget.value) || 1) })} aria-label="QQ 最大图片大小 MB" />
-                  <span className="sp-bridge-unit">MB</span>
-                </div>
-              </div>
-            </div>
-            <div className="sp-field">
-              <label className="sp-field-label">
-                Aris 可执行路径
-                <span className="sp-field-hint-inline">留空自动检测</span>
-              </label>
-              <input className="sp-input" value={bridgeForm.arisPath ?? ""} onChange={(e) => updateBridgeForm({ arisPath: e.currentTarget.value, runtime: "aris" })} placeholder="target/debug/aris.exe 或 PATH 中的 aris" spellCheck={false} />
-            </div>
-          </div>
-
-          <div className="sp-detail-row2">
-            <div className="sp-field">
-              <label className="sp-field-label">工作目录</label>
-              <input className="sp-input" value={bridgeForm.defaultWorkdir ?? ""} onChange={(e) => updateBridgeForm({ defaultWorkdir: e.currentTarget.value })} spellCheck={false} />
-            </div>
-            <div className="sp-field">
-              <label className="sp-field-label">配置文件</label>
-              <input className="sp-input" value={bridgeView.configPath ?? ""} readOnly />
-            </div>
-          </div>
-
-          {bridgeNotice && (
-            <div className={`sp-bridge-notice${bridgeNotice.ok ? " ok" : " failed"}`}>
-              <strong>{bridgeNotice.message}</strong>
-              {bridgeNotice.output && <pre>{bridgeNotice.output}</pre>}
-            </div>
-          )}
-          {!bridgeNotice && showBridgeLog && bridgeView.recentLog && (
-            <div className="sp-bridge-notice ok"><pre>{bridgeView.recentLog}</pre></div>
-          )}
-
-          <div className="sp-detail-actions">
-            <button className="sp-btn sp-btn-primary" type="button" onClick={() => void startBridge()} disabled={Boolean(bridgeBusy) || !bridgeEnabled}>
-              {bridgeBusy === "starting" ? "启动中…" : "启动"}
-            </button>
-            <button className="sp-btn sp-btn-exec" type="button" onClick={() => void saveBridge()} disabled={Boolean(bridgeBusy)}>
-              {bridgeBusy === "saving" ? "保存中…" : "保存"}
-            </button>
-            <button className="sp-btn sp-btn-secondary" type="button" onClick={() => void testBridge()} disabled={Boolean(bridgeBusy)}>
-              {bridgeBusy === "testing" ? "测试中…" : "测试 QQ"}
-            </button>
-            <button className="sp-btn sp-btn-danger" type="button" onClick={() => void stopBridge()} disabled={Boolean(bridgeBusy) || !bridgeRunning}>
-              {bridgeBusy === "stopping" ? "停止中…" : "停止"}
-            </button>
-            <button className="sp-btn sp-btn-secondary" type="button" onClick={() => void loadBridgeLogs()} disabled={Boolean(bridgeBusy)}>
-              {bridgeBusy === "logs" ? "加载中…" : "日志"}
-            </button>
-            <button className="sp-btn sp-btn-secondary" type="button" onClick={() => void refreshBridge()} disabled={Boolean(bridgeBusy)}>
-              {bridgeBusyLabel ?? "刷新"}
-            </button>
-          </div>
-        </div>
-      </div>
-    );
-  }
 
   if (mailDetailOpen) {
     return (
@@ -1305,28 +945,15 @@ export default function Settings() {
         )}
       </div>
 
-      {/* Integrations — IM bridges, kept separate from LLM providers */}
+      {/* Integrations — kept separate from LLM providers */}
       <div className="sp-providers-section">
         <div className="sp-section-head">
           <div className="sp-section-head-text">
             <div className="sp-section-title">集成</div>
-            <div className="sp-section-sub">即时通讯桥接，将 Aris 接入外部聊天平台</div>
+            <div className="sp-section-sub">邮箱连接，将 Aris 接入 Gmail / Outlook / IMAP</div>
           </div>
         </div>
         <div className="sp-card-list">
-          <BridgeCard
-            running={bridgeRunning}
-            enabled={bridgeEnabled}
-            status={bridgeView?.statusMessage ?? "未加载"}
-            pid={bridgeView?.pid}
-            hasSecret={Boolean(bridgeView?.hasQqAppSecret)}
-            busy={Boolean(bridgeBusy)}
-            onOpen={() => setBridgeDetailOpen(true)}
-            onStart={() => void startBridge()}
-            onStop={() => void stopBridge()}
-            onTest={() => void testBridge()}
-            onLogs={() => void loadBridgeLogs()}
-          />
           <MailSettings onOpen={() => setMailDetailOpen(true)} />
         </div>
       </div>

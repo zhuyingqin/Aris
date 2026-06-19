@@ -1,4 +1,4 @@
-import { memo, useMemo, useState } from "react";
+import { memo, useMemo, useState, type ReactNode } from "react";
 import type { ChatBlock, ChatTurn } from "../types";
 import { fileOpen } from "../api/tauri";
 import MarkdownContent, { ThinkBlock } from "./MarkdownContent";
@@ -43,10 +43,55 @@ function parseInput(input: string): Record<string, unknown> {
   }
 }
 
+function parseOutput(output: string | undefined): Record<string, unknown> | null {
+  if (!output) return null;
+  try {
+    const parsed = JSON.parse(output) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function diffFromCodexChanges(output: Record<string, unknown> | null): FileChange | null {
+  const changes = output?.changes;
+  if (!changes || typeof changes !== "object" || Array.isArray(changes)) return null;
+  for (const [path, rawChange] of Object.entries(changes as Record<string, unknown>)) {
+    if (!path || !rawChange || typeof rawChange !== "object" || Array.isArray(rawChange)) continue;
+    const change = rawChange as Record<string, unknown>;
+    const type = typeof change.type === "string" ? change.type : "";
+    if (type === "update") {
+      const diff = typeof change.unified_diff === "string" ? change.unified_diff : "";
+      if (diff) return { path, diff };
+    }
+    if (type === "add") {
+      const content = typeof change.content === "string" ? change.content : "";
+      return {
+        path,
+        diff: [`--- /dev/null`, `+++ ${path}`, ...content.split("\n").map((line) => `+${line}`)].join("\n"),
+      };
+    }
+    if (type === "delete") {
+      const content = typeof change.content === "string" ? change.content : "";
+      return {
+        path,
+        diff: [`--- ${path}`, `+++ /dev/null`, ...content.split("\n").map((line) => `-${line}`)].join("\n"),
+      };
+    }
+  }
+  return null;
+}
+
 export function diffFromTool(block: Extract<ChatBlock, { kind: "tool" }>): FileChange | null {
   if (!FILE_WRITE_TOOLS.has(block.name) || block.isError) return null;
+  const output = parseOutput(block.output);
+  const codexChange = diffFromCodexChanges(output);
+  if (codexChange) return codexChange;
+
   const input = parseInput(block.input);
-  const path = String(input.path ?? input.file_path ?? input.target_file ?? "");
+  const path = String(output?.filePath ?? input.path ?? input.file_path ?? input.target_file ?? "");
   if (!path) return null;
   if (block.name === "write_file") {
     const content = String(input.content ?? "");
@@ -162,6 +207,55 @@ function ToolCall({ block }: { block: Extract<ChatBlock, { kind: "tool" }> }) {
   );
 }
 
+/**
+ * Collapses a run of consecutive calls to the same tool (e.g. 77 × mail_move)
+ * into one card with a `current/total` progress counter. Expanding it reveals
+ * the individual calls, each still independently expandable.
+ */
+function ToolGroup({ blocks }: { blocks: Extract<ChatBlock, { kind: "tool" }>[] }) {
+  const [open, setOpen] = useState(false);
+  const total = blocks.length;
+  const done = blocks.filter((b) => b.output !== undefined).length;
+  const running = done < total;
+  const anyError = blocks.some((b) => b.isError);
+  const status = running ? "Running" : anyError ? "Failed" : "Succeeded";
+  const className = running ? "tool-running" : anyError ? "tool-error" : "tool-done";
+  // While running, point at the call in flight (done + 1); when finished, total.
+  const current = running ? Math.min(done + 1, total) : total;
+  const toggle = () => setOpen((value) => !value);
+  return (
+    <div className={`chat-tool chat-tool-group ${className}`}>
+      <div
+        className="chat-tool-header"
+        role="button"
+        tabIndex={0}
+        onClick={toggle}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            toggle();
+          }
+        }}
+      >
+        <span className="tool-status-icon">{running ? "◌" : anyError ? "×" : "✓"}</span>
+        <span className="tool-status-label">{status}</span>
+        <span className="tool-name">{blocks[0].name}</span>
+        <span className="tool-group-count" title={`${current} / ${total}`}>
+          {current}/{total}
+        </span>
+        <span className="tool-collapse-btn">{open ? "▾" : "▸"}</span>
+      </div>
+      {open && (
+        <div className="chat-tool-body chat-tool-group-body">
+          {blocks.map((b, i) => (
+            <ToolCall key={b.id ?? i} block={b} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function PermissionCall({
   block,
   onPermissionRespond,
@@ -202,6 +296,76 @@ function PermissionCall({
   );
 }
 
+function renderSingleBlock(
+  block: ChatBlock,
+  index: number,
+  turn: ChatTurn,
+  onPermissionRespond: (promptId: string, allow: boolean) => void,
+) {
+  if (block.kind === "text") {
+    if (!block.text) return null;
+    return turn.role === "assistant" ? (
+      <MarkdownContent
+        key={index}
+        text={block.text}
+        streaming={Boolean(turn.streaming && index === turn.blocks.length - 1)}
+      />
+    ) : (
+      <div key={index} className="chat-text">
+        {block.text}
+      </div>
+    );
+  }
+  if (block.kind === "thinking") {
+    return block.thinking ? (
+      <ThinkBlock
+        key={index}
+        content={block.thinking}
+        streaming={Boolean(turn.streaming && index === turn.blocks.length - 1)}
+      />
+    ) : null;
+  }
+  if (block.kind === "permission") {
+    return <PermissionCall key={block.id} block={block} onPermissionRespond={onPermissionRespond} />;
+  }
+  // TodoWrite plans are surfaced by the floating workflow box, not inline.
+  if (block.kind === "tool" && block.name === "TodoWrite") return null;
+  return <ToolCall key={block.id ?? index} block={block} />;
+}
+
+/**
+ * Renders a turn's blocks, collapsing runs of ≥2 consecutive calls to the same
+ * tool into a single {@link ToolGroup}. Other blocks render individually.
+ */
+function renderBlocks(
+  turn: ChatTurn,
+  onPermissionRespond: (promptId: string, allow: boolean) => void,
+) {
+  const blocks = turn.blocks;
+  const out: ReactNode[] = [];
+  let i = 0;
+  while (i < blocks.length) {
+    const block = blocks[i];
+    if (block.kind === "tool" && block.name !== "TodoWrite") {
+      let j = i + 1;
+      while (j < blocks.length) {
+        const next = blocks[j];
+        if (next.kind !== "tool" || next.name !== block.name) break;
+        j += 1;
+      }
+      if (j - i > 1) {
+        const run = blocks.slice(i, j) as Extract<ChatBlock, { kind: "tool" }>[];
+        out.push(<ToolGroup key={block.id ?? `group-${i}`} blocks={run} />);
+        i = j;
+        continue;
+      }
+    }
+    out.push(renderSingleBlock(block, i, turn, onPermissionRespond));
+    i += 1;
+  }
+  return out;
+}
+
 function hasRenderableContent(turn: ChatTurn): boolean {
   return turn.blocks.some((block) => {
     if (block.kind === "text") return Boolean(block.text.trim());
@@ -229,25 +393,7 @@ function ChatMessage({ turn, canRetry, onEdit, onRetry, onContinue, onPermission
           {turn.attachments.map((attachment) => <span key={attachment.id}>{attachment.kind === "image" ? "Image" : "File"}: {attachment.name}</span>)}
         </div>
       )}
-      {turn.blocks.map((block, index) => {
-        if (block.kind === "text") {
-          if (!block.text) return null;
-          return turn.role === "assistant"
-            ? <MarkdownContent key={index} text={block.text} streaming={Boolean(turn.streaming && index === turn.blocks.length - 1)} />
-            : <div key={index} className="chat-text">{block.text}</div>;
-        }
-        if (block.kind === "thinking") {
-          return block.thinking
-            ? <ThinkBlock key={index} content={block.thinking} streaming={Boolean(turn.streaming && index === turn.blocks.length - 1)} />
-            : null;
-        }
-        if (block.kind === "permission") {
-          return <PermissionCall key={block.id} block={block} onPermissionRespond={onPermissionRespond} />;
-        }
-        // TodoWrite plans are surfaced by the floating workflow box, not inline.
-        if (block.kind === "tool" && block.name === "TodoWrite") return null;
-        return <ToolCall key={block.id ?? index} block={block} />;
-      })}
+      {renderBlocks(turn, onPermissionRespond)}
       {!turn.streaming && !turn.error && !hasContent && turn.role === "assistant" && (
         <div className="chat-empty-response">Model returned an empty response.</div>
       )}

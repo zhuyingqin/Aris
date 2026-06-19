@@ -9,7 +9,7 @@ import ChatComposer, { attachmentFromFile, resizeComposerTextarea } from "./Chat
 import ChatMessage, { diffFromTool } from "./ChatMessage";
 import ChatSidebar from "./ChatSidebar";
 import CommandSelection from "./CommandSelection";
-import { isNearBottom } from "./ChatThread";
+import { isNearBottom, isScrollbarPointer, shouldPauseAutoFollowForWheel } from "./ChatThread";
 import {
   CURRENT_KEY,
   SESSIONS_KEY,
@@ -65,6 +65,29 @@ describe("Chat interaction helpers", () => {
     expect(isNearBottom({ scrollHeight: 1000, scrollTop: 300, clientHeight: 200 })).toBe(false);
   });
 
+  it("pauses auto-follow as soon as the reader scrolls upward", () => {
+    expect(shouldPauseAutoFollowForWheel(-1)).toBe(true);
+    expect(shouldPauseAutoFollowForWheel(1)).toBe(false);
+  });
+
+  it("detects pointer starts in the scrollbar gutter", () => {
+    const element = document.createElement("div");
+    vi.spyOn(element, "getBoundingClientRect").mockReturnValue({
+      top: 0,
+      right: 300,
+      bottom: 400,
+      left: 0,
+      width: 300,
+      height: 400,
+      x: 0,
+      y: 0,
+      toJSON: () => undefined,
+    } as DOMRect);
+
+    expect(isScrollbarPointer(element, 288)).toBe(true);
+    expect(isScrollbarPointer(element, 240)).toBe(false);
+  });
+
   it("creates a readable diff for file edit tools", () => {
     const change = diffFromTool({
       kind: "tool",
@@ -74,6 +97,26 @@ describe("Chat interaction helpers", () => {
     });
     expect(change?.diff).toContain("-old");
     expect(change?.diff).toContain("+new");
+  });
+
+  it("prefers Codex-style file changes from tool output", () => {
+    const change = diffFromTool({
+      kind: "tool",
+      name: "edit_file",
+      input: JSON.stringify({ path: "src/a.ts", old_string: "old", new_string: "new" }),
+      output: JSON.stringify({
+        changes: {
+          "src/a.ts": {
+            type: "update",
+            unified_diff: "--- src/a.ts\n+++ src/a.ts\n@@ -1 +1 @@\n-old\n+new",
+          },
+        },
+      }),
+    });
+    expect(change).toEqual({
+      path: "src/a.ts",
+      diff: "--- src/a.ts\n+++ src/a.ts\n@@ -1 +1 @@\n-old\n+new",
+    });
   });
 
   it("renders generated file paths as openable links", () => {

@@ -62,6 +62,9 @@ function providerAuthNotice(email: string): string | null {
   if (["outlook.com", "hotmail.com", "live.com", "msn.com"].includes(domain) || domain.endsWith(".onmicrosoft.com")) {
     return "Outlook.com / Microsoft 365 的密码式 IMAP/SMTP 路径不可用。请使用 Continue with Outlook 的 OAuth/Graph 连接。";
   }
+  if (["126.com", "163.com", "yeah.net", "188.com"].includes(domain)) {
+    return "网易邮箱需要先在网页端开启 IMAP/SMTP 服务，并使用客户端授权码作为密码。若出现 Unsafe Login，说明网易风控拒绝了当前客户端或登录环境，请先完成网页端安全验证，或联系 kefu@188.com。";
+  }
   return null;
 }
 

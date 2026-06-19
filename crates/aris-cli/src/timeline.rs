@@ -488,6 +488,9 @@ fn diff_from_tool_result(tool_name: &str, output: &str) -> Option<TimelineDiff> 
         return None;
     }
     let value: Value = serde_json::from_str(output).ok()?;
+    if let Some(diff) = diff_from_codex_changes(&value) {
+        return Some(diff);
+    }
     let file_path = value
         .get("filePath")
         .or_else(|| value.get("notebookPath"))
@@ -525,6 +528,81 @@ fn diff_from_tool_result(tool_name: &str, output: &str) -> Option<TimelineDiff> 
         removed_lines,
         patch_hash: sha256_hex(patch_identity.as_bytes()),
     })
+}
+
+fn diff_from_codex_changes(value: &Value) -> Option<TimelineDiff> {
+    let changes = value.get("changes")?.as_object()?;
+    for (file_path, change) in changes {
+        let kind = change.get("type").and_then(Value::as_str)?;
+        let display_path = change
+            .get("move_path")
+            .and_then(Value::as_str)
+            .unwrap_or(file_path);
+        match kind {
+            "update" => {
+                let unified_diff = change.get("unified_diff").and_then(Value::as_str)?;
+                if unified_diff.trim().is_empty() {
+                    continue;
+                }
+                let (added_lines, removed_lines) = count_unified_diff_lines(unified_diff);
+                if added_lines == 0 && removed_lines == 0 {
+                    continue;
+                }
+                return Some(TimelineDiff {
+                    file_path: display_path.to_string(),
+                    hunks: unified_diff
+                        .lines()
+                        .filter(|line| line.starts_with("@@ "))
+                        .count()
+                        .max(1),
+                    added_lines,
+                    removed_lines,
+                    patch_hash: sha256_hex(unified_diff.as_bytes()),
+                });
+            }
+            "add" => {
+                let content = change
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                return Some(TimelineDiff {
+                    file_path: display_path.to_string(),
+                    hunks: 1,
+                    added_lines: content.lines().count(),
+                    removed_lines: 0,
+                    patch_hash: sha256_hex(content.as_bytes()),
+                });
+            }
+            "delete" => {
+                let content = change
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                return Some(TimelineDiff {
+                    file_path: display_path.to_string(),
+                    hunks: 1,
+                    added_lines: 0,
+                    removed_lines: content.lines().count(),
+                    patch_hash: sha256_hex(content.as_bytes()),
+                });
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn count_unified_diff_lines(unified_diff: &str) -> (usize, usize) {
+    let mut added_lines = 0usize;
+    let mut removed_lines = 0usize;
+    for line in unified_diff.lines() {
+        if line.starts_with('+') && !line.starts_with("+++") {
+            added_lines += 1;
+        } else if line.starts_with('-') && !line.starts_with("---") {
+            removed_lines += 1;
+        }
+    }
+    (added_lines, removed_lines)
 }
 
 fn diff_from_file_pair(file_path: &str, value: &Value) -> Option<TimelineDiff> {
@@ -602,9 +680,19 @@ fn collect_paths_from_value(value: &Value, paths: &mut BTreeSet<String>) {
     match value {
         Value::Object(map) => {
             for (key, value) in map {
+                if key == "changes" {
+                    if let Some(changes) = value.as_object() {
+                        paths.extend(changes.keys().cloned());
+                    }
+                }
                 if matches!(
                     key.as_str(),
-                    "path" | "filePath" | "file_path" | "notebook_path" | "notebookPath"
+                    "path"
+                        | "filePath"
+                        | "file_path"
+                        | "move_path"
+                        | "notebook_path"
+                        | "notebookPath"
                 ) {
                     if let Some(path) = value.as_str() {
                         paths.insert(path.to_string());
@@ -788,5 +876,44 @@ mod tests {
             timeline.active_head_id.as_deref(),
             Some(timeline.nodes.last().expect("last node").id.as_str())
         );
+    }
+
+    #[test]
+    fn builds_file_diff_from_codex_style_changes() {
+        let tool_output = json!({
+            "changes": {
+                "demo.txt": {
+                    "type": "update",
+                    "unified_diff": "--- demo.txt\n+++ demo.txt\n@@ -1 +1,2 @@\n-old\n+new\n+more"
+                }
+            }
+        })
+        .to_string();
+        let session = Session {
+            version: 1,
+            messages: vec![
+                ConversationMessage::user_text("change the file"),
+                ConversationMessage {
+                    role: MessageRole::Tool,
+                    blocks: vec![ContentBlock::ToolResult {
+                        tool_use_id: "tool-1".to_string(),
+                        tool_name: "edit_file".to_string(),
+                        output: tool_output,
+                        is_error: false,
+                    }],
+                    usage: None,
+                },
+            ],
+        };
+
+        let timeline = timeline_from_session("session-test", &session);
+        let diff_node = timeline
+            .nodes
+            .iter()
+            .find(|node| node.kind == TimelineNodeKind::FileDiff)
+            .expect("file diff node");
+        assert_eq!(diff_node.file_paths, vec!["demo.txt".to_string()]);
+        assert_eq!(diff_node.diff.as_ref().expect("diff").added_lines, 2);
+        assert_eq!(diff_node.diff.as_ref().expect("diff").removed_lines, 1);
     }
 }

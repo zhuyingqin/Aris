@@ -1,4 +1,4 @@
-//! On-disk message-summary cache for generic IMAP accounts.
+//! On-disk message cache for mail accounts.
 //!
 //! Reopening a mailbox should be instant: instead of re-fetching every row over
 //! IMAP, we persist the summaries we have already rendered under
@@ -14,7 +14,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use super::model::MailMessageSummary;
+use super::model::{MailMessageFull, MailMessageSummary};
 
 /// Bump when the cached summary shape or how it's produced changes, so stale
 /// caches from older builds are dropped instead of shown. v1 → v2 fixed
@@ -71,6 +71,14 @@ fn cache_path(account_id: &str, folder: &str) -> PathBuf {
     ))
 }
 
+fn message_cache_path(account_id: &str, message_id: &str) -> PathBuf {
+    cache_dir().join("messages").join(format!(
+        "{}__{}.json",
+        sanitize(account_id),
+        sanitize(message_id)
+    ))
+}
+
 pub fn load(account_id: &str, folder: &str) -> Option<FolderCache> {
     let cache: FolderCache = std::fs::read_to_string(cache_path(account_id, folder))
         .ok()
@@ -90,10 +98,38 @@ pub fn save(account_id: &str, folder: &str, cache: &FolderCache) -> Result<(), S
     super::atomic_file::write_replace(&path, body).map_err(|e| e.to_string())
 }
 
+pub fn load_message(account_id: &str, message_id: &str) -> Option<MailMessageFull> {
+    std::fs::read_to_string(message_cache_path(account_id, message_id))
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+}
+
+pub fn save_message(
+    account_id: &str,
+    message_id: &str,
+    message: &MailMessageFull,
+) -> Result<(), String> {
+    let body = serde_json::to_string(message).map_err(|e| e.to_string())?;
+    super::atomic_file::write_replace(&message_cache_path(account_id, message_id), body)
+        .map_err(|e| e.to_string())
+}
+
 /// Drop every cached folder for an account (called on disconnect).
 pub fn clear_account(account_id: &str) {
     let prefix = format!("{}__", sanitize(account_id));
     let Ok(entries) = std::fs::read_dir(cache_dir()) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(prefix.as_str())
+        {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+    let Ok(entries) = std::fs::read_dir(cache_dir().join("messages")) else {
         return;
     };
     for entry in entries.flatten() {

@@ -205,10 +205,12 @@ function parseTodoList(input: string): ChatTodoItem[] | null {
   return todos;
 }
 
-// The latest TodoWrite plan in a thread drives the floating workflow box. The
-// model emits a fresh full list on every update, so the last call wins.
+// The latest TodoWrite plan for the current user request drives the floating
+// workflow box. The model emits a fresh full list on every update, so the last
+// call in the current turn wins.
 export function latestTodosFromTurns(turns: ChatTurn[]): ChatTodoItem[] {
-  for (let turnIndex = turns.length - 1; turnIndex >= 0; turnIndex -= 1) {
+  const start = latestUserTurnIndex(turns);
+  for (let turnIndex = turns.length - 1; turnIndex >= start; turnIndex -= 1) {
     const blocks = turns[turnIndex].blocks;
     for (let blockIndex = blocks.length - 1; blockIndex >= 0; blockIndex -= 1) {
       const block = blocks[blockIndex];
@@ -297,22 +299,57 @@ function toolInputPath(input: Record<string, unknown> | null): string | null {
   return stringField(input, ["path", "file_path", "target_file", "notebook_path"]);
 }
 
-function changeFromWriteTool(
+function statusFromCodexChangeType(change: Record<string, unknown>): ChatFileChangeStatus | null {
+  const type = typeof change.type === "string" ? change.type : "";
+  if (type === "add") return "added";
+  if (type === "delete") return "deleted";
+  if (type === "update") return typeof change.move_path === "string" && change.move_path.trim()
+    ? "renamed"
+    : "modified";
+  return null;
+}
+
+function changesFromCodexOutput(
+  output: Record<string, unknown> | null,
+  sourceTool: string,
+  projectRoot?: string | null,
+): ChatFileChange[] {
+  const rawChanges = output?.changes;
+  if (!rawChanges || typeof rawChanges !== "object" || Array.isArray(rawChanges)) return [];
+  const changes: ChatFileChange[] = [];
+  for (const [rawPath, rawChange] of Object.entries(rawChanges as Record<string, unknown>)) {
+    if (!rawPath || !rawChange || typeof rawChange !== "object" || Array.isArray(rawChange)) continue;
+    const change = rawChange as Record<string, unknown>;
+    const status = statusFromCodexChangeType(change);
+    if (!status) continue;
+    const path = normalizeFileChangePath(
+      typeof change.move_path === "string" && change.move_path.trim() ? change.move_path : rawPath,
+      projectRoot,
+    );
+    if (path) changes.push({ path, status, sourceTool });
+  }
+  return changes;
+}
+
+function changesFromWriteTool(
   block: Extract<ChatBlock, { kind: "tool" }>,
   projectRoot?: string | null,
-): ChatFileChange | null {
-  if (!FILE_CHANGE_TOOL_NAMES.has(block.name) || block.isError || block.output === undefined) return null;
+): ChatFileChange[] {
+  if (!FILE_CHANGE_TOOL_NAMES.has(block.name) || block.isError || block.output === undefined) return [];
   const input = parseJsonObject(block.input);
   const output = parseJsonObject(block.output);
+  const codexChanges = changesFromCodexOutput(output, block.name, projectRoot);
+  if (codexChanges.length > 0) return codexChanges;
+
   const outputPath = stringField(output, ["filePath", "path", "target_file", "notebook_path"]);
   const path = normalizeFileChangePath(outputPath ?? toolInputPath(input) ?? "", projectRoot);
-  if (!path) return null;
+  if (!path) return [];
 
   const outputKind = stringField(output, ["type"]);
   const status: ChatFileChangeStatus = block.name === "write_file" && outputKind === "create"
     ? "added"
     : "modified";
-  return { path, status, sourceTool: block.name };
+  return [{ path, status, sourceTool: block.name }];
 }
 
 function changesFromShellTool(
@@ -367,8 +404,9 @@ export function latestFileChangesFromTurns(
     if (turn.role !== "assistant") continue;
     for (const block of turn.blocks) {
       if (block.kind !== "tool") continue;
-      const direct = changeFromWriteTool(block, projectRoot);
-      if (direct) rememberFileChange(changes, direct);
+      for (const direct of changesFromWriteTool(block, projectRoot)) {
+        rememberFileChange(changes, direct);
+      }
       for (const shellChange of changesFromShellTool(block, projectRoot)) {
         rememberFileChange(changes, shellChange);
       }

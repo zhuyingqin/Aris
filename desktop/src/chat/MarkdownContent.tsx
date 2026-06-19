@@ -152,6 +152,8 @@ export const ThinkBlock = memo(function ThinkBlock({
   const [open, setOpen] = useState(streaming);
   const [elapsedSec, setElapsedSec] = useState(0);
   const startRef = useRef<number | null>(null);
+  const wasStreaming = useRef(streaming);
+  const bodyRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (!streaming) {
@@ -168,6 +170,20 @@ export const ThinkBlock = memo(function ThinkBlock({
     }, 1000);
     return () => window.clearInterval(id);
   }, [streaming]);
+
+  // Collapse once thinking finishes (streaming true → false), but leave the
+  // user free to re-open it afterwards.
+  useEffect(() => {
+    if (wasStreaming.current && !streaming) setOpen(false);
+    wasStreaming.current = streaming;
+  }, [streaming]);
+
+  // Keep the bounded body pinned to the newest thinking text while it streams.
+  useEffect(() => {
+    if (streaming && open && bodyRef.current) {
+      bodyRef.current.scrollTop = bodyRef.current.scrollHeight;
+    }
+  }, [content, streaming, open]);
 
   const preview = content.slice(0, 80).replace(/\s+/g, " ");
   const label = streaming
@@ -186,7 +202,11 @@ export const ThinkBlock = memo(function ThinkBlock({
           <span className="md-think-preview">{preview}{content.length > 80 ? "..." : ""}</span>
         )}
       </button>
-      {open && <div className="md-think-body"><ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown></div>}
+      {open && (
+        <div className="md-think-body" ref={bodyRef}>
+          <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
+        </div>
+      )}
     </div>
   );
 });

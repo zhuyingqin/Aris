@@ -57,6 +57,30 @@ describe("latestTodosFromTurns", () => {
     expect(todos[1]).toMatchObject({ content: "实现 Rust IMAP/SMTP", status: "in_progress" });
   });
 
+  it("does not carry a previous request's plan into the current request", () => {
+    const turns: ChatTurn[] = [
+      userTurn("first task"),
+      todoTurn([{ content: "old", activeForm: "old", status: "in_progress" }]),
+      userTurn("second task"),
+    ];
+
+    expect(latestTodosFromTurns(turns)).toEqual([]);
+  });
+
+  it("uses the latest TodoWrite update within the current request", () => {
+    const turns: ChatTurn[] = [
+      userTurn("first task"),
+      todoTurn([{ content: "old", activeForm: "old", status: "completed" }]),
+      userTurn("second task"),
+      todoTurn([{ content: "draft", activeForm: "draft", status: "in_progress" }]),
+      todoTurn([{ content: "final", activeForm: "final", status: "completed" }]),
+    ];
+
+    expect(latestTodosFromTurns(turns)).toEqual([
+      { content: "final", activeForm: "final", status: "completed" },
+    ]);
+  });
+
   it("falls back to content when activeForm is missing", () => {
     const todos = latestTodosFromTurns([todoTurn([{ content: "lone step", status: "pending" }])]);
     expect(todos[0]).toMatchObject({ content: "lone step", activeForm: "lone step" });
@@ -111,6 +135,33 @@ describe("latestFileChangesFromTurns", () => {
       { path: "desktop/src/App.tsx", status: "modified", sourceTool: "git status" },
       { path: "desktop/src/new.ts", status: "added", sourceTool: "git status" },
       { path: "desktop/src/renamed.ts", status: "renamed", sourceTool: "git status" },
+    ]);
+  });
+
+  it("extracts Codex-style structured file changes from tool output", () => {
+    const turns: ChatTurn[] = [
+      userTurn("codex changes"),
+      toolTurn(
+        "edit_file",
+        { path: "desktop/src/App.tsx", old_string: "old", new_string: "new" },
+        {
+          changes: {
+            "F:\\Agent\\Aris\\desktop\\src\\App.tsx": {
+              type: "update",
+              unified_diff: "--- a\n+++ b\n@@ -1 +1 @@\n-old\n+new",
+            },
+            "F:\\Agent\\Aris\\desktop\\src\\new.ts": {
+              type: "add",
+              content: "new",
+            },
+          },
+        },
+      ),
+    ];
+
+    expect(latestFileChangesFromTurns(turns, "F:\\Agent\\Aris")).toEqual([
+      { path: "desktop/src/App.tsx", status: "modified", sourceTool: "edit_file" },
+      { path: "desktop/src/new.ts", status: "added", sourceTool: "edit_file" },
     ]);
   });
 });

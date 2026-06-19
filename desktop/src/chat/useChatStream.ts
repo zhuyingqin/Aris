@@ -142,6 +142,10 @@ export function useChatStream({ patchAssistant, onComplete, onError }: StreamHan
     try {
       const reply = await chatSend(sessionId, message);
       flush(sessionId);
+      if (stopRequested.current.has(sessionId)) {
+        onError(sessionId, "", true);
+        return false;
+      }
       onComplete(sessionId, reply);
       return true;
     } catch (error) {
@@ -158,13 +162,17 @@ export function useChatStream({ patchAssistant, onComplete, onError }: StreamHan
   const stop = useCallback(async (sessionId: string) => {
     if (stopRequested.current.has(sessionId)) return;
     stopRequested.current.add(sessionId);
+    flush(sessionId);
+    runningSessions.current.delete(sessionId);
+    setRunningSessionIds(new Set(runningSessions.current));
+    onError(sessionId, "", true);
     try {
       await chatCancel(sessionId);
     } catch (error) {
       stopRequested.current.delete(sessionId);
       throw error;
     }
-  }, []);
+  }, [flush, onError]);
 
   return {
     busy: runningSessionIds.size > 0,

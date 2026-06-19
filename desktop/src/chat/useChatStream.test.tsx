@@ -141,4 +141,42 @@ describe("useChatStream concurrent sessions", () => {
       await result.current.run("chat-large", "go");
     });
   });
+
+  it("stops only the selected session and updates local state immediately", async () => {
+    for (const listener of [
+      mocks.onChatDelta,
+      mocks.onChatThinkingDelta,
+      mocks.onChatTool,
+      mocks.onChatToolResult,
+      mocks.onChatPermissionRequest,
+      mocks.onChatPermissionResolved,
+      mocks.onChatDone,
+    ]) {
+      listener.mockReturnValue(Promise.resolve(() => undefined));
+    }
+    mocks.chatSend.mockImplementation(() => new Promise<string>(() => undefined));
+    mocks.chatCancel.mockResolvedValue(undefined);
+
+    const onError = vi.fn();
+    const { result } = renderHook(() => useChatStream({
+      patchAssistant: vi.fn(),
+      onComplete: vi.fn(),
+      onError,
+    }));
+
+    act(() => {
+      void result.current.run("chat-a", "A");
+      void result.current.run("chat-b", "B");
+    });
+    expect(result.current.runningSessionIds).toEqual(new Set(["chat-a", "chat-b"]));
+
+    await act(async () => {
+      await result.current.stop("chat-a");
+    });
+
+    expect(mocks.chatCancel).toHaveBeenCalledWith("chat-a");
+    expect(result.current.runningSessionIds).toEqual(new Set(["chat-b"]));
+    expect(onError).toHaveBeenCalledWith("chat-a", "", true);
+    expect(onError).not.toHaveBeenCalledWith("chat-b", expect.anything(), true);
+  });
 });

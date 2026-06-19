@@ -238,6 +238,10 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+async function openSelectedPaperOverview(user: { click: (element: Element) => Promise<void> }) {
+  await user.click(screen.getByRole("tab", { name: "简报" }));
+}
+
 describe("Literature library", () => {
   it("loads the persisted library and shows pipeline counts", async () => {
     render(<Literature />);
@@ -260,6 +264,7 @@ describe("Literature library", () => {
   });
 
   it("normalizes legacy records and clearly shows a missing abstract", async () => {
+    const user = userEvent.setup();
     const legacy = fixtureLibrary();
     const paper = legacy.papers[0] as Partial<LiteraturePaper>;
     delete paper.abstract;
@@ -270,6 +275,8 @@ describe("Literature library", () => {
 
     render(<Literature />);
 
+    await screen.findAllByText("Persisted Paper on Grounded Reading");
+    await openSelectedPaperOverview(user);
     expect(await screen.findByText("当前元数据源未提供摘要。可尝试重新检索或从论文页面补充元数据。")).toBeTruthy();
     expect(screen.getByText("缺失")).toBeTruthy();
   });
@@ -292,7 +299,7 @@ describe("Literature library", () => {
     expect(screen.queryByText("Literature Workflow")).toBeNull();
     expect(screen.queryByText("Screen, understand, and convert papers into evidence.")).toBeNull();
     expect(screen.queryByRole("tab", { name: "知识库" })).toBeNull();
-    expect(screen.getByRole("tab", { name: "知识点" })).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "知识图谱" })).toBeTruthy();
 
     await user.click(screen.getByRole("tab", { name: "知识图谱" }));
 
@@ -514,7 +521,7 @@ describe("Literature library", () => {
 
     render(<Literature />);
     await screen.findAllByText("Persisted Paper on Grounded Reading");
-    await user.click(screen.getByRole("button", { name: "下载 PDF" }));
+    await user.click(screen.getByRole("button", { name: "获取 PDF" }));
 
     expect(mocks.literatureDownloadPdf).not.toHaveBeenCalled();
     expect(useStore.getState().pendingChatInput).toContain("Playwright MCP");
@@ -605,6 +612,7 @@ describe("Literature library", () => {
 
     render(<Literature />);
     await screen.findAllByText("Persisted Paper on Grounded Reading");
+    await openSelectedPaperOverview(user);
     await user.click(screen.getByRole("button", { name: "从完整全文生成简报" }));
 
     expect((await screen.findAllByText(/全文简报生成失败/)).length).toBeGreaterThan(0);
@@ -630,6 +638,7 @@ describe("Literature library", () => {
 
     render(<Literature />);
     await screen.findAllByText("Persisted Paper on Grounded Reading");
+    await openSelectedPaperOverview(user);
     await user.click(screen.getByRole("button", { name: "从完整全文生成简报" }));
 
     expect((await screen.findAllByText(/PDF 全文不完整/)).length).toBeGreaterThan(0);
@@ -686,6 +695,7 @@ describe("Literature library", () => {
     );
     render(<Literature />);
     await screen.findAllByText("Persisted Paper on Grounded Reading");
+    await openSelectedPaperOverview(user);
     await user.click(screen.getByRole("button", { name: "从完整全文生成简报" }));
 
     expect(await screen.findByText("Reviewers drown in papers.")).toBeTruthy();
