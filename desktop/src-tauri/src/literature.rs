@@ -106,7 +106,7 @@ impl ToolExecutor for NoTools {
     }
 }
 
-fn run_oneshot(system: &str, message: ConversationMessage) -> Result<String, String> {
+pub(crate) fn run_oneshot(system: &str, message: ConversationMessage) -> Result<String, String> {
     let config = crate::config::load_object();
     let (model, _provider, executor_config) = aris_chat::resolve_settings_executor_config(&config)?;
     if message
@@ -221,21 +221,23 @@ fn resolve_pdf_path_at(
     {
         return Err("invalid PDF path".to_string());
     }
-    let papers_dir = base
-        .join("papers")
-        .canonicalize()
-        .map_err(|e| e.to_string())?;
+    let allowed_roots = ["papers", "slides", "poster", "studio"]
+        .into_iter()
+        .filter_map(|directory| base.join(directory).canonicalize().ok())
+        .collect::<Vec<_>>();
     let path = base
         .join(relative)
         .canonicalize()
         .map_err(|e| e.to_string())?;
-    if !path.starts_with(&papers_dir)
+    if !allowed_roots.iter().any(|root| path.starts_with(root))
         || !path
             .extension()
             .and_then(|value| value.to_str())
             .is_some_and(|value| value.eq_ignore_ascii_case("pdf"))
     {
-        return Err("PDF must be a downloaded file inside papers/".to_string());
+        return Err(
+            "PDF must be a local file inside papers/, slides/, poster/, or studio/".to_string(),
+        );
     }
     Ok(path)
 }
@@ -764,13 +766,19 @@ mod tests {
     }
 
     #[test]
-    fn pdf_paths_are_limited_to_downloaded_papers() {
+    fn pdf_paths_are_limited_to_library_and_studio_results() {
         let base = temp_base("paths");
         std::fs::write(base.join("papers/paper.pdf"), b"%PDF-1.4").expect("write pdf");
         std::fs::write(base.join("papers/notes.txt"), b"notes").expect("write text");
         std::fs::write(base.join("outside.pdf"), b"%PDF-1.4").expect("write outside pdf");
 
         assert!(resolve_pdf_path_at(&base, "papers/paper.pdf").is_ok());
+        std::fs::create_dir_all(base.join("slides")).expect("slides dir");
+        std::fs::write(base.join("slides/main.pdf"), b"%PDF-1.7").expect("slides pdf");
+        assert!(resolve_pdf_path_at(&base, "slides/main.pdf").is_ok());
+        std::fs::create_dir_all(base.join("studio")).expect("studio dir");
+        std::fs::write(base.join("studio/slides.pdf"), b"%PDF-1.7").expect("studio pdf");
+        assert!(resolve_pdf_path_at(&base, "studio/slides.pdf").is_ok());
         assert!(resolve_pdf_path_at(&base, "papers/notes.txt").is_err());
         assert!(resolve_pdf_path_at(&base, "outside.pdf").is_err());
         assert!(resolve_pdf_path_at(&base, "../outside.pdf").is_err());

@@ -5,22 +5,22 @@ use std::time::{Duration, Instant};
 // Bundled skills are compiled into the runtime crate and re-exported
 use runtime::BUNDLED_SKILLS;
 
-use api::{
-    read_base_url, AnthropicClient, ContentBlockDelta, ImageSource, InputContentBlock,
-    InputMessage, MessageRequest, MessageResponse, OutputContentBlock,
-    StreamEvent as ApiStreamEvent, ToolChoice, ToolDefinition, ToolResultContentBlock,
+use api::{read_base_url, read_send_betas, AuthSource};
+use aris_executor::{
+    AnthropicRuntimeClient as SharedAnthropicRuntimeClient, ExecutorToolSpec, NoopStreamObserver,
 };
 use reqwest::blocking::Client;
 use runtime::{
     edit_file, execute_bash, glob_search, grep_search, load_system_prompt, read_file, write_file,
-    ApiClient, ApiRequest, AssistantEvent, BashCommandInput, ContentBlock, ConversationMessage,
-    ConversationRuntime, GrepSearchInput, MessageRole, PermissionMode, PermissionPolicy,
-    RuntimeError, Session, TokenUsage, ToolError, ToolExecutor,
+    ApiClient, ApiRequest, AssistantEvent, BashCommandInput, ConversationRuntime, GrepSearchInput,
+    PermissionMode, PermissionPolicy, RuntimeError, Session, ToolError, ToolExecutor,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+pub mod knowledge;
 pub mod literature;
+pub mod studio;
 mod team_state;
 mod workflow_state;
 
@@ -107,7 +107,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "write_file",
-            description: "Write a text file in the workspace.",
+            description: "Write a complete text file in the workspace. Prefer edit_file for localized edits; use shell scripts only for justified bulk mechanical rewrites.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -121,7 +121,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "edit_file",
-            description: "Replace text in a workspace file.",
+            description: "Replace text directly in a workspace file. Use this for small and medium edits instead of generating helper scripts; it returns Codex-style structured file changes.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -327,6 +327,93 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                     "paperId": { "type": "string", "description": "Library paper id (e.g. arxiv:2602.01491) to mark as downloaded." }
                 },
                 "required": ["url", "fileName"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::WorkspaceWrite,
+        },
+        ToolSpec {
+            name: "KnowledgeSearch",
+            description: "Search the project's confirmed knowledge base (papers/knowledge.db) BEFORE re-searching literature or answering from memory. Returns user-confirmed knowledge points — each with its original question, answer, condensed statement, supporting evidence (paperId, page, quote, stable anchor ids) and 1-hop relations to other points. Cite evidence as [paperId p.PAGE] so the user can jump to the exact PDF page. Only confirmed knowledge is returned; if nothing matches, fall back to literature search.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "minLength": 1 },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 50 }
+                },
+                "required": ["query"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
+            name: "KnowledgeUpsert",
+            description: "Propose knowledge points into the project knowledge base (papers/knowledge.db). Points are always recorded as DRAFTS — this tool cannot confirm them. Confirmation happens only through the user's review UI ('AI generates, human filters'). Every point must keep its original question and answer plus a condensed statement, and carry at least one evidence anchor (paperId + page + quote). Drafts are not retrievable until the user confirms them.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "points": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": { "type": "string" },
+                                "question": { "type": "string" },
+                                "answer": { "type": "string" },
+                                "statement": { "type": "string" },
+                                "kind": { "type": "string" },
+                                "sourcePaperId": { "type": "string" },
+                                "evidence": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "paperId": { "type": "string" },
+                                            "page": { "type": "integer" },
+                                            "quote": { "type": "string" },
+                                            "role": { "type": "string" },
+                                            "annotationId": { "type": "string" },
+                                            "evidenceId": { "type": "string" }
+                                        },
+                                        "required": ["paperId"],
+                                        "additionalProperties": false
+                                    }
+                                },
+                                "relations": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "dstId": { "type": "string" },
+                                            "kind": { "type": "string" }
+                                        },
+                                        "required": ["dstId", "kind"],
+                                        "additionalProperties": false
+                                    }
+                                }
+                            },
+                            "required": ["question", "answer", "statement"],
+                            "additionalProperties": false
+                        }
+                    }
+                },
+                "required": ["points"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::WorkspaceWrite,
+        },
+        ToolSpec {
+            name: "StudioLibraryUpsert",
+            description: "Record externally generated slide decks, posters, and interactive HTML pages in the project's shared Studio review index (studio/library.json). Existing user title, pinned state, notes, and page-specific review feedback are preserved when generated metadata is refreshed. The result returns studioLinks; include the relevant link in the final response so the user can jump directly to the generated artifact in Studio.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "artifacts": {
+                        "type": "array",
+                        "items": { "type": "object" },
+                        "description": "Generated artifact records with kind (slides, poster, or web) and at least one result path (pdfPath, pptxPath, svgPath, texPath, or htmlPath). Use htmlPath for interactive web artifacts."
+                    }
+                },
+                "required": ["artifacts"],
                 "additionalProperties": false
             }),
             required_permission: PermissionMode::WorkspaceWrite,
@@ -807,6 +894,12 @@ pub fn execute_tool(name: &str, input: &Value) -> Result<String, String> {
             .and_then(literature::run_literature_library_upsert),
         "LiteraturePdfDownload" => from_value::<literature::LiteraturePdfDownloadInput>(input)
             .and_then(literature::run_literature_pdf_download),
+        "KnowledgeSearch" => from_value::<knowledge::KnowledgeSearchInput>(input)
+            .and_then(knowledge::run_knowledge_search),
+        "KnowledgeUpsert" => from_value::<knowledge::KnowledgeUpsertInput>(input)
+            .and_then(knowledge::run_knowledge_upsert),
+        "StudioLibraryUpsert" => from_value::<studio::StudioLibraryUpsertInput>(input)
+            .and_then(studio::run_studio_library_upsert),
         "TodoWrite" => from_value::<TodoWriteInput>(input).and_then(run_todo_write),
         "LlmReview" => from_value::<LlmReviewInput>(input).and_then(run_llm_review),
         "Skill" => from_value::<SkillInput>(input).and_then(run_skill),
@@ -2101,32 +2194,28 @@ fn skill_search_roots() -> Vec<std::path::PathBuf> {
     let mut roots = Vec::new();
 
     // 1. ~/.config/aris/skills/ (ARIS user-level, highest priority)
-    let home = runtime::home_dir();
-    roots.push(
-        std::path::PathBuf::from(&home)
-            .join(".config")
-            .join("aris")
-            .join("skills"),
-    );
+    roots.push(runtime::aris_user_skills_dir());
 
-    // 2. ~/.claude/skills/ (Claude Code compat, user-level)
-    roots.push(
-        std::path::PathBuf::from(&home)
-            .join(".claude")
-            .join("skills"),
-    );
-
-    // 3. Project-level .claude/skills/
+    // 2. Project-level .aris/skills/
     if let Ok(cwd) = std::env::current_dir() {
-        roots.push(cwd.join(".claude").join("skills"));
+        roots.push(runtime::aris_project_skills_dir(&cwd));
     }
 
-    // 3. CODEX_HOME/skills (legacy compat)
+    // 3. Legacy Claude Code skills are opt-in compatibility only.
+    if runtime::legacy_claude_skills_enabled() {
+        roots.push(runtime::claude_user_skills_dir());
+
+        if let Ok(cwd) = std::env::current_dir() {
+            roots.push(runtime::claude_project_skills_dir(&cwd));
+        }
+    }
+
+    // 4. CODEX_HOME/skills (explicit legacy compat)
     if let Ok(codex_home) = std::env::var("CODEX_HOME") {
         roots.push(std::path::PathBuf::from(codex_home).join("skills"));
     }
 
-    // 4. ARIS bundled share/skills/ (next to binary)
+    // 5. ARIS bundled share/skills/ (next to binary)
     if let Ok(exe) = std::env::current_exe() {
         if let Some(bin_dir) = exe.parent() {
             let share_skills = bin_dir
@@ -2212,7 +2301,7 @@ pub fn discover_skills() -> Vec<SkillMeta> {
                 continue;
             }
             let name = entry.file_name().to_string_lossy().to_string();
-            // First-found wins (user > project > codex > bundled)
+            // First-found wins (ARIS user > ARIS project > explicit compat > bundled)
             if seen.contains(&name) {
                 continue;
             }
@@ -2243,7 +2332,7 @@ pub fn discover_skills() -> Vec<SkillMeta> {
 }
 
 /// Return the raw `SKILL.md` markdown for a skill by name, resolving filesystem
-/// skills first (user > project > codex roots) and falling back to the bundled
+/// skills first (ARIS user > ARIS project > explicit compat roots) and falling back to the bundled
 /// copy. Used by external UIs (e.g. the desktop app) to preview a skill without
 /// executing it. Returns `None` if no skill of that name exists.
 pub fn skill_markdown(name: &str) -> Option<String> {
@@ -2628,14 +2717,14 @@ fn run_agent_job(job: &AgentJob) -> Result<(), String> {
 
 fn build_agent_runtime(
     job: &AgentJob,
-) -> Result<ConversationRuntime<AnthropicRuntimeClient, SubagentToolExecutor>, String> {
+) -> Result<ConversationRuntime<SubagentRuntimeClient, SubagentToolExecutor>, String> {
     let model = job
         .manifest
         .model
         .clone()
         .unwrap_or_else(|| DEFAULT_AGENT_MODEL.to_string());
     let allowed_tools = job.allowed_tools.clone();
-    let api_client = AnthropicRuntimeClient::new(model, allowed_tools.clone())?;
+    let api_client = SubagentRuntimeClient::new(model, allowed_tools.clone())?;
     let tool_executor = SubagentToolExecutor::new(allowed_tools);
     Ok(ConversationRuntime::new(
         Session::new(),
@@ -2843,193 +2932,92 @@ fn format_agent_terminal_output(status: &str, result: Option<&str>, error: Optio
     sections.join("")
 }
 
-struct AnthropicRuntimeClient {
-    runtime: tokio::runtime::Runtime,
-    client: AnthropicClient,
+struct SubagentRuntimeClient {
+    auth: AuthSource,
+    base_url: String,
+    send_betas: bool,
     model: String,
     allowed_tools: BTreeSet<String>,
-    /// Latches the subagent's Opus 4.8 → 4.7 fallback so it warns once and
+    inner: SharedAnthropicRuntimeClient,
+    /// Latches the subagent's Opus 4.8 to 4.7 fallback so it warns once and
     /// never re-probes on subsequent turns.
     model_fell_back: bool,
 }
 
-impl AnthropicRuntimeClient {
+impl SubagentRuntimeClient {
     fn new(model: String, allowed_tools: BTreeSet<String>) -> Result<Self, String> {
-        let client = AnthropicClient::from_env()
-            .map_err(|error| error.to_string())?
-            .with_base_url(read_base_url());
+        let auth = AuthSource::from_env_or_saved().map_err(|error| error.to_string())?;
+        let base_url = read_base_url();
+        let send_betas = read_send_betas();
+        let inner =
+            build_subagent_executor(auth.clone(), &base_url, send_betas, &model, &allowed_tools)?;
         Ok(Self {
-            runtime: tokio::runtime::Runtime::new().map_err(|error| error.to_string())?,
-            client,
+            auth,
+            base_url,
+            send_betas,
             model,
             allowed_tools,
+            inner,
             model_fell_back: false,
         })
     }
+
+    fn rebuild_inner(&mut self) -> Result<(), String> {
+        self.inner = build_subagent_executor(
+            self.auth.clone(),
+            &self.base_url,
+            self.send_betas,
+            &self.model,
+            &self.allowed_tools,
+        )?;
+        Ok(())
+    }
 }
 
-impl ApiClient for AnthropicRuntimeClient {
+impl ApiClient for SubagentRuntimeClient {
     fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
-        let tools = tool_specs_for_allowed_tools(Some(&self.allowed_tools))
-            .into_iter()
-            .map(|spec| ToolDefinition {
-                name: spec.name.to_string(),
-                description: Some(spec.description.to_string()),
-                input_schema: spec.input_schema,
-            })
-            .collect::<Vec<_>>();
-        let mut message_request = MessageRequest {
-            model: self.model.clone(),
-            max_tokens: 32_000,
-            messages: convert_messages(&request.messages),
-            system: if request.system_prompt.is_empty() {
-                None
-            } else {
-                Some(serde_json::json!(request.system_prompt.join("\n\n")))
-            },
-            tools: (!tools.is_empty()).then_some(tools),
-            tool_choice: (!self.allowed_tools.is_empty()).then_some(ToolChoice::Auto),
-            stream: true,
-        };
-
-        self.runtime.block_on(async {
-            // Subagent default-model fallback: if DEFAULT_AGENT_MODEL (Opus
-            // 4.8) is unavailable (404 not_found), fall back to 4.7 and retry
-            // once so background Agent tasks don't hard-fail for non-4.8 users.
-            let mut stream = match self.client.stream_message(&message_request).await {
-                Ok(stream) => stream,
-                Err(error)
-                    if error.is_model_unavailable()
-                        && message_request.model == DEFAULT_AGENT_MODEL
-                        && !self.model_fell_back =>
-                {
-                    self.model_fell_back = true;
-                    self.model = DEFAULT_AGENT_MODEL_FALLBACK.to_string();
-                    message_request.model = DEFAULT_AGENT_MODEL_FALLBACK.to_string();
-                    eprintln!(
-                        "\x1b[33mwarning:\x1b[0m {DEFAULT_AGENT_MODEL} is not available on this \
-                         account; subagent falling back to {DEFAULT_AGENT_MODEL_FALLBACK}."
-                    );
-                    self.client
-                        .stream_message(&message_request)
-                        .await
-                        .map_err(|error| RuntimeError::new(error.to_string()))?
-                }
-                Err(error) => return Err(RuntimeError::new(error.to_string())),
-            };
-            let mut events = Vec::new();
-            let mut pending_tool: Option<(String, String, String)> = None;
-            let mut saw_stop = false;
-            let mut stop_reason: Option<String> = None;
-
-            loop {
-                let event = match stream.next_event().await {
-                    Ok(Some(event)) => event,
-                    Ok(None) => break,
-                    Err(_error) if !events.is_empty() || pending_tool.is_some() => {
-                        stop_reason = Some("stream_error_after_partial_output".to_string());
-                        break;
-                    }
-                    Err(error) => return Err(RuntimeError::new(error.to_string())),
-                };
-                match event {
-                    ApiStreamEvent::MessageStart(start) => {
-                        for block in start.message.content {
-                            push_output_block(block, &mut events, &mut pending_tool, true);
-                        }
-                    }
-                    ApiStreamEvent::ContentBlockStart(start) => {
-                        push_output_block(
-                            start.content_block,
-                            &mut events,
-                            &mut pending_tool,
-                            true,
-                        );
-                    }
-                    ApiStreamEvent::ContentBlockDelta(delta) => match delta.delta {
-                        ContentBlockDelta::TextDelta { text } => {
-                            if !text.is_empty() {
-                                push_subagent_text_event(&mut events, text);
-                            }
-                        }
-                        ContentBlockDelta::InputJsonDelta { partial_json } => {
-                            if let Some((_, _, input)) = &mut pending_tool {
-                                input.push_str(&partial_json);
-                            }
-                        }
-                        ContentBlockDelta::ThinkingDelta { .. } => {}
-                        ContentBlockDelta::SignatureDelta { .. } => {}
-                    },
-                    ApiStreamEvent::ContentBlockStop(_) => {
-                        if let Some((id, name, input)) = pending_tool.take() {
-                            events.push(AssistantEvent::ToolUse { id, name, input });
-                        }
-                    }
-                    ApiStreamEvent::MessageDelta(delta) => {
-                        if let Some(reason) =
-                            delta.delta.stop_reason.filter(|value| !value.is_empty())
-                        {
-                            stop_reason = Some(reason);
-                        }
-                        events.push(AssistantEvent::Usage(TokenUsage {
-                            input_tokens: delta.usage.input_tokens,
-                            output_tokens: delta.usage.output_tokens,
-                            cache_creation_input_tokens: 0,
-                            cache_read_input_tokens: 0,
-                        }));
-                    }
-                    ApiStreamEvent::MessageStop(_) => {
-                        saw_stop = true;
-                        events.push(AssistantEvent::MessageStop);
-                    }
-                    ApiStreamEvent::Error(e) => {
-                        let msg = e
-                            .error
-                            .get("message")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("stream error")
-                            .to_string();
-                        return Err(RuntimeError::new(msg));
-                    }
-                }
-            }
-
-            let has_partial_output = events.iter().any(|event| {
-                matches!(event, AssistantEvent::TextDelta(text) if !text.is_empty())
-                    || matches!(event, AssistantEvent::ToolUse { .. })
-            }) || pending_tool.is_some();
-            if !saw_stop && has_partial_output {
-                if stop_reason.is_none() {
-                    stop_reason = Some("stream_truncated".to_string());
-                }
-                events.push(AssistantEvent::MessageStop);
-            }
-            if let Some(reason) = stop_reason {
-                let insert_at = events
-                    .iter()
-                    .position(|event| matches!(event, AssistantEvent::MessageStop))
-                    .unwrap_or(events.len());
-                events.insert(insert_at, AssistantEvent::StopReason(reason));
-            }
-
-            if events
-                .iter()
-                .any(|event| matches!(event, AssistantEvent::MessageStop))
+        match self.inner.stream(request.clone()) {
+            Ok(events) => Ok(events),
+            Err(error)
+                if error.is_model_unavailable()
+                    && self.model == DEFAULT_AGENT_MODEL
+                    && !self.model_fell_back =>
             {
-                return Ok(events);
+                self.model_fell_back = true;
+                self.model = DEFAULT_AGENT_MODEL_FALLBACK.to_string();
+                eprintln!(
+                    "\x1b[33mwarning:\x1b[0m {DEFAULT_AGENT_MODEL} is not available on this \
+                     account; subagent falling back to {DEFAULT_AGENT_MODEL_FALLBACK}."
+                );
+                self.rebuild_inner().map_err(RuntimeError::new)?;
+                self.inner.stream(request)
             }
-
-            let response = self
-                .client
-                .send_message(&MessageRequest {
-                    stream: false,
-                    ..message_request.clone()
-                })
-                .await
-                .map_err(|error| RuntimeError::new(error.to_string()))?;
-            Ok(response_to_events(response))
-        })
+            Err(error) => Err(error),
+        }
     }
+}
+
+fn build_subagent_executor(
+    auth: AuthSource,
+    base_url: &str,
+    send_betas: bool,
+    model: &str,
+    allowed_tools: &BTreeSet<String>,
+) -> Result<SharedAnthropicRuntimeClient, String> {
+    let tool_specs = tool_specs_for_allowed_tools(Some(allowed_tools))
+        .into_iter()
+        .map(|spec| ExecutorToolSpec::new(spec.name, spec.description, spec.input_schema))
+        .collect::<Vec<_>>();
+    SharedAnthropicRuntimeClient::new(
+        auth,
+        base_url.to_string(),
+        send_betas,
+        model.to_string(),
+        !tool_specs.is_empty(),
+        tool_specs,
+        32_000,
+        Box::new(NoopStreamObserver),
+    )
 }
 
 struct SubagentToolExecutor {
@@ -3062,140 +3050,8 @@ fn tool_specs_for_allowed_tools(allowed_tools: Option<&BTreeSet<String>>) -> Vec
         .collect()
 }
 
-fn convert_messages(messages: &[ConversationMessage]) -> Vec<InputMessage> {
-    messages
-        .iter()
-        .filter_map(|message| {
-            let role = match message.role {
-                MessageRole::System | MessageRole::User | MessageRole::Tool => "user",
-                MessageRole::Assistant => "assistant",
-            };
-            let content = message
-                .blocks
-                .iter()
-                .map(|block| match block {
-                    ContentBlock::Text { text } => InputContentBlock::Text { text: text.clone() },
-                    ContentBlock::Image { media_type, data } => InputContentBlock::Image {
-                        source: ImageSource::base64(media_type.clone(), data.clone()),
-                    },
-                    ContentBlock::ToolUse { id, name, input } => InputContentBlock::ToolUse {
-                        id: id.clone(),
-                        name: name.clone(),
-                        input: serde_json::from_str(input)
-                            .unwrap_or_else(|_| serde_json::json!({ "raw": input })),
-                    },
-                    ContentBlock::ToolResult {
-                        tool_use_id,
-                        output,
-                        is_error,
-                        ..
-                    } => InputContentBlock::ToolResult {
-                        tool_use_id: tool_use_id.clone(),
-                        content: vec![ToolResultContentBlock::Text {
-                            text: output.clone(),
-                        }],
-                        is_error: *is_error,
-                    },
-                    ContentBlock::Thinking {
-                        thinking,
-                        signature,
-                    } => InputContentBlock::Thinking {
-                        thinking: thinking.clone(),
-                        signature: signature.clone(),
-                    },
-                })
-                .collect::<Vec<_>>();
-            (!content.is_empty()).then(|| InputMessage {
-                role: role.to_string(),
-                content,
-            })
-        })
-        .collect()
-}
-
-fn push_output_block(
-    block: OutputContentBlock,
-    events: &mut Vec<AssistantEvent>,
-    pending_tool: &mut Option<(String, String, String)>,
-    streaming_tool_input: bool,
-) {
-    match block {
-        OutputContentBlock::Text { text } => {
-            if !text.is_empty() {
-                push_subagent_text_event(events, text);
-            }
-        }
-        OutputContentBlock::ToolUse { id, name, input } => {
-            let initial_input = if streaming_tool_input
-                && input.is_object()
-                && input.as_object().is_some_and(serde_json::Map::is_empty)
-            {
-                String::new()
-            } else {
-                input.to_string()
-            };
-            *pending_tool = Some((id, name, initial_input));
-        }
-        OutputContentBlock::Thinking {
-            thinking,
-            signature,
-        } => {
-            events.push(AssistantEvent::Thinking {
-                thinking,
-                signature,
-            });
-        }
-    }
-}
-
-fn push_subagent_text_event(events: &mut Vec<AssistantEvent>, text: String) {
-    if let Some(AssistantEvent::TextDelta(existing)) = events.last_mut() {
-        existing.push_str(&text);
-    } else if !text.is_empty() {
-        events.push(AssistantEvent::TextDelta(text));
-    }
-}
-
-fn response_to_events(response: MessageResponse) -> Vec<AssistantEvent> {
-    let mut events = Vec::new();
-    let mut pending_tool = None;
-
-    for block in response.content {
-        push_output_block(block, &mut events, &mut pending_tool, false);
-        if let Some((id, name, input)) = pending_tool.take() {
-            events.push(AssistantEvent::ToolUse { id, name, input });
-        }
-    }
-
-    events.push(AssistantEvent::Usage(TokenUsage {
-        input_tokens: response.usage.input_tokens,
-        output_tokens: response.usage.output_tokens,
-        cache_creation_input_tokens: response.usage.cache_creation_input_tokens,
-        cache_read_input_tokens: response.usage.cache_read_input_tokens,
-    }));
-    if let Some(reason) = response.stop_reason.filter(|value| !value.is_empty()) {
-        events.push(AssistantEvent::StopReason(reason));
-    }
-    events.push(AssistantEvent::MessageStop);
-    events
-}
-
 fn final_assistant_text(summary: &runtime::TurnSummary) -> String {
-    summary
-        .assistant_messages
-        .last()
-        .map(|message| {
-            message
-                .blocks
-                .iter()
-                .filter_map(|block| match block {
-                    ContentBlock::Text { text } => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("")
-        })
-        .unwrap_or_default()
+    runtime::assistant_text_from_turn_summary(summary)
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -3683,22 +3539,40 @@ fn execute_repl(input: ReplInput) -> Result<ReplOutput, String> {
     if input.code.trim().is_empty() {
         return Err(String::from("code must not be empty"));
     }
-    let _ = input.timeout_ms;
     let runtime = resolve_repl_runtime(&input.language)?;
     let started = Instant::now();
-    let output = runtime::hidden_command(runtime.program)
-        .args(runtime.args)
-        .arg(&input.code)
-        .output()
-        .map_err(|error| error.to_string())?;
+    let mut command = runtime::hidden_command(runtime.program);
+    command.args(runtime.args).arg(&input.code);
+    let output = runtime::run_managed_command(
+        &mut command,
+        format!(
+            "REPL {}: {}",
+            input.language,
+            truncate_process_label(&input.code)
+        ),
+        input.timeout_ms.map(Duration::from_millis),
+        true,
+    )
+    .map_err(|error| error.to_string())?;
 
     Ok(ReplOutput {
         language: input.language,
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        stderr: repl_stderr(&output),
         exit_code: output.status.code().unwrap_or(1),
         duration_ms: started.elapsed().as_millis(),
     })
+}
+
+fn repl_stderr(output: &runtime::ManagedCommandOutput) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    if output.timed_out {
+        append_process_status_message(stderr, "REPL exceeded timeout")
+    } else if output.interrupted {
+        append_process_status_message(stderr, "REPL interrupted by user")
+    } else {
+        stderr
+    }
 }
 
 struct ReplRuntime {
@@ -4030,22 +3904,26 @@ fn execute_shell_command(
     run_in_background: Option<bool>,
 ) -> std::io::Result<runtime::BashCommandOutput> {
     if run_in_background.unwrap_or(false) {
-        let child = runtime::hidden_command(shell)
+        let mut process = runtime::hidden_command(shell);
+        process
             .arg("-NoProfile")
             .arg("-NonInteractive")
             .arg("-Command")
             .arg(command)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()?;
+            .stderr(std::process::Stdio::null());
+        let pid = runtime::spawn_managed_background(
+            &mut process,
+            format!("PowerShell background: {}", truncate_process_label(command)),
+        )?;
         return Ok(runtime::BashCommandOutput {
             stdout: String::new(),
             stderr: String::new(),
             raw_output_path: None,
             interrupted: false,
             is_image: None,
-            background_task_id: Some(child.id().to_string()),
+            background_task_id: Some(pid.to_string()),
             backgrounded_by_user: Some(true),
             assistant_auto_backgrounded: Some(false),
             dangerously_disable_sandbox: None,
@@ -4068,72 +3946,62 @@ fn execute_shell_command(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
 
-    if let Some(timeout_ms) = timeout {
-        let mut child = process.spawn()?;
-        let started = Instant::now();
-        loop {
-            if let Some(status) = child.try_wait()? {
-                let output = child.wait_with_output()?;
-                return Ok(runtime::BashCommandOutput {
-                    stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-                    stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-                    raw_output_path: None,
-                    interrupted: false,
-                    is_image: None,
-                    background_task_id: None,
-                    backgrounded_by_user: None,
-                    assistant_auto_backgrounded: None,
-                    dangerously_disable_sandbox: None,
-                    return_code_interpretation: status
-                        .code()
-                        .filter(|code| *code != 0)
-                        .map(|code| format!("exit_code:{code}")),
-                    no_output_expected: Some(output.stdout.is_empty() && output.stderr.is_empty()),
-                    structured_content: None,
-                    persisted_output_path: None,
-                    persisted_output_size: None,
-                    sandbox_status: None,
-                });
-            }
-            if started.elapsed() >= Duration::from_millis(timeout_ms) {
-                let _ = child.kill();
-                let output = child.wait_with_output()?;
-                let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-                let stderr = if stderr.trim().is_empty() {
-                    format!("Command exceeded timeout of {timeout_ms} ms")
-                } else {
-                    format!(
-                        "{}
-Command exceeded timeout of {timeout_ms} ms",
-                        stderr.trim_end()
-                    )
-                };
-                return Ok(runtime::BashCommandOutput {
-                    stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-                    stderr,
-                    raw_output_path: None,
-                    interrupted: true,
-                    is_image: None,
-                    background_task_id: None,
-                    backgrounded_by_user: None,
-                    assistant_auto_backgrounded: None,
-                    dangerously_disable_sandbox: None,
-                    return_code_interpretation: Some(String::from("timeout")),
-                    no_output_expected: Some(false),
-                    structured_content: None,
-                    persisted_output_path: None,
-                    persisted_output_size: None,
-                    sandbox_status: None,
-                });
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
+    let output = runtime::run_managed_command(
+        &mut process,
+        format!("PowerShell: {}", truncate_process_label(command)),
+        timeout.map(Duration::from_millis),
+        true,
+    )?;
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    if output.timed_out {
+        return Ok(runtime::BashCommandOutput {
+            stdout,
+            stderr: append_process_status_message(
+                stderr,
+                &format!(
+                    "Command exceeded timeout of {} ms",
+                    timeout.unwrap_or_default()
+                ),
+            ),
+            raw_output_path: None,
+            interrupted: true,
+            is_image: None,
+            background_task_id: None,
+            backgrounded_by_user: None,
+            assistant_auto_backgrounded: None,
+            dangerously_disable_sandbox: None,
+            return_code_interpretation: Some(String::from("timeout")),
+            no_output_expected: Some(false),
+            structured_content: None,
+            persisted_output_path: None,
+            persisted_output_size: None,
+            sandbox_status: None,
+        });
+    }
+    if output.interrupted {
+        return Ok(runtime::BashCommandOutput {
+            stdout,
+            stderr: append_process_status_message(stderr, "Command interrupted by user"),
+            raw_output_path: None,
+            interrupted: true,
+            is_image: None,
+            background_task_id: None,
+            backgrounded_by_user: None,
+            assistant_auto_backgrounded: None,
+            dangerously_disable_sandbox: None,
+            return_code_interpretation: Some(String::from("interrupted")),
+            no_output_expected: Some(false),
+            structured_content: None,
+            persisted_output_path: None,
+            persisted_output_size: None,
+            sandbox_status: None,
+        });
     }
 
-    let output = process.output()?;
     Ok(runtime::BashCommandOutput {
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        stdout,
+        stderr,
         raw_output_path: None,
         interrupted: false,
         is_image: None,
@@ -4152,6 +4020,24 @@ Command exceeded timeout of {timeout_ms} ms",
         persisted_output_size: None,
         sandbox_status: None,
     })
+}
+
+fn append_process_status_message(stderr: String, message: &str) -> String {
+    if stderr.trim().is_empty() {
+        message.to_string()
+    } else {
+        format!("{}\n{message}", stderr.trim_end())
+    }
+}
+
+fn truncate_process_label(value: &str) -> String {
+    const MAX: usize = 120;
+    if value.chars().count() <= MAX {
+        value.to_string()
+    } else {
+        let head = value.chars().take(MAX).collect::<String>();
+        format!("{head}...")
+    }
 }
 
 fn resolve_cell_index(
@@ -4399,15 +4285,7 @@ fn run_llm_review(input: LlmReviewInput) -> Result<String, String> {
         let base = custom_base_url.ok_or_else(|| {
             "LlmReview: ARIS_REVIEWER_BASE_URL not set (needed for custom reviewer)".to_string()
         })?;
-        let trimmed = base.trim_end_matches('/');
-        let url = if trimmed.ends_with("/chat/completions") {
-            trimmed.to_string()
-        } else if trimmed.ends_with("/v1") {
-            format!("{trimmed}/chat/completions")
-        } else {
-            format!("{trimmed}/v1/chat/completions")
-        };
-        return call_openai_compat_reviewer(&key, &url, model, &input.prompt);
+        return call_openai_compat_reviewer(&key, &base, model, &input.prompt);
     }
 
     // Anthropic-compatible reviewer mode (e.g., Claude via proxy, DeepSeek).
@@ -4437,8 +4315,7 @@ fn run_llm_review(input: LlmReviewInput) -> Result<String, String> {
             "https://api.anthropic.com"
         };
         let base = custom_base_url.unwrap_or_else(|| default_base.to_string());
-        let endpoint = format!("{}/v1/messages", base.trim_end_matches('/'));
-        return call_anthropic_compat_reviewer(&key, &endpoint, model, &input.prompt);
+        return call_anthropic_compat_reviewer(&key, &base, model, &input.prompt);
     }
 
     // OpenAI-compat path: resolve model with fallback, then route to its endpoint.
@@ -4468,206 +4345,72 @@ fn run_llm_review(input: LlmReviewInput) -> Result<String, String> {
     call_openai_compat_reviewer(&key, &base_url, model, &input.prompt)
 }
 
-/// Returns true if this reqwest error is a transient network-level failure
-/// worth retrying (connection reset, timeout, DNS hiccup, etc.).
-/// HTTP 4xx/5xx responses are NOT retried here — those come back as Ok(response).
-fn is_transient_network_error(err: &reqwest::Error) -> bool {
-    err.is_timeout() || err.is_connect() || err.is_request() || err.is_body()
-}
-
-/// Build a fresh blocking HTTP client. Each retry attempt gets its own pool
-/// so we never reuse a broken TCP/TLS connection that caused the last failure.
-fn fresh_reviewer_client() -> reqwest::blocking::Client {
-    reqwest::blocking::Client::builder()
-        .pool_max_idle_per_host(0) // no connection pooling between calls
-        .connect_timeout(std::time::Duration::from_secs(15))
-        .timeout(std::time::Duration::from_secs(180))
-        .build()
-        .unwrap_or_else(|_| reqwest::blocking::Client::new())
-}
-
-/// Format a reqwest error with its full source chain so we can see what actually failed
-/// (DNS? TLS? connection reset?) instead of just "error sending request".
-fn describe_reqwest_error(err: &reqwest::Error) -> String {
-    let mut parts: Vec<String> = vec![err.to_string()];
-    let mut src: Option<&(dyn std::error::Error + 'static)> = std::error::Error::source(err);
-    let mut depth = 0;
-    while let Some(s) = src {
-        parts.push(format!("  caused by: {s}"));
-        src = s.source();
-        depth += 1;
-        if depth > 6 {
-            break;
-        }
+// Reviewer settings historically stored full endpoint URLs. The shared
+// executor expects provider base URLs and appends the concrete route itself.
+fn openai_executor_base_url(base_url_or_endpoint: &str) -> String {
+    let trimmed = base_url_or_endpoint.trim().trim_end_matches('/');
+    if let Some(base) = trimmed.strip_suffix("/chat/completions") {
+        base.trim_end_matches('/').to_string()
+    } else if trimmed.ends_with("/v1") || trimmed.ends_with("/openai") {
+        trimmed.to_string()
+    } else {
+        format!("{trimmed}/v1")
     }
-    parts.join("\n")
 }
 
-/// Send a reviewer request with retry on transient network errors AND HTTP 429/5xx.
-/// Up to 4 attempts total, exponential backoff (1s, 2s, 4s). Aborts early on Ctrl+C.
-/// Respects Retry-After header when present.
-fn send_reviewer_request_with_retry(
-    build: impl Fn() -> reqwest::blocking::RequestBuilder,
-) -> Result<reqwest::blocking::Response, String> {
-    const MAX_ATTEMPTS: u32 = 4;
-    let mut last_err: Option<String> = None;
-    for attempt in 1..=MAX_ATTEMPTS {
-        if runtime::is_interrupted() {
-            runtime::clear_interrupt();
-            return Err("LlmReview interrupted by user".to_string());
-        }
-        match build().send() {
-            Ok(resp) => {
-                let status = resp.status();
-                if status.is_success() {
-                    return Ok(resp);
-                }
-                let retryable = status.as_u16() == 429 || status.is_server_error();
-                if !retryable || attempt == MAX_ATTEMPTS {
-                    let body = resp.text().unwrap_or_default();
-                    return Err(format!("LlmReview API error {status}: {body}"));
-                }
-                let retry_after = resp
-                    .headers()
-                    .get("retry-after")
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|s| s.parse::<u64>().ok());
-                let body = resp.text().unwrap_or_default();
-                let preview: String = body.chars().take(160).collect();
-                let backoff_ms = if let Some(secs) = retry_after {
-                    (secs * 1000).min(10_000)
-                } else {
-                    (1u64 << (attempt - 1)) * 1000
-                };
-                eprintln!(
-                    "\x1b[33m  LlmReview {status} (attempt {attempt}/{MAX_ATTEMPTS}), retrying in {backoff_ms}ms: {preview}\x1b[0m"
-                );
-                let deadline =
-                    std::time::Instant::now() + std::time::Duration::from_millis(backoff_ms);
-                while std::time::Instant::now() < deadline {
-                    if runtime::is_interrupted() {
-                        runtime::clear_interrupt();
-                        return Err("LlmReview interrupted by user".to_string());
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(100));
-                }
-            }
-            Err(e) => {
-                let transient = is_transient_network_error(&e);
-                let detail = describe_reqwest_error(&e);
-                last_err = Some(format!("LlmReview request failed: {detail}"));
-                if !transient || attempt == MAX_ATTEMPTS {
-                    break;
-                }
-                let backoff_ms: u64 = (1u64 << (attempt - 1)) * 1000;
-                eprintln!(
-                    "\x1b[33m  LlmReview transient error (attempt {attempt}/{MAX_ATTEMPTS}), retrying in {backoff_ms}ms:\n{detail}\x1b[0m"
-                );
-                let deadline =
-                    std::time::Instant::now() + std::time::Duration::from_millis(backoff_ms);
-                while std::time::Instant::now() < deadline {
-                    if runtime::is_interrupted() {
-                        runtime::clear_interrupt();
-                        return Err("LlmReview interrupted by user".to_string());
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(100));
-                }
-            }
-        }
+fn anthropic_executor_base_url(base_url_or_endpoint: &str) -> String {
+    let trimmed = base_url_or_endpoint.trim().trim_end_matches('/');
+    if let Some(base) = trimmed.strip_suffix("/v1/messages") {
+        base.trim_end_matches('/').to_string()
+    } else if let Some(base) = trimmed.strip_suffix("/v1") {
+        base.trim_end_matches('/').to_string()
+    } else {
+        trimmed.to_string()
     }
-    Err(last_err.unwrap_or_else(|| "LlmReview request failed: unknown".to_string()))
 }
 
-/// Whether this reviewer model accepts an OpenAI-style `reasoning_effort`
-/// request field. Mirrors the allow-list in `aris-cli/openai_executor.rs`
-/// so reviewer and executor agree on which models route through which API
-/// shape.
-///
-/// v0.4.12 P1.B: uses [`reviewer_word_match`] so provider-prefixed names
-/// (`openai/o3-mini`, `proxy:o4`) are recognised — `starts_with` was the
-/// prior gate and missed those.
-#[must_use]
-fn reviewer_supports_reasoning_effort(model: &str) -> bool {
-    let m = model.to_ascii_lowercase();
-    reviewer_word_match(&m, "o1")
-        || reviewer_word_match(&m, "o3")
-        || reviewer_word_match(&m, "o4")
-        || m.contains("gpt-5.5")
-        || m.contains("gpt-5.6")
-        || m.contains("reasoner")
-        || m.contains("thinking")
-}
-
-/// v0.4.12 P1.B — word-boundary match (boundary = `-_/:` + start/end).
-/// Mirrors `runtime::usage::has_word` and `openai_executor::word_match`
-/// so reviewer capability detection stays consistent with executor +
-/// pricing table.
-fn reviewer_word_match(haystack: &str, needle: &str) -> bool {
-    let bytes = haystack.as_bytes();
-    let nbytes = needle.as_bytes();
-    if nbytes.is_empty() || bytes.len() < nbytes.len() {
-        return false;
+fn run_reviewer_turn(
+    client: aris_executor::ExecutorClient,
+    prompt: &str,
+) -> Result<String, String> {
+    runtime::clear_interrupt();
+    let mut runtime = ConversationRuntime::new(
+        Session::new(),
+        client,
+        SubagentToolExecutor::new(BTreeSet::new()),
+        PermissionPolicy::new(PermissionMode::ReadOnly),
+        Vec::new(),
+    );
+    let summary = runtime
+        .run_turn(prompt.to_string(), None)
+        .map_err(|error| format!("LlmReview request failed: {error}"))?;
+    let text = final_assistant_text(&summary).trim().to_string();
+    if text.is_empty() {
+        Err("LlmReview: empty reviewer response".to_string())
+    } else {
+        Ok(text)
     }
-    let is_boundary = |b: u8| matches!(b, b'-' | b'_' | b'/' | b':');
-    let mut i = 0;
-    while i + nbytes.len() <= bytes.len() {
-        if &bytes[i..i + nbytes.len()] == nbytes {
-            let before_ok = i == 0 || is_boundary(bytes[i - 1]);
-            let after_idx = i + nbytes.len();
-            let after_ok = after_idx == bytes.len() || is_boundary(bytes[after_idx]);
-            if before_ok && after_ok {
-                return true;
-            }
-        }
-        i += 1;
-    }
-    false
-}
-
-/// Effort tier for reasoning-capable reviewer calls. Reads
-/// `ARIS_REASONING_EFFORT` and falls back to `xhigh`.
-#[must_use]
-fn reviewer_reasoning_effort() -> String {
-    std::env::var("ARIS_REASONING_EFFORT")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "xhigh".to_string())
 }
 
 fn call_anthropic_compat_reviewer(
     api_key: &str,
-    endpoint: &str,
+    base_url: &str,
     model: &str,
     prompt: &str,
 ) -> Result<String, String> {
-    let body = serde_json::json!({
-        "model": model,
-        "max_tokens": 8192,
-        "messages": [{"role": "user", "content": prompt}]
-    });
-
-    // Build a fresh client per request to avoid reusing a broken connection pool.
-    let response = send_reviewer_request_with_retry(|| {
-        fresh_reviewer_client()
-            .post(endpoint)
-            .bearer_auth(api_key)
-            .header("anthropic-version", "2023-06-01")
-            .header("content-type", "application/json")
-            .json(&body)
-    })?;
-
-    let json: serde_json::Value = response
-        .json()
-        .map_err(|e| format!("LlmReview response parse failed: {e}"))?;
-
-    // Anthropic format: content[0].text
-    json.get("content")
-        .and_then(|c| c.get(0))
-        .and_then(|b| b.get("text"))
-        .and_then(|t| t.as_str())
-        .map(ToOwned::to_owned)
-        .ok_or_else(|| format!("LlmReview: unexpected response format: {json}"))
+    let client = SharedAnthropicRuntimeClient::new(
+        AuthSource::BearerToken(api_key.to_string()),
+        anthropic_executor_base_url(base_url),
+        false,
+        model.to_string(),
+        false,
+        Vec::new(),
+        8192,
+        Box::new(NoopStreamObserver),
+    )
+    .map(aris_executor::ExecutorClient::Anthropic)
+    .map_err(|error| format!("LlmReview executor setup failed: {error}"))?;
+    run_reviewer_turn(client, prompt)
 }
 
 fn call_openai_compat_reviewer(
@@ -4676,38 +4419,19 @@ fn call_openai_compat_reviewer(
     model: &str,
     prompt: &str,
 ) -> Result<String, String> {
-    let mut body = serde_json::json!({
-        "model": model,
-        "messages": [{"role": "user", "content": prompt}]
-    });
-
-    // Reasoning-capable models (o1/o3/o4 family, gpt-5.5+, thinking variants)
-    // accept an explicit `reasoning_effort` field; older OpenAI-compat
-    // models reject it, so gate on an allow-list. Default tier is `xhigh`,
-    // overridable via `ARIS_REASONING_EFFORT`.
-    if reviewer_supports_reasoning_effort(model) {
-        body["reasoning_effort"] = serde_json::json!(reviewer_reasoning_effort());
-    }
-
-    // Build a fresh client per request to avoid reusing a broken connection pool.
-    let response = send_reviewer_request_with_retry(|| {
-        fresh_reviewer_client()
-            .post(base_url)
-            .bearer_auth(api_key)
-            .json(&body)
-    })?;
-
-    let json: serde_json::Value = response
-        .json()
-        .map_err(|e| format!("LlmReview response parse failed: {e}"))?;
-
-    json.get("choices")
-        .and_then(|c| c.get(0))
-        .and_then(|c| c.get("message"))
-        .and_then(|m| m.get("content"))
-        .and_then(|c| c.as_str())
-        .map(ToOwned::to_owned)
-        .ok_or_else(|| format!("LlmReview: unexpected response format: {json}"))
+    let client = aris_executor::OpenAIRuntimeClient::new(
+        aris_executor::OpenAIExecutorConfig {
+            api_key: api_key.to_string(),
+            base_url: openai_executor_base_url(base_url),
+        },
+        model.to_string(),
+        false,
+        Vec::new(),
+        Box::new(NoopStreamObserver),
+    )
+    .map(aris_executor::ExecutorClient::OpenAI)
+    .map_err(|error| format!("LlmReview executor setup failed: {error}"))?;
+    run_reviewer_turn(client, prompt)
 }
 
 #[cfg(test)]
@@ -4730,7 +4454,10 @@ mod tests {
         resolve_reviewer_model, route_openai_compat_model, run_llm_review, skill_markdown,
         AgentInput, AgentJob, LlmReviewInput, SubagentToolExecutor,
     };
-    use runtime::{ApiRequest, AssistantEvent, ConversationRuntime, RuntimeError, Session};
+    use runtime::{
+        ApiRequest, AssistantEvent, ContentBlock, ConversationMessage, ConversationRuntime,
+        RuntimeError, Session, TokenUsage, TurnSummary,
+    };
     use serde_json::json;
 
     fn env_lock() -> &'static Mutex<()> {
@@ -5158,20 +4885,19 @@ mod tests {
         )
         .expect("write SKILL.md");
 
-        // Point HOME to temp dir so ~/.claude/skills/ resolves there
+        // Point HOME/USERPROFILE to temp dir so ~/.config/aris/skills resolves there.
         let _guard = env_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let claude_skills = tmp
-            .parent()
-            .unwrap()
-            .join("claude-home")
-            .join(".claude")
-            .join("skills");
-        let _home_guard = EnvGuard::set("HOME", claude_skills.parent().unwrap().parent().unwrap());
-        fs::create_dir_all(&claude_skills).expect("create claude skills dir");
-        // Copy the skill into the claude skills dir
-        let target_skill = claude_skills.join("test-skill");
+        let aris_home = tmp.parent().unwrap().join("aris-home");
+        let aris_skills = aris_home.join(".config").join("aris").join("skills");
+        let _home_guard = EnvGuard::set("HOME", &aris_home);
+        let _userprofile_guard = EnvGuard::set("USERPROFILE", &aris_home);
+        let _claude_compat_guard = EnvGuard::unset("ARIS_ENABLE_CLAUDE_SKILLS");
+        fs::create_dir_all(&aris_skills).expect("create aris skills dir");
+
+        // Copy the skill into the ARIS skills dir.
+        let target_skill = aris_skills.join("test-skill");
         fs::create_dir_all(&target_skill).expect("create target skill dir");
         fs::copy(skill_dir.join("SKILL.md"), target_skill.join("SKILL.md")).expect("copy skill");
 
@@ -5213,7 +4939,56 @@ mod tests {
 
         // Cleanup
         let _ = fs::remove_dir_all(&tmp);
-        let _ = fs::remove_dir_all(claude_skills.parent().unwrap().parent().unwrap());
+        let _ = fs::remove_dir_all(&aris_home);
+    }
+
+    #[test]
+    fn claude_skills_require_explicit_compat_flag() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = temp_path("legacy-claude-skills");
+        let home = tmp.join("home");
+        let claude_skills = home.join(".claude").join("skills");
+        let _home_guard = EnvGuard::set("HOME", &home);
+        let _userprofile_guard = EnvGuard::set("USERPROFILE", &home);
+        let _codex_home_guard = EnvGuard::unset("CODEX_HOME");
+        let _claude_compat_guard = EnvGuard::unset("ARIS_ENABLE_CLAUDE_SKILLS");
+        fs::create_dir_all(&claude_skills).expect("create claude skills dir");
+        let target_skill = claude_skills.join("legacy-claude-only");
+        fs::create_dir_all(&target_skill).expect("create target skill dir");
+        fs::write(
+            target_skill.join("SKILL.md"),
+            "---\nname: legacy-claude-only\ndescription: \"Legacy Claude skill\"\n---\n\n# Legacy Claude Skill\n",
+        )
+        .expect("write legacy skill");
+
+        assert!(
+            skill_markdown("legacy-claude-only").is_none(),
+            "Claude Code skills should not be visible by default"
+        );
+
+        let _claude_compat_enabled = EnvGuard::set("ARIS_ENABLE_CLAUDE_SKILLS", "1");
+        let markdown = skill_markdown("legacy-claude-only")
+            .expect("legacy Claude skill should load when compat is enabled");
+        assert!(markdown.contains("# Legacy Claude Skill"));
+
+        let result = execute_tool(
+            "Skill",
+            &json!({
+                "skill": "legacy-claude-only"
+            }),
+        )
+        .expect("legacy Claude skill should execute when compat is enabled");
+        let output: serde_json::Value = serde_json::from_str(&result).expect("valid json");
+        let expected_path = target_skill
+            .join("SKILL.md")
+            .display()
+            .to_string()
+            .replace('\\', "/");
+        assert_eq!(output["path"].as_str().expect("path"), expected_path);
+
+        let _ = fs::remove_dir_all(&tmp);
     }
 
     #[test]
@@ -6019,6 +5794,36 @@ mod tests {
     }
 
     #[test]
+    fn final_assistant_text_keeps_all_nonempty_text_iterations() {
+        let summary = TurnSummary {
+            assistant_messages: vec![
+                ConversationMessage::assistant(vec![
+                    ContentBlock::Text {
+                        text: "Preparing review.".to_string(),
+                    },
+                    ContentBlock::ToolUse {
+                        id: "tool-1".to_string(),
+                        name: "read_file".to_string(),
+                        input: "{}".to_string(),
+                    },
+                ]),
+                ConversationMessage::assistant(vec![ContentBlock::Text {
+                    text: "Review complete.".to_string(),
+                }]),
+            ],
+            tool_results: Vec::new(),
+            iterations: 2,
+            usage: TokenUsage::default(),
+            auto_compaction: None,
+        };
+
+        assert_eq!(
+            final_assistant_text(&summary),
+            "Preparing review.\n\nReview complete."
+        );
+    }
+
+    #[test]
     fn agent_rejects_blank_required_fields() {
         let missing_description = execute_tool(
             "Agent",
@@ -6220,6 +6025,11 @@ mod tests {
         let write_create_output: serde_json::Value =
             serde_json::from_str(&write_create).expect("json");
         assert_eq!(write_create_output["type"], "create");
+        let write_create_path = write_create_output["filePath"].as_str().expect("file path");
+        assert_eq!(
+            write_create_output["changes"][write_create_path]["type"],
+            "add"
+        );
         assert!(root.join("nested/demo.txt").exists());
 
         let write_update = execute_tool(
@@ -6231,6 +6041,17 @@ mod tests {
             serde_json::from_str(&write_update).expect("json");
         assert_eq!(write_update_output["type"], "update");
         assert_eq!(write_update_output["originalFile"], "alpha\nbeta\nalpha\n");
+        let write_update_path = write_update_output["filePath"].as_str().expect("file path");
+        assert_eq!(
+            write_update_output["changes"][write_update_path]["type"],
+            "update"
+        );
+        assert!(
+            write_update_output["changes"][write_update_path]["unified_diff"]
+                .as_str()
+                .expect("unified diff")
+                .contains("+gamma")
+        );
 
         let read_full = execute_tool("read_file", &json!({ "path": "nested/demo.txt" }))
             .expect("read full should succeed");
@@ -6268,6 +6089,11 @@ mod tests {
         .expect("single edit should succeed");
         let edit_once_output: serde_json::Value = serde_json::from_str(&edit_once).expect("json");
         assert_eq!(edit_once_output["replaceAll"], false);
+        let edit_once_path = edit_once_output["filePath"].as_str().expect("file path");
+        assert_eq!(
+            edit_once_output["changes"][edit_once_path]["type"],
+            "update"
+        );
         assert_eq!(
             fs::read_to_string(root.join("nested/demo.txt")).expect("read file"),
             "omega\nbeta\ngamma\n"
@@ -6924,16 +6750,35 @@ printf 'pwsh:%s' "$1"
         std::env::remove_var("ARIS_REVIEWER_PROVIDER");
     }
 
-    // v0.4.13 regression — v0.4.12 P1.B introduced reviewer_word_match,
-    // a copy of runtime::usage::has_word so the reviewer crate stays
-    // consistent with the executor + pricing word-boundary detection.
-    // Lock down provider-prefix and digit-suffix boundary cases so a
-    // future divergence between the three copies surfaces here.
     #[test]
-    fn reviewer_word_match_provider_prefix() {
-        assert!(super::reviewer_word_match("openai/o3-mini", "o3"));
-        assert!(super::reviewer_word_match("proxy:o4-preview", "o4"));
-        // Digit-suffix collision — "o32-mini" must NOT count as an o3 model.
-        assert!(!super::reviewer_word_match("o32-mini", "o3"));
+    fn llm_review_openai_urls_are_normalized_for_shared_executor() {
+        assert_eq!(
+            super::openai_executor_base_url("https://api.openai.com/v1/chat/completions"),
+            "https://api.openai.com/v1"
+        );
+        assert_eq!(
+            super::openai_executor_base_url("https://proxy.example.com/openai"),
+            "https://proxy.example.com/openai"
+        );
+        assert_eq!(
+            super::openai_executor_base_url("https://proxy.example.com"),
+            "https://proxy.example.com/v1"
+        );
+    }
+
+    #[test]
+    fn llm_review_anthropic_urls_are_normalized_for_shared_executor() {
+        assert_eq!(
+            super::anthropic_executor_base_url("https://api.anthropic.com/v1/messages"),
+            "https://api.anthropic.com"
+        );
+        assert_eq!(
+            super::anthropic_executor_base_url("https://api.anthropic.com/v1"),
+            "https://api.anthropic.com"
+        );
+        assert_eq!(
+            super::anthropic_executor_base_url("https://api.deepseek.com/anthropic"),
+            "https://api.deepseek.com/anthropic"
+        );
     }
 }

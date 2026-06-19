@@ -1,5 +1,15 @@
-import { useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type MouseEvent as ReactMouseEvent,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
+import { createPortal } from "react-dom";
 import type { DesktopProject } from "../types";
+import { useStore } from "../store";
 import { fuzzyMatch, groupSessionsByProject } from "./model";
 import type { ChatSession } from "./types";
 
@@ -37,6 +47,16 @@ function sameProjectOrder(left: string[], right: string[]) {
   return left.length === right.length && left.every((id, index) => id === right[index]);
 }
 
+type SessionMenuAnchor = {
+  id: string;
+  rect: Pick<DOMRect, "top" | "right" | "bottom" | "left">;
+};
+
+type SessionMenuPosition = {
+  top: number;
+  left: number;
+};
+
 export default function ChatSidebar({
   sessions,
   projects,
@@ -57,7 +77,12 @@ export default function ChatSidebar({
   const [renameValue, setRenameValue] = useState("");
   const [draggedProjectId, setDraggedProjectId] = useState<string | null>(null);
   const [projectOrderPreview, setProjectOrderPreview] = useState<string[] | null>(null);
+  const [openMenu, setOpenMenu] = useState<SessionMenuAnchor | null>(null);
+  const [menuPosition, setMenuPosition] = useState<SessionMenuPosition | null>(null);
+  const [unreadIds, setUnreadIds] = useState<Set<string>>(new Set());
+  const setTab = useStore((s) => s.setTab);
   const sessionListRef = useRef<HTMLDivElement | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
   const groupRefs = useRef(new Map<string, HTMLElement>());
   const projectOrderPreviewRef = useRef<string[] | null>(null);
   const projectDragRef = useRef<{
@@ -67,6 +92,7 @@ export default function ChatSidebar({
     startY: number;
     moved: boolean;
   } | null>(null);
+  const openMenuId = openMenu?.id ?? null;
   const groups = useMemo(
     () => groupSessionsByProject(
       sessions.filter((session) => fuzzyMatch(query, session.title)),
@@ -87,6 +113,55 @@ export default function ChatSidebar({
       );
   }, [groups, projectOrderPreview, projects]);
   const canReorderProjects = !busy && projects.length > 1;
+
+  useEffect(() => {
+    if (!openMenuId) return;
+    const handler = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      if (!target.closest(".chat-session-menu") && !target.closest(".chat-session-menu-btn")) {
+        setOpenMenu(null);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [openMenuId]);
+
+  useEffect(() => {
+    if (!openMenuId) return;
+    const closeMenu = () => setOpenMenu(null);
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") closeMenu();
+    };
+    window.addEventListener("resize", closeMenu);
+    window.addEventListener("scroll", closeMenu, true);
+    document.addEventListener("keydown", handleKey);
+    return () => {
+      window.removeEventListener("resize", closeMenu);
+      window.removeEventListener("scroll", closeMenu, true);
+      document.removeEventListener("keydown", handleKey);
+    };
+  }, [openMenuId]);
+
+  useLayoutEffect(() => {
+    if (!openMenu || !menuRef.current) {
+      setMenuPosition(null);
+      return;
+    }
+    const menuRect = menuRef.current.getBoundingClientRect();
+    const margin = 8;
+    const gap = 4;
+    const maxLeft = Math.max(margin, window.innerWidth - menuRect.width - margin);
+    const left = Math.min(Math.max(margin, openMenu.rect.right - menuRect.width), maxLeft);
+    const belowTop = openMenu.rect.bottom + gap;
+    const aboveTop = openMenu.rect.top - menuRect.height - gap;
+    const fitsBelow = belowTop + menuRect.height <= window.innerHeight - margin;
+    const top = fitsBelow ? belowTop : Math.max(margin, aboveTop);
+    setMenuPosition((current) => (
+      current && Math.abs(current.top - top) < 0.5 && Math.abs(current.left - left) < 0.5
+        ? current
+        : { top, left }
+    ));
+  }, [openMenu]);
 
   const setGroupRef = (id: string) => (element: HTMLElement | null) => {
     if (element) groupRefs.current.set(id, element);
@@ -211,33 +286,97 @@ export default function ChatSidebar({
     setRenamingId(null);
   };
 
+  const toggleUnread = (id: string) => {
+    setUnreadIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const handleOpen = (id: string) => {
+    setUnreadIds((prev) => {
+      if (!prev.has(id)) return prev;
+      const next = new Set(prev);
+      next.delete(id);
+      return next;
+    });
+    void onOpen(id);
+    onClose();
+  };
+
+  const toggleSessionMenu = (
+    event: ReactMouseEvent<HTMLButtonElement>,
+    id: string,
+  ) => {
+    event.stopPropagation();
+    const rect = event.currentTarget.getBoundingClientRect();
+    setMenuPosition(null);
+    setOpenMenu((current) => (
+      current?.id === id
+        ? null
+        : {
+          id,
+          rect: {
+            top: rect.top,
+            right: rect.right,
+            bottom: rect.bottom,
+            left: rect.left,
+          },
+        }
+    ));
+  };
+
+  const closeSessionMenu = () => {
+    setOpenMenu(null);
+    setMenuPosition(null);
+  };
+
+  const menuStyle = openMenu
+    ? {
+      top: menuPosition?.top ?? openMenu.rect.bottom + 4,
+      left: menuPosition?.left ?? openMenu.rect.left,
+      visibility: menuPosition ? "visible" : "hidden",
+    } as const
+    : undefined;
+
   return (
     <aside className={`chat-sidebar${open ? " open" : ""}`} aria-label="Chat sessions">
       <div className="chat-sidebar-head">
-        <button className="chat-new-btn" onClick={onNew} disabled={busy}>
-          <span className="chat-new-icon">+</span>
-          <span>New chat</span>
-        </button>
+        <div className="chat-sidebar-top-row">
+          <button className="chat-new-btn" onClick={onNew} disabled={busy}>
+            <span className="chat-new-icon">+</span>
+            <span>新线程</span>
+          </button>
+          <button
+            className="chat-sidebar-desktop-collapse"
+            onClick={onDesktopCollapse}
+            title="Collapse sidebar"
+            aria-label="Collapse chat sidebar"
+          >
+            ‹
+          </button>
+          <button className="chat-sidebar-close" onClick={onClose} aria-label="Close chat sidebar">×</button>
+        </div>
         <button
-          className="chat-sidebar-desktop-collapse"
-          onClick={onDesktopCollapse}
-          title="Collapse sidebar"
-          aria-label="Collapse chat sidebar"
+          className="chat-scheduled-btn"
+          onClick={() => setTab("scheduled")}
         >
-          ‹
+          <span className="chat-scheduled-icon">⚡</span>
+          <span>定时任务</span>
         </button>
-        <button className="chat-sidebar-close" onClick={onClose} aria-label="Close chat sidebar">×</button>
       </div>
       <div className="chat-session-search">
         <input
           value={query}
           onChange={(event) => setQuery(event.target.value)}
-          placeholder="Search chats"
+          placeholder="搜索对话"
           aria-label="Search chats"
         />
       </div>
       <div className="chat-session-list" ref={sessionListRef}>
-        {groups.length === 0 && <div className="chat-session-empty">No matching chats</div>}
+        {groups.length === 0 && <div className="chat-session-empty">无匹配对话</div>}
         {orderedGroups.map((group) => (
           <section
             className={`chat-session-group${draggedProjectId === group.id ? " dragging" : ""}`}
@@ -260,19 +399,15 @@ export default function ChatSidebar({
             {group.sessions.map((session) => (
               <div
                 key={session.id}
-                className={`chat-session-item${session.id === currentId ? " active" : ""}`}
-                onClick={() => {
-                  void onOpen(session.id);
-                  onClose();
-                }}
+                className={`chat-session-item${session.id === currentId ? " active" : ""}${unreadIds.has(session.id) ? " unread" : ""}`}
+                onClick={() => handleOpen(session.id)}
                 onDoubleClick={() => beginRename(session)}
                 role="button"
                 tabIndex={0}
                 onKeyDown={(event) => {
                   if (event.key === "Enter" || event.key === " ") {
                     event.preventDefault();
-                    void onOpen(session.id);
-                    onClose();
+                    handleOpen(session.id);
                   }
                 }}
               >
@@ -291,41 +426,77 @@ export default function ChatSidebar({
                     }}
                   />
                 ) : (
-                  <div className="chat-session-title">{session.title}</div>
+                  <div className="chat-session-title">
+                    {unreadIds.has(session.id) && <span className="chat-unread-dot" aria-label="Unread" />}
+                    {session.title}
+                  </div>
                 )}
-                <div className="chat-session-actions">
-                  <button
-                    className={session.pinned ? "active" : ""}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      onTogglePinned(session.id);
-                    }}
-                    title={session.pinned ? "Unpin" : "Pin"}
-                    aria-label={session.pinned ? "Unpin chat" : "Pin chat"}
+                <button
+                  className="chat-session-menu-btn"
+                  onClick={(event) => toggleSessionMenu(event, session.id)}
+                  aria-label="Session options"
+                  aria-haspopup="true"
+                  aria-expanded={openMenuId === session.id}
+                >
+                  ···
+                </button>
+                {openMenuId === session.id && createPortal(
+                  <div
+                    ref={menuRef}
+                    className="chat-session-menu"
+                    role="menu"
+                    style={menuStyle}
                   >
-                    {session.pinned ? "●" : "○"}
-                  </button>
-                  <button
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      beginRename(session);
-                    }}
-                    title="Rename"
-                    aria-label="Rename chat"
-                  >
-                    ✎
-                  </button>
-                  <button
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      onDelete(session.id);
-                    }}
-                    title="Delete"
-                    aria-label="Delete chat"
-                  >
-                    ×
-                  </button>
-                </div>
+                    <button
+                      role="menuitem"
+                      className={session.pinned ? "active" : ""}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onTogglePinned(session.id);
+                        closeSessionMenu();
+                      }}
+                    >
+                      {session.pinned ? "取消置顶" : "置顶"}
+                      <span className="chat-session-menu-key">P</span>
+                    </button>
+                    <button
+                      role="menuitem"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        toggleUnread(session.id);
+                        closeSessionMenu();
+                      }}
+                    >
+                      {unreadIds.has(session.id) ? "标为已读" : "标为未读"}
+                      <span className="chat-session-menu-key">U</span>
+                    </button>
+                    <button
+                      role="menuitem"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        beginRename(session);
+                        closeSessionMenu();
+                      }}
+                    >
+                      重命名
+                      <span className="chat-session-menu-key">R</span>
+                    </button>
+                    <div className="chat-session-menu-divider" role="separator" />
+                    <button
+                      role="menuitem"
+                      className="danger"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onDelete(session.id);
+                        closeSessionMenu();
+                      }}
+                    >
+                      删除
+                      <span className="chat-session-menu-key">D</span>
+                    </button>
+                  </div>,
+                  document.body,
+                )}
               </div>
             ))}
           </section>

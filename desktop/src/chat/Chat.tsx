@@ -1,13 +1,17 @@
-import { useCallback, useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
 import {
   chatDelete,
   chatCommandSpecs,
+  chatModelOptions,
+  chatModelSet,
   chatPermissionGet,
+  chatPermissionRespond,
   chatPermissionSet,
   chatRunCommand,
   chatSetContext,
   chatStatus,
   chatSuggestTitle,
+  fileOpen,
   fileRead,
   isTauri,
   projectChatStarters,
@@ -17,18 +21,38 @@ import {
   type ChatSendRequest,
 } from "../api/tauri";
 import { useStore } from "../store";
-import type { ChatAttachment, ChatCommandSelection, ChatStatus, DesktopCommandSpec, ChatTurn, PermissionModeView, SkillMeta } from "../types";
-import ChatComposer from "./ChatComposer";
+import type { ChatAttachment, ChatCommandSelection, ChatModelOption, ChatStatus, DesktopCommandSpec, ChatTurn, PermissionModeView, SkillMeta } from "../types";
+import ChatComposer, { attachmentFromFile } from "./ChatComposer";
 import CommandSelection from "./CommandSelection";
 import ChatSidebar from "./ChatSidebar";
 import ChatThread from "./ChatThread";
-import { makeId, textFromTurn, titleFromTurns, transcriptFromTurn } from "./model";
+import FilePathMenu from "./FilePathMenu";
+import { cleanChatTitle, latestFileChangesFromTurns, latestTodosFromTurns, makeId, textFromTurn, titleFromTurns, transcriptFromTurn } from "./model";
+import WorkflowFlow from "./WorkflowFlow";
 import type { ChatSession } from "./types";
 import { useChatSessions } from "./useChatSessions";
 import { useChatStream } from "./useChatStream";
 
 const EMPTY_ASSISTANT_RESPONSE = "Model returned an empty response.";
 const IMAGE_UNSUPPORTED_MESSAGE = "(Image preview only. Vision input is not supported in desktop Chat yet.)";
+
+// Matches relative file paths like `desktop/src/chat/Chat.tsx` or `./src/lib.rs:42`
+const FILE_PATH_RE = /^(\.\.?\/)?([a-zA-Z0-9_\-.]+\/)+[a-zA-Z0-9_\-.]+(:\d+)?$/;
+
+function detectFilePath(element: HTMLElement): string | null {
+  // Local markdown link — use the href (already decoded by MarkdownLink)
+  if (element.tagName === "A") {
+    const href = element.getAttribute("href");
+    if (href && !/^(https?:|#|mailto:)/i.test(href)) {
+      const decoded = (() => { try { return decodeURIComponent(href); } catch { return href; } })();
+      if (FILE_PATH_RE.test(decoded)) return decoded;
+    }
+  }
+  // Inline code or any element whose entire text looks like a path
+  const text = element.textContent?.trim() ?? "";
+  if (text && text.length < 260 && !text.includes("\n") && FILE_PATH_RE.test(text)) return text;
+  return null;
+}
 
 function estimateTokens(turns: ChatTurn[]): number {
   let chars = 0;
@@ -39,34 +63,6 @@ function estimateTokens(turns: ChatTurn[]): number {
     }
   }
   return Math.round(chars / 3.5);
-}
-
-function ContextRing({ used, max }: { used: number; max: number }) {
-  const pct = max > 0 ? Math.min(1, used / max) : 0;
-  const radius = 9;
-  const circ = 2 * Math.PI * radius;
-  const dash = pct * circ;
-  const stroke = pct < 0.5 ? "var(--green)" : pct < 0.8 ? "var(--amber)" : "var(--red)";
-  const label = used === 0 ? "0%" : pct < 0.01 ? "<1%" : `${Math.round(pct * 100)}%`;
-  const usedK = used >= 1000 ? `${(used / 1000).toFixed(0)}k` : String(used);
-  const maxK = max >= 1000 ? `${(max / 1000).toFixed(0)}k` : String(max);
-  return (
-    <div className="ctx-ring" title={`Context window: ${label} used (${usedK} / ${maxK} tokens est.)`}>
-      <svg width="22" height="22" viewBox="0 0 22 22" aria-hidden="true">
-        <circle cx="11" cy="11" r={radius} fill="none" stroke="var(--border)" strokeWidth="2.5" />
-        {pct > 0 && (
-          <circle
-            cx="11" cy="11" r={radius}
-            fill="none" stroke={stroke} strokeWidth="2.5"
-            strokeDasharray={`${dash} ${circ}`}
-            strokeLinecap="round"
-            transform="rotate(-90 11 11)"
-          />
-        )}
-      </svg>
-      <span className="ctx-ring-label">{label}</span>
-    </div>
-  );
 }
 
 function MemoryBadge({ count }: { count: number }) {
@@ -169,10 +165,10 @@ const FALLBACK_SLASH_COMMANDS: DesktopCommandSpec[] = [
   { name: "model", description: "Show or switch the executor model", argumentHint: "[model]" },
   { name: "permissions", description: "Show or switch the active permission mode", argumentHint: "[mode]" },
 ];
-const HIDDEN_SLASH_COMMANDS = new Set(["team", "teams", "workflow", "workflows"]);
+const DISABLED_DESKTOP_COMMANDS = new Set(["team", "teams", "workflow", "workflows"]);
 
 function visibleDesktopCommands(commands: DesktopCommandSpec[]) {
-  return commands.filter((command) => !HIDDEN_SLASH_COMMANDS.has(command.name.toLowerCase()));
+  return commands.filter((command) => !DISABLED_DESKTOP_COMMANDS.has(command.name.toLowerCase()));
 }
 
 interface PendingCommandSelection {
@@ -206,6 +202,8 @@ export default function Chat() {
   const [status, setStatus] = useState<ChatStatus | null>(null);
   const [permission, setPermission] = useState<PermissionModeView | null>(null);
   const [permissionBusy, setPermissionBusy] = useState(false);
+  const [modelOptions, setModelOptions] = useState<ChatModelOption[]>([]);
+  const [modelBusy, setModelBusy] = useState(false);
   const [skills, setSkills] = useState<SkillMeta[]>([]);
   const [desktopCommands, setDesktopCommands] = useState<DesktopCommandSpec[]>(FALLBACK_SLASH_COMMANDS);
   const [starters, setStarters] = useState([
@@ -228,6 +226,8 @@ export default function Chat() {
   const [pendingCommandSelection, setPendingCommandSelection] = useState<PendingCommandSelection | null>(null);
   const [focusRequest, setFocusRequest] = useState(0);
   const [exporting, setExporting] = useState(false);
+  const [chatDragging, setChatDragging] = useState(false);
+  const [fileMenu, setFileMenu] = useState<{ x: number; y: number; path: string } | null>(null);
   const deleteTimers = useRef(new Map<string, { timer: number; projectId: string }>());
   const titleRequests = useRef(new Set<string>());
   const sendLocks = useRef(new Set<string>());
@@ -274,11 +274,12 @@ export default function Chat() {
     titleRequests.current.add(sessionId);
     void chatSuggestTitle(userText, assistantText)
       .then((title) => {
-        const trimmed = title.trim();
+        const trimmed = cleanChatTitle(title);
         if (!trimmed) return;
         updateSession(sessionId, (session) => {
           const fallback = titleFromTurns(session.turns);
-          if (session.title !== "New chat" && session.title !== fallback) return session;
+          const current = cleanChatTitle(session.title);
+          if (current && session.title !== "New chat" && session.title !== fallback) return session;
           return { ...session, title: trimmed };
         });
       })
@@ -326,36 +327,87 @@ export default function Chat() {
   const currentChatBusy = runningSessionIds.has(currentId);
   const turns = currentSession?.turns ?? [];
   const estimatedTokens = estimateTokens(turns);
+  const workflowTodos = useMemo(() => latestTodosFromTurns(turns), [turns]);
+  const workflowFileChanges = useMemo(
+    () => latestFileChangesFromTurns(turns, currentProject?.path),
+    [currentProject?.path, turns],
+  );
   const input = currentSession?.draft ?? "";
   const attachments = currentSession?.draftAttachments ?? [];
   const runningSessionIdsRef = useRef(runningSessionIds);
   runningSessionIdsRef.current = runningSessionIds;
 
-  const refreshStatus = useCallback(() => {
+  const refreshStatus = useCallback((model?: string | null) => {
     if (!isTauri()) {
       setStatus({ ready: true, model: "Preview", provider: "Browser" });
       return;
     }
-    chatStatus().then(setStatus).catch((error) => setStatus({ ready: false, message: String(error) }));
+    const request = model ? chatModelSet(model, false) : chatStatus();
+    request.then(setStatus).catch((error) => setStatus({ ready: false, message: String(error) }));
   }, []);
 
   useEffect(() => {
-    refreshStatus();
+    refreshStatus(currentSession?.model ?? null);
     if (!isTauri()) {
-      setPermission({ mode: "workspace-write", label: "Accept edits", description: "Read and edit workspace files" });
+      setPermission({ mode: "danger-full-access", label: "Auto-approve", description: "Auto-approve tool calls; no OS administrator elevation" });
       return;
     }
     chatPermissionGet(currentId).then(setPermission).catch(() => setPermission(null));
+    chatModelOptions().then((opts) => setModelOptions(opts.options)).catch(() => setModelOptions([]));
     chatCommandSpecs()
       .then((commands) => setDesktopCommands(visibleDesktopCommands(commands)))
       .catch(() => setDesktopCommands(FALLBACK_SLASH_COMMANDS));
     skillsList().then(setSkills).catch(() => undefined);
     projectChatStarters().then(setStarters).catch(() => undefined);
-  }, [currentId, currentProject?.id, refreshStatus]);
+  }, [currentId, currentProject?.id, currentSession?.model, refreshStatus]);
+
+  const activeModel = currentSession?.model || status?.model || null;
+
+  // Options for the header model dropdown — the verified models from Settings,
+  // plus the active model so the select never renders blank (e.g. a custom id,
+  // an unverified running model, or the browser preview).
+  const modelSelectOptions = useMemo(() => {
+    const items = modelOptions.map((option) => ({
+      value: option.value,
+      label: option.label,
+      description: option.description ?? null,
+    }));
+    const current = activeModel;
+    if (current && !items.some((item) => item.value === current)) {
+      items.unshift({ value: current, label: current, description: null });
+    }
+    return items;
+  }, [activeModel, modelOptions]);
+
+  // Only meaningful to switch when there is more than the running model on offer.
+  const canSwitchModel = modelSelectOptions.length > 1;
+
+  const changeModel = async (model: string) => {
+    if (!model || model === activeModel || !currentSession) return;
+    if (!isTauri()) {
+      updateSession(currentSession.id, (session) => ({ ...session, model, updatedAt: Date.now() }));
+      setStatus({ ready: true, model, provider: "Browser" });
+      return;
+    }
+    setModelBusy(true);
+    try {
+      const nextStatus = await chatModelSet(model, false);
+      setStatus(nextStatus);
+      updateSession(currentSession.id, (session) => ({
+        ...session,
+        model: nextStatus.model ?? model,
+        updatedAt: Date.now(),
+      }));
+    } catch (error) {
+      setError(String(error));
+    } finally {
+      setModelBusy(false);
+    }
+  };
 
   const changePermission = async (mode: string) => {
     if (!isTauri()) {
-      const label = mode === "read-only" ? "Plan" : mode === "danger-full-access" ? "Don't ask" : "Accept edits";
+      const label = mode === "read-only" ? "Plan" : mode === "danger-full-access" ? "Auto-approve" : mode === "prompt" ? "Ask" : "Accept edits";
       setPermission({ mode, label, description: "" });
       return;
     }
@@ -368,6 +420,15 @@ export default function Chat() {
       setPermissionBusy(false);
     }
   };
+
+  const respondPermission = useCallback(async (promptId: string, allow: boolean) => {
+    if (!isTauri()) return;
+    try {
+      await chatPermissionRespond(promptId, allow);
+    } catch (error) {
+      setError(String(error));
+    }
+  }, [setError]);
 
   useEffect(() => () => {
     deleteTimers.current.forEach(({ timer, projectId }, sessionId) => {
@@ -399,6 +460,19 @@ export default function Chat() {
     updateSession(currentSession.id, (session) => ({ ...session, draftAttachments: next }));
   };
 
+  const addFilesToChat = useCallback(async (files: File[]) => {
+    if (!currentSession || files.length === 0) return;
+    const sessionId = currentSession.id;
+    const next = await Promise.all(
+      files.slice(0, 20).map(async (file) => {
+        try { return await attachmentFromFile(file); }
+        catch { return { id: makeId("att"), kind: "file" as const, name: file.name, mimeType: file.type || "application/octet-stream", content: "(File content could not be read.)" }; }
+      }),
+    );
+    updateSession(sessionId, (s) => ({ ...s, draftAttachments: [...(s.draftAttachments ?? []), ...next] }));
+    focusComposer();
+  }, [currentSession, focusComposer, updateSession]);
+
   const beginRun = useCallback(async (
     session: ChatSession,
     prefix: ChatTurn[],
@@ -410,6 +484,8 @@ export default function Chat() {
     const prompt = typeof promptOverride === "string"
       ? { text: promptOverride }
       : promptOverride ?? (await outgoingMessage(text, attached));
+    const selectedModel = session.model || status?.model || undefined;
+    const request = selectedModel ? { ...prompt, model: selectedModel } : prompt;
     if (!isTauri()) {
       patchTurns(session.id, () => [
         ...prefix,
@@ -428,8 +504,8 @@ export default function Chat() {
     patchTurns(session.id, () => [...prefix, userTurn(text, attached), assistantTurn()]);
     updateSession(session.id, (item) => ({ ...item, draft: "", draftAttachments: [] }));
     setEditingTurnId(null);
-    await run(session.id, prompt);
-  }, [patchTurns, run, updateSession]);
+    await run(session.id, request);
+  }, [patchTurns, run, status?.model, updateSession]);
 
   const runSlashCommand = useCallback(async (
     session: ChatSession,
@@ -439,11 +515,11 @@ export default function Chat() {
     const trimmed = text.trim();
     if (!trimmed.startsWith("/")) return false;
     const commandName = trimmed.slice(1).split(/\s+/)[0]?.toLowerCase() ?? "";
-    if (HIDDEN_SLASH_COMMANDS.has(commandName)) {
+    if (DISABLED_DESKTOP_COMMANDS.has(commandName)) {
       patchTurns(session.id, (turns) => [
         ...turns,
         userTurn(text, []),
-        assistantTextTurn("This desktop command is no longer available."),
+        assistantTextTurn("This desktop command is disabled in this build."),
       ]);
       updateSession(session.id, (item) => ({ ...item, draft: "", draftAttachments: [] }));
       setEditingTurnId(null);
@@ -469,7 +545,7 @@ export default function Chat() {
       const result = await chatRunCommand(session.id, text);
       if (!result.handled) return false;
       if (result.openSettings) setTab("settings");
-      if (result.refreshStatus) refreshStatus();
+      if (result.refreshStatus) refreshStatus(session.model ?? null);
       if (result.selection) {
         setPendingCommandSelection({ sessionId: session.id, selection: result.selection });
         setEditingTurnId(null);
@@ -517,8 +593,12 @@ export default function Chat() {
     setPendingChatRunInput(null);
     const session = materializeCurrentSession();
     if (!session) return;
-    void runSlashCommand(session, text, []);
-  }, [currentChatBusy, currentSession, materializeCurrentSession, pendingChatRunInput, runSlashCommand, setPendingChatRunInput]);
+    void (async () => {
+      if (!await runSlashCommand(session, text, [])) {
+        await beginRun(session, session.turns, text, []);
+      }
+    })();
+  }, [beginRun, currentChatBusy, currentSession, materializeCurrentSession, pendingChatRunInput, runSlashCommand, setPendingChatRunInput]);
 
   const selectCommandOption = useCallback(async (value: string) => {
     const pending = pendingCommandSelection;
@@ -611,7 +691,7 @@ export default function Chat() {
       const result = await chatRunCommand(session.id, "/export");
       if (!result.handled) return;
       if (result.openSettings) setTab("settings");
-      if (result.refreshStatus) refreshStatus();
+      if (result.refreshStatus) refreshStatus(session.model ?? null);
       patchTurns(session.id, (turns) => [
         ...turns,
         assistantTextTurn(result.message ?? "Export complete."),
@@ -627,6 +707,42 @@ export default function Chat() {
       setExporting(false);
     }
   }, [exporting, patchTurns, refreshStatus, setError, setTab]);
+
+  const handleChatContextMenu = useCallback((e: React.MouseEvent<HTMLElement>) => {
+    let node = e.target as HTMLElement | null;
+    for (let depth = 0; depth < 5 && node; depth++) {
+      const found = detectFilePath(node);
+      if (found) {
+        e.preventDefault();
+        setFileMenu({ x: e.clientX, y: e.clientY, path: found });
+        return;
+      }
+      if (node.classList.contains("chat-turn") || node.classList.contains("chat-head")) break;
+      node = node.parentElement;
+    }
+  }, []);
+
+  const openWorkflowFile = useCallback((path: string) => {
+    if (!isTauri()) return;
+    void fileOpen(path).catch((error) => setError(String(error)));
+  }, [setError]);
+
+  const attachFileFromMenu = useCallback(async (path: string, content: string) => {
+    const session = currentSessionRef.current;
+    if (!session) return;
+    const attachment: ChatAttachment = {
+      id: makeId("att"),
+      kind: "file",
+      name: path.split(/[\\/]/).pop() ?? path,
+      path,
+      content: content || undefined,
+    };
+    updateSession(session.id, (s) => ({
+      ...s,
+      draftAttachments: [...(s.draftAttachments ?? []), attachment],
+    }));
+    focusComposer();
+  }, [focusComposer, updateSession]);
 
   const deleteSession = (id: string) => {
     const removed = removeSession(id);
@@ -714,7 +830,34 @@ export default function Chat() {
         onPointerUp={onChatSidebarResizeEnd}
         onPointerCancel={onChatSidebarResizeEnd}
       />
-      <main className={`chat${turns.length === 0 ? " chat-empty" : ""}`}>
+      <main
+        className={`chat${turns.length === 0 ? " chat-empty" : ""}`}
+        onContextMenu={handleChatContextMenu}
+        onDragEnter={(e) => { e.preventDefault(); setChatDragging(true); }}
+        onDragOver={(e) => e.preventDefault()}
+        onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) setChatDragging(false); }}
+        onDrop={(e) => { e.preventDefault(); setChatDragging(false); void addFilesToChat(Array.from(e.dataTransfer.files)); }}
+      >
+        {chatDragging && (
+          <div
+            className="chat-drop-full"
+            onDragOver={(e) => e.preventDefault()}
+            onDragLeave={(e) => {
+              if (!(e.currentTarget.parentElement?.contains(e.relatedTarget as Node) ?? false)) {
+                setChatDragging(false);
+              }
+            }}
+            onDrop={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              setChatDragging(false);
+              void addFilesToChat(Array.from(e.dataTransfer.files));
+            }}
+          >
+            <span className="chat-drop-full-icon">📎</span>
+            <span>拖放文件以附加</span>
+          </div>
+        )}
         <header className="chat-head">
           <button
             className="chat-sidebar-toggle"
@@ -729,26 +872,10 @@ export default function Chat() {
           <div className="chat-thread-heading">
             <span className="chat-thread-title">{currentSession?.title ?? "New chat"}</span>
             {status?.ready
-              ? <span className="chat-model">{status.model} · {status.provider}</span>
+              ? <span className="chat-model">{status.provider}</span>
               : <span className="chat-model chat-model-error">{status?.message ?? "Checking..."}</span>}
           </div>
           <div className="chat-head-actions">
-            <label className="chat-permission-control" title={permission?.description ?? "Active permission mode"}>
-              <span>Permission</span>
-              <select
-                aria-label="Chat permission mode"
-                value={permission?.mode ?? "workspace-write"}
-                disabled={permissionBusy || currentChatBusy}
-                onChange={(event) => void changePermission(event.currentTarget.value)}
-              >
-                <option value="read-only">Plan</option>
-                <option value="workspace-write">Accept edits</option>
-                <option value="danger-full-access">Don't ask</option>
-              </select>
-            </label>
-            {status?.ready && status.contextWindow != null && (
-              <ContextRing used={estimatedTokens} max={status.contextWindow} />
-            )}
             {status?.memoryFiles != null && status.memoryFiles > 0 && (
               <MemoryBadge count={status.memoryFiles} />
             )}
@@ -765,6 +892,7 @@ export default function Chat() {
           </div>
         </header>
         <ChatThread
+          key={currentId}
           sessionId={currentId}
           turns={turns}
           composerHeight={composerHeight}
@@ -777,7 +905,17 @@ export default function Chat() {
           onEdit={edit}
           onRetry={retry}
           onContinue={continueStopped}
+          onPermissionRespond={(promptId, allow) => void respondPermission(promptId, allow)}
         />
+        {(workflowTodos.length > 0 || workflowFileChanges.length > 0) && !pendingCommandSelection && (
+          <WorkflowFlow
+            todos={workflowTodos}
+            fileChanges={workflowFileChanges}
+            bottomOffset={composerHeight + 14}
+            active={currentChatBusy}
+            onOpenFile={openWorkflowFile}
+          />
+        )}
         {pendingCommandSelection && pendingCommandSelection.sessionId === currentId && (
           <CommandSelection
             selection={pendingCommandSelection.selection}
@@ -798,6 +936,16 @@ export default function Chat() {
           ready={Boolean(status?.ready)}
           editing={Boolean(editingTurnId)}
           focusRequest={focusRequest}
+          permission={permission}
+          permissionBusy={permissionBusy}
+          onPermissionChange={(mode) => void changePermission(mode)}
+          modelName={status?.ready ? activeModel : null}
+          modelOptions={modelSelectOptions}
+          modelBusy={modelBusy}
+          canSwitchModel={canSwitchModel}
+          onModelChange={(model) => void changeModel(model)}
+          contextUsed={estimatedTokens}
+          contextMax={status?.ready && status.contextWindow != null ? status.contextWindow : null}
           onInputChange={(value) => {
             if (pendingCommandSelection) setPendingCommandSelection(null);
             if (currentSession) setDraft(currentSession.id, value);
@@ -811,9 +959,19 @@ export default function Chat() {
       </main>
       {deleted && (
         <div className="chat-undo">
-          Deleted “{deleted.title}”
+          {`Deleted "${deleted.title}"`}
           <button onClick={undoDelete}>Undo</button>
         </div>
+      )}
+      {fileMenu && (
+        <FilePathMenu
+          x={fileMenu.x}
+          y={fileMenu.y}
+          path={fileMenu.path}
+          projectRoot={currentProject?.path}
+          onClose={() => setFileMenu(null)}
+          onAttach={(path, content) => void attachFileFromMenu(path, content)}
+        />
       )}
     </div>
   );

@@ -1,10 +1,19 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import type { ChatTurn } from "../types";
 import ChatMessage from "./ChatMessage";
 
 export function isNearBottom(element: Pick<HTMLElement, "scrollHeight" | "scrollTop" | "clientHeight">, threshold = 140) {
   return element.scrollHeight - element.scrollTop - element.clientHeight <= threshold;
+}
+
+export function shouldPauseAutoFollowForWheel(deltaY: number) {
+  return deltaY < 0;
+}
+
+export function isScrollbarPointer(element: HTMLElement, clientX: number, gutter = 18) {
+  const rect = element.getBoundingClientRect();
+  return clientX >= rect.right - gutter;
 }
 
 interface Props {
@@ -16,6 +25,7 @@ interface Props {
   onEdit: (turn: ChatTurn) => void;
   onRetry: (turn: ChatTurn) => void;
   onContinue: () => void;
+  onPermissionRespond: (promptId: string, allow: boolean) => void;
 }
 
 export default function ChatThread({
@@ -27,9 +37,17 @@ export default function ChatThread({
   onEdit,
   onRetry,
   onContinue,
+  onPermissionRespond,
 }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [following, setFollowing] = useState(true);
+  const followingRef = useRef(true);
+  // True while the initial scroll for a session is still settling. Dynamic row
+  // measurement means the first scroll lands on *estimated* offsets, then rows
+  // measure and the total size shifts; during that window we ignore the
+  // reflow-driven onScroll events that would otherwise flip `following` off and
+  // leave the scrollbar stranded mid-thread.
+  const settlingRef = useRef(false);
   const virtualizer = useVirtualizer({
     count: turns.length,
     getScrollElement: () => scrollRef.current,
@@ -38,21 +56,54 @@ export default function ChatThread({
     getItemKey: (index) => turns[index]?.id ?? index,
   });
 
+  const setFollowingValue = useCallback((next: boolean) => {
+    followingRef.current = next;
+    setFollowing(next);
+  }, []);
+
+  const pauseAutoFollow = useCallback(() => {
+    settlingRef.current = false;
+    setFollowingValue(false);
+  }, [setFollowingValue]);
+
   const scrollToBottom = (smooth = false) => {
     if (turns.length === 0) return;
     virtualizer.scrollToIndex(turns.length - 1, { align: "end", behavior: smooth ? "smooth" : "auto" });
-    setFollowing(true);
+    setFollowingValue(true);
   };
 
+  // Land at the latest message when a conversation opens, re-pinning across a few
+  // frames so the scrollbar converges as rows measure instead of jumping around.
   useEffect(() => {
-    setFollowing(true);
-    window.requestAnimationFrame(() => scrollToBottom());
+    setFollowingValue(true);
+    settlingRef.current = true;
+    let frame = 0;
+    let raf = window.requestAnimationFrame(function settle() {
+      scrollToBottom();
+      frame += 1;
+      if (frame < 5) {
+        raf = window.requestAnimationFrame(settle);
+      } else {
+        settlingRef.current = false;
+      }
+    });
+    return () => {
+      window.cancelAnimationFrame(raf);
+      settlingRef.current = false;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
 
   useEffect(() => {
-    if (!following) return;
-    window.requestAnimationFrame(() => scrollToBottom());
+    if (!followingRef.current) return;
+    // Re-check inside the frame: the user may have scrolled up (pausing follow)
+    // between this effect scheduling the frame and the frame running. Without
+    // this guard the stale frame yanks them back to the bottom and re-enables
+    // follow, making it impossible to scroll up while messages stream in.
+    const raf = window.requestAnimationFrame(() => {
+      if (followingRef.current) scrollToBottom();
+    });
+    return () => window.cancelAnimationFrame(raf);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [turns, composerHeight, following]);
 
@@ -61,7 +112,17 @@ export default function ChatThread({
       <div
         className="chat-scroll"
         ref={scrollRef}
-        onScroll={(event) => setFollowing(isNearBottom(event.currentTarget))}
+        onWheel={(event) => {
+          if (shouldPauseAutoFollowForWheel(event.deltaY)) pauseAutoFollow();
+        }}
+        onTouchStart={pauseAutoFollow}
+        onPointerDown={(event) => {
+          if (isScrollbarPointer(event.currentTarget, event.clientX)) pauseAutoFollow();
+        }}
+        onScroll={(event) => {
+          if (settlingRef.current) return;
+          setFollowingValue(isNearBottom(event.currentTarget));
+        }}
         style={{ paddingBottom: composerHeight + 24 }}
       >
         {turns.length === 0 ? (
@@ -95,6 +156,7 @@ export default function ChatThread({
                     onEdit={onEdit}
                     onRetry={onRetry}
                     onContinue={onContinue}
+                    onPermissionRespond={onPermissionRespond}
                   />
                 </div>
               );

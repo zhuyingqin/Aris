@@ -2,8 +2,8 @@
 //!
 //! Operates on the raw JSON object (snake_case keys, matching aris-cli's
 //! `ArisConfig`) so unmodelled fields (e.g. `meta_logging`) survive a round trip,
-//! and so the schema can't drift. API keys are never returned to the frontend —
-//! only a masked preview + a "has key" flag.
+//! and so the schema can't drift. API keys are masked in the normal view; raw
+//! values are exposed only through the explicit, allow-listed reveal command.
 
 use api::AuthSource;
 use serde::{Deserialize, Serialize};
@@ -40,7 +40,16 @@ fn mask(key: &str) -> String {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct VerifiedSummary {
+    pub provider: String,
+    pub model: String,
+    pub base_url: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ConfigView {
+    pub app_version: String,
     pub config_path: String,
     pub executor_provider: Option<String>,
     pub executor_model: Option<String>,
@@ -56,6 +65,10 @@ pub struct ConfigView {
     pub scopus_key_masked: Option<String>,
     pub language: Option<String>,
     pub memory_write_approval: bool,
+    /// Providers that passed a connection test — surfaced so the Settings list
+    /// can show every configured provider (not just the executor/reviewer
+    /// slots). Keys are never included.
+    pub verified_executors: Vec<VerifiedSummary>,
 }
 
 fn build_view(obj: &Map<String, Value>) -> ConfigView {
@@ -63,6 +76,7 @@ fn build_view(obj: &Map<String, Value>) -> ConfigView {
     let rev_key = get_str(obj, "reviewer_api_key").filter(|k| !k.is_empty());
     let scopus_key = get_str(obj, "scopus_api_key").filter(|k| !k.is_empty());
     ConfigView {
+        app_version: env!("CARGO_PKG_VERSION").to_string(),
         config_path: state::config_path().display().to_string(),
         executor_provider: get_str(obj, "executor_provider"),
         executor_model: get_str(obj, "executor_model"),
@@ -81,12 +95,321 @@ fn build_view(obj: &Map<String, Value>) -> ConfigView {
             .get("memory_write_approval")
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        verified_executors: read_verified(obj)
+            .into_iter()
+            .map(|entry| VerifiedSummary {
+                provider: entry.provider,
+                model: entry.model,
+                base_url: entry.base_url,
+            })
+            .collect(),
     }
 }
 
 #[tauri::command]
 pub fn config_get() -> ConfigView {
     build_view(&load_object())
+}
+
+#[tauri::command]
+pub fn config_secret_get(kind: String) -> Result<Option<String>, String> {
+    let key = match kind.as_str() {
+        "executorApiKey" | "executor_api_key" => "executor_api_key",
+        "reviewerApiKey" | "reviewer_api_key" => "reviewer_api_key",
+        "scopusApiKey" | "scopus_api_key" => "scopus_api_key",
+        _ => return Err(format!("Unsupported secret field: {kind}")),
+    };
+    Ok(get_non_empty(&load_object(), key))
+}
+
+fn save_object(obj: &Map<String, Value>) -> Result<(), String> {
+    let path = state::config_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let json =
+        serde_json::to_string_pretty(&Value::Object(obj.clone())).map_err(|e| e.to_string())?;
+    std::fs::write(&path, json).map_err(|e| e.to_string())
+}
+
+// ── Verified executor registry ──────────────────────────────────────────────
+//
+// Every executor config that passes the Settings "Test" is recorded here so the
+// Chat header dropdown can offer only models known to actually work. An entry
+// carries everything needed to *use* that model — provider, model id, base URL
+// and the key that passed — because verified models can live on different
+// endpoints with different keys, and switching must restore the full config.
+
+#[derive(Clone)]
+pub(crate) struct VerifiedExecutor {
+    pub provider: String,
+    pub model: String,
+    /// Empty string means "provider default endpoint".
+    pub base_url: String,
+    pub api_key: String,
+}
+
+fn parse_verified(value: &Value) -> Option<VerifiedExecutor> {
+    let obj = value.as_object()?;
+    let model = obj.get("model").and_then(Value::as_str)?.trim().to_string();
+    if model.is_empty() {
+        return None;
+    }
+    Some(VerifiedExecutor {
+        provider: obj
+            .get("provider")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string(),
+        model,
+        base_url: obj
+            .get("base_url")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string(),
+        api_key: obj
+            .get("api_key")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+    })
+}
+
+fn read_verified(obj: &Map<String, Value>) -> Vec<VerifiedExecutor> {
+    obj.get("verified_executors")
+        .and_then(Value::as_array)
+        .map(|arr| arr.iter().filter_map(parse_verified).collect())
+        .unwrap_or_default()
+}
+
+fn write_verified(obj: &mut Map<String, Value>, list: &[VerifiedExecutor]) {
+    let arr = list
+        .iter()
+        .map(|entry| {
+            let mut item = Map::new();
+            item.insert(
+                "provider".to_string(),
+                Value::String(entry.provider.clone()),
+            );
+            item.insert("model".to_string(), Value::String(entry.model.clone()));
+            item.insert(
+                "base_url".to_string(),
+                Value::String(entry.base_url.clone()),
+            );
+            item.insert("api_key".to_string(), Value::String(entry.api_key.clone()));
+            Value::Object(item)
+        })
+        .collect();
+    obj.insert("verified_executors".to_string(), Value::Array(arr));
+}
+
+/// Insert or update by `(provider, model, base_url)`; re-verifying refreshes the
+/// stored key without creating a duplicate entry.
+fn upsert_verified(list: &mut Vec<VerifiedExecutor>, entry: VerifiedExecutor) {
+    if let Some(existing) = list.iter_mut().find(|item| {
+        item.provider == entry.provider
+            && item.model == entry.model
+            && item.base_url == entry.base_url
+    }) {
+        existing.api_key = entry.api_key;
+    } else {
+        list.push(entry);
+    }
+}
+
+/// Record a verified executor after a successful Settings test. No-op if the
+/// model id or key is empty (an entry without a key could not be switched to).
+pub(crate) fn record_verified_executor(
+    provider: &str,
+    model: &str,
+    base_url: Option<&str>,
+    api_key: &str,
+) -> Result<(), String> {
+    let model = model.trim();
+    let api_key = api_key.trim();
+    if model.is_empty() || api_key.is_empty() {
+        return Ok(());
+    }
+    let mut obj = load_object();
+    let mut list = read_verified(&obj);
+    upsert_verified(
+        &mut list,
+        VerifiedExecutor {
+            provider: provider.trim().to_string(),
+            model: model.to_string(),
+            base_url: base_url.unwrap_or("").trim().to_string(),
+            api_key: api_key.to_string(),
+        },
+    );
+    write_verified(&mut obj, &list);
+    save_object(&obj)
+}
+
+/// `(provider, model, base_url)` for each verified executor — keys are never
+/// returned to the frontend.
+pub(crate) fn verified_executor_summaries() -> Vec<(String, String, String)> {
+    read_verified(&load_object())
+        .into_iter()
+        .map(|entry| (entry.provider, entry.model, entry.base_url))
+        .collect()
+}
+
+const DEEPSEEK_EXECUTOR_MODEL: &str = "deepseek-v4-pro";
+const DEEPSEEK_ANTHROPIC_BASE_URL: &str = "https://api.deepseek.com/anthropic";
+
+fn value_contains(obj: &Map<String, Value>, key: &str, needle: &str) -> bool {
+    obj.get(key)
+        .and_then(Value::as_str)
+        .map(|value| value.to_ascii_lowercase().contains(needle))
+        .unwrap_or(false)
+}
+
+fn config_has_deepseek_executor(obj: &Map<String, Value>) -> bool {
+    value_contains(obj, "executor_provider", "deepseek")
+        || value_contains(obj, "executor_model", "deepseek")
+        || value_contains(obj, "executor_base_url", "deepseek")
+}
+
+fn config_has_deepseek_reviewer(obj: &Map<String, Value>) -> bool {
+    value_contains(obj, "reviewer_provider", "deepseek")
+        || value_contains(obj, "reviewer_model", "deepseek")
+        || value_contains(obj, "reviewer_base_url", "deepseek")
+}
+
+fn deepseek_executor_key(obj: &Map<String, Value>) -> Option<String> {
+    if config_has_deepseek_executor(obj) {
+        if let Some(key) = get_non_empty(obj, "executor_api_key") {
+            return Some(key);
+        }
+    }
+    if config_has_deepseek_reviewer(obj) {
+        if let Some(key) = get_non_empty(obj, "reviewer_api_key") {
+            return Some(key);
+        }
+    }
+    std::env::var("DEEPSEEK_API_KEY")
+        .ok()
+        .filter(|key| !key.trim().is_empty())
+}
+
+fn apply_deepseek_executor(obj: &mut Map<String, Value>, key: String) {
+    obj.insert(
+        "executor_provider".to_string(),
+        Value::String("anthropic-compat".to_string()),
+    );
+    obj.insert(
+        "executor_model".to_string(),
+        Value::String(DEEPSEEK_EXECUTOR_MODEL.to_string()),
+    );
+    obj.insert(
+        "executor_base_url".to_string(),
+        Value::String(DEEPSEEK_ANTHROPIC_BASE_URL.to_string()),
+    );
+    obj.insert("executor_api_key".to_string(), Value::String(key));
+}
+
+fn apply_verified_executor(obj: &mut Map<String, Value>, entry: VerifiedExecutor) {
+    obj.insert(
+        "executor_provider".to_string(),
+        Value::String(entry.provider),
+    );
+    obj.insert("executor_model".to_string(), Value::String(entry.model));
+    if entry.base_url.is_empty() {
+        obj.remove("executor_base_url");
+    } else {
+        obj.insert(
+            "executor_base_url".to_string(),
+            Value::String(entry.base_url),
+        );
+    }
+    obj.insert("executor_api_key".to_string(), Value::String(entry.api_key));
+}
+
+/// Return a config object with `model` selected as executor, without saving it.
+/// The model must be the current executor, a verified executor, or a built-in
+/// preset backed by an already configured key.
+pub(crate) fn executor_object_for_model(model: &str) -> Result<Option<Map<String, Value>>, String> {
+    let model = model.trim();
+    if model.is_empty() {
+        return Err("model id must not be empty".to_string());
+    }
+    let mut obj = load_object();
+    if get_non_empty(&obj, "executor_model").as_deref() == Some(model) {
+        return Ok(Some(obj));
+    }
+    if let Some(entry) = read_verified(&obj)
+        .into_iter()
+        .find(|item| item.model == model)
+    {
+        apply_verified_executor(&mut obj, entry);
+        return Ok(Some(obj));
+    }
+    if model == DEEPSEEK_EXECUTOR_MODEL {
+        let Some(key) = deepseek_executor_key(&obj) else {
+            return Err(
+                "DeepSeek API key is not configured. Add DeepSeek in Settings first.".to_string(),
+            );
+        };
+        apply_deepseek_executor(&mut obj, key);
+        return Ok(Some(obj));
+    }
+    Ok(None)
+}
+
+/// Built-in executor choices backed by keys already present in config/env.
+/// Keys are never returned to the frontend.
+pub(crate) fn builtin_executor_summaries() -> Vec<(String, String, String)> {
+    let obj = load_object();
+    let mut out = Vec::new();
+    if deepseek_executor_key(&obj).is_some() {
+        out.push((
+            "anthropic-compat".to_string(),
+            DEEPSEEK_EXECUTOR_MODEL.to_string(),
+            DEEPSEEK_ANTHROPIC_BASE_URL.to_string(),
+        ));
+    }
+    out
+}
+
+/// Restore the full executor config of a verified model. Returns `Ok(false)`
+/// when no verified entry matches the model id (caller decides how to react).
+pub(crate) fn switch_to_verified_executor(model: &str) -> Result<bool, String> {
+    let model = model.trim();
+    let mut obj = load_object();
+    let Some(entry) = read_verified(&obj)
+        .into_iter()
+        .find(|item| item.model == model)
+    else {
+        return Ok(false);
+    };
+    apply_verified_executor(&mut obj, entry);
+    save_object(&obj)?;
+    Ok(true)
+}
+
+/// Switch to a built-in executor preset when a usable key already exists.
+pub(crate) fn switch_to_builtin_executor(model: &str) -> Result<bool, String> {
+    let model = model.trim();
+    if model != DEEPSEEK_EXECUTOR_MODEL {
+        return Ok(false);
+    }
+    let mut obj = load_object();
+    let Some(key) = deepseek_executor_key(&obj) else {
+        return Err(
+            "DeepSeek API key is not configured. Add DeepSeek in Settings first.".to_string(),
+        );
+    };
+    apply_deepseek_executor(&mut obj, key.clone());
+    save_object(&obj)?;
+    let _ = record_verified_executor(
+        "anthropic-compat",
+        DEEPSEEK_EXECUTOR_MODEL,
+        Some(DEEPSEEK_ANTHROPIC_BASE_URL),
+        &key,
+    );
+    Ok(true)
 }
 
 #[derive(Deserialize, Default)]
@@ -181,14 +504,7 @@ fn apply_patch(obj: &mut Map<String, Value>, patch: ConfigPatch) {
 pub fn config_set(patch: ConfigPatch) -> Result<ConfigView, String> {
     let mut obj = load_object();
     apply_patch(&mut obj, patch);
-
-    let path = state::config_path();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    let json =
-        serde_json::to_string_pretty(&Value::Object(obj.clone())).map_err(|e| e.to_string())?;
-    std::fs::write(&path, json).map_err(|e| e.to_string())?;
+    save_object(&obj)?;
     apply_reviewer_environment_from(&obj, true);
     Ok(build_view(&obj))
 }
@@ -516,6 +832,113 @@ async fn test_reviewer(obj: &Map<String, Value>) -> Option<ConfigTestDetail> {
     Some(test_openai_compat("Reviewer", provider, model, base_url, key).await)
 }
 
+/// Per-provider connection test for the Settings provider cards. The API key is
+/// optional: when omitted (the common case — saved keys are never sent to the
+/// frontend) it is resolved from the saved config by matching the base URL
+/// against the executor / reviewer slots and the verified-executor registry.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderTestInput {
+    pub base_url: String,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub api_key: Option<String>,
+}
+
+fn norm_url(url: &str) -> String {
+    url.trim().trim_end_matches('/').to_ascii_lowercase()
+}
+
+fn url_host(url: &str) -> String {
+    let lower = url.trim().to_ascii_lowercase();
+    let after_scheme = lower.split("://").last().unwrap_or(&lower);
+    after_scheme.split('/').next().unwrap_or("").to_string()
+}
+
+/// Find a usable key for `base_url`: exact base-URL match first, then a
+/// host-level fallback (keys are vendor-wide, so a host match is safe enough).
+fn resolve_saved_key(obj: &Map<String, Value>, base_url: &str) -> Option<String> {
+    let target = norm_url(base_url);
+    let target_host = url_host(base_url);
+    let mut candidates: Vec<(String, String)> = Vec::new();
+    if let (Some(url), Some(key)) = (
+        get_non_empty(obj, "executor_base_url"),
+        get_non_empty(obj, "executor_api_key"),
+    ) {
+        candidates.push((url, key));
+    }
+    if let (Some(url), Some(key)) = (
+        get_non_empty(obj, "reviewer_base_url"),
+        get_non_empty(obj, "reviewer_api_key"),
+    ) {
+        candidates.push((url, key));
+    }
+    for entry in read_verified(obj) {
+        if !entry.base_url.is_empty() {
+            candidates.push((entry.base_url, entry.api_key));
+        }
+    }
+    if let Some((_, key)) = candidates.iter().find(|(url, _)| norm_url(url) == target) {
+        return Some(key.clone());
+    }
+    if !target_host.is_empty() {
+        if let Some((_, key)) = candidates
+            .iter()
+            .find(|(url, _)| url_host(url) == target_host)
+        {
+            return Some(key.clone());
+        }
+    }
+    None
+}
+
+fn is_anthropic_url(base_url: &str) -> bool {
+    let lower = base_url.to_ascii_lowercase();
+    lower.contains("anthropic") || lower.contains("newcli.com") || lower.contains("modelscope.cn")
+}
+
+#[tauri::command]
+pub async fn provider_test(input: ProviderTestInput) -> Result<ConfigTestDetail, String> {
+    let base_url = input.base_url.trim().to_string();
+    if base_url.is_empty() {
+        return Err("Base URL is required to test this provider.".to_string());
+    }
+    let obj = load_object();
+    let key = input
+        .api_key
+        .map(|key| key.trim().to_string())
+        .filter(|key| !key.is_empty())
+        .or_else(|| resolve_saved_key(&obj, &base_url));
+    let Some(key) = key else {
+        return Err(
+            "No API key found for this provider. Open it to paste a key, or set it as executor / reviewer first."
+                .to_string(),
+        );
+    };
+    let model = input
+        .model
+        .map(|model| model.trim().to_string())
+        .filter(|model| !model.is_empty())
+        .unwrap_or_else(|| "gpt-5.5".to_string());
+
+    if is_anthropic_url(&base_url) {
+        let normalized = normalized_base_url(Some(base_url), "https://api.anthropic.com");
+        let auth = if normalized
+            .to_ascii_lowercase()
+            .contains("api.anthropic.com")
+        {
+            AuthSource::ApiKey(key)
+        } else {
+            AuthSource::BearerToken(key)
+        };
+        Ok(test_anthropic("Provider", "anthropic".to_string(), model, normalized, auth).await)
+    } else {
+        let normalized = normalized_base_url(Some(base_url), "https://api.openai.com/v1");
+        Ok(test_openai_compat("Provider", "openai".to_string(), model, normalized, key).await)
+    }
+}
+
 #[tauri::command]
 pub async fn config_test(patch: ConfigPatch) -> Result<ConfigTestResult, String> {
     let mut obj = load_object();
@@ -556,6 +979,18 @@ pub async fn config_test(patch: ConfigPatch) -> Result<ConfigTestResult, String>
         },
     };
 
+    // Record any executor that passes so the Chat header dropdown can offer it.
+    // Persists into the saved config without committing the rest of the unsaved
+    // form — only the verified registry is touched.
+    if executor.ok {
+        if let (Some(provider), Some(model)) = (executor.provider.clone(), executor.model.clone()) {
+            if let Some(key) = get_non_empty(&obj, "executor_api_key") {
+                let _ =
+                    record_verified_executor(&provider, &model, executor.base_url.as_deref(), &key);
+            }
+        }
+    }
+
     let reviewer = test_reviewer(&obj).await;
     let reviewer_ok = reviewer.as_ref().map(|detail| detail.ok).unwrap_or(true);
     let ok = executor.ok && reviewer_ok;
@@ -574,11 +1009,102 @@ pub async fn config_test(patch: ConfigPatch) -> Result<ConfigTestResult, String>
 
 #[cfg(test)]
 mod tests {
-    use super::apply_reviewer_environment_from;
+    use super::{
+        apply_reviewer_environment_from, deepseek_executor_key, read_verified, upsert_verified,
+        write_verified, VerifiedExecutor,
+    };
     use serde_json::{Map, Value};
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn entry(provider: &str, model: &str, base_url: &str, key: &str) -> VerifiedExecutor {
+        VerifiedExecutor {
+            provider: provider.to_string(),
+            model: model.to_string(),
+            base_url: base_url.to_string(),
+            api_key: key.to_string(),
+        }
+    }
+
+    #[test]
+    fn upsert_refreshes_key_without_duplicating_same_endpoint() {
+        let mut list = vec![entry(
+            "openai",
+            "MiniMax-M3",
+            "https://api.minimaxi.com/v1",
+            "k1",
+        )];
+        // Same (provider, model, base_url) → update key in place.
+        upsert_verified(
+            &mut list,
+            entry("openai", "MiniMax-M3", "https://api.minimaxi.com/v1", "k2"),
+        );
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].api_key, "k2");
+
+        // Same model id, different endpoint → distinct entry.
+        upsert_verified(
+            &mut list,
+            entry("openai", "MiniMax-M3", "https://other.example/v1", "k3"),
+        );
+        assert_eq!(list.len(), 2);
+    }
+
+    #[test]
+    fn verified_registry_round_trips_through_json() {
+        let mut obj = Map::new();
+        let list = vec![
+            entry("anthropic", "claude-opus-4-7", "", "ka"),
+            entry("openai", "gpt-5.5", "https://api.openai.com/v1", "kb"),
+        ];
+        write_verified(&mut obj, &list);
+        let parsed = read_verified(&obj);
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].model, "claude-opus-4-7");
+        assert_eq!(parsed[0].base_url, "");
+        assert_eq!(parsed[1].api_key, "kb");
+    }
+
+    #[test]
+    fn read_verified_skips_entries_without_a_model() {
+        let mut obj = Map::new();
+        obj.insert(
+            "verified_executors".to_string(),
+            Value::Array(vec![
+                serde_json::json!({ "provider": "openai", "base_url": "x", "api_key": "k" }),
+                serde_json::json!({ "provider": "openai", "model": "gpt-5.5", "api_key": "k" }),
+            ]),
+        );
+        let parsed = read_verified(&obj);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].model, "gpt-5.5");
+    }
+
+    #[test]
+    fn deepseek_executor_key_can_reuse_reviewer_key() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        std::env::remove_var("DEEPSEEK_API_KEY");
+
+        let mut obj = Map::new();
+        obj.insert(
+            "reviewer_provider".to_string(),
+            Value::String("deepseek".to_string()),
+        );
+        obj.insert(
+            "reviewer_model".to_string(),
+            Value::String("deepseek-v4-pro".to_string()),
+        );
+        obj.insert(
+            "reviewer_api_key".to_string(),
+            Value::String("reviewer-token".to_string()),
+        );
+
+        assert_eq!(
+            deepseek_executor_key(&obj).as_deref(),
+            Some("reviewer-token")
+        );
+    }
 
     #[test]
     fn forced_reviewer_environment_marks_reviewer_disabled_after_clearing() {

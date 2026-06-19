@@ -4,16 +4,12 @@ use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
-use tokio::process::Command as TokioCommand;
-use tokio::runtime::Builder;
-use tokio::time::timeout;
-
 use crate::sandbox::{
     build_linux_sandbox_command, resolve_sandbox_status_for_request, FilesystemIsolationMode,
     SandboxConfig, SandboxStatus,
 };
-use crate::{hidden_command, hidden_tokio_command, ConfigLoader};
+use crate::{hidden_command, ConfigLoader};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BashCommandInput {
@@ -76,11 +72,14 @@ pub fn execute_bash(input: BashCommandInput) -> io::Result<BashCommandOutput> {
 
     if input.run_in_background.unwrap_or(false) {
         let mut child = prepare_command(&input.command, &cwd, &sandbox_status, false);
-        let child = child
+        child
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()?;
+            .stderr(Stdio::null());
+        let pid = crate::spawn_managed_background(
+            &mut child,
+            format!("bash background: {}", truncate_label(&input.command)),
+        )?;
 
         return Ok(BashCommandOutput {
             stdout: String::new(),
@@ -88,7 +87,7 @@ pub fn execute_bash(input: BashCommandInput) -> io::Result<BashCommandOutput> {
             raw_output_path: None,
             interrupted: false,
             is_image: None,
-            background_task_id: Some(child.id().to_string()),
+            background_task_id: Some(pid.to_string()),
             backgrounded_by_user: Some(false),
             assistant_auto_backgrounded: Some(false),
             dangerously_disable_sandbox: input.dangerously_disable_sandbox,
@@ -101,49 +100,54 @@ pub fn execute_bash(input: BashCommandInput) -> io::Result<BashCommandOutput> {
         });
     }
 
-    let runtime = Builder::new_current_thread().enable_all().build()?;
-    runtime.block_on(execute_bash_async(input, sandbox_status, cwd))
+    execute_bash_blocking(input, sandbox_status, cwd)
 }
 
-async fn execute_bash_async(
+fn execute_bash_blocking(
     input: BashCommandInput,
     sandbox_status: SandboxStatus,
     cwd: std::path::PathBuf,
 ) -> io::Result<BashCommandOutput> {
-    let mut command = prepare_tokio_command(&input.command, &cwd, &sandbox_status, true);
+    let mut command = prepare_command(&input.command, &cwd, &sandbox_status, true);
+    let result = crate::run_managed_command(
+        &mut command,
+        format!("bash: {}", truncate_label(&input.command)),
+        input.timeout.map(Duration::from_millis),
+        true,
+    )?;
 
-    let output_result = if let Some(timeout_ms) = input.timeout {
-        match timeout(Duration::from_millis(timeout_ms), command.output()).await {
-            Ok(result) => (result?, false),
-            Err(_) => {
-                return Ok(BashCommandOutput {
-                    stdout: String::new(),
-                    stderr: format!("Command exceeded timeout of {timeout_ms} ms"),
-                    raw_output_path: None,
-                    interrupted: true,
-                    is_image: None,
-                    background_task_id: None,
-                    backgrounded_by_user: None,
-                    assistant_auto_backgrounded: None,
-                    dangerously_disable_sandbox: input.dangerously_disable_sandbox,
-                    return_code_interpretation: Some(String::from("timeout")),
-                    no_output_expected: Some(true),
-                    structured_content: None,
-                    persisted_output_path: None,
-                    persisted_output_size: None,
-                    sandbox_status: Some(sandbox_status),
-                });
-            }
-        }
-    } else {
-        (command.output().await?, false)
-    };
+    if result.timed_out {
+        return Ok(interrupted_output(
+            String::from_utf8_lossy(&result.stdout).into_owned(),
+            append_status_message(
+                String::from_utf8_lossy(&result.stderr).into_owned(),
+                format!(
+                    "Command exceeded timeout of {} ms",
+                    input.timeout.unwrap_or_default()
+                ),
+            ),
+            Some(String::from("timeout")),
+            input.dangerously_disable_sandbox,
+            sandbox_status,
+        ));
+    }
+    if result.interrupted {
+        return Ok(interrupted_output(
+            String::from_utf8_lossy(&result.stdout).into_owned(),
+            append_status_message(
+                String::from_utf8_lossy(&result.stderr).into_owned(),
+                String::from("Command interrupted by user"),
+            ),
+            Some(String::from("interrupted")),
+            input.dangerously_disable_sandbox,
+            sandbox_status,
+        ));
+    }
 
-    let (output, interrupted) = output_result;
-    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let stdout = String::from_utf8_lossy(&result.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&result.stderr).into_owned();
     let no_output_expected = Some(stdout.trim().is_empty() && stderr.trim().is_empty());
-    let return_code_interpretation = output.status.code().and_then(|code| {
+    let return_code_interpretation = result.status.code().and_then(|code| {
         if code == 0 {
             None
         } else {
@@ -155,7 +159,7 @@ async fn execute_bash_async(
         stdout,
         stderr,
         raw_output_path: None,
-        interrupted,
+        interrupted: false,
         is_image: None,
         background_task_id: None,
         backgrounded_by_user: None,
@@ -168,6 +172,50 @@ async fn execute_bash_async(
         persisted_output_size: None,
         sandbox_status: Some(sandbox_status),
     })
+}
+
+fn append_status_message(stderr: String, message: String) -> String {
+    if stderr.trim().is_empty() {
+        message
+    } else {
+        format!("{}\n{message}", stderr.trim_end())
+    }
+}
+
+fn truncate_label(value: &str) -> String {
+    const MAX: usize = 120;
+    if value.chars().count() <= MAX {
+        value.to_string()
+    } else {
+        let head = value.chars().take(MAX).collect::<String>();
+        format!("{head}...")
+    }
+}
+
+fn interrupted_output(
+    stdout: String,
+    stderr: String,
+    return_code_interpretation: Option<String>,
+    dangerously_disable_sandbox: Option<bool>,
+    sandbox_status: SandboxStatus,
+) -> BashCommandOutput {
+    BashCommandOutput {
+        stdout,
+        stderr,
+        raw_output_path: None,
+        interrupted: true,
+        is_image: None,
+        background_task_id: None,
+        backgrounded_by_user: None,
+        assistant_auto_backgrounded: None,
+        dangerously_disable_sandbox,
+        return_code_interpretation,
+        no_output_expected: Some(true),
+        structured_content: None,
+        persisted_output_path: None,
+        persisted_output_size: None,
+        sandbox_status: Some(sandbox_status),
+    }
 }
 
 fn sandbox_status_for_input(input: &BashCommandInput, cwd: &std::path::Path) -> SandboxStatus {
@@ -257,47 +305,6 @@ fn prepare_command(
     }
 
     let mut prepared = hidden_command("sh");
-    prepared.arg("-lc").arg(command).current_dir(cwd);
-    if sandbox_status.filesystem_active {
-        prepared.env("HOME", cwd.join(".sandbox-home"));
-        prepared.env("TMPDIR", cwd.join(".sandbox-tmp"));
-    }
-    prepared
-}
-
-fn prepare_tokio_command(
-    command: &str,
-    cwd: &std::path::Path,
-    sandbox_status: &SandboxStatus,
-    create_dirs: bool,
-) -> TokioCommand {
-    if create_dirs {
-        prepare_sandbox_dirs(cwd);
-    }
-
-    if let Some(launcher) = build_linux_sandbox_command(command, cwd, sandbox_status) {
-        let mut prepared = hidden_tokio_command(launcher.program);
-        prepared.args(launcher.args);
-        prepared.current_dir(cwd);
-        prepared.envs(launcher.env);
-        return prepared;
-    }
-
-    if cfg!(windows) {
-        let launcher = windows_shell_launcher();
-        if launcher.posix {
-            prepare_sandbox_dirs(cwd);
-        }
-        let mut prepared = hidden_tokio_command(&launcher.program);
-        prepared.args(launcher.args).arg(command).current_dir(cwd);
-        if launcher.posix {
-            prepared.env("HOME", cwd.join(".sandbox-home"));
-            prepared.env("TMPDIR", cwd.join(".sandbox-tmp"));
-        }
-        return prepared;
-    }
-
-    let mut prepared = hidden_tokio_command("sh");
     prepared.arg("-lc").arg(command).current_dir(cwd);
     if sandbox_status.filesystem_active {
         prepared.env("HOME", cwd.join(".sandbox-home"));

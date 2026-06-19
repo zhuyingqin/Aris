@@ -1,72 +1,47 @@
 import { invoke } from "@tauri-apps/api/core";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { listen } from "@tauri-apps/api/event";
 
 /** True only inside the Tauri webview; false in a plain browser (vite preview). */
 export const isTauri = (): boolean =>
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+export const openExternalUrl = (url: string) => {
+  if (isTauri()) return invoke<void>("open_external_url", { url });
+  window.open(url, "_blank", "noopener,noreferrer");
+  return Promise.resolve();
+};
 import type {
   ChatCommandResult,
+  ChatModelOptions,
   ChatStatus,
+  ConnectorActionResult,
+  ConnectorPluginView,
   ConfigPatch,
+  ConfigSecretKind,
+  ConfigTestDetail,
   ConfigTestResult,
   ConfigView,
   DesktopCommandSpec,
+  GenericMailAccountInput,
+  GenericMailTestResult,
+  MailAccount,
+  MailAutoconfigResult,
+  MailDraft,
+  MailFolder,
+  MailMessageFull,
+  MailMessageList,
+  MailModifyPatch,
+  MailOauthConfigPatch,
+  MailOauthConfigView,
   McpConfigView,
   McpStdioServerInput,
   McpTestResult,
   PermissionModeView,
   ProjectView,
-  RunEvent,
+  ScheduledTask,
   SessionSummary,
   SessionTranscript,
   SkillMeta,
-  TeamSnapshot,
-  WorkflowApproval,
-  WorkflowControlAction,
-  WorkflowOutput,
 } from "../types";
-
-// ── Workflow commands ─────────────────────────────────────────────────────────
-
-export const workflowPlan = (script: string) =>
-  invoke<WorkflowOutput>("workflow_plan", { script });
-
-export const workflowList = () => invoke<WorkflowOutput>("workflow_list");
-
-export const workflowInspect = (id: string) =>
-  invoke<WorkflowOutput>("workflow_inspect", { id });
-
-export interface StartReq {
-  script: string;
-  approval: WorkflowApproval;
-  name?: string;
-  saveAs?: string;
-  maxConcurrency?: number;
-  maxAgents?: number;
-}
-
-export const workflowStart = (req: StartReq) =>
-  invoke<WorkflowOutput>("workflow_start", { req });
-
-export const workflowControl = (id: string, action: WorkflowControlAction) =>
-  invoke<WorkflowOutput>("workflow_control", { id, action });
-
-export const workflowSave = (name: string, script: string) =>
-  invoke<WorkflowOutput>("workflow_save", { name, script });
-
-export const workflowDiscover = () =>
-  invoke<WorkflowOutput>("workflow_discover");
-
-// ── Team / agent commands ─────────────────────────────────────────────────────
-
-export const teamList = (
-  team: string | null,
-  messages: boolean,
-  events: boolean,
-) => invoke<TeamSnapshot>("team_list", { team, messages, events });
-
-export const agentSupervisor = (action: string, agent?: string) =>
-  invoke<unknown>("agent_supervisor", { action, agent: agent ?? null });
 
 export const stateDir = () => invoke<string>("state_dir");
 export const projectsGet = () => invoke<ProjectView>("projects_get");
@@ -80,10 +55,16 @@ export const projectsReorder = (projectIds: string[]) =>
 // ── Settings / Skills / Sessions (P1) ─────────────────────────────────────────
 
 export const configGet = () => invoke<ConfigView>("config_get");
+export const configSecretGet = (kind: ConfigSecretKind) =>
+  invoke<string | null>("config_secret_get", { kind });
 export const configSet = (patch: ConfigPatch) =>
   invoke<ConfigView>("config_set", { patch });
 export const configTest = (patch: ConfigPatch) =>
   invoke<ConfigTestResult>("config_test", { patch });
+export const providerTest = (input: { baseUrl: string; model?: string; apiKey?: string }) =>
+  invoke<ConfigTestDetail>("provider_test", { input });
+export const scheduledTasksList = () =>
+  invoke<ScheduledTask[]>("scheduled_tasks_list");
 export const projectPermissionGet = () =>
   invoke<PermissionModeView>("project_permission_get");
 export const projectPermissionSet = (mode: string) =>
@@ -92,6 +73,54 @@ export const mcpConfigGet = () => invoke<McpConfigView>("mcp_config_get");
 export const mcpConfigSet = (servers: McpStdioServerInput[]) =>
   invoke<McpConfigView>("mcp_config_set", { servers });
 export const mcpConfigTest = () => invoke<McpTestResult>("mcp_config_test");
+
+// ── Codex-style connectors ───────────────────────────────────────────────────
+
+export const connectorPluginsList = () =>
+  invoke<ConnectorPluginView[]>("connector_plugins_list");
+export const connectorConnect = (id: string) =>
+  invoke<ConnectorActionResult>("connector_connect", { id });
+
+// ── Mail (Gmail API + Microsoft Graph) ────────────────────────────────────────
+
+export const mailAccountsGet = () => invoke<MailAccount[]>("mail_accounts_get");
+export const mailOauthConfigGet = () =>
+  invoke<MailOauthConfigView>("mail_oauth_config_get");
+export const mailOauthConfigSet = (patch: MailOauthConfigPatch) =>
+  invoke<MailOauthConfigView>("mail_oauth_config_set", { patch });
+export const mailConnect = (provider: "gmail" | "outlook") =>
+  invoke<MailAccount>("mail_connect", { provider });
+export const mailAutoconfig = (email: string) =>
+  invoke<MailAutoconfigResult>("mail_autoconfig", { email });
+export const mailGenericTest = (input: GenericMailAccountInput) =>
+  invoke<GenericMailTestResult>("mail_generic_test", { input });
+export const mailGenericConnect = (input: GenericMailAccountInput) =>
+  invoke<MailAccount>("mail_generic_connect", { input });
+export const mailDisconnect = (accountId: string) =>
+  invoke<MailAccount[]>("mail_disconnect", { accountId });
+export const mailFolders = (accountId: string) =>
+  invoke<MailFolder[]>("mail_folders", { accountId });
+export const mailList = (
+  accountId: string,
+  folder: string,
+  query: string,
+  pageToken?: string | null,
+) =>
+  invoke<MailMessageList>("mail_list", {
+    accountId,
+    folder,
+    query,
+    pageToken: pageToken ?? null,
+  });
+export const mailRead = (accountId: string, messageId: string) =>
+  invoke<MailMessageFull>("mail_read", { accountId, messageId });
+export const mailModify = (
+  accountId: string,
+  messageId: string,
+  patch: MailModifyPatch,
+) => invoke<void>("mail_modify", { accountId, messageId, patch });
+export const mailSend = (accountId: string, draft: MailDraft) =>
+  invoke<void>("mail_send", { accountId, draft });
 
 export const skillsList = () => invoke<SkillMeta[]>("skills_list");
 export const skillView = (name: string) =>
@@ -159,6 +188,28 @@ export const literatureImageOcr = (image: number[]) =>
 export const literaturePdfOpen = (relativePath: string) =>
   invoke<void>("literature_pdf_open", { relativePath });
 
+// ── Studio artifacts ──────────────────────────────────────────────────────────
+
+export const studioLoad = <T>() => invoke<T>("studio_load");
+export const studioSave = <T>(library: T) =>
+  invoke<void>("studio_save", { library });
+export const studioHtml = (relativePath: string) =>
+  invoke<string>("studio_html", { relativePath });
+
+// ── Knowledge base ────────────────────────────────────────────────────────────
+
+export const knowledgeLoad = <T>() => invoke<T>("knowledge_load");
+export const knowledgeSearch = <T>(query: string, limit?: number) =>
+  invoke<T>("knowledge_search", { query, limit: limit ?? null });
+export const knowledgeUpsert = <T>(points: unknown[]) =>
+  invoke<T>("knowledge_upsert", { points });
+export const knowledgeConfirm = (kpId: string) =>
+  invoke<void>("knowledge_confirm", { kpId });
+export const knowledgeReject = (kpId: string) =>
+  invoke<boolean>("knowledge_reject", { kpId });
+export const knowledgeGenerate = <T>(paperId: string) =>
+  invoke<T>("knowledge_generate", { paperId });
+
 // ── File browser ─────────────────────────────────────────────────────────────
 
 export const fileSearch = (pattern: string, root?: string) =>
@@ -173,10 +224,16 @@ export const projectChatStarters = () => invoke<string[]>("project_chat_starters
 // ── Chat engine (P2) ──────────────────────────────────────────────────────────
 
 export const chatStatus = () => invoke<ChatStatus>("chat_status");
+export const chatModelOptions = () =>
+  invoke<ChatModelOptions>("chat_model_options");
+export const chatModelSet = (model: string, persist = true) =>
+  invoke<ChatStatus>("chat_model_set", { model, persist });
 export const chatPermissionGet = (sessionId: string) =>
   invoke<PermissionModeView>("chat_permission_get", { sessionId });
 export const chatPermissionSet = (sessionId: string, mode: string) =>
   invoke<PermissionModeView>("chat_permission_set", { sessionId, mode });
+export const chatPermissionRespond = (promptId: string, allow: boolean) =>
+  invoke<void>("chat_permission_respond", { promptId, allow });
 export const chatCommandSpecs = () =>
   invoke<DesktopCommandSpec[]>("chat_command_specs");
 export const chatRunCommand = (sessionId: string, input: string) =>
@@ -193,6 +250,7 @@ export interface ChatImageInput {
 export interface ChatSendRequest {
   text: string;
   images?: ChatImageInput[];
+  model?: string | null;
 }
 
 export interface ChatContextMessage {
@@ -211,6 +269,10 @@ export const chatSend = (sessionId: string, message: string | ChatSendRequest) =
 export const literatureAgentSend = (sessionId: string, message: string | ChatSendRequest) => {
   const request = typeof message === "string" ? { text: message } : message;
   return invoke<string>("literature_agent_send_rich", { sessionId, request });
+};
+export const studioAgentSend = (sessionId: string, message: string | ChatSendRequest) => {
+  const request = typeof message === "string" ? { text: message } : message;
+  return invoke<string>("studio_agent_send_rich", { sessionId, request });
 };
 export const chatReset = (sessionId: string) =>
   invoke<void>("chat_reset", { sessionId });
@@ -232,6 +294,21 @@ export interface ChatThinkingEvent {
   thinking: string;
 }
 
+export interface ChatPermissionRequestEvent {
+  sessionId: string;
+  promptId: string;
+  toolName: string;
+  input: string;
+  currentMode: string;
+  requiredMode: string;
+}
+
+export interface ChatPermissionResolvedEvent {
+  sessionId: string;
+  promptId: string;
+  decision: "allow" | "deny";
+}
+
 export const onChatDelta = (handler: (event: ChatTextEvent) => void) =>
   listen<ChatTextEvent>("chat-delta", (e) => handler(e.payload));
 export const onChatThinkingDelta = (handler: (event: ChatThinkingEvent) => void) =>
@@ -246,12 +323,9 @@ export const onChatToolResult = (
     "chat-tool-result",
     (e) => handler(e.payload),
   );
+export const onChatPermissionRequest = (handler: (event: ChatPermissionRequestEvent) => void) =>
+  listen<ChatPermissionRequestEvent>("chat-permission-request", (e) => handler(e.payload));
+export const onChatPermissionResolved = (handler: (event: ChatPermissionResolvedEvent) => void) =>
+  listen<ChatPermissionResolvedEvent>("chat-permission-resolved", (e) => handler(e.payload));
 export const onChatDone = (handler: (event: ChatTextEvent) => void) =>
   listen<ChatTextEvent>("chat-done", (e) => handler(e.payload));
-
-// ── Live events ───────────────────────────────────────────────────────────────
-
-export const onRunEvent = (
-  handler: (event: RunEvent) => void,
-): Promise<UnlistenFn> =>
-  listen<RunEvent>("run-event", (e) => handler(e.payload));

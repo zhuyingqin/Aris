@@ -656,6 +656,7 @@ pub struct McpStdioProcess {
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
     framing: McpStdioFraming,
+    _process_guard: Option<crate::ManagedProcessGuard>,
     /// v0.4.13 P1.D: per-server timeout override copied from the
     /// transport. `None` means fall through to
     /// `MCP_REQUEST_TIMEOUT_SECS` env / 300s default at request time.
@@ -680,8 +681,16 @@ impl McpStdioProcess {
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
         apply_env(&mut command, &transport.env);
+        crate::configure_managed_tokio_command(&mut command);
 
         let mut child = command.spawn()?;
+        let process_guard = child.id().map(|pid| {
+            crate::register_managed_process(
+                pid,
+                format!("mcp stdio: {}", transport.command),
+                crate::ManagedProcessKind::Mcp,
+            )
+        });
         let stdin = child
             .stdin
             .take()
@@ -704,6 +713,7 @@ impl McpStdioProcess {
             } else {
                 McpStdioFraming::JsonLines
             },
+            _process_guard: process_guard,
             request_timeout_override_secs: transport.request_timeout_secs,
         })
     }
@@ -866,6 +876,8 @@ impl McpStdioProcess {
     ///   fills) also unblocks the caller.
     /// * After a successful read, the response id must equal the
     ///   request id.
+    /// * A process-wide interrupt immediately kills the child and returns
+    ///   `Interrupted`, so a hung tool call cannot pin the conversation.
     /// * On *any* failure mode (timeout, I/O error during
     ///   send/read, id mismatch) we `kill().await` the child so the
     ///   stdio pipes are flushed and the next call respawns from a
@@ -936,18 +948,30 @@ impl McpStdioProcess {
             }
         };
 
-        let response: JsonRpcResponse<TResult> = match tokio::time::timeout(timeout, send_then_read)
-            .await
-        {
-            Ok(Ok(response)) => response,
-            Ok(Err(error)) => {
+        let request_result = tokio::select! {
+            response = tokio::time::timeout(timeout, send_then_read) => Some(response),
+            () = wait_for_interrupt() => None,
+        };
+
+        let response: JsonRpcResponse<TResult> = match request_result {
+            None => {
+                // Keep the global flag set so the conversation loop unwinds
+                // instead of treating cancellation as an ordinary tool error.
+                let _ = self.terminate().await;
+                return Err(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "MCP request interrupted by user",
+                ));
+            }
+            Some(Ok(Ok(response))) => response,
+            Some(Ok(Err(error))) => {
                 // I/O error during send or read. Stdio buffer is now
                 // ambiguous — kill so the next call respawns cleanly.
-                let _ = self.child.kill().await;
+                let _ = self.terminate().await;
                 return Err(error);
             }
-            Err(_elapsed) => {
-                let _ = self.child.kill().await;
+            Some(Err(_elapsed)) => {
+                let _ = self.terminate().await;
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
                     format!(
@@ -961,7 +985,7 @@ impl McpStdioProcess {
         if response.id != id {
             // Correlation mismatch: server is desynced or buggy. Treat
             // as fatal for this connection so we respawn cleanly.
-            let _ = self.child.kill().await;
+            let _ = self.terminate().await;
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
@@ -1022,7 +1046,19 @@ impl McpStdioProcess {
     }
 
     pub async fn terminate(&mut self) -> io::Result<()> {
-        self.child.kill().await
+        // For stdio MCP servers, closing stdin is the safest shutdown signal:
+        // well-behaved servers exit their read loop on EOF. Avoid sending a
+        // negative-pid process-group signal here; hosted Linux runners have
+        // cancelled the entire job when this test path tears down quickly.
+        let _ = self.stdin.shutdown().await;
+        if let Ok(Some(_)) = self.child.try_wait() {
+            return Ok(());
+        }
+        match self.child.kill().await {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::InvalidInput => Ok(()),
+            Err(error) => Err(error),
+        }
     }
 
     pub async fn wait(&mut self) -> io::Result<std::process::ExitStatus> {
@@ -1031,10 +1067,23 @@ impl McpStdioProcess {
 
     async fn shutdown(&mut self) -> io::Result<()> {
         if self.child.try_wait()?.is_none() {
-            self.child.kill().await?;
+            self.terminate().await?;
         }
         let _ = self.child.wait().await?;
         Ok(())
+    }
+}
+
+async fn wait_for_interrupt() {
+    wait_for_interrupt_flag(&crate::INTERRUPTED).await;
+}
+
+async fn wait_for_interrupt_flag(flag: &std::sync::atomic::AtomicBool) {
+    loop {
+        if flag.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
 }
 
@@ -1120,7 +1169,7 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use serde_json::json;
@@ -1134,10 +1183,11 @@ mod tests {
     use crate::mcp_client::McpClientBootstrap;
 
     use super::{
-        mcp_request_timeout, spawn_mcp_stdio_process, JsonRpcId, JsonRpcRequest, JsonRpcResponse,
-        McpInitializeClientInfo, McpInitializeParams, McpInitializeResult, McpInitializeServerInfo,
-        McpListToolsResult, McpReadResourceParams, McpReadResourceResult, McpServerManager,
-        McpServerManagerError, McpStdioProcess, McpTool, McpToolCallParams,
+        mcp_request_timeout, spawn_mcp_stdio_process, wait_for_interrupt_flag, JsonRpcId,
+        JsonRpcRequest, JsonRpcResponse, McpInitializeClientInfo, McpInitializeParams,
+        McpInitializeResult, McpInitializeServerInfo, McpListToolsResult, McpReadResourceParams,
+        McpReadResourceResult, McpServerManager, McpServerManagerError, McpStdioProcess, McpTool,
+        McpToolCallParams,
     };
 
     fn temp_dir() -> PathBuf {
@@ -2312,6 +2362,29 @@ mod tests {
 
             let _ = process.wait().await;
             cleanup_script(&script_path);
+        });
+    }
+
+    #[test]
+    fn interrupt_wait_returns_after_flag_is_set() {
+        let runtime = Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let flag = AtomicBool::new(false);
+            let set_flag = async {
+                tokio::time::sleep(std::time::Duration::from_millis(75)).await;
+                flag.store(true, Ordering::SeqCst);
+            };
+
+            let started = std::time::Instant::now();
+            tokio::join!(wait_for_interrupt_flag(&flag), set_flag);
+
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(1),
+                "interrupt polling returned too slowly"
+            );
         });
     }
 

@@ -14,7 +14,7 @@ export type PaperFit = "high" | "medium" | "low";
 
 export type PdfStatus = "none" | "queued" | "downloading" | "downloaded" | "failed";
 
-export type DetailTab = "overview" | "reader" | "notes" | "evidence" | "files";
+export type DetailTab = "info" | "overview" | "reader" | "notes" | "evidence" | "files";
 
 export type ScreeningDecision = "include" | "exclude" | "maybe";
 
@@ -228,6 +228,7 @@ export interface LiteratureSearch {
 export interface LiteratureCollection {
   id: string;
   label: string;
+  parentId?: string;
 }
 
 export interface LiteratureLibrary {

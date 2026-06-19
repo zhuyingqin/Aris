@@ -10,6 +10,7 @@ const apiMocks = vi.hoisted(() => ({
   chatStatus: vi.fn(() => Promise.resolve({ ready: true, model: "MiniMax-M3", provider: "anthropic-compat" })),
   chatPermissionGet: vi.fn(() => Promise.resolve({ mode: "workspace-write", label: "Accept edits", description: "Read and edit workspace files" })),
   chatPermissionSet: vi.fn((_sessionId: string, mode: string) => Promise.resolve({ mode, label: mode, description: "" })),
+  chatPermissionRespond: vi.fn(() => Promise.resolve()),
   chatCommandSpecs: vi.fn(() => Promise.resolve([])),
   skillsList: vi.fn(() => Promise.resolve([])),
   projectChatStarters: vi.fn(() => Promise.resolve([])),
@@ -22,11 +23,14 @@ const apiMocks = vi.hoisted(() => ({
   fileRead: vi.fn(() => Promise.resolve("")),
   fileSearch: vi.fn(() => Promise.resolve([])),
   chatSend: vi.fn(() => Promise.resolve("")),
+  chatModelOptions: vi.fn(() => Promise.resolve({ provider: "anthropic-compat", current: "MiniMax-M3", options: [{ value: "MiniMax-M3", label: "MiniMax-M3", description: null }] })),
   chatCancel: vi.fn(() => Promise.resolve()),
   onChatDelta: vi.fn(() => Promise.resolve(() => undefined)),
   onChatThinkingDelta: vi.fn(() => Promise.resolve(() => undefined)),
   onChatTool: vi.fn(() => Promise.resolve(() => undefined)),
   onChatToolResult: vi.fn(() => Promise.resolve(() => undefined)),
+  onChatPermissionRequest: vi.fn(() => Promise.resolve(() => undefined)),
+  onChatPermissionResolved: vi.fn(() => Promise.resolve(() => undefined)),
   onChatDone: vi.fn(() => Promise.resolve(() => undefined)),
 }));
 

@@ -7,20 +7,24 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChatAttachment, ChatCommandSelection, ChatTurn, DesktopCommandSpec, DesktopProject, SkillMeta } from "../types";
 import ChatComposer, { attachmentFromFile, resizeComposerTextarea } from "./ChatComposer";
 import ChatMessage, { diffFromTool } from "./ChatMessage";
+import ChatSidebar from "./ChatSidebar";
 import CommandSelection from "./CommandSelection";
-import { isNearBottom } from "./ChatThread";
+import { isNearBottom, isScrollbarPointer, shouldPauseAutoFollowForWheel } from "./ChatThread";
 import {
   CURRENT_KEY,
   SESSIONS_KEY,
+  cleanChatTitle,
   fuzzyScore,
   groupSessionsByProject,
   makeId,
   makeSession,
   migrateSession,
+  titleFromTurns,
   transcriptFromTurn,
 } from "./model";
 import { appendToolOutput } from "./useChatStream";
 import { useChatSessions } from "./useChatSessions";
+import { useStore } from "../store";
 
 class ResizeObserverMock {
   observe() {}
@@ -30,6 +34,7 @@ class ResizeObserverMock {
 
 beforeEach(() => {
   localStorage.clear();
+  useStore.setState({ tab: "chat", pendingStudioArtifactId: null });
   vi.stubGlobal("ResizeObserver", ResizeObserverMock);
   Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
     configurable: true,
@@ -60,6 +65,29 @@ describe("Chat interaction helpers", () => {
     expect(isNearBottom({ scrollHeight: 1000, scrollTop: 300, clientHeight: 200 })).toBe(false);
   });
 
+  it("pauses auto-follow as soon as the reader scrolls upward", () => {
+    expect(shouldPauseAutoFollowForWheel(-1)).toBe(true);
+    expect(shouldPauseAutoFollowForWheel(1)).toBe(false);
+  });
+
+  it("detects pointer starts in the scrollbar gutter", () => {
+    const element = document.createElement("div");
+    vi.spyOn(element, "getBoundingClientRect").mockReturnValue({
+      top: 0,
+      right: 300,
+      bottom: 400,
+      left: 0,
+      width: 300,
+      height: 400,
+      x: 0,
+      y: 0,
+      toJSON: () => undefined,
+    } as DOMRect);
+
+    expect(isScrollbarPointer(element, 288)).toBe(true);
+    expect(isScrollbarPointer(element, 240)).toBe(false);
+  });
+
   it("creates a readable diff for file edit tools", () => {
     const change = diffFromTool({
       kind: "tool",
@@ -69,6 +97,26 @@ describe("Chat interaction helpers", () => {
     });
     expect(change?.diff).toContain("-old");
     expect(change?.diff).toContain("+new");
+  });
+
+  it("prefers Codex-style file changes from tool output", () => {
+    const change = diffFromTool({
+      kind: "tool",
+      name: "edit_file",
+      input: JSON.stringify({ path: "src/a.ts", old_string: "old", new_string: "new" }),
+      output: JSON.stringify({
+        changes: {
+          "src/a.ts": {
+            type: "update",
+            unified_diff: "--- src/a.ts\n+++ src/a.ts\n@@ -1 +1 @@\n-old\n+new",
+          },
+        },
+      }),
+    });
+    expect(change).toEqual({
+      path: "src/a.ts",
+      diff: "--- src/a.ts\n+++ src/a.ts\n@@ -1 +1 @@\n-old\n+new",
+    });
   });
 
   it("renders generated file paths as openable links", () => {
@@ -110,6 +158,39 @@ describe("Chat interaction helpers", () => {
     );
 
     expect(screen.getByRole("link", { name: "the report" }).getAttribute("title")).toBe("Open local file");
+  });
+
+  it("renders a direct Studio entry after artifact registration", async () => {
+    const user = userEvent.setup();
+    render(
+      <ChatMessage
+        turn={{
+          id: "assistant-studio",
+          role: "assistant",
+          blocks: [{
+            kind: "tool",
+            name: "StudioLibraryUpsert",
+            input: "{}",
+            output: JSON.stringify({
+              studioLinks: [{
+                id: "web:irl-demo",
+                title: "IRL demo",
+                href: "studio/artifact/web%3Airl-demo",
+              }],
+            }),
+          }],
+        }}
+        canRetry={false}
+        onEdit={() => undefined}
+        onRetry={() => undefined}
+        onContinue={() => undefined}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Open IRL demo in Studio" }));
+
+    expect(useStore.getState().tab).toBe("studio");
+    expect(useStore.getState().pendingStudioArtifactId).toBe("web:irl-demo");
   });
 
   it("omits dropped binary bodies without reading them into the renderer", async () => {
@@ -352,6 +433,52 @@ describe("project chat grouping", () => {
     expect(migrateSession({ title: "Legacy" }).projectId).toBe("default");
   });
 
+  it("cleans generated titles before showing them in the sidebar", () => {
+    expect(cleanChatTitle(
+      "<think>\nThe user asked me to pick a title.\n</think>\nTitle: Chemistry Slides",
+    )).toBe("Chemistry Slides");
+    expect(cleanChatTitle("<think>The user asked me to pick a title")).toBe("");
+    expect(cleanChatTitle("The user asked for help")).toBe("");
+    expect(cleanChatTitle("Untitled")).toBe("");
+    expect(cleanChatTitle("无主题")).toBe("");
+  });
+
+  it("falls back to the first user request when a stored title is unusable", () => {
+    const turns: ChatTurn[] = [
+      { id: "turn-user", role: "user", blocks: [{ kind: "text", text: "选择化学论文 slides 制作" }] },
+      { id: "turn-assistant", role: "assistant", blocks: [{ kind: "text", text: "可以。" }] },
+    ];
+
+    expect(titleFromTurns(turns)).toBe("选择化学论文 slides 制作");
+    expect(migrateSession({ title: "<think>The user asked me", turns }).title)
+      .toBe("选择化学论文 slides 制作");
+    expect(migrateSession({ title: "The user asked for help", turns }).title)
+      .toBe("选择化学论文 slides 制作");
+    expect(migrateSession({ title: "无主题", turns }).title)
+      .toBe("选择化学论文 slides 制作");
+  });
+
+  it("uses attached file context when the first user turn has no typed title", () => {
+    const attachment: ChatAttachment = {
+      id: "att-report",
+      kind: "file",
+      name: "analysis-report.md",
+      path: "docs/analysis-report.md",
+    };
+    const turns: ChatTurn[] = [
+      {
+        id: "turn-user",
+        role: "user",
+        blocks: [{ kind: "text", text: "Attached context" }],
+        attachments: [attachment],
+      },
+      { id: "turn-assistant", role: "assistant", blocks: [{ kind: "text", text: "收到。" }] },
+    ];
+
+    expect(titleFromTurns(turns)).toBe("docs/analysis-report.md");
+    expect(migrateSession({ title: "Untitled", turns }).title).toBe("docs/analysis-report.md");
+  });
+
   it("groups chats by project instead of date", () => {
     const alpha = { ...makeSession("project-a"), title: "Alpha chat" };
     const beta = { ...makeSession("project-b"), title: "Beta chat" };
@@ -360,6 +487,70 @@ describe("project chat grouping", () => {
 
     expect(groups.map((group) => group.label)).toEqual(["Alpha", "Beta"]);
     expect(groups[0].sessions[0].projectId).toBe("project-a");
+  });
+});
+
+describe("ChatSidebar session menu", () => {
+  const projects: DesktopProject[] = [
+    { id: "project-a", name: "Alpha", path: "C:/Alpha", addedAt: 1, lastOpenedAt: 2 },
+  ];
+
+  function renderSidebar() {
+    const session = { ...makeSession("project-a"), id: "chat-a", title: "Alpha chat" };
+    render(
+      <ChatSidebar
+        sessions={[session]}
+        projects={projects}
+        currentId="chat-a"
+        open
+        busy={false}
+        onClose={() => undefined}
+        onDesktopCollapse={() => undefined}
+        onNew={() => undefined}
+        onOpen={() => undefined}
+        onRename={() => undefined}
+        onTogglePinned={() => undefined}
+        onDelete={() => undefined}
+        onReorderProjects={async () => undefined}
+      />,
+    );
+  }
+
+  it("keeps the session menu inside the viewport when the anchor is near the bottom", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal("innerWidth", 300);
+    vi.stubGlobal("innerHeight", 600);
+    const rect = (top: number, right: number, bottom: number, left: number) => ({
+      top,
+      right,
+      bottom,
+      left,
+      width: right - left,
+      height: bottom - top,
+      x: left,
+      y: top,
+      toJSON: () => undefined,
+    });
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      const element = this;
+      if (element.classList.contains("chat-session-menu-btn")) {
+        return rect(560, 280, 584, 256) as DOMRect;
+      }
+      if (element.classList.contains("chat-session-menu")) {
+        return rect(0, 180, 170, 0) as DOMRect;
+      }
+      return rect(0, 0, 0, 0) as DOMRect;
+    });
+
+    renderSidebar();
+    await user.click(screen.getByRole("button", { name: "Session options" }));
+
+    const menu = await screen.findByRole("menu");
+    await waitFor(() => expect(menu.style.visibility).toBe("visible"));
+
+    expect(menu.parentElement).toBe(document.body);
+    expect(Number(menu.style.top.replace("px", ""))).toBeLessThan(560);
+    expect(Number(menu.style.left.replace("px", ""))).toBeGreaterThanOrEqual(8);
   });
 });
 

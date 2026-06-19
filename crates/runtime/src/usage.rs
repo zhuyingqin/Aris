@@ -94,7 +94,7 @@ pub fn pricing_for_model(model: &str) -> Option<ModelPricing> {
         let legacy_opus = has_word(&m, "opus-4-0")    // claude-opus-4-0 alias (4.0)
             || has_word(&m, "opus-4-1")               // claude-opus-4-1[-date] (4.1)
             || m.contains("opus-4-2025")              // claude-opus-4-20250514 (dated 4.0)
-            || m.ends_with("opus-4");                 // bare claude-opus-4 (4.0)
+            || m.ends_with("opus-4"); // bare claude-opus-4 (4.0)
         if legacy_opus {
             return Some(ModelPricing {
                 input_cost_per_million: 15.0,
@@ -477,8 +477,14 @@ mod tests {
         let p = pricing_for_model(model).unwrap_or_else(|| panic!("no pricing for {model}"));
         assert_eq!(p.input_cost_per_million, input, "input for {model}");
         assert_eq!(p.output_cost_per_million, output, "output for {model}");
-        assert_eq!(p.cache_creation_cost_per_million, cache_create, "cache_create for {model}");
-        assert_eq!(p.cache_read_cost_per_million, cache_read, "cache_read for {model}");
+        assert_eq!(
+            p.cache_creation_cost_per_million, cache_create,
+            "cache_create for {model}"
+        );
+        assert_eq!(
+            p.cache_read_cost_per_million, cache_read,
+            "cache_read for {model}"
+        );
     }
 
     #[test]

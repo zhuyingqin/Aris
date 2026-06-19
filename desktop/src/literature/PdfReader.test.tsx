@@ -32,6 +32,7 @@ const renderReader = (overrides: {
   onUpdateAnnotation?: ReturnType<typeof vi.fn>;
   onDeleteAnnotation?: ReturnType<typeof vi.fn>;
   onRunAi?: ReturnType<typeof vi.fn>;
+  readOnly?: boolean;
 } = {}) => {
   const handlers = {
     onAddAnnotation: overrides.onAddAnnotation ?? vi.fn(),
@@ -44,6 +45,7 @@ const renderReader = (overrides: {
       relativePath="papers/test.pdf"
       annotations={[annotation]}
       onOpenExternal={() => undefined}
+      readOnly={overrides.readOnly}
       {...handlers}
     />,
   );
@@ -107,6 +109,23 @@ const mockTextSelection = () => {
 };
 
 describe("PdfReader annotation interactions", () => {
+  it("only reserves sidebar space while annotations are visible", () => {
+    renderReader();
+
+    const body = document.querySelector(".lit-pdf-reader-body");
+    expect(body?.classList.contains("with-annotations")).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: /标注/ }));
+    expect(body?.classList.contains("with-annotations")).toBe(true);
+  });
+
+  it("does not expose annotation controls in read-only previews", () => {
+    renderReader({ readOnly: true });
+
+    expect(screen.queryByRole("button", { name: /标注/ })).toBeNull();
+    expect(document.querySelector(".lit-pdf-reader-body")?.classList.contains("with-annotations")).toBe(false);
+  });
+
   it("keeps the sidebar compact and edits an annotation in an on-demand popover", () => {
     const onUpdateAnnotation = vi.fn();
     const onDeleteAnnotation = vi.fn();

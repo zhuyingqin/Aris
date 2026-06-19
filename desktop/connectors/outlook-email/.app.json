@@ -1,0 +1,9 @@
+{
+  "apps": {
+    "outlook-email": {
+      "id": "connector_aris_outlook_email_local",
+      "required": true,
+      "provider": "outlook"
+    }
+  }
+}

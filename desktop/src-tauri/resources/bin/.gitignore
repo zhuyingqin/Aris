@@ -1,2 +1,4 @@
 *
 !.gitignore
+!aris-playwright-mcp
+!aris-playwright-mcp.cmd

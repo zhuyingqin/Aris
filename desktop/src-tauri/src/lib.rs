@@ -1,24 +1,107 @@
 mod commands;
 mod config;
+mod connectors;
 mod engine;
 mod files;
+mod knowledge;
 mod literature;
+mod mail;
 mod mcp;
 mod process;
 mod projects;
+mod scheduled;
 mod sessions;
 mod state;
+mod studio;
 mod watcher;
 
+use std::path::PathBuf;
 use tauri::{image::Image, Manager};
+
+fn prepend_existing_path_entries(paths: impl IntoIterator<Item = PathBuf>) {
+    let existing = std::env::var_os("PATH").unwrap_or_default();
+    let existing_paths = std::env::split_paths(&existing).collect::<Vec<_>>();
+    let mut extras = paths
+        .into_iter()
+        .filter(|path| path.exists() && !existing_paths.iter().any(|item| item == path))
+        .collect::<Vec<_>>();
+    if extras.is_empty() {
+        return;
+    }
+    extras.extend(existing_paths);
+    if let Ok(joined) = std::env::join_paths(extras) {
+        std::env::set_var("PATH", joined);
+    }
+}
+
+/// Extend the process PATH with common user-installed tool directories so that
+/// MCP stdio servers (node, npx, uvx, python, etc.) can be found when the app
+/// is launched from a desktop shortcut on Windows, which does not inherit the
+/// full shell PATH.
+#[cfg(windows)]
+fn augment_path_for_mcp() {
+    let home = runtime::home_dir();
+    let candidates = [
+        // Node.js via nvm-windows
+        format!("{home}\\AppData\\Roaming\\nvm\\current"),
+        // npm global prefix
+        format!("{home}\\AppData\\Roaming\\npm"),
+        // Node.js system-wide installer default
+        "C:\\Program Files\\nodejs".to_string(),
+        // uv / uvx (installed via `pip install uv` or standalone installer)
+        format!("{home}\\AppData\\Local\\uv\\bin"),
+        format!("{home}\\AppData\\Roaming\\uv\\bin"),
+        // pipx
+        format!("{home}\\AppData\\Local\\Packages\\PythonSoftwareFoundation.Python.3.12_qbz5n2kfra8p0\\LocalCache\\local-packages\\Python312\\Scripts"),
+        // Python Launcher / standard Python installs
+        format!("{home}\\AppData\\Local\\Programs\\Python\\Python312"),
+        format!("{home}\\AppData\\Local\\Programs\\Python\\Python311"),
+        format!("{home}\\AppData\\Local\\Programs\\Python\\Python310"),
+        // Scoop shims
+        format!("{home}\\scoop\\shims"),
+    ];
+    prepend_existing_path_entries(candidates.into_iter().map(PathBuf::from));
+}
+
+#[cfg(not(windows))]
+fn augment_path_for_mcp() {}
+
+fn augment_resource_path_for_mcp(app: &tauri::App) {
+    let Ok(resource_dir) = app.path().resource_dir() else {
+        return;
+    };
+    prepend_existing_path_entries([resource_dir.join("bin"), resource_dir.join("node")]);
+    std::env::set_var("ARIS_RESOURCE_DIR", &resource_dir);
+}
+
+/// Point Tectonic's on-demand package cache at a user-writable directory. The
+/// bundled `tectonic.exe` lives under the read-only install directory on
+/// Windows, so its CTAN package downloads must land elsewhere. Mirrors the
+/// `~/.config/aris/cache` layout used for the extracted skill bundle.
+fn configure_tectonic_environment() {
+    if std::env::var_os("TECTONIC_CACHE_DIR").is_some() {
+        return;
+    }
+    let cache = PathBuf::from(runtime::home_dir())
+        .join(".config")
+        .join("aris")
+        .join("cache")
+        .join("tectonic");
+    if std::fs::create_dir_all(&cache).is_ok() {
+        std::env::set_var("TECTONIC_CACHE_DIR", &cache);
+    }
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    augment_path_for_mcp();
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(engine::ChatState::default())
         .manage(projects::ProjectState::default())
         .setup(|app| {
+            augment_resource_path_for_mcp(app);
+            configure_tectonic_environment();
             state::apply_bundle_cache_environment();
             // Export config-held keys (e.g. SCOPUS_API_KEY) before any
             // literature search runs; force=false keeps real env vars intact.
@@ -34,28 +117,38 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            commands::workflow_plan,
-            commands::workflow_list,
-            commands::workflow_inspect,
-            commands::workflow_start,
-            commands::workflow_control,
-            commands::workflow_save,
-            commands::workflow_discover,
-            commands::team_list,
-            commands::agent_supervisor,
             commands::skills_list,
             commands::skill_view,
             commands::state_dir,
+            commands::open_external_url,
             projects::projects_get,
             projects::project_add,
             projects::project_set_current,
             projects::projects_reorder,
             config::config_get,
+            config::config_secret_get,
             config::config_set,
             config::config_test,
+            config::provider_test,
+            connectors::connector_plugins_list,
+            connectors::connector_connect,
+            scheduled::scheduled_tasks_list,
             mcp::mcp_config_get,
             mcp::mcp_config_set,
             mcp::mcp_config_test,
+            mail::mail_accounts_get,
+            mail::mail_oauth_config_get,
+            mail::mail_oauth_config_set,
+            mail::mail_connect,
+            mail::mail_autoconfig,
+            mail::mail_generic_test,
+            mail::mail_generic_connect,
+            mail::mail_disconnect,
+            mail::mail_folders,
+            mail::mail_list,
+            mail::mail_read,
+            mail::mail_modify,
+            mail::mail_send,
             sessions::sessions_list,
             sessions::session_get,
             sessions::chat_ui_sessions_load,
@@ -73,9 +166,21 @@ pub fn run() {
             literature::literature_import_pdf,
             literature::literature_image_ocr,
             literature::literature_pdf_open,
+            studio::studio_load,
+            studio::studio_save,
+            studio::studio_html,
+            knowledge::knowledge_load,
+            knowledge::knowledge_search,
+            knowledge::knowledge_upsert,
+            knowledge::knowledge_confirm,
+            knowledge::knowledge_reject,
+            knowledge::knowledge_generate,
             engine::chat_status,
+            engine::chat_model_options,
+            engine::chat_model_set,
             engine::chat_permission_get,
             engine::chat_permission_set,
+            engine::chat_permission_respond,
             engine::project_permission_get,
             engine::project_permission_set,
             engine::chat_command_specs,
@@ -83,6 +188,7 @@ pub fn run() {
             engine::chat_send,
             engine::chat_send_rich,
             engine::literature_agent_send_rich,
+            engine::studio_agent_send_rich,
             engine::chat_suggest_title,
             engine::chat_reset,
             engine::chat_set_context,
@@ -93,6 +199,13 @@ pub fn run() {
             files::file_open,
             files::project_chat_starters,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running ARIS Studio");
+        .build(tauri::generate_context!())
+        .expect("error while building ARIS Studio")
+        .run(|app_handle, event| {
+            if matches!(event, tauri::RunEvent::ExitRequested { .. }) {
+                let chat_state = app_handle.state::<engine::ChatState>();
+                engine::cancel_all_running_turns(chat_state.inner());
+                runtime::terminate_all_managed_processes();
+            }
+        });
 }

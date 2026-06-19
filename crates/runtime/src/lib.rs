@@ -20,6 +20,7 @@ mod memory_provider;
 mod oauth;
 mod permissions;
 mod process;
+mod process_registry;
 mod prompt;
 mod remote;
 pub mod sandbox;
@@ -42,17 +43,18 @@ pub use config::{
     ScopedMcpServerConfig, CLAUDE_CODE_SETTINGS_SCHEMA_NAME,
 };
 pub use conversation::{
-    auto_compaction_threshold_from_env, ApiClient, ApiRequest, AssistantEvent, AutoCompactionEvent,
-    ConversationRuntime, RuntimeError, StaticToolExecutor, ToolError, ToolExecutor, TurnSummary,
+    assistant_text_from_turn_summary, auto_compaction_threshold_from_env, ApiClient, ApiRequest,
+    AssistantEvent, AutoCompactionEvent, ConversationRuntime, RuntimeError, StaticToolExecutor,
+    ToolError, ToolExecutor, TurnSummary,
 };
 pub use event_sink::{
     now_iso8601, today_iso, EventSink, EventType, JsonlEventSink, MetaLoggingLevel, NoopEventSink,
     RuntimeEvent,
 };
 pub use file_ops::{
-    edit_file, glob_search, grep_search, read_file, write_file, EditFileOutput, GlobSearchOutput,
-    GrepSearchInput, GrepSearchOutput, ReadFileOutput, StructuredPatchHunk, TextFilePayload,
-    WriteFileOutput,
+    edit_file, glob_search, grep_search, read_file, write_file, EditFileOutput, FileChange,
+    GlobSearchOutput, GrepSearchInput, GrepSearchOutput, ReadFileOutput, StructuredPatchHunk,
+    TextFilePayload, WriteFileOutput,
 };
 pub use hooks::{HookEvent, HookRunResult, HookRunner};
 pub use hot_memory::{
@@ -94,6 +96,12 @@ pub use permissions::{
     PermissionPrompter, PermissionRequest,
 };
 pub use process::{hidden_command, hidden_tokio_command, hide_window};
+pub use process_registry::{
+    configure_managed_tokio_command, managed_processes_snapshot, register_managed_process,
+    run_managed_command, spawn_managed_background, terminate_all_managed_processes,
+    terminate_managed_process_tree, unregister_managed_process, ManagedCommandOutput,
+    ManagedProcessGuard, ManagedProcessInfo, ManagedProcessKind,
+};
 pub use prompt::{
     load_system_prompt, prepend_bullets, team_orchestration_section, ContextFile, ProjectContext,
     PromptBuildError, SystemPromptBuilder, SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
@@ -118,6 +126,54 @@ pub fn home_dir() -> String {
     std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .unwrap_or_else(|_| ".".into())
+}
+
+pub const ARIS_ENABLE_CLAUDE_SKILLS_ENV: &str = "ARIS_ENABLE_CLAUDE_SKILLS";
+
+/// ARIS user-level skills directory.
+#[must_use]
+pub fn aris_user_skills_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(home_dir())
+        .join(".config")
+        .join("aris")
+        .join("skills")
+}
+
+/// ARIS project-level skills directory.
+#[must_use]
+pub fn aris_project_skills_dir(cwd: impl AsRef<std::path::Path>) -> std::path::PathBuf {
+    cwd.as_ref().join(".aris").join("skills")
+}
+
+/// Legacy Claude Code user-level skills directory.
+#[must_use]
+pub fn claude_user_skills_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(home_dir())
+        .join(".claude")
+        .join("skills")
+}
+
+/// Legacy Claude Code project-level skills directory.
+#[must_use]
+pub fn claude_project_skills_dir(cwd: impl AsRef<std::path::Path>) -> std::path::PathBuf {
+    cwd.as_ref().join(".claude").join("skills")
+}
+
+/// Whether ARIS should include legacy Claude Code skills in discovery.
+///
+/// ARIS keeps this as an explicit compatibility bridge so Claude Code skills do
+/// not silently become part of the default ARIS skill namespace.
+#[must_use]
+pub fn legacy_claude_skills_enabled() -> bool {
+    std::env::var(ARIS_ENABLE_CLAUDE_SKILLS_ENV)
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
 }
 
 /// Global interrupt flag set by SIGINT handler. Streaming loops check this

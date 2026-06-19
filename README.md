@@ -88,10 +88,19 @@ Outputs `aris-desktop.exe` and `ARIS Studio_0.2.0_x64-setup.exe` under `desktop\
 First launch opens **Settings**, where you configure:
 
 - **Executor** and **Reviewer** — provider, model, base URL, API key
-- **Language** and **connectivity checks** for the configured models
+- **Scopus API key**, **Language**, **memory write approval**, and **connectivity checks** for the configured models
 
-Config is stored locally at `~/.config/aris/config.json`. API keys are masked in the UI — the Tauri
-backend reads/writes them locally and never returns raw secrets to the frontend.
+Config is stored locally at `~/.config/aris/config.json`. API keys are masked by default in the UI.
+Click **Show** in local Settings to reveal a key temporarily; the normal config view still returns only masked previews.
+
+### MCP & Playwright
+
+ARIS Desktop reads MCP servers from the current project's `.mcp.json` and surfaces them in
+**Extensions → Plugins** and **Settings → Permissions & MCP**. The Windows bundle includes an
+`aris-playwright-mcp` launcher, vendored `@playwright/mcp`, and a Node runtime, so installed users
+can add the Playwright preset without installing Node.js or npm themselves. The default preset uses
+Microsoft Edge (`--browser=msedge`) and enables PDF tools (`--caps=pdf`); edit the arguments in the
+MCP page for custom browser options.
 
 ---
 
@@ -179,6 +188,26 @@ To run a workflow: design it in **Workflow Studio**, save the plan, then start a
 ```
 
 Set `ARIS_WORKSPACE_ROOT` to override the default workspace root.
+
+`config.json` and the Settings page use the same snake_case fields:
+
+```json
+{
+  "executor_provider": "anthropic | anthropic-compat | openai | custom",
+  "executor_model": "claude-opus-4-7",
+  "executor_base_url": "https://api.example.com/v1",
+  "executor_api_key": "sk-...",
+  "reviewer_provider": "openai | gemini | glm | minimax | kimi | deepseek | anthropic-compat | custom",
+  "reviewer_model": "gpt-5.5",
+  "reviewer_base_url": "https://api.openai.com/v1",
+  "reviewer_api_key": "sk-...",
+  "scopus_api_key": "...",
+  "language": "cn | en",
+  "memory_write_approval": false
+}
+```
+
+Desktop also maintains `verified_executors` so the Chat model dropdown can restore provider/model/base URL/key combinations that already passed a Settings test.
 
 ---
 

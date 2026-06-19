@@ -1,0 +1,25 @@
+{
+  "mcpServers": {
+    "codex": {
+      "type": "stdio",
+      "command": "cmd",
+      "args": [
+        "/c",
+        "codex",
+        "mcp-server"
+      ],
+      "env": {},
+      "requestTimeoutSecs": 900
+    },
+    "claude": {
+      "type": "stdio",
+      "command": "claude",
+      "args": [
+        "mcp",
+        "serve"
+      ],
+      "env": {},
+      "requestTimeoutSecs": 900
+    }
+  }
+}

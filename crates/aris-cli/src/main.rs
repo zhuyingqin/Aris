@@ -228,12 +228,22 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         } => resume_session(&session_path, &commands),
         CliAction::Prompt {
             prompt,
-            model,
+            mut model,
             output_format,
             allowed_tools,
             permission_mode,
-        } => LiveCli::new(model, true, allowed_tools, permission_mode)?
-            .run_turn_with_output(&prompt, output_format)?,
+        } => {
+            // Match REPL behavior: when the caller did not pass --model, use
+            // the saved executor model from ~/.config/aris/config.json.
+            if model == DEFAULT_MODEL {
+                model = saved_config
+                    .executor_model()
+                    .map(|m| resolve_model_alias(m).to_string())
+                    .unwrap_or(model);
+            }
+            LiveCli::new(model, true, allowed_tools, permission_mode)?
+                .run_turn_with_output(&prompt, output_format)?;
+        }
         CliAction::Login => run_login()?,
         CliAction::Logout => run_logout()?,
         CliAction::Init => run_init()?,
@@ -2164,17 +2174,19 @@ impl LiveCli {
                 for (name, desc, source) in &skills {
                     let tag = match *source {
                         "aris" => "\x1b[1;32m[aris]\x1b[0m  ",
-                        "user" => "\x1b[1;34m[user]\x1b[0m  ",
+                        "project" => "\x1b[1;36m[project]\x1b[0m",
+                        "compat" => "\x1b[1;34m[compat]\x1b[0m ",
                         _ => "\x1b[2m[built-in]\x1b[0m",
                     };
                     let d = if desc.is_empty() { "" } else { desc.as_str() };
                     println!("  {tag} {name:<width$} \x1b[2m{d}\x1b[0m", width = name_col);
                 }
-                println!(
-                    "\n\x1b[2mSkill dirs: {} > {} > bundled\x1b[0m",
-                    dirs_aris_skills().display(),
-                    dirs_claude_skills().display(),
-                );
+                let skill_dirs = skill_search_dirs()
+                    .into_iter()
+                    .map(|dir| dir.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(" > ");
+                println!("\n\x1b[2mSkill dirs: {skill_dirs} > bundled\x1b[0m");
                 println!("\x1b[2mUse /skills show <name> to view · /skills export <name> to customize\x1b[0m");
             }
             Some("show") => {
@@ -5215,24 +5227,19 @@ fn run_doctor() -> Result<(), Box<dyn std::error::Error>> {
         all_ok = false;
     }
 
-    // Check 2: Skills directory + discovered skills
-    let skills_dir = dirs_claude_skills();
-    print!("  Skills dir:   ");
-    if skills_dir.exists() {
-        // Count actual skills (dirs with SKILL.md)
-        let skill_count = fs::read_dir(&skills_dir)
-            .map(|entries| {
-                entries
-                    .filter_map(Result::ok)
-                    .filter(|e| e.path().join("SKILL.md").exists())
-                    .count()
-            })
-            .unwrap_or(0);
-        println!("OK ({skill_count} skills in {})", skills_dir.display());
-    } else {
-        println!("MISSING ({})", skills_dir.display());
-        all_ok = false;
-    }
+    // Check 2: ARIS skills directories + discovered skills.
+    let skill_dirs = skill_search_dirs();
+    let skill_count: usize = skill_dirs
+        .iter()
+        .map(|dir| count_filesystem_skills(dir))
+        .sum();
+    let skill_dir_list = skill_dirs
+        .iter()
+        .map(|dir| dir.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    print!("  Skills dirs:  ");
+    println!("OK ({skill_count} custom skills across {skill_dir_list}; built-ins available)");
 
     // Check 2b: Reviewer API (LlmReview)
     print!("  Reviewer API: ");
@@ -5335,31 +5342,58 @@ fn run_doctor() -> Result<(), Box<dyn std::error::Error>> {
 
 /// ARIS-specific skills directory (highest priority).
 fn dirs_aris_skills() -> PathBuf {
-    let home = runtime::home_dir();
-    PathBuf::from(home)
-        .join(".config")
-        .join("aris")
-        .join("skills")
+    runtime::aris_user_skills_dir()
 }
 
-/// Claude Code user skills directory.
+/// ARIS project-specific skills directory.
+fn dirs_project_aris_skills() -> Option<PathBuf> {
+    env::current_dir()
+        .ok()
+        .map(|cwd| runtime::aris_project_skills_dir(&cwd))
+}
+
+/// Legacy Claude Code user skills directory.
 fn dirs_claude_skills() -> PathBuf {
-    let home = runtime::home_dir();
-    PathBuf::from(home).join(".claude").join("skills")
+    runtime::claude_user_skills_dir()
 }
 
 /// All skill search directories in priority order.
 fn skill_search_dirs() -> Vec<PathBuf> {
-    let mut dirs = vec![dirs_aris_skills(), dirs_claude_skills()];
-    if let Ok(cwd) = env::current_dir() {
-        dirs.push(cwd.join(".claude").join("skills"));
+    skill_search_dirs_with_sources()
+        .into_iter()
+        .map(|(dir, _)| dir)
+        .collect()
+}
+
+/// All skill search directories with display source labels.
+fn skill_search_dirs_with_sources() -> Vec<(PathBuf, &'static str)> {
+    let mut dirs = vec![(dirs_aris_skills(), "aris")];
+    if let Some(project_dir) = dirs_project_aris_skills() {
+        dirs.push((project_dir, "project"));
+    }
+    if runtime::legacy_claude_skills_enabled() {
+        dirs.push((dirs_claude_skills(), "compat"));
+        if let Ok(cwd) = env::current_dir() {
+            dirs.push((runtime::claude_project_skills_dir(&cwd), "compat"));
+        }
     }
     dirs
 }
 
+fn count_filesystem_skills(dir: &Path) -> usize {
+    fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .filter(|entry| entry.path().join("SKILL.md").exists())
+                .count()
+        })
+        .unwrap_or(0)
+}
+
 /// Find skill content by name, checking all sources in priority order.
 fn find_skill_content(name: &str) -> Option<String> {
-    // Check filesystem dirs first (ARIS > Claude > project)
+    // Check filesystem dirs first (ARIS user > ARIS project > explicit compat)
     for dir in skill_search_dirs() {
         let path = dir.join(name).join("SKILL.md");
         if let Ok(content) = fs::read_to_string(&path) {
@@ -5404,8 +5438,11 @@ fn discover_all_skills() -> Vec<(String, String, &'static str)> {
     let mut seen = std::collections::HashSet::new();
     let mut result = Vec::new();
 
-    // ARIS user skills
-    if let Ok(entries) = fs::read_dir(dirs_aris_skills()) {
+    // Filesystem skills.
+    for (dir, source) in skill_search_dirs_with_sources() {
+        let Ok(entries) = fs::read_dir(dir) else {
+            continue;
+        };
         for entry in entries.flatten() {
             let skill_md = entry.path().join("SKILL.md");
             if !skill_md.exists() {
@@ -5417,25 +5454,7 @@ fn discover_all_skills() -> Vec<(String, String, &'static str)> {
                     .ok()
                     .and_then(|c| parse_skill_description(&c))
                     .unwrap_or_default();
-                result.push((name, desc, "aris"));
-            }
-        }
-    }
-
-    // Claude Code user skills
-    if let Ok(entries) = fs::read_dir(dirs_claude_skills()) {
-        for entry in entries.flatten() {
-            let skill_md = entry.path().join("SKILL.md");
-            if !skill_md.exists() {
-                continue;
-            }
-            let name = entry.file_name().to_string_lossy().to_string();
-            if seen.insert(name.clone()) {
-                let desc = fs::read_to_string(&skill_md)
-                    .ok()
-                    .and_then(|c| parse_skill_description(&c))
-                    .unwrap_or_default();
-                result.push((name, desc, "user"));
+                result.push((name, desc, source));
             }
         }
     }

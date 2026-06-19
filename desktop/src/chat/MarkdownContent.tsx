@@ -4,6 +4,7 @@ import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
 import "highlight.js/styles/github-dark.css";
 import { fileOpen } from "../api/tauri";
+import { useStore } from "../store";
 
 interface Segment {
   kind: "text" | "think";
@@ -89,6 +90,14 @@ function decodeLocalHref(href: string): string {
   }
 }
 
+export function studioArtifactIdFromHref(href: string): string | null {
+  const normalized = href.replace(/^\.\//, "");
+  const prefix = "studio/artifact/";
+  if (!normalized.startsWith(prefix)) return null;
+  const encoded = normalized.slice(prefix.length).split(/[?#]/, 1)[0];
+  return encoded ? decodeLocalHref(encoded) : null;
+}
+
 function MarkdownLink({
   href,
   children,
@@ -96,6 +105,25 @@ function MarkdownLink({
   href?: string;
   children?: React.ReactNode;
 }) {
+  const setTab = useStore((state) => state.setTab);
+  const setPendingStudioArtifactId = useStore((state) => state.setPendingStudioArtifactId);
+  const studioArtifactId = href ? studioArtifactIdFromHref(href) : null;
+  if (studioArtifactId) {
+    return (
+      <a
+        href={href}
+        className="md-link md-studio-link"
+        title="Open result in Studio"
+        onClick={(event) => {
+          event.preventDefault();
+          setPendingStudioArtifactId(studioArtifactId);
+          setTab("studio");
+        }}
+      >
+        {children}
+      </a>
+    );
+  }
   if (!href || isExternalHref(href)) {
     return <a href={href} target="_blank" rel="noreferrer" className="md-link">{children}</a>;
   }
@@ -122,15 +150,63 @@ export const ThinkBlock = memo(function ThinkBlock({
   streaming?: boolean;
 }) {
   const [open, setOpen] = useState(streaming);
+  const [elapsedSec, setElapsedSec] = useState(0);
+  const startRef = useRef<number | null>(null);
+  const wasStreaming = useRef(streaming);
+  const bodyRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!streaming) {
+      if (startRef.current !== null) {
+        setElapsedSec(Math.round((Date.now() - startRef.current) / 1000));
+        startRef.current = null;
+      }
+      return;
+    }
+    startRef.current = Date.now();
+    setElapsedSec(0);
+    const id = window.setInterval(() => {
+      setElapsedSec(Math.round((Date.now() - startRef.current!) / 1000));
+    }, 1000);
+    return () => window.clearInterval(id);
+  }, [streaming]);
+
+  // Collapse once thinking finishes (streaming true → false), but leave the
+  // user free to re-open it afterwards.
+  useEffect(() => {
+    if (wasStreaming.current && !streaming) setOpen(false);
+    wasStreaming.current = streaming;
+  }, [streaming]);
+
+  // Keep the bounded body pinned to the newest thinking text while it streams.
+  useEffect(() => {
+    if (streaming && open && bodyRef.current) {
+      bodyRef.current.scrollTop = bodyRef.current.scrollHeight;
+    }
+  }, [content, streaming, open]);
+
   const preview = content.slice(0, 80).replace(/\s+/g, " ");
+  const label = streaming
+    ? `正在思考${elapsedSec > 0 ? ` · ${elapsedSec}s` : ""}`
+    : elapsedSec > 0
+      ? `已处理 ${elapsedSec}s`
+      : "已思考";
+
   return (
-    <div className="md-think">
+    <div className={`md-think${streaming ? " md-think-active" : ""}`}>
       <button className="md-think-toggle" onClick={() => setOpen((value) => !value)}>
         <span className="md-think-icon">{open ? "▾" : "▸"}</span>
-        <span className="md-think-label">Thinking</span>
-        {!open && <span className="md-think-preview">{preview}{content.length > 80 ? "..." : ""}</span>}
+        {streaming && <span className="md-think-spinner" aria-hidden="true" />}
+        <span className="md-think-label">{label}</span>
+        {!streaming && !open && content && (
+          <span className="md-think-preview">{preview}{content.length > 80 ? "..." : ""}</span>
+        )}
       </button>
-      {open && <div className="md-think-body"><ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown></div>}
+      {open && (
+        <div className="md-think-body" ref={bodyRef}>
+          <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
+        </div>
+      )}
     </div>
   );
 });

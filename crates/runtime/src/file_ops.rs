@@ -52,11 +52,28 @@ pub struct StructuredPatchHunk {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum FileChange {
+    Add {
+        content: String,
+    },
+    Delete {
+        content: String,
+    },
+    Update {
+        unified_diff: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        move_path: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WriteFileOutput {
     #[serde(rename = "type")]
     pub kind: String,
     #[serde(rename = "filePath")]
     pub file_path: String,
+    pub changes: BTreeMap<String, FileChange>,
     pub content: String,
     #[serde(rename = "structuredPatch")]
     pub structured_patch: Vec<StructuredPatchHunk>,
@@ -78,6 +95,7 @@ pub struct EditFileOutput {
     pub original_file: String,
     #[serde(rename = "structuredPatch")]
     pub structured_patch: Vec<StructuredPatchHunk>,
+    pub changes: BTreeMap<String, FileChange>,
     #[serde(rename = "userModified")]
     pub user_modified: bool,
     #[serde(rename = "replaceAll")]
@@ -211,6 +229,11 @@ pub fn write_file(path: &str, content: &str) -> io::Result<WriteFileOutput> {
             String::from("create")
         },
         file_path: display_path(&absolute_path),
+        changes: make_file_changes(
+            &display_path(&absolute_path),
+            original_file.as_deref(),
+            Some(content),
+        ),
         content: content.to_owned(),
         structured_patch: make_patch(original_file.as_deref().unwrap_or(""), content),
         original_file,
@@ -252,6 +275,11 @@ pub fn edit_file(
         new_string: new_string.to_owned(),
         original_file: original_file.clone(),
         structured_patch: make_patch(&original_file, &updated),
+        changes: make_file_changes(
+            &display_path(&absolute_path),
+            Some(&original_file),
+            Some(&updated),
+        ),
         user_modified: false,
         replace_all,
         git_diff: None,
@@ -1300,21 +1328,112 @@ fn ascii_contains(haystack: &[u8], needle: &[u8]) -> bool {
 }
 
 fn make_patch(original: &str, updated: &str) -> Vec<StructuredPatchHunk> {
+    if original == updated {
+        return Vec::new();
+    }
+
+    let original_lines = original.lines().collect::<Vec<_>>();
+    let updated_lines = updated.lines().collect::<Vec<_>>();
+    let mut start = 0usize;
+    while start < original_lines.len()
+        && start < updated_lines.len()
+        && original_lines[start] == updated_lines[start]
+    {
+        start += 1;
+    }
+
+    let mut old_end = original_lines.len();
+    let mut new_end = updated_lines.len();
+    while old_end > start
+        && new_end > start
+        && original_lines[old_end - 1] == updated_lines[new_end - 1]
+    {
+        old_end -= 1;
+        new_end -= 1;
+    }
+
     let mut lines = Vec::new();
-    for line in original.lines() {
+    for line in &original_lines[start..old_end] {
         lines.push(format!("-{line}"));
     }
-    for line in updated.lines() {
+    for line in &updated_lines[start..new_end] {
         lines.push(format!("+{line}"));
     }
 
     vec![StructuredPatchHunk {
-        old_start: 1,
-        old_lines: original.lines().count(),
-        new_start: 1,
-        new_lines: updated.lines().count(),
+        old_start: start + 1,
+        old_lines: old_end.saturating_sub(start),
+        new_start: start + 1,
+        new_lines: new_end.saturating_sub(start),
         lines,
     }]
+}
+
+fn make_file_changes(
+    file_path: &str,
+    original: Option<&str>,
+    updated: Option<&str>,
+) -> BTreeMap<String, FileChange> {
+    let mut changes = BTreeMap::new();
+    match (original, updated) {
+        (None, Some(updated)) => {
+            changes.insert(
+                file_path.to_string(),
+                FileChange::Add {
+                    content: updated.to_string(),
+                },
+            );
+        }
+        (Some(original), None) => {
+            changes.insert(
+                file_path.to_string(),
+                FileChange::Delete {
+                    content: original.to_string(),
+                },
+            );
+        }
+        (Some(original), Some(updated)) if original != updated => {
+            changes.insert(
+                file_path.to_string(),
+                FileChange::Update {
+                    unified_diff: make_unified_diff(file_path, original, updated),
+                    move_path: None,
+                },
+            );
+        }
+        _ => {}
+    }
+    changes
+}
+
+fn make_unified_diff(file_path: &str, original: &str, updated: &str) -> String {
+    let hunks = make_patch(original, updated);
+    if hunks.is_empty() {
+        return String::new();
+    }
+
+    let mut diff = format!("--- {file_path}\n+++ {file_path}");
+    for hunk in hunks {
+        diff.push('\n');
+        diff.push_str(&format!(
+            "@@ -{} +{} @@",
+            unified_range(hunk.old_start, hunk.old_lines),
+            unified_range(hunk.new_start, hunk.new_lines),
+        ));
+        for line in hunk.lines {
+            diff.push('\n');
+            diff.push_str(&line);
+        }
+    }
+    diff
+}
+
+fn unified_range(start: usize, lines: usize) -> String {
+    if lines == 1 {
+        start.to_string()
+    } else {
+        format!("{start},{lines}")
+    }
 }
 
 fn normalize_path(path: &str) -> io::Result<PathBuf> {
@@ -1533,8 +1652,8 @@ mod tests {
     use flate2::{write::ZlibEncoder, Compression};
 
     use super::{
-        display_path, edit_file, glob_search, grep_search, read_file, write_file, GrepSearchInput,
-        MAX_READ_FILE_CONTENT_CHARS, READONLY_ROOTS_ENV,
+        display_path, edit_file, glob_search, grep_search, read_file, write_file, FileChange,
+        GrepSearchInput, MAX_READ_FILE_CONTENT_CHARS, READONLY_ROOTS_ENV,
     };
 
     struct EnvGuard {
@@ -1607,6 +1726,10 @@ mod tests {
         let write_output = write_file(path.to_string_lossy().as_ref(), "one\ntwo\nthree")
             .expect("write should succeed");
         assert_eq!(write_output.kind, "create");
+        assert!(matches!(
+            write_output.changes.get(&write_output.file_path),
+            Some(FileChange::Add { content }) if content == "one\ntwo\nthree"
+        ));
 
         let read_output = read_file(path.to_string_lossy().as_ref(), Some(1), Some(1))
             .expect("read should succeed");
@@ -1706,6 +1829,35 @@ end
         let output = edit_file(path.to_string_lossy().as_ref(), "alpha", "omega", true)
             .expect("edit should succeed");
         assert!(output.replace_all);
+    }
+
+    #[test]
+    fn edit_file_reports_only_changed_patch_window() {
+        let _lock = crate::test_env_lock();
+        let _env = EnvGuard::unset("ARIS_WORKSPACE_ROOT");
+        let path = temp_path("compact-patch.txt");
+        write_file(
+            path.to_string_lossy().as_ref(),
+            "one\ntwo\nthree\nfour\nfive\nsix\n",
+        )
+        .expect("initial write should succeed");
+
+        let output = edit_file(path.to_string_lossy().as_ref(), "three", "THREE", false)
+            .expect("edit should succeed");
+
+        assert_eq!(output.structured_patch.len(), 1);
+        assert_eq!(output.structured_patch[0].old_start, 3);
+        assert_eq!(output.structured_patch[0].old_lines, 1);
+        assert_eq!(output.structured_patch[0].new_start, 3);
+        assert_eq!(output.structured_patch[0].new_lines, 1);
+        assert_eq!(output.structured_patch[0].lines, vec!["-three", "+THREE"]);
+        assert!(matches!(
+            output.changes.get(&output.file_path),
+            Some(FileChange::Update { unified_diff, move_path: None })
+                if unified_diff.contains("@@ -3 +3 @@")
+                    && unified_diff.contains("-three")
+                    && unified_diff.contains("+THREE")
+        ));
     }
 
     #[test]

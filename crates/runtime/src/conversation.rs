@@ -124,7 +124,7 @@ impl RuntimeError {
     }
 
     /// Construct an error flagged as "model unavailable" so the CLI can
-    /// drive the default-model fallback (Opus 4.8 → 4.7).
+    /// drive the default-model fallback (Opus 4.8 to 4.7).
     #[must_use]
     pub fn model_unavailable(message: impl Into<String>) -> Self {
         Self {
@@ -155,6 +155,28 @@ pub struct TurnSummary {
     pub iterations: usize,
     pub usage: TokenUsage,
     pub auto_compaction: Option<AutoCompactionEvent>,
+}
+
+#[must_use]
+pub fn assistant_text_from_turn_summary(summary: &TurnSummary) -> String {
+    summary
+        .assistant_messages
+        .iter()
+        .filter_map(|message| {
+            let text = message
+                .blocks
+                .iter()
+                .filter_map(|block| match block {
+                    ContentBlock::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("");
+            let text = text.trim();
+            (!text.is_empty()).then(|| text.to_string())
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -873,15 +895,52 @@ impl ToolExecutor for StaticToolExecutor {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_internal_continuation_message, parse_auto_compaction_threshold, ApiClient, ApiRequest,
-        AssistantEvent, AutoCompactionEvent, ConversationRuntime, RuntimeError, StaticToolExecutor,
+        assistant_text_from_turn_summary, is_internal_continuation_message,
+        parse_auto_compaction_threshold, ApiClient, ApiRequest, AssistantEvent,
+        AutoCompactionEvent, ConversationRuntime, RuntimeError, StaticToolExecutor, TurnSummary,
         DEFAULT_AUTO_COMPACTION_INPUT_TOKENS_THRESHOLD,
     };
-    // The CLI's Opus 4.8 → 4.7 fallback keys off this flag.
+    // The CLI's Opus 4.8 to 4.7 fallback keys off this flag.
     #[test]
     fn runtime_error_model_unavailable_flag() {
         assert!(!RuntimeError::new("boom").is_model_unavailable());
         assert!(RuntimeError::model_unavailable("model x not found").is_model_unavailable());
+    }
+
+    #[test]
+    fn turn_summary_assistant_text_keeps_nonempty_text_from_each_iteration() {
+        let summary = TurnSummary {
+            assistant_messages: vec![
+                ConversationMessage::assistant(vec![
+                    ContentBlock::Text {
+                        text: "Checking files.".to_string(),
+                    },
+                    ContentBlock::ToolUse {
+                        id: "tool-1".to_string(),
+                        name: "read_file".to_string(),
+                        input: "{}".to_string(),
+                    },
+                ]),
+                ConversationMessage::assistant(vec![
+                    ContentBlock::Thinking {
+                        thinking: "private reasoning".to_string(),
+                        signature: String::new(),
+                    },
+                    ContentBlock::Text {
+                        text: "Fix complete.".to_string(),
+                    },
+                ]),
+            ],
+            tool_results: Vec::new(),
+            iterations: 2,
+            usage: TokenUsage::default(),
+            auto_compaction: None,
+        };
+
+        assert_eq!(
+            assistant_text_from_turn_summary(&summary),
+            "Checking files.\n\nFix complete."
+        );
     }
 
     use crate::compact::CompactionConfig;
@@ -1691,9 +1750,7 @@ mod tests {
             vec!["system".to_string()],
         );
 
-        runtime
-            .run_turn("do a thing", None)
-            .expect("turn succeeds");
+        runtime.run_turn("do a thing", None).expect("turn succeeds");
     }
 
     #[test]
@@ -1833,5 +1890,76 @@ mod tests {
 
         assert!(runtime.estimated_tokens() < 5_000);
         assert!(runtime.session().messages.len() < 20);
+    }
+
+    /// Regression: if the Anthropic executor receives `stop_reason: "end_turn"`
+    /// in a MessageDelta but the stream drops before the MessageStop event, the
+    /// executor now always overrides the stop_reason to "stream_truncated". This
+    /// ensures the conversation loop triggers a continuation instead of silently
+    /// returning partial output.
+    #[test]
+    fn stream_truncated_after_end_turn_triggers_continuation() {
+        struct PartialThenComplete {
+            calls: usize,
+        }
+
+        impl ApiClient for PartialThenComplete {
+            fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+                self.calls += 1;
+                match self.calls {
+                    1 => Ok(vec![
+                        // Simulates what the fixed executor emits when the
+                        // stream carries MessageDelta(stop_reason: "end_turn")
+                        // but drops before MessageStop arrives.
+                        AssistantEvent::TextDelta("half".to_string()),
+                        AssistantEvent::StopReason("stream_truncated".to_string()),
+                        AssistantEvent::MessageStop,
+                    ]),
+                    2 => {
+                        assert!(request.messages.iter().any(|m| {
+                            m.role == MessageRole::User
+                                && m.blocks.iter().any(|b| {
+                                    matches!(b, ContentBlock::Text { text }
+                                        if text.contains("Continue the unfinished task"))
+                                })
+                        }));
+                        Ok(vec![
+                            AssistantEvent::TextDelta("-done".to_string()),
+                            AssistantEvent::StopReason("end_turn".to_string()),
+                            AssistantEvent::MessageStop,
+                        ])
+                    }
+                    _ => Err(RuntimeError::new("unexpected extra call")),
+                }
+            }
+        }
+
+        let mut runtime = ConversationRuntime::new(
+            Session::new(),
+            PartialThenComplete { calls: 0 },
+            StaticToolExecutor::new(),
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            vec!["system".to_string()],
+        );
+
+        let summary = runtime
+            .run_turn("write something", None)
+            .expect("should continue after stream truncation");
+        assert_eq!(summary.iterations, 2, "must have sent a continuation turn");
+        let last_text = summary
+            .assistant_messages
+            .last()
+            .unwrap()
+            .blocks
+            .iter()
+            .find_map(|b| {
+                if let ContentBlock::Text { text } = b {
+                    Some(text.as_str())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or("");
+        assert_eq!(last_text, "-done");
     }
 }

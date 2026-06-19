@@ -1,0 +1,24 @@
+#!/usr/bin/env sh
+set -eu
+
+DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+ROOT=$(dirname "$DIR")
+NODE="$ROOT/node/node"
+SCRIPT="$ROOT/mcp/playwright/node_modules/@playwright/mcp/cli.js"
+VERSION="0.0.76"
+
+if [ -f "$SCRIPT" ]; then
+  if [ -x "$NODE" ]; then
+    exec "$NODE" "$SCRIPT" "$@"
+  fi
+  if command -v node >/dev/null 2>&1; then
+    exec node "$SCRIPT" "$@"
+  fi
+fi
+
+if command -v npx >/dev/null 2>&1; then
+  exec npx -y "@playwright/mcp@$VERSION" "$@"
+fi
+
+echo "ARIS Playwright MCP runtime is missing. Rebuild the desktop bundle with 'npm run build:resources', or install Node.js/npm and retry." >&2
+exit 1
