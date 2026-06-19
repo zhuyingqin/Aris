@@ -22,12 +22,6 @@ pub struct ManagedProcessInfo {
     pub started_at: SystemTime,
 }
 
-#[derive(Debug, Clone)]
-struct ManagedProcessRecord {
-    info: ManagedProcessInfo,
-    process_group_id: Option<u32>,
-}
-
 #[derive(Debug)]
 pub struct ManagedProcessGuard {
     pid: u32,
@@ -42,8 +36,8 @@ pub struct ManagedCommandOutput {
     pub timed_out: bool,
 }
 
-fn registry() -> &'static Mutex<BTreeMap<u32, ManagedProcessRecord>> {
-    static REGISTRY: OnceLock<Mutex<BTreeMap<u32, ManagedProcessRecord>>> = OnceLock::new();
+fn registry() -> &'static Mutex<BTreeMap<u32, ManagedProcessInfo>> {
+    static REGISTRY: OnceLock<Mutex<BTreeMap<u32, ManagedProcessInfo>>> = OnceLock::new();
     REGISTRY.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
@@ -53,16 +47,11 @@ pub fn register_managed_process(
     label: impl Into<String>,
     kind: ManagedProcessKind,
 ) -> ManagedProcessGuard {
-    let _ = insert_managed_process(pid, label, kind);
+    insert_managed_process(pid, label, kind);
     ManagedProcessGuard { pid }
 }
 
-fn insert_managed_process(
-    pid: u32,
-    label: impl Into<String>,
-    kind: ManagedProcessKind,
-) -> Option<u32> {
-    let process_group_id = managed_process_group_id(pid);
+fn insert_managed_process(pid: u32, label: impl Into<String>, kind: ManagedProcessKind) {
     let info = ManagedProcessInfo {
         pid,
         label: label.into(),
@@ -70,15 +59,8 @@ fn insert_managed_process(
         started_at: SystemTime::now(),
     };
     if let Ok(mut processes) = registry().lock() {
-        processes.insert(
-            pid,
-            ManagedProcessRecord {
-                info,
-                process_group_id,
-            },
-        );
+        processes.insert(pid, info);
     }
-    process_group_id
 }
 
 pub fn unregister_managed_process(pid: u32) {
@@ -91,26 +73,18 @@ pub fn unregister_managed_process(pid: u32) {
 pub fn managed_processes_snapshot() -> Vec<ManagedProcessInfo> {
     registry()
         .lock()
-        .map(|processes| {
-            processes
-                .values()
-                .map(|record| record.info.clone())
-                .collect()
-        })
+        .map(|processes| processes.values().cloned().collect())
         .unwrap_or_default()
 }
 
 pub fn terminate_all_managed_processes() {
-    let records: Vec<_> = registry()
-        .lock()
-        .map(|processes| processes.values().cloned().collect())
-        .unwrap_or_default();
-    for record in &records {
-        terminate_managed_process_tree_with_group(record.info.pid, record.process_group_id);
+    let processes = managed_processes_snapshot();
+    for process in &processes {
+        terminate_managed_process_tree(process.pid);
     }
     if let Ok(mut registry) = registry().lock() {
-        for record in records {
-            registry.remove(&record.info.pid);
+        for process in processes {
+            registry.remove(&process.pid);
         }
     }
 }
@@ -119,14 +93,7 @@ pub fn terminate_managed_process_tree(pid: u32) {
     if pid == 0 {
         return;
     }
-    terminate_managed_process_tree_with_group(pid, managed_process_group_id(pid));
-}
-
-fn terminate_managed_process_tree_with_group(pid: u32, process_group_id: Option<u32>) {
-    if pid == 0 {
-        return;
-    }
-    terminate_process_tree(pid, process_group_id);
+    terminate_process_tree(pid);
 }
 
 pub fn spawn_managed_background(
@@ -136,7 +103,7 @@ pub fn spawn_managed_background(
     configure_managed_command(command);
     let mut child = command.spawn()?;
     let pid = child.id();
-    let _ = insert_managed_process(pid, label, ManagedProcessKind::Background);
+    insert_managed_process(pid, label, ManagedProcessKind::Background);
     thread::Builder::new()
         .name(format!("aris-managed-process-{pid}"))
         .spawn(move || {
@@ -157,7 +124,7 @@ pub fn run_managed_command(
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = command.spawn()?;
     let pid = child.id();
-    let process_group_id = insert_managed_process(pid, label, ManagedProcessKind::Foreground);
+    insert_managed_process(pid, label, ManagedProcessKind::Foreground);
     let _guard = ManagedProcessGuard { pid };
     let stdout_reader = child.stdout.take().map(read_stream_in_thread);
     let stderr_reader = child.stderr.take().map(read_stream_in_thread);
@@ -165,9 +132,6 @@ pub fn run_managed_command(
 
     loop {
         if let Some(status) = child.try_wait()? {
-            if process_group_id.is_some() {
-                terminate_managed_process_tree_with_group(pid, process_group_id);
-            }
             return Ok(ManagedCommandOutput {
                 stdout: join_reader(stdout_reader),
                 stderr: join_reader(stderr_reader),
@@ -177,7 +141,7 @@ pub fn run_managed_command(
             });
         }
         if interruptible && crate::is_interrupted() {
-            terminate_managed_process_tree_with_group(pid, process_group_id);
+            terminate_managed_process_tree(pid);
             let status = terminate_child_and_wait(&mut child)?;
             return Ok(ManagedCommandOutput {
                 stdout: join_reader(stdout_reader),
@@ -188,7 +152,7 @@ pub fn run_managed_command(
             });
         }
         if timeout.is_some_and(|timeout| started.elapsed() >= timeout) {
-            terminate_managed_process_tree_with_group(pid, process_group_id);
+            terminate_managed_process_tree(pid);
             let status = terminate_child_and_wait(&mut child)?;
             return Ok(ManagedCommandOutput {
                 stdout: join_reader(stdout_reader),
@@ -250,35 +214,9 @@ fn join_reader(reader: Option<thread::JoinHandle<Vec<u8>>>) -> Vec<u8> {
         .unwrap_or_default()
 }
 
-#[cfg(unix)]
-fn managed_process_group_id(pid: u32) -> Option<u32> {
-    use nix::unistd::{getpgid, getpgrp, Pid};
-
-    if pid <= 1 {
-        return None;
-    }
-    let raw_pid = i32::try_from(pid).ok()?;
-    let process_group = getpgid(Some(Pid::from_raw(raw_pid))).ok()?;
-    if process_group == getpgrp() {
-        return None;
-    }
-    let raw_group = process_group.as_raw();
-    if raw_group <= 1 {
-        return None;
-    }
-    let group_id = u32::try_from(raw_group).ok()?;
-    (group_id == pid).then_some(group_id)
-}
-
-#[cfg(not(unix))]
-fn managed_process_group_id(_pid: u32) -> Option<u32> {
-    None
-}
-
-fn terminate_process_tree(pid: u32, process_group_id: Option<u32>) {
+fn terminate_process_tree(pid: u32) {
     #[cfg(windows)]
     {
-        let _ = process_group_id;
         let _ = crate::hidden_command("taskkill")
             .args(["/PID", &pid.to_string(), "/T", "/F"])
             .stdin(Stdio::null())
@@ -289,26 +227,68 @@ fn terminate_process_tree(pid: u32, process_group_id: Option<u32>) {
 
     #[cfg(unix)]
     {
-        let target = process_group_id
-            .map(|group_id| format!("-{group_id}"))
-            .unwrap_or_else(|| pid.to_string());
-        let _ = Command::new("kill")
-            .args(["-TERM", &target])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        let targets = collect_unix_process_tree(pid);
+        for target in &targets {
+            send_unix_signal("-TERM", *target);
+        }
         thread::sleep(Duration::from_millis(100));
-        let _ = Command::new("kill")
-            .args(["-KILL", &target])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        for target in targets {
+            send_unix_signal("-KILL", target);
+        }
     }
 
     #[cfg(not(any(windows, unix)))]
-    let _ = (pid, process_group_id);
+    let _ = pid;
+}
+
+#[cfg(unix)]
+fn collect_unix_process_tree(pid: u32) -> Vec<u32> {
+    fn collect(pid: u32, targets: &mut Vec<u32>) {
+        if pid <= 1 || targets.contains(&pid) {
+            return;
+        }
+        for child in unix_child_pids(pid) {
+            collect(child, targets);
+        }
+        targets.push(pid);
+    }
+
+    let mut targets = Vec::new();
+    collect(pid, &mut targets);
+    targets
+}
+
+#[cfg(unix)]
+fn unix_child_pids(pid: u32) -> Vec<u32> {
+    let Ok(output) = Command::new("pgrep")
+        .args(["-P", &pid.to_string()])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.trim().parse::<u32>().ok())
+        .filter(|child| *child > 1)
+        .collect()
+}
+
+#[cfg(unix)]
+fn send_unix_signal(signal: &str, pid: u32) {
+    if pid <= 1 {
+        return;
+    }
+    let _ = Command::new("kill")
+        .args([signal, &pid.to_string()])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
 }
 
 impl Drop for ManagedProcessGuard {

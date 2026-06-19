@@ -1152,7 +1152,6 @@ dependencies = [
  "flate2",
  "getrandom",
  "glob",
- "nix",
  "regex",
  "rusqlite",
  "serde",
