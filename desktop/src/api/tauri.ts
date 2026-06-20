@@ -15,6 +15,9 @@ import type {
   ChatStatus,
   ConnectorActionResult,
   ConnectorPluginView,
+  AppUpdateInfo,
+  AppUpdateInstallResult,
+  AppUpdateProgress,
   ConfigPatch,
   ConfigSecretKind,
   ConfigTestDetail,
@@ -63,6 +66,66 @@ export const configTest = (patch: ConfigPatch) =>
   invoke<ConfigTestResult>("config_test", { patch });
 export const providerTest = (input: { baseUrl: string; model?: string; apiKey?: string }) =>
   invoke<ConfigTestDetail>("provider_test", { input });
+export const appUpdateCheck = async (): Promise<AppUpdateInfo> => {
+  if (!isTauri()) return { available: false };
+  const { check } = await import("@tauri-apps/plugin-updater");
+  const update = await check();
+  if (!update) return { available: false };
+  return {
+    available: true,
+    currentVersion: update.currentVersion,
+    version: update.version,
+    date: update.date,
+    body: update.body,
+  };
+};
+export const appUpdateDownloadAndInstall = async (
+  onProgress?: (progress: AppUpdateProgress) => void,
+): Promise<AppUpdateInstallResult> => {
+  if (!isTauri()) return { installed: false };
+  const { check } = await import("@tauri-apps/plugin-updater");
+  const update = await check();
+  if (!update) return { installed: false };
+
+  let downloadedBytes = 0;
+  let contentLength: number | null = null;
+  await update.downloadAndInstall((event) => {
+    if (event.event === "Started") {
+      downloadedBytes = 0;
+      contentLength = event.data.contentLength ?? null;
+      onProgress?.({
+        stage: "started",
+        downloadedBytes,
+        contentLength,
+        percent: null,
+      });
+    } else if (event.event === "Progress") {
+      downloadedBytes += event.data.chunkLength;
+      const percent = contentLength
+        ? Math.min(100, Math.round((downloadedBytes / contentLength) * 100))
+        : null;
+      onProgress?.({
+        stage: "progress",
+        downloadedBytes,
+        contentLength,
+        percent,
+      });
+    } else {
+      onProgress?.({
+        stage: "finished",
+        downloadedBytes,
+        contentLength,
+        percent: 100,
+      });
+    }
+  });
+  return { installed: true, version: update.version };
+};
+export const appRelaunch = async () => {
+  if (!isTauri()) return;
+  const { relaunch } = await import("@tauri-apps/plugin-process");
+  await relaunch();
+};
 export const scheduledTasksList = () =>
   invoke<ScheduledTask[]>("scheduled_tasks_list");
 export const projectPermissionGet = () =>
@@ -329,3 +392,9 @@ export const onChatPermissionResolved = (handler: (event: ChatPermissionResolved
   listen<ChatPermissionResolvedEvent>("chat-permission-resolved", (e) => handler(e.payload));
 export const onChatDone = (handler: (event: ChatTextEvent) => void) =>
   listen<ChatTextEvent>("chat-done", (e) => handler(e.payload));
+export interface ChatErrorEvent {
+  sessionId: string;
+  message: string;
+}
+export const onChatError = (handler: (event: ChatErrorEvent) => void) =>
+  listen<ChatErrorEvent>("chat-error", (e) => handler(e.payload));

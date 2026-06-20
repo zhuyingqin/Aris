@@ -29,8 +29,23 @@ const MAX_CONTEXT_TOOL_INPUT_CHARS: usize = 8_000;
 const MAX_CONTEXT_USER_TEXT_CHARS: usize = 120_000;
 const MAX_CONTEXT_ASSISTANT_TEXT_CHARS: usize = 64_000;
 const MAX_OUTPUT_LIMIT_CONTINUATIONS: usize = 8;
+/// How many times a single turn may force-compact and retry after the provider
+/// rejects the request for exceeding the model's context window. Bounded so an
+/// irreducible oversized turn surfaces the error instead of looping forever.
+const MAX_CONTEXT_OVERFLOW_RETRIES: usize = 3;
 const CONTINUATION_PROMPT_PREFIX: &str =
     "Continue the unfinished task from the exact point where the previous response stopped";
+/// How many times a turn that ended with no visible output at all (blank /
+/// whitespace-only text, reasoning that came back empty, a filtered or proxy
+/// `" "` finish, or a post-compaction "nothing to add" reply) may nudge the
+/// model to actually respond before giving up. Bounded so a model that is
+/// genuinely done — or repeatedly filtered — does not loop forever.
+const MAX_BLANK_RESPONSE_CONTINUATIONS: usize = 2;
+const BLANK_RESPONSE_PROMPT_PREFIX: &str = "Your previous response contained no visible text";
+/// Shown as the assistant's reply when, after retries, the model still
+/// produced nothing visible. Guarantees the turn returns non-empty text
+/// instead of finishing silently with an empty bubble.
+const BLANK_RESPONSE_PLACEHOLDER: &str = "[ARIS: the model returned an empty response and did not continue after automatic retries. It may have treated the task as already complete, or the output was filtered. Try rephrasing, or ask it to proceed.]";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApiRequest {
@@ -112,6 +127,11 @@ pub struct RuntimeError {
     /// account" (Anthropic 404 `not_found_error`). The CLI reads this to
     /// fall back from the default Opus 4.8 to 4.7. `new()` leaves it false.
     model_unavailable: bool,
+    /// Set when the provider rejected the request because the prompt exceeds
+    /// the model's context window (e.g. a 400 "context window exceeds limit").
+    /// The conversation loop reads this to force-compact and retry instead of
+    /// failing the whole turn. `new()` leaves it false.
+    context_overflow: bool,
 }
 
 impl RuntimeError {
@@ -120,6 +140,7 @@ impl RuntimeError {
         Self {
             message: message.into(),
             model_unavailable: false,
+            context_overflow: false,
         }
     }
 
@@ -130,6 +151,18 @@ impl RuntimeError {
         Self {
             message: message.into(),
             model_unavailable: true,
+            context_overflow: false,
+        }
+    }
+
+    /// Construct an error flagged as "context window exceeded" so the
+    /// conversation loop can force-compact the session and retry the request.
+    #[must_use]
+    pub fn context_overflow(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            model_unavailable: false,
+            context_overflow: true,
         }
     }
 
@@ -137,6 +170,13 @@ impl RuntimeError {
     #[must_use]
     pub fn is_model_unavailable(&self) -> bool {
         self.model_unavailable
+    }
+
+    /// Whether the provider rejected the request for exceeding the model's
+    /// context window.
+    #[must_use]
+    pub fn is_context_overflow(&self) -> bool {
+        self.context_overflow
     }
 }
 
@@ -173,7 +213,20 @@ pub fn assistant_text_from_turn_summary(summary: &TurnSummary) -> String {
                 .collect::<Vec<_>>()
                 .join("");
             let text = text.trim();
-            (!text.is_empty()).then(|| text.to_string())
+            if !text.is_empty() {
+                return Some(text.to_string());
+            }
+            let thinking = message
+                .blocks
+                .iter()
+                .filter_map(|block| match block {
+                    ContentBlock::Thinking { thinking, .. } => Some(thinking.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("");
+            let thinking = thinking.trim();
+            (!thinking.is_empty()).then(|| thinking.to_string())
         })
         .collect::<Vec<_>>()
         .join("\n\n")
@@ -312,6 +365,8 @@ where
         let mut tool_results = Vec::new();
         let mut iterations = 0;
         let mut output_limit_continuations = 0;
+        let mut context_overflow_retries = 0;
+        let mut blank_response_continuations = 0;
         let mut auto_compaction = None;
 
         loop {
@@ -335,7 +390,33 @@ where
                 system_prompt: self.system_prompt.clone(),
                 messages: self.session.messages.clone(),
             };
-            let events = self.api_client.stream(request)?;
+            let events = match self.api_client.stream(request) {
+                Ok(events) => events,
+                // Safety limit: the provider rejected the request because the
+                // prompt exceeds the model's context window. Our local token
+                // estimate can sit well under the budget while the real window
+                // is much smaller (small-context proxies/models), so the
+                // proactive `prepare_context_for_request` pass never fires.
+                // Force-compact and retry instead of failing the whole turn.
+                // Bounded so an irreducible single oversized turn still
+                // surfaces the original error rather than looping forever.
+                Err(error) if error.is_context_overflow() => {
+                    context_overflow_retries += 1;
+                    if context_overflow_retries > MAX_CONTEXT_OVERFLOW_RETRIES {
+                        return Err(error);
+                    }
+                    match self.force_compact_for_overflow() {
+                        Some(event) => {
+                            if event.removed_message_count > 0 {
+                                merge_auto_compaction_event(&mut auto_compaction, event);
+                            }
+                            continue;
+                        }
+                        None => return Err(error),
+                    }
+                }
+                Err(error) => return Err(error),
+            };
             let (assistant_message, usage, stop_reason) = build_assistant_message(events)?;
             if let Some(usage) = usage {
                 self.usage_tracker.record(usage);
@@ -367,6 +448,30 @@ where
                     }
                     self.session.messages.push(ConversationMessage::user_text(
                         continuation_prompt(stop_reason.as_deref().unwrap_or("output_limit")),
+                    ));
+                    continue;
+                }
+                // Blank-output guard: the turn ended with no visible text,
+                // thinking, or tool activity at all. This is the silent-stop
+                // path — a whitespace-only reply, reasoning that came back
+                // empty, a filtered/proxy `" "` finish, or a post-compaction
+                // "nothing to add" reply. Rather than returning an empty
+                // bubble with no error, nudge the model to respond; only after
+                // repeated failure do we stop, and even then with a visible
+                // explanation so the turn is never silent.
+                if !assistant_messages.iter().any(message_has_visible_output) {
+                    blank_response_continuations += 1;
+                    if blank_response_continuations > MAX_BLANK_RESPONSE_CONTINUATIONS {
+                        let placeholder =
+                            ConversationMessage::assistant(vec![ContentBlock::Text {
+                                text: BLANK_RESPONSE_PLACEHOLDER.to_string(),
+                            }]);
+                        self.session.messages.push(placeholder.clone());
+                        assistant_messages.push(placeholder);
+                        break;
+                    }
+                    self.session.messages.push(ConversationMessage::user_text(
+                        blank_response_continuation_prompt(),
                     ));
                     continue;
                 }
@@ -595,6 +700,53 @@ where
             removed_message_count: result.removed_message_count,
         })
     }
+
+    /// Aggressively shrink the session after the provider rejected the request
+    /// for exceeding the model's context window. Unlike
+    /// `prepare_context_for_request`, this ignores the local token-estimate
+    /// threshold — the model's real window can be far smaller than our default
+    /// budget — and always tries to reduce.
+    ///
+    /// Returns `Some` when the request was made smaller (so the caller should
+    /// retry): with `removed_message_count > 0` when older messages were
+    /// summarized, or `removed_message_count == 0` when only the lossy
+    /// tool-history shrink reduced the prompt. Returns `None` when nothing more
+    /// can be removed (an irreducible single oversized turn), so the caller
+    /// surfaces the original error.
+    fn force_compact_for_overflow(&mut self) -> Option<AutoCompactionEvent> {
+        let before = estimate_session_tokens(&self.session);
+
+        // Step 1 — lossy shrink of already-consumed tool inputs/results.
+        compact_context_history(&mut self.session);
+
+        // Step 2 — summarize the oldest messages, preserving the active turn.
+        let result = compact_session(
+            &self.session,
+            CompactionConfig {
+                preserve_recent_messages: active_turn_message_count(&self.session).max(1),
+                max_estimated_tokens: 0,
+            },
+        );
+        if result.removed_message_count > 0 {
+            self.session = result.compacted_session;
+            self.api_client
+                .on_session_compacted(result.removed_message_count);
+            return Some(AutoCompactionEvent {
+                removed_message_count: result.removed_message_count,
+            });
+        }
+
+        // No older messages could be summarized, but the lossy step may have
+        // shrunk the prompt enough to fit. Signal progress (count 0) so the
+        // caller retries; only give up when nothing changed at all.
+        if estimate_session_tokens(&self.session) < before {
+            Some(AutoCompactionEvent {
+                removed_message_count: 0,
+            })
+        } else {
+            None
+        }
+    }
 }
 
 #[must_use]
@@ -681,6 +833,11 @@ fn build_assistant_message(
     if blocks.is_empty() {
         return Err(RuntimeError::new("assistant stream produced no content"));
     }
+    if assistant_output_looks_degenerate(&blocks) {
+        return Err(RuntimeError::new(
+            "assistant output degenerated into repeated text; stopping to avoid context corruption",
+        ));
+    }
 
     Ok((
         ConversationMessage::assistant_with_usage(blocks, usage),
@@ -705,6 +862,26 @@ fn continuation_prompt(reason: &str) -> String {
     format!(
         "{CONTINUATION_PROMPT_PREFIX} ({reason}). Do not repeat completed work. If a tool call was truncated, retry it with a smaller payload or split the work into multiple tool calls."
     )
+}
+
+fn blank_response_continuation_prompt() -> String {
+    format!(
+        "{BLANK_RESPONSE_PROMPT_PREFIX}. If the task is already complete, state the result or a brief confirmation. Otherwise continue the work now. Do not reply with an empty or whitespace-only message."
+    )
+}
+
+/// Whether a single assistant message carries anything the user can see: real
+/// (non-whitespace) text or thinking, or any tool/image activity. Used to
+/// detect a turn that produced nothing at all so the loop can drive a
+/// continuation instead of finishing silently.
+fn message_has_visible_output(message: &ConversationMessage) -> bool {
+    message.blocks.iter().any(|block| match block {
+        ContentBlock::Text { text } => !text.trim().is_empty(),
+        ContentBlock::Thinking { thinking, .. } => !thinking.trim().is_empty(),
+        ContentBlock::ToolUse { .. }
+        | ContentBlock::ToolResult { .. }
+        | ContentBlock::Image { .. } => true,
+    })
 }
 
 fn merge_auto_compaction_event(
@@ -737,7 +914,9 @@ fn is_internal_continuation_message(message: &ConversationMessage) -> bool {
     message.blocks.iter().any(|block| {
         matches!(
             block,
-            ContentBlock::Text { text } if text.starts_with(CONTINUATION_PROMPT_PREFIX)
+            ContentBlock::Text { text }
+                if text.starts_with(CONTINUATION_PROMPT_PREFIX)
+                    || text.starts_with(BLANK_RESPONSE_PROMPT_PREFIX)
         )
     })
 }
@@ -826,6 +1005,73 @@ fn bound_context_text(output: String, max_chars: usize, label: &str) -> String {
     format!("{head}{marker}{tail}")
 }
 
+fn assistant_output_looks_degenerate(blocks: &[ContentBlock]) -> bool {
+    if blocks.iter().any(|block| {
+        matches!(
+            block,
+            ContentBlock::ToolUse { .. }
+                | ContentBlock::ToolResult { .. }
+                | ContentBlock::Image { .. }
+        )
+    }) {
+        return false;
+    }
+    let text = blocks
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            ContentBlock::Thinking { thinking, .. } => Some(thinking.as_str()),
+            ContentBlock::Image { .. }
+            | ContentBlock::ToolUse { .. }
+            | ContentBlock::ToolResult { .. } => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    repeated_token_output(&text) || repeated_char_output(&text)
+}
+
+fn repeated_token_output(text: &str) -> bool {
+    let mut counts = BTreeMap::<String, usize>::new();
+    let mut total = 0_usize;
+    for raw in text.split_whitespace() {
+        let token = raw
+            .trim_matches(|ch: char| !ch.is_alphanumeric())
+            .to_ascii_lowercase();
+        if token.is_empty() || token.chars().count() > 32 || !token.chars().any(char::is_alphabetic)
+        {
+            continue;
+        }
+        total += 1;
+        *counts.entry(token).or_default() += 1;
+    }
+    if total < 80 || counts.len() > 4 {
+        return false;
+    }
+    counts
+        .values()
+        .copied()
+        .max()
+        .is_some_and(|max_count| max_count.saturating_mul(100) >= total.saturating_mul(90))
+}
+
+fn repeated_char_output(text: &str) -> bool {
+    let mut counts = BTreeMap::<char, usize>::new();
+    let mut total = 0_usize;
+    for ch in text.chars().filter(|ch| !ch.is_whitespace()) {
+        total += 1;
+        *counts.entry(ch).or_default() += 1;
+    }
+    if total < 240 || counts.len() > 4 {
+        return false;
+    }
+    counts
+        .iter()
+        .filter(|(ch, _)| ch.is_alphabetic())
+        .map(|(_, count)| *count)
+        .max()
+        .is_some_and(|max_count| max_count.saturating_mul(100) >= total.saturating_mul(92))
+}
+
 fn flush_text_block(text: &mut String, blocks: &mut Vec<ContentBlock>) {
     if !text.is_empty() {
         blocks.push(ContentBlock::Text {
@@ -895,9 +1141,10 @@ impl ToolExecutor for StaticToolExecutor {
 #[cfg(test)]
 mod tests {
     use super::{
-        assistant_text_from_turn_summary, is_internal_continuation_message,
-        parse_auto_compaction_threshold, ApiClient, ApiRequest, AssistantEvent,
-        AutoCompactionEvent, ConversationRuntime, RuntimeError, StaticToolExecutor, TurnSummary,
+        assistant_output_looks_degenerate, assistant_text_from_turn_summary,
+        build_assistant_message, is_internal_continuation_message, parse_auto_compaction_threshold,
+        ApiClient, ApiRequest, AssistantEvent, AutoCompactionEvent, ConversationRuntime,
+        RuntimeError, StaticToolExecutor, TurnSummary,
         DEFAULT_AUTO_COMPACTION_INPUT_TOKENS_THRESHOLD,
     };
     // The CLI's Opus 4.8 to 4.7 fallback keys off this flag.
@@ -941,6 +1188,65 @@ mod tests {
             assistant_text_from_turn_summary(&summary),
             "Checking files.\n\nFix complete."
         );
+    }
+
+    #[test]
+    fn turn_summary_assistant_text_falls_back_to_thinking_only_output() {
+        let summary = TurnSummary {
+            assistant_messages: vec![ConversationMessage::assistant(vec![
+                ContentBlock::Thinking {
+                    thinking: "Visible answer streamed as reasoning_content.".to_string(),
+                    signature: String::new(),
+                },
+            ])],
+            tool_results: Vec::new(),
+            iterations: 1,
+            usage: TokenUsage::default(),
+            auto_compaction: None,
+        };
+
+        assert_eq!(
+            assistant_text_from_turn_summary(&summary),
+            "Visible answer streamed as reasoning_content."
+        );
+    }
+
+    #[test]
+    fn repeated_single_word_output_is_rejected() {
+        let error = build_assistant_message(vec![
+            AssistantEvent::TextDelta("loop ".repeat(120)),
+            AssistantEvent::MessageStop,
+        ])
+        .expect_err("degenerate output should fail");
+
+        assert!(error.to_string().contains("repeated text"));
+    }
+
+    #[test]
+    fn repeated_reasoning_output_is_rejected() {
+        let error = build_assistant_message(vec![
+            AssistantEvent::Thinking {
+                thinking: "wait ".repeat(120),
+                signature: String::new(),
+            },
+            AssistantEvent::MessageStop,
+        ])
+        .expect_err("degenerate reasoning output should fail");
+
+        assert!(error.to_string().contains("repeated text"));
+    }
+
+    #[test]
+    fn repetition_guard_allows_normal_text() {
+        let normal = vec![ContentBlock::Text {
+            text: "Context context context matters, but this sentence has enough variety to be a normal explanation.".to_string(),
+        }];
+        assert!(!assistant_output_looks_degenerate(&normal));
+
+        let numeric_table = vec![ContentBlock::Text {
+            text: "0 ".repeat(120),
+        }];
+        assert!(!assistant_output_looks_degenerate(&numeric_table));
     }
 
     use crate::compact::CompactionConfig;
@@ -1118,6 +1424,105 @@ mod tests {
             &summary.tool_results[0].blocks[0],
             ContentBlock::ToolResult { is_error: true, output, .. } if output == "not now"
         ));
+    }
+
+    #[test]
+    fn context_overflow_force_compacts_and_retries() {
+        // First request is rejected for exceeding the model's context window;
+        // the loop must force-compact the (compactable) session and retry,
+        // succeeding on the second attempt.
+        struct OverflowThenSucceedClient {
+            calls: usize,
+        }
+        impl ApiClient for OverflowThenSucceedClient {
+            fn stream(
+                &mut self,
+                _request: ApiRequest,
+            ) -> Result<Vec<AssistantEvent>, RuntimeError> {
+                self.calls += 1;
+                if self.calls == 1 {
+                    Err(RuntimeError::context_overflow(
+                        "OpenAI API error 400: context window exceeds limit (2013)",
+                    ))
+                } else {
+                    Ok(vec![
+                        AssistantEvent::TextDelta("recovered".to_string()),
+                        AssistantEvent::MessageStop,
+                    ])
+                }
+            }
+        }
+
+        // Preload enough history that compaction can actually remove messages.
+        let mut session = Session::new();
+        session.messages = vec![
+            ConversationMessage::user_text("q1 ".repeat(50)),
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "a1 ".repeat(50),
+            }]),
+            ConversationMessage::user_text("q2 ".repeat(50)),
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "a2 ".repeat(50),
+            }]),
+        ];
+
+        let mut runtime = ConversationRuntime::new(
+            session,
+            OverflowThenSucceedClient { calls: 0 },
+            StaticToolExecutor::new(),
+            PermissionPolicy::new(PermissionMode::WorkspaceWrite),
+            vec!["system".to_string()],
+        );
+
+        let summary = runtime
+            .run_turn("q3", None)
+            .expect("loop should recover after force-compaction");
+
+        // Two stream attempts: overflow, then success.
+        assert_eq!(summary.iterations, 2);
+        assert_eq!(assistant_text_from_turn_summary(&summary), "recovered");
+        // The four preloaded messages were summarized away.
+        assert_eq!(
+            summary
+                .auto_compaction
+                .expect("a compaction should have happened")
+                .removed_message_count,
+            4
+        );
+    }
+
+    #[test]
+    fn context_overflow_surfaces_error_when_irreducible() {
+        // A single oversized turn cannot be compacted further, so the error
+        // must surface instead of looping forever.
+        struct AlwaysOverflowClient;
+        impl ApiClient for AlwaysOverflowClient {
+            fn stream(
+                &mut self,
+                _request: ApiRequest,
+            ) -> Result<Vec<AssistantEvent>, RuntimeError> {
+                Err(RuntimeError::context_overflow("context length exceeded"))
+            }
+        }
+
+        let mut runtime = ConversationRuntime::new(
+            Session::new(),
+            AlwaysOverflowClient,
+            StaticToolExecutor::new(),
+            PermissionPolicy::new(PermissionMode::WorkspaceWrite),
+            vec!["system".to_string()],
+        );
+
+        let error = runtime
+            .run_turn("only message", None)
+            .expect_err("an irreducible overflow must surface");
+        assert!(error.is_context_overflow());
+    }
+
+    #[test]
+    fn runtime_error_context_overflow_flag() {
+        assert!(!RuntimeError::new("boom").is_context_overflow());
+        assert!(RuntimeError::context_overflow("too long").is_context_overflow());
     }
 
     #[test]
@@ -1508,7 +1913,16 @@ mod tests {
                 self.calls += 1;
                 if self.calls == 1 {
                     return Ok(vec![
-                        AssistantEvent::TextDelta("partial ".repeat(10_000)),
+                        AssistantEvent::TextDelta(
+                            (0..2_000)
+                                .map(|index| {
+                                    format!(
+                                        "partial segment {index} keeps varied continuation context"
+                                    )
+                                })
+                                .collect::<Vec<_>>()
+                                .join(" "),
+                        ),
                         AssistantEvent::StopReason("max_tokens".to_string()),
                         AssistantEvent::MessageStop,
                     ]);
@@ -1829,7 +2243,14 @@ mod tests {
                 }
                 Ok(vec![
                     AssistantEvent::TextDelta(if self.calls == 1 {
-                        "a".repeat(300_000)
+                        (0..4_000)
+                            .map(|index| {
+                                format!(
+                                    "oversized assistant response segment {index} keeps varied context words for bounding"
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join(" ")
                     } else {
                         "done".to_string()
                     }),
@@ -1867,7 +2288,16 @@ mod tests {
                 _request: ApiRequest,
             ) -> Result<Vec<AssistantEvent>, RuntimeError> {
                 Ok(vec![
-                    AssistantEvent::TextDelta("z".repeat(1_000)),
+                    AssistantEvent::TextDelta(
+                        (0..20)
+                            .map(|index| {
+                                format!(
+                                    "bounded memory response segment {index} keeps enough varied words"
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join(" "),
+                    ),
                     AssistantEvent::MessageStop,
                 ])
             }
@@ -1961,5 +2391,226 @@ mod tests {
             })
             .unwrap_or("");
         assert_eq!(last_text, "-done");
+    }
+
+    // ----------------------------------------------------------------------
+    // Silent-stop fix.
+    //
+    // A turn that ends with no visible output (blank/whitespace-only text,
+    // empty reasoning, a filtered/proxy `" "` finish, or a post-compaction
+    // "nothing to add" reply) must NOT finish silently. The loop nudges the
+    // model to continue; if it recovers, the real text is returned; if it
+    // never does, a visible placeholder is returned so the desktop emits a
+    // non-empty `chat-done` instead of a blank stop with no error.
+    // ----------------------------------------------------------------------
+
+    /// A whitespace-only reply no longer ends the turn silently: the loop
+    /// nudges the model to respond, and after the bounded retries are
+    /// exhausted it returns a visible placeholder (never empty text).
+    #[test]
+    fn persistently_blank_response_ends_with_visible_placeholder() {
+        struct BlankApi {
+            calls: usize,
+        }
+        impl ApiClient for BlankApi {
+            fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+                self.calls += 1;
+                // After the first blank reply every later request must carry
+                // the blank-response nudge.
+                if self.calls > 1 {
+                    assert!(
+                        request.messages.iter().any(|message| message.blocks.iter().any(
+                            |block| matches!(block, ContentBlock::Text { text }
+                                if text.starts_with("Your previous response contained no visible text"))
+                        )),
+                        "expected the blank-response continuation nudge on retry {}",
+                        self.calls
+                    );
+                }
+                Ok(vec![
+                    // A lone whitespace delta: non-empty as a String (passes the
+                    // "no content" guard) but blank once trimmed for display.
+                    AssistantEvent::TextDelta("   \n  ".to_string()),
+                    AssistantEvent::StopReason("end_turn".to_string()),
+                    AssistantEvent::MessageStop,
+                ])
+            }
+        }
+
+        let mut runtime = ConversationRuntime::new(
+            Session::new(),
+            BlankApi { calls: 0 },
+            StaticToolExecutor::new(),
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            vec!["system".to_string()],
+        );
+
+        let summary = runtime
+            .run_turn("do the task", None)
+            .expect("turn returns Ok with a visible placeholder, never a silent empty stop");
+
+        // It retried before giving up: 1 initial + MAX_BLANK_RESPONSE_CONTINUATIONS.
+        assert_eq!(summary.iterations, 3);
+        let text = assistant_text_from_turn_summary(&summary);
+        assert!(
+            !text.trim().is_empty(),
+            "the turn must never finish with empty visible text"
+        );
+        assert!(
+            text.contains("empty response"),
+            "expected the visible placeholder, got: {text:?}"
+        );
+    }
+
+    /// The key behaviour the user asked for: a blank reply makes the model
+    /// *keep going*. Here it returns blank once, then real text on the nudge —
+    /// the turn surfaces the recovered answer, not a placeholder.
+    #[test]
+    fn blank_then_real_response_recovers_with_the_model_continuing() {
+        struct BlankThenRealApi {
+            calls: usize,
+        }
+        impl ApiClient for BlankThenRealApi {
+            fn stream(
+                &mut self,
+                _request: ApiRequest,
+            ) -> Result<Vec<AssistantEvent>, RuntimeError> {
+                self.calls += 1;
+                if self.calls == 1 {
+                    return Ok(vec![
+                        AssistantEvent::TextDelta(" ".to_string()),
+                        AssistantEvent::StopReason("end_turn".to_string()),
+                        AssistantEvent::MessageStop,
+                    ]);
+                }
+                Ok(vec![
+                    AssistantEvent::TextDelta("Here is the answer.".to_string()),
+                    AssistantEvent::StopReason("end_turn".to_string()),
+                    AssistantEvent::MessageStop,
+                ])
+            }
+        }
+
+        let mut runtime = ConversationRuntime::new(
+            Session::new(),
+            BlankThenRealApi { calls: 0 },
+            StaticToolExecutor::new(),
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            vec!["system".to_string()],
+        );
+
+        let summary = runtime.run_turn("do the task", None).expect("turn succeeds");
+        assert_eq!(summary.iterations, 2, "the model was nudged once and continued");
+        assert_eq!(
+            assistant_text_from_turn_summary(&summary),
+            "Here is the answer.",
+            "the recovered answer should be returned, not a placeholder"
+        );
+    }
+
+    /// Context pressure forces a real compaction; the model then replies blank
+    /// every time. The turn must still recover into a visible placeholder
+    /// rather than a silent empty stop — confirming the fix covers the
+    /// compaction path the user identified.
+    #[test]
+    fn compaction_then_blank_response_recovers_not_silent() {
+        struct CompactThenBlankApi;
+        impl ApiClient for CompactThenBlankApi {
+            fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+                // Prove compaction actually ran: the heavy preloaded history is
+                // gone, replaced by the summary continuation message.
+                assert!(
+                    request.messages.len() < 12,
+                    "expected history to be compacted before the request"
+                );
+                assert!(
+                    request.messages.iter().any(|message| message.blocks.iter().any(|block| {
+                        matches!(block, ContentBlock::Text { text }
+                            if text.contains("This session is being continued"))
+                    })),
+                    "expected the compaction continuation summary in the request"
+                );
+                Ok(vec![
+                    AssistantEvent::TextDelta(" ".to_string()),
+                    AssistantEvent::StopReason("end_turn".to_string()),
+                    AssistantEvent::MessageStop,
+                ])
+            }
+        }
+
+        // Preload a large history so the context-estimate threshold is crossed
+        // and `prepare_context_for_request` summarizes it away.
+        let mut session = Session::new();
+        for index in 0..40 {
+            session
+                .messages
+                .push(ConversationMessage::user_text(format!("old-{index} {}", "x".repeat(500))));
+            session
+                .messages
+                .push(ConversationMessage::assistant(vec![ContentBlock::Text {
+                    text: "y".repeat(500),
+                }]));
+        }
+
+        let mut runtime = ConversationRuntime::new(
+            session,
+            CompactThenBlankApi,
+            StaticToolExecutor::new(),
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            vec!["system".to_string()],
+        )
+        .with_context_compaction_estimated_tokens_threshold(1_000);
+
+        let summary = runtime
+            .run_turn("continue", None)
+            .expect("turn returns Ok with a visible placeholder, not a silent empty stop");
+
+        assert!(
+            summary.auto_compaction.is_some(),
+            "the heavy history should have been compacted"
+        );
+        assert!(
+            !assistant_text_from_turn_summary(&summary).trim().is_empty(),
+            "blank reply after compaction must recover into visible text, never a silent stop"
+        );
+    }
+
+    /// Contrast case / guard: a final message carrying only `Thinking` (no
+    /// visible text) is NOT a silent stop — the summary falls back to the
+    /// reasoning text, so the user still sees something. This pins the boundary
+    /// so a future change that drops the thinking fallback is caught here.
+    #[test]
+    fn thinking_only_final_response_is_not_a_silent_stop() {
+        struct ThinkingOnlyApi;
+        impl ApiClient for ThinkingOnlyApi {
+            fn stream(
+                &mut self,
+                _request: ApiRequest,
+            ) -> Result<Vec<AssistantEvent>, RuntimeError> {
+                Ok(vec![
+                    AssistantEvent::Thinking {
+                        thinking: "The answer streamed as reasoning content.".to_string(),
+                        signature: String::new(),
+                    },
+                    AssistantEvent::StopReason("end_turn".to_string()),
+                    AssistantEvent::MessageStop,
+                ])
+            }
+        }
+
+        let mut runtime = ConversationRuntime::new(
+            Session::new(),
+            ThinkingOnlyApi,
+            StaticToolExecutor::new(),
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            vec!["system".to_string()],
+        );
+
+        let summary = runtime.run_turn("ask", None).expect("turn succeeds");
+        assert_eq!(
+            assistant_text_from_turn_summary(&summary),
+            "The answer streamed as reasoning content.",
+            "thinking-only output must still surface text, not a silent stop"
+        );
     }
 }

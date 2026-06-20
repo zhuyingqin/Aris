@@ -21,13 +21,13 @@ import {
   type ChatSendRequest,
 } from "../api/tauri";
 import { useStore } from "../store";
-import type { ChatAttachment, ChatCommandSelection, ChatModelOption, ChatStatus, DesktopCommandSpec, ChatTurn, PermissionModeView, SkillMeta } from "../types";
+import type { ChatAttachment, ChatBlock, ChatCommandSelection, ChatModelOption, ChatStatus, DesktopCommandSpec, ChatTurn, PermissionModeView, SkillMeta } from "../types";
 import ChatComposer, { attachmentFromFile } from "./ChatComposer";
 import CommandSelection from "./CommandSelection";
 import ChatSidebar from "./ChatSidebar";
 import ChatThread from "./ChatThread";
 import FilePathMenu from "./FilePathMenu";
-import { cleanChatTitle, latestFileChangesFromTurns, latestTodosFromTurns, makeId, textFromTurn, titleFromTurns, transcriptFromTurn } from "./model";
+import { cleanChatTitle, latestFileChangesFromTurns, latestTodosFromTurns, makeId, textFromTurn, titleFromTurns } from "./model";
 import WorkflowFlow from "./WorkflowFlow";
 import type { ChatSession } from "./types";
 import { useChatSessions } from "./useChatSessions";
@@ -83,6 +83,52 @@ function hasRenderableBlock(turn: ChatTurn) {
   });
 }
 
+function textBlocksHaveContent(blocks: ChatBlock[]): boolean {
+  return blocks.some((block) => block.kind === "text" && block.text.trim());
+}
+
+function thinkingFallbackText(blocks: ChatBlock[]): string {
+  return blocks
+    .filter((block): block is Extract<ChatBlock, { kind: "thinking" }> => block.kind === "thinking")
+    .map((block) => block.thinking.trim())
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+export function completedAssistantBlocks(turn: ChatTurn, reply: string): ChatBlock[] {
+  if (textBlocksHaveContent(turn.blocks)) return turn.blocks;
+  if (reply.trim()) return [...turn.blocks, { kind: "text", text: reply }];
+
+  const fallback = thinkingFallbackText(turn.blocks);
+  if (fallback) {
+    const nonThinkingBlocks = turn.blocks.filter((block) => block.kind !== "thinking");
+    return [...nonThinkingBlocks, { kind: "text", text: fallback }];
+  }
+
+  if (hasRenderableBlock(turn)) return turn.blocks;
+  return [{ kind: "text", text: EMPTY_ASSISTANT_RESPONSE }];
+}
+
+function isExpectedStopError(message: string): boolean {
+  const normalized = message.toLowerCase();
+  return [
+    "interrupted by user",
+    "mcp request interrupted by user",
+    "operation canceled",
+    "operation cancelled",
+    "canceled by user",
+    "cancelled by user",
+    "aborterror",
+  ].some((needle) => normalized.includes(needle));
+}
+
+export function visibleTurnError(error: string, stopped: boolean): string | undefined {
+  const message = error.trim();
+  if (!message) return undefined;
+  if (stopped && isExpectedStopError(message)) return undefined;
+  return message;
+}
+
 function mimeTypeFromDataUrl(value: string): string | null {
   const match = /^data:([^;,]+);base64,/.exec(value);
   return match?.[1] ?? null;
@@ -126,7 +172,7 @@ async function outgoingMessage(text: string, attachments: ChatAttachment[]): Pro
   };
 }
 
-async function contextForRetry(turns: ChatTurn[]) {
+export async function contextForRetry(turns: ChatTurn[]) {
   const messages: ChatContextMessage[] = [];
   for (const turn of turns) {
     if (turn.streaming || turn.error) continue;
@@ -136,11 +182,21 @@ async function contextForRetry(turns: ChatTurn[]) {
         messages.push({ role: "user", text: message.text, images: message.images });
       }
     } else {
-      const text = transcriptFromTurn(turn);
+      const text = textFromTurn(turn);
       if (text.trim()) messages.push({ role: "assistant", text });
     }
   }
   return messages;
+}
+
+export function needsBackendContextReset(
+  currentTurns: ChatTurn[],
+  prefixTurns: ChatTurn[],
+  explicitReset = false,
+): boolean {
+  if (explicitReset) return true;
+  if (currentTurns.length !== prefixTurns.length) return true;
+  return prefixTurns.some((turn, index) => currentTurns[index]?.id !== turn.id);
 }
 
 function userTurn(text: string, attachments: ChatAttachment[]): ChatTurn {
@@ -269,7 +325,7 @@ export default function Chat() {
     const assistantTurns = nextTurns.filter((turn) => turn.role === "assistant");
     if (userTurns.length !== 1 || assistantTurns.length !== 1) return;
     const userText = textFromTurn(userTurns[0]).trim();
-    const assistantText = transcriptFromTurn(assistantTurns[0]).trim();
+    const assistantText = textFromTurn(assistantTurns[0]).trim();
     if (!userText || !assistantText) return;
     titleRequests.current.add(sessionId);
     void chatSuggestTitle(userText, assistantText)
@@ -290,17 +346,9 @@ export default function Chat() {
     patchAssistant(
       sessionId,
       (turn) => {
-        const hasText = turn.blocks.some((block) => block.kind === "text" && block.text.trim());
-        const nextBlocks = hasText
-          ? turn.blocks
-          : reply.trim()
-            ? [...turn.blocks, { kind: "text" as const, text: reply }]
-            : hasRenderableBlock(turn)
-              ? turn.blocks
-              : [{ kind: "text" as const, text: EMPTY_ASSISTANT_RESPONSE }];
         return {
           ...turn,
-          blocks: nextBlocks,
+          blocks: completedAssistantBlocks(turn, reply),
           streaming: false,
           error: undefined,
           stopped: false,
@@ -311,15 +359,16 @@ export default function Chat() {
   }, [patchAssistant, suggestTitle]);
 
   const onError = useCallback((sessionId: string, error: string, stopped: boolean) => {
+    const visibleError = visibleTurnError(error, stopped);
     patchAssistant(
       sessionId,
       (turn) => ({
         ...turn,
         streaming: false,
-        error: stopped ? undefined : error,
+        error: visibleError,
         stopped,
       }),
-      stopped ? (nextTurns) => syncBackendContext(sessionId, nextTurns) : undefined,
+      stopped && !visibleError ? (nextTurns) => syncBackendContext(sessionId, nextTurns) : undefined,
     );
   }, [patchAssistant, syncBackendContext]);
 
@@ -500,7 +549,8 @@ export default function Chat() {
       setEditingTurnId(null);
       return;
     }
-    if (resetContext) await chatSetContext(session.id, await contextForRetry(prefix));
+    const shouldResetContext = needsBackendContextReset(session.turns, prefix, resetContext);
+    if (shouldResetContext) await chatSetContext(session.id, await contextForRetry(prefix));
     patchTurns(session.id, () => [...prefix, userTurn(text, attached), assistantTurn()]);
     updateSession(session.id, (item) => ({ ...item, draft: "", draftAttachments: [] }));
     setEditingTurnId(null);

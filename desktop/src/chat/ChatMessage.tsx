@@ -5,7 +5,7 @@ import MarkdownContent, { ThinkBlock } from "./MarkdownContent";
 import { textFromTurn } from "./model";
 import { useStore } from "../store";
 
-const FILE_WRITE_TOOLS = new Set(["write_file", "edit_file", "str_replace_based_edit_tool"]);
+const FILE_WRITE_TOOLS = new Set(["write_file", "append_file", "edit_file", "str_replace_based_edit_tool"]);
 
 interface FileChange {
   path: string;
@@ -98,6 +98,13 @@ export function diffFromTool(block: Extract<ChatBlock, { kind: "tool" }>): FileC
     return {
       path,
       diff: [`--- /dev/null`, `+++ ${path}`, ...content.split("\n").map((line) => `+${line}`)].join("\n"),
+    };
+  }
+  if (block.name === "append_file") {
+    const content = String(input.content ?? "");
+    return {
+      path,
+      diff: [`--- ${path}`, `+++ ${path}`, ...content.split("\n").map((line) => `+${line}`)].join("\n"),
     };
   }
   const before = String(input.old_string ?? input.old_str ?? input.old_text ?? "");
@@ -394,8 +401,14 @@ function ChatMessage({ turn, canRetry, onEdit, onRetry, onContinue, onPermission
         </div>
       )}
       {renderBlocks(turn, onPermissionRespond)}
-      {!turn.streaming && !turn.error && !hasContent && turn.role === "assistant" && (
+      {!turn.streaming && !turn.error && !turn.stopped && !hasContent && turn.role === "assistant" && (
         <div className="chat-empty-response">Model returned an empty response.</div>
+      )}
+      {!turn.streaming && !turn.error && turn.stopped && turn.role === "assistant" && (
+        <div className="chat-stopped-card">
+          <strong>Response stopped</strong>
+          <span>Stopped by user.</span>
+        </div>
       )}
       {turn.streaming && <span className="chat-inline-cursor">▌</span>}
       {turn.error && (

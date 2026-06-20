@@ -95,6 +95,26 @@ export interface ConfigTestResult {
   reviewer?: ConfigTestDetail | null;
 }
 
+export interface AppUpdateInfo {
+  available: boolean;
+  currentVersion?: string;
+  version?: string;
+  date?: string;
+  body?: string;
+}
+
+export interface AppUpdateProgress {
+  stage: "started" | "progress" | "finished";
+  downloadedBytes: number;
+  contentLength?: number | null;
+  percent?: number | null;
+}
+
+export interface AppUpdateInstallResult {
+  installed: boolean;
+  version?: string;
+}
+
 // ── Mail (Gmail API + Microsoft Graph) ───────────────────────────────────────
 
 export type MailProvider = "gmail" | "outlook" | "imap";

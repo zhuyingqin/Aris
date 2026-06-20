@@ -89,6 +89,56 @@ fn is_stream_options_unknown_field_error(body: &str) -> bool {
     REJECT_KEYWORDS.iter().any(|kw| lower.contains(kw))
 }
 
+/// Detect a 4xx response whose error body indicates the request exceeded the
+/// model's context window. Providers phrase this many ways:
+/// - OpenAI: `code: "context_length_exceeded"` / "maximum context length …"
+/// - Anthropic-style proxies: "prompt is too long"
+/// - Chinese providers (GLM/MiniMax/Moonshot/Qwen and gmncode-style proxies):
+///   "context window exceeds limit", "上下文长度超过限制", "tokens exceed"
+///
+/// When matched, the executor tags the error so the conversation loop
+/// force-compacts and retries instead of failing the whole turn.
+///
+/// Strict enough to avoid swallowing unrelated 400s: first try the structured
+/// `error.code`, then fall back to a substring scan that requires a
+/// context/length/token keyword paired with an over-limit keyword.
+pub(crate) fn is_context_window_exceeded_error(body: &str) -> bool {
+    if body.is_empty() {
+        return false;
+    }
+    if let Ok(json) = serde_json::from_str::<Value>(body) {
+        if let Some(code) = json
+            .get("error")
+            .and_then(|e| e.get("code"))
+            .and_then(|c| c.as_str())
+        {
+            if code.eq_ignore_ascii_case("context_length_exceeded") {
+                return true;
+            }
+        }
+    }
+    let lower = body.to_ascii_lowercase();
+    // Canonical phrasings that are unambiguous on their own.
+    const DIRECT_PHRASES: &[&str] = &[
+        "context window exceeds",
+        "context length exceeded",
+        "context_length_exceeded",
+        "maximum context length",
+        "exceeds the maximum context",
+        "prompt is too long",
+        "reduce the length of the messages",
+        "上下文",
+    ];
+    if DIRECT_PHRASES.iter().any(|p| lower.contains(p)) {
+        return true;
+    }
+    // Looser fallback: a context/length/token subject paired with an
+    // over-limit verb in the same body.
+    const SUBJECT: &[&str] = &["context window", "context length", "token", "tokens"];
+    const OVER_LIMIT: &[&str] = &["exceed", "too long", "too many", "over the limit", "超过"];
+    SUBJECT.iter().any(|s| lower.contains(s)) && OVER_LIMIT.iter().any(|o| lower.contains(o))
+}
+
 /// v0.4.12 P1.B — word-boundary match (treats `-`, `_`, `/`, `:` and start /
 /// end of string as boundaries). Mirrors `runtime::usage::has_word` so the
 /// executor's capability detection stays consistent with the pricing table.
@@ -251,6 +301,50 @@ fn stream_error_detail(parsed: &Value) -> Option<String> {
     }
 }
 
+/// Whether a mid-stream error envelope (see [`stream_error_detail`]) looks
+/// worth restarting rather than failing the turn. Two families qualify:
+///
+/// 1. **Content-moderation / sensitivity filters** — many providers (GLM,
+///    MiniMax, Qwen and similar proxies) run a safety classifier over the
+///    *generated* output and abort the stream with codes like
+///    `new_sensitive (1027)` / `unprocessable_entity_error`. Because the
+///    verdict is keyed on the sampled tokens, a fresh sample (temperature > 0)
+///    frequently passes — restarting recovers legitimate content that a
+///    false-positive flagged.
+/// 2. **Transient provider hiccups** — overload / rate-limit / timeout /
+///    internal-error envelopes delivered mid-stream instead of as an HTTP
+///    status.
+///
+/// Permanent failures (auth, quota, bad request) are NOT matched, so they
+/// surface immediately without burning the restart budget.
+fn stream_error_is_retryable(detail: &str) -> bool {
+    const RETRYABLE: &[&str] = &[
+        // content moderation / sensitivity (stochastic on sampled output)
+        "sensitive",
+        "content_filter",
+        "content filter",
+        "moderation",
+        "flagged",
+        "unprocessable_entity",
+        "敏感",
+        "审核",
+        "违规",
+        // transient provider hiccups
+        "rate limit",
+        "overload",
+        "timeout",
+        "timed out",
+        "temporar",
+        "try again",
+        "again later",
+        "server error",
+        "service unavailable",
+        "internal error",
+    ];
+    let d = detail.to_ascii_lowercase();
+    RETRYABLE.iter().any(|k| d.contains(k))
+}
+
 /// The non-empty `finish_reason` of a streaming choice, if present. Read
 /// independently of `delta` so a terminal choice carrying only
 /// `finish_reason` (no `delta`) is still recognized (OE7 / #249).
@@ -259,6 +353,18 @@ fn choice_finish_reason(choice: &Value) -> Option<&str> {
         .get("finish_reason")
         .and_then(|r| r.as_str())
         .filter(|r| !r.is_empty())
+}
+
+fn finish_reason_may_have_partial_tool_payload(reason: &str) -> bool {
+    matches!(
+        reason,
+        "length"
+            | "max_output"
+            | "max_output_tokens"
+            | "content_filter"
+            | "stream_truncated"
+            | "stream_error_after_partial_output"
+    )
 }
 
 /// Accumulate one streaming `tool_calls[]` delta entry into `pending`
@@ -641,6 +747,17 @@ on a compatible third-party proxy, or use Claude/another provider as executor an
                             continue;
                         }
 
+                        // Context-window overflow: tag the error so the
+                        // conversation loop force-compacts and retries instead
+                        // of failing the whole turn. Most providers report this
+                        // as 400, but some use 413 (payload too large), so we
+                        // sniff the body regardless of the exact status.
+                        if is_context_window_exceeded_error(&body_text) {
+                            return Err(RuntimeError::context_overflow(format!(
+                                "OpenAI API error {status}: {body_text}"
+                            )));
+                        }
+
                         return Err(RuntimeError::new(format!(
                             "OpenAI API error {status}: {body_text}"
                         )));
@@ -887,12 +1004,51 @@ on a compatible third-party proxy, or use Claude/another provider as executor an
                     // `choices` guard below. That is doubly dangerous now
                     // that a prior `finish_reason` marks the stream
                     // "complete" on EOF — an error chunk arriving after a
-                    // finish_reason would otherwise be misjudged as
-                    // success. Surface it as a hard error.
+                    // finish_reason would otherwise be misjudged as success.
+                    //
+                    // Before hard-failing, two recovery paths (mirrors the
+                    // premature-EOF / body-abort handling above):
+                    //   1. Nothing emitted yet + a retryable envelope
+                    //      (content-moderation false positive or transient
+                    //      hiccup) + budget remaining → restart the whole
+                    //      stream; a fresh sample often clears the filter.
+                    //   2. Output already streamed → preserve it instead of
+                    //      discarding, mark it truncated so a cut-off tool call
+                    //      is never executed, and let the conversation loop
+                    //      attempt a bounded continuation.
                     if let Some(detail) = stream_error_detail(&parsed) {
-                        return Err(RuntimeError::new(format!(
-                            "OpenAI stream returned a mid-stream error: {detail}"
-                        )));
+                        if nothing_emitted_yet(&events, &pending_tools, &current_reasoning) {
+                            if stream_retries_remaining > 0
+                                && stream_error_is_retryable(&detail)
+                            {
+                                stream_retries_remaining -= 1;
+                                eprintln!(
+                                    "\x1b[33m  OpenAI stream restart (mid-stream error: {detail}, {} attempt(s) left)\x1b[0m",
+                                    stream_retries_remaining
+                                );
+                                response = stream_restart_send(
+                                    &self.http,
+                                    &url,
+                                    &self.api_key,
+                                    &body,
+                                )
+                                .await?;
+                                stream_buf.clear();
+                                done = false;
+                                break;
+                            }
+                            return Err(RuntimeError::new(format!(
+                                "OpenAI stream returned a mid-stream error: {detail}"
+                            )));
+                        }
+                        eprintln!(
+                            "\x1b[33m  OpenAI mid-stream error after partial output: {detail} — keeping partial output\x1b[0m"
+                        );
+                        events.push(AssistantEvent::StopReason(
+                            "stream_error_after_partial_output".to_string(),
+                        ));
+                        done = true;
+                        break;
                     }
 
                     // Extract usage if present (some providers send it).
@@ -989,16 +1145,14 @@ on a compatible third-party proxy, or use Claude/another provider as executor an
                         // drain does not).
                         if let Some(reason) = finish_reason {
                             events.push(AssistantEvent::StopReason(reason.to_string()));
-                            let truncated = matches!(
-                                reason,
-                                "length" | "max_output" | "max_output_tokens"
-                            );
-                            if truncated || reason == "content_filter" {
+                            let partial_tool_payload =
+                                finish_reason_may_have_partial_tool_payload(reason);
+                            if partial_tool_payload {
                                 eprintln!(
                                     "\x1b[33m  OpenAI stream finished with reason='{reason}' — output may be truncated or filtered\x1b[0m"
                                 );
                             }
-                            if !truncated {
+                            if !partial_tool_payload {
                                 flush_pending_tools(&mut pending_tools, observer, &mut events)?;
                             }
                         }
@@ -1019,10 +1173,7 @@ on a compatible third-party proxy, or use Claude/another provider as executor an
                     matches!(
                         event,
                         AssistantEvent::StopReason(reason)
-                            if matches!(
-                                reason.as_str(),
-                                "stream_truncated" | "stream_error_after_partial_output"
-                            )
+                            if finish_reason_may_have_partial_tool_payload(reason.as_str())
                     )
                 });
                 // Never execute a tool call whose JSON may have been cut off.
@@ -1261,6 +1412,39 @@ fn convert_tool_spec_openai(spec: &ExecutorToolSpec) -> Value {
 mod tests {
     use super::*;
     use runtime::{ContentBlock, ConversationMessage, MessageRole};
+
+    #[test]
+    fn detects_context_window_exceeded_errors() {
+        // The exact gmncode-style proxy envelope from the field report.
+        assert!(is_context_window_exceeded_error(
+            r#"{"type":"error","error":{"type":"bad_request_error","message":"invalid params, context window exceeds limit (2013)","http_code":"400"}}"#
+        ));
+        // OpenAI canonical structured code.
+        assert!(is_context_window_exceeded_error(
+            r#"{"error":{"message":"This model's maximum context length is 8192 tokens.","code":"context_length_exceeded"}}"#
+        ));
+        // Anthropic phrasing.
+        assert!(is_context_window_exceeded_error(
+            "prompt is too long: 250000 tokens > 200000 maximum"
+        ));
+        // Looser subject+verb fallback.
+        assert!(is_context_window_exceeded_error(
+            "the number of tokens exceeds the model limit"
+        ));
+        // Chinese phrasing.
+        assert!(is_context_window_exceeded_error("上下文长度超过限制"));
+    }
+
+    #[test]
+    fn ignores_unrelated_errors() {
+        assert!(!is_context_window_exceeded_error(""));
+        assert!(!is_context_window_exceeded_error(
+            r#"{"error":{"message":"invalid api key","code":"invalid_api_key"}}"#
+        ));
+        // A bare "token" mention without an over-limit verb must not match.
+        assert!(!is_context_window_exceeded_error("your token was rejected"));
+        assert!(!is_context_window_exceeded_error("rate limit exceeded"));
+    }
 
     #[test]
     fn convert_messages_drops_system_role_in_messages_array() {
@@ -1521,6 +1705,30 @@ mod tests {
         );
     }
 
+    #[test]
+    fn classifies_retryable_mid_stream_errors() {
+        // The exact field report: a content-sensitivity filter aborts the
+        // stream. `stream_error_detail` renders it as "msg (code)".
+        let detail = stream_error_detail(&json!({
+            "error": {"message": "output new_sensitive", "code": "1027", "type": "unprocessable_entity_error"}
+        }))
+        .expect("error envelope");
+        assert!(stream_error_is_retryable(&detail));
+
+        // Other moderation / transient phrasings.
+        assert!(stream_error_is_retryable("content_filter triggered"));
+        assert!(stream_error_is_retryable("内容审核未通过：敏感"));
+        assert!(stream_error_is_retryable(
+            "service unavailable, try again later"
+        ));
+        assert!(stream_error_is_retryable("upstream timeout"));
+
+        // Permanent failures must NOT be retried.
+        assert!(!stream_error_is_retryable("invalid api key"));
+        assert!(!stream_error_is_retryable("insufficient quota"));
+        assert!(!stream_error_is_retryable("model not found"));
+    }
+
     // OE7 (#249): finish_reason read independently of `delta`.
     #[test]
     fn choice_finish_reason_handles_delta_less_and_empty() {
@@ -1555,6 +1763,27 @@ mod tests {
             choice_finish_reason(&json!({"delta": {"content": "x"}})),
             None
         );
+    }
+
+    #[test]
+    fn truncating_finish_reasons_do_not_flush_pending_tool_payloads() {
+        assert!(finish_reason_may_have_partial_tool_payload("length"));
+        assert!(finish_reason_may_have_partial_tool_payload("max_output"));
+        assert!(finish_reason_may_have_partial_tool_payload(
+            "max_output_tokens"
+        ));
+        assert!(finish_reason_may_have_partial_tool_payload(
+            "content_filter"
+        ));
+        assert!(finish_reason_may_have_partial_tool_payload(
+            "stream_truncated"
+        ));
+        assert!(finish_reason_may_have_partial_tool_payload(
+            "stream_error_after_partial_output"
+        ));
+
+        assert!(!finish_reason_may_have_partial_tool_payload("stop"));
+        assert!(!finish_reason_may_have_partial_tool_payload("tool_calls"));
     }
 
     // Tool-call delta accumulation across chunks.

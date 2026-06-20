@@ -2817,6 +2817,94 @@ textarea {
 .sp-status-key { color: var(--green); font-size: 10px; }
 .sp-status-empty { color: var(--text-dim); font-style: italic; font-size: 11px; }
 
+.sp-update-section {
+  margin: 16px 20px 0;
+  flex-shrink: 0;
+}
+.sp-update-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.sp-update-panel {
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+}
+.sp-update-panel-available {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+}
+.sp-update-panel-ready {
+  border-color: color-mix(in srgb, var(--green) 45%, var(--border));
+}
+.sp-update-panel-error {
+  border-color: color-mix(in srgb, var(--red) 45%, var(--border));
+}
+.sp-update-main {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  min-width: 0;
+}
+.sp-update-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--text-dim);
+  margin-top: 5px;
+  flex-shrink: 0;
+}
+.sp-update-dot-checking,
+.sp-update-dot-downloading {
+  background: var(--amber);
+}
+.sp-update-dot-available {
+  background: var(--accent);
+}
+.sp-update-dot-current,
+.sp-update-dot-ready {
+  background: var(--green);
+}
+.sp-update-dot-error {
+  background: var(--red);
+}
+.sp-update-copy {
+  min-width: 0;
+  flex: 1;
+}
+.sp-update-title {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.35;
+}
+.sp-update-meta,
+.sp-update-message {
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1.45;
+  margin-top: 2px;
+  overflow-wrap: anywhere;
+}
+.sp-update-message {
+  color: var(--text);
+}
+.sp-update-panel-error .sp-update-message {
+  color: var(--red);
+}
+.sp-update-notes {
+  margin-top: 8px;
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  max-height: 120px;
+  overflow: auto;
+}
+
 .sp-secret-panel {
   margin: 12px 20px 0;
   padding: 12px 14px 14px;
@@ -5292,6 +5380,24 @@ textarea {
 }
 
 .chat-error-card span {
+  flex: 1;
+  color: var(--text-dim);
+}
+
+.chat-stopped-card {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--amber) 45%, var(--border));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--amber) 8%, var(--bg-1));
+  color: var(--amber);
+  font-size: 12px;
+}
+
+.chat-stopped-card span {
   flex: 1;
   color: var(--text-dim);
 }

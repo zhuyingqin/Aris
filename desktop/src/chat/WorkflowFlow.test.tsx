@@ -113,11 +113,17 @@ describe("latestFileChangesFromTurns", () => {
         { path: "desktop/src/App.tsx", old_string: "old", new_string: "new" },
         { filePath: "F:\\Agent\\Aris\\desktop\\src\\App.tsx" },
       ),
+      toolTurn(
+        "append_file",
+        { path: "slides/chapter3.tex", content: "\\begin{frame}\n" },
+        { type: "append", filePath: "F:\\Agent\\Aris\\slides\\chapter3.tex", created: false },
+      ),
     ];
 
     expect(latestFileChangesFromTurns(turns, "F:\\Agent\\Aris")).toEqual([
       { path: "desktop/src/new.ts", status: "added", sourceTool: "write_file" },
       { path: "desktop/src/App.tsx", status: "modified", sourceTool: "edit_file" },
+      { path: "slides/chapter3.tex", status: "modified", sourceTool: "append_file" },
     ]);
   });
 

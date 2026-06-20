@@ -32,6 +32,7 @@ const apiMocks = vi.hoisted(() => ({
   onChatPermissionRequest: vi.fn(() => Promise.resolve(() => undefined)),
   onChatPermissionResolved: vi.fn(() => Promise.resolve(() => undefined)),
   onChatDone: vi.fn(() => Promise.resolve(() => undefined)),
+  onChatError: vi.fn(() => Promise.resolve(() => undefined)),
 }));
 
 vi.mock("../api/tauri", () => apiMocks);

@@ -3,7 +3,8 @@
 //! The provider executor lives in `aris-executor`; this module only adapts it
 //! to Tauri events and UI-facing commands.
 //! Streaming surface (Tauri events): `chat-delta`, `chat-thinking-delta`,
-//! `chat-tool`, `chat-tool-result`, `chat-permission-request`, `chat-done`.
+//! `chat-tool`, `chat-tool-result`, `chat-permission-request`, `chat-done`,
+//! `chat-error`.
 
 use std::{
     collections::HashMap,
@@ -190,11 +191,16 @@ where
                 let context_output =
                     compact_tool_output_for_context(tool_name, output, artifact.as_ref());
                 let ui_output = tool_output_for_ui(&context_output, artifact.as_ref());
+                let is_error = tool_output_indicates_error(tool_name, &context_output);
                 let _ = self.app.emit(
                     "chat-tool-result",
-                    json!({ "sessionId": self.session_id, "id": tool_use_id, "name": tool_name, "output": ui_output, "isError": false }),
+                    json!({ "sessionId": self.session_id, "id": tool_use_id, "name": tool_name, "output": ui_output, "isError": is_error }),
                 );
-                Ok(context_output)
+                if is_error {
+                    Err(ToolError::new(context_output))
+                } else {
+                    Ok(context_output)
+                }
             }
             Err(err) => {
                 let _ = self.app.emit(
@@ -237,9 +243,10 @@ impl aris_executor::StreamObserver for DesktopStreamObserver {
     }
 
     fn on_tool_call(&mut self, id: &str, name: &str, input: &str) -> Result<(), RuntimeError> {
+        let ui_input = tool_input_for_ui(name, input);
         let _ = self.app.emit(
             "chat-tool",
-            json!({ "sessionId": self.session_id, "id": id, "name": name, "input": input }),
+            json!({ "sessionId": self.session_id, "id": id, "name": name, "input": ui_input }),
         );
         Ok(())
     }
@@ -445,8 +452,124 @@ fn truncate(text: &str, max: usize) -> String {
 
 const MAX_CONTEXT_TOOL_OUTPUT_CHARS: usize = 64_000;
 const MAX_UI_TOOL_OUTPUT_CHARS: usize = 64_000;
+const MAX_UI_TOOL_INPUT_CHARS: usize = 16_000;
+const MAX_UI_TOOL_INPUT_FIELD_CHARS: usize = 4_000;
 const TOOL_OUTPUT_ARTIFACT_THRESHOLD_CHARS: usize = 64_000;
-const SHELL_STREAM_CONTEXT_CHARS: usize = 48_000;
+const SHELL_STREAM_CONTEXT_CHARS: usize = 12_000;
+
+fn tool_input_for_ui(tool_name: &str, input: &str) -> String {
+    if input.chars().count() <= MAX_UI_TOOL_INPUT_CHARS {
+        return input.to_string();
+    }
+    if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(input) {
+        compact_tool_input_json_for_ui(tool_name, &mut value);
+        if let Ok(rendered) = serde_json::to_string_pretty(&value) {
+            if rendered.chars().count() <= MAX_UI_TOOL_INPUT_CHARS {
+                return rendered;
+            }
+        }
+    }
+    compact_stream_text(input, MAX_UI_TOOL_INPUT_CHARS, "tool input", None).0
+}
+
+fn compact_tool_input_json_for_ui(tool_name: &str, value: &mut serde_json::Value) {
+    match tool_name {
+        "write_file" | "append_file" => {
+            omit_large_json_string_field(value, "content", &format!("{tool_name}.content"));
+        }
+        "edit_file" | "str_replace_based_edit_tool" => {
+            omit_large_json_string_field(value, "old_string", "edit_file.old_string");
+            omit_large_json_string_field(value, "new_string", "edit_file.new_string");
+            omit_large_json_string_field(value, "old_str", "edit_file.old_str");
+            omit_large_json_string_field(value, "new_str", "edit_file.new_str");
+            omit_large_json_string_field(value, "old_text", "edit_file.old_text");
+            omit_large_json_string_field(value, "new_text", "edit_file.new_text");
+        }
+        "bash" | "PowerShell" => {
+            compact_large_json_string_field(value, "command", "shell command");
+        }
+        _ => {
+            compact_json_string_values_for_ui(value);
+        }
+    }
+}
+
+fn compact_json_string_values_for_ui(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(object) => {
+            for item in object.values_mut() {
+                compact_json_string_values_for_ui(item);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                compact_json_string_values_for_ui(item);
+            }
+        }
+        serde_json::Value::String(text) => {
+            let total = text.chars().count();
+            if total > MAX_UI_TOOL_INPUT_FIELD_CHARS {
+                let marker = format!(
+                    "\n\n[ARIS truncated this tool input field for UI: {total} chars total.]\n\n"
+                );
+                *text = compact_edges(text, MAX_UI_TOOL_INPUT_FIELD_CHARS, &marker);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn compact_large_json_string_field(value: &mut serde_json::Value, key: &str, label: &str) {
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+    let Some(text) = object
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned)
+    else {
+        return;
+    };
+    let total = text.chars().count();
+    if total <= MAX_UI_TOOL_INPUT_FIELD_CHARS {
+        return;
+    }
+    let marker =
+        format!("\n\n[ARIS truncated {label} for UI: {total} chars total.]\n\n");
+    object.insert(
+        key.to_string(),
+        serde_json::Value::String(compact_edges(
+            &text,
+            MAX_UI_TOOL_INPUT_FIELD_CHARS,
+            &marker,
+        )),
+    );
+}
+
+fn omit_large_json_string_field(value: &mut serde_json::Value, key: &str, label: &str) {
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+    let Some(text) = object
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned)
+    else {
+        return;
+    };
+    let total = text.chars().count();
+    if total <= MAX_UI_TOOL_INPUT_FIELD_CHARS {
+        return;
+    }
+    object.insert(
+        key.to_string(),
+        serde_json::Value::String(format!(
+            "[ARIS omitted {label} from UI: {total} chars. The tool receives the full value if this call completes; inspect the file on disk.]"
+        )),
+    );
+    object.insert(format!("{key}Chars"), json!(total));
+    object.insert(format!("{key}OmittedForUi"), serde_json::Value::Bool(true));
+}
 
 fn compact_tool_output_for_context(
     tool_name: &str,
@@ -490,6 +613,31 @@ fn tool_output_for_ui(output: &str, artifact: Option<&ToolOutputArtifact>) -> St
         MAX_UI_TOOL_OUTPUT_CHARS,
         "tool output preview",
     )
+}
+
+fn tool_output_indicates_error(tool_name: &str, output: &str) -> bool {
+    matches!(tool_name, "bash" | "PowerShell") && shell_output_indicates_error(output)
+}
+
+fn shell_output_indicates_error(output: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(output) else {
+        return false;
+    };
+    value
+        .get("interrupted")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+        || value
+            .get("returnCodeInterpretation")
+            .is_some_and(json_value_is_present)
+}
+
+fn json_value_is_present(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Null => false,
+        serde_json::Value::String(text) => !text.trim().is_empty(),
+        _ => true,
+    }
 }
 
 fn persist_tool_output_if_large(
@@ -554,7 +702,7 @@ fn compact_shell_json_tool_output(
     let mut base = serde_json::from_str::<serde_json::Value>(output).ok()?;
     insert_output_artifact_fields(&mut base, artifact);
 
-    for stream_limit in [SHELL_STREAM_CONTEXT_CHARS, 24_000, 12_000, 4_000] {
+    for stream_limit in [SHELL_STREAM_CONTEXT_CHARS, 8_000, 4_000] {
         let mut candidate = base.clone();
         let truncated = compact_shell_stream_fields(&mut candidate, stream_limit, artifact);
         if truncated {
@@ -750,11 +898,18 @@ fn build_system_prompt_inner(model: &str, full_tool_registry: bool) -> Vec<Strin
         )
     };
     let file_links = "When you create or modify files, include Markdown links to the relevant file paths in the final response so the desktop UI can open them directly.".to_string();
+    let long_document_reading = "Long document reading: when working with books, chapters, transcripts, logs, or converted documents, do not read multiple large files in full. First get a file list and a read_file outline preview, then read one chapter or section window at a time with explicit offset/limit. Treat tool output as a preview, not as a source file; if full text is needed, keep it on disk and reopen precise windows.".to_string();
+    let long_file_generation = "Long file generation: do not call write_file with an entire long generated artifact such as a Beamer chapter, book chapter, or converted document. Keep single tool payloads small; for files over about 24000 characters, write a small scaffold, append smaller chunks with append_file, and verify line counts/compilation immediately instead of stopping to report an intermediate failure.".to_string();
     let latex_toolchain = latex_toolchain_prompt_section();
     runtime::migrate_legacy_knowledge_memory();
     let hot_memory = runtime::render_hot_memory_prompt(&workspace).unwrap_or_default();
     let knowledge_memory = runtime::render_knowledge_memory_prompt();
-    let mut extra_sections = vec![access.clone(), file_links];
+    let mut extra_sections = vec![
+        access.clone(),
+        file_links,
+        long_document_reading,
+        long_file_generation,
+    ];
     if !latex_toolchain.is_empty() {
         extra_sections.push(latex_toolchain);
     }
@@ -1890,7 +2045,7 @@ async fn run_chat_turn_with_context(
     let worker_app = app.clone();
     let worker_session_id = session_id.clone();
     let worker_cancelled = cancelled.clone();
-    let (text, updated): (String, Session) = tauri::async_runtime::spawn_blocking(move || {
+    let joined = tauri::async_runtime::spawn_blocking(move || {
         let feature_config = match std::env::current_dir()
             .map_err(|error| error.to_string())
             .and_then(|cwd| {
@@ -1962,8 +2117,29 @@ async fn run_chat_turn_with_context(
         let text = aris_chat::final_assistant_text(&summary);
         Ok::<(String, Session), String>((text, runtime.into_session()))
     })
-    .await
-    .map_err(|e| e.to_string())??;
+    .await;
+
+    // Flatten the join result, then surface any failure as a first-class
+    // `chat-error` event before returning. The streaming protocol is
+    // event-driven (chat-delta / chat-tool / chat-done); without a matching
+    // error event the only failure signal was the rejected invoke promise,
+    // which the UI can miss on paths like a network drop that ends the turn
+    // without a streamed assistant turn to attach the error to. Emitting an
+    // explicit event guarantees the failure is always visible.
+    let outcome = match joined {
+        Ok(inner) => inner,
+        Err(join_error) => Err(join_error.to_string()),
+    };
+    let (text, updated): (String, Session) = match outcome {
+        Ok(value) => value,
+        Err(message) => {
+            let _ = app.emit(
+                "chat-error",
+                json!({ "sessionId": session_id, "message": message }),
+            );
+            return Err(message);
+        }
+    };
 
     store_chat_session(state, session_id.clone(), updated)?;
     let _ = app.emit(
@@ -3646,10 +3822,41 @@ mod tests {
         assert!(compacted_stdout.starts_with("start"));
         assert!(compacted_stdout.ends_with("end"));
         assert!(compacted_stdout.contains("ARIS truncated stdout"));
+        assert!(compacted_stdout.chars().count() <= SHELL_STREAM_CONTEXT_CHARS);
         assert_eq!(parsed["persistedOutputPath"], artifact.path);
         assert_eq!(parsed["rawOutputPath"], artifact.path);
         assert_eq!(parsed["persistedOutputSize"], artifact.bytes);
         assert_eq!(parsed["truncatedForContext"], true);
+    }
+
+    #[test]
+    fn shell_status_metadata_marks_tool_output_as_error() {
+        let ok = serde_json::to_string(&json!({
+            "stdout": "ok",
+            "stderr": "",
+            "interrupted": false,
+            "returnCodeInterpretation": null
+        }))
+        .expect("json");
+        assert!(!tool_output_indicates_error("PowerShell", &ok));
+
+        let failed = serde_json::to_string(&json!({
+            "stdout": "",
+            "stderr": "bad",
+            "interrupted": false,
+            "returnCodeInterpretation": "exit_code:7"
+        }))
+        .expect("json");
+        assert!(tool_output_indicates_error("PowerShell", &failed));
+
+        let interrupted = serde_json::to_string(&json!({
+            "stdout": "",
+            "stderr": "Command interrupted by user",
+            "interrupted": true,
+            "returnCodeInterpretation": "interrupted"
+        }))
+        .expect("json");
+        assert!(tool_output_indicates_error("bash", &interrupted));
     }
 
     #[test]
@@ -3716,6 +3923,57 @@ mod tests {
 
         assert!(prompt.contains("desktop tool registry"));
         assert!(prompt.contains("include Markdown links"));
+        assert!(prompt.contains("Long file generation"));
+        assert!(prompt.contains("24000 characters"));
+        assert!(prompt.contains("append_file"));
+    }
+
+    #[test]
+    fn oversized_write_file_input_is_compacted_for_ui() {
+        let input = serde_json::json!({
+            "path": "slides/chapter3.tex",
+            "content": "x".repeat(MAX_UI_TOOL_INPUT_CHARS + 1000)
+        })
+        .to_string();
+
+        let compacted = tool_input_for_ui("write_file", &input);
+        let value: serde_json::Value = serde_json::from_str(&compacted).expect("json");
+
+        assert_eq!(value["path"], "slides/chapter3.tex");
+        assert!(value["content"]
+            .as_str()
+            .expect("content placeholder")
+            .contains("omitted write_file.content"));
+        assert_eq!(
+            value["contentChars"],
+            serde_json::json!(MAX_UI_TOOL_INPUT_CHARS + 1000)
+        );
+        assert_eq!(value["contentOmittedForUi"], serde_json::json!(true));
+        assert!(compacted.chars().count() < MAX_UI_TOOL_INPUT_CHARS);
+    }
+
+    #[test]
+    fn oversized_append_file_input_is_compacted_for_ui() {
+        let input = serde_json::json!({
+            "path": "slides/chapter3.tex",
+            "content": "x".repeat(MAX_UI_TOOL_INPUT_CHARS + 1000)
+        })
+        .to_string();
+
+        let compacted = tool_input_for_ui("append_file", &input);
+        let value: serde_json::Value = serde_json::from_str(&compacted).expect("json");
+
+        assert_eq!(value["path"], "slides/chapter3.tex");
+        assert!(value["content"]
+            .as_str()
+            .expect("content placeholder")
+            .contains("omitted append_file.content"));
+        assert_eq!(
+            value["contentChars"],
+            serde_json::json!(MAX_UI_TOOL_INPUT_CHARS + 1000)
+        );
+        assert_eq!(value["contentOmittedForUi"], serde_json::json!(true));
+        assert!(compacted.chars().count() < MAX_UI_TOOL_INPUT_CHARS);
     }
 
     #[test]

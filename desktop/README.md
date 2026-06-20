@@ -65,6 +65,27 @@ Build outputs:
 - `src-tauri\target\release\aris-desktop.exe`
 - `src-tauri\target\release\bundle\nsis\ARIS Studio_0.2.0_x64-setup.exe`
 
+## GitHub Updater Releases
+
+ARIS Studio uses the Tauri updater plugin and checks:
+
+```text
+https://github.com/zhuyingqin/Aris/releases/latest/download/latest.json
+```
+
+The updater public key is embedded in `src-tauri/tauri.conf.json`. Keep the matching private key out of git and set it as the GitHub repository secret `TAURI_SIGNING_PRIVATE_KEY` before publishing tagged releases. If the key was generated with a password, also set `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
+
+For local signed bundle checks:
+
+```powershell
+cd desktop
+$env:TAURI_SIGNING_PRIVATE_KEY = Get-Content -Raw updater.key
+npx tauri build --bundles nsis --ci
+npm run generate:updater-json -- src-tauri/target/release/bundle/nsis
+```
+
+The GitHub `Release` workflow publishes the NSIS installer, its `.sig`, and `latest.json` to the tag release. The Settings page can then check, download, install, and restart into the new version.
+
 ## Checks
 
 ```powershell

@@ -5,7 +5,7 @@
 
 [package]
 name = "aris-desktop"
-version = "0.3.4"
+version = "0.3.5"
 edition = "2021"
 license = "MIT"
 description = "ARIS Studio — desktop UI for designing and monitoring agent teams & workflows"
@@ -40,3 +40,5 @@ aris-executor = { path = "../../crates/executor" }
 aris-chat = { path = "../../crates/chat" }
 aris-commands = { package = "commands", path = "../../crates/commands" }
 tokio = { version = "1", features = ["rt-multi-thread"] }
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"

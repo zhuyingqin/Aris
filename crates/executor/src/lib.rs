@@ -180,6 +180,11 @@ impl ApiClient for AnthropicRuntimeClient {
                 .map_err(|error| {
                     if error.is_model_unavailable() {
                         RuntimeError::model_unavailable(error.to_string())
+                    } else if openai::is_context_window_exceeded_error(&error.to_string()) {
+                        // Anthropic 400 "prompt is too long: N tokens > M
+                        // maximum" — tag so the conversation loop force-compacts
+                        // and retries instead of failing the turn.
+                        RuntimeError::context_overflow(error.to_string())
                     } else {
                         RuntimeError::new(error.to_string())
                     }

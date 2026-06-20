@@ -52,9 +52,9 @@ pub use event_sink::{
     RuntimeEvent,
 };
 pub use file_ops::{
-    edit_file, glob_search, grep_search, read_file, write_file, EditFileOutput, FileChange,
-    GlobSearchOutput, GrepSearchInput, GrepSearchOutput, ReadFileOutput, StructuredPatchHunk,
-    TextFilePayload, WriteFileOutput,
+    append_file, edit_file, glob_search, grep_search, read_file, write_file, AppendFileOutput,
+    EditFileOutput, FileChange, GlobSearchOutput, GrepSearchInput, GrepSearchOutput,
+    ReadFileOutput, StructuredPatchHunk, TextFilePayload, WriteFileOutput,
 };
 pub use hooks::{HookEvent, HookRunResult, HookRunner};
 pub use hot_memory::{

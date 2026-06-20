@@ -118,6 +118,8 @@ pub fn run() {
     augment_path_for_mcp();
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(engine::ChatState::default())
         .manage(projects::ProjectState::default())
         .setup(|app| {

@@ -11,12 +11,15 @@ use aris_executor::{
 };
 use reqwest::blocking::Client;
 use runtime::{
-    edit_file, execute_bash, glob_search, grep_search, load_system_prompt, read_file, write_file,
-    ApiClient, ApiRequest, AssistantEvent, BashCommandInput, ConversationRuntime, GrepSearchInput,
-    PermissionMode, PermissionPolicy, RuntimeError, Session, ToolError, ToolExecutor,
+    append_file, edit_file, execute_bash, glob_search, grep_search, load_system_prompt, read_file,
+    write_file, ApiClient, ApiRequest, AssistantEvent, BashCommandInput, ConversationRuntime,
+    GrepSearchInput, PermissionMode, PermissionPolicy, RuntimeError, Session, ToolError,
+    ToolExecutor,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+
+const MAX_WRITE_FILE_CONTENT_CHARS: usize = 24_000;
 
 pub mod knowledge;
 pub mod literature;
@@ -92,7 +95,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "read_file",
-            description: "Read a text file or extract readable text from a PDF in the workspace.",
+            description: "Read a text file or extract readable text from a PDF in the workspace. Large files without offset/limit return a safe outline preview; use offset and limit to read one section window at a time.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -107,12 +110,27 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "write_file",
-            description: "Write a complete text file in the workspace. Prefer edit_file for localized edits; use shell scripts only for justified bulk mechanical rewrites.",
+            description: "Write a complete text file in the workspace. Keep content under 24000 characters in a single call; for longer generated files, write a small scaffold, append chunks with append_file, and verify the final file. Prefer edit_file for localized edits; use shell scripts only for justified bulk mechanical rewrites.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string" },
-                    "content": { "type": "string" }
+                    "content": { "type": "string", "maxLength": MAX_WRITE_FILE_CONTENT_CHARS }
+                },
+                "required": ["path", "content"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::WorkspaceWrite,
+        },
+        ToolSpec {
+            name: "append_file",
+            description: "Append one text chunk to a workspace file without returning the full file. Keep content under 24000 characters; use this for long generated artifacts after a small write_file scaffold, then verify with read_file/compilation.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "content": { "type": "string", "maxLength": MAX_WRITE_FILE_CONTENT_CHARS },
+                    "create_if_missing": { "type": "boolean", "description": "Create the target file if it does not exist. Defaults to true." }
                 },
                 "required": ["path", "content"],
                 "additionalProperties": false
@@ -881,6 +899,7 @@ pub fn execute_tool(name: &str, input: &Value) -> Result<String, String> {
         "bash" => from_value::<BashCommandInput>(input).and_then(run_bash),
         "read_file" => from_value::<ReadFileInput>(input).and_then(run_read_file),
         "write_file" => from_value::<WriteFileInput>(input).and_then(run_write_file),
+        "append_file" => from_value::<AppendFileInput>(input).and_then(run_append_file),
         "edit_file" => from_value::<EditFileInput>(input).and_then(run_edit_file),
         "glob_search" => from_value::<GlobSearchInputValue>(input).and_then(run_glob_search),
         "grep_search" => from_value::<GrepSearchInput>(input).and_then(run_grep_search),
@@ -958,7 +977,31 @@ fn run_read_file(input: ReadFileInput) -> Result<String, String> {
 
 #[allow(clippy::needless_pass_by_value)]
 fn run_write_file(input: WriteFileInput) -> Result<String, String> {
+    let content_chars = input.content.chars().count();
+    if content_chars > MAX_WRITE_FILE_CONTENT_CHARS {
+        return Err(format!(
+            "write_file content is {content_chars} characters, above the {MAX_WRITE_FILE_CONTENT_CHARS}-character single-call limit. Split long generated files into smaller append_file chunks, then verify the file on disk."
+        ));
+    }
     to_pretty_json(write_file(&input.path, &input.content).map_err(io_to_string)?)
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn run_append_file(input: AppendFileInput) -> Result<String, String> {
+    let content_chars = input.content.chars().count();
+    if content_chars > MAX_WRITE_FILE_CONTENT_CHARS {
+        return Err(format!(
+            "append_file content is {content_chars} characters, above the {MAX_WRITE_FILE_CONTENT_CHARS}-character single-call limit. Split the artifact into smaller append_file chunks, then verify the file on disk."
+        ));
+    }
+    to_pretty_json(
+        append_file(
+            &input.path,
+            &input.content,
+            input.create_if_missing.unwrap_or(true),
+        )
+        .map_err(io_to_string)?,
+    )
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -1178,6 +1221,13 @@ struct ReadFileInput {
 struct WriteFileInput {
     path: String,
     content: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct AppendFileInput {
+    path: String,
+    content: String,
+    create_if_missing: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2811,6 +2861,7 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
             "bash",
             "read_file",
             "write_file",
+            "append_file",
             "edit_file",
             "glob_search",
             "grep_search",
@@ -2820,6 +2871,7 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
             "bash",
             "read_file",
             "write_file",
+            "append_file",
             "edit_file",
             "glob_search",
             "grep_search",
@@ -3080,6 +3132,7 @@ fn deferred_tool_specs() -> Vec<ToolSpec> {
                 "bash"
                     | "read_file"
                     | "write_file"
+                    | "append_file"
                     | "edit_file"
                     | "glob_search"
                     | "grep_search"
@@ -3903,13 +3956,14 @@ fn execute_shell_command(
     timeout: Option<u64>,
     run_in_background: Option<bool>,
 ) -> std::io::Result<runtime::BashCommandOutput> {
+    let command_arg = powershell_command_arg(command);
     if run_in_background.unwrap_or(false) {
         let mut process = runtime::hidden_command(shell);
         process
             .arg("-NoProfile")
             .arg("-NonInteractive")
             .arg("-Command")
-            .arg(command)
+            .arg(&command_arg)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
@@ -3941,7 +3995,7 @@ fn execute_shell_command(
         .arg("-NoProfile")
         .arg("-NonInteractive")
         .arg("-Command")
-        .arg(command);
+        .arg(&command_arg);
     process
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -4020,6 +4074,21 @@ fn execute_shell_command(
         persisted_output_size: None,
         sandbox_status: None,
     })
+}
+
+fn powershell_command_arg(command: &str) -> String {
+    #[cfg(windows)]
+    {
+        format!(
+            "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); \
+             $OutputEncoding = [Console]::OutputEncoding; {command}"
+        )
+    }
+
+    #[cfg(not(windows))]
+    {
+        command.to_string()
+    }
 }
 
 fn append_process_status_message(stderr: String, message: &str) -> String {
@@ -4452,7 +4521,7 @@ mod tests {
         execute_agent_with_spawn, execute_tool, final_assistant_text, mvp_tool_specs,
         persist_agent_terminal_state, resolve_anthropic_compat_reviewer_model,
         resolve_reviewer_model, route_openai_compat_model, run_llm_review, skill_markdown,
-        AgentInput, AgentJob, LlmReviewInput, SubagentToolExecutor,
+        AgentInput, AgentJob, LlmReviewInput, SubagentToolExecutor, MAX_WRITE_FILE_CONTENT_CHARS,
     };
     use runtime::{
         ApiRequest, AssistantEvent, ContentBlock, ConversationMessage, ConversationRuntime,
@@ -5245,6 +5314,7 @@ mod tests {
         let general = allowed_tools_for_subagent("general-purpose");
         assert!(general.contains("bash"));
         assert!(general.contains("write_file"));
+        assert!(general.contains("append_file"));
         assert!(!general.contains("Agent"));
         assert!(general.contains("ListTeam"));
 
@@ -5263,6 +5333,7 @@ mod tests {
         assert!(verification.contains("bash"));
         assert!(verification.contains("PowerShell"));
         assert!(!verification.contains("write_file"));
+        assert!(!verification.contains("append_file"));
     }
 
     #[test]
@@ -6082,6 +6153,42 @@ mod tests {
             .expect_err("missing file should fail");
         assert!(!read_error.is_empty());
 
+        let long_write = execute_tool(
+            "write_file",
+            &json!({ "path": "nested/too-long.txt", "content": "x".repeat(MAX_WRITE_FILE_CONTENT_CHARS + 1) }),
+        )
+        .expect_err("oversized single-call writes should fail explicitly");
+        assert!(long_write.contains("single-call limit"));
+        assert!(!root.join("nested/too-long.txt").exists());
+
+        let append_output = execute_tool(
+            "append_file",
+            &json!({ "path": "nested/demo.txt", "content": "delta\n", "create_if_missing": false }),
+        )
+        .expect("append should succeed");
+        let append_output: serde_json::Value = serde_json::from_str(&append_output).expect("json");
+        assert_eq!(append_output["type"], "append");
+        assert_eq!(append_output["created"], false);
+        assert_eq!(append_output["appendedChars"], 6);
+        assert!(append_output.get("content").is_none());
+        assert_eq!(
+            fs::read_to_string(root.join("nested/demo.txt")).expect("read file"),
+            "alpha\nbeta\ngamma\ndelta\n"
+        );
+
+        let long_append = execute_tool(
+            "append_file",
+            &json!({ "path": "nested/demo.txt", "content": "x".repeat(MAX_WRITE_FILE_CONTENT_CHARS + 1) }),
+        )
+        .expect_err("oversized append writes should fail explicitly");
+        assert!(long_append.contains("single-call limit"));
+
+        execute_tool(
+            "write_file",
+            &json!({ "path": "nested/demo.txt", "content": "alpha\nbeta\ngamma\n" }),
+        )
+        .expect("reset appended file before edit checks");
+
         let edit_once = execute_tool(
             "edit_file",
             &json!({ "path": "nested/demo.txt", "old_string": "alpha", "new_string": "omega" }),
@@ -6134,6 +6241,73 @@ mod tests {
         )
         .expect_err("missing substring should fail");
         assert!(edit_missing.contains("old_string not found"));
+
+        std::env::set_current_dir(&original_dir).expect("restore cwd");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn read_file_tool_repeatedly_returns_long_text_preview_without_error() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let root = temp_path("repeat-read-tool-suite");
+        fs::create_dir_all(root.join("book")).expect("create root");
+        let original_dir = std::env::current_dir().expect("cwd");
+        std::env::set_current_dir(&root).expect("set cwd");
+
+        let mut lines = vec!["# Chapter 7".to_string()];
+        for index in 1..=1_800 {
+            if index % 450 == 0 {
+                lines.push(format!("## Section {}", index / 450));
+            } else {
+                lines.push(format!("line {index} {}", "x".repeat(100)));
+            }
+        }
+        fs::write(root.join("book/chapter7.md"), lines.join("\n")).expect("write long chapter");
+
+        let mut previous: Option<serde_json::Value> = None;
+        for attempt in 1..=3 {
+            let output = execute_tool("read_file", &json!({ "path": "book/chapter7.md" }))
+                .unwrap_or_else(|error| panic!("read attempt {attempt} should not fail: {error}"));
+            let output: serde_json::Value = serde_json::from_str(&output).expect("json");
+            assert_eq!(output["file"]["truncated"], true);
+            assert_eq!(output["file"]["totalLines"], 1_801);
+            let content = output["file"]["content"].as_str().expect("content");
+            assert!(content.contains("[read_file long-file preview:"));
+            assert!(content.contains("L1: # Chapter 7"));
+            assert!(content.contains("L451: ## Section 1"));
+            assert!(!content.contains("L200: line 200"));
+            assert!(
+                content.chars().count() <= 64_000,
+                "attempt {attempt} returned an oversized preview"
+            );
+
+            if let Some(previous) = previous.as_ref() {
+                assert_eq!(previous, &output, "attempt {attempt} should be stable");
+            }
+            previous = Some(output);
+        }
+
+        let window = execute_tool(
+            "read_file",
+            &json!({ "path": "book/chapter7.md", "offset": 449, "limit": 4 }),
+        )
+        .expect("explicit line window should succeed after repeated previews");
+        let window: serde_json::Value = serde_json::from_str(&window).expect("json");
+        assert_eq!(window["file"]["startLine"], 450);
+        assert_eq!(window["file"]["truncated"], false);
+        assert!(window["file"]["content"]
+            .as_str()
+            .expect("window content")
+            .contains("## Section 1"));
+
+        let missing = execute_tool("read_file", &json!({ "path": "book/missing.md" }))
+            .expect_err("missing file should still produce a visible tool error");
+        assert!(
+            missing.contains("missing.md") || missing.contains("No such file"),
+            "missing read should include a useful error message: {missing}"
+        );
 
         std::env::set_current_dir(&original_dir).expect("restore cwd");
         let _ = fs::remove_dir_all(root);
