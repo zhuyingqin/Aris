@@ -23,6 +23,10 @@ function encodeReleaseAssetName(name) {
   );
 }
 
+function githubReleaseAssetName(name) {
+  return name.replace(/\s+/g, ".");
+}
+
 const bundleDir = path.resolve(
   desktopRoot,
   argValue(
@@ -56,7 +60,10 @@ if (!fs.existsSync(signaturePath)) {
 }
 
 const signature = fs.readFileSync(signaturePath, "utf8").trim();
-const installerUrl = `${releaseBaseUrl.replace(/\/+$/, "")}/${encodeReleaseAssetName(installerName)}`;
+const installerAssetName =
+  argValue("--asset-name", process.env.ARIS_UPDATE_ASSET_NAME) ||
+  githubReleaseAssetName(installerName);
+const installerUrl = `${releaseBaseUrl.replace(/\/+$/, "")}/${encodeReleaseAssetName(installerAssetName)}`;
 const notes = process.env.RELEASE_NOTES || `ARIS Studio ${version}`;
 
 const windowsEntry = {

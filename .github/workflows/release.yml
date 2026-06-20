@@ -147,4 +147,5 @@ jobs:
             ARIS Studio_*_x64-setup.exe
             ARIS Studio_*_x64-setup.exe.sig
             latest.json
+          overwrite_files: true
           generate_release_notes: true
