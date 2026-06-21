@@ -120,6 +120,16 @@ pub fn run_managed_command(
     timeout: Option<Duration>,
     interruptible: bool,
 ) -> io::Result<ManagedCommandOutput> {
+    run_managed_command_with_cancel(command, label, timeout, interruptible, || false)
+}
+
+pub fn run_managed_command_with_cancel(
+    command: &mut Command,
+    label: impl Into<String>,
+    timeout: Option<Duration>,
+    interruptible: bool,
+    should_cancel: impl Fn() -> bool,
+) -> io::Result<ManagedCommandOutput> {
     configure_managed_command(command);
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = command.spawn()?;
@@ -140,7 +150,7 @@ pub fn run_managed_command(
                 timed_out: false,
             });
         }
-        if interruptible && crate::is_interrupted() {
+        if interruptible && (crate::is_interrupted() || should_cancel()) {
             terminate_managed_process_tree(pid);
             let status = terminate_child_and_wait(&mut child)?;
             return Ok(ManagedCommandOutput {
@@ -167,6 +177,8 @@ pub fn run_managed_command(
 }
 
 pub fn configure_managed_tokio_command(command: &mut tokio::process::Command) {
+    crate::hide_window(command.as_std_mut());
+
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -179,6 +191,8 @@ pub fn configure_managed_tokio_command(command: &mut tokio::process::Command) {
 }
 
 fn configure_managed_command(command: &mut Command) {
+    crate::hide_window(command);
+
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -300,12 +314,15 @@ impl Drop for ManagedProcessGuard {
 #[cfg(test)]
 mod tests {
     use super::{
-        managed_processes_snapshot, run_managed_command, spawn_managed_background,
-        terminate_all_managed_processes,
+        managed_processes_snapshot, run_managed_command, run_managed_command_with_cancel,
+        spawn_managed_background, terminate_all_managed_processes,
     };
     use std::{
         process::Command,
-        sync::{Mutex, OnceLock},
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc, Mutex, OnceLock,
+        },
         thread,
         time::Duration,
     };
@@ -323,6 +340,31 @@ mod tests {
         .expect("managed command should run");
 
         assert!(output.status.success());
+        assert!(managed_processes_snapshot().is_empty());
+    }
+
+    #[test]
+    fn managed_command_stops_when_cancel_check_fires() {
+        let _guard = test_lock();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel_worker = cancel.clone();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(100));
+            cancel_worker.store(true, Ordering::SeqCst);
+        });
+
+        let mut command = long_running_shell_command();
+        let output = run_managed_command_with_cancel(
+            &mut command,
+            "test cancellable command",
+            Some(Duration::from_secs(10)),
+            true,
+            || cancel.load(Ordering::SeqCst),
+        )
+        .expect("managed command should be cancelled");
+
+        assert!(output.interrupted);
+        assert!(!output.timed_out);
         assert!(managed_processes_snapshot().is_empty());
     }
 

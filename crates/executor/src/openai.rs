@@ -9,7 +9,10 @@ use runtime::{
 };
 use serde_json::{json, Value};
 
-use crate::{push_text_event, ExecutorToolSpec, StreamObserver};
+use crate::{
+    interrupted_error, push_text_event, stream_cancel_requested, wait_for_stream_cancel,
+    ExecutorToolSpec, StreamObserver,
+};
 
 const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 
@@ -845,9 +848,8 @@ on a compatible third-party proxy, or use Claude/another provider as executor an
 
             loop {
                 // Check for Ctrl+C interrupt between chunks
-                if runtime::is_interrupted() {
-                    runtime::clear_interrupt();
-                    return Err(RuntimeError::new("interrupted by user"));
+                if stream_cancel_requested(observer.as_ref()) {
+                    return Err(interrupted_error());
                 }
                 // v0.4.14 C11 — wrap chunk read in tokio::time::timeout so
                 // a hung upstream proxy can't stall this loop forever.
@@ -856,7 +858,12 @@ on a compatible third-party proxy, or use Claude/another provider as executor an
                 // retry path.
                 let chunk_future = response.chunk();
                 let chunk_result = match idle_timeout {
-                    Some(dur) => match tokio::time::timeout(dur, chunk_future).await {
+                    Some(dur) => match tokio::select! {
+                        result = tokio::time::timeout(dur, chunk_future) => result,
+                        () = wait_for_stream_cancel(observer.as_ref()) => {
+                            return Err(interrupted_error());
+                        }
+                    } {
                         Ok(inner) => inner,
                         Err(_elapsed) => {
                             if nothing_emitted_yet(
@@ -888,7 +895,12 @@ on a compatible third-party proxy, or use Claude/another provider as executor an
                             break;
                         }
                     },
-                    None => chunk_future.await,
+                    None => tokio::select! {
+                        result = chunk_future => result,
+                        () = wait_for_stream_cancel(observer.as_ref()) => {
+                            return Err(interrupted_error());
+                        }
+                    },
                 };
                 let chunk = match chunk_result {
                     Ok(Some(c)) => c,

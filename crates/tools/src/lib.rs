@@ -11,10 +11,10 @@ use aris_executor::{
 };
 use reqwest::blocking::Client;
 use runtime::{
-    append_file, edit_file, execute_bash, glob_search, grep_search, load_system_prompt, read_file,
-    write_file, ApiClient, ApiRequest, AssistantEvent, BashCommandInput, ConversationRuntime,
-    GrepSearchInput, PermissionMode, PermissionPolicy, RuntimeError, Session, ToolError,
-    ToolExecutor,
+    append_file, edit_file, execute_bash_with_cancel, glob_search, grep_search, load_system_prompt,
+    read_file, write_file, ApiClient, ApiRequest, AssistantEvent, BashCommandInput,
+    ConversationRuntime, GrepSearchInput, PermissionMode, PermissionPolicy, RuntimeError, Session,
+    ToolError, ToolExecutor,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -22,8 +22,12 @@ use serde_json::{json, Value};
 const MAX_WRITE_FILE_CONTENT_CHARS: usize = 24_000;
 
 pub mod knowledge;
+pub mod layout;
 pub mod literature;
+pub mod notebook;
+pub mod runs;
 pub mod studio;
+pub mod sweep;
 mod team_state;
 mod workflow_state;
 
@@ -109,8 +113,18 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             required_permission: PermissionMode::ReadOnly,
         },
         ToolSpec {
+            name: "WorkspaceLayout",
+            description: "Return the canonical ARIS project output layout: where to place slides/PPTs, posters, web apps, notebooks, run artifacts, and scratch files.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
             name: "write_file",
-            description: "Write a complete text file in the workspace. Keep content under 24000 characters in a single call; for longer generated files, write a small scaffold, append chunks with append_file, and verify the final file. Prefer edit_file for localized edits; use shell scripts only for justified bulk mechanical rewrites.",
+            description: "Write a complete text file in the workspace. Place generated artifacts in canonical project folders: slide/PPT/PDF deck outputs under slides/, posters under poster/, interactive web apps under web/<name>/ with index.html plus local CSS/assets, source notebooks under notebooks/, run artifacts under experiments/runs/, and scratch/temp/cache files under .aris/. Keep content under 24000 characters in a single call; for longer generated files, write a small scaffold, append chunks with append_file, and verify the final file. Prefer edit_file for localized edits; use shell scripts only for justified bulk mechanical rewrites.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -124,7 +138,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "append_file",
-            description: "Append one text chunk to a workspace file without returning the full file. Keep content under 24000 characters; use this for long generated artifacts after a small write_file scaffold, then verify with read_file/compilation.",
+            description: "Append one text chunk to a workspace file without returning the full file. Keep generated artifacts in the same canonical folders as write_file: slides/, poster/, web/<name>/, notebooks/, experiments/runs/, or .aris/ for scratch/temp/cache files. Keep content under 24000 characters; use this for long generated artifacts after a small write_file scaffold, then verify with read_file/compilation.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -421,7 +435,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "StudioLibraryUpsert",
-            description: "Record externally generated slide decks, posters, and interactive HTML pages in the project's shared Studio review index (studio/library.json). Existing user title, pinned state, notes, and page-specific review feedback are preserved when generated metadata is refreshed. The result returns studioLinks; include the relevant link in the final response so the user can jump directly to the generated artifact in Studio.",
+            description: "Record externally generated slide decks, posters, and interactive HTML pages in the project's shared Studio review index (studio/library.json). Studio also auto-discovers viewable outputs from slides/, poster/, and web/, so this tool is for richer metadata and direct links rather than mandatory registration. Existing user title, pinned state, notes, and page-specific review feedback are preserved when generated metadata is refreshed. The result returns studioLinks; include the relevant link in the final response so the user can jump directly to the generated artifact in Studio.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -435,6 +449,77 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 "additionalProperties": false
             }),
             required_permission: PermissionMode::WorkspaceWrite,
+        },
+        ToolSpec {
+            name: "NotebookExecute",
+            description: "Execute code against a live Jupyter kernel bound to a notebook and capture its outputs (stdout/stderr, execute results, errors, and rich display data). Source notebooks should live under notebooks/; legacy experiments/*.ipynb paths still work. Provide cell_index to run a specific 0-based cell of the .ipynb and write its outputs + execution count back into the file (set write_back=false to skip persisting), or provide code to evaluate a snippet REPL-style without touching the file. The kernel is keyed by notebook_path and persists state across calls, so variables defined in one execute are visible to the next; it auto-starts on first use. Use this to run cells edited with NotebookEdit and iterate on errors.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "notebook_path": { "type": "string" },
+                    "cell_index": { "type": "integer", "minimum": 0 },
+                    "code": { "type": "string" },
+                    "kernel": { "type": "string" },
+                    "timeout_secs": { "type": "integer", "minimum": 1 },
+                    "write_back": { "type": "boolean" }
+                },
+                "required": ["notebook_path"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::DangerFullAccess,
+        },
+        ToolSpec {
+            name: "NotebookKernel",
+            description: "Manage the Jupyter kernel for a notebook. action=status reports whether the notebook's kernel is running; action=list shows all running kernels; action=start launches it; action=restart clears all in-memory kernel state and starts fresh; action=shutdown stops it; action=interrupt raises KeyboardInterrupt in the running cell without losing kernel state (use to stop a runaway cell). notebook_path is required for every action except list.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["status", "list", "start", "restart", "shutdown", "interrupt"]
+                    },
+                    "notebook_path": { "type": "string" },
+                    "kernel": { "type": "string" }
+                },
+                "required": ["action"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::WorkspaceWrite,
+        },
+        ToolSpec {
+            name: "NotebookRun",
+            description: "Run a whole notebook end to end against its kernel, executing every non-empty code cell in order and writing outputs back into the file. Source notebooks should live under notebooks/; parameterized executed copies and run artifacts land under experiments/runs/. Pass parameters (an object of name→value) to inject a papermill-style override cell before the first cell runs — use this to run the same notebook with different inputs. stop_on_error (default true) halts at the first failing cell. Returns per-cell status plus the worst overall status. The kernel is keyed by notebook_path and auto-starts.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "notebook_path": { "type": "string" },
+                    "parameters": { "type": "object" },
+                    "stop_on_error": { "type": "boolean" },
+                    "timeout_secs": { "type": "integer", "minimum": 1 },
+                    "kernel": { "type": "string" }
+                },
+                "required": ["notebook_path"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::DangerFullAccess,
+        },
+        ToolSpec {
+            name: "NotebookSweep",
+            description: "Run a parameter sweep of a notebook locally: expand seeds × the cartesian product of params (each name→array of values) into one run per grid point, execute each sequentially with the values injected, and record every run in experiments/runs.json (executed notebooks land under experiments/runs/<id>/). Source notebooks should live under notebooks/. Use for multi-seed / small grids on the local kernel; for heavy grids prefer handing off to the GPU via /experiment-queue. seeds is injected as `seed`; provide either seeds, params, or both.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "notebook": { "type": "string" },
+                    "seeds": { "type": "array", "items": { "type": "integer" } },
+                    "params": { "type": "object" },
+                    "stop_on_error": { "type": "boolean" },
+                    "timeout_secs": { "type": "integer", "minimum": 1 },
+                    "kernel": { "type": "string" }
+                },
+                "required": ["notebook"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::DangerFullAccess,
         },
         ToolSpec {
             name: "TodoWrite",
@@ -895,9 +980,20 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
 }
 
 pub fn execute_tool(name: &str, input: &Value) -> Result<String, String> {
+    execute_tool_with_cancel(name, input, &|| false)
+}
+
+pub fn execute_tool_with_cancel(
+    name: &str,
+    input: &Value,
+    should_cancel: &dyn Fn() -> bool,
+) -> Result<String, String> {
     match name {
-        "bash" => from_value::<BashCommandInput>(input).and_then(run_bash),
+        "bash" => {
+            from_value::<BashCommandInput>(input).and_then(|input| run_bash(input, should_cancel))
+        }
         "read_file" => from_value::<ReadFileInput>(input).and_then(run_read_file),
+        "WorkspaceLayout" => to_pretty_json(layout::layout_json()),
         "write_file" => from_value::<WriteFileInput>(input).and_then(run_write_file),
         "append_file" => from_value::<AppendFileInput>(input).and_then(run_append_file),
         "edit_file" => from_value::<EditFileInput>(input).and_then(run_edit_file),
@@ -919,6 +1015,16 @@ pub fn execute_tool(name: &str, input: &Value) -> Result<String, String> {
             .and_then(knowledge::run_knowledge_upsert),
         "StudioLibraryUpsert" => from_value::<studio::StudioLibraryUpsertInput>(input)
             .and_then(studio::run_studio_library_upsert),
+        "NotebookExecute" => from_value::<notebook::NotebookExecuteInput>(input)
+            .and_then(notebook::run_notebook_execute),
+        "NotebookKernel" => from_value::<notebook::NotebookKernelInput>(input)
+            .and_then(notebook::run_notebook_kernel),
+        "NotebookRun" => {
+            from_value::<notebook::NotebookRunInput>(input).and_then(notebook::run_notebook_run)
+        }
+        "NotebookSweep" => {
+            from_value::<sweep::SweepSpec>(input).and_then(sweep::run_notebook_sweep)
+        }
         "TodoWrite" => from_value::<TodoWriteInput>(input).and_then(run_todo_write),
         "LlmReview" => from_value::<LlmReviewInput>(input).and_then(run_llm_review),
         "Skill" => from_value::<SkillInput>(input).and_then(run_skill),
@@ -949,14 +1055,17 @@ pub fn execute_tool(name: &str, input: &Value) -> Result<String, String> {
         }
         "ToolSearch" => from_value::<ToolSearchInput>(input).and_then(run_tool_search),
         "NotebookEdit" => from_value::<NotebookEditInput>(input).and_then(run_notebook_edit),
-        "Sleep" => from_value::<SleepInput>(input).and_then(run_sleep),
+        "Sleep" => {
+            from_value::<SleepInput>(input).and_then(|input| run_sleep(input, should_cancel))
+        }
         "SendUserMessage" | "Brief" => from_value::<BriefInput>(input).and_then(run_brief),
         "Config" => from_value::<ConfigInput>(input).and_then(run_config),
         "StructuredOutput" => {
             from_value::<StructuredOutputInput>(input).and_then(run_structured_output)
         }
-        "REPL" => from_value::<ReplInput>(input).and_then(run_repl),
-        "PowerShell" => from_value::<PowerShellInput>(input).and_then(run_powershell),
+        "REPL" => from_value::<ReplInput>(input).and_then(|input| run_repl(input, should_cancel)),
+        "PowerShell" => from_value::<PowerShellInput>(input)
+            .and_then(|input| run_powershell(input, should_cancel)),
         _ => Err(format!("unsupported tool: {name}")),
     }
 }
@@ -965,9 +1074,11 @@ fn from_value<T: for<'de> Deserialize<'de>>(input: &Value) -> Result<T, String> 
     serde_json::from_value(input.clone()).map_err(|error| error.to_string())
 }
 
-fn run_bash(input: BashCommandInput) -> Result<String, String> {
-    serde_json::to_string_pretty(&execute_bash(input).map_err(|error| error.to_string())?)
-        .map_err(|error| error.to_string())
+fn run_bash(input: BashCommandInput, should_cancel: &dyn Fn() -> bool) -> Result<String, String> {
+    serde_json::to_string_pretty(
+        &execute_bash_with_cancel(input, should_cancel).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -1173,8 +1284,8 @@ fn run_notebook_edit(input: NotebookEditInput) -> Result<String, String> {
     to_pretty_json(execute_notebook_edit(input)?)
 }
 
-fn run_sleep(input: SleepInput) -> Result<String, String> {
-    to_pretty_json(execute_sleep(input))
+fn run_sleep(input: SleepInput, should_cancel: &dyn Fn() -> bool) -> Result<String, String> {
+    to_pretty_json(execute_sleep(input, should_cancel)?)
 }
 
 fn run_brief(input: BriefInput) -> Result<String, String> {
@@ -1189,12 +1300,17 @@ fn run_structured_output(input: StructuredOutputInput) -> Result<String, String>
     to_pretty_json(execute_structured_output(input))
 }
 
-fn run_repl(input: ReplInput) -> Result<String, String> {
-    to_pretty_json(execute_repl(input)?)
+fn run_repl(input: ReplInput, should_cancel: &dyn Fn() -> bool) -> Result<String, String> {
+    to_pretty_json(execute_repl(input, should_cancel)?)
 }
 
-fn run_powershell(input: PowerShellInput) -> Result<String, String> {
-    to_pretty_json(execute_powershell(input).map_err(|error| error.to_string())?)
+fn run_powershell(
+    input: PowerShellInput,
+    should_cancel: &dyn Fn() -> bool,
+) -> Result<String, String> {
+    to_pretty_json(
+        execute_powershell_with_cancel(input, should_cancel).map_err(|error| error.to_string())?,
+    )
 }
 
 fn to_pretty_json<T: serde::Serialize>(value: T) -> Result<String, String> {
@@ -3479,12 +3595,23 @@ fn cell_kind(cell: &serde_json::Value) -> Option<NotebookCellType> {
 }
 
 #[allow(clippy::needless_pass_by_value)]
-fn execute_sleep(input: SleepInput) -> SleepOutput {
-    std::thread::sleep(Duration::from_millis(input.duration_ms));
-    SleepOutput {
+fn execute_sleep(
+    input: SleepInput,
+    should_cancel: &dyn Fn() -> bool,
+) -> Result<SleepOutput, String> {
+    let started = Instant::now();
+    let duration = Duration::from_millis(input.duration_ms);
+    while started.elapsed() < duration {
+        if runtime::is_interrupted() || should_cancel() {
+            return Err(String::from("interrupted by user"));
+        }
+        let remaining = duration.saturating_sub(started.elapsed());
+        std::thread::sleep(remaining.min(Duration::from_millis(50)));
+    }
+    Ok(SleepOutput {
         duration_ms: input.duration_ms,
         message: format!("Slept for {}ms", input.duration_ms),
-    }
+    })
 }
 
 fn execute_brief(input: BriefInput) -> Result<BriefOutput, String> {
@@ -3588,7 +3715,7 @@ fn execute_structured_output(input: StructuredOutputInput) -> StructuredOutputRe
     }
 }
 
-fn execute_repl(input: ReplInput) -> Result<ReplOutput, String> {
+fn execute_repl(input: ReplInput, should_cancel: &dyn Fn() -> bool) -> Result<ReplOutput, String> {
     if input.code.trim().is_empty() {
         return Err(String::from("code must not be empty"));
     }
@@ -3596,7 +3723,7 @@ fn execute_repl(input: ReplInput) -> Result<ReplOutput, String> {
     let started = Instant::now();
     let mut command = runtime::hidden_command(runtime.program);
     command.args(runtime.args).arg(&input.code);
-    let output = runtime::run_managed_command(
+    let output = runtime::run_managed_command_with_cancel(
         &mut command,
         format!(
             "REPL {}: {}",
@@ -3605,6 +3732,7 @@ fn execute_repl(input: ReplInput) -> Result<ReplOutput, String> {
         ),
         input.timeout_ms.map(Duration::from_millis),
         true,
+        should_cancel,
     )
     .map_err(|error| error.to_string())?;
 
@@ -3901,8 +4029,10 @@ fn iso8601_timestamp() -> String {
     iso8601_now()
 }
 
-#[allow(clippy::needless_pass_by_value)]
-fn execute_powershell(input: PowerShellInput) -> std::io::Result<runtime::BashCommandOutput> {
+fn execute_powershell_with_cancel(
+    input: PowerShellInput,
+    should_cancel: &dyn Fn() -> bool,
+) -> std::io::Result<runtime::BashCommandOutput> {
     let _ = &input.description;
     let shell = detect_powershell_shell()?;
     execute_shell_command(
@@ -3910,6 +4040,7 @@ fn execute_powershell(input: PowerShellInput) -> std::io::Result<runtime::BashCo
         &input.command,
         input.timeout,
         input.run_in_background,
+        should_cancel,
     )
 }
 
@@ -3955,6 +4086,7 @@ fn execute_shell_command(
     command: &str,
     timeout: Option<u64>,
     run_in_background: Option<bool>,
+    should_cancel: &dyn Fn() -> bool,
 ) -> std::io::Result<runtime::BashCommandOutput> {
     let command_arg = powershell_command_arg(command);
     if run_in_background.unwrap_or(false) {
@@ -4000,11 +4132,12 @@ fn execute_shell_command(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
 
-    let output = runtime::run_managed_command(
+    let output = runtime::run_managed_command_with_cancel(
         &mut process,
         format!("PowerShell: {}", truncate_process_label(command)),
         timeout.map(Duration::from_millis),
         true,
+        should_cancel,
     )?;
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -4518,8 +4651,8 @@ mod tests {
     use super::team_state;
     use super::{
         agent_permission_policy, allowed_tools_for_subagent, discover_skills,
-        execute_agent_with_spawn, execute_tool, final_assistant_text, mvp_tool_specs,
-        persist_agent_terminal_state, resolve_anthropic_compat_reviewer_model,
+        execute_agent_with_spawn, execute_tool, execute_tool_with_cancel, final_assistant_text,
+        mvp_tool_specs, persist_agent_terminal_state, resolve_anthropic_compat_reviewer_model,
         resolve_reviewer_model, route_openai_compat_model, run_llm_review, skill_markdown,
         AgentInput, AgentJob, LlmReviewInput, SubagentToolExecutor, MAX_WRITE_FILE_CONTENT_CHARS,
     };
@@ -6398,6 +6531,16 @@ mod tests {
             .expect("message")
             .contains("Slept for 20ms"));
         assert!(elapsed >= Duration::from_millis(15));
+    }
+
+    #[test]
+    fn sleep_respects_cancel_check() {
+        let started = std::time::Instant::now();
+        let error = execute_tool_with_cancel("Sleep", &json!({"duration_ms": 5_000}), &|| true)
+            .expect_err("cancelled Sleep should fail");
+
+        assert_eq!(error, "interrupted by user");
+        assert!(started.elapsed() < Duration::from_millis(500));
     }
 
     #[test]

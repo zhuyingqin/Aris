@@ -96,11 +96,16 @@ pub trait ToolExecutor {
     ) -> Result<String, ToolError> {
         self.execute(tool_name, input)
     }
+
+    fn is_cancelled(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolError {
     message: String,
+    interrupted: bool,
 }
 
 impl ToolError {
@@ -108,7 +113,21 @@ impl ToolError {
     pub fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
+            interrupted: false,
         }
+    }
+
+    #[must_use]
+    pub fn interrupted_by_user() -> Self {
+        Self {
+            message: "interrupted by user".to_string(),
+            interrupted: true,
+        }
+    }
+
+    #[must_use]
+    pub fn is_interrupted(&self) -> bool {
+        self.interrupted
     }
 }
 
@@ -370,10 +389,9 @@ where
         let mut auto_compaction = None;
 
         loop {
-            // Check for Ctrl+C interrupt between iterations
-            if crate::is_interrupted() {
-                crate::clear_interrupt();
-                return Err(RuntimeError::new("interrupted by user"));
+            // Check for Ctrl+C or caller-provided cancellation between iterations.
+            if self.cancellation_requested() {
+                return Err(Self::interrupted_error());
             }
             iterations += 1;
             if iterations > self.max_iterations {
@@ -480,6 +498,9 @@ where
 
             let mut turn_tool_results = Vec::new();
             for (tool_use_id, tool_name, input) in pending_tool_uses {
+                if self.cancellation_requested() {
+                    return Err(Self::interrupted_error());
+                }
                 let permission_outcome = if let Some(prompt) = prompter.as_mut() {
                     self.permission_policy
                         .authorize(&tool_name, &input, Some(*prompt))
@@ -489,6 +510,9 @@ where
 
                 let result_blocks = match permission_outcome {
                     PermissionOutcome::Allow => {
+                        if self.cancellation_requested() {
+                            return Err(Self::interrupted_error());
+                        }
                         let pre_hook_result = self.hook_runner.run_pre_tool_use(&tool_name, &input);
                         if pre_hook_result.is_denied() {
                             let deny_message = format!("PreToolUse hook denied tool `{tool_name}`");
@@ -504,6 +528,9 @@ where
                                 .execute_with_id(&tool_use_id, &tool_name, &input)
                             {
                                 Ok(output) => (output, false),
+                                Err(error) if error.is_interrupted() => {
+                                    return Err(RuntimeError::new(error.to_string()));
+                                }
                                 Err(error) => (error.to_string(), true),
                             };
                             output = merge_hook_feedback(pre_hook_result.messages(), output, false);
@@ -621,6 +648,17 @@ where
     #[must_use]
     pub fn into_session(self) -> Session {
         self.session
+    }
+
+    fn cancellation_requested(&self) -> bool {
+        crate::is_interrupted() || self.tool_executor.is_cancelled()
+    }
+
+    fn interrupted_error() -> RuntimeError {
+        if crate::is_interrupted() {
+            crate::clear_interrupt();
+        }
+        RuntimeError::new("interrupted by user")
     }
 
     fn maybe_auto_compact(&mut self) -> Option<AutoCompactionEvent> {
@@ -2499,8 +2537,13 @@ mod tests {
             vec!["system".to_string()],
         );
 
-        let summary = runtime.run_turn("do the task", None).expect("turn succeeds");
-        assert_eq!(summary.iterations, 2, "the model was nudged once and continued");
+        let summary = runtime
+            .run_turn("do the task", None)
+            .expect("turn succeeds");
+        assert_eq!(
+            summary.iterations, 2,
+            "the model was nudged once and continued"
+        );
         assert_eq!(
             assistant_text_from_turn_summary(&summary),
             "Here is the answer.",
@@ -2524,10 +2567,13 @@ mod tests {
                     "expected history to be compacted before the request"
                 );
                 assert!(
-                    request.messages.iter().any(|message| message.blocks.iter().any(|block| {
-                        matches!(block, ContentBlock::Text { text }
+                    request
+                        .messages
+                        .iter()
+                        .any(|message| message.blocks.iter().any(|block| {
+                            matches!(block, ContentBlock::Text { text }
                             if text.contains("This session is being continued"))
-                    })),
+                        })),
                     "expected the compaction continuation summary in the request"
                 );
                 Ok(vec![
@@ -2544,7 +2590,10 @@ mod tests {
         for index in 0..40 {
             session
                 .messages
-                .push(ConversationMessage::user_text(format!("old-{index} {}", "x".repeat(500))));
+                .push(ConversationMessage::user_text(format!(
+                    "old-{index} {}",
+                    "x".repeat(500)
+                )));
             session
                 .messages
                 .push(ConversationMessage::assistant(vec![ContentBlock::Text {

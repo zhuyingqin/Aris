@@ -19,6 +19,7 @@ const PREVIEW_PROJECT: DesktopProject = {
 
 export type Tab =
   | "chat"
+  | "lab"
   | "literature"
   | "studio"
   | "mail"

@@ -368,8 +368,9 @@ export default function Studio() {
             {!loaded && <div className="studio-empty">Loading Studio results...</div>}
             {loaded && visibleArtifacts.length === 0 && (
               <div className="studio-empty">
-                No generated results are indexed yet. Generation workflows register their PDF,
-                PPTX, SVG, or HTML outputs through <code>StudioLibraryUpsert</code>.
+                No generated results are indexed yet. Studio auto-discovers outputs in{" "}
+                <code>slides/</code>, <code>poster/</code>, and <code>web/</code>; refresh after a
+                workflow writes a PDF, PPTX, SVG, or HTML result there.
               </div>
             )}
             {visibleArtifacts.map((artifact) => {
@@ -506,8 +507,8 @@ export default function Studio() {
                       <div className="studio-welcome">
                         <strong>No viewable result indexed.</strong>
                         <p>
-                          The external generation workflow should register a PDF or HTML result
-                          through StudioLibraryUpsert.
+                          Add a PDF result under <code>slides/</code> or an HTML result under{" "}
+                          <code>web/</code>, then refresh Studio.
                         </p>
                       </div>
                     )}

@@ -4,6 +4,7 @@ mod connectors;
 mod engine;
 mod files;
 mod knowledge;
+mod lab;
 mod literature;
 mod mail;
 mod mcp;
@@ -16,7 +17,10 @@ mod studio;
 mod watcher;
 
 use std::path::PathBuf;
+use std::sync::Once;
 use tauri::{image::Image, Manager};
+
+static SHUTDOWN_CLEANUP: Once = Once::new();
 
 fn prepend_existing_path_entries(paths: impl IntoIterator<Item = PathBuf>) {
     let existing = std::env::var_os("PATH").unwrap_or_default();
@@ -35,11 +39,11 @@ fn prepend_existing_path_entries(paths: impl IntoIterator<Item = PathBuf>) {
 }
 
 /// Extend the process PATH with common user-installed tool directories so that
-/// MCP stdio servers (node, npx, uvx, python, etc.) can be found when the app
-/// is launched from a desktop shortcut on Windows, which does not inherit the
-/// full shell PATH.
+/// MCP stdio servers and Jupyter kernelspecs can find node, npx, uvx, python,
+/// and helper scripts when the app is launched from a desktop shortcut on
+/// Windows, which does not inherit the full shell PATH.
 #[cfg(windows)]
-fn augment_path_for_mcp() {
+fn augment_path_for_desktop_tools() {
     let home = runtime::home_dir();
     let candidates = [
         // Node.js via nvm-windows
@@ -53,10 +57,16 @@ fn augment_path_for_mcp() {
         format!("{home}\\AppData\\Roaming\\uv\\bin"),
         // pipx
         format!("{home}\\AppData\\Local\\Packages\\PythonSoftwareFoundation.Python.3.12_qbz5n2kfra8p0\\LocalCache\\local-packages\\Python312\\Scripts"),
-        // Python Launcher / standard Python installs
+        // Python Launcher / standard Python installs. Many kernelspecs use
+        // "python" instead of an absolute interpreter path.
+        format!("{home}\\AppData\\Local\\Programs\\Python\\Python313"),
+        format!("{home}\\AppData\\Local\\Programs\\Python\\Python313\\Scripts"),
         format!("{home}\\AppData\\Local\\Programs\\Python\\Python312"),
+        format!("{home}\\AppData\\Local\\Programs\\Python\\Python312\\Scripts"),
         format!("{home}\\AppData\\Local\\Programs\\Python\\Python311"),
+        format!("{home}\\AppData\\Local\\Programs\\Python\\Python311\\Scripts"),
         format!("{home}\\AppData\\Local\\Programs\\Python\\Python310"),
+        format!("{home}\\AppData\\Local\\Programs\\Python\\Python310\\Scripts"),
         // Scoop shims
         format!("{home}\\scoop\\shims"),
     ];
@@ -64,7 +74,7 @@ fn augment_path_for_mcp() {
 }
 
 #[cfg(not(windows))]
-fn augment_path_for_mcp() {}
+fn augment_path_for_desktop_tools() {}
 
 fn augment_resource_path_for_mcp(app: &tauri::App) {
     let Ok(resource_dir) = app.path().resource_dir() else {
@@ -113,9 +123,18 @@ fn valid_tectonic_override_exists() -> bool {
     std::env::var_os("ARIS_TECTONIC").is_some_and(|value| PathBuf::from(value).is_file())
 }
 
+fn cleanup_before_exit(app_handle: &tauri::AppHandle) {
+    SHUTDOWN_CLEANUP.call_once(|| {
+        let chat_state = app_handle.state::<engine::ChatState>();
+        engine::cancel_all_running_turns(chat_state.inner());
+        notebook::KernelManager::shutdown_all();
+        runtime::terminate_all_managed_processes();
+    });
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    augment_path_for_mcp();
+    augment_path_for_desktop_tools();
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
@@ -198,6 +217,21 @@ pub fn run() {
             knowledge::knowledge_confirm,
             knowledge::knowledge_reject,
             knowledge::knowledge_generate,
+            lab::lab_list_kernels,
+            lab::lab_list_notebooks,
+            lab::lab_load_notebook,
+            lab::lab_create_notebook,
+            lab::lab_edit_cell,
+            lab::lab_start_kernel,
+            lab::lab_execute_cell,
+            lab::lab_shutdown_kernel,
+            lab::lab_interrupt_kernel,
+            lab::lab_inspect_vars,
+            lab::lab_run_all,
+            lab::runs_load,
+            lab::runs_save,
+            lab::lab_run_sweep,
+            lab::lab_export_sweep_manifest,
             engine::chat_status,
             engine::chat_model_options,
             engine::chat_model_set,
@@ -217,6 +251,9 @@ pub fn run() {
             engine::chat_set_context,
             engine::chat_delete,
             engine::chat_cancel,
+            files::file_list_dir,
+            files::file_read_text,
+            files::file_write_text,
             files::file_search,
             files::file_read,
             files::file_open,
@@ -226,9 +263,7 @@ pub fn run() {
         .expect("error while building ARIS Studio")
         .run(|app_handle, event| {
             if matches!(event, tauri::RunEvent::ExitRequested { .. }) {
-                let chat_state = app_handle.state::<engine::ChatState>();
-                engine::cancel_all_running_turns(chat_state.inner());
-                runtime::terminate_all_managed_processes();
+                cleanup_before_exit(app_handle);
             }
         });
 }
@@ -246,10 +281,8 @@ mod tests {
     }
 
     fn temp_resource_dir(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "aris-tectonic-env-{name}-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("aris-tectonic-env-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("bin")).expect("create temp resource bin");
         dir

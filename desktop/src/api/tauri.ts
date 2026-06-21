@@ -273,7 +273,94 @@ export const knowledgeReject = (kpId: string) =>
 export const knowledgeGenerate = <T>(paperId: string) =>
   invoke<T>("knowledge_generate", { paperId });
 
+// ── Lab (Jupyter notebooks) ───────────────────────────────────────────────────
+
+export const labListKernels = <T>() => invoke<T>("lab_list_kernels");
+export const labListNotebooks = <T>() => invoke<T>("lab_list_notebooks");
+export const labLoadNotebook = <T>(notebookPath: string) =>
+  invoke<T>("lab_load_notebook", { notebookPath });
+export const labCreateNotebook = <T>(notebookPath: string) =>
+  invoke<T>("lab_create_notebook", { notebookPath });
+export const labEditCell = <T>(
+  notebookPath: string,
+  action: "insert" | "replace" | "delete" | "move",
+  opts: { cellIndex?: number; cellType?: string; source?: string; toIndex?: number } = {},
+) =>
+  invoke<T>("lab_edit_cell", {
+    notebookPath,
+    action,
+    cellIndex: opts.cellIndex ?? null,
+    cellType: opts.cellType ?? null,
+    source: opts.source ?? null,
+    toIndex: opts.toIndex ?? null,
+  });
+export const labStartKernel = <T>(notebookPath: string, kernel?: string) =>
+  invoke<T>("lab_start_kernel", { notebookPath, kernel: kernel ?? null });
+export const labExecuteCell = <T>(
+  notebookPath: string,
+  opts: { cellIndex?: number; code?: string; timeoutSecs?: number; kernel?: string } = {},
+) =>
+  invoke<T>("lab_execute_cell", {
+    notebookPath,
+    cellIndex: opts.cellIndex ?? null,
+    code: opts.code ?? null,
+    timeoutSecs: opts.timeoutSecs ?? null,
+    kernel: opts.kernel ?? null,
+  });
+export const labShutdownKernel = (notebookPath: string) =>
+  invoke<void>("lab_shutdown_kernel", { notebookPath });
+export const labInterruptKernel = (notebookPath: string) =>
+  invoke<void>("lab_interrupt_kernel", { notebookPath });
+export const labInspectVars = <T>(notebookPath: string, kernel?: string) =>
+  invoke<T>("lab_inspect_vars", { notebookPath, kernel: kernel ?? null });
+export const onLabCellOutput = <T>(handler: (event: T) => void) =>
+  listen<T>("lab-cell-output", (e) => handler(e.payload));
+export const labRunAll = <T>(
+  notebookPath: string,
+  opts: {
+    parameters?: Record<string, unknown>;
+    stopOnError?: boolean;
+    timeoutSecs?: number;
+    kernel?: string;
+  } = {},
+) =>
+  invoke<T>("lab_run_all", {
+    notebookPath,
+    parameters: opts.parameters ?? null,
+    stopOnError: opts.stopOnError ?? null,
+    timeoutSecs: opts.timeoutSecs ?? null,
+    kernel: opts.kernel ?? null,
+  });
+
+// ── Experiment runs + sweeps ──────────────────────────────────────────────────
+export const runsLoad = <T>() => invoke<T>("runs_load");
+export const runsSave = (runs: unknown) => invoke<void>("runs_save", { runs });
+export const labRunSweep = <T>(spec: unknown) => invoke<T>("lab_run_sweep", { spec });
+export const labExportSweepManifest = (spec: unknown) =>
+  invoke<string>("lab_export_sweep_manifest", { spec });
+
 // ── File browser ─────────────────────────────────────────────────────────────
+
+export interface FileTreeEntry {
+  name: string;
+  path: string;
+  isDir: boolean;
+}
+
+export interface FileText {
+  path: string;
+  content: string;
+  bytes: number;
+}
+
+export const fileListDir = (path?: string | null) =>
+  invoke<FileTreeEntry[]>("file_list_dir", { path: path ?? null });
+
+export const fileReadText = (path: string) =>
+  invoke<FileText>("file_read_text", { path });
+
+export const fileWriteText = (path: string, content: string) =>
+  invoke<FileText>("file_write_text", { path, content });
 
 export const fileSearch = (pattern: string, root?: string) =>
   invoke<string[]>("file_search", { pattern, root: root ?? null });

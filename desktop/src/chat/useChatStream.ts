@@ -149,7 +149,7 @@ export function useChatStream({ patchAssistant, onComplete, onError }: StreamHan
       onChatError(({ sessionId, message }) => {
         if (!isCurrentListener()) return;
         flush(sessionId);
-        onError(sessionId, message, false);
+        onError(sessionId, message, stopRequested.current.has(sessionId));
       }),
     ];
     return () => {

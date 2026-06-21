@@ -11,8 +11,8 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_json::{json, Value};
 
-const STUDIO_DIR: &str = "studio";
-const LIBRARY_FILE: &str = "library.json";
+use crate::layout;
+
 const USER_STATE_FIELDS: &[&str] = &["title", "pinned", "notes", "pageReviews"];
 
 #[derive(Debug, Deserialize)]
@@ -48,7 +48,7 @@ pub fn run_studio_library_upsert(input: StudioLibraryUpsertInput) -> Result<Stri
 }
 
 pub fn library_path_at(base: &Path) -> PathBuf {
-    base.join(STUDIO_DIR).join(LIBRARY_FILE)
+    layout::studio_library_path_at(base)
 }
 
 #[must_use]
@@ -124,7 +124,7 @@ pub fn library_upsert_at(base: &Path, artifacts: &[Value]) -> Result<StudioUpser
         added,
         merged,
         total,
-        library_path: format!("{STUDIO_DIR}/{LIBRARY_FILE}"),
+        library_path: format!("{}/{}", layout::STUDIO_DIR, layout::STUDIO_LIBRARY_FILE),
         studio_links: artifacts.iter().filter_map(studio_artifact_link).collect(),
     })
 }
@@ -300,30 +300,84 @@ fn normalize_artifact(record: &Value) -> Value {
 }
 
 fn discover_artifacts_at(base: &Path) -> Vec<Value> {
-    ["slides", "poster", "web"]
-        .into_iter()
-        .filter_map(|kind| discover_artifact_at(base, kind))
-        .collect()
+    let mut artifacts = Vec::new();
+    artifacts.extend(discover_standard_artifacts_at(base, "slides"));
+    artifacts.extend(discover_standard_artifacts_at(base, "poster"));
+    artifacts.extend(discover_web_artifacts_at(base));
+    artifacts
 }
 
-fn discover_artifact_at(base: &Path, kind: &str) -> Option<Value> {
-    let directory = base.join(kind);
+fn discover_standard_artifacts_at(base: &Path, kind: &str) -> Vec<Value> {
+    let Some(directory) = layout::standard_artifact_dir_at(base, kind) else {
+        return Vec::new();
+    };
+    if !directory.is_dir() {
+        return Vec::new();
+    }
+    let mut artifacts = Vec::new();
+    if let Some(artifact) =
+        discover_artifact_in_dir(base, kind, &directory, "main", default_title(kind))
+    {
+        artifacts.push(artifact);
+    }
+    let mut children = std::fs::read_dir(&directory)
+        .ok()
+        .into_iter()
+        .flat_map(|entries| entries.flatten())
+        .map(|entry| entry.path())
+        .collect::<Vec<_>>();
+    children.sort();
+    for path in children {
+        if path.is_dir() {
+            let Some(id_part) = file_id_part(&path, false) else {
+                continue;
+            };
+            if id_part == "main" {
+                continue;
+            }
+            if let Some(artifact) =
+                discover_artifact_in_dir(base, kind, &path, &id_part, title_from_id_part(&id_part))
+            {
+                artifacts.push(artifact);
+            }
+        } else if is_studio_artifact_path(&path) {
+            let Some(id_part) = file_id_part(&path, true) else {
+                continue;
+            };
+            if id_part == "main" {
+                continue;
+            }
+            if let Some(artifact) = artifact_from_single_file(base, kind, &path, &id_part) {
+                artifacts.push(artifact);
+            }
+        }
+    }
+    artifacts
+}
+
+fn discover_artifact_in_dir(
+    base: &Path,
+    kind: &str,
+    directory: &Path,
+    id_part: &str,
+    title: String,
+) -> Option<Value> {
     if !directory.is_dir() {
         return None;
     }
-    let tex = preferred_file(&directory, "main.tex", "tex");
-    let pdf = preferred_file(&directory, "main.pdf", "pdf");
-    let pptx = first_with_extension(&directory, "pptx");
-    let svg = first_with_extension(&directory, "svg");
+    let tex = preferred_file_for_id(&directory, id_part, "main.tex", "tex");
+    let pdf = preferred_file_for_id(&directory, id_part, "main.pdf", "pdf");
+    let pptx = preferred_file_for_id(&directory, id_part, "main.pptx", "pptx");
+    let svg = preferred_file_for_id(&directory, id_part, "main.svg", "svg");
     let html = preferred_file(&directory, "index.html", "html")
         .or_else(|| first_with_extension(&directory, "htm"));
     if tex.is_none() && pdf.is_none() && pptx.is_none() && svg.is_none() && html.is_none() {
         return None;
     }
     let mut artifact = json!({
-        "id": format!("{kind}:main"),
+        "id": format!("{kind}:{id_part}"),
         "kind": kind,
-        "title": if kind == "poster" { "Poster" } else if kind == "web" { "Web" } else { "Slides" },
+        "title": title,
         "status": if pdf.is_some() || html.is_some() { "ready" } else { "draft" },
         "generatedAt": now_iso(),
     });
@@ -341,12 +395,170 @@ fn discover_artifact_at(base: &Path, kind: &str) -> Option<Value> {
     Some(artifact)
 }
 
+fn discover_web_artifacts_at(base: &Path) -> Vec<Value> {
+    let directory = layout::web_dir_at(base);
+    if !directory.is_dir() {
+        return Vec::new();
+    }
+    let mut artifacts = Vec::new();
+    if directory.join("index.html").is_file() || directory.join("index.htm").is_file() {
+        if let Some(artifact) =
+            discover_artifact_in_dir(base, "web", &directory, "main", default_title("web"))
+        {
+            artifacts.push(artifact);
+        }
+    }
+    let mut children = std::fs::read_dir(&directory)
+        .ok()
+        .into_iter()
+        .flat_map(|entries| entries.flatten())
+        .map(|entry| entry.path())
+        .collect::<Vec<_>>();
+    children.sort();
+    for path in children {
+        if path.is_dir() {
+            let Some(id_part) = file_id_part(&path, false) else {
+                continue;
+            };
+            if id_part == "main" {
+                continue;
+            }
+            if let Some(artifact) =
+                discover_artifact_in_dir(base, "web", &path, &id_part, title_from_id_part(&id_part))
+            {
+                artifacts.push(artifact);
+            }
+        } else if is_html_path(&path) {
+            let Some(id_part) = file_id_part(&path, true) else {
+                continue;
+            };
+            if id_part == "index" || id_part == "main" {
+                continue;
+            }
+            artifacts.push(json!({
+                "id": format!("web:{id_part}"),
+                "kind": "web",
+                "title": title_from_id_part(&id_part),
+                "status": "ready",
+                "generatedAt": now_iso(),
+                "htmlPath": relative_display(base, &path),
+            }));
+        }
+    }
+    artifacts
+}
+
+fn artifact_from_single_file(base: &Path, kind: &str, path: &Path, id_part: &str) -> Option<Value> {
+    let field = artifact_field(path)?;
+    let ready = matches!(field, "pdfPath" | "pptxPath" | "svgPath" | "htmlPath");
+    let mut artifact = json!({
+        "id": format!("{kind}:{id_part}"),
+        "kind": kind,
+        "title": title_from_id_part(id_part),
+        "status": if ready { "ready" } else { "draft" },
+        "generatedAt": now_iso(),
+    });
+    artifact[field] = Value::String(relative_display(base, path));
+    Some(artifact)
+}
+
+fn artifact_field(path: &Path) -> Option<&'static str> {
+    let extension = path.extension().and_then(|value| value.to_str())?;
+    if extension.eq_ignore_ascii_case("tex") {
+        Some("texPath")
+    } else if extension.eq_ignore_ascii_case("pdf") {
+        Some("pdfPath")
+    } else if extension.eq_ignore_ascii_case("pptx") {
+        Some("pptxPath")
+    } else if extension.eq_ignore_ascii_case("svg") {
+        Some("svgPath")
+    } else if extension.eq_ignore_ascii_case("html") || extension.eq_ignore_ascii_case("htm") {
+        Some("htmlPath")
+    } else {
+        None
+    }
+}
+
+fn is_studio_artifact_path(path: &Path) -> bool {
+    artifact_field(path).is_some()
+}
+
+fn default_title(kind: &str) -> String {
+    if kind == "poster" {
+        "Poster"
+    } else if kind == "web" {
+        "Web"
+    } else {
+        "Slides"
+    }
+    .to_string()
+}
+
+fn title_from_id_part(id_part: &str) -> String {
+    id_part
+        .split(['-', '_'])
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) => format!("{}{}", first.to_uppercase(), chars.as_str()),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn file_id_part(path: &Path, use_stem: bool) -> Option<String> {
+    let raw = if use_stem {
+        path.file_stem()
+    } else {
+        path.file_name()
+    }?
+    .to_string_lossy();
+    let mut id = String::new();
+    let mut last_was_dash = false;
+    for ch in raw.chars() {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.' | '-') {
+            id.push(ch.to_ascii_lowercase());
+            last_was_dash = false;
+        } else if !last_was_dash {
+            id.push('-');
+            last_was_dash = true;
+        }
+    }
+    let id = id.trim_matches('-').to_string();
+    (!id.is_empty()).then_some(id)
+}
+
+fn is_html_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| {
+            value.eq_ignore_ascii_case("html") || value.eq_ignore_ascii_case("htm")
+        })
+}
+
 fn preferred_file(directory: &Path, preferred_name: &str, extension: &str) -> Option<PathBuf> {
     let preferred = directory.join(preferred_name);
     if preferred.is_file() {
         Some(preferred)
     } else {
         first_with_extension(directory, extension)
+    }
+}
+
+fn preferred_file_for_id(
+    directory: &Path,
+    id_part: &str,
+    preferred_name: &str,
+    extension: &str,
+) -> Option<PathBuf> {
+    if id_part == "main" {
+        let preferred = directory.join(preferred_name);
+        preferred.is_file().then_some(preferred)
+    } else {
+        preferred_file(directory, preferred_name, extension)
     }
 }
 
@@ -487,6 +699,52 @@ mod tests {
             stats.studio_links[0].href,
             "studio/artifact/web%3Ainteractive-demo"
         );
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn discovers_multiple_web_entries_without_registration() {
+        let base = temp_dir("web-multi");
+        std::fs::create_dir_all(base.join("web/dashboard")).expect("dashboard");
+        std::fs::write(base.join("web/index.html"), "<h1>Main</h1>").expect("main");
+        std::fs::write(base.join("web/demo.html"), "<h1>Demo</h1>").expect("demo");
+        std::fs::write(base.join("web/dashboard/index.html"), "<h1>Dashboard</h1>")
+            .expect("dashboard html");
+
+        let discovered = library_load_at(&base).expect("library");
+        let artifacts = discovered["artifacts"].as_array().expect("artifacts");
+        assert!(artifacts.iter().any(|artifact| {
+            artifact["id"] == "web:main" && artifact["htmlPath"] == "web/index.html"
+        }));
+        assert!(artifacts.iter().any(|artifact| {
+            artifact["id"] == "web:demo" && artifact["htmlPath"] == "web/demo.html"
+        }));
+        assert!(artifacts.iter().any(|artifact| {
+            artifact["id"] == "web:dashboard" && artifact["htmlPath"] == "web/dashboard/index.html"
+        }));
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn discovers_multiple_slide_outputs_without_registration() {
+        let base = temp_dir("slides-multi");
+        std::fs::create_dir_all(base.join("slides/deck-two")).expect("deck dir");
+        std::fs::write(base.join("slides/main.pdf"), b"%PDF-1.7").expect("main pdf");
+        std::fs::write(base.join("slides/research-talk.pptx"), b"pptx").expect("pptx");
+        std::fs::write(base.join("slides/deck-two/main.pdf"), b"%PDF-1.7").expect("deck pdf");
+
+        let discovered = library_load_at(&base).expect("library");
+        let artifacts = discovered["artifacts"].as_array().expect("artifacts");
+        assert!(artifacts.iter().any(|artifact| {
+            artifact["id"] == "slides:main" && artifact["pdfPath"] == "slides/main.pdf"
+        }));
+        assert!(artifacts.iter().any(|artifact| {
+            artifact["id"] == "slides:research-talk"
+                && artifact["pptxPath"] == "slides/research-talk.pptx"
+        }));
+        assert!(artifacts.iter().any(|artifact| {
+            artifact["id"] == "slides:deck-two" && artifact["pdfPath"] == "slides/deck-two/main.pdf"
+        }));
         let _ = std::fs::remove_dir_all(base);
     }
 }

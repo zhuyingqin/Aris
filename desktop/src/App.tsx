@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type CSSProperties, type PointerEvent as R
 import { open } from "@tauri-apps/plugin-dialog";
 import { useStore, type Tab } from "./store";
 import Chat from "./chat/Chat";
+import Lab from "./lab/Lab";
 import Literature from "./literature/Literature";
 import Studio from "./studio/Studio";
 import Mail from "./mail/Mail";
@@ -32,6 +33,9 @@ const NAV_GROUPS: { group: string; items: NavItem[] }[] = [
     items: [{
       id: "chat", label: "Chat",
       icon: <IC d="M2 3a1 1 0 011-1h10a1 1 0 011 1v6.5a1 1 0 01-1 1H9.5L8 12l-1.5-1.5H3a1 1 0 01-1-1V3z" />,
+    }, {
+      id: "lab", label: "Lab",
+      icon: <IC d="M3.5 2.5h9v11h-9zM5.5 6l2.2 1.6-2.2 1.6M9 9.7h2.5" />,
     }],
   },
   {
@@ -481,6 +485,7 @@ export default function App() {
         <div hidden={tab !== "chat"}>
           <Chat />
         </div>
+        {tab === "lab" && <Lab />}
         {tab === "literature" && <Literature />}
         {tab === "studio" && <Studio />}
         {tab === "mail" && <Mail />}

@@ -57,11 +57,35 @@ pub trait StreamObserver: Send {
     fn on_message_stop(&mut self) -> Result<(), RuntimeError> {
         Ok(())
     }
+
+    fn is_cancelled(&self) -> bool {
+        false
+    }
 }
 
 pub struct NoopStreamObserver;
 
 impl StreamObserver for NoopStreamObserver {}
+
+pub(crate) fn stream_cancel_requested(observer: &dyn StreamObserver) -> bool {
+    runtime::is_interrupted() || observer.is_cancelled()
+}
+
+pub(crate) fn interrupted_error() -> RuntimeError {
+    if runtime::is_interrupted() {
+        runtime::clear_interrupt();
+    }
+    RuntimeError::new("interrupted by user")
+}
+
+pub(crate) async fn wait_for_stream_cancel(observer: &dyn StreamObserver) {
+    loop {
+        if stream_cancel_requested(observer) {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
 
 fn push_text_event(events: &mut Vec<AssistantEvent>, text: String) {
     if text.is_empty() {
@@ -174,10 +198,9 @@ impl ApiClient for AnthropicRuntimeClient {
             // Tag a "model unavailable on this account" failure (404
             // not_found_error from the initial POST) so the CLI can fall back
             // from the default Opus 4.8 to 4.7.
-            let mut stream = client
-                .stream_message(&message_request)
-                .await
-                .map_err(|error| {
+            let mut stream = tokio::select! {
+                result = client.stream_message(&message_request) => {
+                    result.map_err(|error| {
                     if error.is_model_unavailable() {
                         RuntimeError::model_unavailable(error.to_string())
                     } else if openai::is_context_window_exceeded_error(&error.to_string()) {
@@ -188,7 +211,12 @@ impl ApiClient for AnthropicRuntimeClient {
                     } else {
                         RuntimeError::new(error.to_string())
                     }
-                })?;
+                    })?
+                }
+                () = wait_for_stream_cancel(observer.as_ref()) => {
+                    return Err(interrupted_error());
+                }
+            };
             let mut events = Vec::new();
             let mut pending_tool: Option<(String, String, String)> = None;
             let mut pending_thinking: Option<(String, String)> = None;
@@ -197,7 +225,13 @@ impl ApiClient for AnthropicRuntimeClient {
             let mut start_usage: Option<api::Usage> = None;
 
             loop {
-                let event = match stream.next_event().await {
+                let next_event = tokio::select! {
+                    result = stream.next_event() => result,
+                    () = wait_for_stream_cancel(observer.as_ref()) => {
+                        return Err(interrupted_error());
+                    }
+                };
+                let event = match next_event {
                     Ok(Some(event)) => event,
                     Ok(None) => break,
                     Err(_error)
@@ -210,9 +244,8 @@ impl ApiClient for AnthropicRuntimeClient {
                     }
                     Err(error) => return Err(RuntimeError::new(error.to_string())),
                 };
-                if runtime::is_interrupted() {
-                    runtime::clear_interrupt();
-                    return Err(RuntimeError::new("interrupted by user"));
+                if stream_cancel_requested(observer.as_ref()) {
+                    return Err(interrupted_error());
                 }
                 match event {
                     ApiStreamEvent::MessageStart(start) => {
@@ -345,13 +378,18 @@ impl ApiClient for AnthropicRuntimeClient {
                 return Ok(events);
             }
 
-            let response = client
-                .send_message(&MessageRequest {
-                    stream: false,
-                    ..message_request.clone()
-                })
-                .await
-                .map_err(|error| RuntimeError::new(error.to_string()))?;
+            let fallback_request = MessageRequest {
+                stream: false,
+                ..message_request.clone()
+            };
+            let response = tokio::select! {
+                result = client.send_message(&fallback_request) => {
+                    result.map_err(|error| RuntimeError::new(error.to_string()))?
+                }
+                () = wait_for_stream_cancel(observer.as_ref()) => {
+                    return Err(interrupted_error());
+                }
+            };
             response_to_events(response, observer)
         })
     }

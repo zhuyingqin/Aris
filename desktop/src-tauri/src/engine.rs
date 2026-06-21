@@ -131,6 +131,7 @@ fn denied_tool_message(tool_name: &str) -> String {
 
 struct KernelToolExecutor {
     extra_blocked_tools: &'static [&'static str],
+    cancelled: Option<Arc<AtomicBool>>,
 }
 
 impl ToolExecutor for KernelToolExecutor {
@@ -147,11 +148,35 @@ impl ToolExecutor for KernelToolExecutor {
         if is_blocked_tool(tool_name, self.extra_blocked_tools) {
             return Err(ToolError::new(denied_tool_message(tool_name)));
         }
+        if self.is_cancelled() {
+            return Err(ToolError::interrupted_by_user());
+        }
         let value: Value = serde_json::from_str(input).unwrap_or(Value::Null);
         if crate::mail::is_mail_tool(tool_name) {
             return crate::mail::execute_mail_tool(tool_name, &value).map_err(ToolError::new);
         }
-        tools::execute_tool(tool_name, &value).map_err(ToolError::new)
+        let cancelled = self.cancelled.clone();
+        let should_cancel = || {
+            runtime::is_interrupted()
+                || cancelled
+                    .as_ref()
+                    .is_some_and(|flag| flag.load(Ordering::SeqCst))
+        };
+        tools::execute_tool_with_cancel(tool_name, &value, &should_cancel).map_err(|error| {
+            if should_cancel() || error.eq_ignore_ascii_case("interrupted by user") {
+                ToolError::interrupted_by_user()
+            } else {
+                ToolError::new(error)
+            }
+        })
+    }
+
+    fn is_cancelled(&self) -> bool {
+        runtime::is_interrupted()
+            || self
+                .cancelled
+                .as_ref()
+                .is_some_and(|flag| flag.load(Ordering::SeqCst))
     }
 }
 
@@ -182,11 +207,14 @@ where
         tool_name: &str,
         input: &str,
     ) -> Result<String, ToolError> {
-        if self.cancelled.load(Ordering::SeqCst) {
-            return Err(ToolError::new("interrupted by user"));
+        if self.is_cancelled() {
+            return Err(ToolError::interrupted_by_user());
         }
         match self.inner.execute_with_id(tool_use_id, tool_name, input) {
             Ok(output) => {
+                if self.is_cancelled() {
+                    return Err(ToolError::interrupted_by_user());
+                }
                 let artifact = persist_tool_output_if_large(tool_use_id, tool_name, &output);
                 let context_output =
                     compact_tool_output_for_context(tool_name, output, artifact.as_ref());
@@ -203,6 +231,9 @@ where
                 }
             }
             Err(err) => {
+                if err.is_interrupted() {
+                    return Err(err);
+                }
                 let _ = self.app.emit(
                     "chat-tool-result",
                     json!({ "sessionId": self.session_id, "id": tool_use_id, "name": tool_name, "output": truncate(&err.to_string(), 4000), "isError": true }),
@@ -210,6 +241,10 @@ where
                 Err(err)
             }
         }
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst) || self.inner.is_cancelled()
     }
 }
 
@@ -249,6 +284,10 @@ impl aris_executor::StreamObserver for DesktopStreamObserver {
             json!({ "sessionId": self.session_id, "id": id, "name": name, "input": ui_input }),
         );
         Ok(())
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
     }
 }
 
@@ -343,7 +382,6 @@ impl PermissionPrompter for DesktopPermissionPrompter {
                         }
                         let reason = "interrupted by user".to_string();
                         self.emit_resolved(&prompt_id, "deny");
-                        self.emit_skipped_tool_result(request, &reason);
                         return PermissionPromptDecision::Deny { reason };
                     }
                 }
@@ -534,15 +572,10 @@ fn compact_large_json_string_field(value: &mut serde_json::Value, key: &str, lab
     if total <= MAX_UI_TOOL_INPUT_FIELD_CHARS {
         return;
     }
-    let marker =
-        format!("\n\n[ARIS truncated {label} for UI: {total} chars total.]\n\n");
+    let marker = format!("\n\n[ARIS truncated {label} for UI: {total} chars total.]\n\n");
     object.insert(
         key.to_string(),
-        serde_json::Value::String(compact_edges(
-            &text,
-            MAX_UI_TOOL_INPUT_FIELD_CHARS,
-            &marker,
-        )),
+        serde_json::Value::String(compact_edges(&text, MAX_UI_TOOL_INPUT_FIELD_CHARS, &marker)),
     );
 }
 
@@ -898,6 +931,7 @@ fn build_system_prompt_inner(model: &str, full_tool_registry: bool) -> Vec<Strin
         )
     };
     let file_links = "When you create or modify files, include Markdown links to the relevant file paths in the final response so the desktop UI can open them directly.".to_string();
+    let artifact_layout = "Project artifact layout: place slide/PPT/PDF deck outputs under `slides/`, poster outputs under `poster/`, interactive web apps under `web/<name>/` with an `index.html` plus local CSS/assets, notebook programs under `experiments/`, and scratch/temp/cache files under `.aris/`. Studio auto-discovers `slides/`, `poster/`, and `web/`; Lab lists notebooks from the workspace and defaults new notebooks into `experiments/`.".to_string();
     let long_document_reading = "Long document reading: when working with books, chapters, transcripts, logs, or converted documents, do not read multiple large files in full. First get a file list and a read_file outline preview, then read one chapter or section window at a time with explicit offset/limit. Treat tool output as a preview, not as a source file; if full text is needed, keep it on disk and reopen precise windows.".to_string();
     let long_file_generation = "Long file generation: do not call write_file with an entire long generated artifact such as a Beamer chapter, book chapter, or converted document. Keep single tool payloads small; for files over about 24000 characters, write a small scaffold, append smaller chunks with append_file, and verify line counts/compilation immediately instead of stopping to report an intermediate failure.".to_string();
     let latex_toolchain = latex_toolchain_prompt_section();
@@ -907,6 +941,7 @@ fn build_system_prompt_inner(model: &str, full_tool_registry: bool) -> Vec<Strin
     let mut extra_sections = vec![
         access.clone(),
         file_links,
+        artifact_layout,
         long_document_reading,
         long_file_generation,
     ];
@@ -2063,6 +2098,7 @@ async fn run_chat_turn_with_context(
         let mcp_bundle = aris_chat::attach_mcp_tools_with_cancel(
             KernelToolExecutor {
                 extra_blocked_tools,
+                cancelled: Some(worker_cancelled.clone()),
             },
             tool_specs,
             &feature_config,
@@ -3287,6 +3323,7 @@ fn render_desktop_claude_md(cwd: &Path) -> String {
         "## Workspace".to_string(),
         format!("- Desktop workspace: `{}`.", cwd.display()),
         "- Keep generated files and research artifacts inside this workspace unless the user explicitly attaches or references external context.".to_string(),
+        "- Artifact layout: slides/PPT/PDF decks live in `slides/`, posters in `poster/`, interactive web apps in `web/<name>/`, notebooks in `experiments/`, and scratch/temp/cache files in `.aris/`.".to_string(),
         String::new(),
         "## Verification".to_string(),
         "- Record the commands or checks used to validate substantial changes.".to_string(),
