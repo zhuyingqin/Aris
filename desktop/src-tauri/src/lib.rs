@@ -14,6 +14,7 @@ mod scheduled;
 mod sessions;
 mod state;
 mod studio;
+mod usage_log;
 mod watcher;
 
 use std::path::PathBuf;
@@ -296,6 +297,7 @@ pub fn run() {
             engine::chat_set_context,
             engine::chat_delete,
             engine::chat_cancel,
+            usage_log::chat_usage_summary,
             files::file_list_dir,
             files::file_read_text,
             files::file_write_text,

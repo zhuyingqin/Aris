@@ -59,6 +59,7 @@ import type {
   SessionSummary,
   SessionTranscript,
   SkillMeta,
+  TokenUsageSummary,
 } from "../types";
 
 export const stateDir = () => invoke<string>("state_dir");
@@ -136,6 +137,8 @@ export const appUpdateDownloadAndInstall = async (
   });
   return { installed: true, version: update.version };
 };
+
+export const chatUsageSummary = () => invoke<TokenUsageSummary>("chat_usage_summary");
 export const appRelaunch = async () => {
   if (!isTauri()) return;
   const { relaunch } = await import("@tauri-apps/plugin-process");
@@ -538,6 +541,8 @@ export interface ChatContextMessage {
   images?: ChatImageInput[];
 }
 
+export type ChatContextSyncMode = "replace" | "append";
+
 export const chatSend = (sessionId: string, message: string | ChatSendRequest) => {
   const request = typeof message === "string" ? { text: message } : message;
   return invoke<string>("chat_send_rich", { sessionId, request });
@@ -558,7 +563,8 @@ export const chatReset = (sessionId: string) =>
 export const chatSetContext = (
   sessionId: string,
   messages: ChatContextMessage[],
-) => invoke<void>("chat_set_context", { sessionId, messages });
+  mode: ChatContextSyncMode = "replace",
+) => invoke<void>("chat_set_context", { sessionId, messages, mode });
 export const chatDelete = (sessionId: string, projectId?: string) =>
   invoke<void>("chat_delete", { sessionId, projectId: projectId ?? null });
 export const chatCancel = (sessionId: string) => invoke<void>("chat_cancel", { sessionId });
@@ -614,3 +620,10 @@ export interface ChatErrorEvent {
 }
 export const onChatError = (handler: (event: ChatErrorEvent) => void) =>
   listen<ChatErrorEvent>("chat-error", (e) => handler(e.payload));
+
+export interface ChatContextCompactedEvent {
+  sessionId: string;
+  removedMessageCount: number;
+}
+export const onChatContextCompacted = (handler: (event: ChatContextCompactedEvent) => void) =>
+  listen<ChatContextCompactedEvent>("chat-context-compacted", (e) => handler(e.payload));

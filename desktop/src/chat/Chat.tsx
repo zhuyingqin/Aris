@@ -60,6 +60,7 @@ function estimateTokens(turns: ChatTurn[]): number {
   for (const turn of turns) {
     for (const block of turn.blocks) {
       if (block.kind === "text") chars += block.text.length;
+      else if (block.kind === "notice") chars += block.message.length;
       else if (block.kind === "tool") chars += block.input.length + (block.output?.length ?? 0);
     }
   }
@@ -290,16 +291,32 @@ export default function Chat() {
   const titleRequests = useRef(new Set<string>());
   const sendLocks = useRef(new Set<string>());
   const commandSelectionLock = useRef(false);
+  const syncedTurnIds = useRef(new Map<string, Set<string>>());
   const currentSessionRef = useRef(currentSession);
   currentSessionRef.current = currentSession;
   const focusComposer = useCallback(() => setFocusRequest((value) => value + 1), []);
 
+  const markBackendContextSynced = useCallback((sessionId: string, turnsToMark: ChatTurn[]) => {
+    const known = syncedTurnIds.current.get(sessionId) ?? new Set<string>();
+    for (const turn of turnsToMark) known.add(turn.id);
+    syncedTurnIds.current.set(sessionId, known);
+  }, []);
+
   const syncBackendContext = useCallback((sessionId: string, nextTurns: ChatTurn[]) => {
     if (!isTauri()) return;
-    void contextForRetry(nextTurns)
-      .then((messages) => chatSetContext(sessionId, messages))
+    const known = syncedTurnIds.current.get(sessionId) ?? new Set<string>();
+    const deltaTurns = nextTurns.filter((turn) => (
+      !known.has(turn.id) && !turn.streaming && !turn.error
+    ));
+    if (deltaTurns.length === 0) return;
+    void contextForRetry(deltaTurns)
+      .then((messages) => {
+        if (messages.length === 0) return;
+        return chatSetContext(sessionId, messages, "append");
+      })
+      .then(() => markBackendContextSynced(sessionId, deltaTurns))
       .catch((error) => setError(String(error)));
-  }, [setError]);
+  }, [markBackendContextSynced, setError]);
 
   const patchAssistant = useCallback((
     sessionId: string,
@@ -348,9 +365,12 @@ export default function Chat() {
           stopped: false,
         };
       },
-      (nextTurns) => suggestTitle(sessionId, nextTurns),
+      (nextTurns) => {
+        markBackendContextSynced(sessionId, nextTurns);
+        suggestTitle(sessionId, nextTurns);
+      },
     );
-  }, [patchAssistant, suggestTitle]);
+  }, [markBackendContextSynced, patchAssistant, suggestTitle]);
 
   const onError = useCallback((sessionId: string, error: string, stopped: boolean) => {
     const visibleError = visibleTurnError(error, stopped);
@@ -553,12 +573,17 @@ export default function Chat() {
       return;
     }
     const shouldResetContext = needsBackendContextReset(session.turns, prefix, resetContext);
-    if (shouldResetContext) await chatSetContext(session.id, await contextForRetry(prefix));
+    if (shouldResetContext) {
+      await chatSetContext(session.id, await contextForRetry(prefix), "replace");
+      markBackendContextSynced(session.id, prefix);
+    } else {
+      markBackendContextSynced(session.id, prefix);
+    }
     patchTurns(session.id, () => [...prefix, userTurn(text, attached), assistantTurn()]);
     updateSession(session.id, (item) => ({ ...item, draft: "", draftAttachments: [] }));
     setEditingTurnId(null);
     await run(session.id, request);
-  }, [patchTurns, run, status?.model, updateSession]);
+  }, [markBackendContextSynced, patchTurns, run, status?.model, updateSession]);
 
   const runSlashCommand = useCallback(async (
     session: ChatSession,

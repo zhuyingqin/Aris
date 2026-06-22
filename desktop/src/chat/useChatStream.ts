@@ -6,6 +6,7 @@ import {
   onChatDelta,
   onChatDone,
   onChatError,
+  onChatContextCompacted,
   onChatThinkingDelta,
   onChatPermissionRequest,
   onChatPermissionResolved,
@@ -150,6 +151,17 @@ export function useChatStream({ patchAssistant, onComplete, onError }: StreamHan
         if (!isCurrentListener()) return;
         flush(sessionId);
         onError(sessionId, message, stopRequested.current.has(sessionId));
+      }),
+      onChatContextCompacted(({ sessionId, removedMessageCount }) => {
+        if (!isCurrentListener()) return;
+        flush(sessionId);
+        const message = removedMessageCount > 0
+          ? `Context compacted automatically; ${removedMessageCount} earlier messages were summarized.`
+          : "Context compacted automatically; large consumed tool payloads were shortened.";
+        patchAssistant(sessionId, (turn) => ({
+          ...turn,
+          blocks: [...turn.blocks, { kind: "notice", message }],
+        }));
       }),
     ];
     return () => {

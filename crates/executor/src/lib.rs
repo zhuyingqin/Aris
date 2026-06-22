@@ -87,6 +87,53 @@ pub(crate) async fn wait_for_stream_cancel(observer: &dyn StreamObserver) {
     }
 }
 
+fn merge_anthropic_stream_usage(
+    start: Option<&api::Usage>,
+    delta: &api::Usage,
+    input_from_delta: &mut bool,
+) -> TokenUsage {
+    let mut usage = TokenUsage {
+        input_tokens: start.map_or(delta.input_tokens, |usage| usage.input_tokens),
+        output_tokens: delta.output_tokens,
+        cache_creation_input_tokens: start.map_or(delta.cache_creation_input_tokens, |usage| {
+            usage.cache_creation_input_tokens
+        }),
+        cache_read_input_tokens: start.map_or(delta.cache_read_input_tokens, |usage| {
+            usage.cache_read_input_tokens
+        }),
+    };
+
+    // Some Anthropic-compatible SSE providers report the full context in
+    // `message_start`, then the corrected fresh-input count in `message_delta`.
+    // Prefer the smaller positive delta input and copy cache counters from the
+    // same block when present; otherwise keep start values as best-effort
+    // fallback.
+    let should_use_delta_input = delta.input_tokens > 0
+        && (usage.input_tokens == 0
+            || delta.input_tokens < usage.input_tokens
+            || (*input_from_delta && delta.input_tokens <= usage.input_tokens));
+
+    if should_use_delta_input {
+        usage.input_tokens = delta.input_tokens;
+        *input_from_delta = true;
+        if delta.cache_creation_input_tokens > 0 {
+            usage.cache_creation_input_tokens = delta.cache_creation_input_tokens;
+        }
+        if delta.cache_read_input_tokens > 0 {
+            usage.cache_read_input_tokens = delta.cache_read_input_tokens;
+        }
+    } else {
+        if usage.cache_creation_input_tokens == 0 {
+            usage.cache_creation_input_tokens = delta.cache_creation_input_tokens;
+        }
+        if usage.cache_read_input_tokens == 0 {
+            usage.cache_read_input_tokens = delta.cache_read_input_tokens;
+        }
+    }
+
+    usage
+}
+
 fn push_text_event(events: &mut Vec<AssistantEvent>, text: String) {
     if text.is_empty() {
         return;
@@ -223,6 +270,7 @@ impl ApiClient for AnthropicRuntimeClient {
             let mut saw_stop = false;
             let mut stop_reason: Option<String> = None;
             let mut start_usage: Option<api::Usage> = None;
+            let mut input_from_delta = false;
 
             loop {
                 let next_event = tokio::select! {
@@ -317,20 +365,11 @@ impl ApiClient for AnthropicRuntimeClient {
                         {
                             stop_reason = Some(reason);
                         }
-                        let start = start_usage.as_ref();
-                        events.push(AssistantEvent::Usage(TokenUsage {
-                            input_tokens: start
-                                .map_or(delta.usage.input_tokens, |usage| usage.input_tokens),
-                            output_tokens: delta.usage.output_tokens,
-                            cache_creation_input_tokens: start
-                                .map_or(delta.usage.cache_creation_input_tokens, |usage| {
-                                    usage.cache_creation_input_tokens
-                                }),
-                            cache_read_input_tokens: start
-                                .map_or(delta.usage.cache_read_input_tokens, |usage| {
-                                    usage.cache_read_input_tokens
-                                }),
-                        }));
+                        events.push(AssistantEvent::Usage(merge_anthropic_stream_usage(
+                            start_usage.as_ref(),
+                            &delta.usage,
+                            &mut input_from_delta,
+                        )));
                     }
                     ApiStreamEvent::MessageStop(_) => {
                         saw_stop = true;
@@ -537,7 +576,10 @@ mod tests {
     use api::{InputContentBlock, MessageResponse, OutputContentBlock, Usage};
     use runtime::{AssistantEvent, ContentBlock, ConversationMessage, RuntimeError};
 
-    use super::{convert_messages, push_text_event, response_to_events, StreamObserver};
+    use super::{
+        convert_messages, merge_anthropic_stream_usage, push_text_event, response_to_events,
+        StreamObserver,
+    };
 
     struct RecordingObserver {
         deltas: Arc<Mutex<Vec<String>>>,
@@ -595,6 +637,54 @@ mod tests {
             *deltas.lock().unwrap(),
             vec!["thinking:inspect".to_string(), "text:answer".to_string()]
         );
+    }
+
+    #[test]
+    fn anthropic_stream_usage_prefers_corrected_delta_input() {
+        let start = Usage {
+            input_tokens: 180_000,
+            cache_creation_input_tokens: 2_000,
+            cache_read_input_tokens: 120_000,
+            output_tokens: 0,
+        };
+        let delta = Usage {
+            input_tokens: 12_000,
+            cache_creation_input_tokens: 500,
+            cache_read_input_tokens: 110_000,
+            output_tokens: 42,
+        };
+        let mut input_from_delta = false;
+
+        let usage = merge_anthropic_stream_usage(Some(&start), &delta, &mut input_from_delta);
+
+        assert_eq!(usage.input_tokens, 12_000);
+        assert_eq!(usage.output_tokens, 42);
+        assert_eq!(usage.cache_creation_input_tokens, 500);
+        assert_eq!(usage.cache_read_input_tokens, 110_000);
+        assert!(input_from_delta);
+    }
+
+    #[test]
+    fn anthropic_stream_usage_keeps_start_cache_when_delta_omits_it() {
+        let start = Usage {
+            input_tokens: 180_000,
+            cache_creation_input_tokens: 2_000,
+            cache_read_input_tokens: 120_000,
+            output_tokens: 0,
+        };
+        let delta = Usage {
+            input_tokens: 12_000,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+            output_tokens: 42,
+        };
+        let mut input_from_delta = false;
+
+        let usage = merge_anthropic_stream_usage(Some(&start), &delta, &mut input_from_delta);
+
+        assert_eq!(usage.input_tokens, 12_000);
+        assert_eq!(usage.cache_creation_input_tokens, 2_000);
+        assert_eq!(usage.cache_read_input_tokens, 120_000);
     }
 
     #[test]

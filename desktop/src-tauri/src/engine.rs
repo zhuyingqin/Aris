@@ -784,34 +784,12 @@ fn compact_tool_output_for_context(
     output: String,
     artifact: Option<&ToolOutputArtifact>,
 ) -> String {
-    match tool_name {
-        "Skill" => output,
-        "LiteratureSearch" => compact_text_output_for_limit(
-            compact_literature_search_output(output),
-            artifact,
-            MAX_CONTEXT_TOOL_OUTPUT_CHARS,
-            "tool output",
-        ),
-        "bash" | "PowerShell" => {
-            if output.chars().count() <= MAX_CONTEXT_TOOL_OUTPUT_CHARS && artifact.is_none() {
-                return output;
-            }
-            compact_shell_json_tool_output(&output, artifact).unwrap_or_else(|| {
-                compact_text_output_for_limit(
-                    output,
-                    artifact,
-                    MAX_CONTEXT_TOOL_OUTPUT_CHARS,
-                    "tool output",
-                )
-            })
+    for compactor in output_compactors() {
+        if compactor.can_handle(tool_name) {
+            return compactor.compact(output, artifact, MAX_CONTEXT_TOOL_OUTPUT_CHARS);
         }
-        _ => compact_text_output_for_limit(
-            output,
-            artifact,
-            MAX_CONTEXT_TOOL_OUTPUT_CHARS,
-            "tool output",
-        ),
     }
+    output
 }
 
 fn tool_output_for_ui(output: &str, artifact: Option<&ToolOutputArtifact>) -> String {
@@ -821,6 +799,107 @@ fn tool_output_for_ui(output: &str, artifact: Option<&ToolOutputArtifact>) -> St
         MAX_UI_TOOL_OUTPUT_CHARS,
         "tool output preview",
     )
+}
+
+trait OutputCompactor: Sync {
+    fn can_handle(&self, tool_name: &str) -> bool;
+
+    fn compact(
+        &self,
+        output: String,
+        artifact: Option<&ToolOutputArtifact>,
+        max_chars: usize,
+    ) -> String;
+}
+
+struct SkillOutputCompactor;
+struct LiteratureSearchOutputCompactor;
+struct ShellOutputCompactor;
+struct DefaultOutputCompactor;
+
+static SKILL_OUTPUT_COMPACTOR: SkillOutputCompactor = SkillOutputCompactor;
+static LITERATURE_SEARCH_OUTPUT_COMPACTOR: LiteratureSearchOutputCompactor =
+    LiteratureSearchOutputCompactor;
+static SHELL_OUTPUT_COMPACTOR: ShellOutputCompactor = ShellOutputCompactor;
+static DEFAULT_OUTPUT_COMPACTOR: DefaultOutputCompactor = DefaultOutputCompactor;
+
+fn output_compactors() -> [&'static dyn OutputCompactor; 4] {
+    [
+        &SKILL_OUTPUT_COMPACTOR,
+        &LITERATURE_SEARCH_OUTPUT_COMPACTOR,
+        &SHELL_OUTPUT_COMPACTOR,
+        &DEFAULT_OUTPUT_COMPACTOR,
+    ]
+}
+
+impl OutputCompactor for SkillOutputCompactor {
+    fn can_handle(&self, tool_name: &str) -> bool {
+        tool_name == "Skill"
+    }
+
+    fn compact(
+        &self,
+        output: String,
+        _artifact: Option<&ToolOutputArtifact>,
+        _max_chars: usize,
+    ) -> String {
+        output
+    }
+}
+
+impl OutputCompactor for LiteratureSearchOutputCompactor {
+    fn can_handle(&self, tool_name: &str) -> bool {
+        tool_name == "LiteratureSearch"
+    }
+
+    fn compact(
+        &self,
+        output: String,
+        artifact: Option<&ToolOutputArtifact>,
+        max_chars: usize,
+    ) -> String {
+        compact_text_output_for_limit(
+            compact_literature_search_output(output),
+            artifact,
+            max_chars,
+            "tool output",
+        )
+    }
+}
+
+impl OutputCompactor for ShellOutputCompactor {
+    fn can_handle(&self, tool_name: &str) -> bool {
+        matches!(tool_name, "bash" | "PowerShell")
+    }
+
+    fn compact(
+        &self,
+        output: String,
+        artifact: Option<&ToolOutputArtifact>,
+        max_chars: usize,
+    ) -> String {
+        if output.chars().count() <= max_chars && artifact.is_none() {
+            return output;
+        }
+        compact_shell_json_tool_output(&output, artifact).unwrap_or_else(|| {
+            compact_text_output_for_limit(output, artifact, max_chars, "tool output")
+        })
+    }
+}
+
+impl OutputCompactor for DefaultOutputCompactor {
+    fn can_handle(&self, _tool_name: &str) -> bool {
+        true
+    }
+
+    fn compact(
+        &self,
+        output: String,
+        artifact: Option<&ToolOutputArtifact>,
+        max_chars: usize,
+    ) -> String {
+        compact_text_output_for_limit(output, artifact, max_chars, "tool output")
+    }
 }
 
 fn tool_output_indicates_error(tool_name: &str, output: &str) -> bool {
@@ -2265,8 +2344,9 @@ async fn run_chat_turn_with_context(
         session_id: session_id.clone(),
     };
     crate::config::apply_reviewer_environment(true);
-    let (model, _provider, executor_config) =
-        resolve_executor_for_model(model_override.as_deref())?;
+    let (model, provider, executor_config) = resolve_executor_for_model(model_override.as_deref())?;
+    let usage_model = model.clone();
+    let usage_provider = provider.clone();
     let session = get_cached_or_disk_session(&state, &session_id)?;
     let permission_mode = permission_mode_for(&state, &session_id)?;
     let permission_prompts = state.permission_prompts.clone();
@@ -2346,8 +2426,21 @@ async fn run_chat_turn_with_context(
         let summary = runtime
             .run_turn_message(user_message, Some(&mut permission_prompter))
             .map_err(|e| e.to_string())?;
+        let auto_compaction = summary
+            .auto_compaction
+            .map(|event| event.removed_message_count);
+        let turn_usages = summary
+            .assistant_messages
+            .iter()
+            .filter_map(|message| message.usage)
+            .collect::<Vec<_>>();
         let text = aris_chat::final_assistant_text(&summary);
-        Ok::<(String, Session), String>((text, runtime.into_session()))
+        Ok::<(String, Session, Option<usize>, Vec<TokenUsage>), String>((
+            text,
+            runtime.into_session(),
+            auto_compaction,
+            turn_usages,
+        ))
     })
     .await;
 
@@ -2362,7 +2455,12 @@ async fn run_chat_turn_with_context(
         Ok(inner) => inner,
         Err(join_error) => Err(join_error.to_string()),
     };
-    let (text, updated): (String, Session) = match outcome {
+    let (text, updated, auto_compaction, turn_usages): (
+        String,
+        Session,
+        Option<usize>,
+        Vec<TokenUsage>,
+    ) = match outcome {
         Ok(value) => value,
         Err(message) => {
             let _ = app.emit(
@@ -2374,6 +2472,23 @@ async fn run_chat_turn_with_context(
     };
 
     store_chat_session(state, session_id.clone(), updated)?;
+    if let Err(error) = crate::usage_log::append_turn_usage(
+        &session_id,
+        &usage_model,
+        &usage_provider,
+        &turn_usages,
+    ) {
+        eprintln!("aris desktop: failed to write usage log: {error}");
+    }
+    if let Some(removed_message_count) = auto_compaction {
+        let _ = app.emit(
+            "chat-context-compacted",
+            json!({
+                "sessionId": &session_id,
+                "removedMessageCount": removed_message_count
+            }),
+        );
+    }
     let _ = app.emit(
         "chat-done",
         json!({ "sessionId": session_id, "text": &text }),
@@ -2397,13 +2512,7 @@ pub struct ChatContextMessage {
     images: Vec<ChatImageInput>,
 }
 
-#[tauri::command]
-pub fn chat_set_context(
-    state: State<ChatState>,
-    session_id: String,
-    messages: Vec<ChatContextMessage>,
-) -> Result<(), String> {
-    validate_session_id(&session_id)?;
+fn chat_context_messages_to_session(messages: Vec<ChatContextMessage>) -> Result<Session, String> {
     let mut session = Session::new();
     for message in messages {
         match message.role.as_str() {
@@ -2424,7 +2533,24 @@ pub fn chat_set_context(
             _ => return Err("chat context only supports user and assistant messages".to_string()),
         }
     }
-    store_chat_session(&state, session_id, session)
+    Ok(session)
+}
+
+#[tauri::command]
+pub fn chat_set_context(
+    state: State<ChatState>,
+    session_id: String,
+    messages: Vec<ChatContextMessage>,
+    mode: Option<String>,
+) -> Result<(), String> {
+    validate_session_id(&session_id)?;
+    let mut next = chat_context_messages_to_session(messages)?;
+    if mode.as_deref() == Some("append") {
+        let mut current = get_cached_or_disk_session(&state, &session_id)?;
+        current.messages.append(&mut next.messages);
+        return store_chat_session(&state, session_id, current);
+    }
+    store_chat_session(&state, session_id, next)
 }
 
 #[tauri::command]

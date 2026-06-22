@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => ({
   onChatPermissionResolved: vi.fn(),
   onChatDone: vi.fn(),
   onChatError: vi.fn(),
+  onChatContextCompacted: vi.fn(),
 }));
 
 vi.mock("../api/tauri", () => ({
@@ -28,6 +29,7 @@ vi.mock("../api/tauri", () => ({
   onChatPermissionResolved: mocks.onChatPermissionResolved,
   onChatDone: mocks.onChatDone,
   onChatError: mocks.onChatError,
+  onChatContextCompacted: mocks.onChatContextCompacted,
 }));
 
 import { useChatStream } from "./useChatStream";
@@ -41,6 +43,7 @@ const listenerMocks = [
   mocks.onChatPermissionResolved,
   mocks.onChatDone,
   mocks.onChatError,
+  mocks.onChatContextCompacted,
 ];
 
 beforeEach(() => {
@@ -318,6 +321,44 @@ describe("useChatStream concurrent sessions", () => {
       "OpenAI request failed: connection reset",
       false,
     );
+  });
+
+  it("appends a compacted context notice when the backend compacts", async () => {
+    let compactedHandler:
+      | ((event: { sessionId: string; removedMessageCount: number }) => void)
+      | undefined;
+    mocks.onChatContextCompacted.mockImplementation((handler) => {
+      compactedHandler = handler;
+      return Promise.resolve(() => undefined);
+    });
+
+    const patchAssistant = vi.fn((sessionId, fn) => {
+      const next = fn({
+        id: "assistant-1",
+        role: "assistant",
+        blocks: [],
+        streaming: true,
+      });
+      expect(sessionId).toBe("chat-ctx");
+      expect(next.blocks).toEqual([
+        {
+          kind: "notice",
+          message: "Context compacted automatically; 12 earlier messages were summarized.",
+        },
+      ]);
+    });
+
+    renderHook(() => useChatStream({
+      patchAssistant,
+      onComplete: vi.fn(),
+      onError: vi.fn(),
+    }));
+
+    act(() => {
+      compactedHandler?.({ sessionId: "chat-ctx", removedMessageCount: 12 });
+    });
+
+    expect(patchAssistant).toHaveBeenCalled();
   });
 
   it("stops only the selected session and updates local state immediately", async () => {

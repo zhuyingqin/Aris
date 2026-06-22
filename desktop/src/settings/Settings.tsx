@@ -7,6 +7,7 @@ import {
   configSecretGet,
   configSet,
   configTest,
+  chatUsageSummary,
   providerTest,
   isTauri,
 } from "../api/tauri";
@@ -20,6 +21,7 @@ import type {
   ConfigView,
   AppUpdateInfo,
   AppUpdateProgress,
+  TokenUsageSummary,
 } from "../types";
 
 // ── Provider / model presets ──────────────────────────────────────────────────
@@ -517,6 +519,23 @@ function formatUpdateBytes(value: number): string {
   return `${size.toFixed(index === 0 ? 0 : 1)} ${units[index]}`;
 }
 
+function formatUsageTokens(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return "0";
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(2)}M`;
+  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}K`;
+  return `${Math.round(value)}`;
+}
+
+function formatUsageCost(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return "$0.0000";
+  return `$${value.toFixed(4)}`;
+}
+
+function formatUsageTime(epochSeconds: number): string {
+  if (!Number.isFinite(epochSeconds) || epochSeconds <= 0) return "-";
+  return new Date(epochSeconds * 1000).toLocaleString();
+}
+
 type SaveState = "idle" | "saving" | "saved" | "error";
 type TestState = "idle" | "testing" | "passed" | "failed";
 type UpdateState = "idle" | "checking" | "available" | "current" | "downloading" | "ready" | "error";
@@ -535,6 +554,8 @@ export default function Settings() {
   const [updateInfo, setUpdateInfo] = useState<AppUpdateInfo | null>(null);
   const [updateProgress, setUpdateProgress] = useState<AppUpdateProgress | null>(null);
   const [updateMessage, setUpdateMessage] = useState("");
+  const [usageSummary, setUsageSummary] = useState<TokenUsageSummary | null>(null);
+  const [usageLoading, setUsageLoading] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [mailDetailOpen, setMailDetailOpen] = useState(false);
   const operationVersion = useRef(0);
@@ -571,6 +592,24 @@ export default function Settings() {
     if (!isTauri()) return;
     configGet().then(loadConfig).catch((e) => setError(String(e)));
   }, [setError]);
+
+  const loadUsageSummary = async () => {
+    setUsageLoading(true);
+    try {
+      setUsageSummary(await chatUsageSummary());
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setUsageLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!isTauri()) return;
+    void loadUsageSummary();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   useEffect(() => () => {
     operationVersion.current += 1;
     activeOp.current = null;
@@ -934,6 +973,8 @@ export default function Settings() {
       ? `${formatUpdateBytes(updateProgress.downloadedBytes)} / ${formatUpdateBytes(updateProgress.contentLength)}${updateProgress.percent !== null && updateProgress.percent !== undefined ? ` - ${updateProgress.percent}%` : ""}`
       : `${formatUpdateBytes(updateProgress.downloadedBytes)} downloaded`
     : "";
+  const usageModels = usageSummary?.byModel.slice(0, 6) ?? [];
+  const usageRecent = usageSummary?.recent.slice(0, 6) ?? [];
   return (
     <div className="st-page sp-list-page">
       {/* Status bar */}
@@ -1009,6 +1050,90 @@ export default function Settings() {
               )}
             </div>
           </div>
+        </div>
+      </div>
+
+      <div className="sp-usage-section">
+        <div className="sp-section-head">
+          <div className="sp-section-head-text">
+            <div className="sp-section-title">Token 使用量</div>
+            <div className="sp-section-sub">来自模型响应里的真实 usage，本地记录，不额外调用 countTokens API</div>
+          </div>
+          <button className="sp-btn sp-btn-secondary" onClick={() => void loadUsageSummary()} disabled={usageLoading} type="button">
+            {usageLoading ? "刷新中..." : "刷新"}
+          </button>
+        </div>
+        <div className="sp-usage-panel">
+          <div className="sp-usage-metrics">
+            <div className="sp-usage-metric">
+              <span>请求数</span>
+              <strong>{usageSummary?.requests ?? 0}</strong>
+            </div>
+            <div className="sp-usage-metric">
+              <span>Prompt</span>
+              <strong>{formatUsageTokens(usageSummary?.promptTokens ?? 0)}</strong>
+            </div>
+            <div className="sp-usage-metric">
+              <span>输出</span>
+              <strong>{formatUsageTokens(usageSummary?.outputTokens ?? 0)}</strong>
+            </div>
+            <div className="sp-usage-metric">
+              <span>Cache read</span>
+              <strong>{formatUsageTokens(usageSummary?.cacheReadInputTokens ?? 0)}</strong>
+            </div>
+            <div className="sp-usage-metric">
+              <span>估算成本</span>
+              <strong>{formatUsageCost(usageSummary?.estimatedCostUsd ?? 0)}</strong>
+            </div>
+          </div>
+          {usageSummary && usageSummary.requests > 0 ? (
+            <>
+              <div className="sp-usage-split">
+                <div className="sp-usage-table-wrap">
+                  <div className="sp-usage-subtitle">按模型</div>
+                  <div className="sp-usage-table">
+                    <div className="sp-usage-row sp-usage-row-head">
+                      <span>模型</span><span>请求</span><span>Prompt</span><span>输出</span><span>成本</span>
+                    </div>
+                    {usageModels.map((item) => (
+                      <div className="sp-usage-row" key={`${item.provider}:${item.model}`}>
+                        <span className="sp-usage-model" title={`${item.provider} · ${item.model}`}>{item.model}</span>
+                        <span>{item.requests}</span>
+                        <span>{formatUsageTokens(item.promptTokens)}</span>
+                        <span>{formatUsageTokens(item.outputTokens)}</span>
+                        <span>{formatUsageCost(item.estimatedCostUsd)}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                <div className="sp-usage-table-wrap">
+                  <div className="sp-usage-subtitle">最近请求</div>
+                  <div className="sp-usage-table">
+                    <div className="sp-usage-row sp-usage-row-head">
+                      <span>时间</span><span>模型</span><span>Prompt</span><span>输出</span><span>Cache</span>
+                    </div>
+                    {usageRecent.map((item, index) => (
+                      <div className="sp-usage-row" key={`${item.sessionId}:${item.createdAt}:${item.totalTokens}:${index}`}>
+                        <span className="sp-usage-time" title={formatUsageTime(item.createdAt)}>{formatUsageTime(item.createdAt)}</span>
+                        <span className="sp-usage-model" title={`${item.provider} · ${item.model}`}>{item.model}</span>
+                        <span>{formatUsageTokens(item.promptTokens)}</span>
+                        <span>{formatUsageTokens(item.outputTokens)}</span>
+                        <span>{formatUsageTokens(item.cacheReadInputTokens)}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+              <div className="sp-usage-foot">
+                账本：{usageSummary.logPath}
+                {usageSummary.unpricedRequests > 0 ? ` · ${usageSummary.unpricedRequests} 条使用默认价格估算` : ""}
+              </div>
+            </>
+          ) : (
+            <div className="sp-usage-empty">
+              暂无 token 记录。下一次模型响应完成后会自动写入本地 usage log。
+            </div>
+          )}
         </div>
       </div>
 

@@ -492,6 +492,13 @@ function renderSingleBlock(
       />
     ) : null;
   }
+  if (block.kind === "notice") {
+    return block.message ? (
+      <div key={index} className="chat-context-notice">
+        {block.message}
+      </div>
+    ) : null;
+  }
   if (block.kind === "permission") {
     return <PermissionCall key={block.id} block={block} onPermissionRespond={onPermissionRespond} />;
   }
