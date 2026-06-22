@@ -84,7 +84,7 @@ export function useChatStream({ patchAssistant, onComplete, onError }: StreamHan
         flush(tool.sessionId);
         patchAssistant(tool.sessionId, (turn) => ({
           ...turn,
-          blocks: [...turn.blocks, { kind: "tool", id: tool.id, name: tool.name, input: tool.input }],
+          blocks: upsertToolCall(turn.blocks, tool),
         }));
       }),
       onChatToolResult((result) => {
@@ -248,4 +248,23 @@ export function appendToolOutput(
     return copy;
   }
   return [...copy, { kind: "tool", id, name, input: "{}", output, isError }];
+}
+
+export function upsertToolCall(
+  blocks: ChatBlock[],
+  tool: { id?: string; name: string; input: string },
+): ChatBlock[] {
+  if (!tool.id) return [...blocks, { kind: "tool", id: tool.id, name: tool.name, input: tool.input }];
+  const index = blocks.findIndex((block) => (
+    block.kind === "tool"
+    && block.id === tool.id
+    && block.name === tool.name
+  ));
+  if (index < 0) return [...blocks, { kind: "tool", id: tool.id, name: tool.name, input: tool.input }];
+  const copy = blocks.slice();
+  const existing = copy[index];
+  if (existing.kind === "tool") {
+    copy[index] = { ...existing, input: tool.input };
+  }
+  return copy;
 }

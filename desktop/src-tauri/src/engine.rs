@@ -198,7 +198,54 @@ struct ToolOutputArtifact {
     bytes: u64,
 }
 
+fn validate_question_input(input: &str) -> Result<Value, ToolError> {
+    let value = serde_json::from_str::<Value>(input)
+        .map_err(|_| ToolError::new("AskUserQuestion input must be valid JSON."))?;
+    let object = value.as_object().ok_or_else(|| {
+        ToolError::new("AskUserQuestion input must be an object with `question` and `options`.")
+    })?;
+    let question = object
+        .get("question")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    if question.is_empty() {
+        return Err(ToolError::new(
+            "AskUserQuestion input must include a non-empty `question` string.",
+        ));
+    }
+    let options = object
+        .get("options")
+        .and_then(Value::as_array)
+        .ok_or_else(|| ToolError::new("AskUserQuestion input must include an `options` array."))?;
+    let has_labeled_option = options.iter().any(|option| {
+        option
+            .get("label")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .is_some_and(|label| !label.is_empty())
+    });
+    if !has_labeled_option {
+        return Err(ToolError::new(
+            "AskUserQuestion input must include at least one option with a non-empty `label`.",
+        ));
+    }
+    Ok(value)
+}
+
 impl<T> DesktopToolExecutor<T> {
+    fn emit_question_tool_card(&self, tool_use_id: &str, input: &str) {
+        let _ = self.app.emit(
+            "chat-tool",
+            json!({
+                "sessionId": self.session_id,
+                "id": tool_use_id,
+                "name": ASK_USER_QUESTION_TOOL,
+                "input": tool_input_for_ui(ASK_USER_QUESTION_TOOL, input),
+            }),
+        );
+    }
+
     /// Block this tool call until the user answers the question, then return
     /// their answer as the tool result so the turn can resume. Mirrors the
     /// permission prompt's wait loop: poll for an answer while honoring
@@ -211,11 +258,9 @@ impl<T> DesktopToolExecutor<T> {
                 "AskUserQuestion is unavailable: the tool call has no id to answer.",
             ));
         }
-        // Fail fast on malformed input rather than blocking on a card the UI
-        // cannot render.
-        if serde_json::from_str::<Value>(input).is_err() {
-            return Err(ToolError::new("AskUserQuestion input must be valid JSON."));
-        }
+        // Fail fast on malformed or non-renderable input rather than blocking
+        // on a card the UI cannot answer.
+        validate_question_input(input)?;
         let (tx, rx) = mpsc::channel::<String>();
         match self.questions.lock() {
             Ok(mut prompts) => {
@@ -223,6 +268,11 @@ impl<T> DesktopToolExecutor<T> {
             }
             Err(_) => return Err(ToolError::new("question prompt registry is unavailable")),
         }
+        // The streamed tool-call event normally renders the prompt first. Emit
+        // it again after the answer channel is registered so a missed frontend
+        // event or subscription refresh cannot leave the backend waiting with
+        // no visible question. The UI de-duplicates by tool id.
+        self.emit_question_tool_card(tool_use_id, input);
         let cleanup = || {
             if let Ok(mut prompts) = self.questions.lock() {
                 prompts.remove(tool_use_id);
@@ -3973,6 +4023,28 @@ mod tests {
             ),
             runtime::PermissionOutcome::Allow
         );
+    }
+
+    #[test]
+    fn ask_user_question_rejects_inputs_the_ui_cannot_answer() {
+        assert!(
+            validate_question_input(r#"{"question":"Pick one","options":[{"label":"A"}]}"#).is_ok()
+        );
+
+        assert!(validate_question_input(r#"{"question":"Pick one"}"#)
+            .expect_err("missing options should fail")
+            .to_string()
+            .contains("options"));
+        assert!(
+            validate_question_input(r#"{"question":"Pick one","options":[{"label":"  "}]}"#)
+                .expect_err("blank labels should fail")
+                .to_string()
+                .contains("label")
+        );
+        assert!(validate_question_input(r#"{"options":[{"label":"A"}]}"#)
+            .expect_err("missing question should fail")
+            .to_string()
+            .contains("question"));
     }
 
     #[test]

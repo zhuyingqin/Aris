@@ -28,7 +28,7 @@ import CommandSelection from "./CommandSelection";
 import ChatSidebar from "./ChatSidebar";
 import ChatThread from "./ChatThread";
 import FilePathMenu from "./FilePathMenu";
-import { cleanChatTitle, latestFileChangesFromTurns, latestTodosFromTurns, makeId, textFromTurn, titleFromTurns } from "./model";
+import { cleanChatTitle, latestFileChangesFromTurns, latestTodosFromTurns, makeId, patchLastAssistantTurn, textFromTurn, titleFromTurns } from "./model";
 import WorkflowFlow from "./WorkflowFlow";
 import type { ChatSession } from "./types";
 import { useChatSessions } from "./useChatSessions";
@@ -247,6 +247,7 @@ export default function Chat() {
     currentSession,
     setCurrentId,
     materializeCurrentSession,
+    createSession,
     updateSession,
     patchTurns,
     newSession,
@@ -306,15 +307,7 @@ export default function Chat() {
     afterPatch?: (turns: ChatTurn[]) => void,
   ) => {
     patchTurns(sessionId, (turns) => {
-      const copy = turns.slice();
-      let index = -1;
-      for (let candidate = copy.length - 1; candidate >= 0; candidate -= 1) {
-        if (copy[candidate].role === "assistant") {
-          index = candidate;
-          break;
-        }
-      }
-      if (index >= 0) copy[index] = fn(copy[index]);
+      const copy = patchLastAssistantTurn(turns, fn);
       if (afterPatch) afterPatch(copy);
       return copy;
     });
@@ -649,16 +642,15 @@ export default function Chat() {
 
   useEffect(() => {
     const text = pendingChatRunInput?.trim();
-    if (!text || !currentSession || currentChatBusy) return;
+    if (!text || currentChatBusy) return;
     setPendingChatRunInput(null);
-    const session = materializeCurrentSession();
-    if (!session) return;
+    const session = createSession();
     void (async () => {
       if (!await runSlashCommand(session, text, [])) {
         await beginRun(session, session.turns, text, []);
       }
     })();
-  }, [beginRun, currentChatBusy, currentSession, materializeCurrentSession, pendingChatRunInput, runSlashCommand, setPendingChatRunInput]);
+  }, [beginRun, createSession, currentChatBusy, pendingChatRunInput, runSlashCommand, setPendingChatRunInput]);
 
   const selectCommandOption = useCallback(async (value: string) => {
     const pending = pendingCommandSelection;

@@ -29,6 +29,7 @@ const mocks = vi.hoisted(() => ({
   chatPermissionGet: vi.fn(),
   chatPermissionRespond: vi.fn(),
   chatPermissionSet: vi.fn(),
+  chatQuestionRespond: vi.fn(),
   chatSend: vi.fn(),
   chatSetContext: vi.fn(),
   chatStatus: vi.fn(),
@@ -82,6 +83,7 @@ vi.mock("../api/tauri", () => ({
   chatPermissionGet: mocks.chatPermissionGet,
   chatPermissionRespond: mocks.chatPermissionRespond,
   chatPermissionSet: mocks.chatPermissionSet,
+  chatQuestionRespond: mocks.chatQuestionRespond,
   chatSend: mocks.chatSend,
   chatSetContext: mocks.chatSetContext,
   chatStatus: mocks.chatStatus,
@@ -219,6 +221,7 @@ beforeEach(() => {
   mocks.chatCancel.mockReset().mockResolvedValue(undefined);
   mocks.chatPermissionGet.mockReset().mockResolvedValue({ mode: "workspace-write", label: "Accept edits", description: "" });
   mocks.chatPermissionRespond.mockReset().mockResolvedValue(undefined);
+  mocks.chatQuestionRespond.mockReset().mockResolvedValue(undefined);
   mocks.chatPermissionSet.mockReset().mockResolvedValue({ mode: "workspace-write", label: "Accept edits", description: "" });
   mocks.chatSend.mockReset().mockResolvedValue("ok");
   mocks.chatSetContext.mockReset().mockResolvedValue(undefined);

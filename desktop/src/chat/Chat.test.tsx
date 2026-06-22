@@ -20,10 +20,11 @@ import {
   makeId,
   makeSession,
   migrateSession,
+  patchLastAssistantTurn,
   titleFromTurns,
   transcriptFromTurn,
 } from "./model";
-import { appendToolOutput } from "./useChatStream";
+import { appendToolOutput, upsertToolCall } from "./useChatStream";
 import { useChatSessions } from "./useChatSessions";
 import { useStore } from "../store";
 
@@ -294,6 +295,50 @@ describe("Chat interaction helpers", () => {
 
     expect(next).toHaveLength(1);
     expect(next[0]).toMatchObject({ id: "tool-1", output: "first output" });
+  });
+
+  it("updates an existing tool card when the same tool call is emitted again", () => {
+    const blocks = [
+      { kind: "tool" as const, id: "ask-1", name: "AskUserQuestion", input: "{\"question\":\"Old?\"}" },
+    ];
+
+    const next = upsertToolCall(blocks, {
+      id: "ask-1",
+      name: "AskUserQuestion",
+      input: "{\"question\":\"New?\",\"options\":[{\"label\":\"Yes\"}]}",
+    });
+
+    expect(next).toHaveLength(1);
+    expect(next[0]).toMatchObject({
+      id: "ask-1",
+      name: "AskUserQuestion",
+      input: "{\"question\":\"New?\",\"options\":[{\"label\":\"Yes\"}]}",
+    });
+  });
+
+  it("creates a streaming assistant turn when an event arrives before one exists", () => {
+    const next = patchLastAssistantTurn(
+      [{ id: "user-1", role: "user", blocks: [{ kind: "text", text: "Pick one" }] }],
+      (turn) => ({
+        ...turn,
+        blocks: [
+          ...turn.blocks,
+          {
+            kind: "tool",
+            id: "ask-1",
+            name: "AskUserQuestion",
+            input: "{\"question\":\"Continue?\",\"options\":[{\"label\":\"Yes\"}]}",
+          },
+        ],
+      }),
+    );
+
+    expect(next).toHaveLength(2);
+    expect(next[1]).toMatchObject({
+      role: "assistant",
+      streaming: true,
+      blocks: [{ kind: "tool", id: "ask-1", name: "AskUserQuestion" }],
+    });
   });
 
   it("serializes assistant tool blocks for exported transcripts", () => {

@@ -32,6 +32,21 @@ export function makeSession(projectId = "default"): ChatSession {
   };
 }
 
+export function patchLastAssistantTurn(
+  turns: ChatTurn[],
+  fn: (turn: ChatTurn) => ChatTurn,
+): ChatTurn[] {
+  const copy = turns.slice();
+  for (let index = copy.length - 1; index >= 0; index -= 1) {
+    if (copy[index].role === "assistant") {
+      copy[index] = fn(copy[index]);
+      return copy;
+    }
+  }
+  copy.push(fn({ id: makeId("turn"), role: "assistant", blocks: [], streaming: true }));
+  return copy;
+}
+
 export function migrateTurn(raw: Partial<ChatTurn> & Record<string, unknown>): ChatTurn {
   const blocks = Array.isArray(raw.blocks) ? raw.blocks as ChatBlock[] : [];
   if (blocks.length === 0 && typeof raw.text === "string" && raw.text.trim()) {
