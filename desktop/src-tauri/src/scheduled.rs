@@ -139,22 +139,32 @@ fn write_record(record: &ArisScheduledRecord) -> Result<(), String> {
     let tmp = dir.join("automation.toml.tmp");
     let text = toml::to_string_pretty(record).map_err(|error| error.to_string())?;
     fs::write(&tmp, text).map_err(|error| error.to_string())?;
-    if path.exists() {
-        fs::remove_file(&path).map_err(|error| error.to_string())?;
-    }
+    // `fs::rename` atomically replaces an existing file on both Unix and Windows
+    // (MoveFileExW + MOVEFILE_REPLACE_EXISTING); removing the destination first
+    // would open a crash window where neither the old nor the new file exists.
     fs::rename(tmp, path).map_err(|error| error.to_string())
 }
 
 fn validate_task_id(id: &str) -> Result<(), String> {
-    if id.is_empty()
-        || id.len() > 128
-        || !id
+    if is_safe_identifier(id) {
+        Ok(())
+    } else {
+        Err("invalid scheduled task id".to_string())
+    }
+}
+
+/// A conservative check for filesystem-bound identifiers (task ids and the chat
+/// session id a task binds to): non-empty, length-bounded, and restricted to
+/// characters that cannot express a path. Rejects separators (`/`, `\`),
+/// drive-relative ids (`C:foo`), the `\\?\` prefix, and bare `.` / `..` — which
+/// closes the Windows path-bypass on session ids. (Real ids are alphanumeric +
+/// `-`/`_`, e.g. `chat-1781326932161-sqk1vz`.)
+fn is_safe_identifier(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id
             .chars()
             .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
-    {
-        return Err("invalid scheduled task id".to_string());
-    }
-    Ok(())
 }
 
 fn normalize_input(
@@ -167,7 +177,7 @@ fn normalize_input(
     if prompt.is_empty() {
         return Err("scheduled task prompt is required".to_string());
     }
-    if session_id.is_empty() || session_id.contains('/') || session_id.contains('\\') {
+    if !is_safe_identifier(&session_id) {
         return Err("scheduled task must be bound to a valid chat session".to_string());
     }
     if !session_exists(&session_id) {
@@ -415,8 +425,8 @@ pub fn scheduled_task_delete(id: String) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        interval_from_rrule, normalize_status, rrule_for_interval, schedule_label_from_rrule,
-        ArisScheduledRecord, ScheduledTask, STATUS_ACTIVE, STATUS_PAUSED,
+        interval_from_rrule, is_safe_identifier, normalize_status, rrule_for_interval,
+        schedule_label_from_rrule, ArisScheduledRecord, ScheduledTask, STATUS_ACTIVE, STATUS_PAUSED,
     };
 
     #[test]
@@ -461,5 +471,17 @@ mod tests {
         assert_eq!(normalize_status("active").unwrap(), STATUS_ACTIVE);
         assert_eq!(normalize_status("PAUSED").unwrap(), STATUS_PAUSED);
         assert!(normalize_status("running").is_err());
+    }
+
+    #[test]
+    fn safe_identifier_accepts_session_ids_and_rejects_path_chars() {
+        assert!(is_safe_identifier("chat-1781326932161-sqk1vz"));
+        assert!(is_safe_identifier("task-1_2"));
+        assert!(!is_safe_identifier(""));
+        assert!(!is_safe_identifier("C:foo")); // drive-relative path
+        assert!(!is_safe_identifier("a/b")); // path separators
+        assert!(!is_safe_identifier("a\\b"));
+        assert!(!is_safe_identifier(".")); // bare dot
+        assert!(!is_safe_identifier(&"x".repeat(129))); // length bound
     }
 }
