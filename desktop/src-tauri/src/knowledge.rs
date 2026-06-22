@@ -82,7 +82,15 @@ pub async fn knowledge_generate(
 fn parse_points(points: Vec<Value>) -> Result<Vec<tools::knowledge::KnowledgePointInput>, String> {
     points
         .into_iter()
-        .map(|point| serde_json::from_value(point).map_err(|e| e.to_string()))
+        .map(|point| {
+            let mut parsed: tools::knowledge::KnowledgePointInput =
+                serde_json::from_value(point).map_err(|e| e.to_string())?;
+            // `knowledge_upsert` only ever writes drafts; never let a caller
+            // smuggle in a `confirmed` status (promotion is `knowledge_confirm`
+            // only). The id is kept so an existing draft can still be updated.
+            parsed.status = None;
+            Ok(parsed)
+        })
         .collect()
 }
 
@@ -91,16 +99,21 @@ fn generate_candidates(base: &std::path::Path, paper_id: &str) -> Result<Value, 
     let paper = library["papers"]
         .as_array()
         .and_then(|papers| {
-            papers
-                .iter()
-                .find(|paper| paper["id"].as_str() == Some(paper_id))
+            papers.iter().find(|paper| {
+                paper["id"]
+                    .as_str()
+                    .is_some_and(|id| id.eq_ignore_ascii_case(paper_id))
+            })
         })
         .ok_or_else(|| format!("paper `{paper_id}` not found in the library"))?;
 
+    // Anchor evidence/source ids to the library's canonical id (case as stored)
+    // so they stay consistent even when the caller's id differs only by case.
+    let canonical_id = paper["id"].as_str().unwrap_or(paper_id).to_string();
     let project_focus = library["projectFocus"].clone();
     let prompt = build_generation_prompt(paper, &project_focus);
     let raw = run_oneshot(GENERATION_SYSTEM, ConversationMessage::user_text(prompt))?;
-    let candidates = parse_candidates(&raw, paper_id)?;
+    let (candidates, dropped) = parse_candidates(&raw, &canonical_id)?;
     if candidates.is_empty() {
         return Ok(json!({
             "candidates": [],
@@ -126,7 +139,13 @@ fn generate_candidates(base: &std::path::Path, paper_id: &str) -> Result<Value, 
             })
         })
         .collect();
-    Ok(json!({ "candidates": cards }))
+    let mut result = json!({ "candidates": cards });
+    if dropped > 0 {
+        result["warning"] = json!(format!(
+            "{dropped} model candidate(s) were dropped (unparseable or missing an evidence anchor)."
+        ));
+    }
+    Ok(result)
 }
 
 fn evidence_json(item: &tools::knowledge::EvidenceInput) -> Value {
@@ -203,12 +222,13 @@ fn build_generation_prompt(paper: &Value, project_focus: &Value) -> String {
 fn parse_candidates(
     raw: &str,
     paper_id: &str,
-) -> Result<Vec<tools::knowledge::KnowledgePointInput>, String> {
+) -> Result<(Vec<tools::knowledge::KnowledgePointInput>, usize), String> {
     let array = extract_json_array(raw)
         .ok_or_else(|| "the model did not return a JSON array of knowledge points".to_string())?;
     let Value::Array(items) = array else {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), 0));
     };
+    let total = items.len();
     let mut points = Vec::new();
     for item in items {
         let Ok(mut point) =
@@ -234,7 +254,8 @@ fn parse_candidates(
         point.source_paper_id = Some(paper_id.to_string());
         points.push(point);
     }
-    Ok(points)
+    let dropped = total - points.len();
+    Ok((points, dropped))
 }
 
 /// Pull the first balanced JSON array out of an LLM reply (handles ```json
@@ -271,7 +292,7 @@ fn extract_json_array(raw: &str) -> Option<Value> {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_json_array, parse_candidates};
+    use super::{extract_json_array, parse_candidates, parse_points};
 
     #[test]
     fn extracts_json_array_from_fenced_reply() {
@@ -290,10 +311,25 @@ mod tests {
              \"evidence\":[{\"paperId\":\"\",\"page\":3,\"quote\":\"grounded\"}]},\
             {\"question\":\"q2\",\"answer\":\"a2\",\"statement\":\"s2\",\"evidence\":[]}\
         ]";
-        let points = parse_candidates(raw, "arxiv:42").expect("parse");
+        let (points, dropped) = parse_candidates(raw, "arxiv:42").expect("parse");
         assert_eq!(points.len(), 1);
+        assert_eq!(dropped, 1, "the anchorless candidate should be counted as dropped");
         assert_eq!(points[0].statement, "s1");
         assert_eq!(points[0].evidence[0].paper_id, "arxiv:42");
         assert_eq!(points[0].source_paper_id.as_deref(), Some("arxiv:42"));
+    }
+
+    #[test]
+    fn upsert_points_are_forced_to_draft_status() {
+        // A caller must not be able to smuggle a `confirmed` status through the
+        // drafts-only upsert path (promotion is `knowledge_confirm` only).
+        let serde_json::Value::Array(items) = serde_json::json!([
+            {"question": "q", "answer": "a", "statement": "s", "status": "confirmed", "evidence": []}
+        ]) else {
+            unreachable!("literal is an array")
+        };
+        let parsed = parse_points(items).expect("parse");
+        assert_eq!(parsed.len(), 1);
+        assert!(parsed[0].status.is_none());
     }
 }
