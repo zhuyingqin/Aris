@@ -1,0 +1,31 @@
+[package]
+name = "notebook"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+runtime = { path = "../runtime" }
+jupyter-protocol = "2.0.1"
+jupyter-zmq-client = { version = "1.0.0", features = ["tokio-runtime"] }
+nbformat = "3.0.0"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "process", "io-util", "time"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+thiserror = "1"
+
+# Mirrors `[workspace.lints]` but downgrades `unsafe_code` from `forbid` to
+# `deny` so the single audited `win_interrupt` FFI module (Windows kernel
+# interrupt via `JPY_INTERRUPT_EVENT`) can opt in with `#[allow(unsafe_code)]`.
+# Unsafe stays denied everywhere else in the crate.
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_panics_doc = "allow"
+missing_errors_doc = "allow"

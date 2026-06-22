@@ -178,7 +178,13 @@ export function cleanChatTitle(raw: string): string {
 }
 
 const TODO_STATUSES: ChatTodoStatus[] = ["pending", "in_progress", "completed"];
-const FILE_CHANGE_TOOL_NAMES = new Set(["write_file", "edit_file", "str_replace_based_edit_tool", "NotebookEdit"]);
+const FILE_CHANGE_TOOL_NAMES = new Set([
+  "write_file",
+  "append_file",
+  "edit_file",
+  "str_replace_based_edit_tool",
+  "NotebookEdit",
+]);
 const SHELL_TOOL_NAMES = new Set(["bash", "PowerShell"]);
 
 function parseTodoList(input: string): ChatTodoItem[] | null {
@@ -346,7 +352,11 @@ function changesFromWriteTool(
   if (!path) return [];
 
   const outputKind = stringField(output, ["type"]);
-  const status: ChatFileChangeStatus = block.name === "write_file" && outputKind === "create"
+  const created = output?.created === true;
+  const status: ChatFileChangeStatus = (
+    (block.name === "write_file" && outputKind === "create")
+    || (block.name === "append_file" && created)
+  )
     ? "added"
     : "modified";
   return [{ path, status, sourceTool: block.name }];

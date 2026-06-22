@@ -127,13 +127,13 @@ fn open_browser(url: &str) {
     // FileProtocolHandler` hands the full URL to the default handler with no
     // shell re-parsing.
     let result = if cfg!(target_os = "windows") {
-        std::process::Command::new("rundll32")
+        crate::process::hidden_command("rundll32")
             .args(["url.dll,FileProtocolHandler", url])
             .spawn()
     } else if cfg!(target_os = "macos") {
-        std::process::Command::new("open").arg(url).spawn()
+        crate::process::hidden_command("open").arg(url).spawn()
     } else {
-        std::process::Command::new("xdg-open").arg(url).spawn()
+        crate::process::hidden_command("xdg-open").arg(url).spawn()
     };
     if let Err(error) = result {
         eprintln!("mail oauth: failed to open browser: {error}");

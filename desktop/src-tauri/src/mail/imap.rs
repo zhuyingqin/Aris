@@ -379,7 +379,11 @@ fn connect_imap(
 
 fn imap_id_command(address: &str) -> String {
     let address = address.trim();
-    let address = if address.is_empty() { "unknown" } else { address };
+    let address = if address.is_empty() {
+        "unknown"
+    } else {
+        address
+    };
     format!(
         "ID (\"name\" {} \"version\" {} \"vendor\" {} \"address\" {})",
         imap_quote("ARIS Mail"),

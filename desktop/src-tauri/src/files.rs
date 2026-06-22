@@ -1,6 +1,25 @@
 use std::path::{Path, PathBuf};
 
+use serde::Serialize;
 use serde_json::json;
+
+const MAX_FILE_EDITOR_BYTES: u64 = 2 * 1024 * 1024;
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileTreeEntry {
+    name: String,
+    path: String,
+    is_dir: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileText {
+    path: String,
+    content: String,
+    bytes: u64,
+}
 
 fn strip_location_suffix(path: &str) -> &str {
     let Some((candidate, suffix)) = path.rsplit_once(':') else {
@@ -45,6 +64,74 @@ fn resolve_open_path(path: &str) -> Result<PathBuf, String> {
     target.canonicalize().map_err(|error| error.to_string())
 }
 
+fn workspace_root() -> Result<PathBuf, String> {
+    crate::state::workspace_dir()
+        .canonicalize()
+        .map_err(|error| error.to_string())
+}
+
+fn display_workspace_path(path: &Path, root: &Path) -> String {
+    path.strip_prefix(root)
+        .ok()
+        .filter(|relative| !relative.as_os_str().is_empty())
+        .unwrap_or(path)
+        .display()
+        .to_string()
+        .replace('\\', "/")
+}
+
+fn resolve_workspace_dir(path: Option<String>) -> Result<PathBuf, String> {
+    let root = workspace_root()?;
+    let raw = path.unwrap_or_default();
+    let trimmed = raw.trim();
+    let candidate = if trimmed.is_empty() || trimmed == "." {
+        root.clone()
+    } else {
+        let path = Path::new(trimmed);
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            root.join(path)
+        }
+    };
+    let target = candidate
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    if !target.is_dir() {
+        return Err(format!("path is not a directory: {}", target.display()));
+    }
+    if !target.starts_with(&root) {
+        return Err("directory is outside the current workspace".to_string());
+    }
+    Ok(target)
+}
+
+fn resolve_workspace_file(path: &str) -> Result<(PathBuf, PathBuf), String> {
+    let root = workspace_root()?;
+    let raw = path.trim().trim_matches(|ch| matches!(ch, '`' | '<' | '>'));
+    if raw.is_empty() {
+        return Err("file path is empty".to_string());
+    }
+    let candidate = {
+        let path = Path::new(raw);
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            root.join(path)
+        }
+    };
+    let target = candidate
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    if !target.is_file() {
+        return Err(format!("path is not a file: {}", target.display()));
+    }
+    if !target.starts_with(&root) {
+        return Err("file is outside the current workspace".to_string());
+    }
+    Ok((root, target))
+}
+
 #[tauri::command]
 pub fn file_open(path: String) -> Result<(), String> {
     let target = resolve_open_path(&path)?;
@@ -60,6 +147,83 @@ pub fn file_open(path: String) -> Result<(), String> {
         .spawn()
         .map(|_| ())
         .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn file_list_dir(path: Option<String>) -> Result<Vec<FileTreeEntry>, String> {
+    let root = workspace_root()?;
+    let target = resolve_workspace_dir(path)?;
+    let mut entries = Vec::new();
+
+    for entry in std::fs::read_dir(target).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let file_name = entry.file_name();
+        let name = file_name.to_string_lossy().into_owned();
+        if tools::layout::is_noisy_workspace_entry(&name) {
+            continue;
+        }
+        let file_type = entry.file_type().map_err(|error| error.to_string())?;
+        if !file_type.is_dir() && !file_type.is_file() {
+            continue;
+        }
+        let path = entry.path();
+        entries.push(FileTreeEntry {
+            name,
+            path: display_workspace_path(&path, &root),
+            is_dir: file_type.is_dir(),
+        });
+    }
+
+    entries.sort_by(|left, right| {
+        tools::layout::root_display_rank(&left.name)
+            .cmp(&tools::layout::root_display_rank(&right.name))
+            .then_with(|| right.is_dir.cmp(&left.is_dir))
+            .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    Ok(entries)
+}
+
+#[tauri::command]
+pub fn file_read_text(path: String) -> Result<FileText, String> {
+    let (root, target) = resolve_workspace_file(&path)?;
+    let metadata = std::fs::metadata(&target).map_err(|error| error.to_string())?;
+    if metadata.len() > MAX_FILE_EDITOR_BYTES {
+        return Err(format!(
+            "file is too large for the Lab editor ({} bytes, limit {} bytes)",
+            metadata.len(),
+            MAX_FILE_EDITOR_BYTES
+        ));
+    }
+    let content = std::fs::read_to_string(&target)
+        .map_err(|_| "file is not valid UTF-8 text; open it in its native app".to_string())?;
+    Ok(FileText {
+        path: display_workspace_path(&target, &root),
+        content,
+        bytes: metadata.len(),
+    })
+}
+
+#[tauri::command]
+pub fn file_write_text(path: String, content: String) -> Result<FileText, String> {
+    if content.len() as u64 > MAX_FILE_EDITOR_BYTES {
+        return Err(format!(
+            "content is too large for the Lab editor ({} bytes, limit {} bytes)",
+            content.len(),
+            MAX_FILE_EDITOR_BYTES
+        ));
+    }
+    let (root, target) = resolve_workspace_file(&path)?;
+    std::fs::write(&target, content).map_err(|error| error.to_string())?;
+    let content = std::fs::read_to_string(&target).map_err(|error| error.to_string())?;
+    let bytes = std::fs::metadata(&target)
+        .map_err(|error| error.to_string())?
+        .len();
+    Ok(FileText {
+        path: display_workspace_path(&target, &root),
+        content,
+        bytes,
+    })
 }
 
 /// Search files by glob pattern. Requires a non-empty query to avoid

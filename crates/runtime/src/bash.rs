@@ -62,13 +62,28 @@ pub struct BashCommandOutput {
 }
 
 pub fn execute_bash(input: BashCommandInput) -> io::Result<BashCommandOutput> {
+    execute_bash_with_cancel(input, || false)
+}
+
+pub fn execute_bash_with_cancel(
+    input: BashCommandInput,
+    should_cancel: impl Fn() -> bool,
+) -> io::Result<BashCommandOutput> {
     // Pre-execution safety check
     if let Some(rejection) = check_dangerous_command(&input.command) {
         return Err(io::Error::new(io::ErrorKind::PermissionDenied, rejection));
     }
-
     let cwd = env::current_dir()?;
     let sandbox_status = sandbox_status_for_input(&input, &cwd);
+    if should_cancel() {
+        return Ok(interrupted_output(
+            String::new(),
+            String::from("Command interrupted by user"),
+            Some(String::from("interrupted")),
+            input.dangerously_disable_sandbox,
+            sandbox_status,
+        ));
+    }
 
     if input.run_in_background.unwrap_or(false) {
         let mut child = prepare_command(&input.command, &cwd, &sandbox_status, false);
@@ -100,20 +115,22 @@ pub fn execute_bash(input: BashCommandInput) -> io::Result<BashCommandOutput> {
         });
     }
 
-    execute_bash_blocking(input, sandbox_status, cwd)
+    execute_bash_blocking(input, sandbox_status, cwd, should_cancel)
 }
 
 fn execute_bash_blocking(
     input: BashCommandInput,
     sandbox_status: SandboxStatus,
     cwd: std::path::PathBuf,
+    should_cancel: impl Fn() -> bool,
 ) -> io::Result<BashCommandOutput> {
     let mut command = prepare_command(&input.command, &cwd, &sandbox_status, true);
-    let result = crate::run_managed_command(
+    let result = crate::run_managed_command_with_cancel(
         &mut command,
         format!("bash: {}", truncate_label(&input.command)),
         input.timeout.map(Duration::from_millis),
         true,
+        should_cancel,
     )?;
 
     if result.timed_out {

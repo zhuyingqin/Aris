@@ -5,7 +5,7 @@
 
 [package]
 name = "aris-desktop"
-version = "0.3.4"
+version = "0.4.0"
 edition = "2021"
 license = "MIT"
 description = "ARIS Studio — desktop UI for designing and monitoring agent teams & workflows"
@@ -30,13 +30,16 @@ sha2 = "0.10"
 rand = "0.8"
 urlencoding = "2"
 native-tls = "0.2"
-windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_System_Console", "Win32_UI_WindowsAndMessaging"] }
 # Coordination kernel + session/skills primitives + chat engine building
 # blocks — reused as libraries, no business logic duplicated.
 tools = { path = "../../crates/tools" }
+notebook = { path = "../../crates/notebook" }
 runtime = { path = "../../crates/runtime" }
 api = { path = "../../crates/api" }
 aris-executor = { path = "../../crates/executor" }
 aris-chat = { path = "../../crates/chat" }
 aris-commands = { package = "commands", path = "../../crates/commands" }
 tokio = { version = "1", features = ["rt-multi-thread"] }
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"

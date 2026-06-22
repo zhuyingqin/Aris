@@ -5,6 +5,7 @@ import {
   isTauri,
   onChatDelta,
   onChatDone,
+  onChatError,
   onChatThinkingDelta,
   onChatPermissionRequest,
   onChatPermissionResolved,
@@ -27,6 +28,7 @@ export function useChatStream({ patchAssistant, onComplete, onError }: StreamHan
   const stopRequested = useRef(new Set<string>());
   const queues = useRef(new Map<string, Array<{ kind: "text" | "thinking"; delta: string }>>());
   const flushTimers = useRef(new Map<string, number>());
+  const listenerGeneration = useRef(0);
 
   const flush = useCallback((sessionId: string) => {
     const timer = flushTimers.current.get(sessionId);
@@ -65,14 +67,20 @@ export function useChatStream({ patchAssistant, onComplete, onError }: StreamHan
 
   useEffect(() => {
     if (!isTauri()) return;
+    const generation = listenerGeneration.current + 1;
+    listenerGeneration.current = generation;
+    const isCurrentListener = () => listenerGeneration.current === generation;
     const unlisteners = [
       onChatDelta(({ sessionId, text }) => {
+        if (!isCurrentListener()) return;
         enqueue(sessionId, { kind: "text", delta: text });
       }),
       onChatThinkingDelta(({ sessionId, thinking }) => {
+        if (!isCurrentListener()) return;
         enqueue(sessionId, { kind: "thinking", delta: thinking });
       }),
       onChatTool((tool) => {
+        if (!isCurrentListener()) return;
         flush(tool.sessionId);
         patchAssistant(tool.sessionId, (turn) => ({
           ...turn,
@@ -80,6 +88,8 @@ export function useChatStream({ patchAssistant, onComplete, onError }: StreamHan
         }));
       }),
       onChatToolResult((result) => {
+        if (!isCurrentListener()) return;
+        flush(result.sessionId);
         patchAssistant(result.sessionId, (turn) => {
           const blocks = appendToolOutput(
             turn.blocks,
@@ -92,6 +102,7 @@ export function useChatStream({ patchAssistant, onComplete, onError }: StreamHan
         });
       }),
       onChatPermissionRequest((request) => {
+        if (!isCurrentListener()) return;
         flush(request.sessionId);
         patchAssistant(request.sessionId, (turn) => {
           if (turn.blocks.some((block) => block.kind === "permission" && block.id === request.promptId)) {
@@ -115,6 +126,7 @@ export function useChatStream({ patchAssistant, onComplete, onError }: StreamHan
         });
       }),
       onChatPermissionResolved((event) => {
+        if (!isCurrentListener()) return;
         patchAssistant(event.sessionId, (turn) => ({
           ...turn,
           blocks: turn.blocks.map((block) => (
@@ -124,15 +136,30 @@ export function useChatStream({ patchAssistant, onComplete, onError }: StreamHan
           )),
         }));
       }),
-      onChatDone(({ sessionId }) => flush(sessionId)),
+      onChatDone(({ sessionId }) => {
+        if (!isCurrentListener()) return;
+        flush(sessionId);
+      }),
+      // Authoritative failure signal from the backend. The `chatSend` promise
+      // also rejects, and `onError` is idempotent (it sets the same turn
+      // error), so surfacing here is safe and guarantees the failure renders
+      // even if the rejection path is delayed or the listener set was swapped
+      // mid-turn. `stopped: false` — a real backend error is never an expected
+      // user stop; `visibleTurnError` only hides cancellations when stopped.
+      onChatError(({ sessionId, message }) => {
+        if (!isCurrentListener()) return;
+        flush(sessionId);
+        onError(sessionId, message, stopRequested.current.has(sessionId));
+      }),
     ];
     return () => {
+      if (listenerGeneration.current === generation) listenerGeneration.current += 1;
       unlisteners.forEach((promise) => promise.then((unlisten) => unlisten()).catch(() => undefined));
       flushTimers.current.forEach((timer) => window.clearTimeout(timer));
       flushTimers.current.clear();
       queues.current.clear();
     };
-  }, [enqueue, flush, patchAssistant]);
+  }, [enqueue, flush, onError, patchAssistant]);
 
   const run = useCallback(async (sessionId: string, message: string | ChatSendRequest) => {
     if (runningSessions.current.has(sessionId)) return false;
@@ -210,6 +237,15 @@ export function appendToolOutput(
   if (index >= 0) {
     const block = copy[index];
     if (block.kind === "tool") copy[index] = { ...block, output, isError };
+    return copy;
   }
-  return copy;
+  if (id && copy.some((block) => (
+    block.kind === "tool"
+    && block.id === id
+    && block.name === name
+    && block.output !== undefined
+  ))) {
+    return copy;
+  }
+  return [...copy, { kind: "tool", id, name, input: "{}", output, isError }];
 }

@@ -4,6 +4,7 @@ mod connectors;
 mod engine;
 mod files;
 mod knowledge;
+mod lab;
 mod literature;
 mod mail;
 mod mcp;
@@ -16,7 +17,10 @@ mod studio;
 mod watcher;
 
 use std::path::PathBuf;
+use std::sync::Once;
 use tauri::{image::Image, Manager};
+
+static SHUTDOWN_CLEANUP: Once = Once::new();
 
 fn prepend_existing_path_entries(paths: impl IntoIterator<Item = PathBuf>) {
     let existing = std::env::var_os("PATH").unwrap_or_default();
@@ -35,11 +39,11 @@ fn prepend_existing_path_entries(paths: impl IntoIterator<Item = PathBuf>) {
 }
 
 /// Extend the process PATH with common user-installed tool directories so that
-/// MCP stdio servers (node, npx, uvx, python, etc.) can be found when the app
-/// is launched from a desktop shortcut on Windows, which does not inherit the
-/// full shell PATH.
+/// MCP stdio servers and Jupyter kernelspecs can find node, npx, uvx, python,
+/// and helper scripts when the app is launched from a desktop shortcut on
+/// Windows, which does not inherit the full shell PATH.
 #[cfg(windows)]
-fn augment_path_for_mcp() {
+fn augment_path_for_desktop_tools() {
     let home = runtime::home_dir();
     let candidates = [
         // Node.js via nvm-windows
@@ -53,10 +57,16 @@ fn augment_path_for_mcp() {
         format!("{home}\\AppData\\Roaming\\uv\\bin"),
         // pipx
         format!("{home}\\AppData\\Local\\Packages\\PythonSoftwareFoundation.Python.3.12_qbz5n2kfra8p0\\LocalCache\\local-packages\\Python312\\Scripts"),
-        // Python Launcher / standard Python installs
+        // Python Launcher / standard Python installs. Many kernelspecs use
+        // "python" instead of an absolute interpreter path.
+        format!("{home}\\AppData\\Local\\Programs\\Python\\Python313"),
+        format!("{home}\\AppData\\Local\\Programs\\Python\\Python313\\Scripts"),
         format!("{home}\\AppData\\Local\\Programs\\Python\\Python312"),
+        format!("{home}\\AppData\\Local\\Programs\\Python\\Python312\\Scripts"),
         format!("{home}\\AppData\\Local\\Programs\\Python\\Python311"),
+        format!("{home}\\AppData\\Local\\Programs\\Python\\Python311\\Scripts"),
         format!("{home}\\AppData\\Local\\Programs\\Python\\Python310"),
+        format!("{home}\\AppData\\Local\\Programs\\Python\\Python310\\Scripts"),
         // Scoop shims
         format!("{home}\\scoop\\shims"),
     ];
@@ -64,15 +74,16 @@ fn augment_path_for_mcp() {
 }
 
 #[cfg(not(windows))]
-fn augment_path_for_mcp() {}
+fn augment_path_for_desktop_tools() {}
 
-fn augment_resource_path_for_mcp(app: &tauri::App) {
-    let Ok(resource_dir) = app.path().resource_dir() else {
-        return;
-    };
+fn resource_dir(app: &tauri::App) -> Option<PathBuf> {
+    app.path().resource_dir().ok()
+}
+
+fn augment_resource_path_for_mcp(resource_dir: &std::path::Path) {
     prepend_existing_path_entries([resource_dir.join("bin"), resource_dir.join("node")]);
-    std::env::set_var("ARIS_RESOURCE_DIR", &resource_dir);
-    configure_bundled_tectonic_environment(&resource_dir);
+    std::env::set_var("ARIS_RESOURCE_DIR", resource_dir);
+    configure_bundled_tectonic_environment(resource_dir);
 }
 
 /// Point Tectonic's on-demand package cache at a user-writable directory. The
@@ -113,15 +124,57 @@ fn valid_tectonic_override_exists() -> bool {
     std::env::var_os("ARIS_TECTONIC").is_some_and(|value| PathBuf::from(value).is_file())
 }
 
+fn cleanup_before_exit(app_handle: &tauri::AppHandle) {
+    SHUTDOWN_CLEANUP.call_once(|| {
+        let chat_state = app_handle.state::<engine::ChatState>();
+        engine::cancel_all_running_turns(chat_state.inner());
+        notebook::KernelManager::shutdown_all();
+        runtime::terminate_all_managed_processes();
+    });
+}
+
+/// Give the GUI process a single hidden console on Windows so the console
+/// programs we spawn — including ones from third-party crates that don't set
+/// `CREATE_NO_WINDOW` (e.g. Jupyter path discovery) — inherit it instead of each
+/// flashing its own console window. No-op when a console already exists (e.g.
+/// `tauri dev` launched from a terminal) or on non-Windows.
+#[cfg(windows)]
+fn hide_stray_console() {
+    use windows_sys::Win32::System::Console::{AllocConsole, GetConsoleWindow};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE};
+
+    // SAFETY: plain Win32 calls. We allocate a console only when the process has
+    // none, then immediately hide its window so it never shows persistently.
+    unsafe {
+        if GetConsoleWindow().is_null() && AllocConsole() != 0 {
+            let console = GetConsoleWindow();
+            if !console.is_null() {
+                ShowWindow(console, SW_HIDE);
+            }
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn hide_stray_console() {}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    augment_path_for_mcp();
+    hide_stray_console();
+    augment_path_for_desktop_tools();
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(engine::ChatState::default())
         .manage(projects::ProjectState::default())
         .setup(|app| {
-            augment_resource_path_for_mcp(app);
+            if let Some(resource_dir) = resource_dir(app) {
+                augment_resource_path_for_mcp(&resource_dir);
+                if let Err(error) = config::apply_bundled_internal_config(&resource_dir) {
+                    eprintln!("ARIS internal config import skipped: {error}");
+                }
+            }
             configure_tectonic_environment();
             state::apply_bundle_cache_environment();
             // Export config-held keys (e.g. SCOPUS_API_KEY) before any
@@ -196,12 +249,36 @@ pub fn run() {
             knowledge::knowledge_confirm,
             knowledge::knowledge_reject,
             knowledge::knowledge_generate,
+            lab::lab_list_kernels,
+            lab::lab_list_kernelspecs,
+            lab::lab_list_notebooks,
+            lab::lab_load_notebook,
+            lab::lab_create_notebook,
+            lab::lab_save_notebook,
+            lab::lab_edit_cell,
+            lab::lab_set_kernelspec,
+            lab::lab_start_kernel,
+            lab::lab_execute_cell,
+            lab::lab_shutdown_kernel,
+            lab::lab_interrupt_kernel,
+            lab::lab_start_file_kernel,
+            lab::lab_execute_file,
+            lab::lab_interrupt_file_kernel,
+            lab::lab_shutdown_file_kernel,
+            lab::lab_inspect_file_vars,
+            lab::lab_inspect_vars,
+            lab::lab_run_all,
+            lab::runs_load,
+            lab::runs_save,
+            lab::lab_run_sweep,
+            lab::lab_export_sweep_manifest,
             engine::chat_status,
             engine::chat_model_options,
             engine::chat_model_set,
             engine::chat_permission_get,
             engine::chat_permission_set,
             engine::chat_permission_respond,
+            engine::chat_question_respond,
             engine::project_permission_get,
             engine::project_permission_set,
             engine::chat_command_specs,
@@ -215,6 +292,9 @@ pub fn run() {
             engine::chat_set_context,
             engine::chat_delete,
             engine::chat_cancel,
+            files::file_list_dir,
+            files::file_read_text,
+            files::file_write_text,
             files::file_search,
             files::file_read,
             files::file_open,
@@ -224,9 +304,7 @@ pub fn run() {
         .expect("error while building ARIS Studio")
         .run(|app_handle, event| {
             if matches!(event, tauri::RunEvent::ExitRequested { .. }) {
-                let chat_state = app_handle.state::<engine::ChatState>();
-                engine::cancel_all_running_turns(chat_state.inner());
-                runtime::terminate_all_managed_processes();
+                cleanup_before_exit(app_handle);
             }
         });
 }
@@ -244,10 +322,8 @@ mod tests {
     }
 
     fn temp_resource_dir(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "aris-tectonic-env-{name}-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("aris-tectonic-env-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("bin")).expect("create temp resource bin");
         dir

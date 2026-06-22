@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { act, cleanup, renderHook } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   chatSend: vi.fn(),
@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
   onChatPermissionRequest: vi.fn(),
   onChatPermissionResolved: vi.fn(),
   onChatDone: vi.fn(),
+  onChatError: vi.fn(),
 }));
 
 vi.mock("../api/tauri", () => ({
@@ -26,9 +27,30 @@ vi.mock("../api/tauri", () => ({
   onChatPermissionRequest: mocks.onChatPermissionRequest,
   onChatPermissionResolved: mocks.onChatPermissionResolved,
   onChatDone: mocks.onChatDone,
+  onChatError: mocks.onChatError,
 }));
 
 import { useChatStream } from "./useChatStream";
+
+const listenerMocks = [
+  mocks.onChatDelta,
+  mocks.onChatThinkingDelta,
+  mocks.onChatTool,
+  mocks.onChatToolResult,
+  mocks.onChatPermissionRequest,
+  mocks.onChatPermissionResolved,
+  mocks.onChatDone,
+  mocks.onChatError,
+];
+
+beforeEach(() => {
+  // Every listener must return a thenable: the hook's cleanup calls
+  // `.then()` on each subscription handle. Individual tests override with
+  // mockImplementation where they need to capture handlers.
+  for (const listener of listenerMocks) {
+    listener.mockReturnValue(Promise.resolve(() => undefined));
+  }
+});
 
 afterEach(() => {
   cleanup();
@@ -36,6 +58,59 @@ afterEach(() => {
 });
 
 describe("useChatStream concurrent sessions", () => {
+  it("ignores stale Tauri listeners after a subscription refresh", () => {
+    const deltaHandlers: Array<(event: { sessionId: string; text: string }) => void> = [];
+    const doneHandlers: Array<(event: { sessionId: string; text: string }) => void> = [];
+    mocks.onChatDelta.mockImplementation((handler) => {
+      deltaHandlers.push(handler);
+      return new Promise<() => void>(() => undefined);
+    });
+    mocks.onChatDone.mockImplementation((handler) => {
+      doneHandlers.push(handler);
+      return new Promise<() => void>(() => undefined);
+    });
+    for (const listener of [
+      mocks.onChatThinkingDelta,
+      mocks.onChatTool,
+      mocks.onChatToolResult,
+      mocks.onChatPermissionRequest,
+      mocks.onChatPermissionResolved,
+    ]) {
+      listener.mockReturnValue(new Promise<() => void>(() => undefined));
+    }
+
+    const firstPatchAssistant = vi.fn((_sessionId: string, patch) => {
+      patch({ id: "assistant", role: "assistant", blocks: [], streaming: true });
+    });
+    const secondPatchAssistant = vi.fn((_sessionId: string, patch) => {
+      patch({ id: "assistant", role: "assistant", blocks: [], streaming: true });
+    });
+
+    const { rerender } = renderHook(
+      ({ patchAssistant }) => useChatStream({
+        patchAssistant,
+        onComplete: vi.fn(),
+        onError: vi.fn(),
+      }),
+      { initialProps: { patchAssistant: firstPatchAssistant } },
+    );
+    rerender({ patchAssistant: secondPatchAssistant });
+
+    act(() => {
+      for (const handler of deltaHandlers) {
+        handler({ sessionId: "chat-a", text: "duplicated delta" });
+      }
+      for (const handler of doneHandlers) {
+        handler({ sessionId: "chat-a", text: "" });
+      }
+    });
+
+    expect(deltaHandlers).toHaveLength(2);
+    expect(doneHandlers).toHaveLength(2);
+    expect(firstPatchAssistant).not.toHaveBeenCalled();
+    expect(secondPatchAssistant).toHaveBeenCalledTimes(1);
+  });
+
   it("runs two sessions concurrently and routes deltas by session id", async () => {
     let deltaHandler: ((event: { sessionId: string; text: string }) => void) | null = null;
     let doneHandler: ((event: { sessionId: string; text: string }) => void) | null = null;
@@ -140,6 +215,67 @@ describe("useChatStream concurrent sessions", () => {
     await act(async () => {
       await result.current.run("chat-large", "go");
     });
+  });
+
+  it("reports provider errors through onError instead of completing silently", async () => {
+    for (const listener of [
+      mocks.onChatDelta,
+      mocks.onChatThinkingDelta,
+      mocks.onChatTool,
+      mocks.onChatToolResult,
+      mocks.onChatPermissionRequest,
+      mocks.onChatPermissionResolved,
+      mocks.onChatDone,
+    ]) {
+      listener.mockReturnValue(Promise.resolve(() => undefined));
+    }
+    mocks.chatSend.mockRejectedValue(new Error("provider stream failed"));
+
+    const onComplete = vi.fn();
+    const onError = vi.fn();
+    const { result } = renderHook(() => useChatStream({
+      patchAssistant: vi.fn(),
+      onComplete,
+      onError,
+    }));
+
+    let completed!: boolean;
+    await act(async () => {
+      completed = await result.current.run("chat-error", "go");
+    });
+
+    expect(completed).toBe(false);
+    expect(onComplete).not.toHaveBeenCalled();
+    expect(onError).toHaveBeenCalledWith(
+      "chat-error",
+      "Error: provider stream failed",
+      false,
+    );
+  });
+
+  it("surfaces a backend chat-error event through onError", async () => {
+    let errorHandler: ((event: { sessionId: string; message: string }) => void) | undefined;
+    mocks.onChatError.mockImplementation((handler) => {
+      errorHandler = handler;
+      return Promise.resolve(() => undefined);
+    });
+
+    const onError = vi.fn();
+    renderHook(() => useChatStream({
+      patchAssistant: vi.fn(),
+      onComplete: vi.fn(),
+      onError,
+    }));
+
+    act(() => {
+      errorHandler?.({ sessionId: "chat-net", message: "OpenAI request failed: connection reset" });
+    });
+
+    expect(onError).toHaveBeenCalledWith(
+      "chat-net",
+      "OpenAI request failed: connection reset",
+      false,
+    );
   });
 
   it("stops only the selected session and updates local state immediately", async () => {

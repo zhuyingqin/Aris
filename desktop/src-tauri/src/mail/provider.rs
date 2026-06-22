@@ -207,8 +207,7 @@ pub fn list(
     page_token: Option<&str>,
 ) -> Result<MailMessageList, String> {
     let session = resolve(account_id)?;
-    let result =
-        backend(session.provider).list(session.tool_token(), folder, query, page_token)?;
+    let result = backend(session.provider).list(session.tool_token(), folder, query, page_token)?;
     // Background-prefetch bodies for the visible page so the next click is
     // instant. Search results are skipped — they shift on every refresh and
     // prefetching them would mostly waste quota on results the user won't

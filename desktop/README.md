@@ -53,6 +53,17 @@ npm run dev
 
 Some features need the Tauri backend and will only work in `npm run tauri dev`.
 
+Lab UI changes can be previewed without compiling or launching the Tauri
+executable:
+
+```powershell
+npm run dev:lab
+```
+
+This opens Vite at `http://127.0.0.1:5173/?labPreview=1` and uses mock Lab data
+for notebooks, files, kernels, Python execution output, and variables. The same
+mode can be enabled on any Vite URL with `?labPreview=1`.
+
 ## Build
 
 ```powershell
@@ -64,6 +75,27 @@ Build outputs:
 
 - `src-tauri\target\release\aris-desktop.exe`
 - `src-tauri\target\release\bundle\nsis\ARIS Studio_0.2.0_x64-setup.exe`
+
+## GitHub Updater Releases
+
+ARIS Studio uses the Tauri updater plugin and checks:
+
+```text
+https://github.com/zhuyingqin/Aris/releases/latest/download/latest.json
+```
+
+The updater public key is embedded in `src-tauri/tauri.conf.json`. Keep the matching private key out of git and set it as the GitHub repository secret `TAURI_SIGNING_PRIVATE_KEY` before publishing tagged releases. Store the private key as one line with whitespace removed. If the key was generated with a password, also set `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
+
+For local signed bundle checks:
+
+```powershell
+cd desktop
+$env:TAURI_SIGNING_PRIVATE_KEY = [System.IO.File]::ReadAllText("updater.key") -replace "\s", ""
+npx tauri build --bundles nsis --ci
+npm run generate:updater-json -- src-tauri/target/release/bundle/nsis
+```
+
+The GitHub `Release` workflow publishes the NSIS installer, its `.sig`, and `latest.json` to the tag release. The Settings page can then check, download, install, and restart into the new version.
 
 ## Checks
 

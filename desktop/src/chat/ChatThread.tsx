@@ -26,6 +26,7 @@ interface Props {
   onRetry: (turn: ChatTurn) => void;
   onContinue: () => void;
   onPermissionRespond: (promptId: string, allow: boolean) => void;
+  onQuestionRespond: (toolUseId: string, answer: string) => void;
 }
 
 export default function ChatThread({
@@ -38,6 +39,7 @@ export default function ChatThread({
   onRetry,
   onContinue,
   onPermissionRespond,
+  onQuestionRespond,
 }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [following, setFollowing] = useState(true);
@@ -157,6 +159,7 @@ export default function ChatThread({
                     onRetry={onRetry}
                     onContinue={onContinue}
                     onPermissionRespond={onPermissionRespond}
+                    onQuestionRespond={onQuestionRespond}
                   />
                 </div>
               );

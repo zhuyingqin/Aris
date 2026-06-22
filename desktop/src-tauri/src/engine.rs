@@ -3,7 +3,8 @@
 //! The provider executor lives in `aris-executor`; this module only adapts it
 //! to Tauri events and UI-facing commands.
 //! Streaming surface (Tauri events): `chat-delta`, `chat-thinking-delta`,
-//! `chat-tool`, `chat-tool-result`, `chat-permission-request`, `chat-done`.
+//! `chat-tool`, `chat-tool-result`, `chat-permission-request`, `chat-done`,
+//! `chat-error`.
 
 use std::{
     collections::HashMap,
@@ -35,6 +36,9 @@ pub struct ChatState {
     permission_modes: Mutex<HashMap<String, PermissionMode>>,
     running_turns: Mutex<HashMap<String, Arc<AtomicBool>>>,
     permission_prompts: Arc<Mutex<HashMap<String, Sender<PermissionPromptDecision>>>>,
+    // Pending `AskUserQuestion` tool calls, keyed by the model's tool-use id, so
+    // `chat_question_respond` can deliver the user's answer to the blocked tool.
+    question_prompts: QuestionPromptRegistry,
 }
 
 const MAX_CACHED_CHAT_SESSIONS: usize = 4;
@@ -46,6 +50,7 @@ impl Default for ChatState {
             permission_modes: Mutex::new(HashMap::new()),
             running_turns: Mutex::new(HashMap::new()),
             permission_prompts: Arc::new(Mutex::new(HashMap::new())),
+            question_prompts: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -130,6 +135,7 @@ fn denied_tool_message(tool_name: &str) -> String {
 
 struct KernelToolExecutor {
     extra_blocked_tools: &'static [&'static str],
+    cancelled: Option<Arc<AtomicBool>>,
 }
 
 impl ToolExecutor for KernelToolExecutor {
@@ -146,11 +152,35 @@ impl ToolExecutor for KernelToolExecutor {
         if is_blocked_tool(tool_name, self.extra_blocked_tools) {
             return Err(ToolError::new(denied_tool_message(tool_name)));
         }
+        if self.is_cancelled() {
+            return Err(ToolError::interrupted_by_user());
+        }
         let value: Value = serde_json::from_str(input).unwrap_or(Value::Null);
         if crate::mail::is_mail_tool(tool_name) {
             return crate::mail::execute_mail_tool(tool_name, &value).map_err(ToolError::new);
         }
-        tools::execute_tool(tool_name, &value).map_err(ToolError::new)
+        let cancelled = self.cancelled.clone();
+        let should_cancel = || {
+            runtime::is_interrupted()
+                || cancelled
+                    .as_ref()
+                    .is_some_and(|flag| flag.load(Ordering::SeqCst))
+        };
+        tools::execute_tool_with_cancel(tool_name, &value, &should_cancel).map_err(|error| {
+            if should_cancel() || error.eq_ignore_ascii_case("interrupted by user") {
+                ToolError::interrupted_by_user()
+            } else {
+                ToolError::new(error)
+            }
+        })
+    }
+
+    fn is_cancelled(&self) -> bool {
+        runtime::is_interrupted()
+            || self
+                .cancelled
+                .as_ref()
+                .is_some_and(|flag| flag.load(Ordering::SeqCst))
     }
 }
 
@@ -158,6 +188,7 @@ struct DesktopToolExecutor<T> {
     app: AppHandle,
     session_id: String,
     cancelled: Arc<AtomicBool>,
+    questions: QuestionPromptRegistry,
     inner: T,
 }
 
@@ -165,6 +196,57 @@ struct DesktopToolExecutor<T> {
 struct ToolOutputArtifact {
     path: String,
     bytes: u64,
+}
+
+impl<T> DesktopToolExecutor<T> {
+    /// Block this tool call until the user answers the question, then return
+    /// their answer as the tool result so the turn can resume. Mirrors the
+    /// permission prompt's wait loop: poll for an answer while honoring
+    /// cancellation. The `chat-tool` card was already emitted from the streamed
+    /// tool call, so no extra event is needed here — the answer is surfaced by
+    /// the caller's `chat-tool-result` emit.
+    fn ask_user_question(&self, tool_use_id: &str, input: &str) -> Result<String, ToolError> {
+        if tool_use_id.is_empty() {
+            return Err(ToolError::new(
+                "AskUserQuestion is unavailable: the tool call has no id to answer.",
+            ));
+        }
+        // Fail fast on malformed input rather than blocking on a card the UI
+        // cannot render.
+        if serde_json::from_str::<Value>(input).is_err() {
+            return Err(ToolError::new("AskUserQuestion input must be valid JSON."));
+        }
+        let (tx, rx) = mpsc::channel::<String>();
+        match self.questions.lock() {
+            Ok(mut prompts) => {
+                prompts.insert(tool_use_id.to_string(), tx);
+            }
+            Err(_) => return Err(ToolError::new("question prompt registry is unavailable")),
+        }
+        let cleanup = || {
+            if let Ok(mut prompts) = self.questions.lock() {
+                prompts.remove(tool_use_id);
+            }
+        };
+        loop {
+            match rx.recv_timeout(Duration::from_millis(200)) {
+                Ok(answer) => {
+                    cleanup();
+                    return Ok(answer);
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    if self.cancelled.load(Ordering::SeqCst) || runtime::is_interrupted() {
+                        cleanup();
+                        return Err(ToolError::interrupted_by_user());
+                    }
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    cleanup();
+                    return Err(ToolError::new("question prompt was dismissed"));
+                }
+            }
+        }
+    }
 }
 
 impl<T> ToolExecutor for DesktopToolExecutor<T>
@@ -181,22 +263,42 @@ where
         tool_name: &str,
         input: &str,
     ) -> Result<String, ToolError> {
-        if self.cancelled.load(Ordering::SeqCst) {
-            return Err(ToolError::new("interrupted by user"));
+        if self.is_cancelled() {
+            return Err(ToolError::interrupted_by_user());
         }
-        match self.inner.execute_with_id(tool_use_id, tool_name, input) {
+        // `AskUserQuestion` is handled here, not by the shared registry: it
+        // blocks for the user's answer and resumes the turn with it. The
+        // `chat-tool` card already rendered from the streamed call; the answer
+        // flows back through the normal `chat-tool-result` emit below.
+        let inner_result = if tool_name == ASK_USER_QUESTION_TOOL {
+            self.ask_user_question(tool_use_id, input)
+        } else {
+            self.inner.execute_with_id(tool_use_id, tool_name, input)
+        };
+        match inner_result {
             Ok(output) => {
+                if self.is_cancelled() {
+                    return Err(ToolError::interrupted_by_user());
+                }
                 let artifact = persist_tool_output_if_large(tool_use_id, tool_name, &output);
                 let context_output =
                     compact_tool_output_for_context(tool_name, output, artifact.as_ref());
                 let ui_output = tool_output_for_ui(&context_output, artifact.as_ref());
+                let is_error = tool_output_indicates_error(tool_name, &context_output);
                 let _ = self.app.emit(
                     "chat-tool-result",
-                    json!({ "sessionId": self.session_id, "id": tool_use_id, "name": tool_name, "output": ui_output, "isError": false }),
+                    json!({ "sessionId": self.session_id, "id": tool_use_id, "name": tool_name, "output": ui_output, "isError": is_error }),
                 );
-                Ok(context_output)
+                if is_error {
+                    Err(ToolError::new(context_output))
+                } else {
+                    Ok(context_output)
+                }
             }
             Err(err) => {
+                if err.is_interrupted() {
+                    return Err(err);
+                }
                 let _ = self.app.emit(
                     "chat-tool-result",
                     json!({ "sessionId": self.session_id, "id": tool_use_id, "name": tool_name, "output": truncate(&err.to_string(), 4000), "isError": true }),
@@ -204,6 +306,10 @@ where
                 Err(err)
             }
         }
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst) || self.inner.is_cancelled()
     }
 }
 
@@ -237,15 +343,24 @@ impl aris_executor::StreamObserver for DesktopStreamObserver {
     }
 
     fn on_tool_call(&mut self, id: &str, name: &str, input: &str) -> Result<(), RuntimeError> {
+        let ui_input = tool_input_for_ui(name, input);
         let _ = self.app.emit(
             "chat-tool",
-            json!({ "sessionId": self.session_id, "id": id, "name": name, "input": input }),
+            json!({ "sessionId": self.session_id, "id": id, "name": name, "input": ui_input }),
         );
         Ok(())
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
     }
 }
 
 type PermissionPromptRegistry = Arc<Mutex<HashMap<String, Sender<PermissionPromptDecision>>>>;
+
+/// Channels delivering `AskUserQuestion` answers from `chat_question_respond` to
+/// the tool call blocked in [`DesktopToolExecutor`], keyed by the tool-use id.
+type QuestionPromptRegistry = Arc<Mutex<HashMap<String, Sender<String>>>>;
 
 fn next_permission_prompt_id() -> String {
     let nanos = SystemTime::now()
@@ -336,7 +451,6 @@ impl PermissionPrompter for DesktopPermissionPrompter {
                         }
                         let reason = "interrupted by user".to_string();
                         self.emit_resolved(&prompt_id, "deny");
-                        self.emit_skipped_tool_result(request, &reason);
                         return PermissionPromptDecision::Deny { reason };
                     }
                 }
@@ -387,7 +501,63 @@ fn tool_specs_for(extra_blocked_tools: &'static [&'static str]) -> Vec<tools::To
             .into_iter()
             .filter(|spec| !is_blocked_tool(spec.name, extra_blocked_tools)),
     );
+    // Desktop-only: the interactive surface can pause a turn to ask the user a
+    // question. Never registered for autonomous runs (no user to answer).
+    if !is_blocked_tool(ASK_USER_QUESTION_TOOL, extra_blocked_tools) {
+        specs.push(ask_user_question_tool_spec());
+    }
     specs
+}
+
+const ASK_USER_QUESTION_TOOL: &str = "AskUserQuestion";
+
+/// The interactive `AskUserQuestion` tool: the model pauses the turn to ask the
+/// user a question with selectable options, and the turn resumes with the
+/// user's answer as the tool result. Handled in [`DesktopToolExecutor`] rather
+/// than the shared tool registry, since it needs the live UI to answer.
+fn ask_user_question_tool_spec() -> tools::ToolSpec {
+    tools::ToolSpec {
+        name: ASK_USER_QUESTION_TOOL,
+        description: "Ask the user a question and wait for their answer before continuing. Use this when a decision is genuinely the user's to make — choosing between approaches, confirming scope, or resolving ambiguity you cannot settle from the request, the workspace, or sensible defaults — and you can offer concrete options. Provide 2-4 distinct options; the user picks one (or, by default, types their own answer). Prefer this over guessing when the answer materially changes what you do next. Do not use it for choices with an obvious default or facts you can look up yourself.",
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "question": {
+                    "type": "string",
+                    "description": "The question to ask. Be specific and self-contained."
+                },
+                "header": {
+                    "type": "string",
+                    "description": "A very short label for the question (1-3 words), shown as a heading."
+                },
+                "options": {
+                    "type": "array",
+                    "description": "The selectable answers, each a distinct choice.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "label": { "type": "string", "description": "Concise choice text the user sees." },
+                            "description": { "type": "string", "description": "Optional one-line explanation of this choice." }
+                        },
+                        "required": ["label"],
+                        "additionalProperties": false
+                    },
+                    "minItems": 1
+                },
+                "multiSelect": {
+                    "type": "boolean",
+                    "description": "Allow selecting more than one option. Default false."
+                },
+                "allowCustom": {
+                    "type": "boolean",
+                    "description": "Allow the user to type a free-form answer instead of choosing an option. Default true."
+                }
+            },
+            "required": ["question", "options"],
+            "additionalProperties": false
+        }),
+        required_permission: PermissionMode::ReadOnly,
+    }
 }
 
 fn mcp_runtime_status_prompt(
@@ -445,8 +615,119 @@ fn truncate(text: &str, max: usize) -> String {
 
 const MAX_CONTEXT_TOOL_OUTPUT_CHARS: usize = 64_000;
 const MAX_UI_TOOL_OUTPUT_CHARS: usize = 64_000;
+const MAX_UI_TOOL_INPUT_CHARS: usize = 16_000;
+const MAX_UI_TOOL_INPUT_FIELD_CHARS: usize = 4_000;
 const TOOL_OUTPUT_ARTIFACT_THRESHOLD_CHARS: usize = 64_000;
-const SHELL_STREAM_CONTEXT_CHARS: usize = 48_000;
+const SHELL_STREAM_CONTEXT_CHARS: usize = 12_000;
+
+fn tool_input_for_ui(tool_name: &str, input: &str) -> String {
+    if input.chars().count() <= MAX_UI_TOOL_INPUT_CHARS {
+        return input.to_string();
+    }
+    if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(input) {
+        compact_tool_input_json_for_ui(tool_name, &mut value);
+        if let Ok(rendered) = serde_json::to_string_pretty(&value) {
+            if rendered.chars().count() <= MAX_UI_TOOL_INPUT_CHARS {
+                return rendered;
+            }
+        }
+    }
+    compact_stream_text(input, MAX_UI_TOOL_INPUT_CHARS, "tool input", None).0
+}
+
+fn compact_tool_input_json_for_ui(tool_name: &str, value: &mut serde_json::Value) {
+    match tool_name {
+        "write_file" | "append_file" => {
+            omit_large_json_string_field(value, "content", &format!("{tool_name}.content"));
+        }
+        "edit_file" | "str_replace_based_edit_tool" => {
+            omit_large_json_string_field(value, "old_string", "edit_file.old_string");
+            omit_large_json_string_field(value, "new_string", "edit_file.new_string");
+            omit_large_json_string_field(value, "old_str", "edit_file.old_str");
+            omit_large_json_string_field(value, "new_str", "edit_file.new_str");
+            omit_large_json_string_field(value, "old_text", "edit_file.old_text");
+            omit_large_json_string_field(value, "new_text", "edit_file.new_text");
+        }
+        "bash" | "PowerShell" => {
+            compact_large_json_string_field(value, "command", "shell command");
+        }
+        _ => {
+            compact_json_string_values_for_ui(value);
+        }
+    }
+}
+
+fn compact_json_string_values_for_ui(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(object) => {
+            for item in object.values_mut() {
+                compact_json_string_values_for_ui(item);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                compact_json_string_values_for_ui(item);
+            }
+        }
+        serde_json::Value::String(text) => {
+            let total = text.chars().count();
+            if total > MAX_UI_TOOL_INPUT_FIELD_CHARS {
+                let marker = format!(
+                    "\n\n[ARIS truncated this tool input field for UI: {total} chars total.]\n\n"
+                );
+                *text = compact_edges(text, MAX_UI_TOOL_INPUT_FIELD_CHARS, &marker);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn compact_large_json_string_field(value: &mut serde_json::Value, key: &str, label: &str) {
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+    let Some(text) = object
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned)
+    else {
+        return;
+    };
+    let total = text.chars().count();
+    if total <= MAX_UI_TOOL_INPUT_FIELD_CHARS {
+        return;
+    }
+    let marker = format!("\n\n[ARIS truncated {label} for UI: {total} chars total.]\n\n");
+    object.insert(
+        key.to_string(),
+        serde_json::Value::String(compact_edges(&text, MAX_UI_TOOL_INPUT_FIELD_CHARS, &marker)),
+    );
+}
+
+fn omit_large_json_string_field(value: &mut serde_json::Value, key: &str, label: &str) {
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+    let Some(text) = object
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned)
+    else {
+        return;
+    };
+    let total = text.chars().count();
+    if total <= MAX_UI_TOOL_INPUT_FIELD_CHARS {
+        return;
+    }
+    object.insert(
+        key.to_string(),
+        serde_json::Value::String(format!(
+            "[ARIS omitted {label} from UI: {total} chars. The tool receives the full value if this call completes; inspect the file on disk.]"
+        )),
+    );
+    object.insert(format!("{key}Chars"), json!(total));
+    object.insert(format!("{key}OmittedForUi"), serde_json::Value::Bool(true));
+}
 
 fn compact_tool_output_for_context(
     tool_name: &str,
@@ -490,6 +771,31 @@ fn tool_output_for_ui(output: &str, artifact: Option<&ToolOutputArtifact>) -> St
         MAX_UI_TOOL_OUTPUT_CHARS,
         "tool output preview",
     )
+}
+
+fn tool_output_indicates_error(tool_name: &str, output: &str) -> bool {
+    matches!(tool_name, "bash" | "PowerShell") && shell_output_indicates_error(output)
+}
+
+fn shell_output_indicates_error(output: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(output) else {
+        return false;
+    };
+    value
+        .get("interrupted")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+        || value
+            .get("returnCodeInterpretation")
+            .is_some_and(json_value_is_present)
+}
+
+fn json_value_is_present(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Null => false,
+        serde_json::Value::String(text) => !text.trim().is_empty(),
+        _ => true,
+    }
 }
 
 fn persist_tool_output_if_large(
@@ -554,7 +860,7 @@ fn compact_shell_json_tool_output(
     let mut base = serde_json::from_str::<serde_json::Value>(output).ok()?;
     insert_output_artifact_fields(&mut base, artifact);
 
-    for stream_limit in [SHELL_STREAM_CONTEXT_CHARS, 24_000, 12_000, 4_000] {
+    for stream_limit in [SHELL_STREAM_CONTEXT_CHARS, 8_000, 4_000] {
         let mut candidate = base.clone();
         let truncated = compact_shell_stream_fields(&mut candidate, stream_limit, artifact);
         if truncated {
@@ -750,11 +1056,20 @@ fn build_system_prompt_inner(model: &str, full_tool_registry: bool) -> Vec<Strin
         )
     };
     let file_links = "When you create or modify files, include Markdown links to the relevant file paths in the final response so the desktop UI can open them directly.".to_string();
+    let artifact_layout = "Project artifact layout: place slide/PPT/PDF deck outputs under `slides/`, poster outputs under `poster/`, interactive web apps under `web/<name>/` with an `index.html` plus local CSS/assets, notebook programs under `experiments/`, and scratch/temp/cache files under `.aris/`. Studio auto-discovers `slides/`, `poster/`, and `web/`; Lab lists notebooks from the workspace and defaults new notebooks into `experiments/`.".to_string();
+    let long_document_reading = "Long document reading: when working with books, chapters, transcripts, logs, or converted documents, do not read multiple large files in full. First get a file list and a read_file outline preview, then read one chapter or section window at a time with explicit offset/limit. Treat tool output as a preview, not as a source file; if full text is needed, keep it on disk and reopen precise windows.".to_string();
+    let long_file_generation = "Long file generation: do not call write_file with an entire long generated artifact such as a Beamer chapter, book chapter, or converted document. Keep single tool payloads small; for files over about 24000 characters, write a small scaffold, append smaller chunks with append_file, and verify line counts/compilation immediately instead of stopping to report an intermediate failure.".to_string();
     let latex_toolchain = latex_toolchain_prompt_section();
     runtime::migrate_legacy_knowledge_memory();
     let hot_memory = runtime::render_hot_memory_prompt(&workspace).unwrap_or_default();
     let knowledge_memory = runtime::render_knowledge_memory_prompt();
-    let mut extra_sections = vec![access.clone(), file_links];
+    let mut extra_sections = vec![
+        access.clone(),
+        file_links,
+        artifact_layout,
+        long_document_reading,
+        long_file_generation,
+    ];
     if !latex_toolchain.is_empty() {
         extra_sections.push(latex_toolchain);
     }
@@ -900,6 +1215,25 @@ pub fn chat_permission_respond(
     sender
         .send(decision)
         .map_err(|_| "permission prompt is no longer waiting".to_string())
+}
+
+/// Deliver the user's answer to an `AskUserQuestion` tool call that is blocked
+/// in [`DesktopToolExecutor::ask_user_question`], keyed by the tool-use id.
+#[tauri::command]
+pub fn chat_question_respond(
+    state: State<ChatState>,
+    tool_use_id: String,
+    answer: String,
+) -> Result<(), String> {
+    let sender = state
+        .question_prompts
+        .lock()
+        .map_err(|_| "chat question state poisoned".to_string())?
+        .remove(&tool_use_id)
+        .ok_or_else(|| "question prompt is no longer active".to_string())?;
+    sender
+        .send(answer)
+        .map_err(|_| "question prompt is no longer waiting".to_string())
 }
 
 #[tauri::command]
@@ -1886,11 +2220,12 @@ async fn run_chat_turn_with_context(
     let session = get_cached_or_disk_session(&state, &session_id)?;
     let permission_mode = permission_mode_for(&state, &session_id)?;
     let permission_prompts = state.permission_prompts.clone();
+    let question_prompts = state.question_prompts.clone();
 
     let worker_app = app.clone();
     let worker_session_id = session_id.clone();
     let worker_cancelled = cancelled.clone();
-    let (text, updated): (String, Session) = tauri::async_runtime::spawn_blocking(move || {
+    let joined = tauri::async_runtime::spawn_blocking(move || {
         let feature_config = match std::env::current_dir()
             .map_err(|error| error.to_string())
             .and_then(|cwd| {
@@ -1908,6 +2243,7 @@ async fn run_chat_turn_with_context(
         let mcp_bundle = aris_chat::attach_mcp_tools_with_cancel(
             KernelToolExecutor {
                 extra_blocked_tools,
+                cancelled: Some(worker_cancelled.clone()),
             },
             tool_specs,
             &feature_config,
@@ -1928,6 +2264,7 @@ async fn run_chat_turn_with_context(
             app: worker_app.clone(),
             session_id: worker_session_id.clone(),
             cancelled: worker_cancelled.clone(),
+            questions: question_prompts,
             inner: mcp_bundle.executor,
         };
         let mut permission_prompter = DesktopPermissionPrompter {
@@ -1962,8 +2299,29 @@ async fn run_chat_turn_with_context(
         let text = aris_chat::final_assistant_text(&summary);
         Ok::<(String, Session), String>((text, runtime.into_session()))
     })
-    .await
-    .map_err(|e| e.to_string())??;
+    .await;
+
+    // Flatten the join result, then surface any failure as a first-class
+    // `chat-error` event before returning. The streaming protocol is
+    // event-driven (chat-delta / chat-tool / chat-done); without a matching
+    // error event the only failure signal was the rejected invoke promise,
+    // which the UI can miss on paths like a network drop that ends the turn
+    // without a streamed assistant turn to attach the error to. Emitting an
+    // explicit event guarantees the failure is always visible.
+    let outcome = match joined {
+        Ok(inner) => inner,
+        Err(join_error) => Err(join_error.to_string()),
+    };
+    let (text, updated): (String, Session) = match outcome {
+        Ok(value) => value,
+        Err(message) => {
+            let _ = app.emit(
+                "chat-error",
+                json!({ "sessionId": session_id, "message": message }),
+            );
+            return Err(message);
+        }
+    };
 
     store_chat_session(state, session_id.clone(), updated)?;
     let _ = app.emit(
@@ -3111,6 +3469,7 @@ fn render_desktop_claude_md(cwd: &Path) -> String {
         "## Workspace".to_string(),
         format!("- Desktop workspace: `{}`.", cwd.display()),
         "- Keep generated files and research artifacts inside this workspace unless the user explicitly attaches or references external context.".to_string(),
+        "- Artifact layout: slides/PPT/PDF decks live in `slides/`, posters in `poster/`, interactive web apps in `web/<name>/`, notebooks in `experiments/`, and scratch/temp/cache files in `.aris/`.".to_string(),
         String::new(),
         "## Verification".to_string(),
         "- Record the commands or checks used to validate substantial changes.".to_string(),
@@ -3595,6 +3954,28 @@ mod tests {
     }
 
     #[test]
+    fn desktop_chat_registers_ask_user_question_gated_read_only() {
+        let specs = tool_specs_for(DESKTOP_CHAT_EXTRA_BLOCKED_TOOLS);
+        let spec = specs
+            .iter()
+            .find(|spec| spec.name == ASK_USER_QUESTION_TOOL)
+            .expect("AskUserQuestion is registered for desktop chat");
+        assert!(matches!(spec.required_permission, PermissionMode::ReadOnly));
+
+        // Even read-only ("Plan") mode must let the model ask the user a
+        // question without surfacing a permission prompt for it.
+        let plan = desktop_permission_policy(&specs, PermissionMode::ReadOnly);
+        assert_eq!(
+            plan.authorize(
+                ASK_USER_QUESTION_TOOL,
+                r#"{"question":"Pick one","options":[{"label":"A"}]}"#,
+                None,
+            ),
+            runtime::PermissionOutcome::Allow
+        );
+    }
+
+    #[test]
     fn ui_keeps_moderate_tool_output_intact() {
         let output = "x".repeat(10_000);
         let rendered = tool_output_for_ui(&output, None);
@@ -3646,10 +4027,41 @@ mod tests {
         assert!(compacted_stdout.starts_with("start"));
         assert!(compacted_stdout.ends_with("end"));
         assert!(compacted_stdout.contains("ARIS truncated stdout"));
+        assert!(compacted_stdout.chars().count() <= SHELL_STREAM_CONTEXT_CHARS);
         assert_eq!(parsed["persistedOutputPath"], artifact.path);
         assert_eq!(parsed["rawOutputPath"], artifact.path);
         assert_eq!(parsed["persistedOutputSize"], artifact.bytes);
         assert_eq!(parsed["truncatedForContext"], true);
+    }
+
+    #[test]
+    fn shell_status_metadata_marks_tool_output_as_error() {
+        let ok = serde_json::to_string(&json!({
+            "stdout": "ok",
+            "stderr": "",
+            "interrupted": false,
+            "returnCodeInterpretation": null
+        }))
+        .expect("json");
+        assert!(!tool_output_indicates_error("PowerShell", &ok));
+
+        let failed = serde_json::to_string(&json!({
+            "stdout": "",
+            "stderr": "bad",
+            "interrupted": false,
+            "returnCodeInterpretation": "exit_code:7"
+        }))
+        .expect("json");
+        assert!(tool_output_indicates_error("PowerShell", &failed));
+
+        let interrupted = serde_json::to_string(&json!({
+            "stdout": "",
+            "stderr": "Command interrupted by user",
+            "interrupted": true,
+            "returnCodeInterpretation": "interrupted"
+        }))
+        .expect("json");
+        assert!(tool_output_indicates_error("bash", &interrupted));
     }
 
     #[test]
@@ -3716,6 +4128,57 @@ mod tests {
 
         assert!(prompt.contains("desktop tool registry"));
         assert!(prompt.contains("include Markdown links"));
+        assert!(prompt.contains("Long file generation"));
+        assert!(prompt.contains("24000 characters"));
+        assert!(prompt.contains("append_file"));
+    }
+
+    #[test]
+    fn oversized_write_file_input_is_compacted_for_ui() {
+        let input = serde_json::json!({
+            "path": "slides/chapter3.tex",
+            "content": "x".repeat(MAX_UI_TOOL_INPUT_CHARS + 1000)
+        })
+        .to_string();
+
+        let compacted = tool_input_for_ui("write_file", &input);
+        let value: serde_json::Value = serde_json::from_str(&compacted).expect("json");
+
+        assert_eq!(value["path"], "slides/chapter3.tex");
+        assert!(value["content"]
+            .as_str()
+            .expect("content placeholder")
+            .contains("omitted write_file.content"));
+        assert_eq!(
+            value["contentChars"],
+            serde_json::json!(MAX_UI_TOOL_INPUT_CHARS + 1000)
+        );
+        assert_eq!(value["contentOmittedForUi"], serde_json::json!(true));
+        assert!(compacted.chars().count() < MAX_UI_TOOL_INPUT_CHARS);
+    }
+
+    #[test]
+    fn oversized_append_file_input_is_compacted_for_ui() {
+        let input = serde_json::json!({
+            "path": "slides/chapter3.tex",
+            "content": "x".repeat(MAX_UI_TOOL_INPUT_CHARS + 1000)
+        })
+        .to_string();
+
+        let compacted = tool_input_for_ui("append_file", &input);
+        let value: serde_json::Value = serde_json::from_str(&compacted).expect("json");
+
+        assert_eq!(value["path"], "slides/chapter3.tex");
+        assert!(value["content"]
+            .as_str()
+            .expect("content placeholder")
+            .contains("omitted append_file.content"));
+        assert_eq!(
+            value["contentChars"],
+            serde_json::json!(MAX_UI_TOOL_INPUT_CHARS + 1000)
+        );
+        assert_eq!(value["contentOmittedForUi"], serde_json::json!(true));
+        assert!(compacted.chars().count() < MAX_UI_TOOL_INPUT_CHARS);
     }
 
     #[test]

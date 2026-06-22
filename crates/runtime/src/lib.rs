@@ -28,7 +28,7 @@ mod session;
 mod session_index;
 mod usage;
 
-pub use bash::{execute_bash, BashCommandInput, BashCommandOutput};
+pub use bash::{execute_bash, execute_bash_with_cancel, BashCommandInput, BashCommandOutput};
 pub use bootstrap::{BootstrapPhase, BootstrapPlan};
 pub use cache::{extract_bundle, extraction_report, ExtractionError, ExtractionReport};
 pub use compact::{
@@ -52,9 +52,9 @@ pub use event_sink::{
     RuntimeEvent,
 };
 pub use file_ops::{
-    edit_file, glob_search, grep_search, read_file, write_file, EditFileOutput, FileChange,
-    GlobSearchOutput, GrepSearchInput, GrepSearchOutput, ReadFileOutput, StructuredPatchHunk,
-    TextFilePayload, WriteFileOutput,
+    append_file, edit_file, glob_search, grep_search, read_file, write_file, AppendFileOutput,
+    EditFileOutput, FileChange, GlobSearchOutput, GrepSearchInput, GrepSearchOutput,
+    ReadFileOutput, StructuredPatchHunk, TextFilePayload, WriteFileOutput,
 };
 pub use hooks::{HookEvent, HookRunResult, HookRunner};
 pub use hot_memory::{
@@ -98,9 +98,9 @@ pub use permissions::{
 pub use process::{hidden_command, hidden_tokio_command, hide_window};
 pub use process_registry::{
     configure_managed_tokio_command, managed_processes_snapshot, register_managed_process,
-    run_managed_command, spawn_managed_background, terminate_all_managed_processes,
-    terminate_managed_process_tree, unregister_managed_process, ManagedCommandOutput,
-    ManagedProcessGuard, ManagedProcessInfo, ManagedProcessKind,
+    run_managed_command, run_managed_command_with_cancel, spawn_managed_background,
+    terminate_all_managed_processes, terminate_managed_process_tree, unregister_managed_process,
+    ManagedCommandOutput, ManagedProcessGuard, ManagedProcessInfo, ManagedProcessKind,
 };
 pub use prompt::{
     load_system_prompt, prepend_bullets, team_orchestration_section, ContextFile, ProjectContext,

@@ -1,5 +1,19 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import {
+  isLabPreviewMode,
+  previewExecuteFile,
+  previewFileTree,
+  previewKernelspecs,
+  previewKernelInfo,
+  previewNotebookList,
+  previewNotebookView,
+  previewReadText,
+  previewRunAll,
+  previewRunsLibrary,
+  previewVariables,
+  previewWriteText,
+} from "./labPreview";
 
 /** True only inside the Tauri webview; false in a plain browser (vite preview). */
 export const isTauri = (): boolean =>
@@ -15,6 +29,9 @@ import type {
   ChatStatus,
   ConnectorActionResult,
   ConnectorPluginView,
+  AppUpdateInfo,
+  AppUpdateInstallResult,
+  AppUpdateProgress,
   ConfigPatch,
   ConfigSecretKind,
   ConfigTestDetail,
@@ -63,6 +80,66 @@ export const configTest = (patch: ConfigPatch) =>
   invoke<ConfigTestResult>("config_test", { patch });
 export const providerTest = (input: { baseUrl: string; model?: string; apiKey?: string }) =>
   invoke<ConfigTestDetail>("provider_test", { input });
+export const appUpdateCheck = async (): Promise<AppUpdateInfo> => {
+  if (!isTauri()) return { available: false };
+  const { check } = await import("@tauri-apps/plugin-updater");
+  const update = await check();
+  if (!update) return { available: false };
+  return {
+    available: true,
+    currentVersion: update.currentVersion,
+    version: update.version,
+    date: update.date,
+    body: update.body,
+  };
+};
+export const appUpdateDownloadAndInstall = async (
+  onProgress?: (progress: AppUpdateProgress) => void,
+): Promise<AppUpdateInstallResult> => {
+  if (!isTauri()) return { installed: false };
+  const { check } = await import("@tauri-apps/plugin-updater");
+  const update = await check();
+  if (!update) return { installed: false };
+
+  let downloadedBytes = 0;
+  let contentLength: number | null = null;
+  await update.downloadAndInstall((event) => {
+    if (event.event === "Started") {
+      downloadedBytes = 0;
+      contentLength = event.data.contentLength ?? null;
+      onProgress?.({
+        stage: "started",
+        downloadedBytes,
+        contentLength,
+        percent: null,
+      });
+    } else if (event.event === "Progress") {
+      downloadedBytes += event.data.chunkLength;
+      const percent = contentLength
+        ? Math.min(100, Math.round((downloadedBytes / contentLength) * 100))
+        : null;
+      onProgress?.({
+        stage: "progress",
+        downloadedBytes,
+        contentLength,
+        percent,
+      });
+    } else {
+      onProgress?.({
+        stage: "finished",
+        downloadedBytes,
+        contentLength,
+        percent: 100,
+      });
+    }
+  });
+  return { installed: true, version: update.version };
+};
+export const appRelaunch = async () => {
+  if (!isTauri()) return;
+  const { relaunch } = await import("@tauri-apps/plugin-process");
+  await relaunch();
+};
 export const scheduledTasksList = () =>
   invoke<ScheduledTask[]>("scheduled_tasks_list");
 export const projectPermissionGet = () =>
@@ -210,14 +287,205 @@ export const knowledgeReject = (kpId: string) =>
 export const knowledgeGenerate = <T>(paperId: string) =>
   invoke<T>("knowledge_generate", { paperId });
 
+// ── Lab (Jupyter notebooks) ───────────────────────────────────────────────────
+
+const preview = <T>(value: T): Promise<T> => Promise.resolve(value);
+const noopUnlisten = () => undefined;
+
+export const labListKernels = <T>() =>
+  isLabPreviewMode() ? preview<T>([] as T) : invoke<T>("lab_list_kernels");
+export const labListKernelspecs = <T>() =>
+  isLabPreviewMode() ? preview<T>(previewKernelspecs() as T) : invoke<T>("lab_list_kernelspecs");
+export const labSetKernelspec = <T>(
+  notebookPath: string,
+  name: string,
+  displayName?: string,
+  language?: string,
+) =>
+  isLabPreviewMode()
+    ? preview<T>(previewNotebookView(notebookPath) as T)
+    :
+  invoke<T>("lab_set_kernelspec", {
+    notebookPath,
+    name,
+    displayName: displayName ?? null,
+    language: language ?? null,
+  });
+export const labListNotebooks = <T>() =>
+  isLabPreviewMode() ? preview<T>(previewNotebookList() as T) : invoke<T>("lab_list_notebooks");
+export const labLoadNotebook = <T>(notebookPath: string) =>
+  isLabPreviewMode()
+    ? preview<T>(previewNotebookView(notebookPath) as T)
+    :
+  invoke<T>("lab_load_notebook", { notebookPath });
+export const labCreateNotebook = <T>(notebookPath: string) =>
+  isLabPreviewMode()
+    ? preview<T>(previewNotebookView(notebookPath) as T)
+    :
+  invoke<T>("lab_create_notebook", { notebookPath });
+export const labSaveNotebook = <T>(notebookPath: string, notebook: unknown) =>
+  isLabPreviewMode()
+    ? preview<T>(previewNotebookView(notebookPath) as T)
+    :
+  invoke<T>("lab_save_notebook", { notebookPath, notebook });
+export const labEditCell = <T>(
+  notebookPath: string,
+  action: "insert" | "replace" | "delete" | "move",
+  opts: { cellIndex?: number; cellType?: string; source?: string; toIndex?: number } = {},
+) =>
+  isLabPreviewMode()
+    ? preview<T>(previewNotebookView(notebookPath) as T)
+    :
+  invoke<T>("lab_edit_cell", {
+    notebookPath,
+    action,
+    cellIndex: opts.cellIndex ?? null,
+    cellType: opts.cellType ?? null,
+    source: opts.source ?? null,
+    toIndex: opts.toIndex ?? null,
+  });
+export const labStartKernel = <T>(notebookPath: string, kernel?: string) =>
+  isLabPreviewMode()
+    ? preview<T>(previewKernelInfo(notebookPath) as T)
+    :
+  invoke<T>("lab_start_kernel", { notebookPath, kernel: kernel ?? null });
+export const labExecuteCell = <T>(
+  notebookPath: string,
+  opts: { cellIndex?: number; code?: string; timeoutSecs?: number; kernel?: string } = {},
+) =>
+  isLabPreviewMode()
+    ? preview<T>({
+      status: "ok",
+      executionCount: 3,
+      outputs: [{ output_type: "stream", name: "stdout", text: "Preview cell executed\n" }],
+      cellIndex: opts.cellIndex ?? null,
+      outline: previewNotebookView(notebookPath).outline,
+    } as T)
+    :
+  invoke<T>("lab_execute_cell", {
+    notebookPath,
+    cellIndex: opts.cellIndex ?? null,
+    code: opts.code ?? null,
+    timeoutSecs: opts.timeoutSecs ?? null,
+    kernel: opts.kernel ?? null,
+  });
+export const labShutdownKernel = (notebookPath: string) =>
+  isLabPreviewMode() ? Promise.resolve() :
+  invoke<void>("lab_shutdown_kernel", { notebookPath });
+export const labInterruptKernel = (notebookPath: string) =>
+  isLabPreviewMode() ? Promise.resolve() :
+  invoke<void>("lab_interrupt_kernel", { notebookPath });
+export const labStartFileKernel = <T>(filePath: string, kernel?: string) =>
+  isLabPreviewMode()
+    ? preview<T>(previewKernelInfo(`file:${filePath}`) as T)
+    :
+  invoke<T>("lab_start_file_kernel", { filePath, kernel: kernel ?? null });
+export const labExecuteFile = <T>(
+  filePath: string,
+  opts: { code?: string; timeoutSecs?: number; kernel?: string } = {},
+) =>
+  isLabPreviewMode()
+    ? preview<T>(previewExecuteFile(filePath, opts.code) as T)
+    :
+  invoke<T>("lab_execute_file", {
+    filePath,
+    code: opts.code ?? null,
+    timeoutSecs: opts.timeoutSecs ?? null,
+    kernel: opts.kernel ?? null,
+  });
+export const labInterruptFileKernel = (filePath: string) =>
+  isLabPreviewMode() ? Promise.resolve() :
+  invoke<void>("lab_interrupt_file_kernel", { filePath });
+export const labShutdownFileKernel = (filePath: string) =>
+  isLabPreviewMode() ? Promise.resolve() :
+  invoke<void>("lab_shutdown_file_kernel", { filePath });
+export const labInspectFileVars = <T>(filePath: string, kernel?: string) =>
+  isLabPreviewMode() ? preview<T>(previewVariables() as T) :
+  invoke<T>("lab_inspect_file_vars", { filePath, kernel: kernel ?? null });
+export const labInspectVars = <T>(notebookPath: string, kernel?: string) =>
+  isLabPreviewMode() ? preview<T>(previewVariables() as T) :
+  invoke<T>("lab_inspect_vars", { notebookPath, kernel: kernel ?? null });
+export const onLabCellOutput = <T>(handler: (event: T) => void) =>
+  isLabPreviewMode() ? Promise.resolve(noopUnlisten) :
+  listen<T>("lab-cell-output", (e) => handler(e.payload));
+export const onLabFileOutput = <T>(handler: (event: T) => void) =>
+  isLabPreviewMode() ? Promise.resolve(noopUnlisten) :
+  listen<T>("lab-file-output", (e) => handler(e.payload));
+export const labRunAll = <T>(
+  notebookPath: string,
+  opts: {
+    parameters?: Record<string, unknown>;
+    stopOnError?: boolean;
+    timeoutSecs?: number;
+    kernel?: string;
+  } = {},
+) =>
+  isLabPreviewMode()
+    ? preview<T>(previewRunAll(notebookPath) as T)
+    :
+  invoke<T>("lab_run_all", {
+    notebookPath,
+    parameters: opts.parameters ?? null,
+    stopOnError: opts.stopOnError ?? null,
+    timeoutSecs: opts.timeoutSecs ?? null,
+    kernel: opts.kernel ?? null,
+  });
+
+// ── Experiment runs + sweeps ──────────────────────────────────────────────────
+export const runsLoad = <T>() =>
+  isLabPreviewMode() ? preview<T>(previewRunsLibrary() as T) : invoke<T>("runs_load");
+export const runsSave = (runs: unknown) => invoke<void>("runs_save", { runs });
+export const labRunSweep = <T>(spec: unknown) =>
+  isLabPreviewMode()
+    ? preview<T>({ sweepId: "preview-sweep", total: 1, runs: [{ id: "preview-run-1", seed: null, status: "ok" }] } as T)
+    : invoke<T>("lab_run_sweep", { spec });
+export const labExportSweepManifest = (spec: unknown) =>
+  isLabPreviewMode()
+    ? Promise.resolve("# preview experiment-queue manifest\njobs: []\n")
+    :
+  invoke<string>("lab_export_sweep_manifest", { spec });
+
 // ── File browser ─────────────────────────────────────────────────────────────
 
+export interface FileTreeEntry {
+  name: string;
+  path: string;
+  isDir: boolean;
+}
+
+export interface FileText {
+  path: string;
+  content: string;
+  bytes: number;
+}
+
+export const fileListDir = (path?: string | null) =>
+  isLabPreviewMode()
+    ? preview<FileTreeEntry[]>(previewFileTree(path ?? null))
+    :
+  invoke<FileTreeEntry[]>("file_list_dir", { path: path ?? null });
+
+export const fileReadText = (path: string) =>
+  isLabPreviewMode()
+    ? preview<FileText>(previewReadText(path))
+    :
+  invoke<FileText>("file_read_text", { path });
+
+export const fileWriteText = (path: string, content: string) =>
+  isLabPreviewMode()
+    ? preview<FileText>(previewWriteText(path, content))
+    :
+  invoke<FileText>("file_write_text", { path, content });
+
 export const fileSearch = (pattern: string, root?: string) =>
+  isLabPreviewMode() ? preview<string[]>([]) :
   invoke<string[]>("file_search", { pattern, root: root ?? null });
 
 export const fileRead = (path: string, limit?: number) =>
+  isLabPreviewMode() ? preview<string>(previewReadText(path).content) :
   invoke<string>("file_read", { path, limit: limit ?? null });
 export const fileOpen = (path: string) =>
+  isLabPreviewMode() ? Promise.resolve() :
   invoke<void>("file_open", { path });
 export const projectChatStarters = () => invoke<string[]>("project_chat_starters");
 
@@ -234,6 +502,8 @@ export const chatPermissionSet = (sessionId: string, mode: string) =>
   invoke<PermissionModeView>("chat_permission_set", { sessionId, mode });
 export const chatPermissionRespond = (promptId: string, allow: boolean) =>
   invoke<void>("chat_permission_respond", { promptId, allow });
+export const chatQuestionRespond = (toolUseId: string, answer: string) =>
+  invoke<void>("chat_question_respond", { toolUseId, answer });
 export const chatCommandSpecs = () =>
   invoke<DesktopCommandSpec[]>("chat_command_specs");
 export const chatRunCommand = (sessionId: string, input: string) =>
@@ -329,3 +599,9 @@ export const onChatPermissionResolved = (handler: (event: ChatPermissionResolved
   listen<ChatPermissionResolvedEvent>("chat-permission-resolved", (e) => handler(e.payload));
 export const onChatDone = (handler: (event: ChatTextEvent) => void) =>
   listen<ChatTextEvent>("chat-done", (e) => handler(e.payload));
+export interface ChatErrorEvent {
+  sessionId: string;
+  message: string;
+}
+export const onChatError = (handler: (event: ChatErrorEvent) => void) =>
+  listen<ChatErrorEvent>("chat-error", (e) => handler(e.payload));

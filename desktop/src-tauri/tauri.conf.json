@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "ARIS Studio",
-  "version": "0.3.4",
+  "version": "0.4.0",
   "identifier": "com.aris.studio",
   "build": {
     "frontendDist": "../dist",
@@ -17,7 +17,10 @@
         "height": 920,
         "minWidth": 1024,
         "minHeight": 680,
-        "resizable": true
+        "resizable": true,
+        "decorations": false,
+        "shadow": true,
+        "theme": "Dark"
       }
     ],
     "security": {
@@ -27,6 +30,7 @@
   "bundle": {
     "active": true,
     "targets": ["nsis"],
+    "createUpdaterArtifacts": true,
     "windows": {
       "webviewInstallMode": {
         "type": "embedBootstrapper",
@@ -45,5 +49,16 @@
     "category": "DeveloperTool",
     "shortDescription": "Design & monitor agent teams and workflows; chat with ARIS.",
     "longDescription": "ARIS Studio — desktop UI for designing agent-team workflows, monitoring runs live, browsing skills/sessions, and chatting with the ARIS executor."
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEQwOEQ3OUM5MEMxQzlDREQKUldUZG5Cd015WG1OMEZSOElveUJhbVV0ZUFCQy9BdGZITm81TWQ5dXlzMnM1NTlzTkw2Yk5rWUEK",
+      "endpoints": [
+        "https://github.com/zhuyingqin/Aris/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

@@ -257,8 +257,8 @@ where
 
         // Respect the process-wide interrupt (CLI Ctrl+C) and, in desktop Chat,
         // the per-session cancellation flag before committing to a long MCP call.
-        if self.is_cancelled() {
-            return Err(ToolError::new("interrupted by user"));
+        if self.cancel_requested() {
+            return Err(ToolError::interrupted_by_user());
         }
 
         let arguments = serde_json::from_str(input)
@@ -294,7 +294,7 @@ where
                 {
                     let _ = runtime.block_on(manager.shutdown());
                 }
-                return Err(ToolError::new("interrupted by user"));
+                return Err(ToolError::interrupted_by_user());
             }
         };
 
@@ -315,10 +315,14 @@ where
             Ok(output)
         }
     }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancel_requested() || self.inner.is_cancelled()
+    }
 }
 
 impl<T> McpToolExecutor<T> {
-    fn is_cancelled(&self) -> bool {
+    fn cancel_requested(&self) -> bool {
         is_interrupted()
             || self
                 .cancel_flag

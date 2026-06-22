@@ -8,6 +8,7 @@
 use api::AuthSource;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use std::path::Path;
 
 use crate::state;
 
@@ -130,6 +131,68 @@ fn save_object(obj: &Map<String, Value>) -> Result<(), String> {
     let json =
         serde_json::to_string_pretty(&Value::Object(obj.clone())).map_err(|e| e.to_string())?;
     std::fs::write(&path, json).map_err(|e| e.to_string())
+}
+
+fn value_is_missing_or_empty(value: Option<&Value>) -> bool {
+    match value {
+        None | Some(Value::Null) => true,
+        Some(Value::String(value)) => value.trim().is_empty(),
+        Some(Value::Array(value)) => value.is_empty(),
+        Some(Value::Object(value)) => value.is_empty(),
+        Some(_) => false,
+    }
+}
+
+fn internal_overwrite_enabled(obj: &Map<String, Value>) -> bool {
+    obj.get("_internal")
+        .and_then(Value::as_object)
+        .and_then(|meta| meta.get("overwriteExisting"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// Apply an optional bundled internal configuration from the app resources.
+///
+/// This is used by internal installers to seed `~/.config/aris/config.json` on
+/// first launch. By default it only fills missing fields, so installing an
+/// internal build does not silently replace a user's existing LLM settings.
+pub(crate) fn apply_bundled_internal_config(resource_dir: &Path) -> Result<bool, String> {
+    let path = resource_dir.join("internal-config.json");
+    if !path.is_file() {
+        return Ok(false);
+    }
+
+    let text = std::fs::read_to_string(&path)
+        .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+    let mut bundled = serde_json::from_str::<Value>(&text)
+        .map_err(|error| format!("invalid internal config JSON: {error}"))?
+        .as_object()
+        .cloned()
+        .ok_or_else(|| "internal config must be a JSON object".to_string())?;
+    let overwrite = internal_overwrite_enabled(&bundled);
+    bundled.remove("_internal");
+
+    let mut current = load_object();
+    let mut changed = false;
+    for (key, value) in bundled {
+        if value.is_null() {
+            if overwrite && current.remove(&key).is_some() {
+                changed = true;
+            }
+            continue;
+        }
+        if overwrite || value_is_missing_or_empty(current.get(&key)) {
+            if current.get(&key) != Some(&value) {
+                current.insert(key, value);
+                changed = true;
+            }
+        }
+    }
+
+    if changed {
+        save_object(&current)?;
+    }
+    Ok(changed)
 }
 
 // ── Verified executor registry ──────────────────────────────────────────────

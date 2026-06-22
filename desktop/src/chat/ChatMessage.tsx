@@ -5,7 +5,7 @@ import MarkdownContent, { ThinkBlock } from "./MarkdownContent";
 import { textFromTurn } from "./model";
 import { useStore } from "../store";
 
-const FILE_WRITE_TOOLS = new Set(["write_file", "edit_file", "str_replace_based_edit_tool"]);
+const FILE_WRITE_TOOLS = new Set(["write_file", "append_file", "edit_file", "str_replace_based_edit_tool"]);
 
 interface FileChange {
   path: string;
@@ -98,6 +98,13 @@ export function diffFromTool(block: Extract<ChatBlock, { kind: "tool" }>): FileC
     return {
       path,
       diff: [`--- /dev/null`, `+++ ${path}`, ...content.split("\n").map((line) => `+${line}`)].join("\n"),
+    };
+  }
+  if (block.name === "append_file") {
+    const content = String(input.content ?? "");
+    return {
+      path,
+      diff: [`--- ${path}`, `+++ ${path}`, ...content.split("\n").map((line) => `+${line}`)].join("\n"),
     };
   }
   const before = String(input.old_string ?? input.old_str ?? input.old_text ?? "");
@@ -296,11 +303,171 @@ function PermissionCall({
   );
 }
 
+interface QuestionOption {
+  label: string;
+  description?: string;
+}
+
+interface QuestionSpec {
+  question: string;
+  header?: string;
+  options: QuestionOption[];
+  multiSelect: boolean;
+  allowCustom: boolean;
+}
+
+/** Parses an `AskUserQuestion` tool input into a renderable question, or null
+ *  if it isn't a well-formed question (the caller falls back to a tool card). */
+function parseQuestionSpec(input: string): QuestionSpec | null {
+  try {
+    const value = JSON.parse(input) as Partial<QuestionSpec>;
+    if (!value || typeof value.question !== "string" || !Array.isArray(value.options)) return null;
+    const options = value.options.filter(
+      (option): option is QuestionOption =>
+        Boolean(option) && typeof (option as QuestionOption).label === "string",
+    );
+    if (options.length === 0) return null;
+    return {
+      question: value.question,
+      header: typeof value.header === "string" && value.header.trim() ? value.header : undefined,
+      options,
+      multiSelect: value.multiSelect === true,
+      // Free-form answers are allowed unless the model explicitly opts out.
+      allowCustom: value.allowCustom !== false,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Renders an `AskUserQuestion` tool call as an interactive prompt: option
+ * buttons (and, by default, a free-text answer) while the backend tool is
+ * blocked waiting; once `output` arrives the user's answer is shown read-only.
+ */
+function QuestionCall({
+  block,
+  active,
+  onQuestionRespond,
+}: {
+  block: Extract<ChatBlock, { kind: "tool" }>;
+  active: boolean;
+  onQuestionRespond: (toolUseId: string, answer: string) => void;
+}) {
+  const spec = useMemo(() => parseQuestionSpec(block.input), [block.input]);
+  const [selected, setSelected] = useState<Set<number>>(() => new Set());
+  const [custom, setCustom] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+
+  // Not a usable question — show the raw tool call rather than an empty card.
+  if (!spec) return <ToolCall block={block} />;
+
+  const resolved = block.output !== undefined;
+  // Interactive only while the turn is still running and waiting on this call;
+  // a stopped/finished turn leaves the question unanswerable.
+  const interactive = !resolved && active;
+  const locked = !interactive || submitting || !block.id;
+  const send = (answer: string) => {
+    const text = answer.trim();
+    if (locked || !block.id || !text) return;
+    setSubmitting(true);
+    onQuestionRespond(block.id, text);
+  };
+  const sendSelection = () => {
+    const labels = [...selected].sort((a, b) => a - b).map((i) => spec.options[i].label);
+    if (spec.allowCustom && custom.trim()) labels.push(custom.trim());
+    send(labels.join(", "));
+  };
+  const toggle = (index: number) => {
+    if (locked) return;
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(index)) next.delete(index);
+      else next.add(index);
+      return next;
+    });
+  };
+  const canSubmit = spec.multiSelect ? selected.size > 0 || custom.trim().length > 0 : custom.trim().length > 0;
+  const answered = resolved && !block.isError;
+  const statusClass = answered ? "tool-done" : interactive ? "tool-running" : "tool-error";
+  const statusIcon = answered ? "✓" : interactive ? "?" : "!";
+  const statusLabel = answered ? "Answered" : interactive ? "Awaiting your answer" : "Unanswered";
+
+  return (
+    <div className={`chat-tool chat-question-card ${statusClass}`}>
+      <div className="chat-tool-header">
+        <span className="tool-status-icon">{statusIcon}</span>
+        <span className="tool-status-label">{statusLabel}</span>
+        {spec.header && <span className="tool-name">{spec.header}</span>}
+      </div>
+      <div className="chat-question-body">
+        <p className="chat-question-text">{spec.question}</p>
+        {resolved ? (
+          <div className="chat-question-answer">
+            <span className="chat-question-answer-label">{block.isError ? "Not answered" : "You answered"}</span>
+            <span className="chat-question-answer-value">{block.output}</span>
+          </div>
+        ) : !interactive ? (
+          <p className="chat-question-stale">This question is no longer awaiting an answer.</p>
+        ) : (
+          <>
+            <div className={`chat-question-options${spec.multiSelect ? " is-multi" : ""}`}>
+              {spec.options.map((option, index) => (
+                <button
+                  key={index}
+                  type="button"
+                  className={`chat-question-option${selected.has(index) ? " selected" : ""}`}
+                  disabled={locked}
+                  onClick={() => (spec.multiSelect ? toggle(index) : send(option.label))}
+                >
+                  <span className="chat-question-option-label">{option.label}</span>
+                  {option.description && (
+                    <span className="chat-question-option-desc">{option.description}</span>
+                  )}
+                </button>
+              ))}
+            </div>
+            {spec.allowCustom && (
+              <input
+                className="chat-question-custom"
+                type="text"
+                placeholder="Or type your own answer…"
+                value={custom}
+                disabled={locked}
+                onChange={(event) => setCustom(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    if (spec.multiSelect) sendSelection();
+                    else send(custom);
+                  }
+                }}
+              />
+            )}
+            {(spec.multiSelect || spec.allowCustom) && (
+              <div className="chat-question-actions">
+                <button
+                  type="button"
+                  disabled={locked || !canSubmit}
+                  onClick={spec.multiSelect ? sendSelection : () => send(custom)}
+                >
+                  {submitting ? "Sending…" : "Submit"}
+                </button>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function renderSingleBlock(
   block: ChatBlock,
   index: number,
   turn: ChatTurn,
   onPermissionRespond: (promptId: string, allow: boolean) => void,
+  onQuestionRespond: (toolUseId: string, answer: string) => void,
 ) {
   if (block.kind === "text") {
     if (!block.text) return null;
@@ -330,6 +497,16 @@ function renderSingleBlock(
   }
   // TodoWrite plans are surfaced by the floating workflow box, not inline.
   if (block.kind === "tool" && block.name === "TodoWrite") return null;
+  if (block.kind === "tool" && block.name === "AskUserQuestion") {
+    return (
+      <QuestionCall
+        key={block.id ?? index}
+        block={block}
+        active={Boolean(turn.streaming)}
+        onQuestionRespond={onQuestionRespond}
+      />
+    );
+  }
   return <ToolCall key={block.id ?? index} block={block} />;
 }
 
@@ -340,13 +517,15 @@ function renderSingleBlock(
 function renderBlocks(
   turn: ChatTurn,
   onPermissionRespond: (promptId: string, allow: boolean) => void,
+  onQuestionRespond: (toolUseId: string, answer: string) => void,
 ) {
   const blocks = turn.blocks;
   const out: ReactNode[] = [];
   let i = 0;
   while (i < blocks.length) {
     const block = blocks[i];
-    if (block.kind === "tool" && block.name !== "TodoWrite") {
+    // AskUserQuestion is interactive and rendered individually, never collapsed.
+    if (block.kind === "tool" && block.name !== "TodoWrite" && block.name !== "AskUserQuestion") {
       let j = i + 1;
       while (j < blocks.length) {
         const next = blocks[j];
@@ -360,7 +539,7 @@ function renderBlocks(
         continue;
       }
     }
-    out.push(renderSingleBlock(block, i, turn, onPermissionRespond));
+    out.push(renderSingleBlock(block, i, turn, onPermissionRespond, onQuestionRespond));
     i += 1;
   }
   return out;
@@ -381,9 +560,18 @@ interface Props {
   onRetry: (turn: ChatTurn) => void;
   onContinue: () => void;
   onPermissionRespond?: (promptId: string, allow: boolean) => void;
+  onQuestionRespond?: (toolUseId: string, answer: string) => void;
 }
 
-function ChatMessage({ turn, canRetry, onEdit, onRetry, onContinue, onPermissionRespond = () => undefined }: Props) {
+function ChatMessage({
+  turn,
+  canRetry,
+  onEdit,
+  onRetry,
+  onContinue,
+  onPermissionRespond = () => undefined,
+  onQuestionRespond = () => undefined,
+}: Props) {
   const text = textFromTurn(turn);
   const hasContent = hasRenderableContent(turn);
   return (
@@ -393,9 +581,15 @@ function ChatMessage({ turn, canRetry, onEdit, onRetry, onContinue, onPermission
           {turn.attachments.map((attachment) => <span key={attachment.id}>{attachment.kind === "image" ? "Image" : "File"}: {attachment.name}</span>)}
         </div>
       )}
-      {renderBlocks(turn, onPermissionRespond)}
-      {!turn.streaming && !turn.error && !hasContent && turn.role === "assistant" && (
+      {renderBlocks(turn, onPermissionRespond, onQuestionRespond)}
+      {!turn.streaming && !turn.error && !turn.stopped && !hasContent && turn.role === "assistant" && (
         <div className="chat-empty-response">Model returned an empty response.</div>
+      )}
+      {!turn.streaming && !turn.error && turn.stopped && turn.role === "assistant" && (
+        <div className="chat-stopped-card">
+          <strong>Response stopped</strong>
+          <span>Stopped by user.</span>
+        </div>
       )}
       {turn.streaming && <span className="chat-inline-cursor">▌</span>}
       {turn.error && (

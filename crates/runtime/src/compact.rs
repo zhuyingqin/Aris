@@ -61,11 +61,11 @@ pub fn get_compact_continuation_message(
     );
 
     if recent_messages_preserved {
-        base.push_str("\n\nRecent messages are preserved verbatim.");
+        base.push_str("\n\nRecent messages are preserved verbatim and are authoritative. If the summary conflicts with the preserved recent messages, follow the preserved recent messages.");
     }
 
     if suppress_follow_up_questions {
-        base.push_str("\nContinue the conversation from where it left off without asking the user any further questions. Resume directly — do not acknowledge the summary, do not recap what was happening, and do not preface with continuation text.");
+        base.push_str("\nContinue the conversation from where it left off without asking the user any further questions. Resume the actual work or answer directly — do not acknowledge the summary, recap what was happening, or preface with continuation text. Do produce a substantive response: never reply with an empty, whitespace-only, or content-free message.");
     }
 
     base
@@ -177,6 +177,8 @@ fn summarize_messages(messages: &[ConversationMessage]) -> String {
             assistant_messages,
             tool_messages
         ),
+        "- Authority: this is older context only; later preserved messages supersede it."
+            .to_string(),
     ];
 
     if !tool_names.is_empty() {
@@ -204,11 +206,13 @@ fn summarize_messages(messages: &[ConversationMessage]) -> String {
         lines.push(format!("- Key files referenced: {}.", key_files.join(", ")));
     }
 
-    if let Some(current_work) = infer_current_work(messages) {
-        lines.push(format!("- Current work: {current_work}"));
+    if let Some(latest_user_request) = infer_latest_user_request(messages) {
+        lines.push(format!(
+            "- Latest compacted user request: {latest_user_request}"
+        ));
     }
 
-    lines.push("- Key timeline:".to_string());
+    lines.push("- Key timeline (audit only; not active instructions):".to_string());
     for message in messages {
         let role = match message.role {
             MessageRole::System => "system",
@@ -306,10 +310,11 @@ fn collect_key_files(messages: &[ConversationMessage]) -> Vec<String> {
     files.into_iter().take(8).collect()
 }
 
-fn infer_current_work(messages: &[ConversationMessage]) -> Option<String> {
+fn infer_latest_user_request(messages: &[ConversationMessage]) -> Option<String> {
     messages
         .iter()
         .rev()
+        .filter(|message| message.role == MessageRole::User)
         .filter_map(first_text_block)
         .find(|text| !text.trim().is_empty())
         .map(|text| truncate_summary(text, 200))
@@ -422,7 +427,8 @@ fn collapse_blank_lines(content: &str) -> String {
 mod tests {
     use super::{
         collect_key_files, compact_session, estimate_session_tokens, format_compact_summary,
-        infer_pending_work, CompactionConfig,
+        get_compact_continuation_message, infer_latest_user_request, infer_pending_work,
+        CompactionConfig,
     };
     use crate::session::{ContentBlock, ConversationMessage, MessageRole, Session};
 
@@ -430,6 +436,13 @@ mod tests {
     fn formats_compact_summary_like_upstream() {
         let summary = "<analysis>scratch</analysis>\n<summary>Kept work</summary>";
         assert_eq!(format_compact_summary(summary), "Summary:\nKept work");
+    }
+
+    #[test]
+    fn continuation_treats_preserved_tail_as_authoritative() {
+        let message = get_compact_continuation_message("<summary>old</summary>", true, true);
+        assert!(message.contains("Recent messages are preserved verbatim and are authoritative"));
+        assert!(message.contains("If the summary conflicts"));
     }
 
     #[test]
@@ -487,7 +500,9 @@ mod tests {
             ContentBlock::Text { text } if text.contains("Summary:")
         ));
         assert!(result.formatted_summary.contains("Scope:"));
-        assert!(result.formatted_summary.contains("Key timeline:"));
+        assert!(result
+            .formatted_summary
+            .contains("Key timeline (audit only; not active instructions):"));
         assert!(
             estimate_session_tokens(&result.compacted_session) < estimate_session_tokens(&session)
         );
@@ -613,5 +628,21 @@ mod tests {
         ]);
         assert_eq!(pending.len(), 1);
         assert!(pending[0].contains("Next: update tests"));
+    }
+
+    #[test]
+    fn latest_compacted_user_request_ignores_assistant_tail() {
+        let latest = infer_latest_user_request(&[
+            ConversationMessage::user_text("old request"),
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "Assistant says the current work is old.".to_string(),
+            }]),
+            ConversationMessage::user_text("new request"),
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "I will keep working on it.".to_string(),
+            }]),
+        ]);
+
+        assert_eq!(latest.as_deref(), Some("new request"));
     }
 }

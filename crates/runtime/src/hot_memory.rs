@@ -206,7 +206,7 @@ fn add_hot_memory_unlocked(
     scope: &str,
     expires_at: Option<&str>,
 ) -> Result<HotMemoryEntry, String> {
-    validate_content(content)?;
+    validate_content(content, expires_at)?;
     validate_scope(scope)?;
     validate_expiry(expires_at)?;
     let mut entries = read_entries(target)?;
@@ -252,7 +252,7 @@ fn replace_hot_memory_unlocked(
     scope: &str,
     expires_at: Option<&str>,
 ) -> Result<HotMemoryEntry, String> {
-    validate_content(content)?;
+    validate_content(content, expires_at)?;
     validate_scope(scope)?;
     validate_expiry(expires_at)?;
     let mut entries = read_entries(target)?;
@@ -577,7 +577,7 @@ fn ensure_within_limit(target: HotMemoryTarget, entries: &[HotMemoryEntry]) -> R
     Ok(())
 }
 
-fn validate_content(content: &str) -> Result<(), String> {
+fn validate_content(content: &str, expires_at: Option<&str>) -> Result<(), String> {
     let content = content.trim();
     if content.is_empty() {
         return Err("memory content cannot be empty".to_string());
@@ -596,7 +596,83 @@ fn validate_content(content: &str) -> Result<(), String> {
             ));
         }
     }
+    if expires_at.is_none() {
+        if let Some(pattern) = transient_task_memory_pattern(content) {
+            return Err(format!(
+                "hot memory is for stable facts; `{pattern}` looks like temporary task progress. Use session_search for task history, or set expires_at for short-lived memory."
+            ));
+        }
+    }
     Ok(())
+}
+
+fn transient_task_memory_pattern(content: &str) -> Option<&'static str> {
+    let lowered = content.to_ascii_lowercase();
+    for pattern in [
+        "current task",
+        "this task",
+        "this session",
+        "this conversation",
+        "right now",
+        "next step",
+        "next steps",
+        "follow up",
+        "we just",
+        "just finished",
+    ] {
+        if lowered.contains(pattern) {
+            return Some(pattern);
+        }
+    }
+    for word in [
+        "todo",
+        "pending",
+        "remaining",
+        "completed",
+        "rollback",
+        "revert",
+    ] {
+        if contains_ascii_word(&lowered, word) {
+            return Some(word);
+        }
+    }
+    for pattern in [
+        "当前任务",
+        "本轮",
+        "这次任务",
+        "待办",
+        "下一步",
+        "已完成",
+        "回滚",
+        "撤销",
+    ] {
+        if content.contains(pattern) {
+            return Some(pattern);
+        }
+    }
+    None
+}
+
+fn contains_ascii_word(haystack: &str, needle: &str) -> bool {
+    let bytes = haystack.as_bytes();
+    let needle_bytes = needle.as_bytes();
+    if needle_bytes.is_empty() || bytes.len() < needle_bytes.len() {
+        return false;
+    }
+    let is_word = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
+    let mut index = 0;
+    while index + needle_bytes.len() <= bytes.len() {
+        if &bytes[index..index + needle_bytes.len()] == needle_bytes {
+            let before_ok = index == 0 || !is_word(bytes[index - 1]);
+            let after_index = index + needle_bytes.len();
+            let after_ok = after_index == bytes.len() || !is_word(bytes[after_index]);
+            if before_ok && after_ok {
+                return true;
+            }
+        }
+        index += 1;
+    }
+    false
 }
 
 fn validate_scope(scope: &str) -> Result<(), String> {
@@ -672,6 +748,20 @@ mod tests {
             HotMemoryTarget::Memory
         );
         assert!("other".parse::<HotMemoryTarget>().is_err());
+    }
+
+    #[test]
+    fn unexpired_task_progress_is_not_hot_memory() {
+        let error = super::validate_content("Next step: run the remaining tests.", None)
+            .expect_err("task progress should require expiry or session history");
+        assert!(error.contains("temporary task progress"));
+
+        assert!(
+            super::validate_content("Next step: run the remaining tests.", Some("2099-01-01"))
+                .is_ok()
+        );
+        assert!(super::validate_content("Project uses Rust and React.", None).is_ok());
+        assert!(super::validate_content("Module name is todolist_view.", None).is_ok());
     }
 
     #[test]

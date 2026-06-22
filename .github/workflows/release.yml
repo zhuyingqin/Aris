@@ -76,8 +76,54 @@ jobs:
             ${{ matrix.artifact }}.zip
             ${{ matrix.artifact }}.zip.sha256
 
+  desktop-windows:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      - name: Install desktop dependencies
+        working-directory: desktop
+        run: npm ci
+
+      - name: Build signed ARIS Studio installer
+        working-directory: desktop
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: npx tauri build --bundles nsis --ci
+
+      - name: Generate updater manifest
+        working-directory: desktop
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+        run: npm run generate:updater-json -- src-tauri/target/release/bundle/nsis
+
+      - name: Upload desktop artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: aris-studio-windows-x64
+          path: |
+            desktop/src-tauri/target/release/bundle/nsis/ARIS Studio_*_x64-setup.exe
+            desktop/src-tauri/target/release/bundle/nsis/ARIS Studio_*_x64-setup.exe.sig
+            desktop/src-tauri/target/release/bundle/nsis/latest.json
+
   release:
-    needs: build
+    needs:
+      - build
+      - desktop-windows
     runs-on: ubuntu-22.04
 
     steps:
@@ -98,4 +144,8 @@ jobs:
             aris-code-linux-x64.tar.gz.sha256
             aris-code-windows-x64.zip
             aris-code-windows-x64.zip.sha256
+            ARIS Studio_*_x64-setup.exe
+            ARIS Studio_*_x64-setup.exe.sig
+            latest.json
+          overwrite_files: true
           generate_release_notes: true

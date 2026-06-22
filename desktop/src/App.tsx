@@ -1,7 +1,11 @@
-import { useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { appRelaunch, appUpdateCheck, appUpdateDownloadAndInstall, isTauri } from "./api/tauri";
 import { useStore, type Tab } from "./store";
+import type { AppUpdateInfo, AppUpdateProgress } from "./types";
 import Chat from "./chat/Chat";
+import Lab from "./lab/Lab";
 import Literature from "./literature/Literature";
 import Studio from "./studio/Studio";
 import Mail from "./mail/Mail";
@@ -16,6 +20,12 @@ interface NavItem {
   label: string;
   icon: ReactNode;
 }
+
+type UpdateIndicatorState = "idle" | "available" | "downloading" | "ready";
+
+const UPDATE_CHECK_INTERVAL_MS = 30 * 60 * 1000;
+
+const WINDOW_MENUS = ["文件", "编辑", "视图", "帮助"];
 
 const IC = (p: { d: string; extra?: string }) => (
   <svg width="16" height="16" viewBox="0 0 16 16" fill="none"
@@ -32,6 +42,9 @@ const NAV_GROUPS: { group: string; items: NavItem[] }[] = [
     items: [{
       id: "chat", label: "Chat",
       icon: <IC d="M2 3a1 1 0 011-1h10a1 1 0 011 1v6.5a1 1 0 01-1 1H9.5L8 12l-1.5-1.5H3a1 1 0 01-1-1V3z" />,
+    }, {
+      id: "lab", label: "Lab",
+      icon: <IC d="M3.5 2.5h9v11h-9zM5.5 6l2.2 1.6-2.2 1.6M9 9.7h2.5" />,
     }],
   },
   {
@@ -105,6 +118,14 @@ function sameProjectOrder(left: string[], right: string[]) {
   return left.length === right.length && left.every((id, index) => id === right[index]);
 }
 
+function windowAction(action: "minimize" | "maximize" | "close") {
+  if (!isTauri()) return;
+  const currentWindow = getCurrentWindow();
+  if (action === "minimize") void currentWindow.minimize();
+  else if (action === "maximize") void currentWindow.toggleMaximize();
+  else void currentWindow.close();
+}
+
 export default function App() {
   const tab = useStore((s) => s.tab);
   const setTab = useStore((s) => s.setTab);
@@ -133,9 +154,14 @@ export default function App() {
   const [projectMenuOpen, setProjectMenuOpen] = useState(false);
   const [draggedProjectId, setDraggedProjectId] = useState<string | null>(null);
   const [projectOrderPreview, setProjectOrderPreview] = useState<string[] | null>(null);
+  const [updateState, setUpdateState] = useState<UpdateIndicatorState>("idle");
+  const [updateInfo, setUpdateInfo] = useState<AppUpdateInfo | null>(null);
+  const [updateProgress, setUpdateProgress] = useState<AppUpdateProgress | null>(null);
   const projectSwitcherRef = useRef<HTMLDivElement | null>(null);
   const projectOrderPreviewRef = useRef<string[] | null>(null);
   const suppressProjectClickRef = useRef(false);
+  const updateCheckInFlightRef = useRef(false);
+  const updateStateRef = useRef<UpdateIndicatorState>("idle");
   const projectDragRef = useRef<{
     id: string;
     pointerId: number;
@@ -276,6 +302,39 @@ export default function App() {
 
   useEffect(() => init(), [init]);
   useEffect(() => {
+    updateStateRef.current = updateState;
+  }, [updateState]);
+  const checkForAppUpdate = useCallback(async () => {
+    if (updateCheckInFlightRef.current) return;
+    if (updateStateRef.current === "downloading" || updateStateRef.current === "ready") return;
+    updateCheckInFlightRef.current = true;
+    try {
+      const result = await appUpdateCheck();
+      if (result.available) {
+        setUpdateInfo(result);
+        setUpdateProgress(null);
+        setUpdateState("available");
+      } else {
+        setUpdateInfo(result);
+        setUpdateProgress(null);
+        setUpdateState("idle");
+      }
+    } catch {
+      if (updateStateRef.current !== "available") {
+        setUpdateState("idle");
+      }
+    } finally {
+      updateCheckInFlightRef.current = false;
+    }
+  }, []);
+  useEffect(() => {
+    void checkForAppUpdate();
+    const timer = window.setInterval(() => {
+      void checkForAppUpdate();
+    }, UPDATE_CHECK_INTERVAL_MS);
+    return () => window.clearInterval(timer);
+  }, [checkForAppUpdate]);
+  useEffect(() => {
     document.documentElement.dataset.theme = theme;
     localStorage.setItem("aris-theme", theme);
   }, [theme]);
@@ -312,12 +371,123 @@ export default function App() {
   const orderedProjects = (projectOrderPreview ?? projects.map((project) => project.id))
     .map((id) => projectById.get(id))
     .filter((project): project is NonNullable<typeof project> => Boolean(project));
+  const labWorkbench = tab === "lab";
+  const showUpdateIndicator = updateState === "available" || updateState === "downloading" || updateState === "ready";
+  const updateVersionLabel = updateInfo?.version ? ` v${updateInfo.version}` : "";
+  const updateTitle = updateState === "ready"
+    ? `Update${updateVersionLabel} installed. Restart ARIS Studio.`
+    : updateState === "downloading"
+      ? updateProgress?.percent != null
+        ? `Installing update${updateVersionLabel}: ${updateProgress.percent}%`
+        : `Installing update${updateVersionLabel}`
+      : `Update${updateVersionLabel} available. Click to install.`;
+  const handleUpdateIndicatorClick = async () => {
+    if (updateState === "ready") {
+      try {
+        await appRelaunch();
+      } catch (err) {
+        setError(`Failed to restart after update: ${String(err)}`);
+      }
+      return;
+    }
+    if (updateState !== "available") return;
+    setUpdateState("downloading");
+    setUpdateProgress(null);
+    try {
+      const result = await appUpdateDownloadAndInstall((progress) => {
+        setUpdateProgress(progress);
+      });
+      if (result.installed) {
+        setUpdateInfo((current) => ({
+          available: true,
+          currentVersion: current?.currentVersion,
+          version: result.version ?? current?.version,
+          date: current?.date,
+          body: current?.body,
+        }));
+        setUpdateState("ready");
+      } else {
+        setUpdateState("idle");
+        setUpdateInfo(null);
+      }
+    } catch (err) {
+      setUpdateState("available");
+      setError(`Failed to install update: ${String(err)}`);
+    }
+  };
+  const renderUpdateIndicator = () => showUpdateIndicator ? (
+    <button
+      className={`app-update-indicator ${updateState}`}
+      type="button"
+      onClick={() => void handleUpdateIndicatorClick()}
+      disabled={updateState === "downloading"}
+      title={updateTitle}
+      aria-label={updateTitle}
+    >
+      <span className="app-update-icon" aria-hidden="true">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none"
+          stroke="currentColor" strokeWidth="1.55" strokeLinecap="round" strokeLinejoin="round">
+          {updateState === "ready" ? (
+            <path d="M3 8.2 6.4 11.5 13 4.5" />
+          ) : (
+            <path d="M8 2.5v7M4.7 6.4 8 9.7l3.3-3.3M3 13.2h10" />
+          )}
+        </svg>
+      </span>
+      <span className="app-update-badge" aria-hidden="true" />
+    </button>
+  ) : null;
 
   return (
     <div
-      className={`app${sidebarCollapsed ? " sidebar-collapsed" : ""}`}
+      className={`app${sidebarCollapsed ? " sidebar-collapsed" : ""}${labWorkbench ? " app-lab-workbench" : ""}`}
       style={{ "--app-sidebar-w": sidebarCollapsed ? "0px" : `${sidebarWidth}px` } as CSSProperties}
     >
+      <div className="window-titlebar">
+        <div className="window-titlebar-left">
+          <button
+            className="window-titlebar-sidebar"
+            type="button"
+            onClick={toggleSidebar}
+            title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+            aria-label={sidebarCollapsed ? "Expand navigation sidebar" : "Collapse navigation sidebar"}
+          >
+            <span aria-hidden="true" />
+          </button>
+          <button className="window-nav-btn" type="button" disabled aria-label="Back">
+            <span aria-hidden="true">‹</span>
+          </button>
+          <button className="window-nav-btn" type="button" disabled aria-label="Forward">
+            <span aria-hidden="true">›</span>
+          </button>
+          <nav className="window-menu" aria-label="Application menu">
+            {WINDOW_MENUS.map((item) => (
+              <button key={item} type="button">
+                {item}
+              </button>
+            ))}
+          </nav>
+        </div>
+        <div
+          className="window-titlebar-drag"
+          data-tauri-drag-region
+          onDoubleClick={() => windowAction("maximize")}
+        >
+          <span data-tauri-drag-region>ARIS Studio</span>
+        </div>
+        <div className="window-titlebar-controls">
+          {renderUpdateIndicator()}
+          <button type="button" aria-label="Minimize window" onClick={() => windowAction("minimize")}>
+            <span aria-hidden="true">─</span>
+          </button>
+          <button type="button" aria-label="Maximize window" onClick={() => windowAction("maximize")}>
+            <span aria-hidden="true">□</span>
+          </button>
+          <button type="button" className="close" aria-label="Close window" onClick={() => windowAction("close")}>
+            <span aria-hidden="true">×</span>
+          </button>
+        </div>
+      </div>
       <aside className={`sidebar${mobileNavOpen ? " mobile-open" : ""}${sidebarCollapsed ? " sidebar-collapsed" : ""}`}>
         <div className="brand">
           <img className="brand-mark" src={arisIcon} alt="" />
@@ -481,6 +651,7 @@ export default function App() {
         <div hidden={tab !== "chat"}>
           <Chat />
         </div>
+        {tab === "lab" && <Lab />}
         {tab === "literature" && <Literature />}
         {tab === "studio" && <Studio />}
         {tab === "mail" && <Mail />}

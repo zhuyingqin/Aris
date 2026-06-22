@@ -1,5 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import {
+  appRelaunch,
+  appUpdateCheck,
+  appUpdateDownloadAndInstall,
   configGet,
   configSecretGet,
   configSet,
@@ -15,6 +18,8 @@ import type {
   ConfigSecretKind,
   ConfigTestResult,
   ConfigView,
+  AppUpdateInfo,
+  AppUpdateProgress,
 } from "../types";
 
 // ── Provider / model presets ──────────────────────────────────────────────────
@@ -122,9 +127,36 @@ function extractModelFromToml(toml: string): string {
 function extractKeyFromAuthJson(authJson: string): string {
   try {
     const auth = JSON.parse(authJson) as Record<string, unknown>;
+    for (const field of ["api_key", "API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "access_token"]) {
+      const value = auth[field];
+      if (typeof value === "string" && value.trim()) return value.trim();
+    }
     const tokens = auth?.tokens as Record<string, unknown> | undefined;
-    return (tokens?.access_token as string) ?? (auth?.OPENAI_API_KEY as string) ?? "";
+    for (const field of ["access_token", "api_key", "API_KEY", "OPENAI_API_KEY"]) {
+      const value = tokens?.[field];
+      if (typeof value === "string" && value.trim()) return value.trim();
+    }
+    return "";
   } catch { return ""; }
+}
+
+function authJsonWithApiKey(authJson: string | null | undefined, apiKey: string): string {
+  const key = apiKey.trim();
+  if (!key) return authJson ?? "";
+  let auth: Record<string, unknown> = {};
+  const raw = authJson?.trim() ?? "";
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        auth = parsed as Record<string, unknown>;
+      }
+    } catch {
+      auth = {};
+    }
+  }
+  auth.api_key = key;
+  return JSON.stringify(auth, null, 2);
 }
 
 /** Human-readable provider name inferred from base URL */
@@ -473,8 +505,21 @@ function ProviderCard({
 
 // ── Main ──────────────────────────────────────────────────────────────────────
 
+function formatUpdateBytes(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  let size = value;
+  let index = 0;
+  while (size >= 1024 && index < units.length - 1) {
+    size /= 1024;
+    index += 1;
+  }
+  return `${size.toFixed(index === 0 ? 0 : 1)} ${units[index]}`;
+}
+
 type SaveState = "idle" | "saving" | "saved" | "error";
 type TestState = "idle" | "testing" | "passed" | "failed";
+type UpdateState = "idle" | "checking" | "available" | "current" | "downloading" | "ready" | "error";
 
 export default function Settings() {
   const setError = useStore((s) => s.setError);
@@ -486,6 +531,10 @@ export default function Settings() {
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [testState, setTestState] = useState<TestState>("idle");
   const [testResult, setTestResult] = useState<ConfigTestResult | null>(null);
+  const [updateState, setUpdateState] = useState<UpdateState>("idle");
+  const [updateInfo, setUpdateInfo] = useState<AppUpdateInfo | null>(null);
+  const [updateProgress, setUpdateProgress] = useState<AppUpdateProgress | null>(null);
+  const [updateMessage, setUpdateMessage] = useState("");
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [mailDetailOpen, setMailDetailOpen] = useState(false);
   const operationVersion = useRef(0);
@@ -624,12 +673,71 @@ export default function Settings() {
   };
 
   // Apply from provider card — NO api key sent, backend keeps saved key
+  const checkForUpdates = async () => {
+    setUpdateState("checking");
+    setUpdateProgress(null);
+    setUpdateMessage("");
+    try {
+      const result = await appUpdateCheck();
+      setUpdateInfo(result);
+      if (result.available) {
+        setUpdateState("available");
+        setUpdateMessage(`发现新版本 v${result.version ?? ""}`.trim());
+      } else {
+        setUpdateState("current");
+        setUpdateMessage("当前已是最新版本");
+      }
+    } catch (e) {
+      setUpdateState("error");
+      setUpdateMessage(String(e));
+    }
+  };
+
+  const installUpdate = async () => {
+    setUpdateState("downloading");
+    setUpdateProgress(null);
+    setUpdateMessage("正在下载更新");
+    try {
+      const result = await appUpdateDownloadAndInstall((progress) => {
+        setUpdateProgress(progress);
+        if (progress.stage === "finished") setUpdateMessage("更新已安装，重启后生效");
+      });
+      if (result.installed) {
+        setUpdateState("ready");
+        setUpdateInfo((current) => ({
+          available: true,
+          currentVersion: current?.currentVersion,
+          version: result.version ?? current?.version,
+          date: current?.date,
+          body: current?.body,
+        }));
+        setUpdateMessage("更新已安装，重启后生效");
+      } else {
+        setUpdateState("current");
+        setUpdateMessage("没有可安装的更新");
+      }
+    } catch (e) {
+      setUpdateState("error");
+      setUpdateMessage(String(e));
+    }
+  };
+
+  const restartForUpdate = async () => {
+    try {
+      await appRelaunch();
+    } catch (e) {
+      setUpdateState("error");
+      setUpdateMessage(String(e));
+    }
+  };
+
   const applyFromCard = async (provider: ProviderEntry, role: "exec" | "review", model: string) => {
     const url = provider.url.trim();
     const protocol = detectProtocol(url);
+    const key = extractKeyFromAuthJson(provider.authJson);
     const patch: ConfigPatch = role === "exec"
-      ? { executorProvider: protocol, executorModel: model, executorBaseUrl: url }
-      : { reviewerProvider: protocol, reviewerModel: model, reviewerBaseUrl: url };
+      ? { executorProvider: protocol, executorModel: model, executorBaseUrl: url, ...(key ? { executorApiKey: key } : {}) }
+      : { reviewerProvider: protocol, reviewerModel: model, reviewerBaseUrl: url, ...(key ? { reviewerApiKey: key } : {}) };
     try {
       const next = await configSet(patch);
       loadConfig(next);
@@ -649,8 +757,9 @@ export default function Settings() {
 
   const saveDetail = () => {
     if (!form.name?.trim()) return;
-    if (detailId === "new") add({ name: form.name.trim(), url: form.url?.trim() ?? "", notes: form.notes?.trim() ?? "", authJson: form.authJson ?? "", configToml: form.configToml ?? "" });
-    else if (detailId) update(detailId, { name: form.name.trim(), url: form.url?.trim() ?? "", notes: form.notes?.trim() ?? "", authJson: form.authJson ?? "", configToml: form.configToml ?? "" });
+    const authJson = authJsonWithApiKey(form.authJson, detailApiKey);
+    if (detailId === "new") add({ name: form.name.trim(), url: form.url?.trim() ?? "", notes: form.notes?.trim() ?? "", authJson, configToml: form.configToml ?? "" });
+    else if (detailId) update(detailId, { name: form.name.trim(), url: form.url?.trim() ?? "", notes: form.notes?.trim() ?? "", authJson, configToml: form.configToml ?? "" });
     closeDetail();
   };
 
@@ -659,8 +768,9 @@ export default function Settings() {
     try {
       const url = form.url?.trim() ?? "";
       const protocol = detectProtocol(url);
+      const authJson = authJsonWithApiKey(form.authJson, detailApiKey);
       let key = detailApiKey.trim();
-      if (!key && form.authJson?.trim()) key = extractKeyFromAuthJson(form.authJson);
+      if (!key && authJson.trim()) key = extractKeyFromAuthJson(authJson);
       const model = extractModelFromToml(form.configToml ?? "") || (role === "exec" ? (configView?.executorModel ?? "") : (configView?.reviewerModel ?? ""));
       const patch: ConfigPatch = role === "exec"
         ? { executorProvider: protocol, executorModel: model, executorBaseUrl: url, ...(key ? { executorApiKey: key } : {}) }
@@ -668,6 +778,7 @@ export default function Settings() {
       const next = await configSet(patch);
       loadConfig(next);
       const pid = detailId !== "new" && detailId ? detailId : null;
+      if (pid && detailApiKey.trim()) update(pid, { authJson });
       if (role === "exec") setExecutor(pid, model); else setReviewer(pid, model);
     } catch (e) { setError(String(e)); }
     finally { setDetailApplying(null); }
@@ -815,6 +926,14 @@ export default function Settings() {
     if (!prov) { setAdvForm((f) => ({ ...f, reviewerProvider: "", reviewerModel: "", reviewerBaseUrl: "" })); return; }
     setAdvForm((f) => ({ ...f, reviewerProvider: prov, reviewerModel: prov === "custom" ? (f.reviewerModel ?? "") : meta.defaultModel, reviewerBaseUrl: prov === "custom" ? (f.reviewerBaseUrl ?? "") : (meta.defaultBaseUrl ?? meta.baseUrls?.[0]?.value ?? "") }));
   };
+  const updateBusy = updateState === "checking" || updateState === "downloading";
+  const updateCanInstall = updateState === "available";
+  const updateCanRestart = updateState === "ready";
+  const updateProgressLabel = updateProgress
+    ? updateProgress.contentLength
+      ? `${formatUpdateBytes(updateProgress.downloadedBytes)} / ${formatUpdateBytes(updateProgress.contentLength)}${updateProgress.percent !== null && updateProgress.percent !== undefined ? ` - ${updateProgress.percent}%` : ""}`
+      : `${formatUpdateBytes(updateProgress.downloadedBytes)} downloaded`
+    : "";
   return (
     <div className="st-page sp-list-page">
       {/* Status bar */}
@@ -836,6 +955,60 @@ export default function Settings() {
         <div className="sp-status-slot sp-status-version">
           <span className="sp-status-tag sp-status-tag-version">版本</span>
           <span className="sp-status-model">ARIS Studio v{configView.appVersion}</span>
+        </div>
+      </div>
+
+      <div className="sp-update-section">
+        <div className="sp-section-head">
+          <div className="sp-section-head-text">
+            <div className="sp-section-title">应用更新</div>
+            <div className="sp-section-sub">通过 GitHub Release 检查、下载并安装 ARIS Studio 更新</div>
+          </div>
+          <div className="sp-update-actions">
+            <button className="sp-btn sp-btn-secondary" onClick={() => void checkForUpdates()} disabled={updateBusy} type="button">
+              {updateState === "checking" ? "检查中..." : "检查更新"}
+            </button>
+            {updateCanInstall && (
+              <button className="sp-btn sp-btn-primary" onClick={() => void installUpdate()} disabled={updateBusy} type="button">
+                下载并安装
+              </button>
+            )}
+            {updateCanRestart && (
+              <button className="sp-btn sp-btn-primary" onClick={() => void restartForUpdate()} type="button">
+                重启应用
+              </button>
+            )}
+          </div>
+        </div>
+        <div className={`sp-update-panel sp-update-panel-${updateState}`}>
+          <div className="sp-update-main">
+            <span className={`sp-update-dot sp-update-dot-${updateState}`} />
+            <div className="sp-update-copy">
+              <div className="sp-update-title">
+                {updateState === "available"
+                  ? `可更新到 v${updateInfo?.version ?? ""}`
+                  : updateState === "ready"
+                    ? `v${updateInfo?.version ?? ""} 已安装`
+                    : updateState === "downloading"
+                      ? "正在安装更新"
+                      : "ARIS Studio 已连接 GitHub 更新通道"}
+              </div>
+              <div className="sp-update-meta">
+                当前版本 v{configView.appVersion}
+                {updateInfo?.version && updateState !== "current" ? ` -> 远端版本 v${updateInfo.version}` : ""}
+                {updateInfo?.date ? ` · ${updateInfo.date}` : ""}
+              </div>
+              {(updateMessage || updateProgressLabel) && (
+                <div className="sp-update-message">
+                  {updateMessage}
+                  {updateProgressLabel ? ` · ${updateProgressLabel}` : ""}
+                </div>
+              )}
+              {updateInfo?.body && updateState === "available" && (
+                <div className="sp-update-notes">{updateInfo.body}</div>
+              )}
+            </div>
+          </div>
         </div>
       </div>
 

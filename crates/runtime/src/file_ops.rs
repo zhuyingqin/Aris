@@ -2,7 +2,7 @@ use std::cmp::Reverse;
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::time::Instant;
 
@@ -12,7 +12,12 @@ use regex::RegexBuilder;
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
-const MAX_READ_FILE_CONTENT_CHARS: usize = 200_000;
+const MAX_READ_FILE_CONTENT_CHARS: usize = 64_000;
+const MAX_IMPLICIT_READ_FILE_CHARS: usize = 48_000;
+const MAX_IMPLICIT_READ_FILE_LINES: usize = 800;
+const LONG_FILE_HEAD_LINES: usize = 120;
+const LONG_FILE_TAIL_LINES: usize = 40;
+const LONG_FILE_MAX_OUTLINE_LINES: usize = 200;
 const READONLY_ROOTS_ENV: &str = "ARIS_READONLY_ROOTS";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -81,6 +86,23 @@ pub struct WriteFileOutput {
     pub original_file: Option<String>,
     #[serde(rename = "gitDiff")]
     pub git_diff: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AppendFileOutput {
+    #[serde(rename = "type")]
+    pub kind: String,
+    #[serde(rename = "filePath")]
+    pub file_path: String,
+    pub created: bool,
+    #[serde(rename = "appendedChars")]
+    pub appended_chars: usize,
+    #[serde(rename = "appendedBytes")]
+    pub appended_bytes: usize,
+    #[serde(rename = "totalChars")]
+    pub total_chars: usize,
+    #[serde(rename = "totalLines")]
+    pub total_lines: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -177,12 +199,32 @@ fn read_text_payload(
     limit: Option<usize>,
 ) -> ReadFileOutput {
     let lines: Vec<&str> = content.lines().collect();
+    let total_chars = content.chars().count();
+    if offset.is_none()
+        && limit.is_none()
+        && (total_chars > MAX_IMPLICIT_READ_FILE_CHARS
+            || lines.len() > MAX_IMPLICIT_READ_FILE_LINES)
+    {
+        let content = long_file_preview(&lines, total_chars);
+        return ReadFileOutput {
+            kind: String::from("text"),
+            file: TextFilePayload {
+                file_path: display_path(&absolute_path),
+                num_lines: content.lines().count(),
+                start_line: 1,
+                total_lines: lines.len(),
+                total_chars,
+                content,
+                truncated: true,
+            },
+        };
+    }
+
     let start_index = offset.unwrap_or(0).min(lines.len());
     let end_index = limit.map_or(lines.len(), |limit| {
         start_index.saturating_add(limit).min(lines.len())
     });
     let selected = lines[start_index..end_index].join("\n");
-    let total_chars = content.chars().count();
     let (content, truncated) = truncate_read_content(selected);
 
     ReadFileOutput {
@@ -199,6 +241,68 @@ fn read_text_payload(
     }
 }
 
+fn long_file_preview(lines: &[&str], total_chars: usize) -> String {
+    let total_lines = lines.len();
+    let mut out = Vec::new();
+    out.push(format!(
+        "[read_file long-file preview: full file is {total_lines} lines / {total_chars} chars. This preview is intentionally partial. Use read_file with offset/limit to read one section window at a time.]"
+    ));
+
+    let outline = markdown_outline_lines(lines);
+    if !outline.is_empty() {
+        out.push(String::new());
+        out.push(format!(
+            "[outline: first {} markdown heading lines]",
+            outline.len()
+        ));
+        out.extend(outline);
+    }
+
+    let head_end = LONG_FILE_HEAD_LINES.min(total_lines);
+    if head_end > 0 {
+        out.push(String::new());
+        out.push(format!("[head: lines 1-{head_end}]"));
+        out.extend(numbered_lines(&lines[..head_end], 1));
+    }
+
+    let tail_start = total_lines
+        .saturating_sub(LONG_FILE_TAIL_LINES)
+        .max(head_end);
+    if tail_start < total_lines {
+        out.push(String::new());
+        out.push(format!("[tail: lines {}-{total_lines}]", tail_start + 1));
+        out.extend(numbered_lines(&lines[tail_start..], tail_start + 1));
+    }
+
+    let preview = out.join("\n");
+    truncate_read_content(preview).0
+}
+
+fn markdown_outline_lines(lines: &[&str]) -> Vec<String> {
+    lines
+        .iter()
+        .enumerate()
+        .filter_map(|(index, line)| {
+            let trimmed = line.trim_start();
+            is_markdown_heading(trimmed).then(|| format!("L{}: {trimmed}", index + 1))
+        })
+        .take(LONG_FILE_MAX_OUTLINE_LINES)
+        .collect()
+}
+
+fn is_markdown_heading(line: &str) -> bool {
+    let hashes = line.chars().take_while(|ch| *ch == '#').count();
+    (1..=6).contains(&hashes) && line.chars().nth(hashes).is_some_and(char::is_whitespace)
+}
+
+fn numbered_lines(lines: &[&str], start_line: usize) -> Vec<String> {
+    lines
+        .iter()
+        .enumerate()
+        .map(|(offset, line)| format!("L{}: {line}", start_line + offset))
+        .collect()
+}
+
 fn truncate_read_content(content: String) -> (String, bool) {
     if content.chars().count() <= MAX_READ_FILE_CONTENT_CHARS {
         return (content, false);
@@ -209,7 +313,7 @@ fn truncate_read_content(content: String) -> (String, bool) {
         .take(MAX_READ_FILE_CONTENT_CHARS)
         .collect::<String>();
     truncated.push_str(
-        "\n\n[read_file truncated: selected content exceeded 200000 characters. Use a narrower offset/limit window or grep_search.]",
+        "\n\n[read_file truncated: selected content exceeded 64000 characters. Use a narrower offset/limit window or grep_search.]",
     );
     (truncated, true)
 }
@@ -238,6 +342,41 @@ pub fn write_file(path: &str, content: &str) -> io::Result<WriteFileOutput> {
         structured_patch: make_patch(original_file.as_deref().unwrap_or(""), content),
         original_file,
         git_diff: None,
+    })
+}
+
+pub fn append_file(
+    path: &str,
+    content: &str,
+    create_if_missing: bool,
+) -> io::Result<AppendFileOutput> {
+    let absolute_path = normalize_path_allow_missing(path)?;
+    let created = !absolute_path.exists();
+    if created && !create_if_missing {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("file `{}` does not exist", absolute_path.display()),
+        ));
+    }
+    if let Some(parent) = absolute_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut file = fs::OpenOptions::new()
+        .create(create_if_missing)
+        .append(true)
+        .open(&absolute_path)?;
+    file.write_all(content.as_bytes())?;
+    file.flush()?;
+
+    let updated = fs::read_to_string(&absolute_path)?;
+    Ok(AppendFileOutput {
+        kind: String::from("append"),
+        file_path: display_path(&absolute_path),
+        created,
+        appended_chars: content.chars().count(),
+        appended_bytes: content.len(),
+        total_chars: updated.chars().count(),
+        total_lines: updated.lines().count(),
     })
 }
 
@@ -1449,7 +1588,12 @@ fn normalize_path(path: &str) -> io::Result<PathBuf> {
 fn normalize_read_path(path: &str) -> io::Result<PathBuf> {
     let root = workspace_root()?;
     let candidate = path_candidate(path, root.as_deref())?;
-    let canonical = candidate.canonicalize()?;
+    let canonical = candidate.canonicalize().map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("failed to resolve `{}`: {error}", candidate.display()),
+        )
+    })?;
     if root.is_some() {
         ensure_readable_path(&canonical, &readable_roots(root.as_deref())?)?;
     }
@@ -1652,8 +1796,8 @@ mod tests {
     use flate2::{write::ZlibEncoder, Compression};
 
     use super::{
-        display_path, edit_file, glob_search, grep_search, read_file, write_file, FileChange,
-        GrepSearchInput, MAX_READ_FILE_CONTENT_CHARS, READONLY_ROOTS_ENV,
+        append_file, display_path, edit_file, glob_search, grep_search, read_file, write_file,
+        FileChange, GrepSearchInput, MAX_READ_FILE_CONTENT_CHARS, READONLY_ROOTS_ENV,
     };
 
     struct EnvGuard {
@@ -1737,6 +1881,43 @@ mod tests {
     }
 
     #[test]
+    fn append_file_returns_summary_without_full_content() {
+        let _lock = crate::test_env_lock();
+        let _env = EnvGuard::unset("ARIS_WORKSPACE_ROOT");
+        let path = temp_path("append.txt");
+        write_file(path.to_string_lossy().as_ref(), "one\n").expect("initial write should succeed");
+
+        let output = append_file(path.to_string_lossy().as_ref(), "two\nthree\n", false)
+            .expect("append should succeed");
+
+        assert_eq!(output.kind, "append");
+        assert!(!output.created);
+        assert_eq!(output.appended_chars, "two\nthree\n".chars().count());
+        assert_eq!(output.total_lines, 3);
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read appended file"),
+            "one\ntwo\nthree\n"
+        );
+    }
+
+    #[test]
+    fn append_file_can_create_missing_file_when_allowed() {
+        let _lock = crate::test_env_lock();
+        let _env = EnvGuard::unset("ARIS_WORKSPACE_ROOT");
+        let path = temp_path("append-create.txt");
+
+        let missing_error = append_file(path.to_string_lossy().as_ref(), "first\n", false)
+            .expect_err("missing append without create should fail");
+        assert_eq!(missing_error.kind(), std::io::ErrorKind::NotFound);
+
+        let output = append_file(path.to_string_lossy().as_ref(), "first\n", true)
+            .expect("append should create file");
+        assert!(output.created);
+        assert_eq!(output.total_lines, 1);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "first\n");
+    }
+
+    #[test]
     fn reads_large_file_with_line_window() {
         let _lock = crate::test_env_lock();
         let _env = EnvGuard::unset("ARIS_WORKSPACE_ROOT");
@@ -1754,6 +1935,78 @@ mod tests {
         assert_eq!(output.file.start_line, 5_000);
         assert_eq!(output.file.total_lines, 6_000);
         assert!(!output.file.truncated);
+    }
+
+    #[test]
+    fn implicit_read_of_long_markdown_returns_outline_preview() {
+        let _lock = crate::test_env_lock();
+        let _env = EnvGuard::unset("ARIS_WORKSPACE_ROOT");
+        let path = temp_path("long-book-chapter.md");
+        let mut lines = vec!["# Chapter 2".to_string()];
+        for index in 1..=1_000 {
+            if index == 500 {
+                lines.push("## Section 2.3 Important Topic".to_string());
+            } else {
+                lines.push(format!("body line {index} {}", "x".repeat(80)));
+            }
+        }
+        std::fs::write(&path, lines.join("\n")).expect("long markdown file should be written");
+
+        let output = read_file(path.to_string_lossy().as_ref(), None, None)
+            .expect("long markdown file should read as preview");
+
+        assert!(output.file.truncated);
+        assert_eq!(output.file.total_lines, 1_001);
+        assert!(output
+            .file
+            .content
+            .contains("[read_file long-file preview:"));
+        assert!(output.file.content.contains("L1: # Chapter 2"));
+        assert!(output
+            .file
+            .content
+            .contains("L501: ## Section 2.3 Important Topic"));
+        assert!(output.file.content.contains("[head: lines 1-120]"));
+        assert!(output.file.content.contains("[tail: lines 962-1001]"));
+        assert!(!output.file.content.contains("L300: body line 300"));
+    }
+
+    #[test]
+    fn repeated_implicit_reads_of_long_markdown_return_stable_preview() {
+        let _lock = crate::test_env_lock();
+        let _env = EnvGuard::unset("ARIS_WORKSPACE_ROOT");
+        let path = temp_path("repeat-long-book-chapter.md");
+        let mut lines = vec!["# Repeated Chapter".to_string()];
+        for index in 1..=1_500 {
+            if index % 300 == 0 {
+                lines.push(format!("## Section {}", index / 300));
+            } else {
+                lines.push(format!("paragraph {index} {}", "x".repeat(90)));
+            }
+        }
+        std::fs::write(&path, lines.join("\n")).expect("long markdown file should be written");
+
+        let first = read_file(path.to_string_lossy().as_ref(), None, None)
+            .expect("first implicit long read should return a preview");
+        let second = read_file(path.to_string_lossy().as_ref(), None, None)
+            .expect("second implicit long read should return a preview");
+        let third = read_file(path.to_string_lossy().as_ref(), None, None)
+            .expect("third implicit long read should return a preview");
+
+        for output in [&first, &second, &third] {
+            assert!(output.file.truncated);
+            assert_eq!(output.file.total_lines, 1_501);
+            assert!(output
+                .file
+                .content
+                .contains("[read_file long-file preview:"));
+            assert!(output.file.content.contains("L1: # Repeated Chapter"));
+            assert!(output.file.content.contains("L301: ## Section 1"));
+            assert!(output.file.content.chars().count() <= MAX_READ_FILE_CONTENT_CHARS);
+            assert!(!output.file.content.contains("L200: paragraph 200"));
+        }
+        assert_eq!(first, second);
+        assert_eq!(second, third);
     }
 
     #[test]

@@ -3,6 +3,7 @@ use std::{env, io, path::PathBuf};
 const DESKTOP_ALLOWED_AGENT_TOOLS: &[&str] = &[
     "read_file",
     "write_file",
+    "append_file",
     "edit_file",
     "glob_search",
     "grep_search",

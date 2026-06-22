@@ -8,6 +8,7 @@ import {
   projectSetCurrent,
   stateDir as fetchStateDir,
 } from "./api/tauri";
+import { isLabPreviewMode } from "./api/labPreview";
 
 const PREVIEW_PROJECT: DesktopProject = {
   id: "default",
@@ -19,6 +20,7 @@ const PREVIEW_PROJECT: DesktopProject = {
 
 export type Tab =
   | "chat"
+  | "lab"
   | "literature"
   | "studio"
   | "mail"
@@ -59,7 +61,7 @@ interface AppState {
 }
 
 export const useStore = create<AppState>((set, get) => ({
-  tab: "chat",
+  tab: isLabPreviewMode() ? "lab" : "chat",
   setTab: (tab) => set({ tab }),
 
   pendingChatInput: null,
