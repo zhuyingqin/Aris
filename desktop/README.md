@@ -53,6 +53,17 @@ npm run dev
 
 Some features need the Tauri backend and will only work in `npm run tauri dev`.
 
+Lab UI changes can be previewed without compiling or launching the Tauri
+executable:
+
+```powershell
+npm run dev:lab
+```
+
+This opens Vite at `http://127.0.0.1:5173/?labPreview=1` and uses mock Lab data
+for notebooks, files, kernels, Python execution output, and variables. The same
+mode can be enabled on any Vite URL with `?labPreview=1`.
+
 ## Build
 
 ```powershell

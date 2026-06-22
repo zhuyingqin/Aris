@@ -1,4 +1,4 @@
-import { useLayoutEffect, useMemo, useRef } from "react";
+import { useLayoutEffect, useMemo, useRef, type KeyboardEvent, type RefCallback } from "react";
 import hljs from "highlight.js/lib/core";
 import bash from "highlight.js/lib/languages/bash";
 import css from "highlight.js/lib/languages/css";
@@ -6,6 +6,7 @@ import ini from "highlight.js/lib/languages/ini";
 import javascript from "highlight.js/lib/languages/javascript";
 import json from "highlight.js/lib/languages/json";
 import latex from "highlight.js/lib/languages/latex";
+import matlab from "highlight.js/lib/languages/matlab";
 import python from "highlight.js/lib/languages/python";
 import markdown from "highlight.js/lib/languages/markdown";
 import powershell from "highlight.js/lib/languages/powershell";
@@ -22,6 +23,7 @@ hljs.registerLanguage("ini", ini);
 hljs.registerLanguage("javascript", javascript);
 hljs.registerLanguage("json", json);
 hljs.registerLanguage("latex", latex);
+hljs.registerLanguage("matlab", matlab);
 hljs.registerLanguage("python", python);
 hljs.registerLanguage("markdown", markdown);
 hljs.registerLanguage("powershell", powershell);
@@ -40,6 +42,7 @@ export type EditorLanguage =
   | "javascript"
   | "json"
   | "latex"
+  | "matlab"
   | "python"
   | "markdown"
   | "powershell"
@@ -57,6 +60,7 @@ const HIGHLIGHT_LANGUAGES = new Set<EditorLanguage>([
   "javascript",
   "json",
   "latex",
+  "matlab",
   "python",
   "markdown",
   "powershell",
@@ -71,14 +75,23 @@ interface CodeEditorProps {
   value: string;
   language: EditorLanguage;
   onChange: (value: string) => void;
+  diffLines?: CodeDiffLine[];
   /** Called before the editor's own Tab/Enter handling — preventDefault to win. */
-  onKeyDown?: (event: React.KeyboardEvent<HTMLTextAreaElement>) => void;
+  onKeyDown?: (event: KeyboardEvent<HTMLTextAreaElement>) => void;
   onFocus?: () => void;
   onBlur?: () => void;
   placeholder?: string;
   readOnly?: boolean;
   /** Stamped as `data-editor` on the textarea so the parent can focus it by index. */
   dataEditor?: number;
+  /** Optional access to the textarea for selection-aware commands. */
+  inputRef?: RefCallback<HTMLTextAreaElement>;
+}
+
+export interface CodeDiffLine {
+  line: number;
+  type: "added" | "removed";
+  text?: string;
 }
 
 function escapeHtml(text: string): string {
@@ -94,6 +107,23 @@ function highlight(code: string, language: EditorLanguage): string {
     }
   }
   return escapeHtml(code);
+}
+
+function lineNumbersFor(text: string): number[] {
+  const count = Math.max(1, text.split("\n").length);
+  return Array.from({ length: count }, (_, index) => index + 1);
+}
+
+function diffLinesFor(line: number, diffLines: CodeDiffLine[] | undefined): CodeDiffLine[] {
+  if (!diffLines?.length) return [];
+  return diffLines.filter((entry) => entry.line === line);
+}
+
+function lineClass(line: number, diffLines: CodeDiffLine[] | undefined): string {
+  const marks = diffLinesFor(line, diffLines);
+  if (marks.some((entry) => entry.type === "added")) return " diff-added";
+  if (marks.some((entry) => entry.type === "removed")) return " diff-removed";
+  return "";
 }
 
 /**
@@ -113,10 +143,13 @@ export default function CodeEditor({
   placeholder,
   readOnly,
   dataEditor,
+  inputRef,
+  diffLines,
 }: CodeEditorProps) {
-  const taRef = useRef<HTMLTextAreaElement>(null);
+  const taRef = useRef<HTMLTextAreaElement | null>(null);
   const pendingSelection = useRef<[number, number] | null>(null);
   const html = useMemo(() => highlight(value, language), [value, language]);
+  const lineNumbers = useMemo(() => lineNumbersFor(value), [value]);
 
   // After a programmatic edit (indent / auto-indent) restore the caret once the
   // controlled value has flushed to the DOM.
@@ -133,7 +166,7 @@ export default function CodeEditor({
     onChange(next);
   };
 
-  const handleKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+  const handleKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     onKeyDown?.(event);
     if (event.defaultPrevented || readOnly) return;
 
@@ -190,26 +223,45 @@ export default function CodeEditor({
 
   return (
     <div className="lab-editor" data-lang={language}>
-      <pre className="lab-editor-pre" aria-hidden="true">
-        <code className="hljs" dangerouslySetInnerHTML={{ __html: html }} />
-      </pre>
-      <textarea
-        ref={taRef}
-        data-editor={dataEditor}
-        className="lab-editor-input"
-        value={value}
-        rows={1}
-        spellCheck={false}
-        autoComplete="off"
-        autoCapitalize="off"
-        autoCorrect="off"
-        readOnly={readOnly}
-        placeholder={placeholder}
-        onChange={(event) => onChange(event.target.value)}
-        onKeyDown={handleKeyDown}
-        onFocus={onFocus}
-        onBlur={onBlur}
-      />
+      <div className="lab-editor-lines" aria-hidden="true">
+        {lineNumbers.map((line) => (
+          <span key={line} className={lineClass(line, diffLines)}>
+            {line}
+          </span>
+        ))}
+      </div>
+      <div className="lab-editor-code">
+        <pre className="lab-editor-pre" aria-hidden="true">
+          <code className="hljs" dangerouslySetInnerHTML={{ __html: html }} />
+        </pre>
+        {diffLines?.length ? (
+          <div className="lab-editor-diff-overlay" aria-hidden="true">
+            {lineNumbers.map((line) => (
+              <span key={line} className={`lab-editor-diff-line${lineClass(line, diffLines)}`} />
+            ))}
+          </div>
+        ) : null}
+        <textarea
+          ref={(node) => {
+            taRef.current = node;
+            inputRef?.(node);
+          }}
+          data-editor={dataEditor}
+          className="lab-editor-input"
+          value={value}
+          rows={1}
+          spellCheck={false}
+          autoComplete="off"
+          autoCapitalize="off"
+          autoCorrect="off"
+          readOnly={readOnly}
+          placeholder={placeholder}
+          onChange={(event) => onChange(event.target.value)}
+          onKeyDown={handleKeyDown}
+          onFocus={onFocus}
+          onBlur={onBlur}
+        />
+      </div>
     </div>
   );
 }

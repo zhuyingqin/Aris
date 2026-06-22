@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
+import { isLabPreviewMode } from "../api/labPreview";
 import { fileListDir, fileOpen, isTauri, type FileTreeEntry } from "../api/tauri";
 import { makeId } from "../chat/model";
 import type { ChatAttachment } from "../types";
@@ -73,9 +74,10 @@ export default function LabFiles({
   const [loading, setLoading] = useState<Set<string>>(() => new Set());
   const [error, setError] = useState<string | null>(null);
   const notebookSet = useMemo(() => new Set(notebooks), [notebooks]);
+  const previewMode = isLabPreviewMode();
 
   const loadDir = useCallback(async (path: string) => {
-    if (!isTauri()) return;
+    if (!isTauri() && !previewMode) return;
     setLoading((items) => new Set(items).add(path));
     setError(null);
     try {
@@ -90,7 +92,7 @@ export default function LabFiles({
         return next;
       });
     }
-  }, []);
+  }, [previewMode]);
 
   useEffect(() => {
     setExpanded(new Set([""]));

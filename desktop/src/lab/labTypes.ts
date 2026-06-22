@@ -52,6 +52,13 @@ export interface KernelInfo {
   kernelName: string;
 }
 
+/** An available kernel the user can pick (Jupyter kernelspec or native MATLAB). */
+export interface KernelSpecInfo {
+  name: string;
+  displayName: string;
+  language: string;
+}
+
 export interface ExecuteResult {
   status: "ok" | "error" | "timeout";
   executionCount: number | null;
@@ -64,6 +71,19 @@ export interface LabCellOutputEvent {
   notebookPath: string;
   cellIndex: number | null;
   output: CellOutput;
+}
+
+export interface LabFileOutputEvent {
+  filePath: string;
+  output: CellOutput;
+}
+
+export interface FileExecutionResult {
+  filePath: string;
+  status: "ok" | "error" | "timeout";
+  executionCount: number | null;
+  outputs: CellOutput[];
+  kernelName?: string | null;
 }
 
 export interface CellRun {

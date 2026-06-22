@@ -8,17 +8,22 @@ import {
   labExportSweepManifest,
   labInspectVars,
   labInterruptKernel,
+  labListKernelspecs,
   labListNotebooks,
   labLoadNotebook,
   labRunAll,
   labRunSweep,
+  labSaveNotebook,
+  labSetKernelspec,
   labShutdownKernel,
   labStartKernel,
   runsLoad,
 } from "../api/tauri";
+import { isLabPreviewMode } from "../api/labPreview";
 import type {
   ExecuteResult,
   CellOutput,
+  KernelSpecInfo,
   LabCellOutputEvent,
   NotebookView,
   RunAllResult,
@@ -31,6 +36,17 @@ import type {
 } from "./labTypes";
 
 const asError = (e: unknown) => String(e);
+
+/** The kernel recorded in a notebook's `metadata.kernelspec`, if any. */
+const kernelFromView = (view: NotebookView | null): string | null => {
+  const meta = view?.notebook?.metadata as { kernelspec?: { name?: string } } | undefined;
+  const name = meta?.kernelspec?.name;
+  return typeof name === "string" && name ? name : null;
+};
+
+/** Default kernel pick: prefer python3, else the first available spec. */
+const defaultKernel = (specs: KernelSpecInfo[]): string | null =>
+  specs.find((s) => s.name === "python3")?.name ?? specs[0]?.name ?? null;
 const latestFirst = (a: RunRecord, b: RunRecord) =>
   (b.startedAt ?? b.finishedAt ?? 0) - (a.startedAt ?? a.finishedAt ?? 0);
 const replaceCellOutputs = (
@@ -45,13 +61,35 @@ const replaceCellOutputs = (
 };
 const sameProject = (state: LabState, projectId: string | null) => state.currentProjectId === projectId;
 
+const cellText = (source: string | string[]): string =>
+  Array.isArray(source) ? source.join("") : source ?? "";
+const CELL_SIGNATURE_FIELD_SEPARATOR = "\u001f";
+const CELL_SIGNATURE_CELL_SEPARATOR = "\u001e";
+
+/** Signature of a notebook's source + structure, ignoring outputs and execution
+ *  counts. Used to detect AI/external *edits* without flagging mere re-runs. */
+const cellSignature = (cells: NotebookView["notebook"]["cells"]): string =>
+  cells.map((cell) => `${cell.cell_type}${CELL_SIGNATURE_FIELD_SEPARATOR}${cellText(cell.source)}`)
+    .join(CELL_SIGNATURE_CELL_SEPARATOR);
+
 interface LabState {
   currentProjectId: string | null;
   notebooks: string[];
+  /** Kernels the user can pick (Jupyter kernelspecs + native MATLAB). */
+  kernelspecs: KernelSpecInfo[];
+  /** The kernel selected for the active notebook (kernelspec name). */
+  selectedKernel: string | null;
   runs: RunRecord[];
   variables: VariableInfo[];
   activePath: string | null;
   view: NotebookView | null;
+  /** Pre-edit baseline notebook JSON while an AI/external change awaits review;
+   *  null when there is nothing to review. Drives the cell-diff highlighting. */
+  reviewBaseline: NotebookView["notebook"] | null;
+  /** True while the Lab Assistant is running a conversation. Pauses the
+   *  external-edit poll so we never reload the notebook mid-stream (which would
+   *  wipe streaming outputs / flicker the view); the review fires once it ends. */
+  assistantBusy: boolean;
   busy: boolean;
   variablesBusy: boolean;
   /** Index of the cell currently executing, if any. */
@@ -65,10 +103,27 @@ interface LabState {
   error: string | null;
 
   init: (projectId?: string | null) => void;
+  refreshKernelspecs: () => Promise<void>;
+  /** Pick a kernel for the active notebook: persist it + restart if one runs. */
+  setKernel: (name: string) => Promise<void>;
+  /** Pick the Lab runtime without writing notebook metadata. Used by regular files. */
+  selectKernel: (name: string) => void;
   refreshNotebooks: (projectId?: string | null) => Promise<void>;
   refreshRuns: (projectId?: string | null) => Promise<void>;
   open: (path: string, projectId?: string | null) => Promise<void>;
   createNotebook: (name: string) => Promise<void>;
+  /** Poll disk for an external (AI) notebook edit. When the source/structure
+   *  changed, snapshot a review baseline (if none yet) and swap in the new
+   *  content. Returns whether it applied a change so the caller can clear any
+   *  stale local cell drafts. `hasLocalEdits` suppresses it (never clobber the
+   *  user's unsaved typing). */
+  checkExternalNotebookEdit: (hasLocalEdits: boolean) => Promise<boolean>;
+  /** Report whether the Lab Assistant is mid-conversation (pauses the poll). */
+  setAssistantBusy: (busy: boolean) => void;
+  /** Accept the AI changes: drop the review baseline (clears highlighting). */
+  acceptNotebookReview: () => void;
+  /** Revert the notebook to the pre-edit baseline, then clear the review. */
+  revertNotebookReview: () => Promise<void>;
   addCell: (cellType: "code" | "markdown") => Promise<void>;
   /** Insert a cell of `cellType` at `index`; resolves to the new cell's index. */
   insertCellAt: (cellType: "code" | "markdown", index: number) => Promise<number>;
@@ -103,10 +158,14 @@ interface LabState {
 export const useLabStore = create<LabState>((set, get) => ({
   currentProjectId: null,
   notebooks: [],
+  kernelspecs: [],
+  selectedKernel: null,
   runs: [],
   variables: [],
   activePath: null,
   view: null,
+  reviewBaseline: null,
+  assistantBusy: false,
   busy: false,
   variablesBusy: false,
   runningCell: null,
@@ -118,14 +177,17 @@ export const useLabStore = create<LabState>((set, get) => ({
   error: null,
 
   init: (projectId = null) => {
-    if (!isTauri()) return;
+    if (!isTauri() && !isLabPreviewMode()) return;
     set({
       currentProjectId: projectId,
       notebooks: [],
+      selectedKernel: null,
       runs: [],
       variables: [],
       activePath: null,
       view: null,
+      reviewBaseline: null,
+      assistantBusy: false,
       busy: false,
       variablesBusy: false,
       runningCell: null,
@@ -136,8 +198,48 @@ export const useLabStore = create<LabState>((set, get) => ({
       sweepManifest: null,
       error: null,
     });
+    void get().refreshKernelspecs();
     void get().refreshNotebooks(projectId);
     void get().refreshRuns(projectId);
+  },
+
+  refreshKernelspecs: async () => {
+    try {
+      const specs = await labListKernelspecs<KernelSpecInfo[]>();
+      set((state) => ({
+        kernelspecs: specs,
+        selectedKernel: state.selectedKernel ?? defaultKernel(specs),
+      }));
+    } catch (e) {
+      set({ error: asError(e) });
+    }
+  },
+
+  setKernel: async (name) => {
+    const { activePath, currentProjectId: projectId, view, kernelspecs } = get();
+    if (get().selectedKernel === name) return;
+    set({ selectedKernel: name });
+    const spec = kernelspecs.find((s) => s.name === name);
+    if (activePath) {
+      try {
+        const next = await labSetKernelspec<NotebookView>(
+          activePath,
+          name,
+          spec?.displayName,
+          spec?.language,
+        );
+        if (sameProject(get(), projectId)) set({ view: next });
+      } catch (e) {
+        if (sameProject(get(), projectId)) set({ error: asError(e) });
+      }
+    }
+    // Switching kernels means a new process: the manager keys sessions by
+    // notebook path and reuses a running one, so restart to honor the choice.
+    if (view?.running) await get().restartKernel();
+  },
+
+  selectKernel: (name) => {
+    set({ selectedKernel: name });
   },
 
   refreshNotebooks: async (projectId = get().currentProjectId) => {
@@ -171,7 +273,77 @@ export const useLabStore = create<LabState>((set, get) => ({
     try {
       const view = await labLoadNotebook<NotebookView>(path);
       if (!sameProject(get(), projectId)) return;
-      set({ activePath: path, view, variables: [] });
+      set({
+        activePath: path,
+        view,
+        reviewBaseline: null,
+        variables: [],
+        selectedKernel: kernelFromView(view) ?? defaultKernel(get().kernelspecs),
+      });
+    } catch (e) {
+      if (sameProject(get(), projectId)) set({ error: asError(e) });
+    } finally {
+      if (sameProject(get(), projectId)) set({ busy: false });
+    }
+  },
+
+  checkExternalNotebookEdit: async (hasLocalEdits) => {
+    const { activePath, view, currentProjectId: projectId, runningAll, runningCell, assistantBusy } = get();
+    if (
+      !isTauri() ||
+      !activePath ||
+      !view ||
+      hasLocalEdits ||
+      runningAll ||
+      runningCell !== null ||
+      assistantBusy
+    ) {
+      return false;
+    }
+    try {
+      const disk = await labLoadNotebook<NotebookView>(activePath);
+      const cur = get();
+      // Bail if anything moved under us during the async read (project switch,
+      // notebook close, a run or a Lab Assistant conversation that started, …).
+      if (
+        !sameProject(cur, projectId) ||
+        cur.activePath !== activePath ||
+        !cur.view ||
+        cur.runningAll ||
+        cur.runningCell !== null ||
+        cur.assistantBusy
+      ) {
+        return false;
+      }
+      // Only react to source/structure edits — re-runs change outputs on disk
+      // but are not "modifications" to review.
+      if (cellSignature(cur.view.notebook.cells) === cellSignature(disk.notebook.cells)) {
+        return false;
+      }
+      set({
+        view: disk,
+        reviewBaseline: cur.reviewBaseline ?? structuredClone(cur.view.notebook),
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  },
+
+  setAssistantBusy: (busy) => {
+    if (get().assistantBusy !== busy) set({ assistantBusy: busy });
+  },
+
+  acceptNotebookReview: () => set({ reviewBaseline: null }),
+
+  revertNotebookReview: async () => {
+    const { activePath, reviewBaseline, currentProjectId: projectId } = get();
+    if (!activePath || !reviewBaseline) return;
+    set({ busy: true, error: null });
+    try {
+      const view = await labSaveNotebook<NotebookView>(activePath, reviewBaseline);
+      if (!sameProject(get(), projectId)) return;
+      set({ view, reviewBaseline: null });
     } catch (e) {
       if (sameProject(get(), projectId)) set({ error: asError(e) });
     } finally {
@@ -189,7 +361,13 @@ export const useLabStore = create<LabState>((set, get) => ({
     try {
       const view = await labCreateNotebook<NotebookView>(path);
       if (!sameProject(get(), projectId)) return;
-      set({ activePath: path, view, variables: [] });
+      set({
+        activePath: path,
+        view,
+        reviewBaseline: null,
+        variables: [],
+        selectedKernel: kernelFromView(view) ?? defaultKernel(get().kernelspecs),
+      });
       await get().refreshNotebooks(projectId);
     } catch (e) {
       if (sameProject(get(), projectId)) set({ error: asError(e) });
@@ -355,7 +533,10 @@ export const useLabStore = create<LabState>((set, get) => ({
       await labEditCell<NotebookView>(activePath, "replace", { cellIndex: index, source });
       if (!sameProject(get(), projectId)) return;
       set((state) => ({ view: replaceCellOutputs(state.view, index, []) }));
-      await labExecuteCell<ExecuteResult>(activePath, { cellIndex: index });
+      await labExecuteCell<ExecuteResult>(activePath, {
+        cellIndex: index,
+        kernel: get().selectedKernel ?? undefined,
+      });
       if (!sameProject(get(), projectId)) return;
       const view = await labLoadNotebook<NotebookView>(activePath);
       if (!sameProject(get(), projectId)) return;
@@ -373,7 +554,10 @@ export const useLabStore = create<LabState>((set, get) => ({
     const hasParameters = parameters && Object.keys(parameters).length > 0;
     set({ runningAll: true, runStartedAt: Date.now(), error: null });
     try {
-      await labRunAll<RunAllResult>(activePath, { parameters: hasParameters ? parameters : undefined });
+      await labRunAll<RunAllResult>(activePath, {
+        parameters: hasParameters ? parameters : undefined,
+        kernel: get().selectedKernel ?? undefined,
+      });
       if (!sameProject(get(), projectId)) return;
       const view = await labLoadNotebook<NotebookView>(activePath);
       if (!sameProject(get(), projectId)) return;
@@ -408,7 +592,10 @@ export const useLabStore = create<LabState>((set, get) => ({
         set({ runningCell: index, runStartedAt: Date.now() });
         // Clear this cell's outputs so streamed output replaces (not appends to) stale results.
         set((state) => ({ view: replaceCellOutputs(state.view, index, []) }));
-        const result = await labExecuteCell<ExecuteResult>(activePath, { cellIndex: index });
+        const result = await labExecuteCell<ExecuteResult>(activePath, {
+          cellIndex: index,
+          kernel: get().selectedKernel ?? undefined,
+        });
         if (!sameProject(get(), projectId)) return;
         set((state) => {
           if (!state.view) return {};
@@ -442,7 +629,10 @@ export const useLabStore = create<LabState>((set, get) => ({
     if (!activePath) return;
     set({ variablesBusy: true, error: null });
     try {
-      const result = await labInspectVars<VariablesResult>(activePath);
+      const result = await labInspectVars<VariablesResult>(
+        activePath,
+        get().selectedKernel ?? undefined,
+      );
       if (!sameProject(get(), projectId)) return;
       set({ variables: result.variables ?? [] });
     } catch (e) {
@@ -493,11 +683,11 @@ export const useLabStore = create<LabState>((set, get) => ({
   },
 
   startKernel: async () => {
-    const { activePath, currentProjectId: projectId } = get();
+    const { activePath, currentProjectId: projectId, selectedKernel } = get();
     if (!activePath) return;
     set({ busy: true, error: null });
     try {
-      await labStartKernel(activePath);
+      await labStartKernel(activePath, selectedKernel ?? undefined);
       if (!sameProject(get(), projectId)) return;
       const view = await labLoadNotebook<NotebookView>(activePath);
       if (!sameProject(get(), projectId)) return;
@@ -510,13 +700,13 @@ export const useLabStore = create<LabState>((set, get) => ({
   },
 
   restartKernel: async () => {
-    const { activePath, currentProjectId: projectId } = get();
+    const { activePath, currentProjectId: projectId, selectedKernel } = get();
     if (!activePath) return;
     set({ busy: true, error: null });
     try {
       await labShutdownKernel(activePath);
       if (!sameProject(get(), projectId)) return;
-      await labStartKernel(activePath);
+      await labStartKernel(activePath, selectedKernel ?? undefined);
       if (!sameProject(get(), projectId)) return;
       const view = await labLoadNotebook<NotebookView>(activePath);
       if (!sameProject(get(), projectId)) return;

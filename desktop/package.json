@@ -1,11 +1,12 @@
 {
   "name": "aris-studio",
   "private": true,
-  "version": "0.3.6",
+  "version": "0.4.0",
   "type": "module",
   "description": "ARIS Studio - desktop UI for Chat, literature, skills, sessions, and settings",
   "scripts": {
     "dev": "vite",
+    "dev:lab": "vite --host 127.0.0.1 --port 5173 --strictPort --open /?labPreview=1",
     "build": "vite build",
     "build:cli": "node scripts/build-cli-resource.cjs",
     "build:playwright-mcp": "node scripts/build-playwright-mcp-resource.cjs",

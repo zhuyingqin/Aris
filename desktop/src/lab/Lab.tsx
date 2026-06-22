@@ -1,11 +1,12 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
 
 import MarkdownContent from "../chat/MarkdownContent";
 import { isTauri, onLabCellOutput } from "../api/tauri";
+import { isLabPreviewMode } from "../api/labPreview";
 import { useStore } from "../store";
 import type { ChatAttachment } from "../types";
 import { useLabStore } from "./labStore";
-import CodeEditor from "./CodeEditor";
+import CodeEditor, { type CodeDiffLine, type EditorLanguage } from "./CodeEditor";
 import FileEditorPane from "./FileEditorPane";
 import LabAssistant from "./LabAssistant";
 import LabFiles from "./LabFiles";
@@ -17,20 +18,161 @@ import type {
   SweepSpec,
   VariableInfo,
 } from "./labTypes";
+import { diffTextLines } from "./textDiff";
 import "./Lab.css";
 
 type Mode = "command" | "edit";
 type CellPhase = "idle" | "queued" | "running";
-type LabSideTab = "notebook" | "files" | "assistant";
+type LabSideTab = "files" | "notebook" | "runtime";
+type LabEditorKind = "notebook" | "file";
+
+interface LabEditorTab {
+  id: string;
+  kind: LabEditorKind;
+  path: string;
+}
 
 const cx = (...parts: Array<string | false | null | undefined>) => parts.filter(Boolean).join(" ");
+
+const LAB_SIDE_WIDTH_KEY = "aris-lab-side-w";
+const LAB_ASSISTANT_WIDTH_KEY = "aris-lab-assistant-w";
+const LAB_SIDE_WIDTH_DEFAULT = 260;
+const LAB_SIDE_WIDTH_MIN = 210;
+const LAB_SIDE_WIDTH_MAX = 420;
+const LAB_ASSISTANT_WIDTH_DEFAULT = 380;
+const LAB_ASSISTANT_WIDTH_MIN = 300;
+const LAB_ASSISTANT_WIDTH_MAX = 680;
+
+function clampPanelWidth(value: number, min: number, max: number): number {
+  return Math.round(Math.max(min, Math.min(max, value)));
+}
+
+function storedPanelWidth(key: string, min: number, max: number, fallback: number): number {
+  const value = Number(localStorage.getItem(key));
+  return Number.isFinite(value) && value >= min && value <= max ? value : fallback;
+}
 
 function cellSource(cell: NotebookCell): string {
   return Array.isArray(cell.source) ? cell.source.join("") : cell.source ?? "";
 }
 
+/** How often we poll the open notebook on disk for external (AI) edits. */
+const NOTEBOOK_POLL_MS = 2000;
+const CELL_DIFF_KEY_SEPARATOR = "\u001f";
+
+type CellChange = "added" | "modified";
+
+interface NotebookReview {
+  /** Current-cell index → how it changed vs the baseline (unchanged omitted). */
+  status: Map<number, CellChange>;
+  lineDiffs: Map<number, CodeDiffLine[]>;
+  /** Cells present in the baseline but gone from the current notebook. */
+  removed: { cellType: string; source: string }[];
+  added: number;
+  modified: number;
+}
+
+function cellMatchKey(cell: NotebookCell): string {
+  return `${cell.cell_type}${CELL_DIFF_KEY_SEPARATOR}${cellSource(cell)}`;
+}
+
+function addedCellDiffLines(source: string): CodeDiffLine[] {
+  const lines = source.split(/\r?\n/);
+  if (lines.length > 1 && lines[lines.length - 1] === "") lines.pop();
+  return lines.map((text, index) => ({ line: index + 1, type: "added", text }));
+}
+
+/**
+ * Cell-level diff between a baseline notebook and the current one, classifying
+ * each current cell as added / modified / unchanged and collecting removed
+ * cells. Matches by stable cell `id` first (Lab edits preserve ids, so in-place
+ * rewrites read as `modified`), then falls back to identical content for id-less
+ * or fully-rewritten cells.
+ */
+function diffNotebookCells(baseline: NotebookCell[], current: NotebookCell[]): NotebookReview {
+  const usedBaseline = baseline.map(() => false);
+  const matchedCurrent = current.map(() => false);
+  const status = new Map<number, CellChange>();
+  const lineDiffs = new Map<number, CodeDiffLine[]>();
+
+  const byId = new Map<string, number>();
+  baseline.forEach((cell, index) => {
+    if (cell.id && !byId.has(cell.id)) byId.set(cell.id, index);
+  });
+
+  current.forEach((cell, index) => {
+    if (!cell.id) return;
+    const baseIndex = byId.get(cell.id);
+    if (baseIndex === undefined || usedBaseline[baseIndex]) return;
+    usedBaseline[baseIndex] = true;
+    matchedCurrent[index] = true;
+    const base = baseline[baseIndex];
+    if (base.cell_type !== cell.cell_type || cellSource(base) !== cellSource(cell)) {
+      status.set(index, "modified");
+      const diffLines = diffTextLines(cellSource(base), cellSource(cell));
+      lineDiffs.set(index, diffLines.length > 0 ? diffLines : addedCellDiffLines(cellSource(cell)));
+    }
+  });
+
+  current.forEach((cell, index) => {
+    if (matchedCurrent[index]) return;
+    const key = cellMatchKey(cell);
+    const baseIndex = baseline.findIndex(
+      (base, j) => !usedBaseline[j] && cellMatchKey(base) === key,
+    );
+    if (baseIndex >= 0) {
+      usedBaseline[baseIndex] = true;
+      matchedCurrent[index] = true;
+    } else {
+      status.set(index, "added");
+      lineDiffs.set(index, addedCellDiffLines(cellSource(cell)));
+    }
+  });
+
+  const removed: { cellType: string; source: string }[] = [];
+  baseline.forEach((base, j) => {
+    if (!usedBaseline[j]) removed.push({ cellType: base.cell_type, source: cellSource(base) });
+  });
+
+  let added = 0;
+  let modified = 0;
+  status.forEach((value) => (value === "added" ? (added += 1) : (modified += 1)));
+  return { status, lineDiffs, removed, added, modified };
+}
+
+/** First non-empty line of a cell's source, trimmed for the review-bar preview. */
+function firstLine(source: string): string {
+  const line = source.split("\n").find((entry) => entry.trim()) ?? "";
+  return line.length > 80 ? `${line.slice(0, 80)}…` : line;
+}
+
 function isMarkdown(cell: NotebookCell): boolean {
   return cell.cell_type === "markdown";
+}
+
+/** Map a kernel's language id to the editor's highlighter language. */
+function codeLanguageFor(kernelLanguage: string | undefined): EditorLanguage {
+  if (kernelLanguage === "matlab") return "matlab";
+  return "python";
+}
+
+function basename(path: string | null | undefined): string {
+  if (!path) return "";
+  return path.replace(/\\/g, "/").replace(/\/+$/, "").split("/").pop() || path;
+}
+
+function dirname(path: string): string {
+  const normalized = path.replace(/\\/g, "/");
+  const index = normalized.lastIndexOf("/");
+  return index > 0 ? normalized.slice(0, index) : "";
+}
+
+function editorTabId(kind: LabEditorKind, path: string): string {
+  return `${kind}:${path}`;
+}
+
+function editorTabLabel(tab: LabEditorTab): string {
+  return basename(tab.path) || (tab.kind === "notebook" ? "Notebook" : "File");
 }
 
 function formatRunTime(value?: number | null): string {
@@ -56,18 +198,29 @@ function useElapsed(startedAt: number | null): number {
   return startedAt == null ? 0 : Math.max(0, now - startedAt);
 }
 
-// ── Icons (inline, currentColor) ─────────────────────────────────────────────
+// Icons (inline, currentColor)
 const Icon = ({ d, fill = "none" }: { d: string; fill?: string }) => (
   <svg viewBox="0 0 16 16" width="14" height="14" fill={fill} stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
     <path d={d} />
   </svg>
 );
 const IconRun = () => <Icon d="M5 3.5 12 8l-7 4.5z" fill="currentColor" />;
+const IconRunAll = () => (
+  <svg viewBox="0 0 20 20" width="20" height="20" fill="none" aria-hidden="true">
+    <path d="M4 3.8 9.8 7.5 4 11.2zM10.3 3.8l5.8 3.7-5.8 3.7z" fill="currentColor" />
+    <path d="M4 15.5h12" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
+  </svg>
+);
 const IconUp = () => <Icon d="M4 10l4-4 4 4" />;
 const IconDown = () => <Icon d="M4 6l4 4 4-4" />;
 const IconCopy = () => <Icon d="M6 6h7v7H6zM3 3h7v2M3 3v7h2" />;
 const IconTrash = () => <Icon d="M3 4h10M6.5 4V2.8h3V4M5 4l.6 9h4.8L11 4" />;
 const IconPlus = () => <Icon d="M8 3.5v9M3.5 8h9" />;
+const IconFiles = () => <Icon d="M2.5 3.5h4l1 1h6v8h-11z" />;
+const IconNotebook = () => <Icon d="M4 2.5h8v11H4zM6 5h4M6 7.5h4M6 10h2.5" />;
+const IconRuntime = () => <Icon d="M3 4.5h10M3 8h10M3 11.5h10M5 3v3M11 6.5v3M7 10v3" />;
+const IconAssistant = () => <Icon d="M2.5 4.5h11v6.5h-4L8 12.5 6.5 11h-4zM5 7.5h.01M8 7.5h.01M11 7.5h.01" />;
+const IconClose = () => <Icon d="M4.5 4.5l7 7M11.5 4.5l-7 7" />;
 
 function normalizeSweepSpec(raw: unknown, activePath: string | null): SweepSpec {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
@@ -112,7 +265,7 @@ function normalizeSweepSpec(raw: unknown, activePath: string | null): SweepSpec 
   return spec;
 }
 
-/** Markdown headings across the notebook → a clickable table of contents. */
+/** Markdown headings across the notebook become a clickable table of contents. */
 function buildToc(cells: NotebookCell[]): { index: number; level: number; text: string }[] {
   const toc: { index: number; level: number; text: string }[] = [];
   cells.forEach((cell, index) => {
@@ -134,7 +287,11 @@ interface CellViewProps {
   phase: CellPhase;
   elapsedMs: number;
   source: string;
+  /** When an AI/external edit is under review, how this cell changed. */
+  changeStatus?: CellChange;
+  diffLines?: CodeDiffLine[];
   disabled: boolean;
+  editorLanguage: EditorLanguage;
   onChange: (index: number, value: string) => void;
   onBlurCode: (index: number) => void;
   onSelect: (index: number, mode: Mode) => void;
@@ -149,7 +306,7 @@ interface CellViewProps {
 }
 
 function CellView(props: CellViewProps) {
-  const { cell, index, total, selected, mode, phase, elapsedMs, source, disabled } = props;
+  const { cell, index, total, selected, mode, phase, elapsedMs, source, disabled, changeStatus, diffLines } = props;
   const code = !isMarkdown(cell);
   const running = phase === "running";
   const queued = phase === "queued";
@@ -167,7 +324,16 @@ function CellView(props: CellViewProps) {
 
   return (
     <div
-      className={cx("lab-cell", code ? "code" : "md", selected && "selected", selected && `mode-${mode}`, running && "running", queued && "queued")}
+      className={cx(
+        "lab-cell",
+        code ? "code" : "md",
+        selected && "selected",
+        selected && `mode-${mode}`,
+        running && "running",
+        queued && "queued",
+        changeStatus === "added" && "cell-added",
+        changeStatus === "modified" && "cell-modified",
+      )}
       data-cell={index}
       tabIndex={0}
       onFocus={(event) => {
@@ -185,6 +351,14 @@ function CellView(props: CellViewProps) {
           <span className="lab-prompt md">M</span>
         )}
         {running && <span className="lab-elapsed">{formatElapsed(elapsedMs)}</span>}
+        {changeStatus && (
+          <span
+            className={cx("lab-cell-change-tag", changeStatus)}
+            title={changeStatus === "added" ? "AI 新增的 cell" : "AI 修改的 cell"}
+          >
+            {changeStatus === "added" ? "+AI" : "~AI"}
+          </span>
+        )}
       </div>
 
       <div className="lab-cell-body">
@@ -206,7 +380,7 @@ function CellView(props: CellViewProps) {
             title={code ? "Convert to Markdown (m)" : "Convert to Code (y)"}
             onClick={() => props.onChangeType(index, code ? "markdown" : "code")}
           >
-            {code ? "M↓" : "</>"}
+            {code ? "MD" : "</>"}
           </button>
           <button className="lab-tool danger" title="Delete (dd)" onClick={() => props.onDelete(index)}>
             <IconTrash />
@@ -222,15 +396,16 @@ function CellView(props: CellViewProps) {
             {source.trim() ? (
               <MarkdownContent text={source} />
             ) : (
-              <span className="lab-md-empty">Empty markdown cell — double-click to edit</span>
+              <span className="lab-md-empty">Empty markdown cell - double-click to edit</span>
             )}
           </div>
         ) : (
           <CodeEditor
             value={source}
-            language={code ? "python" : "markdown"}
-            placeholder={code ? "Type Python here…" : "Type Markdown here…"}
+            language={code ? props.editorLanguage : "markdown"}
+            placeholder={code ? "Type code here..." : "Type Markdown here..."}
             dataEditor={index}
+            diffLines={diffLines}
             onChange={(value) => props.onChange(index, value)}
             onFocus={() => props.onSelect(index, "edit")}
             onBlur={() => code && props.onBlurCode(index)}
@@ -286,7 +461,7 @@ function RunRow({ run, onOpen }: { run: RunRecord; onOpen: (path: string) => voi
 }
 
 function VariableRow({ variable }: { variable: VariableInfo }) {
-  const shape = variable.shape?.length ? variable.shape.join(" × ") : null;
+  const shape = variable.shape?.length ? variable.shape.join(" x ") : null;
   return (
     <div className="lab-var-row">
       <div className="lab-var-main">
@@ -304,10 +479,15 @@ function VariableRow({ variable }: { variable: VariableInfo }) {
 export default function Lab() {
   const {
     notebooks,
+    kernelspecs,
+    selectedKernel,
+    setKernel,
+    selectKernel,
     runs,
     variables,
     activePath,
     view,
+    reviewBaseline,
     busy,
     variablesBusy,
     runningCell,
@@ -318,10 +498,14 @@ export default function Lab() {
     sweepManifest,
     error,
     init,
+    refreshKernelspecs,
     refreshNotebooks,
     refreshRuns,
     open,
     createNotebook,
+    checkExternalNotebookEdit,
+    acceptNotebookReview,
+    revertNotebookReview,
     insertCellAt,
     deleteCell,
     moveCell,
@@ -351,14 +535,32 @@ export default function Lab() {
   const [drafts, setDrafts] = useState<Record<number, string>>({});
   const [selected, setSelected] = useState<number | null>(null);
   const [mode, setMode] = useState<Mode>("command");
-  const [sideTab, setSideTab] = useState<LabSideTab>("assistant");
+  const [sideTab, setSideTab] = useState<LabSideTab>("files");
+  const [sideCollapsed, setSideCollapsed] = useState(false);
+  const [assistantOpen, setAssistantOpen] = useState(true);
+  const [sideWidth, setSideWidth] = useState(() =>
+    storedPanelWidth(LAB_SIDE_WIDTH_KEY, LAB_SIDE_WIDTH_MIN, LAB_SIDE_WIDTH_MAX, LAB_SIDE_WIDTH_DEFAULT),
+  );
+  const [assistantWidth, setAssistantWidth] = useState(() =>
+    storedPanelWidth(
+      LAB_ASSISTANT_WIDTH_KEY,
+      LAB_ASSISTANT_WIDTH_MIN,
+      LAB_ASSISTANT_WIDTH_MAX,
+      LAB_ASSISTANT_WIDTH_DEFAULT,
+    ),
+  );
+  const [resizingPanel, setResizingPanel] = useState<"side" | "assistant" | null>(null);
   const [activeFilePath, setActiveFilePath] = useState<string | null>(null);
+  const [openTabs, setOpenTabs] = useState<LabEditorTab[]>([]);
+  const [tabMenu, setTabMenu] = useState<{ x: number; y: number; tabId: string } | null>(null);
   const [assistantAttachments, setAssistantAttachments] = useState<ChatAttachment[]>([]);
   const [newName, setNewName] = useState("");
   const [sweepSpecText, setSweepSpecText] = useState("");
   const [sweepParseError, setSweepParseError] = useState<string | null>(null);
   const cellsRef = useRef<HTMLDivElement>(null);
   const lastD = useRef<{ index: number; time: number } | null>(null);
+  const sideResizeRef = useRef<{ startX: number; startWidth: number } | null>(null);
+  const assistantResizeRef = useRef<{ startX: number; startWidth: number } | null>(null);
   // Whether execution-follow auto-scroll is armed. A manual wheel/touch scroll
   // disarms it until the next run command re-arms it.
   const followRef = useRef(true);
@@ -367,8 +569,38 @@ export default function Lab() {
   const cellCount = cells.length;
   const elapsedMs = useElapsed(runStartedAt);
 
+  // AI/external-edit review: diff the live notebook against the snapshot taken
+  // when the change was detected, so changed cells light up and deletions list.
+  const review = useMemo(
+    () => (reviewBaseline && activePath && !activeFilePath
+      ? diffNotebookCells(reviewBaseline.cells ?? [], cells)
+      : null),
+    [reviewBaseline, activePath, activeFilePath, cells],
+  );
+  const hasReview = Boolean(review && (review.added || review.modified || review.removed.length));
+
+  // Latest drafts/cells for the poll, read without re-arming the interval on
+  // every keystroke.
+  const draftsRef = useRef(drafts);
+  draftsRef.current = drafts;
+  const cellsForPollRef = useRef(cells);
+  cellsForPollRef.current = cells;
+
+  const ensureEditorTab = useCallback((kind: LabEditorKind, path: string) => {
+    const id = editorTabId(kind, path);
+    setOpenTabs((tabs) => {
+      if (tabs.some((tab) => tab.id === id)) return tabs;
+      return [...tabs, { id, kind, path }];
+    });
+  }, []);
+
   useEffect(() => {
     setActiveFilePath(null);
+    setOpenTabs([]);
+    setSideTab("files");
+    setSideCollapsed(false);
+    setTabMenu(null);
+    setAssistantOpen(true);
     init(currentProjectId);
   }, [currentProjectId, init]);
 
@@ -388,6 +620,26 @@ export default function Lab() {
     };
   }, [appendCellOutput]);
 
+  // Poll the open notebook on disk for external (AI) edits, mirroring the file
+  // editor's review flow. Idle-only: never while a kernel runs or the user has
+  // unsaved cell drafts, so we don't clobber in-flight outputs or typing.
+  useEffect(() => {
+    if (!isTauri() || !activePath || activeFilePath) return;
+    const timer = window.setInterval(() => {
+      if (busy || runningAll || runningCell !== null) return;
+      const liveCells = cellsForPollRef.current;
+      const hasLocalEdits = Object.entries(draftsRef.current).some(([key, value]) => {
+        const cell = liveCells[Number(key)];
+        return cell ? value !== cellSource(cell) : value.length > 0;
+      });
+      if (hasLocalEdits) return;
+      void checkExternalNotebookEdit(false).then((applied) => {
+        if (applied) setDrafts({});
+      });
+    }, NOTEBOOK_POLL_MS);
+    return () => window.clearInterval(timer);
+  }, [activePath, activeFilePath, busy, runningAll, runningCell, checkExternalNotebookEdit]);
+
   useEffect(() => {
     setDrafts({});
     setSelected(null);
@@ -403,6 +655,10 @@ export default function Lab() {
         : "",
     );
   }, [activePath]);
+
+  useEffect(() => {
+    if (activePath) ensureEditorTab("notebook", activePath);
+  }, [activePath, ensureEditorTab]);
 
   // Focus follows selection + mode: the textarea in edit mode, the cell shell in
   // command mode (so keyboard shortcuts land). Structural changes (cellCount)
@@ -427,7 +683,28 @@ export default function Lab() {
       ?.scrollIntoView({ block: "nearest", behavior: "smooth" });
   }, [runningCell]);
 
-  if (!isTauri()) {
+  // Dismiss the editor-tab context menu on any outside interaction.
+  useEffect(() => {
+    if (!tabMenu) return;
+    const dismiss = () => setTabMenu(null);
+    const onKey = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") setTabMenu(null);
+    };
+    window.addEventListener("mousedown", dismiss);
+    window.addEventListener("resize", dismiss);
+    window.addEventListener("blur", dismiss);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("mousedown", dismiss);
+      window.removeEventListener("resize", dismiss);
+      window.removeEventListener("blur", dismiss);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [tabMenu]);
+
+  const previewMode = isLabPreviewMode();
+
+  if (!isTauri() && !previewMode) {
     return (
       <div className="lab">
         <div className="lab-empty">
@@ -440,15 +717,33 @@ export default function Lab() {
 
   const running = view?.running ?? false;
   const kernelName = view?.kernelName ?? null;
-  const activeItemPath = activeFilePath ?? activePath;
-  const activeItemKind = activeFilePath ? "file" : activePath ? "notebook" : null;
-  const showingNotebook = !activeFilePath && Boolean(activePath);
-  const hasCode = cells.some((c) => c.cell_type === "code");
+  const activeSpec = kernelspecs.find((s) => s.name === selectedKernel) ?? null;
+  const codeLanguage = codeLanguageFor(activeSpec?.language);
+  const activeEditorPath = activeFilePath ?? activePath;
+  const activeEditorKind: LabEditorKind | null = activeFilePath ? "file" : activePath ? "notebook" : null;
+  const activeEditorTabId = activeEditorKind && activeEditorPath ? editorTabId(activeEditorKind, activeEditorPath) : null;
+  const activeOpenTab = activeEditorTabId ? openTabs.find((tab) => tab.id === activeEditorTabId) ?? null : null;
+  const activeItemPath = activeOpenTab?.path ?? null;
+  const activeItemKind = activeOpenTab?.kind ?? null;
+  const showingNotebook = activeItemKind === "notebook";
+  const hasCode = showingNotebook && cells.some((c) => c.cell_type === "code");
   const recentRuns = runs.slice(0, 8);
   const busyRunning = runningAll || runningCell !== null;
-  const toc = buildToc(cells);
-  const codeTotal = cells.filter((c) => c.cell_type === "code").length;
-  const codeDone = runningCell === null ? 0 : cells.slice(0, runningCell + 1).filter((c) => c.cell_type === "code").length;
+  // Kernel chip state: executing -> busy, starting/stopping -> starting, live -> on.
+  const kernelState = running ? (busyRunning ? "busy" : "on") : busy ? "starting" : "off";
+  const kernelTitle =
+    kernelState === "busy"
+      ? "Kernel busy"
+      : kernelState === "starting"
+        ? "Kernel starting..."
+        : kernelState === "on"
+          ? "Kernel ready"
+          : "No kernel running";
+  const toc = showingNotebook ? buildToc(cells) : [];
+  const codeTotal = showingNotebook ? cells.filter((c) => c.cell_type === "code").length : 0;
+  const codeDone = showingNotebook && runningCell !== null
+    ? cells.slice(0, runningCell + 1).filter((c) => c.cell_type === "code").length
+    : 0;
 
   // During a sequential Run-all, every code cell reads as queued until the runner
   // reaches it, the active one as running, and the ones above as done.
@@ -489,7 +784,7 @@ export default function Lab() {
     }
   };
 
-  // Run a cell (code → execute, markdown → render) then move per the shortcut.
+  // Run a cell (code -> execute, markdown -> render) then move per the shortcut.
   const runWithShortcut = async (index: number, kind: "advance" | "stay" | "insert") => {
     const cell = cells[index];
     if (!cell) return;
@@ -649,107 +944,152 @@ export default function Lab() {
       ...items.filter((item) => item.path !== attachment.path),
       attachment,
     ]);
-    setSideTab("assistant");
+    setAssistantOpen(true);
   };
+
+  const activateEditorTab = async (tab: LabEditorTab) => {
+    if (tab.kind === "notebook") {
+      setActiveFilePath(null);
+      if (activePath !== tab.path) await open(tab.path);
+      return;
+    }
+    setActiveFilePath(tab.path);
+    setSelected(null);
+    setMode("command");
+  };
+
+  const closeEditorTab = (tabId: string) => {
+    setOpenTabs((tabs) => {
+      const index = tabs.findIndex((tab) => tab.id === tabId);
+      if (index < 0) return tabs;
+      const closing = tabs[index];
+      const next = tabs.filter((tab) => tab.id !== tabId);
+      if (activeEditorTabId === tabId) {
+        const fallback = next[Math.min(index, next.length - 1)] ?? null;
+        window.setTimeout(() => {
+          if (fallback) {
+            void activateEditorTab(fallback);
+          } else {
+            setActiveFilePath(null);
+            if (closing.kind === "notebook") setSelected(null);
+          }
+        }, 0);
+      }
+      return next;
+    });
+  };
+
+  const closeOtherEditorTabs = (keepId: string) => {
+    const keep = openTabs.find((tab) => tab.id === keepId);
+    if (!keep) return;
+    setOpenTabs([keep]);
+    if (activeEditorTabId !== keepId) {
+      window.setTimeout(() => void activateEditorTab(keep), 0);
+    }
+  };
+
+  const closeAllEditorTabs = () => {
+    setOpenTabs([]);
+    setActiveFilePath(null);
+    setSelected(null);
+  };
+
+  // Clicking an activity icon: expand to that view, collapse it when it's
+  // already the open one, or just switch views. The activity bar always stays
+  // visible, so a collapsed side panel can always be restored from here.
+  const handleActivitySelect = (tab: LabSideTab) => {
+    if (sideCollapsed) {
+      setSideCollapsed(false);
+      setSideTab(tab);
+    } else if (sideTab === tab) {
+      setSideCollapsed(true);
+    } else {
+      setSideTab(tab);
+    }
+  };
+
+  const handleSideResizeStart = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if ((event.button ?? 0) !== 0 || sideCollapsed) return;
+    sideResizeRef.current = { startX: event.clientX, startWidth: sideWidth };
+    setResizingPanel("side");
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+  };
+  const handleSideResizeMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = sideResizeRef.current;
+    if (!drag) return;
+    event.preventDefault();
+    const width = clampPanelWidth(
+      drag.startWidth + (event.clientX - drag.startX),
+      LAB_SIDE_WIDTH_MIN,
+      LAB_SIDE_WIDTH_MAX,
+    );
+    setSideWidth(width);
+  };
+  const handleSideResizeEnd = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = sideResizeRef.current;
+    if (!drag) return;
+    const width = clampPanelWidth(
+      drag.startWidth + (event.clientX - drag.startX),
+      LAB_SIDE_WIDTH_MIN,
+      LAB_SIDE_WIDTH_MAX,
+    );
+    sideResizeRef.current = null;
+    setResizingPanel(null);
+    setSideWidth(width);
+    localStorage.setItem(LAB_SIDE_WIDTH_KEY, String(width));
+  };
+
+  const handleAssistantResizeStart = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if ((event.button ?? 0) !== 0 || !assistantOpen) return;
+    assistantResizeRef.current = { startX: event.clientX, startWidth: assistantWidth };
+    setResizingPanel("assistant");
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+  };
+  const handleAssistantResizeMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = assistantResizeRef.current;
+    if (!drag) return;
+    event.preventDefault();
+    const width = clampPanelWidth(
+      drag.startWidth + (drag.startX - event.clientX),
+      LAB_ASSISTANT_WIDTH_MIN,
+      LAB_ASSISTANT_WIDTH_MAX,
+    );
+    setAssistantWidth(width);
+  };
+  const handleAssistantResizeEnd = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = assistantResizeRef.current;
+    if (!drag) return;
+    const width = clampPanelWidth(
+      drag.startWidth + (drag.startX - event.clientX),
+      LAB_ASSISTANT_WIDTH_MIN,
+      LAB_ASSISTANT_WIDTH_MAX,
+    );
+    assistantResizeRef.current = null;
+    setResizingPanel(null);
+    setAssistantWidth(width);
+    localStorage.setItem(LAB_ASSISTANT_WIDTH_KEY, String(width));
+  };
+
   const handleOpenNotebook = async (path: string) => {
+    ensureEditorTab("notebook", path);
     setActiveFilePath(null);
     await open(path);
   };
   const handleOpenFile = (path: string) => {
+    ensureEditorTab("file", path);
     setActiveFilePath(path);
     setSelected(null);
     setMode("command");
   };
 
+  const sideTitle = sideTab === "files" ? "Explorer" : sideTab === "notebook" ? "Notebook" : "Runtime";
+  const labStyle = {
+    "--lab-side-w": `${sideWidth}px`,
+    "--lab-assistant-w": `${assistantWidth}px`,
+  } as CSSProperties;
+
   return (
-    <div className="lab">
-      <div className="lab-bar">
-        <div className="lab-bar-group">
-          <select
-            className="lab-select"
-            value={activePath ?? ""}
-            onChange={(e) => void handleOpenNotebook(e.target.value)}
-          >
-            <option value="" disabled>
-              Select a notebook…
-            </option>
-            {notebooks.map((nb) => (
-              <option key={nb} value={nb}>
-                {nb}
-              </option>
-            ))}
-          </select>
-          <input
-            className="lab-new"
-            placeholder="notebooks/new-notebook.ipynb"
-            value={newName}
-            onChange={(e) => setNewName(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") handleCreate();
-            }}
-          />
-          <button className="lab-btn" onClick={handleCreate}>
-            New
-          </button>
-          <button className="lab-btn ghost" onClick={() => void refreshNotebooks()} disabled={busy}>
-            Refresh
-          </button>
-        </div>
-
-        {showingNotebook && (
-          <div className="lab-bar-group">
-            <button
-              className="lab-btn"
-              onClick={() => void handleRunAll()}
-              disabled={!hasCode || busyRunning}
-              title="Run every code cell top to bottom"
-            >
-              {runningAll ? `Running ${codeDone}/${codeTotal}…` : "▶ Run all"}
-            </button>
-            <button
-              className="lab-btn"
-              onClick={() => void handleRestartRunAll()}
-              disabled={!hasCode || busyRunning}
-              title="Restart the kernel, then run all cells"
-            >
-              ⟳ Restart &amp; Run all
-            </button>
-            {busyRunning ? (
-              <button className="lab-btn warn" onClick={() => void interruptKernel()} title="Interrupt the kernel">
-                ■ Interrupt
-              </button>
-            ) : (
-              <button className="lab-btn ghost" onClick={() => void clearAllOutputs()} title="Clear all outputs">
-                Clear outputs
-              </button>
-            )}
-          </div>
-        )}
-
-        <div className="lab-spacer" />
-
-        <div className="lab-bar-group">
-          <span className={`lab-kernel ${running ? "on" : "off"}`} title={running ? "Kernel running" : "Kernel idle"}>
-            <span className="lab-dot" />
-            {running ? kernelName ?? "python3" : "no kernel"}
-          </span>
-          {running ? (
-            <>
-              <button className="lab-btn" onClick={() => void restartKernel()} disabled={busy}>
-                Restart
-              </button>
-              <button className="lab-btn" onClick={() => void shutdownKernel()} disabled={busy}>
-                Stop
-              </button>
-            </>
-          ) : (
-            <button className="lab-btn primary" onClick={() => void startKernel()} disabled={busy || !showingNotebook}>
-              Start kernel
-            </button>
-          )}
-        </div>
-      </div>
-
+    <div className={cx("lab", resizingPanel && "lab-resizing")} style={labStyle}>
       {error && (
         <div className="lab-error" role="alert">
           <span>{error}</span>
@@ -758,14 +1098,454 @@ export default function Lab() {
       )}
 
       <div className="lab-workspace">
+        <nav className="lab-activitybar" role="tablist" aria-label="Lab workbench views">
+          <button
+            className={cx("lab-activity", sideTab === "files" && !sideCollapsed && "active")}
+            role="tab"
+            aria-selected={sideTab === "files" && !sideCollapsed}
+            title={sideTab === "files" && !sideCollapsed ? "Hide Files" : "Files"}
+            onClick={() => handleActivitySelect("files")}
+          >
+            <IconFiles />
+            <span>Files</span>
+          </button>
+          <button
+            className={cx("lab-activity", sideTab === "notebook" && !sideCollapsed && "active")}
+            role="tab"
+            aria-selected={sideTab === "notebook" && !sideCollapsed}
+            title={sideTab === "notebook" && !sideCollapsed ? "Hide Notebook" : "Notebook"}
+            onClick={() => handleActivitySelect("notebook")}
+          >
+            <IconNotebook />
+            <span>Notebook</span>
+          </button>
+          <button
+            className={cx("lab-activity", sideTab === "runtime" && !sideCollapsed && "active")}
+            role="tab"
+            aria-selected={sideTab === "runtime" && !sideCollapsed}
+            title={sideTab === "runtime" && !sideCollapsed ? "Hide Runtime" : "Runtime"}
+            onClick={() => handleActivitySelect("runtime")}
+          >
+            <IconRuntime />
+            <span>Runtime</span>
+          </button>
+          <div className="lab-activity-spacer" />
+          <button
+            className={cx("lab-activity", assistantOpen && "active")}
+            title={assistantOpen ? "Hide Assistant" : "Show Assistant"}
+            onClick={() => setAssistantOpen((open) => !open)}
+          >
+            <IconAssistant />
+            <span>Assistant</span>
+            {assistantAttachments.length > 0 && <em>{assistantAttachments.length}</em>}
+          </button>
+        </nav>
+
+        {!sideCollapsed && (
+        <aside className="lab-side">
+          <div className="lab-side-title">
+            <span>{sideTitle}</span>
+          </div>
+          <div className={cx("lab-side-content", sideTab === "files" && "files")}>
+            {sideTab === "files" && (
+              <LabFiles
+                projectPath={currentProjectPath}
+                notebooks={notebooks}
+                activePath={activeItemPath}
+                onOpenNotebook={(path) => void handleOpenNotebook(path)}
+                onOpenFile={handleOpenFile}
+                onAttachToAssistant={attachToAssistant}
+              />
+            )}
+
+            {sideTab === "notebook" && (
+              <>
+                <section className="lab-panel lab-notebook-controls">
+                  <div className="lab-panel-head">
+                    <h3>Notebook</h3>
+                    <button className="lab-btn ghost" onClick={() => void refreshNotebooks()} disabled={busy}>
+                      Refresh
+                    </button>
+                  </div>
+                  <select
+                    className="lab-select lab-panel-select"
+                    value={activePath ?? ""}
+                    onChange={(event) => void handleOpenNotebook(event.target.value)}
+                    disabled={busy || notebooks.length === 0}
+                    title="Open notebook"
+                  >
+                    <option value="" disabled>
+                      {notebooks.length === 0 ? "No notebooks found" : "Open notebook..."}
+                    </option>
+                    {notebooks.map((nb) => (
+                      <option key={nb} value={nb}>
+                        {nb}
+                      </option>
+                    ))}
+                  </select>
+                  <div className="lab-new-row">
+                    <input
+                      className="lab-new"
+                      placeholder="notebooks/new-notebook.ipynb"
+                      value={newName}
+                      onChange={(event) => setNewName(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") handleCreate();
+                      }}
+                    />
+                    <button className="lab-btn" onClick={handleCreate} disabled={busy || !newName.trim()}>
+                      New
+                    </button>
+                  </div>
+                </section>
+
+                <section className="lab-panel lab-notebook-controls">
+                  <div className="lab-panel-head">
+                    <h3>Run</h3>
+                    <span className={`lab-kernel ${kernelState}`} title={kernelTitle}>
+                      <span className="lab-dot" />
+                      {running ? kernelName ?? selectedKernel ?? "kernel" : "no kernel"}
+                    </span>
+                  </div>
+                  <div className="lab-command-stack">
+                    <button
+                      className="lab-btn primary lab-run-all-btn"
+                      onClick={() => void handleRunAll()}
+                      disabled={!hasCode || busyRunning}
+                      title="Run every code cell top to bottom"
+                    >
+                      <IconRunAll />
+                      <span>{runningAll ? `Running ${codeDone}/${codeTotal}...` : "Run all cells"}</span>
+                    </button>
+                    <button
+                      className="lab-btn"
+                      onClick={() => void handleRestartRunAll()}
+                      disabled={!hasCode || busyRunning}
+                      title="Restart the kernel, then run all cells"
+                    >
+                      Restart &amp; Run all
+                    </button>
+                    {busyRunning ? (
+                      <button className="lab-btn warn" onClick={() => void interruptKernel()} title="Interrupt the kernel">
+                        Interrupt
+                      </button>
+                    ) : (
+                      <button className="lab-btn ghost" onClick={() => void clearAllOutputs()} disabled={!showingNotebook} title="Clear all outputs">
+                        Clear outputs
+                      </button>
+                    )}
+                  </div>
+                </section>
+
+                {toc.length > 0 && (
+                  <section className="lab-panel">
+                    <div className="lab-panel-head">
+                      <h3>Contents</h3>
+                    </div>
+                    <nav className="lab-toc">
+                      {toc.map((item, i) => (
+                        <button
+                          key={i}
+                          className="lab-toc-item"
+                          style={{ paddingLeft: `${(item.level - 1) * 12 + 4}px` }}
+                          onClick={() => scrollToCell(item.index)}
+                          title={item.text}
+                        >
+                          {item.text}
+                        </button>
+                      ))}
+                    </nav>
+                  </section>
+                )}
+
+                <section className="lab-panel">
+                  <div className="lab-panel-head">
+                    <h3>Variables {variables.length > 0 && <span className="lab-count-badge">{variables.length}</span>}</h3>
+                    <button
+                      className="lab-btn ghost"
+                      disabled={variablesBusy || busyRunning}
+                      onClick={() => void inspectVariables()}
+                    >
+                      {variablesBusy ? "Inspecting..." : "Refresh"}
+                    </button>
+                  </div>
+                  {variables.length === 0 ? (
+                    <div className="lab-muted">Run a cell, then refresh to inspect kernel variables.</div>
+                  ) : (
+                    <div className="lab-var-list">
+                      {variables.map((variable) => (
+                        <VariableRow key={variable.name} variable={variable} />
+                      ))}
+                    </div>
+                  )}
+                </section>
+
+                <section className="lab-panel">
+                  <div className="lab-panel-head">
+                    <h3>Runs</h3>
+                    <button className="lab-btn ghost" onClick={() => void refreshRuns()}>
+                      Refresh
+                    </button>
+                  </div>
+                  {recentRuns.length === 0 ? (
+                    <div className="lab-muted">No runs yet.</div>
+                  ) : (
+                    <div className="lab-run-list">
+                      {recentRuns.map((run) => (
+                        <RunRow key={run.id} run={run} onOpen={(path) => void handleOpenNotebook(path)} />
+                      ))}
+                    </div>
+                  )}
+                </section>
+
+                <details className="lab-panel lab-panel-details">
+                  <summary className="lab-panel-head">
+                    <h3>Parameter sweep</h3>
+                  </summary>
+                  <textarea
+                    className="lab-sweep-src"
+                    value={sweepSpecText}
+                    spellCheck={false}
+                    rows={9}
+                    onChange={(e) => setSweepSpecText(e.target.value)}
+                  />
+                  {sweepParseError && <div className="lab-inline-error">{sweepParseError}</div>}
+                  <div className="lab-row">
+                    <button className="lab-btn primary" disabled={sweepBusy} onClick={() => void handleRunSweep()}>
+                      {sweepBusy ? "Working..." : "Run sweep"}
+                    </button>
+                    <button className="lab-btn" disabled={sweepBusy} onClick={() => void handleExportSweep()}>
+                      Export manifest
+                    </button>
+                  </div>
+                  {sweepResult && (
+                    <div className="lab-muted">
+                      Sweep {sweepResult.sweepId}: {sweepResult.runs.length}/{sweepResult.total} runs recorded.
+                    </div>
+                  )}
+                  {sweepManifest && (
+                    <div className="lab-manifest">
+                      <div className="lab-panel-subhead">
+                        <span>Manifest</span>
+                        <button className="lab-btn ghost" onClick={clearSweepManifest}>
+                          Clear
+                        </button>
+                      </div>
+                      <textarea className="lab-sweep-src" readOnly rows={8} value={sweepManifest} />
+                    </div>
+                  )}
+                </details>
+              </>
+            )}
+
+            {sideTab === "runtime" && (
+              <>
+                <section className="lab-panel lab-runtime-panel">
+                  <div className="lab-panel-head">
+                    <h3>Interpreter</h3>
+                    <button className="lab-btn ghost" onClick={() => void refreshKernelspecs()}>
+                      Refresh
+                    </button>
+                  </div>
+                  <select
+                    className="lab-select lab-runtime-select"
+                    value={selectedKernel ?? ""}
+                    onChange={(event) => {
+                      if (showingNotebook) void setKernel(event.target.value);
+                      else selectKernel(event.target.value);
+                    }}
+                    disabled={busy || busyRunning || kernelspecs.length === 0}
+                    title="Select Python interpreter / notebook kernel"
+                  >
+                    {kernelspecs.length === 0 ? (
+                      <option value="" disabled>
+                        No kernels found
+                      </option>
+                    ) : (
+                      kernelspecs.map((spec) => (
+                        <option key={spec.name} value={spec.name}>
+                          {spec.displayName}
+                        </option>
+                      ))
+                    )}
+                  </select>
+                  <div className="lab-runtime-summary">
+                    <span>Active</span>
+                    <strong>{activeSpec?.displayName ?? selectedKernel ?? "No interpreter selected"}</strong>
+                    {activeSpec && <em>{activeSpec.language || activeSpec.name}</em>}
+                  </div>
+                  <div className="lab-muted">
+                    Lab uses installed Jupyter kernelspecs. Python files run against a file-scoped kernel session; notebooks persist this choice into nbformat metadata.
+                  </div>
+                </section>
+
+                <section className="lab-panel lab-runtime-panel">
+                  <div className="lab-panel-head">
+                    <h3>Notebook Kernel</h3>
+                  </div>
+                  <div className="lab-runtime-kernel-card">
+                    <span className={`lab-kernel ${kernelState}`} title={kernelTitle}>
+                      <span className="lab-dot" />
+                      {running ? kernelName ?? selectedKernel ?? "kernel" : "no kernel"}
+                    </span>
+                    <div className="lab-row">
+                      {running ? (
+                        <>
+                          <button className="lab-btn" onClick={() => void restartKernel()} disabled={busy || !showingNotebook}>
+                            Restart
+                          </button>
+                          <button className="lab-btn" onClick={() => void shutdownKernel()} disabled={busy || !showingNotebook}>
+                            Stop
+                          </button>
+                        </>
+                      ) : (
+                        <button className="lab-btn primary" onClick={() => void startKernel()} disabled={busy || !showingNotebook}>
+                          Start kernel
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                </section>
+
+                <section className="lab-panel lab-runtime-panel">
+                  <div className="lab-panel-head">
+                    <h3>Kernels</h3>
+                  </div>
+                  <div className="lab-kernelspec-list">
+                    {kernelspecs.length === 0 ? (
+                      <div className="lab-muted">No kernels discovered.</div>
+                    ) : (
+                      kernelspecs.map((spec) => (
+                        <button
+                          key={spec.name}
+                          className={cx("lab-kernelspec-row", selectedKernel === spec.name && "active")}
+                          onClick={() => {
+                            if (showingNotebook) void setKernel(spec.name);
+                            else selectKernel(spec.name);
+                          }}
+                        >
+                          <span>{spec.displayName}</span>
+                          <em>{spec.language || spec.name}</em>
+                        </button>
+                      ))
+                    )}
+                  </div>
+                </section>
+              </>
+            )}
+          </div>
+          <div
+            className={cx("lab-side-resize-handle", resizingPanel === "side" && "dragging")}
+            role="separator"
+            aria-label="Resize Lab side panel"
+            aria-orientation="vertical"
+            title="Resize side panel"
+            onPointerDown={handleSideResizeStart}
+            onPointerMove={handleSideResizeMove}
+            onPointerUp={handleSideResizeEnd}
+            onPointerCancel={handleSideResizeEnd}
+          />
+        </aside>
+        )}
+
+        <main className="lab-main">
+          <div className="lab-editor-tabs" role="tablist" aria-label="Open editors">
+            {openTabs.length === 0 ? (
+              <div className="lab-editor-tab-empty">No editors open</div>
+            ) : (
+              openTabs.map((tab) => (
+                <button
+                  key={tab.id}
+                  className={cx("lab-editor-tab", activeEditorTabId === tab.id && "active")}
+                  role="tab"
+                  aria-selected={activeEditorTabId === tab.id}
+                  title={tab.path}
+                  onClick={() => void activateEditorTab(tab)}
+                  onContextMenu={(event) => {
+                    event.preventDefault();
+                    setTabMenu({ x: event.clientX, y: event.clientY, tabId: tab.id });
+                  }}
+                >
+                  <span className={cx("lab-editor-tab-icon", tab.kind)}>{tab.kind === "notebook" ? "[]" : "<>"}</span>
+                  <span className="lab-editor-tab-label">{editorTabLabel(tab)}</span>
+                  <span className="lab-editor-tab-dir">{dirname(tab.path)}</span>
+                  <span
+                    role="button"
+                    tabIndex={0}
+                    className="lab-editor-tab-close"
+                    title="Close editor"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      closeEditorTab(tab.id);
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        closeEditorTab(tab.id);
+                      }
+                    }}
+                  >
+                    <IconClose />
+                  </span>
+                </button>
+              ))
+            )}
+          </div>
+
+          {tabMenu && (
+            <div
+              className="lab-tab-menu"
+              style={{ left: tabMenu.x, top: tabMenu.y }}
+              role="menu"
+              onMouseDown={(event) => event.stopPropagation()}
+            >
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  closeEditorTab(tabMenu.tabId);
+                  setTabMenu(null);
+                }}
+              >
+                Close
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                disabled={openTabs.length <= 1}
+                onClick={() => {
+                  closeOtherEditorTabs(tabMenu.tabId);
+                  setTabMenu(null);
+                }}
+              >
+                Close others
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                disabled={openTabs.length === 0}
+                onClick={() => {
+                  closeAllEditorTabs();
+                  setTabMenu(null);
+                }}
+              >
+                Close all
+              </button>
+            </div>
+          )}
+
+          <div className="lab-editor-body">
         {activeFilePath ? (
           <FileEditorPane
             path={activeFilePath}
-            onAttachToAssistant={attachToAssistant}
+            kernelspecs={kernelspecs}
+            selectedKernel={selectedKernel}
+            onSelectKernel={selectKernel}
           />
         ) : !activePath ? (
           <div className="lab-cells">
-            <div className="lab-empty">Pick a notebook above, or create one to start experimenting.</div>
+            <div className="lab-empty">Pick a notebook from Explorer or the Notebook panel to start experimenting.</div>
           </div>
         ) : (
           <div
@@ -778,6 +1558,50 @@ export default function Lab() {
               followRef.current = false;
             }}
           >
+            {hasReview && review && (
+              <div className="lab-nb-review-bar" role="status" aria-live="polite">
+                <div className="lab-nb-review-info">
+                  <strong>检测到 AI 修改</strong>
+                  <div className="lab-nb-review-counts">
+                    {review.added > 0 && <em className="add">+{review.added} 新增</em>}
+                    {review.modified > 0 && <em className="mod">~{review.modified} 修改</em>}
+                    {review.removed.length > 0 && <em className="del">-{review.removed.length} 删除</em>}
+                  </div>
+                  {review.removed.length > 0 && (
+                    <div className="lab-nb-review-removed">
+                      {review.removed.slice(0, 3).map((cell, i) => (
+                        <code key={i} title={cell.source}>
+                          - {firstLine(cell.source) || `(空 ${cell.cellType} cell)`}
+                        </code>
+                      ))}
+                      {review.removed.length > 3 && (
+                        <em>还有 {review.removed.length - 3} 个被删除的 cell</em>
+                      )}
+                    </div>
+                  )}
+                </div>
+                <div className="lab-nb-review-actions">
+                  <button
+                    className="lab-btn primary"
+                    type="button"
+                    onClick={acceptNotebookReview}
+                    disabled={busy}
+                    title="保留 AI 修改"
+                  >
+                    保留
+                  </button>
+                  <button
+                    className="lab-btn"
+                    type="button"
+                    onClick={() => void revertNotebookReview()}
+                    disabled={busy}
+                    title="恢复修改前的 notebook"
+                  >
+                    恢复
+                  </button>
+                </div>
+              </div>
+            )}
             {cellCount === 0 ? (
               <div className="lab-empty-nb">
                 <p>This notebook is empty.</p>
@@ -799,7 +1623,10 @@ export default function Lab() {
                       phase={phaseOf(index, cell.cell_type === "code")}
                       elapsedMs={runningCell === index ? elapsedMs : 0}
                       source={draftOf(index, cell)}
+                      changeStatus={review?.status.get(index)}
+                      diffLines={review?.lineDiffs.get(index)}
                       disabled={busyRunning}
+                      editorLanguage={codeLanguage}
                       onChange={(i, value) => setDrafts((d) => ({ ...d, [i]: value }))}
                       onBlurCode={onBlurCode}
                       onSelect={select}
@@ -819,164 +1646,67 @@ export default function Lab() {
             )}
           </div>
         )}
+          </div>
+        </main>
 
-          <aside className="lab-side">
-            <div className="lab-side-tabs" role="tablist" aria-label="Lab sidebar">
-              <button
-                className={cx("lab-side-tab", sideTab === "notebook" && "active")}
-                onClick={() => setSideTab("notebook")}
-                role="tab"
-                aria-selected={sideTab === "notebook"}
-              >
-                Notebook
-              </button>
-              <button
-                className={cx("lab-side-tab", sideTab === "files" && "active")}
-                onClick={() => setSideTab("files")}
-                role="tab"
-                aria-selected={sideTab === "files"}
-              >
-                Files
-              </button>
-              <button
-                className={cx("lab-side-tab", sideTab === "assistant" && "active")}
-                onClick={() => setSideTab("assistant")}
-                role="tab"
-                aria-selected={sideTab === "assistant"}
-              >
-                Assistant
-                {assistantAttachments.length > 0 && <span>{assistantAttachments.length}</span>}
-              </button>
-            </div>
-
-            <div className={cx("lab-side-content", sideTab === "assistant" && "assistant", sideTab === "files" && "files")}>
-              {sideTab === "notebook" && (
-                <>
-            {toc.length > 0 && (
-              <section className="lab-panel">
-                <div className="lab-panel-head">
-                  <h3>Contents</h3>
-                </div>
-                <nav className="lab-toc">
-                  {toc.map((item, i) => (
-                    <button
-                      key={i}
-                      className="lab-toc-item"
-                      style={{ paddingLeft: `${(item.level - 1) * 12 + 4}px` }}
-                      onClick={() => scrollToCell(item.index)}
-                      title={item.text}
-                    >
-                      {item.text}
-                    </button>
-                  ))}
-                </nav>
-              </section>
-            )}
-
-            <section className="lab-panel">
-              <div className="lab-panel-head">
-                <h3>Variables {variables.length > 0 && <span className="lab-count-badge">{variables.length}</span>}</h3>
-                <button
-                  className="lab-btn ghost"
-                  disabled={variablesBusy || busyRunning}
-                  onClick={() => void inspectVariables()}
-                >
-                  {variablesBusy ? "Inspecting…" : "Refresh"}
-                </button>
-              </div>
-              {variables.length === 0 ? (
-                <div className="lab-muted">Run a cell, then refresh to inspect kernel variables.</div>
-              ) : (
-                <div className="lab-var-list">
-                  {variables.map((variable) => (
-                    <VariableRow key={variable.name} variable={variable} />
-                  ))}
-                </div>
-              )}
-            </section>
-
-            <section className="lab-panel">
-              <div className="lab-panel-head">
-                <h3>Runs</h3>
-                <button className="lab-btn ghost" onClick={() => void refreshRuns()}>
-                  Refresh
-                </button>
-              </div>
-              {recentRuns.length === 0 ? (
-                <div className="lab-muted">No runs yet.</div>
-              ) : (
-                <div className="lab-run-list">
-                  {recentRuns.map((run) => (
-                    <RunRow key={run.id} run={run} onOpen={(path) => void handleOpenNotebook(path)} />
-                  ))}
-                </div>
-              )}
-            </section>
-
-            <details className="lab-panel lab-panel-details">
-              <summary className="lab-panel-head">
-                <h3>Parameter sweep</h3>
-              </summary>
-              <textarea
-                className="lab-sweep-src"
-                value={sweepSpecText}
-                spellCheck={false}
-                rows={9}
-                onChange={(e) => setSweepSpecText(e.target.value)}
-              />
-              {sweepParseError && <div className="lab-inline-error">{sweepParseError}</div>}
-              <div className="lab-row">
-                <button className="lab-btn primary" disabled={sweepBusy} onClick={() => void handleRunSweep()}>
-                  {sweepBusy ? "Working…" : "Run sweep"}
-                </button>
-                <button className="lab-btn" disabled={sweepBusy} onClick={() => void handleExportSweep()}>
-                  Export manifest
-                </button>
-              </div>
-              {sweepResult && (
-                <div className="lab-muted">
-                  Sweep {sweepResult.sweepId}: {sweepResult.runs.length}/{sweepResult.total} runs recorded.
-                </div>
-              )}
-              {sweepManifest && (
-                <div className="lab-manifest">
-                  <div className="lab-panel-subhead">
-                    <span>Manifest</span>
-                    <button className="lab-btn ghost" onClick={clearSweepManifest}>
-                      Clear
-                    </button>
-                  </div>
-                  <textarea className="lab-sweep-src" readOnly rows={8} value={sweepManifest} />
-                </div>
-              )}
-            </details>
-                </>
-              )}
-
-              {sideTab === "files" && (
-                <LabFiles
-                  projectPath={currentProjectPath}
-                  notebooks={notebooks}
-                  activePath={activeItemPath}
-                  onOpenNotebook={(path) => void handleOpenNotebook(path)}
-                  onOpenFile={handleOpenFile}
-                  onAttachToAssistant={attachToAssistant}
-                />
-              )}
-
-              {sideTab === "assistant" && (
-                <LabAssistant
-                  projectId={currentProjectId}
-                  projectPath={currentProjectPath}
-                  activePath={activeItemPath}
-                  activeKind={activeItemKind}
-                  cells={activeFilePath ? [] : cells}
-                  attachments={assistantAttachments}
-                  onAttachmentsChange={setAssistantAttachments}
-                />
-              )}
-            </div>
+        {assistantOpen && (
+          <aside className="lab-assistant-side">
+            <div
+              className={cx("lab-assistant-resize-handle", resizingPanel === "assistant" && "dragging")}
+              role="separator"
+              aria-label="Resize Lab Assistant"
+              aria-orientation="vertical"
+              title="Resize Lab Assistant"
+              onPointerDown={handleAssistantResizeStart}
+              onPointerMove={handleAssistantResizeMove}
+              onPointerUp={handleAssistantResizeEnd}
+              onPointerCancel={handleAssistantResizeEnd}
+            />
+            <LabAssistant
+              projectId={currentProjectId}
+              projectPath={currentProjectPath}
+              activePath={activeItemPath}
+              activeKind={activeItemKind}
+              cells={activeFilePath ? [] : cells}
+              attachments={assistantAttachments}
+              onAttachmentsChange={setAssistantAttachments}
+            />
           </aside>
+        )}
+
+        </div>
+
+        <div className="lab-statusbar">
+          <span className={`lab-status-item lab-status-kernel ${kernelState}`}>
+            <span className="lab-dot" />
+            {running ? kernelName ?? selectedKernel ?? "kernel" : "No kernel"}
+          </span>
+          {activeSpec && <span className="lab-status-item">{activeSpec.language || activeSpec.name}</span>}
+          {activeItemKind === "file" && (
+            <span className="lab-status-item">{activeSpec?.displayName ?? selectedKernel ?? "No interpreter"}</span>
+          )}
+          {showingNotebook && (
+            <span className="lab-status-item">
+              {selected != null ? `Cell ${selected + 1} of ${cellCount}` : `${cellCount} cells`}
+            </span>
+          )}
+          {runningAll && (
+            <span className="lab-status-item lab-status-progress">
+              Running {codeDone}/{codeTotal}
+            </span>
+          )}
+          <span className="lab-spacer" />
+          {runStartedAt != null && <span className="lab-status-item">{formatElapsed(elapsedMs)}</span>}
+          {showingNotebook && activePath && (
+            <span className="lab-status-item lab-status-path" title={activePath}>
+              {activePath}
+            </span>
+          )}
+          {activeItemKind === "file" && activeItemPath && (
+            <span className="lab-status-item lab-status-path" title={activeItemPath}>
+              {activeItemPath}
+            </span>
+          )}
         </div>
     </div>
   );

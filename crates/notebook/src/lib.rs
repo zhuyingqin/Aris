@@ -10,14 +10,18 @@
 //!   so the async kernel can be driven from Aris's synchronous tool layer.
 #![allow(clippy::must_use_candidate, clippy::missing_panics_doc)]
 
+mod backend;
 mod doc;
 mod kernel;
 mod manager;
+mod matlab;
 mod run;
 
+pub use backend::KernelHandle;
 pub use doc::{CellSummary, NotebookDoc};
 pub use kernel::{CellOutput, ExecStatus, ExecuteOutcome, KernelSession};
-pub use manager::{KernelInfo, KernelManager};
+pub use manager::{KernelInfo, KernelManager, KernelspecInfo};
+pub use matlab::{find_matlab, MatlabSession, VAR_INSPECT_CODE as MATLAB_VAR_INSPECT_CODE};
 pub use run::{run_all, CellRun, RunOptions, RunReport};
 
 /// Errors surfaced by the notebook document and kernel layers.

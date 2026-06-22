@@ -10,7 +10,9 @@ use std::time::Duration;
 
 use serde::Serialize;
 
+use crate::backend::KernelHandle;
 use crate::kernel::{CellOutput, ExecuteOutcome, KernelSession, OutputCallback};
+use crate::matlab::{self, MatlabSession};
 use crate::NotebookError;
 
 /// Lightweight description of a running kernel (for the UI / tool replies).
@@ -22,8 +24,18 @@ pub struct KernelInfo {
     pub kernel_name: String,
 }
 
-fn sessions() -> &'static Mutex<HashMap<String, Arc<KernelSession>>> {
-    static SESSIONS: OnceLock<Mutex<HashMap<String, Arc<KernelSession>>>> = OnceLock::new();
+/// An *available* kernel the user can pick (installed Jupyter kernelspec or the
+/// native MATLAB backend), independent of whether one is currently running.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KernelspecInfo {
+    pub name: String,
+    pub display_name: String,
+    pub language: String,
+}
+
+fn sessions() -> &'static Mutex<HashMap<String, Arc<KernelHandle>>> {
+    static SESSIONS: OnceLock<Mutex<HashMap<String, Arc<KernelHandle>>>> = OnceLock::new();
     SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -44,8 +56,25 @@ impl KernelManager {
                 kernel_name: existing.kernel_name().to_string(),
             });
         }
+        // Resolve the kernel: an explicit name wins; otherwise fall back to the
+        // notebook's recorded `metadata.kernelspec` (the session id is the
+        // notebook path) so a MATLAB notebook starts MATLAB even when the caller
+        // — an LLM tool, the CLI — doesn't specify one. Failing both, auto-pick.
+        let recorded = if kernel_name.is_none() {
+            crate::NotebookDoc::load(std::path::Path::new(id))
+                .ok()
+                .and_then(|doc| doc.kernelspec_name())
+        } else {
+            None
+        };
+        let resolved = kernel_name.or(recorded.as_deref());
+
         // Start outside the lock: kernel boot + handshake can take seconds.
-        let session = KernelSession::start(kernel_name, workdir)?;
+        let session = if resolved.is_some_and(matlab::is_matlab_kernel) {
+            KernelHandle::Matlab(MatlabSession::start(workdir)?)
+        } else {
+            KernelHandle::Jupyter(KernelSession::start(resolved, workdir)?)
+        };
         let info = KernelInfo {
             id: id.to_string(),
             pid: session.pid(),
@@ -124,6 +153,34 @@ impl KernelManager {
         }
     }
 
+    /// All kernels the user can choose: installed Jupyter kernelspecs plus the
+    /// native MATLAB backend when a MATLAB install is detected. Blocking (reads
+    /// kernelspec dirs); call from a blocking context.
+    pub fn available_kernels() -> Vec<KernelspecInfo> {
+        let mut out: Vec<KernelspecInfo> = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map(|rt| {
+                rt.block_on(jupyter_zmq_client::list_kernelspecs_with_jupyter_paths())
+                    .into_iter()
+                    .map(|spec| KernelspecInfo {
+                        name: spec.kernel_name.clone(),
+                        display_name: spec.kernelspec.display_name.clone(),
+                        language: spec.kernelspec.language.clone(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if matlab::find_matlab().is_some() && !out.iter().any(|k| matlab::is_matlab_kernel(&k.name)) {
+            out.push(KernelspecInfo {
+                name: matlab::KERNEL_NAME.to_string(),
+                display_name: "MATLAB".to_string(),
+                language: "matlab".to_string(),
+            });
+        }
+        out
+    }
+
     /// All currently running kernels.
     pub fn list() -> Vec<KernelInfo> {
         sessions()
@@ -140,5 +197,15 @@ impl KernelManager {
 
     pub fn is_running(id: &str) -> bool {
         sessions().lock().unwrap().contains_key(id)
+    }
+
+    /// Coarse language of the kernel for `id` (`"python"`, `"matlab"`, …), used
+    /// to pick the right variable-inspection snippet. `None` if not running.
+    pub fn language(id: &str) -> Option<String> {
+        sessions()
+            .lock()
+            .unwrap()
+            .get(id)
+            .map(|s| s.language().to_string())
     }
 }

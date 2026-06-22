@@ -76,13 +76,14 @@ fn augment_path_for_desktop_tools() {
 #[cfg(not(windows))]
 fn augment_path_for_desktop_tools() {}
 
-fn augment_resource_path_for_mcp(app: &tauri::App) {
-    let Ok(resource_dir) = app.path().resource_dir() else {
-        return;
-    };
+fn resource_dir(app: &tauri::App) -> Option<PathBuf> {
+    app.path().resource_dir().ok()
+}
+
+fn augment_resource_path_for_mcp(resource_dir: &std::path::Path) {
     prepend_existing_path_entries([resource_dir.join("bin"), resource_dir.join("node")]);
-    std::env::set_var("ARIS_RESOURCE_DIR", &resource_dir);
-    configure_bundled_tectonic_environment(&resource_dir);
+    std::env::set_var("ARIS_RESOURCE_DIR", resource_dir);
+    configure_bundled_tectonic_environment(resource_dir);
 }
 
 /// Point Tectonic's on-demand package cache at a user-writable directory. The
@@ -132,8 +133,34 @@ fn cleanup_before_exit(app_handle: &tauri::AppHandle) {
     });
 }
 
+/// Give the GUI process a single hidden console on Windows so the console
+/// programs we spawn — including ones from third-party crates that don't set
+/// `CREATE_NO_WINDOW` (e.g. Jupyter path discovery) — inherit it instead of each
+/// flashing its own console window. No-op when a console already exists (e.g.
+/// `tauri dev` launched from a terminal) or on non-Windows.
+#[cfg(windows)]
+fn hide_stray_console() {
+    use windows_sys::Win32::System::Console::{AllocConsole, GetConsoleWindow};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE};
+
+    // SAFETY: plain Win32 calls. We allocate a console only when the process has
+    // none, then immediately hide its window so it never shows persistently.
+    unsafe {
+        if GetConsoleWindow().is_null() && AllocConsole() != 0 {
+            let console = GetConsoleWindow();
+            if !console.is_null() {
+                ShowWindow(console, SW_HIDE);
+            }
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn hide_stray_console() {}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    hide_stray_console();
     augment_path_for_desktop_tools();
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -142,7 +169,12 @@ pub fn run() {
         .manage(engine::ChatState::default())
         .manage(projects::ProjectState::default())
         .setup(|app| {
-            augment_resource_path_for_mcp(app);
+            if let Some(resource_dir) = resource_dir(app) {
+                augment_resource_path_for_mcp(&resource_dir);
+                if let Err(error) = config::apply_bundled_internal_config(&resource_dir) {
+                    eprintln!("ARIS internal config import skipped: {error}");
+                }
+            }
             configure_tectonic_environment();
             state::apply_bundle_cache_environment();
             // Export config-held keys (e.g. SCOPUS_API_KEY) before any
@@ -218,14 +250,22 @@ pub fn run() {
             knowledge::knowledge_reject,
             knowledge::knowledge_generate,
             lab::lab_list_kernels,
+            lab::lab_list_kernelspecs,
             lab::lab_list_notebooks,
             lab::lab_load_notebook,
             lab::lab_create_notebook,
+            lab::lab_save_notebook,
             lab::lab_edit_cell,
+            lab::lab_set_kernelspec,
             lab::lab_start_kernel,
             lab::lab_execute_cell,
             lab::lab_shutdown_kernel,
             lab::lab_interrupt_kernel,
+            lab::lab_start_file_kernel,
+            lab::lab_execute_file,
+            lab::lab_interrupt_file_kernel,
+            lab::lab_shutdown_file_kernel,
+            lab::lab_inspect_file_vars,
             lab::lab_inspect_vars,
             lab::lab_run_all,
             lab::runs_load,
@@ -238,6 +278,7 @@ pub fn run() {
             engine::chat_permission_get,
             engine::chat_permission_set,
             engine::chat_permission_respond,
+            engine::chat_question_respond,
             engine::project_permission_get,
             engine::project_permission_set,
             engine::chat_command_specs,

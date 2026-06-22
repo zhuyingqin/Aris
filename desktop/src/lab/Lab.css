@@ -4,28 +4,9 @@
   height: 100%;
   overflow: hidden;
   color: var(--text);
-}
-
-/* ── Top toolbar ──────────────────────────────────────────────────────────── */
-.lab-bar {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 9px 14px;
-  border-bottom: 1px solid var(--border);
-  background: var(--bg-1);
-  flex-wrap: wrap;
-}
-
-.lab-bar-group {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.lab-bar-group + .lab-bar-group {
-  padding-left: 10px;
-  border-left: 1px solid var(--border);
+  --lab-activity-w: 48px;
+  --lab-side-w: 260px;
+  --lab-assistant-w: 380px;
 }
 
 .lab-spacer {
@@ -37,9 +18,9 @@
   background: var(--bg-2);
   color: var(--text);
   border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 5px 8px;
-  font-size: 13px;
+  border-radius: 3px;
+  padding: 4px 7px;
+  font-size: 12px;
   font-family: inherit;
 }
 
@@ -62,9 +43,9 @@
   background: var(--bg-2);
   color: var(--text);
   border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 5px 11px;
-  font-size: 12.5px;
+  border-radius: 3px;
+  padding: 4px 9px;
+  font-size: 12px;
   cursor: pointer;
   white-space: nowrap;
   transition: border-color 0.12s, background 0.12s, color 0.12s;
@@ -107,7 +88,7 @@
   color: var(--text-dim);
   padding: 3px 10px;
   border: 1px solid var(--border);
-  border-radius: 999px;
+  border-radius: 3px;
   background: var(--bg-2);
 }
 
@@ -127,7 +108,93 @@
   box-shadow: 0 0 6px var(--green);
 }
 
-/* ── Error + empty states ─────────────────────────────────────────────────── */
+.lab-kernel.busy,
+.lab-kernel.starting {
+  color: var(--text);
+}
+
+.lab-kernel.busy .lab-dot {
+  background: var(--amber);
+  box-shadow: 0 0 6px var(--amber);
+  animation: lab-pulse 1s ease-in-out infinite;
+}
+
+.lab-kernel.starting .lab-dot {
+  background: var(--blue);
+  box-shadow: 0 0 6px var(--blue);
+  animation: lab-pulse 1s ease-in-out infinite;
+}
+
+@keyframes lab-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+/* The kernel picker is tighter than the notebook selector. */
+.lab-kernel-picker {
+  min-width: 120px;
+  max-width: 200px;
+}
+
+/* Bottom status bar */
+.lab-statusbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+  height: 22px;
+  padding: 0 10px;
+  border-top: 1px solid var(--border);
+  background: #007acc;
+  font-size: 11px;
+  color: #fff;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.lab-status-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.lab-status-kernel.on {
+  color: #fff;
+}
+
+.lab-status-kernel.busy {
+  color: #fff3c4;
+}
+
+.lab-status-kernel.starting {
+  color: #dff0ff;
+}
+
+.lab-status-kernel.on .lab-dot {
+  background: var(--green);
+}
+
+.lab-status-kernel.busy .lab-dot {
+  background: var(--amber);
+}
+
+.lab-status-kernel.starting .lab-dot {
+  background: var(--blue);
+}
+
+.lab-status-progress {
+  color: var(--amber);
+}
+
+.lab-status-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 40%;
+  direction: rtl;
+  text-align: left;
+}
+
+/* Error and empty states */
 .lab-error {
   display: flex;
   align-items: center;
@@ -183,21 +250,311 @@
   gap: 6px;
 }
 
-/* ── Workspace layout ─────────────────────────────────────────────────────── */
+/* Workspace layout */
 .lab-workspace {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  position: relative;
+  overflow: hidden;
+  background: var(--bg);
+}
+
+.lab.lab-resizing,
+.lab.lab-resizing * {
+  cursor: col-resize !important;
+  user-select: none;
+}
+
+.lab-activitybar {
+  width: var(--lab-activity-w);
+  flex: 0 0 var(--lab-activity-w);
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  padding: 4px 0;
+  border-right: 1px solid var(--border);
+  background: #181818;
+}
+
+.lab-activity {
+  position: relative;
+  width: 100%;
+  height: 48px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: #858585;
+  padding: 0;
+}
+
+.lab-activity:hover {
+  background: transparent;
+  color: var(--text);
+  border-color: transparent;
+}
+
+.lab-activity.active {
+  color: var(--text);
+}
+
+.lab-activity.active::before {
+  content: "";
+  position: absolute;
+  inset: 7px auto 7px 0;
+  width: 2px;
+  background: var(--text);
+}
+
+.lab-activity svg {
+  width: 21px;
+  height: 21px;
+}
+
+.lab-activity span {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+}
+
+.lab-activity em {
+  position: absolute;
+  right: 7px;
+  bottom: 7px;
+  min-width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: var(--accent);
+  color: #fff;
+  font-style: normal;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.lab-activity-spacer {
+  flex: 1;
+}
+
+.lab-main {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--bg);
+}
+
+.lab-editor-tabs {
+  height: 35px;
+  flex: 0 0 35px;
+  display: flex;
+  align-items: stretch;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  border-bottom: 1px solid var(--border);
+  background: #181818;
+}
+
+.lab-editor-tab,
+.lab-editor-tab-empty {
+  height: 35px;
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  border: 0;
+  border-right: 1px solid var(--border);
+  border-radius: 0;
+  background: #1f1f1f;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.lab-editor-tab {
+  position: relative;
+  gap: 7px;
+  max-width: 240px;
+  padding: 0 8px 0 10px;
+}
+
+.lab-editor-tab:hover {
+  background: #262626;
+  border-color: var(--border);
+  color: var(--text);
+}
+
+.lab-editor-tab.active {
+  background: var(--bg);
+  color: var(--text);
+}
+
+.lab-editor-tab.active::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 1px;
+  background: var(--bg);
+}
+
+.lab-editor-tab-empty {
+  padding: 0 12px;
+}
+
+.lab-editor-tab-icon {
+  flex: 0 0 auto;
+  color: var(--accent-2);
+  font: 700 10px/1 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+
+.lab-editor-tab-icon.notebook {
+  color: var(--amber);
+}
+
+.lab-editor-tab-label,
+.lab-editor-tab-dir {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lab-editor-tab-label {
+  flex: 0 1 auto;
+}
+
+.lab-editor-tab-dir {
+  flex: 1 1 auto;
+  color: color-mix(in srgb, var(--text-dim) 80%, transparent);
+  font-size: 10.5px;
+}
+
+.lab-editor-tab-close {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 3px;
+  color: transparent;
+}
+
+.lab-editor-tab:hover .lab-editor-tab-close,
+.lab-editor-tab.active .lab-editor-tab-close {
+  color: var(--text-dim);
+}
+
+.lab-editor-tab-close:hover {
+  background: var(--bg-3);
+  color: var(--text);
+}
+
+.lab-editor-tab-close svg {
+  width: 12px;
+  height: 12px;
+}
+
+/* Right-click menu on an editor tab (Close / Close others / Close all). */
+.lab-tab-menu {
+  position: fixed;
+  z-index: 50;
+  min-width: 150px;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-2);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+
+.lab-tab-menu button {
+  text-align: left;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text);
+  padding: 6px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.lab-tab-menu button:hover:not(:disabled) {
+  background: var(--accent);
+  color: #fff;
+}
+
+.lab-tab-menu button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.lab-editor-body {
   flex: 1;
   min-height: 0;
   display: flex;
   overflow: hidden;
 }
 
+.lab-assistant-side {
+  position: relative;
+  width: var(--lab-assistant-w);
+  min-width: 300px;
+  max-width: min(680px, 60vw);
+  flex: 0 0 var(--lab-assistant-w);
+  min-height: 0;
+  display: flex;
+  border-left: 1px solid var(--border);
+  background: var(--bg);
+}
+
+.lab-assistant-resize-handle,
+.lab-side-resize-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 7px;
+  cursor: col-resize;
+  touch-action: none;
+  user-select: none;
+  z-index: 30;
+  transition: background 0.15s;
+}
+
+.lab-assistant-resize-handle {
+  left: -4px;
+}
+
+.lab-side-resize-handle {
+  right: 0;
+}
+
+.lab-assistant-resize-handle:hover,
+.lab-assistant-resize-handle.dragging,
+.lab-side-resize-handle:hover,
+.lab-side-resize-handle.dragging {
+  background: color-mix(in srgb, var(--accent) 55%, transparent);
+}
+
 .lab-cells {
   flex: 1;
   min-width: 0;
   overflow-y: auto;
-  padding: 8px 18px 80px;
+  padding: 12px 18px 80px;
   display: flex;
   flex-direction: column;
+  background: var(--bg);
 }
 
 .lab-cell-slot {
@@ -205,7 +562,7 @@
   flex-direction: column;
 }
 
-/* ── Insert-between affordance ────────────────────────────────────────────── */
+/* Insert-between affordance */
 .lab-insert {
   position: relative;
   height: 16px;
@@ -262,7 +619,7 @@
   height: 11px;
 }
 
-/* ── Cell ─────────────────────────────────────────────────────────────────── */
+/* Cell */
 .lab-cell {
   position: relative;
   display: grid;
@@ -361,6 +718,119 @@
   color: var(--amber);
 }
 
+/* ── AI / external-edit review ── */
+.lab-nb-review-bar {
+  position: sticky;
+  top: 0;
+  z-index: 6;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+  padding: 9px 12px;
+  border: 1px solid color-mix(in srgb, var(--amber) 55%, var(--border));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--amber) 14%, var(--bg-1));
+  font-size: 12px;
+}
+
+.lab-nb-review-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.lab-nb-review-info strong {
+  font-weight: 650;
+}
+
+.lab-nb-review-counts {
+  display: flex;
+  gap: 10px;
+  font-family: ui-monospace, "Cascadia Code", Menlo, Consolas, monospace;
+  font-weight: 700;
+}
+
+.lab-nb-review-counts em {
+  font-style: normal;
+}
+
+.lab-nb-review-counts .add { color: var(--green); }
+.lab-nb-review-counts .mod { color: var(--amber); }
+.lab-nb-review-counts .del { color: var(--red); }
+
+.lab-nb-review-removed {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 2px;
+  max-width: min(640px, 56vw);
+}
+
+.lab-nb-review-removed code {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--red);
+  font-family: ui-monospace, "Cascadia Code", Menlo, Consolas, monospace;
+  font-size: 11px;
+}
+
+.lab-nb-review-removed em {
+  color: var(--text-dim);
+  font-style: normal;
+  font-size: 11px;
+}
+
+.lab-nb-review-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+/* Changed-cell highlight (added / modified vs the review baseline). The change
+   classes are appended after .lab-cell.selected, so they win the border /
+   background even while the cell is selected. */
+.lab-cell.cell-added {
+  border-color: color-mix(in srgb, var(--green) 55%, var(--border));
+  background: color-mix(in srgb, var(--green) 7%, var(--bg-1));
+}
+
+.lab-cell.cell-modified {
+  border-color: color-mix(in srgb, var(--amber) 55%, var(--border));
+  background: color-mix(in srgb, var(--amber) 7%, var(--bg-1));
+}
+
+.lab-cell.cell-added.selected {
+  background: color-mix(in srgb, var(--green) 10%, var(--bg-2));
+}
+
+.lab-cell.cell-modified.selected {
+  background: color-mix(in srgb, var(--amber) 10%, var(--bg-2));
+}
+
+.lab-cell-change-tag {
+  padding: 0 4px;
+  border-radius: 4px;
+  font-family: ui-monospace, "Cascadia Code", Menlo, Consolas, monospace;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  line-height: 1.6;
+}
+
+.lab-cell-change-tag.added {
+  color: var(--green);
+  background: color-mix(in srgb, var(--green) 16%, transparent);
+}
+
+.lab-cell-change-tag.modified {
+  color: var(--amber);
+  background: color-mix(in srgb, var(--amber) 16%, transparent);
+}
+
 .lab-cell-body {
   position: relative;
   min-width: 0;
@@ -369,7 +839,7 @@
   gap: 7px;
 }
 
-/* ── Per-cell hover toolbar ───────────────────────────────────────────────── */
+/* Per-cell hover toolbar */
 .lab-cell-toolbar {
   position: absolute;
   top: -2px;
@@ -427,10 +897,11 @@
   font-weight: 600;
 }
 
-/* ── Code editor (textarea overlaid on highlighted pre) ───────────────────── */
+/* Code editor */
 .lab-editor {
   position: relative;
   display: grid;
+  grid-template-columns: 38px minmax(0, 1fr);
   border: 1px solid var(--border);
   border-radius: 7px;
   background: var(--bg);
@@ -442,12 +913,11 @@
   border-color: color-mix(in srgb, var(--green) 55%, var(--border));
 }
 
+.lab-editor-lines,
 .lab-editor-pre,
 .lab-editor-input {
-  grid-area: 1 / 1 / 2 / 2;
   margin: 0;
   border: 0;
-  padding: 9px 12px;
   font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   font-size: 12.5px;
   line-height: 1.55;
@@ -457,10 +927,78 @@
   word-break: normal;
 }
 
+.lab-editor-lines {
+  grid-column: 1;
+  padding: 9px 8px 9px 4px;
+  border-right: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+  background: color-mix(in srgb, var(--bg-1) 72%, transparent);
+  color: color-mix(in srgb, var(--text-dim) 78%, transparent);
+  text-align: right;
+  user-select: none;
+  pointer-events: none;
+}
+
+.lab-editor-lines span {
+  display: block;
+  min-height: 1.55em;
+}
+
+.lab-editor-code {
+  position: relative;
+  grid-column: 2;
+  min-width: 0;
+  display: grid;
+}
+
+.lab-editor-pre,
+.lab-editor-input,
+.lab-editor-diff-overlay {
+  grid-area: 1 / 1 / 2 / 2;
+  padding: 9px 12px;
+}
+
 .lab-editor-pre {
   pointer-events: none;
   user-select: none;
   min-height: 1.55em;
+}
+
+.lab-editor-diff-overlay {
+  pointer-events: none;
+  z-index: 1;
+  color: transparent;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 12.5px;
+  line-height: 1.55;
+  tab-size: 4;
+  white-space: pre;
+}
+
+.lab-editor-diff-line {
+  display: block;
+  min-height: 1.55em;
+  margin: 0 -12px;
+  padding: 0 12px;
+}
+
+.lab-editor-diff-line.diff-added,
+.lab-editor-lines span.diff-added {
+  background: color-mix(in srgb, var(--green) 16%, transparent);
+}
+
+.lab-editor-lines span.diff-added {
+  color: var(--green);
+  box-shadow: inset 2px 0 0 var(--green);
+}
+
+.lab-editor-diff-line.diff-removed,
+.lab-editor-lines span.diff-removed {
+  background: color-mix(in srgb, var(--red) 13%, transparent);
+}
+
+.lab-editor-lines span.diff-removed {
+  color: var(--red);
+  box-shadow: inset 2px 0 0 var(--red);
 }
 
 .lab-editor-pre code.hljs {
@@ -472,6 +1010,8 @@
 }
 
 .lab-editor-input {
+  position: relative;
+  z-index: 2;
   resize: none;
   overflow: hidden;
   background: transparent;
@@ -488,46 +1028,70 @@
   background: color-mix(in srgb, var(--accent) 30%, transparent);
 }
 
-/* Theme-aware syntax tokens (override the globally-imported github-dark theme). */
+/* VSCode-style syntax tokens, theme-aware via the --code-* palette (Dark+ in the
+   dark theme, Light+ under [data-theme="light"]). highlight.js is regex-based, so
+   user-defined type names aren't semantically detected the way VSCode does, but
+   keywords, built-in types, functions, strings, numbers and comments all match. */
 .lab-editor .hljs {
   background: transparent;
-  color: var(--text);
+  color: var(--code-fg);
 }
+/* Keywords and language constants. */
 .lab-editor .hljs-keyword,
-.lab-editor .hljs-built_in,
 .lab-editor .hljs-literal,
-.lab-editor .hljs-type {
-  color: var(--accent-2);
+.lab-editor .hljs-selector-tag,
+.lab-editor .hljs-name {
+  color: var(--code-keyword);
 }
-.lab-editor .hljs-string,
-.lab-editor .hljs-meta .hljs-string {
-  color: var(--green);
+/* Types, classes, and built-ins. */
+.lab-editor .hljs-built_in,
+.lab-editor .hljs-type,
+.lab-editor .hljs-title.class_,
+.lab-editor .hljs-class .hljs-title,
+.lab-editor .hljs-selector-class,
+.lab-editor .hljs-selector-id {
+  color: var(--code-entity);
 }
-.lab-editor .hljs-number {
-  color: var(--amber);
-}
-.lab-editor .hljs-comment,
-.lab-editor .hljs-quote {
-  color: var(--text-dim);
-  font-style: italic;
-}
+/* Function and method names. */
 .lab-editor .hljs-title,
 .lab-editor .hljs-title.function_,
 .lab-editor .hljs-section {
-  color: var(--accent);
+  color: var(--code-func);
 }
+/* Strings and regex. */
+.lab-editor .hljs-string,
+.lab-editor .hljs-regexp,
+.lab-editor .hljs-char.escape_,
+.lab-editor .hljs-meta .hljs-string {
+  color: var(--code-string);
+}
+.lab-editor .hljs-number {
+  color: var(--code-number);
+}
+.lab-editor .hljs-comment,
+.lab-editor .hljs-quote {
+  color: var(--code-comment);
+  font-style: italic;
+}
+/* Variables, parameters, object fields, and attributes. */
+.lab-editor .hljs-variable,
+.lab-editor .hljs-template-variable,
+.lab-editor .hljs-params,
 .lab-editor .hljs-attr,
 .lab-editor .hljs-attribute,
+.lab-editor .hljs-property,
 .lab-editor .hljs-symbol {
-  color: var(--blue);
+  color: var(--code-variable);
 }
+/* Decorators and attributes. */
 .lab-editor .hljs-meta,
+.lab-editor .hljs-meta .hljs-keyword,
 .lab-editor .hljs-decorator {
-  color: var(--text-dim);
+  color: var(--code-meta);
 }
 .lab-editor .hljs-bullet,
 .lab-editor .hljs-link {
-  color: var(--accent);
+  color: var(--code-entity);
 }
 .lab-editor .hljs-emphasis {
   font-style: italic;
@@ -547,14 +1111,49 @@
 }
 
 .lab-file-editor-bar {
-  min-height: 45px;
+  min-height: 35px;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 8px 12px;
+  padding: 5px 10px;
   border-bottom: 1px solid var(--border);
   background: var(--bg-1);
+}
+
+.lab-file-runtime-strip {
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+  overflow-x: auto;
+  white-space: nowrap;
+}
+
+.lab-file-runtime-strip .lab-kernel-picker {
+  min-width: 170px;
+}
+
+.lab-file-kernel {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 5px;
+  border: 0;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.lab-file-kernel.on {
+  color: var(--text);
+}
+
+.lab-file-kernel.on .lab-dot {
+  background: var(--green);
 }
 
 .lab-file-editor-title {
@@ -572,7 +1171,7 @@
 }
 
 .lab-file-editor-title strong {
-  font-size: 13px;
+  font-size: 12.5px;
 }
 
 .lab-file-editor-title span {
@@ -585,15 +1184,119 @@
   flex-shrink: 0;
   display: flex;
   align-items: center;
+  gap: 2px;
+}
+
+.lab-file-tool {
+  width: 28px;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-dim);
+}
+
+.lab-file-tool:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--text-dim) 14%, transparent);
+  border-color: transparent;
+  color: var(--text);
+}
+
+.lab-file-tool:disabled {
+  opacity: 0.34;
+  cursor: default;
+}
+
+.lab-file-tool.primary {
+  border-color: transparent;
+  background: transparent;
+  color: var(--accent);
+  font-weight: 400;
+}
+
+.lab-file-tool.primary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+  color: color-mix(in srgb, var(--accent) 84%, white);
+  filter: none;
+}
+
+.lab-file-tool.dirty {
+  color: var(--amber);
+}
+
+.lab-file-tool.danger:hover:not(:disabled) {
+  color: var(--red);
+}
+
+.lab-file-tool svg {
+  width: 16px;
+  height: 16px;
+  display: block;
+}
+
+.lab-file-review-bar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px;
+  border-bottom: 1px solid color-mix(in srgb, var(--amber) 42%, var(--border));
+  background: color-mix(in srgb, var(--amber) 9%, var(--bg));
+  color: var(--text);
+  font-size: 12px;
+}
+
+.lab-file-review-bar strong {
+  margin-right: 8px;
+  font-weight: 650;
+}
+
+.lab-file-review-bar span {
+  color: var(--amber);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-weight: 700;
+}
+
+.lab-file-review-actions {
+  display: flex;
   gap: 6px;
+  flex-shrink: 0;
+}
+
+.lab-file-review-removed {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 5px;
+  max-width: min(720px, 58vw);
+}
+
+.lab-file-review-removed code {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: color-mix(in srgb, var(--red) 82%, var(--text));
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 11px;
+}
+
+.lab-file-review-removed em {
+  color: var(--text-dim);
+  font-style: normal;
+  font-size: 11px;
 }
 
 .lab-file-editor-lang {
-  padding: 2px 7px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
+  padding: 0 4px;
+  border: 0;
+  border-radius: 0;
   color: var(--text-dim);
-  background: var(--bg-2);
+  background: transparent;
   font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   font-size: 10.5px;
 }
@@ -624,8 +1327,22 @@
   overflow: auto;
 }
 
+.lab-file-editor > .lab-editor {
+  grid-template-columns: 52px minmax(0, 1fr);
+}
+
+.lab-file-editor > .lab-editor .lab-editor-lines {
+  padding: 14px 10px 80px 4px;
+  font-size: 13px;
+  line-height: 1.55;
+  position: sticky;
+  left: 0;
+  z-index: 2;
+}
+
 .lab-file-editor > .lab-editor .lab-editor-pre,
-.lab-file-editor > .lab-editor .lab-editor-input {
+.lab-file-editor > .lab-editor .lab-editor-input,
+.lab-file-editor > .lab-editor .lab-editor-diff-overlay {
   padding: 14px 16px 80px;
   font-size: 13px;
   line-height: 1.55;
@@ -633,7 +1350,99 @@
   overflow-wrap: normal;
 }
 
-/* ── Markdown cell (rendered) ─────────────────────────────────────────────── */
+.lab-file-editor > .lab-editor .lab-editor-diff-line {
+  margin-left: -16px;
+  margin-right: -16px;
+  padding-left: 16px;
+  padding-right: 16px;
+}
+
+.lab-file-runtime {
+  flex: 0 0 210px;
+  min-height: 170px;
+  max-height: 36%;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(220px, 30%);
+  border-top: 1px solid var(--border);
+  background: var(--bg-1);
+}
+
+.lab-file-output-panel,
+.lab-file-vars-panel {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--border);
+}
+
+.lab-file-vars-panel {
+  border-right: 0;
+}
+
+.lab-file-panel-head {
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+}
+
+.lab-file-panel-head > div {
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.lab-file-panel-head strong {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.lab-file-panel-head span {
+  color: var(--text-dim);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lab-file-output-body,
+.lab-file-vars-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 9px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.lab-file-var-row {
+  border-top: 1px solid var(--border);
+  padding-top: 7px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.lab-file-var-row:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.lab-file-var-main {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+/* Markdown cell */
 .lab-md {
   font-size: 13.5px;
   line-height: 1.6;
@@ -652,7 +1461,7 @@
   font-size: 12.5px;
 }
 
-/* ── Outputs ──────────────────────────────────────────────────────────────── */
+/* Outputs */
 .lab-outputs {
   border-left: 2px solid var(--border);
   margin-left: 1px;
@@ -740,19 +1549,36 @@
   background: color-mix(in srgb, var(--bg-2) 45%, transparent);
 }
 
-/* ── Side panels ──────────────────────────────────────────────────────────── */
+/* Side panels */
 .lab-side {
-  width: min(390px, 38vw);
-  min-width: 310px;
+  position: relative;
+  width: var(--lab-side-w);
+  min-width: 210px;
+  max-width: 34vw;
+  flex: 0 0 var(--lab-side-w);
   overflow: hidden;
-  border-left: 1px solid var(--border);
+  border-right: 1px solid var(--border);
   background: var(--bg-1);
   display: flex;
   flex-direction: column;
 }
 
+.lab-side-title {
+  height: 35px;
+  flex: 0 0 35px;
+  display: flex;
+  align-items: center;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-dim);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
 .lab-side-tabs {
-  display: grid;
+  display: none;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 4px;
   padding: 8px;
@@ -803,13 +1629,12 @@
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 12px;
+  padding: 10px;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 10px;
 }
 
-.lab-side-content.assistant,
 .lab-side-content.files {
   padding: 0;
   overflow: hidden;
@@ -818,9 +1643,9 @@
 
 .lab-panel {
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: 0;
   background: var(--bg);
-  padding: 10px;
+  padding: 9px;
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -836,14 +1661,14 @@
 }
 
 .lab-panel-details summary::before {
-  content: "▸";
+  content: ">";
   color: var(--text-dim);
   font-size: 10px;
   margin-right: 2px;
 }
 
 .lab-panel-details[open] summary::before {
-  content: "▾";
+  content: "v";
 }
 
 .lab-panel-head,
@@ -866,6 +1691,57 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
+}
+
+.lab-panel-select {
+  width: 100%;
+  min-width: 0;
+  max-width: none;
+}
+
+.lab-notebook-controls .lab-kernel {
+  min-width: 0;
+  max-width: 130px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lab-new-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
+  align-items: center;
+}
+
+.lab-new-row .lab-new {
+  width: auto;
+  min-width: 0;
+}
+
+.lab-command-stack {
+  display: grid;
+  gap: 6px;
+}
+
+.lab-command-stack .lab-btn {
+  width: 100%;
+  min-width: 0;
+  justify-content: center;
+}
+
+.lab-run-all-btn {
+  min-height: 34px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+}
+
+.lab-run-all-btn svg {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
 }
 
 .lab-count-badge {
@@ -1047,6 +1923,102 @@
   gap: 6px;
 }
 
+/* Runtime panel */
+.lab-runtime-panel {
+  gap: 9px;
+}
+
+.lab-runtime-select {
+  width: 100%;
+  min-width: 0;
+  max-width: none;
+}
+
+.lab-runtime-summary {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 3px 8px;
+  align-items: baseline;
+  padding: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-2);
+  font-size: 12px;
+}
+
+.lab-runtime-summary span {
+  color: var(--text-dim);
+}
+
+.lab-runtime-summary strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+.lab-runtime-summary em {
+  grid-column: 2;
+  color: var(--text-dim);
+  font-style: normal;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 11px;
+}
+
+.lab-runtime-kernel-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.lab-kernelspec-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.lab-kernelspec-row {
+  width: 100%;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: baseline;
+  padding: 5px 7px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-dim);
+  text-align: left;
+  cursor: pointer;
+}
+
+.lab-kernelspec-row:hover {
+  background: var(--bg-2);
+  color: var(--text);
+}
+
+.lab-kernelspec-row.active {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  color: var(--text);
+}
+
+.lab-kernelspec-row span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lab-kernelspec-row em {
+  color: var(--text-dim);
+  font-style: normal;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 10.5px;
+}
+
 /* Files tab */
 .lab-files {
   flex: 1;
@@ -1201,13 +2173,13 @@
   min-height: 0;
   display: flex;
   flex-direction: column;
-  background: var(--bg);
+  background: var(--bg-1);
   color: var(--text);
 }
 
 .lab-explorer-title {
-  height: 34px;
-  display: flex;
+  height: 0;
+  display: none;
   align-items: center;
   justify-content: space-between;
   padding: 0 10px 0 14px;
@@ -1235,7 +2207,7 @@
 .lab-explorer-root-row {
   display: flex;
   align-items: center;
-  padding: 6px 0 2px;
+  padding: 5px 0 1px;
   padding-right: 6px;
 }
 
@@ -1252,7 +2224,7 @@
   cursor: pointer;
   padding: 0 10px;
   text-align: left;
-  font-size: 12px;
+  font-size: 11.5px;
   font-weight: 700;
 }
 
@@ -1272,7 +2244,7 @@
 
 .lab-explorer-row {
   position: relative;
-  min-height: 28px;
+  min-height: 24px;
   display: flex;
   align-items: center;
   padding-right: 6px;
@@ -1293,10 +2265,10 @@
   background: transparent;
   color: var(--text);
   cursor: pointer;
-  padding: 4px 0;
+  padding: 3px 0;
   text-align: left;
   font: inherit;
-  font-size: 13px;
+  font-size: 12.5px;
 }
 
 .lab-explorer-caret {
@@ -1338,8 +2310,8 @@
 }
 
 .lab-explorer-attach {
-  width: 20px;
-  height: 20px;
+  width: 18px;
+  height: 18px;
   flex-shrink: 0;
   display: inline-flex;
   align-items: center;
@@ -1447,18 +2419,25 @@
 /* Assistant tab */
 .lab-assistant {
   flex: 1;
+  /* Without min-width:0 this flex item's automatic minimum is its min-content
+     width — a long `white-space: nowrap` thinking preview / tool name then
+     expands the whole assistant column past the fixed-width side panel, spilling
+     chat content off-screen on the right. min-width:0 lets it shrink to the
+     panel so children ellipsize/wrap instead. */
+  min-width: 0;
   min-height: 0;
   display: flex;
   flex-direction: column;
-  background: var(--bg);
+  background: var(--bg-1);
 }
 
 .lab-assistant-head {
+  min-height: 35px;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  padding: 12px;
+  padding: 6px 10px;
   border-bottom: 1px solid var(--border);
   background: var(--bg-1);
 }
@@ -1468,8 +2447,8 @@
   background: var(--bg-2);
   color: var(--text);
   border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 5px 7px;
+  border-radius: 3px;
+  padding: 4px 7px;
   font-size: 11.5px;
 }
 
@@ -1480,9 +2459,34 @@
 
 .lab-assistant-turns {
   flex: 1;
+  min-width: 0;
   min-height: 0;
   overflow-y: auto;
-  padding: 12px;
+  overflow-x: hidden;
+  padding: 10px;
+}
+
+/* Keep assistant content inside the narrow side panel: let the head info and
+   message text shrink, wrap long tokens, and scroll wide code blocks instead
+   of spilling out of the panel. */
+.lab-assistant-head > div {
+  min-width: 0;
+}
+
+.lab-assistant-head span {
+  max-width: 100%;
+}
+
+.lab-assistant-turns .chat-turn,
+.lab-assistant-turns .md-content,
+.lab-assistant-turns .chat-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.lab-assistant-turns pre {
+  max-width: 100%;
+  overflow-x: auto;
 }
 
 .lab-assistant-empty {
@@ -1502,7 +2506,7 @@
 .lab-assistant-empty button {
   text-align: left;
   border: 1px solid var(--border);
-  border-radius: 7px;
+  border-radius: 3px;
   background: var(--bg-1);
   color: var(--text);
   padding: 8px 9px;
@@ -1525,7 +2529,7 @@
 .lab-assistant-turns .md-content {
   font-size: 12.5px;
   line-height: 1.55;
-  border-radius: 8px;
+  border-radius: 3px;
   padding: 8px 10px;
 }
 
@@ -1549,7 +2553,7 @@
 .lab-assistant-composer {
   border-top: 1px solid var(--border);
   background: var(--bg-1);
-  padding: 10px;
+  padding: 8px;
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -1558,10 +2562,10 @@
 .lab-assistant-composer textarea {
   width: 100%;
   resize: none;
-  min-height: 78px;
+  min-height: 72px;
   max-height: 160px;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: 3px;
   background: var(--bg-2);
   color: var(--text);
   padding: 9px;
@@ -1629,15 +2633,414 @@
 }
 
 @media (max-width: 980px) {
-  .lab-workspace {
-    flex-direction: column;
+  .lab {
+    --lab-side-w: min(240px, 34vw);
+    --lab-assistant-w: min(340px, 38vw);
   }
 
-  .lab-side {
-    width: auto;
-    min-width: 0;
-    max-height: 45%;
-    border-left: 0;
-    border-top: 1px solid var(--border);
+  .lab-assistant-side {
+    min-width: 280px;
+  }
+
+  .lab-file-runtime {
+    grid-template-columns: minmax(0, 1fr);
+    flex-basis: 300px;
+  }
+
+  .lab-file-output-panel {
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+}
+
+@media (max-width: 760px) {
+  /* Panels stay visible and user-collapsible (activity bar / Assistant toggle)
+     rather than auto-hiding with no way to restore them. */
+  .lab-editor-tab {
+    max-width: 180px;
+  }
+
+  .lab-editor-tab-dir {
+    display: none;
+  }
+
+  .lab-file-runtime-strip {
+    flex-wrap: wrap;
+    white-space: normal;
+  }
+
+  .lab-file-runtime {
+    max-height: 42%;
+  }
+}
+
+/* VSCode-style Lab Assistant chat panel */
+.lab-assistant {
+  background: #181818;
+}
+
+.lab-assistant-head {
+  position: relative;
+  min-height: 35px;
+  height: 35px;
+  padding: 0 8px 0 20px;
+  border-bottom: 1px solid #2b2b2b;
+  background: #181818;
+}
+
+.lab-assistant-tabs,
+.lab-assistant-head-actions {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+}
+
+.lab-assistant-tabs {
+  gap: 10px;
+}
+
+.lab-assistant-head-actions {
+  gap: 2px;
+}
+
+.lab-assistant-tab {
+  position: relative;
+  height: 35px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 400;
+  letter-spacing: 0;
+}
+
+.lab-assistant-tab.active::after {
+  content: "";
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: 1px;
+  background: var(--accent);
+}
+
+.lab-assistant-icon-btn,
+.lab-assistant-send {
+  display: inline-flex;
+  width: 28px;
+  height: 28px;
+  min-height: 0;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: #a8a8a8;
+  line-height: 1;
+}
+
+.lab-assistant-icon-btn:hover:not(:disabled),
+.lab-assistant-send:hover:not(:disabled) {
+  background: #2a2a2a;
+  color: #dcdcdc;
+}
+
+.lab-assistant-icon-btn:disabled,
+.lab-assistant-send:disabled {
+  cursor: default;
+  opacity: 0.38;
+}
+
+.lab-assistant-icon-btn svg,
+.lab-assistant-send svg {
+  width: 16px;
+  height: 16px;
+}
+
+.lab-assistant-history {
+  position: absolute;
+  top: 31px;
+  left: 12px;
+  z-index: 30;
+  width: min(300px, calc(100% - 24px));
+  max-height: 360px;
+  overflow: auto;
+  padding: 6px;
+  border: 1px solid #343434;
+  border-radius: 6px;
+  background: #1f1f1f;
+  box-shadow: 0 12px 28px rgb(0 0 0 / 34%);
+}
+
+.lab-assistant-history-title {
+  padding: 4px 7px 7px;
+  color: #a8a8a8;
+  font-size: 11px;
+}
+
+.lab-assistant-history-empty {
+  padding: 10px 7px;
+  color: #8a8a8a;
+  font-size: 12px;
+}
+
+.lab-assistant-history button {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 3px;
+  padding: 7px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: #dcdcdc;
+  text-align: left;
+}
+
+.lab-assistant-history button:hover,
+.lab-assistant-history button.active {
+  background: #2a2d2e;
+}
+
+.lab-assistant-history-name,
+.lab-assistant-history-meta {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lab-assistant-history-name {
+  font-size: 12px;
+}
+
+.lab-assistant-history-meta {
+  color: #8a8a8a;
+  font-size: 10.5px;
+}
+
+.lab-assistant-context-bar {
+  display: flex;
+  min-height: 28px;
+  align-items: center;
+  padding: 0 12px 0 20px;
+  border-bottom: 1px solid #252525;
+  background: #181818;
+  color: #a8a8a8;
+  font-size: 11px;
+}
+
+.lab-assistant-model {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lab-assistant-model.ready {
+  color: #c8c8c8;
+}
+
+.lab-assistant-model.error {
+  color: var(--amber);
+}
+
+.lab-assistant-model-dot {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 7px;
+  border-radius: 50%;
+  background: var(--amber);
+}
+
+.lab-assistant-model.ready .lab-assistant-model-dot {
+  background: var(--green);
+}
+
+.lab-assistant-turns {
+  padding: 12px;
+  background: #1e1e1e;
+}
+
+.lab-assistant-empty {
+  gap: 7px;
+  padding-top: 2px;
+  color: #a8a8a8;
+}
+
+.lab-assistant-empty strong {
+  color: #dcdcdc;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.lab-assistant-empty button {
+  padding: 7px 9px;
+  border-color: #313131;
+  border-radius: 3px;
+  background: transparent;
+  color: #dcdcdc;
+}
+
+.lab-assistant-empty button:hover {
+  border-color: #3f3f46;
+  background: #2a2a2a;
+}
+
+.lab-assistant-turns .chat-turn {
+  max-width: none;
+  margin: 0 0 13px;
+  padding-bottom: 0;
+}
+
+.lab-assistant-turns .chat-text,
+.lab-assistant-turns .md-content {
+  padding: 7px 9px;
+  border-radius: 3px;
+  font-size: 12.5px;
+  line-height: 1.52;
+}
+
+.lab-assistant-turns .chat-user .chat-text {
+  border-color: color-mix(in srgb, var(--accent) 36%, #313131);
+  background: color-mix(in srgb, var(--accent) 13%, #1e1e1e);
+}
+
+.lab-assistant-turns .chat-message-actions {
+  min-height: 20px;
+}
+
+.lab-assistant-composer {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  margin: 0 12px 12px;
+  padding: 0;
+  border: 1px solid #313131;
+  border-radius: 6px;
+  background: #1f1f1f;
+}
+
+.lab-assistant-composer:focus-within {
+  border-color: #3f3f46;
+}
+
+.lab-assistant-composer textarea {
+  min-height: 52px;
+  max-height: 150px;
+  padding: 10px 12px 8px;
+  border: 0;
+  border-radius: 6px 6px 0 0;
+  background: transparent;
+  font-size: 12.5px;
+}
+
+.lab-assistant-composer textarea:focus {
+  border-color: transparent;
+}
+
+.lab-assistant-attachments,
+.lab-assistant-editing {
+  padding: 7px 7px 0;
+}
+
+.lab-assistant-attachments span {
+  border-color: #313131;
+  border-radius: 4px;
+  background: #252526;
+}
+
+.lab-assistant-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, auto) 28px;
+  align-items: center;
+  min-height: 34px;
+  padding: 4px 7px;
+  border-top: 1px solid #313131;
+  gap: 6px;
+}
+
+.lab-assistant-footer-item,
+.lab-assistant-permission {
+  display: flex;
+  min-width: 0;
+  height: 26px;
+  align-items: center;
+  gap: 6px;
+  color: #a8a8a8;
+  font-size: 11.5px;
+}
+
+.lab-assistant-footer-item {
+  width: 100%;
+  overflow: hidden;
+}
+
+.lab-assistant-footer-item svg,
+.lab-assistant-permission svg {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+}
+
+.lab-assistant-footer-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lab-assistant-permission {
+  width: 138px;
+  max-width: 138px;
+  overflow: hidden;
+}
+
+.lab-assistant-permission .lab-mini-select {
+  width: 112px;
+  min-width: 0;
+  max-width: 112px;
+  height: 24px;
+  padding: 0 2px;
+  border: 0;
+  background: transparent;
+  color: #a8a8a8;
+  font-size: 11.5px;
+}
+
+.lab-assistant-permission .lab-mini-select:focus {
+  outline: none;
+}
+
+.lab-assistant-send {
+  flex: 0 0 28px;
+  width: 28px;
+  color: var(--accent);
+}
+
+.lab-assistant-send.is-stop {
+  color: #dcdcdc;
+}
+
+@media (max-width: 980px) {
+  .lab-assistant-composer {
+    margin-inline: 10px;
+  }
+
+  .lab-assistant-permission {
+    width: 126px;
+    max-width: 126px;
+  }
+
+  .lab-assistant-permission .lab-mini-select {
+    width: 100px;
+    max-width: 100px;
   }
 }

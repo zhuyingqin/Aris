@@ -417,8 +417,85 @@ describe("Chat interaction helpers", () => {
   });
 });
 
+describe("AskUserQuestion card", () => {
+  const questionBlock = (overrides: Record<string, unknown> = {}) => ({
+    kind: "tool" as const,
+    id: "ask-1",
+    name: "AskUserQuestion",
+    input: JSON.stringify({
+      question: "Which database?",
+      header: "Database",
+      options: [
+        { label: "Postgres", description: "Relational" },
+        { label: "SQLite", description: "Embedded" },
+      ],
+      ...overrides,
+    }),
+  });
+
+  const questionTurn = (
+    block: ReturnType<typeof questionBlock> & { output?: string },
+    streaming = true,
+  ): ChatTurn => ({ id: "assistant-q", role: "assistant", streaming, blocks: [block] });
+
+  const renderQuestion = (
+    turn: ChatTurn,
+    onQuestionRespond: (toolUseId: string, answer: string) => void = () => undefined,
+  ) =>
+    render(
+      <ChatMessage
+        turn={turn}
+        canRetry={false}
+        onEdit={() => undefined}
+        onRetry={() => undefined}
+        onContinue={() => undefined}
+        onQuestionRespond={onQuestionRespond}
+      />,
+    );
+
+  it("submits the chosen option label for a single-select question", async () => {
+    const user = userEvent.setup();
+    const onQuestionRespond = vi.fn();
+    renderQuestion(questionTurn(questionBlock()), onQuestionRespond);
+
+    expect(screen.getByText("Which database?")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: /Postgres/ }));
+
+    expect(onQuestionRespond).toHaveBeenCalledWith("ask-1", "Postgres");
+  });
+
+  it("joins selected labels for a multi-select question", async () => {
+    const user = userEvent.setup();
+    const onQuestionRespond = vi.fn();
+    renderQuestion(questionTurn(questionBlock({ multiSelect: true })), onQuestionRespond);
+
+    await user.click(screen.getByRole("button", { name: /Postgres/ }));
+    await user.click(screen.getByRole("button", { name: /SQLite/ }));
+    await user.click(screen.getByRole("button", { name: "Submit" }));
+
+    expect(onQuestionRespond).toHaveBeenCalledWith("ask-1", "Postgres, SQLite");
+  });
+
+  it("shows the recorded answer once the tool result arrives", () => {
+    renderQuestion(questionTurn({ ...questionBlock(), output: "Postgres" }, false));
+
+    expect(screen.getByText("You answered")).toBeTruthy();
+    expect(screen.getByText("Postgres")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Postgres/ })).toBeNull();
+  });
+
+  it("locks the question when the turn is no longer streaming", () => {
+    const onQuestionRespond = vi.fn();
+    renderQuestion(questionTurn(questionBlock(), false), onQuestionRespond);
+
+    expect(screen.getByText("This question is no longer awaiting an answer.")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Postgres/ })).toBeNull();
+    expect(onQuestionRespond).not.toHaveBeenCalled();
+  });
+});
+
 describe("useChatSessions", () => {
-  it("opens a blank new-chat home instead of restoring saved history on startup", async () => {
+  it("restores the last active chat and keeps saved sessions in history", async () => {
     const old = makeSession("default");
     old.id = "old-chat";
     old.title = "Old chat";
@@ -436,14 +513,32 @@ describe("useChatSessions", () => {
 
     const { result } = renderHook(() => useChatSessions());
 
-    await waitFor(() => expect(result.current.currentSession).not.toBeNull());
-    expect(result.current.currentSession?.turns).toHaveLength(0);
-    expect(result.current.currentSession?.title).toBe("New chat");
-    expect(result.current.currentId).not.toBe(old.id);
-    expect(result.current.currentId).not.toBe(recent.id);
+    await waitFor(() => expect(result.current.currentId).toBe(old.id));
+    expect(result.current.currentSession?.title).toBe("Old chat");
+    expect(result.current.currentSession?.turns).toHaveLength(1);
     expect(result.current.sessions).toHaveLength(2);
     expect(result.current.sessions.some((session) => session.id === old.id)).toBe(true);
     expect(result.current.sessions.some((session) => session.id === recent.id)).toBe(true);
+  });
+
+  it("falls back to the most recently updated chat when no current id is saved", async () => {
+    const old = makeSession("default");
+    old.id = "old-chat";
+    old.updatedAt = 1;
+    old.turns = [{ id: "old-turn", role: "user", blocks: [{ kind: "text", text: "old" }] }];
+    const recent = makeSession("default");
+    recent.id = "recent-chat";
+    recent.updatedAt = 2;
+    recent.turns = [{ id: "recent-turn", role: "user", blocks: [{ kind: "text", text: "recent" }] }];
+    localStorage.setItem(SESSIONS_KEY, JSON.stringify([old, recent]));
+
+    const { result } = renderHook(() => useChatSessions());
+
+    await waitFor(() => expect(result.current.currentId).toBe(recent.id));
+    expect(result.current.currentSession?.turns[0]).toMatchObject({
+      role: "user",
+      blocks: [{ kind: "text", text: "recent" }],
+    });
   });
 
   it("retains a draft per session", async () => {

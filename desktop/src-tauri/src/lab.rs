@@ -22,6 +22,7 @@ const DEFAULT_TIMEOUT_SECS: u64 = 120;
 const VAR_INSPECT_TIMEOUT_SECS: u64 = 5;
 const VAR_INSPECT_SENTINEL: &str = "__ARIS_VARS_JSON__";
 const LAB_CELL_OUTPUT_EVENT: &str = "lab-cell-output";
+const LAB_FILE_OUTPUT_EVENT: &str = "lab-file-output";
 const MAX_WALK_DEPTH: usize = 12;
 const VAR_INSPECT_CODE: &str = r#"
 def __aris_variable_snapshot_20260620():
@@ -96,8 +97,20 @@ fn resolve(projects_state: &ProjectState, notebook_path: &str) -> Result<PathBuf
     }
 }
 
+fn resolve_file(projects_state: &ProjectState, file_path: &str) -> Result<PathBuf, String> {
+    let candidate = PathBuf::from(file_path);
+    if candidate.is_absolute() {
+        return Ok(candidate);
+    }
+    Ok(projects::current_project_path(projects_state)?.join(candidate))
+}
+
 fn session_id(path: &Path) -> String {
     path.to_string_lossy().to_string()
+}
+
+fn file_session_id(path: &Path) -> String {
+    format!("file:{}", session_id(path))
 }
 
 fn workdir(path: &Path) -> PathBuf {
@@ -105,6 +118,18 @@ fn workdir(path: &Path) -> PathBuf {
         .filter(|p| !p.as_os_str().is_empty())
         .map(Path::to_path_buf)
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+}
+
+fn ensure_python_file(path: &Path) -> Result<(), String> {
+    let is_python = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|extension| matches!(extension.to_ascii_lowercase().as_str(), "py" | "pyw"));
+    if is_python {
+        Ok(())
+    } else {
+        Err("Lab can run Python files with .py or .pyw extensions.".to_string())
+    }
 }
 
 /// The standard payload the UI renders: raw notebook JSON + a compact outline +
@@ -128,6 +153,18 @@ fn notebook_view(path: &Path) -> Result<Value, String> {
 #[tauri::command]
 pub fn lab_list_kernels() -> Result<Value, String> {
     serde_json::to_value(KernelManager::list()).map_err(|e| e.to_string())
+}
+
+/// All kernels the user can pick: installed Jupyter kernelspecs plus the native
+/// MATLAB backend when a MATLAB install is detected. Reads kernelspec dirs, so it
+/// runs on a blocking thread.
+#[tauri::command]
+pub async fn lab_list_kernelspecs() -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        serde_json::to_value(KernelManager::available_kernels()).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -162,6 +199,24 @@ pub fn lab_create_notebook(
             .save(&path)
             .map_err(|e| e.to_string())?;
     }
+    notebook_view(&path)
+}
+
+/// Overwrite the whole notebook with `notebook` (a full nbformat JSON object),
+/// validating structure before saving. Powers the "revert AI changes" review
+/// action: restore the pre-edit baseline in one shot instead of replaying edits.
+#[tauri::command]
+pub fn lab_save_notebook(
+    projects_state: State<ProjectState>,
+    notebook_path: String,
+    notebook: Value,
+) -> Result<Value, String> {
+    let path = resolve(&projects_state, &notebook_path)?;
+    let text = serde_json::to_string(&notebook).map_err(|e| e.to_string())?;
+    // from_json_str runs nbformat validation, so a malformed baseline can never
+    // clobber the on-disk notebook.
+    let doc = NotebookDoc::from_json_str(&text).map_err(|e| e.to_string())?;
+    doc.save(&path).map_err(|e| e.to_string())?;
     notebook_view(&path)
 }
 
@@ -207,6 +262,27 @@ pub fn lab_edit_cell(
             ))
         }
     }
+    doc.save(&path).map_err(|e| e.to_string())?;
+    notebook_view(&path)
+}
+
+/// Persist the user's kernel choice into the notebook's `metadata.kernelspec`
+/// (nbformat standard) so it is restored on reopen. Returns the refreshed view.
+#[tauri::command]
+pub fn lab_set_kernelspec(
+    projects_state: State<ProjectState>,
+    notebook_path: String,
+    name: String,
+    display_name: Option<String>,
+    language: Option<String>,
+) -> Result<Value, String> {
+    let path = resolve(&projects_state, &notebook_path)?;
+    let mut doc = NotebookDoc::load_or_empty(&path).map_err(|e| e.to_string())?;
+    doc.set_kernelspec(
+        &name,
+        display_name.as_deref().unwrap_or(&name),
+        language.as_deref().unwrap_or(""),
+    );
     doc.save(&path).map_err(|e| e.to_string())?;
     notebook_view(&path)
 }
@@ -291,7 +367,120 @@ pub async fn lab_interrupt_kernel(
     .map_err(|e| e.to_string())?
 }
 
-/// Inspect live Python variables in the notebook's current kernel.
+#[tauri::command]
+pub async fn lab_start_file_kernel(
+    projects_state: State<'_, ProjectState>,
+    file_path: String,
+    kernel: Option<String>,
+) -> Result<Value, String> {
+    let path = resolve_file(&projects_state, &file_path)?;
+    ensure_python_file(&path)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let info = KernelManager::start(&file_session_id(&path), kernel.as_deref(), &workdir(&path))
+            .map_err(|e| e.to_string())?;
+        serde_json::to_value(info).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn lab_execute_file(
+    app: AppHandle,
+    projects_state: State<'_, ProjectState>,
+    file_path: String,
+    code: Option<String>,
+    timeout_secs: Option<u64>,
+    kernel: Option<String>,
+) -> Result<Value, String> {
+    let path = resolve_file(&projects_state, &file_path)?;
+    ensure_python_file(&path)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let event_file_path = file_path.clone();
+        let on_output = move |output: CellOutput| {
+            let _ = app.emit(
+                LAB_FILE_OUTPUT_EVENT,
+                json!({
+                    "filePath": event_file_path,
+                    "output": output,
+                }),
+            );
+        };
+        execute_file_blocking(
+            &path,
+            code.as_deref(),
+            timeout_secs,
+            kernel.as_deref(),
+            Some(on_output),
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn lab_interrupt_file_kernel(
+    projects_state: State<'_, ProjectState>,
+    file_path: String,
+) -> Result<(), String> {
+    let path = resolve_file(&projects_state, &file_path)?;
+    ensure_python_file(&path)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        KernelManager::interrupt(&file_session_id(&path)).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn lab_shutdown_file_kernel(
+    projects_state: State<'_, ProjectState>,
+    file_path: String,
+) -> Result<(), String> {
+    let path = resolve_file(&projects_state, &file_path)?;
+    ensure_python_file(&path)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        KernelManager::shutdown(&file_session_id(&path)).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn lab_inspect_file_vars(
+    projects_state: State<'_, ProjectState>,
+    file_path: String,
+    kernel: Option<String>,
+) -> Result<Value, String> {
+    let path = resolve_file(&projects_state, &file_path)?;
+    ensure_python_file(&path)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let id = file_session_id(&path);
+        KernelManager::start(&id, kernel.as_deref(), &workdir(&path)).map_err(|e| e.to_string())?;
+        let snippet = match KernelManager::language(&id).as_deref() {
+            Some("python") => Some(VAR_INSPECT_CODE),
+            _ => None,
+        };
+        let Some(snippet) = snippet else {
+            return Ok(json!({ "status": "ok", "variables": [] }));
+        };
+        let outcome =
+            KernelManager::execute(&id, snippet, Duration::from_secs(VAR_INSPECT_TIMEOUT_SECS))
+                .map_err(|e| e.to_string())?;
+        let variables = extract_var_payload(&outcome.outputs)?;
+        Ok(json!({
+            "status": outcome.status,
+            "variables": variables,
+        }))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Inspect live kernel variables. The inspection snippet is language-specific:
+/// Python kernels run `VAR_INSPECT_CODE`, the native MATLAB backend runs its
+/// `whos`-based analogue; both emit the same `__ARIS_VARS_JSON__` sentinel that
+/// `extract_var_payload` scans for. Other languages report no variables.
 #[tauri::command]
 pub async fn lab_inspect_vars(
     projects_state: State<'_, ProjectState>,
@@ -300,14 +489,19 @@ pub async fn lab_inspect_vars(
 ) -> Result<Value, String> {
     let path = resolve(&projects_state, &notebook_path)?;
     tauri::async_runtime::spawn_blocking(move || {
-        KernelManager::start(&session_id(&path), kernel.as_deref(), &workdir(&path))
-            .map_err(|e| e.to_string())?;
-        let outcome = KernelManager::execute(
-            &session_id(&path),
-            VAR_INSPECT_CODE,
-            Duration::from_secs(VAR_INSPECT_TIMEOUT_SECS),
-        )
-        .map_err(|e| e.to_string())?;
+        let id = session_id(&path);
+        KernelManager::start(&id, kernel.as_deref(), &workdir(&path)).map_err(|e| e.to_string())?;
+        let snippet = match KernelManager::language(&id).as_deref() {
+            Some("matlab") => Some(notebook::MATLAB_VAR_INSPECT_CODE),
+            Some("python") => Some(VAR_INSPECT_CODE),
+            _ => None,
+        };
+        let Some(snippet) = snippet else {
+            return Ok(json!({ "status": "ok", "variables": [] }));
+        };
+        let outcome =
+            KernelManager::execute(&id, snippet, Duration::from_secs(VAR_INSPECT_TIMEOUT_SECS))
+                .map_err(|e| e.to_string())?;
         let variables = extract_var_payload(&outcome.outputs)?;
         Ok(json!({
             "status": outcome.status,
@@ -460,6 +654,39 @@ where
         "outputs": outcome.outputs,
         "cellIndex": cell_index,
         "outline": doc.outline(),
+    }))
+}
+
+fn execute_file_blocking<F>(
+    path: &Path,
+    code: Option<&str>,
+    timeout_secs: Option<u64>,
+    kernel: Option<&str>,
+    on_output: Option<F>,
+) -> Result<Value, String>
+where
+    F: Fn(CellOutput) + Send + 'static,
+{
+    let id = file_session_id(path);
+    let info = KernelManager::start(&id, kernel, &workdir(path)).map_err(|e| e.to_string())?;
+    let timeout = Duration::from_secs(timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS));
+    let run_code = match code {
+        Some(code) => code.to_string(),
+        None => std::fs::read_to_string(path).map_err(|e| e.to_string())?,
+    };
+
+    let outcome = match on_output {
+        Some(on_output) => KernelManager::execute_streaming(&id, &run_code, timeout, on_output),
+        None => KernelManager::execute(&id, &run_code, timeout),
+    }
+    .map_err(|e| e.to_string())?;
+
+    Ok(json!({
+        "filePath": path.to_string_lossy(),
+        "status": outcome.status,
+        "executionCount": outcome.execution_count,
+        "outputs": outcome.outputs,
+        "kernelName": info.kernel_name,
     }))
 }
 

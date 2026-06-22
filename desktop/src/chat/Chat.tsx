@@ -7,6 +7,7 @@ import {
   chatPermissionGet,
   chatPermissionRespond,
   chatPermissionSet,
+  chatQuestionRespond,
   chatRunCommand,
   chatSetContext,
   chatStatus,
@@ -254,7 +255,7 @@ export default function Chat() {
     togglePinned,
     removeSession,
     restoreSession,
-  } = useChatSessions(currentProject?.id ?? "default");
+  } = useChatSessions(currentProject?.id);
   const [status, setStatus] = useState<ChatStatus | null>(null);
   const [permission, setPermission] = useState<PermissionModeView | null>(null);
   const [permissionBusy, setPermissionBusy] = useState(false);
@@ -474,6 +475,15 @@ export default function Chat() {
     if (!isTauri()) return;
     try {
       await chatPermissionRespond(promptId, allow);
+    } catch (error) {
+      setError(String(error));
+    }
+  }, [setError]);
+
+  const respondQuestion = useCallback(async (toolUseId: string, answer: string) => {
+    if (!isTauri()) return;
+    try {
+      await chatQuestionRespond(toolUseId, answer);
     } catch (error) {
       setError(String(error));
     }
@@ -956,6 +966,7 @@ export default function Chat() {
           onRetry={retry}
           onContinue={continueStopped}
           onPermissionRespond={(promptId, allow) => void respondPermission(promptId, allow)}
+          onQuestionRespond={(toolUseId, answer) => void respondQuestion(toolUseId, answer)}
         />
         {(workflowTodos.length > 0 || workflowFileChanges.length > 0) && !pendingCommandSelection && (
           <WorkflowFlow

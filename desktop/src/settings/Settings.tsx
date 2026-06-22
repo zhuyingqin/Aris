@@ -127,9 +127,36 @@ function extractModelFromToml(toml: string): string {
 function extractKeyFromAuthJson(authJson: string): string {
   try {
     const auth = JSON.parse(authJson) as Record<string, unknown>;
+    for (const field of ["api_key", "API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "access_token"]) {
+      const value = auth[field];
+      if (typeof value === "string" && value.trim()) return value.trim();
+    }
     const tokens = auth?.tokens as Record<string, unknown> | undefined;
-    return (tokens?.access_token as string) ?? (auth?.OPENAI_API_KEY as string) ?? "";
+    for (const field of ["access_token", "api_key", "API_KEY", "OPENAI_API_KEY"]) {
+      const value = tokens?.[field];
+      if (typeof value === "string" && value.trim()) return value.trim();
+    }
+    return "";
   } catch { return ""; }
+}
+
+function authJsonWithApiKey(authJson: string | null | undefined, apiKey: string): string {
+  const key = apiKey.trim();
+  if (!key) return authJson ?? "";
+  let auth: Record<string, unknown> = {};
+  const raw = authJson?.trim() ?? "";
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        auth = parsed as Record<string, unknown>;
+      }
+    } catch {
+      auth = {};
+    }
+  }
+  auth.api_key = key;
+  return JSON.stringify(auth, null, 2);
 }
 
 /** Human-readable provider name inferred from base URL */
@@ -707,9 +734,10 @@ export default function Settings() {
   const applyFromCard = async (provider: ProviderEntry, role: "exec" | "review", model: string) => {
     const url = provider.url.trim();
     const protocol = detectProtocol(url);
+    const key = extractKeyFromAuthJson(provider.authJson);
     const patch: ConfigPatch = role === "exec"
-      ? { executorProvider: protocol, executorModel: model, executorBaseUrl: url }
-      : { reviewerProvider: protocol, reviewerModel: model, reviewerBaseUrl: url };
+      ? { executorProvider: protocol, executorModel: model, executorBaseUrl: url, ...(key ? { executorApiKey: key } : {}) }
+      : { reviewerProvider: protocol, reviewerModel: model, reviewerBaseUrl: url, ...(key ? { reviewerApiKey: key } : {}) };
     try {
       const next = await configSet(patch);
       loadConfig(next);
@@ -729,8 +757,9 @@ export default function Settings() {
 
   const saveDetail = () => {
     if (!form.name?.trim()) return;
-    if (detailId === "new") add({ name: form.name.trim(), url: form.url?.trim() ?? "", notes: form.notes?.trim() ?? "", authJson: form.authJson ?? "", configToml: form.configToml ?? "" });
-    else if (detailId) update(detailId, { name: form.name.trim(), url: form.url?.trim() ?? "", notes: form.notes?.trim() ?? "", authJson: form.authJson ?? "", configToml: form.configToml ?? "" });
+    const authJson = authJsonWithApiKey(form.authJson, detailApiKey);
+    if (detailId === "new") add({ name: form.name.trim(), url: form.url?.trim() ?? "", notes: form.notes?.trim() ?? "", authJson, configToml: form.configToml ?? "" });
+    else if (detailId) update(detailId, { name: form.name.trim(), url: form.url?.trim() ?? "", notes: form.notes?.trim() ?? "", authJson, configToml: form.configToml ?? "" });
     closeDetail();
   };
 
@@ -739,8 +768,9 @@ export default function Settings() {
     try {
       const url = form.url?.trim() ?? "";
       const protocol = detectProtocol(url);
+      const authJson = authJsonWithApiKey(form.authJson, detailApiKey);
       let key = detailApiKey.trim();
-      if (!key && form.authJson?.trim()) key = extractKeyFromAuthJson(form.authJson);
+      if (!key && authJson.trim()) key = extractKeyFromAuthJson(authJson);
       const model = extractModelFromToml(form.configToml ?? "") || (role === "exec" ? (configView?.executorModel ?? "") : (configView?.reviewerModel ?? ""));
       const patch: ConfigPatch = role === "exec"
         ? { executorProvider: protocol, executorModel: model, executorBaseUrl: url, ...(key ? { executorApiKey: key } : {}) }
@@ -748,6 +778,7 @@ export default function Settings() {
       const next = await configSet(patch);
       loadConfig(next);
       const pid = detailId !== "new" && detailId ? detailId : null;
+      if (pid && detailApiKey.trim()) update(pid, { authJson });
       if (role === "exec") setExecutor(pid, model); else setReviewer(pid, model);
     } catch (e) { setError(String(e)); }
     finally { setDetailApplying(null); }

@@ -36,6 +36,9 @@ pub struct ChatState {
     permission_modes: Mutex<HashMap<String, PermissionMode>>,
     running_turns: Mutex<HashMap<String, Arc<AtomicBool>>>,
     permission_prompts: Arc<Mutex<HashMap<String, Sender<PermissionPromptDecision>>>>,
+    // Pending `AskUserQuestion` tool calls, keyed by the model's tool-use id, so
+    // `chat_question_respond` can deliver the user's answer to the blocked tool.
+    question_prompts: QuestionPromptRegistry,
 }
 
 const MAX_CACHED_CHAT_SESSIONS: usize = 4;
@@ -47,6 +50,7 @@ impl Default for ChatState {
             permission_modes: Mutex::new(HashMap::new()),
             running_turns: Mutex::new(HashMap::new()),
             permission_prompts: Arc::new(Mutex::new(HashMap::new())),
+            question_prompts: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -184,6 +188,7 @@ struct DesktopToolExecutor<T> {
     app: AppHandle,
     session_id: String,
     cancelled: Arc<AtomicBool>,
+    questions: QuestionPromptRegistry,
     inner: T,
 }
 
@@ -191,6 +196,57 @@ struct DesktopToolExecutor<T> {
 struct ToolOutputArtifact {
     path: String,
     bytes: u64,
+}
+
+impl<T> DesktopToolExecutor<T> {
+    /// Block this tool call until the user answers the question, then return
+    /// their answer as the tool result so the turn can resume. Mirrors the
+    /// permission prompt's wait loop: poll for an answer while honoring
+    /// cancellation. The `chat-tool` card was already emitted from the streamed
+    /// tool call, so no extra event is needed here — the answer is surfaced by
+    /// the caller's `chat-tool-result` emit.
+    fn ask_user_question(&self, tool_use_id: &str, input: &str) -> Result<String, ToolError> {
+        if tool_use_id.is_empty() {
+            return Err(ToolError::new(
+                "AskUserQuestion is unavailable: the tool call has no id to answer.",
+            ));
+        }
+        // Fail fast on malformed input rather than blocking on a card the UI
+        // cannot render.
+        if serde_json::from_str::<Value>(input).is_err() {
+            return Err(ToolError::new("AskUserQuestion input must be valid JSON."));
+        }
+        let (tx, rx) = mpsc::channel::<String>();
+        match self.questions.lock() {
+            Ok(mut prompts) => {
+                prompts.insert(tool_use_id.to_string(), tx);
+            }
+            Err(_) => return Err(ToolError::new("question prompt registry is unavailable")),
+        }
+        let cleanup = || {
+            if let Ok(mut prompts) = self.questions.lock() {
+                prompts.remove(tool_use_id);
+            }
+        };
+        loop {
+            match rx.recv_timeout(Duration::from_millis(200)) {
+                Ok(answer) => {
+                    cleanup();
+                    return Ok(answer);
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    if self.cancelled.load(Ordering::SeqCst) || runtime::is_interrupted() {
+                        cleanup();
+                        return Err(ToolError::interrupted_by_user());
+                    }
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    cleanup();
+                    return Err(ToolError::new("question prompt was dismissed"));
+                }
+            }
+        }
+    }
 }
 
 impl<T> ToolExecutor for DesktopToolExecutor<T>
@@ -210,7 +266,16 @@ where
         if self.is_cancelled() {
             return Err(ToolError::interrupted_by_user());
         }
-        match self.inner.execute_with_id(tool_use_id, tool_name, input) {
+        // `AskUserQuestion` is handled here, not by the shared registry: it
+        // blocks for the user's answer and resumes the turn with it. The
+        // `chat-tool` card already rendered from the streamed call; the answer
+        // flows back through the normal `chat-tool-result` emit below.
+        let inner_result = if tool_name == ASK_USER_QUESTION_TOOL {
+            self.ask_user_question(tool_use_id, input)
+        } else {
+            self.inner.execute_with_id(tool_use_id, tool_name, input)
+        };
+        match inner_result {
             Ok(output) => {
                 if self.is_cancelled() {
                     return Err(ToolError::interrupted_by_user());
@@ -292,6 +357,10 @@ impl aris_executor::StreamObserver for DesktopStreamObserver {
 }
 
 type PermissionPromptRegistry = Arc<Mutex<HashMap<String, Sender<PermissionPromptDecision>>>>;
+
+/// Channels delivering `AskUserQuestion` answers from `chat_question_respond` to
+/// the tool call blocked in [`DesktopToolExecutor`], keyed by the tool-use id.
+type QuestionPromptRegistry = Arc<Mutex<HashMap<String, Sender<String>>>>;
 
 fn next_permission_prompt_id() -> String {
     let nanos = SystemTime::now()
@@ -432,7 +501,63 @@ fn tool_specs_for(extra_blocked_tools: &'static [&'static str]) -> Vec<tools::To
             .into_iter()
             .filter(|spec| !is_blocked_tool(spec.name, extra_blocked_tools)),
     );
+    // Desktop-only: the interactive surface can pause a turn to ask the user a
+    // question. Never registered for autonomous runs (no user to answer).
+    if !is_blocked_tool(ASK_USER_QUESTION_TOOL, extra_blocked_tools) {
+        specs.push(ask_user_question_tool_spec());
+    }
     specs
+}
+
+const ASK_USER_QUESTION_TOOL: &str = "AskUserQuestion";
+
+/// The interactive `AskUserQuestion` tool: the model pauses the turn to ask the
+/// user a question with selectable options, and the turn resumes with the
+/// user's answer as the tool result. Handled in [`DesktopToolExecutor`] rather
+/// than the shared tool registry, since it needs the live UI to answer.
+fn ask_user_question_tool_spec() -> tools::ToolSpec {
+    tools::ToolSpec {
+        name: ASK_USER_QUESTION_TOOL,
+        description: "Ask the user a question and wait for their answer before continuing. Use this when a decision is genuinely the user's to make — choosing between approaches, confirming scope, or resolving ambiguity you cannot settle from the request, the workspace, or sensible defaults — and you can offer concrete options. Provide 2-4 distinct options; the user picks one (or, by default, types their own answer). Prefer this over guessing when the answer materially changes what you do next. Do not use it for choices with an obvious default or facts you can look up yourself.",
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "question": {
+                    "type": "string",
+                    "description": "The question to ask. Be specific and self-contained."
+                },
+                "header": {
+                    "type": "string",
+                    "description": "A very short label for the question (1-3 words), shown as a heading."
+                },
+                "options": {
+                    "type": "array",
+                    "description": "The selectable answers, each a distinct choice.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "label": { "type": "string", "description": "Concise choice text the user sees." },
+                            "description": { "type": "string", "description": "Optional one-line explanation of this choice." }
+                        },
+                        "required": ["label"],
+                        "additionalProperties": false
+                    },
+                    "minItems": 1
+                },
+                "multiSelect": {
+                    "type": "boolean",
+                    "description": "Allow selecting more than one option. Default false."
+                },
+                "allowCustom": {
+                    "type": "boolean",
+                    "description": "Allow the user to type a free-form answer instead of choosing an option. Default true."
+                }
+            },
+            "required": ["question", "options"],
+            "additionalProperties": false
+        }),
+        required_permission: PermissionMode::ReadOnly,
+    }
 }
 
 fn mcp_runtime_status_prompt(
@@ -1090,6 +1215,25 @@ pub fn chat_permission_respond(
     sender
         .send(decision)
         .map_err(|_| "permission prompt is no longer waiting".to_string())
+}
+
+/// Deliver the user's answer to an `AskUserQuestion` tool call that is blocked
+/// in [`DesktopToolExecutor::ask_user_question`], keyed by the tool-use id.
+#[tauri::command]
+pub fn chat_question_respond(
+    state: State<ChatState>,
+    tool_use_id: String,
+    answer: String,
+) -> Result<(), String> {
+    let sender = state
+        .question_prompts
+        .lock()
+        .map_err(|_| "chat question state poisoned".to_string())?
+        .remove(&tool_use_id)
+        .ok_or_else(|| "question prompt is no longer active".to_string())?;
+    sender
+        .send(answer)
+        .map_err(|_| "question prompt is no longer waiting".to_string())
 }
 
 #[tauri::command]
@@ -2076,6 +2220,7 @@ async fn run_chat_turn_with_context(
     let session = get_cached_or_disk_session(&state, &session_id)?;
     let permission_mode = permission_mode_for(&state, &session_id)?;
     let permission_prompts = state.permission_prompts.clone();
+    let question_prompts = state.question_prompts.clone();
 
     let worker_app = app.clone();
     let worker_session_id = session_id.clone();
@@ -2119,6 +2264,7 @@ async fn run_chat_turn_with_context(
             app: worker_app.clone(),
             session_id: worker_session_id.clone(),
             cancelled: worker_cancelled.clone(),
+            questions: question_prompts,
             inner: mcp_bundle.executor,
         };
         let mut permission_prompter = DesktopPermissionPrompter {
@@ -3803,6 +3949,28 @@ mod tests {
         let unrestricted = desktop_permission_policy(&specs, PermissionMode::DangerFullAccess);
         assert_eq!(
             unrestricted.authorize("bash", r#"{"command":"echo hi"}"#, None),
+            runtime::PermissionOutcome::Allow
+        );
+    }
+
+    #[test]
+    fn desktop_chat_registers_ask_user_question_gated_read_only() {
+        let specs = tool_specs_for(DESKTOP_CHAT_EXTRA_BLOCKED_TOOLS);
+        let spec = specs
+            .iter()
+            .find(|spec| spec.name == ASK_USER_QUESTION_TOOL)
+            .expect("AskUserQuestion is registered for desktop chat");
+        assert!(matches!(spec.required_permission, PermissionMode::ReadOnly));
+
+        // Even read-only ("Plan") mode must let the model ask the user a
+        // question without surfacing a permission prompt for it.
+        let plan = desktop_permission_policy(&specs, PermissionMode::ReadOnly);
+        assert_eq!(
+            plan.authorize(
+                ASK_USER_QUESTION_TOOL,
+                r#"{"question":"Pick one","options":[{"label":"A"}]}"#,
+                None,
+            ),
             runtime::PermissionOutcome::Allow
         );
     }

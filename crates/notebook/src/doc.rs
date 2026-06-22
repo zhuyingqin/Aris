@@ -219,6 +219,41 @@ impl NotebookDoc {
         Ok(())
     }
 
+    /// The kernel recorded in `metadata.kernelspec.name`, if any. Callers use this
+    /// to start the notebook's declared kernel when none is given explicitly.
+    pub fn kernelspec_name(&self) -> Option<String> {
+        self.kernelspec_field("name")
+    }
+
+    /// The language recorded in `metadata.kernelspec.language` (e.g. `"matlab"`),
+    /// which decides how injected-parameter cells are rendered.
+    pub fn notebook_language(&self) -> Option<String> {
+        self.kernelspec_field("language")
+    }
+
+    fn kernelspec_field(&self, field: &str) -> Option<String> {
+        self.root
+            .get("metadata")
+            .and_then(|m| m.get("kernelspec"))
+            .and_then(|k| k.get(field))
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    }
+
+    /// Record the selected kernel under the standard nbformat
+    /// `metadata.kernelspec` field, so reopening the notebook restores the choice.
+    pub fn set_kernelspec(&mut self, name: &str, display_name: &str, language: &str) {
+        if !self.root.get("metadata").is_some_and(Value::is_object) {
+            self.root["metadata"] = json!({});
+        }
+        self.root["metadata"]["kernelspec"] = json!({
+            "name": name,
+            "display_name": display_name,
+            "language": language,
+        });
+    }
+
     /// Index of the first code cell tagged `parameters` (the papermill convention
     /// for "this cell declares the notebook's default parameters").
     pub fn find_parameters_cell(&self) -> Option<usize> {
@@ -238,9 +273,23 @@ impl NotebookDoc {
         if params.is_empty() {
             return Ok(None);
         }
-        let mut source = String::from("# Parameters injected by Aris\n");
+        // Render assignments in the notebook's own language so a MATLAB sweep
+        // injects MATLAB (`x = 7;`), not Python — the previous Python-only path
+        // silently corrupted MATLAB notebooks.
+        let matlab = self
+            .notebook_language()
+            .is_some_and(|lang| lang.eq_ignore_ascii_case("matlab"));
+        let mut source = String::from(if matlab {
+            "% Parameters injected by Aris\n"
+        } else {
+            "# Parameters injected by Aris\n"
+        });
         for (key, value) in params {
-            source.push_str(&format!("{key} = {}\n", py_literal(value)));
+            if matlab {
+                source.push_str(&format!("{key} = {};\n", mat_literal(value)));
+            } else {
+                source.push_str(&format!("{key} = {}\n", py_literal(value)));
+            }
         }
         let at = self.find_parameters_cell().map_or(0, |i| i + 1);
         let cell = new_tagged_code_cell(&source, INJECTED_TAG)?;
@@ -285,6 +334,35 @@ fn py_literal(value: &Value) -> String {
     }
 }
 
+/// Render a JSON value as an equivalent MATLAB literal, so an injected
+/// `name = <literal>;` assignment is valid MATLAB. Numeric arrays become row
+/// vectors `[..]`, mixed arrays become cell arrays `{..}`, objects become
+/// `struct('k', v, ...)`, and strings use single quotes (doubling embedded `'`).
+fn mat_literal(value: &Value) -> String {
+    match value {
+        Value::Null => "[]".to_string(),
+        Value::Bool(true) => "true".to_string(),
+        Value::Bool(false) => "false".to_string(),
+        Value::Number(n) => n.to_string(),
+        Value::String(s) => format!("'{}'", s.replace('\'', "''")),
+        Value::Array(items) => {
+            let inner: Vec<String> = items.iter().map(mat_literal).collect();
+            if items.iter().all(Value::is_number) {
+                format!("[{}]", inner.join(", "))
+            } else {
+                format!("{{{}}}", inner.join(", "))
+            }
+        }
+        Value::Object(map) => {
+            let inner: Vec<String> = map
+                .iter()
+                .map(|(k, v)| format!("'{}', {}", k.replace('\'', "''"), mat_literal(v)))
+                .collect();
+            format!("struct({})", inner.join(", "))
+        }
+    }
+}
+
 /// A code cell carrying a single metadata tag.
 fn new_tagged_code_cell(source: &str, tag: &str) -> Result<Value, NotebookError> {
     let mut cell = new_cell("code", source)?;
@@ -318,6 +396,31 @@ mod tests {
         assert!(injected.contains("name = \"run-a\""), "got: {injected}");
         assert!(injected.contains("flag = True"), "got: {injected}");
         assert!(cell_has_tag(doc.cells().get(1).unwrap(), INJECTED_TAG));
+    }
+
+    #[test]
+    fn inject_parameters_renders_matlab_for_matlab_notebooks() {
+        let mut doc = NotebookDoc::new_empty();
+        doc.set_kernelspec("matlab", "MATLAB", "matlab");
+        doc.append("code", "disp(seed)").unwrap();
+        assert_eq!(doc.kernelspec_name().as_deref(), Some("matlab"));
+
+        let mut params = serde_json::Map::new();
+        params.insert("seed".into(), json!(7));
+        params.insert("name".into(), json!("run-a"));
+        params.insert("flag".into(), json!(true));
+        params.insert("lrs".into(), json!([0.1, 0.01]));
+        let at = doc.inject_parameters(&params).unwrap();
+        assert_eq!(at, Some(0));
+
+        let injected = doc.cell_source(0).unwrap();
+        assert!(injected.contains("% Parameters injected by Aris"), "got: {injected}");
+        assert!(injected.contains("seed = 7;"), "got: {injected}");
+        assert!(injected.contains("name = 'run-a';"), "got: {injected}");
+        assert!(injected.contains("flag = true;"), "got: {injected}");
+        assert!(injected.contains("lrs = [0.1, 0.01];"), "got: {injected}");
+        // No Python literals leaked in.
+        assert!(!injected.contains("True"), "got: {injected}");
     }
 
     #[test]
