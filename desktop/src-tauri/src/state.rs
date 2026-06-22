@@ -38,16 +38,20 @@ pub fn workspace_dir() -> PathBuf {
 }
 
 pub fn runtime_dir() -> PathBuf {
-    PathBuf::from(runtime::home_dir())
-        .join(".config")
-        .join("aris")
-        .join("desktop-runtime")
+    std::env::var("ARIS_RUNTIME_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            PathBuf::from(runtime::home_dir())
+                .join(".config")
+                .join("aris")
+                .join("desktop-runtime")
+        })
 }
 
 pub fn config_dir() -> PathBuf {
-    PathBuf::from(runtime::home_dir())
-        .join(".config")
-        .join("aris")
+    std::env::var("ARIS_CONFIG_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(runtime::home_dir()).join(".config").join("aris"))
 }
 
 pub fn skills_dir() -> PathBuf {
@@ -157,7 +161,37 @@ fn migrate_dir(from: &PathBuf, to: &PathBuf) -> io::Result<()> {
     if let Some(parent) = to.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::rename(from, to)
+    match std::fs::rename(from, to) {
+        Ok(()) => Ok(()),
+        // `rename` cannot move across volumes/drives (Windows
+        // ERROR_NOT_SAME_DEVICE = 17, Unix EXDEV = 18). The runtime dir and the
+        // legacy workspace may live on different drives, so fall back to a
+        // recursive copy followed by removal of the source.
+        Err(error) if is_cross_device(&error) => {
+            copy_dir_recursive(from, to)?;
+            std::fs::remove_dir_all(from)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn is_cross_device(error: &io::Error) -> bool {
+    matches!(error.raw_os_error(), Some(17) | Some(18))
+}
+
+fn copy_dir_recursive(from: &PathBuf, to: &PathBuf) -> io::Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let src = entry.path();
+        let dst = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_recursive(&src, &dst)?;
+        } else {
+            std::fs::copy(&src, &dst)?;
+        }
+    }
+    Ok(())
 }
 
 pub fn state_root() -> PathBuf {
