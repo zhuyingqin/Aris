@@ -351,7 +351,7 @@ where
                 }
                 let _ = self.app.emit(
                     "chat-tool-result",
-                    json!({ "sessionId": self.session_id, "id": tool_use_id, "name": tool_name, "output": truncate(&err.to_string(), 4000), "isError": true }),
+                    json!({ "sessionId": self.session_id, "id": tool_use_id, "name": tool_name, "output": truncate(&err.to_string(), MAX_TOOL_EVENT_CHARS), "isError": true }),
                 );
                 Err(err)
             }
@@ -441,7 +441,7 @@ impl DesktopPermissionPrompter {
             json!({
                 "sessionId": self.session_id,
                 "name": &request.tool_name,
-                "output": truncate(reason, 4000),
+                "output": truncate(reason, MAX_TOOL_EVENT_CHARS),
                 "isError": true
             }),
         );
@@ -467,7 +467,7 @@ impl PermissionPrompter for DesktopPermissionPrompter {
                     "sessionId": self.session_id,
                     "promptId": prompt_id,
                     "toolName": &request.tool_name,
-                    "input": truncate(&request.input, 4000),
+                    "input": truncate(&request.input, MAX_TOOL_EVENT_CHARS),
                     "currentMode": request.current_mode.as_str(),
                     "requiredMode": request.required_mode.as_str()
                 }),
@@ -667,6 +667,9 @@ const MAX_CONTEXT_TOOL_OUTPUT_CHARS: usize = 64_000;
 const MAX_UI_TOOL_OUTPUT_CHARS: usize = 64_000;
 const MAX_UI_TOOL_INPUT_CHARS: usize = 16_000;
 const MAX_UI_TOOL_INPUT_FIELD_CHARS: usize = 4_000;
+/// Char budget for tool/permission strings emitted into chat events (tool error
+/// output, denial reason, permission-prompt input) before they reach the UI.
+const MAX_TOOL_EVENT_CHARS: usize = 4_000;
 const TOOL_OUTPUT_ARTIFACT_THRESHOLD_CHARS: usize = 64_000;
 const SHELL_STREAM_CONTEXT_CHARS: usize = 12_000;
 

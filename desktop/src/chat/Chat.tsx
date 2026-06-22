@@ -55,15 +55,38 @@ function detectFilePath(element: HTMLElement): string | null {
   return null;
 }
 
+// Rough token estimate. Latin/code text is ~3.5 chars/token, but CJK characters
+// are far denser (~1 token per character), so the old flat `chars / 3.5`
+// under-counted CJK-heavy text by roughly 3x — the ContextRing read low and
+// users hit the real window without warning. Weight CJK separately. Still a
+// heuristic; replace with a real tokenizer when one is wired up (#34 P0-3.1).
+function isCjkCharCode(code: number): boolean {
+  return (
+    (code >= 0x3000 && code <= 0x9fff) || // CJK symbols/punct, ideographs, Hangul/Kana
+    (code >= 0xf900 && code <= 0xfaff) || // CJK compatibility ideographs
+    (code >= 0xff00 && code <= 0xffef) // full-width / half-width forms
+  );
+}
+
+function estimateTextTokens(text: string): number {
+  let cjk = 0;
+  for (let i = 0; i < text.length; i += 1) {
+    if (isCjkCharCode(text.charCodeAt(i))) cjk += 1;
+  }
+  const other = text.length - cjk;
+  return cjk + Math.round(other / 3.5);
+}
+
 function estimateTokens(turns: ChatTurn[]): number {
-  let chars = 0;
+  let tokens = 0;
   for (const turn of turns) {
     for (const block of turn.blocks) {
-      if (block.kind === "text") chars += block.text.length;
-      else if (block.kind === "tool") chars += block.input.length + (block.output?.length ?? 0);
+      if (block.kind === "text") tokens += estimateTextTokens(block.text);
+      else if (block.kind === "tool")
+        tokens += estimateTextTokens(block.input) + (block.output ? estimateTextTokens(block.output) : 0);
     }
   }
-  return Math.round(chars / 3.5);
+  return tokens;
 }
 
 function MemoryBadge({ count }: { count: number }) {
