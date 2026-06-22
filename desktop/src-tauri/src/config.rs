@@ -502,6 +502,28 @@ pub struct ConfigTestDetail {
     pub message: String,
 }
 
+impl ConfigTestDetail {
+    /// Build a detail for a provider-style check where the provider, model and
+    /// base URL are all known. Centralizes the otherwise-repeated field wiring.
+    fn outcome(
+        ok: bool,
+        label: &str,
+        provider: String,
+        model: String,
+        base_url: String,
+        message: String,
+    ) -> Self {
+        Self {
+            ok,
+            label: label.to_string(),
+            provider: Some(provider),
+            model: Some(model),
+            base_url: Some(base_url),
+            message,
+        }
+    }
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConfigTestResult {
@@ -764,14 +786,14 @@ async fn test_anthropic(
     {
         Ok(client) => client,
         Err(error) => {
-            return ConfigTestDetail {
-                ok: false,
-                label: label.to_string(),
-                provider: Some(provider),
-                model: Some(model),
-                base_url: Some(base_url),
-                message: format!("Could not create HTTP client: {error}"),
-            };
+            return ConfigTestDetail::outcome(
+                false,
+                label,
+                provider,
+                model,
+                base_url,
+                format!("Could not create HTTP client: {error}"),
+            );
         }
     };
     let request = auth
@@ -789,22 +811,8 @@ async fn test_anthropic(
             ]
         }));
     match check_response(label, request).await {
-        Ok(message) => ConfigTestDetail {
-            ok: true,
-            label: label.to_string(),
-            provider: Some(provider),
-            model: Some(model),
-            base_url: Some(base_url),
-            message,
-        },
-        Err(message) => ConfigTestDetail {
-            ok: false,
-            label: label.to_string(),
-            provider: Some(provider),
-            model: Some(model),
-            base_url: Some(base_url),
-            message,
-        },
+        Ok(message) => ConfigTestDetail::outcome(true, label, provider, model, base_url, message),
+        Err(message) => ConfigTestDetail::outcome(false, label, provider, model, base_url, message),
     }
 }
 
@@ -822,34 +830,20 @@ async fn test_openai_compat(
     {
         Ok(client) => client,
         Err(error) => {
-            return ConfigTestDetail {
-                ok: false,
-                label: label.to_string(),
-                provider: Some(provider),
-                model: Some(model),
-                base_url: Some(base_url),
-                message: format!("Could not create HTTP client: {error}"),
-            };
+            return ConfigTestDetail::outcome(
+                false,
+                label,
+                provider,
+                model,
+                base_url,
+                format!("Could not create HTTP client: {error}"),
+            );
         }
     };
     let request = client.get(models_url(&base_url)).bearer_auth(api_key);
     match check_response(label, request).await {
-        Ok(message) => ConfigTestDetail {
-            ok: true,
-            label: label.to_string(),
-            provider: Some(provider),
-            model: Some(model),
-            base_url: Some(base_url),
-            message,
-        },
-        Err(message) => ConfigTestDetail {
-            ok: false,
-            label: label.to_string(),
-            provider: Some(provider),
-            model: Some(model),
-            base_url: Some(base_url),
-            message,
-        },
+        Ok(message) => ConfigTestDetail::outcome(true, label, provider, model, base_url, message),
+        Err(message) => ConfigTestDetail::outcome(false, label, provider, model, base_url, message),
     }
 }
 
