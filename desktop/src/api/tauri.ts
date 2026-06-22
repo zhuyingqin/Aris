@@ -55,6 +55,7 @@ import type {
   PermissionModeView,
   ProjectView,
   ScheduledTask,
+  ScheduledTaskInput,
   SessionSummary,
   SessionTranscript,
   SkillMeta,
@@ -142,6 +143,14 @@ export const appRelaunch = async () => {
 };
 export const scheduledTasksList = () =>
   invoke<ScheduledTask[]>("scheduled_tasks_list");
+export const scheduledTaskCreate = (input: ScheduledTaskInput) =>
+  invoke<ScheduledTask>("scheduled_task_create", { input });
+export const scheduledTaskUpdate = (id: string, input: ScheduledTaskInput) =>
+  invoke<ScheduledTask>("scheduled_task_update", { id, input });
+export const scheduledTaskSetStatus = (id: string, status: "active" | "paused") =>
+  invoke<ScheduledTask>("scheduled_task_set_status", { id, status });
+export const scheduledTaskDelete = (id: string) =>
+  invoke<void>("scheduled_task_delete", { id });
 export const projectPermissionGet = () =>
   invoke<PermissionModeView>("project_permission_get");
 export const projectPermissionSet = (mode: string) =>

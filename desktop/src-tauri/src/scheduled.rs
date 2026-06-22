@@ -1,70 +1,115 @@
-//! Read-only listing of scheduled tasks for the Chat-side page.
+//! ARIS-owned scheduled task registry for the Chat-side page.
 //!
-//! ARIS-local tasks live in `~/.config/aris/scheduled-tasks.json`, while tasks
-//! created through the surrounding Codex app live under
-//! `~/.codex/automations/*/automation.toml`. The page should show both so a
-//! successfully-created automation is not invisible in the ARIS UI.
+//! The on-disk shape intentionally mirrors the Codex automation TOML shape, but
+//! lives under ARIS config: `~/.config/aris/automations/<id>/automation.toml`.
 
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::state;
 
-#[derive(Serialize, Deserialize, Default)]
+const TASK_KIND: &str = "aris-scheduled-task";
+const STATUS_ACTIVE: &str = "ACTIVE";
+const STATUS_PAUSED: &str = "PAUSED";
+
+#[derive(Serialize, Deserialize, Default, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ScheduledTask {
     #[serde(default)]
     pub id: String,
     #[serde(default)]
     pub title: String,
-    /// Human-readable cadence, e.g. "心跳" (heartbeat), "每天 09:00", a cron expr.
     #[serde(default, alias = "schedule")]
     pub schedule_label: String,
-    /// "active" | "paused" — anything other than "paused" is treated as active.
     #[serde(default)]
     pub status: String,
     #[serde(default)]
     pub session_id: Option<String>,
     #[serde(default)]
+    pub prompt: String,
+    #[serde(default)]
+    pub rrule: String,
+    #[serde(default)]
+    pub interval_value: u32,
+    #[serde(default)]
+    pub interval_unit: String,
+    #[serde(default)]
     pub created_at: Option<String>,
+    #[serde(default)]
+    pub updated_at: Option<String>,
     #[serde(default)]
     pub next_run: Option<String>,
 }
 
-#[derive(Deserialize)]
-struct CodexAutomation {
+#[derive(Serialize, Deserialize)]
+struct ArisScheduledRecord {
+    version: u32,
     id: String,
-    kind: Option<String>,
-    name: Option<String>,
-    prompt: Option<String>,
-    status: Option<String>,
-    rrule: Option<String>,
-    target_thread_id: Option<String>,
-    created_at: Option<i64>,
+    kind: String,
+    name: String,
+    prompt: String,
+    status: String,
+    rrule: String,
+    target_thread_id: String,
+    created_at: i64,
+    updated_at: i64,
 }
 
-fn store_path() -> std::path::PathBuf {
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScheduledTaskInput {
+    title: String,
+    prompt: String,
+    session_id: String,
+    interval_value: u32,
+    interval_unit: String,
+    status: Option<String>,
+}
+
+struct NormalizedTaskInput {
+    title: String,
+    prompt: String,
+    session_id: String,
+    interval_value: u32,
+    interval_unit: String,
+    status: String,
+}
+
+fn legacy_store_path() -> PathBuf {
     state::config_dir().join("scheduled-tasks.json")
 }
 
-fn codex_automations_dir() -> PathBuf {
-    std::env::var_os("CODEX_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(runtime::home_dir()).join(".codex"))
-        .join("automations")
+fn chat_ui_sessions_path() -> PathBuf {
+    state::runtime_dir().join("chat-ui-sessions.json")
 }
 
-fn local_scheduled_tasks() -> Vec<ScheduledTask> {
-    std::fs::read_to_string(store_path())
+fn aris_automations_dir() -> PathBuf {
+    state::config_dir().join("automations")
+}
+
+fn task_dir(id: &str) -> Result<PathBuf, String> {
+    validate_task_id(id)?;
+    Ok(aris_automations_dir().join(id))
+}
+
+fn task_path(id: &str) -> Result<PathBuf, String> {
+    Ok(task_dir(id)?.join("automation.toml"))
+}
+
+fn legacy_scheduled_tasks() -> Vec<ScheduledTask> {
+    fs::read_to_string(legacy_store_path())
         .ok()
         .and_then(|text| serde_json::from_str::<Vec<ScheduledTask>>(&text).ok())
         .unwrap_or_default()
 }
 
-fn codex_scheduled_tasks() -> Vec<ScheduledTask> {
-    let Ok(entries) = std::fs::read_dir(codex_automations_dir()) else {
+fn aris_scheduled_tasks() -> Vec<ScheduledTask> {
+    let Ok(entries) = fs::read_dir(aris_automations_dir()) else {
         return Vec::new();
     };
 
@@ -72,49 +117,122 @@ fn codex_scheduled_tasks() -> Vec<ScheduledTask> {
         .filter_map(Result::ok)
         .filter_map(|entry| {
             let path = entry.path().join("automation.toml");
-            let text = std::fs::read_to_string(path).ok()?;
-            let automation = toml::from_str::<CodexAutomation>(&text).ok()?;
-            Some(automation.into())
+            let record = read_record_from_path(&path).ok()?;
+            Some(record.into())
         })
         .collect()
 }
 
-impl From<CodexAutomation> for ScheduledTask {
-    fn from(automation: CodexAutomation) -> Self {
-        let CodexAutomation {
-            id,
-            kind,
-            name,
-            prompt,
-            status,
-            rrule,
-            target_thread_id,
-            created_at,
-        } = automation;
+fn read_record(id: &str) -> Result<ArisScheduledRecord, String> {
+    read_record_from_path(&task_path(id)?)
+}
 
-        let kind = kind.unwrap_or_else(|| "automation".to_string());
-        let schedule_label = rrule
-            .as_deref()
-            .map(schedule_label_from_rrule)
-            .unwrap_or_else(|| kind.clone());
-        let title = name
-            .or_else(|| prompt.and_then(|text| first_prompt_line(&text)))
-            .unwrap_or_else(|| id.clone());
+fn read_record_from_path(path: &Path) -> Result<ArisScheduledRecord, String> {
+    let text = fs::read_to_string(path).map_err(|error| error.to_string())?;
+    toml::from_str::<ArisScheduledRecord>(&text).map_err(|error| error.to_string())
+}
 
-        Self {
-            id,
-            title,
-            schedule_label: format!("{kind}: {schedule_label}"),
-            status: if status.as_deref() == Some("PAUSED") {
-                "paused".to_string()
-            } else {
-                "active".to_string()
-            },
-            session_id: target_thread_id,
-            created_at: created_at.map(|value| value.to_string()),
-            next_run: None,
-        }
+fn write_record(record: &ArisScheduledRecord) -> Result<(), String> {
+    let dir = task_dir(&record.id)?;
+    fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+    let path = dir.join("automation.toml");
+    let tmp = dir.join("automation.toml.tmp");
+    let text = toml::to_string_pretty(record).map_err(|error| error.to_string())?;
+    fs::write(&tmp, text).map_err(|error| error.to_string())?;
+    if path.exists() {
+        fs::remove_file(&path).map_err(|error| error.to_string())?;
     }
+    fs::rename(tmp, path).map_err(|error| error.to_string())
+}
+
+fn validate_task_id(id: &str) -> Result<(), String> {
+    if id.is_empty()
+        || id.len() > 128
+        || !id
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+    {
+        return Err("invalid scheduled task id".to_string());
+    }
+    Ok(())
+}
+
+fn normalize_input(
+    input: ScheduledTaskInput,
+    fallback_status: Option<&str>,
+) -> Result<NormalizedTaskInput, String> {
+    let title = input.title.trim().to_string();
+    let prompt = input.prompt.trim().to_string();
+    let session_id = input.session_id.trim().to_string();
+    if prompt.is_empty() {
+        return Err("scheduled task prompt is required".to_string());
+    }
+    if session_id.is_empty() || session_id.contains('/') || session_id.contains('\\') {
+        return Err("scheduled task must be bound to a valid chat session".to_string());
+    }
+    if !session_exists(&session_id) {
+        return Err("scheduled task must be bound to an existing chat session".to_string());
+    }
+    if input.interval_value == 0 || input.interval_value > 10_000 {
+        return Err("scheduled task interval must be between 1 and 10000".to_string());
+    }
+    let interval_unit = normalize_interval_unit(&input.interval_unit)?;
+    let status = input
+        .status
+        .as_deref()
+        .or(fallback_status)
+        .map(normalize_status)
+        .transpose()?
+        .unwrap_or_else(|| STATUS_ACTIVE.to_string());
+
+    Ok(NormalizedTaskInput {
+        title: if title.is_empty() {
+            first_prompt_line(&prompt).unwrap_or_else(|| "Scheduled task".to_string())
+        } else {
+            title
+        },
+        prompt,
+        session_id,
+        interval_value: input.interval_value,
+        interval_unit,
+        status,
+    })
+}
+
+fn normalize_status(status: &str) -> Result<String, String> {
+    match status {
+        "active" | "ACTIVE" => Ok(STATUS_ACTIVE.to_string()),
+        "paused" | "PAUSED" => Ok(STATUS_PAUSED.to_string()),
+        _ => Err("scheduled task status must be active or paused".to_string()),
+    }
+}
+
+fn normalize_interval_unit(unit: &str) -> Result<String, String> {
+    match unit {
+        "minutes" | "hours" | "days" => Ok(unit.to_string()),
+        _ => Err("scheduled task interval unit must be minutes, hours, or days".to_string()),
+    }
+}
+
+fn session_exists(session_id: &str) -> bool {
+    if state::sessions_dir()
+        .join(format!("{session_id}.json"))
+        .is_file()
+    {
+        return true;
+    }
+    let Ok(text) = fs::read_to_string(chat_ui_sessions_path()) else {
+        return false;
+    };
+    let Ok(Value::Array(sessions)) = serde_json::from_str::<Value>(&text) else {
+        return false;
+    };
+    sessions.iter().any(|session| {
+        session
+            .get("id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| id == session_id)
+    })
 }
 
 fn first_prompt_line(text: &str) -> Option<String> {
@@ -132,21 +250,48 @@ fn first_prompt_line(text: &str) -> Option<String> {
         })
 }
 
-fn schedule_label_from_rrule(rrule: &str) -> String {
-    let frequency = rrule_field(rrule, "FREQ");
-    let interval = rrule_field(rrule, "INTERVAL").and_then(|value| value.parse::<u64>().ok());
+fn now_millis() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
+        .unwrap_or_default()
+}
 
-    match (frequency.as_deref(), interval) {
-        (Some("MINUTELY"), Some(1) | None) => "every minute".to_string(),
-        (Some("MINUTELY"), Some(minutes)) => format!("every {minutes} minutes"),
-        (Some("HOURLY"), Some(1) | None) => "hourly".to_string(),
-        (Some("HOURLY"), Some(hours)) => format!("every {hours} hours"),
-        (Some("DAILY"), Some(1) | None) => "daily".to_string(),
-        (Some("DAILY"), Some(days)) => format!("every {days} days"),
-        (Some("WEEKLY"), Some(1) | None) => "weekly".to_string(),
-        (Some("WEEKLY"), Some(weeks)) => format!("every {weeks} weeks"),
-        _ => rrule.to_string(),
-    }
+fn new_task_id() -> String {
+    format!("task-{}-{}", now_millis(), std::process::id())
+}
+
+fn rrule_for_interval(value: u32, unit: &str) -> String {
+    let frequency = match unit {
+        "minutes" => "MINUTELY",
+        "hours" => "HOURLY",
+        "days" => "DAILY",
+        _ => "MINUTELY",
+    };
+    format!("FREQ={frequency};INTERVAL={value}")
+}
+
+fn interval_from_rrule(rrule: &str) -> (u32, String) {
+    let value = rrule_field(rrule, "INTERVAL")
+        .and_then(|raw| raw.parse::<u32>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(1);
+    let unit = match rrule_field(rrule, "FREQ").as_deref() {
+        Some("HOURLY") => "hours",
+        Some("DAILY") => "days",
+        _ => "minutes",
+    };
+    (value, unit.to_string())
+}
+
+fn schedule_label_from_rrule(rrule: &str) -> String {
+    let (value, unit) = interval_from_rrule(rrule);
+    let unit_label = match unit.as_str() {
+        "hours" => "小时",
+        "days" => "天",
+        _ => "分钟",
+    };
+    format!("每 {value} {unit_label}")
 }
 
 fn rrule_field(rrule: &str, key: &str) -> Option<String> {
@@ -160,55 +305,161 @@ fn rrule_field(rrule: &str, key: &str) -> Option<String> {
     })
 }
 
-/// Every scheduled task currently on disk. A missing or malformed source yields
-/// an empty contribution rather than an error, so the page always renders.
+impl From<ArisScheduledRecord> for ScheduledTask {
+    fn from(record: ArisScheduledRecord) -> Self {
+        let (interval_value, interval_unit) = interval_from_rrule(&record.rrule);
+        Self {
+            id: record.id,
+            title: record.name,
+            schedule_label: schedule_label_from_rrule(&record.rrule),
+            status: if record.status == STATUS_PAUSED {
+                "paused".to_string()
+            } else {
+                "active".to_string()
+            },
+            session_id: Some(record.target_thread_id),
+            prompt: record.prompt,
+            rrule: record.rrule,
+            interval_value,
+            interval_unit,
+            created_at: Some(record.created_at.to_string()),
+            updated_at: Some(record.updated_at.to_string()),
+            next_run: None,
+        }
+    }
+}
+
+/// Every scheduled task currently on disk. Legacy JSON is listed read-only;
+/// new ARIS-owned tasks live in TOML files under `~/.config/aris/automations`.
 #[tauri::command]
 pub fn scheduled_tasks_list() -> Vec<ScheduledTask> {
-    let mut tasks = local_scheduled_tasks();
+    let mut tasks = aris_scheduled_tasks();
     let mut seen = tasks
         .iter()
         .map(|task| task.id.clone())
         .collect::<HashSet<_>>();
 
-    for task in codex_scheduled_tasks() {
+    for task in legacy_scheduled_tasks() {
         if seen.insert(task.id.clone()) {
             tasks.push(task);
         }
     }
 
+    tasks.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
     tasks
+}
+
+#[tauri::command]
+pub fn scheduled_task_create(input: ScheduledTaskInput) -> Result<ScheduledTask, String> {
+    let normalized = normalize_input(input, None)?;
+    let now = now_millis();
+    let record = ArisScheduledRecord {
+        version: 1,
+        id: new_task_id(),
+        kind: TASK_KIND.to_string(),
+        name: normalized.title,
+        prompt: normalized.prompt,
+        status: normalized.status,
+        rrule: rrule_for_interval(normalized.interval_value, &normalized.interval_unit),
+        target_thread_id: normalized.session_id,
+        created_at: now,
+        updated_at: now,
+    };
+    write_record(&record)?;
+    Ok(record.into())
+}
+
+#[tauri::command]
+pub fn scheduled_task_update(
+    id: String,
+    input: ScheduledTaskInput,
+) -> Result<ScheduledTask, String> {
+    validate_task_id(&id)?;
+    let existing = read_record(&id)?;
+    let normalized = normalize_input(input, Some(&existing.status))?;
+    let record = ArisScheduledRecord {
+        version: existing.version,
+        id,
+        kind: TASK_KIND.to_string(),
+        name: normalized.title,
+        prompt: normalized.prompt,
+        status: normalized.status,
+        rrule: rrule_for_interval(normalized.interval_value, &normalized.interval_unit),
+        target_thread_id: normalized.session_id,
+        created_at: existing.created_at,
+        updated_at: now_millis(),
+    };
+    write_record(&record)?;
+    Ok(record.into())
+}
+
+#[tauri::command]
+pub fn scheduled_task_set_status(id: String, status: String) -> Result<ScheduledTask, String> {
+    validate_task_id(&id)?;
+    let mut record = read_record(&id)?;
+    record.status = normalize_status(&status)?;
+    record.updated_at = now_millis();
+    write_record(&record)?;
+    Ok(record.into())
+}
+
+#[tauri::command]
+pub fn scheduled_task_delete(id: String) -> Result<(), String> {
+    let dir = task_dir(&id)?;
+    if dir.exists() {
+        fs::remove_dir_all(dir).map_err(|error| error.to_string())?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{schedule_label_from_rrule, CodexAutomation, ScheduledTask};
+    use super::{
+        interval_from_rrule, normalize_status, rrule_for_interval, schedule_label_from_rrule,
+        ArisScheduledRecord, ScheduledTask, STATUS_ACTIVE, STATUS_PAUSED,
+    };
 
     #[test]
-    fn codex_automation_maps_to_scheduled_task() {
-        let task = ScheduledTask::from(CodexAutomation {
-            id: "check-thing".to_string(),
-            kind: Some("heartbeat".to_string()),
-            name: Some("Check thing".to_string()),
-            prompt: None,
-            status: Some("PAUSED".to_string()),
-            rrule: Some("FREQ=MINUTELY;INTERVAL=15".to_string()),
-            target_thread_id: Some("thread-1".to_string()),
-            created_at: Some(1234),
+    fn aris_record_maps_to_scheduled_task() {
+        let task = ScheduledTask::from(ArisScheduledRecord {
+            version: 1,
+            id: "task-1".to_string(),
+            kind: "aris-scheduled-task".to_string(),
+            name: "Check inbox".to_string(),
+            prompt: "Check unread mail".to_string(),
+            status: STATUS_PAUSED.to_string(),
+            rrule: "FREQ=MINUTELY;INTERVAL=15".to_string(),
+            target_thread_id: "chat-1".to_string(),
+            created_at: 10,
+            updated_at: 20,
         });
 
-        assert_eq!(task.id, "check-thing");
-        assert_eq!(task.title, "Check thing");
-        assert_eq!(task.schedule_label, "heartbeat: every 15 minutes");
+        assert_eq!(task.id, "task-1");
+        assert_eq!(task.title, "Check inbox");
+        assert_eq!(task.schedule_label, "每 15 分钟");
         assert_eq!(task.status, "paused");
-        assert_eq!(task.session_id.as_deref(), Some("thread-1"));
-        assert_eq!(task.created_at.as_deref(), Some("1234"));
+        assert_eq!(task.session_id.as_deref(), Some("chat-1"));
+        assert_eq!(task.interval_value, 15);
+        assert_eq!(task.interval_unit, "minutes");
     }
 
     #[test]
-    fn schedule_label_keeps_unknown_rrules_readable() {
+    fn interval_round_trips_to_rrule() {
+        assert_eq!(rrule_for_interval(2, "hours"), "FREQ=HOURLY;INTERVAL=2");
         assert_eq!(
-            schedule_label_from_rrule("FREQ=MONTHLY;INTERVAL=2"),
-            "FREQ=MONTHLY;INTERVAL=2"
+            interval_from_rrule("FREQ=DAILY;INTERVAL=3"),
+            (3, "days".to_string())
         );
+        assert_eq!(
+            schedule_label_from_rrule("FREQ=HOURLY;INTERVAL=6"),
+            "每 6 小时"
+        );
+    }
+
+    #[test]
+    fn status_accepts_ui_and_toml_values() {
+        assert_eq!(normalize_status("active").unwrap(), STATUS_ACTIVE);
+        assert_eq!(normalize_status("PAUSED").unwrap(), STATUS_PAUSED);
+        assert!(normalize_status("running").is_err());
     }
 }
