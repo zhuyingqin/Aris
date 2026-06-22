@@ -750,9 +750,16 @@ fn build_system_prompt_inner(model: &str, full_tool_registry: bool) -> Vec<Strin
         )
     };
     let file_links = "When you create or modify files, include Markdown links to the relevant file paths in the final response so the desktop UI can open them directly.".to_string();
+    let latex_toolchain = latex_toolchain_prompt_section();
     runtime::migrate_legacy_knowledge_memory();
     let hot_memory = runtime::render_hot_memory_prompt(&workspace).unwrap_or_default();
     let knowledge_memory = runtime::render_knowledge_memory_prompt();
+    let mut extra_sections = vec![access.clone(), file_links];
+    if !latex_toolchain.is_empty() {
+        extra_sections.push(latex_toolchain);
+    }
+    extra_sections.push(hot_memory);
+    extra_sections.push(knowledge_memory);
     aris_chat::build_common_system_prompt(aris_chat::CommonSystemPromptOptions {
         workspace,
         current_date: runtime::today_iso(),
@@ -763,9 +770,21 @@ fn build_system_prompt_inner(model: &str, full_tool_registry: bool) -> Vec<Strin
         language: std::env::var("ARIS_LANGUAGE").unwrap_or_else(|_| "cn".to_string()),
         include_language_preference: true,
         include_team_orchestration: false,
-        extra_sections: vec![access.clone(), file_links, hot_memory, knowledge_memory],
+        extra_sections,
     })
     .unwrap_or_else(|_| vec![access])
+}
+
+fn latex_toolchain_prompt_section() -> String {
+    let Some(tectonic) = std::env::var("ARIS_TECTONIC")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return String::new();
+    };
+    format!(
+        "Bundled LaTeX fallback: `ARIS_TECTONIC` points to `{tectonic}`. When the user asks to compile LaTeX and `latexmk`/`pdflatex`/`xelatex` are unavailable, try this bundled Tectonic binary before telling the user to install a TeX distribution. Run it from the directory containing the entrypoint, for example: `\"$ARIS_TECTONIC\" --keep-logs --keep-intermediates main.tex`."
+    )
 }
 
 /// Read config.json and validate the executor is configured. Returns
@@ -3451,6 +3470,14 @@ fn indent_block(value: &str, spaces: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 
     #[test]
     fn rich_chat_request_maps_data_url_to_image_block() {
@@ -3687,8 +3714,25 @@ mod tests {
     fn desktop_prompt_requests_links_for_generated_files() {
         let prompt = build_system_prompt_inner("test-model", true).join("\n");
 
-        assert!(prompt.contains("complete tool registry"));
+        assert!(prompt.contains("desktop tool registry"));
         assert!(prompt.contains("include Markdown links"));
+    }
+
+    #[test]
+    fn latex_toolchain_prompt_mentions_bundled_tectonic() {
+        let _guard = env_lock();
+        let previous = std::env::var_os("ARIS_TECTONIC");
+        std::env::set_var("ARIS_TECTONIC", r"C:\Program Files\Aris\tectonic.exe");
+
+        let prompt = latex_toolchain_prompt_section();
+
+        assert!(prompt.contains("Bundled LaTeX fallback"));
+        assert!(prompt.contains("ARIS_TECTONIC"));
+        assert!(prompt.contains("tectonic.exe"));
+        match previous {
+            Some(value) => std::env::set_var("ARIS_TECTONIC", value),
+            None => std::env::remove_var("ARIS_TECTONIC"),
+        }
     }
 
     #[test]

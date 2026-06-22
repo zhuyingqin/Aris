@@ -1,0 +1,4 @@
+desktop/src-tauri/resources/bin/aris-playwright-mcp text eol=lf
+desktop/src-tauri/resources/bin/latexmk text eol=lf
+desktop/src-tauri/resources/bin/pdflatex text eol=lf
+desktop/src-tauri/resources/bin/*.cmd text eol=crlf

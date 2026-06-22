@@ -72,6 +72,7 @@ fn augment_resource_path_for_mcp(app: &tauri::App) {
     };
     prepend_existing_path_entries([resource_dir.join("bin"), resource_dir.join("node")]);
     std::env::set_var("ARIS_RESOURCE_DIR", &resource_dir);
+    configure_bundled_tectonic_environment(&resource_dir);
 }
 
 /// Point Tectonic's on-demand package cache at a user-writable directory. The
@@ -90,6 +91,26 @@ fn configure_tectonic_environment() {
     if std::fs::create_dir_all(&cache).is_ok() {
         std::env::set_var("TECTONIC_CACHE_DIR", &cache);
     }
+}
+
+fn configure_bundled_tectonic_environment(resource_dir: &std::path::Path) {
+    let bundled = resource_dir.join("bin").join(tectonic_binary_name());
+    if !bundled.is_file() || valid_tectonic_override_exists() {
+        return;
+    }
+    std::env::set_var("ARIS_TECTONIC", bundled);
+}
+
+fn tectonic_binary_name() -> &'static str {
+    if cfg!(windows) {
+        "tectonic.exe"
+    } else {
+        "tectonic"
+    }
+}
+
+fn valid_tectonic_override_exists() -> bool {
+    std::env::var_os("ARIS_TECTONIC").is_some_and(|value| PathBuf::from(value).is_file())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -208,4 +229,74 @@ pub fn run() {
                 runtime::terminate_all_managed_processes();
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{configure_bundled_tectonic_environment, tectonic_binary_name};
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn temp_resource_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "aris-tectonic-env-{name}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("bin")).expect("create temp resource bin");
+        dir
+    }
+
+    fn restore_env(previous: Option<std::ffi::OsString>) {
+        match previous {
+            Some(value) => std::env::set_var("ARIS_TECTONIC", value),
+            None => std::env::remove_var("ARIS_TECTONIC"),
+        }
+    }
+
+    #[test]
+    fn bundled_tectonic_sets_env_when_present() {
+        let _guard = env_lock();
+        let previous = std::env::var_os("ARIS_TECTONIC");
+        std::env::remove_var("ARIS_TECTONIC");
+        let dir = temp_resource_dir("sets");
+        let bundled = dir.join("bin").join(tectonic_binary_name());
+        std::fs::write(&bundled, b"tectonic").expect("write bundled tectonic marker");
+
+        configure_bundled_tectonic_environment(&dir);
+
+        assert_eq!(
+            std::env::var_os("ARIS_TECTONIC").as_deref(),
+            Some(bundled.as_os_str())
+        );
+        let _ = std::fs::remove_dir_all(dir);
+        restore_env(previous);
+    }
+
+    #[test]
+    fn bundled_tectonic_preserves_valid_override() {
+        let _guard = env_lock();
+        let previous = std::env::var_os("ARIS_TECTONIC");
+        let dir = temp_resource_dir("preserves");
+        let bundled = dir.join("bin").join(tectonic_binary_name());
+        std::fs::write(&bundled, b"tectonic").expect("write bundled tectonic marker");
+        let override_path = dir.join("custom-tectonic.exe");
+        std::fs::write(&override_path, b"custom").expect("write override marker");
+        std::env::set_var("ARIS_TECTONIC", &override_path);
+
+        configure_bundled_tectonic_environment(&dir);
+
+        assert_eq!(
+            std::env::var_os("ARIS_TECTONIC").as_deref(),
+            Some(override_path.as_os_str())
+        );
+        let _ = std::fs::remove_dir_all(dir);
+        restore_env(previous);
+    }
 }

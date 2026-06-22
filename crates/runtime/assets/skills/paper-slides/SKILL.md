@@ -117,8 +117,16 @@ Persist state to `slides/SLIDES_STATE.json` after each phase:
 
 1. **Check prerequisites**:
    ```bash
-   which pdflatex && which latexmk
+   command -v pdflatex >/dev/null && command -v latexmk >/dev/null
+   if [ -n "${ARIS_TECTONIC:-}" ] && [ -f "$ARIS_TECTONIC" ]; then
+     echo "Bundled Tectonic available: $ARIS_TECTONIC"
+   elif command -v tectonic >/dev/null; then
+     echo "Tectonic available: $(command -v tectonic)"
+   fi
    ```
+
+   Prefer `latexmk` when it is available. If system LaTeX is missing, use
+   `ARIS_TECTONIC` or `tectonic` before asking the user to install TeX Live.
 
 2. **Verify paper exists**:
    ```bash
@@ -355,7 +363,20 @@ ln -sf ../paper/figures/*.png slides/figures/ 2>/dev/null
 ### Phase 4: Compile Slides
 
 ```bash
-cd slides && latexmk -$ENGINE -interaction=nonstopmode main.tex
+cd slides
+if command -v latexmk >/dev/null; then
+  latexmk -$ENGINE -interaction=nonstopmode main.tex
+else
+  TECTONIC_BIN="${ARIS_TECTONIC:-}"
+  if [ -z "$TECTONIC_BIN" ] || [ ! -f "$TECTONIC_BIN" ]; then
+    TECTONIC_BIN="$(command -v tectonic || true)"
+  fi
+  if [ -z "$TECTONIC_BIN" ]; then
+    echo "No LaTeX engine found. Install TeX Live/MacTeX or use ARIS Desktop's bundled Tectonic."
+    exit 127
+  fi
+  "$TECTONIC_BIN" --keep-logs --keep-intermediates main.tex
+fi
 ```
 
 **Error handling loop** (max 3 attempts):

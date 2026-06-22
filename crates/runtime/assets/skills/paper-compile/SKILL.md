@@ -24,14 +24,26 @@ Compile the LaTeX paper and fix any issues: **$ARGUMENTS**
 Check that the compilation environment is ready:
 
 ```bash
-# Check LaTeX installation
-which pdflatex && which latexmk && which bibtex
+# Check LaTeX installation and bundled fallback.
+command -v pdflatex >/dev/null && command -v latexmk >/dev/null && command -v bibtex >/dev/null
+SYSTEM_LATEX=$?
+if [ -n "${ARIS_TECTONIC:-}" ] && [ -f "$ARIS_TECTONIC" ]; then
+  echo "Bundled Tectonic available: $ARIS_TECTONIC"
+elif command -v tectonic >/dev/null; then
+  echo "Tectonic available: $(command -v tectonic)"
+fi
 
-# If not installed, provide instructions:
+# If neither system LaTeX nor Tectonic is installed, provide instructions:
 # macOS: brew install --cask mactex-no-gui
 # Ubuntu: sudo apt-get install texlive-full
 # Server: conda install -c conda-forge texlive-core
 ```
+
+Prefer system `latexmk` when it is available because it handles BibTeX and
+multi-pass builds for legacy templates. If system LaTeX is missing but
+`ARIS_TECTONIC` or `tectonic` exists, use Tectonic before asking the user to
+install a TeX distribution. In ARIS Desktop, `ARIS_TECTONIC` points to the
+bundled `tectonic.exe`.
 
 Verify all required files exist:
 
@@ -51,10 +63,26 @@ ls $PAPER_DIR/figures/*.pdf 2>/dev/null || ls $PAPER_DIR/figures/*.png 2>/dev/nu
 cd $PAPER_DIR
 
 # Clean previous build artifacts
-latexmk -C
+if command -v latexmk >/dev/null; then
+  latexmk -C
+else
+  rm -f main.{aux,bbl,bcf,blg,fdb_latexmk,fls,log,out,run.xml,synctex.gz,toc}
+fi
 
 # Full compilation (pdflatex + bibtex + pdflatex × 2)
-latexmk -pdf -interaction=nonstopmode -halt-on-error main.tex 2>&1 | tee compile.log
+if command -v latexmk >/dev/null && command -v pdflatex >/dev/null; then
+  latexmk -pdf -interaction=nonstopmode -halt-on-error main.tex 2>&1 | tee compile.log
+else
+  TECTONIC_BIN="${ARIS_TECTONIC:-}"
+  if [ -z "$TECTONIC_BIN" ] || [ ! -f "$TECTONIC_BIN" ]; then
+    TECTONIC_BIN="$(command -v tectonic || true)"
+  fi
+  if [ -z "$TECTONIC_BIN" ]; then
+    echo "No LaTeX engine found. Install TeX Live/MacTeX or use ARIS Desktop's bundled Tectonic." | tee compile.log
+    exit 127
+  fi
+  "$TECTONIC_BIN" --keep-logs --keep-intermediates main.tex 2>&1 | tee compile.log
+fi
 ```
 
 ### Step 3: Error Diagnosis and Auto-Fix
@@ -251,7 +279,7 @@ For conference submission, additional checks:
 - **Never delete the user's source files** — only modify to fix errors
 - **Keep compile.log** — useful for debugging
 - **Don't suppress warnings** — report them, let the user decide
-- **If LaTeX is not installed**, provide clear installation instructions rather than failing silently
+- **If LaTeX is not installed**, try `ARIS_TECTONIC`/`tectonic` first; provide installation instructions only when no Tectonic fallback is available or the template requires unsupported packages
 - **Font embedding is critical** — some venues reject PDFs with non-embedded fonts
 - **Page count rules differ by venue** — ML conferences: main body to Conclusion (refs excluded). **IEEE venues: total pages including references.**
 
