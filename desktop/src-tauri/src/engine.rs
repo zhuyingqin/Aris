@@ -1571,6 +1571,93 @@ fn context_window_for_model(model: &str) -> u64 {
     128_000
 }
 
+/// Auto-compaction thresholds, as a fraction of the model's context window.
+/// At/above WARN we nudge the UI; at/above TRIGGER we compact automatically so a
+/// long session never silently overflows the window and drops early context
+/// (#34 P0-2).
+const AUTO_COMPACT_WARN_RATIO: f64 = 0.70;
+const AUTO_COMPACT_TRIGGER_RATIO: f64 = 0.90;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContextAction {
+    None,
+    Warn,
+    Compact,
+}
+
+/// Pure decision: what to do at `used_tokens` of `context_window`. Extracted so
+/// the threshold policy is unit-testable without a live session/app.
+fn context_action(used_tokens: u64, context_window: u64) -> ContextAction {
+    if context_window == 0 {
+        return ContextAction::None;
+    }
+    let usage = used_tokens as f64 / context_window as f64;
+    if usage >= AUTO_COMPACT_TRIGGER_RATIO {
+        ContextAction::Compact
+    } else if usage >= AUTO_COMPACT_WARN_RATIO {
+        ContextAction::Warn
+    } else {
+        ContextAction::None
+    }
+}
+
+fn emit_context_warning(app: &AppHandle, session_id: &str, used: u64, window: u64) {
+    let _ = app.emit(
+        "chat-context-warning",
+        json!({
+            "sessionId": session_id,
+            "usedTokens": used,
+            "contextWindow": window,
+            "usage": used as f64 / window.max(1) as f64,
+        }),
+    );
+}
+
+/// Before running a turn, keep the session within the model's context window:
+/// warn at >=70% usage, auto-compact at >=90% (falling back to a warning when
+/// there is too little history to compact). Returns the session to run the turn
+/// against — compacted in place when triggered, and persisted so the next turn
+/// and the UI both see the reduced history.
+fn maybe_auto_compact(
+    app: &AppHandle,
+    state: &ChatState,
+    session_id: &str,
+    model: &str,
+    session: Session,
+) -> Result<Session, String> {
+    let window = context_window_for_model(model);
+    let used = runtime::estimate_session_tokens(&session) as u64;
+    match context_action(used, window) {
+        ContextAction::None => Ok(session),
+        ContextAction::Warn => {
+            emit_context_warning(app, session_id, used, window);
+            Ok(session)
+        }
+        ContextAction::Compact => {
+            let result = runtime::compact_session(&session, CompactionConfig::default());
+            if result.removed_message_count == 0 {
+                // Too little history to compact — warn instead of claiming a no-op.
+                emit_context_warning(app, session_id, used, window);
+                return Ok(session);
+            }
+            let compacted = result.compacted_session;
+            store_chat_session(state, session_id.to_string(), compacted.clone())?;
+            let after = runtime::estimate_session_tokens(&compacted) as u64;
+            let _ = app.emit(
+                "chat-context-compacted",
+                json!({
+                    "sessionId": session_id,
+                    "removedMessages": result.removed_message_count,
+                    "tokensBefore": used,
+                    "tokensAfter": after,
+                    "contextWindow": window,
+                }),
+            );
+            Ok(compacted)
+        }
+    }
+}
+
 fn chat_status_for(model: String, provider: String) -> ChatStatus {
     let memory_files = status_context(None).ok().map(|ctx| ctx.memory_file_count);
     let cw = context_window_for_model(&model);
@@ -2271,6 +2358,7 @@ async fn run_chat_turn_with_context(
     let (model, _provider, executor_config) =
         resolve_executor_for_model(model_override.as_deref())?;
     let session = get_cached_or_disk_session(&state, &session_id)?;
+    let session = maybe_auto_compact(&app, state, &session_id, &model, session)?;
     let permission_mode = permission_mode_for(&state, &session_id)?;
     let permission_prompts = state.permission_prompts.clone();
     let question_prompts = state.question_prompts.clone();
@@ -4305,5 +4393,17 @@ mod tests {
         let sessions = state.sessions.lock().expect("chat state");
         assert_eq!(sessions.len(), MAX_CACHED_CHAT_SESSIONS);
         assert!(sessions.contains_key("session-19"));
+    }
+
+    #[test]
+    fn context_action_picks_warn_then_compact_by_usage() {
+        use super::{context_action, ContextAction};
+        assert_eq!(context_action(0, 0), ContextAction::None); // unknown window
+        assert_eq!(context_action(100, 1_000), ContextAction::None); // 10%
+        assert_eq!(context_action(699, 1_000), ContextAction::None); // just under warn
+        assert_eq!(context_action(700, 1_000), ContextAction::Warn); // 70%
+        assert_eq!(context_action(899, 1_000), ContextAction::Warn); // just under trigger
+        assert_eq!(context_action(900, 1_000), ContextAction::Compact); // 90%
+        assert_eq!(context_action(2_000, 1_000), ContextAction::Compact); // over window
     }
 }
