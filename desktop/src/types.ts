@@ -61,8 +61,22 @@ export interface ScheduledTask {
   scheduleLabel?: string;
   status?: string; // "active" | "paused"
   sessionId?: string | null;
+  prompt?: string;
+  rrule?: string;
+  intervalValue?: number;
+  intervalUnit?: "minutes" | "hours" | "days" | string;
   createdAt?: string | null;
+  updatedAt?: string | null;
   nextRun?: string | null;
+}
+
+export interface ScheduledTaskInput {
+  title: string;
+  prompt: string;
+  sessionId: string;
+  intervalValue: number;
+  intervalUnit: "minutes" | "hours" | "days";
+  status?: "active" | "paused";
 }
 
 export interface ConfigPatch {

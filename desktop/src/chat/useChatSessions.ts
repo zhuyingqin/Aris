@@ -185,6 +185,14 @@ export function useChatSessions(projectId?: string | null) {
     return fresh;
   }, [activeProjectId, currentId, currentSession, homeSession]);
 
+  const createSession = useCallback(() => {
+    const fresh = makeSession(activeProjectId);
+    setAllSessions((previous) => [...previous, fresh]);
+    setCurrentId(fresh.id);
+    setHomeSession(makeHomeSession(activeProjectId));
+    return fresh;
+  }, [activeProjectId]);
+
   const patchTurns = useCallback((id: string, fn: (turns: ChatTurn[]) => ChatTurn[]) => {
     if (id === HOME_SESSION_ID) {
       const turns = fn(homeSession.turns);
@@ -260,6 +268,7 @@ export function useChatSessions(projectId?: string | null) {
     setCurrentId,
     setSessions: setAllSessions,
     materializeCurrentSession,
+    createSession,
     updateSession,
     patchTurns,
     newSession,

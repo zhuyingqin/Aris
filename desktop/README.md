@@ -76,6 +76,50 @@ Build outputs:
 - `src-tauri\target\release\aris-desktop.exe`
 - `src-tauri\target\release\bundle\nsis\ARIS Studio_0.2.0_x64-setup.exe`
 
+## Internal Installer
+
+Use `build:internal` to create an NSIS installer that seeds LLM settings on the
+first launch after installation. The bundled config is copied into the user's
+`~/.config/aris/config.json`; existing non-empty fields are preserved by
+default.
+
+```powershell
+cd desktop
+$env:ARIS_INTERNAL_PRODUCT_NAME = "ARIS Studio Internal"
+$env:ARIS_INTERNAL_IDENTIFIER = "com.aris.studio.internal"
+$env:ARIS_INTERNAL_EXECUTOR_PROVIDER = "openai"
+$env:ARIS_INTERNAL_EXECUTOR_MODEL = "gpt-5.5"
+$env:ARIS_INTERNAL_EXECUTOR_BASE_URL = "https://api.openai.com/v1"
+$env:ARIS_INTERNAL_EXECUTOR_API_KEY = "<internal-key>"
+npm run build:internal
+```
+
+For a fuller config, keep a local JSON file outside git and pass it with
+`ARIS_INTERNAL_CONFIG`:
+
+```json
+{
+  "_internal": { "overwriteExisting": false },
+  "executor_provider": "openai",
+  "executor_model": "gpt-5.5",
+  "executor_base_url": "https://api.openai.com/v1",
+  "executor_api_key": "<internal-key>",
+  "reviewer_provider": "openai",
+  "reviewer_model": "gpt-5.5",
+  "reviewer_base_url": "https://api.openai.com/v1",
+  "reviewer_api_key": "<internal-key>",
+  "language": "cn"
+}
+```
+
+```powershell
+$env:ARIS_INTERNAL_CONFIG = "C:\secure\aris-internal-config.json"
+npm run build:internal
+```
+
+The temporary bundled `internal-config.json` is removed after the build script
+finishes and is ignored by git.
+
 ## GitHub Updater Releases
 
 ARIS Studio uses the Tauri updater plugin and checks:

@@ -1,7 +1,7 @@
 {
   "name": "aris-studio",
   "private": true,
-  "version": "0.4.0",
+  "version": "0.4.1",
   "type": "module",
   "description": "ARIS Studio - desktop UI for Chat, literature, skills, sessions, and settings",
   "scripts": {
@@ -12,6 +12,7 @@
     "build:playwright-mcp": "node scripts/build-playwright-mcp-resource.cjs",
     "build:tectonic": "node scripts/build-tectonic-resource.cjs",
     "build:resources": "npm run build:playwright-mcp && npm run build:tectonic",
+    "build:internal": "node scripts/build-internal-installer.cjs",
     "generate:updater-json": "node scripts/generate-updater-json.cjs",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",

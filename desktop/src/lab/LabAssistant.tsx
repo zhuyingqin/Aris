@@ -4,6 +4,7 @@ import {
   chatPermissionGet,
   chatPermissionRespond,
   chatPermissionSet,
+  chatQuestionRespond,
   chatSetContext,
   chatStatus,
   fileRead,
@@ -12,7 +13,7 @@ import {
   type ChatSendRequest,
 } from "../api/tauri";
 import ChatMessage from "../chat/ChatMessage";
-import { makeId, textFromTurn } from "../chat/model";
+import { makeId, patchLastAssistantTurn, textFromTurn } from "../chat/model";
 import { useChatStream } from "../chat/useChatStream";
 import type { ChatAttachment, ChatBlock, ChatStatus, ChatTurn, PermissionModeView } from "../types";
 import { useLabStore } from "./labStore";
@@ -357,16 +358,7 @@ export default function LabAssistant({
 
   const patchAssistant = useCallback((eventSessionId: string, fn: (turn: ChatTurn) => ChatTurn) => {
     if (eventSessionId !== sessionId) return;
-    setTurns((previous) => {
-      const next = previous.slice();
-      for (let index = next.length - 1; index >= 0; index -= 1) {
-        if (next[index].role === "assistant") {
-          next[index] = fn(next[index]);
-          return next;
-        }
-      }
-      return previous;
-    });
+    setTurns((previous) => patchLastAssistantTurn(previous, fn));
   }, [sessionId]);
 
   const onComplete = useCallback((eventSessionId: string, reply: string) => {
@@ -388,6 +380,15 @@ export default function LabAssistant({
       stopped,
     }));
   }, [patchAssistant]);
+
+  const respondQuestion = useCallback(async (toolUseId: string, answer: string) => {
+    if (!isTauri()) return;
+    try {
+      await chatQuestionRespond(toolUseId, answer);
+    } catch (error) {
+      onError(sessionId, String(error), false);
+    }
+  }, [onError, sessionId]);
 
   const { run, stop, runningSessionIds } = useChatStream({ patchAssistant, onComplete, onError });
   const busy = runningSessionIds.has(sessionId);
@@ -641,6 +642,7 @@ export default function LabAssistant({
               onRetry={retry}
               onContinue={continueStopped}
               onPermissionRespond={(promptId, allow) => void chatPermissionRespond(promptId, allow)}
+              onQuestionRespond={(toolUseId, answer) => void respondQuestion(toolUseId, answer)}
             />
           ))
         )}

@@ -1073,13 +1073,32 @@ pub async fn config_test(patch: ConfigPatch) -> Result<ConfigTestResult, String>
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_reviewer_environment_from, deepseek_executor_key, read_verified, upsert_verified,
-        write_verified, VerifiedExecutor,
+        apply_bundled_internal_config, apply_reviewer_environment_from, deepseek_executor_key,
+        read_verified, upsert_verified, write_verified, VerifiedExecutor,
     };
     use serde_json::{Map, Value};
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn temp_dir(name: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("aris-desktop-config-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    fn restore_home(home: Option<String>, userprofile: Option<String>) {
+        match home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+        match userprofile {
+            Some(value) => std::env::set_var("USERPROFILE", value),
+            None => std::env::remove_var("USERPROFILE"),
+        }
+    }
 
     fn entry(provider: &str, model: &str, base_url: &str, key: &str) -> VerifiedExecutor {
         VerifiedExecutor {
@@ -1142,6 +1161,93 @@ mod tests {
         let parsed = read_verified(&obj);
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].model, "gpt-5.5");
+    }
+
+    #[test]
+    fn bundled_internal_config_fills_missing_without_overwriting_existing() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let previous_home = std::env::var("HOME").ok();
+        let previous_userprofile = std::env::var("USERPROFILE").ok();
+        let home = temp_dir("fills-home");
+        let resources = temp_dir("fills-resources");
+        std::env::set_var("HOME", &home);
+        std::env::set_var("USERPROFILE", &home);
+
+        let config_path = crate::state::config_path();
+        std::fs::create_dir_all(config_path.parent().expect("config parent"))
+            .expect("create config parent");
+        std::fs::write(
+            &config_path,
+            serde_json::json!({
+                "executor_model": "existing-model",
+                "executor_api_key": "existing-key"
+            })
+            .to_string(),
+        )
+        .expect("write existing config");
+        std::fs::write(
+            resources.join("internal-config.json"),
+            serde_json::json!({
+                "executor_model": "bundled-model",
+                "executor_api_key": "bundled-key",
+                "executor_provider": "openai"
+            })
+            .to_string(),
+        )
+        .expect("write internal config");
+
+        assert!(apply_bundled_internal_config(&resources).expect("apply internal config"));
+        let saved = crate::config::load_object();
+        assert_eq!(saved["executor_model"], "existing-model");
+        assert_eq!(saved["executor_api_key"], "existing-key");
+        assert_eq!(saved["executor_provider"], "openai");
+
+        let _ = std::fs::remove_dir_all(&home);
+        let _ = std::fs::remove_dir_all(&resources);
+        restore_home(previous_home, previous_userprofile);
+    }
+
+    #[test]
+    fn bundled_internal_config_can_overwrite_existing() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let previous_home = std::env::var("HOME").ok();
+        let previous_userprofile = std::env::var("USERPROFILE").ok();
+        let home = temp_dir("overwrite-home");
+        let resources = temp_dir("overwrite-resources");
+        std::env::set_var("HOME", &home);
+        std::env::set_var("USERPROFILE", &home);
+
+        let config_path = crate::state::config_path();
+        std::fs::create_dir_all(config_path.parent().expect("config parent"))
+            .expect("create config parent");
+        std::fs::write(
+            &config_path,
+            serde_json::json!({
+                "executor_model": "existing-model",
+                "reviewer_provider": "openai"
+            })
+            .to_string(),
+        )
+        .expect("write existing config");
+        std::fs::write(
+            resources.join("internal-config.json"),
+            serde_json::json!({
+                "_internal": { "overwriteExisting": true },
+                "executor_model": "bundled-model",
+                "reviewer_provider": null
+            })
+            .to_string(),
+        )
+        .expect("write internal config");
+
+        assert!(apply_bundled_internal_config(&resources).expect("apply internal config"));
+        let saved = crate::config::load_object();
+        assert_eq!(saved["executor_model"], "bundled-model");
+        assert!(saved.get("reviewer_provider").is_none());
+
+        let _ = std::fs::remove_dir_all(&home);
+        let _ = std::fs::remove_dir_all(&resources);
+        restore_home(previous_home, previous_userprofile);
     }
 
     #[test]

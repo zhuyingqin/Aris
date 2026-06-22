@@ -217,6 +217,48 @@ describe("useChatStream concurrent sessions", () => {
     });
   });
 
+  it("deduplicates repeated AskUserQuestion tool-call events by id", () => {
+    let toolHandler:
+      | ((event: { sessionId: string; id?: string; name: string; input: string }) => void)
+      | null = null;
+    mocks.onChatTool.mockImplementation((handler) => {
+      toolHandler = handler;
+      return Promise.resolve(() => undefined);
+    });
+
+    let current = { id: "assistant", role: "assistant" as const, blocks: [], streaming: true };
+    const patchAssistant = vi.fn((_sessionId: string, patch) => {
+      current = patch(current);
+    });
+    renderHook(() => useChatStream({
+      patchAssistant,
+      onComplete: vi.fn(),
+      onError: vi.fn(),
+    }));
+
+    act(() => {
+      toolHandler?.({
+        sessionId: "chat-q",
+        id: "ask-1",
+        name: "AskUserQuestion",
+        input: "{\"question\":\"Old?\",\"options\":[{\"label\":\"A\"}]}",
+      });
+      toolHandler?.({
+        sessionId: "chat-q",
+        id: "ask-1",
+        name: "AskUserQuestion",
+        input: "{\"question\":\"New?\",\"options\":[{\"label\":\"B\"}]}",
+      });
+    });
+
+    expect(current.blocks).toHaveLength(1);
+    expect(current.blocks[0]).toMatchObject({
+      id: "ask-1",
+      name: "AskUserQuestion",
+      input: "{\"question\":\"New?\",\"options\":[{\"label\":\"B\"}]}",
+    });
+  });
+
   it("reports provider errors through onError instead of completing silently", async () => {
     for (const listener of [
       mocks.onChatDelta,

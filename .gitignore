@@ -12,6 +12,8 @@ target/
 dist/
 desktop/src-tauri/resources/mcp/
 desktop/src-tauri/resources/node/
+desktop/src-tauri/resources/internal-config.json
+desktop/internal-config*.json
 
 # Tool caches
 .clawd-*

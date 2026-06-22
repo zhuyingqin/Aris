@@ -173,8 +173,8 @@ pub async fn lab_list_notebooks(projects_state: State<'_, ProjectState>) -> Resu
     tauri::async_runtime::spawn_blocking(move || {
         Ok::<Value, String>(json!({ "notebooks": list_notebooks_at(&base) }))
     })
-        .await
-        .map_err(|e| e.to_string())?
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -376,8 +376,9 @@ pub async fn lab_start_file_kernel(
     let path = resolve_file(&projects_state, &file_path)?;
     ensure_python_file(&path)?;
     tauri::async_runtime::spawn_blocking(move || {
-        let info = KernelManager::start(&file_session_id(&path), kernel.as_deref(), &workdir(&path))
-            .map_err(|e| e.to_string())?;
+        let info =
+            KernelManager::start(&file_session_id(&path), kernel.as_deref(), &workdir(&path))
+                .map_err(|e| e.to_string())?;
         serde_json::to_value(info).map_err(|e| e.to_string())
     })
     .await

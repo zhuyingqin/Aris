@@ -11,6 +11,7 @@ const apiMocks = vi.hoisted(() => ({
   chatPermissionGet: vi.fn(() => Promise.resolve({ mode: "workspace-write", label: "Accept edits", description: "Read and edit workspace files" })),
   chatPermissionSet: vi.fn((_sessionId: string, mode: string) => Promise.resolve({ mode, label: mode, description: "" })),
   chatPermissionRespond: vi.fn(() => Promise.resolve()),
+  chatQuestionRespond: vi.fn(() => Promise.resolve()),
   chatCommandSpecs: vi.fn(() => Promise.resolve([])),
   skillsList: vi.fn(() => Promise.resolve([])),
   projectChatStarters: vi.fn(() => Promise.resolve([])),
