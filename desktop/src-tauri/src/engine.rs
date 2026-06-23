@@ -1180,14 +1180,20 @@ fn resolve_executor_for_model(
 }
 
 fn validate_session_id(session_id: &str) -> Result<(), String> {
-    if session_id.is_empty()
-        || session_id.contains('/')
-        || session_id.contains('\\')
-        || session_id.contains("..")
-    {
-        return Err("invalid chat session id".to_string());
+    // Restrict to characters that cannot express a path: rejects separators
+    // (`/`, `\`), drive-relative ids (`C:foo`), the `\\?\` prefix, and `..`
+    // traversal. Real chat ids are alphanumeric + `-`/`_`, e.g.
+    // `chat-1781326932161-sqk1vz`.
+    let valid = !session_id.is_empty()
+        && session_id.len() <= 128
+        && session_id
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_');
+    if valid {
+        Ok(())
+    } else {
+        Err("invalid chat session id".to_string())
     }
-    Ok(())
 }
 
 #[derive(Serialize)]
@@ -4393,6 +4399,19 @@ mod tests {
         let sessions = state.sessions.lock().expect("chat state");
         assert_eq!(sessions.len(), MAX_CACHED_CHAT_SESSIONS);
         assert!(sessions.contains_key("session-19"));
+    }
+
+    #[test]
+    fn validate_session_id_accepts_real_ids_and_rejects_path_chars() {
+        use super::validate_session_id;
+        assert!(validate_session_id("chat-1781326932161-sqk1vz").is_ok());
+        assert!(validate_session_id("session-19").is_ok());
+        assert!(validate_session_id("").is_err());
+        assert!(validate_session_id("C:foo").is_err()); // drive-relative
+        assert!(validate_session_id("a/b").is_err());
+        assert!(validate_session_id("a\\b").is_err());
+        assert!(validate_session_id("../x").is_err());
+        assert!(validate_session_id("a.b").is_err()); // dot no longer allowed
     }
 
     #[test]

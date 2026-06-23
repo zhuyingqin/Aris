@@ -38,7 +38,9 @@ const EMPTY_ASSISTANT_RESPONSE = "Model returned an empty response.";
 const IMAGE_UNSUPPORTED_MESSAGE = "(Image preview only. Vision input is not supported in desktop Chat yet.)";
 
 // Matches relative file paths like `desktop/src/chat/Chat.tsx` or `./src/lib.rs:42`
-const FILE_PATH_RE = /^(\.\.?\/)?([a-zA-Z0-9_\-.]+\/)+[a-zA-Z0-9_\-.]+(:\d+)?$/;
+// Unicode letters/numbers (`\p{L}\p{N}`, `u` flag) so non-ASCII paths — e.g.
+// `桌面/项目/数据.csv` — are detected as clickable, not just ASCII paths.
+const FILE_PATH_RE = /^(\.\.?\/)?([\p{L}\p{N}_\-.]+\/)+[\p{L}\p{N}_\-.]+(:\d+)?$/u;
 
 function detectFilePath(element: HTMLElement): string | null {
   // Local markdown link — use the href (already decoded by MarkdownLink)
