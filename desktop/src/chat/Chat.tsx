@@ -91,6 +91,20 @@ function estimateTokens(turns: ChatTurn[]): number {
   return tokens;
 }
 
+type ContextOverride = { tokens: number; anchor: number };
+
+// The ContextRing's "used" value. When an authoritative backend count is pinned
+// (after each turn, or after compaction), use it as the base and add only the
+// estimate of turns appended past the anchor — so the ring tracks the backend's
+// real token usage instead of the divergent transcript estimate. The anchor
+// guard self-heals if the transcript was later truncated below it (e.g. an
+// edited or retried turn).
+function ringTokens(turns: ChatTurn[], override: ContextOverride | undefined): number {
+  return override && override.anchor <= turns.length
+    ? override.tokens + estimateTokens(turns.slice(override.anchor))
+    : estimateTokens(turns);
+}
+
 function MemoryBadge({ count }: { count: number }) {
   if (count === 0) return null;
   return (
@@ -302,6 +316,13 @@ export default function Chat() {
   const chatSidebarResizeRef = useRef<{ startX: number; startWidth: number } | null>(null);
   const [composerHeight, setComposerHeight] = useState(120);
   const [editingTurnId, setEditingTurnId] = useState<string | null>(null);
+  // After `/compact` the backend session shrinks but the visible transcript is
+  // kept intact, so the transcript-derived token estimate (and thus the
+  // ContextRing) would never move. Pin the ring to the real post-compaction
+  // token count reported by the command, plus an anchor (turn count at compact
+  // time) so later turns still accrue on top. Keyed per session; invalidated
+  // automatically once the transcript is truncated below the anchor.
+  const [contextOverrides, setContextOverrides] = useState<Map<string, { tokens: number; anchor: number }>>(() => new Map());
   const [deleted, setDeleted] = useState<ChatSession | null>(null);
   const [pendingCommandSelection, setPendingCommandSelection] = useState<PendingCommandSelection | null>(null);
   const [focusRequest, setFocusRequest] = useState(0);
@@ -315,6 +336,10 @@ export default function Chat() {
   const syncedTurnIds = useRef(new Map<string, Set<string>>());
   const currentSessionRef = useRef(currentSession);
   currentSessionRef.current = currentSession;
+  const allSessionsRef = useRef(allSessions);
+  allSessionsRef.current = allSessions;
+  const contextOverridesRef = useRef(contextOverrides);
+  contextOverridesRef.current = contextOverrides;
   const focusComposer = useCallback(() => setFocusRequest((value) => value + 1), []);
 
   const markBackendContextSynced = useCallback((sessionId: string, turnsToMark: ChatTurn[]) => {
@@ -407,10 +432,36 @@ export default function Chat() {
     );
   }, [patchAssistant, syncBackendContext]);
 
-  const { run, stop, runningSessionIds } = useChatStream({ patchAssistant, onComplete, onError });
+  // Pin the ContextRing to an authoritative backend token count — reported
+  // after every turn (real usage) and after compaction — anchored at the
+  // current turn count so later turns still accrue on top. Same override the
+  // `/compact` path uses; the anchor guard in `ringTokens` self-heals if the
+  // transcript is later truncated.
+  const applyContextTokens = useCallback((sessionId: string, tokens: number) => {
+    const session = allSessionsRef.current.find((item) => item.id === sessionId);
+    const anchor = session ? session.turns.length : 0;
+    setContextOverrides((prev) => new Map(prev).set(sessionId, { tokens, anchor }));
+  }, []);
+
+  // Current ring value for a session, so the compaction notice can report how
+  // much context was freed (before → after).
+  const readContextTokens = useCallback((sessionId: string): number | null => {
+    const session = allSessionsRef.current.find((item) => item.id === sessionId);
+    if (!session) return null;
+    return ringTokens(session.turns, contextOverridesRef.current.get(sessionId));
+  }, []);
+
+  const { run, stop, runningSessionIds } = useChatStream({
+    patchAssistant,
+    onComplete,
+    onError,
+    onContextCompacted: applyContextTokens,
+    onContextTokens: applyContextTokens,
+    getContextTokens: readContextTokens,
+  });
   const currentChatBusy = runningSessionIds.has(currentId);
   const turns = currentSession?.turns ?? [];
-  const estimatedTokens = estimateTokens(turns);
+  const estimatedTokens = ringTokens(turns, contextOverrides.get(currentId));
   const workflowTodos = useMemo(() => latestTodosFromTurns(turns), [turns]);
   const workflowFileChanges = useMemo(
     () => latestFileChangesFromTurns(turns, currentProject?.path),
@@ -669,6 +720,13 @@ export default function Chat() {
         userTurn(text, []),
         assistantTextTurn(result.message ?? ""),
       ]);
+      if (result.contextTokens != null) {
+        // Anchor past the two turns just appended (command echo + report) so
+        // the ring reads the real compacted size now and grows with later turns.
+        const anchor = (result.replaceTurns ? 0 : session.turns.length) + 2;
+        const tokens = result.contextTokens;
+        setContextOverrides((prev) => new Map(prev).set(session.id, { tokens, anchor }));
+      }
       updateSession(session.id, (item) => ({ ...item, draft: "", draftAttachments: [] }));
       setEditingTurnId(null);
       return true;

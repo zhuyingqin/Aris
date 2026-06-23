@@ -612,8 +612,16 @@ export const onChatPermissionRequest = (handler: (event: ChatPermissionRequestEv
   listen<ChatPermissionRequestEvent>("chat-permission-request", (e) => handler(e.payload));
 export const onChatPermissionResolved = (handler: (event: ChatPermissionResolvedEvent) => void) =>
   listen<ChatPermissionResolvedEvent>("chat-permission-resolved", (e) => handler(e.payload));
-export const onChatDone = (handler: (event: ChatTextEvent) => void) =>
-  listen<ChatTextEvent>("chat-done", (e) => handler(e.payload));
+export interface ChatDoneEvent {
+  sessionId: string;
+  text: string;
+  /** Real context occupancy (last request's prompt + output) of the finished
+   * turn. Drives the ContextRing from the backend's actual token count instead
+   * of the transcript estimate. Absent when the provider reported no usage. */
+  contextTokens?: number | null;
+}
+export const onChatDone = (handler: (event: ChatDoneEvent) => void) =>
+  listen<ChatDoneEvent>("chat-done", (e) => handler(e.payload));
 export interface ChatErrorEvent {
   sessionId: string;
   message: string;
@@ -624,6 +632,9 @@ export const onChatError = (handler: (event: ChatErrorEvent) => void) =>
 export interface ChatContextCompactedEvent {
   sessionId: string;
   removedMessageCount: number;
+  /** Real post-compaction context size in tokens. Drives the ContextRing down
+   * to the authoritative value; absent/null leaves the transcript estimate. */
+  tokensAfter?: number | null;
 }
 export const onChatContextCompacted = (handler: (event: ChatContextCompactedEvent) => void) =>
   listen<ChatContextCompactedEvent>("chat-context-compacted", (e) => handler(e.payload));

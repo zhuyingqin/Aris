@@ -37,6 +37,12 @@ interface ProviderMeta {
 }
 interface PresetOption { label: string; value: string; hint?: string; }
 
+const SUMMARIZER_MODELS: PresetOption[] = [
+  { label: "Auto", value: "", hint: "Claude 用 Haiku，其他关闭" },
+  { label: "Claude Haiku 4.5", value: "claude-haiku-4-5-20251001", hint: "便宜快速" },
+  { label: "关闭", value: "off", hint: "用快速文本摘要" },
+];
+
 const EXECUTOR_MODELS: PresetOption[] = [
   { label: "Claude Opus 4.7", value: "claude-opus-4-7", hint: "Anthropic" },
   { label: "Claude Sonnet 4.6", value: "claude-sonnet-4-6", hint: "Anthropic" },
@@ -582,6 +588,7 @@ export default function Settings() {
       executorProvider: normalizeExecutorProvider(v.executorProvider, v.executorBaseUrl),
       executorModel: v.executorModel ?? "",
       executorBaseUrl: v.executorBaseUrl ?? "",
+      summarizerModel: v.summarizerModel ?? "",
       reviewerProvider: normalizeReviewerProvider(v.reviewerProvider, v.reviewerBaseUrl),
       reviewerModel: v.reviewerModel ?? "",
       reviewerBaseUrl: v.reviewerBaseUrl ?? "",
@@ -1246,6 +1253,7 @@ export default function Settings() {
             <div className="sp-adv-section">
               <div className="sp-adv-section-title">其他</div>
               <div className="sp-adv-rows">
+                <div className="st-row"><div className="st-row-label"><span className="st-label">摘要模型</span><span className="st-hint">压缩上下文时生成摘要所用的模型；留空 = 自动</span></div><div className="st-row-control"><PresetTextInput value={advForm.summarizerModel ?? ""} placeholder="Auto（自动选便宜模型，如 Haiku）" options={SUMMARIZER_MODELS} onChange={(v) => { resetOpState(); setAdvForm((f) => ({ ...f, summarizerModel: v })); }} /></div></div>
                 <div className="st-row"><div className="st-row-label"><span className="st-label">语言</span></div><div className="st-row-control"><div className="st-lang-grid">{[{ value: "cn", label: "中文" }, { value: "en", label: "English" }].map((l) => <button key={l.value} type="button" className={`st-lang-card${advForm.language === l.value ? " active" : ""}`} onClick={() => { resetOpState(); setAdvForm((f) => ({ ...f, language: l.value })); }}><span className="st-lang-label">{l.label}</span></button>)}</div></div></div>
                 <div className="st-row"><div className="st-row-label"><span className="st-label">Scopus Key</span><span className="st-hint">{configView.hasScopusKey ? `Saved: ${configView.scopusKeyMasked ?? "configured"}` : "No key"}</span></div><div className="st-row-control"><KeyInput value={scopusKey} placeholder={configView.hasScopusKey ? "leave blank to keep" : "paste Elsevier key"} masked={configView.scopusKeyMasked} secretKind="scopusApiKey" onChange={(v) => { resetOpState(); setScopusKey(v); }} /></div></div>
                 <div className="st-row"><div className="st-row-label"><span className="st-label">Config file</span></div><div className="st-row-control"><input className="st-readonly-input" value={configView.configPath} readOnly /></div></div>

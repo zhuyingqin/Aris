@@ -361,6 +361,37 @@ describe("useChatStream concurrent sessions", () => {
     expect(patchAssistant).toHaveBeenCalled();
   });
 
+  it("annotates the compaction notice with how much context was freed", async () => {
+    let compactedHandler:
+      | ((event: { sessionId: string; removedMessageCount: number; tokensAfter?: number | null }) => void)
+      | undefined;
+    mocks.onChatContextCompacted.mockImplementation((handler) => {
+      compactedHandler = handler;
+      return Promise.resolve(() => undefined);
+    });
+
+    let noticeMessage: string | undefined;
+    const patchAssistant = vi.fn((_sessionId, fn) => {
+      const next = fn({ id: "assistant-1", role: "assistant", blocks: [], streaming: true });
+      const notice = next.blocks.find((block: { kind: string }) => block.kind === "notice");
+      noticeMessage = (notice as { message?: string } | undefined)?.message;
+    });
+
+    renderHook(() => useChatStream({
+      patchAssistant,
+      onComplete: vi.fn(),
+      onError: vi.fn(),
+      getContextTokens: () => 45_000,
+    }));
+
+    act(() => {
+      compactedHandler?.({ sessionId: "chat-ctx", removedMessageCount: 8, tokensAfter: 12_000 });
+    });
+
+    // 1 - 12000/45000 ≈ 73%.
+    expect(noticeMessage).toContain("45.0k → 12.0k tokens (−73%)");
+  });
+
   it("stops only the selected session and updates local state immediately", async () => {
     for (const listener of [
       mocks.onChatDelta,

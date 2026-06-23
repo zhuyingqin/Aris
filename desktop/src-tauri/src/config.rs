@@ -55,6 +55,9 @@ pub struct ConfigView {
     pub executor_provider: Option<String>,
     pub executor_model: Option<String>,
     pub executor_base_url: Option<String>,
+    /// Model used to summarize context on compaction. Empty/absent means "Auto"
+    /// (a per-provider default). See `aris_chat::resolve_summarizer_model`.
+    pub summarizer_model: Option<String>,
     pub has_executor_key: bool,
     pub executor_key_masked: Option<String>,
     pub reviewer_provider: Option<String>,
@@ -82,6 +85,7 @@ fn build_view(obj: &Map<String, Value>) -> ConfigView {
         executor_provider: get_str(obj, "executor_provider"),
         executor_model: get_str(obj, "executor_model"),
         executor_base_url: get_str(obj, "executor_base_url"),
+        summarizer_model: get_str(obj, "summarizer_model"),
         has_executor_key: exec_key.is_some(),
         executor_key_masked: exec_key.as_deref().map(mask),
         reviewer_provider: get_str(obj, "reviewer_provider"),
@@ -481,6 +485,7 @@ pub struct ConfigPatch {
     pub executor_provider: Option<String>,
     pub executor_model: Option<String>,
     pub executor_base_url: Option<String>,
+    pub summarizer_model: Option<String>,
     pub executor_api_key: Option<String>,
     pub reviewer_provider: Option<String>,
     pub reviewer_model: Option<String>,
@@ -561,6 +566,7 @@ fn apply_patch(obj: &mut Map<String, Value>, patch: ConfigPatch) {
     set_or_clear(obj, "executor_provider", patch.executor_provider);
     set_or_clear(obj, "executor_model", patch.executor_model);
     set_or_clear(obj, "executor_base_url", patch.executor_base_url);
+    set_or_clear(obj, "summarizer_model", patch.summarizer_model);
     set_or_clear(obj, "reviewer_provider", patch.reviewer_provider);
     set_or_clear(obj, "reviewer_model", patch.reviewer_model);
     set_or_clear(obj, "reviewer_base_url", patch.reviewer_base_url);

@@ -17,13 +17,55 @@ import type { ChatSendRequest } from "../api/tauri";
 import type { ChatBlock, ChatTurn } from "../types";
 import { appendTextDelta, appendThinkingDelta } from "./model";
 
+/** Compact a token count for display: 320, 1.2k, 45.0k. */
+function formatTokenCount(tokens: number): string {
+  return tokens >= 1000 ? `${(tokens / 1000).toFixed(1)}k` : String(tokens);
+}
+
+/** Build the auto-compaction notice. When both the pre- and post-compaction
+ * token counts are known (and the context actually shrank), annotate it with
+ * how much was freed: "… · 45.0k → 12.0k tokens (−73%)". Falls back to the
+ * bare message otherwise so callers without token data get a stable string. */
+function compactionNoticeMessage(
+  removedMessageCount: number,
+  before: number | null,
+  after: number | null,
+): string {
+  const base = removedMessageCount > 0
+    ? `Context compacted automatically; ${removedMessageCount} earlier messages were summarized.`
+    : "Context compacted automatically; large consumed tool payloads were shortened.";
+  if (before != null && after != null && before > after) {
+    const pct = Math.round((1 - after / before) * 100);
+    return `${base} · ${formatTokenCount(before)} → ${formatTokenCount(after)} tokens (−${pct}%)`;
+  }
+  return base;
+}
+
 interface StreamHandlers {
   patchAssistant: (sessionId: string, fn: (turn: ChatTurn) => ChatTurn) => void;
   onComplete: (sessionId: string, reply: string) => void;
   onError: (sessionId: string, error: string, stopped: boolean) => void;
+  /** Mid-turn auto-compaction reported the real post-compaction token count.
+   * Lets the host pin the ContextRing to it (same as the manual `/compact`
+   * path). Only called when the backend supplies a token count. */
+  onContextCompacted?: (sessionId: string, tokensAfter: number) => void;
+  /** A turn finished and the backend reported its real context occupancy
+   * (prompt + output). The host pins the ContextRing to it so the ring tracks
+   * the backend rather than the transcript estimate. */
+  onContextTokens?: (sessionId: string, tokens: number) => void;
+  /** Current authoritative context-token count for a session, used only to
+   * annotate the compaction notice with how much was freed. */
+  getContextTokens?: (sessionId: string) => number | null;
 }
 
-export function useChatStream({ patchAssistant, onComplete, onError }: StreamHandlers) {
+export function useChatStream({
+  patchAssistant,
+  onComplete,
+  onError,
+  onContextCompacted,
+  onContextTokens,
+  getContextTokens,
+}: StreamHandlers) {
   const [runningSessionIds, setRunningSessionIds] = useState<Set<string>>(() => new Set());
   const runningSessions = useRef(new Set<string>());
   const stopRequested = useRef(new Set<string>());
@@ -137,9 +179,10 @@ export function useChatStream({ patchAssistant, onComplete, onError }: StreamHan
           )),
         }));
       }),
-      onChatDone(({ sessionId }) => {
+      onChatDone(({ sessionId, contextTokens }) => {
         if (!isCurrentListener()) return;
         flush(sessionId);
+        if (contextTokens != null) onContextTokens?.(sessionId, contextTokens);
       }),
       // Authoritative failure signal from the backend. The `chatSend` promise
       // also rejects, and `onError` is idempotent (it sets the same turn
@@ -152,16 +195,16 @@ export function useChatStream({ patchAssistant, onComplete, onError }: StreamHan
         flush(sessionId);
         onError(sessionId, message, stopRequested.current.has(sessionId));
       }),
-      onChatContextCompacted(({ sessionId, removedMessageCount }) => {
+      onChatContextCompacted(({ sessionId, removedMessageCount, tokensAfter }) => {
         if (!isCurrentListener()) return;
         flush(sessionId);
-        const message = removedMessageCount > 0
-          ? `Context compacted automatically; ${removedMessageCount} earlier messages were summarized.`
-          : "Context compacted automatically; large consumed tool payloads were shortened.";
+        const before = getContextTokens?.(sessionId) ?? null;
+        const message = compactionNoticeMessage(removedMessageCount, before, tokensAfter ?? null);
         patchAssistant(sessionId, (turn) => ({
           ...turn,
           blocks: [...turn.blocks, { kind: "notice", message }],
         }));
+        if (tokensAfter != null) onContextCompacted?.(sessionId, tokensAfter);
       }),
     ];
     return () => {
@@ -171,7 +214,7 @@ export function useChatStream({ patchAssistant, onComplete, onError }: StreamHan
       flushTimers.current.clear();
       queues.current.clear();
     };
-  }, [enqueue, flush, onError, patchAssistant]);
+  }, [enqueue, flush, onError, patchAssistant, onContextCompacted, onContextTokens, getContextTokens]);
 
   const run = useCallback(async (sessionId: string, message: string | ChatSendRequest) => {
     if (runningSessions.current.has(sessionId)) return false;

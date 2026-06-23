@@ -1913,6 +1913,10 @@ pub struct ChatCommandResult {
     replace_turns: bool,
     open_settings: bool,
     refresh_status: bool,
+    /// Authoritative post-command context size in tokens, set by `/compact` so
+    /// the frontend ContextRing can drop to the real backend value instead of
+    /// the stale visible-transcript estimate. `None` leaves the ring untouched.
+    context_tokens: Option<u64>,
 }
 
 impl ChatCommandResult {
@@ -1925,6 +1929,7 @@ impl ChatCommandResult {
             replace_turns: false,
             open_settings: false,
             refresh_status: false,
+            context_tokens: None,
         }
     }
 
@@ -1937,6 +1942,7 @@ impl ChatCommandResult {
             replace_turns: false,
             open_settings: false,
             refresh_status: false,
+            context_tokens: None,
         }
     }
 
@@ -1949,6 +1955,7 @@ impl ChatCommandResult {
             replace_turns: false,
             open_settings: false,
             refresh_status: false,
+            context_tokens: None,
         }
     }
 
@@ -1961,6 +1968,7 @@ impl ChatCommandResult {
             replace_turns: false,
             open_settings: false,
             refresh_status: false,
+            context_tokens: None,
         }
     }
 
@@ -2044,13 +2052,18 @@ pub fn chat_run_command(
         SlashCommand::Compact => {
             let result = runtime::compact_session(&session, CompactionConfig::default());
             let removed = result.removed_message_count;
-            let kept = result.compacted_session.messages.len();
-            store_chat_session(&state, session_id, result.compacted_session)?;
-            Ok(ChatCommandResult::message(format_compact_report(
-                removed,
-                kept,
-                removed == 0,
-            )))
+            let compacted = result.compacted_session;
+            let kept = compacted.messages.len();
+            // Real post-compaction context size. Only surface it when something
+            // was actually removed; a no-op compaction leaves the ring's own
+            // estimate in place rather than pinning it.
+            let context_tokens = (removed > 0)
+                .then(|| runtime::estimate_session_tokens(&compacted) as u64);
+            store_chat_session(&state, session_id, compacted)?;
+            Ok(ChatCommandResult {
+                context_tokens,
+                ..ChatCommandResult::message(format_compact_report(removed, kept, removed == 0))
+            })
         }
         SlashCommand::Model { model } => handle_model_command(model),
         SlashCommand::Reviewer { model } => handle_reviewer_command(model),
@@ -2237,6 +2250,9 @@ fn suggest_chat_title(user: &str, assistant: &str) -> Result<String, String> {
         aris_chat::permission_policy_for_tools(Vec::new(), PermissionMode::ReadOnly),
         vec![system.to_string()],
         runtime::RuntimeFeatureConfig::default(),
+        // Title generation is a single tiny turn; never compacts, so no
+        // summarizer is needed.
+        None,
     )?;
     let summary = runtime
         .run_turn_message(ConversationMessage::user_text(prompt), None)
@@ -2443,6 +2459,9 @@ async fn run_chat_turn_with_context(
     let permission_prompts = state.permission_prompts.clone();
     let question_prompts = state.question_prompts.clone();
 
+    // Configured compaction-summary model (Settings → "Summary model"); empty
+    // means "Auto" and the chat crate picks a sensible default.
+    let summarizer_model = config_string("summarizer_model");
     let worker_app = app.clone();
     let worker_session_id = session_id.clone();
     let worker_cancelled = cancelled.clone();
@@ -2513,6 +2532,7 @@ async fn run_chat_turn_with_context(
             permission_policy,
             system_prompt,
             feature_config,
+            summarizer_model,
         )?;
         let summary = runtime
             .run_turn_message(user_message, Some(&mut permission_prompter))
@@ -2562,6 +2582,11 @@ async fn run_chat_turn_with_context(
         }
     };
 
+    // Capture the real post-compaction size before `updated` is moved into
+    // storage, so the frontend ContextRing can drop to it (same mechanism as
+    // the manual `/compact` path) instead of the stale transcript estimate.
+    let auto_compaction_tokens_after =
+        auto_compaction.map(|_| runtime::estimate_session_tokens(&updated) as u64);
     store_chat_session(state, session_id.clone(), updated)?;
     if let Err(error) = crate::usage_log::append_turn_usage(
         &session_id,
@@ -2576,13 +2601,20 @@ async fn run_chat_turn_with_context(
             "chat-context-compacted",
             json!({
                 "sessionId": &session_id,
-                "removedMessageCount": removed_message_count
+                "removedMessageCount": removed_message_count,
+                "tokensAfter": auto_compaction_tokens_after
             }),
         );
     }
+    // Real context occupancy of the just-finished turn (last request's prompt
+    // + its output) so the frontend ContextRing tracks the backend instead of
+    // its own transcript estimate. `None` when the provider reported no usage.
+    let context_tokens = turn_usages
+        .last()
+        .map(|usage| u64::from(usage.total_tokens()));
     let _ = app.emit(
         "chat-done",
-        json!({ "sessionId": session_id, "text": &text }),
+        json!({ "sessionId": session_id, "text": &text, "contextTokens": context_tokens }),
     );
     Ok(text)
 }

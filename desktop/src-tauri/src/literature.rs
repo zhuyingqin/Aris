@@ -129,6 +129,8 @@ pub(crate) fn run_oneshot(system: &str, message: ConversationMessage) -> Result<
         aris_chat::permission_policy_for_tools(Vec::new(), PermissionMode::ReadOnly),
         vec![system.to_string()],
         RuntimeFeatureConfig::default(),
+        // Single-turn helper; never compacts, so no summarizer needed.
+        None,
     )?;
     let summary = conversation
         .run_turn_message(message, None)

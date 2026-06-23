@@ -29,6 +29,10 @@ export interface ChatCommandResult {
   replaceTurns: boolean;
   openSettings: boolean;
   refreshStatus: boolean;
+  /** Authoritative post-compaction context size in tokens (set by `/compact`),
+   * used to drop the ContextRing to the real backend value. Null/absent leaves
+   * the ring's own transcript estimate in place. */
+  contextTokens?: number | null;
 }
 
 // ── Settings / Skills / Sessions (P1) ─────────────────────────────────────────
@@ -39,6 +43,8 @@ export interface ConfigView {
   executorProvider?: string | null;
   executorModel?: string | null;
   executorBaseUrl?: string | null;
+  /** Model used to summarize context on compaction; empty/absent = "Auto". */
+  summarizerModel?: string | null;
   hasExecutorKey: boolean;
   executorKeyMasked?: string | null;
   reviewerProvider?: string | null;
@@ -83,6 +89,7 @@ export interface ConfigPatch {
   executorProvider?: string;
   executorModel?: string;
   executorBaseUrl?: string;
+  summarizerModel?: string;
   executorApiKey?: string;
   reviewerProvider?: string;
   reviewerModel?: string;
