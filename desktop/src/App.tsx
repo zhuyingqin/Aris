@@ -13,6 +13,7 @@ import Extensions from "./extensions/Extensions";
 import Settings from "./settings/Settings";
 import Sessions from "./sessions/Sessions";
 import ScheduledTasks from "./scheduled/ScheduledTasks";
+import OnboardingTutorial from "./OnboardingTutorial";
 
 interface NavItem {
   id: string;
@@ -543,7 +544,10 @@ export default function App() {
           </button>
         </div>
       </div>
-      <aside className={`sidebar${mobileNavOpen ? " mobile-open" : ""}${sidebarCollapsed ? " sidebar-collapsed" : ""}`}>
+      <aside
+        className={`sidebar${mobileNavOpen ? " mobile-open" : ""}${sidebarCollapsed ? " sidebar-collapsed" : ""}`}
+        data-onboarding-target="sidebar"
+      >
         {NAV_GROUPS.map((g) => (
           <div className="nav-group" key={g.group}>
             <div className="nav-group-label">{g.group}</div>
@@ -551,6 +555,7 @@ export default function App() {
               <button
                 key={t.id}
                 className={`nav-item${tab === t.id ? " active" : ""}`}
+                data-onboarding-target={`nav-${t.id}`}
                 onClick={() => {
                   setTab(t.id as Tab);
                   setMobileNavOpen(false);
@@ -582,6 +587,7 @@ export default function App() {
         <div className="app-head-title">
           <button
             className="app-nav-toggle"
+            data-onboarding-target="mobile-menu"
             onClick={() => setMobileNavOpen((open) => !open)}
             aria-label="Toggle navigation"
             aria-expanded={mobileNavOpen}
@@ -608,7 +614,11 @@ export default function App() {
           )}
         </div>
         <div className="app-head-actions">
-          <div className="project-switcher" ref={projectSwitcherRef}>
+          <div
+            className="project-switcher"
+            ref={projectSwitcherRef}
+            data-onboarding-target="project-switcher"
+          >
             <button
               className="project-switcher-trigger"
               type="button"
@@ -694,7 +704,7 @@ export default function App() {
         </div>
       </header>
 
-      <main className="app-main">
+      <main className="app-main" data-onboarding-target="workspace">
         <div hidden={tab !== "chat"}>
           <Chat />
         </div>
@@ -716,6 +726,7 @@ export default function App() {
           </div>
         )}
       </main>
+      <OnboardingTutorial />
     </div>
   );
 }

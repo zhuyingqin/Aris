@@ -763,7 +763,7 @@ describe("ChatSidebar session menu", () => {
 
   function renderSidebar() {
     const session = { ...makeSession("project-a"), id: "chat-a", title: "Alpha chat" };
-    render(
+    return render(
       <ChatSidebar
         sessions={[session]}
         projects={projects}
@@ -780,6 +780,12 @@ describe("ChatSidebar session menu", () => {
       />,
     );
   }
+
+  it("does not render a duplicate Chat title inside the chat sidebar", () => {
+    const { container } = renderSidebar();
+
+    expect(container.querySelector(".chat-sidebar-title")).toBeNull();
+  });
 
   it("keeps the session menu inside the viewport when the anchor is near the bottom", async () => {
     const user = userEvent.setup();
@@ -816,6 +822,43 @@ describe("ChatSidebar session menu", () => {
     expect(menu.parentElement).toBe(document.body);
     expect(Number(menu.style.top.replace("px", ""))).toBeLessThan(560);
     expect(Number(menu.style.left.replace("px", ""))).toBeGreaterThanOrEqual(8);
+  });
+
+  it("shows the first five chats and collapses the rest in large project groups", async () => {
+    const user = userEvent.setup();
+    const sessions = Array.from({ length: 6 }, (_, index) => ({
+      ...makeSession("project-a"),
+      id: `chat-${index + 1}`,
+      title: `Topic ${index + 1}`,
+    }));
+
+    render(
+      <ChatSidebar
+        sessions={sessions}
+        projects={projects}
+        currentId="chat-1"
+        open
+        busy={false}
+        onClose={() => undefined}
+        onNew={() => undefined}
+        onOpen={() => undefined}
+        onRename={() => undefined}
+        onTogglePinned={() => undefined}
+        onDelete={() => undefined}
+        onReorderProjects={async () => undefined}
+      />,
+    );
+
+    expect(screen.getByText("Topic 1")).toBeTruthy();
+    expect(screen.getByText("Topic 5")).toBeTruthy();
+    expect(screen.queryByText("Topic 6")).toBeNull();
+    const toggle = screen.getByRole("button", { name: "Alpha, 6 chats, collapsed" });
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+
+    await user.click(toggle);
+
+    expect(screen.getByText("Topic 6")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Alpha, 6 chats, expanded" }).getAttribute("aria-expanded")).toBe("true");
   });
 });
 
