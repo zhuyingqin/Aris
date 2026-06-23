@@ -396,7 +396,7 @@ export default function ScheduledTasks() {
                     rows={6}
                     value={form.prompt}
                     onChange={(event) => setForm((current) => ({ ...current, prompt: event.target.value }))}
-                    placeholder="写下 Aris 到时间后要在该对话里继续执行的任务"
+                    placeholder="写下 SomniQ 到时间后要在该对话里继续执行的任务"
                   />
                 </label>
 

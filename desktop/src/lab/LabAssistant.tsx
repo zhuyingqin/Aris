@@ -94,7 +94,7 @@ interface LabAssistantSession {
 
 function labContext(projectPath: string | null, activePath: string | null, activeKind: ActiveKind, cells: NotebookCell[]): string {
   return [
-    "You are the Lab side assistant inside ARIS.",
+    "You are the Lab side assistant inside SomniQ.",
     "Help the user inspect files, edit workspace code when requested, and reason about the current Lab item.",
     projectPath ? `Project path: ${projectPath}` : null,
     activeKind === "file" && activePath ? `Current file: ${activePath}` : null,
@@ -671,7 +671,7 @@ export default function LabAssistant({
           ref={textareaRef}
           value={input}
           disabled={busy}
-          placeholder={ready ? "Ask ARIS to explain, inspect, or change code..." : "Configure a model in Settings first"}
+          placeholder={ready ? "Ask SomniQ to explain, inspect, or change code..." : "Configure a model in Settings first"}
           rows={4}
           onChange={(event) => setInput(event.target.value)}
           onKeyDown={(event) => {

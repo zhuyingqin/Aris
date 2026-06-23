@@ -114,7 +114,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "WorkspaceLayout",
-            description: "Return the canonical ARIS project output layout: where to place slides/PPTs, posters, web apps, notebooks, run artifacts, and scratch files.",
+            description: "Return the canonical SomniQ project output layout: where to place slides/PPTs, posters, web apps, notebooks, run artifacts, and scratch files.",
             input_schema: json!({
                 "type": "object",
                 "properties": {},
@@ -551,7 +551,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "LlmReview",
-            description: "Send content to an external LLM reviewer for independent critical review. Supports OpenAI, Gemini, GLM, MiniMax, Kimi, and Anthropic-compatible endpoints. Routes by model name. Prefer omitting `model` and letting ARIS use the user's configured reviewer.",
+            description: "Send content to an external LLM reviewer for independent critical review. Supports OpenAI, Gemini, GLM, MiniMax, Kimi, and Anthropic-compatible endpoints. Routes by model name. Prefer omitting `model` and letting SomniQ use the user's configured reviewer.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -2306,7 +2306,7 @@ fn inject_resolver_preamble(
     ));
     layer += 1;
     preamble.push_str(&format!(
-        "{layer}. `<project_root>/tools/<helper>` (legacy compat with main-branch ARIS layouts)\n\n"
+        "{layer}. `<project_root>/tools/<helper>` (legacy compat with main-branch SomniQ layouts)\n\n"
     ));
 
     if report.available_helpers.is_empty() {
@@ -4449,7 +4449,7 @@ fn run_llm_review(input: LlmReviewInput) -> Result<String, String> {
         Some("none" | "disabled" | "off")
     ) {
         return Err(
-            "LlmReview: reviewer is disabled in ARIS settings. Configure a reviewer before using LlmReview."
+            "LlmReview: reviewer is disabled in SomniQ settings. Configure a reviewer before using LlmReview."
                 .to_string(),
         );
     }

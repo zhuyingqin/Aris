@@ -47,11 +47,12 @@ if (!fs.existsSync(bundleDir)) {
 
 const files = fs.readdirSync(bundleDir);
 const installerName =
+  files.find((name) => name === `SomniQ Studio_${version}_x64-setup.exe`) ||
   files.find((name) => name === `ARIS Studio_${version}_x64-setup.exe`) ||
   files.find((name) => name.endsWith("_x64-setup.exe"));
 
 if (!installerName) {
-  throw new Error(`Could not find ARIS Studio NSIS installer in ${bundleDir}`);
+  throw new Error(`Could not find SomniQ Studio NSIS installer in ${bundleDir}`);
 }
 
 const signaturePath = path.join(bundleDir, `${installerName}.sig`);
@@ -64,7 +65,7 @@ const installerAssetName =
   argValue("--asset-name", process.env.ARIS_UPDATE_ASSET_NAME) ||
   githubReleaseAssetName(installerName);
 const installerUrl = `${releaseBaseUrl.replace(/\/+$/, "")}/${encodeReleaseAssetName(installerAssetName)}`;
-const notes = process.env.RELEASE_NOTES || `ARIS Studio ${version}`;
+const notes = process.env.RELEASE_NOTES || `SomniQ Studio ${version}`;
 
 const windowsEntry = {
   signature,

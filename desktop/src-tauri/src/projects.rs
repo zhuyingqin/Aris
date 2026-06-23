@@ -60,7 +60,7 @@ fn default_project() -> DesktopProject {
     let path = state::default_workspace_dir();
     DesktopProject {
         id: "default".to_string(),
-        name: "ARIS Desktop Workspace".to_string(),
+        name: "SomniQ Desktop Workspace".to_string(),
         path: path.to_string_lossy().into_owned(),
         added_at: 0,
         last_opened_at: 0,

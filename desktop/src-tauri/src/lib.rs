@@ -173,7 +173,7 @@ pub fn run() {
             if let Some(resource_dir) = resource_dir(app) {
                 augment_resource_path_for_mcp(&resource_dir);
                 if let Err(error) = config::apply_bundled_internal_config(&resource_dir) {
-                    eprintln!("ARIS internal config import skipped: {error}");
+                    eprintln!("SomniQ internal config import skipped: {error}");
                 }
             }
             configure_tectonic_environment();
@@ -307,7 +307,7 @@ pub fn run() {
             files::project_chat_starters,
         ])
         .build(tauri::generate_context!())
-        .expect("error while building ARIS Studio")
+        .expect("error while building SomniQ Studio")
         .run(|app_handle, event| {
             if matches!(event, tauri::RunEvent::ExitRequested { .. }) {
                 cleanup_before_exit(app_handle);

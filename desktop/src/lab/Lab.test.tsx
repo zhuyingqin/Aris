@@ -42,6 +42,7 @@ const mocks = vi.hoisted(() => ({
   onChatDelta: vi.fn(),
   onChatDone: vi.fn(),
   onChatError: vi.fn(),
+  onChatContextCompacted: vi.fn(),
   onChatPermissionRequest: vi.fn(),
   onChatPermissionResolved: vi.fn(),
   onChatThinkingDelta: vi.fn(),
@@ -96,6 +97,7 @@ vi.mock("../api/tauri", () => ({
   onChatDelta: mocks.onChatDelta,
   onChatDone: mocks.onChatDone,
   onChatError: mocks.onChatError,
+  onChatContextCompacted: mocks.onChatContextCompacted,
   onChatPermissionRequest: mocks.onChatPermissionRequest,
   onChatPermissionResolved: mocks.onChatPermissionResolved,
   onChatThinkingDelta: mocks.onChatThinkingDelta,
@@ -236,6 +238,7 @@ beforeEach(() => {
   mocks.onChatDelta.mockReset().mockResolvedValue(unlisten);
   mocks.onChatDone.mockReset().mockResolvedValue(unlisten);
   mocks.onChatError.mockReset().mockResolvedValue(unlisten);
+  mocks.onChatContextCompacted.mockReset().mockResolvedValue(unlisten);
   mocks.onChatPermissionRequest.mockReset().mockResolvedValue(unlisten);
   mocks.onChatPermissionResolved.mockReset().mockResolvedValue(unlisten);
   mocks.onChatThinkingDelta.mockReset().mockResolvedValue(unlisten);
@@ -499,7 +502,7 @@ describe("Lab", () => {
     ]));
 
     const { container } = render(<Lab />);
-    await screen.findByPlaceholderText("Ask ARIS to explain, inspect, or change code...");
+    await screen.findByPlaceholderText("Ask SomniQ to explain, inspect, or change code...");
 
     expect(screen.queryByText("Previous Lab question")).toBeNull();
     expect(container.querySelector(".lab-assistant-empty")).toBeTruthy();
@@ -513,7 +516,7 @@ describe("Lab", () => {
 
   it("keeps Lab Assistant chats in local history", async () => {
     const { container } = render(<Lab />);
-    const input = await screen.findByPlaceholderText("Ask ARIS to explain, inspect, or change code...");
+    const input = await screen.findByPlaceholderText("Ask SomniQ to explain, inspect, or change code...");
     fireEvent.change(input, { target: { value: "Explain my Lab history" } });
     fireEvent.click(screen.getByRole("button", { name: "Send message" }));
 

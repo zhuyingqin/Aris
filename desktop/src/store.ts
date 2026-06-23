@@ -12,7 +12,7 @@ import { isLabPreviewMode } from "./api/labPreview";
 
 const PREVIEW_PROJECT: DesktopProject = {
   id: "default",
-  name: "ARIS Desktop Workspace",
+  name: "SomniQ Desktop Workspace",
   path: "browser preview",
   addedAt: 0,
   lastOpenedAt: 0,
@@ -29,9 +29,35 @@ export type Tab =
   | "sessions"
   | "scheduled";
 
+export type Theme = "dark" | "light";
+
+const THEME_STORAGE_KEY = "aris-theme";
+
+function readStoredTheme(): Theme {
+  try {
+    return localStorage.getItem(THEME_STORAGE_KEY) === "light" ? "light" : "dark";
+  } catch {
+    return "dark";
+  }
+}
+
+function applyTheme(theme: Theme) {
+  if (typeof document !== "undefined") {
+    document.documentElement.dataset.theme = theme;
+  }
+  try {
+    localStorage.setItem(THEME_STORAGE_KEY, theme);
+  } catch {
+    // Private mode / storage disabled — theme still applies for this session.
+  }
+}
+
 interface AppState {
   tab: Tab;
   setTab: (tab: Tab) => void;
+
+  theme: Theme;
+  setTheme: (theme: Theme) => void;
 
   /** One-shot composer prefill consumed by Chat (e.g. Literature → /arxiv). */
   pendingChatInput: string | null;
@@ -60,9 +86,18 @@ interface AppState {
   init: () => () => void;
 }
 
+const initialTheme = readStoredTheme();
+applyTheme(initialTheme);
+
 export const useStore = create<AppState>((set, get) => ({
   tab: isLabPreviewMode() ? "lab" : "chat",
   setTab: (tab) => set({ tab }),
+
+  theme: initialTheme,
+  setTheme: (theme) => {
+    applyTheme(theme);
+    set({ theme });
+  },
 
   pendingChatInput: null,
   setPendingChatInput: (value) => set({ pendingChatInput: value }),

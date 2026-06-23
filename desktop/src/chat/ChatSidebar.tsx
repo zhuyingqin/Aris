@@ -20,7 +20,6 @@ interface Props {
   open: boolean;
   busy: boolean;
   onClose: () => void;
-  onDesktopCollapse: () => void;
   onNew: () => void;
   onOpen: (id: string) => void | Promise<void>;
   onRename: (id: string, title: string) => void;
@@ -64,7 +63,6 @@ export default function ChatSidebar({
   open,
   busy,
   onClose,
-  onDesktopCollapse,
   onNew,
   onOpen,
   onRename,
@@ -343,19 +341,14 @@ export default function ChatSidebar({
 
   return (
     <aside className={`chat-sidebar${open ? " open" : ""}`} aria-label="Chat sessions">
+      <div className="chat-sidebar-container">
+        <div className="chat-sidebar-top-group">
+        <div className="chat-sidebar-title">Chat</div>
       <div className="chat-sidebar-head">
         <div className="chat-sidebar-top-row">
           <button className="chat-new-btn" onClick={onNew} disabled={busy}>
             <span className="chat-new-icon">+</span>
             <span>新线程</span>
-          </button>
-          <button
-            className="chat-sidebar-desktop-collapse"
-            onClick={onDesktopCollapse}
-            title="Collapse sidebar"
-            aria-label="Collapse chat sidebar"
-          >
-            ‹
           </button>
           <button className="chat-sidebar-close" onClick={onClose} aria-label="Close chat sidebar">×</button>
         </div>
@@ -367,6 +360,7 @@ export default function ChatSidebar({
           <span>定时任务</span>
         </button>
       </div>
+        </div>
       <div className="chat-session-search">
         <input
           value={query}
@@ -501,6 +495,7 @@ export default function ChatSidebar({
             ))}
           </section>
         ))}
+      </div>
       </div>
     </aside>
   );

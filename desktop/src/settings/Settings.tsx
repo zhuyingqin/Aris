@@ -12,6 +12,7 @@ import {
   isTauri,
 } from "../api/tauri";
 import { useStore } from "../store";
+import companyLogo from "../assets/company-logo.png";
 import { useProvidersStore, type ProviderEntry } from "./providersStore";
 import MailSettings, { MailSettingsDetail } from "./MailSettings";
 import type {
@@ -542,6 +543,8 @@ type UpdateState = "idle" | "checking" | "available" | "current" | "downloading"
 
 export default function Settings() {
   const setError = useStore((s) => s.setError);
+  const theme = useStore((s) => s.theme);
+  const setTheme = useStore((s) => s.setTheme);
   const [configView, setConfigView] = useState<ConfigView | null>(null);
   const [advForm, setAdvForm] = useState<ConfigPatch>({});
   const [execKey, setExecKey] = useState("");
@@ -607,7 +610,7 @@ export default function Settings() {
   useEffect(() => {
     if (!isTauri()) return;
     void loadUsageSummary();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => () => {
@@ -656,7 +659,7 @@ export default function Settings() {
 
     if (execId) setExecutor(execId, configView.executorModel ?? "");
     if (reviewId) setReviewer(reviewId, configView.reviewerModel ?? "");
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [configView]);
 
   const resetOpState = () => {
@@ -995,7 +998,7 @@ export default function Settings() {
         <div className="sp-status-sep" />
         <div className="sp-status-slot sp-status-version">
           <span className="sp-status-tag sp-status-tag-version">版本</span>
-          <span className="sp-status-model">ARIS Studio v{configView.appVersion}</span>
+          <span className="sp-status-model">SomniQ Studio v{configView.appVersion}</span>
         </div>
       </div>
 
@@ -1003,7 +1006,7 @@ export default function Settings() {
         <div className="sp-section-head">
           <div className="sp-section-head-text">
             <div className="sp-section-title">应用更新</div>
-            <div className="sp-section-sub">通过 GitHub Release 检查、下载并安装 ARIS Studio 更新</div>
+            <div className="sp-section-sub">通过 GitHub Release 检查、下载并安装 SomniQ Studio 更新</div>
           </div>
           <div className="sp-update-actions">
             <button className="sp-btn sp-btn-secondary" onClick={() => void checkForUpdates()} disabled={updateBusy} type="button">
@@ -1032,7 +1035,7 @@ export default function Settings() {
                     ? `v${updateInfo?.version ?? ""} 已安装`
                     : updateState === "downloading"
                       ? "正在安装更新"
-                      : "ARIS Studio 已连接 GitHub 更新通道"}
+                      : "SomniQ Studio 已连接 GitHub 更新通道"}
               </div>
               <div className="sp-update-meta">
                 当前版本 v{configView.appVersion}
@@ -1049,6 +1052,33 @@ export default function Settings() {
                 <div className="sp-update-notes">{updateInfo.body}</div>
               )}
             </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="sp-appearance-section">
+        <div className="sp-section-head">
+          <div className="sp-section-head-text">
+            <div className="sp-section-title">外观</div>
+            <div className="sp-section-sub">切换 SomniQ Studio 的明暗主题</div>
+          </div>
+          <div className="sp-theme-toggle" role="radiogroup" aria-label="主题">
+            {([
+              { value: "dark", label: "深色" },
+              { value: "light", label: "浅色" },
+            ] as const).map((opt) => (
+              <button
+                key={opt.value}
+                type="button"
+                role="radio"
+                aria-checked={theme === opt.value}
+                className={`sp-theme-option${theme === opt.value ? " active" : ""}`}
+                onClick={() => setTheme(opt.value)}
+              >
+                <span className="sp-theme-swatch" data-theme-swatch={opt.value} aria-hidden="true" />
+                {opt.label}
+              </button>
+            ))}
           </div>
         </div>
       </div>
@@ -1248,12 +1278,17 @@ export default function Settings() {
         <div className="sp-section-head">
           <div className="sp-section-head-text">
             <div className="sp-section-title">集成</div>
-            <div className="sp-section-sub">邮箱连接，将 Aris 接入 Gmail / Outlook / IMAP</div>
+            <div className="sp-section-sub">邮箱连接，将 SomniQ 接入 Gmail / Outlook / IMAP</div>
           </div>
         </div>
         <div className="sp-card-list">
           <MailSettings onOpen={() => setMailDetailOpen(true)} />
         </div>
+      </div>
+
+      <div className="sp-brand-footer">
+        <img className="sp-brand-logo" src={companyLogo} alt="SomniQ" />
+        <span className="sp-brand-copy">SomniQ Studio</span>
       </div>
     </div>
   );

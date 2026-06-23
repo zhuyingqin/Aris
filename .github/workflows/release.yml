@@ -96,7 +96,7 @@ jobs:
         working-directory: desktop
         run: npm ci
 
-      - name: Build signed ARIS Studio installer
+      - name: Build signed SomniQ Studio installer
         working-directory: desktop
         shell: pwsh
         env:
@@ -116,8 +116,8 @@ jobs:
         with:
           name: aris-studio-windows-x64
           path: |
-            desktop/src-tauri/target/release/bundle/nsis/ARIS Studio_*_x64-setup.exe
-            desktop/src-tauri/target/release/bundle/nsis/ARIS Studio_*_x64-setup.exe.sig
+            desktop/src-tauri/target/release/bundle/nsis/SomniQ Studio_*_x64-setup.exe
+            desktop/src-tauri/target/release/bundle/nsis/SomniQ Studio_*_x64-setup.exe.sig
             desktop/src-tauri/target/release/bundle/nsis/latest.json
 
   release:
@@ -144,8 +144,8 @@ jobs:
             aris-code-linux-x64.tar.gz.sha256
             aris-code-windows-x64.zip
             aris-code-windows-x64.zip.sha256
-            ARIS Studio_*_x64-setup.exe
-            ARIS Studio_*_x64-setup.exe.sig
+            SomniQ Studio_*_x64-setup.exe
+            SomniQ Studio_*_x64-setup.exe.sig
             latest.json
           overwrite_files: true
           generate_release_notes: true

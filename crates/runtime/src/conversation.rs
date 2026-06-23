@@ -859,7 +859,7 @@ fn build_assistant_message(
             .as_deref()
             .is_some_and(is_recoverable_stop_reason)
     {
-        text = "[The previous response was truncated before it produced a complete content or tool-call block. ARIS will continue automatically.]".to_string();
+        text = "[The previous response was truncated before it produced a complete content or tool-call block. SomniQ will continue automatically.]".to_string();
     }
     flush_text_block(&mut text, &mut blocks);
 
@@ -1026,7 +1026,7 @@ fn bound_context_text(output: String, max_chars: usize, label: &str) -> String {
         return output;
     }
     let marker = format!(
-        "\n\n[ARIS truncated this {label} for context safety: {total} chars total. Use a narrower query, pagination, or a file artifact to inspect the omitted content.]\n\n"
+        "\n\n[SomniQ truncated this {label} for context safety: {total} chars total. Use a narrower query, pagination, or a file artifact to inspect the omitted content.]\n\n"
     );
     let available = max_chars.saturating_sub(marker.chars().count());
     let head_chars = available.saturating_mul(3) / 4;

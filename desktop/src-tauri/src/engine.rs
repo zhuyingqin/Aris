@@ -129,7 +129,7 @@ fn is_disabled_desktop_slash_command(command_name: &str) -> bool {
 
 fn denied_tool_message(tool_name: &str) -> String {
     format!(
-        "tool `{tool_name}` is disabled in desktop Chat because it can escape the isolated ARIS workspace"
+        "tool `{tool_name}` is disabled in desktop Chat because it can escape the isolated SomniQ workspace"
     )
 }
 
@@ -726,7 +726,7 @@ fn compact_json_string_values_for_ui(value: &mut serde_json::Value) {
             let total = text.chars().count();
             if total > MAX_UI_TOOL_INPUT_FIELD_CHARS {
                 let marker = format!(
-                    "\n\n[ARIS truncated this tool input field for UI: {total} chars total.]\n\n"
+                    "\n\n[SomniQ truncated this tool input field for UI: {total} chars total.]\n\n"
                 );
                 *text = compact_edges(text, MAX_UI_TOOL_INPUT_FIELD_CHARS, &marker);
             }
@@ -750,7 +750,7 @@ fn compact_large_json_string_field(value: &mut serde_json::Value, key: &str, lab
     if total <= MAX_UI_TOOL_INPUT_FIELD_CHARS {
         return;
     }
-    let marker = format!("\n\n[ARIS truncated {label} for UI: {total} chars total.]\n\n");
+    let marker = format!("\n\n[SomniQ truncated {label} for UI: {total} chars total.]\n\n");
     object.insert(
         key.to_string(),
         serde_json::Value::String(compact_edges(&text, MAX_UI_TOOL_INPUT_FIELD_CHARS, &marker)),
@@ -775,7 +775,7 @@ fn omit_large_json_string_field(value: &mut serde_json::Value, key: &str, label:
     object.insert(
         key.to_string(),
         serde_json::Value::String(format!(
-            "[ARIS omitted {label} from UI: {total} chars. The tool receives the full value if this call completes; inspect the file on disk.]"
+            "[SomniQ omitted {label} from UI: {total} chars. The tool receives the full value if this call completes; inspect the file on disk.]"
         )),
     );
     object.insert(format!("{key}Chars"), json!(total));
@@ -1083,7 +1083,7 @@ fn compact_stream_text(
         return (value.to_string(), false);
     }
     let marker = format!(
-        "\n\n[ARIS truncated {stream_name}: {total} chars total. {}]\n\n",
+        "\n\n[SomniQ truncated {stream_name}: {total} chars total. {}]\n\n",
         full_output_note(artifact)
     );
     (compact_edges(value, max_chars, &marker), true)
@@ -1100,7 +1100,7 @@ fn compact_text_output_for_limit(
         return output;
     }
     let marker = format!(
-        "\n\n[ARIS truncated this {label}: {total} chars total. {}]\n\n",
+        "\n\n[SomniQ truncated this {label}: {total} chars total. {}]\n\n",
         full_output_note(artifact)
     );
     compact_edges(&output, max_chars, &marker)
@@ -1178,12 +1178,12 @@ fn build_system_prompt_inner(model: &str, full_tool_registry: bool) -> Vec<Strin
         .unwrap_or_else(|_| crate::state::workspace_dir());
     let access = if full_tool_registry {
         format!(
-            "Desktop Chat runs in the ARIS workspace at `{}`. The desktop tool registry, including shell, MCP, and single-agent tools, is available when the active permission mode allows it. Team/Workflow orchestration tools are disabled on this surface. Respect the selected permission mode and keep generated project artifacts in this workspace unless the user explicitly requests another location.",
+            "Desktop Chat runs in the SomniQ workspace at `{}`. The desktop tool registry, including shell, MCP, and single-agent tools, is available when the active permission mode allows it. Team/Workflow orchestration tools are disabled on this surface. Respect the selected permission mode and keep generated project artifacts in this workspace unless the user explicitly requests another location.",
             workspace.display()
         )
     } else {
         format!(
-            "Desktop Chat runs in the ARIS workspace at `{}`. Some tools are unavailable on this surface; use the available tools and respect the selected permission mode.",
+            "Desktop Chat runs in the SomniQ workspace at `{}`. Some tools are unavailable on this surface; use the available tools and respect the selected permission mode.",
             workspace.display()
         )
     };
@@ -3063,7 +3063,7 @@ fn handle_permissions_command(
 
 fn format_permissions_report(mode: &str) -> String {
     format!(
-        "Permissions\n  Active mode      {mode}\n  Surface          desktop Chat\n\nModes\n  plan / read-only              Inspect and search only\n  acceptEdits / workspace-write Read and edit workspace files\n  ask / prompt                  Ask before gated tool calls\n  dontAsk / danger-full-access  Auto-approve shell, MCP, and available agent tools\n\nBoundary\n  These modes gate ARIS tool calls only. They do not grant Windows administrator rights; shell commands still run with the current ARIS process/user privileges.\n\nUsage\n  Inspect current mode with /permissions\n  Switch modes with /permissions <mode>\n  Project settings permissions.defaultMode supplies the session default"
+        "Permissions\n  Active mode      {mode}\n  Surface          desktop Chat\n\nModes\n  plan / read-only              Inspect and search only\n  acceptEdits / workspace-write Read and edit workspace files\n  ask / prompt                  Ask before gated tool calls\n  dontAsk / danger-full-access  Auto-approve shell, MCP, and available agent tools\n\nBoundary\n  These modes gate SomniQ tool calls only. They do not grant Windows administrator rights; shell commands still run with the current SomniQ process/user privileges.\n\nUsage\n  Inspect current mode with /permissions\n  Switch modes with /permissions <mode>\n  Project settings permissions.defaultMode supplies the session default"
     )
 }
 
@@ -3731,7 +3731,7 @@ fn render_desktop_claude_md(cwd: &Path) -> String {
     let lines = vec![
         "# CLAUDE.md".to_string(),
         String::new(),
-        "This file provides guidance to ARIS desktop Chat when working in this isolated workspace.".to_string(),
+        "This file provides guidance to SomniQ desktop Chat when working in this isolated workspace.".to_string(),
         String::new(),
         "## Workspace".to_string(),
         format!("- Desktop workspace: `{}`.", cwd.display()),
@@ -3858,7 +3858,7 @@ fn render_last_tool_debug_report(session: &Session) -> Result<String, String> {
 
 fn render_version_report() -> String {
     format!(
-        "ARIS Desktop\n  Version          {}\n  Target           {}\n  Build date       {}",
+        "SomniQ Desktop\n  Version          {}\n  Target           {}\n  Build date       {}",
         env!("CARGO_PKG_VERSION"),
         option_env!("TARGET").unwrap_or("unknown"),
         option_env!("ARIS_BUILD_DATE").unwrap_or("unknown")
@@ -4270,7 +4270,7 @@ mod tests {
         let rendered = tool_output_for_ui(&output, None);
 
         assert_eq!(rendered, output);
-        assert!(!rendered.contains("ARIS truncated"));
+        assert!(!rendered.contains("SomniQ truncated"));
     }
 
     #[test]
@@ -4289,7 +4289,7 @@ mod tests {
 
         assert_eq!(compacted, raw);
         assert_eq!(parsed["stdout"].as_str().unwrap().chars().count(), 20_000);
-        assert!(!compacted.contains("ARIS truncated"));
+        assert!(!compacted.contains("SomniQ truncated"));
     }
 
     #[test]
@@ -4315,7 +4315,7 @@ mod tests {
         assert!(compacted.chars().count() <= MAX_CONTEXT_TOOL_OUTPUT_CHARS);
         assert!(compacted_stdout.starts_with("start"));
         assert!(compacted_stdout.ends_with("end"));
-        assert!(compacted_stdout.contains("ARIS truncated stdout"));
+        assert!(compacted_stdout.contains("SomniQ truncated stdout"));
         assert!(compacted_stdout.chars().count() <= SHELL_STREAM_CONTEXT_CHARS);
         assert_eq!(parsed["persistedOutputPath"], artifact.path);
         assert_eq!(parsed["rawOutputPath"], artifact.path);
@@ -4420,6 +4420,23 @@ mod tests {
         assert!(prompt.contains("Long file generation"));
         assert!(prompt.contains("24000 characters"));
         assert!(prompt.contains("append_file"));
+    }
+
+    #[test]
+    fn desktop_prompt_is_deterministic_for_prompt_caching() {
+        // The system prompt is rebuilt every turn and forms the request prefix.
+        // OpenAI-compatible automatic prompt caching (the only caching path ARIS
+        // has — there is no native Anthropic /v1/messages channel) only engages
+        // when that prefix is byte-identical across turns. Any per-call
+        // nondeterminism — a timestamp, a random id, HashMap iteration order — in
+        // a prompt section would silently bust the cache and quietly inflate input
+        // token cost. Guard the invariant so such a regression fails loudly here.
+        let first = build_system_prompt_inner("test-model", true).join("\n");
+        let second = build_system_prompt_inner("test-model", true).join("\n");
+        assert_eq!(
+            first, second,
+            "system prompt must be deterministic across rebuilds so prompt caching can hit"
+        );
     }
 
     #[test]

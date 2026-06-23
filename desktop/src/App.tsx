@@ -6,14 +6,13 @@ import { useStore, type Tab } from "./store";
 import type { AppUpdateInfo, AppUpdateProgress } from "./types";
 import Chat from "./chat/Chat";
 import Lab from "./lab/Lab";
-import Literature from "./literature/Literature";
+import Literature, { LiteratureViewTabs, type LiteraturePageView } from "./literature/Literature";
 import Studio from "./studio/Studio";
 import Mail from "./mail/Mail";
 import Extensions from "./extensions/Extensions";
 import Settings from "./settings/Settings";
 import Sessions from "./sessions/Sessions";
 import ScheduledTasks from "./scheduled/ScheduledTasks";
-import arisIcon from "./assets/aris-icon.svg";
 
 interface NavItem {
   id: string;
@@ -33,6 +32,67 @@ const IC = (p: { d: string; extra?: string }) => (
     aria-hidden="true">
     <path d={p.d} />
     {p.extra && <path d={p.extra} />}
+  </svg>
+);
+
+// Chevron / control glyphs rendered as crisp SVG so they align on the pixel grid
+// instead of relying on font-dependent glyphs like "‹", "×" or "v".
+const Chevron = (p: { dir: "left" | "right" | "down"; size?: number }) => {
+  const s = p.size ?? 16;
+  const d = p.dir === "left" ? "M10 3.5 5.5 8l4.5 4.5"
+    : p.dir === "right" ? "M6 3.5 10.5 8 6 12.5"
+      : "M3.5 6 8 10.5 12.5 6";
+  return (
+    <svg width={s} height={s} viewBox="0 0 16 16" fill="none" stroke="currentColor"
+      strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d={d} />
+    </svg>
+  );
+};
+
+// Windows-style window controls, 10×10 viewBox centered in a 46×36 hit area.
+const WinCtl = {
+  minimize: (
+    <svg className="win-ctl-glyph" width="10" height="10" viewBox="0 0 10 10"
+      fill="none" stroke="currentColor" strokeWidth="1" aria-hidden="true">
+      <path d="M1.5 5h7" />
+    </svg>
+  ),
+  maximize: (
+    <svg className="win-ctl-glyph" width="10" height="10" viewBox="0 0 10 10"
+      fill="none" stroke="currentColor" strokeWidth="1" aria-hidden="true">
+      <rect x="1.5" y="1.5" width="7" height="7" rx="0.75" />
+    </svg>
+  ),
+  close: (
+    <svg className="win-ctl-glyph" width="10" height="10" viewBox="0 0 10 10"
+      fill="none" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" aria-hidden="true">
+      <path d="M1.6 1.6 8.4 8.4M8.4 1.6 1.6 8.4" />
+    </svg>
+  ),
+};
+
+// Sidebar panel-toggle icon (rounded frame with a left rail), and a six-dot grip.
+const PanelIcon = () => (
+  <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+    strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <rect x="2.25" y="3" width="11.5" height="10" rx="2" />
+    <path d="M6.25 3v10" />
+  </svg>
+);
+
+const GripIcon = () => (
+  <svg width="10" height="14" viewBox="0 0 10 14" fill="currentColor" aria-hidden="true">
+    <circle cx="3" cy="3" r="1.1" /><circle cx="7" cy="3" r="1.1" />
+    <circle cx="3" cy="7" r="1.1" /><circle cx="7" cy="7" r="1.1" />
+    <circle cx="3" cy="11" r="1.1" /><circle cx="7" cy="11" r="1.1" />
+  </svg>
+);
+
+const PlusIcon = () => (
+  <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+    strokeWidth="1.6" strokeLinecap="round" aria-hidden="true">
+    <path d="M8 3.5v9M3.5 8h9" />
   </svg>
 );
 
@@ -139,9 +199,6 @@ export default function App() {
   const addProject = useStore((s) => s.addProject);
   const switchProject = useStore((s) => s.switchProject);
   const reorderProjects = useStore((s) => s.reorderProjects);
-  const [theme, setTheme] = useState<"dark" | "light">(
-    () => (localStorage.getItem("aris-theme") === "light" ? "light" : "dark"),
-  );
   const [sidebarWidth, setSidebarWidth] = useState<number>(() => {
     const v = Number(localStorage.getItem("aris-sidebar-w"));
     return v >= 140 && v <= 400 ? v : 192;
@@ -157,6 +214,7 @@ export default function App() {
   const [updateState, setUpdateState] = useState<UpdateIndicatorState>("idle");
   const [updateInfo, setUpdateInfo] = useState<AppUpdateInfo | null>(null);
   const [updateProgress, setUpdateProgress] = useState<AppUpdateProgress | null>(null);
+  const [literaturePageView, setLiteraturePageView] = useState<LiteraturePageView>("library");
   const projectSwitcherRef = useRef<HTMLDivElement | null>(null);
   const projectOrderPreviewRef = useRef<string[] | null>(null);
   const suppressProjectClickRef = useRef(false);
@@ -175,7 +233,7 @@ export default function App() {
     const selected = await open({
       directory: true,
       multiple: false,
-      title: "Add ARIS project",
+      title: "Add SomniQ project",
     });
     if (typeof selected === "string") {
       try {
@@ -335,10 +393,6 @@ export default function App() {
     return () => window.clearInterval(timer);
   }, [checkForAppUpdate]);
   useEffect(() => {
-    document.documentElement.dataset.theme = theme;
-    localStorage.setItem("aris-theme", theme);
-  }, [theme]);
-  useEffect(() => {
     if (!mobileNavOpen) return;
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape") setMobileNavOpen(false);
@@ -372,10 +426,11 @@ export default function App() {
     .map((id) => projectById.get(id))
     .filter((project): project is NonNullable<typeof project> => Boolean(project));
   const labWorkbench = tab === "lab";
+  const chatShell = tab === "chat";
   const showUpdateIndicator = updateState === "available" || updateState === "downloading" || updateState === "ready";
   const updateVersionLabel = updateInfo?.version ? ` v${updateInfo.version}` : "";
   const updateTitle = updateState === "ready"
-    ? `Update${updateVersionLabel} installed. Restart ARIS Studio.`
+    ? `Update${updateVersionLabel} installed. Restart SomniQ Studio.`
     : updateState === "downloading"
       ? updateProgress?.percent != null
         ? `Installing update${updateVersionLabel}: ${updateProgress.percent}%`
@@ -440,7 +495,7 @@ export default function App() {
 
   return (
     <div
-      className={`app${sidebarCollapsed ? " sidebar-collapsed" : ""}${labWorkbench ? " app-lab-workbench" : ""}`}
+      className={`app${sidebarCollapsed ? " sidebar-collapsed" : ""}${labWorkbench ? " app-lab-workbench" : ""}${chatShell ? " app-chat-shell" : ""}`}
       style={{ "--app-sidebar-w": sidebarCollapsed ? "0px" : `${sidebarWidth}px` } as CSSProperties}
     >
       <div className="window-titlebar">
@@ -452,13 +507,13 @@ export default function App() {
             title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
             aria-label={sidebarCollapsed ? "Expand navigation sidebar" : "Collapse navigation sidebar"}
           >
-            <span aria-hidden="true" />
+            <PanelIcon />
           </button>
           <button className="window-nav-btn" type="button" disabled aria-label="Back">
-            <span aria-hidden="true">‹</span>
+            <Chevron dir="left" />
           </button>
           <button className="window-nav-btn" type="button" disabled aria-label="Forward">
-            <span aria-hidden="true">›</span>
+            <Chevron dir="right" />
           </button>
           <nav className="window-menu" aria-label="Application menu">
             {WINDOW_MENUS.map((item) => (
@@ -473,37 +528,22 @@ export default function App() {
           data-tauri-drag-region
           onDoubleClick={() => windowAction("maximize")}
         >
-          <span data-tauri-drag-region>ARIS Studio</span>
+          <span data-tauri-drag-region>SomniQ Studio</span>
         </div>
         <div className="window-titlebar-controls">
           {renderUpdateIndicator()}
           <button type="button" aria-label="Minimize window" onClick={() => windowAction("minimize")}>
-            <span aria-hidden="true">─</span>
+            {WinCtl.minimize}
           </button>
           <button type="button" aria-label="Maximize window" onClick={() => windowAction("maximize")}>
-            <span aria-hidden="true">□</span>
+            {WinCtl.maximize}
           </button>
           <button type="button" className="close" aria-label="Close window" onClick={() => windowAction("close")}>
-            <span aria-hidden="true">×</span>
+            {WinCtl.close}
           </button>
         </div>
       </div>
       <aside className={`sidebar${mobileNavOpen ? " mobile-open" : ""}${sidebarCollapsed ? " sidebar-collapsed" : ""}`}>
-        <div className="brand">
-          <img className="brand-mark" src={arisIcon} alt="" />
-          <span className="brand-text">
-            ARIS
-            <small>Chat</small>
-          </span>
-          <button
-            className="sidebar-collapse-btn"
-            onClick={toggleSidebar}
-            title="Collapse sidebar"
-            aria-label="Collapse navigation sidebar"
-          >
-            ‹
-          </button>
-        </div>
         {NAV_GROUPS.map((g) => (
           <div className="nav-group" key={g.group}>
             <div className="nav-group-label">{g.group}</div>
@@ -559,6 +599,13 @@ export default function App() {
             </button>
           )}
           <div className="app-title">{LABELS[tab]}</div>
+          {tab === "literature" && (
+            <LiteratureViewTabs
+              pageView={literaturePageView}
+              onPageViewChange={setLiteraturePageView}
+              className="app-head-literature-tabs"
+            />
+          )}
         </div>
         <div className="app-head-actions">
           <div className="project-switcher" ref={projectSwitcherRef}>
@@ -576,7 +623,7 @@ export default function App() {
                 {currentProject?.name ?? "No project"}
               </span>
               <span className="project-switcher-caret" aria-hidden="true">
-                v
+                <Chevron dir="down" size={13} />
               </span>
             </button>
             {projectMenuOpen && (
@@ -619,7 +666,7 @@ export default function App() {
                         event.stopPropagation();
                       }}
                     >
-                      ::
+                      <GripIcon />
                     </span>
                     <span className="project-menu-copy">
                       <span className="project-menu-name">{project.name}</span>
@@ -630,20 +677,20 @@ export default function App() {
                 ))}
               </div>
             )}
-            <button onClick={() => void chooseProject()} disabled={projectBusy}>
-              Add project
+            <button
+              className="project-add-btn"
+              onClick={() => void chooseProject()}
+              disabled={projectBusy}
+              title="Add SomniQ project"
+              aria-label="Add project"
+            >
+              <PlusIcon />
+              <span>Add</span>
             </button>
           </div>
           <div className="dir" title={stateDir || "run-state directory"}>
             {currentProject?.path ?? stateDir}
           </div>
-          <button
-            className="theme-toggle"
-            onClick={() => setTheme((value) => value === "dark" ? "light" : "dark")}
-            aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} theme`}
-          >
-            {theme === "dark" ? "Light" : "Dark"}
-          </button>
         </div>
       </header>
 
@@ -652,7 +699,9 @@ export default function App() {
           <Chat />
         </div>
         {tab === "lab" && <Lab />}
-        {tab === "literature" && <Literature />}
+        {tab === "literature" && (
+          <Literature pageView={literaturePageView} onPageViewChange={setLiteraturePageView} />
+        )}
         {tab === "studio" && <Studio />}
         {tab === "mail" && <Mail />}
         {tab === "extensions" && <Extensions />}

@@ -156,7 +156,7 @@ export async function attachmentFromFile(file: File): Promise<ChatAttachment> {
       kind: "file",
       name: file.name,
       mimeType: file.type || "application/octet-stream",
-      content: "(Binary file content omitted. Attach a workspace path with @ to let ARIS read it safely.)",
+      content: "(Binary file content omitted. Attach a workspace path with @ to let SomniQ read it safely.)",
     };
   }
   const truncated = file.size > MAX_TEXT_BYTES;
@@ -590,7 +590,7 @@ export default function ChatComposer({
           ref={textareaRef}
           value={input}
           disabled={busy}
-          placeholder={ready ? "Message ARIS" : "Configure an API key, or type /help"}
+          placeholder={ready ? "Message SomniQ" : "Configure an API key, or type /help"}
           onChange={(event) => {
             onInputChange(event.target.value);
             updatePicker(event.target.value, event.target.selectionStart ?? event.target.value.length);

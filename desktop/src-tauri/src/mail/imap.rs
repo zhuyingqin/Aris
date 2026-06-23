@@ -386,9 +386,9 @@ fn imap_id_command(address: &str) -> String {
     };
     format!(
         "ID (\"name\" {} \"version\" {} \"vendor\" {} \"address\" {})",
-        imap_quote("ARIS Mail"),
+        imap_quote("SomniQ Mail"),
         imap_quote(env!("CARGO_PKG_VERSION")),
-        imap_quote("ARIS"),
+        imap_quote("SomniQ"),
         imap_quote(address),
     )
 }
@@ -1694,7 +1694,7 @@ mod tests {
     fn imap_id_command_includes_client_identity() {
         let command = imap_id_command("owner@example.com");
 
-        assert!(command.contains("\"name\" \"ARIS Mail\""));
+        assert!(command.contains("\"name\" \"SomniQ Mail\""));
         assert!(command.contains(&format!("\"version\" \"{}\"", env!("CARGO_PKG_VERSION"))));
         assert!(command.contains("\"vendor\" \"ARIS\""));
         assert!(command.contains("\"address\" \"owner@example.com\""));

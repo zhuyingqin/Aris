@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
+import { createPortal } from "react-dom";
 import {
   chatDelete,
   chatCommandSpecs,
@@ -298,9 +299,6 @@ export default function Chat() {
     const v = Number(localStorage.getItem("aris-chat-sidebar-w"));
     return v >= 150 && v <= 400 ? v : 218;
   });
-  const [chatSidebarCollapsed, setChatSidebarCollapsed] = useState<boolean>(
-    () => localStorage.getItem("aris-chat-sidebar-collapsed") === "true",
-  );
   const chatSidebarResizeRef = useRef<{ startX: number; startWidth: number } | null>(null);
   const [composerHeight, setComposerHeight] = useState(120);
   const [editingTurnId, setEditingTurnId] = useState<string | null>(null);
@@ -866,7 +864,7 @@ export default function Chat() {
   };
 
   const onChatSidebarResizeStart = (e: ReactPointerEvent<HTMLDivElement>) => {
-    if (e.button !== 0 || chatSidebarCollapsed) return;
+    if (e.button !== 0) return;
     chatSidebarResizeRef.current = { startX: e.clientX, startWidth: chatSidebarWidth };
     e.currentTarget.setPointerCapture(e.pointerId);
   };
@@ -882,16 +880,16 @@ export default function Chat() {
     setChatSidebarWidth(w);
     localStorage.setItem("aris-chat-sidebar-w", String(w));
   };
-  const toggleChatSidebar = () => {
-    const next = !chatSidebarCollapsed;
-    setChatSidebarCollapsed(next);
-    localStorage.setItem("aris-chat-sidebar-collapsed", String(next));
-  };
+  useEffect(() => {
+    document.body.style.setProperty("--chat-sidebar-w", `${chatSidebarWidth}px`);
+    return () => { document.body.style.removeProperty("--chat-sidebar-w"); };
+  }, [chatSidebarWidth]);
+
 
   return (
     <div
-      className={`chat-root${chatSidebarCollapsed ? " chat-sidebar-collapsed" : ""}`}
-      style={{ "--chat-sidebar-w": chatSidebarCollapsed ? "0px" : `${chatSidebarWidth}px` } as CSSProperties}
+      className="chat-root"
+      style={{ "--chat-sidebar-w": `${chatSidebarWidth}px` } as CSSProperties}
     >
       <ChatSidebar
         sessions={allSessions}
@@ -900,7 +898,6 @@ export default function Chat() {
         open={sidebarOpen}
         busy={projectBusy}
         onClose={() => setSidebarOpen(false)}
-        onDesktopCollapse={toggleChatSidebar}
         onNew={() => {
           setEditingTurnId(null);
           setCurrentId(newSession());
@@ -958,39 +955,44 @@ export default function Chat() {
             <span>拖放文件以附加</span>
           </div>
         )}
-        <header className="chat-head">
-          <button
-            className="chat-sidebar-toggle"
-            onClick={() => {
-              if (chatSidebarCollapsed) toggleChatSidebar();
-              else setSidebarOpen((open) => !open);
-            }}
-            aria-label="Toggle chat sidebar"
-          >
-            ☰
-          </button>
-          <div className="chat-thread-heading">
-            <span className="chat-thread-title">{currentSession?.title ?? "New chat"}</span>
-            {status?.ready
-              ? <span className="chat-model">{status.provider}</span>
-              : <span className="chat-model chat-model-error">{status?.message ?? "Checking..."}</span>}
-          </div>
-          <div className="chat-head-actions">
+
+        {document.getElementById("app-chat-actions-portal") && createPortal(
+          <div className="chat-head-actions" data-tauri-drag-region style={{ display: "flex", alignItems: "center", gap: "8px" }}>
             {status?.memoryFiles != null && status.memoryFiles > 0 && (
               <MemoryBadge count={status.memoryFiles} />
             )}
+            <div className="chat-head-model-badge" style={{
+              background: "var(--bg-2)",
+              color: "var(--text-dim)",
+              padding: "2px 6px",
+              borderRadius: "4px",
+              fontSize: "12px",
+              fontWeight: 500
+            }}>
+              {status?.ready ? status.provider : (status?.message ?? "Checking...")}
+            </div>
             <button
               className="chat-export-btn"
               onClick={() => void exportCurrentChat()}
               disabled={currentChatBusy || exporting || turns.length === 0}
               title="Export current chat"
               aria-label="Export current chat"
+              style={{ background: "transparent", border: "none", color: "var(--text-dim)", padding: "4px", cursor: "pointer", display: "flex", alignItems: "center" }}
             >
-              {exporting ? "Exporting" : "Export"}
+              {exporting ? (
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" className="spinner">
+                  <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="2" strokeDasharray="31.4 31.4" strokeLinecap="round" opacity="0.5"/>
+                </svg>
+              ) : (
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                  <path d="M12 15V3M12 15L8 11M12 15L16 11M21 21H3" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                </svg>
+              )}
             </button>
             {!status?.ready && <button onClick={() => setTab("settings")}>Settings</button>}
-          </div>
-        </header>
+          </div>,
+          document.getElementById("app-chat-actions-portal")!
+        )}
         <ChatThread
           key={currentId}
           sessionId={currentId}

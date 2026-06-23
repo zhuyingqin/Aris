@@ -182,7 +182,7 @@ export default function RuntimeAccess() {
             ))}
           </div>
           <div className="st-access-note">
-            New chats use this project default. The Chat header can override it for the active session. Auto-approve gates ARIS tools only and does not grant administrator rights.
+            New chats use this project default. The Chat header can override it for the active session. Auto-approve gates SomniQ tools only and does not grant administrator rights.
           </div>
         </div>
 

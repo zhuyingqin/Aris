@@ -51,7 +51,7 @@ pub async fn literature_review_llm(system: String, prompt: String) -> Result<Str
             "LlmReview",
             &json!({
                 "prompt": format!(
-                    "{system}\n\nARIS built-in research-review skill instructions:\n{review_skill}\n\n\
+                    "{system}\n\nSomniQ built-in research-review skill instructions:\n{review_skill}\n\n\
                      Apply those evidence-first independent review standards and return exactly \
                      the output format requested below.\n\n{prompt}"
                 )

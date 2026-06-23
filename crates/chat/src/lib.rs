@@ -79,7 +79,7 @@ pub fn model_identity_section(model_id: Option<&str>, product_surface: &str) -> 
     let friendly_name = friendly_model_name(model_name);
     let developer = model_developer(model_name);
     format!(
-        "You are running inside ARIS (Auto Research in Sleep), a {product_surface}. \
+        "You are running inside SomniQ, a {product_surface}. \
          Your exact model is {model_name} ({friendly_name}), developed by {developer}. \
          When users ask what model you are, answer: \"{friendly_name}\" (model ID: {model_name}). \
          Do NOT guess or hallucinate a different version number."
@@ -99,7 +99,7 @@ pub fn language_preference_section(language: &str) -> String {
 pub fn llm_review_override_section() -> String {
     "IMPORTANT: When a skill instructs you to use `mcp__codex__codex` or `mcp__codex__codex-reply` \
      for external LLM review, call that MCP tool when it is available. Otherwise use the \
-     `LlmReview` tool, which uses the user's configured reviewer from ARIS settings. Pass the \
+     `LlmReview` tool, which uses the user's configured reviewer from SomniQ settings. Pass the \
      full review prompt as the `prompt` parameter and omit the optional `model` field unless \
      the user explicitly asks for a reviewer override."
         .to_string()

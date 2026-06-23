@@ -78,7 +78,7 @@ pub fn tool_specs() -> Vec<tools::ToolSpec> {
     vec![
         tools::ToolSpec {
             name: "mail_accounts",
-            description: "List connected ARIS mail accounts available to the agent.",
+            description: "List connected SomniQ mail accounts available to the agent.",
             input_schema: json!({
                 "type": "object",
                 "properties": {},

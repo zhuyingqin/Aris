@@ -771,7 +771,6 @@ describe("ChatSidebar session menu", () => {
         open
         busy={false}
         onClose={() => undefined}
-        onDesktopCollapse={() => undefined}
         onNew={() => undefined}
         onOpen={() => undefined}
         onRename={() => undefined}

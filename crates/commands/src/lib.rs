@@ -220,7 +220,7 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
     },
     SlashCommandSpec {
         name: "meta-optimize",
-        summary: "Analyze usage logs and optimize ARIS skills",
+        summary: "Analyze usage logs and optimize SomniQ skills",
         argument_hint: Some("[apply <N>|status]"),
         resume_supported: false,
     },

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import type { ChatTurn } from "../types";
 import ChatMessage from "./ChatMessage";
+import arisIcon from "../assets/app-logo.png";
 
 export function isNearBottom(element: Pick<HTMLElement, "scrollHeight" | "scrollTop" | "clientHeight">, threshold = 140) {
   return element.scrollHeight - element.scrollTop - element.clientHeight <= threshold;
@@ -130,14 +131,26 @@ export default function ChatThread({
         {turns.length === 0 ? (
           <div className="chat-welcome">
             <div className="chat-welcome-inner">
-              <div className="chat-welcome-mark">A</div>
-              <h1>What are we working on?</h1>
-              <p>Start with the current project context or attach files below.</p>
-              <div className="chat-starters">
-                {starters.map((prompt) => (
-                  <button key={prompt} onClick={() => onStarter(prompt)}>{prompt}</button>
-                ))}
+              <div className="chat-welcome-mark">
+                <span className="chat-welcome-glow" aria-hidden="true" />
+                <img src={arisIcon} alt="" />
               </div>
+              <h1>What are we working on?</h1>
+              <p>Start from the current project context, or attach files and ask anything.</p>
+              {starters.length > 0 && (
+                <div className="chat-starters">
+                  {starters.map((prompt) => (
+                    <button key={prompt} type="button" onClick={() => onStarter(prompt)}>
+                      <span className="chat-starter-label">{prompt}</span>
+                      <svg className="chat-starter-arrow" width="14" height="14" viewBox="0 0 16 16"
+                        fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"
+                        strokeLinejoin="round" aria-hidden="true">
+                        <path d="M5 3.5 9.5 8 5 12.5" />
+                      </svg>
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
         ) : (

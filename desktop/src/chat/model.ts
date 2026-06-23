@@ -558,7 +558,7 @@ export function groupSessionsByProject(
     .sort(([left], [right]) => (order.get(left) ?? Number.MAX_SAFE_INTEGER) - (order.get(right) ?? Number.MAX_SAFE_INTEGER))
     .map(([projectId, projectSessions]) => ({
       id: projectId,
-      label: names.get(projectId) ?? (projectId === "default" ? "ARIS Desktop Workspace" : "Unknown project"),
+      label: names.get(projectId) ?? (projectId === "default" ? "SomniQ Desktop Workspace" : "Unknown project"),
       sessions: projectSessions.sort((left, right) =>
         Number(right.pinned) - Number(left.pinned) || right.updatedAt - left.updatedAt),
     }));
