@@ -78,7 +78,7 @@ fn inline_local_stylesheets(base: &Path, html_path: &Path, html: String) -> Stri
                     output.push_str("<style data-aris-inline=\"");
                     output.push_str(&escape_html_attr(&href));
                     output.push_str("\">\n");
-                    output.push_str(&css.replace("</style", "<\\/style"));
+                    output.push_str(&neutralize_style_close(&css));
                     output.push_str("\n</style>");
                     cursor = end;
                     continue;
@@ -90,6 +90,25 @@ fn inline_local_stylesheets(base: &Path, html_path: &Path, html: String) -> Stri
     }
     output.push_str(&html[cursor..]);
     output
+}
+
+/// Break any `</style` sequence (ASCII case-insensitive) in inlined CSS so a
+/// crafted stylesheet cannot terminate the surrounding `<style>` raw-text
+/// element and inject markup. The previous `replace("</style", ...)` only
+/// matched lowercase, leaving `</STYLE>` as a breakout vector. Original case is
+/// preserved; only the `</` is broken.
+fn neutralize_style_close(css: &str) -> String {
+    let mut out = String::with_capacity(css.len());
+    let mut cursor = 0;
+    while let Some(offset) = find_ascii_case_insensitive(&css[cursor..], "</style") {
+        let pos = cursor + offset;
+        out.push_str(&css[cursor..pos]);
+        out.push_str("<\\/");
+        out.push_str(&css[pos + 2..pos + 7]); // original-case "style"
+        cursor = pos + 7;
+    }
+    out.push_str(&css[cursor..]);
+    out
 }
 
 fn is_stylesheet_link(tag: &str) -> bool {
@@ -260,5 +279,17 @@ mod tests {
         assert!(html.contains("body { color: red; }"));
         assert!(!html.contains(r#"<link rel="stylesheet" href="styles/app.css">"#));
         let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn neutralizes_style_close_in_any_case() {
+        use super::neutralize_style_close;
+        assert_eq!(neutralize_style_close("body{color:red}"), "body{color:red}");
+        assert_eq!(neutralize_style_close("a</style>b"), "a<\\/style>b");
+        // case is preserved, but the closing sequence is broken
+        assert_eq!(neutralize_style_close("a</STYLE>b"), "a<\\/STYLE>b");
+        // no raw `</style` (any case) survives — the CSS-XSS breakout is closed
+        let out = neutralize_style_close("x</style>y</StYlE attack>z");
+        assert!(!out.to_ascii_lowercase().contains("</style"));
     }
 }
