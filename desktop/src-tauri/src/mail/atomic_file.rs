@@ -11,10 +11,25 @@ pub fn write_replace(path: &Path, body: impl AsRef<[u8]>) -> io::Result<()> {
     let tmp = temp_path(path);
     {
         let mut file = std::fs::File::create(&tmp)?;
+        // Mail store/cache hold OAuth refresh tokens and message bodies; restrict
+        // to owner-only before writing so they are never group/world-readable.
+        // No-op on Windows, where the default ACL is already user-scoped.
+        restrict_to_owner(&file)?;
         file.write_all(body.as_ref())?;
         file.sync_all()?;
     }
     replace_file(&tmp, path)
+}
+
+#[cfg(unix)]
+fn restrict_to_owner(file: &std::fs::File) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))
+}
+
+#[cfg(not(unix))]
+fn restrict_to_owner(_file: &std::fs::File) -> io::Result<()> {
+    Ok(())
 }
 
 fn temp_path(path: &Path) -> PathBuf {
@@ -89,6 +104,28 @@ mod tests {
             std::fs::read_to_string(&path).expect("read replaced"),
             "{\"version\":2}"
         );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_replace_restricts_permissions_to_owner() {
+        use std::os::unix::fs::PermissionsExt;
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "aris-mail-atomic-perms-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("accounts.json");
+
+        write_replace(&path, b"{\"refresh_token\":\"secret\"}").expect("write");
+        let mode = std::fs::metadata(&path).expect("meta").permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "credentials file must be owner-only");
 
         let _ = std::fs::remove_dir_all(dir);
     }

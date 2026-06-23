@@ -46,8 +46,8 @@ struct Endpoints {
     extra_auth_params: &'static [(&'static str, &'static str)],
 }
 
-fn endpoints(provider: Provider) -> Endpoints {
-    match provider {
+fn endpoints(provider: Provider) -> Result<Endpoints, String> {
+    Ok(match provider {
         Provider::Gmail => Endpoints {
             auth_url: "https://accounts.google.com/o/oauth2/v2/auth",
             token_url: "https://oauth2.googleapis.com/token",
@@ -67,8 +67,10 @@ fn endpoints(provider: Provider) -> Endpoints {
             fixed_port: None,
             extra_auth_params: &[("prompt", "select_account")],
         },
-        Provider::Imap => panic!("IMAP accounts do not use OAuth loopback connect"),
-    }
+        Provider::Imap => {
+            return Err("IMAP accounts do not use OAuth loopback connect.".to_string())
+        }
+    })
 }
 
 fn client_credentials(provider: Provider, cfg: &OauthConfig) -> Result<(String, String), String> {
@@ -279,7 +281,7 @@ fn parse_request_target(request_line: &str) -> std::collections::HashMap<String,
 pub fn connect(provider: Provider) -> Result<StoredAccount, String> {
     let cfg = store::oauth_config();
     let (client_id, client_secret) = client_credentials(provider, &cfg)?;
-    let ep = endpoints(provider);
+    let ep = endpoints(provider)?;
 
     // Google requires a stable localhost callback; Microsoft localhost
     // redirect URIs ignore the port, so use an ephemeral callback for Outlook.
@@ -409,7 +411,7 @@ pub fn ensure_access_token(account_id: &str) -> Result<String, String> {
 
     let cfg = store::oauth_config();
     let (client_id, client_secret) = client_credentials(account.provider, &cfg)?;
-    let ep = endpoints(account.provider);
+    let ep = endpoints(account.provider)?;
 
     let mut form = vec![
         ("grant_type", "refresh_token".to_string()),
