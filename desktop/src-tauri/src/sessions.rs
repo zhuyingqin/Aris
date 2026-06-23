@@ -3,6 +3,7 @@
 
 use serde::Serialize;
 use serde_json::{json, Value};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::UNIX_EPOCH;
 
 use runtime::{ContentBlock, MessageRole, Session};
@@ -10,6 +11,9 @@ use runtime::{ContentBlock, MessageRole, Session};
 use crate::state;
 
 const CHAT_UI_SESSIONS_FILE: &str = "chat-ui-sessions.json";
+
+/// Per-write counter so concurrent saves never share a temp file name.
+static SESSIONS_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -138,11 +142,14 @@ pub fn chat_ui_sessions_save(sessions: Value) -> Result<(), String> {
         return Err("chat UI session store must be an array".to_string());
     }
     let path = state::runtime_dir().join(CHAT_UI_SESSIONS_FILE);
-    let tmp = path.with_extension("json.tmp");
     let data = serde_json::to_vec_pretty(&sessions).map_err(|e| e.to_string())?;
+    // Unique temp name (pid + counter) so two concurrent saves don't write to a
+    // shared `.tmp` and clobber each other.
+    let counter = SESSIONS_TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let tmp = path.with_extension(format!("{}.{counter}.tmp", std::process::id()));
     std::fs::write(&tmp, data).map_err(|e| e.to_string())?;
-    if path.exists() {
-        std::fs::remove_file(&path).map_err(|e| e.to_string())?;
-    }
+    // `fs::rename` replaces an existing file atomically on both Unix and Windows;
+    // removing the destination first would open a crash window where neither the
+    // old nor the new file exists.
     std::fs::rename(tmp, path).map_err(|e| e.to_string())
 }
