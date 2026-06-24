@@ -252,10 +252,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "aris-fm-{}-{nanos}-{label}.md",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("aris-fm-{}-{nanos}-{label}.md", std::process::id()));
         let mut file = fs::File::create(&path).unwrap();
         file.write_all(content.as_bytes()).unwrap();
         path

@@ -13,21 +13,21 @@ use std::{
     sync::mpsc::{self, RecvTimeoutError, Sender},
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use aris_commands::{slash_command_specs, SlashCommand};
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use tauri::{AppHandle, Emitter, State};
 
 use runtime::{
-    CompactionConfig, ConfigLoader, ConfigSource, ContentBlock, ConversationMessage, MessageRole,
-    PermissionMode, PermissionPromptDecision, PermissionPrompter, PermissionRequest,
-    ProjectContext, ResolvedPermissionMode, RuntimeError, Session, TokenUsage, ToolError,
-    ToolExecutor, UsageTracker,
+    CompactionConfig, CompactionResult, ConfigLoader, ConfigSource, ContentBlock,
+    ConversationMessage, MessageRole, PermissionMode, PermissionPromptDecision, PermissionPrompter,
+    PermissionRequest, ProjectContext, ResolvedPermissionMode, RuntimeError, Session, TokenUsage,
+    ToolError, ToolExecutor, UsageTracker,
 };
 
 /// Per-app chat sessions, keyed by the UI session id.
@@ -536,7 +536,7 @@ struct NoToolsExecutor;
 impl ToolExecutor for NoToolsExecutor {
     fn execute(&mut self, tool_name: &str, _input: &str) -> Result<String, ToolError> {
         Err(ToolError::new(format!(
-            "tool `{tool_name}` is not available while generating chat titles"
+            "tool `{tool_name}` is not available during this no-tools request"
         )))
     }
 }
@@ -1171,12 +1171,69 @@ fn compact_literature_search_output(output: String) -> String {
     serde_json::to_string_pretty(&root).unwrap_or(output)
 }
 
+#[derive(Clone, PartialEq, Eq)]
+struct SystemPromptCacheKey {
+    model: String,
+    full_tool_registry: bool,
+    workspace: PathBuf,
+    current_date: String,
+    language: String,
+    tectonic: Option<String>,
+    hot_memory: String,
+    knowledge_memory: String,
+}
+
+#[derive(Clone)]
+struct CachedSystemPrompt {
+    key: SystemPromptCacheKey,
+    prompt: Vec<String>,
+}
+
+fn system_prompt_cache() -> &'static Mutex<Option<CachedSystemPrompt>> {
+    static CACHE: OnceLock<Mutex<Option<CachedSystemPrompt>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(None))
+}
+
 fn build_system_prompt_inner(model: &str, full_tool_registry: bool) -> Vec<String> {
     let workspace = std::env::var("ARIS_WORKSPACE_ROOT")
         .map(PathBuf::from)
         .or_else(|_| std::env::current_dir())
         .unwrap_or_else(|_| crate::state::workspace_dir());
-    let access = if full_tool_registry {
+    runtime::migrate_legacy_knowledge_memory();
+    let hot_memory = runtime::render_hot_memory_prompt(&workspace).unwrap_or_default();
+    let knowledge_memory = runtime::render_knowledge_memory_prompt();
+    let key = SystemPromptCacheKey {
+        model: model.to_string(),
+        full_tool_registry,
+        workspace,
+        current_date: runtime::today_iso(),
+        language: std::env::var("ARIS_LANGUAGE").unwrap_or_else(|_| "cn".to_string()),
+        tectonic: std::env::var("ARIS_TECTONIC")
+            .ok()
+            .filter(|value| !value.trim().is_empty()),
+        hot_memory,
+        knowledge_memory,
+    };
+
+    if let Ok(cache) = system_prompt_cache().lock() {
+        if let Some(cached) = cache.as_ref().filter(|cached| cached.key == key) {
+            return cached.prompt.clone();
+        }
+    }
+
+    let prompt = build_system_prompt_uncached(&key);
+    if let Ok(mut cache) = system_prompt_cache().lock() {
+        *cache = Some(CachedSystemPrompt {
+            key,
+            prompt: prompt.clone(),
+        });
+    }
+    prompt
+}
+
+fn build_system_prompt_uncached(key: &SystemPromptCacheKey) -> Vec<String> {
+    let workspace = key.workspace.clone();
+    let access = if key.full_tool_registry {
         format!(
             "Desktop Chat runs in the SomniQ workspace at `{}`. The desktop tool registry, including shell, MCP, and single-agent tools, is available when the active permission mode allows it. Team/Workflow orchestration tools are disabled on this surface. Respect the selected permission mode and keep generated project artifacts in this workspace unless the user explicitly requests another location.",
             workspace.display()
@@ -1191,10 +1248,7 @@ fn build_system_prompt_inner(model: &str, full_tool_registry: bool) -> Vec<Strin
     let artifact_layout = "Project artifact layout: place slide/PPT/PDF deck outputs under `slides/`, poster outputs under `poster/`, interactive web apps under `web/<name>/` with an `index.html` plus local CSS/assets, notebook programs under `experiments/`, and scratch/temp/cache files under `.aris/`. Studio auto-discovers `slides/`, `poster/`, and `web/`; Lab lists notebooks from the workspace and defaults new notebooks into `experiments/`.".to_string();
     let long_document_reading = "Long document reading: when working with books, chapters, transcripts, logs, or converted documents, do not read multiple large files in full. First get a file list and a read_file outline preview, then read one chapter or section window at a time with explicit offset/limit. Treat tool output as a preview, not as a source file; if full text is needed, keep it on disk and reopen precise windows.".to_string();
     let long_file_generation = "Long file generation: do not call write_file with an entire long generated artifact such as a Beamer chapter, book chapter, or converted document. Keep single tool payloads small; for files over about 24000 characters, write a small scaffold, append smaller chunks with append_file, and verify line counts/compilation immediately instead of stopping to report an intermediate failure.".to_string();
-    let latex_toolchain = latex_toolchain_prompt_section();
-    runtime::migrate_legacy_knowledge_memory();
-    let hot_memory = runtime::render_hot_memory_prompt(&workspace).unwrap_or_default();
-    let knowledge_memory = runtime::render_knowledge_memory_prompt();
+    let latex_toolchain = latex_toolchain_prompt_section(key.tectonic.as_deref());
     let mut extra_sections = vec![
         access.clone(),
         file_links,
@@ -1205,16 +1259,16 @@ fn build_system_prompt_inner(model: &str, full_tool_registry: bool) -> Vec<Strin
     if !latex_toolchain.is_empty() {
         extra_sections.push(latex_toolchain);
     }
-    extra_sections.push(hot_memory);
-    extra_sections.push(knowledge_memory);
+    extra_sections.push(key.hot_memory.clone());
+    extra_sections.push(key.knowledge_memory.clone());
     aris_chat::build_common_system_prompt(aris_chat::CommonSystemPromptOptions {
         workspace,
-        current_date: runtime::today_iso(),
+        current_date: key.current_date.clone(),
         os_name: std::env::consts::OS.to_string(),
         os_version: "unknown".to_string(),
-        model_id: Some(model.to_string()),
+        model_id: Some(key.model.clone()),
         product_surface: "desktop research automation app".to_string(),
-        language: std::env::var("ARIS_LANGUAGE").unwrap_or_else(|_| "cn".to_string()),
+        language: key.language.clone(),
         include_language_preference: true,
         include_team_orchestration: false,
         extra_sections,
@@ -1222,16 +1276,12 @@ fn build_system_prompt_inner(model: &str, full_tool_registry: bool) -> Vec<Strin
     .unwrap_or_else(|_| vec![access])
 }
 
-fn latex_toolchain_prompt_section() -> String {
-    let Some(tectonic) = std::env::var("ARIS_TECTONIC")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-    else {
-        return String::new();
-    };
-    format!(
-        "Bundled LaTeX fallback: `ARIS_TECTONIC` points to `{tectonic}`. When the user asks to compile LaTeX and `latexmk`/`pdflatex`/`xelatex` are unavailable, try this bundled Tectonic binary before telling the user to install a TeX distribution. Run it from the directory containing the entrypoint, for example: `\"$ARIS_TECTONIC\" --keep-logs --keep-intermediates main.tex`."
-    )
+fn latex_toolchain_prompt_section(tectonic: Option<&str>) -> String {
+    tectonic.map_or_else(String::new, |tectonic| {
+        format!(
+            "Bundled LaTeX fallback: `ARIS_TECTONIC` points to `{tectonic}`. When the user asks to compile LaTeX and `latexmk`/`pdflatex`/`xelatex` are unavailable, try this bundled Tectonic binary before telling the user to install a TeX distribution. Run it from the directory containing the entrypoint, for example: `\"$ARIS_TECTONIC\" --keep-logs --keep-intermediates main.tex`."
+        )
+    })
 }
 
 /// Read config.json and validate the executor is configured. Returns
@@ -1702,6 +1752,9 @@ fn maybe_auto_compact(
     state: &ChatState,
     session_id: &str,
     model: &str,
+    executor_config: aris_chat::ChatExecutorConfig,
+    summarizer_model: Option<String>,
+    summarizer_config: Option<aris_chat::SummarizerConfig>,
     session: Session,
 ) -> Result<Session, String> {
     let window = context_window_for_model(model);
@@ -1713,7 +1766,14 @@ fn maybe_auto_compact(
             Ok(session)
         }
         ContextAction::Compact => {
-            let result = runtime::compact_session(&session, CompactionConfig::default());
+            let result = compact_session_with_runtime(
+                session.clone(),
+                executor_config,
+                model.to_string(),
+                summarizer_model,
+                summarizer_config,
+                CompactionConfig::default(),
+            )?;
             if result.removed_message_count == 0 {
                 // Too little history to compact — warn instead of claiming a no-op.
                 emit_context_warning(app, session_id, used, window);
@@ -1735,6 +1795,31 @@ fn maybe_auto_compact(
             Ok(compacted)
         }
     }
+}
+
+fn compact_session_with_runtime(
+    session: Session,
+    executor_config: aris_chat::ChatExecutorConfig,
+    model: String,
+    summarizer_model: Option<String>,
+    summarizer_config: Option<aris_chat::SummarizerConfig>,
+    compaction: CompactionConfig,
+) -> Result<runtime::CompactionResult, String> {
+    let mut runtime = aris_chat::build_conversation_runtime(
+        session,
+        executor_config,
+        model,
+        false,
+        Vec::new(),
+        Box::new(SilentStreamObserver),
+        NoToolsExecutor,
+        aris_chat::permission_policy_for_tools(Vec::new(), PermissionMode::ReadOnly),
+        Vec::new(),
+        runtime::RuntimeFeatureConfig::default(),
+        summarizer_model,
+        summarizer_config,
+    )?;
+    Ok(runtime.compact(compaction))
 }
 
 fn chat_status_for(model: String, provider: String) -> ChatStatus {
@@ -2049,20 +2134,37 @@ pub fn chat_run_command(
                 &status_context(Some(&chat_session_path(&session_id)?))?,
             )))
         }
-        SlashCommand::Compact => {
-            let result = runtime::compact_session(&session, CompactionConfig::default());
+        SlashCommand::Compact { instruction } => {
+            let (model, _provider, executor_config) = resolve_executor()?;
+            let config_obj = crate::config::load_object();
+            let summarizer_model = config_object_string(&config_obj, "summarizer_model");
+            let summarizer_config = match resolve_summarizer_config(&config_obj) {
+                Ok(config) => config,
+                Err(error) => {
+                    eprintln!("aris desktop: summary provider disabled: {error}");
+                    None
+                }
+            };
+            let result = compact_session_with_runtime(
+                session,
+                executor_config,
+                model,
+                summarizer_model,
+                summarizer_config,
+                CompactionConfig::manual(instruction.clone()),
+            )?;
             let removed = result.removed_message_count;
+            let report = format_compact_report(&result);
             let compacted = result.compacted_session;
-            let kept = compacted.messages.len();
             // Real post-compaction context size. Only surface it when something
             // was actually removed; a no-op compaction leaves the ring's own
             // estimate in place rather than pinning it.
-            let context_tokens = (removed > 0)
-                .then(|| runtime::estimate_session_tokens(&compacted) as u64);
+            let context_tokens =
+                (removed > 0).then(|| runtime::estimate_session_tokens(&compacted) as u64);
             store_chat_session(&state, session_id, compacted)?;
             Ok(ChatCommandResult {
                 context_tokens,
-                ..ChatCommandResult::message(format_compact_report(removed, kept, removed == 0))
+                ..ChatCommandResult::message(report)
             })
         }
         SlashCommand::Model { model } => handle_model_command(model),
@@ -2252,6 +2354,7 @@ fn suggest_chat_title(user: &str, assistant: &str) -> Result<String, String> {
         runtime::RuntimeFeatureConfig::default(),
         // Title generation is a single tiny turn; never compacts, so no
         // summarizer is needed.
+        None,
         None,
     )?;
     let summary = runtime
@@ -2454,14 +2557,31 @@ async fn run_chat_turn_with_context(
     let usage_model = model.clone();
     let usage_provider = provider.clone();
     let session = get_cached_or_disk_session(&state, &session_id)?;
-    let session = maybe_auto_compact(&app, state, &session_id, &model, session)?;
+    let config_obj = crate::config::load_object();
+    let summarizer_model = config_object_string(&config_obj, "summarizer_model");
+    let summarizer_config = match resolve_summarizer_config(&config_obj) {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("aris desktop: summary provider disabled: {error}");
+            None
+        }
+    };
+    let session = maybe_auto_compact(
+        &app,
+        state,
+        &session_id,
+        &model,
+        executor_config.clone(),
+        summarizer_model.clone(),
+        summarizer_config.clone(),
+        session,
+    )?;
     let permission_mode = permission_mode_for(&state, &session_id)?;
     let permission_prompts = state.permission_prompts.clone();
     let question_prompts = state.question_prompts.clone();
 
     // Configured compaction-summary model (Settings → "Summary model"); empty
     // means "Auto" and the chat crate picks a sensible default.
-    let summarizer_model = config_string("summarizer_model");
     let worker_app = app.clone();
     let worker_session_id = session_id.clone();
     let worker_cancelled = cancelled.clone();
@@ -2533,6 +2653,7 @@ async fn run_chat_turn_with_context(
             system_prompt,
             feature_config,
             summarizer_model,
+            summarizer_config,
         )?;
         let summary = runtime
             .run_turn_message(user_message, Some(&mut permission_prompter))
@@ -2773,6 +2894,174 @@ fn config_string(key: &str) -> Option<String> {
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty())
         .map(ToOwned::to_owned)
+}
+
+fn config_object_string(obj: &Map<String, Value>, key: &str) -> Option<String> {
+    obj.get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn normalized_provider_for_settings(provider: &str, base_url: Option<&str>) -> String {
+    let provider = provider.trim();
+    let lower_url = base_url.unwrap_or("").trim().to_lowercase();
+    if provider == "anthropic"
+        && (lower_url.contains("minimaxi.com/anthropic")
+            || lower_url.contains("deepseek.com/anthropic"))
+    {
+        return "anthropic-compat".to_string();
+    }
+    if provider.is_empty() {
+        if lower_url.contains("anthropic.com")
+            || lower_url.contains("newcli.com")
+            || lower_url.contains("modelscope.cn")
+            || lower_url.contains("/anthropic")
+        {
+            "anthropic-compat".to_string()
+        } else {
+            "openai".to_string()
+        }
+    } else {
+        provider.to_string()
+    }
+}
+
+fn reusable_provider_key(
+    obj: &Map<String, Value>,
+    provider: &str,
+    base_url: Option<&str>,
+) -> Option<String> {
+    let target_provider = normalized_provider_for_settings(provider, base_url);
+    let target_base = base_url.unwrap_or("").trim().trim_end_matches('/');
+    for prefix in ["executor", "reviewer"] {
+        let slot_provider = config_object_string(obj, &format!("{prefix}_provider"))
+            .unwrap_or_else(|| {
+                if prefix == "executor" {
+                    "anthropic".to_string()
+                } else {
+                    String::new()
+                }
+            });
+        let slot_base = config_object_string(obj, &format!("{prefix}_base_url"))
+            .unwrap_or_default()
+            .trim_end_matches('/')
+            .to_string();
+        if normalized_provider_for_settings(&slot_provider, Some(&slot_base)) == target_provider
+            && (target_base.is_empty() || slot_base == target_base)
+        {
+            if let Some(key) = config_object_string(obj, &format!("{prefix}_api_key")) {
+                return Some(key);
+            }
+        }
+    }
+    None
+}
+
+fn reusable_provider_model(
+    obj: &Map<String, Value>,
+    provider: &str,
+    base_url: Option<&str>,
+) -> Option<String> {
+    let target_provider = normalized_provider_for_settings(provider, base_url);
+    let target_base = base_url.unwrap_or("").trim().trim_end_matches('/');
+    for prefix in ["executor", "reviewer"] {
+        let slot_provider = config_object_string(obj, &format!("{prefix}_provider"))
+            .unwrap_or_else(|| {
+                if prefix == "executor" {
+                    "anthropic".to_string()
+                } else {
+                    String::new()
+                }
+            });
+        let slot_base = config_object_string(obj, &format!("{prefix}_base_url"))
+            .unwrap_or_default()
+            .trim_end_matches('/')
+            .to_string();
+        if normalized_provider_for_settings(&slot_provider, Some(&slot_base)) == target_provider
+            && (target_base.is_empty() || slot_base == target_base)
+        {
+            if let Some(model) = config_object_string(obj, &format!("{prefix}_model")) {
+                return Some(model);
+            }
+        }
+    }
+    obj.get("verified_executors")
+        .and_then(Value::as_array)?
+        .iter()
+        .filter_map(Value::as_object)
+        .find_map(|entry| {
+            let entry_base = entry
+                .get("base_url")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .trim_end_matches('/');
+            let entry_provider = entry.get("provider").and_then(Value::as_str).unwrap_or("");
+            if normalized_provider_for_settings(entry_provider, Some(entry_base)) == target_provider
+                && (target_base.is_empty() || entry_base == target_base)
+            {
+                entry
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|model| !model.is_empty())
+                    .map(ToOwned::to_owned)
+            } else {
+                None
+            }
+        })
+}
+
+fn resolve_summarizer_config(
+    obj: &Map<String, Value>,
+) -> Result<Option<aris_chat::SummarizerConfig>, String> {
+    let Some(raw_provider) = config_object_string(obj, "summarizer_provider") else {
+        return Ok(None);
+    };
+    let base_url = config_object_string(obj, "summarizer_base_url");
+    let provider = normalized_provider_for_settings(&raw_provider, base_url.as_deref());
+    let model = config_object_string(obj, "summarizer_model")
+        .or_else(|| reusable_provider_model(obj, &provider, base_url.as_deref()));
+    let api_key = config_object_string(obj, "summarizer_api_key")
+        .or_else(|| reusable_provider_key(obj, &provider, base_url.as_deref()));
+
+    let executor_config = match provider.as_str() {
+        "anthropic" | "anthropic-compat" => {
+            let configured_base = base_url.clone();
+            let base_url = configured_base.clone().unwrap_or_else(api::read_base_url);
+            let send_betas = configured_base.is_none() && api::read_send_betas();
+            let auth = match api_key {
+                Some(key) if provider == "anthropic-compat" => api::AuthSource::BearerToken(key),
+                Some(key) => api::AuthSource::ApiKey(key),
+                None => api::resolve_startup_auth_source(|| Ok(None)).map_err(|_| {
+                    "No API key configured for the selected summary provider.".to_string()
+                })?,
+            };
+            aris_chat::ChatExecutorConfig::Anthropic {
+                auth,
+                base_url,
+                send_betas,
+            }
+        }
+        _ => {
+            let api_key = api_key.ok_or_else(|| {
+                "No API key configured for the selected summary provider.".to_string()
+            })?;
+            aris_chat::ChatExecutorConfig::OpenAiCompatible {
+                api_key,
+                base_url: base_url
+                    .unwrap_or_else(|| aris_chat::DEFAULT_OPENAI_BASE_URL.to_string()),
+            }
+        }
+    };
+
+    Ok(Some(aris_chat::SummarizerConfig {
+        provider,
+        model,
+        executor_config,
+    }))
 }
 
 fn save_config_object(obj: &serde_json::Map<String, Value>) -> Result<(), String> {
@@ -3524,14 +3813,23 @@ fn format_cost_report(usage: TokenUsage) -> String {
     )
 }
 
-fn format_compact_report(removed: usize, resulting_messages: usize, skipped: bool) -> String {
+fn format_compact_report(result: &CompactionResult) -> String {
+    let removed = result.removed_message_count;
+    let resulting_messages = result.compacted_session.messages.len();
+    let skipped = removed == 0;
     if skipped {
         format!(
-            "Compact\n  Result           skipped\n  Reason           session below compaction threshold\n  Messages kept    {resulting_messages}"
+            "Compact\n  Result           skipped\n  Reason           no safe prefix or session below threshold\n  Messages kept    {resulting_messages}\n  Tokens before    {}\n  Tokens after     {}",
+            result.tokens_before, result.tokens_after
         )
     } else {
+        let saved = result.tokens_before.saturating_sub(result.tokens_after);
         format!(
-            "Compact\n  Result           compacted\n  Messages removed {removed}\n  Messages kept    {resulting_messages}"
+            "Compact\n  Result           compacted\n  Summary source   {}\n  Messages removed {removed}\n  Messages kept    {resulting_messages}\n  Tail preserved   {}\n  Tokens before    {}\n  Tokens after     {}\n  Tokens saved     {saved}",
+            result.summary_source.as_str(),
+            result.preserved_message_count,
+            result.tokens_before,
+            result.tokens_after
         )
     }
 }
@@ -4525,7 +4823,7 @@ mod tests {
         let previous = std::env::var_os("ARIS_TECTONIC");
         std::env::set_var("ARIS_TECTONIC", r"C:\Program Files\Aris\tectonic.exe");
 
-        let prompt = latex_toolchain_prompt_section();
+        let prompt = latex_toolchain_prompt_section(Some(r"C:\Program Files\Aris\tectonic.exe"));
 
         assert!(prompt.contains("Bundled LaTeX fallback"));
         assert!(prompt.contains("ARIS_TECTONIC"));

@@ -222,28 +222,54 @@ fn matlab_backend_runs_persists_and_inspects() {
     // Cell 1 sets state; Cell 2 reads it back -> long-lived base workspace.
     let out1 = KernelManager::execute(&id, "a = magic(4)", Duration::from_secs(60)).unwrap();
     assert_eq!(out1.status, ExecStatus::Ok);
-    assert!(stdout_text(&out1.outputs).contains("16"), "got: {:?}", out1.outputs);
+    assert!(
+        stdout_text(&out1.outputs).contains("16"),
+        "got: {:?}",
+        out1.outputs
+    );
 
     let out2 = KernelManager::execute(&id, "disp(sum(a(:)))", Duration::from_secs(60)).unwrap();
-    assert!(stdout_text(&out2.outputs).contains("136"), "state did not persist: {:?}", out2.outputs);
+    assert!(
+        stdout_text(&out2.outputs).contains("136"),
+        "state did not persist: {:?}",
+        out2.outputs
+    );
 
     // A plot should come back as a base64 PNG display_data output.
-    let out3 = KernelManager::execute(&id, "plot(1:10); title('t')", Duration::from_secs(60)).unwrap();
-    let has_image = out3.outputs.iter().any(|o| matches!(o, CellOutput::DisplayData { .. }));
-    assert!(has_image, "expected a figure image output: {:?}", out3.outputs);
+    let out3 =
+        KernelManager::execute(&id, "plot(1:10); title('t')", Duration::from_secs(60)).unwrap();
+    let has_image = out3
+        .outputs
+        .iter()
+        .any(|o| matches!(o, CellOutput::DisplayData { .. }));
+    assert!(
+        has_image,
+        "expected a figure image output: {:?}",
+        out3.outputs
+    );
 
     // The MATLAB language is reported, and the inspector finds `a`.
     assert_eq!(KernelManager::language(&id).as_deref(), Some("matlab"));
-    let vars = KernelManager::execute(&id, notebook::MATLAB_VAR_INSPECT_CODE, Duration::from_secs(30))
-        .unwrap();
+    let vars = KernelManager::execute(
+        &id,
+        notebook::MATLAB_VAR_INSPECT_CODE,
+        Duration::from_secs(30),
+    )
+    .unwrap();
     let text = stdout_text(&vars.outputs);
     assert!(text.contains("__ARIS_VARS_JSON__"), "no sentinel: {text}");
-    assert!(text.contains("\"a\""), "inspector missed variable `a`: {text}");
+    assert!(
+        text.contains("\"a\""),
+        "inspector missed variable `a`: {text}"
+    );
 
     // An error cell reports status Error with a MATLAB traceback.
     let err = KernelManager::execute(&id, "error('boom')", Duration::from_secs(30)).unwrap();
     assert_eq!(err.status, ExecStatus::Error);
-    assert!(err.outputs.iter().any(|o| matches!(o, CellOutput::Error { .. })));
+    assert!(err
+        .outputs
+        .iter()
+        .any(|o| matches!(o, CellOutput::Error { .. })));
 
     // Streaming path: the callback receives output, and the final outcome still
     // carries the canonical stdout.
@@ -260,8 +286,15 @@ fn matlab_backend_runs_persists_and_inspects() {
         },
     )
     .unwrap();
-    assert!(stdout_text(&out4.outputs).contains('3'), "final outcome stdout: {:?}", out4.outputs);
-    assert!(streamed.lock().unwrap().contains('3'), "callback received no streamed output");
+    assert!(
+        stdout_text(&out4.outputs).contains('3'),
+        "final outcome stdout: {:?}",
+        out4.outputs
+    );
+    assert!(
+        streamed.lock().unwrap().contains('3'),
+        "callback received no streamed output"
+    );
 
     KernelManager::shutdown(&id).unwrap();
     assert!(!KernelManager::is_running(&id));

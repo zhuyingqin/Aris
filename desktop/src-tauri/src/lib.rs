@@ -309,7 +309,10 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building SomniQ Studio")
         .run(|app_handle, event| {
-            if matches!(event, tauri::RunEvent::ExitRequested { .. }) {
+            if matches!(
+                event,
+                tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
+            ) {
                 cleanup_before_exit(app_handle);
             }
         });

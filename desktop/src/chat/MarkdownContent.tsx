@@ -6,9 +6,23 @@ import "highlight.js/styles/github-dark.css";
 import { fileOpen } from "../api/tauri";
 import { useStore } from "../store";
 
+const MAX_MARKDOWN_RENDER_CHARS = 80_000;
+const LARGE_MARKDOWN_HEAD_CHARS = 48_000;
+const LARGE_MARKDOWN_TAIL_CHARS = 16_000;
+
 interface Segment {
   kind: "text" | "think";
   content: string;
+}
+
+function largeTextExcerpt(text: string): string {
+  if (text.length <= LARGE_MARKDOWN_HEAD_CHARS + LARGE_MARKDOWN_TAIL_CHARS) return text;
+  const omitted = text.length - LARGE_MARKDOWN_HEAD_CHARS - LARGE_MARKDOWN_TAIL_CHARS;
+  return [
+    text.slice(0, LARGE_MARKDOWN_HEAD_CHARS),
+    `\n\n[SomniQ is showing a lightweight preview of this large message; ${omitted.toLocaleString()} characters are hidden here. Use Copy on the message for the full text.]\n\n`,
+    text.slice(-LARGE_MARKDOWN_TAIL_CHARS),
+  ].join("");
 }
 
 function parseThinkBlocks(raw: string): Segment[] {
@@ -213,6 +227,16 @@ export const ThinkBlock = memo(function ThinkBlock({
 
 function MarkdownContent({ text, streaming = false }: { text: string; streaming?: boolean }) {
   const rendered = useThrottledText(text, streaming);
+  if (rendered.length > MAX_MARKDOWN_RENDER_CHARS) {
+    return (
+      <div className="md-content md-content-large">
+        <div className="md-large-notice">
+          Large response preview
+        </div>
+        <pre className="md-large-text">{largeTextExcerpt(rendered)}</pre>
+      </div>
+    );
+  }
   const segments = parseThinkBlocks(rendered);
   return (
     <div className="md-content">

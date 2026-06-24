@@ -1,19 +1,52 @@
-import { useCallback, useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { lazy, memo, Suspense, useCallback, useDeferredValue, useEffect, useRef, useState, useTransition, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { appRelaunch, appUpdateCheck, appUpdateDownloadAndInstall, isTauri } from "./api/tauri";
 import { useStore, type Tab } from "./store";
 import type { AppUpdateInfo, AppUpdateProgress } from "./types";
+import ErrorBoundary from "./ErrorBoundary";
 import Chat from "./chat/Chat";
 import Lab from "./lab/Lab";
-import Literature, { LiteratureViewTabs, type LiteraturePageView } from "./literature/Literature";
-import Studio from "./studio/Studio";
-import Mail from "./mail/Mail";
+import LiteratureViewTabs, { type LiteraturePageView } from "./literature/LiteratureViewTabs";
 import Extensions from "./extensions/Extensions";
 import Settings from "./settings/Settings";
 import Sessions from "./sessions/Sessions";
 import ScheduledTasks from "./scheduled/ScheduledTasks";
 import OnboardingTutorial from "./OnboardingTutorial";
+
+const loadLiterature = () => import("./literature/Literature");
+const loadStudio = () => import("./studio/Studio");
+const loadMail = () => import("./mail/Mail");
+
+const Literature = lazy(loadLiterature);
+const Studio = lazy(loadStudio);
+const Mail = lazy(loadMail);
+const ChatPane = memo(Chat);
+
+function preloadTabModule(tabId: string) {
+  if (tabId === "literature") void loadLiterature();
+  else if (tabId === "studio") void loadStudio();
+  else if (tabId === "mail") void loadMail();
+}
+
+function AppLoadingPane({ label }: { label: string }) {
+  return (
+    <div className="app-loading-pane" role="status" aria-live="polite">
+      <span className="app-loading-spinner" aria-hidden="true" />
+      <span>Loading {label}...</span>
+    </div>
+  );
+}
+
+function AppViewFallback({ error, reset }: { error: Error; reset: () => void }) {
+  return (
+    <div className="app-view-error" role="alert">
+      <strong>This view hit a UI error.</strong>
+      <span>{error.message || "The current screen could not render."}</span>
+      <button type="button" onClick={reset}>Try again</button>
+    </div>
+  );
+}
 
 interface NavItem {
   id: string;
@@ -190,6 +223,8 @@ function windowAction(action: "minimize" | "maximize" | "close") {
 export default function App() {
   const tab = useStore((s) => s.tab);
   const setTab = useStore((s) => s.setTab);
+  const deferredTab = useDeferredValue(tab);
+  const [, startTabTransition] = useTransition();
   const stateDir = useStore((s) => s.stateDir);
   const error = useStore((s) => s.error);
   const setError = useStore((s) => s.setError);
@@ -228,6 +263,12 @@ export default function App() {
     startY: number;
     moved: boolean;
   } | null>(null);
+
+  const selectTab = useCallback((nextTab: Tab) => {
+    preloadTabModule(nextTab);
+    startTabTransition(() => setTab(nextTab));
+    setMobileNavOpen(false);
+  }, [setTab, startTabTransition]);
 
   const chooseProject = async () => {
     setProjectMenuOpen(false);
@@ -361,6 +402,38 @@ export default function App() {
 
   useEffect(() => init(), [init]);
   useEffect(() => {
+    let disposed = false;
+    const heavyTabs = ["literature", "studio", "mail"];
+    const idleWindow = window as Window & {
+      requestIdleCallback?: (callback: () => void, options?: { timeout?: number }) => number;
+      cancelIdleCallback?: (id: number) => void;
+    };
+    let idleId: number | null = null;
+    let timerId: number | null = null;
+
+    const scheduleNext = () => {
+      if (disposed || heavyTabs.length === 0) return;
+      const warm = () => {
+        if (disposed) return;
+        const next = heavyTabs.shift();
+        if (next) preloadTabModule(next);
+        timerId = window.setTimeout(scheduleNext, 500);
+      };
+      if (idleWindow.requestIdleCallback) {
+        idleId = idleWindow.requestIdleCallback(warm, { timeout: 4000 });
+      } else {
+        timerId = window.setTimeout(warm, 1200);
+      }
+    };
+
+    timerId = window.setTimeout(scheduleNext, 2500);
+    return () => {
+      disposed = true;
+      if (timerId !== null) window.clearTimeout(timerId);
+      if (idleId !== null && idleWindow.cancelIdleCallback) idleWindow.cancelIdleCallback(idleId);
+    };
+  }, []);
+  useEffect(() => {
     updateStateRef.current = updateState;
   }, [updateState]);
   const checkForAppUpdate = useCallback(async () => {
@@ -426,8 +499,9 @@ export default function App() {
   const orderedProjects = (projectOrderPreview ?? projects.map((project) => project.id))
     .map((id) => projectById.get(id))
     .filter((project): project is NonNullable<typeof project> => Boolean(project));
-  const labWorkbench = tab === "lab";
-  const chatShell = tab === "chat";
+  const renderedTab = deferredTab;
+  const labWorkbench = renderedTab === "lab";
+  const chatShell = renderedTab === "chat";
   const showUpdateIndicator = updateState === "available" || updateState === "downloading" || updateState === "ready";
   const updateVersionLabel = updateInfo?.version ? ` v${updateInfo.version}` : "";
   const updateTitle = updateState === "ready"
@@ -556,9 +630,10 @@ export default function App() {
                 key={t.id}
                 className={`nav-item${tab === t.id ? " active" : ""}`}
                 data-onboarding-target={`nav-${t.id}`}
+                onPointerEnter={() => preloadTabModule(t.id)}
+                onFocus={() => preloadTabModule(t.id)}
                 onClick={() => {
-                  setTab(t.id as Tab);
-                  setMobileNavOpen(false);
+                  selectTab(t.id as Tab);
                 }}
               >
                 <span className="nav-icon">{t.icon}</span>
@@ -705,19 +780,39 @@ export default function App() {
       </header>
 
       <main className="app-main" data-onboarding-target="workspace">
-        <div hidden={tab !== "chat"}>
-          <Chat />
-        </div>
-        {tab === "lab" && <Lab />}
-        {tab === "literature" && (
-          <Literature pageView={literaturePageView} onPageViewChange={setLiteraturePageView} />
-        )}
-        {tab === "studio" && <Studio />}
-        {tab === "mail" && <Mail />}
-        {tab === "extensions" && <Extensions />}
-        {tab === "sessions" && <Sessions />}
-        {tab === "scheduled" && <ScheduledTasks />}
-        {tab === "settings" && <Settings />}
+        <ErrorBoundary
+          resetKey={renderedTab}
+          fallback={(viewError, reset) => <AppViewFallback error={viewError} reset={reset} />}
+        >
+          <div hidden={renderedTab !== "chat"}>
+            <ErrorBoundary
+              resetKey="chat"
+              fallback={(viewError, reset) => <AppViewFallback error={viewError} reset={reset} />}
+            >
+              <ChatPane />
+            </ErrorBoundary>
+          </div>
+          {renderedTab === "lab" && <Lab />}
+          {renderedTab === "literature" && (
+            <Suspense fallback={<AppLoadingPane label="Literature" />}>
+              <Literature pageView={literaturePageView} onPageViewChange={setLiteraturePageView} />
+            </Suspense>
+          )}
+          {renderedTab === "studio" && (
+            <Suspense fallback={<AppLoadingPane label="Studio" />}>
+              <Studio />
+            </Suspense>
+          )}
+          {renderedTab === "mail" && (
+            <Suspense fallback={<AppLoadingPane label="Mail" />}>
+              <Mail />
+            </Suspense>
+          )}
+          {renderedTab === "extensions" && <Extensions />}
+          {renderedTab === "sessions" && <Sessions />}
+          {renderedTab === "scheduled" && <ScheduledTasks />}
+          {renderedTab === "settings" && <Settings />}
+        </ErrorBoundary>
 
         {error && (
           <div className="toast" role="alert" aria-live="assertive">

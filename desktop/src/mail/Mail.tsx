@@ -9,7 +9,7 @@ import {
   type PointerEvent as ReactPointerEvent,
   type UIEvent,
 } from "react";
-import arisIcon from "../assets/app-logo.png";
+import arisIcon from "../assets/aris-icon.svg";
 import avatarManBlue from "../assets/mail/avatar-man-blue-shirt.png";
 import avatarWomanBlazer from "../assets/mail/avatar-woman-navy-blazer.png";
 import avatarManNavy from "../assets/mail/avatar-man-navy-sweater.png";
@@ -526,7 +526,7 @@ function Avatar({
       title={title}
     >
       <span>{label}</span>
-      <img src={avatarImage(seed)} alt="" />
+      <img src={avatarImage(seed)} alt="" loading="lazy" decoding="async" />
     </span>
   );
 }
@@ -960,7 +960,7 @@ export default function Mail() {
     return (
       <div className="agent-mail-empty">
         <div className="agent-mail-empty-card">
-          <img src={arisIcon} alt="" />
+          <img src={arisIcon} alt="" decoding="async" />
           <h2>正在打开邮箱</h2>
           <p>正在读取已连接账号和文件夹，请稍等。</p>
         </div>
@@ -972,7 +972,7 @@ export default function Mail() {
     return (
       <div className="agent-mail-empty">
         <div className="agent-mail-empty-card">
-          <img src={arisIcon} alt="" />
+          <img src={arisIcon} alt="" decoding="async" />
           <h2>{previewMode ? "浏览器预览无法读取邮箱" : "连接一个邮箱账号"}</h2>
           <p>
             {previewMode
@@ -992,7 +992,7 @@ export default function Mail() {
     <div className="agent-mail">
       <aside className="am-sidebar">
         <div className="am-brand">
-          <img src={arisIcon} alt="" />
+          <img src={arisIcon} alt="" decoding="async" />
           <span>SomniQ Mail</span>
         </div>
 

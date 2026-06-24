@@ -32,4 +32,11 @@ describe("MarkdownContent Studio links", () => {
     expect(useStore.getState().tab).toBe("studio");
     expect(useStore.getState().pendingStudioArtifactId).toBe("web:irl-demo");
   });
+
+  it("uses a lightweight preview for very large Markdown messages", () => {
+    render(<MarkdownContent text={"x".repeat(90_000)} />);
+
+    expect(screen.getByText("Large response preview")).toBeTruthy();
+    expect(screen.getByText(/characters are hidden here/)).toBeTruthy();
+  });
 });

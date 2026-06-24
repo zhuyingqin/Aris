@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import type { ChatTurn } from "../types";
+import ErrorBoundary from "../ErrorBoundary";
 import ChatMessage from "./ChatMessage";
-import arisIcon from "../assets/app-logo.png";
+import arisIcon from "../assets/aris-icon.svg";
 
 export function isNearBottom(element: Pick<HTMLElement, "scrollHeight" | "scrollTop" | "clientHeight">, threshold = 140) {
   return element.scrollHeight - element.scrollTop - element.clientHeight <= threshold;
@@ -28,6 +29,29 @@ interface Props {
   onContinue: () => void;
   onPermissionRespond: (promptId: string, allow: boolean) => void;
   onQuestionRespond: (toolUseId: string, answer: string) => void;
+}
+
+function ChatMessageFallback({ error, reset }: { error: Error; reset: () => void }) {
+  return (
+    <article className="chat-turn chat-assistant chat-turn-error">
+      <div className="chat-error-card">
+        <strong>Message failed to render</strong>
+        <span>{error.message || "This message hit a UI rendering error."}</span>
+        <button type="button" onClick={reset}>Retry</button>
+      </div>
+    </article>
+  );
+}
+
+function turnRenderKey(turn: ChatTurn): string {
+  const blockSignature = turn.blocks.map((block) => {
+    if (block.kind === "text") return `t:${block.text.length}`;
+    if (block.kind === "thinking") return `r:${block.thinking.length}`;
+    if (block.kind === "notice") return `n:${block.message.length}`;
+    if (block.kind === "permission") return `p:${block.id}:${block.status ?? "pending"}:${block.input.length}`;
+    return `c:${block.id ?? ""}:${block.name}:${block.input.length}:${block.output?.length ?? -1}`;
+  }).join("|");
+  return `${turn.id}:${turn.streaming ? "streaming" : "done"}:${blockSignature}`;
 }
 
 export default function ChatThread({
@@ -133,7 +157,7 @@ export default function ChatThread({
             <div className="chat-welcome-inner">
               <div className="chat-welcome-mark">
                 <span className="chat-welcome-glow" aria-hidden="true" />
-                <img src={arisIcon} alt="" />
+                <img src={arisIcon} alt="" decoding="async" />
               </div>
               <h1>What are we working on?</h1>
               <p>Start from the current project context, or attach files and ask anything.</p>
@@ -157,6 +181,7 @@ export default function ChatThread({
           <div className="chat-virtual-list" style={{ height: virtualizer.getTotalSize() }}>
             {virtualizer.getVirtualItems().map((item) => {
               const turn = turns[item.index];
+              if (!turn) return null;
               return (
                 <div
                   key={turn.id}
@@ -165,15 +190,20 @@ export default function ChatThread({
                   className="chat-virtual-row"
                   style={{ transform: `translateY(${item.start}px)` }}
                 >
-                  <ChatMessage
-                    turn={turn}
-                    canRetry={turn.role === "assistant" && item.index > 0}
-                    onEdit={onEdit}
-                    onRetry={onRetry}
-                    onContinue={onContinue}
-                    onPermissionRespond={onPermissionRespond}
-                    onQuestionRespond={onQuestionRespond}
-                  />
+                  <ErrorBoundary
+                    resetKey={turnRenderKey(turn)}
+                    fallback={(error, reset) => <ChatMessageFallback error={error} reset={reset} />}
+                  >
+                    <ChatMessage
+                      turn={turn}
+                      canRetry={turn.role === "assistant" && item.index > 0}
+                      onEdit={onEdit}
+                      onRetry={onRetry}
+                      onContinue={onContinue}
+                      onPermissionRespond={onPermissionRespond}
+                      onQuestionRespond={onQuestionRespond}
+                    />
+                  </ErrorBoundary>
                 </div>
               );
             })}

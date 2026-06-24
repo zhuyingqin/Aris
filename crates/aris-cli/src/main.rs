@@ -40,10 +40,11 @@ use render::{MarkdownStreamState, Spinner, TerminalRenderer};
 use runtime::AssistantEvent;
 use runtime::{
     clear_oauth_credentials, generate_pkce_pair, generate_state, load_system_prompt,
-    parse_oauth_callback_request_target, save_oauth_credentials, CompactionConfig, ConfigLoader,
-    ConfigSource, ContentBlock, ConversationMessage, ConversationRuntime, MessageRole,
-    OAuthAuthorizationRequest, OAuthConfig, OAuthTokenExchangeRequest, PermissionMode,
-    ProjectContext, RuntimeError, Session, TokenUsage, ToolError, ToolExecutor, UsageTracker,
+    parse_oauth_callback_request_target, save_oauth_credentials, CompactionConfig,
+    CompactionResult, ConfigLoader, ConfigSource, ContentBlock, ConversationMessage,
+    ConversationRuntime, MessageRole, OAuthAuthorizationRequest, OAuthConfig,
+    OAuthTokenExchangeRequest, PermissionMode, ProjectContext, RuntimeError, Session, TokenUsage,
+    ToolError, ToolExecutor, UsageTracker,
 };
 use serde_json::json;
 use tools::{execute_tool, mvp_tool_specs};
@@ -203,7 +204,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // api::resolve_startup_auth_source() — otherwise a user whose auth DOES work
     // (shell env var or saved OAuth credentials) would be wrongly routed through
     // setup, and force_apply_to_env() would erase their shell-provided key.
-    let needs_api_key = matches!(action, CliAction::Repl { .. } | CliAction::Prompt { .. });
+    let needs_api_key = match &action {
+        CliAction::Repl { .. } | CliAction::Prompt { .. } => true,
+        CliAction::ResumeSession { commands, .. } => commands.iter().any(|command| {
+            matches!(
+                SlashCommand::parse(command),
+                Some(SlashCommand::Compact { .. })
+            )
+        }),
+        _ => false,
+    };
     if needs_api_key && !has_any_executor_auth() {
         println!("\x1b[1;33mNo API key found.\x1b[0m Let's set up ARIS first.\n");
         let new_config = config::run_interactive_setup()?;
@@ -225,7 +235,24 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         CliAction::ResumeSession {
             session_path,
             commands,
-        } => resume_session(&session_path, &commands),
+            mut model,
+            allowed_tools,
+            permission_mode,
+        } => {
+            if model == DEFAULT_MODEL {
+                model = saved_config
+                    .executor_model()
+                    .map(|m| resolve_model_alias(m).to_string())
+                    .unwrap_or(model);
+            }
+            resume_session(
+                &session_path,
+                &commands,
+                model,
+                allowed_tools,
+                permission_mode,
+            )?;
+        }
         CliAction::Prompt {
             prompt,
             mut model,
@@ -284,6 +311,9 @@ enum CliAction {
     ResumeSession {
         session_path: PathBuf,
         commands: Vec<String>,
+        model: String,
+        allowed_tools: Option<AllowedToolSet>,
+        permission_mode: PermissionMode,
     },
     Prompt {
         prompt: String,
@@ -435,7 +465,7 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
         return Ok(CliAction::Help);
     }
     if rest.first().map(String::as_str) == Some("--resume") {
-        return parse_resume_args(&rest[1..]);
+        return parse_resume_args(&rest[1..], model, allowed_tools, permission_mode);
     }
 
     match rest[0].as_str() {
@@ -601,7 +631,12 @@ fn parse_system_prompt_args(args: &[String]) -> Result<CliAction, String> {
     Ok(CliAction::PrintSystemPrompt { cwd, date })
 }
 
-fn parse_resume_args(args: &[String]) -> Result<CliAction, String> {
+fn parse_resume_args(
+    args: &[String],
+    model: String,
+    allowed_tools: Option<AllowedToolSet>,
+    permission_mode: PermissionMode,
+) -> Result<CliAction, String> {
     let session_path = args
         .first()
         .ok_or_else(|| "missing session path for --resume".to_string())
@@ -616,6 +651,9 @@ fn parse_resume_args(args: &[String]) -> Result<CliAction, String> {
     Ok(CliAction::ResumeSession {
         session_path,
         commands,
+        model,
+        allowed_tools,
+        permission_mode,
     })
 }
 
@@ -782,7 +820,13 @@ fn print_version() {
     println!("{}", render_version_report());
 }
 
-fn resume_session(session_path: &Path, commands: &[String]) {
+fn resume_session(
+    session_path: &Path,
+    commands: &[String],
+    model: String,
+    allowed_tools: Option<AllowedToolSet>,
+    permission_mode: PermissionMode,
+) -> Result<(), Box<dyn std::error::Error>> {
     let session = match Session::load_from_path(session_path) {
         Ok(session) => session,
         Err(error) => {
@@ -797,16 +841,26 @@ fn resume_session(session_path: &Path, commands: &[String]) {
             session_path.display(),
             session.messages.len()
         );
-        return;
+        return Ok(());
     }
 
     let mut session = session;
+    let mut runtime: Option<ConversationRuntime<aris_executor::ExecutorClient, CliToolExecutor>> =
+        None;
     for raw_command in commands {
         let Some(command) = SlashCommand::parse(raw_command) else {
             eprintln!("unsupported resumed command: {raw_command}");
             std::process::exit(2);
         };
-        match run_resume_command(session_path, &session, &command) {
+        match run_resume_command(
+            session_path,
+            &session,
+            &command,
+            &model,
+            allowed_tools.clone(),
+            permission_mode,
+            &mut runtime,
+        ) {
             Ok(ResumeCommandOutcome {
                 session: next_session,
                 message,
@@ -822,6 +876,7 @@ fn resume_session(session_path: &Path, commands: &[String]) {
             }
         }
     }
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -951,20 +1006,23 @@ fn format_resume_report(session_path: &str, message_count: usize, turns: u32) ->
     )
 }
 
-fn format_compact_report(removed: usize, resulting_messages: usize, skipped: bool) -> String {
+fn format_compact_report(result: &CompactionResult) -> String {
+    let removed = result.removed_message_count;
+    let resulting_messages = result.compacted_session.messages.len();
+    let skipped = removed == 0;
     if skipped {
         format!(
-            "Compact
-  Result           skipped
-  Reason           session below compaction threshold
-  Messages kept    {resulting_messages}"
+            "Compact\n  Result           skipped\n  Reason           no safe prefix or session below threshold\n  Messages kept    {resulting_messages}\n  Tokens before    {}\n  Tokens after     {}",
+            result.tokens_before, result.tokens_after
         )
     } else {
+        let saved = result.tokens_before.saturating_sub(result.tokens_after);
         format!(
-            "Compact
-  Result           compacted
-  Messages removed {removed}
-  Messages kept    {resulting_messages}"
+            "Compact\n  Result           compacted\n  Summary source   {}\n  Messages removed {removed}\n  Messages kept    {resulting_messages}\n  Tail preserved   {}\n  Tokens before    {}\n  Tokens after     {}\n  Tokens saved     {saved}",
+            result.summary_source.as_str(),
+            result.preserved_message_count,
+            result.tokens_before,
+            result.tokens_after
         )
     }
 }
@@ -1011,31 +1069,28 @@ fn run_resume_command(
     session_path: &Path,
     session: &Session,
     command: &SlashCommand,
+    model: &str,
+    allowed_tools: Option<AllowedToolSet>,
+    permission_mode: PermissionMode,
+    runtime: &mut Option<ConversationRuntime<aris_executor::ExecutorClient, CliToolExecutor>>,
 ) -> Result<ResumeCommandOutcome, Box<dyn std::error::Error>> {
     match command {
         SlashCommand::Help => Ok(ResumeCommandOutcome {
             session: session.clone(),
             message: Some(render_repl_help()),
         }),
-        SlashCommand::Compact => {
-            let result = runtime::compact_session(
-                session,
-                CompactionConfig {
-                    max_estimated_tokens: 0,
-                    ..CompactionConfig::default()
-                },
-            );
-            let removed = result.removed_message_count;
-            let kept = result.compacted_session.messages.len();
-            let skipped = removed == 0;
+        SlashCommand::Compact { instruction } => {
+            let runtime = resumed_runtime(runtime, session, model, allowed_tools, permission_mode)?;
+            let result = runtime.compact(CompactionConfig::manual(instruction.clone()));
             save_session_artifacts(
                 &session_id_from_path(session_path),
                 session_path,
                 &result.compacted_session,
             )?;
+            let message = format_compact_report(&result);
             Ok(ResumeCommandOutcome {
                 session: result.compacted_session,
-                message: Some(format_compact_report(removed, kept, skipped)),
+                message: Some(message),
             })
         }
         SlashCommand::Clear { confirm } => {
@@ -1136,6 +1191,36 @@ fn run_resume_command(
         | SlashCommand::MetaOptimize { .. }
         | SlashCommand::Unknown { .. } => Err("unsupported resumed slash command".into()),
     }
+}
+
+fn resumed_runtime<'a>(
+    runtime: &'a mut Option<ConversationRuntime<aris_executor::ExecutorClient, CliToolExecutor>>,
+    session: &Session,
+    model: &str,
+    allowed_tools: Option<AllowedToolSet>,
+    permission_mode: PermissionMode,
+) -> Result<
+    &'a mut ConversationRuntime<aris_executor::ExecutorClient, CliToolExecutor>,
+    Box<dyn std::error::Error>,
+> {
+    let needs_rebuild = runtime
+        .as_ref()
+        .is_none_or(|runtime| runtime.session() != session);
+    if needs_rebuild {
+        let system_prompt = build_system_prompt(Some(model))?;
+        *runtime = Some(build_runtime(
+            session.clone(),
+            model.to_string(),
+            system_prompt,
+            true,
+            false,
+            allowed_tools,
+            permission_mode,
+        )?);
+    }
+    runtime
+        .as_mut()
+        .ok_or_else(|| "failed to initialize resumed runtime".into())
 }
 
 fn run_repl(
@@ -1700,8 +1785,8 @@ impl LiveCli {
                 self.run_debug_tool_call()?;
                 false
             }
-            SlashCommand::Compact => {
-                self.compact()?;
+            SlashCommand::Compact { instruction } => {
+                self.compact(instruction)?;
                 false
             }
             SlashCommand::Model { model } => self.set_model(model)?,
@@ -2851,11 +2936,9 @@ impl LiveCli {
         Ok(())
     }
 
-    fn compact(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let result = self.runtime.compact(CompactionConfig::default());
-        let removed = result.removed_message_count;
-        let kept = result.compacted_session.messages.len();
-        let skipped = removed == 0;
+    fn compact(&mut self, instruction: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
+        let result = self.runtime.compact(CompactionConfig::manual(instruction));
+        let report = format_compact_report(&result);
         self.runtime = build_runtime(
             result.compacted_session,
             self.model.clone(),
@@ -2866,7 +2949,7 @@ impl LiveCli {
             self.permission_mode,
         )?;
         self.persist_session()?;
-        println!("{}", format_compact_report(removed, kept, skipped));
+        println!("{report}");
         Ok(())
     }
 
@@ -4210,6 +4293,8 @@ fn build_runtime(
         permission_policy,
         system_prompt,
         feature_config,
+        None,
+        None,
     )
     .map_err(|error| io::Error::new(io::ErrorKind::Other, error))?;
     Ok(runtime.with_event_sink(event_sink))
@@ -5485,7 +5570,10 @@ mod tests {
         CliAction, CliOutputFormat, SlashCommand, StatusUsage, DEFAULT_MODEL,
     };
     use api::{MessageResponse, OutputContentBlock, Usage};
-    use runtime::{AssistantEvent, ContentBlock, ConversationMessage, MessageRole, PermissionMode};
+    use runtime::{
+        AssistantEvent, CompactionResult, CompactionSummarySource, ContentBlock,
+        ConversationMessage, MessageRole, PermissionMode, Session,
+    };
     use serde_json::json;
     use std::path::PathBuf;
 
@@ -5669,6 +5757,9 @@ mod tests {
             CliAction::ResumeSession {
                 session_path: PathBuf::from("session.json"),
                 commands: vec!["/compact".to_string()],
+                model: DEFAULT_MODEL.to_string(),
+                allowed_tools: None,
+                permission_mode: PermissionMode::DangerFullAccess,
             }
         );
     }
@@ -5691,6 +5782,9 @@ mod tests {
                     "/compact".to_string(),
                     "/cost".to_string(),
                 ],
+                model: DEFAULT_MODEL.to_string(),
+                allowed_tools: None,
+                permission_mode: PermissionMode::DangerFullAccess,
             }
         );
     }
@@ -5772,11 +5866,30 @@ mod tests {
 
     #[test]
     fn compact_report_uses_structured_output() {
-        let compacted = format_compact_report(8, 5, false);
+        let compacted = format_compact_report(&CompactionResult {
+            summary: "<summary>done</summary>".to_string(),
+            formatted_summary: "Summary:\ndone".to_string(),
+            compacted_session: Session::new(),
+            removed_message_count: 8,
+            preserved_message_count: 4,
+            tokens_before: 100,
+            tokens_after: 40,
+            summary_source: CompactionSummarySource::Llm,
+        });
         assert!(compacted.contains("Compact"));
         assert!(compacted.contains("Result           compacted"));
+        assert!(compacted.contains("Summary source   llm"));
         assert!(compacted.contains("Messages removed 8"));
-        let skipped = format_compact_report(0, 3, true);
+        let skipped = format_compact_report(&CompactionResult {
+            summary: String::new(),
+            formatted_summary: String::new(),
+            compacted_session: Session::new(),
+            removed_message_count: 0,
+            preserved_message_count: 0,
+            tokens_before: 12,
+            tokens_after: 12,
+            summary_source: CompactionSummarySource::Skipped,
+        });
         assert!(skipped.contains("Result           skipped"));
     }
 

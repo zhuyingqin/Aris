@@ -1,10 +1,8 @@
-import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Fragment, lazy, Suspense, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { literatureLlm } from "../api/tauri";
 import { useStore } from "../store";
-import Knowledge from "../knowledge/KnowledgeReview";
-import MathText from "./MathText";
-import PdfReader from "./PdfReader";
+import type { LiteraturePageView } from "./LiteratureViewTabs";
 import { useLiteratureStore } from "./literatureStore";
 import {
   type DetailTab,
@@ -18,7 +16,33 @@ import {
 import "./Literature.css";
 
 type SortKey = "added" | "fit" | "year" | "title" | "citations";
-export type LiteraturePageView = "library" | "graph";
+
+const Knowledge = lazy(() => import("../knowledge/KnowledgeReview"));
+const LazyMathText = lazy(() => import("./MathText"));
+const PdfReader = lazy(() => import("./PdfReader"));
+
+function MathText({
+  text,
+  className = "",
+}: {
+  text: string;
+  className?: string;
+}) {
+  return (
+    <Suspense fallback={<span className={`lit-math-text ${className}`.trim()}>{text}</span>}>
+      <LazyMathText text={text} className={className} />
+    </Suspense>
+  );
+}
+
+function LiteratureLoading({ label }: { label: string }) {
+  return (
+    <div className="lit-lazy-loading" role="status" aria-live="polite">
+      <span className="lit-search-spinner" aria-hidden="true" />
+      {label}
+    </div>
+  );
+}
 
 interface LiteratureProps {
   pageView?: LiteraturePageView;
@@ -885,7 +909,9 @@ export default function Literature({
 
       {pageView === "graph" ? (
         <div className="lit-knowledge-shell">
-          <Knowledge mode="globalGraph" />
+          <Suspense fallback={<LiteratureLoading label="Loading knowledge graph..." />}>
+            <Knowledge mode="globalGraph" />
+          </Suspense>
         </div>
       ) : selectedPaper && workspaceTab === "reader" && selectedPaper.pdf.path ? (
         <div className="lit-reading-shell">
@@ -927,23 +953,25 @@ export default function Literature({
               ))}
             </div>
           </div>
-          <PdfReader
-            relativePath={selectedPaper.pdf.path}
-            initialPage={readerPage}
-            annotations={selectedPaper.pdfAnnotations}
-            focusedAnnotationId={readerAnnotationId}
-            onOpenExternal={() => void openPdf(selectedPaper.id)}
-            onAddAnnotation={(page, data) =>
-              addPdfAnnotation(selectedPaper.id, { page, ...data })
-            }
-            onUpdateAnnotation={(annotationId, patch) =>
-              updatePdfAnnotation(selectedPaper.id, annotationId, patch)
-            }
-            onDeleteAnnotation={(annotationId) =>
-              deletePdfAnnotation(selectedPaper.id, annotationId)
-            }
-            onRunAi={(system, prompt) => literatureLlm(system, prompt)}
-          />
+          <Suspense fallback={<LiteratureLoading label="Loading PDF reader..." />}>
+            <PdfReader
+              relativePath={selectedPaper.pdf.path}
+              initialPage={readerPage}
+              annotations={selectedPaper.pdfAnnotations}
+              focusedAnnotationId={readerAnnotationId}
+              onOpenExternal={() => void openPdf(selectedPaper.id)}
+              onAddAnnotation={(page, data) =>
+                addPdfAnnotation(selectedPaper.id, { page, ...data })
+              }
+              onUpdateAnnotation={(annotationId, patch) =>
+                updatePdfAnnotation(selectedPaper.id, annotationId, patch)
+              }
+              onDeleteAnnotation={(annotationId) =>
+                deletePdfAnnotation(selectedPaper.id, annotationId)
+              }
+              onRunAi={(system, prompt) => literatureLlm(system, prompt)}
+            />
+          </Suspense>
         </div>
       ) : (
         <div

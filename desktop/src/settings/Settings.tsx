@@ -12,7 +12,7 @@ import {
   isTauri,
 } from "../api/tauri";
 import { useStore } from "../store";
-import companyLogo from "../assets/company-logo.png";
+import arisIcon from "../assets/aris-icon.svg";
 import { useProvidersStore, type ProviderEntry } from "./providersStore";
 import MailSettings, { MailSettingsDetail } from "./MailSettings";
 import type {
@@ -554,6 +554,7 @@ export default function Settings() {
   const [configView, setConfigView] = useState<ConfigView | null>(null);
   const [advForm, setAdvForm] = useState<ConfigPatch>({});
   const [execKey, setExecKey] = useState("");
+  const [summaryKey, setSummaryKey] = useState("");
   const [reviewerKey, setReviewerKey] = useState("");
   const [scopusKey, setScopusKey] = useState("");
   const [saveState, setSaveState] = useState<SaveState>("idle");
@@ -588,14 +589,16 @@ export default function Settings() {
       executorProvider: normalizeExecutorProvider(v.executorProvider, v.executorBaseUrl),
       executorModel: v.executorModel ?? "",
       executorBaseUrl: v.executorBaseUrl ?? "",
+      summarizerProvider: v.summarizerProvider ?? "",
       summarizerModel: v.summarizerModel ?? "",
+      summarizerBaseUrl: v.summarizerBaseUrl ?? "",
       reviewerProvider: normalizeReviewerProvider(v.reviewerProvider, v.reviewerBaseUrl),
       reviewerModel: v.reviewerModel ?? "",
       reviewerBaseUrl: v.reviewerBaseUrl ?? "",
       language: v.language ?? "cn",
       memoryWriteApproval: v.memoryWriteApproval,
     });
-    setExecKey(""); setReviewerKey(""); setScopusKey("");
+    setExecKey(""); setSummaryKey(""); setReviewerKey(""); setScopusKey("");
   };
 
   useEffect(() => {
@@ -678,7 +681,14 @@ export default function Settings() {
   const buildAdvPatch = () => {
     const patch: ConfigPatch = { ...advForm };
     if (execKey.trim()) patch.executorApiKey = execKey.trim();
+    if (summaryKey.trim()) patch.summarizerApiKey = summaryKey.trim();
     if (reviewerKey.trim()) patch.reviewerApiKey = reviewerKey.trim();
+    if (patch.summarizerProvider && !patch.summarizerApiKey) {
+      const targetUrl = (patch.summarizerBaseUrl ?? "").trim().replace(/\/+$/, "").toLowerCase();
+      const matchingProvider = providers.find((provider) => provider.url.trim().replace(/\/+$/, "").toLowerCase() === targetUrl);
+      const key = matchingProvider ? extractKeyFromAuthJson(matchingProvider.authJson) : "";
+      if (key) patch.summarizerApiKey = key;
+    }
     if (scopusKey.trim()) patch.scopusApiKey = scopusKey.trim();
     return patch;
   };
@@ -963,6 +973,46 @@ export default function Settings() {
   const advExecMeta = EXECUTOR_PROVIDERS[advExecProvider] ?? EXECUTOR_PROVIDERS.custom;
   const advReviewerProvider = advForm.reviewerProvider ?? "";
   const advReviewerMeta = REVIEWER_PROVIDERS[advReviewerProvider] ?? REVIEWER_PROVIDERS.custom;
+  const summaryProviderOptions = (() => {
+    const options: { key: string; label: string; provider: string; baseUrl: string; model: string }[] = [];
+    const addOption = (label: string, provider: string | null | undefined, baseUrl: string | null | undefined, model: string | null | undefined) => {
+      const protocol = provider?.trim() || detectProtocol(baseUrl ?? "");
+      const url = baseUrl?.trim() ?? "";
+      const key = `${protocol}::${url.replace(/\/+$/, "").toLowerCase()}`;
+      if (!protocol || options.some((item) => item.key === key)) return;
+      options.push({ key, label, provider: protocol, baseUrl: url, model: model?.trim() ?? "" });
+    };
+    addOption("Executor", configView.executorProvider, configView.executorBaseUrl, configView.executorModel);
+    addOption("Reviewer", configView.reviewerProvider, configView.reviewerBaseUrl, configView.reviewerModel);
+    for (const ve of configView.verifiedExecutors ?? []) {
+      addOption(`${guessProviderName(ve.baseUrl)} · ${ve.model}`, ve.provider, ve.baseUrl, ve.model);
+    }
+    for (const p of providers) {
+      const model = extractModelFromToml(p.configToml) || suggestModels(p.url)[0] || "";
+      addOption(p.name, detectProtocol(p.url), p.url, model);
+    }
+    return options;
+  })();
+  const summaryProviderKey = advForm.summarizerProvider
+    ? `${advForm.summarizerProvider}::${(advForm.summarizerBaseUrl ?? "").replace(/\/+$/, "").toLowerCase()}`
+    : "";
+  const selectedSummaryProvider = summaryProviderOptions.find((item) => item.key === summaryProviderKey);
+  const isManualSummaryProvider = Boolean(advForm.summarizerProvider) && !selectedSummaryProvider;
+  const summarySelectValue = isManualSummaryProvider ? "__manual" : summaryProviderKey;
+  const summarySuggestionBaseUrl = selectedSummaryProvider?.baseUrl ?? advForm.summarizerBaseUrl ?? "";
+  const summaryModelOptions = [
+    ...SUMMARIZER_MODELS,
+    ...Array.from(new Set([
+      selectedSummaryProvider?.model,
+      ...suggestModels(summarySuggestionBaseUrl),
+      advForm.executorProvider === advForm.summarizerProvider ? advForm.executorModel : "",
+      advForm.reviewerProvider === advForm.summarizerProvider ? advForm.reviewerModel : "",
+    ].filter((model): model is string => Boolean(model?.trim())))).map((model) => ({
+      label: model,
+      value: model,
+      hint: selectedSummaryProvider?.label,
+    })),
+  ];
 
   const chooseExecProvider = (prov: string) => {
     const meta = EXECUTOR_PROVIDERS[prov] ?? EXECUTOR_PROVIDERS.custom;
@@ -974,6 +1024,30 @@ export default function Settings() {
     resetOpState();
     if (!prov) { setAdvForm((f) => ({ ...f, reviewerProvider: "", reviewerModel: "", reviewerBaseUrl: "" })); return; }
     setAdvForm((f) => ({ ...f, reviewerProvider: prov, reviewerModel: prov === "custom" ? (f.reviewerModel ?? "") : meta.defaultModel, reviewerBaseUrl: prov === "custom" ? (f.reviewerBaseUrl ?? "") : (meta.defaultBaseUrl ?? meta.baseUrls?.[0]?.value ?? "") }));
+  };
+  const chooseSummaryProvider = (key: string) => {
+    resetOpState();
+    if (!key) {
+      setAdvForm((f) => ({ ...f, summarizerProvider: "", summarizerBaseUrl: "" }));
+      return;
+    }
+    if (key === "__manual") {
+      setAdvForm((f) => ({
+        ...f,
+        summarizerProvider: f.summarizerProvider || "openai",
+        summarizerBaseUrl: f.summarizerBaseUrl ?? "",
+        summarizerModel: f.summarizerModel ?? "",
+      }));
+      return;
+    }
+    const option = summaryProviderOptions.find((item) => item.key === key);
+    if (!option) return;
+    setAdvForm((f) => ({
+      ...f,
+      summarizerProvider: option.provider,
+      summarizerBaseUrl: option.baseUrl,
+      summarizerModel: f.summarizerModel ?? "",
+    }));
   };
   const updateBusy = updateState === "checking" || updateState === "downloading";
   const updateCanInstall = updateState === "available";
@@ -1253,7 +1327,15 @@ export default function Settings() {
             <div className="sp-adv-section">
               <div className="sp-adv-section-title">其他</div>
               <div className="sp-adv-rows">
-                <div className="st-row"><div className="st-row-label"><span className="st-label">摘要模型</span><span className="st-hint">压缩上下文时生成摘要所用的模型；留空 = 自动</span></div><div className="st-row-control"><PresetTextInput value={advForm.summarizerModel ?? ""} placeholder="Auto（自动选便宜模型，如 Haiku）" options={SUMMARIZER_MODELS} onChange={(v) => { resetOpState(); setAdvForm((f) => ({ ...f, summarizerModel: v })); }} /></div></div>
+                <div className="st-row"><div className="st-row-label"><span className="st-label">摘要供应商</span><span className="st-hint">Auto 会使用这里选择的供应商和已保存的 key</span></div><div className="st-row-control"><select value={summarySelectValue} onChange={(e) => chooseSummaryProvider(e.target.value)}><option value="">跟随执行器</option><option value="__manual">手动配置</option>{summaryProviderOptions.map((item) => <option key={item.key} value={item.key}>{item.label}{item.model ? ` · ${item.model}` : ""}</option>)}</select></div></div>
+                {isManualSummaryProvider && (
+                  <>
+                    <div className="st-row"><div className="st-row-label"><span className="st-label">摘要协议</span></div><div className="st-row-control"><select value={advForm.summarizerProvider ?? "openai"} onChange={(e) => { resetOpState(); setAdvForm((f) => ({ ...f, summarizerProvider: e.target.value })); }}><option value="openai">OpenAI-compatible</option><option value="anthropic">Anthropic</option><option value="anthropic-compat">Anthropic-compatible</option></select></div></div>
+                    <div className="st-row"><div className="st-row-label"><span className="st-label">摘要 Base URL</span></div><div className="st-row-control"><PresetTextInput value={advForm.summarizerBaseUrl ?? ""} placeholder="https://api.openai.com/v1" options={[...OPENAI_COMPAT_URLS, ...ANTHROPIC_COMPAT_URLS]} onChange={(v) => { resetOpState(); setAdvForm((f) => ({ ...f, summarizerBaseUrl: v })); }} /></div></div>
+                    <div className="st-row"><div className="st-row-label"><span className="st-label">摘要 API Key</span><span className="st-hint">{configView.hasSummarizerKey ? `Saved: ${configView.summarizerKeyMasked ?? "configured"}` : "No key"}</span></div><div className="st-row-control"><KeyInput value={summaryKey} placeholder={configView.hasSummarizerKey ? "leave blank to keep" : "paste summary key"} masked={configView.summarizerKeyMasked} secretKind="summarizerApiKey" onChange={(v) => { resetOpState(); setSummaryKey(v); }} /></div></div>
+                  </>
+                )}
+                <div className="st-row"><div className="st-row-label"><span className="st-label">摘要模型</span><span className="st-hint">压缩上下文时生成摘要所用的模型；留空 = 自动</span></div><div className="st-row-control"><PresetTextInput value={advForm.summarizerModel ?? ""} placeholder="Auto（使用所选摘要供应商）" options={summaryModelOptions} onChange={(v) => { resetOpState(); setAdvForm((f) => ({ ...f, summarizerModel: v })); }} /></div></div>
                 <div className="st-row"><div className="st-row-label"><span className="st-label">语言</span></div><div className="st-row-control"><div className="st-lang-grid">{[{ value: "cn", label: "中文" }, { value: "en", label: "English" }].map((l) => <button key={l.value} type="button" className={`st-lang-card${advForm.language === l.value ? " active" : ""}`} onClick={() => { resetOpState(); setAdvForm((f) => ({ ...f, language: l.value })); }}><span className="st-lang-label">{l.label}</span></button>)}</div></div></div>
                 <div className="st-row"><div className="st-row-label"><span className="st-label">Scopus Key</span><span className="st-hint">{configView.hasScopusKey ? `Saved: ${configView.scopusKeyMasked ?? "configured"}` : "No key"}</span></div><div className="st-row-control"><KeyInput value={scopusKey} placeholder={configView.hasScopusKey ? "leave blank to keep" : "paste Elsevier key"} masked={configView.scopusKeyMasked} secretKind="scopusApiKey" onChange={(v) => { resetOpState(); setScopusKey(v); }} /></div></div>
                 <div className="st-row"><div className="st-row-label"><span className="st-label">Config file</span></div><div className="st-row-control"><input className="st-readonly-input" value={configView.configPath} readOnly /></div></div>
@@ -1295,7 +1377,7 @@ export default function Settings() {
       </div>
 
       <div className="sp-brand-footer">
-        <img className="sp-brand-logo" src={companyLogo} alt="SomniQ" />
+        <img className="sp-brand-logo" src={arisIcon} alt="ARIS" />
         <span className="sp-brand-copy">SomniQ Studio</span>
       </div>
     </div>

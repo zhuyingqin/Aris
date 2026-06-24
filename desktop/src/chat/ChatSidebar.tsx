@@ -20,7 +20,7 @@ interface Props {
   open: boolean;
   busy: boolean;
   onClose: () => void;
-  onNew: () => void;
+  onNew: (projectId?: string) => void | Promise<void>;
   onOpen: (id: string) => void | Promise<void>;
   onRename: (id: string, title: string) => void;
   onTogglePinned: (id: string) => void;
@@ -188,7 +188,7 @@ export default function ChatSidebar({
             { transform: "translateY(0)" },
           ],
           {
-            duration: 150,
+            duration: 190,
             easing: "cubic-bezier(0.2, 0, 0, 1)",
           },
         );
@@ -367,7 +367,7 @@ export default function ChatSidebar({
         <div className="chat-sidebar-top-group">
       <div className="chat-sidebar-head">
         <div className="chat-sidebar-top-row">
-          <button className="chat-new-btn" onClick={onNew} disabled={busy}>
+          <button className="chat-new-btn" onClick={() => void onNew()} disabled={busy}>
             <span className="chat-new-icon">+</span>
             <span>新线程</span>
           </button>
@@ -413,9 +413,7 @@ export default function ChatSidebar({
               onPointerMove={moveProjectDrag}
               onPointerUp={finishProjectDrag}
               onPointerCancel={cancelProjectDrag}
-              title={canReorderProjects ? "Drag to reorder projects" : undefined}
             >
-              <span className="chat-project-drag-handle" aria-hidden="true">::</span>
               <button
                 className="chat-project-toggle"
                 type="button"
@@ -431,7 +429,21 @@ export default function ChatSidebar({
                   {collapsed ? ">" : "v"}
                 </span>
                 <span className="chat-project-label-text">{group.label}</span>
-                <span className="chat-project-count">{group.sessions.length}</span>
+              </button>
+              <button
+                className="chat-project-add"
+                type="button"
+                aria-label={`New chat in ${group.label}`}
+                title="New chat in this project"
+                disabled={busy}
+                onPointerDown={(event) => event.stopPropagation()}
+                onClick={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  void onNew(group.id);
+                }}
+              >
+                +
               </button>
             </div>
             {visibleSessions.map((session) => (

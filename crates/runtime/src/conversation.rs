@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
 
 use crate::compact::{
-    assemble_compacted_session, compact_session, estimate_session_tokens, plan_compaction,
-    summarize_messages, CompactionConfig, CompactionResult,
+    assemble_compacted_session, estimate_session_tokens, plan_compaction, summarize_messages,
+    CompactionConfig, CompactionResult, CompactionSummarySource,
 };
 use crate::config::RuntimeFeatureConfig;
 use crate::event_sink::{now_iso8601, EventSink, EventType, NoopEventSink, RuntimeEvent};
@@ -640,9 +640,35 @@ where
         })
     }
 
-    #[must_use]
-    pub fn compact(&self, config: CompactionConfig) -> CompactionResult {
-        compact_session(&self.session, config)
+    pub fn compact(&mut self, config: CompactionConfig) -> CompactionResult {
+        let Some(plan) = plan_compaction(&self.session, &config) else {
+            let tokens = estimate_session_tokens(&self.session);
+            return CompactionResult {
+                summary: String::new(),
+                formatted_summary: String::new(),
+                compacted_session: self.session.clone(),
+                removed_message_count: 0,
+                preserved_message_count: self.session.messages.len(),
+                tokens_before: tokens,
+                tokens_after: tokens,
+                summary_source: CompactionSummarySource::Skipped,
+            };
+        };
+        let (summary, summary_source) = if let Some(summary) =
+            self.llm_summarize(&plan.removed, config.instruction.as_deref())
+        {
+            (summary, CompactionSummarySource::Llm)
+        } else {
+            (
+                summarize_messages(&plan.removed),
+                CompactionSummarySource::Fallback,
+            )
+        };
+        let result = assemble_compacted_session(&self.session, summary, summary_source, &plan);
+        self.session = result.compacted_session.clone();
+        self.api_client
+            .on_session_compacted(result.removed_message_count);
+        result
     }
 
     #[must_use]
@@ -693,6 +719,8 @@ where
 
         self.compact_now(CompactionConfig {
             max_estimated_tokens: 0,
+            source: crate::compact::CompactionSource::Auto,
+            instruction: None,
             ..CompactionConfig::default()
         })
     }
@@ -719,10 +747,7 @@ where
 
         // Step 2 — summarize the oldest messages, preserving the active turn.
         let preserve = active_turn_message_count(&self.session).max(1);
-        self.compact_now(CompactionConfig {
-            preserve_recent_messages: preserve,
-            max_estimated_tokens: 0,
-        })
+        self.compact_now(CompactionConfig::overflow(preserve))
     }
 
     /// Aggressively shrink the session after the provider rejected the request
@@ -745,10 +770,7 @@ where
 
         // Step 2 — summarize the oldest messages, preserving the active turn.
         let preserve = active_turn_message_count(&self.session).max(1);
-        if let Some(event) = self.compact_now(CompactionConfig {
-            preserve_recent_messages: preserve,
-            max_estimated_tokens: 0,
-        }) {
+        if let Some(event) = self.compact_now(CompactionConfig::overflow(preserve)) {
             return Some(event);
         }
 
@@ -770,16 +792,11 @@ where
     /// compacted form. Returns `None` when there is nothing to compact. Shared
     /// by all three compaction entry points so they get identical quality.
     fn compact_now(&mut self, config: CompactionConfig) -> Option<AutoCompactionEvent> {
-        let plan = plan_compaction(&self.session, config)?;
-        let summary = self
-            .llm_summarize(&plan.removed)
-            .unwrap_or_else(|| summarize_messages(&plan.removed));
-        let result = assemble_compacted_session(self.session.version, summary, &plan);
+        let result = self.compact(config);
         let removed_message_count = result.removed_message_count;
-        self.session = result.compacted_session;
-        // Notify the client so any per-message-index state (e.g. the OpenAI
-        // executor's reasoning_cache keyed by usize) is cleared.
-        self.api_client.on_session_compacted(removed_message_count);
+        if removed_message_count == 0 {
+            return None;
+        }
         Some(AutoCompactionEvent {
             removed_message_count,
         })
@@ -790,9 +807,13 @@ where
     /// any client error, or empty output yields `None` and never fails the
     /// turn. Output is wrapped in a `<summary>` block so downstream formatting
     /// matches the assembled path.
-    fn llm_summarize(&mut self, removed: &[ConversationMessage]) -> Option<String> {
+    fn llm_summarize(
+        &mut self,
+        removed: &[ConversationMessage],
+        instruction: Option<&str>,
+    ) -> Option<String> {
         let summarizer = self.summarizer.as_mut()?;
-        let request = build_summary_request(removed);
+        let request = build_summary_request(removed, instruction);
         let events = summarizer.stream(request).ok()?;
         let text = collect_assistant_text(&events);
         let trimmed = text.trim();
@@ -809,11 +830,43 @@ where
 
 /// System prompt steering the summarizer model toward a continuation-ready
 /// `<summary>` block rather than chit-chat.
-const SUMMARY_SYSTEM_PROMPT: &str = "You are compacting a long coding-assistant conversation to free up context. \
-Produce a single <summary>...</summary> block and nothing else — no preamble, no follow-up. \
-Inside it, concisely capture what a fresh assistant needs to continue seamlessly: the user's goals and constraints; \
-decisions already made; the current state of the work; concrete pending tasks; key files, paths, and identifiers; \
-and any important facts or gotchas. Use tight bullet points. Omit small talk and resolved dead ends. Do not invent details.";
+const SUMMARY_SYSTEM_PROMPT: &str = r#"You are compacting a long coding-assistant conversation to free up context.
+Output one <summary>...</summary> block and nothing else.
+
+The summary must preserve the information needed to continue development after earlier messages are removed.
+Prefer concrete paths, commands, errors, decisions, constraints, and current task state over generic narration.
+Do not invent details. If something is unknown, omit it.
+
+Inside <summary>, use this exact structure:
+
+## Current Focus
+[What is being worked on right now and what should happen next.]
+
+## Environment
+- [Repository/workspace, platform, branch, tools, configs, or model/provider setup.]
+
+## Completed Tasks
+- [Task]: [Outcome.]
+
+## Active Issues
+- [Issue]: [Status and next steps.]
+
+## Code State
+### [Critical file name]
+[Current purpose/state. Include latest important functions or snippets only when useful.]
+
+## Commands & Test Results
+- [Command]: [Result.]
+
+## User Intent & Constraints
+- [Stable user requirements, preferences, and constraints.]
+
+## Important Context
+- [Facts that would be expensive or risky to lose.]
+
+## All User Messages
+- [Detailed non-tool user messages from the compacted range.]
+"#;
 
 /// Upper bound on the characters of removed transcript fed to the summarizer,
 /// so summarization itself never overflows the (small) summarizer's window.
@@ -824,7 +877,7 @@ const MAX_SUMMARY_INPUT_CHARS: usize = 120_000;
 /// Flattening (vs. forwarding structured tool blocks) sidesteps dangling
 /// tool_use/tool_result pairs, which otherwise make providers return an empty
 /// stream.
-fn build_summary_request(removed: &[ConversationMessage]) -> ApiRequest {
+fn build_summary_request(removed: &[ConversationMessage], instruction: Option<&str>) -> ApiRequest {
     let mut transcript = String::new();
     for message in removed {
         let role = match message.role {
@@ -859,12 +912,19 @@ fn build_summary_request(removed: &[ConversationMessage]) -> ApiRequest {
     }
 
     let bounded = bound_summary_input(&transcript);
+    let custom_instruction = instruction
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| format!("\n\nCustom compaction instruction from the user:\n{value}\n"))
+        .unwrap_or_default();
     ApiRequest {
         system_prompt: vec![SUMMARY_SYSTEM_PROMPT.to_string()],
         messages: vec![ConversationMessage {
             role: MessageRole::User,
             blocks: vec![ContentBlock::Text {
-                text: format!("Summarize this conversation:\n\n{bounded}"),
+                text: format!(
+                    "This message is a direct compaction task, not part of the conversation. Do not call tools.{custom_instruction}\nConversation transcript to compact:\n\n{bounded}"
+                ),
             }],
             usage: None,
         }],
@@ -1881,8 +1941,9 @@ mod tests {
         let result = runtime.compact(CompactionConfig {
             preserve_recent_messages: 2,
             max_estimated_tokens: 1,
+            ..CompactionConfig::default()
         });
-        assert!(result.summary.contains("Conversation summary"));
+        assert!(result.summary.contains("## Current Focus"));
         assert_eq!(result.compacted_session.messages[0].role, MessageRole::User);
     }
 
@@ -1932,6 +1993,7 @@ mod tests {
                     text: "four".to_string(),
                 }]),
             ],
+            compactions: Vec::new(),
         };
 
         let mut runtime = ConversationRuntime::new(
@@ -2457,6 +2519,30 @@ mod tests {
             !continuation.contains("Key timeline (audit only"),
             "LLM path must not emit the text-assembly timeline"
         );
+    }
+
+    #[test]
+    fn manual_compact_uses_llm_summarizer_when_attached() {
+        let mut runtime = ConversationRuntime::new(
+            preloaded_session_over_budget(),
+            SummaryAwareApi { summary_text: None },
+            StaticToolExecutor::new(),
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            vec!["system".to_string()],
+        )
+        .with_summarizer(SummaryAwareApi {
+            summary_text: Some("<summary>\nMANUAL LLM SUMMARY\n</summary>".to_string()),
+        });
+
+        let result = runtime.compact(CompactionConfig {
+            preserve_recent_messages: 2,
+            max_estimated_tokens: 1,
+            ..CompactionConfig::default()
+        });
+
+        assert!(result.summary.contains("MANUAL LLM SUMMARY"));
+        assert!(!result.summary.contains("Key timeline (audit only"));
+        assert!(first_message_text(runtime.session()).contains("MANUAL LLM SUMMARY"));
     }
 
     #[test]

@@ -32,8 +32,8 @@ pub use bash::{execute_bash, execute_bash_with_cancel, BashCommandInput, BashCom
 pub use bootstrap::{BootstrapPhase, BootstrapPlan};
 pub use cache::{extract_bundle, extraction_report, ExtractionError, ExtractionReport};
 pub use compact::{
-    compact_session, estimate_session_tokens, format_compact_summary,
-    get_compact_continuation_message, should_compact, CompactionConfig, CompactionResult,
+    estimate_session_tokens, format_compact_summary, get_compact_continuation_message,
+    should_compact, CompactionConfig, CompactionResult, CompactionSource, CompactionSummarySource,
 };
 pub use config::{
     ConfigEntry, ConfigError, ConfigLoader, ConfigSource, McpClaudeAiProxyServerConfig,
@@ -111,7 +111,9 @@ pub use remote::{
     RemoteSessionContext, UpstreamProxyBootstrap, UpstreamProxyState, DEFAULT_REMOTE_BASE_URL,
     DEFAULT_SESSION_TOKEN_PATH, DEFAULT_SYSTEM_CA_BUNDLE, NO_PROXY_HOSTS, UPSTREAM_PROXY_ENV_KEYS,
 };
-pub use session::{ContentBlock, ConversationMessage, MessageRole, Session, SessionError};
+pub use session::{
+    ContentBlock, ConversationMessage, MessageRole, Session, SessionCompactionRecord, SessionError,
+};
 pub use session_index::{
     index_session, search_sessions, sessions_dir_from_env, sync_sessions_dir, SessionBrowseEntry,
     SessionSearchHit, SessionSearchMessage, SessionSearchResult,

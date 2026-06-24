@@ -45,6 +45,10 @@ export interface ConfigView {
   executorBaseUrl?: string | null;
   /** Model used to summarize context on compaction; empty/absent = "Auto". */
   summarizerModel?: string | null;
+  summarizerProvider?: string | null;
+  summarizerBaseUrl?: string | null;
+  hasSummarizerKey: boolean;
+  summarizerKeyMasked?: string | null;
   hasExecutorKey: boolean;
   executorKeyMasked?: string | null;
   reviewerProvider?: string | null;
@@ -59,7 +63,7 @@ export interface ConfigView {
   verifiedExecutors?: { provider: string; model: string; baseUrl: string }[];
 }
 
-export type ConfigSecretKind = "executorApiKey" | "reviewerApiKey" | "scopusApiKey";
+export type ConfigSecretKind = "executorApiKey" | "summarizerApiKey" | "reviewerApiKey" | "scopusApiKey";
 
 export interface ScheduledTask {
   id: string;
@@ -89,7 +93,10 @@ export interface ConfigPatch {
   executorProvider?: string;
   executorModel?: string;
   executorBaseUrl?: string;
+  summarizerProvider?: string;
   summarizerModel?: string;
+  summarizerBaseUrl?: string;
+  summarizerApiKey?: string;
   executorApiKey?: string;
   reviewerProvider?: string;
   reviewerModel?: string;

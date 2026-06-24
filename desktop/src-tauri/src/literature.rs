@@ -131,6 +131,7 @@ pub(crate) fn run_oneshot(system: &str, message: ConversationMessage) -> Result<
         RuntimeFeatureConfig::default(),
         // Single-turn helper; never compacts, so no summarizer needed.
         None,
+        None,
     )?;
     let summary = conversation
         .run_turn_message(message, None)

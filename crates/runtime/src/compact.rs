@@ -1,9 +1,44 @@
-use crate::session::{ContentBlock, ConversationMessage, MessageRole, Session};
+use crate::session::{
+    ContentBlock, ConversationMessage, MessageRole, Session, SessionCompactionRecord,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompactionSource {
+    Auto,
+    Manual,
+    Overflow,
+}
+
+impl Default for CompactionSource {
+    fn default() -> Self {
+        Self::Auto
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompactionSummarySource {
+    Llm,
+    Fallback,
+    Skipped,
+}
+
+impl CompactionSummarySource {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Llm => "llm",
+            Self::Fallback => "fallback",
+            Self::Skipped => "skipped",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompactionConfig {
     pub preserve_recent_messages: usize,
     pub max_estimated_tokens: usize,
+    pub source: CompactionSource,
+    pub instruction: Option<String>,
 }
 
 impl Default for CompactionConfig {
@@ -11,6 +46,30 @@ impl Default for CompactionConfig {
         Self {
             preserve_recent_messages: 4,
             max_estimated_tokens: 10_000,
+            source: CompactionSource::Auto,
+            instruction: None,
+        }
+    }
+}
+
+impl CompactionConfig {
+    #[must_use]
+    pub fn manual(instruction: Option<String>) -> Self {
+        Self {
+            preserve_recent_messages: 1,
+            max_estimated_tokens: 0,
+            source: CompactionSource::Manual,
+            instruction,
+        }
+    }
+
+    #[must_use]
+    pub fn overflow(preserve_recent_messages: usize) -> Self {
+        Self {
+            preserve_recent_messages,
+            max_estimated_tokens: 0,
+            source: CompactionSource::Overflow,
+            instruction: None,
         }
     }
 }
@@ -21,6 +80,10 @@ pub struct CompactionResult {
     pub formatted_summary: String,
     pub compacted_session: Session,
     pub removed_message_count: usize,
+    pub preserved_message_count: usize,
+    pub tokens_before: usize,
+    pub tokens_after: usize,
+    pub summary_source: CompactionSummarySource,
 }
 
 #[must_use]
@@ -29,7 +92,7 @@ pub fn estimate_session_tokens(session: &Session) -> usize {
 }
 
 #[must_use]
-pub fn should_compact(session: &Session, config: CompactionConfig) -> bool {
+pub fn should_compact(session: &Session, config: &CompactionConfig) -> bool {
     session.messages.len() > config.preserve_recent_messages
         && estimate_session_tokens(session) >= config.max_estimated_tokens
 }
@@ -81,16 +144,163 @@ pub fn get_compact_continuation_message(
 pub struct CompactionPlan {
     pub removed: Vec<ConversationMessage>,
     pub preserved: Vec<ConversationMessage>,
+    pub split_index: usize,
+    pub tokens_before: usize,
 }
 
 /// Decide what to remove vs preserve, returning `None` when the session is too
 /// small to compact or nothing would be removed.
 #[must_use]
-pub fn plan_compaction(session: &Session, config: CompactionConfig) -> Option<CompactionPlan> {
+pub fn plan_compaction(session: &Session, config: &CompactionConfig) -> Option<CompactionPlan> {
     if !should_compact(session, config) {
         return None;
     }
 
+    let split_index = match config.source {
+        CompactionSource::Manual => largest_safe_split(&session.messages)?,
+        CompactionSource::Auto | CompactionSource::Overflow => {
+            recent_window_safe_split(&session.messages, config.preserve_recent_messages)?
+        }
+    };
+
+    let removed = session.messages[..split_index].to_vec();
+    if removed.is_empty() {
+        return None;
+    }
+    let preserved = session.messages[split_index..].to_vec();
+    Some(CompactionPlan {
+        removed,
+        preserved,
+        split_index,
+        tokens_before: estimate_session_tokens(session),
+    })
+}
+
+fn recent_window_safe_split(
+    messages: &[ConversationMessage],
+    preserve_recent_messages: usize,
+) -> Option<usize> {
+    if messages.len() <= preserve_recent_messages {
+        return None;
+    }
+    let target_split = messages.len().saturating_sub(preserve_recent_messages);
+    (1..=target_split)
+        .rev()
+        .find(|split_index| can_split_after(messages, split_index - 1))
+        .or_else(|| {
+            ((target_split + 1)..messages.len())
+                .find(|split_index| can_split_after(messages, split_index - 1))
+        })
+}
+
+fn largest_safe_split(messages: &[ConversationMessage]) -> Option<usize> {
+    (1..messages.len())
+        .rev()
+        .find(|split_index| can_split_after(messages, split_index - 1))
+}
+
+fn can_split_after(messages: &[ConversationMessage], index: usize) -> bool {
+    let Some(message) = messages.get(index) else {
+        return false;
+    };
+    if message.role == MessageRole::User {
+        return false;
+    }
+    if message.role == MessageRole::Assistant && has_tool_use(message) {
+        return false;
+    }
+    if messages
+        .get(index + 1)
+        .is_some_and(|next| next.role == MessageRole::Tool || has_tool_result(next))
+    {
+        return false;
+    }
+    if suffix_contains_orphan_tool_result(messages, index + 1) {
+        return false;
+    }
+    if prefix_ends_with_open_tool_exchange(messages, index) {
+        return false;
+    }
+    true
+}
+
+fn has_tool_use(message: &ConversationMessage) -> bool {
+    message
+        .blocks
+        .iter()
+        .any(|block| matches!(block, ContentBlock::ToolUse { .. }))
+}
+
+fn has_tool_result(message: &ConversationMessage) -> bool {
+    message
+        .blocks
+        .iter()
+        .any(|block| matches!(block, ContentBlock::ToolResult { .. }))
+}
+
+fn prefix_ends_with_open_tool_exchange(messages: &[ConversationMessage], index: usize) -> bool {
+    if messages
+        .get(index)
+        .is_none_or(|message| message.role != MessageRole::Tool)
+    {
+        return false;
+    }
+    let mut tool_result_count = 0usize;
+    for message in messages[..=index].iter().rev() {
+        if message.role == MessageRole::Tool || has_tool_result(message) {
+            tool_result_count = tool_result_count.saturating_add(tool_result_blocks(message));
+            continue;
+        }
+        return message.role == MessageRole::Assistant
+            && tool_use_blocks(message) > tool_result_count;
+    }
+    false
+}
+
+fn tool_use_blocks(message: &ConversationMessage) -> usize {
+    message
+        .blocks
+        .iter()
+        .filter(|block| matches!(block, ContentBlock::ToolUse { .. }))
+        .count()
+}
+
+fn tool_result_blocks(message: &ConversationMessage) -> usize {
+    let block_count = message
+        .blocks
+        .iter()
+        .filter(|block| matches!(block, ContentBlock::ToolResult { .. }))
+        .count();
+    block_count.max(usize::from(message.role == MessageRole::Tool))
+}
+
+fn suffix_contains_orphan_tool_result(messages: &[ConversationMessage], start: usize) -> bool {
+    let mut pending_tool_results = 0usize;
+    for message in messages.iter().skip(start) {
+        if message.role == MessageRole::Assistant {
+            pending_tool_results = tool_use_blocks(message);
+            continue;
+        }
+        if message.role == MessageRole::Tool || has_tool_result(message) {
+            let result_count = tool_result_blocks(message);
+            if pending_tool_results < result_count {
+                return true;
+            }
+            pending_tool_results -= result_count;
+            continue;
+        }
+        if message.role == MessageRole::User || message.role == MessageRole::System {
+            pending_tool_results = 0;
+        }
+    }
+    false
+}
+
+#[allow(dead_code)]
+fn legacy_plan_compaction_tail_scan(
+    session: &Session,
+    config: &CompactionConfig,
+) -> Option<CompactionPlan> {
     let initial_keep_from = session
         .messages
         .len()
@@ -122,7 +332,12 @@ pub fn plan_compaction(session: &Session, config: CompactionConfig) -> Option<Co
     } else {
         Vec::new()
     };
-    Some(CompactionPlan { removed, preserved })
+    Some(CompactionPlan {
+        removed,
+        preserved,
+        split_index: keep_from,
+        tokens_before: estimate_session_tokens(session),
+    })
 }
 
 /// Build the compacted session from a plan and an already-produced summary. The
@@ -131,8 +346,9 @@ pub fn plan_compaction(session: &Session, config: CompactionConfig) -> Option<Co
 /// continuation framing behave identically regardless of source.
 #[must_use]
 pub fn assemble_compacted_session(
-    version: u32,
+    session: &Session,
     summary: String,
+    summary_source: CompactionSummarySource,
     plan: &CompactionPlan,
 ) -> CompactionResult {
     let formatted_summary = format_compact_summary(&summary);
@@ -150,30 +366,31 @@ pub fn assemble_compacted_session(
     }];
     compacted_messages.extend(plan.preserved.iter().cloned());
 
+    let mut compacted_session = Session {
+        version: session.version,
+        messages: compacted_messages,
+        compactions: session.compactions.clone(),
+    };
+    let tokens_after = estimate_session_tokens(&compacted_session);
+    compacted_session.compactions.push(SessionCompactionRecord {
+        summary: summary.clone(),
+        messages: plan.removed.clone(),
+        removed_message_count: plan.removed.len(),
+        preserved_message_count: plan.preserved.len(),
+        tokens_before: plan.tokens_before,
+        tokens_after,
+        summary_source: summary_source.as_str().to_string(),
+    });
+
     CompactionResult {
         summary,
         formatted_summary,
-        compacted_session: Session {
-            version,
-            messages: compacted_messages,
-        },
+        compacted_session,
         removed_message_count: plan.removed.len(),
-    }
-}
-
-#[must_use]
-pub fn compact_session(session: &Session, config: CompactionConfig) -> CompactionResult {
-    match plan_compaction(session, config) {
-        None => CompactionResult {
-            summary: String::new(),
-            formatted_summary: String::new(),
-            compacted_session: session.clone(),
-            removed_message_count: 0,
-        },
-        Some(plan) => {
-            let summary = summarize_messages(&plan.removed);
-            assemble_compacted_session(session.version, summary, &plan)
-        }
+        preserved_message_count: plan.preserved.len(),
+        tokens_before: plan.tokens_before,
+        tokens_after,
+        summary_source,
     }
 }
 
@@ -205,51 +422,92 @@ pub(crate) fn summarize_messages(messages: &[ConversationMessage]) -> String {
     tool_names.sort_unstable();
     tool_names.dedup();
 
-    let mut lines = vec![
-        "<summary>".to_string(),
-        "Conversation summary:".to_string(),
-        format!(
-            "- Scope: {} earlier messages compacted (user={}, assistant={}, tool={}).",
-            messages.len(),
-            user_messages,
-            assistant_messages,
-            tool_messages
-        ),
-        "- Authority: this is older context only; later preserved messages supersede it."
-            .to_string(),
-    ];
-
-    if !tool_names.is_empty() {
-        lines.push(format!("- Tools mentioned: {}.", tool_names.join(", ")));
-    }
-
-    let recent_user_requests = collect_recent_role_summaries(messages, MessageRole::User, 3);
-    if !recent_user_requests.is_empty() {
-        lines.push("- Recent user requests:".to_string());
-        lines.extend(
-            recent_user_requests
-                .into_iter()
-                .map(|request| format!("  - {request}")),
-        );
-    }
-
-    let pending_work = infer_pending_work(messages);
-    if !pending_work.is_empty() {
-        lines.push("- Pending work:".to_string());
-        lines.extend(pending_work.into_iter().map(|item| format!("  - {item}")));
-    }
-
-    let key_files = collect_key_files(messages);
-    if !key_files.is_empty() {
-        lines.push(format!("- Key files referenced: {}.", key_files.join(", ")));
-    }
-
+    let mut lines = vec!["<summary>".to_string(), "## Current Focus".to_string()];
     if let Some(latest_user_request) = infer_latest_user_request(messages) {
         lines.push(format!(
             "- Latest compacted user request: {latest_user_request}"
         ));
+    } else {
+        lines.push("- No explicit user request found in compacted range.".to_string());
+    }
+    lines.push("- Recent preserved messages, if any, supersede this summary.".to_string());
+
+    lines.push(String::new());
+    lines.push("## Environment".to_string());
+    let key_files = collect_key_files(messages);
+    if key_files.is_empty() {
+        lines.push("- No file paths detected in compacted range.".to_string());
+    } else {
+        lines.push(format!("- Key files referenced: {}.", key_files.join(", ")));
+    }
+    if !tool_names.is_empty() {
+        lines.push(format!("- Tools mentioned: {}.", tool_names.join(", ")));
     }
 
+    lines.push(String::new());
+    lines.push("## Completed Tasks".to_string());
+    let assistant_summaries = collect_recent_role_summaries(messages, MessageRole::Assistant, 5);
+    if assistant_summaries.is_empty() {
+        lines.push("- No assistant completions detected.".to_string());
+    } else {
+        lines.extend(
+            assistant_summaries
+                .into_iter()
+                .map(|item| format!("- Assistant state: {item}")),
+        );
+    }
+
+    lines.push(String::new());
+    lines.push("## Active Issues".to_string());
+    let pending_work = infer_pending_work(messages);
+    if pending_work.is_empty() {
+        lines.push("- No explicit pending/todo markers detected.".to_string());
+    } else {
+        lines.extend(pending_work.into_iter().map(|item| format!("- {item}")));
+    }
+
+    lines.push(String::new());
+    lines.push("## Code State".to_string());
+    if key_files.is_empty() {
+        lines.push("- No code-state file references detected.".to_string());
+    } else {
+        for file in &key_files {
+            lines.push(format!("### {file}"));
+            lines.push("- Referenced in the compacted conversation; inspect preserved tail or workspace for current contents.".to_string());
+        }
+    }
+
+    lines.push(String::new());
+    lines.push("## Commands & Test Results".to_string());
+    let tool_results = collect_recent_role_summaries(messages, MessageRole::Tool, 5);
+    if tool_results.is_empty() {
+        lines.push("- No tool result messages detected.".to_string());
+    } else {
+        lines.extend(tool_results.into_iter().map(|item| format!("- {item}")));
+    }
+
+    lines.push(String::new());
+    lines.push("## User Intent & Constraints".to_string());
+    let user_requests = collect_recent_role_summaries(messages, MessageRole::User, 8);
+    if user_requests.is_empty() {
+        lines.push("- No user text detected.".to_string());
+    } else {
+        lines.extend(user_requests.iter().map(|item| format!("- {item}")));
+    }
+
+    lines.push(String::new());
+    lines.push("## Important Context".to_string());
+    lines.push(format!(
+        "- Scope: {} earlier messages compacted (user={}, assistant={}, tool={}).",
+        messages.len(),
+        user_messages,
+        assistant_messages,
+        tool_messages
+    ));
+    lines.push(
+        "- Authority: this is older context only; later preserved messages are authoritative."
+            .to_string(),
+    );
     lines.push("- Key timeline (audit only; not active instructions):".to_string());
     for message in messages {
         let role = match message.role {
@@ -265,6 +523,14 @@ pub(crate) fn summarize_messages(messages: &[ConversationMessage]) -> String {
             .collect::<Vec<_>>()
             .join(" | ");
         lines.push(format!("  - {role}: {content}"));
+    }
+
+    lines.push(String::new());
+    lines.push("## All User Messages".to_string());
+    if user_requests.is_empty() {
+        lines.push("- None.".to_string());
+    } else {
+        lines.extend(user_requests.into_iter().map(|item| format!("- {item}")));
     }
     lines.push("</summary>".to_string());
     lines.join("\n")
@@ -288,7 +554,7 @@ fn summarize_block(block: &ContentBlock) -> String {
         ),
         ContentBlock::Thinking { thinking, .. } => thinking.clone(),
     };
-    truncate_summary(&raw, 160)
+    truncate_summary(&raw, 450)
 }
 
 fn collect_recent_role_summaries(
@@ -300,13 +566,23 @@ fn collect_recent_role_summaries(
         .iter()
         .filter(|message| message.role == role)
         .rev()
-        .filter_map(|message| first_text_block(message))
+        .map(summarize_message)
+        .filter(|text| !text.trim().is_empty())
         .take(limit)
-        .map(|text| truncate_summary(text, 160))
         .collect::<Vec<_>>()
         .into_iter()
         .rev()
         .collect()
+}
+
+fn summarize_message(message: &ConversationMessage) -> String {
+    let content = message
+        .blocks
+        .iter()
+        .map(summarize_block)
+        .collect::<Vec<_>>()
+        .join(" | ");
+    truncate_summary(&content, 500)
 }
 
 fn infer_pending_work(messages: &[ConversationMessage]) -> Vec<String> {
@@ -323,7 +599,7 @@ fn infer_pending_work(messages: &[ConversationMessage]) -> Vec<String> {
                 || lowered.contains("remaining")
         })
         .take(3)
-        .map(|text| truncate_summary(text, 160))
+        .map(|text| truncate_summary(text, 350))
         .collect::<Vec<_>>()
         .into_iter()
         .rev()
@@ -355,7 +631,7 @@ fn infer_latest_user_request(messages: &[ConversationMessage]) -> Option<String>
         .filter(|message| message.role == MessageRole::User)
         .filter_map(first_text_block)
         .find(|text| !text.trim().is_empty())
-        .map(|text| truncate_summary(text, 200))
+        .map(|text| truncate_summary(text, 450))
 }
 
 fn first_text_block(message: &ConversationMessage) -> Option<&str> {
@@ -400,9 +676,23 @@ fn truncate_summary(content: &str, max_chars: usize) -> String {
     if content.chars().count() <= max_chars {
         return content.to_string();
     }
-    let mut truncated = content.chars().take(max_chars).collect::<String>();
-    truncated.push('…');
-    truncated
+    if max_chars <= 10 {
+        return content.chars().take(max_chars).collect();
+    }
+    let marker = " ... ";
+    let available = max_chars.saturating_sub(marker.chars().count());
+    let head_chars = available / 2;
+    let tail_chars = available.saturating_sub(head_chars);
+    let head = content.chars().take(head_chars).collect::<String>();
+    let tail = content
+        .chars()
+        .rev()
+        .take(tail_chars)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect::<String>();
+    format!("{head}{marker}{tail}")
 }
 
 fn estimate_message_tokens(message: &ConversationMessage) -> usize {
@@ -410,18 +700,38 @@ fn estimate_message_tokens(message: &ConversationMessage) -> usize {
         .blocks
         .iter()
         .map(|block| match block {
-            ContentBlock::Text { text } => text.len() / 4 + 1,
+            ContentBlock::Text { text } => estimate_text_tokens(text),
             ContentBlock::Image { data, .. } => data.len() / 4 + 1,
-            ContentBlock::ToolUse { name, input, .. } => (name.len() + input.len()) / 4 + 1,
+            ContentBlock::ToolUse { name, input, .. } => {
+                estimate_text_tokens(name) + estimate_text_tokens(input)
+            }
             ContentBlock::ToolResult {
                 tool_name, output, ..
-            } => (tool_name.len() + output.len()) / 4 + 1,
+            } => estimate_text_tokens(tool_name) + estimate_text_tokens(output),
             ContentBlock::Thinking {
                 thinking,
                 signature,
-            } => (thinking.len() + signature.len()) / 4 + 1,
+            } => estimate_text_tokens(thinking) + estimate_text_tokens(signature),
         })
         .sum()
+}
+
+fn estimate_text_tokens(text: &str) -> usize {
+    let (cjk, other) = text.chars().fold((0usize, 0usize), |(cjk, other), ch| {
+        if is_cjk_or_full_width(ch) {
+            (cjk + 1, other)
+        } else {
+            (cjk, other + 1)
+        }
+    });
+    cjk + ((other as f64) / 3.5).round() as usize + 1
+}
+
+fn is_cjk_or_full_width(ch: char) -> bool {
+    let code = ch as u32;
+    (0x3000..=0x9fff).contains(&code)
+        || (0xf900..=0xfaff).contains(&code)
+        || (0xff00..=0xffef).contains(&code)
 }
 
 fn extract_tag_block(content: &str, tag: &str) -> Option<String> {
@@ -464,11 +774,36 @@ fn collapse_blank_lines(content: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        collect_key_files, compact_session, estimate_session_tokens, format_compact_summary,
-        get_compact_continuation_message, infer_latest_user_request, infer_pending_work,
-        CompactionConfig,
+        assemble_compacted_session, collect_key_files, estimate_session_tokens,
+        format_compact_summary, get_compact_continuation_message, infer_latest_user_request,
+        infer_pending_work, plan_compaction, summarize_messages, CompactionConfig,
+        CompactionResult, CompactionSummarySource,
     };
     use crate::session::{ContentBlock, ConversationMessage, MessageRole, Session};
+
+    fn compact_session_for_test(session: &Session, config: CompactionConfig) -> CompactionResult {
+        match plan_compaction(session, &config) {
+            None => CompactionResult {
+                summary: String::new(),
+                formatted_summary: String::new(),
+                compacted_session: session.clone(),
+                removed_message_count: 0,
+                preserved_message_count: session.messages.len(),
+                tokens_before: estimate_session_tokens(session),
+                tokens_after: estimate_session_tokens(session),
+                summary_source: CompactionSummarySource::Skipped,
+            },
+            Some(plan) => {
+                let summary = summarize_messages(&plan.removed);
+                assemble_compacted_session(
+                    session,
+                    summary,
+                    CompactionSummarySource::Fallback,
+                    &plan,
+                )
+            }
+        }
+    }
 
     #[test]
     fn formats_compact_summary_like_upstream() {
@@ -488,9 +823,10 @@ mod tests {
         let session = Session {
             version: 1,
             messages: vec![ConversationMessage::user_text("hello")],
+            compactions: Vec::new(),
         };
 
-        let result = compact_session(&session, CompactionConfig::default());
+        let result = compact_session_for_test(&session, CompactionConfig::default());
         assert_eq!(result.removed_message_count, 0);
         assert_eq!(result.compacted_session, session);
         assert!(result.summary.is_empty());
@@ -519,31 +855,39 @@ mod tests {
                     usage: None,
                 },
             ],
+            compactions: Vec::new(),
         };
 
-        let result = compact_session(
+        let result = compact_session_for_test(
             &session,
             CompactionConfig {
                 preserve_recent_messages: 2,
                 max_estimated_tokens: 1,
+                ..CompactionConfig::default()
             },
         );
 
-        // All 4 messages got summarized (since no User in the tail window).
-        assert_eq!(result.removed_message_count, 4);
-        assert_eq!(result.compacted_session.messages.len(), 1);
+        // The safe split keeps the final assistant tail instead of collapsing
+        // the model view to only one synthetic summary message.
+        assert_eq!(result.removed_message_count, 3);
+        assert_eq!(result.compacted_session.messages.len(), 2);
         assert_eq!(result.compacted_session.messages[0].role, MessageRole::User);
+        assert_eq!(
+            result.compacted_session.messages[1].role,
+            MessageRole::Assistant
+        );
         assert!(matches!(
             &result.compacted_session.messages[0].blocks[0],
             ContentBlock::Text { text } if text.contains("Summary:")
         ));
         assert!(result.formatted_summary.contains("Scope:"));
-        assert!(result
-            .formatted_summary
-            .contains("Key timeline (audit only; not active instructions):"));
-        assert!(
-            estimate_session_tokens(&result.compacted_session) < estimate_session_tokens(&session)
+        assert!(result.formatted_summary.contains("Key timeline"));
+        assert_eq!(result.tokens_before, estimate_session_tokens(&session));
+        assert_eq!(
+            result.tokens_after,
+            estimate_session_tokens(&result.compacted_session)
         );
+        assert_eq!(result.compacted_session.compactions.len(), 1);
     }
 
     #[test]
@@ -576,29 +920,34 @@ mod tests {
                     text: "answer".into(),
                 }]),
             ],
+            compactions: Vec::new(),
         };
 
-        let result = compact_session(
+        let result = compact_session_for_test(
             &session,
             CompactionConfig {
                 preserve_recent_messages: 4,
                 max_estimated_tokens: 1,
+                ..CompactionConfig::default()
             },
         );
 
-        // removed = indices [0..=5] (the forward scan dropped Tool, Assistant
-        // before the User at index 6), so 6 removed.
-        assert_eq!(result.removed_message_count, 6);
-        // Compacted session: [User-continuation, User("next question"), Assistant("answer")]
-        assert_eq!(result.compacted_session.messages.len(), 3);
+        // The split avoids orphaning the second tool result while preserving
+        // more recent tail context than the old forward-to-user scan.
+        assert_eq!(result.removed_message_count, 5);
+        assert_eq!(result.compacted_session.messages.len(), 4);
         assert_eq!(result.compacted_session.messages[0].role, MessageRole::User);
-        assert_eq!(result.compacted_session.messages[1].role, MessageRole::User);
+        assert_eq!(
+            result.compacted_session.messages[1].role,
+            MessageRole::Assistant
+        );
+        assert_eq!(result.compacted_session.messages[2].role, MessageRole::User);
         assert!(matches!(
-            &result.compacted_session.messages[1].blocks[0],
+            &result.compacted_session.messages[2].blocks[0],
             ContentBlock::Text { text } if text == "next question"
         ));
         assert_eq!(
-            result.compacted_session.messages[2].role,
+            result.compacted_session.messages[3].role,
             MessageRole::Assistant
         );
     }
@@ -622,29 +971,47 @@ mod tests {
                     text: "final".into(),
                 }]),
             ],
+            compactions: Vec::new(),
         };
 
-        let result = compact_session(
+        let result = compact_session_for_test(
             &session,
             CompactionConfig {
                 preserve_recent_messages: 2,
                 max_estimated_tokens: 1,
+                ..CompactionConfig::default()
             },
         );
 
-        // All 4 messages summarized, only continuation (User) remains.
-        assert_eq!(result.removed_message_count, 4);
-        assert_eq!(result.compacted_session.messages.len(), 1);
+        // The final assistant response is a safe tail and should remain verbatim.
+        assert_eq!(result.removed_message_count, 3);
+        assert_eq!(result.compacted_session.messages.len(), 2);
         assert_eq!(result.compacted_session.messages[0].role, MessageRole::User);
+        assert_eq!(
+            result.compacted_session.messages[1].role,
+            MessageRole::Assistant
+        );
     }
 
     #[test]
     fn truncates_long_blocks_in_summary() {
         let summary = super::summarize_block(&ContentBlock::Text {
-            text: "x".repeat(400),
+            text: "x".repeat(2_000),
         });
-        assert!(summary.ends_with('…'));
-        assert!(summary.chars().count() <= 161);
+        assert!(summary.contains(" ... "));
+        assert!(summary.chars().count() <= 450);
+    }
+
+    #[test]
+    fn estimates_cjk_text_by_characters_not_utf8_bytes() {
+        let cjk = "上下文压缩质量很重要";
+        let ascii = "context compression quality matters";
+
+        assert_eq!(super::estimate_text_tokens(cjk), cjk.chars().count() + 1);
+        assert_eq!(
+            super::estimate_text_tokens(ascii),
+            ((ascii.chars().count() as f64) / 3.5).round() as usize + 1
+        );
     }
 
     #[test]
@@ -691,7 +1058,8 @@ mod tests {
         // Build a session large enough to actually trigger compaction.
         // Each text block is ~3500 chars → ~900 backend tokens. 12 blocks
         // × ~900 = ~10800 tokens, just over the 10k default threshold.
-        let cjk_chunk = "你好世界，这是一个测试用的中文句子，用于观察压缩前后的 token 数变化。".repeat(40);
+        let cjk_chunk =
+            "你好世界，这是一个测试用的中文句子，用于观察压缩前后的 token 数变化。".repeat(40);
         let eng_chunk = "The quick brown fox jumps over the lazy dog. ".repeat(40);
         let mut messages: Vec<ConversationMessage> = Vec::new();
         for i in 0..6 {
@@ -701,7 +1069,11 @@ mod tests {
                 text: format!("Reply {i}: {cjk_chunk}{eng_chunk}"),
             }]));
         }
-        let session = Session { version: 1, messages };
+        let session = Session {
+            version: 1,
+            messages,
+            compactions: Vec::new(),
+        };
 
         // 1. Compute backend estimate.
         let backend_before = estimate_session_tokens(&session);
@@ -714,12 +1086,15 @@ mod tests {
             for b in &m.blocks {
                 if let ContentBlock::Text { text } = b {
                     chars += text.chars().count();
-                    cjk += text.chars().filter(|c| {
-                        let u = *c as u32;
-                        (0x4E00..=0x9FFF).contains(&u)
-                            || (0x3400..=0x4DBF).contains(&u)
-                            || (0xF900..=0xFAFF).contains(&u)
-                    }).count();
+                    cjk += text
+                        .chars()
+                        .filter(|c| {
+                            let u = *c as u32;
+                            (0x4E00..=0x9FFF).contains(&u)
+                                || (0x3400..=0x4DBF).contains(&u)
+                                || (0xF900..=0xFAFF).contains(&u)
+                        })
+                        .count();
                 }
             }
         }
@@ -728,7 +1103,7 @@ mod tests {
 
         // 3. Apply compaction with default config (preserve 4 recent,
         //    max 10k est.).
-        let result = compact_session(&session, CompactionConfig::default());
+        let result = compact_session_for_test(&session, CompactionConfig::default());
         let backend_after = estimate_session_tokens(&result.compacted_session);
 
         // 4. Print: shows real numbers, not descriptions.
@@ -773,25 +1148,34 @@ mod tests {
         );
 
         // Real behavior we want to confirm:
-        assert!(result.removed_message_count > 0, "compaction must fire above 10k threshold");
-        assert!(backend_after < backend_before, "compaction must reduce tokens");
+        assert!(
+            result.removed_message_count > 0,
+            "compaction must fire above 10k threshold"
+        );
+        assert!(
+            backend_after < backend_before,
+            "compaction must reduce tokens"
+        );
         // Compaction reduces by a meaningful fraction (heuristic summary, not
         // LLM — actual ratio depends on tool/role mix; 30%+ is the realistic
         // floor for content-heavy sessions).
-        let saved_pct = 100.0
-            * (backend_before.saturating_sub(backend_after)) as f64
+        let saved_pct = 100.0 * (backend_before.saturating_sub(backend_after)) as f64
             / backend_before.max(1) as f64;
         assert!(
             saved_pct > 30.0,
             "compaction should save at least 30%, got {:.1}% (before={} after={})",
-            saved_pct, backend_before, backend_after,
+            saved_pct,
+            backend_before,
+            backend_after,
         );
         // After compaction, the 4 preserved recent messages + summary should
         // leave us at <60% of the original token count.
         assert!(
             backend_after * 10 < backend_before * 6,
             "compacted session should be <60% of original size, got before={} after={} ({:.1}%)",
-            backend_before, backend_after, saved_pct,
+            backend_before,
+            backend_after,
+            saved_pct,
         );
     }
 
@@ -804,12 +1188,15 @@ mod tests {
         fn measure(label: &str, body: &str) {
             let chars = body.chars().count();
             let bytes = body.len();
-            let cjk = body.chars().filter(|c| {
-                let u = *c as u32;
-                (0x4E00..=0x9FFF).contains(&u)
-                    || (0x3400..=0x4DBF).contains(&u)
-                    || (0xF900..=0xFAFF).contains(&u)
-            }).count();
+            let cjk = body
+                .chars()
+                .filter(|c| {
+                    let u = *c as u32;
+                    (0x4E00..=0x9FFF).contains(&u)
+                        || (0x3400..=0x4DBF).contains(&u)
+                        || (0xF900..=0xFAFF).contains(&u)
+                })
+                .count();
             let non_cjk = chars.saturating_sub(cjk);
             // Frontend (Chat.tsx): CJK = 1 tok/char, others = chars/3.5.
             let frontend = cjk + ((non_cjk as f64) / 3.5).round() as usize;
@@ -823,11 +1210,27 @@ mod tests {
         }
 
         eprintln!("==== ESTIMATE GAP DIAGNOSTIC (per 1 text block) ====");
-        measure("pure_zh", &"你好世界这是一个测试用的中文句子用于观察token数变化。".repeat(5));
-        measure("pure_en", &"The quick brown fox jumps over the lazy dog. ".repeat(10));
-        measure("mixed", &"你好 world, this is a mixed 中英文 sentence for testing token estimation accuracy.".repeat(5));
-        measure("code", &"fn main() { let x = vec![1, 2, 3]; println!(\"{:?}\", x); }");
-        measure("json", &r#"{"name":"aris","version":"0.4.2","features":["chat","lab","literature"]}"#);
+        measure(
+            "pure_zh",
+            &"你好世界这是一个测试用的中文句子用于观察token数变化。".repeat(5),
+        );
+        measure(
+            "pure_en",
+            &"The quick brown fox jumps over the lazy dog. ".repeat(10),
+        );
+        measure(
+            "mixed",
+            &"你好 world, this is a mixed 中英文 sentence for testing token estimation accuracy."
+                .repeat(5),
+        );
+        measure(
+            "code",
+            &"fn main() { let x = vec![1, 2, 3]; println!(\"{:?}\", x); }",
+        );
+        measure(
+            "json",
+            &r#"{"name":"aris","version":"0.4.2","features":["chat","lab","literature"]}"#,
+        );
         eprintln!("==================================================");
         // Always passes — this is purely informational.
     }
@@ -855,18 +1258,21 @@ mod tests {
         let win = 200_000u64;
         let cases = [
             (0, "None"),
-            (50_000, "None"),         // 25%
-            (139_999, "None"),        // 69.9995%
-            (140_000, "Warn"),        // 70%
-            (179_999, "Warn"),        // 89.9995%
-            (180_000, "Compact"),     // 90%
-            (200_000, "Compact"),     // 100%
+            (50_000, "None"),     // 25%
+            (139_999, "None"),    // 69.9995%
+            (140_000, "Warn"),    // 70%
+            (179_999, "Warn"),    // 89.9995%
+            (180_000, "Compact"), // 90%
+            (200_000, "Compact"), // 100%
         ];
         eprintln!("==== THRESHOLD TRIGGER DIAGNOSTIC (window=200k) ====");
         for (used, expected) in cases {
             let got = action(used, win);
             let pct = 100.0 * used as f64 / win as f64;
-            eprintln!("  used={:>7} ({:>5.2}%) → {} (expected {})", used, pct, got, expected);
+            eprintln!(
+                "  used={:>7} ({:>5.2}%) → {} (expected {})",
+                used, pct, got, expected
+            );
             assert_eq!(got, expected, "mismatch at used={}", used);
         }
 
@@ -896,20 +1302,32 @@ mod tests {
         // Build a long text with the fact at a controlled position.
         //   fact_at_start=true  → prefix + fact + fill    (fact in first 160 chars)
         //   fact_at_start=false → prefix + fill + fact + fill  (fact past 160 chars)
-        fn long(prefix: &str, fact: &str, fill: &str, target_len: usize, fact_at_start: bool) -> String {
+        fn long(
+            prefix: &str,
+            fact: &str,
+            fill: &str,
+            target_len: usize,
+            fact_at_start: bool,
+        ) -> String {
             let mut s = String::with_capacity(target_len + fact.len() + prefix.len());
             s.push_str(prefix);
             if fact_at_start {
                 // fact right after the prefix → survives 160-char truncation
                 s.push_str(fact);
-                while s.chars().count() < target_len { s.push_str(fill); }
+                while s.chars().count() < target_len {
+                    s.push_str(fill);
+                }
             } else {
                 // fill first so fact lands ~50 chars before target_len end,
                 // i.e. well past the 160-char truncation boundary
                 let desired = target_len.saturating_sub(fact.chars().count() + 50);
-                while s.chars().count() < desired { s.push_str(fill); }
+                while s.chars().count() < desired {
+                    s.push_str(fill);
+                }
                 s.push_str(fact);
-                while s.chars().count() < target_len { s.push_str(fill); }
+                while s.chars().count() < target_len {
+                    s.push_str(fill);
+                }
             }
             s
         }
@@ -1042,6 +1460,7 @@ mod tests {
                 ConversationMessage::user_text(t11),
                 ConversationMessage::assistant(vec![ContentBlock::Text { text: t12 }]),
             ],
+            compactions: Vec::new(),
         };
 
         // 10 probes. Each has a question (for human reading) and one or
@@ -1056,20 +1475,68 @@ mod tests {
             keys: &'static [&'static str],
         }
         let probes: &[Probe] = &[
-            Probe { q: "API endpoint URL?",                    kind: "EARLY",     keys: &["FACT_API_URL", "api.example.com"] },
-            Probe { q: "Frontend port?",                       kind: "BURIED",    keys: &["localhost:3000"] },
-            Probe { q: "NPM package installed?",               kind: "BURIED",    keys: &["FACT_NPM_PKG", "npm install cors"] },
-            Probe { q: "Second error message?",                 kind: "EARLY",     keys: &["FACT_CREDENTIALS_ERR", "Access-Control-Allow-Credentials must be true"] },
-            Probe { q: "Fix for credentials?",                 kind: "BURIED",    keys: &["FACT_FIX_CREDENTIALS", "credentials: true"] },
-            Probe { q: "curl HTTP status?",                    kind: "EARLY",     keys: &["FACT_CURL_STATUS", "HTTP 200 OK but missing"] },
-            Probe { q: "Reverse proxy hint?",                  kind: "BURIED",    keys: &["FACT_REVERSE_PROXY", "nginx config"] },
-            Probe { q: "Preflight response?",                  kind: "EARLY",     keys: &["FACT_PREFLIGHT", "returns 204"] },
-            Probe { q: "Explicit preflight fix?",              kind: "BURIED",    keys: &["FACT_EXPLICIT_PREFLIGHT", "app.options"] },
-            Probe { q: "Final 401 + token expiry?",            kind: "PRESERVED", keys: &["FACT_401_ERROR", "FACT_TOKEN_EXPIRY", "401 Unauthorized", "JWT exp"] },
+            Probe {
+                q: "API endpoint URL?",
+                kind: "EARLY",
+                keys: &["FACT_API_URL", "api.example.com"],
+            },
+            Probe {
+                q: "Frontend port?",
+                kind: "BURIED",
+                keys: &["localhost:3000"],
+            },
+            Probe {
+                q: "NPM package installed?",
+                kind: "BURIED",
+                keys: &["FACT_NPM_PKG", "npm install cors"],
+            },
+            Probe {
+                q: "Second error message?",
+                kind: "EARLY",
+                keys: &[
+                    "FACT_CREDENTIALS_ERR",
+                    "Access-Control-Allow-Credentials must be true",
+                ],
+            },
+            Probe {
+                q: "Fix for credentials?",
+                kind: "BURIED",
+                keys: &["FACT_FIX_CREDENTIALS", "credentials: true"],
+            },
+            Probe {
+                q: "curl HTTP status?",
+                kind: "EARLY",
+                keys: &["FACT_CURL_STATUS", "HTTP 200 OK but missing"],
+            },
+            Probe {
+                q: "Reverse proxy hint?",
+                kind: "BURIED",
+                keys: &["FACT_REVERSE_PROXY", "nginx config"],
+            },
+            Probe {
+                q: "Preflight response?",
+                kind: "EARLY",
+                keys: &["FACT_PREFLIGHT", "returns 204"],
+            },
+            Probe {
+                q: "Explicit preflight fix?",
+                kind: "BURIED",
+                keys: &["FACT_EXPLICIT_PREFLIGHT", "app.options"],
+            },
+            Probe {
+                q: "Final 401 + token expiry?",
+                kind: "PRESERVED",
+                keys: &[
+                    "FACT_401_ERROR",
+                    "FACT_TOKEN_EXPIRY",
+                    "401 Unauthorized",
+                    "JWT exp",
+                ],
+            },
         ];
 
         // Run current heuristic compaction.
-        let result = compact_session(&session, CompactionConfig::default());
+        let result = compact_session_for_test(&session, CompactionConfig::default());
         let tokens_before = estimate_session_tokens(&session);
         let tokens_after = estimate_session_tokens(&result.compacted_session);
 
@@ -1106,10 +1573,14 @@ mod tests {
         eprintln!("  {}", "-".repeat(78));
         for probe in probes {
             let found = probe.keys.iter().any(|k| compacted_view.contains(k));
-            if found { passed += 1; }
+            if found {
+                passed += 1;
+            }
             let entry = by_kind.entry(probe.kind).or_insert((0, 0));
             entry.1 += 1;
-            if found { entry.0 += 1; }
+            if found {
+                entry.0 += 1;
+            }
             eprintln!(
                 "  {:>4}  {:>10}  {:<32}  {:?}",
                 if found { "✓" } else { "✗" },

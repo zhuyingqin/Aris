@@ -287,6 +287,7 @@ export default function Chat() {
     setCurrentId,
     materializeCurrentSession,
     createSession,
+    createSessionInProject,
     updateSession,
     patchTurns,
     newSession,
@@ -956,9 +957,19 @@ export default function Chat() {
         open={sidebarOpen}
         busy={projectBusy}
         onClose={() => setSidebarOpen(false)}
-        onNew={() => {
+        onNew={async (projectId) => {
           setEditingTurnId(null);
-          setCurrentId(newSession());
+          if (!projectId || projectId === currentProject?.id) {
+            setCurrentId(newSession());
+          } else {
+            try {
+              await switchProject(projectId);
+              const fresh = createSessionInProject(projectId);
+              setCurrentId(fresh.id);
+            } catch {
+              return;
+            }
+          }
           setSidebarOpen(false);
         }}
         onOpen={async (id) => {

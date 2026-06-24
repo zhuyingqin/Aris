@@ -414,7 +414,10 @@ mod tests {
         assert_eq!(at, Some(0));
 
         let injected = doc.cell_source(0).unwrap();
-        assert!(injected.contains("% Parameters injected by Aris"), "got: {injected}");
+        assert!(
+            injected.contains("% Parameters injected by Aris"),
+            "got: {injected}"
+        );
         assert!(injected.contains("seed = 7;"), "got: {injected}");
         assert!(injected.contains("name = 'run-a';"), "got: {injected}");
         assert!(injected.contains("flag = true;"), "got: {injected}");

@@ -58,6 +58,10 @@ pub struct ConfigView {
     /// Model used to summarize context on compaction. Empty/absent means "Auto"
     /// (a per-provider default). See `aris_chat::resolve_summarizer_model`.
     pub summarizer_model: Option<String>,
+    pub summarizer_provider: Option<String>,
+    pub summarizer_base_url: Option<String>,
+    pub has_summarizer_key: bool,
+    pub summarizer_key_masked: Option<String>,
     pub has_executor_key: bool,
     pub executor_key_masked: Option<String>,
     pub reviewer_provider: Option<String>,
@@ -78,6 +82,7 @@ pub struct ConfigView {
 fn build_view(obj: &Map<String, Value>) -> ConfigView {
     let exec_key = get_str(obj, "executor_api_key").filter(|k| !k.is_empty());
     let rev_key = get_str(obj, "reviewer_api_key").filter(|k| !k.is_empty());
+    let summarizer_key = get_str(obj, "summarizer_api_key").filter(|k| !k.is_empty());
     let scopus_key = get_str(obj, "scopus_api_key").filter(|k| !k.is_empty());
     ConfigView {
         app_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -86,6 +91,10 @@ fn build_view(obj: &Map<String, Value>) -> ConfigView {
         executor_model: get_str(obj, "executor_model"),
         executor_base_url: get_str(obj, "executor_base_url"),
         summarizer_model: get_str(obj, "summarizer_model"),
+        summarizer_provider: get_str(obj, "summarizer_provider"),
+        summarizer_base_url: get_str(obj, "summarizer_base_url"),
+        has_summarizer_key: summarizer_key.is_some(),
+        summarizer_key_masked: summarizer_key.as_deref().map(mask),
         has_executor_key: exec_key.is_some(),
         executor_key_masked: exec_key.as_deref().map(mask),
         reviewer_provider: get_str(obj, "reviewer_provider"),
@@ -120,6 +129,7 @@ pub fn config_get() -> ConfigView {
 pub fn config_secret_get(kind: String) -> Result<Option<String>, String> {
     let key = match kind.as_str() {
         "executorApiKey" | "executor_api_key" => "executor_api_key",
+        "summarizerApiKey" | "summarizer_api_key" => "summarizer_api_key",
         "reviewerApiKey" | "reviewer_api_key" => "reviewer_api_key",
         "scopusApiKey" | "scopus_api_key" => "scopus_api_key",
         _ => return Err(format!("Unsupported secret field: {kind}")),
@@ -485,7 +495,10 @@ pub struct ConfigPatch {
     pub executor_provider: Option<String>,
     pub executor_model: Option<String>,
     pub executor_base_url: Option<String>,
+    pub summarizer_provider: Option<String>,
     pub summarizer_model: Option<String>,
+    pub summarizer_base_url: Option<String>,
+    pub summarizer_api_key: Option<String>,
     pub executor_api_key: Option<String>,
     pub reviewer_provider: Option<String>,
     pub reviewer_model: Option<String>,
@@ -566,7 +579,9 @@ fn apply_patch(obj: &mut Map<String, Value>, patch: ConfigPatch) {
     set_or_clear(obj, "executor_provider", patch.executor_provider);
     set_or_clear(obj, "executor_model", patch.executor_model);
     set_or_clear(obj, "executor_base_url", patch.executor_base_url);
+    set_or_clear(obj, "summarizer_provider", patch.summarizer_provider);
     set_or_clear(obj, "summarizer_model", patch.summarizer_model);
+    set_or_clear(obj, "summarizer_base_url", patch.summarizer_base_url);
     set_or_clear(obj, "reviewer_provider", patch.reviewer_provider);
     set_or_clear(obj, "reviewer_model", patch.reviewer_model);
     set_or_clear(obj, "reviewer_base_url", patch.reviewer_base_url);
@@ -576,6 +591,7 @@ fn apply_patch(obj: &mut Map<String, Value>, patch: ConfigPatch) {
     }
 
     set_secret(obj, "executor_api_key", patch.executor_api_key);
+    set_secret(obj, "summarizer_api_key", patch.summarizer_api_key);
     set_secret(obj, "reviewer_api_key", patch.reviewer_api_key);
     set_secret(obj, "scopus_api_key", patch.scopus_api_key);
 

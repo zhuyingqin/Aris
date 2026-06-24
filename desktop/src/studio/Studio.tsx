@@ -1,6 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { fileRead, isTauri, studioHtml } from "../api/tauri";
-import PdfReader from "../literature/PdfReader";
 import Presentation from "./Presentation";
 import { useStore } from "../store";
 import { useStudioStore } from "./studioStore";
@@ -10,6 +9,8 @@ import {
   type StudioPageReview,
 } from "./studioTypes";
 import "./Studio.css";
+
+const PdfReader = lazy(() => import("../literature/PdfReader"));
 
 type StudioView = "review" | "overview" | "speaker";
 type ArtifactFilter = "all" | StudioArtifactKind | "feedback";
@@ -489,20 +490,22 @@ export default function Studio() {
                         onOpenExternal={() => void openPath(selected.htmlPath!)}
                       />
                     ) : selected.pdfPath ? (
-                      <PdfReader
-                        relativePath={selected.pdfPath}
-                        initialPage={requestedPage}
-                        pageRequestKey={pageRequestKey}
-                        annotations={EMPTY_ANNOTATIONS}
-                        onOpenExternal={() => void openPath(selected.pdfPath!)}
-                        onAddAnnotation={NOOP}
-                        onUpdateAnnotation={NOOP}
-                        onDeleteAnnotation={NOOP}
-                        onRunAi={NOOP_AI}
-                        onPageChange={handlePageChange}
-                        onDocumentLoaded={handleDocumentLoaded}
-                        readOnly
-                      />
+                      <Suspense fallback={<div className="studio-loading">Loading PDF preview...</div>}>
+                        <PdfReader
+                          relativePath={selected.pdfPath}
+                          initialPage={requestedPage}
+                          pageRequestKey={pageRequestKey}
+                          annotations={EMPTY_ANNOTATIONS}
+                          onOpenExternal={() => void openPath(selected.pdfPath!)}
+                          onAddAnnotation={NOOP}
+                          onUpdateAnnotation={NOOP}
+                          onDeleteAnnotation={NOOP}
+                          onRunAi={NOOP_AI}
+                          onPageChange={handlePageChange}
+                          onDocumentLoaded={handleDocumentLoaded}
+                          readOnly
+                        />
+                      </Suspense>
                     ) : (
                       <div className="studio-welcome">
                         <strong>No viewable result indexed.</strong>
