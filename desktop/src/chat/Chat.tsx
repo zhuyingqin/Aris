@@ -71,11 +71,13 @@ function isCjkCharCode(code: number): boolean {
 
 function estimateTextTokens(text: string): number {
   let cjk = 0;
-  for (let i = 0; i < text.length; i += 1) {
-    if (isCjkCharCode(text.charCodeAt(i))) cjk += 1;
+  let other = 0;
+  for (const char of text) {
+    const code = char.codePointAt(0) ?? 0;
+    if (isCjkCharCode(code)) cjk += 1;
+    else other += 1;
   }
-  const other = text.length - cjk;
-  return cjk + Math.round(other / 3.5);
+  return cjk + Math.round(other / 3.5) + 1;
 }
 
 function estimateTokens(turns: ChatTurn[]): number {
@@ -92,6 +94,13 @@ function estimateTokens(turns: ChatTurn[]): number {
 }
 
 type ContextOverride = { tokens: number; anchor: number };
+type ContextNotice = {
+  kind: "warning" | "compacted";
+  sessionId: string;
+  message: string;
+  detail?: string;
+  createdAt: number;
+};
 
 // The ContextRing's "used" value. When an authoritative backend count is pinned
 // (after each turn, or after compaction), use it as the base and add only the
@@ -113,6 +122,10 @@ function MemoryBadge({ count }: { count: number }) {
       <span className="mem-badge-count">{count}</span>
     </div>
   );
+}
+
+function formatCompactTokens(tokens: number): string {
+  return tokens >= 1000 ? `${(tokens / 1000).toFixed(1)}k` : String(tokens);
 }
 
 function hasRenderableBlock(turn: ChatTurn) {
@@ -326,6 +339,7 @@ export default function Chat() {
   const [contextOverrides, setContextOverrides] = useState<Map<string, { tokens: number; anchor: number }>>(() => new Map());
   const [deleted, setDeleted] = useState<ChatSession | null>(null);
   const [pendingCommandSelection, setPendingCommandSelection] = useState<PendingCommandSelection | null>(null);
+  const [contextNotice, setContextNotice] = useState<ContextNotice | null>(null);
   const [focusRequest, setFocusRequest] = useState(0);
   const [exporting, setExporting] = useState(false);
   const [chatDragging, setChatDragging] = useState(false);
@@ -342,6 +356,10 @@ export default function Chat() {
   const contextOverridesRef = useRef(contextOverrides);
   contextOverridesRef.current = contextOverrides;
   const focusComposer = useCallback(() => setFocusRequest((value) => value + 1), []);
+
+  useEffect(() => {
+    setContextNotice((notice) => notice && notice.sessionId === currentId ? notice : null);
+  }, [currentId]);
 
   const markBackendContextSynced = useCallback((sessionId: string, turnsToMark: ChatTurn[]) => {
     const known = syncedTurnIds.current.get(sessionId) ?? new Set<string>();
@@ -361,7 +379,12 @@ export default function Chat() {
         if (messages.length === 0) return;
         return chatSetContext(sessionId, messages, "append");
       })
-      .then(() => markBackendContextSynced(sessionId, deltaTurns))
+      .then((tokens) => {
+        if (tokens != null) {
+          setContextOverrides((prev) => new Map(prev).set(sessionId, { tokens, anchor: nextTurns.length }));
+        }
+        markBackendContextSynced(sessionId, deltaTurns);
+      })
       .catch((error) => setError(String(error)));
   }, [markBackendContextSynced, setError]);
 
@@ -444,6 +467,36 @@ export default function Chat() {
     setContextOverrides((prev) => new Map(prev).set(sessionId, { tokens, anchor }));
   }, []);
 
+  const handleContextCompacted = useCallback((sessionId: string, tokensAfter: number) => {
+    applyContextTokens(sessionId, tokensAfter);
+    setContextNotice({
+      kind: "compacted",
+      sessionId,
+      message: "Context was compacted automatically.",
+      detail: `Earlier messages were summarized; backend context is now ${formatCompactTokens(tokensAfter)} tokens.`,
+      createdAt: Date.now(),
+    });
+  }, [applyContextTokens]);
+
+  const handleContextWarning = useCallback((event: {
+    sessionId: string;
+    usedTokens: number;
+    contextWindow?: number | null;
+    compactionBudget?: number | null;
+  }) => {
+    const budget = event.compactionBudget ?? event.contextWindow ?? status?.compactionBudget ?? status?.contextWindow ?? null;
+    const pct = budget && budget > 0 ? Math.round((event.usedTokens / budget) * 100) : null;
+    setContextNotice({
+      kind: "warning",
+      sessionId: event.sessionId,
+      message: "Context is close to the auto-compact budget.",
+      detail: budget
+        ? `${formatCompactTokens(event.usedTokens)} / ${formatCompactTokens(budget)} tokens${pct != null ? ` (${pct}%)` : ""}.`
+        : `${formatCompactTokens(event.usedTokens)} tokens in context.`,
+      createdAt: Date.now(),
+    });
+  }, [status?.compactionBudget, status?.contextWindow]);
+
   // Current ring value for a session, so the compaction notice can report how
   // much context was freed (before → after).
   const readContextTokens = useCallback((sessionId: string): number | null => {
@@ -456,13 +509,18 @@ export default function Chat() {
     patchAssistant,
     onComplete,
     onError,
-    onContextCompacted: applyContextTokens,
+    onContextCompacted: handleContextCompacted,
     onContextTokens: applyContextTokens,
+    onContextWarning: handleContextWarning,
     getContextTokens: readContextTokens,
   });
   const currentChatBusy = runningSessionIds.has(currentId);
   const turns = currentSession?.turns ?? [];
   const estimatedTokens = ringTokens(turns, contextOverrides.get(currentId));
+  const contextMax = status?.ready
+    ? (status.compactionBudget ?? status.contextWindow ?? null)
+    : null;
+  const currentContextNotice = contextNotice?.sessionId === currentId ? contextNotice : null;
   const workflowTodos = useMemo(() => latestTodosFromTurns(turns), [turns]);
   const workflowFileChanges = useMemo(
     () => latestFileChangesFromTurns(turns, currentProject?.path),
@@ -647,7 +705,8 @@ export default function Chat() {
     }
     const shouldResetContext = needsBackendContextReset(session.turns, prefix, resetContext);
     if (shouldResetContext) {
-      await chatSetContext(session.id, await contextForRetry(prefix), "replace");
+      const tokens = await chatSetContext(session.id, await contextForRetry(prefix), "replace");
+      setContextOverrides((prev) => new Map(prev).set(session.id, { tokens, anchor: prefix.length }));
       markBackendContextSynced(session.id, prefix);
     } else {
       markBackendContextSynced(session.id, prefix);
@@ -1117,7 +1176,8 @@ export default function Chat() {
           canSwitchModel={canSwitchModel}
           onModelChange={(model) => void changeModel(model)}
           contextUsed={estimatedTokens}
-          contextMax={status?.ready && status.contextWindow != null ? status.contextWindow : null}
+          contextMax={contextMax}
+          contextStatus={currentContextNotice}
           onInputChange={(value) => {
             if (pendingCommandSelection) setPendingCommandSelection(null);
             if (currentSession) setDraft(currentSession.id, value);

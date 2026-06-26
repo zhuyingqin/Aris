@@ -15,6 +15,7 @@ const mocks = vi.hoisted(() => ({
   onChatDone: vi.fn(),
   onChatError: vi.fn(),
   onChatContextCompacted: vi.fn(),
+  onChatContextWarning: vi.fn(),
 }));
 
 vi.mock("../api/tauri", () => ({
@@ -30,6 +31,7 @@ vi.mock("../api/tauri", () => ({
   onChatDone: mocks.onChatDone,
   onChatError: mocks.onChatError,
   onChatContextCompacted: mocks.onChatContextCompacted,
+  onChatContextWarning: mocks.onChatContextWarning,
 }));
 
 import { useChatStream } from "./useChatStream";
@@ -44,6 +46,7 @@ const listenerMocks = [
   mocks.onChatDone,
   mocks.onChatError,
   mocks.onChatContextCompacted,
+  mocks.onChatContextWarning,
 ];
 
 beforeEach(() => {
@@ -220,6 +223,41 @@ describe("useChatStream concurrent sessions", () => {
     });
   });
 
+  it("uses session contextTokens instead of provider usage to update context state", () => {
+    let doneHandler:
+      | ((event: {
+        sessionId: string;
+        text: string;
+        contextTokens?: number | null;
+        providerUsage?: { totalTokens: number; promptTokens: number } | null;
+      }) => void)
+      | null = null;
+    mocks.onChatDone.mockImplementation((handler) => {
+      doneHandler = handler;
+      return Promise.resolve(() => undefined);
+    });
+
+    const onContextTokens = vi.fn();
+    renderHook(() => useChatStream({
+      patchAssistant: vi.fn(),
+      onComplete: vi.fn(),
+      onError: vi.fn(),
+      onContextTokens,
+    }));
+
+    act(() => {
+      doneHandler?.({
+        sessionId: "chat-ctx",
+        text: "done",
+        contextTokens: 900,
+        providerUsage: { promptTokens: 420_000, totalTokens: 500_000 },
+      });
+    });
+
+    expect(onContextTokens).toHaveBeenCalledWith("chat-ctx", 900);
+    expect(onContextTokens).not.toHaveBeenCalledWith("chat-ctx", 500_000);
+  });
+
   it("deduplicates repeated AskUserQuestion tool-call events by id", () => {
     let toolHandler:
       | ((event: { sessionId: string; id?: string; name: string; input: string }) => void)
@@ -388,8 +426,46 @@ describe("useChatStream concurrent sessions", () => {
       compactedHandler?.({ sessionId: "chat-ctx", removedMessageCount: 8, tokensAfter: 12_000 });
     });
 
-    // 1 - 12000/45000 ≈ 73%.
-    expect(noticeMessage).toContain("45.0k → 12.0k tokens (−73%)");
+    expect(noticeMessage).toContain("45.0k -> 12.0k tokens (-73%)");
+  });
+
+  it("surfaces context warning events to the host", async () => {
+    let warningHandler:
+      | ((event: {
+        sessionId: string;
+        usedTokens: number;
+        contextWindow: number;
+        compactionBudget?: number | null;
+      }) => void)
+      | undefined;
+    mocks.onChatContextWarning.mockImplementation((handler) => {
+      warningHandler = handler;
+      return Promise.resolve(() => undefined);
+    });
+
+    const onContextWarning = vi.fn();
+    renderHook(() => useChatStream({
+      patchAssistant: vi.fn(),
+      onComplete: vi.fn(),
+      onError: vi.fn(),
+      onContextWarning,
+    }));
+
+    act(() => {
+      warningHandler?.({
+        sessionId: "chat-ctx",
+        usedTokens: 120_000,
+        contextWindow: 160_000,
+        compactionBudget: 160_000,
+      });
+    });
+
+    expect(onContextWarning).toHaveBeenCalledWith({
+      sessionId: "chat-ctx",
+      usedTokens: 120_000,
+      contextWindow: 160_000,
+      compactionBudget: 160_000,
+    });
   });
 
   it("stops only the selected session and updates local state immediately", async () => {

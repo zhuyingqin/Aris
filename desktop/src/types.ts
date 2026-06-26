@@ -29,9 +29,9 @@ export interface ChatCommandResult {
   replaceTurns: boolean;
   openSettings: boolean;
   refreshStatus: boolean;
-  /** Authoritative post-compaction context size in tokens (set by `/compact`),
-   * used to drop the ContextRing to the real backend value. Null/absent leaves
-   * the ring's own transcript estimate in place. */
+  /** Backend session-history token estimate in the same unit as the
+   * auto-compaction budget. Null/absent leaves the ring's own transcript
+   * estimate in place. */
   contextTokens?: number | null;
 }
 
@@ -441,6 +441,7 @@ export interface ChatStatus {
   provider?: string | null;
   message?: string | null;
   contextWindow?: number | null;
+  compactionBudget?: number | null;
   memoryFiles?: number | null;
 }
 

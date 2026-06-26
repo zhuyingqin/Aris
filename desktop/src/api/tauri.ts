@@ -564,7 +564,7 @@ export const chatSetContext = (
   sessionId: string,
   messages: ChatContextMessage[],
   mode: ChatContextSyncMode = "replace",
-) => invoke<void>("chat_set_context", { sessionId, messages, mode });
+) => invoke<number>("chat_set_context", { sessionId, messages, mode });
 export const chatDelete = (sessionId: string, projectId?: string) =>
   invoke<void>("chat_delete", { sessionId, projectId: projectId ?? null });
 export const chatCancel = (sessionId: string) => invoke<void>("chat_cancel", { sessionId });
@@ -615,10 +615,18 @@ export const onChatPermissionResolved = (handler: (event: ChatPermissionResolved
 export interface ChatDoneEvent {
   sessionId: string;
   text: string;
-  /** Real context occupancy (last request's prompt + output) of the finished
-   * turn. Drives the ContextRing from the backend's actual token count instead
-   * of the transcript estimate. Absent when the provider reported no usage. */
+  /** Backend session-history estimate in the same unit used by the
+   * auto-compaction budget. This intentionally excludes fixed prompt/tool
+   * overhead and generated output. */
   contextTokens?: number | null;
+  providerUsage?: {
+    inputTokens: number;
+    outputTokens: number;
+    cacheCreationInputTokens: number;
+    cacheReadInputTokens: number;
+    promptTokens: number;
+    totalTokens: number;
+  } | null;
 }
 export const onChatDone = (handler: (event: ChatDoneEvent) => void) =>
   listen<ChatDoneEvent>("chat-done", (e) => handler(e.payload));
@@ -632,9 +640,22 @@ export const onChatError = (handler: (event: ChatErrorEvent) => void) =>
 export interface ChatContextCompactedEvent {
   sessionId: string;
   removedMessageCount: number;
-  /** Real post-compaction context size in tokens. Drives the ContextRing down
-   * to the authoritative value; absent/null leaves the transcript estimate. */
+  tokensBefore?: number | null;
+  /** Post-compaction session-history estimate in the same unit used by the
+   * auto-compaction budget. Absent/null leaves the transcript estimate. */
   tokensAfter?: number | null;
+  contextWindow?: number | null;
+  compactionBudget?: number | null;
 }
 export const onChatContextCompacted = (handler: (event: ChatContextCompactedEvent) => void) =>
   listen<ChatContextCompactedEvent>("chat-context-compacted", (e) => handler(e.payload));
+
+export interface ChatContextWarningEvent {
+  sessionId: string;
+  usedTokens: number;
+  contextWindow: number;
+  compactionBudget?: number | null;
+  usage?: number | null;
+}
+export const onChatContextWarning = (handler: (event: ChatContextWarningEvent) => void) =>
+  listen<ChatContextWarningEvent>("chat-context-warning", (e) => handler(e.payload));

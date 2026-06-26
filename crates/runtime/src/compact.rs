@@ -2,6 +2,20 @@ use crate::session::{
     ContentBlock, ConversationMessage, MessageRole, Session, SessionCompactionRecord,
 };
 
+const COMPACTION_CONTINUATION_PREFIX: &str =
+    "This session is being continued from a previous conversation that ran out of context.";
+const OUTPUT_LIMIT_CONTINUATION_PREFIX: &str =
+    "Continue the unfinished task from the exact point where the previous response stopped";
+const BLANK_RESPONSE_CONTINUATION_PREFIX: &str = "Your previous response contained no visible text";
+const DIRECT_COMPACTION_TASK_PREFIX: &str =
+    "This message is a direct compaction task, not part of the conversation.";
+const RECENT_MESSAGES_AUTHORITY_PREFIX: &str =
+    "Recent messages are preserved verbatim and are authoritative.";
+const RESUME_WITHOUT_QUESTIONS_PREFIX: &str =
+    "Continue the conversation from where it left off without asking the user any further questions.";
+const MAX_ACTIVE_USER_GOAL_CHARS: usize = 220;
+const MAX_PRIOR_COMPACTION_SUMMARY_CHARS: usize = 4_000;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompactionSource {
     Auto,
@@ -130,6 +144,7 @@ pub fn get_compact_continuation_message(
     if suppress_follow_up_questions {
         base.push_str("\nContinue the conversation from where it left off without asking the user any further questions. Resume the actual work or answer directly — do not acknowledge the summary, recap what was happening, or preface with continuation text. Do produce a substantive response: never reply with an empty, whitespace-only, or content-free message.");
     }
+    base.push_str("\n\nResume anchor: prioritize the Current Focus, Active Issues, Code State, Commands & Test Results, and the most recent non-internal user request. Treat Aris-generated continuation or compaction prompts as resume metadata, not as the user's task.");
 
     base
 }
@@ -422,15 +437,44 @@ pub(crate) fn summarize_messages(messages: &[ConversationMessage]) -> String {
     tool_names.sort_unstable();
     tool_names.dedup();
 
+    let prior_compaction_summaries = collect_prior_compaction_summaries(messages);
+    let prior_focus = prior_compaction_summaries
+        .iter()
+        .rev()
+        .find_map(|summary| extract_prior_current_focus(summary));
+    let latest_assistant_state = infer_latest_assistant_state(messages);
+
     let mut lines = vec!["<summary>".to_string(), "## Current Focus".to_string()];
     if let Some(latest_user_request) = infer_latest_user_request(messages) {
+        lines.push(format!("- Active user goal: {latest_user_request}"));
+    } else if let Some(prior_focus) = prior_focus {
         lines.push(format!(
-            "- Latest compacted user request: {latest_user_request}"
+            "- Active user goal from prior compacted state: {prior_focus}"
         ));
     } else {
         lines.push("- No explicit user request found in compacted range.".to_string());
     }
+    if let Some(latest_assistant_state) = latest_assistant_state {
+        lines.push(format!(
+            "- Last assistant state before compaction: {latest_assistant_state}"
+        ));
+    }
+    lines.push(
+        "- Aris internal continuation/compaction prompts are resume metadata, not user tasks."
+            .to_string(),
+    );
     lines.push("- Recent preserved messages, if any, supersede this summary.".to_string());
+
+    if !prior_compaction_summaries.is_empty() {
+        lines.push(String::new());
+        lines.push("## Prior Compaction Summary".to_string());
+        for summary in &prior_compaction_summaries {
+            lines.push("- Rolled forward from an earlier context compaction:".to_string());
+            for line in summary.lines() {
+                lines.push(format!("  {line}"));
+            }
+        }
+    }
 
     lines.push(String::new());
     lines.push("## Environment".to_string());
@@ -488,7 +532,7 @@ pub(crate) fn summarize_messages(messages: &[ConversationMessage]) -> String {
 
     lines.push(String::new());
     lines.push("## User Intent & Constraints".to_string());
-    let user_requests = collect_recent_role_summaries(messages, MessageRole::User, 8);
+    let user_requests = collect_recent_user_summaries(messages, 8);
     if user_requests.is_empty() {
         lines.push("- No user text detected.".to_string());
     } else {
@@ -512,6 +556,7 @@ pub(crate) fn summarize_messages(messages: &[ConversationMessage]) -> String {
     for message in messages {
         let role = match message.role {
             MessageRole::System => "system",
+            MessageRole::User if is_internal_user_message(message) => "internal-user",
             MessageRole::User => "user",
             MessageRole::Assistant => "assistant",
             MessageRole::Tool => "tool",
@@ -575,6 +620,20 @@ fn collect_recent_role_summaries(
         .collect()
 }
 
+fn collect_recent_user_summaries(messages: &[ConversationMessage], limit: usize) -> Vec<String> {
+    messages
+        .iter()
+        .filter(|message| message.role == MessageRole::User && !is_internal_user_message(message))
+        .rev()
+        .map(summarize_message)
+        .filter(|text| !text.trim().is_empty())
+        .take(limit)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect()
+}
+
 fn summarize_message(message: &ConversationMessage) -> String {
     let content = message
         .blocks
@@ -589,6 +648,7 @@ fn infer_pending_work(messages: &[ConversationMessage]) -> Vec<String> {
     messages
         .iter()
         .rev()
+        .filter(|message| message.role != MessageRole::User || !is_internal_user_message(message))
         .filter_map(first_text_block)
         .filter(|text| {
             let lowered = text.to_ascii_lowercase();
@@ -629,9 +689,20 @@ fn infer_latest_user_request(messages: &[ConversationMessage]) -> Option<String>
         .iter()
         .rev()
         .filter(|message| message.role == MessageRole::User)
+        .filter(|message| !is_internal_user_message(message))
         .filter_map(first_text_block)
         .find(|text| !text.trim().is_empty())
-        .map(|text| truncate_summary(text, 450))
+        .map(|text| truncate_summary(text, MAX_ACTIVE_USER_GOAL_CHARS))
+}
+
+fn infer_latest_assistant_state(messages: &[ConversationMessage]) -> Option<String> {
+    messages
+        .iter()
+        .rev()
+        .filter(|message| message.role == MessageRole::Assistant)
+        .filter_map(first_text_block)
+        .find(|text| !text.trim().is_empty())
+        .map(|text| truncate_summary(text, 160))
 }
 
 fn first_text_block(message: &ConversationMessage) -> Option<&str> {
@@ -643,6 +714,102 @@ fn first_text_block(message: &ConversationMessage) -> Option<&str> {
         | ContentBlock::Text { .. }
         | ContentBlock::Thinking { .. } => None,
     })
+}
+
+fn is_internal_user_message(message: &ConversationMessage) -> bool {
+    message.role == MessageRole::User
+        && message.blocks.iter().any(|block| match block {
+            ContentBlock::Text { text } => is_internal_user_text(text),
+            ContentBlock::Image { .. }
+            | ContentBlock::ToolUse { .. }
+            | ContentBlock::ToolResult { .. }
+            | ContentBlock::Thinking { .. } => false,
+        })
+}
+
+fn is_internal_user_text(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    trimmed.starts_with(COMPACTION_CONTINUATION_PREFIX)
+        || trimmed.starts_with(OUTPUT_LIMIT_CONTINUATION_PREFIX)
+        || trimmed.starts_with(BLANK_RESPONSE_CONTINUATION_PREFIX)
+        || trimmed.starts_with(DIRECT_COMPACTION_TASK_PREFIX)
+}
+
+fn collect_prior_compaction_summaries(messages: &[ConversationMessage]) -> Vec<String> {
+    messages
+        .iter()
+        .filter(|message| message.role == MessageRole::User)
+        .filter_map(first_text_block)
+        .filter_map(extract_prior_compaction_summary)
+        .rev()
+        .take(2)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect()
+}
+
+fn extract_prior_compaction_summary(text: &str) -> Option<String> {
+    let trimmed = text.trim_start();
+    if !trimmed.starts_with(COMPACTION_CONTINUATION_PREFIX) {
+        return None;
+    }
+
+    let summary_start = trimmed
+        .find("Summary:\n")
+        .map(|index| index + "Summary:\n".len())
+        .or_else(|| {
+            trimmed
+                .find("<summary>")
+                .map(|index| index + "<summary>".len())
+        })?;
+    let mut summary = &trimmed[summary_start..];
+    if let Some(index) = summary.find("</summary>") {
+        summary = &summary[..index];
+    }
+    for marker in [
+        RECENT_MESSAGES_AUTHORITY_PREFIX,
+        RESUME_WITHOUT_QUESTIONS_PREFIX,
+        "Resume anchor:",
+    ] {
+        if let Some(index) = summary.find(marker) {
+            summary = &summary[..index];
+        }
+    }
+
+    let summary = collapse_blank_lines(summary).trim().to_string();
+    if summary.is_empty() {
+        None
+    } else {
+        Some(truncate_summary(
+            &summary,
+            MAX_PRIOR_COMPACTION_SUMMARY_CHARS,
+        ))
+    }
+}
+
+fn extract_prior_current_focus(summary: &str) -> Option<String> {
+    let mut in_focus = false;
+    for line in summary.lines() {
+        let trimmed = line.trim();
+        if trimmed.eq_ignore_ascii_case("## Current Focus") {
+            in_focus = true;
+            continue;
+        }
+        if in_focus && trimmed.starts_with("## ") {
+            return None;
+        }
+        if in_focus && !trimmed.is_empty() {
+            let focus = trimmed
+                .trim_start_matches('-')
+                .trim_start_matches('*')
+                .trim();
+            if !focus.is_empty() {
+                return Some(truncate_summary(focus, 450));
+            }
+        }
+    }
+    None
 }
 
 fn has_interesting_extension(candidate: &str) -> bool {
@@ -1049,6 +1216,50 @@ mod tests {
         ]);
 
         assert_eq!(latest.as_deref(), Some("new request"));
+    }
+
+    #[test]
+    fn latest_user_request_ignores_internal_resume_messages() {
+        let prior = get_compact_continuation_message(
+            "<summary>\n## Current Focus\n- Active user goal: keep prior compacted goal\n</summary>",
+            true,
+            false,
+        );
+        let latest = infer_latest_user_request(&[
+            ConversationMessage::user_text("repair Aris context compression focus loss"),
+            ConversationMessage::user_text(
+                "Continue the unfinished task from the exact point where the previous response stopped (max_tokens).",
+            ),
+            ConversationMessage::user_text(
+                "Your previous response contained no visible text. Otherwise continue the work now.",
+            ),
+            ConversationMessage::user_text(prior),
+        ]);
+
+        assert_eq!(
+            latest.as_deref(),
+            Some("repair Aris context compression focus loss")
+        );
+    }
+
+    #[test]
+    fn fallback_summary_rolls_forward_prior_compaction_focus() {
+        let prior = get_compact_continuation_message(
+            "<summary>\n## Current Focus\n- Active user goal: repair Aris context compression focus loss.\n\n## Active Issues\n- Fallback summary may lose the old focus during repeated compaction.\n</summary>",
+            true,
+            false,
+        );
+        let summary = summarize_messages(&[
+            ConversationMessage::user_text(prior),
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "Inspected compact.rs and found the fallback summary path.".to_string(),
+            }]),
+        ]);
+
+        assert!(summary.contains("## Prior Compaction Summary"));
+        assert!(summary.contains("repair Aris context compression focus loss"));
+        assert!(summary.contains("Active user goal from prior compacted state"));
+        assert!(!summary.contains("Active user goal: This session is being continued"));
     }
 
     /// Diagnostic: end-to-end behavior of context compression on a realistic

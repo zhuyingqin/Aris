@@ -10,7 +10,12 @@ import ChatMessage, { diffFromTool } from "./ChatMessage";
 import { completedAssistantBlocks, contextForRetry, needsBackendContextReset, visibleTurnError } from "./Chat";
 import ChatSidebar from "./ChatSidebar";
 import CommandSelection from "./CommandSelection";
-import { isNearBottom, isScrollbarPointer, shouldPauseAutoFollowForWheel } from "./ChatThread";
+import {
+  isNearBottom,
+  isScrollbarPointer,
+  shouldIgnoreProgrammaticFollowScroll,
+  shouldPauseAutoFollowForWheel,
+} from "./ChatThread";
 import {
   CURRENT_KEY,
   SESSIONS_KEY,
@@ -88,6 +93,12 @@ describe("Chat interaction helpers", () => {
 
     expect(isScrollbarPointer(element, 288)).toBe(true);
     expect(isScrollbarPointer(element, 240)).toBe(false);
+  });
+
+  it("ignores scroll events caused by programmatic bottom-following", () => {
+    expect(shouldIgnoreProgrammaticFollowScroll(180, 100, true)).toBe(true);
+    expect(shouldIgnoreProgrammaticFollowScroll(180, 220, true)).toBe(false);
+    expect(shouldIgnoreProgrammaticFollowScroll(180, 100, false)).toBe(false);
   });
 
   it("creates a readable diff for file edit tools", () => {
@@ -459,6 +470,31 @@ describe("Chat interaction helpers", () => {
     );
 
     expect(screen.getByText("Model returned an empty response.")).toBeTruthy();
+  });
+
+  it("keeps streamed thinking from splitting assistant Markdown text", () => {
+    const { container } = render(
+      <ChatMessage
+        turn={{
+          id: "assistant-mixed-thinking",
+          role: "assistant",
+          blocks: [
+            { kind: "text", text: "## 直接验证\n\n" },
+            { kind: "thinking", thinking: "这里是中途 reasoning，不应该插入正文。" },
+            { kind: "text", text: "FINAL_JSON: | X | 最终会出现 |\n\n```text\n样本 | X | 是否能看到\n```" },
+          ],
+        }}
+        canRetry={false}
+        onEdit={() => undefined}
+        onRetry={() => undefined}
+        onContinue={() => undefined}
+      />,
+    );
+
+    expect(screen.getByText("这里是中途 reasoning，不应该插入正文。")).toBeTruthy();
+    expect(container.querySelector(".md-think")).toBeTruthy();
+    expect(container.querySelector("h2")?.textContent).toBe("直接验证");
+    expect(container.querySelector(".md-code-block")?.textContent).toContain("样本 | X | 是否能看到");
   });
 });
 

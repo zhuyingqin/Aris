@@ -1246,6 +1246,7 @@ fn build_system_prompt_uncached(key: &SystemPromptCacheKey) -> Vec<String> {
     };
     let file_links = "When you create or modify files, include Markdown links to the relevant file paths in the final response so the desktop UI can open them directly.".to_string();
     let artifact_layout = "Project artifact layout: place slide/PPT/PDF deck outputs under `slides/`, poster outputs under `poster/`, interactive web apps under `web/<name>/` with an `index.html` plus local CSS/assets, notebook programs under `experiments/`, and scratch/temp/cache files under `.aris/`. Studio auto-discovers `slides/`, `poster/`, and `web/`; Lab lists notebooks from the workspace and defaults new notebooks into `experiments/`.".to_string();
+    let diagram_output = "Diagram output: when explaining a workflow, process, call path, architecture, state machine, dependency graph, or decision tree, prefer a fenced `mermaid` code block over ASCII art. Keep diagrams compact, use semantic node ids, short readable labels, left-to-right flow for pipelines, meaningful edge labels when they clarify the flow, and avoid oversized text inside nodes. For publication-grade diagram files, use the `mermaid-diagram` skill and verify the rendered output.".to_string();
     let long_document_reading = "Long document reading: when working with books, chapters, transcripts, logs, or converted documents, do not read multiple large files in full. First get a file list and a read_file outline preview, then read one chapter or section window at a time with explicit offset/limit. Treat tool output as a preview, not as a source file; if full text is needed, keep it on disk and reopen precise windows.".to_string();
     let long_file_generation = "Long file generation: do not call write_file with an entire long generated artifact such as a Beamer chapter, book chapter, or converted document. Keep single tool payloads small; for files over about 24000 characters, write a small scaffold, append smaller chunks with append_file, and verify line counts/compilation immediately instead of stopping to report an intermediate failure.".to_string();
     let latex_toolchain = latex_toolchain_prompt_section(key.tectonic.as_deref());
@@ -1253,6 +1254,7 @@ fn build_system_prompt_uncached(key: &SystemPromptCacheKey) -> Vec<String> {
         access.clone(),
         file_links,
         artifact_layout,
+        diagram_output,
         long_document_reading,
         long_file_generation,
     ];
@@ -1675,7 +1677,43 @@ pub struct ChatStatus {
     provider: Option<String>,
     message: Option<String>,
     context_window: Option<u64>,
+    compaction_budget: Option<u64>,
     memory_files: Option<usize>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ChatDoneProviderUsage {
+    input_tokens: u32,
+    output_tokens: u32,
+    cache_creation_input_tokens: u32,
+    cache_read_input_tokens: u32,
+    prompt_tokens: u32,
+    total_tokens: u32,
+}
+
+impl From<TokenUsage> for ChatDoneProviderUsage {
+    fn from(usage: TokenUsage) -> Self {
+        Self {
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            cache_creation_input_tokens: usage.cache_creation_input_tokens,
+            cache_read_input_tokens: usage.cache_read_input_tokens,
+            prompt_tokens: usage.prompt_tokens(),
+            total_tokens: usage.total_tokens(),
+        }
+    }
+}
+
+fn chat_done_context_tokens(session: &Session) -> u64 {
+    runtime::estimate_session_tokens(session) as u64
+}
+
+fn latest_provider_usage(turn_usages: &[TokenUsage]) -> Option<ChatDoneProviderUsage> {
+    turn_usages
+        .last()
+        .copied()
+        .map(ChatDoneProviderUsage::from)
 }
 
 fn context_window_for_model(model: &str) -> u64 {
@@ -1700,10 +1738,13 @@ fn context_window_for_model(model: &str) -> u64 {
     128_000
 }
 
-/// Auto-compaction thresholds, as a fraction of the model's context window.
-/// At/above WARN we nudge the UI; at/above TRIGGER we compact automatically so a
-/// long session never silently overflows the window and drops early context
-/// (#34 P0-2).
+fn compaction_budget_for_model(model: &str) -> u64 {
+    u64::try_from(aris_chat::context_compaction_threshold_for_model(model)).unwrap_or(u64::MAX)
+}
+
+/// Auto-compaction thresholds, as a fraction of the model-derived compaction
+/// budget. The budget is already below the provider's full context window so it
+/// leaves headroom for system prompts, tool schemas, and output.
 const AUTO_COMPACT_WARN_RATIO: f64 = 0.70;
 const AUTO_COMPACT_TRIGGER_RATIO: f64 = 0.90;
 
@@ -1714,13 +1755,13 @@ enum ContextAction {
     Compact,
 }
 
-/// Pure decision: what to do at `used_tokens` of `context_window`. Extracted so
+/// Pure decision: what to do at `used_tokens` of `budget_tokens`. Extracted so
 /// the threshold policy is unit-testable without a live session/app.
-fn context_action(used_tokens: u64, context_window: u64) -> ContextAction {
-    if context_window == 0 {
+fn context_action(used_tokens: u64, budget_tokens: u64) -> ContextAction {
+    if budget_tokens == 0 {
         return ContextAction::None;
     }
-    let usage = used_tokens as f64 / context_window as f64;
+    let usage = used_tokens as f64 / budget_tokens as f64;
     if usage >= AUTO_COMPACT_TRIGGER_RATIO {
         ContextAction::Compact
     } else if usage >= AUTO_COMPACT_WARN_RATIO {
@@ -1730,19 +1771,26 @@ fn context_action(used_tokens: u64, context_window: u64) -> ContextAction {
     }
 }
 
-fn emit_context_warning(app: &AppHandle, session_id: &str, used: u64, window: u64) {
+fn emit_context_warning(
+    app: &AppHandle,
+    session_id: &str,
+    used: u64,
+    context_window: u64,
+    compaction_budget: u64,
+) {
     let _ = app.emit(
         "chat-context-warning",
         json!({
             "sessionId": session_id,
             "usedTokens": used,
-            "contextWindow": window,
-            "usage": used as f64 / window.max(1) as f64,
+            "contextWindow": context_window,
+            "compactionBudget": compaction_budget,
+            "usage": used as f64 / compaction_budget.max(1) as f64,
         }),
     );
 }
 
-/// Before running a turn, keep the session within the model's context window:
+/// Before running a turn, keep the session within the model-derived budget:
 /// warn at >=70% usage, auto-compact at >=90% (falling back to a warning when
 /// there is too little history to compact). Returns the session to run the turn
 /// against — compacted in place when triggered, and persisted so the next turn
@@ -1758,11 +1806,12 @@ fn maybe_auto_compact(
     session: Session,
 ) -> Result<Session, String> {
     let window = context_window_for_model(model);
+    let budget = compaction_budget_for_model(model);
     let used = runtime::estimate_session_tokens(&session) as u64;
-    match context_action(used, window) {
+    match context_action(used, budget) {
         ContextAction::None => Ok(session),
         ContextAction::Warn => {
-            emit_context_warning(app, session_id, used, window);
+            emit_context_warning(app, session_id, used, window, budget);
             Ok(session)
         }
         ContextAction::Compact => {
@@ -1776,7 +1825,7 @@ fn maybe_auto_compact(
             )?;
             if result.removed_message_count == 0 {
                 // Too little history to compact — warn instead of claiming a no-op.
-                emit_context_warning(app, session_id, used, window);
+                emit_context_warning(app, session_id, used, window, budget);
                 return Ok(session);
             }
             let compacted = result.compacted_session;
@@ -1790,6 +1839,7 @@ fn maybe_auto_compact(
                     "tokensBefore": used,
                     "tokensAfter": after,
                     "contextWindow": window,
+                    "compactionBudget": budget,
                 }),
             );
             Ok(compacted)
@@ -1825,12 +1875,14 @@ fn compact_session_with_runtime(
 fn chat_status_for(model: String, provider: String) -> ChatStatus {
     let memory_files = status_context(None).ok().map(|ctx| ctx.memory_file_count);
     let cw = context_window_for_model(&model);
+    let budget = compaction_budget_for_model(&model);
     ChatStatus {
         ready: true,
         model: Some(model),
         provider: Some(provider),
         message: None,
         context_window: Some(cw),
+        compaction_budget: Some(budget),
         memory_files,
     }
 }
@@ -1846,6 +1898,7 @@ pub fn chat_status() -> ChatStatus {
             provider: None,
             message: Some(message),
             context_window: None,
+            compaction_budget: None,
             memory_files,
         },
     }
@@ -2703,11 +2756,14 @@ async fn run_chat_turn_with_context(
         }
     };
 
-    // Capture the real post-compaction size before `updated` is moved into
-    // storage, so the frontend ContextRing can drop to it (same mechanism as
-    // the manual `/compact` path) instead of the stale transcript estimate.
-    let auto_compaction_tokens_after =
-        auto_compaction.map(|_| runtime::estimate_session_tokens(&updated) as u64);
+    // Session-history token estimate after this turn. This is the same budget
+    // unit used by auto-compaction, so it is the value that should drive the
+    // frontend ContextRing. Provider usage is emitted separately below because
+    // it may include fixed system/tool prompt overhead, cached prompt tokens,
+    // and generated output.
+    let context_tokens = chat_done_context_tokens(&updated);
+    let auto_compaction_tokens_after = auto_compaction.map(|_| context_tokens);
+    let provider_usage = latest_provider_usage(&turn_usages);
     store_chat_session(state, session_id.clone(), updated)?;
     if let Err(error) = crate::usage_log::append_turn_usage(
         &session_id,
@@ -2727,15 +2783,14 @@ async fn run_chat_turn_with_context(
             }),
         );
     }
-    // Real context occupancy of the just-finished turn (last request's prompt
-    // + its output) so the frontend ContextRing tracks the backend instead of
-    // its own transcript estimate. `None` when the provider reported no usage.
-    let context_tokens = turn_usages
-        .last()
-        .map(|usage| u64::from(usage.total_tokens()));
     let _ = app.emit(
         "chat-done",
-        json!({ "sessionId": session_id, "text": &text, "contextTokens": context_tokens }),
+        json!({
+            "sessionId": session_id,
+            "text": &text,
+            "contextTokens": context_tokens,
+            "providerUsage": provider_usage,
+        }),
     );
     Ok(text)
 }
@@ -2786,15 +2841,19 @@ pub fn chat_set_context(
     session_id: String,
     messages: Vec<ChatContextMessage>,
     mode: Option<String>,
-) -> Result<(), String> {
+) -> Result<u64, String> {
     validate_session_id(&session_id)?;
     let mut next = chat_context_messages_to_session(messages)?;
     if mode.as_deref() == Some("append") {
         let mut current = get_cached_or_disk_session(&state, &session_id)?;
         current.messages.append(&mut next.messages);
-        return store_chat_session(&state, session_id, current);
+        let tokens = runtime::estimate_session_tokens(&current) as u64;
+        store_chat_session(&state, session_id, current)?;
+        return Ok(tokens);
     }
-    store_chat_session(&state, session_id, next)
+    let tokens = runtime::estimate_session_tokens(&next) as u64;
+    store_chat_session(&state, session_id, next)?;
+    Ok(tokens)
 }
 
 #[tauri::command]
@@ -4747,6 +4806,7 @@ mod tests {
 
         assert!(prompt.contains("desktop tool registry"));
         assert!(prompt.contains("include Markdown links"));
+        assert!(prompt.contains("fenced `mermaid` code block"));
         assert!(prompt.contains("Long file generation"));
         assert!(prompt.contains("24000 characters"));
         assert!(prompt.contains("append_file"));
@@ -4878,5 +4938,36 @@ mod tests {
         assert_eq!(context_action(899, 1_000), ContextAction::Warn); // just under trigger
         assert_eq!(context_action(900, 1_000), ContextAction::Compact); // 90%
         assert_eq!(context_action(2_000, 1_000), ContextAction::Compact); // over window
+    }
+
+    #[test]
+    fn chat_done_context_tokens_use_session_estimate_not_provider_total() {
+        let session = Session {
+            version: 1,
+            messages: vec![
+                ConversationMessage::user_text("short visible history"),
+                ConversationMessage::assistant(vec![ContentBlock::Text {
+                    text: "short reply".to_string(),
+                }]),
+            ],
+            compactions: Vec::new(),
+        };
+        let provider_usage = TokenUsage {
+            input_tokens: 120_000,
+            output_tokens: 8_000,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 300_000,
+        };
+
+        let context_tokens = chat_done_context_tokens(&session);
+        let usage = latest_provider_usage(&[provider_usage]).expect("provider usage");
+
+        assert_eq!(
+            context_tokens,
+            runtime::estimate_session_tokens(&session) as u64
+        );
+        assert_ne!(context_tokens, u64::from(provider_usage.total_tokens()));
+        assert_eq!(usage.prompt_tokens, provider_usage.prompt_tokens());
+        assert_eq!(usage.total_tokens, provider_usage.total_tokens());
     }
 }

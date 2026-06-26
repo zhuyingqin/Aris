@@ -4926,6 +4926,57 @@ textarea {
   background: linear-gradient(to bottom, transparent, var(--bg) 28%);
 }
 
+.chat-context-status {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: min(100%, 860px);
+  margin: 0 auto 8px;
+  padding: 8px 11px;
+  border: 1px solid color-mix(in srgb, var(--amber) 45%, var(--border));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--amber) 9%, var(--bg-1));
+  color: var(--text);
+  font-size: 12.5px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
+}
+
+.chat-context-status-compacted {
+  border-color: color-mix(in srgb, var(--green) 38%, var(--border));
+  background: color-mix(in srgb, var(--green) 8%, var(--bg-1));
+}
+
+.chat-context-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--amber);
+  flex: 0 0 auto;
+}
+
+.chat-context-status-compacted .chat-context-status-dot {
+  background: var(--green);
+}
+
+.chat-context-status-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.chat-context-status-copy span,
+.chat-context-status-copy small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-context-status-copy small {
+  color: var(--text-dim);
+  font-size: 11.5px;
+}
+
 .skill-picker {
   position: absolute;
   bottom: calc(100% + 6px);
@@ -5463,45 +5514,79 @@ textarea {
 .md-inline-code {
   font-family: ui-monospace, "Cascadia Code", "Fira Code", monospace;
   font-size: 12.5px;
-  background: var(--bg-3);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 1px 5px;
-  color: #e2a7ff;
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent);
+  border-radius: 5px;
+  padding: 1px 6px;
+  color: color-mix(in srgb, var(--accent) 88%, var(--text));
+  word-break: break-word;
 }
 
-/* Code block */
+/* Code block — Mac-terminal styled text panel */
 .md-code-block {
-  margin: 10px 0;
-  border: 1px solid var(--border);
+  margin: 12px 0;
+  border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 8px;
   overflow: hidden;
-  background: #0d1117;
+  background: linear-gradient(180deg, #0d1117 0%, #0a0e14 100%);
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.04) inset,
+    0 4px 16px rgba(0, 0, 0, 0.22);
+  font-family: ui-monospace, "Cascadia Code", "Fira Code", monospace;
 }
 
 .md-code-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 5px 12px;
-  background: #161b22;
-  border-bottom: 1px solid var(--border);
+  gap: 10px;
+  padding: 8px 14px;
+  background: rgba(255, 255, 255, 0.025);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
 }
 
+.md-code-header-left {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.md-code-dots {
+  display: inline-flex;
+  gap: 6px;
+}
+
+.md-code-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.25) inset;
+}
+
+.md-code-dot-r { background: #ff5f57; }
+.md-code-dot-y { background: #febc2e; }
+.md-code-dot-g { background: #28c840; }
+
 .md-code-lang {
-  font-size: 11px;
-  font-family: ui-monospace, monospace;
+  font-size: 11.5px;
+  font-family: inherit;
   color: var(--text-dim);
   text-transform: lowercase;
+  letter-spacing: 0.4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .md-code-copy {
   font-size: 11px;
-  padding: 1px 8px;
+  padding: 2px 9px;
   background: transparent;
-  border: 1px solid var(--border);
-  border-radius: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 5px;
   color: var(--text-dim);
+  transition: color 0.15s, border-color 0.15s;
 }
 
 .md-code-copy:hover {
@@ -5510,15 +5595,236 @@ textarea {
   background: transparent;
 }
 
-.md-code-block code {
-  display: block;
-  padding: 14px;
+.md-code-body {
+  display: flex;
+  max-height: min(520px, 62vh);
+  overflow: auto;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.22) transparent;
+  overscroll-behavior: contain;
+}
+
+.md-code-body::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.md-code-body::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.md-code-body::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.18);
+  border-radius: 4px;
+}
+
+.md-code-body::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.3);
+}
+
+.md-code-gutter {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 12px 10px 14px 14px;
   font-size: 12.5px;
-  font-family: ui-monospace, "Cascadia Code", "Fira Code", monospace;
-  line-height: 1.6;
-  overflow-x: auto;
+  line-height: 1.65;
+  color: rgba(255, 255, 255, 0.28);
+  text-align: right;
+  user-select: none;
+  background: rgba(255, 255, 255, 0.025);
+  border-right: 1px solid rgba(255, 255, 255, 0.05);
+  white-space: pre;
+  font-variant-numeric: tabular-nums;
+}
+
+.md-code-gutter span {
+  display: block;
+}
+
+.md-code-block code.md-code-content {
+  flex: 1;
+  display: block;
+  margin: 0;
+  padding: 12px 16px 14px;
+  font-size: 12.5px;
+  line-height: 1.65;
+  font-family: inherit;
+  white-space: pre;
+  word-break: normal;
+  overflow-wrap: normal;
+  min-width: max-content;
+  color: #c9d1d9;
   /* override hljs default bg so our wrapper bg shows */
   background: transparent !important;
+}
+
+/* Mermaid diagrams */
+.md-mermaid {
+  margin: 12px 0;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--accent) 26%, var(--border));
+  border-radius: 8px;
+  background: #0d1117;
+}
+
+.md-mermaid-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 34px;
+  padding: 5px 10px 5px 12px;
+  border-bottom: 1px solid var(--border);
+  background: #161b22;
+}
+
+.md-mermaid-lang {
+  color: var(--text-dim);
+  font-family: ui-monospace, "Cascadia Code", monospace;
+  font-size: 11px;
+  text-transform: lowercase;
+}
+
+.md-mermaid-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.md-mermaid-zoom {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.md-mermaid-zoom-btn {
+  min-height: 23px;
+  min-width: 28px;
+  padding: 1px 8px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 1;
+}
+
+.md-mermaid-zoom-btn:hover {
+  border-color: var(--accent);
+  background: transparent;
+  color: var(--text);
+}
+
+.md-mermaid-zoom-label {
+  min-width: 42px;
+  color: var(--text-dim);
+  font-family: ui-monospace, "Cascadia Code", monospace;
+  font-size: 11px;
+  text-align: center;
+}
+
+.md-mermaid-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.md-mermaid-btn {
+  min-height: 23px;
+  padding: 1px 8px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.md-mermaid-btn:hover {
+  border-color: var(--accent);
+  background: transparent;
+  color: var(--text);
+}
+
+.md-mermaid-canvas {
+  min-height: 156px;
+  max-height: min(680px, 72vh);
+  overflow: auto;
+  padding: 18px;
+  background:
+    linear-gradient(90deg, rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+    #10151d;
+  background-size: 28px 28px;
+}
+
+.md-mermaid-stage {
+  margin: 0 auto;
+  overflow: hidden;
+}
+
+.md-mermaid-diagram {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  justify-content: center;
+  align-items: flex-start;
+}
+
+.md-mermaid-diagram svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.md-mermaid-placeholder,
+.md-mermaid-error-wrap {
+  display: grid;
+  min-height: 120px;
+  place-items: center;
+  gap: 6px;
+  padding: 18px;
+  color: var(--text-dim);
+  font-size: 12.5px;
+  text-align: center;
+}
+
+.md-mermaid.has-error {
+  border-color: color-mix(in srgb, var(--red) 48%, var(--border));
+}
+
+.md-mermaid-error-title {
+  color: var(--red);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.md-mermaid-error {
+  color: var(--red);
+  line-height: 1.55;
+}
+
+.md-mermaid-error-detail {
+  color: var(--text-dim);
+  font-family: ui-monospace, "Cascadia Code", monospace;
+  font-size: 11.5px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.md-mermaid-source {
+  max-height: 260px;
+  margin: 0;
+  overflow: auto;
+  padding: 12px 14px;
+  border-top: 1px solid var(--border);
+  background: #0d1117;
+  color: var(--text);
+  font: 12px/1.55 ui-monospace, "Cascadia Code", "Fira Code", monospace;
+  white-space: pre;
 }
 
 /* Tables */
@@ -6537,6 +6843,7 @@ textarea {
   align-items: center;
   gap: 7px;
   width: 100%;
+  min-height: 32px;
   text-align: left;
   background: transparent;
   border: none;
@@ -6597,8 +6904,9 @@ textarea {
   font-size: 12.5px;
   color: var(--text-dim);
   font-style: italic;
-  max-height: 220px;
+  max-height: min(180px, 28vh);
   overflow-y: auto;
+  scrollbar-width: thin;
   overscroll-behavior: contain;
 }
 
@@ -7452,6 +7760,7 @@ textarea {
   position: relative;
   padding: 26px 24px 20px;
   background: var(--bg);
+  overflow-anchor: none;
 }
 
 .chat-thread {

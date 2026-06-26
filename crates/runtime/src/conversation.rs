@@ -16,6 +16,7 @@ const DEFAULT_AUTO_COMPACTION_INPUT_TOKENS_THRESHOLD: u32 = 200_000;
 const AUTO_COMPACTION_THRESHOLD_ENV_VAR: &str = "CLAUDE_CODE_AUTO_COMPACT_INPUT_TOKENS";
 const DEFAULT_CONTEXT_COMPACTION_ESTIMATED_TOKENS_THRESHOLD: usize = 150_000;
 const CONTEXT_COMPACTION_THRESHOLD_ENV_VAR: &str = "ARIS_CONTEXT_COMPACT_TOKENS";
+const AUTO_COMPACT_SESSION_ESTIMATE_RATIO: f64 = 0.80;
 /// Always-on cap applied to a tool result the moment it is produced. A tool
 /// can return arbitrary megabytes; this bounds it once before it ever enters
 /// the session. Generous on purpose — a normal large file read should survive.
@@ -709,11 +710,16 @@ where
         // because each turn re-sends the whole history, that sum balloons far
         // faster than real occupancy and forced compaction after only a few
         // turns (catastrophic for large-window models like MiniMax/Gemini).
-        if self.usage_tracker.current_turn_usage().prompt_tokens()
-            < self.auto_compaction_input_tokens_threshold
-            && estimate_session_tokens(&self.session)
-                < self.context_compaction_estimated_tokens_threshold
-        {
+        let session_tokens = estimate_session_tokens(&self.session);
+        let near_budget_threshold = ((self.context_compaction_estimated_tokens_threshold as f64)
+            * AUTO_COMPACT_SESSION_ESTIMATE_RATIO)
+            .round() as usize;
+        let real_prompt_over_budget = self.usage_tracker.current_turn_usage().prompt_tokens()
+            >= self.auto_compaction_input_tokens_threshold;
+        let session_over_budget =
+            session_tokens >= self.context_compaction_estimated_tokens_threshold;
+        let session_near_budget = session_tokens >= near_budget_threshold.max(1);
+        if !session_over_budget && !(real_prompt_over_budget && session_near_budget) {
             return None;
         }
 
@@ -836,11 +842,15 @@ Output one <summary>...</summary> block and nothing else.
 The summary must preserve the information needed to continue development after earlier messages are removed.
 Prefer concrete paths, commands, errors, decisions, constraints, and current task state over generic narration.
 Do not invent details. If something is unknown, omit it.
+If the transcript contains a previous context-compaction continuation or summary, merge its useful Current Focus, Active Issues, Code State, Commands & Test Results, User Intent, and Important Context forward into the new summary. Do not treat the wrapper text itself as a user request.
+Ignore Aris-generated continuation prompts such as "Continue the unfinished task..." or "Your previous response contained no visible text" when identifying the user's active goal.
 
 Inside <summary>, use this exact structure:
 
 ## Current Focus
-[What is being worked on right now and what should happen next.]
+- Active user goal: [most recent non-internal user request, or the active goal from a prior compaction summary.]
+- Where work stopped: [latest assistant/tool state that matters.]
+- Immediate next step: [what should happen next.]
 
 ## Environment
 - [Repository/workspace, platform, branch, tools, configs, or model/provider setup.]
@@ -1961,7 +1971,7 @@ mod tests {
     }
 
     #[test]
-    fn auto_compacts_when_latest_input_threshold_is_crossed() {
+    fn auto_compacts_when_latest_input_threshold_is_crossed_and_history_near_budget() {
         struct SimpleApi;
         impl ApiClient for SimpleApi {
             fn stream(
@@ -1984,13 +1994,13 @@ mod tests {
         let session = Session {
             version: 1,
             messages: vec![
-                crate::session::ConversationMessage::user_text("one"),
+                crate::session::ConversationMessage::user_text("one ".repeat(700)),
                 crate::session::ConversationMessage::assistant(vec![ContentBlock::Text {
-                    text: "two".to_string(),
+                    text: "two ".repeat(700),
                 }]),
-                crate::session::ConversationMessage::user_text("three"),
+                crate::session::ConversationMessage::user_text("three ".repeat(700)),
                 crate::session::ConversationMessage::assistant(vec![ContentBlock::Text {
-                    text: "four".to_string(),
+                    text: "four ".repeat(700),
                 }]),
             ],
             compactions: Vec::new(),
@@ -2003,7 +2013,8 @@ mod tests {
             PermissionPolicy::new(PermissionMode::DangerFullAccess),
             vec!["system".to_string()],
         )
-        .with_auto_compaction_input_tokens_threshold(100_000);
+        .with_auto_compaction_input_tokens_threshold(100_000)
+        .with_context_compaction_estimated_tokens_threshold(4_000);
 
         let summary = runtime
             .run_turn("trigger", None)
@@ -2016,6 +2027,45 @@ mod tests {
             })
         );
         assert_eq!(runtime.session().messages[0].role, MessageRole::User);
+    }
+
+    #[test]
+    fn high_fixed_prompt_usage_does_not_compact_tiny_history_every_turn() {
+        struct LargeFixedPromptApi;
+        impl ApiClient for LargeFixedPromptApi {
+            fn stream(
+                &mut self,
+                _request: ApiRequest,
+            ) -> Result<Vec<AssistantEvent>, RuntimeError> {
+                Ok(vec![
+                    AssistantEvent::TextDelta("done".to_string()),
+                    AssistantEvent::Usage(TokenUsage {
+                        input_tokens: 120_000,
+                        output_tokens: 4,
+                        cache_creation_input_tokens: 0,
+                        cache_read_input_tokens: 0,
+                    }),
+                    AssistantEvent::MessageStop,
+                ])
+            }
+        }
+
+        let mut runtime = ConversationRuntime::new(
+            Session::new(),
+            LargeFixedPromptApi,
+            StaticToolExecutor::new(),
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            vec!["large fixed system/tool prompt".to_string()],
+        )
+        .with_auto_compaction_input_tokens_threshold(100_000)
+        .with_context_compaction_estimated_tokens_threshold(150_000);
+
+        for index in 0..3 {
+            let summary = runtime
+                .run_turn(format!("short turn {index}"), None)
+                .expect("turn should succeed");
+            assert_eq!(summary.auto_compaction, None, "turn {index} compacted");
+        }
     }
 
     #[test]

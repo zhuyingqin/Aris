@@ -4,6 +4,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type CSSProperties,
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
 } from "react";
@@ -76,6 +77,7 @@ export default function ChatSidebar({
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
   const [draggedProjectId, setDraggedProjectId] = useState<string | null>(null);
+  const [draggedProjectOffsetY, setDraggedProjectOffsetY] = useState(0);
   const [projectOrderPreview, setProjectOrderPreview] = useState<string[] | null>(null);
   const [openMenu, setOpenMenu] = useState<SessionMenuAnchor | null>(null);
   const [menuPosition, setMenuPosition] = useState<SessionMenuPosition | null>(null);
@@ -91,8 +93,11 @@ export default function ChatSidebar({
     pointerId: number;
     startX: number;
     startY: number;
+    currentY: number;
+    grabOffsetY: number;
     moved: boolean;
   } | null>(null);
+  const suppressProjectToggleClickRef = useRef<string | null>(null);
   const openMenuId = openMenu?.id ?? null;
   const groups = useMemo(
     () => groupSessionsByProject(
@@ -143,6 +148,14 @@ export default function ChatSidebar({
     };
   }, [openMenuId]);
 
+  useEffect(() => {
+    return () => {
+      document.removeEventListener("pointermove", handleDocumentProjectMove, true);
+      document.removeEventListener("pointerup", handleDocumentProjectUp, true);
+      document.removeEventListener("pointercancel", handleDocumentProjectCancel, true);
+    };
+  }, []);
+
   useLayoutEffect(() => {
     if (!openMenu || !menuRef.current) {
       setMenuPosition(null);
@@ -169,15 +182,39 @@ export default function ChatSidebar({
     else groupRefs.current.delete(id);
   };
 
+  const updateProjectDragOffset = (clientY: number) => {
+    const drag = projectDragRef.current;
+    if (!drag) return;
+    drag.currentY = clientY;
+    const element = groupRefs.current.get(drag.id);
+    if (!element) return;
+    const rect = element.getBoundingClientRect();
+    // Use the state-tracked offset, NOT a ref: after a reorder the DOM may
+    // briefly measure without the latest transform applied (transition /
+    // uncommitted style), so `rect.top` only matches the natural position
+    // when we subtract what React has actually painted.
+    setDraggedProjectOffsetY((current) => {
+      const baseTop = rect.top - current;
+      const nextOffset = clientY - drag.grabOffsetY - baseTop;
+      if (Math.abs(nextOffset - current) < 0.5) return current;
+      return nextOffset;
+    });
+  };
+
   const animateProjectOrderPreview = (ids: string[]) => {
+    const draggedId = projectDragRef.current?.id ?? null;
     const previousTop = new Map<string, number>();
     groupRefs.current.forEach((element, id) => {
+      if (id === draggedId) return;
       previousTop.set(id, element.getBoundingClientRect().top);
     });
     projectOrderPreviewRef.current = ids;
     setProjectOrderPreview(ids);
     window.requestAnimationFrame(() => {
+      const drag = projectDragRef.current;
+      if (drag) updateProjectDragOffset(drag.currentY);
       groupRefs.current.forEach((element, id) => {
+        if (id === draggedId) return;
         const from = previousTop.get(id);
         if (from === undefined) return;
         const delta = from - element.getBoundingClientRect().top;
@@ -220,17 +257,40 @@ export default function ChatSidebar({
     id: string,
   ) => {
     if (!canReorderProjects || event.button !== 0) return;
+    if (projectDragRef.current) return;
+    const rect = groupRefs.current.get(id)?.getBoundingClientRect();
     projectDragRef.current = {
       id,
       pointerId: event.pointerId,
       startX: event.clientX,
       startY: event.clientY,
+      currentY: event.clientY,
+      grabOffsetY: rect ? event.clientY - rect.top : 0,
       moved: false,
     };
     event.currentTarget.setPointerCapture(event.pointerId);
+    document.addEventListener("pointermove", handleDocumentProjectMove, true);
+    document.addEventListener("pointerup", handleDocumentProjectUp, true);
+    document.addEventListener("pointercancel", handleDocumentProjectCancel, true);
   };
 
-  const moveProjectDrag = (event: ReactPointerEvent<HTMLElement>) => {
+  const handleDocumentProjectMove = (event: PointerEvent) =>
+    documentProjectHandlersRef.current.move(event);
+  const handleDocumentProjectUp = (event: PointerEvent) =>
+    documentProjectHandlersRef.current.up(event);
+  const handleDocumentProjectCancel = (event: PointerEvent) =>
+    documentProjectHandlersRef.current.cancel(event);
+
+  const documentProjectHandlersRef = useRef<{
+    move: (event: PointerEvent) => void;
+    up: (event: PointerEvent) => void;
+    cancel: (event: PointerEvent) => void;
+  }>({
+    move: () => undefined,
+    up: () => undefined,
+    cancel: () => undefined,
+  });
+  documentProjectHandlersRef.current.move = (event) => {
     const drag = projectDragRef.current;
     if (!drag || drag.pointerId !== event.pointerId) return;
     if (!drag.moved) {
@@ -245,35 +305,44 @@ export default function ChatSidebar({
     }
     event.preventDefault();
     event.stopPropagation();
+    updateProjectDragOffset(event.clientY);
     const currentIds = projectOrderPreviewRef.current ?? projects.map((project) => project.id);
     const ids = projectOrderFromPointer(event.clientY, drag.id);
     if (!ids || sameProjectOrder(ids, currentIds)) return;
     animateProjectOrderPreview(ids);
   };
-
-  const finishProjectDrag = (event: ReactPointerEvent<HTMLElement>) => {
+  documentProjectHandlersRef.current.up = (event) => {
+    document.removeEventListener("pointermove", handleDocumentProjectMove, true);
+    document.removeEventListener("pointerup", handleDocumentProjectUp, true);
+    document.removeEventListener("pointercancel", handleDocumentProjectCancel, true);
     const drag = projectDragRef.current;
-    if (!drag || drag.pointerId !== event.pointerId) return;
+    if (!drag) return;
+    if (drag.pointerId !== event.pointerId) return;
     if (drag.moved) {
       event.preventDefault();
       event.stopPropagation();
+      suppressProjectToggleClickRef.current = drag.id;
     }
     const ids = projectOrderPreviewRef.current;
     projectDragRef.current = null;
     projectOrderPreviewRef.current = null;
     setDraggedProjectId(null);
+    setDraggedProjectOffsetY(0);
     setProjectOrderPreview(null);
     if (ids && drag.moved && !sameProjectOrder(ids, projects.map((project) => project.id))) {
       void onReorderProjects(ids).catch(() => undefined);
     }
   };
-
-  const cancelProjectDrag = (event: ReactPointerEvent<HTMLElement>) => {
+  documentProjectHandlersRef.current.cancel = (event) => {
+    document.removeEventListener("pointermove", handleDocumentProjectMove, true);
+    document.removeEventListener("pointerup", handleDocumentProjectUp, true);
+    document.removeEventListener("pointercancel", handleDocumentProjectCancel, true);
     const drag = projectDragRef.current;
     if (!drag || drag.pointerId !== event.pointerId) return;
     projectDragRef.current = null;
     projectOrderPreviewRef.current = null;
     setDraggedProjectId(null);
+    setDraggedProjectOffsetY(0);
     setProjectOrderPreview(null);
   };
 
@@ -399,29 +468,34 @@ export default function ChatSidebar({
             ? group.sessions.slice(0, AUTO_COLLAPSE_SESSION_COUNT)
             : group.sessions;
           const hiddenCount = group.sessions.length - visibleSessions.length;
+          const dragStyle: CSSProperties | undefined = draggedProjectId === group.id
+            ? { transform: `translateY(${draggedProjectOffsetY}px)` }
+            : undefined;
           return (
           <section
             className={`chat-session-group${draggedProjectId === group.id ? " dragging" : ""}${collapsed ? " collapsed" : ""}`}
             key={group.id}
             data-chat-project-id={group.id}
             ref={setGroupRef(group.id)}
+            style={dragStyle}
           >
             <div
               className={`chat-sidebar-label chat-project-label${canReorderProjects ? " can-reorder" : ""}`}
               data-chat-project-label-id={group.id}
               onPointerDown={(event) => startProjectDrag(event, group.id)}
-              onPointerMove={moveProjectDrag}
-              onPointerUp={finishProjectDrag}
-              onPointerCancel={cancelProjectDrag}
             >
               <button
                 className="chat-project-toggle"
                 type="button"
                 aria-expanded={!collapsed}
                 aria-label={`${group.label}, ${group.sessions.length} chats, ${collapsed ? "collapsed" : "expanded"}`}
-                onPointerDown={(event) => event.stopPropagation()}
                 onClick={(event) => {
                   event.stopPropagation();
+                  if (suppressProjectToggleClickRef.current === group.id) {
+                    suppressProjectToggleClickRef.current = null;
+                    event.preventDefault();
+                    return;
+                  }
                   toggleGroupCollapsed(group.id, group.sessions.length);
                 }}
               >

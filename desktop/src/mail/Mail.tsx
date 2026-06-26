@@ -9,7 +9,7 @@ import {
   type PointerEvent as ReactPointerEvent,
   type UIEvent,
 } from "react";
-import arisIcon from "../assets/aris-icon.svg";
+import arisIcon from "../assets/app-logo.png";
 import avatarManBlue from "../assets/mail/avatar-man-blue-shirt.png";
 import avatarWomanBlazer from "../assets/mail/avatar-woman-navy-blazer.png";
 import avatarManNavy from "../assets/mail/avatar-man-navy-sweater.png";

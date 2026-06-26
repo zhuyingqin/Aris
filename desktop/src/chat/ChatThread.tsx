@@ -1,9 +1,9 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import type { ChatTurn } from "../types";
 import ErrorBoundary from "../ErrorBoundary";
 import ChatMessage from "./ChatMessage";
-import arisIcon from "../assets/aris-icon.svg";
+import arisIcon from "../assets/app-logo.png";
 
 export function isNearBottom(element: Pick<HTMLElement, "scrollHeight" | "scrollTop" | "clientHeight">, threshold = 140) {
   return element.scrollHeight - element.scrollTop - element.clientHeight <= threshold;
@@ -16,6 +16,10 @@ export function shouldPauseAutoFollowForWheel(deltaY: number) {
 export function isScrollbarPointer(element: HTMLElement, clientX: number, gutter = 18) {
   const rect = element.getBoundingClientRect();
   return clientX >= rect.right - gutter;
+}
+
+export function shouldIgnoreProgrammaticFollowScroll(programmaticUntil: number, now: number, following: boolean) {
+  return following && now <= programmaticUntil;
 }
 
 interface Props {
@@ -69,6 +73,7 @@ export default function ChatThread({
   const scrollRef = useRef<HTMLDivElement>(null);
   const [following, setFollowing] = useState(true);
   const followingRef = useRef(true);
+  const programmaticScrollUntilRef = useRef(0);
   // True while the initial scroll for a session is still settling. Dynamic row
   // measurement means the first scroll lands on *estimated* offsets, then rows
   // measure and the total size shifts; during that window we ignore the
@@ -88,16 +93,27 @@ export default function ChatThread({
     setFollowing(next);
   }, []);
 
+  const markProgrammaticScroll = useCallback(() => {
+    programmaticScrollUntilRef.current = window.performance.now() + 180;
+  }, []);
+
   const pauseAutoFollow = useCallback(() => {
     settlingRef.current = false;
+    programmaticScrollUntilRef.current = 0;
     setFollowingValue(false);
   }, [setFollowingValue]);
 
-  const scrollToBottom = (smooth = false) => {
+  const scrollToBottom = useCallback((smooth = false, strategy?: "direct" | "virtual") => {
     if (turns.length === 0) return;
-    virtualizer.scrollToIndex(turns.length - 1, { align: "end", behavior: smooth ? "smooth" : "auto" });
+    const mode = strategy ?? (smooth ? "virtual" : "direct");
+    markProgrammaticScroll();
+    if (mode === "direct" && scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    } else {
+      virtualizer.scrollToIndex(turns.length - 1, { align: "end", behavior: smooth ? "smooth" : "auto" });
+    }
     setFollowingValue(true);
-  };
+  }, [markProgrammaticScroll, setFollowingValue, turns.length, virtualizer]);
 
   // Land at the latest message when a conversation opens, re-pinning across a few
   // frames so the scrollbar converges as rows measure instead of jumping around.
@@ -106,7 +122,7 @@ export default function ChatThread({
     settlingRef.current = true;
     let frame = 0;
     let raf = window.requestAnimationFrame(function settle() {
-      scrollToBottom();
+      scrollToBottom(false, "virtual");
       frame += 1;
       if (frame < 5) {
         raf = window.requestAnimationFrame(settle);
@@ -121,18 +137,23 @@ export default function ChatThread({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!followingRef.current) return;
     // Re-check inside the frame: the user may have scrolled up (pausing follow)
     // between this effect scheduling the frame and the frame running. Without
     // this guard the stale frame yanks them back to the bottom and re-enables
     // follow, making it impossible to scroll up while messages stream in.
-    const raf = window.requestAnimationFrame(() => {
-      if (followingRef.current) scrollToBottom();
+    scrollToBottom(false, "direct");
+    let raf = window.requestAnimationFrame(() => {
+      if (!followingRef.current) return;
+      scrollToBottom(false, "direct");
+      raf = window.requestAnimationFrame(() => {
+        if (followingRef.current) scrollToBottom(false, "direct");
+      });
     });
     return () => window.cancelAnimationFrame(raf);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [turns, composerHeight, following]);
+  }, [turns, composerHeight]);
 
   return (
     <div className="chat-thread">
@@ -148,6 +169,10 @@ export default function ChatThread({
         }}
         onScroll={(event) => {
           if (settlingRef.current) return;
+          const now = window.performance.now();
+          if (shouldIgnoreProgrammaticFollowScroll(programmaticScrollUntilRef.current, now, followingRef.current)) {
+            return;
+          }
           setFollowingValue(isNearBottom(event.currentTarget));
         }}
         style={{ paddingBottom: composerHeight + 24 }}

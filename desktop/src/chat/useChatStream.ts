@@ -7,6 +7,7 @@ import {
   onChatDone,
   onChatError,
   onChatContextCompacted,
+  onChatContextWarning,
   onChatThinkingDelta,
   onChatPermissionRequest,
   onChatPermissionResolved,
@@ -24,7 +25,7 @@ function formatTokenCount(tokens: number): string {
 
 /** Build the auto-compaction notice. When both the pre- and post-compaction
  * token counts are known (and the context actually shrank), annotate it with
- * how much was freed: "… · 45.0k → 12.0k tokens (−73%)". Falls back to the
+ * how much was freed: " - 45.0k -> 12.0k tokens (-73%)". Falls back to the
  * bare message otherwise so callers without token data get a stable string. */
 function compactionNoticeMessage(
   removedMessageCount: number,
@@ -36,7 +37,7 @@ function compactionNoticeMessage(
     : "Context compacted automatically; large consumed tool payloads were shortened.";
   if (before != null && after != null && before > after) {
     const pct = Math.round((1 - after / before) * 100);
-    return `${base} · ${formatTokenCount(before)} → ${formatTokenCount(after)} tokens (−${pct}%)`;
+    return `${base} - ${formatTokenCount(before)} -> ${formatTokenCount(after)} tokens (-${pct}%)`;
   }
   return base;
 }
@@ -49,10 +50,15 @@ interface StreamHandlers {
    * Lets the host pin the ContextRing to it (same as the manual `/compact`
    * path). Only called when the backend supplies a token count. */
   onContextCompacted?: (sessionId: string, tokensAfter: number) => void;
-  /** A turn finished and the backend reported its real context occupancy
-   * (prompt + output). The host pins the ContextRing to it so the ring tracks
-   * the backend rather than the transcript estimate. */
+  /** A turn finished and the backend reported its session-history token
+   * estimate, in the same unit as the auto-compaction budget. */
   onContextTokens?: (sessionId: string, tokens: number) => void;
+  onContextWarning?: (event: {
+    sessionId: string;
+    usedTokens: number;
+    contextWindow?: number | null;
+    compactionBudget?: number | null;
+  }) => void;
   /** Current authoritative context-token count for a session, used only to
    * annotate the compaction notice with how much was freed. */
   getContextTokens?: (sessionId: string) => number | null;
@@ -64,6 +70,7 @@ export function useChatStream({
   onError,
   onContextCompacted,
   onContextTokens,
+  onContextWarning,
   getContextTokens,
 }: StreamHandlers) {
   const [runningSessionIds, setRunningSessionIds] = useState<Set<string>>(() => new Set());
@@ -188,7 +195,7 @@ export function useChatStream({
       // also rejects, and `onError` is idempotent (it sets the same turn
       // error), so surfacing here is safe and guarantees the failure renders
       // even if the rejection path is delayed or the listener set was swapped
-      // mid-turn. `stopped: false` — a real backend error is never an expected
+      // mid-turn. `stopped: false` �?a real backend error is never an expected
       // user stop; `visibleTurnError` only hides cancellations when stopped.
       onChatError(({ sessionId, message }) => {
         if (!isCurrentListener()) return;
@@ -206,6 +213,10 @@ export function useChatStream({
         }));
         if (tokensAfter != null) onContextCompacted?.(sessionId, tokensAfter);
       }),
+      onChatContextWarning(({ sessionId, usedTokens, contextWindow, compactionBudget }) => {
+        if (!isCurrentListener()) return;
+        onContextWarning?.({ sessionId, usedTokens, contextWindow, compactionBudget });
+      }),
     ];
     return () => {
       if (listenerGeneration.current === generation) listenerGeneration.current += 1;
@@ -214,7 +225,7 @@ export function useChatStream({
       flushTimers.current.clear();
       queues.current.clear();
     };
-  }, [enqueue, flush, onError, patchAssistant, onContextCompacted, onContextTokens, getContextTokens]);
+  }, [enqueue, flush, onError, patchAssistant, onContextCompacted, onContextTokens, onContextWarning, getContextTokens]);
 
   const run = useCallback(async (sessionId: string, message: string | ChatSendRequest) => {
     if (runningSessions.current.has(sessionId)) return false;

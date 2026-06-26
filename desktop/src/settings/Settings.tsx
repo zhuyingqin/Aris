@@ -12,7 +12,7 @@ import {
   isTauri,
 } from "../api/tauri";
 import { useStore } from "../store";
-import arisIcon from "../assets/aris-icon.svg";
+import arisIcon from "../assets/app-logo.png";
 import { useProvidersStore, type ProviderEntry } from "./providersStore";
 import MailSettings, { MailSettingsDetail } from "./MailSettings";
 import type {
