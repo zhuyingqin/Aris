@@ -124,7 +124,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "write_file",
-            description: "Write a complete text file in the workspace. Place generated artifacts in canonical project folders: slide/PPT/PDF deck outputs under slides/, posters under poster/, interactive web apps under web/<name>/ with index.html plus local CSS/assets, source notebooks under notebooks/, run artifacts under experiments/runs/, and scratch/temp/cache files under .aris/. Keep content under 24000 characters in a single call; for longer generated files, write a small scaffold, append chunks with append_file, and verify the final file. Prefer edit_file for localized edits; use shell scripts only for justified bulk mechanical rewrites.",
+            description: "Write a complete text file in the workspace. Place generated artifacts in canonical project folders: slide/PPT/PDF deck outputs under slides/, posters under poster/, interactive web apps under web/<name>/ with index.html plus local CSS/assets, source notebooks under notebooks/, run artifacts under experiments/runs/, and scratch/temp/cache files under .aris/. When the user asks to modify an existing/current artifact, reuse the existing path and update it in place; do not create sibling version files such as _v2, _new, _final, or timestamped copies unless explicitly requested. Keep content under 24000 characters in a single call; for longer generated files, write a small scaffold, append chunks with append_file, and verify the final file. Prefer edit_file for localized edits; use shell scripts only for justified bulk mechanical rewrites.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -138,7 +138,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "append_file",
-            description: "Append one text chunk to a workspace file without returning the full file. Keep generated artifacts in the same canonical folders as write_file: slides/, poster/, web/<name>/, notebooks/, experiments/runs/, or .aris/ for scratch/temp/cache files. Keep content under 24000 characters; use this for long generated artifacts after a small write_file scaffold, then verify with read_file/compilation.",
+            description: "Append one text chunk to a workspace file without returning the full file. Keep generated artifacts in the same canonical folders as write_file: slides/, poster/, web/<name>/, notebooks/, experiments/runs/, or .aris/ for scratch/temp/cache files. For existing/current artifacts, append only to the identified existing path and do not create a new versioned sibling unless explicitly requested. Keep content under 24000 characters; use this for long generated artifacts after a small write_file scaffold, then verify with read_file/compilation.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -153,7 +153,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "edit_file",
-            description: "Replace text directly in a workspace file. Use this for small and medium edits instead of generating helper scripts; it returns Codex-style structured file changes.",
+            description: "Replace text directly in a workspace file. Use this for small and medium edits to existing/current artifacts instead of creating new version files or generating helper scripts; it returns Codex-style structured file changes.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -362,6 +362,22 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 "additionalProperties": false
             }),
             required_permission: PermissionMode::WorkspaceWrite,
+        },
+        ToolSpec {
+            name: "LiteratureBrowserDownloadTask",
+            description: "Build a browser-download task for publisher PDFs that direct HTTP downloads cannot handle, especially IEEE Xplore and Elsevier ScienceDirect. Use this after LiteraturePdfDownload fails or when search results have no direct pdfUrl. The returned task is compatible with the paper-pdf-downloader browser_batch_download.py workflow.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "paper": {
+                        "type": "object",
+                        "description": "One paper record from LiteratureSearch output."
+                    }
+                },
+                "required": ["paper"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
         },
         ToolSpec {
             name: "KnowledgeSearch",
@@ -1009,6 +1025,10 @@ pub fn execute_tool_with_cancel(
             .and_then(literature::run_literature_library_upsert),
         "LiteraturePdfDownload" => from_value::<literature::LiteraturePdfDownloadInput>(input)
             .and_then(literature::run_literature_pdf_download),
+        "LiteratureBrowserDownloadTask" => {
+            from_value::<literature::LiteratureBrowserDownloadTaskInput>(input)
+                .and_then(literature::run_literature_browser_download_task)
+        }
         "KnowledgeSearch" => from_value::<knowledge::KnowledgeSearchInput>(input)
             .and_then(knowledge::run_knowledge_search),
         "KnowledgeUpsert" => from_value::<knowledge::KnowledgeUpsertInput>(input)
@@ -5467,6 +5487,24 @@ mod tests {
         assert!(verification.contains("PowerShell"));
         assert!(!verification.contains("write_file"));
         assert!(!verification.contains("append_file"));
+    }
+
+    #[test]
+    fn file_tool_descriptions_preserve_existing_artifact_paths() {
+        let specs = mvp_tool_specs();
+        let description = |name: &str| {
+            specs
+                .iter()
+                .find(|spec| spec.name == name)
+                .unwrap_or_else(|| panic!("{name} spec should exist"))
+                .description
+        };
+
+        assert!(description("write_file").contains("reuse the existing path"));
+        assert!(description("write_file").contains("_v2"));
+        assert!(description("write_file").contains("unless explicitly requested"));
+        assert!(description("append_file").contains("existing/current artifacts"));
+        assert!(description("edit_file").contains("existing/current artifacts"));
     }
 
     #[test]

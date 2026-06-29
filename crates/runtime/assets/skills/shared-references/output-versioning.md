@@ -1,5 +1,13 @@
 # Output Versioning Protocol
 
+Scope: this protocol applies to a fresh workflow run that writes a new stage
+output or reruns a stage. It does **not** apply when the user asks to modify,
+revise, polish, fix, or continue editing an existing/current artifact. In that
+case, identify the existing source path, edit that file in place, and rebuild
+derived outputs at the same base path. Do not create `_v2`, `_v9`, `_new`,
+`_final`, or timestamped sibling files unless the user explicitly asks for a
+new version, backup, archive, or comparison copy.
+
 When writing any output file that would overwrite an existing file, use timestamped filename + fixed-name latest copy:
 
 1. Write output to timestamped file: `{FILENAME}_{YYYYMMDD_HHmmss}.md` (or `.json`, `.tex` as appropriate)

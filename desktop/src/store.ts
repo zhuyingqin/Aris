@@ -1,7 +1,11 @@
 import { create } from "zustand";
 import type { DesktopProject } from "./types";
 import {
+  configSet,
   isTauri,
+  newapiLogin,
+  newapiRegister,
+  type NewApiLoginResult,
   projectAdd,
   projectsGet,
   projectsReorder,
@@ -52,7 +56,74 @@ function applyTheme(theme: Theme) {
   }
 }
 
+// ── Managed login (new-api gateway) ───────────────────────────────────────────
+// A signed-in flag gates the UI; the actual authorization is the downstream
+// token written into the executor config. Browser preview has no backend, so it
+// is never gated.
+
+const AUTH_FLAG_KEY = "aris-auth-v1";
+const AUTH_SERVER_KEY = "aris-auth-server-v1";
+export const DEFAULT_AUTH_SERVER = "http://106.53.28.124:18080";
+const DEFAULT_MODEL = "MiniMax-M3";
+
+function readStoredServer(): string {
+  try {
+    return localStorage.getItem(AUTH_SERVER_KEY) ?? DEFAULT_AUTH_SERVER;
+  } catch {
+    return DEFAULT_AUTH_SERVER;
+  }
+}
+
+function initialAuthed(): boolean {
+  if (!isTauri()) return true; // no gateway in plain-browser preview
+  try {
+    return localStorage.getItem(AUTH_FLAG_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+async function persistManagedAuthResult(result: NewApiLoginResult) {
+  await configSet({
+    executorProvider: "openai",
+    executorModel: result.model,
+    executorBaseUrl: result.baseUrl,
+    executorApiKey: result.token,
+  });
+}
+
+function markAuthed(server: string) {
+  try {
+    localStorage.setItem(AUTH_FLAG_KEY, "1");
+    localStorage.setItem(AUTH_SERVER_KEY, server);
+  } catch {
+    // Storage disabled — session still authed for this run.
+  }
+}
+
+function rememberAuthServer(server: string) {
+  try {
+    localStorage.setItem(AUTH_SERVER_KEY, server);
+  } catch {
+    // ignore
+  }
+}
+
 interface AppState {
+  /** True once the user has signed in to the managed gateway (or in preview). */
+  authed: boolean;
+  /** Last-used gateway server URL, prefilled in the login form. */
+  authServer: string;
+  /** Sign in, then persist the returned executor config. Throws on failure. */
+  login: (server: string, username: string, password: string) => Promise<void>;
+  register: (
+    server: string,
+    username: string,
+    password: string,
+    options?: { email?: string; verificationCode?: string; affCode?: string; turnstile?: string },
+  ) => Promise<void>;
+  logout: () => void;
+
   tab: Tab;
   setTab: (tab: Tab) => void;
 
@@ -70,6 +141,10 @@ interface AppState {
   /** One-shot deep link consumed by Studio after switching tabs. */
   pendingStudioArtifactId: string | null;
   setPendingStudioArtifactId: (value: string | null) => void;
+
+  /** One-shot: open this session's transcript, consumed by Sessions after switching tabs. */
+  pendingSessionViewId: string | null;
+  setPendingSessionViewId: (value: string | null) => void;
 
   stateDir: string;
   error: string | null;
@@ -90,6 +165,40 @@ const initialTheme = readStoredTheme();
 applyTheme(initialTheme);
 
 export const useStore = create<AppState>((set, get) => ({
+  authed: initialAuthed(),
+  authServer: readStoredServer(),
+  login: async (server, username, password) => {
+    const trimmedServer = (server.trim() || DEFAULT_AUTH_SERVER).replace(/\/+$/, "");
+    if (!trimmedServer) throw new Error("请输入服务器地址");
+    const result = await newapiLogin(trimmedServer, DEFAULT_MODEL, username, password);
+    await persistManagedAuthResult(result);
+    markAuthed(trimmedServer);
+    set({ authed: true, authServer: trimmedServer });
+  },
+  register: async (server, username, password, options = {}) => {
+    const trimmedServer = (server.trim() || DEFAULT_AUTH_SERVER).replace(/\/+$/, "");
+    if (!trimmedServer) throw new Error("请输入服务器地址");
+    await newapiRegister({
+      baseUrl: trimmedServer,
+      username,
+      password,
+      email: options.email,
+      verificationCode: options.verificationCode,
+      affCode: options.affCode,
+      turnstile: options.turnstile,
+    });
+    rememberAuthServer(trimmedServer);
+    set({ authServer: trimmedServer });
+  },
+  logout: () => {
+    try {
+      localStorage.removeItem(AUTH_FLAG_KEY);
+    } catch {
+      // ignore
+    }
+    set({ authed: false });
+  },
+
   tab: isLabPreviewMode() ? "lab" : "chat",
   setTab: (tab) => set({ tab }),
 
@@ -107,6 +216,9 @@ export const useStore = create<AppState>((set, get) => ({
 
   pendingStudioArtifactId: null,
   setPendingStudioArtifactId: (value) => set({ pendingStudioArtifactId: value }),
+
+  pendingSessionViewId: null,
+  setPendingSessionViewId: (value) => set({ pendingSessionViewId: value }),
 
   stateDir: "",
   error: null,

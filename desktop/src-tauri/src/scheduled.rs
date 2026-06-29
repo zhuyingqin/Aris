@@ -6,16 +6,28 @@
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tauri::AppHandle;
 
 use crate::state;
 
 const TASK_KIND: &str = "aris-scheduled-task";
 const STATUS_ACTIVE: &str = "ACTIVE";
 const STATUS_PAUSED: &str = "PAUSED";
+/// Task fires on a time interval (`rrule`). The default for legacy records.
+const TRIGGER_INTERVAL: &str = "interval";
+/// Task fires when a new mail arrives (optionally filtered by account/keyword).
+const TRIGGER_MAIL: &str = "mail";
+const RUNNER_TICK_SECS: u64 = 30;
+static RUNNER_STARTED: OnceLock<()> = OnceLock::new();
+
+fn default_trigger_kind() -> String {
+    TRIGGER_INTERVAL.to_string()
+}
 
 #[derive(Serialize, Deserialize, Default, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -43,7 +55,17 @@ pub struct ScheduledTask {
     #[serde(default)]
     pub updated_at: Option<String>,
     #[serde(default)]
+    pub last_run_at: Option<String>,
+    #[serde(default)]
+    pub last_error: Option<String>,
+    #[serde(default)]
     pub next_run: Option<String>,
+    #[serde(default = "default_trigger_kind")]
+    pub trigger_kind: String,
+    #[serde(default)]
+    pub mail_account_id: String,
+    #[serde(default)]
+    pub mail_keywords: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -58,6 +80,16 @@ struct ArisScheduledRecord {
     target_thread_id: String,
     created_at: i64,
     updated_at: i64,
+    #[serde(default)]
+    last_run_at: Option<i64>,
+    #[serde(default)]
+    last_error: Option<String>,
+    #[serde(default = "default_trigger_kind")]
+    trigger_kind: String,
+    #[serde(default)]
+    mail_account_id: String,
+    #[serde(default)]
+    mail_keywords: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -66,9 +98,17 @@ pub struct ScheduledTaskInput {
     title: String,
     prompt: String,
     session_id: String,
+    #[serde(default)]
     interval_value: u32,
+    #[serde(default)]
     interval_unit: String,
     status: Option<String>,
+    #[serde(default)]
+    trigger_kind: Option<String>,
+    #[serde(default)]
+    mail_account_id: Option<String>,
+    #[serde(default)]
+    mail_keywords: Option<Vec<String>>,
 }
 
 struct NormalizedTaskInput {
@@ -78,6 +118,9 @@ struct NormalizedTaskInput {
     interval_value: u32,
     interval_unit: String,
     status: String,
+    trigger_kind: String,
+    mail_account_id: String,
+    mail_keywords: Vec<String>,
 }
 
 fn legacy_store_path() -> PathBuf {
@@ -183,10 +226,20 @@ fn normalize_input(
     if !session_exists(&session_id) {
         return Err("scheduled task must be bound to an existing chat session".to_string());
     }
-    if input.interval_value == 0 || input.interval_value > 10_000 {
-        return Err("scheduled task interval must be between 1 and 10000".to_string());
-    }
-    let interval_unit = normalize_interval_unit(&input.interval_unit)?;
+    let trigger_kind = normalize_trigger_kind(input.trigger_kind.as_deref())?;
+    // Mail-triggered tasks don't run on a clock, so the interval is irrelevant —
+    // we keep a placeholder rrule only so the on-disk record stays uniform.
+    let (interval_value, interval_unit) = if trigger_kind == TRIGGER_MAIL {
+        (1, "minutes".to_string())
+    } else {
+        if input.interval_value == 0 || input.interval_value > 10_000 {
+            return Err("scheduled task interval must be between 1 and 10000".to_string());
+        }
+        (
+            input.interval_value,
+            normalize_interval_unit(&input.interval_unit)?,
+        )
+    };
     let status = input
         .status
         .as_deref()
@@ -203,10 +256,32 @@ fn normalize_input(
         },
         prompt,
         session_id,
-        interval_value: input.interval_value,
+        interval_value,
         interval_unit,
         status,
+        mail_account_id: input.mail_account_id.unwrap_or_default().trim().to_string(),
+        mail_keywords: clean_keywords(input.mail_keywords.unwrap_or_default()),
+        trigger_kind,
     })
+}
+
+fn normalize_trigger_kind(kind: Option<&str>) -> Result<String, String> {
+    match kind.map(str::trim).unwrap_or(TRIGGER_INTERVAL) {
+        "" | TRIGGER_INTERVAL => Ok(TRIGGER_INTERVAL.to_string()),
+        TRIGGER_MAIL => Ok(TRIGGER_MAIL.to_string()),
+        _ => Err("scheduled task trigger must be interval or mail".to_string()),
+    }
+}
+
+fn clean_keywords(items: Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for item in items {
+        let value = item.trim();
+        if !value.is_empty() && !out.iter().any(|existing| existing == value) {
+            out.push(value.to_string());
+        }
+    }
+    out
 }
 
 fn normalize_status(status: &str) -> Result<String, String> {
@@ -318,10 +393,22 @@ fn rrule_field(rrule: &str, key: &str) -> Option<String> {
 impl From<ArisScheduledRecord> for ScheduledTask {
     fn from(record: ArisScheduledRecord) -> Self {
         let (interval_value, interval_unit) = interval_from_rrule(&record.rrule);
+        let is_mail = record.trigger_kind == TRIGGER_MAIL;
+        let schedule_label = if is_mail {
+            mail_schedule_label(&record.mail_keywords)
+        } else {
+            schedule_label_from_rrule(&record.rrule)
+        };
+        // Mail tasks have no clock-based "next run"; they fire on arrival.
+        let next_run = if is_mail {
+            None
+        } else {
+            next_run_at(&record).map(|value| value.to_string())
+        };
         Self {
             id: record.id,
             title: record.name,
-            schedule_label: schedule_label_from_rrule(&record.rrule),
+            schedule_label,
             status: if record.status == STATUS_PAUSED {
                 "paused".to_string()
             } else {
@@ -334,9 +421,169 @@ impl From<ArisScheduledRecord> for ScheduledTask {
             interval_unit,
             created_at: Some(record.created_at.to_string()),
             updated_at: Some(record.updated_at.to_string()),
-            next_run: None,
+            last_run_at: record.last_run_at.map(|value| value.to_string()),
+            last_error: record.last_error,
+            next_run,
+            trigger_kind: record.trigger_kind,
+            mail_account_id: record.mail_account_id,
+            mail_keywords: record.mail_keywords,
         }
     }
+}
+
+fn mail_schedule_label(keywords: &[String]) -> String {
+    if keywords.is_empty() {
+        "收到新邮件时".to_string()
+    } else {
+        format!("收到含「{}」的新邮件时", keywords.join(" / "))
+    }
+}
+
+fn interval_millis_from_rrule(rrule: &str) -> i64 {
+    let (value, unit) = interval_from_rrule(rrule);
+    let unit_ms: i64 = match unit.as_str() {
+        "hours" => 60 * 60 * 1000,
+        "days" => 24 * 60 * 60 * 1000,
+        _ => 60 * 1000,
+    };
+    i64::from(value).saturating_mul(unit_ms)
+}
+
+fn next_run_at(record: &ArisScheduledRecord) -> Option<i64> {
+    if record.status == STATUS_PAUSED {
+        return None;
+    }
+    let anchor = record.last_run_at.unwrap_or(record.created_at);
+    Some(anchor.saturating_add(interval_millis_from_rrule(&record.rrule)))
+}
+
+fn due_records(now: i64) -> Vec<ArisScheduledRecord> {
+    let Ok(entries) = fs::read_dir(aris_automations_dir()) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| read_record_from_path(&entry.path().join("automation.toml")).ok())
+        .filter(|record| {
+            record.kind == TASK_KIND
+                && record.status == STATUS_ACTIVE
+                && record.trigger_kind != TRIGGER_MAIL
+                && !record.prompt.trim().is_empty()
+                && next_run_at(record).is_some_and(|next| next <= now)
+        })
+        .collect()
+}
+
+fn update_run_state(id: &str, last_run_at: i64, last_error: Option<String>) -> Result<(), String> {
+    let mut record = read_record(id)?;
+    record.last_run_at = Some(last_run_at);
+    record.last_error = last_error;
+    record.updated_at = now_millis();
+    write_record(&record)
+}
+
+pub fn spawn_runner(app: AppHandle) {
+    if RUNNER_STARTED.set(()).is_err() {
+        return;
+    }
+    tauri::async_runtime::spawn(async move {
+        loop {
+            let now = now_millis();
+            for record in due_records(now) {
+                let _ = update_run_state(&record.id, now, None);
+                let result = crate::engine::run_background_prompt(
+                    app.clone(),
+                    record.target_thread_id.clone(),
+                    record.prompt.clone(),
+                )
+                .await;
+                if let Err(error) = result {
+                    let _ = update_run_state(&record.id, now, Some(error));
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(RUNNER_TICK_SECS)).await;
+        }
+    });
+}
+
+/// Minimal, mail-module-agnostic snapshot of the message that triggered a task.
+/// Kept primitive so `scheduled` doesn't depend on `mail`'s internal types.
+pub struct MailTriggerContext {
+    pub account_id: String,
+    pub from: String,
+    pub from_name: String,
+    pub subject: String,
+    pub snippet: String,
+    pub message_id: String,
+}
+
+/// Fire every active `mail`-trigger task that matches an incoming message. Called
+/// from the mail event watcher for each new message. Each match runs its prompt
+/// (with the email context appended) in its bound chat session.
+pub fn on_new_mail(app: AppHandle, ctx: MailTriggerContext) {
+    let matches: Vec<ArisScheduledRecord> = mail_trigger_records()
+        .into_iter()
+        .filter(|record| mail_trigger_matches(record, &ctx))
+        .collect();
+    if matches.is_empty() {
+        return;
+    }
+    tauri::async_runtime::spawn(async move {
+        for record in matches {
+            let now = now_millis();
+            let prompt = build_mail_trigger_prompt(&record.prompt, &ctx);
+            let _ = update_run_state(&record.id, now, None);
+            let result = crate::engine::run_background_prompt(
+                app.clone(),
+                record.target_thread_id.clone(),
+                prompt,
+            )
+            .await;
+            if let Err(error) = result {
+                let _ = update_run_state(&record.id, now, Some(error));
+            }
+        }
+    });
+}
+
+fn mail_trigger_records() -> Vec<ArisScheduledRecord> {
+    let Ok(entries) = fs::read_dir(aris_automations_dir()) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| read_record_from_path(&entry.path().join("automation.toml")).ok())
+        .filter(|record| {
+            record.kind == TASK_KIND
+                && record.status == STATUS_ACTIVE
+                && record.trigger_kind == TRIGGER_MAIL
+                && !record.prompt.trim().is_empty()
+        })
+        .collect()
+}
+
+fn mail_trigger_matches(record: &ArisScheduledRecord, ctx: &MailTriggerContext) -> bool {
+    let wanted_account = record.mail_account_id.trim();
+    if !wanted_account.is_empty() && !wanted_account.eq_ignore_ascii_case(ctx.account_id.trim()) {
+        return false;
+    }
+    if record.mail_keywords.is_empty() {
+        return true;
+    }
+    let haystack =
+        format!("{} {} {}", ctx.subject, ctx.snippet, ctx.from_name).to_ascii_lowercase();
+    record
+        .mail_keywords
+        .iter()
+        .map(|keyword| keyword.trim().to_ascii_lowercase())
+        .any(|keyword| !keyword.is_empty() && haystack.contains(&keyword))
+}
+
+fn build_mail_trigger_prompt(prompt: &str, ctx: &MailTriggerContext) -> String {
+    format!(
+        "{prompt}\n\n---\n[触发] 收到一封新邮件，请据此处理：\n- 账户ID: {}\n- 邮件ID: {}\n- 发件人: {} <{}>\n- 主题: {}\n- 摘要: {}",
+        ctx.account_id, ctx.message_id, ctx.from_name, ctx.from, ctx.subject, ctx.snippet
+    )
 }
 
 /// Every scheduled task currently on disk. Legacy JSON is listed read-only;
@@ -374,6 +621,11 @@ pub fn scheduled_task_create(input: ScheduledTaskInput) -> Result<ScheduledTask,
         target_thread_id: normalized.session_id,
         created_at: now,
         updated_at: now,
+        last_run_at: None,
+        last_error: None,
+        trigger_kind: normalized.trigger_kind,
+        mail_account_id: normalized.mail_account_id,
+        mail_keywords: normalized.mail_keywords,
     };
     write_record(&record)?;
     Ok(record.into())
@@ -398,6 +650,11 @@ pub fn scheduled_task_update(
         target_thread_id: normalized.session_id,
         created_at: existing.created_at,
         updated_at: now_millis(),
+        last_run_at: existing.last_run_at,
+        last_error: existing.last_error,
+        trigger_kind: normalized.trigger_kind,
+        mail_account_id: normalized.mail_account_id,
+        mail_keywords: normalized.mail_keywords,
     };
     write_record(&record)?;
     Ok(record.into())
@@ -425,9 +682,41 @@ pub fn scheduled_task_delete(id: String) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        interval_from_rrule, is_safe_identifier, normalize_status, rrule_for_interval,
-        schedule_label_from_rrule, ArisScheduledRecord, ScheduledTask, STATUS_ACTIVE, STATUS_PAUSED,
+        interval_from_rrule, is_safe_identifier, mail_trigger_matches, normalize_status,
+        normalize_trigger_kind, rrule_for_interval, schedule_label_from_rrule, ArisScheduledRecord,
+        MailTriggerContext, ScheduledTask, STATUS_ACTIVE, STATUS_PAUSED, TRIGGER_MAIL,
     };
+
+    fn mail_record(account: &str, keywords: &[&str]) -> ArisScheduledRecord {
+        ArisScheduledRecord {
+            version: 1,
+            id: "task-mail".to_string(),
+            kind: "aris-scheduled-task".to_string(),
+            name: "Mail trigger".to_string(),
+            prompt: "handle it".to_string(),
+            status: STATUS_ACTIVE.to_string(),
+            rrule: "FREQ=MINUTELY;INTERVAL=1".to_string(),
+            target_thread_id: "chat-1".to_string(),
+            created_at: 0,
+            updated_at: 0,
+            last_run_at: None,
+            last_error: None,
+            trigger_kind: TRIGGER_MAIL.to_string(),
+            mail_account_id: account.to_string(),
+            mail_keywords: keywords.iter().map(|k| k.to_string()).collect(),
+        }
+    }
+
+    fn mail_ctx(account: &str, subject: &str) -> MailTriggerContext {
+        MailTriggerContext {
+            account_id: account.to_string(),
+            from: "client@example.com".to_string(),
+            from_name: "Client".to_string(),
+            subject: subject.to_string(),
+            snippet: String::new(),
+            message_id: "m1".to_string(),
+        }
+    }
 
     #[test]
     fn aris_record_maps_to_scheduled_task() {
@@ -442,6 +731,11 @@ mod tests {
             target_thread_id: "chat-1".to_string(),
             created_at: 10,
             updated_at: 20,
+            last_run_at: None,
+            last_error: None,
+            trigger_kind: "interval".to_string(),
+            mail_account_id: String::new(),
+            mail_keywords: Vec::new(),
         });
 
         assert_eq!(task.id, "task-1");
@@ -464,6 +758,45 @@ mod tests {
             schedule_label_from_rrule("FREQ=HOURLY;INTERVAL=6"),
             "每 6 小时"
         );
+    }
+
+    #[test]
+    fn mail_task_reports_event_schedule_and_no_next_run() {
+        let task = ScheduledTask::from(mail_record("acct-1", &["文献求助"]));
+        assert_eq!(task.trigger_kind, "mail");
+        assert_eq!(task.schedule_label, "收到含「文献求助」的新邮件时");
+        assert_eq!(task.next_run, None);
+    }
+
+    #[test]
+    fn mail_trigger_filters_by_account_and_keyword() {
+        let record = mail_record("acct-1", &["文献求助"]);
+        // Wrong account is skipped.
+        assert!(!mail_trigger_matches(
+            &record,
+            &mail_ctx("acct-2", "文献求助")
+        ));
+        // Right account, keyword present.
+        assert!(mail_trigger_matches(
+            &record,
+            &mail_ctx("acct-1", "请帮忙 文献求助")
+        ));
+        // Right account, keyword absent.
+        assert!(!mail_trigger_matches(
+            &record,
+            &mail_ctx("acct-1", "周会改期")
+        ));
+        // No account filter + no keywords = any new mail on any account.
+        let open = mail_record("", &[]);
+        assert!(mail_trigger_matches(&open, &mail_ctx("acct-9", "anything")));
+    }
+
+    #[test]
+    fn trigger_kind_normalizes_or_rejects() {
+        assert_eq!(normalize_trigger_kind(None).unwrap(), "interval");
+        assert_eq!(normalize_trigger_kind(Some("")).unwrap(), "interval");
+        assert_eq!(normalize_trigger_kind(Some("mail")).unwrap(), "mail");
+        assert!(normalize_trigger_kind(Some("webhook")).is_err());
     }
 
     #[test]

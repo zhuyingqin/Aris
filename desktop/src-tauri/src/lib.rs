@@ -8,6 +8,7 @@ mod lab;
 mod literature;
 mod mail;
 mod mcp;
+mod newapi;
 mod process;
 mod projects;
 mod scheduled;
@@ -189,12 +190,15 @@ pub fn run() {
                 }
             }
             watcher::spawn_event_watcher(app.handle().clone());
+            mail::spawn_event_watchers(app.handle().clone());
+            scheduled::spawn_runner(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             commands::skills_list,
             commands::skill_view,
             commands::state_dir,
+            commands::local_environment_checks,
             commands::open_external_url,
             projects::projects_get,
             projects::project_add,
@@ -205,6 +209,12 @@ pub fn run() {
             config::config_set,
             config::config_test,
             config::provider_test,
+            newapi::newapi_auth_status,
+            newapi::newapi_login,
+            newapi::newapi_register,
+            newapi::newapi_send_verification,
+            newapi::newapi_models,
+            newapi::newapi_bootstrap,
             connectors::connector_plugins_list,
             connectors::connector_connect,
             scheduled::scheduled_tasks_list,

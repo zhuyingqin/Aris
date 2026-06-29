@@ -21,7 +21,7 @@ use std::{
 use aris_commands::{slash_command_specs, SlashCommand};
 use serde::Serialize;
 use serde_json::{json, Map, Value};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use runtime::{
     CompactionConfig, CompactionResult, ConfigLoader, ConfigSource, ContentBlock,
@@ -1246,6 +1246,7 @@ fn build_system_prompt_uncached(key: &SystemPromptCacheKey) -> Vec<String> {
     };
     let file_links = "When you create or modify files, include Markdown links to the relevant file paths in the final response so the desktop UI can open them directly.".to_string();
     let artifact_layout = "Project artifact layout: place slide/PPT/PDF deck outputs under `slides/`, poster outputs under `poster/`, interactive web apps under `web/<name>/` with an `index.html` plus local CSS/assets, notebook programs under `experiments/`, and scratch/temp/cache files under `.aris/`. Studio auto-discovers `slides/`, `poster/`, and `web/`; Lab lists notebooks from the workspace and defaults new notebooks into `experiments/`.".to_string();
+    let existing_artifact_edits = "Existing artifact edits: when the user asks to modify, revise, continue editing, polish, or fix a current/existing report, paper, slide deck, PDF source, or other generated artifact, first identify and reuse the existing source path from the user message, recent file links, tool outputs, or workspace search. Edit that source in place and rebuild derived outputs at the same base path. Do not create sibling version files such as `_v2`, `_v9`, `_new`, `_final`, or timestamped copies unless the user explicitly asks for a new version, backup, archive, or comparison copy. If the target file cannot be identified, ask for the path instead of creating a new artifact.".to_string();
     let diagram_output = "Diagram output: when explaining a workflow, process, call path, architecture, state machine, dependency graph, or decision tree, prefer a fenced `mermaid` code block over ASCII art. Keep diagrams compact, use semantic node ids, short readable labels, left-to-right flow for pipelines, meaningful edge labels when they clarify the flow, and avoid oversized text inside nodes. For publication-grade diagram files, use the `mermaid-diagram` skill and verify the rendered output.".to_string();
     let long_document_reading = "Long document reading: when working with books, chapters, transcripts, logs, or converted documents, do not read multiple large files in full. First get a file list and a read_file outline preview, then read one chapter or section window at a time with explicit offset/limit. Treat tool output as a preview, not as a source file; if full text is needed, keep it on disk and reopen precise windows.".to_string();
     let long_file_generation = "Long file generation: do not call write_file with an entire long generated artifact such as a Beamer chapter, book chapter, or converted document. Keep single tool payloads small; for files over about 24000 characters, write a small scaffold, append smaller chunks with append_file, and verify line counts/compilation immediately instead of stopping to report an intermediate failure.".to_string();
@@ -1254,6 +1255,7 @@ fn build_system_prompt_uncached(key: &SystemPromptCacheKey) -> Vec<String> {
         access.clone(),
         file_links,
         artifact_layout,
+        existing_artifact_edits,
         diagram_output,
         long_document_reading,
         long_file_generation,
@@ -1289,7 +1291,8 @@ fn latex_toolchain_prompt_section(tectonic: Option<&str>) -> String {
 /// Read config.json and validate the executor is configured. Returns
 /// `(model, provider, executor_config)` or a user-facing error string.
 fn resolve_executor() -> Result<(String, String, aris_chat::ChatExecutorConfig), String> {
-    aris_chat::resolve_settings_executor_config(&crate::config::load_object())
+    let obj = crate::config::current_executor_object()?;
+    aris_chat::resolve_settings_executor_config(&obj)
 }
 
 fn resolve_executor_for_model(
@@ -1308,6 +1311,15 @@ fn resolve_executor_for_model(
         );
     };
     aris_chat::resolve_settings_executor_config(&obj)
+}
+
+fn executor_server_label(config: &aris_chat::ChatExecutorConfig) -> String {
+    match config {
+        aris_chat::ChatExecutorConfig::Anthropic { base_url, .. }
+        | aris_chat::ChatExecutorConfig::OpenAiCompatible { base_url, .. } => {
+            base_url.trim().trim_end_matches('/').to_string()
+        }
+    }
 }
 
 fn validate_session_id(session_id: &str) -> Result<(), String> {
@@ -1710,10 +1722,7 @@ fn chat_done_context_tokens(session: &Session) -> u64 {
 }
 
 fn latest_provider_usage(turn_usages: &[TokenUsage]) -> Option<ChatDoneProviderUsage> {
-    turn_usages
-        .last()
-        .copied()
-        .map(ChatDoneProviderUsage::from)
+    turn_usages.last().copied().map(ChatDoneProviderUsage::from)
 }
 
 fn context_window_for_model(model: &str) -> u64 {
@@ -1926,12 +1935,25 @@ pub struct ChatModelOptions {
 /// model is always included so the select reflects what is actually running.
 #[tauri::command]
 pub fn chat_model_options() -> ChatModelOptions {
-    let provider = config_string("executor_provider").unwrap_or_else(|| "anthropic".to_string());
-    let current =
-        config_string("executor_model").unwrap_or_else(|| aris_chat::DEFAULT_MODEL.to_string());
+    let effective =
+        crate::config::current_executor_object().unwrap_or_else(|_| crate::config::load_object());
+    let provider = config_object_string(&effective, "executor_provider")
+        .unwrap_or_else(|| "anthropic".to_string());
+    let current = config_object_string(&effective, "executor_model")
+        .unwrap_or_else(|| aris_chat::DEFAULT_MODEL.to_string());
 
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut options: Vec<ChatModelOption> = Vec::new();
+    for model in crate::config::managed_model_summaries() {
+        if model.trim().is_empty() || !seen.insert(model.clone()) {
+            continue;
+        }
+        options.push(ChatModelOption {
+            value: model.clone(),
+            label: model,
+            description: Some("Managed account".to_string()),
+        });
+    }
     for (entry_provider, model, base_url) in crate::config::verified_executor_summaries() {
         if model.trim().is_empty() || !seen.insert(model.clone()) {
             continue;
@@ -1995,6 +2017,9 @@ pub fn chat_model_set(model: String, persist: Option<bool>) -> Result<ChatStatus
     if persist == Some(false) {
         let (model, provider, _) = resolve_executor_for_model(Some(trimmed))?;
         return Ok(chat_status_for(model, provider));
+    }
+    if crate::config::switch_to_managed_executor(trimmed)? {
+        return Ok(chat_status());
     }
     let switched = crate::config::switch_to_verified_executor(trimmed)?;
     if switched {
@@ -2561,6 +2586,22 @@ async fn run_chat_turn(
     .await
 }
 
+pub async fn run_background_prompt(
+    app: AppHandle,
+    session_id: String,
+    prompt: String,
+) -> Result<String, String> {
+    let state = app.state::<ChatState>();
+    run_chat_turn(
+        app.clone(),
+        state.inner(),
+        session_id,
+        ConversationMessage::user_text(prompt),
+        None,
+    )
+    .await
+}
+
 async fn run_literature_chat_turn(
     app: AppHandle,
     state: &ChatState,
@@ -2609,6 +2650,7 @@ async fn run_chat_turn_with_context(
     let (model, provider, executor_config) = resolve_executor_for_model(model_override.as_deref())?;
     let usage_model = model.clone();
     let usage_provider = provider.clone();
+    let usage_server = executor_server_label(&executor_config);
     let session = get_cached_or_disk_session(&state, &session_id)?;
     let config_obj = crate::config::load_object();
     let summarizer_model = config_object_string(&config_obj, "summarizer_model");
@@ -2769,6 +2811,7 @@ async fn run_chat_turn_with_context(
         &session_id,
         &usage_model,
         &usage_provider,
+        &usage_server,
         &turn_usages,
     ) {
         eprintln!("aris desktop: failed to write usage log: {error}");
@@ -3191,7 +3234,25 @@ fn model_selection_items(
     items
 }
 
+fn model_selection_items_owned(
+    current: &str,
+    choices: &[(String, String, String)],
+) -> Vec<ChatCommandSelectionItem> {
+    let refs = choices
+        .iter()
+        .map(|(value, label, description)| (value.as_str(), label.as_str(), description.as_str()))
+        .collect::<Vec<_>>();
+    model_selection_items(current, &refs)
+}
+
 fn executor_model_selection(provider: &str, current: &str) -> ChatCommandSelection {
+    let managed_choices = crate::config::managed_model_summaries()
+        .into_iter()
+        .map(|model| {
+            let label = model.clone();
+            (model, label, "Managed account".to_string())
+        })
+        .collect::<Vec<_>>();
     let anthropic_choices = [
         (
             "claude-opus-4-7",
@@ -3258,6 +3319,13 @@ fn executor_model_selection(provider: &str, current: &str) -> ChatCommandSelecti
     } else {
         &openai_compat_choices[..]
     };
+    let mut items = model_selection_items(current, choices);
+    if !managed_choices.is_empty() {
+        let mut managed_items = model_selection_items_owned(current, &managed_choices);
+        managed_items.retain(|item| !items.iter().any(|existing| existing.value == item.value));
+        managed_items.extend(items);
+        items = managed_items;
+    }
     ChatCommandSelection {
         command: "model".to_string(),
         title: "Select executor model".to_string(),
@@ -3265,7 +3333,7 @@ fn executor_model_selection(provider: &str, current: &str) -> ChatCommandSelecti
             "Provider: {provider}. You can still type /model <model-id>."
         )),
         current: Some(current.to_string()),
-        items: model_selection_items(current, choices),
+        items,
     }
 }
 
@@ -4806,6 +4874,8 @@ mod tests {
 
         assert!(prompt.contains("desktop tool registry"));
         assert!(prompt.contains("include Markdown links"));
+        assert!(prompt.contains("Existing artifact edits"));
+        assert!(prompt.contains("Do not create sibling version files"));
         assert!(prompt.contains("fenced `mermaid` code block"));
         assert!(prompt.contains("Long file generation"));
         assert!(prompt.contains("24000 characters"));

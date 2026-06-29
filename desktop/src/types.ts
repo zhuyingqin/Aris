@@ -60,6 +60,7 @@ export interface ConfigView {
   scopusKeyMasked?: string | null;
   language?: string | null;
   memoryWriteApproval: boolean;
+  managedModels?: string[];
   verifiedExecutors?: { provider: string; model: string; baseUrl: string }[];
 }
 
@@ -77,7 +78,12 @@ export interface ScheduledTask {
   intervalUnit?: "minutes" | "hours" | "days" | string;
   createdAt?: string | null;
   updatedAt?: string | null;
+  lastRunAt?: string | null;
+  lastError?: string | null;
   nextRun?: string | null;
+  triggerKind?: "interval" | "mail" | string;
+  mailAccountId?: string;
+  mailKeywords?: string[];
 }
 
 export interface ScheduledTaskInput {
@@ -87,6 +93,9 @@ export interface ScheduledTaskInput {
   intervalValue: number;
   intervalUnit: "minutes" | "hours" | "days";
   status?: "active" | "paused";
+  triggerKind?: "interval" | "mail";
+  mailAccountId?: string;
+  mailKeywords?: string[];
 }
 
 export interface ConfigPatch {
@@ -123,6 +132,18 @@ export interface ConfigTestResult {
   reviewer?: ConfigTestDetail | null;
 }
 
+export interface LocalEnvironmentCheck {
+  id: string;
+  label: string;
+  category: string;
+  status: "ready" | "warning" | "missing" | string;
+  available: boolean;
+  version?: string | null;
+  path?: string | null;
+  message: string;
+  detail?: string | null;
+}
+
 export interface AppUpdateInfo {
   available: boolean;
   currentVersion?: string;
@@ -144,6 +165,7 @@ export interface AppUpdateInstallResult {
 }
 
 export interface TokenUsageBucket {
+  server: string;
   model: string;
   provider: string;
   requests: number;
@@ -156,9 +178,24 @@ export interface TokenUsageBucket {
   estimatedCostUsd: number;
 }
 
+export interface TokenUsageServerBucket {
+  server: string;
+  provider: string;
+  requests: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheCreationInputTokens: number;
+  cacheReadInputTokens: number;
+  promptTokens: number;
+  totalTokens: number;
+  estimatedCostUsd: number;
+  byModel: TokenUsageBucket[];
+}
+
 export interface TokenUsageLogEntry {
   createdAt: number;
   sessionId: string;
+  server: string;
   model: string;
   provider: string;
   inputTokens: number;
@@ -181,6 +218,7 @@ export interface TokenUsageSummary {
   totalTokens: number;
   estimatedCostUsd: number;
   unpricedRequests: number;
+  byServer: TokenUsageServerBucket[];
   byModel: TokenUsageBucket[];
   recent: TokenUsageLogEntry[];
 }
@@ -226,6 +264,14 @@ export interface MailMessageList {
   nextPageToken?: string | null;
 }
 
+export interface MailNewMessageEvent {
+  accountId: string;
+  provider: MailProvider;
+  folder: string;
+  message: MailMessageSummary;
+  detectedAt: number;
+}
+
 export interface MailAttachment {
   id: string;
   filename: string;
@@ -264,6 +310,13 @@ export interface MailDraft {
   bcc?: string;
   subject: string;
   body: string;
+  attachments?: MailDraftAttachment[];
+}
+
+export interface MailDraftAttachment {
+  path: string;
+  filename?: string;
+  mimeType?: string;
 }
 
 export interface MailOauthConfigView {

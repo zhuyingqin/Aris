@@ -911,8 +911,17 @@ mod tests {
         assert!(is_within_project(&base, &base.join("a.ipynb")));
         assert!(is_within_project(&base, &base));
         // `..` traversal that climbs out, and sibling/elsewhere paths, are blocked.
-        assert!(!is_within_project(&base, &base.join("papers/../../etc/passwd")));
-        assert!(!is_within_project(&base, &base.join("../proj-evil/secret.ipynb")));
-        assert!(!is_within_project(&base, &PathBuf::from("somewhere/else.ipynb")));
+        assert!(!is_within_project(
+            &base,
+            &base.join("papers/../../etc/passwd")
+        ));
+        assert!(!is_within_project(
+            &base,
+            &base.join("../proj-evil/secret.ipynb")
+        ));
+        assert!(!is_within_project(
+            &base,
+            &PathBuf::from("somewhere/else.ipynb")
+        ));
     }
 }

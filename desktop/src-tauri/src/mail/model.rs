@@ -252,6 +252,20 @@ pub struct MailDraft {
     pub bcc: String,
     pub subject: String,
     pub body: String,
+    #[serde(default)]
+    pub attachments: Vec<MailDraftAttachment>,
+}
+
+/// A local file to attach to an outgoing draft.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MailDraftAttachment {
+    /// Absolute path or a path relative to the current ARIS workspace.
+    pub path: String,
+    #[serde(default)]
+    pub filename: String,
+    #[serde(default)]
+    pub mime_type: String,
 }
 
 /// OAuth client credentials the user supplies in Settings. Secrets are masked

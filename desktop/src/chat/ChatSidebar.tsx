@@ -59,6 +59,14 @@ type SessionMenuPosition = {
   left: number;
 };
 
+function untransformedTop(element: HTMLElement) {
+  const previousTransform = element.style.transform;
+  if (previousTransform) element.style.transform = "none";
+  const top = element.getBoundingClientRect().top;
+  if (previousTransform) element.style.transform = previousTransform;
+  return top;
+}
+
 export default function ChatSidebar({
   sessions,
   projects,
@@ -182,23 +190,32 @@ export default function ChatSidebar({
     else groupRefs.current.delete(id);
   };
 
+  const removeProjectDragListeners = () => {
+    document.removeEventListener("pointermove", handleDocumentProjectMove, true);
+    document.removeEventListener("pointerup", handleDocumentProjectUp, true);
+    document.removeEventListener("pointercancel", handleDocumentProjectCancel, true);
+  };
+
+  const resetProjectDrag = () => {
+    projectDragRef.current = null;
+    projectOrderPreviewRef.current = null;
+    setDraggedProjectId(null);
+    setDraggedProjectOffsetY(0);
+    setProjectOrderPreview(null);
+  };
+
   const updateProjectDragOffset = (clientY: number) => {
     const drag = projectDragRef.current;
     if (!drag) return;
     drag.currentY = clientY;
     const element = groupRefs.current.get(drag.id);
     if (!element) return;
-    const rect = element.getBoundingClientRect();
-    // Use the state-tracked offset, NOT a ref: after a reorder the DOM may
-    // briefly measure without the latest transform applied (transition /
-    // uncommitted style), so `rect.top` only matches the natural position
-    // when we subtract what React has actually painted.
-    setDraggedProjectOffsetY((current) => {
-      const baseTop = rect.top - current;
-      const nextOffset = clientY - drag.grabOffsetY - baseTop;
-      if (Math.abs(nextOffset - current) < 0.5) return current;
-      return nextOffset;
-    });
+    const baseTop = untransformedTop(element);
+    const nextOffset = clientY - drag.grabOffsetY - baseTop;
+    if (!Number.isFinite(nextOffset)) return;
+    setDraggedProjectOffsetY((current) => (
+      Math.abs(nextOffset - current) < 0.5 ? current : nextOffset
+    ));
   };
 
   const animateProjectOrderPreview = (ids: string[]) => {
@@ -312,38 +329,26 @@ export default function ChatSidebar({
     animateProjectOrderPreview(ids);
   };
   documentProjectHandlersRef.current.up = (event) => {
-    document.removeEventListener("pointermove", handleDocumentProjectMove, true);
-    document.removeEventListener("pointerup", handleDocumentProjectUp, true);
-    document.removeEventListener("pointercancel", handleDocumentProjectCancel, true);
     const drag = projectDragRef.current;
     if (!drag) return;
     if (drag.pointerId !== event.pointerId) return;
+    removeProjectDragListeners();
     if (drag.moved) {
       event.preventDefault();
       event.stopPropagation();
       suppressProjectToggleClickRef.current = drag.id;
     }
     const ids = projectOrderPreviewRef.current;
-    projectDragRef.current = null;
-    projectOrderPreviewRef.current = null;
-    setDraggedProjectId(null);
-    setDraggedProjectOffsetY(0);
-    setProjectOrderPreview(null);
+    resetProjectDrag();
     if (ids && drag.moved && !sameProjectOrder(ids, projects.map((project) => project.id))) {
       void onReorderProjects(ids).catch(() => undefined);
     }
   };
   documentProjectHandlersRef.current.cancel = (event) => {
-    document.removeEventListener("pointermove", handleDocumentProjectMove, true);
-    document.removeEventListener("pointerup", handleDocumentProjectUp, true);
-    document.removeEventListener("pointercancel", handleDocumentProjectCancel, true);
     const drag = projectDragRef.current;
     if (!drag || drag.pointerId !== event.pointerId) return;
-    projectDragRef.current = null;
-    projectOrderPreviewRef.current = null;
-    setDraggedProjectId(null);
-    setDraggedProjectOffsetY(0);
-    setProjectOrderPreview(null);
+    removeProjectDragListeners();
+    resetProjectDrag();
   };
 
   const beginRename = (session: ChatSession) => {

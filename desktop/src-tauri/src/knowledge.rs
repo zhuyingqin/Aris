@@ -313,7 +313,10 @@ mod tests {
         ]";
         let (points, dropped) = parse_candidates(raw, "arxiv:42").expect("parse");
         assert_eq!(points.len(), 1);
-        assert_eq!(dropped, 1, "the anchorless candidate should be counted as dropped");
+        assert_eq!(
+            dropped, 1,
+            "the anchorless candidate should be counted as dropped"
+        );
         assert_eq!(points[0].statement, "s1");
         assert_eq!(points[0].evidence[0].paper_id, "arxiv:42");
         assert_eq!(points[0].source_paper_id.as_deref(), Some("arxiv:42"));

@@ -40,12 +40,14 @@ import type {
   DesktopCommandSpec,
   GenericMailAccountInput,
   GenericMailTestResult,
+  LocalEnvironmentCheck,
   MailAccount,
   MailAutoconfigResult,
   MailDraft,
   MailFolder,
   MailMessageFull,
   MailMessageList,
+  MailNewMessageEvent,
   MailModifyPatch,
   MailOauthConfigPatch,
   MailOauthConfigView,
@@ -63,6 +65,8 @@ import type {
 } from "../types";
 
 export const stateDir = () => invoke<string>("state_dir");
+export const localEnvironmentChecks = () =>
+  invoke<LocalEnvironmentCheck[]>("local_environment_checks");
 export const projectsGet = () => invoke<ProjectView>("projects_get");
 export const projectAdd = (path: string) =>
   invoke<ProjectView>("project_add", { path });
@@ -82,6 +86,75 @@ export const configTest = (patch: ConfigPatch) =>
   invoke<ConfigTestResult>("config_test", { patch });
 export const providerTest = (input: { baseUrl: string; model?: string; apiKey?: string }) =>
   invoke<ConfigTestDetail>("provider_test", { input });
+
+// ── Managed login (new-api gateway) ───────────────────────────────────────────
+
+export interface NewApiLoginResult {
+  /** OpenAI-compatible base URL for the executor (`<base>/v1`). */
+  baseUrl: string;
+  model: string;
+  /** Usable downstream key (`sk-…`) for the executor. */
+  token: string;
+}
+
+export interface NewApiAuthStatus {
+  registerEnabled: boolean;
+  passwordRegisterEnabled: boolean;
+  passwordLoginEnabled: boolean;
+  emailVerification: boolean;
+  turnstileCheck: boolean;
+  turnstileSiteKey: string;
+  userAgreementEnabled: boolean;
+  privacyPolicyEnabled: boolean;
+}
+
+export const newapiAuthStatus = (baseUrl: string) =>
+  invoke<NewApiAuthStatus>("newapi_auth_status", { baseUrl });
+
+/** Sign in to a new-api gateway; returns an executor config for the user. */
+export const newapiLogin = (
+  baseUrl: string,
+  model: string,
+  username: string,
+  password: string,
+) =>
+  invoke<NewApiLoginResult>("newapi_login", { baseUrl, model, username, password });
+export const newapiRegister = (input: {
+  baseUrl: string;
+  username: string;
+  password: string;
+  email?: string;
+  verificationCode?: string;
+  affCode?: string;
+  turnstile?: string;
+}) => invoke<void>("newapi_register", { input });
+export const newapiSendVerification = (input: {
+  baseUrl: string;
+  email: string;
+  turnstile?: string;
+}) => invoke<void>("newapi_send_verification", { input });
+export const newapiModels = () => invoke<string[]>("newapi_models");
+
+export interface NewApiAccount {
+  username: string;
+  displayName: string;
+  /** new-api user group, shown as the plan / 套餐. */
+  group: string;
+  /** Human description of the current group (套餐说明). */
+  groupDesc: string;
+  /** Price multiplier of the current group ("1.5", "自动"). */
+  groupRatio: string;
+  /** Remaining quota balance, in new-api credit units. */
+  quota: number;
+  /** Quota consumed so far, in new-api credit units. */
+  usedQuota: number;
+  models: string[];
+  /** Currently selected executor model. */
+  model: string;
+}
+
+/** One-shot account/entitlements projection for the signed-in user. */
+export const newapiBootstrap = () => invoke<NewApiAccount>("newapi_bootstrap");
 export const appUpdateCheck = async (): Promise<AppUpdateInfo> => {
   if (!isTauri()) return { available: false };
   const { check } = await import("@tauri-apps/plugin-updater");
@@ -210,6 +283,8 @@ export const mailModify = (
 ) => invoke<void>("mail_modify", { accountId, messageId, patch });
 export const mailSend = (accountId: string, draft: MailDraft) =>
   invoke<void>("mail_send", { accountId, draft });
+export const onMailNewMessage = (handler: (event: MailNewMessageEvent) => void) =>
+  listen<MailNewMessageEvent>("mail-new-message", (e) => handler(e.payload));
 
 export const skillsList = () => invoke<SkillMeta[]>("skills_list");
 export const skillView = (name: string) =>

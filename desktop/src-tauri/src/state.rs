@@ -51,7 +51,11 @@ pub fn runtime_dir() -> PathBuf {
 pub fn config_dir() -> PathBuf {
     std::env::var("ARIS_CONFIG_ROOT")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(runtime::home_dir()).join(".config").join("aris"))
+        .unwrap_or_else(|_| {
+            PathBuf::from(runtime::home_dir())
+                .join(".config")
+                .join("aris")
+        })
 }
 
 pub fn skills_dir() -> PathBuf {

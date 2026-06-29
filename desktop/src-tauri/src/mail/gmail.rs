@@ -9,6 +9,7 @@ use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use base64::Engine;
 use serde_json::{json, Value};
 
+use super::draft_attachment::{self, ResolvedDraftAttachment};
 use super::model::{
     MailAttachment, MailDraft, MailFolder, MailMessageFull, MailMessageList, MailMessageSummary,
     MailModifyPatch,
@@ -384,7 +385,7 @@ pub fn modify(token: &str, message_id: &str, patch: &MailModifyPatch) -> Result<
 }
 
 pub fn send(token: &str, draft: &MailDraft) -> Result<(), String> {
-    let raw = build_rfc822(draft);
+    let raw = build_rfc822(draft)?;
     let encoded = URL_SAFE_NO_PAD.encode(raw.as_bytes());
     let resp = client()
         .post(format!("{BASE}/messages/send"))
@@ -398,7 +399,8 @@ pub fn send(token: &str, draft: &MailDraft) -> Result<(), String> {
 
 /// Build a minimal RFC822 message. Subject is RFC2047-encoded so non-ASCII
 /// survives; the body is sent as UTF-8 base64 to avoid line-length issues.
-fn build_rfc822(draft: &MailDraft) -> String {
+fn build_rfc822(draft: &MailDraft) -> Result<String, String> {
+    let attachments = draft_attachment::resolve_all(draft)?;
     let mut headers = format!("To: {}\r\n", draft.to);
     if !draft.cc.is_empty() {
         headers.push_str(&format!("Cc: {}\r\n", draft.cc));
@@ -411,9 +413,60 @@ fn build_rfc822(draft: &MailDraft) -> String {
         STANDARD.encode(draft.subject.as_bytes())
     ));
     headers.push_str("MIME-Version: 1.0\r\n");
+    if attachments.is_empty() {
+        headers.push_str("Content-Type: text/plain; charset=UTF-8\r\n");
+        headers.push_str("Content-Transfer-Encoding: base64\r\n");
+        headers.push_str("\r\n");
+        let body = STANDARD.encode(draft.body.as_bytes());
+        return Ok(format!("{headers}{body}"));
+    }
+
+    let boundary = "aris-mail-boundary-7b3c9a31";
+    headers.push_str(&format!(
+        "Content-Type: multipart/mixed; boundary=\"{boundary}\"\r\n\r\n"
+    ));
+    headers.push_str(&format!("--{boundary}\r\n"));
     headers.push_str("Content-Type: text/plain; charset=UTF-8\r\n");
     headers.push_str("Content-Transfer-Encoding: base64\r\n");
     headers.push_str("\r\n");
-    let body = STANDARD.encode(draft.body.as_bytes());
-    format!("{headers}{body}")
+    headers.push_str(&wrap_base64(&STANDARD.encode(draft.body.as_bytes())));
+    headers.push_str("\r\n");
+    for attachment in attachments {
+        append_attachment_part(&mut headers, boundary, &attachment);
+    }
+    headers.push_str(&format!("--{boundary}--\r\n"));
+    Ok(headers)
+}
+
+fn append_attachment_part(
+    message: &mut String,
+    boundary: &str,
+    attachment: &ResolvedDraftAttachment,
+) {
+    message.push_str(&format!("--{boundary}\r\n"));
+    message.push_str(&format!(
+        "Content-Type: {}; name=\"{}\"\r\n",
+        attachment.mime_type,
+        encoded_word(&attachment.filename)
+    ));
+    message.push_str("Content-Transfer-Encoding: base64\r\n");
+    message.push_str(&format!(
+        "Content-Disposition: attachment; filename=\"{}\"\r\n\r\n",
+        encoded_word(&attachment.filename)
+    ));
+    message.push_str(&wrap_base64(&STANDARD.encode(&attachment.bytes)));
+    message.push_str("\r\n");
+}
+
+fn encoded_word(value: &str) -> String {
+    format!("=?UTF-8?B?{}?=", STANDARD.encode(value.as_bytes()))
+}
+
+fn wrap_base64(value: &str) -> String {
+    value
+        .as_bytes()
+        .chunks(76)
+        .map(|chunk| String::from_utf8_lossy(chunk).to_string())
+        .collect::<Vec<_>>()
+        .join("\r\n")
 }

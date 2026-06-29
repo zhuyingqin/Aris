@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { useState } from "react";
-import { act, cleanup, render, renderHook, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, renderHook, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChatAttachment, ChatCommandSelection, ChatTurn, DesktopCommandSpec, DesktopProject, SkillMeta } from "../types";
@@ -895,6 +895,107 @@ describe("ChatSidebar session menu", () => {
 
     expect(screen.getByText("Topic 6")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Alpha, 6 chats, expanded" }).getAttribute("aria-expanded")).toBe("true");
+  });
+});
+
+describe("ChatSidebar project drag", () => {
+  const projects: DesktopProject[] = [
+    { id: "project-a", name: "Alpha", path: "C:/Alpha", addedAt: 1, lastOpenedAt: 3 },
+    { id: "project-b", name: "Beta", path: "C:/Beta", addedAt: 1, lastOpenedAt: 2 },
+    { id: "project-c", name: "Gamma", path: "C:/Gamma", addedAt: 1, lastOpenedAt: 1 },
+  ];
+  const sessions = projects.map((project, index) => ({
+    ...makeSession(project.id),
+    id: `chat-${index}`,
+    title: `${project.name} chat`,
+  }));
+
+  function renderProjectDragSidebar() {
+    return render(
+      <ChatSidebar
+        sessions={sessions}
+        projects={projects}
+        currentId="chat-0"
+        open
+        busy={false}
+        onClose={() => undefined}
+        onNew={() => undefined}
+        onOpen={() => undefined}
+        onRename={() => undefined}
+        onTogglePinned={() => undefined}
+        onDelete={() => undefined}
+        onReorderProjects={async () => undefined}
+      />,
+    );
+  }
+
+  function rect(top: number, height: number) {
+    return {
+      top,
+      right: 220,
+      bottom: top + height,
+      left: 0,
+      width: 220,
+      height,
+      x: 0,
+      y: top,
+      toJSON: () => undefined,
+    } as DOMRect;
+  }
+
+  function fireProjectPointer(
+    target: Window | Document | Node | Element,
+    type: "pointerdown" | "pointermove" | "pointerup" | "pointercancel",
+    init: { clientX: number; clientY: number; pointerId: number; button?: number; buttons?: number },
+  ) {
+    const event = new Event(type, { bubbles: true, cancelable: true });
+    Object.defineProperty(event, "clientX", { value: init.clientX });
+    Object.defineProperty(event, "clientY", { value: init.clientY });
+    Object.defineProperty(event, "pointerId", { value: init.pointerId });
+    Object.defineProperty(event, "button", { value: init.button ?? 0 });
+    Object.defineProperty(event, "buttons", { value: init.buttons ?? 1 });
+    fireEvent(target, event);
+  }
+
+  it("does not compound drag offset when a transformed group rect is measured without its transform", async () => {
+    if (!HTMLElement.prototype.setPointerCapture) {
+      Object.defineProperty(HTMLElement.prototype, "setPointerCapture", {
+        configurable: true,
+        value: vi.fn(),
+      });
+    }
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      const group = this.matches("[data-chat-project-id]")
+        ? this
+        : this.closest<HTMLElement>("[data-chat-project-id]");
+      if (group) {
+        const groups = Array.from(document.querySelectorAll<HTMLElement>("[data-chat-project-id]"));
+        const index = Math.max(0, groups.indexOf(group));
+        const top = 100 + index * 64;
+        return rect(top, this.matches("[data-chat-project-label-id]") ? 28 : 56);
+      }
+      return rect(0, 0);
+    });
+
+    renderProjectDragSidebar();
+    const alphaToggle = screen.getByRole("button", { name: "Alpha, 1 chats, expanded" });
+    const alphaLabel = alphaToggle.closest<HTMLElement>("[data-chat-project-label-id]")!;
+    const alphaGroup = document.querySelector<HTMLElement>("[data-chat-project-id='project-a']")!;
+
+    act(() => {
+      fireProjectPointer(alphaLabel, "pointerdown", { button: 0, buttons: 1, clientX: 12, clientY: 110, pointerId: 9 });
+    });
+    act(() => {
+      fireProjectPointer(document, "pointermove", { buttons: 1, clientX: 12, clientY: 140, pointerId: 9 });
+    });
+
+    await waitFor(() => expect(alphaGroup.style.transform).toBe("translateY(30px)"));
+
+    act(() => {
+      fireProjectPointer(document, "pointermove", { buttons: 1, clientX: 12, clientY: 150, pointerId: 9 });
+    });
+
+    await waitFor(() => expect(alphaGroup.style.transform).toBe("translateY(40px)"));
   });
 });
 

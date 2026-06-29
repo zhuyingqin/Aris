@@ -21,6 +21,7 @@ import {
   mailModify,
   mailRead,
   mailSend,
+  onMailNewMessage,
   isTauri,
 } from "../api/tauri";
 import { useStore } from "../store";
@@ -690,7 +691,6 @@ export default function Mail() {
     () => [...messages].sort((a, b) => messageTime(b) - messageTime(a)),
     [messages],
   );
-
   const fail = useCallback((e: unknown) => setError(String(e)), []);
 
   useEffect(() => {
@@ -804,6 +804,38 @@ export default function Mail() {
     },
     [loadList, nextPageToken],
   );
+
+  useEffect(() => {
+    if (previewMode || !accountId) return;
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+    onMailNewMessage((event) => {
+      if (event.accountId !== accountId) return;
+      setFolders((prev) =>
+        prev.map((item) =>
+          item.id === event.folder
+            ? { ...item, unreadCount: item.unreadCount + (event.message.unread ? 1 : 0) }
+            : item,
+        ),
+      );
+      if (event.folder !== folder || query.trim()) return;
+      setMessages((prev) =>
+        prev.some((message) => message.id === event.message.id)
+          ? prev
+          : [event.message, ...prev],
+      );
+      MAIL_VIEW_CACHE.listKey = mailListKey(accountId, folder, query);
+    })
+      .then((handler) => {
+        if (disposed) handler();
+        else unlisten = handler;
+      })
+      .catch(() => undefined);
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [accountId, folder, previewMode, query]);
 
   useEffect(() => {
     if (!accountId) return;
