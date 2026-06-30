@@ -1,6 +1,5 @@
 use std::path::Path;
 
-use runtime::{compact_session, CompactionConfig, Session};
 use serde_json::json;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,7 +56,7 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
     SlashCommandSpec {
         name: "compact",
         summary: "Compact local session history",
-        argument_hint: None,
+        argument_hint: Some("[instruction]"),
         resume_supported: true,
     },
     SlashCommandSpec {
@@ -220,7 +219,7 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
     },
     SlashCommandSpec {
         name: "meta-optimize",
-        summary: "Analyze usage logs and optimize ARIS skills",
+        summary: "Analyze usage logs and optimize SomniQ skills",
         argument_hint: Some("[apply <N>|status]"),
         resume_supported: false,
     },
@@ -230,7 +229,9 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
 pub enum SlashCommand {
     Help,
     Status,
-    Compact,
+    Compact {
+        instruction: Option<String>,
+    },
     Bughunter {
         scope: Option<String>,
     },
@@ -323,7 +324,9 @@ impl SlashCommand {
         Some(match command {
             "help" => Self::Help,
             "status" => Self::Status,
-            "compact" => Self::Compact,
+            "compact" => Self::Compact {
+                instruction: remainder_after_command(trimmed, command),
+            },
             "bughunter" => Self::Bughunter {
                 scope: remainder_after_command(trimmed, command),
             },
@@ -450,70 +453,6 @@ pub fn render_slash_command_help() -> String {
         lines.push(format!("  {name:<20} {}{}", spec.summary, resume));
     }
     lines.join("\n")
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SlashCommandResult {
-    pub message: String,
-    pub session: Session,
-}
-
-#[must_use]
-pub fn handle_slash_command(
-    input: &str,
-    session: &Session,
-    compaction: CompactionConfig,
-) -> Option<SlashCommandResult> {
-    match SlashCommand::parse(input)? {
-        SlashCommand::Compact => {
-            let result = compact_session(session, compaction);
-            let message = if result.removed_message_count == 0 {
-                "Compaction skipped: session is below the compaction threshold.".to_string()
-            } else {
-                format!(
-                    "Compacted {} messages into a resumable summary.",
-                    result.removed_message_count
-                )
-            };
-            Some(SlashCommandResult {
-                message,
-                session: result.compacted_session,
-            })
-        }
-        SlashCommand::Help => Some(SlashCommandResult {
-            message: render_slash_command_help(),
-            session: session.clone(),
-        }),
-        SlashCommand::Status
-        | SlashCommand::Bughunter { .. }
-        | SlashCommand::Commit
-        | SlashCommand::Pr { .. }
-        | SlashCommand::Issue { .. }
-        | SlashCommand::Ultraplan { .. }
-        | SlashCommand::Teleport { .. }
-        | SlashCommand::DebugToolCall
-        | SlashCommand::Model { .. }
-        | SlashCommand::Reviewer { .. }
-        | SlashCommand::Setup
-        | SlashCommand::Plan { .. }
-        | SlashCommand::Tasks { .. }
-        | SlashCommand::Skills { .. }
-        | SlashCommand::Permissions { .. }
-        | SlashCommand::Clear { .. }
-        | SlashCommand::Cost
-        | SlashCommand::Resume { .. }
-        | SlashCommand::Config { .. }
-        | SlashCommand::Memory { .. }
-        | SlashCommand::Init
-        | SlashCommand::Diff
-        | SlashCommand::Version
-        | SlashCommand::Export { .. }
-        | SlashCommand::Session { .. }
-        | SlashCommand::Team { .. }
-        | SlashCommand::Workflows { .. }
-        | SlashCommand::MetaOptimize { .. }
-        | SlashCommand::Unknown { .. } => None,
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -678,16 +617,21 @@ fn workflow_start_input(action: &str, target: &str, approval: Option<&str>) -> s
 #[cfg(test)]
 mod tests {
     use super::{
-        handle_slash_command, plan_team_command, plan_workflows_command, render_slash_command_help,
+        plan_team_command, plan_workflows_command, render_slash_command_help,
         resume_supported_slash_commands, slash_command_specs, SlashCommand, TeamCommandPlan,
         WorkflowCommandPlan,
     };
-    use runtime::{CompactionConfig, ContentBlock, ConversationMessage, MessageRole, Session};
 
     #[test]
     fn parses_supported_slash_commands() {
         assert_eq!(SlashCommand::parse("/help"), Some(SlashCommand::Help));
         assert_eq!(SlashCommand::parse(" /status "), Some(SlashCommand::Status));
+        assert_eq!(
+            SlashCommand::parse("/compact keep exact file paths"),
+            Some(SlashCommand::Compact {
+                instruction: Some("keep exact file paths".to_string())
+            })
+        );
         assert_eq!(
             SlashCommand::parse("/bughunter runtime"),
             Some(SlashCommand::Bughunter {
@@ -816,7 +760,7 @@ mod tests {
         assert!(help.contains("works with --resume SESSION.json"));
         assert!(help.contains("/help"));
         assert!(help.contains("/status"));
-        assert!(help.contains("/compact"));
+        assert!(help.contains("/compact [instruction]"));
         assert!(help.contains("/bughunter [scope]"));
         assert!(help.contains("/commit"));
         assert!(help.contains("/pr [context]"));
@@ -844,104 +788,6 @@ mod tests {
         ));
         assert_eq!(slash_command_specs().len(), 30);
         assert_eq!(resume_supported_slash_commands().len(), 11);
-    }
-
-    #[test]
-    fn compacts_sessions_via_slash_command() {
-        let session = Session {
-            version: 1,
-            messages: vec![
-                ConversationMessage::user_text("a ".repeat(200)),
-                ConversationMessage::assistant(vec![ContentBlock::Text {
-                    text: "b ".repeat(200),
-                }]),
-                ConversationMessage::tool_result("1", "bash", "ok ".repeat(200), false),
-                ConversationMessage::assistant(vec![ContentBlock::Text {
-                    text: "recent".to_string(),
-                }]),
-            ],
-        };
-
-        let result = handle_slash_command(
-            "/compact",
-            &session,
-            CompactionConfig {
-                preserve_recent_messages: 2,
-                max_estimated_tokens: 1,
-            },
-        )
-        .expect("slash command should be handled");
-
-        // Tail [Tool, Assistant] has no User message, so the safe boundary
-        // forward-scan drops the whole tail and summarizes all 4 messages.
-        assert!(result.message.contains("Compacted 4 messages"));
-        assert_eq!(result.session.messages[0].role, MessageRole::User);
-    }
-
-    #[test]
-    fn help_command_is_non_mutating() {
-        let session = Session::new();
-        let result = handle_slash_command("/help", &session, CompactionConfig::default())
-            .expect("help command should be handled");
-        assert_eq!(result.session, session);
-        assert!(result.message.contains("Slash commands"));
-    }
-
-    #[test]
-    fn ignores_unknown_or_runtime_bound_slash_commands() {
-        let session = Session::new();
-        assert!(handle_slash_command("/unknown", &session, CompactionConfig::default()).is_none());
-        assert!(handle_slash_command("/status", &session, CompactionConfig::default()).is_none());
-        assert!(
-            handle_slash_command("/bughunter", &session, CompactionConfig::default()).is_none()
-        );
-        assert!(handle_slash_command("/commit", &session, CompactionConfig::default()).is_none());
-        assert!(handle_slash_command("/pr", &session, CompactionConfig::default()).is_none());
-        assert!(handle_slash_command("/issue", &session, CompactionConfig::default()).is_none());
-        assert!(
-            handle_slash_command("/ultraplan", &session, CompactionConfig::default()).is_none()
-        );
-        assert!(
-            handle_slash_command("/teleport foo", &session, CompactionConfig::default()).is_none()
-        );
-        assert!(
-            handle_slash_command("/debug-tool-call", &session, CompactionConfig::default())
-                .is_none()
-        );
-        assert!(
-            handle_slash_command("/model claude", &session, CompactionConfig::default()).is_none()
-        );
-        assert!(handle_slash_command(
-            "/permissions read-only",
-            &session,
-            CompactionConfig::default()
-        )
-        .is_none());
-        assert!(handle_slash_command("/clear", &session, CompactionConfig::default()).is_none());
-        assert!(
-            handle_slash_command("/clear --confirm", &session, CompactionConfig::default())
-                .is_none()
-        );
-        assert!(handle_slash_command("/cost", &session, CompactionConfig::default()).is_none());
-        assert!(handle_slash_command(
-            "/resume session.json",
-            &session,
-            CompactionConfig::default()
-        )
-        .is_none());
-        assert!(handle_slash_command("/config", &session, CompactionConfig::default()).is_none());
-        assert!(
-            handle_slash_command("/config env", &session, CompactionConfig::default()).is_none()
-        );
-        assert!(handle_slash_command("/diff", &session, CompactionConfig::default()).is_none());
-        assert!(handle_slash_command("/version", &session, CompactionConfig::default()).is_none());
-        assert!(
-            handle_slash_command("/export note.txt", &session, CompactionConfig::default())
-                .is_none()
-        );
-        assert!(
-            handle_slash_command("/session list", &session, CompactionConfig::default()).is_none()
-        );
     }
 
     #[test]

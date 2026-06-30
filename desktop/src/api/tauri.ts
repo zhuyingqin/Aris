@@ -40,12 +40,14 @@ import type {
   DesktopCommandSpec,
   GenericMailAccountInput,
   GenericMailTestResult,
+  LocalEnvironmentCheck,
   MailAccount,
   MailAutoconfigResult,
   MailDraft,
   MailFolder,
   MailMessageFull,
   MailMessageList,
+  MailNewMessageEvent,
   MailModifyPatch,
   MailOauthConfigPatch,
   MailOauthConfigView,
@@ -59,9 +61,12 @@ import type {
   SessionSummary,
   SessionTranscript,
   SkillMeta,
+  TokenUsageSummary,
 } from "../types";
 
 export const stateDir = () => invoke<string>("state_dir");
+export const localEnvironmentChecks = () =>
+  invoke<LocalEnvironmentCheck[]>("local_environment_checks");
 export const projectsGet = () => invoke<ProjectView>("projects_get");
 export const projectAdd = (path: string) =>
   invoke<ProjectView>("project_add", { path });
@@ -81,6 +86,75 @@ export const configTest = (patch: ConfigPatch) =>
   invoke<ConfigTestResult>("config_test", { patch });
 export const providerTest = (input: { baseUrl: string; model?: string; apiKey?: string }) =>
   invoke<ConfigTestDetail>("provider_test", { input });
+
+// ── Managed login (new-api gateway) ───────────────────────────────────────────
+
+export interface NewApiLoginResult {
+  /** OpenAI-compatible base URL for the executor (`<base>/v1`). */
+  baseUrl: string;
+  model: string;
+  /** Usable downstream key (`sk-…`) for the executor. */
+  token: string;
+}
+
+export interface NewApiAuthStatus {
+  registerEnabled: boolean;
+  passwordRegisterEnabled: boolean;
+  passwordLoginEnabled: boolean;
+  emailVerification: boolean;
+  turnstileCheck: boolean;
+  turnstileSiteKey: string;
+  userAgreementEnabled: boolean;
+  privacyPolicyEnabled: boolean;
+}
+
+export const newapiAuthStatus = (baseUrl: string) =>
+  invoke<NewApiAuthStatus>("newapi_auth_status", { baseUrl });
+
+/** Sign in to a new-api gateway; returns an executor config for the user. */
+export const newapiLogin = (
+  baseUrl: string,
+  model: string,
+  username: string,
+  password: string,
+) =>
+  invoke<NewApiLoginResult>("newapi_login", { baseUrl, model, username, password });
+export const newapiRegister = (input: {
+  baseUrl: string;
+  username: string;
+  password: string;
+  email?: string;
+  verificationCode?: string;
+  affCode?: string;
+  turnstile?: string;
+}) => invoke<void>("newapi_register", { input });
+export const newapiSendVerification = (input: {
+  baseUrl: string;
+  email: string;
+  turnstile?: string;
+}) => invoke<void>("newapi_send_verification", { input });
+export const newapiModels = () => invoke<string[]>("newapi_models");
+
+export interface NewApiAccount {
+  username: string;
+  displayName: string;
+  /** new-api user group, shown as the plan / 套餐. */
+  group: string;
+  /** Human description of the current group (套餐说明). */
+  groupDesc: string;
+  /** Price multiplier of the current group ("1.5", "自动"). */
+  groupRatio: string;
+  /** Remaining quota balance, in new-api credit units. */
+  quota: number;
+  /** Quota consumed so far, in new-api credit units. */
+  usedQuota: number;
+  models: string[];
+  /** Currently selected executor model. */
+  model: string;
+}
+
+/** One-shot account/entitlements projection for the signed-in user. */
+export const newapiBootstrap = () => invoke<NewApiAccount>("newapi_bootstrap");
 export const appUpdateCheck = async (): Promise<AppUpdateInfo> => {
   if (!isTauri()) return { available: false };
   const { check } = await import("@tauri-apps/plugin-updater");
@@ -136,6 +210,8 @@ export const appUpdateDownloadAndInstall = async (
   });
   return { installed: true, version: update.version };
 };
+
+export const chatUsageSummary = () => invoke<TokenUsageSummary>("chat_usage_summary");
 export const appRelaunch = async () => {
   if (!isTauri()) return;
   const { relaunch } = await import("@tauri-apps/plugin-process");
@@ -207,6 +283,8 @@ export const mailModify = (
 ) => invoke<void>("mail_modify", { accountId, messageId, patch });
 export const mailSend = (accountId: string, draft: MailDraft) =>
   invoke<void>("mail_send", { accountId, draft });
+export const onMailNewMessage = (handler: (event: MailNewMessageEvent) => void) =>
+  listen<MailNewMessageEvent>("mail-new-message", (e) => handler(e.payload));
 
 export const skillsList = () => invoke<SkillMeta[]>("skills_list");
 export const skillView = (name: string) =>
@@ -538,6 +616,8 @@ export interface ChatContextMessage {
   images?: ChatImageInput[];
 }
 
+export type ChatContextSyncMode = "replace" | "append";
+
 export const chatSend = (sessionId: string, message: string | ChatSendRequest) => {
   const request = typeof message === "string" ? { text: message } : message;
   return invoke<string>("chat_send_rich", { sessionId, request });
@@ -558,7 +638,8 @@ export const chatReset = (sessionId: string) =>
 export const chatSetContext = (
   sessionId: string,
   messages: ChatContextMessage[],
-) => invoke<void>("chat_set_context", { sessionId, messages });
+  mode: ChatContextSyncMode = "replace",
+) => invoke<number>("chat_set_context", { sessionId, messages, mode });
 export const chatDelete = (sessionId: string, projectId?: string) =>
   invoke<void>("chat_delete", { sessionId, projectId: projectId ?? null });
 export const chatCancel = (sessionId: string) => invoke<void>("chat_cancel", { sessionId });
@@ -606,11 +687,50 @@ export const onChatPermissionRequest = (handler: (event: ChatPermissionRequestEv
   listen<ChatPermissionRequestEvent>("chat-permission-request", (e) => handler(e.payload));
 export const onChatPermissionResolved = (handler: (event: ChatPermissionResolvedEvent) => void) =>
   listen<ChatPermissionResolvedEvent>("chat-permission-resolved", (e) => handler(e.payload));
-export const onChatDone = (handler: (event: ChatTextEvent) => void) =>
-  listen<ChatTextEvent>("chat-done", (e) => handler(e.payload));
+export interface ChatDoneEvent {
+  sessionId: string;
+  text: string;
+  /** Backend session-history estimate in the same unit used by the
+   * auto-compaction budget. This intentionally excludes fixed prompt/tool
+   * overhead and generated output. */
+  contextTokens?: number | null;
+  providerUsage?: {
+    inputTokens: number;
+    outputTokens: number;
+    cacheCreationInputTokens: number;
+    cacheReadInputTokens: number;
+    promptTokens: number;
+    totalTokens: number;
+  } | null;
+}
+export const onChatDone = (handler: (event: ChatDoneEvent) => void) =>
+  listen<ChatDoneEvent>("chat-done", (e) => handler(e.payload));
 export interface ChatErrorEvent {
   sessionId: string;
   message: string;
 }
 export const onChatError = (handler: (event: ChatErrorEvent) => void) =>
   listen<ChatErrorEvent>("chat-error", (e) => handler(e.payload));
+
+export interface ChatContextCompactedEvent {
+  sessionId: string;
+  removedMessageCount: number;
+  tokensBefore?: number | null;
+  /** Post-compaction session-history estimate in the same unit used by the
+   * auto-compaction budget. Absent/null leaves the transcript estimate. */
+  tokensAfter?: number | null;
+  contextWindow?: number | null;
+  compactionBudget?: number | null;
+}
+export const onChatContextCompacted = (handler: (event: ChatContextCompactedEvent) => void) =>
+  listen<ChatContextCompactedEvent>("chat-context-compacted", (e) => handler(e.payload));
+
+export interface ChatContextWarningEvent {
+  sessionId: string;
+  usedTokens: number;
+  contextWindow: number;
+  compactionBudget?: number | null;
+  usage?: number | null;
+}
+export const onChatContextWarning = (handler: (event: ChatContextWarningEvent) => void) =>
+  listen<ChatContextWarningEvent>("chat-context-warning", (e) => handler(e.payload));

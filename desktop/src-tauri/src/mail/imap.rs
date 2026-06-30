@@ -3,6 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
+use std::thread;
 use std::time::Duration;
 
 use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE_NO_PAD};
@@ -11,6 +12,7 @@ use native_tls::TlsConnector;
 use serde_json::json;
 
 use super::cache;
+use super::draft_attachment::{self, ResolvedDraftAttachment};
 use super::model::{
     GenericMailAccountInput, GenericMailTestResult, IncomingServerConfig, MailAttachment,
     MailDraft, MailFolder, MailIdentityConfig, MailMessageFull, MailMessageList,
@@ -294,6 +296,107 @@ impl ImapClient {
         read_imap_response_from(&mut self.reader, &tag)
     }
 
+    fn append_literal(&mut self, folder: &str, bytes: &[u8]) -> Result<(), String> {
+        let tag = format!("A{:04}", self.next_tag);
+        self.next_tag += 1;
+        let wire = format!(
+            "{tag} APPEND {} (\\Seen) {{{}}}\r\n",
+            imap_quote(folder),
+            bytes.len()
+        );
+        self.reader
+            .get_mut()
+            .write_all(wire.as_bytes())
+            .map_err(|error| error.to_string())?;
+        self.reader
+            .get_mut()
+            .flush()
+            .map_err(|error| error.to_string())?;
+        let continuation = read_line_from(&mut self.reader)?;
+        if !String::from_utf8_lossy(&continuation).starts_with('+') {
+            return Err(format!(
+                "IMAP APPEND was not accepted: {}",
+                String::from_utf8_lossy(&continuation).trim()
+            ));
+        }
+        self.reader
+            .get_mut()
+            .write_all(bytes)
+            .map_err(|error| error.to_string())?;
+        self.reader
+            .get_mut()
+            .write_all(b"\r\n")
+            .map_err(|error| error.to_string())?;
+        self.reader
+            .get_mut()
+            .flush()
+            .map_err(|error| error.to_string())?;
+        read_imap_response_from(&mut self.reader, &tag)?;
+        Ok(())
+    }
+
+    fn start_idle(&mut self) -> Result<String, String> {
+        let tag = format!("A{:04}", self.next_tag);
+        self.next_tag += 1;
+        let wire = format!("{tag} IDLE\r\n");
+        self.reader
+            .get_mut()
+            .write_all(wire.as_bytes())
+            .map_err(|error| error.to_string())?;
+        self.reader
+            .get_mut()
+            .flush()
+            .map_err(|error| error.to_string())?;
+
+        let line = read_line_from(&mut self.reader)?;
+        let text = String::from_utf8_lossy(&line);
+        if text.starts_with('+') {
+            Ok(tag)
+        } else {
+            Err(format!("IMAP IDLE was not accepted: {}", text.trim()))
+        }
+    }
+
+    fn finish_idle(&mut self, tag: &str) -> Result<(), String> {
+        self.reader
+            .get_mut()
+            .write_all(b"DONE\r\n")
+            .map_err(|error| error.to_string())?;
+        self.reader
+            .get_mut()
+            .flush()
+            .map_err(|error| error.to_string())?;
+        read_imap_response_from(&mut self.reader, tag)?;
+        Ok(())
+    }
+
+    fn idle_wait_for_change(&mut self) -> Result<bool, String> {
+        let tag = self.start_idle()?;
+        loop {
+            match read_line_from(&mut self.reader) {
+                Ok(line) => {
+                    let text = String::from_utf8_lossy(&line);
+                    if is_idle_new_mail_line(&text) {
+                        self.finish_idle(&tag)?;
+                        return Ok(true);
+                    }
+                    if text.starts_with("* BYE") {
+                        let _ = self.finish_idle(&tag);
+                        return Err(format!("IMAP server closed IDLE: {}", text.trim()));
+                    }
+                }
+                Err(error) => {
+                    if looks_like_idle_timeout(&error) {
+                        self.finish_idle(&tag)?;
+                        return Ok(false);
+                    }
+                    let _ = self.finish_idle(&tag);
+                    return Err(error);
+                }
+            }
+        }
+    }
+
     fn login(&mut self, username: &str, password: &str) -> Result<(), String> {
         self.command(&format!(
             "LOGIN {} {}",
@@ -317,6 +420,19 @@ impl ImapClient {
     fn logout(&mut self) {
         let _ = self.command("LOGOUT");
     }
+}
+
+fn looks_like_idle_timeout(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    lower.contains("timed out") || lower.contains("would block") || lower.contains("10060")
+}
+
+fn is_idle_new_mail_line(line: &str) -> bool {
+    let parts = line.split_whitespace().collect::<Vec<_>>();
+    parts.len() >= 3
+        && parts[0] == "*"
+        && parts[1].chars().all(|ch| ch.is_ascii_digit())
+        && matches!(parts[2].to_ascii_uppercase().as_str(), "EXISTS" | "RECENT")
 }
 
 fn connect_imap(
@@ -386,7 +502,7 @@ fn imap_id_command(address: &str) -> String {
     };
     format!(
         "ID (\"name\" {} \"version\" {} \"vendor\" {} \"address\" {})",
-        imap_quote("ARIS Mail"),
+        imap_quote("SomniQ Mail"),
         imap_quote(env!("CARGO_PKG_VERSION")),
         imap_quote("ARIS"),
         imap_quote(address),
@@ -503,7 +619,13 @@ fn folder_kind(name: &str) -> String {
     let lower = name.to_ascii_lowercase();
     if lower == "inbox" {
         "inbox"
-    } else if lower.contains("sent") || lower.contains("已发送") {
+    } else if lower.contains("sent")
+        || lower.contains("已发送")
+        || lower.contains("已发")
+        || lower.contains("发件")
+        || lower.contains("寄件")
+        || lower.contains("enviado")
+    {
         "sent"
     } else if lower.contains("draft") || lower.contains("草稿") {
         "drafts"
@@ -1403,6 +1525,73 @@ fn fetch_flags_batch(
 
 /// Direct (uncached) listing — used for search queries and as a fallback when
 /// the incremental cache path fails. Batched, light fetch.
+fn latest_uid(client: &mut ImapClient) -> Result<u32, String> {
+    let response = client.command("UID SEARCH ALL")?;
+    Ok(search_uids_u32(&response).into_iter().max().unwrap_or(0))
+}
+
+fn new_uids_since(client: &mut ImapClient, last_seen_uid: u32) -> Result<Vec<u32>, String> {
+    let response = client.command("UID SEARCH ALL")?;
+    let mut uids = search_uids_u32(&response)
+        .into_iter()
+        .filter(|uid| *uid > last_seen_uid)
+        .collect::<Vec<_>>();
+    uids.sort_unstable();
+    Ok(uids)
+}
+
+const IDLE_EVENT_BATCH_LIMIT: usize = 25;
+
+/// Watch the account inbox with IMAP IDLE and call `on_message` only when the
+/// server reports new mail. This is intentionally event-driven: no mailbox list
+/// or search request runs until the server emits EXISTS/RECENT.
+pub fn idle_watch_inbox<F, S>(
+    account_id: &str,
+    initial_last_seen_uid: Option<u32>,
+    mut should_continue: S,
+    mut on_message: F,
+) -> Result<u32, String>
+where
+    F: FnMut(String, u32, MailMessageSummary),
+    S: FnMut() -> bool,
+{
+    let config = helper_config(account_id)?;
+    let folder = find_folder(&config, "inbox").unwrap_or_else(|| "INBOX".to_string());
+    let mut client = connect_imap(&config, None, true)?;
+    client.command(&format!("EXAMINE {}", imap_quote(&folder)))?;
+    let mut last_seen_uid = match initial_last_seen_uid {
+        Some(uid) => uid,
+        None => latest_uid(&mut client)?,
+    };
+
+    while should_continue() {
+        if !client.idle_wait_for_change()? {
+            continue;
+        }
+        if !should_continue() {
+            break;
+        }
+        let new_uids = new_uids_since(&mut client, last_seen_uid)?;
+        let max_seen = new_uids.iter().copied().max();
+        let start = new_uids.len().saturating_sub(IDLE_EVENT_BATCH_LIMIT);
+        let limited = &new_uids[start..];
+        let summaries = fetch_summaries_batch(&mut client, &folder, limited)?
+            .into_iter()
+            .collect::<HashMap<_, _>>();
+        for uid in limited {
+            if let Some(summary) = summaries.get(uid).cloned() {
+                on_message(folder.clone(), *uid, summary);
+            }
+        }
+        if let Some(uid) = max_seen {
+            last_seen_uid = last_seen_uid.max(uid);
+        }
+    }
+
+    client.logout();
+    Ok(last_seen_uid)
+}
+
 fn list_uncached(
     config: &HelperConfig,
     folder: &str,
@@ -1603,6 +1792,7 @@ pub fn modify(account_id: &str, message_id: &str, patch: &MailModifyPatch) -> Re
 
 pub fn send(account_id: &str, draft: &MailDraft) -> Result<(), String> {
     let config = helper_config(account_id)?;
+    let message = build_message(&config.identity, draft)?;
     let mut client = connect_smtp(&config)?;
     let from = config.identity.email.as_str();
     client.expect(&format!("MAIL FROM:<{from}>"), &[250])?;
@@ -1610,7 +1800,7 @@ pub fn send(account_id: &str, draft: &MailDraft) -> Result<(), String> {
         client.expect(&format!("RCPT TO:<{recipient}>"), &[250, 251])?;
     }
     client.expect("DATA", &[354])?;
-    let body = build_message(&config.identity, draft);
+    let body = smtp_data_escape(&message);
     client
         .reader
         .get_mut()
@@ -1631,6 +1821,35 @@ pub fn send(account_id: &str, draft: &MailDraft) -> Result<(), String> {
         return Err(format!("SMTP send failed ({code}): {}", response.trim()));
     }
     client.quit();
+    if let Err(error) = append_sent_copy(&config, &message) {
+        eprintln!("mail send: SMTP accepted message but Sent copy was not saved: {error}");
+    }
+    Ok(())
+}
+
+fn append_sent_copy(config: &HelperConfig, message: &str) -> Result<(), String> {
+    let mut last_error = None;
+    for attempt in 0..3 {
+        match append_sent_copy_once(config, message) {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                last_error = Some(error);
+                if attempt < 2 {
+                    thread::sleep(Duration::from_secs(2));
+                }
+            }
+        }
+    }
+    Err(last_error.unwrap_or_else(|| "sent copy was not saved".to_string()))
+}
+
+fn append_sent_copy_once(config: &HelperConfig, message: &str) -> Result<(), String> {
+    let Some(sent_folder) = find_folder(config, "sent") else {
+        return Err("sent folder not found".to_string());
+    };
+    let mut client = connect_imap(config, None, true)?;
+    client.append_literal(&sent_folder, message.as_bytes())?;
+    client.logout();
     Ok(())
 }
 
@@ -1653,7 +1872,8 @@ fn recipients(draft: &MailDraft) -> Vec<String> {
         .collect()
 }
 
-fn build_message(identity: &MailIdentityConfig, draft: &MailDraft) -> String {
+fn build_message(identity: &MailIdentityConfig, draft: &MailDraft) -> Result<String, String> {
+    let attachments = draft_attachment::resolve_all(draft)?;
     let mut message = String::new();
     message.push_str(&format!(
         "From: {} <{}>\r\n",
@@ -1668,10 +1888,70 @@ fn build_message(identity: &MailIdentityConfig, draft: &MailDraft) -> String {
         draft.subject.replace('\r', "").replace('\n', " ")
     ));
     message.push_str("MIME-Version: 1.0\r\n");
+    if attachments.is_empty() {
+        message.push_str("Content-Type: text/plain; charset=utf-8\r\n");
+        message.push_str("Content-Transfer-Encoding: 8bit\r\n\r\n");
+        message.push_str(&draft.body.replace("\r\n", "\n").replace('\n', "\r\n"));
+        return Ok(message);
+    }
+
+    let boundary = "aris-mail-boundary-7b3c9a31";
+    message.push_str(&format!(
+        "Content-Type: multipart/mixed; boundary=\"{boundary}\"\r\n\r\n"
+    ));
+    message.push_str(&format!("--{boundary}\r\n"));
     message.push_str("Content-Type: text/plain; charset=utf-8\r\n");
     message.push_str("Content-Transfer-Encoding: 8bit\r\n\r\n");
     message.push_str(&draft.body.replace("\r\n", "\n").replace('\n', "\r\n"));
-    message
+    message.push_str("\r\n");
+    for attachment in attachments {
+        append_smtp_attachment(&mut message, boundary, &attachment);
+    }
+    message.push_str(&format!("--{boundary}--\r\n"));
+    Ok(message)
+}
+
+fn append_smtp_attachment(
+    message: &mut String,
+    boundary: &str,
+    attachment: &ResolvedDraftAttachment,
+) {
+    message.push_str(&format!("--{boundary}\r\n"));
+    message.push_str(&format!(
+        "Content-Type: {}; name=\"{}\"\r\n",
+        attachment.mime_type, attachment.filename
+    ));
+    message.push_str("Content-Transfer-Encoding: base64\r\n");
+    message.push_str(&format!(
+        "Content-Disposition: attachment; filename=\"{}\"\r\n\r\n",
+        attachment.filename
+    ));
+    message.push_str(&wrap_base64(&STANDARD.encode(&attachment.bytes)));
+    message.push_str("\r\n");
+}
+
+fn wrap_base64(value: &str) -> String {
+    value
+        .as_bytes()
+        .chunks(76)
+        .map(|chunk| String::from_utf8_lossy(chunk).to_string())
+        .collect::<Vec<_>>()
+        .join("\r\n")
+}
+
+fn smtp_data_escape(value: &str) -> String {
+    value
+        .replace("\r\n", "\n")
+        .split('\n')
+        .map(|line| {
+            if line.starts_with('.') {
+                format!(".{line}")
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\r\n")
 }
 
 #[cfg(test)]
@@ -1694,7 +1974,7 @@ mod tests {
     fn imap_id_command_includes_client_identity() {
         let command = imap_id_command("owner@example.com");
 
-        assert!(command.contains("\"name\" \"ARIS Mail\""));
+        assert!(command.contains("\"name\" \"SomniQ Mail\""));
         assert!(command.contains(&format!("\"version\" \"{}\"", env!("CARGO_PKG_VERSION"))));
         assert!(command.contains("\"vendor\" \"ARIS\""));
         assert!(command.contains("\"address\" \"owner@example.com\""));
@@ -1767,6 +2047,161 @@ A0003 OK FETCH completed\r\n";
     fn search_uids_u32_parses_search_line() {
         let resp = b"* SEARCH 1 2 3 42\r\nA0002 OK SEARCH completed\r\n";
         assert_eq!(search_uids_u32(resp), vec![1, 2, 3, 42]);
+    }
+
+    #[test]
+    #[ignore = "sends real email; set ARIS_TEST_MAIL_TO and optionally ARIS_TEST_MAIL_ACCOUNT_ID"]
+    fn sends_attachment_smoke_to_configured_recipient() {
+        let to = std::env::var("ARIS_TEST_MAIL_TO").expect("ARIS_TEST_MAIL_TO is required");
+        let account_id = std::env::var("ARIS_TEST_MAIL_ACCOUNT_ID").unwrap_or_else(|_| {
+            super::super::store::list_accounts()
+                .into_iter()
+                .find(|account| account.provider == Provider::Imap && account.connected)
+                .expect("connected IMAP account is required")
+                .id
+        });
+        let path = std::env::temp_dir().join(format!(
+            "aris-mail-attachment-smoke-{}.txt",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            "ARIS attachment smoke test.\nThis file verifies SMTP attachments.\n",
+        )
+        .expect("write attachment");
+        let result = send(
+            &account_id,
+            &MailDraft {
+                to,
+                cc: String::new(),
+                bcc: String::new(),
+                subject: "ARIS mail attachment smoke test".to_string(),
+                body: "This is an ARIS test message with a small attachment.".to_string(),
+                attachments: vec![super::super::model::MailDraftAttachment {
+                    path: path.to_string_lossy().into_owned(),
+                    filename: "aris-mail-attachment-smoke.txt".to_string(),
+                    mime_type: "text/plain".to_string(),
+                }],
+            },
+        );
+        let _ = std::fs::remove_file(path);
+        result.expect("send smoke email");
+    }
+
+    #[test]
+    #[ignore = "searches/downloads a real paper and sends real email; set ARIS_TEST_MAIL_TO and optionally ARIS_TEST_MAIL_ACCOUNT_ID"]
+    fn literature_download_pdf_attachment_smoke_to_configured_recipient() {
+        let to = std::env::var("ARIS_TEST_MAIL_TO").expect("ARIS_TEST_MAIL_TO is required");
+        let account_id = std::env::var("ARIS_TEST_MAIL_ACCOUNT_ID").unwrap_or_else(|_| {
+            super::super::store::list_accounts()
+                .into_iter()
+                .find(|account| account.provider == Provider::Imap && account.connected)
+                .expect("connected IMAP account is required")
+                .id
+        });
+        let query = std::env::var("ARIS_TEST_LITERATURE_QUERY")
+            .unwrap_or_else(|_| "attention is all you need".to_string());
+        let sources = vec!["arxiv".to_string()];
+        let outcome =
+            tools::literature::search_remote(&query, &sources, 3).expect("search literature");
+        let paper = outcome
+            .papers
+            .iter()
+            .find(|paper| paper.pdf_url.is_some())
+            .expect("search result with direct PDF");
+        let pdf_url = paper.pdf_url.as_deref().expect("PDF URL");
+        let base =
+            std::env::temp_dir().join(format!("aris-literature-mail-smoke-{}", std::process::id()));
+        std::fs::create_dir_all(&base).expect("create smoke directory");
+        let file_name = paper
+            .arxiv_id
+            .as_deref()
+            .unwrap_or(&paper.id)
+            .replace(['/', ':'], "-");
+        let download =
+            tools::literature::download_pdf_at(&base, pdf_url, &file_name, Some(&paper.id))
+                .expect("download PDF");
+        let path = download
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .expect("download path")
+            .to_string();
+        let size = std::fs::metadata(&path).expect("download metadata").len();
+        assert!(size > 1024, "downloaded PDF is unexpectedly small");
+        let subject = format!(
+            "ARIS literature PDF smoke test {}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_secs()
+        );
+        println!("smoke subject: {subject}");
+
+        let result = send(
+            &account_id,
+            &MailDraft {
+                to,
+                cc: String::new(),
+                bcc: String::new(),
+                subject: subject.clone(),
+                body: format!(
+                    "ARIS searched for:\n\n{query}\n\nDownloaded and attached:\n{}\n\nSource: {pdf_url}",
+                    paper.title
+                ),
+                attachments: vec![super::super::model::MailDraftAttachment {
+                    path: path.clone(),
+                    filename: std::path::Path::new(&path)
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("paper.pdf")
+                        .to_string(),
+                    mime_type: "application/pdf".to_string(),
+                }],
+            },
+        );
+        result.expect("send literature PDF smoke email");
+        if std::env::var("ARIS_TEST_VERIFY_SENT_COPY").as_deref() != Ok("0") {
+            assert!(
+                sent_folder_contains_subject(&account_id, &subject),
+                "sent folder did not contain smoke email subject"
+            );
+        }
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    fn sent_folder_contains_subject(account_id: &str, subject: &str) -> bool {
+        let mut last_error = None;
+        for attempt in 0..3 {
+            let result = (|| -> Result<bool, String> {
+                let config = helper_config(account_id)?;
+                let sent = find_folder(&config, "sent").ok_or_else(|| "sent folder".to_string())?;
+                let sent_messages = list(account_id, &sent, subject, None)?;
+                Ok(sent_messages
+                    .messages
+                    .iter()
+                    .any(|message| message.subject.contains(subject)))
+            })();
+            match result {
+                Ok(true) => return true,
+                Ok(false) => last_error = Some("subject was not found".to_string()),
+                Err(error) => last_error = Some(error),
+            }
+            if attempt < 2 {
+                std::thread::sleep(std::time::Duration::from_secs(4));
+            }
+        }
+        if let Some(error) = last_error {
+            eprintln!("sent folder verification failed: {error}");
+        }
+        false
+    }
+
+    #[test]
+    fn idle_new_mail_line_accepts_exists_and_recent() {
+        assert!(is_idle_new_mail_line("* 42 EXISTS\r\n"));
+        assert!(is_idle_new_mail_line("* 1 RECENT\r\n"));
+        assert!(!is_idle_new_mail_line("* 2 FETCH (FLAGS (\\Seen))\r\n"));
+        assert!(!is_idle_new_mail_line("A0001 OK IDLE completed\r\n"));
     }
 
     #[test]

@@ -3,8 +3,8 @@ use serde_json::{json, Value};
 
 use runtime::PermissionMode;
 
-use super::model::{MailDraft, MailModifyPatch};
-use super::{provider, store};
+use super::model::{MailDraft, MailDraftAttachment, MailModifyPatch};
+use super::{auto_literature, provider, store};
 
 const MAIL_TOOL_NAMES: &[&str] = &[
     "mail_accounts",
@@ -14,6 +14,7 @@ const MAIL_TOOL_NAMES: &[&str] = &[
     "mail_send",
     "mail_mark",
     "mail_move",
+    "mail_literature_catch_up",
 ];
 
 #[derive(Debug, Deserialize)]
@@ -49,6 +50,8 @@ struct MailSendInput {
     bcc: String,
     subject: String,
     body: String,
+    #[serde(default)]
+    attachments: Vec<MailDraftAttachment>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -70,6 +73,14 @@ struct MailMoveInput {
     folder: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MailLiteratureCatchUpInput {
+    account_id: Option<String>,
+    limit: Option<usize>,
+    retry_sent_without_attachments: Option<bool>,
+}
+
 pub fn is_mail_tool(name: &str) -> bool {
     MAIL_TOOL_NAMES.contains(&name)
 }
@@ -78,7 +89,7 @@ pub fn tool_specs() -> Vec<tools::ToolSpec> {
     vec![
         tools::ToolSpec {
             name: "mail_accounts",
-            description: "List connected ARIS mail accounts available to the agent.",
+            description: "List connected SomniQ mail accounts available to the agent.",
             input_schema: json!({
                 "type": "object",
                 "properties": {},
@@ -138,7 +149,20 @@ pub fn tool_specs() -> Vec<tools::ToolSpec> {
                     "cc": { "type": "string" },
                     "bcc": { "type": "string" },
                     "subject": { "type": "string" },
-                    "body": { "type": "string" }
+                    "body": { "type": "string" },
+                    "attachments": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "path": { "type": "string" },
+                                "filename": { "type": "string" },
+                                "mimeType": { "type": "string" }
+                            },
+                            "required": ["path"],
+                            "additionalProperties": false
+                        }
+                    }
                 },
                 "required": ["to", "subject", "body"],
                 "additionalProperties": false
@@ -174,6 +198,20 @@ pub fn tool_specs() -> Vec<tools::ToolSpec> {
                     "folder": { "type": "string" }
                 },
                 "required": ["messageId", "folder"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::WorkspaceWrite,
+        },
+        tools::ToolSpec {
+            name: "mail_literature_catch_up",
+            description: "Scan recent inbox messages for literature/paper-help requests, then run the deterministic responder: extract the DOI/title/query, search the literature sources, download public PDFs into the workspace library, and (when Mail automation is configured with auto-send + an allowlist) reply with the PDFs attached. This is the building block for a scheduled literature-reply workflow — it works for every provider (Gmail/Outlook/IMAP) on a timer. Behaviour is governed by Settings > Mail automation (sources, max results/downloads, auto-send, allowlist); already-handled messages are skipped.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "accountId": { "type": "string", "description": "Restrict to one connected account; omit to sweep all connected accounts." },
+                    "limit": { "type": "integer", "description": "How many recent inbox messages per account to inspect (1-25, default 12)." },
+                    "retrySentWithoutAttachments": { "type": "boolean", "description": "Re-process messages already replied to that had no PDF attached." }
+                },
                 "additionalProperties": false
             }),
             required_permission: PermissionMode::WorkspaceWrite,
@@ -222,6 +260,7 @@ pub fn execute_tool(name: &str, input: &Value) -> Result<String, String> {
                 bcc: input.bcc,
                 subject: input.subject,
                 body: input.body,
+                attachments: input.attachments,
             };
             provider::send(&account_id, &draft)?;
             json!({ "ok": true, "accountId": account_id })
@@ -250,6 +289,26 @@ pub fn execute_tool(name: &str, input: &Value) -> Result<String, String> {
             };
             provider::modify(&account_id, &input.message_id, &patch)?;
             json!({ "ok": true, "accountId": account_id })
+        }
+        "mail_literature_catch_up" => {
+            let input = serde_json::from_value::<MailLiteratureCatchUpInput>(input.clone())
+                .map_err(|error| error.to_string())?;
+            let runs = auto_literature::catch_up_recent_quiet(
+                input.account_id,
+                input.limit,
+                input.retry_sent_without_attachments.unwrap_or(false),
+            )?;
+            let sent = runs.iter().filter(|run| run.status == "sent").count();
+            let prepared = runs.iter().filter(|run| run.status == "prepared").count();
+            let failed = runs.iter().filter(|run| run.error.is_some()).count();
+            json!({
+                "ok": true,
+                "handled": runs.len(),
+                "sent": sent,
+                "prepared": prepared,
+                "failed": failed,
+                "runs": runs,
+            })
         }
         _ => return Err(format!("unknown mail tool: {name}")),
     };

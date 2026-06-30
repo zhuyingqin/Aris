@@ -29,6 +29,10 @@ export interface ChatCommandResult {
   replaceTurns: boolean;
   openSettings: boolean;
   refreshStatus: boolean;
+  /** Backend session-history token estimate in the same unit as the
+   * auto-compaction budget. Null/absent leaves the ring's own transcript
+   * estimate in place. */
+  contextTokens?: number | null;
 }
 
 // ── Settings / Skills / Sessions (P1) ─────────────────────────────────────────
@@ -39,6 +43,12 @@ export interface ConfigView {
   executorProvider?: string | null;
   executorModel?: string | null;
   executorBaseUrl?: string | null;
+  /** Model used to summarize context on compaction; empty/absent = "Auto". */
+  summarizerModel?: string | null;
+  summarizerProvider?: string | null;
+  summarizerBaseUrl?: string | null;
+  hasSummarizerKey: boolean;
+  summarizerKeyMasked?: string | null;
   hasExecutorKey: boolean;
   executorKeyMasked?: string | null;
   reviewerProvider?: string | null;
@@ -50,10 +60,11 @@ export interface ConfigView {
   scopusKeyMasked?: string | null;
   language?: string | null;
   memoryWriteApproval: boolean;
+  managedModels?: string[];
   verifiedExecutors?: { provider: string; model: string; baseUrl: string }[];
 }
 
-export type ConfigSecretKind = "executorApiKey" | "reviewerApiKey" | "scopusApiKey";
+export type ConfigSecretKind = "executorApiKey" | "summarizerApiKey" | "reviewerApiKey" | "scopusApiKey";
 
 export interface ScheduledTask {
   id: string;
@@ -67,7 +78,12 @@ export interface ScheduledTask {
   intervalUnit?: "minutes" | "hours" | "days" | string;
   createdAt?: string | null;
   updatedAt?: string | null;
+  lastRunAt?: string | null;
+  lastError?: string | null;
   nextRun?: string | null;
+  triggerKind?: "interval" | "mail" | string;
+  mailAccountId?: string;
+  mailKeywords?: string[];
 }
 
 export interface ScheduledTaskInput {
@@ -77,12 +93,19 @@ export interface ScheduledTaskInput {
   intervalValue: number;
   intervalUnit: "minutes" | "hours" | "days";
   status?: "active" | "paused";
+  triggerKind?: "interval" | "mail";
+  mailAccountId?: string;
+  mailKeywords?: string[];
 }
 
 export interface ConfigPatch {
   executorProvider?: string;
   executorModel?: string;
   executorBaseUrl?: string;
+  summarizerProvider?: string;
+  summarizerModel?: string;
+  summarizerBaseUrl?: string;
+  summarizerApiKey?: string;
   executorApiKey?: string;
   reviewerProvider?: string;
   reviewerModel?: string;
@@ -109,6 +132,18 @@ export interface ConfigTestResult {
   reviewer?: ConfigTestDetail | null;
 }
 
+export interface LocalEnvironmentCheck {
+  id: string;
+  label: string;
+  category: string;
+  status: "ready" | "warning" | "missing" | string;
+  available: boolean;
+  version?: string | null;
+  path?: string | null;
+  message: string;
+  detail?: string | null;
+}
+
 export interface AppUpdateInfo {
   available: boolean;
   currentVersion?: string;
@@ -127,6 +162,65 @@ export interface AppUpdateProgress {
 export interface AppUpdateInstallResult {
   installed: boolean;
   version?: string;
+}
+
+export interface TokenUsageBucket {
+  server: string;
+  model: string;
+  provider: string;
+  requests: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheCreationInputTokens: number;
+  cacheReadInputTokens: number;
+  promptTokens: number;
+  totalTokens: number;
+  estimatedCostUsd: number;
+}
+
+export interface TokenUsageServerBucket {
+  server: string;
+  provider: string;
+  requests: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheCreationInputTokens: number;
+  cacheReadInputTokens: number;
+  promptTokens: number;
+  totalTokens: number;
+  estimatedCostUsd: number;
+  byModel: TokenUsageBucket[];
+}
+
+export interface TokenUsageLogEntry {
+  createdAt: number;
+  sessionId: string;
+  server: string;
+  model: string;
+  provider: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheCreationInputTokens: number;
+  cacheReadInputTokens: number;
+  promptTokens: number;
+  totalTokens: number;
+  estimatedCostUsd: number;
+}
+
+export interface TokenUsageSummary {
+  logPath: string;
+  requests: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheCreationInputTokens: number;
+  cacheReadInputTokens: number;
+  promptTokens: number;
+  totalTokens: number;
+  estimatedCostUsd: number;
+  unpricedRequests: number;
+  byServer: TokenUsageServerBucket[];
+  byModel: TokenUsageBucket[];
+  recent: TokenUsageLogEntry[];
 }
 
 // ── Mail (Gmail API + Microsoft Graph) ───────────────────────────────────────
@@ -170,6 +264,14 @@ export interface MailMessageList {
   nextPageToken?: string | null;
 }
 
+export interface MailNewMessageEvent {
+  accountId: string;
+  provider: MailProvider;
+  folder: string;
+  message: MailMessageSummary;
+  detectedAt: number;
+}
+
 export interface MailAttachment {
   id: string;
   filename: string;
@@ -208,6 +310,13 @@ export interface MailDraft {
   bcc?: string;
   subject: string;
   body: string;
+  attachments?: MailDraftAttachment[];
+}
+
+export interface MailDraftAttachment {
+  path: string;
+  filename?: string;
+  mimeType?: string;
 }
 
 export interface MailOauthConfigView {
@@ -385,6 +494,7 @@ export interface ChatStatus {
   provider?: string | null;
   message?: string | null;
   contextWindow?: number | null;
+  compactionBudget?: number | null;
   memoryFiles?: number | null;
 }
 
@@ -405,6 +515,7 @@ export interface ChatModelOptions {
 export type ChatBlock =
   | { kind: "text"; text: string }
   | { kind: "thinking"; thinking: string }
+  | { kind: "notice"; message: string }
   | {
       kind: "permission";
       id: string;

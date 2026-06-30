@@ -207,11 +207,13 @@ impl MatlabSession {
         }
         let _ = launcher.wait(); // reap the already-exited launcher
 
-        let pid = read_pid(&dir).ok_or_else(|| {
-            NotebookError::Kernel("MATLAB became ready but wrote no pid".into())
-        })?;
-        let guard =
-            runtime::register_managed_process(pid, "matlab-kernel", runtime::ManagedProcessKind::Mcp);
+        let pid = read_pid(&dir)
+            .ok_or_else(|| NotebookError::Kernel("MATLAB became ready but wrote no pid".into()))?;
+        let guard = runtime::register_managed_process(
+            pid,
+            "matlab-kernel",
+            runtime::ManagedProcessKind::Mcp,
+        );
 
         Ok(Self {
             dir,
@@ -304,10 +306,11 @@ impl MatlabSession {
                     execution_count: None,
                     outputs: vec![CellOutput::Error {
                         ename: "Timeout".into(),
-                        evalue: format!("MATLAB cell exceeded {}s; session terminated", timeout.as_secs()),
-                        traceback: vec![
-                            "Restart the kernel to continue.".into(),
-                        ],
+                        evalue: format!(
+                            "MATLAB cell exceeded {}s; session terminated",
+                            timeout.as_secs()
+                        ),
+                        traceback: vec!["Restart the kernel to continue.".into()],
                     }],
                 });
             }
@@ -355,7 +358,11 @@ impl MatlabSession {
         }
 
         Ok(ExecuteOutcome {
-            status: if had_error { ExecStatus::Error } else { ExecStatus::Ok },
+            status: if had_error {
+                ExecStatus::Error
+            } else {
+                ExecStatus::Ok
+            },
             execution_count: Some(count),
             outputs,
         })
@@ -464,7 +471,9 @@ fn scan_matlab_installs() -> Option<PathBuf> {
         // MATLAB is frequently installed off the system drive (e.g. E:\).
         for drive in ['C', 'D', 'E', 'F', 'G', 'H'] {
             roots.push(PathBuf::from(format!("{drive}:\\Program Files\\MATLAB")));
-            roots.push(PathBuf::from(format!("{drive}:\\Program Files (x86)\\MATLAB")));
+            roots.push(PathBuf::from(format!(
+                "{drive}:\\Program Files (x86)\\MATLAB"
+            )));
         }
     } else {
         roots.push(PathBuf::from("/usr/local/MATLAB"));
@@ -509,7 +518,10 @@ mod tests {
     #[test]
     fn matlab_path_uses_forward_slashes() {
         let p = PathBuf::from(r"C:\Users\x\AppData\Local\Temp\aris-matlab-1");
-        assert_eq!(matlab_path(&p), "C:/Users/x/AppData/Local/Temp/aris-matlab-1");
+        assert_eq!(
+            matlab_path(&p),
+            "C:/Users/x/AppData/Local/Temp/aris-matlab-1"
+        );
     }
 
     #[test]
@@ -521,8 +533,8 @@ mod tests {
 
     #[test]
     fn response_parses_partial_fields() {
-        let r: MatlabResponse = serde_json::from_str(r#"{"stdout":"hi\n","error":"","images":[]}"#)
-            .expect("parse");
+        let r: MatlabResponse =
+            serde_json::from_str(r#"{"stdout":"hi\n","error":"","images":[]}"#).expect("parse");
         assert_eq!(r.stdout, "hi\n");
         assert!(r.error.is_empty());
         assert!(r.images.is_empty());

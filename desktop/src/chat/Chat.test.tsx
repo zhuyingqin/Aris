@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { useState } from "react";
-import { act, cleanup, render, renderHook, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, renderHook, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChatAttachment, ChatCommandSelection, ChatTurn, DesktopCommandSpec, DesktopProject, SkillMeta } from "../types";
@@ -10,7 +10,12 @@ import ChatMessage, { diffFromTool } from "./ChatMessage";
 import { completedAssistantBlocks, contextForRetry, needsBackendContextReset, visibleTurnError } from "./Chat";
 import ChatSidebar from "./ChatSidebar";
 import CommandSelection from "./CommandSelection";
-import { isNearBottom, isScrollbarPointer, shouldPauseAutoFollowForWheel } from "./ChatThread";
+import {
+  isNearBottom,
+  isScrollbarPointer,
+  shouldIgnoreProgrammaticFollowScroll,
+  shouldPauseAutoFollowForWheel,
+} from "./ChatThread";
 import {
   CURRENT_KEY,
   SESSIONS_KEY,
@@ -88,6 +93,12 @@ describe("Chat interaction helpers", () => {
 
     expect(isScrollbarPointer(element, 288)).toBe(true);
     expect(isScrollbarPointer(element, 240)).toBe(false);
+  });
+
+  it("ignores scroll events caused by programmatic bottom-following", () => {
+    expect(shouldIgnoreProgrammaticFollowScroll(180, 100, true)).toBe(true);
+    expect(shouldIgnoreProgrammaticFollowScroll(180, 220, true)).toBe(false);
+    expect(shouldIgnoreProgrammaticFollowScroll(180, 100, false)).toBe(false);
   });
 
   it("creates a readable diff for file edit tools", () => {
@@ -460,6 +471,31 @@ describe("Chat interaction helpers", () => {
 
     expect(screen.getByText("Model returned an empty response.")).toBeTruthy();
   });
+
+  it("keeps streamed thinking from splitting assistant Markdown text", () => {
+    const { container } = render(
+      <ChatMessage
+        turn={{
+          id: "assistant-mixed-thinking",
+          role: "assistant",
+          blocks: [
+            { kind: "text", text: "## 直接验证\n\n" },
+            { kind: "thinking", thinking: "这里是中途 reasoning，不应该插入正文。" },
+            { kind: "text", text: "FINAL_JSON: | X | 最终会出现 |\n\n```text\n样本 | X | 是否能看到\n```" },
+          ],
+        }}
+        canRetry={false}
+        onEdit={() => undefined}
+        onRetry={() => undefined}
+        onContinue={() => undefined}
+      />,
+    );
+
+    expect(screen.getByText("这里是中途 reasoning，不应该插入正文。")).toBeTruthy();
+    expect(container.querySelector(".md-think")).toBeTruthy();
+    expect(container.querySelector("h2")?.textContent).toBe("直接验证");
+    expect(container.querySelector(".md-code-block")?.textContent).toContain("样本 | X | 是否能看到");
+  });
 });
 
 describe("AskUserQuestion card", () => {
@@ -763,7 +799,7 @@ describe("ChatSidebar session menu", () => {
 
   function renderSidebar() {
     const session = { ...makeSession("project-a"), id: "chat-a", title: "Alpha chat" };
-    render(
+    return render(
       <ChatSidebar
         sessions={[session]}
         projects={projects}
@@ -771,7 +807,6 @@ describe("ChatSidebar session menu", () => {
         open
         busy={false}
         onClose={() => undefined}
-        onDesktopCollapse={() => undefined}
         onNew={() => undefined}
         onOpen={() => undefined}
         onRename={() => undefined}
@@ -781,6 +816,12 @@ describe("ChatSidebar session menu", () => {
       />,
     );
   }
+
+  it("does not render a duplicate Chat title inside the chat sidebar", () => {
+    const { container } = renderSidebar();
+
+    expect(container.querySelector(".chat-sidebar-title")).toBeNull();
+  });
 
   it("keeps the session menu inside the viewport when the anchor is near the bottom", async () => {
     const user = userEvent.setup();
@@ -817,6 +858,144 @@ describe("ChatSidebar session menu", () => {
     expect(menu.parentElement).toBe(document.body);
     expect(Number(menu.style.top.replace("px", ""))).toBeLessThan(560);
     expect(Number(menu.style.left.replace("px", ""))).toBeGreaterThanOrEqual(8);
+  });
+
+  it("shows the first five chats and collapses the rest in large project groups", async () => {
+    const user = userEvent.setup();
+    const sessions = Array.from({ length: 6 }, (_, index) => ({
+      ...makeSession("project-a"),
+      id: `chat-${index + 1}`,
+      title: `Topic ${index + 1}`,
+    }));
+
+    render(
+      <ChatSidebar
+        sessions={sessions}
+        projects={projects}
+        currentId="chat-1"
+        open
+        busy={false}
+        onClose={() => undefined}
+        onNew={() => undefined}
+        onOpen={() => undefined}
+        onRename={() => undefined}
+        onTogglePinned={() => undefined}
+        onDelete={() => undefined}
+        onReorderProjects={async () => undefined}
+      />,
+    );
+
+    expect(screen.getByText("Topic 1")).toBeTruthy();
+    expect(screen.getByText("Topic 5")).toBeTruthy();
+    expect(screen.queryByText("Topic 6")).toBeNull();
+    const toggle = screen.getByRole("button", { name: "Alpha, 6 chats, collapsed" });
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+
+    await user.click(toggle);
+
+    expect(screen.getByText("Topic 6")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Alpha, 6 chats, expanded" }).getAttribute("aria-expanded")).toBe("true");
+  });
+});
+
+describe("ChatSidebar project drag", () => {
+  const projects: DesktopProject[] = [
+    { id: "project-a", name: "Alpha", path: "C:/Alpha", addedAt: 1, lastOpenedAt: 3 },
+    { id: "project-b", name: "Beta", path: "C:/Beta", addedAt: 1, lastOpenedAt: 2 },
+    { id: "project-c", name: "Gamma", path: "C:/Gamma", addedAt: 1, lastOpenedAt: 1 },
+  ];
+  const sessions = projects.map((project, index) => ({
+    ...makeSession(project.id),
+    id: `chat-${index}`,
+    title: `${project.name} chat`,
+  }));
+
+  function renderProjectDragSidebar() {
+    return render(
+      <ChatSidebar
+        sessions={sessions}
+        projects={projects}
+        currentId="chat-0"
+        open
+        busy={false}
+        onClose={() => undefined}
+        onNew={() => undefined}
+        onOpen={() => undefined}
+        onRename={() => undefined}
+        onTogglePinned={() => undefined}
+        onDelete={() => undefined}
+        onReorderProjects={async () => undefined}
+      />,
+    );
+  }
+
+  function rect(top: number, height: number) {
+    return {
+      top,
+      right: 220,
+      bottom: top + height,
+      left: 0,
+      width: 220,
+      height,
+      x: 0,
+      y: top,
+      toJSON: () => undefined,
+    } as DOMRect;
+  }
+
+  function fireProjectPointer(
+    target: Window | Document | Node | Element,
+    type: "pointerdown" | "pointermove" | "pointerup" | "pointercancel",
+    init: { clientX: number; clientY: number; pointerId: number; button?: number; buttons?: number },
+  ) {
+    const event = new Event(type, { bubbles: true, cancelable: true });
+    Object.defineProperty(event, "clientX", { value: init.clientX });
+    Object.defineProperty(event, "clientY", { value: init.clientY });
+    Object.defineProperty(event, "pointerId", { value: init.pointerId });
+    Object.defineProperty(event, "button", { value: init.button ?? 0 });
+    Object.defineProperty(event, "buttons", { value: init.buttons ?? 1 });
+    fireEvent(target, event);
+  }
+
+  it("does not compound drag offset when a transformed group rect is measured without its transform", async () => {
+    if (!HTMLElement.prototype.setPointerCapture) {
+      Object.defineProperty(HTMLElement.prototype, "setPointerCapture", {
+        configurable: true,
+        value: vi.fn(),
+      });
+    }
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      const group = this.matches("[data-chat-project-id]")
+        ? this
+        : this.closest<HTMLElement>("[data-chat-project-id]");
+      if (group) {
+        const groups = Array.from(document.querySelectorAll<HTMLElement>("[data-chat-project-id]"));
+        const index = Math.max(0, groups.indexOf(group));
+        const top = 100 + index * 64;
+        return rect(top, this.matches("[data-chat-project-label-id]") ? 28 : 56);
+      }
+      return rect(0, 0);
+    });
+
+    renderProjectDragSidebar();
+    const alphaToggle = screen.getByRole("button", { name: "Alpha, 1 chats, expanded" });
+    const alphaLabel = alphaToggle.closest<HTMLElement>("[data-chat-project-label-id]")!;
+    const alphaGroup = document.querySelector<HTMLElement>("[data-chat-project-id='project-a']")!;
+
+    act(() => {
+      fireProjectPointer(alphaLabel, "pointerdown", { button: 0, buttons: 1, clientX: 12, clientY: 110, pointerId: 9 });
+    });
+    act(() => {
+      fireProjectPointer(document, "pointermove", { buttons: 1, clientX: 12, clientY: 140, pointerId: 9 });
+    });
+
+    await waitFor(() => expect(alphaGroup.style.transform).toBe("translateY(30px)"));
+
+    act(() => {
+      fireProjectPointer(document, "pointermove", { buttons: 1, clientX: 12, clientY: 150, pointerId: 9 });
+    });
+
+    await waitFor(() => expect(alphaGroup.style.transform).toBe("translateY(40px)"));
   });
 });
 

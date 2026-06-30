@@ -3,8 +3,10 @@
 //! resources into the provider-neutral shapes in `model.rs`. All operations run
 //! live, so changes appear in the Outlook web UI immediately.
 
+use base64::Engine;
 use serde_json::{json, Value};
 
+use super::draft_attachment;
 use super::model::{
     MailAttachment, MailDraft, MailFolder, MailMessageFull, MailMessageList, MailMessageSummary,
     MailModifyPatch,
@@ -392,6 +394,23 @@ pub fn send(token: &str, draft: &MailDraft) -> Result<(), String> {
     }
     if !draft.bcc.is_empty() {
         message.insert("bccRecipients".into(), json!(recipients_json(&draft.bcc)));
+    }
+    let attachments = draft_attachment::resolve_all(draft)?;
+    if !attachments.is_empty() {
+        message.insert(
+            "attachments".into(),
+            json!(
+                attachments
+                    .iter()
+                    .map(|attachment| json!({
+                        "@odata.type": "#microsoft.graph.fileAttachment",
+                        "name": attachment.filename,
+                        "contentType": attachment.mime_type,
+                        "contentBytes": base64::engine::general_purpose::STANDARD.encode(&attachment.bytes),
+                    }))
+                    .collect::<Vec<_>>()
+            ),
+        );
     }
 
     let resp = client()

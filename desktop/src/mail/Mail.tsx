@@ -9,7 +9,7 @@ import {
   type PointerEvent as ReactPointerEvent,
   type UIEvent,
 } from "react";
-import arisIcon from "../assets/aris-icon.svg";
+import arisIcon from "../assets/app-logo.png";
 import avatarManBlue from "../assets/mail/avatar-man-blue-shirt.png";
 import avatarWomanBlazer from "../assets/mail/avatar-woman-navy-blazer.png";
 import avatarManNavy from "../assets/mail/avatar-man-navy-sweater.png";
@@ -21,6 +21,7 @@ import {
   mailModify,
   mailRead,
   mailSend,
+  onMailNewMessage,
   isTauri,
 } from "../api/tauri";
 import { useStore } from "../store";
@@ -526,7 +527,7 @@ function Avatar({
       title={title}
     >
       <span>{label}</span>
-      <img src={avatarImage(seed)} alt="" />
+      <img src={avatarImage(seed)} alt="" loading="lazy" decoding="async" />
     </span>
   );
 }
@@ -690,7 +691,6 @@ export default function Mail() {
     () => [...messages].sort((a, b) => messageTime(b) - messageTime(a)),
     [messages],
   );
-
   const fail = useCallback((e: unknown) => setError(String(e)), []);
 
   useEffect(() => {
@@ -804,6 +804,38 @@ export default function Mail() {
     },
     [loadList, nextPageToken],
   );
+
+  useEffect(() => {
+    if (previewMode || !accountId) return;
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+    onMailNewMessage((event) => {
+      if (event.accountId !== accountId) return;
+      setFolders((prev) =>
+        prev.map((item) =>
+          item.id === event.folder
+            ? { ...item, unreadCount: item.unreadCount + (event.message.unread ? 1 : 0) }
+            : item,
+        ),
+      );
+      if (event.folder !== folder || query.trim()) return;
+      setMessages((prev) =>
+        prev.some((message) => message.id === event.message.id)
+          ? prev
+          : [event.message, ...prev],
+      );
+      MAIL_VIEW_CACHE.listKey = mailListKey(accountId, folder, query);
+    })
+      .then((handler) => {
+        if (disposed) handler();
+        else unlisten = handler;
+      })
+      .catch(() => undefined);
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [accountId, folder, previewMode, query]);
 
   useEffect(() => {
     if (!accountId) return;
@@ -960,7 +992,7 @@ export default function Mail() {
     return (
       <div className="agent-mail-empty">
         <div className="agent-mail-empty-card">
-          <img src={arisIcon} alt="" />
+          <img src={arisIcon} alt="" decoding="async" />
           <h2>正在打开邮箱</h2>
           <p>正在读取已连接账号和文件夹，请稍等。</p>
         </div>
@@ -972,12 +1004,12 @@ export default function Mail() {
     return (
       <div className="agent-mail-empty">
         <div className="agent-mail-empty-card">
-          <img src={arisIcon} alt="" />
+          <img src={arisIcon} alt="" decoding="async" />
           <h2>{previewMode ? "浏览器预览无法读取邮箱" : "连接一个邮箱账号"}</h2>
           <p>
             {previewMode
-              ? "当前页面运行在 Vite 浏览器预览中，没有桌面端邮箱后端。请在 ARIS 桌面应用的 Mail 标签查看真实 Gmail/IMAP/Outlook 内容。"
-              : "添加 IMAP、Gmail 或 Outlook 账号后，ARIS Mail 会在这里展示真实收件箱、阅读区和邮件助手。"}
+              ? "当前页面运行在 Vite 浏览器预览中，没有桌面端邮箱后端。请在 SomniQ 桌面应用的 Mail 标签查看真实 Gmail/IMAP/Outlook 内容。"
+              : "添加 IMAP、Gmail 或 Outlook 账号后，SomniQ Mail 会在这里展示真实收件箱、阅读区和邮件助手。"}
           </p>
           <button className="am-primary" onClick={() => setTab("settings")}>
             打开邮箱设置
@@ -992,8 +1024,8 @@ export default function Mail() {
     <div className="agent-mail">
       <aside className="am-sidebar">
         <div className="am-brand">
-          <img src={arisIcon} alt="" />
-          <span>ARIS Mail</span>
+          <img src={arisIcon} alt="" decoding="async" />
+          <span>SomniQ Mail</span>
         </div>
 
         <button className="am-compose" onClick={() => setCompose(EMPTY_COMPOSE)}>

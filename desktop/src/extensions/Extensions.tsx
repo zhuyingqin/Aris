@@ -79,7 +79,7 @@ interface CatalogItem {
   build: () => McpStdioServerInput;
 }
 
-/** Curated one-click MCP servers ARIS knows how to launch. The `id` must match
+/** Curated one-click MCP servers SomniQ knows how to launch. The `id` must match
  *  the server `name` we write so the connected-state check lines up. On Windows,
  *  npm-shim CLIs (codex) must go through `cmd /c` — the runtime spawns via
  *  CreateProcess, which cannot execute a `.cmd` directly. */
@@ -113,7 +113,7 @@ const MCP_CATALOG: CatalogItem[] = [
   {
     id: "playwright",
     name: "Playwright",
-    description: "Browser automation via ARIS bundled Playwright MCP.",
+    description: "Browser automation via SomniQ bundled Playwright MCP.",
     glyph: "P",
     build: () => ({
       name: "playwright",
@@ -337,7 +337,7 @@ export default function Extensions() {
           <h1>{extTab === "plugins" ? "插件" : "技能"}</h1>
           <p>
             {extTab === "plugins"
-              ? "在 ARIS 中接入并管理 MCP 工具"
+              ? "在 SomniQ 中接入并管理 MCP 工具"
               : "浏览并查看当前可用的技能"}
           </p>
         </div>

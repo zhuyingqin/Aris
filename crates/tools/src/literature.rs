@@ -15,6 +15,7 @@
 //!   id is given, mark it downloaded in the library.
 
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -29,6 +30,7 @@ const USER_AGENT: &str = concat!(
     env!("CARGO_PKG_VERSION"),
     " (literature tools; +https://github.com/zhuyingqin/Aris)"
 );
+const SCIENCEDIRECT_ORIGIN: &str = "https://www.sciencedirect.com";
 
 const ATOM_NS: &str = "http://www.w3.org/2005/Atom";
 const ARXIV_NS: &str = "http://arxiv.org/schemas/atom";
@@ -70,6 +72,12 @@ pub struct LiteraturePdfDownloadInput {
     pub paper_id: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LiteratureBrowserDownloadTaskInput {
+    pub paper: RemotePaper,
+}
+
 // ── Tool entry points (sync, pretty-JSON out) ───────────────────────────────
 
 pub fn run_literature_search(input: LiteratureSearchInput) -> Result<String, String> {
@@ -101,6 +109,14 @@ pub fn run_literature_pdf_download(input: LiteraturePdfDownloadInput) -> Result<
         input.paper_id.as_deref(),
     )?;
     serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+}
+
+pub fn run_literature_browser_download_task(
+    input: LiteratureBrowserDownloadTaskInput,
+) -> Result<String, String> {
+    let task = browser_download_task_for_paper(&input.paper)?
+        .ok_or_else(|| "no IEEE Xplore or ScienceDirect browser route found".to_string())?;
+    serde_json::to_string_pretty(&task).map_err(|e| e.to_string())
 }
 
 fn workspace_base() -> Result<PathBuf, String> {
@@ -377,7 +393,7 @@ fn non_empty(value: &str) -> Option<String> {
 
 // ── Remote search ───────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemotePaper {
     pub id: String,
@@ -837,14 +853,61 @@ fn scopus_query(query: &str) -> String {
         "AFFIL(",
     ];
     let compact = collapse_whitespace(query);
-    let fielded = FIELD_CODES
-        .iter()
-        .any(|code| compact.replace(" (", "(").contains(code));
+    if let Some(doi) = scopus_doi_query(&compact) {
+        return format!("DOI({doi})");
+    }
+    let field_probe = compact.to_ascii_uppercase().replace(" (", "(");
+    let fielded = FIELD_CODES.iter().any(|code| field_probe.contains(code));
     if fielded {
         compact
+    } else if should_quote_scopus_query(&compact) {
+        format!("TITLE-ABS-KEY(\"{}\")", scopus_phrase(&compact))
     } else {
         format!("TITLE-ABS-KEY({compact})")
     }
+}
+
+fn scopus_doi_query(query: &str) -> Option<String> {
+    let value = query
+        .trim()
+        .trim_start_matches("doi:")
+        .trim_start_matches("DOI:")
+        .trim()
+        .trim_start_matches("https://doi.org/")
+        .trim_start_matches("http://doi.org/")
+        .trim();
+    let value = value
+        .trim_matches(['.', ',', ';', ':', ')', ']', '}', '）'])
+        .to_ascii_lowercase();
+    is_doi_like(&value).then_some(value)
+}
+
+fn is_doi_like(value: &str) -> bool {
+    let Some(after_prefix) = value.strip_prefix("10.") else {
+        return false;
+    };
+    let Some((registrant, suffix)) = after_prefix.split_once('/') else {
+        return false;
+    };
+    (4..=9).contains(&registrant.len())
+        && registrant.chars().all(|ch| ch.is_ascii_digit())
+        && suffix.len() >= 3
+}
+
+fn should_quote_scopus_query(query: &str) -> bool {
+    let words = query.split_whitespace().count();
+    let booleanish = query
+        .split_whitespace()
+        .any(|word| matches!(word.to_ascii_uppercase().as_str(), "AND" | "OR" | "NOT"));
+    !booleanish
+        && (words >= 6
+            || query
+                .chars()
+                .any(|ch| matches!(ch, ':' | '"' | '\'' | '–' | '—' | '：')))
+}
+
+fn scopus_phrase(query: &str) -> String {
+    collapse_whitespace(&query.replace(['"', '“', '”'], " ").replace(['–', '—'], "-"))
 }
 
 fn search_scopus(
@@ -1066,6 +1129,428 @@ pub fn download_pdf_at(
         "relativePath": relative_path,
         "bytes": bytes.len(),
     }))
+}
+
+fn validate_pdf_file(path: &Path) -> Result<(), String> {
+    let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
+    if bytes.len() as u64 > MAX_PDF_BYTES {
+        return Err(format!("PDF is too large ({} bytes)", bytes.len()));
+    }
+    if !bytes.starts_with(b"%PDF") {
+        return Err(format!("{} is not a valid PDF", path.display()));
+    }
+    Ok(())
+}
+
+pub fn download_best_pdf_for_paper_at(base: &Path, paper: &RemotePaper) -> Result<Value, String> {
+    let file_name = preferred_pdf_file_name(paper);
+    let mut errors = Vec::new();
+    if let Some(pdf_url) = paper.pdf_url.as_deref() {
+        match download_pdf_at(base, pdf_url, &file_name, Some(&paper.id)) {
+            Ok(result) => return Ok(result),
+            Err(error) => errors.push(format!("direct PDF: {error}")),
+        }
+    }
+
+    match publisher_pdf_url(paper) {
+        Ok(Some(url)) => match download_pdf_at(base, &url, &file_name, Some(&paper.id)) {
+            Ok(result) => Ok(result),
+            Err(error) => {
+                errors.push(format!("publisher route: {error}"));
+                Err(errors.join("; "))
+            }
+        },
+        Ok(None) => {
+            errors.push("no IEEE/ScienceDirect PDF route found".to_string());
+            Err(errors.join("; "))
+        }
+        Err(error) => {
+            errors.push(error);
+            Err(errors.join("; "))
+        }
+    }
+}
+
+pub fn browser_download_task_for_paper(paper: &RemotePaper) -> Result<Option<Value>, String> {
+    match publisher_browser_route(paper)? {
+        Some(PublisherBrowserRoute::Ieee { arnumber, page_url }) => Ok(Some(json!({
+            "title": paper.title,
+            "doi": paper.doi,
+            "publisher": "IEEE",
+            "page_url": page_url,
+            "pdf_url": format!("https://ieeexplore.ieee.org/stampPDF/getPDF.jsp?tp=&arnumber={arnumber}&ref="),
+            "extractor": "",
+            "notes": "Use a real browser session; direct HTTP may return 502."
+        }))),
+        Some(PublisherBrowserRoute::ScienceDirect { page_url }) => Ok(Some(json!({
+            "title": paper.title,
+            "doi": paper.doi,
+            "publisher": "Elsevier/ScienceDirect",
+            "page_url": page_url,
+            "pdf_url": "",
+            "extractor": "sciencedirect_viewpdf",
+            "notes": "Open the article page in a real browser and extract the ViewPDF/pdfft href."
+        }))),
+        None => Ok(None),
+    }
+}
+
+pub fn browser_download_pdf_for_paper_at(
+    base: &Path,
+    paper: &RemotePaper,
+) -> Result<Value, String> {
+    let task = browser_download_task_for_paper(paper)?
+        .ok_or_else(|| "no browser-download task route found".to_string())?;
+    let skill_dir = PathBuf::from(runtime::home_dir())
+        .join(".codex")
+        .join("skills")
+        .join("paper-pdf-downloader");
+    let script = skill_dir.join("scripts").join("browser_batch_download.py");
+    if !script.exists() {
+        return Err(format!(
+            "paper-pdf-downloader browser script not found: {}",
+            script.display()
+        ));
+    }
+
+    let work_dir = base
+        .join("tmp")
+        .join("paper-browser-download")
+        .join(format!("{:x}", epoch_millis()));
+    std::fs::create_dir_all(&work_dir).map_err(|error| error.to_string())?;
+    let tasks_path = work_dir.join("tasks.json");
+    let results_path = work_dir.join("download-results.json");
+    let output_dir = base.join(PAPERS_DIR);
+    std::fs::create_dir_all(&output_dir).map_err(|error| error.to_string())?;
+    let tasks = serde_json::to_vec_pretty(&json!([task])).map_err(|error| error.to_string())?;
+    std::fs::write(&tasks_path, tasks).map_err(|error| error.to_string())?;
+
+    let port = 9300 + (epoch_millis() % 500) as u16;
+    let output = Command::new("python")
+        .arg(&script)
+        .arg("--tasks")
+        .arg(&tasks_path)
+        .arg("--output-dir")
+        .arg(&output_dir)
+        .arg("--results-out")
+        .arg(&results_path)
+        .arg("--port")
+        .arg(port.to_string())
+        .arg("--skip-existing")
+        .output()
+        .map_err(|error| format!("failed to start browser downloader: {error}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        return Err(format!(
+            "browser downloader failed: {}{}",
+            stderr.trim(),
+            if stdout.trim().is_empty() {
+                String::new()
+            } else {
+                format!("; stdout: {}", stdout.trim())
+            }
+        ));
+    }
+
+    let raw = std::fs::read_to_string(&results_path).map_err(|error| error.to_string())?;
+    let results: Value = serde_json::from_str(&raw)
+        .map_err(|error| format!("browser download results are invalid JSON: {error}"))?;
+    let Some(item) = results.as_array().and_then(|items| items.first()) else {
+        return Err("browser downloader returned no result rows".to_string());
+    };
+    let status = item["status"].as_str().unwrap_or("");
+    if !matches!(status, "downloaded" | "skipped") {
+        return Err(item["reason"]
+            .as_str()
+            .unwrap_or("browser downloader did not download the PDF")
+            .to_string());
+    }
+    let path = item["file"]
+        .as_str()
+        .ok_or_else(|| "browser downloader result did not include a file path".to_string())?;
+    let path = PathBuf::from(path);
+    validate_pdf_file(&path)?;
+    let bytes = std::fs::metadata(&path)
+        .map_err(|error| error.to_string())?
+        .len() as usize;
+    let relative_path = path
+        .strip_prefix(base)
+        .ok()
+        .map(|path| path.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_else(|| path.to_string_lossy().to_string());
+    mark_pdf_downloaded(base, &paper.id, &relative_path, bytes)?;
+    Ok(json!({
+        "path": path.to_string_lossy(),
+        "relativePath": relative_path,
+        "bytes": bytes,
+        "method": "browser"
+    }))
+}
+
+enum PublisherBrowserRoute {
+    Ieee { arnumber: String, page_url: String },
+    ScienceDirect { page_url: String },
+}
+
+fn publisher_browser_route(paper: &RemotePaper) -> Result<Option<PublisherBrowserRoute>, String> {
+    let candidates = publisher_route_candidates(paper)?;
+    for candidate in candidates {
+        if let Some(arnumber) = parse_ieee_arnumber(&candidate) {
+            return Ok(Some(PublisherBrowserRoute::Ieee {
+                page_url: format!("https://ieeexplore.ieee.org/document/{arnumber}/"),
+                arnumber,
+            }));
+        }
+        if let Some(candidate) = sciencedirect_article_page_url(&candidate) {
+            return Ok(Some(PublisherBrowserRoute::ScienceDirect {
+                page_url: candidate,
+            }));
+        }
+    }
+    Ok(None)
+}
+
+fn preferred_pdf_file_name(paper: &RemotePaper) -> String {
+    paper
+        .arxiv_id
+        .as_deref()
+        .unwrap_or(&paper.id)
+        .replace(['/', ':'], "-")
+}
+
+fn publisher_pdf_url(paper: &RemotePaper) -> Result<Option<String>, String> {
+    let client = http_client()?;
+    let candidates = publisher_route_candidates_with_client(paper, &client)?;
+    for candidate in candidates {
+        if let Some(arnumber) = parse_ieee_arnumber(&candidate) {
+            return Ok(Some(format!(
+                "https://ieeexplore.ieee.org/stampPDF/getPDF.jsp?tp=&arnumber={arnumber}&ref="
+            )));
+        }
+        if let Some(page_url) = sciencedirect_article_page_url(&candidate) {
+            return extract_sciencedirect_pdf_url(&client, &page_url).map(Some);
+        }
+    }
+    Ok(None)
+}
+
+fn publisher_route_candidates(paper: &RemotePaper) -> Result<Vec<String>, String> {
+    let client = http_client()?;
+    publisher_route_candidates_with_client(paper, &client)
+}
+
+fn publisher_route_candidates_with_client(
+    paper: &RemotePaper,
+    client: &reqwest::blocking::Client,
+) -> Result<Vec<String>, String> {
+    let mut candidates = Vec::new();
+    if let Some(url) = paper.url.as_deref() {
+        candidates.push(url.to_string());
+    }
+    if let Some(pdf_url) = paper.pdf_url.as_deref() {
+        candidates.push(pdf_url.to_string());
+    }
+    if let Some(doi) = paper.doi.as_deref() {
+        if let Ok(mut crossref_candidates) = crossref_route_candidates(client, doi) {
+            candidates.append(&mut crossref_candidates);
+        }
+        if let Ok(resolved) = resolve_doi_url(&client, doi) {
+            candidates.push(resolved);
+        }
+    }
+    candidates = dedupe_strings(candidates);
+    Ok(candidates)
+}
+
+fn crossref_route_candidates(
+    client: &reqwest::blocking::Client,
+    doi: &str,
+) -> Result<Vec<String>, String> {
+    let doi = doi
+        .trim()
+        .trim_start_matches("https://doi.org/")
+        .trim_start_matches("http://doi.org/");
+    let body: Value = client
+        .get(format!("https://api.crossref.org/works/{doi}"))
+        .send()
+        .map_err(|error| error.to_string())?
+        .error_for_status()
+        .map_err(|error| error.to_string())?
+        .json()
+        .map_err(|error| error.to_string())?;
+    let message = &body["message"];
+    let mut candidates = Vec::new();
+    let publisher = message["publisher"].as_str().unwrap_or("");
+    let resource = message["resource"]["primary"]["URL"]
+        .as_str()
+        .or_else(|| message["URL"].as_str())
+        .unwrap_or("");
+    if !resource.is_empty() {
+        candidates.push(resource.to_string());
+    }
+    if let Some(url) = message["URL"].as_str() {
+        candidates.push(url.to_string());
+    }
+    if let Some(links) = message["link"].as_array() {
+        for link in links {
+            if let Some(url) = link["URL"].as_str() {
+                candidates.push(url.to_string());
+            }
+        }
+    }
+
+    let lowered = format!("{publisher} {resource}").to_ascii_lowercase();
+    if lowered.contains("elsevier") || lowered.contains("sciencedirect") {
+        if let Some(page_url) = sciencedirect_article_page_url(resource) {
+            candidates.push(page_url);
+        }
+    }
+    if lowered.contains("ieee") || lowered.contains("ieeexplore") {
+        for candidate in candidates.clone() {
+            if let Some(arnumber) = parse_ieee_arnumber(&candidate) {
+                candidates.push(format!("https://ieeexplore.ieee.org/document/{arnumber}/"));
+                break;
+            }
+        }
+    }
+    Ok(dedupe_strings(candidates))
+}
+
+fn dedupe_strings(items: Vec<String>) -> Vec<String> {
+    let mut out = Vec::new();
+    for item in items {
+        if !item.trim().is_empty() && !out.iter().any(|existing: &String| existing == &item) {
+            out.push(item);
+        }
+    }
+    out
+}
+
+fn resolve_doi_url(client: &reqwest::blocking::Client, doi: &str) -> Result<String, String> {
+    let doi = doi
+        .trim()
+        .trim_start_matches("https://doi.org/")
+        .trim_start_matches("http://doi.org/");
+    client
+        .get(format!("https://doi.org/{doi}"))
+        .send()
+        .map_err(|error| error.to_string())?
+        .error_for_status()
+        .map_err(|error| error.to_string())
+        .map(|response| response.url().to_string())
+}
+
+fn parse_ieee_arnumber(url: &str) -> Option<String> {
+    find_digits_after(url, "/document/")
+        .or_else(|| find_digits_after(url, "arnumber="))
+        .or_else(|| find_digits_before_suffix(url, ".pdf"))
+}
+
+fn find_digits_after(value: &str, marker: &str) -> Option<String> {
+    let start = value.find(marker)? + marker.len();
+    let digits = value[start..]
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect::<String>();
+    (!digits.is_empty()).then_some(digits)
+}
+
+fn find_digits_before_suffix(value: &str, suffix: &str) -> Option<String> {
+    let end = value.find(suffix)?;
+    let prefix = &value[..end];
+    let digits = prefix
+        .chars()
+        .rev()
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect::<String>();
+    (!digits.is_empty()).then_some(digits)
+}
+
+fn sciencedirect_article_page_url(url: &str) -> Option<String> {
+    if url.contains("sciencedirect.com/science/article/pii/") {
+        return Some(
+            url.split(['?', '#'])
+                .next()
+                .unwrap_or(url)
+                .trim_end_matches('/')
+                .to_string(),
+        );
+    }
+    parse_sciencedirect_pii(url)
+        .map(|pii| format!("https://www.sciencedirect.com/science/article/pii/{pii}"))
+}
+
+fn parse_sciencedirect_pii(url: &str) -> Option<String> {
+    for marker in ["/pii/", "retrieve/pii/"] {
+        if let Some(start) = url.find(marker).map(|start| start + marker.len()) {
+            let pii = url[start..]
+                .chars()
+                .take_while(|ch| !matches!(ch, '?' | '#' | '/' | '&'))
+                .collect::<String>();
+            if !pii.is_empty() {
+                return Some(pii);
+            }
+        }
+    }
+    None
+}
+
+fn extract_sciencedirect_pdf_url(
+    client: &reqwest::blocking::Client,
+    page_url: &str,
+) -> Result<String, String> {
+    let html = client
+        .get(page_url)
+        .send()
+        .map_err(|error| error.to_string())?
+        .error_for_status()
+        .map_err(|error| error.to_string())?
+        .text()
+        .map_err(|error| error.to_string())?;
+    find_sciencedirect_pdf_href(&html)
+        .map(|href| absolutize_sciencedirect_url(&href))
+        .ok_or_else(|| "ScienceDirect page did not expose a ViewPDF/pdfft link".to_string())
+}
+
+fn find_sciencedirect_pdf_href(html: &str) -> Option<String> {
+    for marker in ["href=\"", "href='", "\"href\":\""] {
+        let quote = if marker.ends_with('\'') { '\'' } else { '"' };
+        let mut rest = html;
+        while let Some(index) = rest.find(marker) {
+            let after = &rest[index + marker.len()..];
+            if let Some(end) = after.find(quote) {
+                let href = html_unescape(&after[..end]);
+                if href.contains("/science/article/pii/") && href.contains("/pdfft?") {
+                    return Some(href);
+                }
+                rest = &after[end + 1..];
+            } else {
+                break;
+            }
+        }
+    }
+    None
+}
+
+fn absolutize_sciencedirect_url(url: &str) -> String {
+    if url.starts_with("http://") || url.starts_with("https://") {
+        url.to_string()
+    } else if url.starts_with('/') {
+        format!("{SCIENCEDIRECT_ORIGIN}{url}")
+    } else {
+        format!("{SCIENCEDIRECT_ORIGIN}/{url}")
+    }
+}
+
+fn html_unescape(value: &str) -> String {
+    value
+        .replace("\\/", "/")
+        .replace("&amp;", "&")
+        .replace("\\u0026", "&")
 }
 
 fn mark_pdf_downloaded(
@@ -1403,12 +1888,143 @@ mod tests {
             "TITLE-ABS-KEY(satellite congestion control)"
         );
         assert_eq!(
+            scopus_query("10.1109/TKDE.2020.2981314"),
+            "DOI(10.1109/tkde.2020.2981314)"
+        );
+        assert_eq!(
+            scopus_query(
+                "Reinforcement learning–guided angle PSO for optimizing echo state networks in wind power forecasting"
+            ),
+            "TITLE-ABS-KEY(\"Reinforcement learning-guided angle PSO for optimizing echo state networks in wind power forecasting\")"
+        );
+        assert_eq!(
             scopus_query("TITLE-ABS-KEY(\"semantic communication\") AND PUBYEAR > 2020"),
             "TITLE-ABS-KEY(\"semantic communication\") AND PUBYEAR > 2020"
         );
         assert_eq!(
             scopus_query("AUTH(rivera) AND KEY(agents)"),
             "AUTH(rivera) AND KEY(agents)"
+        );
+    }
+
+    #[test]
+    fn parses_ieee_stamp_pdf_routes() {
+        assert_eq!(
+            parse_ieee_arnumber("https://ieeexplore.ieee.org/document/9039685/").as_deref(),
+            Some("9039685")
+        );
+        assert_eq!(
+            parse_ieee_arnumber(
+                "https://ieeexplore.ieee.org/stampPDF/getPDF.jsp?tp=&arnumber=9039685&ref="
+            )
+            .as_deref(),
+            Some("9039685")
+        );
+    }
+
+    #[test]
+    fn extracts_sciencedirect_pdfft_links() {
+        let html = r#"
+          <a aria-label="View PDF" href="/science/article/pii/S0010482520301621/pdfft?md5=abc&amp;pid=main.pdf">ViewPDF</a>
+        "#;
+        let href = find_sciencedirect_pdf_href(html).expect("href");
+        assert_eq!(
+            absolutize_sciencedirect_url(&href),
+            "https://www.sciencedirect.com/science/article/pii/S0010482520301621/pdfft?md5=abc&pid=main.pdf"
+        );
+    }
+
+    #[test]
+    fn maps_elsevier_linkinghub_pii_to_sciencedirect_page() {
+        assert_eq!(
+            sciencedirect_article_page_url(
+                "https://linkinghub.elsevier.com/retrieve/pii/S0020025526001908"
+            )
+            .as_deref(),
+            Some("https://www.sciencedirect.com/science/article/pii/S0020025526001908")
+        );
+    }
+
+    #[test]
+    fn builds_ieee_browser_download_task() {
+        let paper = RemotePaper {
+            id: "doi:10.1109/tkde.2020.2981314".into(),
+            title: "A Survey on Deep Learning for Named Entity Recognition".into(),
+            authors: Vec::new(),
+            year: Some(2022),
+            venue: "IEEE Transactions on Knowledge and Data Engineering".into(),
+            doi: Some("10.1109/tkde.2020.2981314".into()),
+            arxiv_id: None,
+            summary: String::new(),
+            url: Some("https://ieeexplore.ieee.org/document/9039685/".into()),
+            pdf_url: None,
+            source: "IEEE".into(),
+            published: None,
+            cited_by: None,
+        };
+        let task = browser_download_task_for_paper(&paper)
+            .expect("task")
+            .expect("publisher task");
+        assert_eq!(task["publisher"], "IEEE");
+        assert_eq!(
+            task["pdf_url"],
+            "https://ieeexplore.ieee.org/stampPDF/getPDF.jsp?tp=&arnumber=9039685&ref="
+        );
+    }
+
+    #[test]
+    fn builds_sciencedirect_browser_download_task() {
+        let paper = RemotePaper {
+            id: "doi:10.1016/j.compbiomed.2020.103792".into(),
+            title: "COVID-19 diagnosis using artificial intelligence".into(),
+            authors: Vec::new(),
+            year: Some(2020),
+            venue: "Computers in Biology and Medicine".into(),
+            doi: Some("10.1016/j.compbiomed.2020.103792".into()),
+            arxiv_id: None,
+            summary: String::new(),
+            url: Some("https://www.sciencedirect.com/science/article/pii/S0010482520301621".into()),
+            pdf_url: None,
+            source: "ScienceDirect".into(),
+            published: None,
+            cited_by: None,
+        };
+        let task = browser_download_task_for_paper(&paper)
+            .expect("task")
+            .expect("publisher task");
+        assert_eq!(task["publisher"], "Elsevier/ScienceDirect");
+        assert_eq!(task["extractor"], "sciencedirect_viewpdf");
+        assert_eq!(
+            task["page_url"],
+            "https://www.sciencedirect.com/science/article/pii/S0010482520301621"
+        );
+    }
+
+    #[test]
+    fn builds_sciencedirect_browser_task_from_elsevier_linkinghub() {
+        let paper = RemotePaper {
+            id: "doi:10.1016/j.ins.2026.123259".into(),
+            title: "Reinforcement learning-guided angle PSO for optimizing echo state networks in wind power forecasting".into(),
+            authors: Vec::new(),
+            year: Some(2026),
+            venue: "Information Sciences".into(),
+            doi: Some("10.1016/j.ins.2026.123259".into()),
+            arxiv_id: None,
+            summary: String::new(),
+            url: Some("https://linkinghub.elsevier.com/retrieve/pii/S0020025526001908".into()),
+            pdf_url: None,
+            source: "Scopus".into(),
+            published: None,
+            cited_by: None,
+        };
+        let task = browser_download_task_for_paper(&paper)
+            .expect("task")
+            .expect("publisher task");
+        assert_eq!(task["publisher"], "Elsevier/ScienceDirect");
+        assert_eq!(task["extractor"], "sciencedirect_viewpdf");
+        assert_eq!(
+            task["page_url"],
+            "https://www.sciencedirect.com/science/article/pii/S0020025526001908"
         );
     }
 

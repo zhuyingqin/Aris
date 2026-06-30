@@ -13,21 +13,21 @@ use std::{
     sync::mpsc::{self, RecvTimeoutError, Sender},
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use aris_commands::{slash_command_specs, SlashCommand};
 use serde::Serialize;
-use serde_json::{json, Value};
-use tauri::{AppHandle, Emitter, State};
+use serde_json::{json, Map, Value};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use runtime::{
-    CompactionConfig, ConfigLoader, ConfigSource, ContentBlock, ConversationMessage, MessageRole,
-    PermissionMode, PermissionPromptDecision, PermissionPrompter, PermissionRequest,
-    ProjectContext, ResolvedPermissionMode, RuntimeError, Session, TokenUsage, ToolError,
-    ToolExecutor, UsageTracker,
+    CompactionConfig, CompactionResult, ConfigLoader, ConfigSource, ContentBlock,
+    ConversationMessage, MessageRole, PermissionMode, PermissionPromptDecision, PermissionPrompter,
+    PermissionRequest, ProjectContext, ResolvedPermissionMode, RuntimeError, Session, TokenUsage,
+    ToolError, ToolExecutor, UsageTracker,
 };
 
 /// Per-app chat sessions, keyed by the UI session id.
@@ -129,7 +129,7 @@ fn is_disabled_desktop_slash_command(command_name: &str) -> bool {
 
 fn denied_tool_message(tool_name: &str) -> String {
     format!(
-        "tool `{tool_name}` is disabled in desktop Chat because it can escape the isolated ARIS workspace"
+        "tool `{tool_name}` is disabled in desktop Chat because it can escape the isolated SomniQ workspace"
     )
 }
 
@@ -351,7 +351,7 @@ where
                 }
                 let _ = self.app.emit(
                     "chat-tool-result",
-                    json!({ "sessionId": self.session_id, "id": tool_use_id, "name": tool_name, "output": truncate(&err.to_string(), 4000), "isError": true }),
+                    json!({ "sessionId": self.session_id, "id": tool_use_id, "name": tool_name, "output": truncate(&err.to_string(), MAX_TOOL_EVENT_CHARS), "isError": true }),
                 );
                 Err(err)
             }
@@ -441,7 +441,7 @@ impl DesktopPermissionPrompter {
             json!({
                 "sessionId": self.session_id,
                 "name": &request.tool_name,
-                "output": truncate(reason, 4000),
+                "output": truncate(reason, MAX_TOOL_EVENT_CHARS),
                 "isError": true
             }),
         );
@@ -467,7 +467,7 @@ impl PermissionPrompter for DesktopPermissionPrompter {
                     "sessionId": self.session_id,
                     "promptId": prompt_id,
                     "toolName": &request.tool_name,
-                    "input": truncate(&request.input, 4000),
+                    "input": truncate(&request.input, MAX_TOOL_EVENT_CHARS),
                     "currentMode": request.current_mode.as_str(),
                     "requiredMode": request.required_mode.as_str()
                 }),
@@ -536,7 +536,7 @@ struct NoToolsExecutor;
 impl ToolExecutor for NoToolsExecutor {
     fn execute(&mut self, tool_name: &str, _input: &str) -> Result<String, ToolError> {
         Err(ToolError::new(format!(
-            "tool `{tool_name}` is not available while generating chat titles"
+            "tool `{tool_name}` is not available during this no-tools request"
         )))
     }
 }
@@ -667,6 +667,9 @@ const MAX_CONTEXT_TOOL_OUTPUT_CHARS: usize = 64_000;
 const MAX_UI_TOOL_OUTPUT_CHARS: usize = 64_000;
 const MAX_UI_TOOL_INPUT_CHARS: usize = 16_000;
 const MAX_UI_TOOL_INPUT_FIELD_CHARS: usize = 4_000;
+/// Char budget for tool/permission strings emitted into chat events (tool error
+/// output, denial reason, permission-prompt input) before they reach the UI.
+const MAX_TOOL_EVENT_CHARS: usize = 4_000;
 const TOOL_OUTPUT_ARTIFACT_THRESHOLD_CHARS: usize = 64_000;
 const SHELL_STREAM_CONTEXT_CHARS: usize = 12_000;
 
@@ -723,7 +726,7 @@ fn compact_json_string_values_for_ui(value: &mut serde_json::Value) {
             let total = text.chars().count();
             if total > MAX_UI_TOOL_INPUT_FIELD_CHARS {
                 let marker = format!(
-                    "\n\n[ARIS truncated this tool input field for UI: {total} chars total.]\n\n"
+                    "\n\n[SomniQ truncated this tool input field for UI: {total} chars total.]\n\n"
                 );
                 *text = compact_edges(text, MAX_UI_TOOL_INPUT_FIELD_CHARS, &marker);
             }
@@ -747,7 +750,7 @@ fn compact_large_json_string_field(value: &mut serde_json::Value, key: &str, lab
     if total <= MAX_UI_TOOL_INPUT_FIELD_CHARS {
         return;
     }
-    let marker = format!("\n\n[ARIS truncated {label} for UI: {total} chars total.]\n\n");
+    let marker = format!("\n\n[SomniQ truncated {label} for UI: {total} chars total.]\n\n");
     object.insert(
         key.to_string(),
         serde_json::Value::String(compact_edges(&text, MAX_UI_TOOL_INPUT_FIELD_CHARS, &marker)),
@@ -772,7 +775,7 @@ fn omit_large_json_string_field(value: &mut serde_json::Value, key: &str, label:
     object.insert(
         key.to_string(),
         serde_json::Value::String(format!(
-            "[ARIS omitted {label} from UI: {total} chars. The tool receives the full value if this call completes; inspect the file on disk.]"
+            "[SomniQ omitted {label} from UI: {total} chars. The tool receives the full value if this call completes; inspect the file on disk.]"
         )),
     );
     object.insert(format!("{key}Chars"), json!(total));
@@ -784,34 +787,12 @@ fn compact_tool_output_for_context(
     output: String,
     artifact: Option<&ToolOutputArtifact>,
 ) -> String {
-    match tool_name {
-        "Skill" => output,
-        "LiteratureSearch" => compact_text_output_for_limit(
-            compact_literature_search_output(output),
-            artifact,
-            MAX_CONTEXT_TOOL_OUTPUT_CHARS,
-            "tool output",
-        ),
-        "bash" | "PowerShell" => {
-            if output.chars().count() <= MAX_CONTEXT_TOOL_OUTPUT_CHARS && artifact.is_none() {
-                return output;
-            }
-            compact_shell_json_tool_output(&output, artifact).unwrap_or_else(|| {
-                compact_text_output_for_limit(
-                    output,
-                    artifact,
-                    MAX_CONTEXT_TOOL_OUTPUT_CHARS,
-                    "tool output",
-                )
-            })
+    for compactor in output_compactors() {
+        if compactor.can_handle(tool_name) {
+            return compactor.compact(output, artifact, MAX_CONTEXT_TOOL_OUTPUT_CHARS);
         }
-        _ => compact_text_output_for_limit(
-            output,
-            artifact,
-            MAX_CONTEXT_TOOL_OUTPUT_CHARS,
-            "tool output",
-        ),
     }
+    output
 }
 
 fn tool_output_for_ui(output: &str, artifact: Option<&ToolOutputArtifact>) -> String {
@@ -821,6 +802,107 @@ fn tool_output_for_ui(output: &str, artifact: Option<&ToolOutputArtifact>) -> St
         MAX_UI_TOOL_OUTPUT_CHARS,
         "tool output preview",
     )
+}
+
+trait OutputCompactor: Sync {
+    fn can_handle(&self, tool_name: &str) -> bool;
+
+    fn compact(
+        &self,
+        output: String,
+        artifact: Option<&ToolOutputArtifact>,
+        max_chars: usize,
+    ) -> String;
+}
+
+struct SkillOutputCompactor;
+struct LiteratureSearchOutputCompactor;
+struct ShellOutputCompactor;
+struct DefaultOutputCompactor;
+
+static SKILL_OUTPUT_COMPACTOR: SkillOutputCompactor = SkillOutputCompactor;
+static LITERATURE_SEARCH_OUTPUT_COMPACTOR: LiteratureSearchOutputCompactor =
+    LiteratureSearchOutputCompactor;
+static SHELL_OUTPUT_COMPACTOR: ShellOutputCompactor = ShellOutputCompactor;
+static DEFAULT_OUTPUT_COMPACTOR: DefaultOutputCompactor = DefaultOutputCompactor;
+
+fn output_compactors() -> [&'static dyn OutputCompactor; 4] {
+    [
+        &SKILL_OUTPUT_COMPACTOR,
+        &LITERATURE_SEARCH_OUTPUT_COMPACTOR,
+        &SHELL_OUTPUT_COMPACTOR,
+        &DEFAULT_OUTPUT_COMPACTOR,
+    ]
+}
+
+impl OutputCompactor for SkillOutputCompactor {
+    fn can_handle(&self, tool_name: &str) -> bool {
+        tool_name == "Skill"
+    }
+
+    fn compact(
+        &self,
+        output: String,
+        _artifact: Option<&ToolOutputArtifact>,
+        _max_chars: usize,
+    ) -> String {
+        output
+    }
+}
+
+impl OutputCompactor for LiteratureSearchOutputCompactor {
+    fn can_handle(&self, tool_name: &str) -> bool {
+        tool_name == "LiteratureSearch"
+    }
+
+    fn compact(
+        &self,
+        output: String,
+        artifact: Option<&ToolOutputArtifact>,
+        max_chars: usize,
+    ) -> String {
+        compact_text_output_for_limit(
+            compact_literature_search_output(output),
+            artifact,
+            max_chars,
+            "tool output",
+        )
+    }
+}
+
+impl OutputCompactor for ShellOutputCompactor {
+    fn can_handle(&self, tool_name: &str) -> bool {
+        matches!(tool_name, "bash" | "PowerShell")
+    }
+
+    fn compact(
+        &self,
+        output: String,
+        artifact: Option<&ToolOutputArtifact>,
+        max_chars: usize,
+    ) -> String {
+        if output.chars().count() <= max_chars && artifact.is_none() {
+            return output;
+        }
+        compact_shell_json_tool_output(&output, artifact).unwrap_or_else(|| {
+            compact_text_output_for_limit(output, artifact, max_chars, "tool output")
+        })
+    }
+}
+
+impl OutputCompactor for DefaultOutputCompactor {
+    fn can_handle(&self, _tool_name: &str) -> bool {
+        true
+    }
+
+    fn compact(
+        &self,
+        output: String,
+        artifact: Option<&ToolOutputArtifact>,
+        max_chars: usize,
+    ) -> String {
+        compact_text_output_for_limit(output, artifact, max_chars, "tool output")
+    }
 }
 
 fn tool_output_indicates_error(tool_name: &str, output: &str) -> bool {
@@ -1001,7 +1083,7 @@ fn compact_stream_text(
         return (value.to_string(), false);
     }
     let marker = format!(
-        "\n\n[ARIS truncated {stream_name}: {total} chars total. {}]\n\n",
+        "\n\n[SomniQ truncated {stream_name}: {total} chars total. {}]\n\n",
         full_output_note(artifact)
     );
     (compact_edges(value, max_chars, &marker), true)
@@ -1018,7 +1100,7 @@ fn compact_text_output_for_limit(
         return output;
     }
     let marker = format!(
-        "\n\n[ARIS truncated this {label}: {total} chars total. {}]\n\n",
+        "\n\n[SomniQ truncated this {label}: {total} chars total. {}]\n\n",
         full_output_note(artifact)
     );
     compact_edges(&output, max_chars, &marker)
@@ -1089,50 +1171,108 @@ fn compact_literature_search_output(output: String) -> String {
     serde_json::to_string_pretty(&root).unwrap_or(output)
 }
 
+#[derive(Clone, PartialEq, Eq)]
+struct SystemPromptCacheKey {
+    model: String,
+    full_tool_registry: bool,
+    workspace: PathBuf,
+    current_date: String,
+    language: String,
+    tectonic: Option<String>,
+    hot_memory: String,
+    knowledge_memory: String,
+}
+
+#[derive(Clone)]
+struct CachedSystemPrompt {
+    key: SystemPromptCacheKey,
+    prompt: Vec<String>,
+}
+
+fn system_prompt_cache() -> &'static Mutex<Option<CachedSystemPrompt>> {
+    static CACHE: OnceLock<Mutex<Option<CachedSystemPrompt>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(None))
+}
+
 fn build_system_prompt_inner(model: &str, full_tool_registry: bool) -> Vec<String> {
     let workspace = std::env::var("ARIS_WORKSPACE_ROOT")
         .map(PathBuf::from)
         .or_else(|_| std::env::current_dir())
         .unwrap_or_else(|_| crate::state::workspace_dir());
-    let access = if full_tool_registry {
+    runtime::migrate_legacy_knowledge_memory();
+    let hot_memory = runtime::render_hot_memory_prompt(&workspace).unwrap_or_default();
+    let knowledge_memory = runtime::render_knowledge_memory_prompt();
+    let key = SystemPromptCacheKey {
+        model: model.to_string(),
+        full_tool_registry,
+        workspace,
+        current_date: runtime::today_iso(),
+        language: std::env::var("ARIS_LANGUAGE").unwrap_or_else(|_| "cn".to_string()),
+        tectonic: std::env::var("ARIS_TECTONIC")
+            .ok()
+            .filter(|value| !value.trim().is_empty()),
+        hot_memory,
+        knowledge_memory,
+    };
+
+    if let Ok(cache) = system_prompt_cache().lock() {
+        if let Some(cached) = cache.as_ref().filter(|cached| cached.key == key) {
+            return cached.prompt.clone();
+        }
+    }
+
+    let prompt = build_system_prompt_uncached(&key);
+    if let Ok(mut cache) = system_prompt_cache().lock() {
+        *cache = Some(CachedSystemPrompt {
+            key,
+            prompt: prompt.clone(),
+        });
+    }
+    prompt
+}
+
+fn build_system_prompt_uncached(key: &SystemPromptCacheKey) -> Vec<String> {
+    let workspace = key.workspace.clone();
+    let access = if key.full_tool_registry {
         format!(
-            "Desktop Chat runs in the ARIS workspace at `{}`. The desktop tool registry, including shell, MCP, and single-agent tools, is available when the active permission mode allows it. Team/Workflow orchestration tools are disabled on this surface. Respect the selected permission mode and keep generated project artifacts in this workspace unless the user explicitly requests another location.",
+            "Desktop Chat runs in the SomniQ workspace at `{}`. The desktop tool registry, including shell, MCP, and single-agent tools, is available when the active permission mode allows it. Team/Workflow orchestration tools are disabled on this surface. Respect the selected permission mode and keep generated project artifacts in this workspace unless the user explicitly requests another location.",
             workspace.display()
         )
     } else {
         format!(
-            "Desktop Chat runs in the ARIS workspace at `{}`. Some tools are unavailable on this surface; use the available tools and respect the selected permission mode.",
+            "Desktop Chat runs in the SomniQ workspace at `{}`. Some tools are unavailable on this surface; use the available tools and respect the selected permission mode.",
             workspace.display()
         )
     };
     let file_links = "When you create or modify files, include Markdown links to the relevant file paths in the final response so the desktop UI can open them directly.".to_string();
     let artifact_layout = "Project artifact layout: place slide/PPT/PDF deck outputs under `slides/`, poster outputs under `poster/`, interactive web apps under `web/<name>/` with an `index.html` plus local CSS/assets, notebook programs under `experiments/`, and scratch/temp/cache files under `.aris/`. Studio auto-discovers `slides/`, `poster/`, and `web/`; Lab lists notebooks from the workspace and defaults new notebooks into `experiments/`.".to_string();
+    let existing_artifact_edits = "Existing artifact edits: when the user asks to modify, revise, continue editing, polish, or fix a current/existing report, paper, slide deck, PDF source, or other generated artifact, first identify and reuse the existing source path from the user message, recent file links, tool outputs, or workspace search. Edit that source in place and rebuild derived outputs at the same base path. Do not create sibling version files such as `_v2`, `_v9`, `_new`, `_final`, or timestamped copies unless the user explicitly asks for a new version, backup, archive, or comparison copy. If the target file cannot be identified, ask for the path instead of creating a new artifact.".to_string();
+    let diagram_output = "Diagram output: when explaining a workflow, process, call path, architecture, state machine, dependency graph, or decision tree, prefer a fenced `mermaid` code block over ASCII art. Keep diagrams compact, use semantic node ids, short readable labels, left-to-right flow for pipelines, meaningful edge labels when they clarify the flow, and avoid oversized text inside nodes. For publication-grade diagram files, use the `mermaid-diagram` skill and verify the rendered output.".to_string();
     let long_document_reading = "Long document reading: when working with books, chapters, transcripts, logs, or converted documents, do not read multiple large files in full. First get a file list and a read_file outline preview, then read one chapter or section window at a time with explicit offset/limit. Treat tool output as a preview, not as a source file; if full text is needed, keep it on disk and reopen precise windows.".to_string();
     let long_file_generation = "Long file generation: do not call write_file with an entire long generated artifact such as a Beamer chapter, book chapter, or converted document. Keep single tool payloads small; for files over about 24000 characters, write a small scaffold, append smaller chunks with append_file, and verify line counts/compilation immediately instead of stopping to report an intermediate failure.".to_string();
-    let latex_toolchain = latex_toolchain_prompt_section();
-    runtime::migrate_legacy_knowledge_memory();
-    let hot_memory = runtime::render_hot_memory_prompt(&workspace).unwrap_or_default();
-    let knowledge_memory = runtime::render_knowledge_memory_prompt();
+    let latex_toolchain = latex_toolchain_prompt_section(key.tectonic.as_deref());
     let mut extra_sections = vec![
         access.clone(),
         file_links,
         artifact_layout,
+        existing_artifact_edits,
+        diagram_output,
         long_document_reading,
         long_file_generation,
     ];
     if !latex_toolchain.is_empty() {
         extra_sections.push(latex_toolchain);
     }
-    extra_sections.push(hot_memory);
-    extra_sections.push(knowledge_memory);
+    extra_sections.push(key.hot_memory.clone());
+    extra_sections.push(key.knowledge_memory.clone());
     aris_chat::build_common_system_prompt(aris_chat::CommonSystemPromptOptions {
         workspace,
-        current_date: runtime::today_iso(),
+        current_date: key.current_date.clone(),
         os_name: std::env::consts::OS.to_string(),
         os_version: "unknown".to_string(),
-        model_id: Some(model.to_string()),
+        model_id: Some(key.model.clone()),
         product_surface: "desktop research automation app".to_string(),
-        language: std::env::var("ARIS_LANGUAGE").unwrap_or_else(|_| "cn".to_string()),
+        language: key.language.clone(),
         include_language_preference: true,
         include_team_orchestration: false,
         extra_sections,
@@ -1140,22 +1280,19 @@ fn build_system_prompt_inner(model: &str, full_tool_registry: bool) -> Vec<Strin
     .unwrap_or_else(|_| vec![access])
 }
 
-fn latex_toolchain_prompt_section() -> String {
-    let Some(tectonic) = std::env::var("ARIS_TECTONIC")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-    else {
-        return String::new();
-    };
-    format!(
-        "Bundled LaTeX fallback: `ARIS_TECTONIC` points to `{tectonic}`. When the user asks to compile LaTeX and `latexmk`/`pdflatex`/`xelatex` are unavailable, try this bundled Tectonic binary before telling the user to install a TeX distribution. Run it from the directory containing the entrypoint, for example: `\"$ARIS_TECTONIC\" --keep-logs --keep-intermediates main.tex`."
-    )
+fn latex_toolchain_prompt_section(tectonic: Option<&str>) -> String {
+    tectonic.map_or_else(String::new, |tectonic| {
+        format!(
+            "Bundled LaTeX fallback: `ARIS_TECTONIC` points to `{tectonic}`. When the user asks to compile LaTeX and `latexmk`/`pdflatex`/`xelatex` are unavailable, try this bundled Tectonic binary before telling the user to install a TeX distribution. Run it from the directory containing the entrypoint, for example: `\"$ARIS_TECTONIC\" --keep-logs --keep-intermediates main.tex`."
+        )
+    })
 }
 
 /// Read config.json and validate the executor is configured. Returns
 /// `(model, provider, executor_config)` or a user-facing error string.
 fn resolve_executor() -> Result<(String, String, aris_chat::ChatExecutorConfig), String> {
-    aris_chat::resolve_settings_executor_config(&crate::config::load_object())
+    let obj = crate::config::current_executor_object()?;
+    aris_chat::resolve_settings_executor_config(&obj)
 }
 
 fn resolve_executor_for_model(
@@ -1174,6 +1311,15 @@ fn resolve_executor_for_model(
         );
     };
     aris_chat::resolve_settings_executor_config(&obj)
+}
+
+fn executor_server_label(config: &aris_chat::ChatExecutorConfig) -> String {
+    match config {
+        aris_chat::ChatExecutorConfig::Anthropic { base_url, .. }
+        | aris_chat::ChatExecutorConfig::OpenAiCompatible { base_url, .. } => {
+            base_url.trim().trim_end_matches('/').to_string()
+        }
+    }
 }
 
 fn validate_session_id(session_id: &str) -> Result<(), String> {
@@ -1543,7 +1689,40 @@ pub struct ChatStatus {
     provider: Option<String>,
     message: Option<String>,
     context_window: Option<u64>,
+    compaction_budget: Option<u64>,
     memory_files: Option<usize>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ChatDoneProviderUsage {
+    input_tokens: u32,
+    output_tokens: u32,
+    cache_creation_input_tokens: u32,
+    cache_read_input_tokens: u32,
+    prompt_tokens: u32,
+    total_tokens: u32,
+}
+
+impl From<TokenUsage> for ChatDoneProviderUsage {
+    fn from(usage: TokenUsage) -> Self {
+        Self {
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            cache_creation_input_tokens: usage.cache_creation_input_tokens,
+            cache_read_input_tokens: usage.cache_read_input_tokens,
+            prompt_tokens: usage.prompt_tokens(),
+            total_tokens: usage.total_tokens(),
+        }
+    }
+}
+
+fn chat_done_context_tokens(session: &Session) -> u64 {
+    runtime::estimate_session_tokens(session) as u64
+}
+
+fn latest_provider_usage(turn_usages: &[TokenUsage]) -> Option<ChatDoneProviderUsage> {
+    turn_usages.last().copied().map(ChatDoneProviderUsage::from)
 }
 
 fn context_window_for_model(model: &str) -> u64 {
@@ -1568,15 +1747,151 @@ fn context_window_for_model(model: &str) -> u64 {
     128_000
 }
 
+fn compaction_budget_for_model(model: &str) -> u64 {
+    u64::try_from(aris_chat::context_compaction_threshold_for_model(model)).unwrap_or(u64::MAX)
+}
+
+/// Auto-compaction thresholds, as a fraction of the model-derived compaction
+/// budget. The budget is already below the provider's full context window so it
+/// leaves headroom for system prompts, tool schemas, and output.
+const AUTO_COMPACT_WARN_RATIO: f64 = 0.70;
+const AUTO_COMPACT_TRIGGER_RATIO: f64 = 0.90;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContextAction {
+    None,
+    Warn,
+    Compact,
+}
+
+/// Pure decision: what to do at `used_tokens` of `budget_tokens`. Extracted so
+/// the threshold policy is unit-testable without a live session/app.
+fn context_action(used_tokens: u64, budget_tokens: u64) -> ContextAction {
+    if budget_tokens == 0 {
+        return ContextAction::None;
+    }
+    let usage = used_tokens as f64 / budget_tokens as f64;
+    if usage >= AUTO_COMPACT_TRIGGER_RATIO {
+        ContextAction::Compact
+    } else if usage >= AUTO_COMPACT_WARN_RATIO {
+        ContextAction::Warn
+    } else {
+        ContextAction::None
+    }
+}
+
+fn emit_context_warning(
+    app: &AppHandle,
+    session_id: &str,
+    used: u64,
+    context_window: u64,
+    compaction_budget: u64,
+) {
+    let _ = app.emit(
+        "chat-context-warning",
+        json!({
+            "sessionId": session_id,
+            "usedTokens": used,
+            "contextWindow": context_window,
+            "compactionBudget": compaction_budget,
+            "usage": used as f64 / compaction_budget.max(1) as f64,
+        }),
+    );
+}
+
+/// Before running a turn, keep the session within the model-derived budget:
+/// warn at >=70% usage, auto-compact at >=90% (falling back to a warning when
+/// there is too little history to compact). Returns the session to run the turn
+/// against — compacted in place when triggered, and persisted so the next turn
+/// and the UI both see the reduced history.
+fn maybe_auto_compact(
+    app: &AppHandle,
+    state: &ChatState,
+    session_id: &str,
+    model: &str,
+    executor_config: aris_chat::ChatExecutorConfig,
+    summarizer_model: Option<String>,
+    summarizer_config: Option<aris_chat::SummarizerConfig>,
+    session: Session,
+) -> Result<Session, String> {
+    let window = context_window_for_model(model);
+    let budget = compaction_budget_for_model(model);
+    let used = runtime::estimate_session_tokens(&session) as u64;
+    match context_action(used, budget) {
+        ContextAction::None => Ok(session),
+        ContextAction::Warn => {
+            emit_context_warning(app, session_id, used, window, budget);
+            Ok(session)
+        }
+        ContextAction::Compact => {
+            let result = compact_session_with_runtime(
+                session.clone(),
+                executor_config,
+                model.to_string(),
+                summarizer_model,
+                summarizer_config,
+                CompactionConfig::default(),
+            )?;
+            if result.removed_message_count == 0 {
+                // Too little history to compact — warn instead of claiming a no-op.
+                emit_context_warning(app, session_id, used, window, budget);
+                return Ok(session);
+            }
+            let compacted = result.compacted_session;
+            store_chat_session(state, session_id.to_string(), compacted.clone())?;
+            let after = runtime::estimate_session_tokens(&compacted) as u64;
+            let _ = app.emit(
+                "chat-context-compacted",
+                json!({
+                    "sessionId": session_id,
+                    "removedMessageCount": result.removed_message_count,
+                    "tokensBefore": used,
+                    "tokensAfter": after,
+                    "contextWindow": window,
+                    "compactionBudget": budget,
+                }),
+            );
+            Ok(compacted)
+        }
+    }
+}
+
+fn compact_session_with_runtime(
+    session: Session,
+    executor_config: aris_chat::ChatExecutorConfig,
+    model: String,
+    summarizer_model: Option<String>,
+    summarizer_config: Option<aris_chat::SummarizerConfig>,
+    compaction: CompactionConfig,
+) -> Result<runtime::CompactionResult, String> {
+    let mut runtime = aris_chat::build_conversation_runtime(
+        session,
+        executor_config,
+        model,
+        false,
+        Vec::new(),
+        Box::new(SilentStreamObserver),
+        NoToolsExecutor,
+        aris_chat::permission_policy_for_tools(Vec::new(), PermissionMode::ReadOnly),
+        Vec::new(),
+        runtime::RuntimeFeatureConfig::default(),
+        summarizer_model,
+        summarizer_config,
+    )?;
+    Ok(runtime.compact(compaction))
+}
+
 fn chat_status_for(model: String, provider: String) -> ChatStatus {
     let memory_files = status_context(None).ok().map(|ctx| ctx.memory_file_count);
     let cw = context_window_for_model(&model);
+    let budget = compaction_budget_for_model(&model);
     ChatStatus {
         ready: true,
         model: Some(model),
         provider: Some(provider),
         message: None,
         context_window: Some(cw),
+        compaction_budget: Some(budget),
         memory_files,
     }
 }
@@ -1592,6 +1907,7 @@ pub fn chat_status() -> ChatStatus {
             provider: None,
             message: Some(message),
             context_window: None,
+            compaction_budget: None,
             memory_files,
         },
     }
@@ -1619,12 +1935,25 @@ pub struct ChatModelOptions {
 /// model is always included so the select reflects what is actually running.
 #[tauri::command]
 pub fn chat_model_options() -> ChatModelOptions {
-    let provider = config_string("executor_provider").unwrap_or_else(|| "anthropic".to_string());
-    let current =
-        config_string("executor_model").unwrap_or_else(|| aris_chat::DEFAULT_MODEL.to_string());
+    let effective =
+        crate::config::current_executor_object().unwrap_or_else(|_| crate::config::load_object());
+    let provider = config_object_string(&effective, "executor_provider")
+        .unwrap_or_else(|| "anthropic".to_string());
+    let current = config_object_string(&effective, "executor_model")
+        .unwrap_or_else(|| aris_chat::DEFAULT_MODEL.to_string());
 
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut options: Vec<ChatModelOption> = Vec::new();
+    for model in crate::config::managed_model_summaries() {
+        if model.trim().is_empty() || !seen.insert(model.clone()) {
+            continue;
+        }
+        options.push(ChatModelOption {
+            value: model.clone(),
+            label: model,
+            description: Some("Managed account".to_string()),
+        });
+    }
     for (entry_provider, model, base_url) in crate::config::verified_executor_summaries() {
         if model.trim().is_empty() || !seen.insert(model.clone()) {
             continue;
@@ -1689,6 +2018,9 @@ pub fn chat_model_set(model: String, persist: Option<bool>) -> Result<ChatStatus
         let (model, provider, _) = resolve_executor_for_model(Some(trimmed))?;
         return Ok(chat_status_for(model, provider));
     }
+    if crate::config::switch_to_managed_executor(trimmed)? {
+        return Ok(chat_status());
+    }
     let switched = crate::config::switch_to_verified_executor(trimmed)?;
     if switched {
         return Ok(chat_status());
@@ -1744,6 +2076,10 @@ pub struct ChatCommandResult {
     replace_turns: bool,
     open_settings: bool,
     refresh_status: bool,
+    /// Authoritative post-command context size in tokens, set by `/compact` so
+    /// the frontend ContextRing can drop to the real backend value instead of
+    /// the stale visible-transcript estimate. `None` leaves the ring untouched.
+    context_tokens: Option<u64>,
 }
 
 impl ChatCommandResult {
@@ -1756,6 +2092,7 @@ impl ChatCommandResult {
             replace_turns: false,
             open_settings: false,
             refresh_status: false,
+            context_tokens: None,
         }
     }
 
@@ -1768,6 +2105,7 @@ impl ChatCommandResult {
             replace_turns: false,
             open_settings: false,
             refresh_status: false,
+            context_tokens: None,
         }
     }
 
@@ -1780,6 +2118,7 @@ impl ChatCommandResult {
             replace_turns: false,
             open_settings: false,
             refresh_status: false,
+            context_tokens: None,
         }
     }
 
@@ -1792,6 +2131,7 @@ impl ChatCommandResult {
             replace_turns: false,
             open_settings: false,
             refresh_status: false,
+            context_tokens: None,
         }
     }
 
@@ -1872,16 +2212,38 @@ pub fn chat_run_command(
                 &status_context(Some(&chat_session_path(&session_id)?))?,
             )))
         }
-        SlashCommand::Compact => {
-            let result = runtime::compact_session(&session, CompactionConfig::default());
+        SlashCommand::Compact { instruction } => {
+            let (model, _provider, executor_config) = resolve_executor()?;
+            let config_obj = crate::config::load_object();
+            let summarizer_model = config_object_string(&config_obj, "summarizer_model");
+            let summarizer_config = match resolve_summarizer_config(&config_obj) {
+                Ok(config) => config,
+                Err(error) => {
+                    eprintln!("aris desktop: summary provider disabled: {error}");
+                    None
+                }
+            };
+            let result = compact_session_with_runtime(
+                session,
+                executor_config,
+                model,
+                summarizer_model,
+                summarizer_config,
+                CompactionConfig::manual(instruction.clone()),
+            )?;
             let removed = result.removed_message_count;
-            let kept = result.compacted_session.messages.len();
-            store_chat_session(&state, session_id, result.compacted_session)?;
-            Ok(ChatCommandResult::message(format_compact_report(
-                removed,
-                kept,
-                removed == 0,
-            )))
+            let report = format_compact_report(&result);
+            let compacted = result.compacted_session;
+            // Real post-compaction context size. Only surface it when something
+            // was actually removed; a no-op compaction leaves the ring's own
+            // estimate in place rather than pinning it.
+            let context_tokens =
+                (removed > 0).then(|| runtime::estimate_session_tokens(&compacted) as u64);
+            store_chat_session(&state, session_id, compacted)?;
+            Ok(ChatCommandResult {
+                context_tokens,
+                ..ChatCommandResult::message(report)
+            })
         }
         SlashCommand::Model { model } => handle_model_command(model),
         SlashCommand::Reviewer { model } => handle_reviewer_command(model),
@@ -2068,6 +2430,10 @@ fn suggest_chat_title(user: &str, assistant: &str) -> Result<String, String> {
         aris_chat::permission_policy_for_tools(Vec::new(), PermissionMode::ReadOnly),
         vec![system.to_string()],
         runtime::RuntimeFeatureConfig::default(),
+        // Title generation is a single tiny turn; never compacts, so no
+        // summarizer is needed.
+        None,
+        None,
     )?;
     let summary = runtime
         .run_turn_message(ConversationMessage::user_text(prompt), None)
@@ -2220,6 +2586,22 @@ async fn run_chat_turn(
     .await
 }
 
+pub async fn run_background_prompt(
+    app: AppHandle,
+    session_id: String,
+    prompt: String,
+) -> Result<String, String> {
+    let state = app.state::<ChatState>();
+    run_chat_turn(
+        app.clone(),
+        state.inner(),
+        session_id,
+        ConversationMessage::user_text(prompt),
+        None,
+    )
+    .await
+}
+
 async fn run_literature_chat_turn(
     app: AppHandle,
     state: &ChatState,
@@ -2265,13 +2647,36 @@ async fn run_chat_turn_with_context(
         session_id: session_id.clone(),
     };
     crate::config::apply_reviewer_environment(true);
-    let (model, _provider, executor_config) =
-        resolve_executor_for_model(model_override.as_deref())?;
+    let (model, provider, executor_config) = resolve_executor_for_model(model_override.as_deref())?;
+    let usage_model = model.clone();
+    let usage_provider = provider.clone();
+    let usage_server = executor_server_label(&executor_config);
     let session = get_cached_or_disk_session(&state, &session_id)?;
+    let config_obj = crate::config::load_object();
+    let summarizer_model = config_object_string(&config_obj, "summarizer_model");
+    let summarizer_config = match resolve_summarizer_config(&config_obj) {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("aris desktop: summary provider disabled: {error}");
+            None
+        }
+    };
+    let session = maybe_auto_compact(
+        &app,
+        state,
+        &session_id,
+        &model,
+        executor_config.clone(),
+        summarizer_model.clone(),
+        summarizer_config.clone(),
+        session,
+    )?;
     let permission_mode = permission_mode_for(&state, &session_id)?;
     let permission_prompts = state.permission_prompts.clone();
     let question_prompts = state.question_prompts.clone();
 
+    // Configured compaction-summary model (Settings → "Summary model"); empty
+    // means "Auto" and the chat crate picks a sensible default.
     let worker_app = app.clone();
     let worker_session_id = session_id.clone();
     let worker_cancelled = cancelled.clone();
@@ -2342,12 +2747,27 @@ async fn run_chat_turn_with_context(
             permission_policy,
             system_prompt,
             feature_config,
+            summarizer_model,
+            summarizer_config,
         )?;
         let summary = runtime
             .run_turn_message(user_message, Some(&mut permission_prompter))
             .map_err(|e| e.to_string())?;
+        let auto_compaction = summary
+            .auto_compaction
+            .map(|event| event.removed_message_count);
+        let turn_usages = summary
+            .assistant_messages
+            .iter()
+            .filter_map(|message| message.usage)
+            .collect::<Vec<_>>();
         let text = aris_chat::final_assistant_text(&summary);
-        Ok::<(String, Session), String>((text, runtime.into_session()))
+        Ok::<(String, Session, Option<usize>, Vec<TokenUsage>), String>((
+            text,
+            runtime.into_session(),
+            auto_compaction,
+            turn_usages,
+        ))
     })
     .await;
 
@@ -2362,7 +2782,12 @@ async fn run_chat_turn_with_context(
         Ok(inner) => inner,
         Err(join_error) => Err(join_error.to_string()),
     };
-    let (text, updated): (String, Session) = match outcome {
+    let (text, updated, auto_compaction, turn_usages): (
+        String,
+        Session,
+        Option<usize>,
+        Vec<TokenUsage>,
+    ) = match outcome {
         Ok(value) => value,
         Err(message) => {
             let _ = app.emit(
@@ -2373,10 +2798,42 @@ async fn run_chat_turn_with_context(
         }
     };
 
+    // Session-history token estimate after this turn. This is the same budget
+    // unit used by auto-compaction, so it is the value that should drive the
+    // frontend ContextRing. Provider usage is emitted separately below because
+    // it may include fixed system/tool prompt overhead, cached prompt tokens,
+    // and generated output.
+    let context_tokens = chat_done_context_tokens(&updated);
+    let auto_compaction_tokens_after = auto_compaction.map(|_| context_tokens);
+    let provider_usage = latest_provider_usage(&turn_usages);
     store_chat_session(state, session_id.clone(), updated)?;
+    if let Err(error) = crate::usage_log::append_turn_usage(
+        &session_id,
+        &usage_model,
+        &usage_provider,
+        &usage_server,
+        &turn_usages,
+    ) {
+        eprintln!("aris desktop: failed to write usage log: {error}");
+    }
+    if let Some(removed_message_count) = auto_compaction {
+        let _ = app.emit(
+            "chat-context-compacted",
+            json!({
+                "sessionId": &session_id,
+                "removedMessageCount": removed_message_count,
+                "tokensAfter": auto_compaction_tokens_after
+            }),
+        );
+    }
     let _ = app.emit(
         "chat-done",
-        json!({ "sessionId": session_id, "text": &text }),
+        json!({
+            "sessionId": session_id,
+            "text": &text,
+            "contextTokens": context_tokens,
+            "providerUsage": provider_usage,
+        }),
     );
     Ok(text)
 }
@@ -2397,13 +2854,7 @@ pub struct ChatContextMessage {
     images: Vec<ChatImageInput>,
 }
 
-#[tauri::command]
-pub fn chat_set_context(
-    state: State<ChatState>,
-    session_id: String,
-    messages: Vec<ChatContextMessage>,
-) -> Result<(), String> {
-    validate_session_id(&session_id)?;
+fn chat_context_messages_to_session(messages: Vec<ChatContextMessage>) -> Result<Session, String> {
     let mut session = Session::new();
     for message in messages {
         match message.role.as_str() {
@@ -2424,7 +2875,28 @@ pub fn chat_set_context(
             _ => return Err("chat context only supports user and assistant messages".to_string()),
         }
     }
-    store_chat_session(&state, session_id, session)
+    Ok(session)
+}
+
+#[tauri::command]
+pub fn chat_set_context(
+    state: State<ChatState>,
+    session_id: String,
+    messages: Vec<ChatContextMessage>,
+    mode: Option<String>,
+) -> Result<u64, String> {
+    validate_session_id(&session_id)?;
+    let mut next = chat_context_messages_to_session(messages)?;
+    if mode.as_deref() == Some("append") {
+        let mut current = get_cached_or_disk_session(&state, &session_id)?;
+        current.messages.append(&mut next.messages);
+        let tokens = runtime::estimate_session_tokens(&current) as u64;
+        store_chat_session(&state, session_id, current)?;
+        return Ok(tokens);
+    }
+    let tokens = runtime::estimate_session_tokens(&next) as u64;
+    store_chat_session(&state, session_id, next)?;
+    Ok(tokens)
 }
 
 #[tauri::command]
@@ -2526,6 +2998,174 @@ fn config_string(key: &str) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+fn config_object_string(obj: &Map<String, Value>, key: &str) -> Option<String> {
+    obj.get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn normalized_provider_for_settings(provider: &str, base_url: Option<&str>) -> String {
+    let provider = provider.trim();
+    let lower_url = base_url.unwrap_or("").trim().to_lowercase();
+    if provider == "anthropic"
+        && (lower_url.contains("minimaxi.com/anthropic")
+            || lower_url.contains("deepseek.com/anthropic"))
+    {
+        return "anthropic-compat".to_string();
+    }
+    if provider.is_empty() {
+        if lower_url.contains("anthropic.com")
+            || lower_url.contains("newcli.com")
+            || lower_url.contains("modelscope.cn")
+            || lower_url.contains("/anthropic")
+        {
+            "anthropic-compat".to_string()
+        } else {
+            "openai".to_string()
+        }
+    } else {
+        provider.to_string()
+    }
+}
+
+fn reusable_provider_key(
+    obj: &Map<String, Value>,
+    provider: &str,
+    base_url: Option<&str>,
+) -> Option<String> {
+    let target_provider = normalized_provider_for_settings(provider, base_url);
+    let target_base = base_url.unwrap_or("").trim().trim_end_matches('/');
+    for prefix in ["executor", "reviewer"] {
+        let slot_provider = config_object_string(obj, &format!("{prefix}_provider"))
+            .unwrap_or_else(|| {
+                if prefix == "executor" {
+                    "anthropic".to_string()
+                } else {
+                    String::new()
+                }
+            });
+        let slot_base = config_object_string(obj, &format!("{prefix}_base_url"))
+            .unwrap_or_default()
+            .trim_end_matches('/')
+            .to_string();
+        if normalized_provider_for_settings(&slot_provider, Some(&slot_base)) == target_provider
+            && (target_base.is_empty() || slot_base == target_base)
+        {
+            if let Some(key) = config_object_string(obj, &format!("{prefix}_api_key")) {
+                return Some(key);
+            }
+        }
+    }
+    None
+}
+
+fn reusable_provider_model(
+    obj: &Map<String, Value>,
+    provider: &str,
+    base_url: Option<&str>,
+) -> Option<String> {
+    let target_provider = normalized_provider_for_settings(provider, base_url);
+    let target_base = base_url.unwrap_or("").trim().trim_end_matches('/');
+    for prefix in ["executor", "reviewer"] {
+        let slot_provider = config_object_string(obj, &format!("{prefix}_provider"))
+            .unwrap_or_else(|| {
+                if prefix == "executor" {
+                    "anthropic".to_string()
+                } else {
+                    String::new()
+                }
+            });
+        let slot_base = config_object_string(obj, &format!("{prefix}_base_url"))
+            .unwrap_or_default()
+            .trim_end_matches('/')
+            .to_string();
+        if normalized_provider_for_settings(&slot_provider, Some(&slot_base)) == target_provider
+            && (target_base.is_empty() || slot_base == target_base)
+        {
+            if let Some(model) = config_object_string(obj, &format!("{prefix}_model")) {
+                return Some(model);
+            }
+        }
+    }
+    obj.get("verified_executors")
+        .and_then(Value::as_array)?
+        .iter()
+        .filter_map(Value::as_object)
+        .find_map(|entry| {
+            let entry_base = entry
+                .get("base_url")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .trim_end_matches('/');
+            let entry_provider = entry.get("provider").and_then(Value::as_str).unwrap_or("");
+            if normalized_provider_for_settings(entry_provider, Some(entry_base)) == target_provider
+                && (target_base.is_empty() || entry_base == target_base)
+            {
+                entry
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|model| !model.is_empty())
+                    .map(ToOwned::to_owned)
+            } else {
+                None
+            }
+        })
+}
+
+fn resolve_summarizer_config(
+    obj: &Map<String, Value>,
+) -> Result<Option<aris_chat::SummarizerConfig>, String> {
+    let Some(raw_provider) = config_object_string(obj, "summarizer_provider") else {
+        return Ok(None);
+    };
+    let base_url = config_object_string(obj, "summarizer_base_url");
+    let provider = normalized_provider_for_settings(&raw_provider, base_url.as_deref());
+    let model = config_object_string(obj, "summarizer_model")
+        .or_else(|| reusable_provider_model(obj, &provider, base_url.as_deref()));
+    let api_key = config_object_string(obj, "summarizer_api_key")
+        .or_else(|| reusable_provider_key(obj, &provider, base_url.as_deref()));
+
+    let executor_config = match provider.as_str() {
+        "anthropic" | "anthropic-compat" => {
+            let configured_base = base_url.clone();
+            let base_url = configured_base.clone().unwrap_or_else(api::read_base_url);
+            let send_betas = configured_base.is_none() && api::read_send_betas();
+            let auth = match api_key {
+                Some(key) if provider == "anthropic-compat" => api::AuthSource::BearerToken(key),
+                Some(key) => api::AuthSource::ApiKey(key),
+                None => api::resolve_startup_auth_source(|| Ok(None)).map_err(|_| {
+                    "No API key configured for the selected summary provider.".to_string()
+                })?,
+            };
+            aris_chat::ChatExecutorConfig::Anthropic {
+                auth,
+                base_url,
+                send_betas,
+            }
+        }
+        _ => {
+            let api_key = api_key.ok_or_else(|| {
+                "No API key configured for the selected summary provider.".to_string()
+            })?;
+            aris_chat::ChatExecutorConfig::OpenAiCompatible {
+                api_key,
+                base_url: base_url
+                    .unwrap_or_else(|| aris_chat::DEFAULT_OPENAI_BASE_URL.to_string()),
+            }
+        }
+    };
+
+    Ok(Some(aris_chat::SummarizerConfig {
+        provider,
+        model,
+        executor_config,
+    }))
+}
+
 fn save_config_object(obj: &serde_json::Map<String, Value>) -> Result<(), String> {
     let path = crate::state::config_path();
     if let Some(parent) = path.parent() {
@@ -2594,7 +3234,25 @@ fn model_selection_items(
     items
 }
 
+fn model_selection_items_owned(
+    current: &str,
+    choices: &[(String, String, String)],
+) -> Vec<ChatCommandSelectionItem> {
+    let refs = choices
+        .iter()
+        .map(|(value, label, description)| (value.as_str(), label.as_str(), description.as_str()))
+        .collect::<Vec<_>>();
+    model_selection_items(current, &refs)
+}
+
 fn executor_model_selection(provider: &str, current: &str) -> ChatCommandSelection {
+    let managed_choices = crate::config::managed_model_summaries()
+        .into_iter()
+        .map(|model| {
+            let label = model.clone();
+            (model, label, "Managed account".to_string())
+        })
+        .collect::<Vec<_>>();
     let anthropic_choices = [
         (
             "claude-opus-4-7",
@@ -2661,6 +3319,13 @@ fn executor_model_selection(provider: &str, current: &str) -> ChatCommandSelecti
     } else {
         &openai_compat_choices[..]
     };
+    let mut items = model_selection_items(current, choices);
+    if !managed_choices.is_empty() {
+        let mut managed_items = model_selection_items_owned(current, &managed_choices);
+        managed_items.retain(|item| !items.iter().any(|existing| existing.value == item.value));
+        managed_items.extend(items);
+        items = managed_items;
+    }
     ChatCommandSelection {
         command: "model".to_string(),
         title: "Select executor model".to_string(),
@@ -2668,7 +3333,7 @@ fn executor_model_selection(provider: &str, current: &str) -> ChatCommandSelecti
             "Provider: {provider}. You can still type /model <model-id>."
         )),
         current: Some(current.to_string()),
-        items: model_selection_items(current, choices),
+        items,
     }
 }
 
@@ -2846,7 +3511,7 @@ fn handle_permissions_command(
 
 fn format_permissions_report(mode: &str) -> String {
     format!(
-        "Permissions\n  Active mode      {mode}\n  Surface          desktop Chat\n\nModes\n  plan / read-only              Inspect and search only\n  acceptEdits / workspace-write Read and edit workspace files\n  ask / prompt                  Ask before gated tool calls\n  dontAsk / danger-full-access  Auto-approve shell, MCP, and available agent tools\n\nBoundary\n  These modes gate ARIS tool calls only. They do not grant Windows administrator rights; shell commands still run with the current ARIS process/user privileges.\n\nUsage\n  Inspect current mode with /permissions\n  Switch modes with /permissions <mode>\n  Project settings permissions.defaultMode supplies the session default"
+        "Permissions\n  Active mode      {mode}\n  Surface          desktop Chat\n\nModes\n  plan / read-only              Inspect and search only\n  acceptEdits / workspace-write Read and edit workspace files\n  ask / prompt                  Ask before gated tool calls\n  dontAsk / danger-full-access  Auto-approve shell, MCP, and available agent tools\n\nBoundary\n  These modes gate SomniQ tool calls only. They do not grant Windows administrator rights; shell commands still run with the current SomniQ process/user privileges.\n\nUsage\n  Inspect current mode with /permissions\n  Switch modes with /permissions <mode>\n  Project settings permissions.defaultMode supplies the session default"
     )
 }
 
@@ -3275,14 +3940,23 @@ fn format_cost_report(usage: TokenUsage) -> String {
     )
 }
 
-fn format_compact_report(removed: usize, resulting_messages: usize, skipped: bool) -> String {
+fn format_compact_report(result: &CompactionResult) -> String {
+    let removed = result.removed_message_count;
+    let resulting_messages = result.compacted_session.messages.len();
+    let skipped = removed == 0;
     if skipped {
         format!(
-            "Compact\n  Result           skipped\n  Reason           session below compaction threshold\n  Messages kept    {resulting_messages}"
+            "Compact\n  Result           skipped\n  Reason           no safe prefix or session below threshold\n  Messages kept    {resulting_messages}\n  Tokens before    {}\n  Tokens after     {}",
+            result.tokens_before, result.tokens_after
         )
     } else {
+        let saved = result.tokens_before.saturating_sub(result.tokens_after);
         format!(
-            "Compact\n  Result           compacted\n  Messages removed {removed}\n  Messages kept    {resulting_messages}"
+            "Compact\n  Result           compacted\n  Summary source   {}\n  Messages removed {removed}\n  Messages kept    {resulting_messages}\n  Tail preserved   {}\n  Tokens before    {}\n  Tokens after     {}\n  Tokens saved     {saved}",
+            result.summary_source.as_str(),
+            result.preserved_message_count,
+            result.tokens_before,
+            result.tokens_after
         )
     }
 }
@@ -3514,7 +4188,7 @@ fn render_desktop_claude_md(cwd: &Path) -> String {
     let lines = vec![
         "# CLAUDE.md".to_string(),
         String::new(),
-        "This file provides guidance to ARIS desktop Chat when working in this isolated workspace.".to_string(),
+        "This file provides guidance to SomniQ desktop Chat when working in this isolated workspace.".to_string(),
         String::new(),
         "## Workspace".to_string(),
         format!("- Desktop workspace: `{}`.", cwd.display()),
@@ -3641,7 +4315,7 @@ fn render_last_tool_debug_report(session: &Session) -> Result<String, String> {
 
 fn render_version_report() -> String {
     format!(
-        "ARIS Desktop\n  Version          {}\n  Target           {}\n  Build date       {}",
+        "SomniQ Desktop\n  Version          {}\n  Target           {}\n  Build date       {}",
         env!("CARGO_PKG_VERSION"),
         option_env!("TARGET").unwrap_or("unknown"),
         option_env!("ARIS_BUILD_DATE").unwrap_or("unknown")
@@ -4053,7 +4727,7 @@ mod tests {
         let rendered = tool_output_for_ui(&output, None);
 
         assert_eq!(rendered, output);
-        assert!(!rendered.contains("ARIS truncated"));
+        assert!(!rendered.contains("SomniQ truncated"));
     }
 
     #[test]
@@ -4072,7 +4746,7 @@ mod tests {
 
         assert_eq!(compacted, raw);
         assert_eq!(parsed["stdout"].as_str().unwrap().chars().count(), 20_000);
-        assert!(!compacted.contains("ARIS truncated"));
+        assert!(!compacted.contains("SomniQ truncated"));
     }
 
     #[test]
@@ -4098,7 +4772,7 @@ mod tests {
         assert!(compacted.chars().count() <= MAX_CONTEXT_TOOL_OUTPUT_CHARS);
         assert!(compacted_stdout.starts_with("start"));
         assert!(compacted_stdout.ends_with("end"));
-        assert!(compacted_stdout.contains("ARIS truncated stdout"));
+        assert!(compacted_stdout.contains("SomniQ truncated stdout"));
         assert!(compacted_stdout.chars().count() <= SHELL_STREAM_CONTEXT_CHARS);
         assert_eq!(parsed["persistedOutputPath"], artifact.path);
         assert_eq!(parsed["rawOutputPath"], artifact.path);
@@ -4200,9 +4874,29 @@ mod tests {
 
         assert!(prompt.contains("desktop tool registry"));
         assert!(prompt.contains("include Markdown links"));
+        assert!(prompt.contains("Existing artifact edits"));
+        assert!(prompt.contains("Do not create sibling version files"));
+        assert!(prompt.contains("fenced `mermaid` code block"));
         assert!(prompt.contains("Long file generation"));
         assert!(prompt.contains("24000 characters"));
         assert!(prompt.contains("append_file"));
+    }
+
+    #[test]
+    fn desktop_prompt_is_deterministic_for_prompt_caching() {
+        // The system prompt is rebuilt every turn and forms the request prefix.
+        // OpenAI-compatible automatic prompt caching (the only caching path ARIS
+        // has — there is no native Anthropic /v1/messages channel) only engages
+        // when that prefix is byte-identical across turns. Any per-call
+        // nondeterminism — a timestamp, a random id, HashMap iteration order — in
+        // a prompt section would silently bust the cache and quietly inflate input
+        // token cost. Guard the invariant so such a regression fails loudly here.
+        let first = build_system_prompt_inner("test-model", true).join("\n");
+        let second = build_system_prompt_inner("test-model", true).join("\n");
+        assert_eq!(
+            first, second,
+            "system prompt must be deterministic across rebuilds so prompt caching can hit"
+        );
     }
 
     #[test]
@@ -4259,7 +4953,7 @@ mod tests {
         let previous = std::env::var_os("ARIS_TECTONIC");
         std::env::set_var("ARIS_TECTONIC", r"C:\Program Files\Aris\tectonic.exe");
 
-        let prompt = latex_toolchain_prompt_section();
+        let prompt = latex_toolchain_prompt_section(Some(r"C:\Program Files\Aris\tectonic.exe"));
 
         assert!(prompt.contains("Bundled LaTeX fallback"));
         assert!(prompt.contains("ARIS_TECTONIC"));
@@ -4302,5 +4996,48 @@ mod tests {
         let sessions = state.sessions.lock().expect("chat state");
         assert_eq!(sessions.len(), MAX_CACHED_CHAT_SESSIONS);
         assert!(sessions.contains_key("session-19"));
+    }
+
+    #[test]
+    fn context_action_picks_warn_then_compact_by_usage() {
+        use super::{context_action, ContextAction};
+        assert_eq!(context_action(0, 0), ContextAction::None); // unknown window
+        assert_eq!(context_action(100, 1_000), ContextAction::None); // 10%
+        assert_eq!(context_action(699, 1_000), ContextAction::None); // just under warn
+        assert_eq!(context_action(700, 1_000), ContextAction::Warn); // 70%
+        assert_eq!(context_action(899, 1_000), ContextAction::Warn); // just under trigger
+        assert_eq!(context_action(900, 1_000), ContextAction::Compact); // 90%
+        assert_eq!(context_action(2_000, 1_000), ContextAction::Compact); // over window
+    }
+
+    #[test]
+    fn chat_done_context_tokens_use_session_estimate_not_provider_total() {
+        let session = Session {
+            version: 1,
+            messages: vec![
+                ConversationMessage::user_text("short visible history"),
+                ConversationMessage::assistant(vec![ContentBlock::Text {
+                    text: "short reply".to_string(),
+                }]),
+            ],
+            compactions: Vec::new(),
+        };
+        let provider_usage = TokenUsage {
+            input_tokens: 120_000,
+            output_tokens: 8_000,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 300_000,
+        };
+
+        let context_tokens = chat_done_context_tokens(&session);
+        let usage = latest_provider_usage(&[provider_usage]).expect("provider usage");
+
+        assert_eq!(
+            context_tokens,
+            runtime::estimate_session_tokens(&session) as u64
+        );
+        assert_ne!(context_tokens, u64::from(provider_usage.total_tokens()));
+        assert_eq!(usage.prompt_tokens, provider_usage.prompt_tokens());
+        assert_eq!(usage.total_tokens, provider_usage.total_tokens());
     }
 }

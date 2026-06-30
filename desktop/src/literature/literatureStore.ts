@@ -1528,7 +1528,7 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
       set({ screening: true });
       let llmResults: Map<string, PaperScreening> | null = null;
       if (isTauri()) {
-        log("info", `Review LLM is screening ${candidates.length} abstracts with ARIS research-review standards`, { open: true });
+        log("info", `Review LLM is screening ${candidates.length} abstracts with SomniQ research-review standards`, { open: true });
         try {
           llmResults = await llmScreen(candidates, task);
         } catch (error) {

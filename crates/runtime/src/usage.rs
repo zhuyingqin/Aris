@@ -574,6 +574,7 @@ mod tests {
                     cache_read_input_tokens: 0,
                 }),
             }],
+            compactions: Vec::new(),
         };
 
         let tracker = UsageTracker::from_session(&session);

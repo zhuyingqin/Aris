@@ -88,7 +88,7 @@ fn client_credentials(provider: Provider, cfg: &OauthConfig) -> Result<(String, 
         }
         Provider::Outlook => {
             let client_id = store::effective_outlook_client_id(cfg).ok_or_else(|| {
-                "ARIS Outlook OAuth is not configured in this build. \
+                "SomniQ Outlook OAuth is not configured in this build. \
                  Set ARIS_OUTLOOK_CLIENT_ID to the Microsoft Entra application \
                  client ID when building the desktop app."
                     .to_string()
@@ -162,7 +162,7 @@ fn bind_loopback_listener(
         };
         format!(
             "Could not bind {target} for the OAuth redirect ({error}). \
-             Another ARIS instance or local app may be using it. Close it and try again. \
+             Another SomniQ instance or local app may be using it. Close it and try again. \
              {provider_hint}"
         )
     })

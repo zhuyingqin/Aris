@@ -1,4 +1,4 @@
-import { memo, useMemo, useState, type ReactNode } from "react";
+import { Fragment, memo, useMemo, useState, type ReactNode } from "react";
 import type { ChatBlock, ChatTurn } from "../types";
 import { fileOpen } from "../api/tauri";
 import MarkdownContent, { ThinkBlock } from "./MarkdownContent";
@@ -492,6 +492,13 @@ function renderSingleBlock(
       />
     ) : null;
   }
+  if (block.kind === "notice") {
+    return block.message ? (
+      <div key={index} className="chat-context-notice">
+        {block.message}
+      </div>
+    ) : null;
+  }
   if (block.kind === "permission") {
     return <PermissionCall key={block.id} block={block} onPermissionRespond={onPermissionRespond} />;
   }
@@ -510,6 +517,36 @@ function renderSingleBlock(
   return <ToolCall key={block.id ?? index} block={block} />;
 }
 
+function renderAssistantTextRun(blocks: ChatBlock[], start: number, end: number, turn: ChatTurn) {
+  const text = blocks
+    .filter((block): block is Extract<ChatBlock, { kind: "text" }> => block.kind === "text")
+    .map((block) => block.text)
+    .join("");
+  const thinking = blocks
+    .filter((block): block is Extract<ChatBlock, { kind: "thinking" }> => block.kind === "thinking")
+    .map((block) => block.thinking.trim())
+    .filter(Boolean)
+    .join("\n\n");
+  const last = blocks[blocks.length - 1];
+  const isTailRun = end === turn.blocks.length;
+  return (
+    <Fragment key={`assistant-text-run-${start}`}>
+      {thinking && (
+        <ThinkBlock
+          content={thinking}
+          streaming={Boolean(turn.streaming && isTailRun && last?.kind === "thinking")}
+        />
+      )}
+      {text.trim() && (
+        <MarkdownContent
+          text={text}
+          streaming={Boolean(turn.streaming && isTailRun && last?.kind === "text")}
+        />
+      )}
+    </Fragment>
+  );
+}
+
 /**
  * Renders a turn's blocks, collapsing runs of ≥2 consecutive calls to the same
  * tool into a single {@link ToolGroup}. Other blocks render individually.
@@ -524,6 +561,15 @@ function renderBlocks(
   let i = 0;
   while (i < blocks.length) {
     const block = blocks[i];
+    if (turn.role === "assistant" && (block.kind === "text" || block.kind === "thinking")) {
+      let j = i + 1;
+      while (j < blocks.length && (blocks[j].kind === "text" || blocks[j].kind === "thinking")) {
+        j += 1;
+      }
+      out.push(renderAssistantTextRun(blocks.slice(i, j), i, j, turn));
+      i = j;
+      continue;
+    }
     // AskUserQuestion is interactive and rendered individually, never collapsed.
     if (block.kind === "tool" && block.name !== "TodoWrite" && block.name !== "AskUserQuestion") {
       let j = i + 1;

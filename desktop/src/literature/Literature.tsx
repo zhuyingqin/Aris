@@ -1,10 +1,8 @@
-import { Fragment, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { Fragment, lazy, Suspense, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { literatureLlm } from "../api/tauri";
 import { useStore } from "../store";
-import Knowledge from "../knowledge/KnowledgeReview";
-import MathText from "./MathText";
-import PdfReader from "./PdfReader";
+import type { LiteraturePageView } from "./LiteratureViewTabs";
 import { useLiteratureStore } from "./literatureStore";
 import {
   type DetailTab,
@@ -18,7 +16,77 @@ import {
 import "./Literature.css";
 
 type SortKey = "added" | "fit" | "year" | "title" | "citations";
-type LiteraturePageView = "library" | "graph";
+
+const Knowledge = lazy(() => import("../knowledge/KnowledgeReview"));
+const LazyMathText = lazy(() => import("./MathText"));
+const PdfReader = lazy(() => import("./PdfReader"));
+
+function MathText({
+  text,
+  className = "",
+}: {
+  text: string;
+  className?: string;
+}) {
+  return (
+    <Suspense fallback={<span className={`lit-math-text ${className}`.trim()}>{text}</span>}>
+      <LazyMathText text={text} className={className} />
+    </Suspense>
+  );
+}
+
+function LiteratureLoading({ label }: { label: string }) {
+  return (
+    <div className="lit-lazy-loading" role="status" aria-live="polite">
+      <span className="lit-search-spinner" aria-hidden="true" />
+      {label}
+    </div>
+  );
+}
+
+interface LiteratureProps {
+  pageView?: LiteraturePageView;
+  onPageViewChange?: (view: LiteraturePageView) => void;
+}
+
+interface LiteratureViewTabsProps {
+  pageView: LiteraturePageView;
+  onPageViewChange: (view: LiteraturePageView) => void;
+  className?: string;
+}
+
+const LITERATURE_PAGE_VIEWS = [
+  { id: "library", label: "文献库", icon: "☰" },
+  { id: "graph", label: "知识图谱", icon: "⌘" },
+] as const;
+
+export function LiteratureViewTabs({
+  pageView,
+  onPageViewChange,
+  className,
+}: LiteratureViewTabsProps) {
+  return (
+    <div
+      className={`lit-mode-switch${className ? ` ${className}` : ""}`}
+      role="tablist"
+      aria-label="文献视图切换"
+    >
+      {LITERATURE_PAGE_VIEWS.map((item) => (
+        <button
+          key={item.id}
+          type="button"
+          role="tab"
+          aria-selected={pageView === item.id}
+          className={`lit-mode-tab${pageView === item.id ? " active" : ""}`}
+          onClick={() => onPageViewChange(item.id)}
+        >
+          <span aria-hidden="true">{item.icon}</span>
+          {item.label}
+        </button>
+      ))}
+    </div>
+  );
+}
 
 const TAG_COLORS = ["amber", "blue", "green", "purple", "accent"];
 function tagColorClass(tag: string): string {
@@ -125,7 +193,10 @@ function formatAuthors(authors: string[]) {
 // Main component
 // ──────────────────────────────────────────────────────────────────────────────
 
-export default function Literature() {
+export default function Literature({
+  pageView: controlledPageView,
+  onPageViewChange,
+}: LiteratureProps = {}) {
   const currentProject = useStore((s) => s.currentProject);
   const setTab = useStore((s) => s.setTab);
   const setPendingChatInput = useStore((s) => s.setPendingChatInput);
@@ -140,7 +211,6 @@ export default function Literature() {
   const watchAgentActivity = useLiteratureStore((s) => s.watchAgentActivity);
   const setStage = useLiteratureStore((s) => s.setStage);
   const deletePapers = useLiteratureStore((s) => s.deletePapers);
-  const runRemoteSearch = useLiteratureStore((s) => s.runRemoteSearch);
   const toggleStar = useLiteratureStore((s) => s.toggleStar);
   const markRead = useLiteratureStore((s) => s.markRead);
   const addTags = useLiteratureStore((s) => s.addTags);
@@ -170,15 +240,13 @@ export default function Literature() {
   const setError = useLiteratureStore((s) => s.setError);
 
   const [view, setView] = useState("all");
-  const [pageView, setPageView] = useState<LiteraturePageView>("library");
+  const [localPageView, setLocalPageView] = useState<LiteraturePageView>("library");
   const [filter, setFilter] = useState("");
   const [sort, setSort] = useState<SortKey>("added");
   const [checked, setChecked] = useState<Set<string>>(new Set());
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [selectionCleared, setSelectionCleared] = useState(false);
   const [workspaceTab, setWorkspaceTab] = useState<DetailTab>("info");
-  const [remoteSearchQuery, setRemoteSearchQuery] = useState("");
-  const [remoteSearching, setRemoteSearching] = useState(false);
   const [tagDraft, setTagDraft] = useState("");
   const [abstractOpen, setAbstractOpen] = useState(true);
   const [colInput, setColInput] = useState("");
@@ -190,6 +258,9 @@ export default function Literature() {
   const [reviewPanelOpen, setReviewPanelOpen] = useState(false);
   const [panelWidths, setPanelWidths] = useState({ sidebar: 220, workspace: 300 });
   const panelDragRef = useRef<{ panel: "sidebar" | "workspace"; startX: number; startW: number } | null>(null);
+  const pageView = controlledPageView ?? localPageView;
+  const setPageView = onPageViewChange ?? setLocalPageView;
+  const showLocalViewTabs = !onPageViewChange;
 
   const startPanelResize = (panel: "sidebar" | "workspace", e: { clientX: number; preventDefault(): void }) => {
     e.preventDefault();
@@ -266,19 +337,6 @@ export default function Literature() {
   const openAgentChat = (input: string) => {
     setPendingChatInput(input);
     setTab("chat");
-  };
-
-  const submitRemoteSearch = async (event: FormEvent) => {
-    event.preventDefault();
-    const query = remoteSearchQuery.trim();
-    if (!query || remoteSearching) return;
-    setRemoteSearching(true);
-    try {
-      await runRemoteSearch(query, ["arxiv", "crossref", "openalex"], 20);
-      setRemoteSearchQuery("");
-    } finally {
-      setRemoteSearching(false);
-    }
   };
 
   const openBrowserDownload = (paper: LiteraturePaper) => {
@@ -807,51 +865,10 @@ export default function Literature() {
 
   return (
     <div className="lit-page">
-      {/* Header */}
-      <header className="lit-header">
-        <div className="lit-mode-switch" role="tablist" aria-label="文献视图切换">
-          {([
-            { id: "library", label: "文献库", icon: "☰" },
-            { id: "graph", label: "知识图谱", icon: "⌘" },
-          ] as Array<{ id: LiteraturePageView; label: string; icon: string }>).map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              role="tab"
-              aria-selected={pageView === item.id}
-              className={`lit-mode-tab${pageView === item.id ? " active" : ""}`}
-              onClick={() => setPageView(item.id)}
-            >
-              <span aria-hidden="true">{item.icon}</span>
-              {item.label}
-            </button>
-          ))}
-        </div>
-      </header>
-
-      {pageView === "library" && (
-        <form className="lit-search-strip" onSubmit={submitRemoteSearch}>
-          <input
-            className="lit-strip-input"
-            aria-label="远程文献检索"
-            placeholder="检索 arXiv / Crossref / OpenAlex"
-            value={remoteSearchQuery}
-            onChange={(event) => setRemoteSearchQuery(event.target.value)}
-          />
-          <button type="submit" className="primary" disabled={!remoteSearchQuery.trim() || remoteSearching}>
-            {remoteSearching ? "检索中…" : "检索并保存"}
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              setActiveReviewTask(null);
-              setReviewQuestion("");
-              setReviewPanelOpen(true);
-            }}
-          >
-            新建审查
-          </button>
-        </form>
+      {showLocalViewTabs && (
+        <header className="lit-header">
+          <LiteratureViewTabs pageView={pageView} onPageViewChange={setPageView} />
+        </header>
       )}
 
       {/* Error banner */}
@@ -892,7 +909,9 @@ export default function Literature() {
 
       {pageView === "graph" ? (
         <div className="lit-knowledge-shell">
-          <Knowledge mode="globalGraph" />
+          <Suspense fallback={<LiteratureLoading label="Loading knowledge graph..." />}>
+            <Knowledge mode="globalGraph" />
+          </Suspense>
         </div>
       ) : selectedPaper && workspaceTab === "reader" && selectedPaper.pdf.path ? (
         <div className="lit-reading-shell">
@@ -934,23 +953,25 @@ export default function Literature() {
               ))}
             </div>
           </div>
-          <PdfReader
-            relativePath={selectedPaper.pdf.path}
-            initialPage={readerPage}
-            annotations={selectedPaper.pdfAnnotations}
-            focusedAnnotationId={readerAnnotationId}
-            onOpenExternal={() => void openPdf(selectedPaper.id)}
-            onAddAnnotation={(page, data) =>
-              addPdfAnnotation(selectedPaper.id, { page, ...data })
-            }
-            onUpdateAnnotation={(annotationId, patch) =>
-              updatePdfAnnotation(selectedPaper.id, annotationId, patch)
-            }
-            onDeleteAnnotation={(annotationId) =>
-              deletePdfAnnotation(selectedPaper.id, annotationId)
-            }
-            onRunAi={(system, prompt) => literatureLlm(system, prompt)}
-          />
+          <Suspense fallback={<LiteratureLoading label="Loading PDF reader..." />}>
+            <PdfReader
+              relativePath={selectedPaper.pdf.path}
+              initialPage={readerPage}
+              annotations={selectedPaper.pdfAnnotations}
+              focusedAnnotationId={readerAnnotationId}
+              onOpenExternal={() => void openPdf(selectedPaper.id)}
+              onAddAnnotation={(page, data) =>
+                addPdfAnnotation(selectedPaper.id, { page, ...data })
+              }
+              onUpdateAnnotation={(annotationId, patch) =>
+                updatePdfAnnotation(selectedPaper.id, annotationId, patch)
+              }
+              onDeleteAnnotation={(annotationId) =>
+                deletePdfAnnotation(selectedPaper.id, annotationId)
+              }
+              onRunAi={(system, prompt) => literatureLlm(system, prompt)}
+            />
+          </Suspense>
         </div>
       ) : (
         <div

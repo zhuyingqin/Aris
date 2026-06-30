@@ -822,6 +822,7 @@ mod tests {
                     text: "Done.".to_string(),
                 }]),
             ],
+            compactions: Vec::new(),
         };
 
         let timeline = timeline_from_session("session-test", &session);
@@ -863,6 +864,7 @@ mod tests {
                     text: "hi".to_string(),
                 }]),
             ],
+            compactions: Vec::new(),
         };
 
         let timeline = timeline_from_session("session-test", &session);
@@ -904,6 +906,7 @@ mod tests {
                     usage: None,
                 },
             ],
+            compactions: Vec::new(),
         };
 
         let timeline = timeline_from_session("session-test", &session);

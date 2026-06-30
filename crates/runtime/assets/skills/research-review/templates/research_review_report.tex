@@ -1,0 +1,355 @@
+% =============================================================================
+% ARIS standardized research review report template
+% Engine: xelatex (or latexmk -xelatex)
+% Encoding: UTF-8
+% =============================================================================
+
+\documentclass[11pt,a4paper]{article}
+
+% -----------------------------------------------------------------------------
+% Metadata to fill for each report
+% -----------------------------------------------------------------------------
+\newcommand{\ReportTitle}{审稿报告}
+\newcommand{\PaperTitle}{TODO: Paper title}
+\newcommand{\PaperSubtitle}{TODO: English title or short subtitle}
+\newcommand{\PaperShortName}{TODO: short name}
+\newcommand{\VenueName}{TODO: venue or journal}
+\newcommand{\ManuscriptId}{TODO: manuscript id}
+\newcommand{\ReviewerName}{匿名审稿人 (ARIS Auto-Review Pipeline)}
+\newcommand{\ReportDate}{\today}
+\newcommand{\Recommendation}{TODO: Accept / Minor Revision / Major Revision / Reject}
+\newcommand{\OverallScore}{TODO: score}
+\newcommand{\ReviewConfidence}{TODO: High / Medium / Low}
+\newcommand{\ReviewScope}{TODO: manuscript, supplementary files, code/data, literature search, external review}
+
+% -----------------------------------------------------------------------------
+% Packages and typography
+% -----------------------------------------------------------------------------
+\usepackage[a4paper,left=2.4cm,right=2.4cm,top=2.6cm,bottom=2.6cm]{geometry}
+\usepackage{amsmath,amssymb,amsfonts,amsthm}
+\usepackage{bm}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{longtable}
+\usepackage{multirow}
+\usepackage{tabularx}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{tikz}
+\usetikzlibrary{shapes,arrows,positioning,calc}
+\usepackage[most]{tcolorbox}
+\usepackage{fancyhdr}
+\usepackage{titlesec}
+\usepackage{caption}
+\usepackage{microtype}
+\usepackage{adjustbox}
+\usepackage{ragged2e}
+\usepackage[UTF8]{ctex}
+\usepackage{hyperref}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue!60!black,
+  citecolor=blue!60!black,
+  urlcolor=blue!60!black,
+  pdfauthor={\ReviewerName},
+  pdftitle={\PaperShortName\space 审稿报告}
+}
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small \PaperShortName\space 审稿报告}
+\fancyhead[R]{\small \thepage}
+\fancyfoot[C]{\small ARIS Auto-Review Pipeline \quad|\quad \ManuscriptId}
+\renewcommand{\headrulewidth}{0.4pt}
+\renewcommand{\footrulewidth}{0.4pt}
+
+\titleformat{\section}{\Large\bfseries\color{blue!50!black}}{\thesection.}{0.6em}{}
+\titleformat{\subsection}{\large\bfseries\color{blue!40!black}}{\thesubsection.}{0.5em}{}
+\titleformat{\subsubsection}{\normalsize\bfseries\color{blue!30!black}}{\thesubsubsection.}{0.5em}{}
+
+\setlength{\parskip}{0.4em}
+\setlength{\parindent}{2em}
+\linespread{1.22}
+\setlist[itemize]{leftmargin=2em,itemsep=0.2em,topsep=0.2em}
+\setlist[enumerate]{leftmargin=2em,itemsep=0.2em,topsep=0.2em}
+
+% -----------------------------------------------------------------------------
+% Reusable review boxes
+% -----------------------------------------------------------------------------
+\newtcolorbox{summarybox}[1][]{
+  colback=blue!5!white,colframe=blue!55!black,
+  fonttitle=\bfseries,title={#1},
+  arc=1mm,boxrule=0.45pt,breakable
+}
+
+\newtcolorbox{positivebox}[1][]{
+  colback=green!6!white,colframe=green!50!black,
+  fonttitle=\bfseries,title={#1},
+  arc=1mm,boxrule=0.45pt,breakable
+}
+
+\newtcolorbox{criticalbox}[1][]{
+  colback=red!6!white,colframe=red!60!black,
+  fonttitle=\bfseries,title={#1},
+  arc=1mm,boxrule=0.45pt,breakable
+}
+
+\newtcolorbox{evidencebox}[1][]{
+  colback=yellow!8!white,colframe=yellow!60!black,
+  fonttitle=\bfseries,title={#1},
+  arc=1mm,boxrule=0.45pt,breakable
+}
+
+\newtcolorbox{innovationbox}[1][]{
+  colback=cyan!6!white,colframe=cyan!55!black,
+  fonttitle=\bfseries,title={#1},
+  arc=1mm,boxrule=0.45pt,breakable
+}
+
+\newcommand{\IssueHeading}[3]{\noindent\textbf{#1. #2} \hfill \textbf{Severity: #3}\par}
+\newcommand{\Evidence}{\noindent\textbf{Evidence:} }
+\newcommand{\Impact}{\noindent\textbf{Impact:} }
+\newcommand{\RequiredAction}{\noindent\textbf{Required action:} }
+\newcommand{\Confidence}{\noindent\textbf{Confidence:} }
+
+% -----------------------------------------------------------------------------
+\begin{document}
+
+\begin{titlepage}
+\vspace*{-1.0cm}
+\begin{tcolorbox}[colback=blue!5,colframe=blue!60!black,arc=2mm,boxrule=0.6pt]
+\centering
+{\LARGE\bfseries \ReportTitle\par}
+\vspace{0.5em}
+{\large \PaperTitle\par}
+\vspace{0.3em}
+{\normalsize \PaperSubtitle\par}
+\end{tcolorbox}
+
+\vspace{1.2em}
+\begin{center}
+\begin{tabular}{rl}
+\textbf{Reviewer:} & \ReviewerName \\
+\textbf{Venue:} & \VenueName \\
+\textbf{Manuscript ID:} & \ManuscriptId \\
+\textbf{Report date:} & \ReportDate \\
+\textbf{Recommendation:} & \Recommendation \\
+\textbf{Overall score:} & \OverallScore \\
+\textbf{Confidence:} & \ReviewConfidence \\
+\end{tabular}
+\end{center}
+
+\vfill
+\begin{summarybox}[Review Scope]
+\ReviewScope
+\end{summarybox}
+\end{titlepage}
+
+\tableofcontents
+\newpage
+
+% =============================================================================
+\section{摘要与审稿结论}
+% =============================================================================
+
+\begin{abstract}
+\noindent
+TODO: Summarize the manuscript, review scope, evidence base, decisive strengths and weaknesses, final recommendation, and confidence in 1--3 paragraphs.
+\end{abstract}
+
+\begin{criticalbox}[Final Recommendation]
+\textbf{Recommendation:} \Recommendation
+
+\textbf{Overall score:} \OverallScore
+
+\textbf{Confidence:} \ReviewConfidence
+
+\textbf{Decisive reasons:}
+\begin{enumerate}
+  \item TODO: decisive reason 1.
+  \item TODO: decisive reason 2.
+  \item TODO: decisive reason 3.
+\end{enumerate}
+\end{criticalbox}
+
+% =============================================================================
+\section{稿件信息与审查范围}
+% =============================================================================
+
+\begin{longtable}{p{0.25\textwidth}p{0.68\textwidth}}
+\toprule
+\textbf{Item} & \textbf{Content} \\
+\midrule
+Paper title & \PaperTitle \\
+Venue / journal & \VenueName \\
+Manuscript ID & \ManuscriptId \\
+Reviewed files & TODO: list manuscript, supplement, code, data, rebuttal, or related files. \\
+External review backend & TODO: model/backend/thread id, or "not used". \\
+Literature search scope & TODO: databases, dates, query families, screening rules. \\
+Known limitations & TODO: missing files, inaccessible data, unavailable code, or unverified citations. \\
+\bottomrule
+\end{longtable}
+
+% =============================================================================
+\section{文献检索与创新性审查}
+% =============================================================================
+
+\subsection{检索策略与覆盖范围}
+TODO: Record database(s), search date, query families, time range, inclusion/exclusion criteria, raw hit counts, deduplication rules, and selected-paper count.
+
+\subsection{最接近工作与差异}
+\begin{longtable}{p{0.24\textwidth}p{0.12\textwidth}p{0.25\textwidth}p{0.27\textwidth}}
+\toprule
+\textbf{Prior work} & \textbf{Year} & \textbf{Overlap} & \textbf{Remaining difference} \\
+\midrule
+TODO & TODO & TODO & TODO \\
+\bottomrule
+\end{longtable}
+
+\begin{innovationbox}[Novelty Judgment]
+TODO: State whether the contribution is novel, incremental, or substantially overlapped with prior work. Tie every claim to verified evidence.
+\end{innovationbox}
+
+% =============================================================================
+\section{论文主张与创新点评估}
+% =============================================================================
+
+\begin{longtable}{p{0.18\textwidth}p{0.25\textwidth}p{0.22\textwidth}p{0.22\textwidth}}
+\toprule
+\textbf{Claim} & \textbf{Author evidence} & \textbf{Review assessment} & \textbf{Required fix} \\
+\midrule
+TODO: C1 & TODO & TODO & TODO \\
+TODO: C2 & TODO & TODO & TODO \\
+\bottomrule
+\end{longtable}
+
+% =============================================================================
+\section{方法与逻辑审查}
+% =============================================================================
+
+\subsection{整体论证链条}
+TODO: Describe the paper's intended reasoning chain from problem to method to evidence to claims.
+
+\subsection{主要逻辑问题}
+\begin{criticalbox}[Major Logic Issues]
+\IssueHeading{M1}{TODO: issue title}{Major}
+\Evidence TODO.
+
+\Impact TODO.
+
+\RequiredAction TODO.
+
+\Confidence TODO.
+\end{criticalbox}
+
+% =============================================================================
+\section{理论与数学审查}
+% =============================================================================
+
+\subsection{定义、符号与目标函数}
+TODO: Check notation, definitions, objectives, constraints, and consistency between text and equations.
+
+\subsection{理论声明与证明}
+TODO: Check theorem/proposition validity, proof gaps, convergence, complexity, and unsupported theoretical language.
+
+% =============================================================================
+\section{实验与实证严谨性审查}
+% =============================================================================
+
+\subsection{数据集、划分与评价指标}
+TODO: Evaluate datasets, splits, preprocessing, leakage risk, metric choice, and thresholding protocol.
+
+\subsection{基线、消融与统计可靠性}
+TODO: Evaluate baseline coverage, head-to-head comparisons, ablations, sensitivity analysis, significance testing, and compute cost.
+
+\begin{evidencebox}[Results-to-Claims Alignment]
+TODO: Explain which claims are supported, partially supported, or unsupported by the reported experiments.
+\end{evidencebox}
+
+% =============================================================================
+\section{写作、图表与可读性审查}
+% =============================================================================
+
+\subsection{结构与表达}
+TODO: Review paper organization, language clarity, terminology consistency, and missing explanations.
+
+\subsection{图表与复现信息}
+TODO: Review figure/table quality, captions, axis labels, reproducibility details, and artifact availability.
+
+% =============================================================================
+\section{外部 LLM 审查摘要}
+% =============================================================================
+
+TODO: If external review was used, summarize thread id, model/backend, strongest independent criticisms, disagreements, and influence on this report. If not used, state "Not used".
+
+% =============================================================================
+\section{综合评价与修改清单}
+% =============================================================================
+
+\subsection{核心优势}
+\begin{positivebox}[Strengths]
+\begin{enumerate}
+  \item TODO: strength 1.
+  \item TODO: strength 2.
+\end{enumerate}
+\end{positivebox}
+
+\subsection{主要问题清单}
+\begin{longtable}{p{0.08\textwidth}p{0.18\textwidth}p{0.33\textwidth}p{0.30\textwidth}}
+\toprule
+\textbf{ID} & \textbf{Severity} & \textbf{Issue} & \textbf{Required action} \\
+\midrule
+M1 & Major & TODO & TODO \\
+M2 & Major & TODO & TODO \\
+Mo1 & Moderate & TODO & TODO \\
+Mi1 & Minor & TODO & TODO \\
+\bottomrule
+\end{longtable}
+
+\subsection{审稿决议}
+TODO: Provide final recommendation, confidence, and minimal conditions for acceptance or resubmission.
+
+\subsection{审稿局限性声明}
+TODO: State evidence gaps and what was not evaluated.
+
+\appendix
+
+% =============================================================================
+\section{文献检索记录}
+% =============================================================================
+
+TODO: Include query strings, raw hit counts, selected references, bibliographic keys, and verification notes.
+
+% =============================================================================
+\section{证据矩阵}
+% =============================================================================
+
+\begin{longtable}{p{0.10\textwidth}p{0.25\textwidth}p{0.28\textwidth}p{0.25\textwidth}}
+\toprule
+\textbf{Issue} & \textbf{Evidence source} & \textbf{Interpretation} & \textbf{Required action} \\
+\midrule
+M1 & TODO & TODO & TODO \\
+\bottomrule
+\end{longtable}
+
+% =============================================================================
+\section{外部审查追踪摘要}
+% =============================================================================
+
+TODO: Include trace path(s), thread id(s), and concise summaries or short excerpts within copyright and privacy limits.
+
+\vspace{2em}
+\begin{center}
+\begin{tcolorbox}[colback=gray!8,colframe=gray!55!black,width=0.82\textwidth,arc=2mm]
+\centering
+\Large\textbf{审稿报告结束}\\[0.5em]
+\normalsize
+\textbf{Final recommendation:} \Recommendation\\
+\textbf{Overall score:} \OverallScore\\
+\textbf{Confidence:} \ReviewConfidence
+\end{tcolorbox}
+\end{center}
+
+\end{document}

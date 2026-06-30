@@ -7,6 +7,8 @@ import type { SessionMessage, SessionSummary } from "../types";
 export default function Sessions() {
   const setError = useStore((s) => s.setError);
   const projectId = useStore((s) => s.currentProject?.id);
+  const pendingSessionViewId = useStore((s) => s.pendingSessionViewId);
+  const setPendingSessionViewId = useStore((s) => s.setPendingSessionViewId);
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [messages, setMessages] = useState<SessionMessage[]>([]);
@@ -17,6 +19,13 @@ export default function Sessions() {
     setMessages([]);
     sessionsList().then(setSessions).catch((e) => setError(String(e)));
   }, [projectId, setError]);
+
+  // Deep link from e.g. the Scheduled Tasks page: open one session's transcript.
+  useEffect(() => {
+    if (!pendingSessionViewId) return;
+    setSelected(pendingSessionViewId);
+    setPendingSessionViewId(null);
+  }, [pendingSessionViewId, setPendingSessionViewId]);
 
   useEffect(() => {
     setMessages([]);

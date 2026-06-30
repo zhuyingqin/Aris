@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
+import { createPortal } from "react-dom";
 import {
   chatDelete,
   chatCommandSpecs,
@@ -55,15 +56,62 @@ function detectFilePath(element: HTMLElement): string | null {
   return null;
 }
 
+// Rough token estimate. Latin/code text is ~3.5 chars/token, but CJK characters
+// are far denser (~1 token per character), so the old flat `chars / 3.5`
+// under-counted CJK-heavy text by roughly 3x — the ContextRing read low and
+// users hit the real window without warning. Weight CJK separately. Still a
+// heuristic; replace with a real tokenizer when one is wired up (#34 P0-3.1).
+function isCjkCharCode(code: number): boolean {
+  return (
+    (code >= 0x3000 && code <= 0x9fff) || // CJK symbols/punct, ideographs, Hangul/Kana
+    (code >= 0xf900 && code <= 0xfaff) || // CJK compatibility ideographs
+    (code >= 0xff00 && code <= 0xffef) // full-width / half-width forms
+  );
+}
+
+function estimateTextTokens(text: string): number {
+  let cjk = 0;
+  let other = 0;
+  for (const char of text) {
+    const code = char.codePointAt(0) ?? 0;
+    if (isCjkCharCode(code)) cjk += 1;
+    else other += 1;
+  }
+  return cjk + Math.round(other / 3.5) + 1;
+}
+
 function estimateTokens(turns: ChatTurn[]): number {
-  let chars = 0;
+  let tokens = 0;
   for (const turn of turns) {
     for (const block of turn.blocks) {
-      if (block.kind === "text") chars += block.text.length;
-      else if (block.kind === "tool") chars += block.input.length + (block.output?.length ?? 0);
+      if (block.kind === "text") tokens += estimateTextTokens(block.text);
+      else if (block.kind === "notice") tokens += estimateTextTokens(block.message);
+      else if (block.kind === "tool")
+        tokens += estimateTextTokens(block.input) + (block.output ? estimateTextTokens(block.output) : 0);
     }
   }
-  return Math.round(chars / 3.5);
+  return tokens;
+}
+
+type ContextOverride = { tokens: number; anchor: number };
+type ContextNotice = {
+  kind: "warning" | "compacted";
+  sessionId: string;
+  message: string;
+  detail?: string;
+  createdAt: number;
+};
+
+// The ContextRing's "used" value. When an authoritative backend count is pinned
+// (after each turn, or after compaction), use it as the base and add only the
+// estimate of turns appended past the anchor — so the ring tracks the backend's
+// real token usage instead of the divergent transcript estimate. The anchor
+// guard self-heals if the transcript was later truncated below it (e.g. an
+// edited or retried turn).
+function ringTokens(turns: ChatTurn[], override: ContextOverride | undefined): number {
+  return override && override.anchor <= turns.length
+    ? override.tokens + estimateTokens(turns.slice(override.anchor))
+    : estimateTokens(turns);
 }
 
 function MemoryBadge({ count }: { count: number }) {
@@ -74,6 +122,10 @@ function MemoryBadge({ count }: { count: number }) {
       <span className="mem-badge-count">{count}</span>
     </div>
   );
+}
+
+function formatCompactTokens(tokens: number): string {
+  return tokens >= 1000 ? `${(tokens / 1000).toFixed(1)}k` : String(tokens);
 }
 
 function hasRenderableBlock(turn: ChatTurn) {
@@ -248,6 +300,7 @@ export default function Chat() {
     setCurrentId,
     materializeCurrentSession,
     createSession,
+    createSessionInProject,
     updateSession,
     patchTurns,
     newSession,
@@ -274,14 +327,19 @@ export default function Chat() {
     const v = Number(localStorage.getItem("aris-chat-sidebar-w"));
     return v >= 150 && v <= 400 ? v : 218;
   });
-  const [chatSidebarCollapsed, setChatSidebarCollapsed] = useState<boolean>(
-    () => localStorage.getItem("aris-chat-sidebar-collapsed") === "true",
-  );
   const chatSidebarResizeRef = useRef<{ startX: number; startWidth: number } | null>(null);
   const [composerHeight, setComposerHeight] = useState(120);
   const [editingTurnId, setEditingTurnId] = useState<string | null>(null);
+  // After `/compact` the backend session shrinks but the visible transcript is
+  // kept intact, so the transcript-derived token estimate (and thus the
+  // ContextRing) would never move. Pin the ring to the real post-compaction
+  // token count reported by the command, plus an anchor (turn count at compact
+  // time) so later turns still accrue on top. Keyed per session; invalidated
+  // automatically once the transcript is truncated below the anchor.
+  const [contextOverrides, setContextOverrides] = useState<Map<string, { tokens: number; anchor: number }>>(() => new Map());
   const [deleted, setDeleted] = useState<ChatSession | null>(null);
   const [pendingCommandSelection, setPendingCommandSelection] = useState<PendingCommandSelection | null>(null);
+  const [contextNotice, setContextNotice] = useState<ContextNotice | null>(null);
   const [focusRequest, setFocusRequest] = useState(0);
   const [exporting, setExporting] = useState(false);
   const [chatDragging, setChatDragging] = useState(false);
@@ -290,16 +348,45 @@ export default function Chat() {
   const titleRequests = useRef(new Set<string>());
   const sendLocks = useRef(new Set<string>());
   const commandSelectionLock = useRef(false);
+  const syncedTurnIds = useRef(new Map<string, Set<string>>());
   const currentSessionRef = useRef(currentSession);
   currentSessionRef.current = currentSession;
+  const allSessionsRef = useRef(allSessions);
+  allSessionsRef.current = allSessions;
+  const contextOverridesRef = useRef(contextOverrides);
+  contextOverridesRef.current = contextOverrides;
   const focusComposer = useCallback(() => setFocusRequest((value) => value + 1), []);
+
+  useEffect(() => {
+    setContextNotice((notice) => notice && notice.sessionId === currentId ? notice : null);
+  }, [currentId]);
+
+  const markBackendContextSynced = useCallback((sessionId: string, turnsToMark: ChatTurn[]) => {
+    const known = syncedTurnIds.current.get(sessionId) ?? new Set<string>();
+    for (const turn of turnsToMark) known.add(turn.id);
+    syncedTurnIds.current.set(sessionId, known);
+  }, []);
 
   const syncBackendContext = useCallback((sessionId: string, nextTurns: ChatTurn[]) => {
     if (!isTauri()) return;
-    void contextForRetry(nextTurns)
-      .then((messages) => chatSetContext(sessionId, messages))
+    const known = syncedTurnIds.current.get(sessionId) ?? new Set<string>();
+    const deltaTurns = nextTurns.filter((turn) => (
+      !known.has(turn.id) && !turn.streaming && !turn.error
+    ));
+    if (deltaTurns.length === 0) return;
+    void contextForRetry(deltaTurns)
+      .then((messages) => {
+        if (messages.length === 0) return;
+        return chatSetContext(sessionId, messages, "append");
+      })
+      .then((tokens) => {
+        if (tokens != null) {
+          setContextOverrides((prev) => new Map(prev).set(sessionId, { tokens, anchor: nextTurns.length }));
+        }
+        markBackendContextSynced(sessionId, deltaTurns);
+      })
       .catch((error) => setError(String(error)));
-  }, [setError]);
+  }, [markBackendContextSynced, setError]);
 
   const patchAssistant = useCallback((
     sessionId: string,
@@ -348,9 +435,12 @@ export default function Chat() {
           stopped: false,
         };
       },
-      (nextTurns) => suggestTitle(sessionId, nextTurns),
+      (nextTurns) => {
+        markBackendContextSynced(sessionId, nextTurns);
+        suggestTitle(sessionId, nextTurns);
+      },
     );
-  }, [patchAssistant, suggestTitle]);
+  }, [markBackendContextSynced, patchAssistant, suggestTitle]);
 
   const onError = useCallback((sessionId: string, error: string, stopped: boolean) => {
     const visibleError = visibleTurnError(error, stopped);
@@ -366,10 +456,71 @@ export default function Chat() {
     );
   }, [patchAssistant, syncBackendContext]);
 
-  const { run, stop, runningSessionIds } = useChatStream({ patchAssistant, onComplete, onError });
+  // Pin the ContextRing to an authoritative backend token count — reported
+  // after every turn (real usage) and after compaction — anchored at the
+  // current turn count so later turns still accrue on top. Same override the
+  // `/compact` path uses; the anchor guard in `ringTokens` self-heals if the
+  // transcript is later truncated.
+  const applyContextTokens = useCallback((sessionId: string, tokens: number) => {
+    const session = allSessionsRef.current.find((item) => item.id === sessionId);
+    const anchor = session ? session.turns.length : 0;
+    setContextOverrides((prev) => new Map(prev).set(sessionId, { tokens, anchor }));
+  }, []);
+
+  const handleContextCompacted = useCallback((sessionId: string, tokensAfter: number) => {
+    applyContextTokens(sessionId, tokensAfter);
+    setContextNotice({
+      kind: "compacted",
+      sessionId,
+      message: "Context was compacted automatically.",
+      detail: `Earlier messages were summarized; backend context is now ${formatCompactTokens(tokensAfter)} tokens.`,
+      createdAt: Date.now(),
+    });
+  }, [applyContextTokens]);
+
+  const handleContextWarning = useCallback((event: {
+    sessionId: string;
+    usedTokens: number;
+    contextWindow?: number | null;
+    compactionBudget?: number | null;
+  }) => {
+    const budget = event.compactionBudget ?? event.contextWindow ?? status?.compactionBudget ?? status?.contextWindow ?? null;
+    const pct = budget && budget > 0 ? Math.round((event.usedTokens / budget) * 100) : null;
+    setContextNotice({
+      kind: "warning",
+      sessionId: event.sessionId,
+      message: "Context is close to the auto-compact budget.",
+      detail: budget
+        ? `${formatCompactTokens(event.usedTokens)} / ${formatCompactTokens(budget)} tokens${pct != null ? ` (${pct}%)` : ""}.`
+        : `${formatCompactTokens(event.usedTokens)} tokens in context.`,
+      createdAt: Date.now(),
+    });
+  }, [status?.compactionBudget, status?.contextWindow]);
+
+  // Current ring value for a session, so the compaction notice can report how
+  // much context was freed (before → after).
+  const readContextTokens = useCallback((sessionId: string): number | null => {
+    const session = allSessionsRef.current.find((item) => item.id === sessionId);
+    if (!session) return null;
+    return ringTokens(session.turns, contextOverridesRef.current.get(sessionId));
+  }, []);
+
+  const { run, stop, runningSessionIds } = useChatStream({
+    patchAssistant,
+    onComplete,
+    onError,
+    onContextCompacted: handleContextCompacted,
+    onContextTokens: applyContextTokens,
+    onContextWarning: handleContextWarning,
+    getContextTokens: readContextTokens,
+  });
   const currentChatBusy = runningSessionIds.has(currentId);
   const turns = currentSession?.turns ?? [];
-  const estimatedTokens = estimateTokens(turns);
+  const estimatedTokens = ringTokens(turns, contextOverrides.get(currentId));
+  const contextMax = status?.ready
+    ? (status.compactionBudget ?? status.contextWindow ?? null)
+    : null;
+  const currentContextNotice = contextNotice?.sessionId === currentId ? contextNotice : null;
   const workflowTodos = useMemo(() => latestTodosFromTurns(turns), [turns]);
   const workflowFileChanges = useMemo(
     () => latestFileChangesFromTurns(turns, currentProject?.path),
@@ -553,12 +704,18 @@ export default function Chat() {
       return;
     }
     const shouldResetContext = needsBackendContextReset(session.turns, prefix, resetContext);
-    if (shouldResetContext) await chatSetContext(session.id, await contextForRetry(prefix));
+    if (shouldResetContext) {
+      const tokens = await chatSetContext(session.id, await contextForRetry(prefix), "replace");
+      setContextOverrides((prev) => new Map(prev).set(session.id, { tokens, anchor: prefix.length }));
+      markBackendContextSynced(session.id, prefix);
+    } else {
+      markBackendContextSynced(session.id, prefix);
+    }
     patchTurns(session.id, () => [...prefix, userTurn(text, attached), assistantTurn()]);
     updateSession(session.id, (item) => ({ ...item, draft: "", draftAttachments: [] }));
     setEditingTurnId(null);
     await run(session.id, request);
-  }, [patchTurns, run, status?.model, updateSession]);
+  }, [markBackendContextSynced, patchTurns, run, status?.model, updateSession]);
 
   const runSlashCommand = useCallback(async (
     session: ChatSession,
@@ -623,6 +780,13 @@ export default function Chat() {
         userTurn(text, []),
         assistantTextTurn(result.message ?? ""),
       ]);
+      if (result.contextTokens != null) {
+        // Anchor past the two turns just appended (command echo + report) so
+        // the ring reads the real compacted size now and grows with later turns.
+        const anchor = (result.replaceTurns ? 0 : session.turns.length) + 2;
+        const tokens = result.contextTokens;
+        setContextOverrides((prev) => new Map(prev).set(session.id, { tokens, anchor }));
+      }
       updateSession(session.id, (item) => ({ ...item, draft: "", draftAttachments: [] }));
       setEditingTurnId(null);
       return true;
@@ -818,7 +982,7 @@ export default function Chat() {
   };
 
   const onChatSidebarResizeStart = (e: ReactPointerEvent<HTMLDivElement>) => {
-    if (e.button !== 0 || chatSidebarCollapsed) return;
+    if (e.button !== 0) return;
     chatSidebarResizeRef.current = { startX: e.clientX, startWidth: chatSidebarWidth };
     e.currentTarget.setPointerCapture(e.pointerId);
   };
@@ -834,16 +998,16 @@ export default function Chat() {
     setChatSidebarWidth(w);
     localStorage.setItem("aris-chat-sidebar-w", String(w));
   };
-  const toggleChatSidebar = () => {
-    const next = !chatSidebarCollapsed;
-    setChatSidebarCollapsed(next);
-    localStorage.setItem("aris-chat-sidebar-collapsed", String(next));
-  };
+  useEffect(() => {
+    document.body.style.setProperty("--chat-sidebar-w", `${chatSidebarWidth}px`);
+    return () => { document.body.style.removeProperty("--chat-sidebar-w"); };
+  }, [chatSidebarWidth]);
+
 
   return (
     <div
-      className={`chat-root${chatSidebarCollapsed ? " chat-sidebar-collapsed" : ""}`}
-      style={{ "--chat-sidebar-w": chatSidebarCollapsed ? "0px" : `${chatSidebarWidth}px` } as CSSProperties}
+      className="chat-root"
+      style={{ "--chat-sidebar-w": `${chatSidebarWidth}px` } as CSSProperties}
     >
       <ChatSidebar
         sessions={allSessions}
@@ -852,10 +1016,19 @@ export default function Chat() {
         open={sidebarOpen}
         busy={projectBusy}
         onClose={() => setSidebarOpen(false)}
-        onDesktopCollapse={toggleChatSidebar}
-        onNew={() => {
+        onNew={async (projectId) => {
           setEditingTurnId(null);
-          setCurrentId(newSession());
+          if (!projectId || projectId === currentProject?.id) {
+            setCurrentId(newSession());
+          } else {
+            try {
+              await switchProject(projectId);
+              const fresh = createSessionInProject(projectId);
+              setCurrentId(fresh.id);
+            } catch {
+              return;
+            }
+          }
           setSidebarOpen(false);
         }}
         onOpen={async (id) => {
@@ -910,39 +1083,44 @@ export default function Chat() {
             <span>拖放文件以附加</span>
           </div>
         )}
-        <header className="chat-head">
-          <button
-            className="chat-sidebar-toggle"
-            onClick={() => {
-              if (chatSidebarCollapsed) toggleChatSidebar();
-              else setSidebarOpen((open) => !open);
-            }}
-            aria-label="Toggle chat sidebar"
-          >
-            ☰
-          </button>
-          <div className="chat-thread-heading">
-            <span className="chat-thread-title">{currentSession?.title ?? "New chat"}</span>
-            {status?.ready
-              ? <span className="chat-model">{status.provider}</span>
-              : <span className="chat-model chat-model-error">{status?.message ?? "Checking..."}</span>}
-          </div>
-          <div className="chat-head-actions">
+
+        {document.getElementById("app-chat-actions-portal") && createPortal(
+          <div className="chat-head-actions" data-tauri-drag-region style={{ display: "flex", alignItems: "center", gap: "8px" }}>
             {status?.memoryFiles != null && status.memoryFiles > 0 && (
               <MemoryBadge count={status.memoryFiles} />
             )}
+            <div className="chat-head-model-badge" style={{
+              background: "var(--bg-2)",
+              color: "var(--text-dim)",
+              padding: "2px 6px",
+              borderRadius: "4px",
+              fontSize: "12px",
+              fontWeight: 500
+            }}>
+              {status?.ready ? status.provider : (status?.message ?? "Checking...")}
+            </div>
             <button
               className="chat-export-btn"
               onClick={() => void exportCurrentChat()}
               disabled={currentChatBusy || exporting || turns.length === 0}
               title="Export current chat"
               aria-label="Export current chat"
+              style={{ background: "transparent", border: "none", color: "var(--text-dim)", padding: "4px", cursor: "pointer", display: "flex", alignItems: "center" }}
             >
-              {exporting ? "Exporting" : "Export"}
+              {exporting ? (
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" className="spinner">
+                  <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="2" strokeDasharray="31.4 31.4" strokeLinecap="round" opacity="0.5"/>
+                </svg>
+              ) : (
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                  <path d="M12 15V3M12 15L8 11M12 15L16 11M21 21H3" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                </svg>
+              )}
             </button>
             {!status?.ready && <button onClick={() => setTab("settings")}>Settings</button>}
-          </div>
-        </header>
+          </div>,
+          document.getElementById("app-chat-actions-portal")!
+        )}
         <ChatThread
           key={currentId}
           sessionId={currentId}
@@ -998,7 +1176,8 @@ export default function Chat() {
           canSwitchModel={canSwitchModel}
           onModelChange={(model) => void changeModel(model)}
           contextUsed={estimatedTokens}
-          contextMax={status?.ready && status.contextWindow != null ? status.contextWindow : null}
+          contextMax={contextMax}
+          contextStatus={currentContextNotice}
           onInputChange={(value) => {
             if (pendingCommandSelection) setPendingCommandSelection(null);
             if (currentSession) setDraft(currentSession.id, value);

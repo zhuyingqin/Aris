@@ -9,7 +9,7 @@
 //! deliberate follow-up; v1 returns the completed cell result + refreshed outline.
 
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use notebook::{CellOutput, ExecStatus, KernelManager, NotebookDoc};
@@ -84,25 +84,62 @@ del __aris_variable_snapshot_20260620
 "#;
 
 fn resolve(projects_state: &ProjectState, notebook_path: &str) -> Result<PathBuf, String> {
-    let candidate = PathBuf::from(notebook_path);
-    if candidate.is_absolute() {
-        return Ok(candidate);
-    }
     let base = projects::current_project_path(projects_state)?;
-    let direct = base.join(&candidate);
-    if direct.exists() || tools::layout::has_path_separator(notebook_path) {
-        Ok(direct)
+    let candidate = PathBuf::from(notebook_path);
+    let resolved = if candidate.is_absolute() {
+        candidate
     } else {
-        Ok(base.join(tools::layout::canonical_notebook_path(notebook_path)))
-    }
+        let direct = base.join(&candidate);
+        if direct.exists() || tools::layout::has_path_separator(notebook_path) {
+            direct
+        } else {
+            base.join(tools::layout::canonical_notebook_path(notebook_path))
+        }
+    };
+    ensure_within_project(&base, resolved)
 }
 
 fn resolve_file(projects_state: &ProjectState, file_path: &str) -> Result<PathBuf, String> {
+    let base = projects::current_project_path(projects_state)?;
     let candidate = PathBuf::from(file_path);
-    if candidate.is_absolute() {
-        return Ok(candidate);
+    let resolved = if candidate.is_absolute() {
+        candidate
+    } else {
+        base.join(candidate)
+    };
+    ensure_within_project(&base, resolved)
+}
+
+/// Reject any notebook/file path that resolves *outside* the current project —
+/// absolute paths pointing elsewhere (e.g. `C:\Windows\...`) and `..` traversal
+/// that climbs above the project root. The Lab keys kernel sessions by absolute
+/// path, so absolute paths *inside* the project are allowed; only escapes are
+/// blocked. The target may not exist yet (e.g. create), so the check is lexical.
+fn ensure_within_project(base: &Path, resolved: PathBuf) -> Result<PathBuf, String> {
+    if is_within_project(base, &resolved) {
+        Ok(resolved)
+    } else {
+        Err("Lab cannot access paths outside the current project.".to_string())
     }
-    Ok(projects::current_project_path(projects_state)?.join(candidate))
+}
+
+fn is_within_project(base: &Path, resolved: &Path) -> bool {
+    lexically_normalize(resolved).starts_with(lexically_normalize(base))
+}
+
+/// Collapse `.`/`..` components without touching the filesystem.
+fn lexically_normalize(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
 }
 
 fn session_id(path: &Path) -> String {
@@ -835,7 +872,8 @@ fn collect_notebooks(
 
 #[cfg(test)]
 mod tests {
-    use super::list_notebooks_at;
+    use super::{is_within_project, list_notebooks_at};
+    use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_base(name: &str) -> std::path::PathBuf {
@@ -863,5 +901,27 @@ mod tests {
 
         assert_eq!(found, vec!["notebooks/a/b/c/d/e/f/g/deep.IPYNB"]);
         let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn sandbox_allows_in_project_and_blocks_escapes() {
+        let base = PathBuf::from("workspace/proj");
+        // In-project paths (relative or absolute-under-base) are allowed.
+        assert!(is_within_project(&base, &base.join("notebooks/a.ipynb")));
+        assert!(is_within_project(&base, &base.join("a.ipynb")));
+        assert!(is_within_project(&base, &base));
+        // `..` traversal that climbs out, and sibling/elsewhere paths, are blocked.
+        assert!(!is_within_project(
+            &base,
+            &base.join("papers/../../etc/passwd")
+        ));
+        assert!(!is_within_project(
+            &base,
+            &base.join("../proj-evil/secret.ipynb")
+        ));
+        assert!(!is_within_project(
+            &base,
+            &PathBuf::from("somewhere/else.ipynb")
+        ));
     }
 }

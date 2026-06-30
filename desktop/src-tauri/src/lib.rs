@@ -8,12 +8,14 @@ mod lab;
 mod literature;
 mod mail;
 mod mcp;
+mod newapi;
 mod process;
 mod projects;
 mod scheduled;
 mod sessions;
 mod state;
 mod studio;
+mod usage_log;
 mod watcher;
 
 use std::path::PathBuf;
@@ -172,7 +174,7 @@ pub fn run() {
             if let Some(resource_dir) = resource_dir(app) {
                 augment_resource_path_for_mcp(&resource_dir);
                 if let Err(error) = config::apply_bundled_internal_config(&resource_dir) {
-                    eprintln!("ARIS internal config import skipped: {error}");
+                    eprintln!("SomniQ internal config import skipped: {error}");
                 }
             }
             configure_tectonic_environment();
@@ -188,12 +190,15 @@ pub fn run() {
                 }
             }
             watcher::spawn_event_watcher(app.handle().clone());
+            mail::spawn_event_watchers(app.handle().clone());
+            scheduled::spawn_runner(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             commands::skills_list,
             commands::skill_view,
             commands::state_dir,
+            commands::local_environment_checks,
             commands::open_external_url,
             projects::projects_get,
             projects::project_add,
@@ -204,6 +209,12 @@ pub fn run() {
             config::config_set,
             config::config_test,
             config::provider_test,
+            newapi::newapi_auth_status,
+            newapi::newapi_login,
+            newapi::newapi_register,
+            newapi::newapi_send_verification,
+            newapi::newapi_models,
+            newapi::newapi_bootstrap,
             connectors::connector_plugins_list,
             connectors::connector_connect,
             scheduled::scheduled_tasks_list,
@@ -296,6 +307,7 @@ pub fn run() {
             engine::chat_set_context,
             engine::chat_delete,
             engine::chat_cancel,
+            usage_log::chat_usage_summary,
             files::file_list_dir,
             files::file_read_text,
             files::file_write_text,
@@ -305,9 +317,12 @@ pub fn run() {
             files::project_chat_starters,
         ])
         .build(tauri::generate_context!())
-        .expect("error while building ARIS Studio")
+        .expect("error while building SomniQ Studio")
         .run(|app_handle, event| {
-            if matches!(event, tauri::RunEvent::ExitRequested { .. }) {
+            if matches!(
+                event,
+                tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
+            ) {
                 cleanup_before_exit(app_handle);
             }
         });

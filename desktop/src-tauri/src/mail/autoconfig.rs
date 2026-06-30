@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use super::model::{MailAutoconfigResult, MailSocketSecurity};
 
-const USER_AGENT: &str = "ARIS Mail Autoconfig/0.3";
+const USER_AGENT: &str = "SomniQ Mail Autoconfig/0.3";
 
 pub fn discover(email: &str) -> Result<MailAutoconfigResult, String> {
     let email = normalize_email(email)?;

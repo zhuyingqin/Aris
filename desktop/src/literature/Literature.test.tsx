@@ -482,34 +482,46 @@ describe("Literature library", () => {
     expect(mocks.literatureDownloadPdf).not.toHaveBeenCalled();
   });
 
-  it("runs a remote search and persists it as a saved search", async () => {
-    const user = userEvent.setup();
+  it("hides the old remote search and new-review strip", async () => {
     render(<Literature />);
     await screen.findAllByText("Persisted Paper on Grounded Reading");
 
-    await user.type(screen.getByLabelText("远程文献检索"), "grounded agents");
-    await user.click(screen.getByRole("button", { name: "检索并保存" }));
-
-    await waitFor(() =>
-      expect(mocks.literatureSearch).toHaveBeenCalledWith(
-        "grounded agents",
-        ["arxiv", "crossref", "openalex"],
-        20,
-      ),
-    );
-    expect(mocks.literatureLibraryUpsert).toHaveBeenCalled();
+    expect(screen.queryByLabelText("远程文献检索")).toBeNull();
+    expect(screen.queryByRole("button", { name: "检索并保存" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "新建审查" })).toBeNull();
+    expect(mocks.literatureSearch).not.toHaveBeenCalled();
+    expect(mocks.literatureLibraryUpsert).not.toHaveBeenCalled();
   });
 
-  it("creates and edits a review task from the visible workflow panel", async () => {
+  it("opens and edits a review task from the sidebar workflow panel", async () => {
     const user = userEvent.setup();
+    const library = fixtureLibrary();
+    library.reviewTasks = [{
+      id: "task-review",
+      question: "Which agents ground claims?",
+      criteria: [{
+        id: "criterion-1",
+        kind: "include",
+        text: "Must discuss grounded claims",
+        createdAt: "2026-06-01T00:00:00.000Z",
+      }],
+      searchIds: [],
+      createdAt: "2026-06-01T00:00:00.000Z",
+      updatedAt: "2026-06-01T00:00:00.000Z",
+      suggestions: [],
+    }];
+    mocks.literatureLoad.mockResolvedValue(library);
+
     render(<Literature />);
     await screen.findAllByText("Persisted Paper on Grounded Reading");
 
-    await user.click(screen.getByRole("button", { name: "新建审查" }));
-    await user.type(screen.getByLabelText("审查问题"), "Which agents ground claims?");
-    await user.click(screen.getByRole("button", { name: "创建任务" }));
+    await user.click(screen.getByRole("button", { name: /Which agents ground claims/ }));
 
-    expect(await screen.findByLabelText("当前审查问题")).toBeTruthy();
+    const question = await screen.findByLabelText("当前审查问题");
+    await user.clear(question);
+    await user.type(question, "Which agents ground claims visually?");
+
+    expect((question as HTMLInputElement).value).toBe("Which agents ground claims visually?");
     expect(screen.getByRole("button", { name: "按标准筛选论文" })).toBeTruthy();
   });
 

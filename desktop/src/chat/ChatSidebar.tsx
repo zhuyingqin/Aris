@@ -4,6 +4,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type CSSProperties,
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
 } from "react";
@@ -20,14 +21,15 @@ interface Props {
   open: boolean;
   busy: boolean;
   onClose: () => void;
-  onDesktopCollapse: () => void;
-  onNew: () => void;
+  onNew: (projectId?: string) => void | Promise<void>;
   onOpen: (id: string) => void | Promise<void>;
   onRename: (id: string, title: string) => void;
   onTogglePinned: (id: string) => void;
   onDelete: (id: string) => void;
   onReorderProjects: (ids: string[]) => Promise<void>;
 }
+
+const AUTO_COLLAPSE_SESSION_COUNT = 5;
 
 function moveProjectId(
   ids: string[],
@@ -57,6 +59,14 @@ type SessionMenuPosition = {
   left: number;
 };
 
+function untransformedTop(element: HTMLElement) {
+  const previousTransform = element.style.transform;
+  if (previousTransform) element.style.transform = "none";
+  const top = element.getBoundingClientRect().top;
+  if (previousTransform) element.style.transform = previousTransform;
+  return top;
+}
+
 export default function ChatSidebar({
   sessions,
   projects,
@@ -64,7 +74,6 @@ export default function ChatSidebar({
   open,
   busy,
   onClose,
-  onDesktopCollapse,
   onNew,
   onOpen,
   onRename,
@@ -76,10 +85,12 @@ export default function ChatSidebar({
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
   const [draggedProjectId, setDraggedProjectId] = useState<string | null>(null);
+  const [draggedProjectOffsetY, setDraggedProjectOffsetY] = useState(0);
   const [projectOrderPreview, setProjectOrderPreview] = useState<string[] | null>(null);
   const [openMenu, setOpenMenu] = useState<SessionMenuAnchor | null>(null);
   const [menuPosition, setMenuPosition] = useState<SessionMenuPosition | null>(null);
   const [unreadIds, setUnreadIds] = useState<Set<string>>(new Set());
+  const [manualGroupState, setManualGroupState] = useState<Record<string, "expanded" | "collapsed">>({});
   const setTab = useStore((s) => s.setTab);
   const sessionListRef = useRef<HTMLDivElement | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
@@ -90,8 +101,11 @@ export default function ChatSidebar({
     pointerId: number;
     startX: number;
     startY: number;
+    currentY: number;
+    grabOffsetY: number;
     moved: boolean;
   } | null>(null);
+  const suppressProjectToggleClickRef = useRef<string | null>(null);
   const openMenuId = openMenu?.id ?? null;
   const groups = useMemo(
     () => groupSessionsByProject(
@@ -142,6 +156,14 @@ export default function ChatSidebar({
     };
   }, [openMenuId]);
 
+  useEffect(() => {
+    return () => {
+      document.removeEventListener("pointermove", handleDocumentProjectMove, true);
+      document.removeEventListener("pointerup", handleDocumentProjectUp, true);
+      document.removeEventListener("pointercancel", handleDocumentProjectCancel, true);
+    };
+  }, []);
+
   useLayoutEffect(() => {
     if (!openMenu || !menuRef.current) {
       setMenuPosition(null);
@@ -168,15 +190,48 @@ export default function ChatSidebar({
     else groupRefs.current.delete(id);
   };
 
+  const removeProjectDragListeners = () => {
+    document.removeEventListener("pointermove", handleDocumentProjectMove, true);
+    document.removeEventListener("pointerup", handleDocumentProjectUp, true);
+    document.removeEventListener("pointercancel", handleDocumentProjectCancel, true);
+  };
+
+  const resetProjectDrag = () => {
+    projectDragRef.current = null;
+    projectOrderPreviewRef.current = null;
+    setDraggedProjectId(null);
+    setDraggedProjectOffsetY(0);
+    setProjectOrderPreview(null);
+  };
+
+  const updateProjectDragOffset = (clientY: number) => {
+    const drag = projectDragRef.current;
+    if (!drag) return;
+    drag.currentY = clientY;
+    const element = groupRefs.current.get(drag.id);
+    if (!element) return;
+    const baseTop = untransformedTop(element);
+    const nextOffset = clientY - drag.grabOffsetY - baseTop;
+    if (!Number.isFinite(nextOffset)) return;
+    setDraggedProjectOffsetY((current) => (
+      Math.abs(nextOffset - current) < 0.5 ? current : nextOffset
+    ));
+  };
+
   const animateProjectOrderPreview = (ids: string[]) => {
+    const draggedId = projectDragRef.current?.id ?? null;
     const previousTop = new Map<string, number>();
     groupRefs.current.forEach((element, id) => {
+      if (id === draggedId) return;
       previousTop.set(id, element.getBoundingClientRect().top);
     });
     projectOrderPreviewRef.current = ids;
     setProjectOrderPreview(ids);
     window.requestAnimationFrame(() => {
+      const drag = projectDragRef.current;
+      if (drag) updateProjectDragOffset(drag.currentY);
       groupRefs.current.forEach((element, id) => {
+        if (id === draggedId) return;
         const from = previousTop.get(id);
         if (from === undefined) return;
         const delta = from - element.getBoundingClientRect().top;
@@ -187,7 +242,7 @@ export default function ChatSidebar({
             { transform: "translateY(0)" },
           ],
           {
-            duration: 150,
+            duration: 190,
             easing: "cubic-bezier(0.2, 0, 0, 1)",
           },
         );
@@ -219,17 +274,40 @@ export default function ChatSidebar({
     id: string,
   ) => {
     if (!canReorderProjects || event.button !== 0) return;
+    if (projectDragRef.current) return;
+    const rect = groupRefs.current.get(id)?.getBoundingClientRect();
     projectDragRef.current = {
       id,
       pointerId: event.pointerId,
       startX: event.clientX,
       startY: event.clientY,
+      currentY: event.clientY,
+      grabOffsetY: rect ? event.clientY - rect.top : 0,
       moved: false,
     };
     event.currentTarget.setPointerCapture(event.pointerId);
+    document.addEventListener("pointermove", handleDocumentProjectMove, true);
+    document.addEventListener("pointerup", handleDocumentProjectUp, true);
+    document.addEventListener("pointercancel", handleDocumentProjectCancel, true);
   };
 
-  const moveProjectDrag = (event: ReactPointerEvent<HTMLElement>) => {
+  const handleDocumentProjectMove = (event: PointerEvent) =>
+    documentProjectHandlersRef.current.move(event);
+  const handleDocumentProjectUp = (event: PointerEvent) =>
+    documentProjectHandlersRef.current.up(event);
+  const handleDocumentProjectCancel = (event: PointerEvent) =>
+    documentProjectHandlersRef.current.cancel(event);
+
+  const documentProjectHandlersRef = useRef<{
+    move: (event: PointerEvent) => void;
+    up: (event: PointerEvent) => void;
+    cancel: (event: PointerEvent) => void;
+  }>({
+    move: () => undefined,
+    up: () => undefined,
+    cancel: () => undefined,
+  });
+  documentProjectHandlersRef.current.move = (event) => {
     const drag = projectDragRef.current;
     if (!drag || drag.pointerId !== event.pointerId) return;
     if (!drag.moved) {
@@ -244,36 +322,33 @@ export default function ChatSidebar({
     }
     event.preventDefault();
     event.stopPropagation();
+    updateProjectDragOffset(event.clientY);
     const currentIds = projectOrderPreviewRef.current ?? projects.map((project) => project.id);
     const ids = projectOrderFromPointer(event.clientY, drag.id);
     if (!ids || sameProjectOrder(ids, currentIds)) return;
     animateProjectOrderPreview(ids);
   };
-
-  const finishProjectDrag = (event: ReactPointerEvent<HTMLElement>) => {
+  documentProjectHandlersRef.current.up = (event) => {
     const drag = projectDragRef.current;
-    if (!drag || drag.pointerId !== event.pointerId) return;
+    if (!drag) return;
+    if (drag.pointerId !== event.pointerId) return;
+    removeProjectDragListeners();
     if (drag.moved) {
       event.preventDefault();
       event.stopPropagation();
+      suppressProjectToggleClickRef.current = drag.id;
     }
     const ids = projectOrderPreviewRef.current;
-    projectDragRef.current = null;
-    projectOrderPreviewRef.current = null;
-    setDraggedProjectId(null);
-    setProjectOrderPreview(null);
+    resetProjectDrag();
     if (ids && drag.moved && !sameProjectOrder(ids, projects.map((project) => project.id))) {
       void onReorderProjects(ids).catch(() => undefined);
     }
   };
-
-  const cancelProjectDrag = (event: ReactPointerEvent<HTMLElement>) => {
+  documentProjectHandlersRef.current.cancel = (event) => {
     const drag = projectDragRef.current;
     if (!drag || drag.pointerId !== event.pointerId) return;
-    projectDragRef.current = null;
-    projectOrderPreviewRef.current = null;
-    setDraggedProjectId(null);
-    setProjectOrderPreview(null);
+    removeProjectDragListeners();
+    resetProjectDrag();
   };
 
   const beginRename = (session: ChatSession) => {
@@ -333,6 +408,25 @@ export default function ChatSidebar({
     setMenuPosition(null);
   };
 
+  const groupHasOverflow = (sessionCount: number) =>
+    !query.trim() && sessionCount > AUTO_COLLAPSE_SESSION_COUNT;
+
+  const groupCollapsed = (groupId: string, sessionCount: number) => {
+    if (query.trim()) return false;
+    if (sessionCount <= AUTO_COLLAPSE_SESSION_COUNT) return false;
+    const manual = manualGroupState[groupId];
+    return manual !== "expanded";
+  };
+
+  const toggleGroupCollapsed = (groupId: string, sessionCount: number) => {
+    if (!groupHasOverflow(sessionCount)) return;
+    const collapsed = groupCollapsed(groupId, sessionCount);
+    setManualGroupState((current) => ({
+      ...current,
+      [groupId]: collapsed ? "expanded" : "collapsed",
+    }));
+  };
+
   const menuStyle = openMenu
     ? {
       top: menuPosition?.top ?? openMenu.rect.bottom + 4,
@@ -343,19 +437,13 @@ export default function ChatSidebar({
 
   return (
     <aside className={`chat-sidebar${open ? " open" : ""}`} aria-label="Chat sessions">
+      <div className="chat-sidebar-container">
+        <div className="chat-sidebar-top-group">
       <div className="chat-sidebar-head">
         <div className="chat-sidebar-top-row">
-          <button className="chat-new-btn" onClick={onNew} disabled={busy}>
+          <button className="chat-new-btn" onClick={() => void onNew()} disabled={busy}>
             <span className="chat-new-icon">+</span>
             <span>新线程</span>
-          </button>
-          <button
-            className="chat-sidebar-desktop-collapse"
-            onClick={onDesktopCollapse}
-            title="Collapse sidebar"
-            aria-label="Collapse chat sidebar"
-          >
-            ‹
           </button>
           <button className="chat-sidebar-close" onClick={onClose} aria-label="Close chat sidebar">×</button>
         </div>
@@ -367,6 +455,7 @@ export default function ChatSidebar({
           <span>定时任务</span>
         </button>
       </div>
+        </div>
       <div className="chat-session-search">
         <input
           value={query}
@@ -377,26 +466,66 @@ export default function ChatSidebar({
       </div>
       <div className="chat-session-list" ref={sessionListRef}>
         {groups.length === 0 && <div className="chat-session-empty">无匹配对话</div>}
-        {orderedGroups.map((group) => (
+        {orderedGroups.map((group) => {
+          const collapsed = groupCollapsed(group.id, group.sessions.length);
+          const hasOverflow = groupHasOverflow(group.sessions.length);
+          const visibleSessions = collapsed
+            ? group.sessions.slice(0, AUTO_COLLAPSE_SESSION_COUNT)
+            : group.sessions;
+          const hiddenCount = group.sessions.length - visibleSessions.length;
+          const dragStyle: CSSProperties | undefined = draggedProjectId === group.id
+            ? { transform: `translateY(${draggedProjectOffsetY}px)` }
+            : undefined;
+          return (
           <section
-            className={`chat-session-group${draggedProjectId === group.id ? " dragging" : ""}`}
+            className={`chat-session-group${draggedProjectId === group.id ? " dragging" : ""}${collapsed ? " collapsed" : ""}`}
             key={group.id}
             data-chat-project-id={group.id}
             ref={setGroupRef(group.id)}
+            style={dragStyle}
           >
             <div
               className={`chat-sidebar-label chat-project-label${canReorderProjects ? " can-reorder" : ""}`}
               data-chat-project-label-id={group.id}
               onPointerDown={(event) => startProjectDrag(event, group.id)}
-              onPointerMove={moveProjectDrag}
-              onPointerUp={finishProjectDrag}
-              onPointerCancel={cancelProjectDrag}
-              title={canReorderProjects ? "Drag to reorder projects" : undefined}
             >
-              <span className="chat-project-drag-handle" aria-hidden="true">::</span>
-              <span className="chat-project-label-text">{group.label}</span>
+              <button
+                className="chat-project-toggle"
+                type="button"
+                aria-expanded={!collapsed}
+                aria-label={`${group.label}, ${group.sessions.length} chats, ${collapsed ? "collapsed" : "expanded"}`}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  if (suppressProjectToggleClickRef.current === group.id) {
+                    suppressProjectToggleClickRef.current = null;
+                    event.preventDefault();
+                    return;
+                  }
+                  toggleGroupCollapsed(group.id, group.sessions.length);
+                }}
+              >
+                <span className="chat-project-caret" aria-hidden="true">
+                  {collapsed ? ">" : "v"}
+                </span>
+                <span className="chat-project-label-text">{group.label}</span>
+              </button>
+              <button
+                className="chat-project-add"
+                type="button"
+                aria-label={`New chat in ${group.label}`}
+                title="New chat in this project"
+                disabled={busy}
+                onPointerDown={(event) => event.stopPropagation()}
+                onClick={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  void onNew(group.id);
+                }}
+              >
+                +
+              </button>
             </div>
-            {group.sessions.map((session) => (
+            {visibleSessions.map((session) => (
               <div
                 key={session.id}
                 className={`chat-session-item${session.id === currentId ? " active" : ""}${unreadIds.has(session.id) ? " unread" : ""}`}
@@ -499,8 +628,19 @@ export default function ChatSidebar({
                 )}
               </div>
             ))}
+            {hasOverflow && (
+              <button
+                className="chat-session-collapsed-summary"
+                type="button"
+                onClick={() => toggleGroupCollapsed(group.id, group.sessions.length)}
+              >
+                {collapsed ? `展开剩余 ${hiddenCount} 个对话` : `收起到最近 ${AUTO_COLLAPSE_SESSION_COUNT} 条`}
+              </button>
+            )}
           </section>
-        ))}
+          );
+        })}
+      </div>
       </div>
     </aside>
   );

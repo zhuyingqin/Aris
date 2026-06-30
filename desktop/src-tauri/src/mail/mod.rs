@@ -14,8 +14,11 @@
 
 mod agent_tools;
 mod atomic_file;
+mod auto_literature;
 mod autoconfig;
 mod cache;
+mod draft_attachment;
+mod events;
 mod gmail;
 mod graph;
 mod imap;
@@ -40,6 +43,10 @@ pub fn mail_tool_specs() -> Vec<tools::ToolSpec> {
 
 pub fn execute_mail_tool(name: &str, input: &serde_json::Value) -> Result<String, String> {
     agent_tools::execute_tool(name, input)
+}
+
+pub fn spawn_event_watchers(app: tauri::AppHandle) {
+    events::start_connected_account_watchers(app)
 }
 
 async fn offload<T, F>(work: F) -> Result<T, String>
@@ -106,19 +113,25 @@ pub async fn mail_autoconfig(email: String) -> Result<MailAutoconfigResult, Stri
 }
 
 #[tauri::command]
-pub async fn mail_generic_connect(input: GenericMailAccountInput) -> Result<MailAccount, String> {
-    offload(move || {
+pub async fn mail_generic_connect(
+    app: tauri::AppHandle,
+    input: GenericMailAccountInput,
+) -> Result<MailAccount, String> {
+    let account = offload(move || {
         let test = imap::test_input(&input)?;
         if !test.ok {
             return Err(test.message);
         }
         store::upsert_generic_account(input)
     })
-    .await
+    .await?;
+    events::start_for_account(app, &account);
+    Ok(account)
 }
 
 #[tauri::command]
 pub fn mail_disconnect(account_id: String) -> Result<Vec<MailAccount>, String> {
+    events::stop_for_account(&account_id);
     store::remove_account(&account_id)?;
     cache::clear_account(&account_id);
     Ok(store::list_accounts())

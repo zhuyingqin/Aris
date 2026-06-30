@@ -51,7 +51,7 @@ pub async fn literature_review_llm(system: String, prompt: String) -> Result<Str
             "LlmReview",
             &json!({
                 "prompt": format!(
-                    "{system}\n\nARIS built-in research-review skill instructions:\n{review_skill}\n\n\
+                    "{system}\n\nSomniQ built-in research-review skill instructions:\n{review_skill}\n\n\
                      Apply those evidence-first independent review standards and return exactly \
                      the output format requested below.\n\n{prompt}"
                 )
@@ -129,6 +129,9 @@ pub(crate) fn run_oneshot(system: &str, message: ConversationMessage) -> Result<
         aris_chat::permission_policy_for_tools(Vec::new(), PermissionMode::ReadOnly),
         vec![system.to_string()],
         RuntimeFeatureConfig::default(),
+        // Single-turn helper; never compacts, so no summarizer needed.
+        None,
+        None,
     )?;
     let summary = conversation
         .run_turn_message(message, None)

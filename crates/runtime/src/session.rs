@@ -51,6 +51,18 @@ pub struct ConversationMessage {
 pub struct Session {
     pub version: u32,
     pub messages: Vec<ConversationMessage>,
+    pub compactions: Vec<SessionCompactionRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionCompactionRecord {
+    pub summary: String,
+    pub messages: Vec<ConversationMessage>,
+    pub removed_message_count: usize,
+    pub preserved_message_count: usize,
+    pub tokens_before: usize,
+    pub tokens_after: usize,
+    pub summary_source: String,
 }
 
 #[derive(Debug)]
@@ -90,6 +102,7 @@ impl Session {
         Self {
             version: 1,
             messages: Vec::new(),
+            compactions: Vec::new(),
         }
     }
 
@@ -150,6 +163,17 @@ impl Session {
                     .collect(),
             ),
         );
+        if !self.compactions.is_empty() {
+            object.insert(
+                "compactions".to_string(),
+                JsonValue::Array(
+                    self.compactions
+                        .iter()
+                        .map(SessionCompactionRecord::to_json)
+                        .collect(),
+                ),
+            );
+        }
         JsonValue::Object(object)
     }
 
@@ -170,7 +194,22 @@ impl Session {
             .iter()
             .map(ConversationMessage::from_json)
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(Self { version, messages })
+        let compactions = object
+            .get("compactions")
+            .and_then(JsonValue::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .map(SessionCompactionRecord::from_json)
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()?
+            .unwrap_or_default();
+        Ok(Self {
+            version,
+            messages,
+            compactions,
+        })
     }
 }
 
@@ -292,6 +331,75 @@ impl ConversationMessage {
             role,
             blocks,
             usage,
+        })
+    }
+}
+
+impl SessionCompactionRecord {
+    #[must_use]
+    pub fn to_json(&self) -> JsonValue {
+        let mut object = BTreeMap::new();
+        object.insert(
+            "summary".to_string(),
+            JsonValue::String(self.summary.clone()),
+        );
+        object.insert(
+            "messages".to_string(),
+            JsonValue::Array(
+                self.messages
+                    .iter()
+                    .map(ConversationMessage::to_json)
+                    .collect(),
+            ),
+        );
+        object.insert(
+            "removed_message_count".to_string(),
+            JsonValue::Number(usize_to_i64(self.removed_message_count)),
+        );
+        object.insert(
+            "preserved_message_count".to_string(),
+            JsonValue::Number(usize_to_i64(self.preserved_message_count)),
+        );
+        object.insert(
+            "tokens_before".to_string(),
+            JsonValue::Number(usize_to_i64(self.tokens_before)),
+        );
+        object.insert(
+            "tokens_after".to_string(),
+            JsonValue::Number(usize_to_i64(self.tokens_after)),
+        );
+        object.insert(
+            "summary_source".to_string(),
+            JsonValue::String(self.summary_source.clone()),
+        );
+        JsonValue::Object(object)
+    }
+
+    fn from_json(value: &JsonValue) -> Result<Self, SessionError> {
+        let object = value
+            .as_object()
+            .ok_or_else(|| SessionError::Format("compaction must be an object".to_string()))?;
+        let summary = required_string(object, "summary")?;
+        let messages = object
+            .get("messages")
+            .and_then(JsonValue::as_array)
+            .ok_or_else(|| SessionError::Format("missing compaction messages".to_string()))?
+            .iter()
+            .map(ConversationMessage::from_json)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self {
+            summary,
+            messages,
+            removed_message_count: optional_usize(object, "removed_message_count")?.unwrap_or(0),
+            preserved_message_count: optional_usize(object, "preserved_message_count")?
+                .unwrap_or(0),
+            tokens_before: optional_usize(object, "tokens_before")?.unwrap_or(0),
+            tokens_after: optional_usize(object, "tokens_after")?.unwrap_or(0),
+            summary_source: object
+                .get("summary_source")
+                .and_then(JsonValue::as_str)
+                .unwrap_or("unknown")
+                .to_string(),
         })
     }
 }
@@ -461,6 +569,25 @@ fn required_u32(object: &BTreeMap<String, JsonValue>, key: &str) -> Result<u32, 
         .and_then(JsonValue::as_i64)
         .ok_or_else(|| SessionError::Format(format!("missing {key}")))?;
     u32::try_from(value).map_err(|_| SessionError::Format(format!("{key} out of range")))
+}
+
+fn optional_usize(
+    object: &BTreeMap<String, JsonValue>,
+    key: &str,
+) -> Result<Option<usize>, SessionError> {
+    let Some(value) = object.get(key) else {
+        return Ok(None);
+    };
+    let value = value
+        .as_i64()
+        .ok_or_else(|| SessionError::Format(format!("{key} must be a number")))?;
+    usize::try_from(value)
+        .map(Some)
+        .map_err(|_| SessionError::Format(format!("{key} out of range")))
+}
+
+fn usize_to_i64(value: usize) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
 }
 
 /// Rotate a session file: foo.json → foo.json.1, foo.json.1 → foo.json.2, etc.

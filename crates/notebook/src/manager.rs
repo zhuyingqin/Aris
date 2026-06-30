@@ -171,7 +171,8 @@ impl KernelManager {
                     .collect()
             })
             .unwrap_or_default();
-        if matlab::find_matlab().is_some() && !out.iter().any(|k| matlab::is_matlab_kernel(&k.name)) {
+        if matlab::find_matlab().is_some() && !out.iter().any(|k| matlab::is_matlab_kernel(&k.name))
+        {
             out.push(KernelspecInfo {
                 name: matlab::KERNEL_NAME.to_string(),
                 display_name: "MATLAB".to_string(),

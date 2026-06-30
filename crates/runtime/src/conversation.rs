@@ -2,7 +2,8 @@ use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
 
 use crate::compact::{
-    compact_session, estimate_session_tokens, CompactionConfig, CompactionResult,
+    assemble_compacted_session, estimate_session_tokens, plan_compaction, summarize_messages,
+    CompactionConfig, CompactionResult, CompactionSummarySource,
 };
 use crate::config::RuntimeFeatureConfig;
 use crate::event_sink::{now_iso8601, EventSink, EventType, NoopEventSink, RuntimeEvent};
@@ -15,6 +16,7 @@ const DEFAULT_AUTO_COMPACTION_INPUT_TOKENS_THRESHOLD: u32 = 200_000;
 const AUTO_COMPACTION_THRESHOLD_ENV_VAR: &str = "CLAUDE_CODE_AUTO_COMPACT_INPUT_TOKENS";
 const DEFAULT_CONTEXT_COMPACTION_ESTIMATED_TOKENS_THRESHOLD: usize = 150_000;
 const CONTEXT_COMPACTION_THRESHOLD_ENV_VAR: &str = "ARIS_CONTEXT_COMPACT_TOKENS";
+const AUTO_COMPACT_SESSION_ESTIMATE_RATIO: f64 = 0.80;
 /// Always-on cap applied to a tool result the moment it is produced. A tool
 /// can return arbitrary megabytes; this bounds it once before it ever enters
 /// the session. Generous on purpose — a normal large file read should survive.
@@ -268,6 +270,11 @@ pub struct ConversationRuntime<C, T> {
     auto_compaction_input_tokens_threshold: u32,
     context_compaction_estimated_tokens_threshold: usize,
     event_sink: Box<dyn EventSink>,
+    /// Optional cheap-model client used to produce a real LLM summary when the
+    /// session is compacted. Same concrete type as `api_client` (in practice a
+    /// second `ExecutorClient` pointed at a small model). `None` falls back to
+    /// the deterministic text-assembly summary.
+    summarizer: Option<C>,
 }
 
 impl<C, T> ConversationRuntime<C, T>
@@ -315,7 +322,16 @@ where
             auto_compaction_input_tokens_threshold: auto_compaction_threshold_from_env(),
             context_compaction_estimated_tokens_threshold: context_compaction_threshold_from_env(),
             event_sink: Box::new(NoopEventSink),
+            summarizer: None,
         }
+    }
+
+    /// Attach a cheap-model client to generate real LLM summaries on
+    /// compaction. Without it, compaction uses the text-assembly summary.
+    #[must_use]
+    pub fn with_summarizer(mut self, summarizer: C) -> Self {
+        self.summarizer = Some(summarizer);
+        self
     }
 
     /// Attach an event sink for passive logging. Default is `NoopEventSink`.
@@ -625,9 +641,35 @@ where
         })
     }
 
-    #[must_use]
-    pub fn compact(&self, config: CompactionConfig) -> CompactionResult {
-        compact_session(&self.session, config)
+    pub fn compact(&mut self, config: CompactionConfig) -> CompactionResult {
+        let Some(plan) = plan_compaction(&self.session, &config) else {
+            let tokens = estimate_session_tokens(&self.session);
+            return CompactionResult {
+                summary: String::new(),
+                formatted_summary: String::new(),
+                compacted_session: self.session.clone(),
+                removed_message_count: 0,
+                preserved_message_count: self.session.messages.len(),
+                tokens_before: tokens,
+                tokens_after: tokens,
+                summary_source: CompactionSummarySource::Skipped,
+            };
+        };
+        let (summary, summary_source) = if let Some(summary) =
+            self.llm_summarize(&plan.removed, config.instruction.as_deref())
+        {
+            (summary, CompactionSummarySource::Llm)
+        } else {
+            (
+                summarize_messages(&plan.removed),
+                CompactionSummarySource::Fallback,
+            )
+        };
+        let result = assemble_compacted_session(&self.session, summary, summary_source, &plan);
+        self.session = result.compacted_session.clone();
+        self.api_client
+            .on_session_compacted(result.removed_message_count);
+        result
     }
 
     #[must_use]
@@ -668,34 +710,24 @@ where
         // because each turn re-sends the whole history, that sum balloons far
         // faster than real occupancy and forced compaction after only a few
         // turns (catastrophic for large-window models like MiniMax/Gemini).
-        if self.usage_tracker.current_turn_usage().prompt_tokens()
-            < self.auto_compaction_input_tokens_threshold
-            && estimate_session_tokens(&self.session)
-                < self.context_compaction_estimated_tokens_threshold
-        {
+        let session_tokens = estimate_session_tokens(&self.session);
+        let near_budget_threshold = ((self.context_compaction_estimated_tokens_threshold as f64)
+            * AUTO_COMPACT_SESSION_ESTIMATE_RATIO)
+            .round() as usize;
+        let real_prompt_over_budget = self.usage_tracker.current_turn_usage().prompt_tokens()
+            >= self.auto_compaction_input_tokens_threshold;
+        let session_over_budget =
+            session_tokens >= self.context_compaction_estimated_tokens_threshold;
+        let session_near_budget = session_tokens >= near_budget_threshold.max(1);
+        if !session_over_budget && !(real_prompt_over_budget && session_near_budget) {
             return None;
         }
 
-        let result = compact_session(
-            &self.session,
-            CompactionConfig {
-                max_estimated_tokens: 0,
-                ..CompactionConfig::default()
-            },
-        );
-
-        if result.removed_message_count == 0 {
-            return None;
-        }
-
-        self.session = result.compacted_session;
-        // Notify the client so any per-message-index state (e.g. OpenAI
-        // executor's reasoning_cache keyed by usize) is cleared.
-        // Default no-op for stateless clients.
-        self.api_client
-            .on_session_compacted(result.removed_message_count);
-        Some(AutoCompactionEvent {
-            removed_message_count: result.removed_message_count,
+        self.compact_now(CompactionConfig {
+            max_estimated_tokens: 0,
+            source: crate::compact::CompactionSource::Auto,
+            instruction: None,
+            ..CompactionConfig::default()
         })
     }
 
@@ -720,23 +752,8 @@ where
         }
 
         // Step 2 — summarize the oldest messages, preserving the active turn.
-        let result = compact_session(
-            &self.session,
-            CompactionConfig {
-                preserve_recent_messages: active_turn_message_count(&self.session).max(1),
-                max_estimated_tokens: 0,
-            },
-        );
-        if result.removed_message_count == 0 {
-            return None;
-        }
-
-        self.session = result.compacted_session;
-        self.api_client
-            .on_session_compacted(result.removed_message_count);
-        Some(AutoCompactionEvent {
-            removed_message_count: result.removed_message_count,
-        })
+        let preserve = active_turn_message_count(&self.session).max(1);
+        self.compact_now(CompactionConfig::overflow(preserve))
     }
 
     /// Aggressively shrink the session after the provider rejected the request
@@ -758,20 +775,9 @@ where
         compact_context_history(&mut self.session);
 
         // Step 2 — summarize the oldest messages, preserving the active turn.
-        let result = compact_session(
-            &self.session,
-            CompactionConfig {
-                preserve_recent_messages: active_turn_message_count(&self.session).max(1),
-                max_estimated_tokens: 0,
-            },
-        );
-        if result.removed_message_count > 0 {
-            self.session = result.compacted_session;
-            self.api_client
-                .on_session_compacted(result.removed_message_count);
-            return Some(AutoCompactionEvent {
-                removed_message_count: result.removed_message_count,
-            });
+        let preserve = active_turn_message_count(&self.session).max(1);
+        if let Some(event) = self.compact_now(CompactionConfig::overflow(preserve)) {
+            return Some(event);
         }
 
         // No older messages could be summarized, but the lossy step may have
@@ -785,6 +791,182 @@ where
             None
         }
     }
+
+    /// Compact the session now: split via `plan_compaction`, summarize the
+    /// removed messages (real LLM summary when a summarizer is attached, else
+    /// the deterministic text assembly), then replace the session with the
+    /// compacted form. Returns `None` when there is nothing to compact. Shared
+    /// by all three compaction entry points so they get identical quality.
+    fn compact_now(&mut self, config: CompactionConfig) -> Option<AutoCompactionEvent> {
+        let result = self.compact(config);
+        let removed_message_count = result.removed_message_count;
+        if removed_message_count == 0 {
+            return None;
+        }
+        Some(AutoCompactionEvent {
+            removed_message_count,
+        })
+    }
+
+    /// Produce a real LLM summary of `removed` via the attached summarizer, or
+    /// `None` to fall back to text assembly. Best-effort: a missing summarizer,
+    /// any client error, or empty output yields `None` and never fails the
+    /// turn. Output is wrapped in a `<summary>` block so downstream formatting
+    /// matches the assembled path.
+    fn llm_summarize(
+        &mut self,
+        removed: &[ConversationMessage],
+        instruction: Option<&str>,
+    ) -> Option<String> {
+        let summarizer = self.summarizer.as_mut()?;
+        let request = build_summary_request(removed, instruction);
+        let events = summarizer.stream(request).ok()?;
+        let text = collect_assistant_text(&events);
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        if trimmed.contains("<summary>") {
+            Some(trimmed.to_string())
+        } else {
+            Some(format!("<summary>\n{trimmed}\n</summary>"))
+        }
+    }
+}
+
+/// System prompt steering the summarizer model toward a continuation-ready
+/// `<summary>` block rather than chit-chat.
+const SUMMARY_SYSTEM_PROMPT: &str = r#"You are compacting a long coding-assistant conversation to free up context.
+Output one <summary>...</summary> block and nothing else.
+
+The summary must preserve the information needed to continue development after earlier messages are removed.
+Prefer concrete paths, commands, errors, decisions, constraints, and current task state over generic narration.
+Do not invent details. If something is unknown, omit it.
+If the transcript contains a previous context-compaction continuation or summary, merge its useful Current Focus, Active Issues, Code State, Commands & Test Results, User Intent, and Important Context forward into the new summary. Do not treat the wrapper text itself as a user request.
+Ignore Aris-generated continuation prompts such as "Continue the unfinished task..." or "Your previous response contained no visible text" when identifying the user's active goal.
+
+Inside <summary>, use this exact structure:
+
+## Current Focus
+- Active user goal: [most recent non-internal user request, or the active goal from a prior compaction summary.]
+- Where work stopped: [latest assistant/tool state that matters.]
+- Immediate next step: [what should happen next.]
+
+## Environment
+- [Repository/workspace, platform, branch, tools, configs, or model/provider setup.]
+
+## Completed Tasks
+- [Task]: [Outcome.]
+
+## Active Issues
+- [Issue]: [Status and next steps.]
+
+## Code State
+### [Critical file name]
+[Current purpose/state. Include latest important functions or snippets only when useful.]
+
+## Commands & Test Results
+- [Command]: [Result.]
+
+## User Intent & Constraints
+- [Stable user requirements, preferences, and constraints.]
+
+## Important Context
+- [Facts that would be expensive or risky to lose.]
+
+## All User Messages
+- [Detailed non-tool user messages from the compacted range.]
+"#;
+
+/// Upper bound on the characters of removed transcript fed to the summarizer,
+/// so summarization itself never overflows the (small) summarizer's window.
+/// ~120k chars ≈ well under a 200k-token Haiku window.
+const MAX_SUMMARY_INPUT_CHARS: usize = 120_000;
+
+/// Flatten removed messages into a plain-text transcript for the summarizer.
+/// Flattening (vs. forwarding structured tool blocks) sidesteps dangling
+/// tool_use/tool_result pairs, which otherwise make providers return an empty
+/// stream.
+fn build_summary_request(removed: &[ConversationMessage], instruction: Option<&str>) -> ApiRequest {
+    let mut transcript = String::new();
+    for message in removed {
+        let role = match message.role {
+            MessageRole::System => "system",
+            MessageRole::User => "user",
+            MessageRole::Assistant => "assistant",
+            MessageRole::Tool => "tool",
+        };
+        for block in &message.blocks {
+            let line = match block {
+                ContentBlock::Text { text } => text.clone(),
+                ContentBlock::Thinking { thinking, .. } => thinking.clone(),
+                ContentBlock::ToolUse { name, input, .. } => format!("[tool_use {name}] {input}"),
+                ContentBlock::ToolResult {
+                    tool_name,
+                    output,
+                    is_error,
+                    ..
+                } => format!(
+                    "[tool_result {tool_name}{}] {output}",
+                    if *is_error { " error" } else { "" }
+                ),
+                ContentBlock::Image { media_type, .. } => format!("[image {media_type}]"),
+            };
+            if !line.trim().is_empty() {
+                transcript.push_str(role);
+                transcript.push_str(": ");
+                transcript.push_str(line.trim());
+                transcript.push('\n');
+            }
+        }
+    }
+
+    let bounded = bound_summary_input(&transcript);
+    let custom_instruction = instruction
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| format!("\n\nCustom compaction instruction from the user:\n{value}\n"))
+        .unwrap_or_default();
+    ApiRequest {
+        system_prompt: vec![SUMMARY_SYSTEM_PROMPT.to_string()],
+        messages: vec![ConversationMessage {
+            role: MessageRole::User,
+            blocks: vec![ContentBlock::Text {
+                text: format!(
+                    "This message is a direct compaction task, not part of the conversation. Do not call tools.{custom_instruction}\nConversation transcript to compact:\n\n{bounded}"
+                ),
+            }],
+            usage: None,
+        }],
+    }
+}
+
+/// Keep the most recent `MAX_SUMMARY_INPUT_CHARS` of the transcript, marking the
+/// elision. Recent context is the most useful for continuation, so we drop from
+/// the front when over budget.
+fn bound_summary_input(transcript: &str) -> String {
+    if transcript.chars().count() <= MAX_SUMMARY_INPUT_CHARS {
+        return transcript.to_string();
+    }
+    let tail: String = transcript
+        .chars()
+        .rev()
+        .take(MAX_SUMMARY_INPUT_CHARS)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    format!("[…earlier messages elided for length…]\n{tail}")
+}
+
+fn collect_assistant_text(events: &[AssistantEvent]) -> String {
+    let mut text = String::new();
+    for event in events {
+        if let AssistantEvent::TextDelta(delta) = event {
+            text.push_str(delta);
+        }
+    }
+    text
 }
 
 #[must_use]
@@ -859,7 +1041,7 @@ fn build_assistant_message(
             .as_deref()
             .is_some_and(is_recoverable_stop_reason)
     {
-        text = "[The previous response was truncated before it produced a complete content or tool-call block. ARIS will continue automatically.]".to_string();
+        text = "[The previous response was truncated before it produced a complete content or tool-call block. SomniQ will continue automatically.]".to_string();
     }
     flush_text_block(&mut text, &mut blocks);
 
@@ -1026,7 +1208,7 @@ fn bound_context_text(output: String, max_chars: usize, label: &str) -> String {
         return output;
     }
     let marker = format!(
-        "\n\n[ARIS truncated this {label} for context safety: {total} chars total. Use a narrower query, pagination, or a file artifact to inspect the omitted content.]\n\n"
+        "\n\n[SomniQ truncated this {label} for context safety: {total} chars total. Use a narrower query, pagination, or a file artifact to inspect the omitted content.]\n\n"
     );
     let available = max_chars.saturating_sub(marker.chars().count());
     let head_chars = available.saturating_mul(3) / 4;
@@ -1769,8 +1951,9 @@ mod tests {
         let result = runtime.compact(CompactionConfig {
             preserve_recent_messages: 2,
             max_estimated_tokens: 1,
+            ..CompactionConfig::default()
         });
-        assert!(result.summary.contains("Conversation summary"));
+        assert!(result.summary.contains("## Current Focus"));
         assert_eq!(result.compacted_session.messages[0].role, MessageRole::User);
     }
 
@@ -1788,7 +1971,7 @@ mod tests {
     }
 
     #[test]
-    fn auto_compacts_when_latest_input_threshold_is_crossed() {
+    fn auto_compacts_when_latest_input_threshold_is_crossed_and_history_near_budget() {
         struct SimpleApi;
         impl ApiClient for SimpleApi {
             fn stream(
@@ -1811,15 +1994,16 @@ mod tests {
         let session = Session {
             version: 1,
             messages: vec![
-                crate::session::ConversationMessage::user_text("one"),
+                crate::session::ConversationMessage::user_text("one ".repeat(700)),
                 crate::session::ConversationMessage::assistant(vec![ContentBlock::Text {
-                    text: "two".to_string(),
+                    text: "two ".repeat(700),
                 }]),
-                crate::session::ConversationMessage::user_text("three"),
+                crate::session::ConversationMessage::user_text("three ".repeat(700)),
                 crate::session::ConversationMessage::assistant(vec![ContentBlock::Text {
-                    text: "four".to_string(),
+                    text: "four ".repeat(700),
                 }]),
             ],
+            compactions: Vec::new(),
         };
 
         let mut runtime = ConversationRuntime::new(
@@ -1829,7 +2013,8 @@ mod tests {
             PermissionPolicy::new(PermissionMode::DangerFullAccess),
             vec!["system".to_string()],
         )
-        .with_auto_compaction_input_tokens_threshold(100_000);
+        .with_auto_compaction_input_tokens_threshold(100_000)
+        .with_context_compaction_estimated_tokens_threshold(4_000);
 
         let summary = runtime
             .run_turn("trigger", None)
@@ -1842,6 +2027,45 @@ mod tests {
             })
         );
         assert_eq!(runtime.session().messages[0].role, MessageRole::User);
+    }
+
+    #[test]
+    fn high_fixed_prompt_usage_does_not_compact_tiny_history_every_turn() {
+        struct LargeFixedPromptApi;
+        impl ApiClient for LargeFixedPromptApi {
+            fn stream(
+                &mut self,
+                _request: ApiRequest,
+            ) -> Result<Vec<AssistantEvent>, RuntimeError> {
+                Ok(vec![
+                    AssistantEvent::TextDelta("done".to_string()),
+                    AssistantEvent::Usage(TokenUsage {
+                        input_tokens: 120_000,
+                        output_tokens: 4,
+                        cache_creation_input_tokens: 0,
+                        cache_read_input_tokens: 0,
+                    }),
+                    AssistantEvent::MessageStop,
+                ])
+            }
+        }
+
+        let mut runtime = ConversationRuntime::new(
+            Session::new(),
+            LargeFixedPromptApi,
+            StaticToolExecutor::new(),
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            vec!["large fixed system/tool prompt".to_string()],
+        )
+        .with_auto_compaction_input_tokens_threshold(100_000)
+        .with_context_compaction_estimated_tokens_threshold(150_000);
+
+        for index in 0..3 {
+            let summary = runtime
+                .run_turn(format!("short turn {index}"), None)
+                .expect("turn should succeed");
+            assert_eq!(summary.auto_compaction, None, "turn {index} compacted");
+        }
     }
 
     #[test]
@@ -2250,6 +2474,151 @@ mod tests {
             .run_turn("trigger", None)
             .expect("request fits context");
         assert!(summary.auto_compaction.is_some());
+    }
+
+    /// A mock that returns a canned `<summary>` block for summarization
+    /// requests (detected by the summarizer system prompt) and "done" for
+    /// normal turns. `summary_text: None` makes summarization fail so the
+    /// fallback path can be exercised.
+    struct SummaryAwareApi {
+        summary_text: Option<String>,
+    }
+    impl ApiClient for SummaryAwareApi {
+        fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+            let is_summary_request = request
+                .system_prompt
+                .iter()
+                .any(|p| p.contains("compacting a long coding-assistant conversation"));
+            if is_summary_request {
+                return match &self.summary_text {
+                    Some(text) => Ok(vec![
+                        AssistantEvent::TextDelta(text.clone()),
+                        AssistantEvent::MessageStop,
+                    ]),
+                    None => Err(RuntimeError::new("summarizer unavailable")),
+                };
+            }
+            Ok(vec![
+                AssistantEvent::TextDelta("done".to_string()),
+                AssistantEvent::MessageStop,
+            ])
+        }
+    }
+
+    fn preloaded_session_over_budget() -> Session {
+        let mut session = Session::new();
+        for index in 0..20 {
+            session
+                .messages
+                .push(ConversationMessage::user_text(format!(
+                    "old-{index} {}",
+                    "x".repeat(500)
+                )));
+            session
+                .messages
+                .push(ConversationMessage::assistant(vec![ContentBlock::Text {
+                    text: "y".repeat(500),
+                }]));
+        }
+        session
+    }
+
+    fn first_message_text(session: &Session) -> String {
+        session
+            .messages
+            .first()
+            .map(|message| {
+                message
+                    .blocks
+                    .iter()
+                    .filter_map(|block| match block {
+                        ContentBlock::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn llm_summarizer_replaces_text_assembly_when_attached() {
+        let mut runtime = ConversationRuntime::new(
+            preloaded_session_over_budget(),
+            SummaryAwareApi { summary_text: None },
+            StaticToolExecutor::new(),
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            vec!["system".to_string()],
+        )
+        .with_context_compaction_estimated_tokens_threshold(1_000)
+        .with_summarizer(SummaryAwareApi {
+            summary_text: Some("<summary>\nLLM-CONDENSED GOALS AND STATE\n</summary>".to_string()),
+        });
+
+        let summary = runtime.run_turn("trigger", None).expect("turn succeeds");
+        assert!(summary.auto_compaction.is_some(), "compaction must fire");
+
+        let continuation = first_message_text(runtime.session());
+        // The LLM summary text is present...
+        assert!(
+            continuation.contains("LLM-CONDENSED GOALS AND STATE"),
+            "continuation should carry the LLM summary, got: {continuation}"
+        );
+        // ...and the bulky text-assembly timeline is NOT (it was replaced).
+        assert!(
+            !continuation.contains("Key timeline (audit only"),
+            "LLM path must not emit the text-assembly timeline"
+        );
+    }
+
+    #[test]
+    fn manual_compact_uses_llm_summarizer_when_attached() {
+        let mut runtime = ConversationRuntime::new(
+            preloaded_session_over_budget(),
+            SummaryAwareApi { summary_text: None },
+            StaticToolExecutor::new(),
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            vec!["system".to_string()],
+        )
+        .with_summarizer(SummaryAwareApi {
+            summary_text: Some("<summary>\nMANUAL LLM SUMMARY\n</summary>".to_string()),
+        });
+
+        let result = runtime.compact(CompactionConfig {
+            preserve_recent_messages: 2,
+            max_estimated_tokens: 1,
+            ..CompactionConfig::default()
+        });
+
+        assert!(result.summary.contains("MANUAL LLM SUMMARY"));
+        assert!(!result.summary.contains("Key timeline (audit only"));
+        assert!(first_message_text(runtime.session()).contains("MANUAL LLM SUMMARY"));
+    }
+
+    #[test]
+    fn compaction_falls_back_to_text_assembly_when_summarizer_fails() {
+        let mut runtime = ConversationRuntime::new(
+            preloaded_session_over_budget(),
+            SummaryAwareApi { summary_text: None },
+            StaticToolExecutor::new(),
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            vec!["system".to_string()],
+        )
+        .with_context_compaction_estimated_tokens_threshold(1_000)
+        // Summarizer errors on every summary request → must fall back.
+        .with_summarizer(SummaryAwareApi { summary_text: None });
+
+        let summary = runtime.run_turn("trigger", None).expect("turn succeeds");
+        assert!(
+            summary.auto_compaction.is_some(),
+            "compaction must still fire via the fallback"
+        );
+
+        let continuation = first_message_text(runtime.session());
+        assert!(
+            continuation.contains("Key timeline (audit only"),
+            "fallback should use the text-assembly summary, got: {continuation}"
+        );
     }
 
     #[test]

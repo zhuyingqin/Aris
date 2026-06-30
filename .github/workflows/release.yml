@@ -96,7 +96,7 @@ jobs:
         working-directory: desktop
         run: npm ci
 
-      - name: Build signed ARIS Studio installer
+      - name: Build signed SomniQ Studio installer
         working-directory: desktop
         shell: pwsh
         env:
@@ -116,14 +116,69 @@ jobs:
         with:
           name: aris-studio-windows-x64
           path: |
-            desktop/src-tauri/target/release/bundle/nsis/ARIS Studio_*_x64-setup.exe
-            desktop/src-tauri/target/release/bundle/nsis/ARIS Studio_*_x64-setup.exe.sig
+            desktop/src-tauri/target/release/bundle/nsis/SomniQ Studio_*_x64-setup.exe
+            desktop/src-tauri/target/release/bundle/nsis/SomniQ Studio_*_x64-setup.exe.sig
             desktop/src-tauri/target/release/bundle/nsis/latest.json
+
+  desktop-macos:
+    # Unsigned universal .app + .dmg. End users will need to
+    # right-click → Open the first time to bypass Gatekeeper
+    # (no Apple Developer ID signing/notarization).
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      - name: Install desktop dependencies
+        working-directory: desktop
+        run: npm ci
+
+      - name: Build unsigned SomniQ Studio for macOS (universal)
+        working-directory: desktop
+        env:
+          # Tauri createUpdaterArtifacts is enabled in tauri.conf.json and
+          # refuses to build without the private key. We only consume the
+          # updater manifest for Windows, but the same key is required here
+          # to keep the .app + .dmg bundle step from erroring out.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: npx tauri build --target universal-apple-darwin --bundles app,dmg --ci
+
+      - name: Zip .app bundle
+        working-directory: desktop
+        run: |
+          cd src-tauri/target/universal-apple-darwin/release/bundle/macos
+          # Replace spaces with dots to match the .dmg naming and avoid
+          # the GitHub upload glitch with whitespace in asset names.
+          APP_NAME=$(ls -d *.app | head -1)
+          ZIP_NAME=$(echo "$APP_NAME" | tr ' ' '.')
+          zip -r "${ZIP_NAME}.zip" "$APP_NAME"
+
+      - name: Upload desktop artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: aris-studio-macos-universal
+          path: |
+            desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app.zip
+            desktop/src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
 
   release:
     needs:
       - build
       - desktop-windows
+      - desktop-macos
     runs-on: ubuntu-22.04
 
     steps:
@@ -144,8 +199,10 @@ jobs:
             aris-code-linux-x64.tar.gz.sha256
             aris-code-windows-x64.zip
             aris-code-windows-x64.zip.sha256
-            ARIS Studio_*_x64-setup.exe
-            ARIS Studio_*_x64-setup.exe.sig
+            SomniQ Studio_*_x64-setup.exe
+            SomniQ Studio_*_x64-setup.exe.sig
+            SomniQ Studio_*.dmg
+            SomniQ.Studio_*.app.zip
             latest.json
           overwrite_files: true
           generate_release_notes: true

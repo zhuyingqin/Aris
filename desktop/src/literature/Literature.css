@@ -68,6 +68,16 @@
   opacity: 0.9;
 }
 
+.app-head-literature-tabs {
+  margin-left: 2px;
+}
+
+.app-head-literature-tabs .lit-mode-tab {
+  min-width: auto;
+  padding: 5px 10px;
+  font-size: 13px;
+}
+
 .lit-header-focus {
   flex: 1;
   display: flex;
@@ -124,31 +134,6 @@
   align-items: center;
   gap: 6px;
   font-size: 13px;
-  padding: 6px 14px;
-}
-
-/* ── Search strip (persistent omnibar) ─────────────────────────────────────── */
-
-.lit-search-strip {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 14px;
-  border-bottom: 1px solid var(--border);
-  background: var(--bg-1);
-  flex-shrink: 0;
-}
-
-.lit-strip-input {
-  flex: 1;
-  min-width: 0;
-  font-size: 13px;
-  padding: 6px 11px;
-}
-
-.lit-search-strip .primary {
-  flex-shrink: 0;
-  font-size: 12px;
   padding: 6px 14px;
 }
 

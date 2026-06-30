@@ -270,6 +270,33 @@ fn stream_eof_action(
     StreamEofAction::Truncated
 }
 
+fn token_usage_from_openai_usage(usage: &Value) -> TokenUsage {
+    let prompt_tokens = usage
+        .get("prompt_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as u32;
+    let output_tokens = usage
+        .get("completion_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as u32;
+    let cached_tokens = usage
+        .get("prompt_tokens_details")
+        .and_then(|d| d.get("cached_tokens"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as u32;
+
+    // OpenAI-compatible usage reports `prompt_tokens` as cache-inclusive.
+    // ARIS stores provider usage in Anthropic-style normalized form: fresh
+    // input is separate from cache reads, so input + cache_read == real prompt
+    // occupancy without double-counting cache tokens in cost summaries.
+    TokenUsage {
+        input_tokens: prompt_tokens.saturating_sub(cached_tokens),
+        output_tokens,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: cached_tokens,
+    }
+}
+
 /// Detail of a mid-stream error envelope, if a parsed SSE `data:` object
 /// carries a non-null top-level `error` (OE4 / #249). Returns `None` for a
 /// normal data chunk. Only message + code/type are surfaced — never the
@@ -1075,23 +1102,7 @@ on a compatible third-party proxy, or use Claude/another provider as executor an
                     // it 0 (their automatic write-on-first-use is not
                     // reported as a separate quantity).
                     if let Some(usage) = parsed.get("usage") {
-                        let input_tokens =
-                            usage.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-                        let output_tokens = usage
-                            .get("completion_tokens")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0) as u32;
-                        let cached_tokens = usage
-                            .get("prompt_tokens_details")
-                            .and_then(|d| d.get("cached_tokens"))
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0) as u32;
-                        events.push(AssistantEvent::Usage(TokenUsage {
-                            input_tokens,
-                            output_tokens,
-                            cache_creation_input_tokens: 0,
-                            cache_read_input_tokens: cached_tokens,
-                        }));
+                        events.push(AssistantEvent::Usage(token_usage_from_openai_usage(usage)));
                     }
 
                     let Some(choices) = parsed.get("choices").and_then(|c| c.as_array()) else {
@@ -1603,6 +1614,32 @@ mod tests {
     // v0.4.13 regression — v0.4.12 added the JSON-first stream_options
     // rejection detector. The classifier has three branches and a fail-
     // safe; pin all of them so a refactor can't silently relax detection.
+    #[test]
+    fn openai_usage_normalizes_cached_prompt_tokens() {
+        let usage = token_usage_from_openai_usage(&json!({
+            "prompt_tokens": 1000,
+            "completion_tokens": 80,
+            "prompt_tokens_details": { "cached_tokens": 600 }
+        }));
+
+        assert_eq!(usage.input_tokens, 400);
+        assert_eq!(usage.output_tokens, 80);
+        assert_eq!(usage.cache_read_input_tokens, 600);
+        assert_eq!(usage.prompt_tokens(), 1000);
+    }
+
+    #[test]
+    fn openai_usage_clamps_malformed_cache_counts() {
+        let usage = token_usage_from_openai_usage(&json!({
+            "prompt_tokens": 100,
+            "completion_tokens": 10,
+            "prompt_tokens_details": { "cached_tokens": 200 }
+        }));
+
+        assert_eq!(usage.input_tokens, 0);
+        assert_eq!(usage.cache_read_input_tokens, 200);
+    }
+
     #[test]
     fn is_stream_options_unknown_field_error_classification() {
         // JSON path: error.param == "stream_options" (exact match).

@@ -79,7 +79,7 @@ pub fn model_identity_section(model_id: Option<&str>, product_surface: &str) -> 
     let friendly_name = friendly_model_name(model_name);
     let developer = model_developer(model_name);
     format!(
-        "You are running inside ARIS (Auto Research in Sleep), a {product_surface}. \
+        "You are running inside SomniQ, a {product_surface}. \
          Your exact model is {model_name} ({friendly_name}), developed by {developer}. \
          When users ask what model you are, answer: \"{friendly_name}\" (model ID: {model_name}). \
          Do NOT guess or hallucinate a different version number."
@@ -99,7 +99,7 @@ pub fn language_preference_section(language: &str) -> String {
 pub fn llm_review_override_section() -> String {
     "IMPORTANT: When a skill instructs you to use `mcp__codex__codex` or `mcp__codex__codex-reply` \
      for external LLM review, call that MCP tool when it is available. Otherwise use the \
-     `LlmReview` tool, which uses the user's configured reviewer from ARIS settings. Pass the \
+     `LlmReview` tool, which uses the user's configured reviewer from SomniQ settings. Pass the \
      full review prompt as the `prompt` parameter and omit the optional `model` field unless \
      the user explicitly asks for a reviewer override."
         .to_string()
@@ -692,6 +692,13 @@ pub enum ChatExecutorConfig {
     },
 }
 
+#[derive(Debug, Clone)]
+pub struct SummarizerConfig {
+    pub provider: String,
+    pub model: Option<String>,
+    pub executor_config: ChatExecutorConfig,
+}
+
 pub fn resolve_env_executor_config<F>(load_anthropic_auth: F) -> Result<ChatExecutorConfig, String>
 where
     F: FnOnce() -> Result<AuthSource, String>,
@@ -815,6 +822,96 @@ pub fn build_executor_client(
     }
 }
 
+/// Pick the model used to generate compaction summaries, or `None` to fall
+/// back to the deterministic text-assembly summary. Precedence:
+/// 1. `configured` — the explicit Settings value (`summarizer_model`).
+/// 2. `ARIS_SUMMARIZER_MODEL` env var.
+/// 3. a per-provider default (Haiku for larger Anthropic chats; otherwise the
+///    active chat model).
+///
+/// At any layer, a value of `off`/`none`/`disabled` turns the LLM summary off,
+/// and `auto`/`default` forces the per-provider default. A specific model id is
+/// used as-is against the same provider auth. Empty/absent falls through.
+#[must_use]
+pub fn resolve_summarizer_model(
+    config: &ChatExecutorConfig,
+    model: &str,
+    configured: Option<&str>,
+) -> Option<String> {
+    if let Some(value) = configured.map(str::trim).filter(|s| !s.is_empty()) {
+        return summarizer_choice(config, model, value);
+    }
+    if let Ok(env_model) = std::env::var("ARIS_SUMMARIZER_MODEL") {
+        let trimmed = env_model.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        return summarizer_choice(config, model, trimmed);
+    }
+    default_summarizer_model(config, model)
+}
+
+pub fn resolve_summarizer_client(
+    chat_config: &ChatExecutorConfig,
+    chat_model: &str,
+    configured_model: Option<&str>,
+    configured_provider: Option<SummarizerConfig>,
+) -> Option<aris_executor::ExecutorClient> {
+    if let Some(configured_provider) = configured_provider {
+        let model = resolve_summarizer_model(
+            &configured_provider.executor_config,
+            configured_provider.model.as_deref().unwrap_or(chat_model),
+            configured_model
+                .or(configured_provider.model.as_deref())
+                .or(Some("auto")),
+        )?;
+        return build_executor_client(
+            configured_provider.executor_config,
+            model,
+            false,
+            Vec::new(),
+            Box::new(aris_executor::NoopStreamObserver),
+        )
+        .ok();
+    }
+
+    resolve_summarizer_model(chat_config, chat_model, configured_model).and_then(|summary_model| {
+        build_executor_client(
+            chat_config.clone(),
+            summary_model,
+            false,
+            Vec::new(),
+            Box::new(aris_executor::NoopStreamObserver),
+        )
+        .ok()
+    })
+}
+
+fn summarizer_choice(config: &ChatExecutorConfig, model: &str, value: &str) -> Option<String> {
+    match value.to_ascii_lowercase().as_str() {
+        "off" | "none" | "disabled" => None,
+        "auto" | "default" => default_summarizer_model(config, model),
+        _ => Some(value.to_string()),
+    }
+}
+
+fn default_summarizer_model(config: &ChatExecutorConfig, model: &str) -> Option<String> {
+    let model = model.trim();
+    if model.is_empty() {
+        return None;
+    }
+    match config {
+        ChatExecutorConfig::Anthropic { .. } => {
+            if model.contains("haiku") {
+                Some(model.to_string())
+            } else {
+                Some("claude-haiku-4-5-20251001".to_string())
+            }
+        }
+        ChatExecutorConfig::OpenAiCompatible { .. } => Some(model.to_string()),
+    }
+}
+
 pub fn build_conversation_runtime<T>(
     session: Session,
     executor_config: ChatExecutorConfig,
@@ -826,12 +923,24 @@ pub fn build_conversation_runtime<T>(
     permission_policy: PermissionPolicy,
     system_prompt: Vec<String>,
     feature_config: runtime::RuntimeFeatureConfig,
+    summarizer_model: Option<String>,
+    summarizer_config: Option<SummarizerConfig>,
 ) -> Result<runtime::ConversationRuntime<aris_executor::ExecutorClient, T>, String>
 where
     T: ToolExecutor,
 {
     let executor_tool_specs = executor_tool_specs_for_tools(tool_specs);
     let context_compaction_threshold = context_compaction_threshold_for_model(&model);
+    // Best-effort cheap-model summarizer for compaction. Built before the main
+    // client consumes `executor_config`/`model`; it reuses the same provider
+    // auth with a small model and no tools. Any construction failure is
+    // swallowed so compaction falls back to the text-assembly summary.
+    let summarizer = resolve_summarizer_client(
+        &executor_config,
+        &model,
+        summarizer_model.as_deref(),
+        summarizer_config,
+    );
     let client = build_executor_client(
         executor_config,
         model,
@@ -839,7 +948,7 @@ where
         executor_tool_specs,
         observer,
     )?;
-    Ok(runtime::ConversationRuntime::new_with_features(
+    let mut runtime = runtime::ConversationRuntime::new_with_features(
         session,
         client,
         tool_executor,
@@ -852,7 +961,11 @@ where
     // so both triggers agree; clamp to u32 for the threshold field.
     .with_auto_compaction_input_tokens_threshold(
         u32::try_from(context_compaction_threshold).unwrap_or(u32::MAX),
-    ))
+    );
+    if let Some(summarizer) = summarizer {
+        runtime = runtime.with_summarizer(summarizer);
+    }
+    Ok(runtime)
 }
 
 #[must_use]
@@ -871,7 +984,7 @@ mod tests {
         attach_mcp_tools, chat_tool_specs, clear_mcp_discovery_cache,
         context_compaction_threshold_for_model, final_assistant_text,
         merge_mcp_tool_search_results, model_developer, permission_policy_for_tools,
-        resolve_settings_executor_config, ChatExecutorConfig,
+        resolve_settings_executor_config, resolve_summarizer_model, ChatExecutorConfig,
     };
     use api::AuthSource;
     use runtime::{
@@ -880,6 +993,46 @@ mod tests {
         TokenUsage, ToolExecutor, TurnSummary,
     };
     use serde_json::{json, Value};
+
+    #[test]
+    fn summarizer_model_honors_explicit_setting_over_defaults() {
+        let anthropic = ChatExecutorConfig::Anthropic {
+            auth: AuthSource::ApiKey("k".into()),
+            base_url: "https://api.anthropic.com".into(),
+            send_betas: false,
+        };
+        let openai = ChatExecutorConfig::OpenAiCompatible {
+            api_key: "k".into(),
+            base_url: "https://example.test/v1".into(),
+        };
+
+        // Explicit setting wins regardless of provider/model. (These paths
+        // short-circuit before the env var, so they are deterministic.)
+        assert_eq!(
+            resolve_summarizer_model(&anthropic, "claude-opus-4-8", Some("off")),
+            None
+        );
+        assert_eq!(
+            resolve_summarizer_model(&openai, "MiniMax-M3", Some("MiniMax-Cheap")),
+            Some("MiniMax-Cheap".to_string())
+        );
+        // "auto" forces the per-provider default.
+        assert_eq!(
+            resolve_summarizer_model(&anthropic, "claude-opus-4-8", Some("auto")),
+            Some("claude-haiku-4-5-20251001".to_string())
+        );
+        // Haiku still uses an LLM summary; it just reuses the active model.
+        assert_eq!(
+            resolve_summarizer_model(&anthropic, "claude-haiku-4-5-20251001", Some("auto")),
+            Some("claude-haiku-4-5-20251001".to_string())
+        );
+        // OpenAI-compatible "auto" uses the active model rather than the
+        // deterministic text-assembly fallback.
+        assert_eq!(
+            resolve_summarizer_model(&openai, "MiniMax-M3", Some("default")),
+            Some("MiniMax-M3".to_string())
+        );
+    }
 
     #[test]
     fn context_budget_scales_with_model_window() {

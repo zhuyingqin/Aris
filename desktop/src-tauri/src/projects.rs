@@ -60,7 +60,7 @@ fn default_project() -> DesktopProject {
     let path = state::default_workspace_dir();
     DesktopProject {
         id: "default".to_string(),
-        name: "ARIS Desktop Workspace".to_string(),
+        name: "SomniQ Desktop Workspace".to_string(),
         path: path.to_string_lossy().into_owned(),
         added_at: 0,
         last_opened_at: 0,
@@ -94,6 +94,12 @@ fn clean_canonical_path(path: PathBuf) -> PathBuf {
     let value = path.to_string_lossy();
     if let Some(rest) = value.strip_prefix(r"\\?\UNC\") {
         return PathBuf::from(format!(r"\\{rest}"));
+    }
+    // Volume-GUID paths (`\\?\Volume{guid}\...`) are only valid *with* the
+    // extended-length prefix; stripping it yields an unusable path, so keep them
+    // intact rather than mangling them.
+    if value.starts_with(r"\\?\Volume{") {
+        return path;
     }
     value
         .strip_prefix(r"\\?\")
@@ -135,8 +141,14 @@ fn load_registry() -> ProjectRegistry {
     }
     let mut seen = HashSet::new();
     registry.projects.retain(|project| {
+        // Beyond the id *format* check, require that a non-default project's id
+        // actually hashes from its stored path. This drops hand-forged entries
+        // (e.g. a manually written `project-aabbccddeeff0011`) that would
+        // otherwise alias another project's runtime directory.
         state::valid_project_id(&project.id)
-            && (project.id == "default" || Path::new(&project.path).is_dir())
+            && (project.id == "default"
+                || (Path::new(&project.path).is_dir()
+                    && project.id == project_id(Path::new(&project.path))))
             && seen.insert(normalize_path(Path::new(&project.path)))
     });
     if !registry
@@ -393,6 +405,14 @@ mod tests {
     fn canonical_paths_remain_usable() {
         let path = PathBuf::from(r"C:\workspace\example");
         assert!(!clean_canonical_path(path).as_os_str().is_empty());
+    }
+
+    #[test]
+    fn volume_guid_paths_are_preserved() {
+        // The `\\?\Volume{...}` prefix must survive — stripping it produces an
+        // unusable path. (No-op early return on non-Windows keeps this valid.)
+        let path = PathBuf::from(r"\\?\Volume{12345678-1234-1234-1234-1234567890ab}\data");
+        assert_eq!(clean_canonical_path(path.clone()), path);
     }
 
     #[test]

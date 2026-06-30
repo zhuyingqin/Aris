@@ -3,6 +3,12 @@ import { fileSearch, isTauri } from "../api/tauri";
 import type { ChatAttachment, DesktopCommandSpec, PermissionModeView, SkillMeta } from "../types";
 import { fuzzyMatch, fuzzyScore, makeId } from "./model";
 
+interface ContextStatusView {
+  kind: "warning" | "compacted";
+  message: string;
+  detail?: string;
+}
+
 const RECENT_SKILLS_KEY = "aris-chat-recent-skills";
 const RECENT_FILES_KEY = "aris-chat-recent-files";
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
@@ -156,7 +162,7 @@ export async function attachmentFromFile(file: File): Promise<ChatAttachment> {
       kind: "file",
       name: file.name,
       mimeType: file.type || "application/octet-stream",
-      content: "(Binary file content omitted. Attach a workspace path with @ to let ARIS read it safely.)",
+      content: "(Binary file content omitted. Attach a workspace path with @ to let SomniQ read it safely.)",
     };
   }
   const truncated = file.size > MAX_TEXT_BYTES;
@@ -180,16 +186,17 @@ const PERMISSION_OPTIONS = [
 ];
 
 function ContextRing({ used, max }: { used: number; max: number }) {
-  const pct = max > 0 ? Math.min(1, used / max) : 0;
+  const rawPct = max > 0 ? used / max : 0;
+  const pct = Math.min(1, Math.max(0, rawPct));
   const radius = 9;
   const circ = 2 * Math.PI * radius;
   const dash = pct * circ;
-  const stroke = pct < 0.5 ? "var(--green)" : pct < 0.8 ? "var(--amber)" : "var(--red)";
-  const label = used === 0 ? "0%" : pct < 0.01 ? "<1%" : `${Math.round(pct * 100)}%`;
+  const stroke = rawPct < 0.5 ? "var(--green)" : rawPct < 0.8 ? "var(--amber)" : "var(--red)";
+  const label = used === 0 ? "0%" : rawPct < 0.01 ? "<1%" : `${Math.round(rawPct * 100)}%`;
   const usedK = used >= 1000 ? `${(used / 1000).toFixed(0)}k` : String(used);
   const maxK = max >= 1000 ? `${(max / 1000).toFixed(0)}k` : String(max);
   return (
-    <div className="ctx-ring" title={`Context window: ${label} used (${usedK} / ${maxK} tokens est.)`}>
+    <div className="ctx-ring" title={`Auto-compact budget: ${label} used (${usedK} / ${maxK} tokens est.)`}>
       <svg width="22" height="22" viewBox="0 0 22 22" aria-hidden="true">
         <circle cx="11" cy="11" r={radius} fill="none" stroke="var(--border)" strokeWidth="2.5" />
         {pct > 0 && (
@@ -232,6 +239,7 @@ interface Props {
   onModelChange?: (model: string) => void;
   contextUsed?: number;
   contextMax?: number | null;
+  contextStatus?: ContextStatusView | null;
 }
 
 export default function ChatComposer({
@@ -259,6 +267,7 @@ export default function ChatComposer({
   onModelChange,
   contextUsed,
   contextMax,
+  contextStatus,
 }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const pickerScrollRef = useRef<HTMLDivElement>(null);
@@ -541,6 +550,15 @@ export default function ChatComposer({
           </div>
         </div>
       )}
+      {contextStatus && (
+        <div className={`chat-context-status chat-context-status-${contextStatus.kind}`}>
+          <span className="chat-context-status-dot" aria-hidden="true" />
+          <div className="chat-context-status-copy">
+            <span>{contextStatus.message}</span>
+            {contextStatus.detail && <small>{contextStatus.detail}</small>}
+          </div>
+        </div>
+      )}
       <div className="chat-input">
         {dragging && <div className="chat-drop-overlay">Drop files to attach</div>}
         <input
@@ -590,7 +608,7 @@ export default function ChatComposer({
           ref={textareaRef}
           value={input}
           disabled={busy}
-          placeholder={ready ? "Message ARIS" : "Configure an API key, or type /help"}
+          placeholder={ready ? "Message SomniQ" : "Configure an API key, or type /help"}
           onChange={(event) => {
             onInputChange(event.target.value);
             updatePicker(event.target.value, event.target.selectionStart ?? event.target.value.length);
