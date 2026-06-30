@@ -147,6 +147,13 @@ jobs:
 
       - name: Build unsigned SomniQ Studio for macOS (universal)
         working-directory: desktop
+        env:
+          # Tauri createUpdaterArtifacts is enabled in tauri.conf.json and
+          # refuses to build without the private key. We only consume the
+          # updater manifest for Windows, but the same key is required here
+          # to keep the .app + .dmg bundle step from erroring out.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npx tauri build --target universal-apple-darwin --bundles app,dmg --ci
 
       - name: Zip .app bundle
