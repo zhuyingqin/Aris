@@ -421,7 +421,7 @@ fn build_rfc822(draft: &MailDraft) -> Result<String, String> {
         return Ok(format!("{headers}{body}"));
     }
 
-    let boundary = "aris-mail-boundary-7b3c9a31";
+    let boundary = "somniq-mail-boundary-7b3c9a31";
     headers.push_str(&format!(
         "Content-Type: multipart/mixed; boundary=\"{boundary}\"\r\n\r\n"
     ));

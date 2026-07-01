@@ -352,7 +352,7 @@ mod tests {
 
     #[test]
     fn notebook_execute_tool_runs_persists_and_writes_back() {
-        let nb = std::env::temp_dir().join(format!("aris-tools-{}.ipynb", std::process::id()));
+        let nb = std::env::temp_dir().join(format!("somniq-tools-{}.ipynb", std::process::id()));
         std::fs::write(&nb, MINIMAL_IPYNB).unwrap();
         let path = nb.to_string_lossy().to_string();
 
@@ -421,7 +421,7 @@ mod tests {
     fn notebook_run_with_parameters_writes_executed_copy_not_source() {
         let _guard = env_lock();
         let previous_root = std::env::var_os("ARIS_WORKSPACE_ROOT");
-        let base = std::env::temp_dir().join(format!("aris-notebook-run-{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!("somniq-notebook-run-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
         std::env::set_var("ARIS_WORKSPACE_ROOT", &base);

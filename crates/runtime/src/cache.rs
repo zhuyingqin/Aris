@@ -1,6 +1,6 @@
-//! Cache directory management for bundled ARIS skill helpers.
+//! Cache directory management for bundled SomniQ skill helpers.
 //!
-//! v0.4.8 introduces a global versioned cache at `~/.config/aris/cache/<version>/`
+//! v0.4.8 introduces a global versioned cache at `~/.config/SomniQ/cache/<version>/`
 //! that replaces the cwd-based extraction model from v0.4.7 and earlier. The
 //! cache materialises [`BUNDLED_RESOURCES`](crate::BUNDLED_RESOURCES) at process
 //! startup so that:
@@ -63,9 +63,9 @@ pub fn extraction_report() -> Option<&'static ExtractionReport> {
 /// Materialise [`BUNDLED_RESOURCES`](crate::BUNDLED_RESOURCES) to a cache
 /// directory.
 ///
-/// 1. Tries `~/.config/aris/cache/<version>/` first.
+/// 1. Tries `~/.config/SomniQ/cache/<version>/` first.
 /// 2. On home failure (permission, disk, missing HOME, etc.), falls back to
-///    `std::env::temp_dir()/aris-cache-<version>/`.
+///    `std::env::temp_dir()/somniq-cache-<version>/`.
 /// 3. If both fail, returns a report with `hard_error = true`.
 ///
 /// Idempotent: only the first call sets the global; subsequent calls return
@@ -98,7 +98,7 @@ fn extract_bundle_inner() -> ExtractionReport {
     }
 
     // Layer 2: temp-dir fallback
-    let temp_cache = std::env::temp_dir().join(format!("aris-cache-{version}"));
+    let temp_cache = std::env::temp_dir().join(format!("somniq-cache-{version}"));
     match try_extract_to(&temp_cache) {
         Ok((extracted, failed)) => {
             paths_tried.push(format!("{} (ok)", temp_cache.display()));
@@ -130,7 +130,7 @@ fn extract_bundle_inner() -> ExtractionReport {
 fn home_cache_dir(version: &str) -> PathBuf {
     PathBuf::from(crate::home_dir())
         .join(".config")
-        .join("aris")
+        .join("SomniQ")
         .join("cache")
         .join(version)
 }

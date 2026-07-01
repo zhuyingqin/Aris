@@ -72,6 +72,7 @@ export interface ScheduledTask {
   scheduleLabel?: string;
   status?: string; // "active" | "paused"
   sessionId?: string | null;
+  model?: string | null;
   prompt?: string;
   rrule?: string;
   intervalValue?: number;
@@ -90,6 +91,7 @@ export interface ScheduledTaskInput {
   title: string;
   prompt: string;
   sessionId: string;
+  model?: string;
   intervalValue: number;
   intervalUnit: "minutes" | "hours" | "days";
   status?: "active" | "paused";

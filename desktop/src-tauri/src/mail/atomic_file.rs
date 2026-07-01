@@ -73,7 +73,7 @@ mod tests {
             .expect("clock")
             .as_nanos();
         let dir = std::env::temp_dir().join(format!(
-            "aris-mail-atomic-file-{}-{unique}",
+            "somniq-mail-atomic-file-{}-{unique}",
             std::process::id()
         ));
         std::fs::create_dir_all(&dir).expect("temp dir");

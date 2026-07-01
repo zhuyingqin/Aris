@@ -2,7 +2,7 @@
 //!
 //! Reopening a mailbox should be instant: instead of re-fetching every row over
 //! IMAP, we persist the summaries we have already rendered under
-//! `~/.aris/mail/cache/`, keyed by account + folder. The cache is *sparse* — it
+//! `~/.config/SomniQ/mail/cache/`, keyed by account + folder. The cache is *sparse* — it
 //! holds whatever UIDs the user has actually paged through, not the whole
 //! folder. `imap::list` reads it, fetches only the page UIDs it is missing, and
 //! refreshes flags for the visible page, so a warm reopen does no body fetches.
@@ -57,10 +57,7 @@ fn sanitize(value: &str) -> String {
 }
 
 fn cache_dir() -> PathBuf {
-    PathBuf::from(runtime::home_dir())
-        .join(".aris")
-        .join("mail")
-        .join("cache")
+    crate::state::mail_dir().join("cache")
 }
 
 fn cache_path(account_id: &str, folder: &str) -> PathBuf {

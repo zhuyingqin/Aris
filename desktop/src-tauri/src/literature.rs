@@ -365,7 +365,7 @@ pub fn literature_image_ocr(image: Vec<u8>) -> Result<String, String> {
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |duration| duration.as_nanos());
     let path = std::env::temp_dir().join(format!(
-        "aris-pdf-page-ocr-{}-{nonce}.png",
+        "somniq-pdf-page-ocr-{}-{nonce}.png",
         std::process::id()
     ));
     std::fs::write(&path, image).map_err(|error| error.to_string())?;
@@ -634,7 +634,7 @@ fn ocr_pdf_page(path: &Path, page: usize) -> Result<String, String> {
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |duration| duration.as_nanos());
     let temp_dir = std::env::temp_dir().join(format!(
-        "aris-pdf-ocr-{}-{page}-{nonce}",
+        "somniq-pdf-ocr-{}-{page}-{nonce}",
         std::process::id()
     ));
     std::fs::create_dir_all(&temp_dir).map_err(|error| error.to_string())?;
@@ -760,7 +760,7 @@ mod tests {
 
     fn temp_base(name: &str) -> std::path::PathBuf {
         let base = std::env::temp_dir().join(format!(
-            "aris-desktop-literature-{name}-{}",
+            "somniq-desktop-literature-{name}-{}",
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&base);

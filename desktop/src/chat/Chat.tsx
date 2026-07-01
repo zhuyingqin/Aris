@@ -29,7 +29,7 @@ import CommandSelection from "./CommandSelection";
 import ChatSidebar from "./ChatSidebar";
 import ChatThread from "./ChatThread";
 import FilePathMenu from "./FilePathMenu";
-import { cleanChatTitle, latestFileChangesFromTurns, latestTodosFromTurns, makeId, patchLastAssistantTurn, textFromTurn, titleFromTurns } from "./model";
+import { cleanChatTitle, latestFileChangesFromTurns, latestTodosFromTurns, makeId, patchLastAssistantTurn, textFromTurn, transcriptFromTurn, titleFromTurns } from "./model";
 import WorkflowFlow from "./WorkflowFlow";
 import type { ChatSession } from "./types";
 import { useChatSessions } from "./useChatSessions";
@@ -37,9 +37,15 @@ import { useChatStream } from "./useChatStream";
 
 const EMPTY_ASSISTANT_RESPONSE = "Model returned an empty response.";
 const IMAGE_UNSUPPORTED_MESSAGE = "(Image preview only. Vision input is not supported in desktop Chat yet.)";
+const CHAT_SIDEBAR_WIDTH_KEY = "somniq-chat-sidebar-w";
+const CHAT_SIDEBAR_WIDTH_LEGACY_KEY = "aris-chat-sidebar-w";
 
 // Matches relative file paths like `desktop/src/chat/Chat.tsx` or `./src/lib.rs:42`
 const FILE_PATH_RE = /^(\.\.?\/)?([a-zA-Z0-9_\-.]+\/)+[a-zA-Z0-9_\-.]+(:\d+)?$/;
+
+function basename(path: string): string {
+  return path.replace(/\\/g, "/").split("/").pop() || path;
+}
 
 function detectFilePath(element: HTMLElement): string | null {
   // Local markdown link — use the href (already decoded by MarkdownLink)
@@ -228,6 +234,9 @@ async function outgoingMessage(text: string, attachments: ChatAttachment[]): Pro
 export async function contextForRetry(turns: ChatTurn[]) {
   const messages: ChatContextMessage[] = [];
   for (const turn of turns) {
+    // Stopped (cleanly cancelled) turns are kept: their partial text and tool
+    // activity is real conversation the model needs to continue coherently.
+    // Only in-flight (streaming) and genuinely failed (error) turns are dropped.
     if (turn.streaming || turn.error) continue;
     if (turn.role === "user") {
       const message = await outgoingMessage(textFromTurn(turn), turn.attachments ?? []);
@@ -235,11 +244,29 @@ export async function contextForRetry(turns: ChatTurn[]) {
         messages.push({ role: "user", text: message.text, images: message.images });
       }
     } else {
-      const text = textFromTurn(turn);
+      // A stopped turn may have run tools whose results are not in the
+      // backend session (the interrupted turn is never persisted there), so
+      // serialize the full transcript — tool calls and results included,
+      // marking any that were interrupted before output — instead of text
+      // alone. Completed turns are backend-authoritative; their text suffices.
+      const text = turn.stopped ? transcriptFromTurn(turn) : textFromTurn(turn);
       if (text.trim()) messages.push({ role: "assistant", text });
     }
   }
   return messages;
+}
+
+// The stopped turn's partial response (and any tool calls/results) is now
+// rebuilt into the backend context by `contextForRetry`, so the continue prompt
+// no longer needs to embed — and truncate — the partial itself. It just points
+// the model at the conversation above, avoiding the old 12k cutoff that dropped
+// everything past the seam on long generations.
+export function continueStoppedPrompt(): string {
+  return [
+    "Continue from where you stopped.",
+    "Your partial response from the interrupted turn — including any tool calls and their results — is already in the conversation above.",
+    "Do not repeat the completed portion unless a short overlap is needed for continuity.",
+  ].join("\n");
 }
 
 export function needsBackendContextReset(
@@ -324,7 +351,7 @@ export default function Chat() {
   ]);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [chatSidebarWidth, setChatSidebarWidth] = useState<number>(() => {
-    const v = Number(localStorage.getItem("aris-chat-sidebar-w"));
+    const v = Number(localStorage.getItem(CHAT_SIDEBAR_WIDTH_KEY) ?? localStorage.getItem(CHAT_SIDEBAR_WIDTH_LEGACY_KEY));
     return v >= 150 && v <= 400 ? v : 218;
   });
   const chatSidebarResizeRef = useRef<{ startX: number; startWidth: number } | null>(null);
@@ -676,6 +703,53 @@ export default function Chat() {
     focusComposer();
   }, [currentSession, focusComposer, updateSession]);
 
+  const addPathsToChat = useCallback((paths: string[]) => {
+    if (!currentSession || paths.length === 0) return;
+    const next = paths
+      .map((path) => path.trim())
+      .filter(Boolean)
+      .slice(0, 20)
+      .map((path): ChatAttachment => ({
+        id: makeId("att"),
+        kind: "file",
+        name: basename(path),
+        path,
+      }));
+    if (next.length === 0) return;
+    updateSession(currentSession.id, (session) => ({
+      ...session,
+      draftAttachments: [...(session.draftAttachments ?? []), ...next],
+    }));
+    focusComposer();
+  }, [currentSession, focusComposer, updateSession]);
+
+  useEffect(() => {
+    if (!isTauri()) return;
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+    void import("@tauri-apps/api/webview")
+      .then(({ getCurrentWebview }) => getCurrentWebview().onDragDropEvent((event) => {
+        if (disposed) return;
+        if (event.payload.type === "enter" || event.payload.type === "over") {
+          setChatDragging(true);
+          return;
+        }
+        setChatDragging(false);
+        if (event.payload.type === "drop") {
+          addPathsToChat(event.payload.paths);
+        }
+      }))
+      .then((cleanup) => {
+        if (disposed) cleanup();
+        else unlisten = cleanup;
+      })
+      .catch(() => undefined);
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [addPathsToChat]);
+
   const beginRun = useCallback(async (
     session: ChatSession,
     prefix: ChatTurn[],
@@ -886,7 +960,14 @@ export default function Chat() {
     if (!session || runningSessionIdsRef.current.has(session.id) || sendLocks.current.has(session.id)) return;
     sendLocks.current.add(session.id);
     try {
-      await beginRun(session, session.turns, "Continue from where you stopped.", [], true);
+      await beginRun(
+        session,
+        session.turns,
+        "Continue from where you stopped.",
+        [],
+        true,
+        continueStoppedPrompt(),
+      );
     } finally {
       sendLocks.current.delete(session.id);
     }
@@ -996,7 +1077,8 @@ export default function Chat() {
     const w = Math.max(150, Math.min(400, chatSidebarResizeRef.current.startWidth + (e.clientX - chatSidebarResizeRef.current.startX)));
     chatSidebarResizeRef.current = null;
     setChatSidebarWidth(w);
-    localStorage.setItem("aris-chat-sidebar-w", String(w));
+    localStorage.setItem(CHAT_SIDEBAR_WIDTH_KEY, String(w));
+    localStorage.removeItem(CHAT_SIDEBAR_WIDTH_LEGACY_KEY);
   };
   useEffect(() => {
     document.body.style.setProperty("--chat-sidebar-w", `${chatSidebarWidth}px`);

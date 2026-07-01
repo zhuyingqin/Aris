@@ -9,8 +9,11 @@ import type {
 } from "../types";
 import type { ChatSession } from "./types";
 
-export const SESSIONS_KEY = "aris-chat-sessions-v2";
-export const CURRENT_KEY = "aris-chat-current-id";
+export const SESSIONS_KEY = "somniq-chat-sessions-v2";
+export const LEGACY_SESSIONS_KEY = "aris-chat-sessions-v2";
+export const LEGACY_SESSIONS_KEY_V1 = "aris-chat-sessions";
+export const CURRENT_KEY = "somniq-chat-current-id";
+export const LEGACY_CURRENT_KEY = "aris-chat-current-id";
 
 export function makeId(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;

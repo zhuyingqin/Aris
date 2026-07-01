@@ -327,9 +327,12 @@ where
         };
         match inner_result {
             Ok(output) => {
-                if self.is_cancelled() {
-                    return Err(ToolError::interrupted_by_user());
-                }
+                // The tool already ran, so its output is real work that must not
+                // be lost to a cancel that lands right after completion. Always
+                // surface the result to the UI first; the frontend keeps it on
+                // the (stopped) turn so a Continue reconstructs the real state
+                // instead of acting as if the tool never ran. Only after
+                // emitting do we honor the interrupt.
                 let artifact = persist_tool_output_if_large(tool_use_id, tool_name, &output);
                 let context_output =
                     compact_tool_output_for_context(tool_name, output, artifact.as_ref());
@@ -339,6 +342,9 @@ where
                     "chat-tool-result",
                     json!({ "sessionId": self.session_id, "id": tool_use_id, "name": tool_name, "output": ui_output, "isError": is_error }),
                 );
+                if self.is_cancelled() {
+                    return Err(ToolError::interrupted_by_user());
+                }
                 if is_error {
                     Err(ToolError::new(context_output))
                 } else {
@@ -939,10 +945,10 @@ fn persist_tool_output_if_large(
         return None;
     }
     let dir = crate::state::workspace_dir()
-        .join(".aris")
+        .join(".somniq")
         .join("tool-output");
     if let Err(error) = fs::create_dir_all(&dir) {
-        eprintln!("aris desktop: could not create tool-output dir: {error}");
+        eprintln!("SomniQ desktop: could not create tool-output dir: {error}");
         return None;
     }
     let millis = SystemTime::now()
@@ -957,7 +963,7 @@ fn persist_tool_output_if_large(
     };
     let path = dir.join(format!("{millis}-{name}-{id}.txt"));
     if let Err(error) = fs::write(&path, output.as_bytes()) {
-        eprintln!("aris desktop: could not persist tool output: {error}");
+        eprintln!("SomniQ desktop: could not persist tool output: {error}");
         return None;
     }
     Some(ToolOutputArtifact {
@@ -1208,7 +1214,8 @@ fn build_system_prompt_inner(model: &str, full_tool_registry: bool) -> Vec<Strin
         workspace,
         current_date: runtime::today_iso(),
         language: std::env::var("ARIS_LANGUAGE").unwrap_or_else(|_| "cn".to_string()),
-        tectonic: std::env::var("ARIS_TECTONIC")
+        tectonic: std::env::var("SOMNIQ_TECTONIC")
+            .or_else(|_| std::env::var("ARIS_TECTONIC"))
             .ok()
             .filter(|value| !value.trim().is_empty()),
         hot_memory,
@@ -1245,7 +1252,7 @@ fn build_system_prompt_uncached(key: &SystemPromptCacheKey) -> Vec<String> {
         )
     };
     let file_links = "When you create or modify files, include Markdown links to the relevant file paths in the final response so the desktop UI can open them directly.".to_string();
-    let artifact_layout = "Project artifact layout: place slide/PPT/PDF deck outputs under `slides/`, poster outputs under `poster/`, interactive web apps under `web/<name>/` with an `index.html` plus local CSS/assets, notebook programs under `experiments/`, and scratch/temp/cache files under `.aris/`. Studio auto-discovers `slides/`, `poster/`, and `web/`; Lab lists notebooks from the workspace and defaults new notebooks into `experiments/`.".to_string();
+    let artifact_layout = "Project artifact layout: place slide/PPT/PDF deck outputs under `slides/`, poster outputs under `poster/`, interactive web apps under `web/<name>/` with an `index.html` plus local CSS/assets, notebook programs under `experiments/`, and scratch/temp/cache files under `.somniq/`. Studio auto-discovers `slides/`, `poster/`, and `web/`; Lab lists notebooks from the workspace and defaults new notebooks into `experiments/`.".to_string();
     let existing_artifact_edits = "Existing artifact edits: when the user asks to modify, revise, continue editing, polish, or fix a current/existing report, paper, slide deck, PDF source, or other generated artifact, first identify and reuse the existing source path from the user message, recent file links, tool outputs, or workspace search. Edit that source in place and rebuild derived outputs at the same base path. Do not create sibling version files such as `_v2`, `_v9`, `_new`, `_final`, or timestamped copies unless the user explicitly asks for a new version, backup, archive, or comparison copy. If the target file cannot be identified, ask for the path instead of creating a new artifact.".to_string();
     let diagram_output = "Diagram output: when explaining a workflow, process, call path, architecture, state machine, dependency graph, or decision tree, prefer a fenced `mermaid` code block over ASCII art. Keep diagrams compact, use semantic node ids, short readable labels, left-to-right flow for pipelines, meaningful edge labels when they clarify the flow, and avoid oversized text inside nodes. For publication-grade diagram files, use the `mermaid-diagram` skill and verify the rendered output.".to_string();
     let long_document_reading = "Long document reading: when working with books, chapters, transcripts, logs, or converted documents, do not read multiple large files in full. First get a file list and a read_file outline preview, then read one chapter or section window at a time with explicit offset/limit. Treat tool output as a preview, not as a source file; if full text is needed, keep it on disk and reopen precise windows.".to_string();
@@ -1283,7 +1290,7 @@ fn build_system_prompt_uncached(key: &SystemPromptCacheKey) -> Vec<String> {
 fn latex_toolchain_prompt_section(tectonic: Option<&str>) -> String {
     tectonic.map_or_else(String::new, |tectonic| {
         format!(
-            "Bundled LaTeX fallback: `ARIS_TECTONIC` points to `{tectonic}`. When the user asks to compile LaTeX and `latexmk`/`pdflatex`/`xelatex` are unavailable, try this bundled Tectonic binary before telling the user to install a TeX distribution. Run it from the directory containing the entrypoint, for example: `\"$ARIS_TECTONIC\" --keep-logs --keep-intermediates main.tex`."
+            "Bundled LaTeX fallback: `SOMNIQ_TECTONIC` points to `{tectonic}`. When the user asks to compile LaTeX and `latexmk`/`pdflatex`/`xelatex` are unavailable, try this bundled Tectonic binary before telling the user to install a TeX distribution. Run it from the directory containing the entrypoint, for example: `\"$SOMNIQ_TECTONIC\" --keep-logs --keep-intermediates main.tex`."
         )
     })
 }
@@ -2219,7 +2226,7 @@ pub fn chat_run_command(
             let summarizer_config = match resolve_summarizer_config(&config_obj) {
                 Ok(config) => config,
                 Err(error) => {
-                    eprintln!("aris desktop: summary provider disabled: {error}");
+                    eprintln!("SomniQ desktop: summary provider disabled: {error}");
                     None
                 }
             };
@@ -2590,6 +2597,7 @@ pub async fn run_background_prompt(
     app: AppHandle,
     session_id: String,
     prompt: String,
+    model_override: Option<String>,
 ) -> Result<String, String> {
     let state = app.state::<ChatState>();
     run_chat_turn(
@@ -2597,7 +2605,7 @@ pub async fn run_background_prompt(
         state.inner(),
         session_id,
         ConversationMessage::user_text(prompt),
-        None,
+        model_override,
     )
     .await
 }
@@ -2657,7 +2665,7 @@ async fn run_chat_turn_with_context(
     let summarizer_config = match resolve_summarizer_config(&config_obj) {
         Ok(config) => config,
         Err(error) => {
-            eprintln!("aris desktop: summary provider disabled: {error}");
+            eprintln!("SomniQ desktop: summary provider disabled: {error}");
             None
         }
     };
@@ -2690,7 +2698,7 @@ async fn run_chat_turn_with_context(
             }) {
             Ok(config) => config.feature_config().clone(),
             Err(error) => {
-                eprintln!("aris desktop: could not load settings: {error}");
+                eprintln!("SomniQ desktop: could not load settings: {error}");
                 runtime::RuntimeFeatureConfig::default()
             }
         };
@@ -2706,7 +2714,7 @@ async fn run_chat_turn_with_context(
             Some(worker_cancelled.clone()),
         );
         for warning in &mcp_bundle.warnings {
-            eprintln!("aris desktop: {warning}");
+            eprintln!("SomniQ desktop: {warning}");
         }
         let permission_policy =
             aris_chat::permission_policy_for_tools(mcp_bundle.tool_specs.clone(), permission_mode);
@@ -2814,7 +2822,7 @@ async fn run_chat_turn_with_context(
         &usage_server,
         &turn_usages,
     ) {
-        eprintln!("aris desktop: failed to write usage log: {error}");
+        eprintln!("SomniQ desktop: failed to write usage log: {error}");
     }
     if let Some(removed_message_count) = auto_compaction {
         let _ = app.emit(
@@ -3570,12 +3578,7 @@ fn skill_prompt(name: &str, args: &str) -> String {
 fn aris_tasks_path() -> PathBuf {
     std::env::var("CLAWD_TODO_STORE")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            PathBuf::from(runtime::home_dir())
-                .join(".config")
-                .join("aris")
-                .join("tasks.json")
-        })
+        .unwrap_or_else(|_| crate::state::config_dir().join("tasks.json"))
 }
 
 fn handle_tasks_command(action: Option<&str>) -> Result<ChatCommandResult, String> {
@@ -3666,11 +3669,7 @@ fn export_skill(name: &str) -> Result<String, String> {
     {
         return Err("invalid skill name".to_string());
     }
-    let target_dir = PathBuf::from(runtime::home_dir())
-        .join(".config")
-        .join("aris")
-        .join("skills")
-        .join(clean_name);
+    let target_dir = crate::state::config_dir().join("skills").join(clean_name);
     let target_file = target_dir.join("SKILL.md");
     if target_file.exists() {
         return Ok(format!(
@@ -4193,7 +4192,7 @@ fn render_desktop_claude_md(cwd: &Path) -> String {
         "## Workspace".to_string(),
         format!("- Desktop workspace: `{}`.", cwd.display()),
         "- Keep generated files and research artifacts inside this workspace unless the user explicitly attaches or references external context.".to_string(),
-        "- Artifact layout: slides/PPT/PDF decks live in `slides/`, posters in `poster/`, interactive web apps in `web/<name>/`, notebooks in `experiments/`, and scratch/temp/cache files in `.aris/`.".to_string(),
+        "- Artifact layout: slides/PPT/PDF decks live in `slides/`, posters in `poster/`, interactive web apps in `web/<name>/`, notebooks in `experiments/`, and scratch/temp/cache files in `.somniq/`.".to_string(),
         String::new(),
         "## Verification".to_string(),
         "- Record the commands or checks used to validate substantial changes.".to_string(),
@@ -4760,7 +4759,7 @@ mod tests {
         }))
         .expect("json");
         let artifact = ToolOutputArtifact {
-            path: "C:\\tmp\\aris-output.txt".to_string(),
+            path: "C:\\tmp\\somniq-output.txt".to_string(),
             bytes: raw.len() as u64,
         };
 
@@ -4837,7 +4836,7 @@ mod tests {
     #[test]
     fn desktop_permission_defaults_to_dont_ask_without_config() {
         let dir = std::env::temp_dir().join(format!(
-            "aris-permission-default-{}",
+            "somniq-permission-default-{}",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .expect("system time")
@@ -4950,17 +4949,17 @@ mod tests {
     #[test]
     fn latex_toolchain_prompt_mentions_bundled_tectonic() {
         let _guard = env_lock();
-        let previous = std::env::var_os("ARIS_TECTONIC");
-        std::env::set_var("ARIS_TECTONIC", r"C:\Program Files\Aris\tectonic.exe");
+        let previous = std::env::var_os("SOMNIQ_TECTONIC");
+        std::env::set_var("SOMNIQ_TECTONIC", r"C:\Program Files\SomniQ\tectonic.exe");
 
-        let prompt = latex_toolchain_prompt_section(Some(r"C:\Program Files\Aris\tectonic.exe"));
+        let prompt = latex_toolchain_prompt_section(Some(r"C:\Program Files\SomniQ\tectonic.exe"));
 
         assert!(prompt.contains("Bundled LaTeX fallback"));
-        assert!(prompt.contains("ARIS_TECTONIC"));
+        assert!(prompt.contains("SOMNIQ_TECTONIC"));
         assert!(prompt.contains("tectonic.exe"));
         match previous {
-            Some(value) => std::env::set_var("ARIS_TECTONIC", value),
-            None => std::env::remove_var("ARIS_TECTONIC"),
+            Some(value) => std::env::set_var("SOMNIQ_TECTONIC", value),
+            None => std::env::remove_var("SOMNIQ_TECTONIC"),
         }
     }
 

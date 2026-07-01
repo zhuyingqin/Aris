@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChatAttachment, ChatCommandSelection, ChatTurn, DesktopCommandSpec, DesktopProject, SkillMeta } from "../types";
 import ChatComposer, { attachmentFromFile, resizeComposerTextarea } from "./ChatComposer";
 import ChatMessage, { diffFromTool } from "./ChatMessage";
-import { completedAssistantBlocks, contextForRetry, needsBackendContextReset, visibleTurnError } from "./Chat";
+import { completedAssistantBlocks, contextForRetry, continueStoppedPrompt, needsBackendContextReset, visibleTurnError } from "./Chat";
 import ChatSidebar from "./ChatSidebar";
 import CommandSelection from "./CommandSelection";
 import {
@@ -369,7 +369,7 @@ describe("Chat interaction helpers", () => {
     expect(transcript).toContain("README body");
   });
 
-  it("omits assistant tool transcripts from retry and continue context", async () => {
+  it("rebuilds stopped assistant turns into backend context with tool activity", async () => {
     const messages = await contextForRetry([
       { id: "user-1", role: "user", blocks: [{ kind: "text", text: "Read README" }] },
       {
@@ -383,10 +383,34 @@ describe("Chat interaction helpers", () => {
       },
     ]);
 
-    expect(messages).toEqual([
-      { role: "user", text: "Read README", images: [] },
-      { role: "assistant", text: "I checked the file." },
+    expect(messages[0]).toEqual({ role: "user", text: "Read README", images: [] });
+    expect(messages).toHaveLength(2);
+    expect(messages[1].role).toBe("assistant");
+    // The interrupted turn's text AND tool result survive so the model does not
+    // act as if it never read the file.
+    expect(messages[1].text).toContain("I checked the file.");
+    expect(messages[1].text).toContain("[Tool call: read_file (tool-1)]");
+    expect(messages[1].text).toContain("README body");
+  });
+
+  it("still drops in-flight and failed turns from backend context", async () => {
+    const messages = await contextForRetry([
+      { id: "user-1", role: "user", blocks: [{ kind: "text", text: "Do it" }] },
+      { id: "a-streaming", role: "assistant", streaming: true, blocks: [{ kind: "text", text: "partial" }] },
+      { id: "a-error", role: "assistant", error: "boom", blocks: [{ kind: "text", text: "failed" }] },
     ]);
+
+    expect(messages).toEqual([{ role: "user", text: "Do it", images: [] }]);
+  });
+
+  it("continue prompt points at the rebuilt context without embedding the partial", () => {
+    const prompt = continueStoppedPrompt();
+
+    expect(prompt).toContain("Continue from where you stopped.");
+    expect(prompt).toContain("already in the conversation above");
+    expect(prompt).toContain("Do not repeat");
+    // No partial text is embedded (and therefore never truncated at 12k).
+    expect(prompt).not.toContain("Partial stopped response:");
   });
 
   it("requires backend context reset when rerunning from an earlier turn", () => {
@@ -1167,7 +1191,7 @@ describe("ChatComposer picker keyboard operation", () => {
   });
 
   it("attaches a recent @ file with Enter instead of inserting its body", async () => {
-    localStorage.setItem("aris-chat-recent-files", JSON.stringify(["src/chat/Chat.tsx"]));
+    localStorage.setItem("somniq-chat-recent-files", JSON.stringify(["src/chat/Chat.tsx"]));
     const user = userEvent.setup();
     render(<ComposerHarness />);
     const textbox = screen.getByRole("textbox");

@@ -2044,19 +2044,11 @@ fn read_jsonl<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<Vec<T>, Strin
 }
 
 fn write_json<T: Serialize>(path: &Path, value: T) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    }
-    let temp = path.with_extension("tmp");
-    fs::write(
-        &temp,
-        format!(
-            "{}\n",
-            serde_json::to_string_pretty(&value).map_err(|error| error.to_string())?
-        ),
-    )
-    .map_err(|error| error.to_string())?;
-    fs::rename(&temp, path).map_err(|error| error.to_string())
+    let body = format!(
+        "{}\n",
+        serde_json::to_string_pretty(&value).map_err(|error| error.to_string())?
+    );
+    runtime::write_file_atomically(path, body.as_bytes()).map_err(|error| error.to_string())
 }
 
 fn make_id(prefix: &str) -> String {

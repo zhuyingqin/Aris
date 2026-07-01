@@ -159,6 +159,9 @@ const fixtureView = (notebookPath = "F:/Agent/Aris/notebooks/demo.ipynb"): Noteb
 });
 
 beforeEach(() => {
+  localStorage.removeItem("somniq-lab-side-w");
+  localStorage.removeItem("somniq-lab-assistant-w");
+  localStorage.removeItem("somniq-lab-assistant-sessions-v1");
   localStorage.removeItem("aris-lab-side-w");
   localStorage.removeItem("aris-lab-assistant-w");
   localStorage.removeItem("aris-lab-assistant-sessions-v1");
@@ -484,7 +487,7 @@ describe("Lab", () => {
   });
 
   it("opens Lab Assistant on the blank main state while keeping history available", async () => {
-    localStorage.setItem("aris-lab-assistant-sessions-v1", JSON.stringify([
+    localStorage.setItem("somniq-lab-assistant-sessions-v1", JSON.stringify([
       {
         id: "lab-chat-old",
         projectId: projectA.id,
@@ -559,7 +562,7 @@ describe("Lab", () => {
     firePanelPointer(sideHandle, "pointermove", { clientX: 310, pointerId: 1 });
     firePanelPointer(sideHandle, "pointerup", { clientX: 310, pointerId: 1 });
     expect(root!.style.getPropertyValue("--lab-side-w")).toBe("310px");
-    expect(localStorage.getItem("aris-lab-side-w")).toBe("310");
+    expect(localStorage.getItem("somniq-lab-side-w")).toBe("310");
 
     const assistantHandle = screen.getByLabelText("Resize Lab Assistant");
     Object.defineProperty(assistantHandle, "setPointerCapture", { value: vi.fn(), configurable: true });
@@ -567,7 +570,7 @@ describe("Lab", () => {
     firePanelPointer(assistantHandle, "pointermove", { clientX: 820, pointerId: 2 });
     firePanelPointer(assistantHandle, "pointerup", { clientX: 820, pointerId: 2 });
     expect(root!.style.getPropertyValue("--lab-assistant-w")).toBe("460px");
-    expect(localStorage.getItem("aris-lab-assistant-w")).toBe("460");
+    expect(localStorage.getItem("somniq-lab-assistant-w")).toBe("460");
   });
 
   it("closes other editor tabs from the tab context menu", async () => {

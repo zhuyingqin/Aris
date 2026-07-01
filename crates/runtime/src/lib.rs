@@ -1,6 +1,7 @@
 // Bundled ARIS skills compiled in from assets/skills/ via build.rs
 include!(concat!(env!("OUT_DIR"), "/bundled_skills.rs"));
 
+mod atomic_file;
 mod bash;
 mod bootstrap;
 mod cache;
@@ -28,6 +29,7 @@ mod session;
 mod session_index;
 mod usage;
 
+pub use atomic_file::write_replace as write_file_atomically;
 pub use bash::{execute_bash, execute_bash_with_cancel, BashCommandInput, BashCommandOutput};
 pub use bootstrap::{BootstrapPhase, BootstrapPlan};
 pub use cache::{extract_bundle, extraction_report, ExtractionError, ExtractionReport};
@@ -132,19 +134,19 @@ pub fn home_dir() -> String {
 
 pub const ARIS_ENABLE_CLAUDE_SKILLS_ENV: &str = "ARIS_ENABLE_CLAUDE_SKILLS";
 
-/// ARIS user-level skills directory.
+/// SomniQ user-level skills directory.
 #[must_use]
 pub fn aris_user_skills_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(home_dir())
         .join(".config")
-        .join("aris")
+        .join("SomniQ")
         .join("skills")
 }
 
-/// ARIS project-level skills directory.
+/// SomniQ project-level skills directory.
 #[must_use]
 pub fn aris_project_skills_dir(cwd: impl AsRef<std::path::Path>) -> std::path::PathBuf {
-    cwd.as_ref().join(".aris").join("skills")
+    cwd.as_ref().join(".somniq").join("skills")
 }
 
 /// Legacy Claude Code user-level skills directory.

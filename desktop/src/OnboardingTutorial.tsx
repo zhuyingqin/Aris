@@ -1,8 +1,22 @@
 import { useEffect, useMemo, useState, type CSSProperties } from "react";
 
-export const ONBOARDING_STORAGE_KEY = "aris-onboarding-v2";
+export const ONBOARDING_STORAGE_KEY = "somniq-onboarding-v2";
 
 const PRIOR_USAGE_STORAGE_KEYS = [
+  "somniq-sidebar-w",
+  "somniq-sidebar-collapsed",
+  "somniq-chat-sessions-v2",
+  "somniq-chat-current-id",
+  "somniq-chat-sidebar-w",
+  "somniq-chat-recent-files",
+  "somniq-chat-recent-skills",
+  "somniq-lab-side-w",
+  "somniq-lab-assistant-w",
+  "somniq-lab-assistant-sessions-v1",
+  "somniq-mail-list-width",
+  "somniq-mail-assistant-width",
+  "somniq-providers-v1",
+  "aris-onboarding-v2",
   "aris-sidebar-w",
   "aris-sidebar-collapsed",
   "aris-chat-sessions-v2",
@@ -108,6 +122,7 @@ function writeSeenFlag() {
   if (typeof window === "undefined") return;
   try {
     window.localStorage.setItem(ONBOARDING_STORAGE_KEY, "done");
+    window.localStorage.removeItem("aris-onboarding-v2");
   } catch {
     // The tutorial can still close for the current session if storage is unavailable.
   }

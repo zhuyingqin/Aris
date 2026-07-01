@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
-pub const SCRATCH_DIR: &str = ".aris";
+pub const SCRATCH_DIR: &str = ".somniq";
 pub const SLIDES_DIR: &str = "slides";
 pub const POSTER_DIR: &str = "poster";
 pub const WEB_DIR: &str = "web";

@@ -1,8 +1,8 @@
 import { lazy, memo, Suspense, useCallback, useDeferredValue, useEffect, useRef, useState, useTransition, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { appRelaunch, appUpdateCheck, appUpdateDownloadAndInstall, isTauri } from "./api/tauri";
-import { useStore, type Tab } from "./store";
+import { appRelaunch, appUpdateCheck, appUpdateDownloadAndInstall, isTauri, newapiBootstrap, type NewApiAccount } from "./api/tauri";
+import { isManagedAuthInvalidError, useStore, type Tab } from "./store";
 import type { AppUpdateInfo, AppUpdateProgress } from "./types";
 import ErrorBoundary from "./ErrorBoundary";
 import Chat from "./chat/Chat";
@@ -57,6 +57,16 @@ interface NavItem {
 type UpdateIndicatorState = "idle" | "available" | "downloading" | "ready";
 
 const UPDATE_CHECK_INTERVAL_MS = 30 * 60 * 1000;
+const SIDEBAR_WIDTH_KEY = "somniq-sidebar-w";
+const SIDEBAR_WIDTH_LEGACY_KEY = "aris-sidebar-w";
+const SIDEBAR_COLLAPSED_KEY = "somniq-sidebar-collapsed";
+const SIDEBAR_COLLAPSED_LEGACY_KEY = "aris-sidebar-collapsed";
+const ACCOUNT_CACHE_KEY = "somniq-account-v1";
+const ACCOUNT_LEGACY_CACHE_KEY = "aris-account-v1";
+const SETTINGS_TAB_REQUEST_KEY = "somniq-settings-tab-request";
+const SETTINGS_TAB_REQUEST_EVENT = "somniq-settings-tab-request";
+
+type RequestedSettingsTab = "general" | "auth" | "usage" | "about";
 
 const WINDOW_MENUS = ["文件", "编辑", "视图", "帮助"];
 
@@ -127,6 +137,44 @@ const PlusIcon = () => (
   <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor"
     strokeWidth="1.6" strokeLinecap="round" aria-hidden="true">
     <path d="M8 3.5v9M3.5 8h9" />
+  </svg>
+);
+
+const UserCircleIcon = () => (
+  <svg width="16" height="16" viewBox="0 0 16 16" fill="none"
+    stroke="currentColor" strokeWidth="1.45" strokeLinecap="round" strokeLinejoin="round"
+    aria-hidden="true">
+    <circle cx="8" cy="8" r="6" />
+    <circle cx="8" cy="6.3" r="1.8" />
+    <path d="M4.8 12c.8-1.7 5.6-1.7 6.4 0" />
+  </svg>
+);
+
+const GearIcon = () => (
+  <svg width="16" height="16" viewBox="0 0 16 16" fill="none"
+    stroke="currentColor" strokeWidth="1.45" strokeLinecap="round" strokeLinejoin="round"
+    aria-hidden="true">
+    <circle cx="8" cy="8" r="2.3" />
+    <path d="M8 1.8v1.5M8 12.7v1.5M14.2 8h-1.5M3.3 8H1.8M12.4 3.6l-1.1 1.1M4.7 11.3l-1.1 1.1M12.4 12.4l-1.1-1.1M4.7 4.7l-1.1-1.1" />
+  </svg>
+);
+
+const UsageIcon = () => (
+  <svg width="16" height="16" viewBox="0 0 16 16" fill="none"
+    stroke="currentColor" strokeWidth="1.45" strokeLinecap="round" strokeLinejoin="round"
+    aria-hidden="true">
+    <path d="M3.3 11.8a5.8 5.8 0 119.4 0" />
+    <path d="M8 8.4l2.6-2.6" />
+    <path d="M5 12.8h6" />
+  </svg>
+);
+
+const LogoutIcon = () => (
+  <svg width="16" height="16" viewBox="0 0 16 16" fill="none"
+    stroke="currentColor" strokeWidth="1.45" strokeLinecap="round" strokeLinejoin="round"
+    aria-hidden="true">
+    <path d="M6.5 3H3.8a1 1 0 00-1 1v8a1 1 0 001 1h2.7" />
+    <path d="M9.5 5.2L12.3 8l-2.8 2.8M12.1 8H6.2" />
   </svg>
 );
 
@@ -212,6 +260,72 @@ function sameProjectOrder(left: string[], right: string[]) {
   return left.length === right.length && left.every((id, index) => id === right[index]);
 }
 
+function readCachedAccount(): NewApiAccount | null {
+  try {
+    const raw = localStorage.getItem(ACCOUNT_CACHE_KEY) ?? localStorage.getItem(ACCOUNT_LEGACY_CACHE_KEY);
+    return raw ? (JSON.parse(raw) as NewApiAccount) : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeCachedAccount(account: NewApiAccount | null) {
+  try {
+    if (account) {
+      localStorage.setItem(ACCOUNT_CACHE_KEY, JSON.stringify(account));
+      localStorage.removeItem(ACCOUNT_LEGACY_CACHE_KEY);
+    } else {
+      localStorage.removeItem(ACCOUNT_CACHE_KEY);
+      localStorage.removeItem(ACCOUNT_LEGACY_CACHE_KEY);
+    }
+  } catch {
+    // Storage may be unavailable in restricted browser contexts.
+  }
+}
+
+function accountName(account: NewApiAccount | null) {
+  const displayName = account?.displayName?.trim();
+  if (displayName) return displayName;
+  const username = account?.username?.trim();
+  if (!username) return "用户";
+  const at = username.indexOf("@");
+  return at > 0 ? username.slice(0, at) : username;
+}
+
+function accountEmail(account: NewApiAccount | null) {
+  return account?.username?.trim() || account?.displayName?.trim() || "账户信息";
+}
+
+function accountPlan(account: NewApiAccount | null) {
+  const subscription = account?.subscriptionName?.trim();
+  if (subscription) return subscription;
+  if (account && Number.isFinite(account.quota)) return `余额 ${formatAccountQuota(account.quota)}`;
+  return "账户";
+}
+
+function formatAccountQuota(credits: number): string {
+  return `$${(credits / 500000).toFixed(2)}`;
+}
+
+function accountInitials(name: string, email: string) {
+  const source = (name && name !== "用户" ? name : email).trim();
+  const local = source.includes("@") ? source.slice(0, source.indexOf("@")) : source;
+  const parts = local.split(/[\s._-]+/).filter(Boolean);
+  const chars = parts.length > 1
+    ? [parts[0][0], parts[1][0]]
+    : Array.from(parts[0] ?? local).slice(0, 2);
+  return chars.join("").toUpperCase() || "U";
+}
+
+function requestSettingsTab(tab: RequestedSettingsTab) {
+  try {
+    sessionStorage.setItem(SETTINGS_TAB_REQUEST_KEY, tab);
+  } catch {
+    // A live event below still handles the already-mounted settings page.
+  }
+  window.dispatchEvent(new CustomEvent<RequestedSettingsTab>(SETTINGS_TAB_REQUEST_EVENT, { detail: tab }));
+}
+
 function windowAction(action: "minimize" | "maximize" | "close") {
   if (!isTauri()) return;
   const currentWindow = getCurrentWindow();
@@ -223,6 +337,7 @@ function windowAction(action: "minimize" | "maximize" | "close") {
 export default function App() {
   const tab = useStore((s) => s.tab);
   const setTab = useStore((s) => s.setTab);
+  const logout = useStore((s) => s.logout);
   const deferredTab = useDeferredValue(tab);
   const [, startTabTransition] = useTransition();
   const stateDir = useStore((s) => s.stateDir);
@@ -236,15 +351,17 @@ export default function App() {
   const switchProject = useStore((s) => s.switchProject);
   const reorderProjects = useStore((s) => s.reorderProjects);
   const [sidebarWidth, setSidebarWidth] = useState<number>(() => {
-    const v = Number(localStorage.getItem("aris-sidebar-w"));
+    const v = Number(localStorage.getItem(SIDEBAR_WIDTH_KEY) ?? localStorage.getItem(SIDEBAR_WIDTH_LEGACY_KEY));
     return v >= 140 && v <= 400 ? v : 192;
   });
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(
-    () => localStorage.getItem("aris-sidebar-collapsed") === "true",
+    () => (localStorage.getItem(SIDEBAR_COLLAPSED_KEY) ?? localStorage.getItem(SIDEBAR_COLLAPSED_LEGACY_KEY)) === "true",
   );
   const sidebarResizeDragRef = useRef<{ startX: number; startWidth: number } | null>(null);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [projectMenuOpen, setProjectMenuOpen] = useState(false);
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
+  const [account, setAccount] = useState<NewApiAccount | null>(() => readCachedAccount());
   const [draggedProjectId, setDraggedProjectId] = useState<string | null>(null);
   const [projectOrderPreview, setProjectOrderPreview] = useState<string[] | null>(null);
   const [updateState, setUpdateState] = useState<UpdateIndicatorState>("idle");
@@ -263,11 +380,13 @@ export default function App() {
     startY: number;
     moved: boolean;
   } | null>(null);
+  const userMenuRef = useRef<HTMLDivElement | null>(null);
 
   const selectTab = useCallback((nextTab: Tab) => {
     preloadTabModule(nextTab);
     startTabTransition(() => setTab(nextTab));
     setMobileNavOpen(false);
+    setUserMenuOpen(false);
   }, [setTab, startTabTransition]);
 
   const chooseProject = async () => {
@@ -392,15 +511,47 @@ export default function App() {
     const w = Math.max(140, Math.min(400, sidebarResizeDragRef.current.startWidth + (e.clientX - sidebarResizeDragRef.current.startX)));
     sidebarResizeDragRef.current = null;
     setSidebarWidth(w);
-    localStorage.setItem("aris-sidebar-w", String(w));
+    localStorage.setItem(SIDEBAR_WIDTH_KEY, String(w));
+    localStorage.removeItem(SIDEBAR_WIDTH_LEGACY_KEY);
   };
   const toggleSidebar = () => {
     const next = !sidebarCollapsed;
     setSidebarCollapsed(next);
-    localStorage.setItem("aris-sidebar-collapsed", String(next));
+    localStorage.setItem(SIDEBAR_COLLAPSED_KEY, String(next));
+    localStorage.removeItem(SIDEBAR_COLLAPSED_LEGACY_KEY);
   };
 
+  const openSettingsTab = useCallback((settingsTab: RequestedSettingsTab = "general") => {
+    requestSettingsTab(settingsTab);
+    selectTab("settings");
+  }, [selectTab]);
+
+  const handleLogout = useCallback(() => {
+    setUserMenuOpen(false);
+    logout();
+  }, [logout]);
+
   useEffect(() => init(), [init]);
+  useEffect(() => {
+    if (!isTauri()) return;
+    let active = true;
+    void newapiBootstrap()
+      .then((next) => {
+        if (!active) return;
+        setAccount(next);
+        writeCachedAccount(next);
+      })
+      .catch((err) => {
+        if (!active) return;
+        if (isManagedAuthInvalidError(err)) {
+          writeCachedAccount(null);
+          logout();
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [logout]);
   useEffect(() => {
     let disposed = false;
     const heavyTabs = ["literature", "studio", "mail"];
@@ -475,6 +626,16 @@ export default function App() {
     return () => window.removeEventListener("keydown", closeOnEscape);
   }, [mobileNavOpen]);
   useEffect(() => {
+    const openSettingsShortcut = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.key === ",") {
+        event.preventDefault();
+        openSettingsTab("general");
+      }
+    };
+    window.addEventListener("keydown", openSettingsShortcut);
+    return () => window.removeEventListener("keydown", openSettingsShortcut);
+  }, [openSettingsTab]);
+  useEffect(() => {
     if (!projectMenuOpen) return;
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape") setProjectMenuOpen(false);
@@ -495,6 +656,27 @@ export default function App() {
       document.removeEventListener("pointerdown", closeOnPointerDown);
     };
   }, [projectMenuOpen]);
+  useEffect(() => {
+    if (!userMenuOpen) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setUserMenuOpen(false);
+    };
+    const closeOnPointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (
+        target instanceof Node &&
+        !userMenuRef.current?.contains(target)
+      ) {
+        setUserMenuOpen(false);
+      }
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    document.addEventListener("pointerdown", closeOnPointerDown);
+    return () => {
+      window.removeEventListener("keydown", closeOnEscape);
+      document.removeEventListener("pointerdown", closeOnPointerDown);
+    };
+  }, [userMenuOpen]);
   const projectById = new Map(projects.map((project) => [project.id, project]));
   const orderedProjects = (projectOrderPreview ?? projects.map((project) => project.id))
     .map((id) => projectById.get(id))
@@ -567,6 +749,10 @@ export default function App() {
       <span className="app-update-badge" aria-hidden="true" />
     </button>
   ) : null;
+  const userName = accountName(account);
+  const userEmail = accountEmail(account);
+  const userPlan = accountPlan(account);
+  const userInitials = accountInitials(userName, userEmail);
 
   return (
     <div
@@ -622,26 +808,77 @@ export default function App() {
         className={`sidebar${mobileNavOpen ? " mobile-open" : ""}${sidebarCollapsed ? " sidebar-collapsed" : ""}`}
         data-onboarding-target="sidebar"
       >
-        {NAV_GROUPS.map((g) => (
-          <div className="nav-group" key={g.group}>
-            <div className="nav-group-label">{g.group}</div>
-            {g.items.map((t) => (
-              <button
-                key={t.id}
-                className={`nav-item${tab === t.id ? " active" : ""}`}
-                data-onboarding-target={`nav-${t.id}`}
-                onPointerEnter={() => preloadTabModule(t.id)}
-                onFocus={() => preloadTabModule(t.id)}
-                onClick={() => {
-                  selectTab(t.id as Tab);
-                }}
-              >
-                <span className="nav-icon">{t.icon}</span>
-                {t.label}
+        <div className="sidebar-nav-scroll">
+          {NAV_GROUPS.map((g) => (
+            <div className="nav-group" key={g.group}>
+              <div className="nav-group-label">{g.group}</div>
+              {g.items.map((t) => (
+                <button
+                  key={t.id}
+                  className={`nav-item${tab === t.id ? " active" : ""}`}
+                  data-onboarding-target={`nav-${t.id}`}
+                  onPointerEnter={() => preloadTabModule(t.id)}
+                  onFocus={() => preloadTabModule(t.id)}
+                  onClick={() => {
+                    selectTab(t.id as Tab);
+                  }}
+                >
+                  <span className="nav-icon">{t.icon}</span>
+                  {t.label}
+                </button>
+              ))}
+            </div>
+          ))}
+        </div>
+        <div className="sidebar-user-area" ref={userMenuRef}>
+          {userMenuOpen && (
+            <div className="sidebar-user-menu" role="menu" aria-label="用户菜单">
+              <div className="sidebar-user-menu-row muted" role="presentation">
+                <span className="sidebar-user-menu-icon"><UserCircleIcon /></span>
+                <span className="sidebar-user-menu-email">{userEmail}</span>
+              </div>
+              <button className="sidebar-user-menu-row" type="button" role="menuitem" onClick={() => openSettingsTab("general")}>
+                <span className="sidebar-user-menu-icon"><GearIcon /></span>
+                <span>设置</span>
+                <span className="sidebar-user-shortcut">Ctrl+,</span>
               </button>
-            ))}
-          </div>
-        ))}
+              <div className="sidebar-user-menu-divider" role="separator" />
+              <button className="sidebar-user-menu-row" type="button" role="menuitem" onClick={() => openSettingsTab("auth")}>
+                <span className="sidebar-user-menu-icon"><UsageIcon /></span>
+                <span>剩余用量</span>
+                <span className="sidebar-user-chevron"><Chevron dir="right" size={13} /></span>
+              </button>
+              <button className="sidebar-user-menu-row" type="button" role="menuitem" onClick={handleLogout}>
+                <span className="sidebar-user-menu-icon"><LogoutIcon /></span>
+                <span>退出登录</span>
+              </button>
+              <div className="sidebar-user-menu-footer" role="presentation">
+                <span className="sidebar-user-avatar">{userInitials}</span>
+                <span className="sidebar-user-info">
+                  <span className="sidebar-user-name">{userName}</span>
+                  <span className="sidebar-user-plan">{userPlan}</span>
+                </span>
+              </div>
+            </div>
+          )}
+          <button
+            className="sidebar-user-button"
+            type="button"
+            aria-haspopup="menu"
+            aria-expanded={userMenuOpen}
+            aria-label="用户"
+            onClick={() => {
+              setProjectMenuOpen(false);
+              setUserMenuOpen((open) => !open);
+            }}
+          >
+            <span className="sidebar-user-avatar">{userInitials}</span>
+            <span className="sidebar-user-info">
+              <span className="sidebar-user-name">{userName}</span>
+              <span className="sidebar-user-plan">{userPlan}</span>
+            </span>
+          </button>
+        </div>
         <div
           className="sidebar-resize-handle"
           onPointerDown={onSidebarResizeStart}

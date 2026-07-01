@@ -26,3 +26,8 @@ desktop/internal-config*.json
 # Local scratch (browser profiles, screenshots, dev logs)
 .codex/
 .tmp-edge-agent-os/
+.aris/
+.somniq/
+aris_output/
+127.0.0.1/
+tmp/

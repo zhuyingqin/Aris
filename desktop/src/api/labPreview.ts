@@ -55,7 +55,7 @@ export function isLabPreviewMode(): boolean {
   return (
     import.meta.env.VITE_ARIS_LAB_PREVIEW === "1" ||
     params.get("labPreview") === "1" ||
-    window.localStorage.getItem("aris-lab-preview") === "true"
+    (window.localStorage.getItem("somniq-lab-preview") ?? window.localStorage.getItem("aris-lab-preview")) === "true"
   );
 }
 

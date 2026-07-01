@@ -75,7 +75,7 @@ fn inline_local_stylesheets(base: &Path, html_path: &Path, html: String) -> Stri
             if let Some(href) = tag_attr(tag, "href") {
                 if let Some(css) = read_local_stylesheet(base, html_path, &href) {
                     output.push_str(&html[cursor..start]);
-                    output.push_str("<style data-aris-inline=\"");
+                    output.push_str("<style data-somniq-inline=\"");
                     output.push_str(&escape_html_attr(&href));
                     output.push_str("\">\n");
                     output.push_str(&css.replace("</style", "<\\/style"));
@@ -216,7 +216,7 @@ mod tests {
     #[test]
     fn reads_project_local_html_and_rejects_non_html() {
         let base = std::env::temp_dir().join(format!(
-            "aris-studio-html-{}-{}",
+            "somniq-studio-html-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -240,7 +240,7 @@ mod tests {
     #[test]
     fn inlines_project_relative_stylesheets_for_preview() {
         let base = std::env::temp_dir().join(format!(
-            "aris-studio-css-{}-{}",
+            "somniq-studio-css-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -256,7 +256,7 @@ mod tests {
         std::fs::write(base.join("web/styles/app.css"), "body { color: red; }").expect("css");
 
         let html = studio_html_at(&base, "web/index.html").expect("preview");
-        assert!(html.contains(r#"<style data-aris-inline="styles/app.css">"#));
+        assert!(html.contains(r#"<style data-somniq-inline="styles/app.css">"#));
         assert!(html.contains("body { color: red; }"));
         assert!(!html.contains(r#"<link rel="stylesheet" href="styles/app.css">"#));
         let _ = std::fs::remove_dir_all(base);

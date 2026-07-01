@@ -194,7 +194,9 @@ fn first_successful_probe(
 
 fn latex_check() -> LocalEnvironmentCheck {
     let mut candidates: Vec<(String, Vec<&'static str>)> = Vec::new();
-    if let Ok(tectonic) = std::env::var("ARIS_TECTONIC") {
+    let configured_tectonic =
+        std::env::var("SOMNIQ_TECTONIC").or_else(|_| std::env::var("ARIS_TECTONIC"));
+    if let Ok(tectonic) = configured_tectonic {
         if !tectonic.trim().is_empty() {
             candidates.push((tectonic, vec!["--version"]));
         }

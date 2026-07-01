@@ -110,6 +110,7 @@ export interface NewApiAuthStatus {
 
 export const newapiAuthStatus = (baseUrl: string) =>
   invoke<NewApiAuthStatus>("newapi_auth_status", { baseUrl });
+export const newapiLogout = () => invoke<void>("newapi_logout");
 
 /** Sign in to a new-api gateway; returns an executor config for the user. */
 export const newapiLogin = (
@@ -135,12 +136,47 @@ export const newapiSendVerification = (input: {
 }) => invoke<void>("newapi_send_verification", { input });
 export const newapiModels = () => invoke<string[]>("newapi_models");
 
+export interface NewApiUsageLogEntry {
+  id: string;
+  createdAt: number;
+  model: string;
+  tokenName: string;
+  channel: string;
+  requestId: string;
+  upstreamRequestId: string;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  quota: number;
+  status: string;
+  typeLabel: string;
+}
+
+export interface NewApiUsageLogPage {
+  items: NewApiUsageLogEntry[];
+  total: number;
+  page: number;
+  pageSize: number;
+}
+
 export interface NewApiAccount {
   username: string;
   displayName: string;
-  /** new-api user group, shown as the plan / 套餐. */
+  /** new-api numeric role, when exposed by the gateway. */
+  role?: number;
+  /** True when the account can manage administrator-only settings. */
+  isAdmin?: boolean;
+  /** Human-facing subscription/plan name if the gateway exposes one. */
+  subscriptionName?: string;
+  /** Human-facing subscription/plan description if the gateway exposes one. */
+  subscriptionDesc?: string;
+  /** Remaining active subscription quota, in new-api credit units. */
+  subscriptionQuota?: number;
+  /** Active subscription quota consumed so far, in new-api credit units. */
+  subscriptionUsedQuota?: number;
+  /** new-api user group. */
   group: string;
-  /** Human description of the current group (套餐说明). */
+  /** Human description of the current group. */
   groupDesc: string;
   /** Price multiplier of the current group ("1.5", "自动"). */
   groupRatio: string;
@@ -155,6 +191,8 @@ export interface NewApiAccount {
 
 /** One-shot account/entitlements projection for the signed-in user. */
 export const newapiBootstrap = () => invoke<NewApiAccount>("newapi_bootstrap");
+export const newapiUsageLogs = (page: number, pageSize: number) =>
+  invoke<NewApiUsageLogPage>("newapi_usage_logs", { page, pageSize });
 export const appUpdateCheck = async (): Promise<AppUpdateInfo> => {
   if (!isTauri()) return { available: false };
   const { check } = await import("@tauri-apps/plugin-updater");

@@ -3,7 +3,6 @@ import {
   appRelaunch,
   appUpdateCheck,
   appUpdateDownloadAndInstall,
-  chatUsageSummary,
   configGet,
   configSecretGet,
   configSet,
@@ -12,10 +11,12 @@ import {
   localEnvironmentChecks,
   newapiBootstrap,
   newapiModels,
+  newapiUsageLogs,
   type NewApiAccount,
+  type NewApiUsageLogPage,
 } from "../api/tauri";
 import arisIcon from "../assets/app-logo.png";
-import { useStore } from "../store";
+import { isManagedAuthInvalidError, useStore } from "../store";
 import type {
   AppUpdateInfo,
   AppUpdateProgress,
@@ -24,7 +25,6 @@ import type {
   ConfigTestResult,
   ConfigView,
   LocalEnvironmentCheck,
-  TokenUsageSummary,
 } from "../types";
 import MailSettings, { MailSettingsDetail } from "./MailSettings";
 
@@ -47,11 +47,111 @@ type SaveState = "idle" | "saving" | "saved" | "error";
 type TestState = "idle" | "testing" | "passed" | "failed";
 type UpdateState = "idle" | "checking" | "available" | "current" | "downloading" | "ready" | "error";
 type SettingsTab = "general" | "auth" | "usage" | "about";
-type UsageDetailTab = "logs" | "providers" | "models";
 
 const MANAGED_NEW_API_MODE = true;
-const ACCOUNT_CACHE_KEY = "aris-account-v1";
+const ACCOUNT_CACHE_KEY = "somniq-account-v1";
+const LEGACY_ACCOUNT_CACHE_KEY = "aris-account-v1";
+const SETTINGS_TAB_REQUEST_KEY = "somniq-settings-tab-request";
+const SETTINGS_TAB_REQUEST_EVENT = "somniq-settings-tab-request";
 const USAGE_LOG_PAGE_SIZE = 12;
+const PREVIEW_CONFIG_VIEW: ConfigView = {
+  appVersion: "0.4.5",
+  configPath: "browser preview - Tauri config is not loaded",
+  executorProvider: "openai",
+  executorModel: "MiniMax-M3",
+  executorBaseUrl: "http://106.53.28.124:18080/v1",
+  summarizerProvider: "",
+  summarizerModel: "",
+  summarizerBaseUrl: "",
+  hasSummarizerKey: false,
+  hasExecutorKey: true,
+  executorKeyMasked: "sk-...preview",
+  reviewerProvider: "openai",
+  reviewerModel: "MiniMax-M3",
+  reviewerBaseUrl: "http://106.53.28.124:18080/v1",
+  hasReviewerKey: true,
+  reviewerKeyMasked: "sk-...preview",
+  hasScopusKey: false,
+  language: "cn",
+  memoryWriteApproval: true,
+  managedModels: ["MiniMax-M3", "MiniMax-M2.7", "gpt-5.5", "GLM-5", "deepseek-v4-pro"],
+  verifiedExecutors: [],
+};
+const PREVIEW_ACCOUNT: NewApiAccount = {
+  username: "preview-user",
+  displayName: "Preview User",
+  role: 10,
+  isAdmin: true,
+  subscriptionName: "Team Plan",
+  subscriptionDesc: "Browser preview data",
+  subscriptionQuota: 1_850_000,
+  subscriptionUsedQuota: 650_000,
+  group: "default",
+  groupDesc: "Standard group",
+  groupRatio: "1",
+  quota: 1_250_000,
+  usedQuota: 750_000,
+  models: ["MiniMax-M3", "MiniMax-M2.7", "gpt-5.5", "GLM-5", "deepseek-v4-pro"],
+  model: "MiniMax-M3",
+};
+const PREVIEW_USAGE_LOGS: NewApiUsageLogPage = {
+  page: 1,
+  pageSize: USAGE_LOG_PAGE_SIZE,
+  total: 3,
+  items: [
+    {
+      id: "preview-1",
+      createdAt: Math.floor(Date.now() / 1000) - 240,
+      model: "MiniMax-M3",
+      tokenName: "somniq-desktop",
+      channel: "MiniMax",
+      requestId: "req_preview_001928374",
+      upstreamRequestId: "",
+      promptTokens: 4180,
+      completionTokens: 920,
+      totalTokens: 5100,
+      quota: 6200,
+      status: "success",
+      typeLabel: "Consume",
+    },
+    {
+      id: "preview-2",
+      createdAt: Math.floor(Date.now() / 1000) - 3600,
+      model: "gpt-5.5",
+      tokenName: "somniq-desktop",
+      channel: "OpenAI-compatible",
+      requestId: "req_preview_001928375",
+      upstreamRequestId: "",
+      promptTokens: 2310,
+      completionTokens: 780,
+      totalTokens: 3090,
+      quota: 4100,
+      status: "success",
+      typeLabel: "Consume",
+    },
+    {
+      id: "preview-3",
+      createdAt: Math.floor(Date.now() / 1000) - 7200,
+      model: "deepseek-v4-pro",
+      tokenName: "somniq-desktop",
+      channel: "DeepSeek",
+      requestId: "req_preview_001928376",
+      upstreamRequestId: "",
+      promptTokens: 1490,
+      completionTokens: 530,
+      totalTokens: 2020,
+      quota: 2400,
+      status: "success",
+      typeLabel: "Consume",
+    },
+  ],
+};
+const ENVIRONMENT_CHECK_PLACEHOLDERS = [
+  { id: "python", label: "Python", category: "运行环境" },
+  { id: "jupyter", label: "Jupyter", category: "Notebook" },
+  { id: "matlab", label: "MATLAB", category: "数值计算" },
+  { id: "latex", label: "LaTeX", category: "论文排版" },
+];
 
 const SETTINGS_TABS: Array<{ id: SettingsTab; label: string }> = [
   { id: "general", label: "通用" },
@@ -226,7 +326,7 @@ const REVIEWER_PROVIDERS: Record<string, ProviderMeta> = {
 
 function readCachedAccount(): NewApiAccount | null {
   try {
-    const raw = localStorage.getItem(ACCOUNT_CACHE_KEY);
+    const raw = localStorage.getItem(ACCOUNT_CACHE_KEY) ?? localStorage.getItem(LEGACY_ACCOUNT_CACHE_KEY);
     return raw ? (JSON.parse(raw) as NewApiAccount) : null;
   } catch {
     return null;
@@ -235,11 +335,33 @@ function readCachedAccount(): NewApiAccount | null {
 
 function writeCachedAccount(account: NewApiAccount | null) {
   try {
-    if (account) localStorage.setItem(ACCOUNT_CACHE_KEY, JSON.stringify(account));
-    else localStorage.removeItem(ACCOUNT_CACHE_KEY);
+    if (account) {
+      localStorage.setItem(ACCOUNT_CACHE_KEY, JSON.stringify(account));
+      localStorage.removeItem(LEGACY_ACCOUNT_CACHE_KEY);
+    } else {
+      localStorage.removeItem(ACCOUNT_CACHE_KEY);
+      localStorage.removeItem(LEGACY_ACCOUNT_CACHE_KEY);
+    }
   } catch {
     // Local storage can be disabled; the in-memory state is still useful.
   }
+}
+
+function isSettingsTab(value: unknown): value is SettingsTab {
+  return value === "general" || value === "auth" || value === "usage" || value === "about";
+}
+
+function readRequestedSettingsTab(): SettingsTab | null {
+  try {
+    const value = sessionStorage.getItem(SETTINGS_TAB_REQUEST_KEY);
+    if (isSettingsTab(value)) {
+      sessionStorage.removeItem(SETTINGS_TAB_REQUEST_KEY);
+      return value;
+    }
+  } catch {
+    // Session storage can be disabled in embedded browser contexts.
+  }
+  return null;
 }
 
 function uniqueModelList(...groups: Array<Array<string | null | undefined> | null | undefined>): string[] {
@@ -260,6 +382,35 @@ function formatQuota(credits: number): string {
   return `$${(credits / 500000).toFixed(2)}`;
 }
 
+function quotaPercent(account: NewApiAccount): number {
+  const total = account.quota + account.usedQuota;
+  if (!Number.isFinite(total) || total <= 0) return 0;
+  return Math.min(100, Math.round((account.usedQuota / total) * 100));
+}
+
+function subscriptionQuotaPercent(account: NewApiAccount): number {
+  const used = account.subscriptionUsedQuota ?? 0;
+  const remaining = account.subscriptionQuota ?? 0;
+  const total = used + remaining;
+  if (!Number.isFinite(total) || total <= 0) return 0;
+  return Math.min(100, Math.round((used / total) * 100));
+}
+
+function isAdminAccount(account: NewApiAccount | null): boolean {
+  if (!account) return false;
+  if (account.isAdmin === true) return true;
+  if (typeof account.role === "number" && account.role >= 10) return true;
+  const markers = [account.group, account.groupDesc, account.subscriptionName, account.subscriptionDesc];
+  return markers.some((value) => {
+    const text = value?.trim();
+    if (!text) return false;
+    const lower = text.toLowerCase();
+    return ["admin", "administrator", "root", "superuser", "super-admin", "owner"].includes(lower)
+      || text.includes("管理员")
+      || text.includes("管理員");
+  });
+}
+
 function formatUpdateBytes(value: number): string {
   if (!Number.isFinite(value) || value <= 0) return "0 B";
   const units = ["B", "KB", "MB", "GB"];
@@ -272,38 +423,33 @@ function formatUpdateBytes(value: number): string {
   return `${size.toFixed(index === 0 ? 0 : 1)} ${units[index]}`;
 }
 
-function formatUsageTokens(value: number): string {
-  if (!Number.isFinite(value) || value <= 0) return "0";
-  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(2)}M`;
-  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}K`;
-  return `${Math.round(value)}`;
-}
-
 function formatUsageExact(value: number): string {
   if (!Number.isFinite(value) || value <= 0) return "0";
   return Math.round(value).toLocaleString();
 }
 
-function formatUsageChinese(value: number): string {
-  if (!Number.isFinite(value) || value <= 0) return "0";
-  if (value >= 100_000_000) return `${(value / 100_000_000).toFixed(2)} 亿`;
-  if (value >= 10_000) return `${(value / 10_000).toFixed(value >= 100_000 ? 1 : 2)} 万`;
-  return Math.round(value).toLocaleString();
+function formatUsageDate(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return "-";
+  const millis = value > 10_000_000_000 ? value : value * 1000;
+  const date = new Date(millis);
+  if (Number.isNaN(date.getTime())) return "-";
+  return date.toLocaleString(undefined, {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 
-function formatUsageCost(value: number): string {
-  if (!Number.isFinite(value) || value <= 0) return "$0.0000";
-  return `$${value.toFixed(4)}`;
+function shortUsageId(value: string): string {
+  const text = value.trim();
+  if (!text) return "-";
+  if (text.length <= 14) return text;
+  return `${text.slice(0, 8)}...${text.slice(-4)}`;
 }
 
-function formatUsageTime(epochSeconds: number): string {
-  if (!Number.isFinite(epochSeconds) || epochSeconds <= 0) return "-";
-  return new Date(epochSeconds * 1000).toLocaleString();
-}
-
-function formatUsageDay(epochSeconds: number): string {
-  const date = new Date(epochSeconds * 1000);
-  return `${String(date.getMonth() + 1).padStart(2, "0")}/${String(date.getDate()).padStart(2, "0")}`;
+function usageLogMeta(status: string, typeLabel: string): string {
+  return [typeLabel, status].map((value) => value.trim()).filter(Boolean).join(" · ");
 }
 
 function environmentMark(id: string): string {
@@ -318,82 +464,6 @@ function environmentStatusLabel(item: LocalEnvironmentCheck): string {
   if (item.status === "ready") return "可用";
   if (item.status === "warning") return "需检查";
   return item.available ? "可用" : "未检测到";
-}
-
-function usageRangeCutoff(days: number): number {
-  const date = new Date();
-  date.setHours(0, 0, 0, 0);
-  date.setDate(date.getDate() - (days - 1));
-  return Math.floor(date.getTime() / 1000);
-}
-
-function makeUsageTrend(entries: TokenUsageSummary["recent"], days: number) {
-  const buckets = new Map<string, {
-    label: string;
-    input: number;
-    output: number;
-    cache: number;
-    total: number;
-    cost: number;
-    requests: number;
-  }>();
-  const start = new Date();
-  start.setHours(0, 0, 0, 0);
-  start.setDate(start.getDate() - (days - 1));
-  for (let index = 0; index < days; index += 1) {
-    const date = new Date(start);
-    date.setDate(start.getDate() + index);
-    const key = date.toISOString().slice(0, 10);
-    buckets.set(key, {
-      label: `${String(date.getMonth() + 1).padStart(2, "0")}/${String(date.getDate()).padStart(2, "0")}`,
-      input: 0,
-      output: 0,
-      cache: 0,
-      total: 0,
-      cost: 0,
-      requests: 0,
-    });
-  }
-  for (const entry of entries) {
-    const date = new Date(entry.createdAt * 1000);
-    date.setHours(0, 0, 0, 0);
-    const key = date.toISOString().slice(0, 10);
-    const bucket = buckets.get(key);
-    if (!bucket) continue;
-    bucket.input += entry.inputTokens;
-    bucket.output += entry.outputTokens;
-    bucket.cache += entry.cacheReadInputTokens + entry.cacheCreationInputTokens;
-    bucket.total += entry.totalTokens;
-    bucket.cost += entry.estimatedCostUsd;
-    bucket.requests += 1;
-  }
-  return Array.from(buckets.values());
-}
-
-function usageChartX(index: number, total: number) {
-  const left = 48;
-  const width = 820;
-  return left + (total <= 1 ? 0 : (index / (total - 1)) * width);
-}
-
-function usageChartY(value: number, max: number) {
-  const top = 18;
-  const height = 210;
-  return top + height - (Math.max(0, value) / Math.max(1, max)) * height;
-}
-
-function usageLinePath(points: ReturnType<typeof makeUsageTrend>, key: "input" | "output" | "cache" | "total" | "cost", max: number) {
-  return points
-    .map((point, index) => `${index === 0 ? "M" : "L"} ${usageChartX(index, points.length).toFixed(1)} ${usageChartY(point[key], max).toFixed(1)}`)
-    .join(" ");
-}
-
-function usageAreaPath(points: ReturnType<typeof makeUsageTrend>, key: "total", max: number) {
-  if (points.length === 0) return "";
-  const baseline = usageChartY(0, max).toFixed(1);
-  const firstX = usageChartX(0, points.length).toFixed(1);
-  const lastX = usageChartX(points.length - 1, points.length).toFixed(1);
-  return `${usageLinePath(points, key, max)} L ${lastX} ${baseline} L ${firstX} ${baseline} Z`;
 }
 
 function normalizeExecutorProvider(provider: string | null | undefined, baseUrl: string | null | undefined): string {
@@ -461,17 +531,20 @@ function PresetTextInput({
   placeholder,
   options,
   onChange,
+  disabled = false,
 }: {
   value: string;
   placeholder: string;
   options: PresetOption[];
   onChange: (value: string) => void;
+  disabled?: boolean;
 }) {
   const currentPreset = options.find((option) => option.value === value)?.value ?? "__custom";
   return (
     <div className="st-preset-control">
       <select
         value={currentPreset}
+        disabled={disabled}
         onChange={(event) => {
           if (event.target.value === "__custom") {
             onChange("");
@@ -487,7 +560,7 @@ function PresetTextInput({
           </option>
         ))}
       </select>
-      <input value={value} placeholder={placeholder} onChange={(event) => onChange(event.target.value)} spellCheck={false} />
+      <input value={value} placeholder={placeholder} onChange={(event) => onChange(event.target.value)} spellCheck={false} disabled={disabled} />
     </div>
   );
 }
@@ -498,12 +571,14 @@ function KeyInput({
   masked,
   secretKind,
   onChange,
+  disabled = false,
 }: {
   value: string;
   placeholder: string;
   masked: string | null | undefined;
   secretKind: ConfigSecretKind;
   onChange: (value: string) => void;
+  disabled?: boolean;
 }) {
   const [visible, setVisible] = useState(false);
   const [savedSecret, setSavedSecret] = useState("");
@@ -551,12 +626,13 @@ function KeyInput({
         className="st-key-input"
         spellCheck={false}
         autoComplete="off"
+        disabled={disabled}
       />
       <button
         type="button"
         className="st-key-eye"
         onClick={() => void toggleVisible()}
-        disabled={loading || (!value && !masked)}
+        disabled={disabled || loading || (!value && !masked)}
         title={error || (visible ? "隐藏密钥" : "显示密钥")}
       >
         {loading ? "..." : visible ? "隐藏" : "显示"}
@@ -585,12 +661,13 @@ export default function Settings() {
   const theme = useStore((state) => state.theme);
   const setTheme = useStore((state) => state.setTheme);
   const logout = useStore((state) => state.logout);
-  const [configView, setConfigView] = useState<ConfigView | null>(null);
+  const [configView, setConfigView] = useState<ConfigView | null>(() => isTauri() ? null : PREVIEW_CONFIG_VIEW);
   const [advForm, setAdvForm] = useState<ConfigPatch>({});
   const [execKey, setExecKey] = useState("");
   const [summaryKey, setSummaryKey] = useState("");
   const [reviewerKey, setReviewerKey] = useState("");
   const [scopusKey, setScopusKey] = useState("");
+  const [summaryToolsOpen, setSummaryToolsOpen] = useState(false);
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [testState, setTestState] = useState<TestState>("idle");
   const [testResult, setTestResult] = useState<ConfigTestResult | null>(null);
@@ -601,20 +678,17 @@ export default function Settings() {
   const [environmentChecks, setEnvironmentChecks] = useState<LocalEnvironmentCheck[]>([]);
   const [environmentLoading, setEnvironmentLoading] = useState(false);
   const [environmentError, setEnvironmentError] = useState("");
-  const [usageSummary, setUsageSummary] = useState<TokenUsageSummary | null>(null);
   const [usageLoading, setUsageLoading] = useState(false);
-  const [usageDetailTab, setUsageDetailTab] = useState<UsageDetailTab>("logs");
-  const [usageRangeDays, setUsageRangeDays] = useState(30);
-  const [usageServerFilter, setUsageServerFilter] = useState("all");
-  const [usageModelFilter, setUsageModelFilter] = useState("all");
   const [usageLogPage, setUsageLogPage] = useState(1);
-  const [managedModels, setManagedModels] = useState<string[]>([]);
+  const [usageLogs, setUsageLogs] = useState<NewApiUsageLogPage | null>(() => isTauri() ? null : PREVIEW_USAGE_LOGS);
+  const [usageLogError, setUsageLogError] = useState("");
+  const [managedModels, setManagedModels] = useState<string[]>(() => isTauri() ? [] : PREVIEW_CONFIG_VIEW.managedModels ?? []);
   const [managedModelsLoading, setManagedModelsLoading] = useState(false);
   const [managedModelsError, setManagedModelsError] = useState("");
-  const [account, setAccount] = useState<NewApiAccount | null>(() => readCachedAccount());
+  const [account, setAccount] = useState<NewApiAccount | null>(() => isTauri() ? readCachedAccount() : PREVIEW_ACCOUNT);
   const [accountLoading, setAccountLoading] = useState(false);
   const [accountError, setAccountError] = useState("");
-  const [activeSettingsTab, setActiveSettingsTab] = useState<SettingsTab>("general");
+  const [activeSettingsTab, setActiveSettingsTab] = useState<SettingsTab>(() => readRequestedSettingsTab() ?? "general");
   const [mailDetailOpen, setMailDetailOpen] = useState(false);
   const savedTimer = useRef<number | null>(null);
 
@@ -648,14 +722,32 @@ export default function Settings() {
     if (savedTimer.current !== null) window.clearTimeout(savedTimer.current);
   }, []);
 
-  const loadUsageSummary = async () => {
+  const loadUsageSummary = async (page = usageLogPage) => {
+    if (!isTauri()) {
+      setUsageLogs({ ...PREVIEW_USAGE_LOGS, page });
+      return;
+    }
     setUsageLoading(true);
+    setUsageLogError("");
     try {
-      setUsageSummary(await chatUsageSummary());
+      await loadAccount();
+      const nextLogs = await newapiUsageLogs(page, USAGE_LOG_PAGE_SIZE);
+      setUsageLogs(nextLogs);
     } catch (error) {
-      setError(String(error));
+      const message = String(error);
+      setUsageLogError(message);
+      setError(message);
     } finally {
       setUsageLoading(false);
+    }
+  };
+
+  const refreshUsage = () => {
+    const firstPage = 1;
+    if (usageLogPage === firstPage) {
+      void loadUsageSummary(firstPage);
+    } else {
+      setUsageLogPage(firstPage);
     }
   };
 
@@ -674,6 +766,11 @@ export default function Settings() {
 
   const loadManagedModels = async () => {
     if (!MANAGED_NEW_API_MODE) return;
+    if (!isTauri()) {
+      setManagedModels(PREVIEW_CONFIG_VIEW.managedModels ?? []);
+      setConfigView(PREVIEW_CONFIG_VIEW);
+      return;
+    }
     setManagedModelsLoading(true);
     setManagedModelsError("");
     try {
@@ -690,6 +787,10 @@ export default function Settings() {
 
   const loadAccount = async () => {
     if (!MANAGED_NEW_API_MODE) return;
+    if (!isTauri()) {
+      setAccount(PREVIEW_ACCOUNT);
+      return;
+    }
     setAccountLoading(true);
     setAccountError("");
     try {
@@ -700,7 +801,12 @@ export default function Settings() {
       }
       writeCachedAccount(next);
     } catch (error) {
-      setAccountError(String(error));
+      const message = String(error);
+      setAccountError(message);
+      if (isManagedAuthInvalidError(error)) {
+        writeCachedAccount(null);
+        logout();
+      }
     } finally {
       setAccountLoading(false);
     }
@@ -708,28 +814,69 @@ export default function Settings() {
 
   useEffect(() => {
     if (!isTauri()) return;
-    void loadUsageSummary();
     void loadManagedModels();
     void loadAccount();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
-    setUsageLogPage(1);
-  }, [usageRangeDays, usageServerFilter, usageModelFilter]);
+    const openRequestedTab = (tab: SettingsTab) => {
+      setActiveSettingsTab(tab);
+      try {
+        sessionStorage.removeItem(SETTINGS_TAB_REQUEST_KEY);
+      } catch {
+        // Session storage may be unavailable.
+      }
+    };
+    const onSettingsTabRequest = (event: Event) => {
+      const detail = (event as CustomEvent<unknown>).detail;
+      if (isSettingsTab(detail)) {
+        openRequestedTab(detail);
+        return;
+      }
+      const requested = readRequestedSettingsTab();
+      if (requested) openRequestedTab(requested);
+    };
+    const requested = readRequestedSettingsTab();
+    if (requested) openRequestedTab(requested);
+    window.addEventListener(SETTINGS_TAB_REQUEST_EVENT, onSettingsTabRequest);
+    return () => {
+      window.removeEventListener(SETTINGS_TAB_REQUEST_EVENT, onSettingsTabRequest);
+    };
+  }, []);
 
   useEffect(() => {
-    if (activeSettingsTab === "about" && environmentChecks.length === 0 && !environmentLoading) {
+    if (activeSettingsTab === "about" && !environmentLoading) {
       void loadEnvironmentChecks();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeSettingsTab]);
 
-  const buildPatch = () => {
+  useEffect(() => {
+    if (!isTauri() || activeSettingsTab !== "usage") return;
+    void loadUsageSummary(usageLogPage);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeSettingsTab, usageLogPage]);
+
+  const buildPatch = (options: { includeExecutor?: boolean; includeReviewer?: boolean } = {}) => {
     const patch: ConfigPatch = { ...advForm };
-    if (execKey.trim()) patch.executorApiKey = execKey.trim();
+    if (options.includeExecutor === false) {
+      delete patch.executorProvider;
+      delete patch.executorModel;
+      delete patch.executorBaseUrl;
+      delete patch.executorApiKey;
+    } else if (execKey.trim()) {
+      patch.executorApiKey = execKey.trim();
+    }
+    if (options.includeReviewer === false) {
+      delete patch.reviewerProvider;
+      delete patch.reviewerModel;
+      delete patch.reviewerBaseUrl;
+      delete patch.reviewerApiKey;
+    } else if (reviewerKey.trim()) {
+      patch.reviewerApiKey = reviewerKey.trim();
+    }
     if (summaryKey.trim()) patch.summarizerApiKey = summaryKey.trim();
-    if (reviewerKey.trim()) patch.reviewerApiKey = reviewerKey.trim();
     if (scopusKey.trim()) patch.scopusApiKey = scopusKey.trim();
     return patch;
   };
@@ -746,7 +893,13 @@ export default function Settings() {
     setTestState("idle");
     setTestResult(null);
     try {
-      const next = await configSet(buildPatch());
+      if (!isTauri()) {
+        setConfigView((current) => current ? { ...current, ...buildPatch({ includeExecutor: canConfigureExecutor, includeReviewer: canConfigureReviewer }) } : current);
+        setSaveState("saved");
+        savedTimer.current = window.setTimeout(() => setSaveState("idle"), 3000);
+        return;
+      }
+      const next = await configSet(buildPatch({ includeExecutor: canConfigureExecutor, includeReviewer: canConfigureReviewer }));
       loadConfig(next);
       setSaveState("saved");
       savedTimer.current = window.setTimeout(() => setSaveState("idle"), 3000);
@@ -760,7 +913,18 @@ export default function Settings() {
     setTestState("testing");
     setTestResult(null);
     try {
-      const result = await configTest(buildPatch());
+      if (!isTauri()) {
+        const result: ConfigTestResult = {
+          ok: true,
+          message: "Browser preview: connection test is simulated.",
+          executor: { ok: true, label: "Executor", model: advForm.executorModel, baseUrl: advForm.executorBaseUrl, message: "Preview mode" },
+          reviewer: canConfigureReviewer ? { ok: true, label: "Reviewer", model: advForm.reviewerModel, baseUrl: advForm.reviewerBaseUrl, message: "Preview mode" } : null,
+        };
+        setTestResult(result);
+        setTestState("passed");
+        return;
+      }
+      const result = await configTest(buildPatch({ includeExecutor: canConfigureExecutor, includeReviewer: canConfigureReviewer }));
       setTestResult(result);
       setTestState(result.ok ? "passed" : "failed");
     } catch (error) {
@@ -772,6 +936,12 @@ export default function Settings() {
 
   const applyManagedModel = async (model: string) => {
     if (!model || model === configView?.executorModel) return;
+    if (!isTauri()) {
+      setConfigView((current) => current ? { ...current, executorModel: model } : current);
+      setAdvForm((current) => ({ ...current, executorModel: model }));
+      setAccount((current) => (current ? { ...current, model } : current));
+      return;
+    }
     try {
       const next = await configSet({ executorModel: model });
       loadConfig(next);
@@ -782,7 +952,13 @@ export default function Settings() {
   };
 
   const applyManagedReviewerModel = async (model: string) => {
+    if (!canConfigureReviewer) return;
     if (model === (configView?.reviewerModel ?? "")) return;
+    if (!isTauri()) {
+      setConfigView((current) => current ? { ...current, reviewerModel: model } : current);
+      setAdvForm((current) => ({ ...current, reviewerModel: model }));
+      return;
+    }
     try {
       const patch: ConfigPatch = model
         ? {
@@ -856,8 +1032,6 @@ export default function Settings() {
     }
   };
 
-  if (!isTauri()) return <div className="board"><div className="empty">Settings need the Tauri backend.</div></div>;
-
   if (mailDetailOpen) {
     return (
       <div className="st-page sp-detail-page">
@@ -877,6 +1051,8 @@ export default function Settings() {
 
   const advExecProvider = advForm.executorProvider ?? "anthropic";
   const advExecMeta = EXECUTOR_PROVIDERS[advExecProvider] ?? EXECUTOR_PROVIDERS.custom;
+  const canConfigureExecutor = isAdminAccount(account);
+  const canConfigureReviewer = canConfigureExecutor;
   const advReviewerProvider = advForm.reviewerProvider ?? "";
   const advReviewerMeta = REVIEWER_PROVIDERS[advReviewerProvider] ?? REVIEWER_PROVIDERS.custom;
   const summaryProviderOptions = (() => {
@@ -889,7 +1065,7 @@ export default function Settings() {
       options.push({ key, label, provider: protocol, baseUrl: url, model: model?.trim() ?? "" });
     };
     addOption("Executor", configView.executorProvider, configView.executorBaseUrl, configView.executorModel);
-    addOption("Reviewer", configView.reviewerProvider, configView.reviewerBaseUrl, configView.reviewerModel);
+    if (canConfigureReviewer) addOption("Reviewer", configView.reviewerProvider, configView.reviewerBaseUrl, configView.reviewerModel);
     for (const item of configView.verifiedExecutors ?? []) {
       addOption(`${formatServerLabel(item.baseUrl)} · ${item.model}`, item.provider, item.baseUrl, item.model);
     }
@@ -971,105 +1147,29 @@ export default function Settings() {
       : `${formatUpdateBytes(updateProgress.downloadedBytes)} downloaded`
     : "";
   const environmentReadyCount = environmentChecks.filter((item) => item.available).length;
-  const usageCutoff = usageRangeCutoff(usageRangeDays);
-  const usageServerOptions = usageSummary?.byServer ?? [];
-  const usageModelOptions = (() => {
-    const seen = new Set<string>();
-    const models: string[] = [];
-    for (const item of usageSummary?.byModel ?? []) {
-      const model = item.model.trim();
-      if (!model || seen.has(model)) continue;
-      seen.add(model);
-      models.push(model);
-    }
-    return models;
-  })();
-  const usageFilteredEntries = (usageSummary?.recent ?? [])
-    .filter((item) => item.createdAt >= usageCutoff)
-    .filter((item) => usageServerFilter === "all" || `${item.provider}:${item.server}` === usageServerFilter)
-    .filter((item) => usageModelFilter === "all" || item.model === usageModelFilter);
-  const usageVisibleTotals = usageFilteredEntries.reduce(
-    (acc, item) => ({
-      requests: acc.requests + 1,
-      inputTokens: acc.inputTokens + item.inputTokens,
-      outputTokens: acc.outputTokens + item.outputTokens,
-      cacheCreationInputTokens: acc.cacheCreationInputTokens + item.cacheCreationInputTokens,
-      cacheReadInputTokens: acc.cacheReadInputTokens + item.cacheReadInputTokens,
-      promptTokens: acc.promptTokens + item.promptTokens,
-      totalTokens: acc.totalTokens + item.totalTokens,
-      estimatedCostUsd: acc.estimatedCostUsd + item.estimatedCostUsd,
-    }),
-    {
-      requests: 0,
-      inputTokens: 0,
-      outputTokens: 0,
-      cacheCreationInputTokens: 0,
-      cacheReadInputTokens: 0,
-      promptTokens: 0,
-      totalTokens: 0,
-      estimatedCostUsd: 0,
-    },
-  );
-  const usageTrend = makeUsageTrend(usageFilteredEntries, usageRangeDays);
-  const usageLogPageCount = Math.max(1, Math.ceil(usageFilteredEntries.length / USAGE_LOG_PAGE_SIZE));
-  const usageCurrentLogPage = Math.min(usageLogPage, usageLogPageCount);
-  const usageRecent = usageFilteredEntries.slice(
-    (usageCurrentLogPage - 1) * USAGE_LOG_PAGE_SIZE,
-    usageCurrentLogPage * USAGE_LOG_PAGE_SIZE,
-  );
-  const usageServers = Array.from(usageFilteredEntries.reduce((map, item) => {
-    const key = `${item.provider}:${item.server}`;
-    const current = map.get(key) ?? {
-      server: item.server,
-      provider: item.provider,
-      requests: 0,
-      inputTokens: 0,
-      outputTokens: 0,
-      totalTokens: 0,
-      estimatedCostUsd: 0,
-    };
-    current.requests += 1;
-    current.inputTokens += item.inputTokens;
-    current.outputTokens += item.outputTokens;
-    current.totalTokens += item.totalTokens;
-    current.estimatedCostUsd += item.estimatedCostUsd;
-    map.set(key, current);
-    return map;
-  }, new Map<string, { server: string; provider: string; requests: number; inputTokens: number; outputTokens: number; totalTokens: number; estimatedCostUsd: number; }>()).values())
-    .sort((left, right) => right.totalTokens - left.totalTokens)
-    .slice(0, 12);
-  const usageModels = Array.from(usageFilteredEntries.reduce((map, item) => {
-    const key = `${item.provider}:${item.server}:${item.model}`;
-    const current = map.get(key) ?? {
-      server: item.server,
-      provider: item.provider,
-      model: item.model,
-      requests: 0,
-      totalTokens: 0,
-      estimatedCostUsd: 0,
-    };
-    current.requests += 1;
-    current.totalTokens += item.totalTokens;
-    current.estimatedCostUsd += item.estimatedCostUsd;
-    map.set(key, current);
-    return map;
-  }, new Map<string, { server: string; provider: string; model: string; requests: number; totalTokens: number; estimatedCostUsd: number; }>()).values())
-    .sort((left, right) => right.totalTokens - left.totalTokens)
-    .slice(0, 20);
-  const usageCacheRate = usageVisibleTotals.promptTokens > 0
-    ? Math.min(100, Math.round((usageVisibleTotals.cacheReadInputTokens / usageVisibleTotals.promptTokens) * 1000) / 10)
-    : 0;
-  const usageTrendMaxTokens = Math.max(1, ...usageTrend.map((point) => point.total));
-  const usageTrendMaxCost = Math.max(0.0001, ...usageTrend.map((point) => point.cost));
+  const accountUsedQuota = account?.usedQuota ?? 0;
+  const accountRemainingQuota = account?.quota ?? 0;
+  const accountTotalQuota = accountUsedQuota + accountRemainingQuota;
+  const accountUsagePercent = account ? quotaPercent(account) : 0;
+  const subscriptionUsedQuota = account?.subscriptionUsedQuota ?? 0;
+  const subscriptionRemainingQuota = account?.subscriptionQuota ?? 0;
+  const subscriptionUsagePercent = account ? subscriptionQuotaPercent(account) : 0;
+  const usageLogTotal = usageLogs?.total ?? 0;
+  const usageLogItems = usageLogs?.items ?? [];
+  const usageLogPageCount = Math.max(1, Math.ceil(usageLogTotal / USAGE_LOG_PAGE_SIZE));
+  const usageLogStart = usageLogTotal > 0 ? (usageLogPage - 1) * USAGE_LOG_PAGE_SIZE + 1 : 0;
+  const usageLogEnd = usageLogTotal > 0 ? Math.min(usageLogStart + usageLogItems.length - 1, usageLogTotal) : 0;
+  const canGoPrevUsageLogPage = usageLogPage > 1 && !usageLoading;
+  const canGoNextUsageLogPage = usageLogPage < usageLogPageCount && !usageLoading;
   const currentManagedModel = configView.executorModel?.trim() || "未选择";
   const availableManagedModels = uniqueModelList(
     managedModels,
     configView.managedModels,
-    [configView.executorModel, configView.reviewerModel],
+    [configView.executorModel, canConfigureReviewer ? configView.reviewerModel : null],
     account?.models,
   );
   const managedModelPreview = availableManagedModels.slice(0, 12);
-  const currentReviewerModel = configView.reviewerModel?.trim() || "";
+  const currentReviewerModel = canConfigureReviewer ? configView.reviewerModel?.trim() || "" : "";
   const currentServerLabel = configuredServerLabel(configView);
 
   return (
@@ -1196,7 +1296,7 @@ export default function Settings() {
             <div className="sp-section-head">
               <div className="sp-section-head-text">
                 <div className="sp-section-title">账号服务</div>
-                <div className="sp-section-sub">账号、套餐与额度由服务器下发；本地只保留最近一次投影。</div>
+                <div className="sp-section-sub">账号、订阅、分组与额度由服务器下发；本地只保留最近一次投影。</div>
               </div>
               <div className="sp-update-actions">
                 <button className="sp-btn sp-btn-secondary" onClick={() => void loadAccount()} disabled={accountLoading} type="button">
@@ -1211,23 +1311,48 @@ export default function Settings() {
                 <div className="sp-update-copy">
                   <div className="sp-update-title">
                     {account ? (account.displayName || account.username || "已登录") : "未登录"}
-                    {account?.group ? <span className="sp-status-tag sp-status-tag-version" style={{ marginLeft: 8 }}>{account.group}</span> : null}
+                    {account?.subscriptionName ? <span className="sp-status-tag sp-status-tag-version" style={{ marginLeft: 8 }}>{account.subscriptionName}</span> : null}
+                    {account?.group ? <span className="sp-status-tag sp-status-tag-version sp-account-group-tag" style={{ marginLeft: 8 }}>分组 {account.group}</span> : null}
                   </div>
                   <div className="sp-update-meta">
                     {account
-                      ? `已用 ${formatQuota(account.usedQuota)} · 剩余 ${formatQuota(account.quota)}`
+                      ? `余额 ${formatQuota(account.quota)} · 已用 ${formatQuota(account.usedQuota)}`
                       : (accountError || "登录后显示账号信息")}
                   </div>
+                  {account && (
+                    <div className="sp-account-summary" aria-label="订阅与余额">
+                      <div className="sp-account-metric">
+                        <span>订阅套餐</span>
+                        <strong>{account.subscriptionName || "无有效订阅"}</strong>
+                        <small>{account.subscriptionDesc || "来自 /api/subscription/self"}</small>
+                      </div>
+                      <div className="sp-account-metric subscription">
+                        <span>订阅余额</span>
+                        <strong>{formatQuota(account.subscriptionQuota ?? 0)}</strong>
+                        <small>{subscriptionQuotaPercent(account)}% 已消耗</small>
+                      </div>
+                      <div className="sp-account-metric balance">
+                        <span>账户余额</span>
+                        <strong>{formatQuota(account.quota)}</strong>
+                        <small>可继续用于模型调用</small>
+                      </div>
+                      <div className="sp-account-metric">
+                        <span>已用额度</span>
+                        <strong>{formatQuota(account.usedQuota)}</strong>
+                        <small>{quotaPercent(account)}% 已消耗 · 倍率 {account.groupRatio || "-"}</small>
+                      </div>
+                    </div>
+                  )}
                   {account && (account.groupRatio || account.groupDesc) && (
                     <div className="sp-update-message">
-                      套餐 {account.group || "-"}
+                      分组 {account.group || "-"}
                       {account.groupRatio ? ` · 倍率 ${account.groupRatio}` : ""}
                       {account.groupDesc ? ` · ${account.groupDesc}` : ""}
                     </div>
                   )}
                   {account && account.quota + account.usedQuota > 0 && (
                     <div className="sp-quota-bar">
-                      <div style={{ width: `${Math.min(100, Math.round((account.usedQuota / (account.usedQuota + account.quota)) * 100))}%` }} />
+                      <div style={{ width: `${quotaPercent(account)}%` }} />
                     </div>
                   )}
                   {account && accountError && <div className="sp-update-message">刷新失败，当前显示上次缓存 · {accountError}</div>}
@@ -1265,29 +1390,34 @@ export default function Settings() {
                   <span className="sp-model-select-empty">登录后同步模型</span>
                 )}
               </label>
-              <label className="sp-model-select-row">
-                <span>审核模型</span>
-                {availableManagedModels.length > 0 ? (
-                  <select
-                    value={currentReviewerModel}
-                    onChange={(event) => void applyManagedReviewerModel(event.target.value)}
-                    className="sp-settings-select"
-                  >
-                    <option value="">关闭审核模型</option>
-                    {availableManagedModels.map((model) => (
-                      <option key={model} value={model}>{model}</option>
-                    ))}
-                  </select>
-                ) : (
-                  <span className="sp-model-select-empty">登录后同步模型</span>
-                )}
-              </label>
+              {canConfigureReviewer && (
+                <label className="sp-model-select-row">
+                  <span>审核模型</span>
+                  {availableManagedModels.length > 0 ? (
+                    <select
+                      value={currentReviewerModel}
+                      onChange={(event) => void applyManagedReviewerModel(event.target.value)}
+                      className="sp-settings-select"
+                    >
+                      <option value="">关闭审核模型</option>
+                      {availableManagedModels.map((model) => (
+                        <option key={model} value={model}>{model}</option>
+                      ))}
+                    </select>
+                  ) : (
+                    <span className="sp-model-select-empty">登录后同步模型</span>
+                  )}
+                </label>
+              )}
             </div>
             <div className={`sp-update-panel ${managedModelsError ? "sp-update-panel-error" : "sp-update-panel-current"}`}>
               <div className="sp-update-main">
                 <span className={`sp-update-dot ${managedModelsError ? "sp-update-dot-error" : "sp-update-dot-current"}`} />
                 <div className="sp-update-copy">
-                  <div className="sp-update-title">当前执行：{currentManagedModel}{currentReviewerModel ? ` · 审核：${currentReviewerModel}` : " · 审核：关闭"}</div>
+                  <div className="sp-update-title">
+                    当前执行：{currentManagedModel}
+                    {canConfigureReviewer ? (currentReviewerModel ? ` · 审核：${currentReviewerModel}` : " · 审核：关闭") : ""}
+                  </div>
                   <div className="sp-update-meta">
                     {managedModelsLoading
                       ? "正在同步模型"
@@ -1325,71 +1455,88 @@ export default function Settings() {
       {activeSettingsTab === "auth" && (
         <div className="sp-advanced-wrap sp-advanced-wrap-tab">
           <div className="sp-advanced-body">
-            <div className="sp-adv-section">
-              <div className="sp-adv-section-title">执行器</div>
-              <div className="sp-field-group">
-                <div className="st-field-label">Provider 类型</div>
-                <div className="st-provider-grid">
-                  {Object.entries(EXECUTOR_PROVIDERS).map(([key, meta]) => (
-                    <button key={key} type="button" className={`st-provider-card${advExecProvider === key ? " active" : ""}`} onClick={() => chooseExecProvider(key)}>
-                      <span className="st-provider-label">{meta.label}</span>
-                      <span className="st-provider-hint">{meta.hint}</span>
-                    </button>
-                  ))}
+            {canConfigureExecutor && (
+              <div className="sp-adv-section">
+                <div className="sp-adv-section-title">执行器</div>
+                <div className="sp-field-group">
+                  <div className="st-field-label">Provider 类型</div>
+                  <div className="st-provider-grid">
+                    {Object.entries(EXECUTOR_PROVIDERS).map(([key, meta]) => (
+                      <button key={key} type="button" className={`st-provider-card${advExecProvider === key ? " active" : ""}`} onClick={() => chooseExecProvider(key)}>
+                        <span className="st-provider-label">{meta.label}</span>
+                        <span className="st-provider-hint">{meta.hint}</span>
+                      </button>
+                    ))}
+                  </div>
                 </div>
-              </div>
-              <div className="sp-adv-rows">
-                <div className="st-row"><div className="st-row-label"><span className="st-label">Model</span></div><div className="st-row-control"><PresetTextInput value={advForm.executorModel ?? ""} placeholder={advExecMeta.defaultModel || "e.g. claude-sonnet-4-6"} options={advExecMeta.models ?? EXECUTOR_MODELS} onChange={(value) => { resetOpState(); setAdvForm((current) => ({ ...current, executorModel: value })); }} /></div></div>
-                <div className="st-row"><div className="st-row-label"><span className="st-label">Base URL</span></div><div className="st-row-control"><PresetTextInput value={advForm.executorBaseUrl ?? ""} placeholder={advExecMeta.defaultBaseUrl || "(official default)"} options={advExecMeta.baseUrls ?? OPENAI_COMPAT_URLS} onChange={(value) => { resetOpState(); setAdvForm((current) => ({ ...current, executorBaseUrl: value })); }} /></div></div>
-                <div className="st-row"><div className="st-row-label"><span className="st-label">API Key</span><span className="st-hint">{configView.hasExecutorKey ? `Saved: ${configView.executorKeyMasked ?? "configured"}` : "No key"}</span></div><div className="st-row-control"><KeyInput value={execKey} placeholder={configView.hasExecutorKey ? "leave blank to keep" : "paste API key"} masked={configView.executorKeyMasked} secretKind="executorApiKey" onChange={(value) => { resetOpState(); setExecKey(value); }} /></div></div>
-              </div>
-            </div>
-
-            <div className="sp-adv-section">
-              <div className="sp-adv-section-title">审阅</div>
-              <div className="sp-field-group">
-                <div className="st-field-label">Provider 类型</div>
-                <div className="st-provider-grid">
-                  {Object.entries(REVIEWER_PROVIDERS).map(([key, meta]) => (
-                    <button key={key} type="button" className={`st-provider-card${advReviewerProvider === key ? " active" : ""}`} onClick={() => chooseReviewerProvider(key)}>
-                      <span className="st-provider-label">{meta.label}</span>
-                      <span className="st-provider-hint">{meta.hint}</span>
-                    </button>
-                  ))}
-                </div>
-              </div>
-              {advReviewerProvider !== "" && (
                 <div className="sp-adv-rows">
-                  <div className="st-row"><div className="st-row-label"><span className="st-label">Model</span></div><div className="st-row-control"><PresetTextInput value={advForm.reviewerModel ?? ""} placeholder={advReviewerMeta.defaultModel || "e.g. gpt-5.5"} options={advReviewerMeta.models ?? REVIEWER_MODELS} onChange={(value) => { resetOpState(); setAdvForm((current) => ({ ...current, reviewerModel: value })); }} /></div></div>
-                  <div className="st-row"><div className="st-row-label"><span className="st-label">Base URL</span></div><div className="st-row-control"><PresetTextInput value={advForm.reviewerBaseUrl ?? ""} placeholder={advReviewerMeta.defaultBaseUrl || "(provider default)"} options={advReviewerMeta.baseUrls ?? OPENAI_COMPAT_URLS} onChange={(value) => { resetOpState(); setAdvForm((current) => ({ ...current, reviewerBaseUrl: value })); }} /></div></div>
-                  <div className="st-row"><div className="st-row-label"><span className="st-label">API Key</span><span className="st-hint">{configView.hasReviewerKey ? `Saved: ${configView.reviewerKeyMasked ?? "configured"}` : "No key"}</span></div><div className="st-row-control"><KeyInput value={reviewerKey} placeholder={configView.hasReviewerKey ? "leave blank to keep" : "paste reviewer key"} masked={configView.reviewerKeyMasked} secretKind="reviewerApiKey" onChange={(value) => { resetOpState(); setReviewerKey(value); }} /></div></div>
+                  <div className="st-row"><div className="st-row-label"><span className="st-label">Model</span></div><div className="st-row-control"><PresetTextInput value={advForm.executorModel ?? ""} placeholder={advExecMeta.defaultModel || "e.g. claude-sonnet-4-6"} options={advExecMeta.models ?? EXECUTOR_MODELS} onChange={(value) => { resetOpState(); setAdvForm((current) => ({ ...current, executorModel: value })); }} /></div></div>
+                  <div className="st-row"><div className="st-row-label"><span className="st-label">Base URL</span></div><div className="st-row-control"><PresetTextInput value={advForm.executorBaseUrl ?? ""} placeholder={advExecMeta.defaultBaseUrl || "(official default)"} options={advExecMeta.baseUrls ?? OPENAI_COMPAT_URLS} onChange={(value) => { resetOpState(); setAdvForm((current) => ({ ...current, executorBaseUrl: value })); }} /></div></div>
+                  <div className="st-row"><div className="st-row-label"><span className="st-label">API Key</span><span className="st-hint">{configView.hasExecutorKey ? `Saved: ${configView.executorKeyMasked ?? "configured"}` : "No key"}</span></div><div className="st-row-control"><KeyInput value={execKey} placeholder={configView.hasExecutorKey ? "leave blank to keep" : "paste API key"} masked={configView.executorKeyMasked} secretKind="executorApiKey" onChange={(value) => { resetOpState(); setExecKey(value); }} /></div></div>
+                </div>
+              </div>
+            )}
+
+            {canConfigureReviewer && (
+              <div className="sp-adv-section">
+                <div className="sp-adv-section-title">审阅</div>
+                <div className="sp-field-group">
+                  <div className="st-field-label">Provider 类型</div>
+                  <div className="st-provider-grid">
+                    {Object.entries(REVIEWER_PROVIDERS).map(([key, meta]) => (
+                      <button key={key} type="button" className={`st-provider-card${advReviewerProvider === key ? " active" : ""}`} onClick={() => chooseReviewerProvider(key)}>
+                        <span className="st-provider-label">{meta.label}</span>
+                        <span className="st-provider-hint">{meta.hint}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                {advReviewerProvider !== "" && (
+                  <div className="sp-adv-rows">
+                    <div className="st-row"><div className="st-row-label"><span className="st-label">Model</span></div><div className="st-row-control"><PresetTextInput value={advForm.reviewerModel ?? ""} placeholder={advReviewerMeta.defaultModel || "e.g. gpt-5.5"} options={advReviewerMeta.models ?? REVIEWER_MODELS} onChange={(value) => { resetOpState(); setAdvForm((current) => ({ ...current, reviewerModel: value })); }} /></div></div>
+                    <div className="st-row"><div className="st-row-label"><span className="st-label">Base URL</span></div><div className="st-row-control"><PresetTextInput value={advForm.reviewerBaseUrl ?? ""} placeholder={advReviewerMeta.defaultBaseUrl || "(provider default)"} options={advReviewerMeta.baseUrls ?? OPENAI_COMPAT_URLS} onChange={(value) => { resetOpState(); setAdvForm((current) => ({ ...current, reviewerBaseUrl: value })); }} /></div></div>
+                    <div className="st-row"><div className="st-row-label"><span className="st-label">API Key</span><span className="st-hint">{configView.hasReviewerKey ? `Saved: ${configView.reviewerKeyMasked ?? "configured"}` : "No key"}</span></div><div className="st-row-control"><KeyInput value={reviewerKey} placeholder={configView.hasReviewerKey ? "leave blank to keep" : "paste reviewer key"} masked={configView.reviewerKeyMasked} secretKind="reviewerApiKey" onChange={(value) => { resetOpState(); setReviewerKey(value); }} /></div></div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            <div className={`sp-adv-section sp-adv-section-collapsible${summaryToolsOpen ? " open" : ""}`}>
+              <button
+                type="button"
+                className="sp-adv-section-toggle"
+                aria-expanded={summaryToolsOpen}
+                onClick={() => setSummaryToolsOpen((open) => !open)}
+              >
+                <span className="sp-adv-section-toggle-main">
+                  <span className="sp-adv-section-title">摘要与工具</span>
+                  <span className="sp-adv-section-sub">摘要模型、Scopus Key 与配置文件路径</span>
+                </span>
+                <span className="sp-adv-section-toggle-state">{summaryToolsOpen ? "收起" : "展开"}</span>
+              </button>
+              {summaryToolsOpen && (
+                <div className="sp-adv-rows">
+                  <div className="st-row"><div className="st-row-label"><span className="st-label">摘要供应商</span><span className="st-hint">Auto 会使用这里选择的供应商和已保存 key</span></div><div className="st-row-control"><select value={summarySelectValue} onChange={(event) => chooseSummaryProvider(event.target.value)}><option value="">跟随执行器</option><option value="__manual">手动配置</option>{summaryProviderOptions.map((item) => <option key={item.key} value={item.key}>{item.label}{item.model ? ` · ${item.model}` : ""}</option>)}</select></div></div>
+                  {isManualSummaryProvider && (
+                    <>
+                      <div className="st-row"><div className="st-row-label"><span className="st-label">摘要协议</span></div><div className="st-row-control"><select value={advForm.summarizerProvider ?? "openai"} onChange={(event) => { resetOpState(); setAdvForm((current) => ({ ...current, summarizerProvider: event.target.value })); }}><option value="openai">OpenAI-compatible</option><option value="anthropic">Anthropic</option><option value="anthropic-compat">Anthropic-compatible</option></select></div></div>
+                      <div className="st-row"><div className="st-row-label"><span className="st-label">摘要 Base URL</span></div><div className="st-row-control"><PresetTextInput value={advForm.summarizerBaseUrl ?? ""} placeholder="https://api.openai.com/v1" options={[...OPENAI_COMPAT_URLS, ...ANTHROPIC_COMPAT_URLS]} onChange={(value) => { resetOpState(); setAdvForm((current) => ({ ...current, summarizerBaseUrl: value })); }} /></div></div>
+                      <div className="st-row"><div className="st-row-label"><span className="st-label">摘要 API Key</span><span className="st-hint">{configView.hasSummarizerKey ? `Saved: ${configView.summarizerKeyMasked ?? "configured"}` : "No key"}</span></div><div className="st-row-control"><KeyInput value={summaryKey} placeholder={configView.hasSummarizerKey ? "leave blank to keep" : "paste summary key"} masked={configView.summarizerKeyMasked} secretKind="summarizerApiKey" onChange={(value) => { resetOpState(); setSummaryKey(value); }} /></div></div>
+                    </>
+                  )}
+                  <div className="st-row"><div className="st-row-label"><span className="st-label">摘要模型</span><span className="st-hint">压缩上下文时生成摘要所用的模型；留空 = 自动</span></div><div className="st-row-control"><PresetTextInput value={advForm.summarizerModel ?? ""} placeholder="Auto" options={summaryModelOptions} onChange={(value) => { resetOpState(); setAdvForm((current) => ({ ...current, summarizerModel: value })); }} /></div></div>
+                  <div className="st-row"><div className="st-row-label"><span className="st-label">Scopus Key</span><span className="st-hint">{configView.hasScopusKey ? `Saved: ${configView.scopusKeyMasked ?? "configured"}` : "No key"}</span></div><div className="st-row-control"><KeyInput value={scopusKey} placeholder={configView.hasScopusKey ? "leave blank to keep" : "paste Elsevier key"} masked={configView.scopusKeyMasked} secretKind="scopusApiKey" onChange={(value) => { resetOpState(); setScopusKey(value); }} /></div></div>
+                  <div className="st-row"><div className="st-row-label"><span className="st-label">Config file</span></div><div className="st-row-control"><input className="st-readonly-input" value={configView.configPath} readOnly /></div></div>
                 </div>
               )}
-            </div>
-
-            <div className="sp-adv-section">
-              <div className="sp-adv-section-title">摘要与工具</div>
-              <div className="sp-adv-rows">
-                <div className="st-row"><div className="st-row-label"><span className="st-label">摘要供应商</span><span className="st-hint">Auto 会使用这里选择的供应商和已保存 key</span></div><div className="st-row-control"><select value={summarySelectValue} onChange={(event) => chooseSummaryProvider(event.target.value)}><option value="">跟随执行器</option><option value="__manual">手动配置</option>{summaryProviderOptions.map((item) => <option key={item.key} value={item.key}>{item.label}{item.model ? ` · ${item.model}` : ""}</option>)}</select></div></div>
-                {isManualSummaryProvider && (
-                  <>
-                    <div className="st-row"><div className="st-row-label"><span className="st-label">摘要协议</span></div><div className="st-row-control"><select value={advForm.summarizerProvider ?? "openai"} onChange={(event) => { resetOpState(); setAdvForm((current) => ({ ...current, summarizerProvider: event.target.value })); }}><option value="openai">OpenAI-compatible</option><option value="anthropic">Anthropic</option><option value="anthropic-compat">Anthropic-compatible</option></select></div></div>
-                    <div className="st-row"><div className="st-row-label"><span className="st-label">摘要 Base URL</span></div><div className="st-row-control"><PresetTextInput value={advForm.summarizerBaseUrl ?? ""} placeholder="https://api.openai.com/v1" options={[...OPENAI_COMPAT_URLS, ...ANTHROPIC_COMPAT_URLS]} onChange={(value) => { resetOpState(); setAdvForm((current) => ({ ...current, summarizerBaseUrl: value })); }} /></div></div>
-                    <div className="st-row"><div className="st-row-label"><span className="st-label">摘要 API Key</span><span className="st-hint">{configView.hasSummarizerKey ? `Saved: ${configView.summarizerKeyMasked ?? "configured"}` : "No key"}</span></div><div className="st-row-control"><KeyInput value={summaryKey} placeholder={configView.hasSummarizerKey ? "leave blank to keep" : "paste summary key"} masked={configView.summarizerKeyMasked} secretKind="summarizerApiKey" onChange={(value) => { resetOpState(); setSummaryKey(value); }} /></div></div>
-                  </>
-                )}
-                <div className="st-row"><div className="st-row-label"><span className="st-label">摘要模型</span><span className="st-hint">压缩上下文时生成摘要所用的模型；留空 = 自动</span></div><div className="st-row-control"><PresetTextInput value={advForm.summarizerModel ?? ""} placeholder="Auto" options={summaryModelOptions} onChange={(value) => { resetOpState(); setAdvForm((current) => ({ ...current, summarizerModel: value })); }} /></div></div>
-                <div className="st-row"><div className="st-row-label"><span className="st-label">Scopus Key</span><span className="st-hint">{configView.hasScopusKey ? `Saved: ${configView.scopusKeyMasked ?? "configured"}` : "No key"}</span></div><div className="st-row-control"><KeyInput value={scopusKey} placeholder={configView.hasScopusKey ? "leave blank to keep" : "paste Elsevier key"} masked={configView.scopusKeyMasked} secretKind="scopusApiKey" onChange={(value) => { resetOpState(); setScopusKey(value); }} /></div></div>
-                <div className="st-row"><div className="st-row-label"><span className="st-label">Config file</span></div><div className="st-row-control"><input className="st-readonly-input" value={configView.configPath} readOnly /></div></div>
-              </div>
             </div>
 
             {testResult && (
               <div className={`st-test-panel${testResult.ok ? " ok" : " failed"}`}>
                 <div className="st-test-summary">{testResult.message}</div>
                 <div className="st-test-grid">
-                  <TestDetail detail={testResult.executor} />
-                  {testResult.reviewer && <TestDetail detail={testResult.reviewer} />}
+                  {canConfigureExecutor && <TestDetail detail={testResult.executor} />}
+                  {canConfigureReviewer && testResult.reviewer && <TestDetail detail={testResult.reviewer} />}
                 </div>
               </div>
             )}
@@ -1411,216 +1558,138 @@ export default function Settings() {
           <div className="sp-usage-page-head">
             <div>
               <div className="sp-usage-page-title">使用统计</div>
-              <div className="sp-usage-page-sub">查看 AI 模型的使用情况和成本统计</div>
+              <div className="sp-usage-page-sub">显示当前登录账号在服务器侧的额度和使用量，不再读取本地项目 usage log。</div>
             </div>
             <div className="sp-usage-toolbar">
-              <select value={usageServerFilter} onChange={(event) => setUsageServerFilter(event.target.value)}>
-                <option value="all">全部来源</option>
-                {usageServerOptions.map((item) => (
-                  <option key={`${item.provider}:${item.server}`} value={`${item.provider}:${item.server}`}>
-                    {formatServerLabel(item.server, item.provider)}
-                  </option>
-                ))}
-              </select>
-              <select value={usageModelFilter} onChange={(event) => setUsageModelFilter(event.target.value)}>
-                <option value="all">全部模型</option>
-                {usageModelOptions.map((model) => (
-                  <option key={model} value={model}>{model}</option>
-                ))}
-              </select>
-              <button className="sp-btn sp-btn-secondary" onClick={() => void loadUsageSummary()} disabled={usageLoading} type="button">
+              <button className="sp-btn sp-btn-secondary" onClick={refreshUsage} disabled={usageLoading} type="button">
                 {usageLoading ? "刷新中..." : "刷新"}
               </button>
-              <select value={usageRangeDays} onChange={(event) => setUsageRangeDays(Number(event.target.value))}>
-                <option value={7}>7d</option>
-                <option value={30}>30d</option>
-                <option value={90}>90d</option>
-              </select>
             </div>
           </div>
 
-          <div className="sp-usage-hero">
-            <div className="sp-usage-hero-top">
-              <div className="sp-usage-total">
-                <span className="sp-usage-total-icon">↯</span>
-                <div>
-                  <span>真实消耗 Tokens</span>
-                  <strong>{formatUsageExact(usageVisibleTotals.totalTokens)}</strong>
-                  <small>≈ {formatUsageChinese(usageVisibleTotals.totalTokens)}</small>
+          {account ? (
+            <>
+              <div className="sp-usage-hero">
+                <div className="sp-usage-hero-top">
+                  <div className="sp-usage-total">
+                    <span className="sp-usage-total-icon">$</span>
+                    <div>
+                      <span>当前账号已用额度</span>
+                      <strong>{formatQuota(accountUsedQuota)}</strong>
+                      <small>{formatUsageExact(accountUsedQuota)} credits</small>
+                    </div>
+                  </div>
+                  <div className="sp-usage-summary-pill">
+                    <span>账户余额</span>
+                    <strong>{formatQuota(accountRemainingQuota)}</strong>
+                  </div>
+                  <div className="sp-usage-summary-pill accent">
+                    <span>账户总额度</span>
+                    <strong>{formatQuota(accountTotalQuota)}</strong>
+                  </div>
+                </div>
+
+                <div className="sp-usage-metrics">
+                  <div className="sp-usage-metric sp-usage-hit-card">
+                    <span>账户消耗比例</span>
+                    <strong>{accountUsagePercent}%</strong>
+                    <div className="sp-usage-progress"><div style={{ width: `${accountUsagePercent}%` }} /></div>
+                  </div>
+                  <div className="sp-usage-metric">
+                    <span>已用额度</span>
+                    <strong>{formatQuota(accountUsedQuota)}</strong>
+                    <small>{formatUsageExact(accountUsedQuota)} credits</small>
+                  </div>
+                  <div className="sp-usage-metric balance">
+                    <span>剩余额度</span>
+                    <strong>{formatQuota(accountRemainingQuota)}</strong>
+                    <small>{formatUsageExact(accountRemainingQuota)} credits</small>
+                  </div>
+                  <div className="sp-usage-metric subscription">
+                    <span>订阅已用</span>
+                    <strong>{formatQuota(subscriptionUsedQuota)}</strong>
+                    <small>{formatUsageExact(subscriptionUsedQuota)} credits</small>
+                  </div>
+                  <div className="sp-usage-metric subscription">
+                    <span>订阅余额</span>
+                    <strong>{formatQuota(subscriptionRemainingQuota)}</strong>
+                    <small>{formatUsageExact(subscriptionRemainingQuota)} credits</small>
+                  </div>
+                  <div className="sp-usage-metric sp-usage-hit-card">
+                    <span>订阅消耗比例</span>
+                    <strong>{subscriptionUsagePercent}%</strong>
+                    <div className="sp-usage-progress"><div style={{ width: `${subscriptionUsagePercent}%` }} /></div>
+                  </div>
                 </div>
               </div>
-              <div className="sp-usage-summary-pill">
-                <span>总请求数</span>
-                <strong>{formatUsageExact(usageVisibleTotals.requests)}</strong>
-              </div>
-              <div className="sp-usage-summary-pill accent">
-                <span>总成本</span>
-                <strong>{formatUsageCost(usageVisibleTotals.estimatedCostUsd)}</strong>
-              </div>
-            </div>
-
-            <div className="sp-usage-metrics">
-              <div className="sp-usage-metric"><span>新增输入</span><strong>{formatUsageChinese(usageVisibleTotals.inputTokens)}</strong></div>
-              <div className="sp-usage-metric"><span>Output</span><strong>{formatUsageChinese(usageVisibleTotals.outputTokens)}</strong></div>
-              <div className="sp-usage-metric"><span>缓存创建</span><strong>{formatUsageChinese(usageVisibleTotals.cacheCreationInputTokens)}</strong></div>
-              <div className="sp-usage-metric"><span>缓存命中</span><strong>{formatUsageChinese(usageVisibleTotals.cacheReadInputTokens)}</strong></div>
-              <div className="sp-usage-metric sp-usage-hit-card">
-                <span>缓存命中率</span>
-                <strong>{usageCacheRate.toFixed(1)}%</strong>
-                <div className="sp-usage-progress"><div style={{ width: `${usageCacheRate}%` }} /></div>
-              </div>
-            </div>
-          </div>
-
-          <div className="sp-usage-chart-card">
-            <div className="sp-usage-card-head">
-              <div className="sp-usage-card-title">使用趋势</div>
-              <div className="sp-usage-card-range">{usageRangeDays}d</div>
-            </div>
-            {usageVisibleTotals.requests > 0 ? (
-              <>
-                <svg className="sp-usage-chart" viewBox="0 0 920 270" role="img" aria-label="使用趋势">
-                  <defs>
-                    <linearGradient id="usageArea" x1="0" x2="0" y1="0" y2="1">
-                      <stop offset="0%" stopColor="#9a4cff" stopOpacity="0.32" />
-                      <stop offset="100%" stopColor="#9a4cff" stopOpacity="0" />
-                    </linearGradient>
-                  </defs>
-                  {[0, 0.25, 0.5, 0.75, 1].map((tick) => {
-                    const value = usageTrendMaxTokens * (1 - tick);
-                    const y = usageChartY(value, usageTrendMaxTokens);
-                    return (
-                      <g key={tick}>
-                        <line x1="48" x2="868" y1={y} y2={y} />
-                        <text x="12" y={y + 4}>{formatUsageTokens(value)}</text>
-                      </g>
-                    );
-                  })}
-                  <path className="sp-usage-area" d={usageAreaPath(usageTrend, "total", usageTrendMaxTokens)} />
-                  <path className="sp-usage-line total" d={usageLinePath(usageTrend, "total", usageTrendMaxTokens)} />
-                  <path className="sp-usage-line cost" d={usageLinePath(usageTrend, "cost", usageTrendMaxCost)} />
-                  <path className="sp-usage-line input" d={usageLinePath(usageTrend, "input", usageTrendMaxTokens)} />
-                  <path className="sp-usage-line output" d={usageLinePath(usageTrend, "output", usageTrendMaxTokens)} />
-                  <path className="sp-usage-line cache" d={usageLinePath(usageTrend, "cache", usageTrendMaxTokens)} />
-                  {usageTrend.map((point, index) => (
-                    <text key={`${point.label}:${index}`} className="sp-usage-x-label" x={usageChartX(index, usageTrend.length)} y="258">
-                      {index === 0 || index === usageTrend.length - 1 || index % Math.ceil(usageTrend.length / 8) === 0 ? point.label : ""}
-                    </text>
-                  ))}
-                </svg>
-                <div className="sp-usage-legend">
-                  <span className="cost">成本</span>
-                  <span className="cache">缓存命中</span>
-                  <span className="input">输入</span>
-                  <span className="output">输出</span>
+              <div className="sp-usage-detail-panel">
+                <div className="sp-usage-card-head">
+                  <div className="sp-usage-card-title">调用明细</div>
+                  <div className="sp-usage-card-range">
+                    {usageLogTotal > 0 ? `第 ${usageLogStart}-${usageLogEnd} 条 / 共 ${usageLogTotal} 条` : "暂无记录"}
+                  </div>
                 </div>
-              </>
-            ) : (
-              <div className="sp-usage-empty">暂无 token 记录。下一次模型响应完成后会写入 usage log，并按服务器汇总。</div>
-            )}
-          </div>
-
-          <div className="sp-usage-tabs" role="tablist" aria-label="统计明细">
-            {([
-              ["logs", "请求日志"],
-              ["providers", "Provider 统计"],
-              ["models", "模型统计"],
-            ] as const).map(([value, label]) => (
-              <button
-                key={value}
-                type="button"
-                role="tab"
-                aria-selected={usageDetailTab === value}
-                className={`sp-usage-tab${usageDetailTab === value ? " active" : ""}`}
-                onClick={() => setUsageDetailTab(value)}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-
-          <div className="sp-usage-detail-panel">
-            {usageVisibleTotals.requests > 0 ? (
-              <>
-                {usageDetailTab === "logs" && (
+                {usageLogError ? (
+                  <div className="sp-usage-empty">{usageLogError}</div>
+                ) : usageLoading && !usageLogs ? (
+                  <div className="sp-usage-empty">加载中...</div>
+                ) : usageLogItems.length > 0 ? (
                   <>
                     <div className="sp-usage-table">
-                      <div className="sp-usage-row sp-usage-row-head sp-usage-row-recent"><span>时间</span><span>来源</span><span>模型</span><span>Tokens</span><span>成本</span></div>
-                      {usageRecent.map((item, index) => (
-                        <div className="sp-usage-row sp-usage-row-recent" key={`${item.sessionId}:${item.createdAt}:${item.totalTokens}:${index}`}>
-                          <span className="sp-usage-time" title={formatUsageTime(item.createdAt)}>{formatUsageDay(item.createdAt)}</span>
-                          <span className="sp-usage-model" title={`${item.server} · ${item.provider}`}>{formatServerLabel(item.server, item.provider)}</span>
-                          <span className="sp-usage-model" title={item.model}>{item.model}</span>
-                          <span>{formatUsageTokens(item.totalTokens)}</span>
-                          <span>{formatUsageCost(item.estimatedCostUsd)}</span>
-                        </div>
-                      ))}
+                      <div className="sp-usage-row sp-usage-row-call sp-usage-row-head">
+                        <span>时间</span>
+                        <span>模型</span>
+                        <span>令牌</span>
+                        <span>Tokens</span>
+                        <span>额度</span>
+                        <span>请求</span>
+                      </div>
+                      {usageLogItems.map((entry) => {
+                        const requestId = entry.requestId || entry.upstreamRequestId;
+                        const meta = usageLogMeta(entry.status, entry.typeLabel);
+                        const createdAt = entry.createdAt > 10_000_000_000 ? entry.createdAt : entry.createdAt * 1000;
+                        return (
+                          <div className="sp-usage-row sp-usage-row-call" key={entry.id}>
+                            <span className="sp-usage-time" title={entry.createdAt ? new Date(createdAt).toLocaleString() : undefined}>
+                              {formatUsageDate(entry.createdAt)}
+                            </span>
+                            <span className="sp-usage-model" title={entry.model || undefined}>{entry.model || "-"}</span>
+                            <span title={entry.tokenName || undefined}>{entry.tokenName || "-"}</span>
+                            <span title={`Prompt ${formatUsageExact(entry.promptTokens)} / Completion ${formatUsageExact(entry.completionTokens)}`}>
+                              {formatUsageExact(entry.totalTokens)}
+                            </span>
+                            <span title={`${formatUsageExact(entry.quota)} credits${meta ? ` · ${meta}` : ""}`}>{formatQuota(entry.quota)}</span>
+                            <span title={requestId || undefined}>{shortUsageId(requestId)}</span>
+                          </div>
+                        );
+                      })}
                     </div>
-                    <div className="sp-usage-pagination" aria-label="请求日志分页">
-                      <span className="sp-usage-pagination-summary">
-                        共 {usageFilteredEntries.length} 条 · 每页 {USAGE_LOG_PAGE_SIZE} 条
-                      </span>
+                    <div className="sp-usage-pagination">
+                      <div className="sp-usage-pagination-summary">
+                        每页 {USAGE_LOG_PAGE_SIZE} 条，当前第 {usageLogPage} / {usageLogPageCount} 页
+                      </div>
                       <div className="sp-usage-page-controls">
-                        <button
-                          type="button"
-                          className="sp-usage-page-button"
-                          onClick={() => setUsageLogPage(Math.max(1, usageCurrentLogPage - 1))}
-                          disabled={usageCurrentLogPage <= 1}
-                        >
+                        <button className="sp-usage-page-button" type="button" disabled={!canGoPrevUsageLogPage} onClick={() => setUsageLogPage((page) => Math.max(1, page - 1))}>
                           上一页
                         </button>
-                        <span className="sp-usage-page-indicator">
-                          {usageCurrentLogPage} / {usageLogPageCount}
-                        </span>
-                        <button
-                          type="button"
-                          className="sp-usage-page-button"
-                          onClick={() => setUsageLogPage(Math.min(usageLogPageCount, usageCurrentLogPage + 1))}
-                          disabled={usageCurrentLogPage >= usageLogPageCount}
-                        >
+                        <span className="sp-usage-page-indicator">{usageLoading ? "..." : usageLogPage}</span>
+                        <button className="sp-usage-page-button" type="button" disabled={!canGoNextUsageLogPage} onClick={() => setUsageLogPage((page) => page + 1)}>
                           下一页
                         </button>
                       </div>
                     </div>
                   </>
+                ) : (
+                  <div className="sp-usage-empty">暂无调用记录。</div>
                 )}
-                {usageDetailTab === "providers" && (
-                  <div className="sp-usage-table">
-                    <div className="sp-usage-row sp-usage-row-head sp-usage-row-server"><span>来源</span><span>请求</span><span>输入</span><span>输出</span><span>成本</span></div>
-                    {usageServers.map((item) => (
-                      <div className="sp-usage-row sp-usage-row-server" key={`${item.provider}:${item.server}`}>
-                        <span className="sp-usage-model" title={`${item.server} · ${item.provider}`}>{formatServerLabel(item.server, item.provider)}</span>
-                        <span>{item.requests}</span>
-                        <span>{formatUsageTokens(item.inputTokens)}</span>
-                        <span>{formatUsageTokens(item.outputTokens)}</span>
-                        <span>{formatUsageCost(item.estimatedCostUsd)}</span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-                {usageDetailTab === "models" && (
-                  <div className="sp-usage-table">
-                    <div className="sp-usage-row sp-usage-row-head sp-usage-row-model"><span>模型</span><span>来源</span><span>请求</span><span>Tokens</span><span>成本</span></div>
-                    {usageModels.map((item) => (
-                      <div className="sp-usage-row sp-usage-row-model" key={`${item.provider}:${item.server}:${item.model}`}>
-                        <span className="sp-usage-model" title={item.model}>{item.model}</span>
-                        <span className="sp-usage-model" title={`${item.server} · ${item.provider}`}>{formatServerLabel(item.server, item.provider)}</span>
-                        <span>{item.requests}</span>
-                        <span>{formatUsageTokens(item.totalTokens)}</span>
-                        <span>{formatUsageCost(item.estimatedCostUsd)}</span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-                <div className="sp-usage-foot">
-                  账本：{usageSummary?.logPath ?? "-"}
-                  {(usageSummary?.unpricedRequests ?? 0) > 0 ? ` · ${usageSummary?.unpricedRequests ?? 0} 条使用默认价格估算` : ""}
-                </div>
-              </>
-            ) : (
-              <div className="sp-usage-empty">暂无明细。</div>
-            )}
-          </div>
+                {accountError && <div className="sp-usage-foot">账号额度刷新失败，当前显示上次缓存 · {accountError}</div>}
+              </div>
+            </>
+          ) : (
+            <div className="sp-usage-detail-panel">
+              <div className="sp-usage-empty">{accountError || "未登录或账号信息未加载。登录后点击刷新获取当前用户使用量。"}</div>
+            </div>
+          )}
         </div>
       )}
 
@@ -1672,7 +1741,9 @@ export default function Settings() {
               <div className="sp-section-head-text">
                 <div className="sp-section-title">本地环境检查</div>
                 <div className="sp-section-sub">
-                  {environmentChecks.length > 0
+                  {environmentLoading
+                    ? "正在检测本机运行环境..."
+                    : environmentChecks.length > 0
                     ? `${environmentReadyCount}/${environmentChecks.length} 项可用`
                     : "查看 Python、MATLAB、LaTeX 等运行环境。"}
                 </div>
@@ -1690,7 +1761,25 @@ export default function Settings() {
             </div>
             {environmentError && <div className="sp-env-error">{environmentError}</div>}
             <div className="sp-env-grid">
-              {environmentChecks.length === 0 && !environmentLoading ? (
+              {environmentLoading ? (
+                ENVIRONMENT_CHECK_PLACEHOLDERS.map((item) => (
+                  <div className="sp-env-card sp-env-card-loading" key={item.id}>
+                    <div className="sp-env-card-top">
+                      <span className="sp-env-mark">{environmentMark(item.id)}</span>
+                      <div className="sp-env-title-block">
+                        <div className="sp-env-title">{item.label}</div>
+                        <div className="sp-env-category">{item.category}</div>
+                      </div>
+                      <span className="sp-env-badge sp-env-badge-loading">
+                        <span className="sp-env-spinner" />
+                        检测中
+                      </span>
+                    </div>
+                    <div className="sp-env-loading-line" />
+                    <div className="sp-env-loading-line short" />
+                  </div>
+                ))
+              ) : environmentChecks.length === 0 ? (
                 <div className="sp-env-empty">点击刷新后显示本机可用的科研与排版运行环境。</div>
               ) : (
                 environmentChecks.map((item) => (

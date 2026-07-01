@@ -9,8 +9,10 @@ interface ContextStatusView {
   detail?: string;
 }
 
-const RECENT_SKILLS_KEY = "aris-chat-recent-skills";
-const RECENT_FILES_KEY = "aris-chat-recent-files";
+const RECENT_SKILLS_KEY = "somniq-chat-recent-skills";
+const RECENT_SKILLS_LEGACY_KEY = "aris-chat-recent-skills";
+const RECENT_FILES_KEY = "somniq-chat-recent-files";
+const RECENT_FILES_LEGACY_KEY = "aris-chat-recent-files";
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 const MAX_TEXT_BYTES = 1024 * 1024;
 const MAX_DROPPED_FILES = 20;
@@ -27,9 +29,15 @@ function basename(path: string): string {
   return path.replace(/\\/g, "/").split("/").pop() || path;
 }
 
+function legacyRecentKey(key: string): string {
+  if (key === RECENT_SKILLS_KEY) return RECENT_SKILLS_LEGACY_KEY;
+  if (key === RECENT_FILES_KEY) return RECENT_FILES_LEGACY_KEY;
+  return key;
+}
+
 function loadRecent(key: string): string[] {
   try {
-    return JSON.parse(localStorage.getItem(key) ?? "[]") as string[];
+    return JSON.parse(localStorage.getItem(key) ?? localStorage.getItem(legacyRecentKey(key)) ?? "[]") as string[];
   } catch {
     return [];
   }
@@ -38,6 +46,7 @@ function loadRecent(key: string): string[] {
 function remember(key: string, value: string) {
   const next = [value, ...loadRecent(key).filter((item) => item !== value)].slice(0, 6);
   localStorage.setItem(key, JSON.stringify(next));
+  localStorage.removeItem(legacyRecentKey(key));
 }
 
 function isExactDesktopCommand(input: string, command: DesktopCommandSpec | undefined): boolean {

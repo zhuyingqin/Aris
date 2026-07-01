@@ -13,14 +13,15 @@ import {
   type ChatSendRequest,
 } from "../api/tauri";
 import ChatMessage from "../chat/ChatMessage";
-import { makeId, patchLastAssistantTurn, textFromTurn } from "../chat/model";
+import { makeId, patchLastAssistantTurn, textFromTurn, transcriptFromTurn } from "../chat/model";
 import { useChatStream } from "../chat/useChatStream";
 import type { ChatAttachment, ChatBlock, ChatStatus, ChatTurn, PermissionModeView } from "../types";
 import { useLabStore } from "./labStore";
 import type { NotebookCell } from "./labTypes";
 
 const EMPTY_ASSISTANT_RESPONSE = "Model returned an empty response.";
-const LAB_ASSISTANT_SESSIONS_KEY = "aris-lab-assistant-sessions-v1";
+const LAB_ASSISTANT_SESSIONS_KEY = "somniq-lab-assistant-sessions-v1";
+const LAB_ASSISTANT_LEGACY_SESSIONS_KEY = "aris-lab-assistant-sessions-v1";
 const MAX_LAB_ASSISTANT_SESSIONS = 30;
 
 const PERMISSION_OPTIONS = [
@@ -130,17 +131,34 @@ async function requestFromInput(
 async function contextFromTurns(turns: ChatTurn[], context: string): Promise<ChatContextMessage[]> {
   const messages: ChatContextMessage[] = [{ role: "user", text: `[Lab context]\n${context}` }];
   for (const turn of turns) {
+    // Keep stopped (cleanly cancelled) turns — their partial output and tool
+    // activity is needed to continue coherently. Only drop in-flight/failed.
     if (turn.streaming || turn.error) continue;
-    const text = textFromTurn(turn).trim();
-    if (!text) continue;
     if (turn.role === "user") {
+      const text = textFromTurn(turn).trim();
+      if (!text) continue;
       const request = await requestFromInput(text, turn.attachments ?? [], "");
       messages.push({ role: "user", text: request.text.trim() });
     } else {
+      // Serialize the full transcript (tool calls + results, interrupted ones
+      // flagged) for stopped turns; completed turns only need their text.
+      const text = (turn.stopped ? transcriptFromTurn(turn) : textFromTurn(turn)).trim();
+      if (!text) continue;
       messages.push({ role: "assistant", text });
     }
   }
   return messages;
+}
+
+// The stopped turn's partial response (and tool activity) is rebuilt into the
+// backend context by `contextFromTurns`, so the continue prompt no longer embeds
+// — or truncates at 12k — the partial itself.
+function continueStoppedPrompt(): string {
+  return [
+    "Continue from where you stopped.",
+    "Your partial response from the interrupted turn — including any tool calls and their results — is already in the conversation above.",
+    "Do not repeat the completed portion unless a short overlap is needed for continuity.",
+  ].join("\n");
 }
 
 function userTurn(text: string, attachments: ChatAttachment[]): ChatTurn {
@@ -231,7 +249,7 @@ function normalizeSession(raw: Partial<LabAssistantSession>, fallbackProjectId: 
 
 function loadLabAssistantSessions(fallbackProjectId: string): LabAssistantSession[] {
   try {
-    const raw = localStorage.getItem(LAB_ASSISTANT_SESSIONS_KEY);
+    const raw = localStorage.getItem(LAB_ASSISTANT_SESSIONS_KEY) ?? localStorage.getItem(LAB_ASSISTANT_LEGACY_SESSIONS_KEY);
     if (!raw) return [];
     return (JSON.parse(raw) as Partial<LabAssistantSession>[])
       .map((session) => normalizeSession(session, fallbackProjectId))
@@ -244,6 +262,7 @@ function loadLabAssistantSessions(fallbackProjectId: string): LabAssistantSessio
 function saveLabAssistantSessions(sessions: LabAssistantSession[]) {
   try {
     localStorage.setItem(LAB_ASSISTANT_SESSIONS_KEY, JSON.stringify(sessions.slice(0, MAX_LAB_ASSISTANT_SESSIONS)));
+    localStorage.removeItem(LAB_ASSISTANT_LEGACY_SESSIONS_KEY);
   } catch {
     // Ignore storage failures; the active Lab chat remains in memory.
   }
@@ -440,8 +459,9 @@ export default function LabAssistant({
     text: string,
     attached: ChatAttachment[],
     resetContext = false,
+    promptOverride?: ChatSendRequest,
   ) => {
-    const prompt = await requestFromInput(text, attached, context);
+    const prompt = promptOverride ?? (await requestFromInput(text, attached, context));
     if (!isTauri()) {
       setTurns([...prefix, userTurn(text, attached), assistantTextTurn("Browser preview response. Run the Tauri app for live Lab Assistant.")]);
       setInput("");
@@ -500,7 +520,13 @@ export default function LabAssistant({
     if (busy || sendLock.current) return;
     sendLock.current = true;
     try {
-      await beginRun(turns, "Continue from where you stopped.", [], true);
+      await beginRun(
+        turns,
+        "Continue from where you stopped.",
+        [],
+        true,
+        { text: continueStoppedPrompt() },
+      );
     } finally {
       sendLock.current = false;
     }

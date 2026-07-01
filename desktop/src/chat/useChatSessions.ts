@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { chatUiSessionsLoad, chatUiSessionsSave, isTauri } from "../api/tauri";
 import { useStore } from "../store";
 import type { ChatTurn } from "../types";
-import { CURRENT_KEY, SESSIONS_KEY, makeSession, migrateSession, titleFromTurns } from "./model";
+import { CURRENT_KEY, LEGACY_CURRENT_KEY, LEGACY_SESSIONS_KEY, LEGACY_SESSIONS_KEY_V1, SESSIONS_KEY, makeSession, migrateSession, titleFromTurns } from "./model";
 import type { ChatSession } from "./types";
 
 const HOME_SESSION_ID = "chat-home";
@@ -21,7 +21,7 @@ function isBlankSession(session: ChatSession) {
 
 function loadLocalSessions(): ChatSession[] {
   try {
-    const raw = localStorage.getItem(SESSIONS_KEY) ?? localStorage.getItem("aris-chat-sessions");
+    const raw = localStorage.getItem(SESSIONS_KEY) ?? localStorage.getItem(LEGACY_SESSIONS_KEY) ?? localStorage.getItem(LEGACY_SESSIONS_KEY_V1);
     if (!raw) return [];
     return (JSON.parse(raw) as ChatSession[])
       .map((session) => migrateSession(session))
@@ -40,7 +40,7 @@ function latestSessionId(sessions: ChatSession[]): string | null {
 
 function restoredCurrentId(sessions: ChatSession[]): string {
   try {
-    const stored = localStorage.getItem(CURRENT_KEY);
+    const stored = localStorage.getItem(CURRENT_KEY) ?? localStorage.getItem(LEGACY_CURRENT_KEY);
     if (stored === HOME_SESSION_ID) return HOME_SESSION_ID;
     if (stored && sessions.some((session) => session.id === stored)) return stored;
   } catch {
@@ -65,6 +65,8 @@ function mergeSessions(...lists: ChatSession[][]): ChatSession[] {
 function persistLocalSessions(sessions: ChatSession[]) {
   try {
     localStorage.setItem(SESSIONS_KEY, JSON.stringify(persistentSessions(sessions)));
+    localStorage.removeItem(LEGACY_SESSIONS_KEY);
+    localStorage.removeItem(LEGACY_SESSIONS_KEY_V1);
   } catch {
     // Browser preview falls back to in-memory state when storage is full.
   }
@@ -73,6 +75,7 @@ function persistLocalSessions(sessions: ChatSession[]) {
 function persistCurrentId(id: string) {
   try {
     localStorage.setItem(CURRENT_KEY, id);
+    localStorage.removeItem(LEGACY_CURRENT_KEY);
   } catch {
     // Ignore storage failures; the in-memory session still works.
   }

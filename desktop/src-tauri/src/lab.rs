@@ -881,7 +881,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .map_or(0, |duration| duration.as_nanos());
         let base =
-            std::env::temp_dir().join(format!("aris-lab-{name}-{}-{nonce}", std::process::id()));
+            std::env::temp_dir().join(format!("somniq-lab-{name}-{}-{nonce}", std::process::id()));
         std::fs::create_dir_all(&base).expect("create temp lab dir");
         base
     }

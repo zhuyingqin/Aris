@@ -166,13 +166,8 @@ fn save_registry(registry: &ProjectRegistry) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
-    let temp = path.with_extension("json.tmp");
     let data = serde_json::to_vec_pretty(registry).map_err(|error| error.to_string())?;
-    std::fs::write(&temp, data).map_err(|error| error.to_string())?;
-    if path.exists() {
-        std::fs::remove_file(&path).map_err(|error| error.to_string())?;
-    }
-    std::fs::rename(temp, path).map_err(|error| error.to_string())
+    runtime::write_file_atomically(&path, data).map_err(|error| error.to_string())
 }
 
 fn current_project(registry: &ProjectRegistry) -> Result<DesktopProject, String> {

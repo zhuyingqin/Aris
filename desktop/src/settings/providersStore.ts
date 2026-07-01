@@ -1,10 +1,11 @@
 import { create } from "zustand";
 
-const STORAGE_KEY = "aris-providers-v1";
+const STORAGE_KEY = "somniq-providers-v1";
+const LEGACY_STORAGE_KEY = "aris-providers-v1";
 
 function loadSaved(): Partial<State> {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = localStorage.getItem(STORAGE_KEY) ?? localStorage.getItem(LEGACY_STORAGE_KEY);
     return raw ? (JSON.parse(raw) as Partial<State>) : {};
   } catch {
     return {};
@@ -48,6 +49,7 @@ export const useProvidersStore = create<State>((set, get) => {
         STORAGE_KEY,
         JSON.stringify({ providers, executorProviderId, executorModel, reviewerProviderId, reviewerModel }),
       );
+      localStorage.removeItem(LEGACY_STORAGE_KEY);
     } catch { /* quota errors */ }
   };
 

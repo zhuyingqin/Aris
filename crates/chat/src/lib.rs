@@ -1067,7 +1067,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("time should be after epoch")
             .as_nanos();
-        std::env::temp_dir().join(format!("aris-chat-mcp-{nanos}"))
+        std::env::temp_dir().join(format!("somniq-chat-mcp-{nanos}"))
     }
 
     fn write_mcp_server_script(root: &Path) -> PathBuf {

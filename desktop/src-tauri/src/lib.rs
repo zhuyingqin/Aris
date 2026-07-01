@@ -91,14 +91,14 @@ fn augment_resource_path_for_mcp(resource_dir: &std::path::Path) {
 /// Point Tectonic's on-demand package cache at a user-writable directory. The
 /// bundled `tectonic.exe` lives under the read-only install directory on
 /// Windows, so its CTAN package downloads must land elsewhere. Mirrors the
-/// `~/.config/aris/cache` layout used for the extracted skill bundle.
+/// `~/.config/SomniQ/cache` layout used for the extracted skill bundle.
 fn configure_tectonic_environment() {
     if std::env::var_os("TECTONIC_CACHE_DIR").is_some() {
         return;
     }
     let cache = PathBuf::from(runtime::home_dir())
         .join(".config")
-        .join("aris")
+        .join("SomniQ")
         .join("cache")
         .join("tectonic");
     if std::fs::create_dir_all(&cache).is_ok() {
@@ -111,6 +111,7 @@ fn configure_bundled_tectonic_environment(resource_dir: &std::path::Path) {
     if !bundled.is_file() || valid_tectonic_override_exists() {
         return;
     }
+    std::env::set_var("SOMNIQ_TECTONIC", &bundled);
     std::env::set_var("ARIS_TECTONIC", bundled);
 }
 
@@ -123,7 +124,9 @@ fn tectonic_binary_name() -> &'static str {
 }
 
 fn valid_tectonic_override_exists() -> bool {
-    std::env::var_os("ARIS_TECTONIC").is_some_and(|value| PathBuf::from(value).is_file())
+    std::env::var_os("SOMNIQ_TECTONIC")
+        .or_else(|| std::env::var_os("ARIS_TECTONIC"))
+        .is_some_and(|value| PathBuf::from(value).is_file())
 }
 
 fn cleanup_before_exit(app_handle: &tauri::AppHandle) {
@@ -210,11 +213,13 @@ pub fn run() {
             config::config_test,
             config::provider_test,
             newapi::newapi_auth_status,
+            newapi::newapi_logout,
             newapi::newapi_login,
             newapi::newapi_register,
             newapi::newapi_send_verification,
             newapi::newapi_models,
             newapi::newapi_bootstrap,
+            newapi::newapi_usage_logs,
             connectors::connector_plugins_list,
             connectors::connector_connect,
             scheduled::scheduled_tasks_list,
@@ -342,14 +347,21 @@ mod tests {
 
     fn temp_resource_dir(name: &str) -> std::path::PathBuf {
         let dir =
-            std::env::temp_dir().join(format!("aris-tectonic-env-{name}-{}", std::process::id()));
+            std::env::temp_dir().join(format!("somniq-tectonic-env-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("bin")).expect("create temp resource bin");
         dir
     }
 
-    fn restore_env(previous: Option<std::ffi::OsString>) {
-        match previous {
+    fn restore_env(
+        previous_somniq: Option<std::ffi::OsString>,
+        previous_aris: Option<std::ffi::OsString>,
+    ) {
+        match previous_somniq {
+            Some(value) => std::env::set_var("SOMNIQ_TECTONIC", value),
+            None => std::env::remove_var("SOMNIQ_TECTONIC"),
+        }
+        match previous_aris {
             Some(value) => std::env::set_var("ARIS_TECTONIC", value),
             None => std::env::remove_var("ARIS_TECTONIC"),
         }
@@ -358,7 +370,9 @@ mod tests {
     #[test]
     fn bundled_tectonic_sets_env_when_present() {
         let _guard = env_lock();
-        let previous = std::env::var_os("ARIS_TECTONIC");
+        let previous_somniq = std::env::var_os("SOMNIQ_TECTONIC");
+        let previous_aris = std::env::var_os("ARIS_TECTONIC");
+        std::env::remove_var("SOMNIQ_TECTONIC");
         std::env::remove_var("ARIS_TECTONIC");
         let dir = temp_resource_dir("sets");
         let bundled = dir.join("bin").join(tectonic_binary_name());
@@ -367,31 +381,38 @@ mod tests {
         configure_bundled_tectonic_environment(&dir);
 
         assert_eq!(
+            std::env::var_os("SOMNIQ_TECTONIC").as_deref(),
+            Some(bundled.as_os_str())
+        );
+        assert_eq!(
             std::env::var_os("ARIS_TECTONIC").as_deref(),
             Some(bundled.as_os_str())
         );
         let _ = std::fs::remove_dir_all(dir);
-        restore_env(previous);
+        restore_env(previous_somniq, previous_aris);
     }
 
     #[test]
     fn bundled_tectonic_preserves_valid_override() {
         let _guard = env_lock();
-        let previous = std::env::var_os("ARIS_TECTONIC");
+        let previous_somniq = std::env::var_os("SOMNIQ_TECTONIC");
+        let previous_aris = std::env::var_os("ARIS_TECTONIC");
         let dir = temp_resource_dir("preserves");
         let bundled = dir.join("bin").join(tectonic_binary_name());
         std::fs::write(&bundled, b"tectonic").expect("write bundled tectonic marker");
         let override_path = dir.join("custom-tectonic.exe");
         std::fs::write(&override_path, b"custom").expect("write override marker");
-        std::env::set_var("ARIS_TECTONIC", &override_path);
+        std::env::set_var("SOMNIQ_TECTONIC", &override_path);
+        std::env::remove_var("ARIS_TECTONIC");
 
         configure_bundled_tectonic_environment(&dir);
 
         assert_eq!(
-            std::env::var_os("ARIS_TECTONIC").as_deref(),
+            std::env::var_os("SOMNIQ_TECTONIC").as_deref(),
             Some(override_path.as_os_str())
         );
+        assert!(std::env::var_os("ARIS_TECTONIC").is_none());
         let _ = std::fs::remove_dir_all(dir);
-        restore_env(previous);
+        restore_env(previous_somniq, previous_aris);
     }
 }

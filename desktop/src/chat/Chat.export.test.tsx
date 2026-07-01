@@ -17,13 +17,13 @@ const apiMocks = vi.hoisted(() => ({
   projectChatStarters: vi.fn(() => Promise.resolve([])),
   chatRunCommand: vi.fn(),
   chatSuggestTitle: vi.fn(() => Promise.resolve("Concise title")),
-  chatSetContext: vi.fn(() => Promise.resolve()),
+  chatSetContext: vi.fn((_sessionId: string, _messages: unknown[], _mode?: string) => Promise.resolve(0)),
   chatDelete: vi.fn(() => Promise.resolve()),
   chatUiSessionsLoad: vi.fn(() => Promise.resolve([])),
   chatUiSessionsSave: vi.fn(() => Promise.resolve()),
   fileRead: vi.fn(() => Promise.resolve("")),
   fileSearch: vi.fn(() => Promise.resolve([])),
-  chatSend: vi.fn(() => Promise.resolve("")),
+  chatSend: vi.fn((_sessionId: string, _message: unknown) => Promise.resolve("")),
   chatModelOptions: vi.fn(() => Promise.resolve({ provider: "anthropic-compat", current: "MiniMax-M3", options: [{ value: "MiniMax-M3", label: "MiniMax-M3", description: null }] })),
   chatCancel: vi.fn(() => Promise.resolve()),
   onChatDelta: vi.fn(() => Promise.resolve(() => undefined)),
@@ -41,13 +41,20 @@ const apiMocks = vi.hoisted(() => ({
 vi.mock("../api/tauri", () => apiMocks);
 
 vi.mock("./ChatThread", () => ({
-  default: ({ turns }: { turns: ChatTurn[] }) => (
+  default: ({
+    turns,
+    onContinue,
+  }: {
+    turns: ChatTurn[];
+    onContinue: () => void;
+  }) => (
     <div data-testid="chat-thread">
       {turns.map((turn) => (
         <article key={turn.id} data-role={turn.role}>
           {turn.blocks.map((block, index) => (
             block.kind === "text" ? <div key={index}>{block.text}</div> : null
           ))}
+          {turn.stopped && <button onClick={onContinue}>Continue</button>}
         </article>
       ))}
     </div>
@@ -196,6 +203,47 @@ describe("Chat export action", () => {
     expect(apiMocks.chatRunCommand.mock.calls[0][0]).not.toBe(session.id);
     expect(useStore.getState().pendingChatRunInput).toBeNull();
     expect(await screen.findByText("Agent search started")).toBeTruthy();
+  });
+
+  it("continues a stopped assistant turn by rebuilding the partial into backend history", async () => {
+    const session = makeSession("default");
+    session.id = "session-stopped";
+    session.title = "Stopped task";
+    session.turns = [
+      { id: "turn-user", role: "user", blocks: [{ kind: "text", text: "Draft the implementation plan" }] },
+      {
+        id: "turn-assistant",
+        role: "assistant",
+        stopped: true,
+        blocks: [{ kind: "text", text: "Partial answer: first finish the context reset path" }],
+      },
+    ];
+    localStorage.setItem(SESSIONS_KEY, JSON.stringify([session]));
+    localStorage.setItem(CURRENT_KEY, session.id);
+    apiMocks.chatSetContext.mockResolvedValue(128);
+    apiMocks.chatSend.mockResolvedValue("Continued answer");
+
+    render(<Chat />);
+
+    await userEvent.click(await screen.findByRole("button", { name: "Continue" }));
+
+    // The stopped turn is now rebuilt into the backend context (not dropped),
+    // so the model sees the partial response it is meant to continue.
+    await waitFor(() => expect(apiMocks.chatSetContext).toHaveBeenCalledWith(
+      session.id,
+      [
+        { role: "user", text: "Draft the implementation plan", images: [] },
+        { role: "assistant", text: "Partial answer: first finish the context reset path" },
+      ],
+      "replace",
+    ));
+    await waitFor(() => expect(apiMocks.chatSend).toHaveBeenCalled());
+    const request = apiMocks.chatSend.mock.calls[0][1] as { text: string };
+    // The continue prompt no longer embeds (or truncates) the partial — it
+    // points at the rebuilt conversation instead.
+    expect(request.text).not.toContain("Partial stopped response:");
+    expect(request.text).toContain("already in the conversation above");
+    expect(request.text).toContain("Do not repeat the completed portion");
   });
 
   it("uses the configured LLM to create a concise title after the first reply", async () => {

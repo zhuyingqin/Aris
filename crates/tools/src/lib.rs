@@ -124,7 +124,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "write_file",
-            description: "Write a complete text file in the workspace. Place generated artifacts in canonical project folders: slide/PPT/PDF deck outputs under slides/, posters under poster/, interactive web apps under web/<name>/ with index.html plus local CSS/assets, source notebooks under notebooks/, run artifacts under experiments/runs/, and scratch/temp/cache files under .aris/. When the user asks to modify an existing/current artifact, reuse the existing path and update it in place; do not create sibling version files such as _v2, _new, _final, or timestamped copies unless explicitly requested. Keep content under 24000 characters in a single call; for longer generated files, write a small scaffold, append chunks with append_file, and verify the final file. Prefer edit_file for localized edits; use shell scripts only for justified bulk mechanical rewrites.",
+            description: "Write a complete text file in the workspace. Place generated artifacts in canonical project folders: slide/PPT/PDF deck outputs under slides/, posters under poster/, interactive web apps under web/<name>/ with index.html plus local CSS/assets, source notebooks under notebooks/, run artifacts under experiments/runs/, and scratch/temp/cache files under .somniq/. When the user asks to modify an existing/current artifact, reuse the existing path and update it in place; do not create sibling version files such as _v2, _new, _final, or timestamped copies unless explicitly requested. Keep content under 24000 characters in a single call; for longer generated files, write a small scaffold, append chunks with append_file, and verify the final file. Prefer edit_file for localized edits; use shell scripts only for justified bulk mechanical rewrites.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -138,7 +138,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "append_file",
-            description: "Append one text chunk to a workspace file without returning the full file. Keep generated artifacts in the same canonical folders as write_file: slides/, poster/, web/<name>/, notebooks/, experiments/runs/, or .aris/ for scratch/temp/cache files. For existing/current artifacts, append only to the identified existing path and do not create a new versioned sibling unless explicitly requested. Keep content under 24000 characters; use this for long generated artifacts after a small write_file scaffold, then verify with read_file/compilation.",
+            description: "Append one text chunk to a workspace file without returning the full file. Keep generated artifacts in the same canonical folders as write_file: slides/, poster/, web/<name>/, notebooks/, experiments/runs/, or .somniq/ for scratch/temp/cache files. For existing/current artifacts, append only to the identified existing path and do not create a new versioned sibling unless explicitly requested. Keep content under 24000 characters; use this for long generated artifacts after a small write_file scaffold, then verify with read_file/compilation.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -2140,14 +2140,9 @@ fn execute_todo_write(input: TodoWriteInput) -> Result<TodoWriteOutput, String> 
         input.todos.clone()
     };
 
-    if let Some(parent) = store_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    }
-    std::fs::write(
-        &store_path,
-        serde_json::to_string_pretty(&persisted).map_err(|error| error.to_string())?,
-    )
-    .map_err(|error| error.to_string())?;
+    let payload = serde_json::to_string_pretty(&persisted).map_err(|error| error.to_string())?;
+    runtime::write_file_atomically(&store_path, payload.as_bytes())
+        .map_err(|error| error.to_string())?;
 
     let verification_nudge_needed = (all_done
         && input.todos.len() >= 3
@@ -2318,7 +2313,7 @@ fn inject_resolver_preamble(
         layer += 1;
     }
     preamble.push_str(&format!(
-        "{layer}. `~/.config/aris/<bundle-key>` (user-customised location; e.g. `~/.config/aris/tools/foo.py` for shared helpers, `~/.config/aris/skills/<name>/<rel>` for skill-local)\n"
+        "{layer}. `~/.config/SomniQ/<bundle-key>` (user-customised location; e.g. `~/.config/SomniQ/tools/foo.py` for shared helpers, `~/.config/SomniQ/skills/<name>/<rel>` for skill-local)\n"
     ));
     layer += 1;
     preamble.push_str(&format!(
@@ -2379,10 +2374,10 @@ fn todo_store_path() -> Result<std::path::PathBuf, String> {
 fn skill_search_roots() -> Vec<std::path::PathBuf> {
     let mut roots = Vec::new();
 
-    // 1. ~/.config/aris/skills/ (ARIS user-level, highest priority)
+    // 1. ~/.config/SomniQ/skills/ (SomniQ user-level, highest priority)
     roots.push(runtime::aris_user_skills_dir());
 
-    // 2. Project-level .aris/skills/
+    // 2. Project-level .somniq/skills/
     if let Ok(cwd) = std::env::current_dir() {
         roots.push(runtime::aris_project_skills_dir(&cwd));
     }
@@ -5107,18 +5102,18 @@ mod tests {
         )
         .expect("write SKILL.md");
 
-        // Point HOME/USERPROFILE to temp dir so ~/.config/aris/skills resolves there.
+        // Point HOME/USERPROFILE to temp dir so ~/.config/SomniQ/skills resolves there.
         let _guard = env_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let aris_home = tmp.parent().unwrap().join("aris-home");
-        let aris_skills = aris_home.join(".config").join("aris").join("skills");
+        let aris_home = tmp.parent().unwrap().join("somniq-home");
+        let aris_skills = aris_home.join(".config").join("SomniQ").join("skills");
         let _home_guard = EnvGuard::set("HOME", &aris_home);
         let _userprofile_guard = EnvGuard::set("USERPROFILE", &aris_home);
         let _claude_compat_guard = EnvGuard::unset("ARIS_ENABLE_CLAUDE_SKILLS");
-        fs::create_dir_all(&aris_skills).expect("create aris skills dir");
+        fs::create_dir_all(&aris_skills).expect("create SomniQ skills dir");
 
-        // Copy the skill into the ARIS skills dir.
+        // Copy the skill into the SomniQ skills dir.
         let target_skill = aris_skills.join("test-skill");
         fs::create_dir_all(&target_skill).expect("create target skill dir");
         fs::copy(skill_dir.join("SKILL.md"), target_skill.join("SKILL.md")).expect("copy skill");

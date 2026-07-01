@@ -315,7 +315,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("time")
             .as_nanos();
-        std::env::temp_dir().join(format!("aris-desktop-{name}-{unique}"))
+        std::env::temp_dir().join(format!("somniq-desktop-{name}-{unique}"))
     }
 
     #[test]

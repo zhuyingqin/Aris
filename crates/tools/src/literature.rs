@@ -1676,7 +1676,7 @@ mod tests {
 
     fn temp_base(name: &str) -> PathBuf {
         let unique = epoch_millis();
-        let base = std::env::temp_dir().join(format!("aris-lit-{name}-{unique}"));
+        let base = std::env::temp_dir().join(format!("somniq-lit-{name}-{unique}"));
         std::fs::create_dir_all(&base).expect("create temp base");
         base
     }

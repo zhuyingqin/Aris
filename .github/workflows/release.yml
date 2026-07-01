@@ -201,8 +201,8 @@ jobs:
             aris-code-windows-x64.zip.sha256
             SomniQ Studio_*_x64-setup.exe
             SomniQ Studio_*_x64-setup.exe.sig
-            SomniQ Studio_*.dmg
-            SomniQ.Studio_*.app.zip
+            dmg/SomniQ Studio_*.dmg
+            macos/SomniQ.Studio.app.zip
             latest.json
           overwrite_files: true
           generate_release_notes: true
