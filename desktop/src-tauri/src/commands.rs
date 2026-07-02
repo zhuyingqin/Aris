@@ -3,7 +3,7 @@
 use crate::state;
 use serde::Serialize;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -222,7 +222,157 @@ fn latex_check() -> LocalEnvironmentCheck {
     )
 }
 
+fn push_candidate_path(candidates: &mut Vec<String>, path: PathBuf) {
+    if path.is_file() {
+        let value = path.display().to_string();
+        if !candidates.iter().any(|candidate| candidate == &value) {
+            candidates.push(value);
+        }
+    }
+}
+
+fn scan_matlab_roots(candidates: &mut Vec<String>, roots: &[PathBuf]) {
+    let mut discovered = Vec::new();
+    for root in roots {
+        let Ok(entries) = std::fs::read_dir(root) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if name.starts_with('R') {
+                discovered.push(path);
+            }
+        }
+    }
+    discovered.sort();
+    discovered.reverse();
+    for root in discovered {
+        push_candidate_path(candidates, root.join("bin").join(matlab_binary_name()));
+    }
+}
+
+fn matlab_binary_name() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "matlab.exe"
+    } else {
+        "matlab"
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn push_matlab_registry_roots(programs: &mut Vec<String>) {
+    for root in [
+        r"HKLM\SOFTWARE\MathWorks\MATLAB",
+        r"HKLM\SOFTWARE\WOW6432Node\MathWorks\MATLAB",
+        r"HKCU\SOFTWARE\MathWorks\MATLAB",
+    ] {
+        let output = crate::process::hidden_command("reg.exe")
+            .args(["query", root, "/s", "/v", "MATLABROOT"])
+            .output();
+        let Ok(output) = output else {
+            continue;
+        };
+        if !output.status.success() {
+            continue;
+        }
+        let text = String::from_utf8_lossy(&output.stdout);
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if !trimmed.starts_with("MATLABROOT") {
+                continue;
+            }
+            let Some((_, value)) = trimmed.split_once("REG_SZ") else {
+                continue;
+            };
+            let root = value.trim();
+            if !root.is_empty() {
+                push_candidate_path(
+                    programs,
+                    PathBuf::from(root).join("bin").join(matlab_binary_name()),
+                );
+            }
+        }
+    }
+}
+
+fn matlab_candidates() -> Vec<(String, Vec<&'static str>)> {
+    let mut programs = Vec::new();
+    for key in [
+        "SOMNIQ_MATLAB",
+        "ARIS_MATLAB",
+        "MATLAB",
+        "MATLABROOT",
+        "MATLAB_ROOT",
+    ] {
+        if let Ok(value) = std::env::var(key) {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let path = PathBuf::from(trimmed);
+            if path.is_file() {
+                push_candidate_path(&mut programs, path);
+            } else {
+                push_candidate_path(&mut programs, path.join("bin").join(matlab_binary_name()));
+            }
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        push_matlab_registry_roots(&mut programs);
+        let mut roots = vec![PathBuf::from(r"C:\Program Files\MATLAB")];
+        if let Ok(program_files) = std::env::var("ProgramFiles") {
+            roots.push(PathBuf::from(program_files).join("MATLAB"));
+        }
+        if let Ok(program_files_x86) = std::env::var("ProgramFiles(x86)") {
+            roots.push(PathBuf::from(program_files_x86).join("MATLAB"));
+        }
+        scan_matlab_roots(&mut programs, &roots);
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let mut app_bins = Vec::new();
+        if let Ok(entries) = std::fs::read_dir("/Applications") {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                    continue;
+                };
+                if name.starts_with("MATLAB_R") && name.ends_with(".app") {
+                    app_bins.push(path.join("bin").join("matlab"));
+                }
+            }
+        }
+        app_bins.sort();
+        app_bins.reverse();
+        for path in app_bins {
+            push_candidate_path(&mut programs, path);
+        }
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        scan_matlab_roots(&mut programs, &[PathBuf::from("/usr/local/MATLAB")]);
+    }
+
+    programs.push("matlab".to_string());
+    programs
+        .into_iter()
+        .map(|program| (program, vec!["-batch", "disp(version)"]))
+        .collect()
+}
+
 fn environment_checks_blocking() -> Vec<LocalEnvironmentCheck> {
+    let matlab_candidates = matlab_candidates();
+    let matlab_borrowed = matlab_candidates
+        .iter()
+        .map(|(program, args)| (program.as_str(), args.as_slice()))
+        .collect::<Vec<_>>();
     vec![
         first_successful_probe(
             "python",
@@ -248,8 +398,8 @@ fn environment_checks_blocking() -> Vec<LocalEnvironmentCheck> {
             "matlab",
             "MATLAB",
             "数值计算",
-            &[("matlab", &["-batch", "disp(version)"])],
-            Duration::from_secs(8),
+            &matlab_borrowed,
+            Duration::from_secs(30),
             "未检测到 MATLAB，可安装 MATLAB 并加入 PATH。",
         ),
         latex_check(),

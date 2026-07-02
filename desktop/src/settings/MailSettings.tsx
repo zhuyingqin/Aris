@@ -14,6 +14,7 @@ import type {
   MailAutoconfigResult,
   MailSocketSecurity,
 } from "../types";
+import { useStore, type Language } from "../store";
 
 const DEFAULT_MAIL: GenericMailAccountInput = {
   email: "",
@@ -29,6 +30,137 @@ const DEFAULT_MAIL: GenericMailAccountInput = {
   smtpSecurity: "tls",
   smtpUsername: "",
   smtpPassword: "",
+};
+
+const MAIL_COPY: Record<Language, {
+  mail: string;
+  connected: string;
+  notConnected: string;
+  cardDescription: string;
+  cardError: string;
+  configure: string;
+  accountSummaryEmpty: string;
+  accountSummary: (connected: number, total: number) => string;
+  detailTitle: string;
+  detailSub: string;
+  connectedCount: (count: number) => string;
+  oauthTitle: string;
+  oauthSub: string;
+  connecting: string;
+  genericTitle: string;
+  genericSub: string;
+  emailAddress: string;
+  displayName: string;
+  displayNamePlaceholder: string;
+  discoverTitle: string;
+  discoverSub: string;
+  discoverUsed: (source: string, notes: string[]) => string;
+  discovering: string;
+  discover: string;
+  defaultEmail: string;
+  passwordPlaceholder: string;
+  enableSmtp: string;
+  enableSmtpSub: string;
+  defaultImapUser: string;
+  reuseImapPassword: string;
+  testTesting: string;
+  testConnection: string;
+  connectMailbox: string;
+  connectedAccounts: string;
+  connectedAccountsSub: string;
+  disconnect: string;
+  noConnectedAccounts: string;
+  emailRequired: string;
+  gmailNotice: string;
+  outlookNotice: string;
+  neteaseNotice: string;
+}> = {
+  cn: {
+    mail: "邮箱",
+    connected: "已连接",
+    notConnected: "未连接",
+    cardDescription: "Provider API + IMAP/SMTP · 对话可读取、整理和发送",
+    cardError: "账户状态加载失败，进入详情页重试",
+    configure: "配置邮箱",
+    accountSummaryEmpty: "尚未连接邮箱",
+    accountSummary: (connected, total) => `${connected}/${total} 个账户已连接`,
+    detailTitle: "邮箱连接",
+    detailSub: "Gmail 和 Outlook 使用 OAuth/API。通用 IMAP/SMTP 仅用于仍支持授权码或应用专用密码的邮箱。",
+    connectedCount: (count) => `${count} 已连接`,
+    oauthTitle: "Gmail / Outlook 推荐连接方式",
+    oauthSub: "个人 Gmail、Outlook.com 和 Microsoft 365 应走 OAuth/API。不要在下面的通用 IMAP 表单里输入普通账户密码。",
+    connecting: "连接中...",
+    genericTitle: "通用 IMAP/SMTP",
+    genericSub: "先输入邮箱地址，自动发现服务器；再输入服务商授权码或应用专用密码测试连接。",
+    emailAddress: "邮箱地址",
+    displayName: "显示名称",
+    displayNamePlaceholder: "发件时显示",
+    discoverTitle: "自动发现 IMAP/SMTP",
+    discoverSub: "按 Thunderbird Autoconfig、Thunderbird ISPDB、内置服务商规则和通用域名猜测依次查找配置。",
+    discoverUsed: (source, notes) => `已使用：${source}${notes.length > 0 ? ` · ${notes.join(" ")}` : ""}`,
+    discovering: "发现中...",
+    discover: "自动发现",
+    defaultEmail: "默认使用邮箱地址",
+    passwordPlaceholder: "密码或应用专用密码",
+    enableSmtp: "启用 SMTP 发件",
+    enableSmtpSub: "关闭后对话只能读取和整理邮件。",
+    defaultImapUser: "默认复用 IMAP 用户名",
+    reuseImapPassword: "留空复用 IMAP 密码",
+    testTesting: "测试中...",
+    testConnection: "测试连接",
+    connectMailbox: "连接邮箱",
+    connectedAccounts: "已连接账户",
+    connectedAccountsSub: "连接后，对话和 Mail 页面会复用同一个账户服务。",
+    disconnect: "断开连接",
+    noConnectedAccounts: "没有已连接的邮箱账户。",
+    emailRequired: "请先输入邮箱地址。",
+    gmailNotice: "Gmail 的普通 Google 密码不能用于 IMAP LOGIN。优先使用 Continue with Gmail；只有已启用 IMAP 且生成了 Google 应用专用密码时，才使用下面的通用 IMAP/SMTP。",
+    outlookNotice: "Outlook.com / Microsoft 365 的密码式 IMAP/SMTP 路径不可用。请使用 Continue with Outlook 的 OAuth/Graph 连接。",
+    neteaseNotice: "网易邮箱需要先在网页端开启 IMAP/SMTP 服务，并使用客户端授权码作为密码。若出现 Unsafe Login，说明网易风控拒绝了当前客户端或登录环境，请先完成网页端安全验证，或联系 kefu@188.com。",
+  },
+  en: {
+    mail: "Mail",
+    connected: "Connected",
+    notConnected: "Not connected",
+    cardDescription: "Provider API + IMAP/SMTP · Chat can read, organize, and send",
+    cardError: "Account status failed to load. Open details to retry.",
+    configure: "Configure mail",
+    accountSummaryEmpty: "No mailbox connected",
+    accountSummary: (connected, total) => `${connected}/${total} accounts connected`,
+    detailTitle: "Mail Connections",
+    detailSub: "Gmail and Outlook use OAuth/API. Generic IMAP/SMTP is only for providers that still support app passwords or authorization codes.",
+    connectedCount: (count) => `${count} connected`,
+    oauthTitle: "Recommended for Gmail / Outlook",
+    oauthSub: "Personal Gmail, Outlook.com, and Microsoft 365 should use OAuth/API. Do not enter a normal account password in the generic IMAP form below.",
+    connecting: "Connecting...",
+    genericTitle: "Generic IMAP/SMTP",
+    genericSub: "Enter an email address to discover servers, then test with the provider authorization code or app password.",
+    emailAddress: "Email address",
+    displayName: "Display name",
+    displayNamePlaceholder: "Shown when sending",
+    discoverTitle: "Discover IMAP/SMTP",
+    discoverSub: "Checks Thunderbird Autoconfig, Thunderbird ISPDB, built-in provider rules, and common domain guesses.",
+    discoverUsed: (source, notes) => `Using: ${source}${notes.length > 0 ? ` · ${notes.join(" ")}` : ""}`,
+    discovering: "Discovering...",
+    discover: "Auto-discover",
+    defaultEmail: "Defaults to email address",
+    passwordPlaceholder: "Password or app password",
+    enableSmtp: "Enable SMTP sending",
+    enableSmtpSub: "When off, Chat can only read and organize mail.",
+    defaultImapUser: "Defaults to IMAP username",
+    reuseImapPassword: "Leave blank to reuse IMAP password",
+    testTesting: "Testing...",
+    testConnection: "Test connection",
+    connectMailbox: "Connect mailbox",
+    connectedAccounts: "Connected Accounts",
+    connectedAccountsSub: "After connecting, Chat and Mail reuse the same account service.",
+    disconnect: "Disconnect",
+    noConnectedAccounts: "No connected mail accounts.",
+    emailRequired: "Enter an email address first.",
+    gmailNotice: "A normal Google password cannot be used for Gmail IMAP LOGIN. Prefer Continue with Gmail; use generic IMAP/SMTP only after enabling IMAP and creating a Google app password.",
+    outlookNotice: "Password-based IMAP/SMTP is unavailable for Outlook.com / Microsoft 365. Use Continue with Outlook for OAuth/Graph.",
+    neteaseNotice: "NetEase mail requires IMAP/SMTP to be enabled in webmail and a client authorization code as the password. Unsafe Login means NetEase rejected this client or login environment.",
+  },
 };
 
 function normalizeMail(input: GenericMailAccountInput): GenericMailAccountInput {
@@ -54,27 +186,29 @@ function providerLabel(provider: MailAccount["provider"]) {
   return "IMAP/SMTP";
 }
 
-function providerAuthNotice(email: string): string | null {
+function providerAuthNotice(email: string, copy: typeof MAIL_COPY[Language]): string | null {
   const domain = email.trim().toLowerCase().split("@").pop() ?? "";
   if (domain === "gmail.com" || domain === "googlemail.com") {
-    return "Gmail 的普通 Google 密码不能用于 IMAP LOGIN。优先使用 Continue with Gmail；只有已启用 IMAP 且生成了 Google 应用专用密码时，才使用下面的通用 IMAP/SMTP。";
+    return copy.gmailNotice;
   }
   if (["outlook.com", "hotmail.com", "live.com", "msn.com"].includes(domain) || domain.endsWith(".onmicrosoft.com")) {
-    return "Outlook.com / Microsoft 365 的密码式 IMAP/SMTP 路径不可用。请使用 Continue with Outlook 的 OAuth/Graph 连接。";
+    return copy.outlookNotice;
   }
   if (["126.com", "163.com", "yeah.net", "188.com"].includes(domain)) {
-    return "网易邮箱需要先在网页端开启 IMAP/SMTP 服务，并使用客户端授权码作为密码。若出现 Unsafe Login，说明网易风控拒绝了当前客户端或登录环境，请先完成网页端安全验证，或联系 kefu@188.com。";
+    return copy.neteaseNotice;
   }
   return null;
 }
 
-function accountSummary(accounts: MailAccount[]) {
+function accountSummary(accounts: MailAccount[], copy: typeof MAIL_COPY[Language]) {
   const connected = accounts.filter((account) => account.connected).length;
-  if (accounts.length === 0) return "尚未连接邮箱";
-  return `${connected}/${accounts.length} 个账户已连接`;
+  if (accounts.length === 0) return copy.accountSummaryEmpty;
+  return copy.accountSummary(connected, accounts.length);
 }
 
 export default function MailSettings({ onOpen }: { onOpen: () => void }) {
+  const language = useStore((state) => state.language);
+  const copy = MAIL_COPY[language];
   const [accounts, setAccounts] = useState<MailAccount[]>([]);
   const [error, setError] = useState<string | null>(null);
 
@@ -110,16 +244,16 @@ export default function MailSettings({ onOpen }: { onOpen: () => void }) {
           <div className="sp-card-icon sp-card-icon-mail" aria-hidden="true">M</div>
           <div className="sp-card-body">
             <div className="sp-card-name">
-              邮箱
+              {copy.mail}
               <span className="sp-role-badge sp-role-mail">Autoconfig</span>
-              {connectedCount > 0 && <span className="sp-role-badge sp-role-running">已连接</span>}
+              {connectedCount > 0 && <span className="sp-role-badge sp-role-running">{copy.connected}</span>}
             </div>
-            <div className="sp-card-url">Provider API + IMAP/SMTP · Chat 可读取、整理和发送</div>
-            <div className="sp-card-notes">{error ? "账户状态加载失败，进入详情页重试" : accountSummary(accounts)}</div>
+            <div className="sp-card-url">{copy.cardDescription}</div>
+            <div className="sp-card-notes">{error ? copy.cardError : accountSummary(accounts, copy)}</div>
           </div>
         </div>
         <div className="sp-card-actions" onClick={(event) => event.stopPropagation()}>
-          <button className="sp-card-btn" title="配置邮箱" type="button" onClick={onOpen}>✎</button>
+          <button className="sp-card-btn" title={copy.configure} type="button" onClick={onOpen}>✎</button>
         </div>
       </div>
     </div>
@@ -127,6 +261,8 @@ export default function MailSettings({ onOpen }: { onOpen: () => void }) {
 }
 
 export function MailSettingsDetail() {
+  const language = useStore((state) => state.language);
+  const copy = MAIL_COPY[language];
   const [accounts, setAccounts] = useState<MailAccount[]>([]);
   const [form, setForm] = useState<GenericMailAccountInput>(DEFAULT_MAIL);
   const [discoveryResult, setDiscoveryResult] = useState<MailAutoconfigResult | null>(null);
@@ -138,7 +274,7 @@ export function MailSettingsDetail() {
     () => accounts.filter((account) => account.connected).length,
     [accounts],
   );
-  const authNotice = useMemo(() => providerAuthNotice(form.email), [form.email]);
+  const authNotice = useMemo(() => providerAuthNotice(form.email, copy), [form.email, copy]);
 
   useEffect(() => {
     mailAccountsGet().then(setAccounts).catch((e) => setError(String(e)));
@@ -154,7 +290,7 @@ export function MailSettingsDetail() {
   const discoverConfig = async () => {
     const email = form.email.trim();
     if (!email) {
-      setError("请先输入邮箱地址。");
+      setError(copy.emailRequired);
       return;
     }
     setBusy("discover");
@@ -247,16 +383,16 @@ export function MailSettingsDetail() {
     <div className="sp-detail-form mail-settings-detail">
       <section className="mail-settings-summary">
         <div>
-          <div className="sp-field-label">邮箱连接</div>
+          <div className="sp-field-label">{copy.detailTitle}</div>
           <div className="sp-field-hint">
-            Gmail 和 Outlook 使用 OAuth/API。通用 IMAP/SMTP 仅用于仍支持授权码或应用专用密码的邮箱。
+            {copy.detailSub}
           </div>
         </div>
         <div className="mail-settings-summary-badges">
           <span className="sp-role-badge sp-role-mail">Provider API</span>
           <span className="sp-role-badge sp-role-mail">IMAP/SMTP</span>
           <span className={`sp-role-badge ${connectedCount > 0 ? "sp-role-running" : "sp-role-muted"}`}>
-            {connectedCount > 0 ? `${connectedCount} 已连接` : "未连接"}
+            {connectedCount > 0 ? copy.connectedCount(connectedCount) : copy.notConnected}
           </span>
         </div>
       </section>
@@ -264,8 +400,8 @@ export function MailSettingsDetail() {
       <section className="mail-settings-panel">
         <div className="mail-settings-oauth-card">
           <div className="mail-settings-oauth-copy">
-            <strong>Gmail / Outlook 推荐连接方式</strong>
-            <span>个人 Gmail、Outlook.com 和 Microsoft 365 应走 OAuth/API。不要在下面的通用 IMAP 表单里输入普通账户密码。</span>
+            <strong>{copy.oauthTitle}</strong>
+            <span>{copy.oauthSub}</span>
           </div>
           <div className="mail-settings-oauth-actions">
             <button
@@ -274,7 +410,7 @@ export function MailSettingsDetail() {
               disabled={busy !== null}
               onClick={() => void connectProvider("gmail")}
             >
-              {busy === "gmail" ? "连接中..." : "Continue with Gmail"}
+              {busy === "gmail" ? copy.connecting : "Continue with Gmail"}
             </button>
             <button
               className="sp-btn sp-btn-secondary"
@@ -282,20 +418,20 @@ export function MailSettingsDetail() {
               disabled={busy !== null}
               onClick={() => void connectProvider("outlook")}
             >
-              {busy === "outlook" ? "连接中..." : "Continue with Outlook"}
+              {busy === "outlook" ? copy.connecting : "Continue with Outlook"}
             </button>
           </div>
         </div>
 
         <div className="mail-settings-panel-head">
           <div>
-            <div className="sp-field-label">通用 IMAP/SMTP</div>
-            <div className="sp-field-hint">先输入邮箱地址，自动发现服务器；再输入服务商授权码或应用专用密码测试连接。</div>
+            <div className="sp-field-label">{copy.genericTitle}</div>
+            <div className="sp-field-hint">{copy.genericSub}</div>
           </div>
         </div>
 
         <div className="sp-detail-row2">
-          <Field label="邮箱地址">
+          <Field label={copy.emailAddress}>
             <input
               className="sp-input"
               value={form.email}
@@ -303,11 +439,11 @@ export function MailSettingsDetail() {
               onChange={(event) => patch({ email: event.target.value })}
             />
           </Field>
-          <Field label="显示名称">
+          <Field label={copy.displayName}>
             <input
               className="sp-input"
               value={form.displayName ?? ""}
-              placeholder="发件时显示"
+              placeholder={copy.displayNamePlaceholder}
               onChange={(event) => patch({ displayName: event.target.value })}
             />
           </Field>
@@ -315,15 +451,10 @@ export function MailSettingsDetail() {
 
         <div className="mail-settings-oauth-card">
           <div className="mail-settings-oauth-copy">
-            <strong>自动发现 IMAP/SMTP</strong>
-            <span>
-              按 Thunderbird Autoconfig、Thunderbird ISPDB、内置服务商规则和通用域名猜测依次查找配置。
-            </span>
+            <strong>{copy.discoverTitle}</strong>
+            <span>{copy.discoverSub}</span>
             {discoveryResult && (
-              <span>
-                已使用：{discoveryResult.source}
-                {discoveryResult.notes.length > 0 ? ` · ${discoveryResult.notes.join(" ")}` : ""}
-              </span>
+              <span>{copy.discoverUsed(discoveryResult.source, discoveryResult.notes)}</span>
             )}
             {authNotice && <span className="mail-settings-oauth-warning">{authNotice}</span>}
           </div>
@@ -333,7 +464,7 @@ export function MailSettingsDetail() {
             disabled={busy !== null || !form.email.trim()}
             onClick={() => void discoverConfig()}
           >
-            {busy === "discover" ? "发现中..." : "自动发现"}
+            {busy === "discover" ? copy.discovering : copy.discover}
           </button>
         </div>
 
@@ -362,7 +493,7 @@ export function MailSettingsDetail() {
             <input
               className="sp-input"
               value={form.imapUsername}
-              placeholder="默认使用邮箱地址"
+              placeholder={copy.defaultEmail}
               onChange={(event) => patch({ imapUsername: event.target.value })}
             />
           </Field>
@@ -371,7 +502,7 @@ export function MailSettingsDetail() {
               className="sp-input"
               type="password"
               value={form.imapPassword}
-              placeholder="密码或应用专用密码"
+              placeholder={copy.passwordPlaceholder}
               onChange={(event) => patch({ imapPassword: event.target.value })}
             />
           </Field>
@@ -384,8 +515,8 @@ export function MailSettingsDetail() {
             onChange={(event) => patch({ smtpEnabled: event.target.checked })}
           />
           <span>
-            <strong>启用 SMTP 发件</strong>
-            <span>关闭后 Chat 只能读取和整理邮件。</span>
+            <strong>{copy.enableSmtp}</strong>
+            <span>{copy.enableSmtpSub}</span>
           </span>
         </label>
 
@@ -419,7 +550,7 @@ export function MailSettingsDetail() {
                 <input
                   className="sp-input"
                   value={form.smtpUsername ?? ""}
-                  placeholder="默认复用 IMAP 用户名"
+                  placeholder={copy.defaultImapUser}
                   onChange={(event) => patch({ smtpUsername: event.target.value })}
                 />
               </Field>
@@ -428,7 +559,7 @@ export function MailSettingsDetail() {
                   className="sp-input"
                   type="password"
                   value={form.smtpPassword ?? ""}
-                  placeholder="留空复用 IMAP 密码"
+                  placeholder={copy.reuseImapPassword}
                   onChange={(event) => patch({ smtpPassword: event.target.value })}
                 />
               </Field>
@@ -438,10 +569,10 @@ export function MailSettingsDetail() {
 
         <div className="sp-detail-actions">
           <button className="sp-btn sp-btn-secondary" type="button" disabled={busy !== null} onClick={() => void testConnection()}>
-            {busy === "test" ? "测试中..." : "测试连接"}
+            {busy === "test" ? copy.testTesting : copy.testConnection}
           </button>
           <button className="sp-btn sp-btn-primary" type="button" disabled={busy !== null} onClick={() => void connect()}>
-            {busy === "connect" ? "连接中..." : "连接邮箱"}
+            {busy === "connect" ? copy.connecting : copy.connectMailbox}
           </button>
           {testResult && (
             <span className={`mail-settings-result ${testResult.ok ? "ok" : "failed"}`}>
@@ -454,8 +585,8 @@ export function MailSettingsDetail() {
       <section className="mail-settings-panel">
         <div className="mail-settings-panel-head">
           <div>
-            <div className="sp-field-label">已连接账户</div>
-            <div className="sp-field-hint">{accounts.length > 0 ? accountSummary(accounts) : "连接后，Chat 和 Mail 页面会复用同一个账户服务。"}</div>
+            <div className="sp-field-label">{copy.connectedAccounts}</div>
+            <div className="sp-field-hint">{accounts.length > 0 ? accountSummary(accounts, copy) : copy.connectedAccountsSub}</div>
           </div>
         </div>
 
@@ -472,7 +603,7 @@ export function MailSettingsDetail() {
                 </div>
                 <button
                   className="sp-card-btn sp-card-btn-danger"
-                  title="断开连接"
+                  title={copy.disconnect}
                   type="button"
                   disabled={busy !== null}
                   onClick={() => void disconnect(account.id)}
@@ -483,7 +614,7 @@ export function MailSettingsDetail() {
             ))}
           </div>
         ) : (
-          <div className="mail-settings-empty">没有已连接的邮箱账户。</div>
+          <div className="mail-settings-empty">{copy.noConnectedAccounts}</div>
         )}
       </section>
 

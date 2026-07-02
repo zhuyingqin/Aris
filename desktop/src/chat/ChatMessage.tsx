@@ -2,6 +2,7 @@ import { Fragment, memo, useMemo, useState, type ReactNode } from "react";
 import type { ChatBlock, ChatTurn } from "../types";
 import { fileOpen } from "../api/tauri";
 import MarkdownContent, { ThinkBlock } from "./MarkdownContent";
+import { CHAT_COPY } from "./i18n";
 import { textFromTurn } from "./model";
 import { useStore } from "../store";
 
@@ -122,6 +123,8 @@ export function diffFromTool(block: Extract<ChatBlock, { kind: "tool" }>): FileC
 
 function CopyButton({ text }: { text: string }) {
   const [copied, setCopied] = useState(false);
+  const language = useStore((state) => state.language);
+  const copy = CHAT_COPY[language];
   return (
     <button
       onClick={() => {
@@ -131,7 +134,7 @@ function CopyButton({ text }: { text: string }) {
         });
       }}
     >
-      {copied ? "Copied" : "Copy"}
+      {copied ? copy.copied : copy.copy}
     </button>
   );
 }
@@ -618,38 +621,40 @@ function ChatMessage({
   onPermissionRespond = () => undefined,
   onQuestionRespond = () => undefined,
 }: Props) {
+  const language = useStore((state) => state.language);
+  const copy = CHAT_COPY[language];
   const text = textFromTurn(turn);
   const hasContent = hasRenderableContent(turn);
   return (
     <article className={`chat-turn chat-${turn.role}${turn.error ? " chat-turn-error" : ""}`}>
       {turn.role === "user" && turn.attachments && turn.attachments.length > 0 && (
         <div className="chat-message-attachments">
-          {turn.attachments.map((attachment) => <span key={attachment.id}>{attachment.kind === "image" ? "Image" : "File"}: {attachment.name}</span>)}
+          {turn.attachments.map((attachment) => <span key={attachment.id}>{attachment.kind === "image" ? copy.image : copy.file}: {attachment.name}</span>)}
         </div>
       )}
       {renderBlocks(turn, onPermissionRespond, onQuestionRespond)}
       {!turn.streaming && !turn.error && !turn.stopped && !hasContent && turn.role === "assistant" && (
-        <div className="chat-empty-response">Model returned an empty response.</div>
+        <div className="chat-empty-response">{copy.emptyResponse}</div>
       )}
       {!turn.streaming && !turn.error && turn.stopped && turn.role === "assistant" && (
         <div className="chat-stopped-card">
-          <strong>Response stopped</strong>
-          <span>Stopped by user.</span>
+          <strong>{copy.responseStopped}</strong>
+          <span>{copy.stoppedByUser}</span>
         </div>
       )}
       {turn.streaming && <span className="chat-inline-cursor">▌</span>}
       {turn.error && (
         <div className="chat-error-card">
-          <strong>Response failed</strong>
+          <strong>{copy.responseFailed}</strong>
           <span>{turn.error}</span>
-          <button onClick={() => onRetry(turn)}>Retry</button>
+          <button onClick={() => onRetry(turn)}>{copy.retry}</button>
         </div>
       )}
       <div className="chat-message-actions">
         {text && <CopyButton text={text} />}
-        {turn.role === "user" && !turn.streaming && <button onClick={() => onEdit(turn)}>Edit and resend</button>}
-        {turn.role === "assistant" && canRetry && !turn.streaming && !turn.error && <button onClick={() => onRetry(turn)}>Retry</button>}
-        {turn.role === "assistant" && turn.stopped && <button onClick={onContinue}>Continue</button>}
+        {turn.role === "user" && !turn.streaming && <button onClick={() => onEdit(turn)}>{copy.editAndResend}</button>}
+        {turn.role === "assistant" && canRetry && !turn.streaming && !turn.error && <button onClick={() => onRetry(turn)}>{copy.retry}</button>}
+        {turn.role === "assistant" && turn.stopped && <button onClick={onContinue}>{copy.continue}</button>}
       </div>
     </article>
   );

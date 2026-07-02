@@ -1,7 +1,7 @@
 {
   "name": "aris-studio",
   "private": true,
-  "version": "0.4.6",
+  "version": "0.4.7",
   "type": "module",
   "description": "SomniQ Studio - desktop UI for Chat, literature, skills, sessions, and settings",
   "scripts": {
@@ -33,7 +33,9 @@
     "react-dom": "^18.3.1",
     "react-markdown": "^10.1.0",
     "rehype-highlight": "^7.0.2",
+    "rehype-katex": "^7.0.1",
     "remark-gfm": "^4.0.1",
+    "remark-math": "^6.0.0",
     "zustand": "^4.5.5"
   },
   "devDependencies": {

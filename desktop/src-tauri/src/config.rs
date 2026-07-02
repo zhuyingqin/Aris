@@ -934,15 +934,129 @@ impl ConfigPatch {
         }
     }
 
-    fn changes_reviewer_api_settings(&self) -> bool {
-        self.reviewer_provider.is_some()
+    fn current_reviewer_slot_is_empty(obj: &Map<String, Value>) -> bool {
+        [
+            "reviewer_provider",
+            "reviewer_model",
+            "reviewer_base_url",
+            "reviewer_api_key",
+        ]
+        .into_iter()
+        .all(|key| get_non_empty(obj, key).is_none())
+    }
+
+    fn current_reviewer_slot_matches_managed(obj: &Map<String, Value>) -> bool {
+        let managed_base = managed_executor_base_url(obj).map(|base| url_match_key(&base));
+        let managed_key = managed_executor_api_key(obj);
+        let base_matches = match (
+            get_non_empty(obj, "reviewer_base_url"),
+            managed_base.as_deref(),
+        ) {
+            (Some(base_url), Some(managed_base)) => url_match_key(&base_url) == managed_base,
+            _ => false,
+        };
+        let key_matches = match (
+            get_non_empty(obj, "reviewer_api_key"),
+            managed_key.as_deref(),
+        ) {
+            (Some(api_key), Some(managed_key)) => api_key == managed_key,
+            _ => false,
+        };
+        base_matches || key_matches
+    }
+
+    fn is_managed_reviewer_disable(&self, obj: &Map<String, Value>) -> bool {
+        if !self
+            .reviewer_provider
+            .as_deref()
+            .is_some_and(|provider| provider.trim().is_empty())
+        {
+            return false;
+        }
+        for value in [
+            self.reviewer_model.as_deref(),
+            self.reviewer_base_url.as_deref(),
+            self.reviewer_api_key.as_deref(),
+        ] {
+            if value.is_some_and(|value| !value.trim().is_empty()) {
+                return false;
+            }
+        }
+        Self::current_reviewer_slot_is_empty(obj)
+            || Self::current_reviewer_slot_matches_managed(obj)
+    }
+
+    fn is_managed_reviewer_update(&self, obj: &Map<String, Value>) -> bool {
+        if self.is_managed_reviewer_disable(obj) {
+            return true;
+        }
+        if self
+            .reviewer_provider
+            .as_deref()
+            .is_some_and(|provider| provider.trim().is_empty())
+        {
+            return false;
+        }
+        let Some(model) = self
+            .reviewer_model
+            .as_deref()
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+        else {
+            return false;
+        };
+        if !managed_model_contains(obj, model) {
+            return false;
+        }
+        if let Some(provider) = self
+            .reviewer_provider
+            .as_deref()
+            .map(str::trim)
+            .filter(|provider| !provider.is_empty())
+        {
+            if provider != "custom" && provider != "openai" {
+                return false;
+            }
+        }
+        if let Some(base_url) = self
+            .reviewer_base_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|base_url| !base_url.is_empty())
+        {
+            let Some(managed_base) = managed_executor_base_url(obj) else {
+                return false;
+            };
+            if url_match_key(base_url) != url_match_key(&managed_base) {
+                return false;
+            }
+        }
+        if let Some(api_key) = self
+            .reviewer_api_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|api_key| !api_key.is_empty())
+        {
+            let Some(managed_key) = managed_executor_api_key(obj) else {
+                return false;
+            };
+            if api_key != managed_key {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn changes_reviewer_api_settings(&self, obj: &Map<String, Value>) -> bool {
+        let touches_reviewer = self.reviewer_provider.is_some()
             || self.reviewer_model.is_some()
             || self.reviewer_base_url.is_some()
-            || self.reviewer_api_key.is_some()
+            || self.reviewer_api_key.is_some();
+        touches_reviewer && !self.is_managed_reviewer_update(obj)
     }
 
     fn changes_admin_api_settings(&self, obj: &Map<String, Value>) -> bool {
-        self.changes_executor_api_settings(obj) || self.changes_reviewer_api_settings()
+        self.changes_executor_api_settings(obj) || self.changes_reviewer_api_settings(obj)
     }
 }
 
@@ -1683,6 +1797,46 @@ mod tests {
         };
 
         assert!(patch.changes_admin_api_settings(&obj));
+    }
+
+    #[test]
+    fn managed_reviewer_update_does_not_require_admin_api_access() {
+        let obj = serde_json::json!({
+            "newapi_base_url": "http://gateway.example",
+            "newapi_executor_base_url": "http://gateway.example/v1",
+            "newapi_executor_api_key": "gateway-token",
+            "managed_models": ["MiniMax-M3", "gpt-5.5"]
+        })
+        .as_object()
+        .expect("object")
+        .clone();
+        let patch = ConfigPatch {
+            reviewer_model: Some("gpt-5.5".to_string()),
+            ..Default::default()
+        };
+
+        assert!(!patch.changes_admin_api_settings(&obj));
+    }
+
+    #[test]
+    fn managed_reviewer_disable_does_not_require_admin_api_access() {
+        let obj = serde_json::json!({
+            "newapi_base_url": "http://gateway.example",
+            "newapi_executor_base_url": "http://gateway.example/v1",
+            "newapi_executor_api_key": "gateway-token",
+            "managed_models": ["MiniMax-M3"]
+        })
+        .as_object()
+        .expect("object")
+        .clone();
+        let patch = ConfigPatch {
+            reviewer_provider: Some(String::new()),
+            reviewer_model: Some(String::new()),
+            reviewer_base_url: Some(String::new()),
+            ..Default::default()
+        };
+
+        assert!(!patch.changes_admin_api_settings(&obj));
     }
 
     #[test]

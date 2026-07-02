@@ -62,4 +62,31 @@ describe("OnboardingTutorial", () => {
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(localStorage.getItem(ONBOARDING_STORAGE_KEY)).toBe("done");
   });
+
+  it("can return to the previous tutorial step", async () => {
+    const user = userEvent.setup();
+    render(<OnboardingTutorial />);
+
+    const previousButton = screen.getByRole("button", { name: "上一步" }) as HTMLButtonElement;
+    expect(previousButton.disabled).toBe(true);
+
+    await user.click(screen.getByRole("button", { name: "下一步" }));
+
+    expect(screen.getByRole("dialog", { name: /Chat 区/ })).toBeTruthy();
+    expect(previousButton.disabled).toBe(false);
+
+    await user.click(previousButton);
+
+    expect(screen.getByRole("dialog", { name: /左侧导航/ })).toBeTruthy();
+  });
+
+  it("supports left-arrow navigation", async () => {
+    const user = userEvent.setup();
+    render(<OnboardingTutorial />);
+
+    await user.click(screen.getByRole("button", { name: "下一步" }));
+    await user.keyboard("{ArrowLeft}");
+
+    expect(screen.getByRole("dialog", { name: /左侧导航/ })).toBeTruthy();
+  });
 });

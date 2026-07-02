@@ -228,6 +228,7 @@ export default function OnboardingTutorial() {
   const [index, setIndex] = useState(0);
   const [targetRect, setTargetRect] = useState<TargetRect | null>(null);
   const step = ONBOARDING_STEPS[index];
+  const isFirstStep = index === 0;
   const isLastStep = index === ONBOARDING_STEPS.length - 1;
   const progressLabel = useMemo(
     () => `${index + 1} / ${ONBOARDING_STEPS.length}`,
@@ -251,6 +252,10 @@ export default function OnboardingTutorial() {
     setIndex((current) => Math.min(current + 1, ONBOARDING_STEPS.length - 1));
   };
 
+  const previous = () => {
+    setIndex((current) => Math.max(current - 1, 0));
+  };
+
   useEffect(() => {
     if (!open) return;
 
@@ -272,6 +277,7 @@ export default function OnboardingTutorial() {
     if (!open) return;
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") close();
+      if (event.key === "ArrowLeft") previous();
       if (event.key === "ArrowRight") next();
     };
     window.addEventListener("keydown", onKeyDown);
@@ -320,6 +326,14 @@ export default function OnboardingTutorial() {
         </ul>
 
         <div className="onboarding-actions">
+          <button
+            type="button"
+            className="onboarding-back"
+            onClick={previous}
+            disabled={isFirstStep}
+          >
+            上一步
+          </button>
           <button type="button" className="onboarding-skip" onClick={close}>
             跳过
           </button>

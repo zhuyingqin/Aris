@@ -11,6 +11,7 @@ import {
 import { createPortal } from "react-dom";
 import type { DesktopProject } from "../types";
 import { useStore } from "../store";
+import { CHAT_COPY } from "./i18n";
 import { fuzzyMatch, groupSessionsByProject } from "./model";
 import type { ChatSession } from "./types";
 
@@ -91,7 +92,9 @@ export default function ChatSidebar({
   const [menuPosition, setMenuPosition] = useState<SessionMenuPosition | null>(null);
   const [unreadIds, setUnreadIds] = useState<Set<string>>(new Set());
   const [manualGroupState, setManualGroupState] = useState<Record<string, "expanded" | "collapsed">>({});
+  const language = useStore((s) => s.language);
   const setTab = useStore((s) => s.setTab);
+  const copy = CHAT_COPY[language];
   const sessionListRef = useRef<HTMLDivElement | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const groupRefs = useRef(new Map<string, HTMLElement>());
@@ -436,23 +439,23 @@ export default function ChatSidebar({
     : undefined;
 
   return (
-    <aside className={`chat-sidebar${open ? " open" : ""}`} aria-label="Chat sessions">
+    <aside className={`chat-sidebar${open ? " open" : ""}`} aria-label={copy.searchChats}>
       <div className="chat-sidebar-container">
         <div className="chat-sidebar-top-group">
       <div className="chat-sidebar-head">
         <div className="chat-sidebar-top-row">
           <button className="chat-new-btn" onClick={() => void onNew()} disabled={busy}>
             <span className="chat-new-icon">+</span>
-            <span>新线程</span>
+            <span>{copy.newChat}</span>
           </button>
-          <button className="chat-sidebar-close" onClick={onClose} aria-label="Close chat sidebar">×</button>
+          <button className="chat-sidebar-close" onClick={onClose} aria-label={copy.closeSidebar}>×</button>
         </div>
         <button
           className="chat-scheduled-btn"
           onClick={() => setTab("scheduled")}
         >
           <span className="chat-scheduled-icon">⚡</span>
-          <span>定时任务</span>
+          <span>{copy.scheduledTasks}</span>
         </button>
       </div>
         </div>
@@ -460,12 +463,12 @@ export default function ChatSidebar({
         <input
           value={query}
           onChange={(event) => setQuery(event.target.value)}
-          placeholder="搜索对话"
-          aria-label="Search chats"
+          placeholder={copy.searchChats}
+          aria-label={copy.searchChats}
         />
       </div>
       <div className="chat-session-list" ref={sessionListRef}>
-        {groups.length === 0 && <div className="chat-session-empty">无匹配对话</div>}
+        {groups.length === 0 && <div className="chat-session-empty">{copy.noMatchingChats}</div>}
         {orderedGroups.map((group) => {
           const collapsed = groupCollapsed(group.id, group.sessions.length);
           const hasOverflow = groupHasOverflow(group.sessions.length);
@@ -493,7 +496,7 @@ export default function ChatSidebar({
                 className="chat-project-toggle"
                 type="button"
                 aria-expanded={!collapsed}
-                aria-label={`${group.label}, ${group.sessions.length} chats, ${collapsed ? "collapsed" : "expanded"}`}
+                aria-label={`${group.label}, ${copy.chatsCount(group.sessions.length)}, ${collapsed ? copy.collapsed : copy.expanded}`}
                 onClick={(event) => {
                   event.stopPropagation();
                   if (suppressProjectToggleClickRef.current === group.id) {
@@ -512,8 +515,8 @@ export default function ChatSidebar({
               <button
                 className="chat-project-add"
                 type="button"
-                aria-label={`New chat in ${group.label}`}
-                title="New chat in this project"
+                aria-label={copy.newChatInProject(group.label)}
+                title={copy.newChatInThisProject}
                 disabled={busy}
                 onPointerDown={(event) => event.stopPropagation()}
                 onClick={(event) => {
@@ -556,7 +559,7 @@ export default function ChatSidebar({
                   />
                 ) : (
                   <div className="chat-session-title">
-                    {unreadIds.has(session.id) && <span className="chat-unread-dot" aria-label="Unread" />}
+                    {unreadIds.has(session.id) && <span className="chat-unread-dot" aria-label={copy.unread} />}
                     {session.title}
                   </div>
                 )}

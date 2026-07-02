@@ -61,7 +61,9 @@ import type {
   SessionSummary,
   SessionTranscript,
   SkillMeta,
+  SystemPromptView,
   TokenUsageSummary,
+  UserPromptView,
 } from "../types";
 
 export const stateDir = () => invoke<string>("state_dir");
@@ -617,6 +619,8 @@ export const projectChatStarters = () => invoke<string[]>("project_chat_starters
 // ── Chat engine (P2) ──────────────────────────────────────────────────────────
 
 export const chatStatus = () => invoke<ChatStatus>("chat_status");
+export const systemPromptView = () => invoke<SystemPromptView>("system_prompt_view");
+export const userPromptView = () => invoke<UserPromptView | null>("user_prompt_view");
 export const chatModelOptions = () =>
   invoke<ChatModelOptions>("chat_model_options");
 export const chatModelSet = (model: string, persist = true) =>

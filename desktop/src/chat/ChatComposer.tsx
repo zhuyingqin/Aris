@@ -1,6 +1,8 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { fileSearch, isTauri } from "../api/tauri";
+import { useStore } from "../store";
 import type { ChatAttachment, DesktopCommandSpec, PermissionModeView, SkillMeta } from "../types";
+import { CHAT_COPY } from "./i18n";
 import { fuzzyMatch, fuzzyScore, makeId } from "./model";
 
 interface ContextStatusView {
@@ -188,10 +190,10 @@ export async function attachmentFromFile(file: File): Promise<ChatAttachment> {
 }
 
 const PERMISSION_OPTIONS = [
-  { value: "read-only", label: "Plan" },
-  { value: "workspace-write", label: "Accept edits" },
-  { value: "prompt", label: "Ask" },
-  { value: "danger-full-access", label: "Auto-approve" },
+  { value: "read-only" },
+  { value: "workspace-write" },
+  { value: "prompt" },
+  { value: "danger-full-access" },
 ];
 
 function ContextRing({ used, max }: { used: number; max: number }) {
@@ -278,6 +280,8 @@ export default function ChatComposer({
   contextMax,
   contextStatus,
 }: Props) {
+  const language = useStore((state) => state.language);
+  const copy = CHAT_COPY[language];
   const wrapRef = useRef<HTMLDivElement>(null);
   const pickerScrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -295,6 +299,7 @@ export default function ChatComposer({
   const fileSearchVersion = useRef(0);
   const recentSkills = loadRecent(RECENT_SKILLS_KEY);
   const recentFiles = loadRecent(RECENT_FILES_KEY);
+  const permissionLabel = permission ? (copy.permissionLabels[permission.mode] ?? permission.label) : "";
 
   const slashItems = useMemo<SlashPickerItem[]>(() => {
     const commandMatches = commands
@@ -516,11 +521,11 @@ export default function ChatComposer({
       {pickerMode && (
         <div className="skill-picker" role="listbox">
           <div className="skill-picker-header">
-            <span>{pickerMode === "skill" ? "Slash menu" : "Files"}</span>
-            <span>Up/Down select · Enter use · Esc close</span>
+            <span>{pickerMode === "skill" ? copy.slashMenu : copy.files}</span>
+            <span>{copy.pickerHint}</span>
           </div>
           <div className="skill-picker-scroll" ref={pickerScrollRef}>
-            {activeItems.length === 0 && <div className="picker-empty">No matches</div>}
+            {activeItems.length === 0 && <div className="picker-empty">{copy.noMatches}</div>}
             {pickerMode === "skill" && slashItems.map((item, index) => (
               <div key={`${item.kind}-${item.kind === "command" ? item.command.name : item.skill.name}`}>
                 {(index === 0 || slashItems[index - 1].group !== item.group) && <div className="picker-group-label">{item.group}</div>}
@@ -541,8 +546,8 @@ export default function ChatComposer({
             ))}
             {pickerMode === "file" && fileItems.map((path, index) => (
               <div key={path}>
-                {index === 0 && <div className="picker-group-label">{recentFiles.includes(path) ? "Recent" : "Search results"}</div>}
-                {index > 0 && !recentFiles.includes(path) && recentFiles.includes(fileItems[index - 1]) && <div className="picker-group-label">Search results</div>}
+                {index === 0 && <div className="picker-group-label">{recentFiles.includes(path) ? copy.recent : copy.searchResults}</div>}
+                {index > 0 && !recentFiles.includes(path) && recentFiles.includes(fileItems[index - 1]) && <div className="picker-group-label">{copy.searchResults}</div>}
                 <button
                   className={`file-picker-item${index === pickerIndex ? " active" : ""}`}
                   ref={index === pickerIndex ? activePickerItemRef : undefined}
@@ -569,7 +574,7 @@ export default function ChatComposer({
         </div>
       )}
       <div className="chat-input">
-        {dragging && <div className="chat-drop-overlay">Drop files to attach</div>}
+        {dragging && <div className="chat-drop-overlay">{copy.dropFiles}</div>}
         <input
           ref={fileInputRef}
           className="chat-file-input"
@@ -599,7 +604,7 @@ export default function ChatComposer({
                 <button
                   type="button"
                   onClick={() => onAttachmentsChange(attachments.filter((item) => item.id !== attachment.id))}
-                  aria-label={`Remove ${attachment.name}`}
+                  aria-label={copy.removeAttachment(attachment.name)}
                 >
                   x
                 </button>
@@ -609,15 +614,15 @@ export default function ChatComposer({
         )}
         {editing && (
           <div className="chat-edit-banner">
-            Editing an earlier message. Sending will replace later turns.
-            <button onClick={onCancelEdit}>Cancel</button>
+            {copy.editingNotice}
+            <button onClick={onCancelEdit}>{copy.cancel}</button>
           </div>
         )}
         <textarea
           ref={textareaRef}
           value={input}
           disabled={busy}
-          placeholder={ready ? "Message SomniQ" : "Configure an API key, or type /help"}
+          placeholder={ready ? copy.messagePlaceholder : copy.configurePlaceholder}
           onChange={(event) => {
             onInputChange(event.target.value);
             updatePicker(event.target.value, event.target.selectionStart ?? event.target.value.length);
@@ -681,9 +686,9 @@ export default function ChatComposer({
                   className={`chat-pill chat-perm-pill chat-perm-${permission.mode}`}
                   onClick={() => setPermMenuOpen((v) => !v)}
                   disabled={permissionBusy || busy}
-                  title={permission.description ?? "Permission mode"}
+                  title={permission.description ?? copy.permissionMode}
                 >
-                  {permission.label}
+                  {permissionLabel}
                   <span className="chat-pill-chevron">▾</span>
                 </button>
                 {permMenuOpen && (
@@ -698,7 +703,7 @@ export default function ChatComposer({
                           setPermMenuOpen(false);
                         }}
                       >
-                        {opt.label}
+                        {copy.permissionLabels[opt.value] ?? opt.value}
                       </button>
                     ))}
                   </div>
@@ -710,8 +715,8 @@ export default function ChatComposer({
               className="chat-upload-btn"
               onClick={() => fileInputRef.current?.click()}
               disabled={busy}
-              title="Attach files"
-              aria-label="Attach files"
+              title={copy.attachFiles}
+              aria-label={copy.attachFiles}
             >
               +
             </button>
@@ -726,7 +731,7 @@ export default function ChatComposer({
                   className="chat-pill chat-model-pill"
                   onClick={() => { if (canSwitchModel) setModelMenuOpen((v) => !v); }}
                   disabled={modelBusy || !canSwitchModel}
-                  title={canSwitchModel ? (busy ? "Switch model for the next turn" : "Switch model") : "Active model"}
+                  title={canSwitchModel ? (busy ? copy.switchModelNextTurn : copy.switchModel) : copy.activeModel}
                 >
                   {modelName}
                   {canSwitchModel && <span className="chat-pill-chevron">▾</span>}
@@ -751,13 +756,13 @@ export default function ChatComposer({
               </div>
             )}
             {busy ? (
-              <button className="chat-send-btn chat-stop-btn" onClick={onStop} aria-label="Stop response">■</button>
+              <button className="chat-send-btn chat-stop-btn" onClick={onStop} aria-label={copy.stopResponse}>■</button>
             ) : (
               <button
                 className="chat-send-btn"
                 onClick={onSubmit}
                 disabled={!canSubmit}
-                aria-label={editing ? "Resend edited message" : "Send message"}
+                aria-label={editing ? copy.resendEditedMessage : copy.sendMessage}
               >
                 ↑
               </button>

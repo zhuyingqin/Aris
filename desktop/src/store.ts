@@ -36,9 +36,12 @@ export type Tab =
   | "scheduled";
 
 export type Theme = "dark" | "light";
+export type Language = "cn" | "en";
 
 const THEME_STORAGE_KEY = "somniq-theme";
 const THEME_LEGACY_STORAGE_KEY = "aris-theme";
+const LANGUAGE_STORAGE_KEY = "somniq-ui-language";
+const LANGUAGE_LEGACY_STORAGE_KEY = "aris-ui-language";
 
 function readStoredTheme(): Theme {
   try {
@@ -57,6 +60,31 @@ function applyTheme(theme: Theme) {
     localStorage.removeItem(THEME_LEGACY_STORAGE_KEY);
   } catch {
     // Private mode / storage disabled — theme still applies for this session.
+  }
+}
+
+function normalizeLanguage(value: string | null | undefined): Language {
+  return value === "en" ? "en" : "cn";
+}
+
+function readStoredLanguage(): Language {
+  try {
+    return normalizeLanguage(localStorage.getItem(LANGUAGE_STORAGE_KEY) ?? localStorage.getItem(LANGUAGE_LEGACY_STORAGE_KEY));
+  } catch {
+    return "cn";
+  }
+}
+
+function applyLanguage(language: Language) {
+  if (typeof document !== "undefined") {
+    document.documentElement.lang = language === "cn" ? "zh-CN" : "en";
+    document.documentElement.dataset.language = language;
+  }
+  try {
+    localStorage.setItem(LANGUAGE_STORAGE_KEY, language);
+    localStorage.removeItem(LANGUAGE_LEGACY_STORAGE_KEY);
+  } catch {
+    // Storage may be unavailable; the current render still uses the in-memory value.
   }
 }
 
@@ -166,6 +194,9 @@ interface AppState {
   theme: Theme;
   setTheme: (theme: Theme) => void;
 
+  language: Language;
+  setLanguage: (language: Language) => void;
+
   /** One-shot composer prefill consumed by Chat (e.g. Literature → /arxiv). */
   pendingChatInput: string | null;
   setPendingChatInput: (value: string | null) => void;
@@ -198,7 +229,9 @@ interface AppState {
 }
 
 const initialTheme = readStoredTheme();
+const initialLanguage = readStoredLanguage();
 applyTheme(initialTheme);
+applyLanguage(initialLanguage);
 
 export const useStore = create<AppState>((set, get) => ({
   authed: initialAuthed(),
@@ -254,6 +287,13 @@ export const useStore = create<AppState>((set, get) => ({
   setTheme: (theme) => {
     applyTheme(theme);
     set({ theme });
+  },
+
+  language: initialLanguage,
+  setLanguage: (language) => {
+    const next = normalizeLanguage(language);
+    applyLanguage(next);
+    set({ language: next });
   },
 
   pendingChatInput: null,

@@ -1940,6 +1940,106 @@ pub struct ChatModelOptions {
 /// the Settings "Test" (the verified registry), so the dropdown never offers a
 /// model that would fail because its endpoint/key isn't configured. The active
 /// model is always included so the select reflects what is actually running.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemPromptView {
+    model: String,
+    full_tool_registry: bool,
+    sections: usize,
+    characters: usize,
+    prompt: String,
+}
+
+#[tauri::command]
+pub fn system_prompt_view() -> SystemPromptView {
+    let obj = crate::config::load_object();
+    let model = config_object_string(&obj, "executor_model")
+        .unwrap_or_else(|| aris_chat::DEFAULT_MODEL.to_string());
+    let prompt_sections = build_system_prompt_inner(&model, true);
+    let prompt = prompt_sections.join("\n\n");
+    SystemPromptView {
+        model,
+        full_tool_registry: true,
+        sections: prompt_sections.len(),
+        characters: prompt.chars().count(),
+        prompt,
+    }
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserPromptView {
+    session_id: String,
+    surface: String,
+    captured_at: u64,
+    blocks: usize,
+    images: usize,
+    characters: usize,
+    prompt: String,
+}
+
+fn last_user_prompt() -> &'static Mutex<Option<UserPromptView>> {
+    static LAST: OnceLock<Mutex<Option<UserPromptView>>> = OnceLock::new();
+    LAST.get_or_init(|| Mutex::new(None))
+}
+
+fn render_user_prompt_message(message: &ConversationMessage) -> (String, usize) {
+    let mut rendered = Vec::new();
+    let mut images = 0usize;
+    for block in &message.blocks {
+        match block {
+            ContentBlock::Text { text } => rendered.push(text.clone()),
+            ContentBlock::Image { media_type, data } => {
+                images += 1;
+                rendered.push(format!(
+                    "[Image: {media_type}, {} base64 chars]",
+                    data.chars().count()
+                ));
+            }
+            ContentBlock::ToolUse { name, input, .. } => {
+                rendered.push(format!("[Tool use: {name}]\n{input}"));
+            }
+            ContentBlock::ToolResult {
+                tool_name,
+                output,
+                is_error,
+                ..
+            } => {
+                rendered.push(format!(
+                    "[Tool result: {tool_name}, error={is_error}]\n{output}"
+                ));
+            }
+            ContentBlock::Thinking { thinking, .. } => rendered.push(thinking.clone()),
+        }
+    }
+    (rendered.join("\n\n"), images)
+}
+
+fn record_user_prompt(session_id: &str, surface: &str, message: &ConversationMessage) {
+    let (prompt, images) = render_user_prompt_message(message);
+    let captured_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default();
+    let view = UserPromptView {
+        session_id: session_id.to_string(),
+        surface: surface.to_string(),
+        captured_at,
+        blocks: message.blocks.len(),
+        images,
+        characters: prompt.chars().count(),
+        prompt,
+    };
+    if let Ok(mut last) = last_user_prompt().lock() {
+        *last = Some(view);
+    }
+}
+
+#[tauri::command]
+pub fn user_prompt_view() -> Option<UserPromptView> {
+    last_user_prompt().lock().ok().and_then(|last| last.clone())
+}
+
 #[tauri::command]
 pub fn chat_model_options() -> ChatModelOptions {
     let effective =
@@ -2650,6 +2750,14 @@ async fn run_chat_turn_with_context(
         }
         running.insert(session_id.clone(), cancelled.clone());
     }
+    let surface = if full_tool_registry {
+        "Chat"
+    } else if extra_blocked_tools == LITERATURE_AGENT_EXTRA_BLOCKED_TOOLS {
+        "Literature/Studio agent"
+    } else {
+        "Restricted agent"
+    };
+    record_user_prompt(&session_id, surface, &user_message);
     let _busy = ChatBusyGuard {
         running_turns: &state.running_turns,
         session_id: session_id.clone(),

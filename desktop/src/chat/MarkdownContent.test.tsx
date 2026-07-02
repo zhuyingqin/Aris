@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../api/tauri", () => ({
   fileOpen: vi.fn(),
+  isTauri: vi.fn(() => false),
 }));
 
 vi.mock("mermaid", () => ({
@@ -67,6 +68,37 @@ describe("MarkdownContent Studio links", () => {
     expect(block).toBeTruthy();
     expect(block?.textContent).toContain("text");
     expect(block?.textContent).toContain("const answer = 42;");
+  });
+
+  it("renders inline and display LaTeX formulas", () => {
+    const { container } = render(
+      <MarkdownContent text={"Inline $E=mc^2$.\n\n$$\\int_0^1 x^2\\,dx$$"} />,
+    );
+
+    expect(container.querySelectorAll(".katex").length).toBeGreaterThanOrEqual(2);
+    expect(container.querySelector(".katex-display")).toBeTruthy();
+    expect(container.textContent).not.toContain("$E=mc^2$");
+  });
+
+  it("renders backslash-delimited LaTeX formulas from model output", () => {
+    const { container } = render(
+      <MarkdownContent text={"Use \\(a^2+b^2=c^2\\) and then:\n\n\\[x=\\frac{-b}{2a}\\]"} />,
+    );
+
+    expect(container.querySelectorAll(".katex").length).toBeGreaterThanOrEqual(2);
+    expect(container.querySelector(".katex-display")).toBeTruthy();
+    expect(container.textContent).not.toContain("\\(");
+    expect(container.textContent).not.toContain("\\[");
+  });
+
+  it("does not render LaTeX delimiters inside fenced code", () => {
+    const { container } = render(
+      <MarkdownContent text={"```tex\n\\(x+y\\)\n$$z$$\n```"} />,
+    );
+
+    expect(container.querySelector(".katex")).toBeNull();
+    expect(container.querySelector(".md-code-block")?.textContent).toContain("\\(x+y\\)");
+    expect(container.querySelector(".md-code-block")?.textContent).toContain("$$z$$");
   });
 
   it("keeps an open streaming think tag inside a bounded thinking block", async () => {

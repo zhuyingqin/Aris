@@ -29,6 +29,7 @@ import CommandSelection from "./CommandSelection";
 import ChatSidebar from "./ChatSidebar";
 import ChatThread from "./ChatThread";
 import FilePathMenu from "./FilePathMenu";
+import { CHAT_COPY } from "./i18n";
 import { cleanChatTitle, latestFileChangesFromTurns, latestTodosFromTurns, makeId, patchLastAssistantTurn, textFromTurn, transcriptFromTurn, titleFromTurns } from "./model";
 import WorkflowFlow from "./WorkflowFlow";
 import type { ChatSession } from "./types";
@@ -313,6 +314,8 @@ interface PendingCommandSelection {
 }
 
 export default function Chat() {
+  const language = useStore((state) => state.language);
+  const copy = CHAT_COPY[language];
   const setTab = useStore((state) => state.setTab);
   const setError = useStore((state) => state.setError);
   const projects = useStore((state) => state.projects);
@@ -560,17 +563,21 @@ export default function Chat() {
 
   const refreshStatus = useCallback((model?: string | null) => {
     if (!isTauri()) {
-      setStatus({ ready: true, model: "Preview", provider: "Browser" });
+      setStatus({ ready: true, model: copy.previewModel, provider: copy.browserProvider });
       return;
     }
     const request = model ? chatModelSet(model, false) : chatStatus();
     request.then(setStatus).catch((error) => setStatus({ ready: false, message: String(error) }));
-  }, []);
+  }, [copy.browserProvider, copy.previewModel]);
 
   useEffect(() => {
     refreshStatus(currentSession?.model ?? null);
     if (!isTauri()) {
-      setPermission({ mode: "danger-full-access", label: "Auto-approve", description: "Auto-approve tool calls; no OS administrator elevation" });
+      setPermission({
+        mode: "danger-full-access",
+        label: copy.permissionLabels["danger-full-access"],
+        description: copy.previewPermissionDescription,
+      });
       return;
     }
     chatPermissionGet(currentId).then(setPermission).catch(() => setPermission(null));
@@ -580,7 +587,7 @@ export default function Chat() {
       .catch(() => setDesktopCommands(FALLBACK_SLASH_COMMANDS));
     skillsList().then(setSkills).catch(() => undefined);
     projectChatStarters().then(setStarters).catch(() => undefined);
-  }, [currentId, currentProject?.id, currentSession?.model, refreshStatus]);
+  }, [copy.permissionLabels, copy.previewPermissionDescription, currentId, currentProject?.id, currentSession?.model, refreshStatus]);
 
   const activeModel = currentSession?.model || status?.model || null;
 
@@ -628,7 +635,7 @@ export default function Chat() {
 
   const changePermission = async (mode: string) => {
     if (!isTauri()) {
-      const label = mode === "read-only" ? "Plan" : mode === "danger-full-access" ? "Auto-approve" : mode === "prompt" ? "Ask" : "Accept edits";
+      const label = copy.permissionLabels[mode] ?? mode;
       setPermission({ mode, label, description: "" });
       return;
     }
@@ -770,7 +777,7 @@ export default function Chat() {
         {
           id: makeId("turn"),
           role: "assistant",
-          blocks: [{ kind: "text", text: "Browser preview response. Run the Tauri app for live Chat." }],
+          blocks: [{ kind: "text", text: copy.previewResponse }],
         },
       ]);
       updateSession(session.id, (item) => ({ ...item, draft: "", draftAttachments: [] }));
@@ -789,7 +796,7 @@ export default function Chat() {
     updateSession(session.id, (item) => ({ ...item, draft: "", draftAttachments: [] }));
     setEditingTurnId(null);
     await run(session.id, request);
-  }, [markBackendContextSynced, patchTurns, run, status?.model, updateSession]);
+  }, [copy.previewResponse, markBackendContextSynced, patchTurns, run, status?.model, updateSession]);
 
   const runSlashCommand = useCallback(async (
     session: ChatSession,
@@ -803,7 +810,7 @@ export default function Chat() {
       patchTurns(session.id, (turns) => [
         ...turns,
         userTurn(text, []),
-        assistantTextTurn("This desktop command is disabled in this build."),
+        assistantTextTurn(copy.disabledCommand),
       ]);
       updateSession(session.id, (item) => ({ ...item, draft: "", draftAttachments: [] }));
       setEditingTurnId(null);
@@ -818,7 +825,7 @@ export default function Chat() {
         ? FALLBACK_SLASH_COMMANDS
           .map((item) => `/${item.name}${item.argumentHint ? ` ${item.argumentHint}` : ""} - ${item.description}`)
           .join("\n")
-        : "Desktop slash commands run inside the Tauri app.";
+        : copy.previewCommandReply;
       patchTurns(session.id, (turns) => [...turns, userTurn(text, []), assistantTextTurn(reply)]);
       updateSession(session.id, (item) => ({ ...item, draft: "", draftAttachments: [] }));
       setEditingTurnId(null);
@@ -876,7 +883,7 @@ export default function Chat() {
       setEditingTurnId(null);
       return true;
     }
-  }, [beginRun, patchTurns, refreshStatus, setError, setTab, skills, updateSession]);
+  }, [beginRun, copy.disabledCommand, copy.previewCommandReply, patchTurns, refreshStatus, setError, setTab, skills, updateSession]);
 
   useEffect(() => {
     const text = pendingChatRunInput?.trim();
@@ -1179,14 +1186,14 @@ export default function Chat() {
               fontSize: "12px",
               fontWeight: 500
             }}>
-              {status?.ready ? status.provider : (status?.message ?? "Checking...")}
+              {status?.ready ? status.provider : (status?.message ?? copy.checking)}
             </div>
             <button
               className="chat-export-btn"
               onClick={() => void exportCurrentChat()}
               disabled={currentChatBusy || exporting || turns.length === 0}
-              title="Export current chat"
-              aria-label="Export current chat"
+              title={copy.exportChat}
+              aria-label={copy.exportChat}
               style={{ background: "transparent", border: "none", color: "var(--text-dim)", padding: "4px", cursor: "pointer", display: "flex", alignItems: "center" }}
             >
               {exporting ? (
@@ -1199,7 +1206,7 @@ export default function Chat() {
                 </svg>
               )}
             </button>
-            {!status?.ready && <button onClick={() => setTab("settings")}>Settings</button>}
+            {!status?.ready && <button onClick={() => setTab("settings")}>{copy.settings}</button>}
           </div>,
           document.getElementById("app-chat-actions-portal")!
         )}
@@ -1273,8 +1280,8 @@ export default function Chat() {
       </main>
       {deleted && (
         <div className="chat-undo">
-          {`Deleted "${deleted.title}"`}
-          <button onClick={undoDelete}>Undo</button>
+          {copy.deleted(deleted.title)}
+          <button onClick={undoDelete}>{copy.undo}</button>
         </div>
       )}
       {fileMenu && (

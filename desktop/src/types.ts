@@ -500,6 +500,24 @@ export interface ChatStatus {
   memoryFiles?: number | null;
 }
 
+export interface SystemPromptView {
+  model: string;
+  fullToolRegistry: boolean;
+  sections: number;
+  characters: number;
+  prompt: string;
+}
+
+export interface UserPromptView {
+  sessionId: string;
+  surface: string;
+  capturedAt: number;
+  blocks: number;
+  images: number;
+  characters: number;
+  prompt: string;
+}
+
 export interface ChatModelOption {
   value: string;
   label: string;

@@ -1,7 +1,10 @@
 import { isValidElement, memo, useEffect, useRef, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
 import rehypeHighlight from "rehype-highlight";
+import rehypeKatex from "rehype-katex";
+import "katex/dist/katex.min.css";
 import "highlight.js/styles/github-dark.css";
 import { fileOpen } from "../api/tauri";
 import { useStore } from "../store";
@@ -85,6 +88,18 @@ function splitMarkdownFences(raw: string): MarkdownChunk[] {
   if (fence) flushCode();
   else flushMarkdown();
   return chunks;
+}
+
+function normalizeMathDelimiters(raw: string): string {
+  return splitMarkdownFences(raw)
+    .map((chunk) => {
+      if (chunk.kind === "code") return chunk.content;
+      return chunk.content
+        .replace(/\\\[([\s\S]+?)\\\]/g, (_match, formula: string) => `\n$$\n${formula.trim()}\n$$\n`)
+        .replace(/(^|\n)[ \t]*\$\$([^\n][\s\S]*?[^\n])\$\$[ \t]*(?=\n|$)/g, (_match, prefix: string, formula: string) => `${prefix}$$\n${formula.trim()}\n$$`)
+        .replace(/\\\(([\s\S]+?)\\\)/g, (_match, formula: string) => `$${formula}$`);
+    })
+    .join("");
 }
 
 function extractThinking(raw: string): ExtractedThinking {
@@ -393,7 +408,12 @@ export const ThinkBlock = memo(function ThinkBlock({
       </button>
       {open && (
         <div className="md-think-body" ref={bodyRef}>
-          <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
+          <ReactMarkdown
+            remarkPlugins={[remarkGfm, remarkMath]}
+            rehypePlugins={[[rehypeKatex, { throwOnError: false }]]}
+          >
+            {normalizeMathDelimiters(content)}
+          </ReactMarkdown>
         </div>
       )}
     </div>
@@ -429,8 +449,8 @@ function MarkdownContent({ text, streaming = false }: { text: string; streaming?
         return (
           <ReactMarkdown
             key={index}
-            remarkPlugins={[remarkGfm]}
-            rehypePlugins={[rehypeHighlight]}
+            remarkPlugins={[remarkGfm, remarkMath]}
+            rehypePlugins={[[rehypeKatex, { throwOnError: false }], rehypeHighlight]}
             components={{
               pre({ children }) {
                 return <>{children}</>;
@@ -450,7 +470,7 @@ function MarkdownContent({ text, streaming = false }: { text: string; streaming?
               },
             }}
           >
-            {segment.content}
+            {normalizeMathDelimiters(segment.content)}
           </ReactMarkdown>
         );
       })}

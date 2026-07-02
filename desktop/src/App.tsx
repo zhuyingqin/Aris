@@ -2,7 +2,7 @@ import { lazy, memo, Suspense, useCallback, useDeferredValue, useEffect, useRef,
 import { open } from "@tauri-apps/plugin-dialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { appRelaunch, appUpdateCheck, appUpdateDownloadAndInstall, isTauri, newapiBootstrap, type NewApiAccount } from "./api/tauri";
-import { isManagedAuthInvalidError, useStore, type Tab } from "./store";
+import { isManagedAuthInvalidError, useStore, type Language, type Tab } from "./store";
 import type { AppUpdateInfo, AppUpdateProgress } from "./types";
 import ErrorBoundary from "./ErrorBoundary";
 import Chat from "./chat/Chat";
@@ -23,27 +23,189 @@ const Studio = lazy(loadStudio);
 const Mail = lazy(loadMail);
 const ChatPane = memo(Chat);
 
+type AppShellCopy = {
+  appMenu: string[];
+  groups: Record<"Build" | "Library" | "System", string>;
+  nav: Record<Tab, string>;
+  loading: (label: string) => string;
+  viewErrorTitle: string;
+  viewErrorBody: string;
+  tryAgain: string;
+  userFallback: string;
+  accountInfo: string;
+  account: string;
+  balance: (value: string) => string;
+  sidebarExpandedTitle: string;
+  sidebarCollapsedTitle: string;
+  sidebarExpandedLabel: string;
+  sidebarCollapsedLabel: string;
+  back: string;
+  forward: string;
+  appMenuLabel: string;
+  minimizeWindow: string;
+  maximizeWindow: string;
+  closeWindow: string;
+  userMenu: string;
+  settings: string;
+  remainingUsage: string;
+  logout: string;
+  user: string;
+  closeNavigation: string;
+  toggleNavigation: string;
+  menu: string;
+  currentProject: string;
+  noProject: string;
+  projects: string;
+  dragToReorder: string;
+  addProject: string;
+  add: string;
+  runStateDir: string;
+  dismiss: string;
+  updateReady: (version: string) => string;
+  updateDownloading: (version: string, percent?: number | null) => string;
+  updateAvailable: (version: string) => string;
+};
+
+const APP_COPY: Record<Language, AppShellCopy> = {
+  cn: {
+    appMenu: ["文件", "编辑", "视图", "帮助"],
+    groups: { Build: "构建", Library: "资料库", System: "系统" },
+    nav: {
+      chat: "对话",
+      lab: "实验室",
+      literature: "文献",
+      studio: "工作室",
+      mail: "邮箱",
+      extensions: "扩展",
+      settings: "设置",
+      sessions: "会话",
+      scheduled: "定时任务",
+    },
+    loading: (label) => `正在加载${label}...`,
+    viewErrorTitle: "当前视图出现界面错误。",
+    viewErrorBody: "当前页面无法渲染。",
+    tryAgain: "重试",
+    userFallback: "用户",
+    accountInfo: "账户信息",
+    account: "账户",
+    balance: (value) => `余额 ${value}`,
+    sidebarExpandedTitle: "展开侧栏",
+    sidebarCollapsedTitle: "折叠侧栏",
+    sidebarExpandedLabel: "展开导航侧栏",
+    sidebarCollapsedLabel: "折叠导航侧栏",
+    back: "后退",
+    forward: "前进",
+    appMenuLabel: "应用菜单",
+    minimizeWindow: "最小化窗口",
+    maximizeWindow: "最大化窗口",
+    closeWindow: "关闭窗口",
+    userMenu: "用户菜单",
+    settings: "设置",
+    remainingUsage: "剩余用量",
+    logout: "退出登录",
+    user: "用户",
+    closeNavigation: "关闭导航",
+    toggleNavigation: "切换导航",
+    menu: "菜单",
+    currentProject: "当前项目",
+    noProject: "无项目",
+    projects: "项目",
+    dragToReorder: "拖动排序",
+    addProject: "添加 SomniQ 项目",
+    add: "添加",
+    runStateDir: "运行状态目录",
+    dismiss: "关闭",
+    updateReady: (version) => `更新${version}已安装，点击重启 SomniQ Studio。`,
+    updateDownloading: (version, percent) => percent != null ? `正在安装更新${version}：${percent}%` : `正在安装更新${version}`,
+    updateAvailable: (version) => `发现更新${version}，点击安装。`,
+  },
+  en: {
+    appMenu: ["File", "Edit", "View", "Help"],
+    groups: { Build: "Build", Library: "Library", System: "System" },
+    nav: {
+      chat: "Chat",
+      lab: "Lab",
+      literature: "Literature",
+      studio: "Studio",
+      mail: "Mail",
+      extensions: "Extensions",
+      settings: "Settings",
+      sessions: "Sessions",
+      scheduled: "Scheduled",
+    },
+    loading: (label) => `Loading ${label}...`,
+    viewErrorTitle: "This view hit a UI error.",
+    viewErrorBody: "The current screen could not render.",
+    tryAgain: "Try again",
+    userFallback: "User",
+    accountInfo: "Account info",
+    account: "Account",
+    balance: (value) => `Balance ${value}`,
+    sidebarExpandedTitle: "Expand sidebar",
+    sidebarCollapsedTitle: "Collapse sidebar",
+    sidebarExpandedLabel: "Expand navigation sidebar",
+    sidebarCollapsedLabel: "Collapse navigation sidebar",
+    back: "Back",
+    forward: "Forward",
+    appMenuLabel: "Application menu",
+    minimizeWindow: "Minimize window",
+    maximizeWindow: "Maximize window",
+    closeWindow: "Close window",
+    userMenu: "User menu",
+    settings: "Settings",
+    remainingUsage: "Remaining usage",
+    logout: "Sign out",
+    user: "User",
+    closeNavigation: "Close navigation",
+    toggleNavigation: "Toggle navigation",
+    menu: "Menu",
+    currentProject: "Current project",
+    noProject: "No project",
+    projects: "Projects",
+    dragToReorder: "Drag to reorder",
+    addProject: "Add SomniQ project",
+    add: "Add",
+    runStateDir: "run-state directory",
+    dismiss: "Dismiss",
+    updateReady: (version) => `Update${version} installed. Restart SomniQ Studio.`,
+    updateDownloading: (version, percent) => percent != null ? `Installing update${version}: ${percent}%` : `Installing update${version}`,
+    updateAvailable: (version) => `Update${version} available. Click to install.`,
+  },
+};
+
+const TAB_MODULE_LABELS: Record<Tab, string> = {
+  chat: "Chat",
+  lab: "Lab",
+  literature: "Literature",
+  studio: "Studio",
+  mail: "Mail",
+  extensions: "Extensions",
+  settings: "Settings",
+  sessions: "Sessions",
+  scheduled: "Scheduled",
+};
+
 function preloadTabModule(tabId: string) {
   if (tabId === "literature") void loadLiterature();
   else if (tabId === "studio") void loadStudio();
   else if (tabId === "mail") void loadMail();
 }
 
-function AppLoadingPane({ label }: { label: string }) {
+function AppLoadingPane({ copy, label }: { copy: AppShellCopy; label: string }) {
   return (
     <div className="app-loading-pane" role="status" aria-live="polite">
       <span className="app-loading-spinner" aria-hidden="true" />
-      <span>Loading {label}...</span>
+      <span>{copy.loading(label)}</span>
     </div>
   );
 }
 
-function AppViewFallback({ error, reset }: { error: Error; reset: () => void }) {
+function AppViewFallback({ copy, error, reset }: { copy: AppShellCopy; error: Error; reset: () => void }) {
   return (
     <div className="app-view-error" role="alert">
-      <strong>This view hit a UI error.</strong>
-      <span>{error.message || "The current screen could not render."}</span>
-      <button type="button" onClick={reset}>Try again</button>
+      <strong>{copy.viewErrorTitle}</strong>
+      <span>{error.message || copy.viewErrorBody}</span>
+      <button type="button" onClick={reset}>{copy.tryAgain}</button>
     </div>
   );
 }
@@ -67,8 +229,6 @@ const SETTINGS_TAB_REQUEST_KEY = "somniq-settings-tab-request";
 const SETTINGS_TAB_REQUEST_EVENT = "somniq-settings-tab-request";
 
 type RequestedSettingsTab = "general" | "auth" | "usage" | "about";
-
-const WINDOW_MENUS = ["文件", "编辑", "视图", "帮助"];
 
 const IC = (p: { d: string; extra?: string }) => (
   <svg width="16" height="16" viewBox="0 0 16 16" fill="none"
@@ -238,10 +398,6 @@ const NAV_GROUPS: { group: string; items: NavItem[] }[] = [
   },
 ];
 
-const LABELS: Record<Tab, string> = Object.fromEntries(
-  NAV_GROUPS.flatMap((g) => g.items).map((i) => [i.id, i.label]),
-) as Record<Tab, string>;
-
 function moveProjectId(
   ids: string[],
   draggedId: string,
@@ -283,32 +439,32 @@ function writeCachedAccount(account: NewApiAccount | null) {
   }
 }
 
-function accountName(account: NewApiAccount | null) {
+function accountName(account: NewApiAccount | null, fallback: string) {
   const displayName = account?.displayName?.trim();
   if (displayName) return displayName;
   const username = account?.username?.trim();
-  if (!username) return "用户";
+  if (!username) return fallback;
   const at = username.indexOf("@");
   return at > 0 ? username.slice(0, at) : username;
 }
 
-function accountEmail(account: NewApiAccount | null) {
-  return account?.username?.trim() || account?.displayName?.trim() || "账户信息";
+function accountEmail(account: NewApiAccount | null, fallback: string) {
+  return account?.username?.trim() || account?.displayName?.trim() || fallback;
 }
 
-function accountPlan(account: NewApiAccount | null) {
+function accountPlan(account: NewApiAccount | null, copy: AppShellCopy) {
   const subscription = account?.subscriptionName?.trim();
   if (subscription) return subscription;
-  if (account && Number.isFinite(account.quota)) return `余额 ${formatAccountQuota(account.quota)}`;
-  return "账户";
+  if (account && Number.isFinite(account.quota)) return copy.balance(formatAccountQuota(account.quota));
+  return copy.account;
 }
 
 function formatAccountQuota(credits: number): string {
   return `$${(credits / 500000).toFixed(2)}`;
 }
 
-function accountInitials(name: string, email: string) {
-  const source = (name && name !== "用户" ? name : email).trim();
+function accountInitials(name: string, email: string, userFallback: string) {
+  const source = (name && name !== userFallback ? name : email).trim();
   const local = source.includes("@") ? source.slice(0, source.indexOf("@")) : source;
   const parts = local.split(/[\s._-]+/).filter(Boolean);
   const chars = parts.length > 1
@@ -335,6 +491,7 @@ function windowAction(action: "minimize" | "maximize" | "close") {
 }
 
 export default function App() {
+  const language = useStore((s) => s.language);
   const tab = useStore((s) => s.tab);
   const setTab = useStore((s) => s.setTab);
   const logout = useStore((s) => s.logout);
@@ -685,14 +842,13 @@ export default function App() {
   const labWorkbench = renderedTab === "lab";
   const chatShell = renderedTab === "chat";
   const showUpdateIndicator = updateState === "available" || updateState === "downloading" || updateState === "ready";
+  const copy = APP_COPY[language];
   const updateVersionLabel = updateInfo?.version ? ` v${updateInfo.version}` : "";
   const updateTitle = updateState === "ready"
-    ? `Update${updateVersionLabel} installed. Restart SomniQ Studio.`
+    ? copy.updateReady(updateVersionLabel)
     : updateState === "downloading"
-      ? updateProgress?.percent != null
-        ? `Installing update${updateVersionLabel}: ${updateProgress.percent}%`
-        : `Installing update${updateVersionLabel}`
-      : `Update${updateVersionLabel} available. Click to install.`;
+      ? copy.updateDownloading(updateVersionLabel, updateProgress?.percent)
+      : copy.updateAvailable(updateVersionLabel);
   const handleUpdateIndicatorClick = async () => {
     if (updateState === "ready") {
       try {
@@ -749,10 +905,10 @@ export default function App() {
       <span className="app-update-badge" aria-hidden="true" />
     </button>
   ) : null;
-  const userName = accountName(account);
-  const userEmail = accountEmail(account);
-  const userPlan = accountPlan(account);
-  const userInitials = accountInitials(userName, userEmail);
+  const userName = accountName(account, copy.userFallback);
+  const userEmail = accountEmail(account, copy.accountInfo);
+  const userPlan = accountPlan(account, copy);
+  const userInitials = accountInitials(userName, userEmail, copy.userFallback);
 
   return (
     <div
@@ -765,19 +921,19 @@ export default function App() {
             className="window-titlebar-sidebar"
             type="button"
             onClick={toggleSidebar}
-            title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
-            aria-label={sidebarCollapsed ? "Expand navigation sidebar" : "Collapse navigation sidebar"}
+            title={sidebarCollapsed ? copy.sidebarExpandedTitle : copy.sidebarCollapsedTitle}
+            aria-label={sidebarCollapsed ? copy.sidebarExpandedLabel : copy.sidebarCollapsedLabel}
           >
             <PanelIcon />
           </button>
-          <button className="window-nav-btn" type="button" disabled aria-label="Back">
+          <button className="window-nav-btn" type="button" disabled aria-label={copy.back}>
             <Chevron dir="left" />
           </button>
-          <button className="window-nav-btn" type="button" disabled aria-label="Forward">
+          <button className="window-nav-btn" type="button" disabled aria-label={copy.forward}>
             <Chevron dir="right" />
           </button>
-          <nav className="window-menu" aria-label="Application menu">
-            {WINDOW_MENUS.map((item) => (
+          <nav className="window-menu" aria-label={copy.appMenuLabel}>
+            {copy.appMenu.map((item) => (
               <button key={item} type="button">
                 {item}
               </button>
@@ -793,13 +949,13 @@ export default function App() {
         </div>
         <div className="window-titlebar-controls">
           {renderUpdateIndicator()}
-          <button type="button" aria-label="Minimize window" onClick={() => windowAction("minimize")}>
+          <button type="button" aria-label={copy.minimizeWindow} onClick={() => windowAction("minimize")}>
             {WinCtl.minimize}
           </button>
-          <button type="button" aria-label="Maximize window" onClick={() => windowAction("maximize")}>
+          <button type="button" aria-label={copy.maximizeWindow} onClick={() => windowAction("maximize")}>
             {WinCtl.maximize}
           </button>
-          <button type="button" className="close" aria-label="Close window" onClick={() => windowAction("close")}>
+          <button type="button" className="close" aria-label={copy.closeWindow} onClick={() => windowAction("close")}>
             {WinCtl.close}
           </button>
         </div>
@@ -811,7 +967,7 @@ export default function App() {
         <div className="sidebar-nav-scroll">
           {NAV_GROUPS.map((g) => (
             <div className="nav-group" key={g.group}>
-              <div className="nav-group-label">{g.group}</div>
+              <div className="nav-group-label">{copy.groups[g.group as keyof AppShellCopy["groups"]]}</div>
               {g.items.map((t) => (
                 <button
                   key={t.id}
@@ -824,7 +980,7 @@ export default function App() {
                   }}
                 >
                   <span className="nav-icon">{t.icon}</span>
-                  {t.label}
+                  {copy.nav[t.id as Tab]}
                 </button>
               ))}
             </div>
@@ -832,25 +988,25 @@ export default function App() {
         </div>
         <div className="sidebar-user-area" ref={userMenuRef}>
           {userMenuOpen && (
-            <div className="sidebar-user-menu" role="menu" aria-label="用户菜单">
+            <div className="sidebar-user-menu" role="menu" aria-label={copy.userMenu}>
               <div className="sidebar-user-menu-row muted" role="presentation">
                 <span className="sidebar-user-menu-icon"><UserCircleIcon /></span>
                 <span className="sidebar-user-menu-email">{userEmail}</span>
               </div>
               <button className="sidebar-user-menu-row" type="button" role="menuitem" onClick={() => openSettingsTab("general")}>
                 <span className="sidebar-user-menu-icon"><GearIcon /></span>
-                <span>设置</span>
+                <span>{copy.settings}</span>
                 <span className="sidebar-user-shortcut">Ctrl+,</span>
               </button>
               <div className="sidebar-user-menu-divider" role="separator" />
               <button className="sidebar-user-menu-row" type="button" role="menuitem" onClick={() => openSettingsTab("auth")}>
                 <span className="sidebar-user-menu-icon"><UsageIcon /></span>
-                <span>剩余用量</span>
+                <span>{copy.remainingUsage}</span>
                 <span className="sidebar-user-chevron"><Chevron dir="right" size={13} /></span>
               </button>
               <button className="sidebar-user-menu-row" type="button" role="menuitem" onClick={handleLogout}>
                 <span className="sidebar-user-menu-icon"><LogoutIcon /></span>
-                <span>退出登录</span>
+                <span>{copy.logout}</span>
               </button>
               <div className="sidebar-user-menu-footer" role="presentation">
                 <span className="sidebar-user-avatar">{userInitials}</span>
@@ -866,7 +1022,7 @@ export default function App() {
             type="button"
             aria-haspopup="menu"
             aria-expanded={userMenuOpen}
-            aria-label="用户"
+            aria-label={copy.user}
             onClick={() => {
               setProjectMenuOpen(false);
               setUserMenuOpen((open) => !open);
@@ -891,7 +1047,7 @@ export default function App() {
         <button
           className="app-nav-backdrop"
           onClick={() => setMobileNavOpen(false)}
-          aria-label="Close navigation"
+          aria-label={copy.closeNavigation}
         />
       )}
 
@@ -901,22 +1057,22 @@ export default function App() {
             className="app-nav-toggle"
             data-onboarding-target="mobile-menu"
             onClick={() => setMobileNavOpen((open) => !open)}
-            aria-label="Toggle navigation"
+            aria-label={copy.toggleNavigation}
             aria-expanded={mobileNavOpen}
           >
-            Menu
+            {copy.menu}
           </button>
           {sidebarCollapsed && (
             <button
               className="sidebar-expand-btn"
               onClick={toggleSidebar}
-              title="Expand sidebar"
-              aria-label="Expand navigation sidebar"
+              title={copy.sidebarExpandedTitle}
+              aria-label={copy.sidebarExpandedLabel}
             >
               ›
             </button>
           )}
-          <div className="app-title">{LABELS[tab]}</div>
+          <div className="app-title">{copy.nav[tab]}</div>
           {tab === "literature" && (
             <LiteratureViewTabs
               pageView={literaturePageView}
@@ -934,7 +1090,7 @@ export default function App() {
             <button
               className="project-switcher-trigger"
               type="button"
-              aria-label="Current project"
+              aria-label={copy.currentProject}
               aria-haspopup="listbox"
               aria-expanded={projectMenuOpen}
               disabled={projectBusy || projects.length === 0}
@@ -942,14 +1098,14 @@ export default function App() {
               title={currentProject?.path}
             >
               <span className="project-switcher-current">
-                {currentProject?.name ?? "No project"}
+                {currentProject?.name ?? copy.noProject}
               </span>
               <span className="project-switcher-caret" aria-hidden="true">
                 <Chevron dir="down" size={13} />
               </span>
             </button>
             {projectMenuOpen && (
-              <div className="project-menu" role="listbox" aria-label="Projects">
+              <div className="project-menu" role="listbox" aria-label={copy.projects}>
                 {orderedProjects.map((project) => (
                   <div
                     key={project.id}
@@ -982,7 +1138,7 @@ export default function App() {
                     <span
                       className="project-drag-handle"
                       aria-hidden="true"
-                      title="Drag to reorder"
+                      title={copy.dragToReorder}
                       onClick={(event) => {
                         event.preventDefault();
                         event.stopPropagation();
@@ -1003,14 +1159,14 @@ export default function App() {
               className="project-add-btn"
               onClick={() => void chooseProject()}
               disabled={projectBusy}
-              title="Add SomniQ project"
-              aria-label="Add project"
+              title={copy.addProject}
+              aria-label={copy.addProject}
             >
               <PlusIcon />
-              <span>Add</span>
+              <span>{copy.add}</span>
             </button>
           </div>
-          <div className="dir" title={stateDir || "run-state directory"}>
+          <div className="dir" title={stateDir || copy.runStateDir}>
             {currentProject?.path ?? stateDir}
           </div>
         </div>
@@ -1019,29 +1175,29 @@ export default function App() {
       <main className="app-main" data-onboarding-target="workspace">
         <ErrorBoundary
           resetKey={renderedTab}
-          fallback={(viewError, reset) => <AppViewFallback error={viewError} reset={reset} />}
+          fallback={(viewError, reset) => <AppViewFallback copy={copy} error={viewError} reset={reset} />}
         >
           <div hidden={renderedTab !== "chat"}>
             <ErrorBoundary
               resetKey="chat"
-              fallback={(viewError, reset) => <AppViewFallback error={viewError} reset={reset} />}
+              fallback={(viewError, reset) => <AppViewFallback copy={copy} error={viewError} reset={reset} />}
             >
               <ChatPane />
             </ErrorBoundary>
           </div>
           {renderedTab === "lab" && <Lab />}
           {renderedTab === "literature" && (
-            <Suspense fallback={<AppLoadingPane label="Literature" />}>
+            <Suspense fallback={<AppLoadingPane copy={copy} label={TAB_MODULE_LABELS.literature} />}>
               <Literature pageView={literaturePageView} onPageViewChange={setLiteraturePageView} />
             </Suspense>
           )}
           {renderedTab === "studio" && (
-            <Suspense fallback={<AppLoadingPane label="Studio" />}>
+            <Suspense fallback={<AppLoadingPane copy={copy} label={TAB_MODULE_LABELS.studio} />}>
               <Studio />
             </Suspense>
           )}
           {renderedTab === "mail" && (
-            <Suspense fallback={<AppLoadingPane label="Mail" />}>
+            <Suspense fallback={<AppLoadingPane copy={copy} label={TAB_MODULE_LABELS.mail} />}>
               <Mail />
             </Suspense>
           )}
@@ -1054,7 +1210,7 @@ export default function App() {
         {error && (
           <div className="toast" role="alert" aria-live="assertive">
             {error}
-            <button onClick={() => setError(null)}>dismiss</button>
+            <button onClick={() => setError(null)}>{copy.dismiss}</button>
           </div>
         )}
       </main>

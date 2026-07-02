@@ -293,6 +293,8 @@ pub fn run() {
             lab::lab_run_sweep,
             lab::lab_export_sweep_manifest,
             engine::chat_status,
+            engine::system_prompt_view,
+            engine::user_prompt_view,
             engine::chat_model_options,
             engine::chat_model_set,
             engine::chat_permission_get,
