@@ -133,6 +133,8 @@ pub fn home_dir() -> String {
 }
 
 pub const ARIS_ENABLE_CLAUDE_SKILLS_ENV: &str = "ARIS_ENABLE_CLAUDE_SKILLS";
+pub const SOMNIQ_PROJECT_DIR_NAME: &str = ".somniq";
+pub const SOMNIQ_PROJECT_TMP_DIR_NAME: &str = "tmp";
 
 /// SomniQ user-level skills directory.
 #[must_use]
@@ -146,7 +148,31 @@ pub fn aris_user_skills_dir() -> std::path::PathBuf {
 /// SomniQ project-level skills directory.
 #[must_use]
 pub fn aris_project_skills_dir(cwd: impl AsRef<std::path::Path>) -> std::path::PathBuf {
-    cwd.as_ref().join(".somniq").join("skills")
+    somniq_project_dir(cwd).join("skills")
+}
+
+/// SomniQ project metadata and scratch directory.
+#[must_use]
+pub fn somniq_project_dir(cwd: impl AsRef<std::path::Path>) -> std::path::PathBuf {
+    cwd.as_ref().join(SOMNIQ_PROJECT_DIR_NAME)
+}
+
+/// SomniQ-owned project-local temporary directory.
+#[must_use]
+pub fn somniq_project_tmp_dir(cwd: impl AsRef<std::path::Path>) -> std::path::PathBuf {
+    somniq_project_dir(cwd).join(SOMNIQ_PROJECT_TMP_DIR_NAME)
+}
+
+/// HOME used by sandboxed commands when they need a writable project-local home.
+#[must_use]
+pub fn somniq_sandbox_home_dir(cwd: impl AsRef<std::path::Path>) -> std::path::PathBuf {
+    somniq_project_tmp_dir(cwd).join("sandbox").join("home")
+}
+
+/// TMPDIR used by sandboxed commands.
+#[must_use]
+pub fn somniq_sandbox_tmp_dir(cwd: impl AsRef<std::path::Path>) -> std::path::PathBuf {
+    somniq_project_tmp_dir(cwd).join("sandbox").join("tmp")
 }
 
 /// Legacy Claude Code user-level skills directory.

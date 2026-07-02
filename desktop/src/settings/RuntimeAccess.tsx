@@ -27,6 +27,10 @@ const isWindows =
 const playwrightArgs = () => [
   isWindows ? "--browser=msedge" : "--browser=chrome",
   "--caps=pdf",
+  "--user-data-dir",
+  ".somniq/tmp/browser/profile",
+  "--output-dir",
+  ".somniq/tmp/browser/output",
 ];
 
 const PRESETS: Record<string, McpStdioServerInput> = {

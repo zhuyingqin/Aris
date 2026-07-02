@@ -18,6 +18,7 @@ const MAX_IMPLICIT_READ_FILE_LINES: usize = 800;
 const LONG_FILE_HEAD_LINES: usize = 120;
 const LONG_FILE_TAIL_LINES: usize = 40;
 const LONG_FILE_MAX_OUTLINE_LINES: usize = 200;
+const MAX_GLOB_SEARCH_RESULTS: usize = 100;
 const READONLY_ROOTS_ENV: &str = "ARIS_READONLY_ROOTS";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -445,25 +446,40 @@ pub fn glob_search(pattern: &str, path: Option<&str>) -> io::Result<GlobSearchOu
         ensure_glob_search_allowed(&search_path, &readable_roots)?;
     }
     let search_pattern = search_path.to_string_lossy().into_owned();
-
-    let mut matches = Vec::new();
-    let entries = glob::glob(&search_pattern)
+    let relative_filter = Pattern::new(pattern)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error.to_string()))?;
-    for entry in entries.flatten() {
-        if !entry.is_file() {
-            continue;
-        }
-        if root.is_some() {
-            let Ok(canonical) = entry.canonicalize() else {
+    let absolute_filter = Pattern::new(&display_path(&search_path))
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error.to_string()))?;
+
+    let mut matches = if let Some(fast_matches) = fast_glob_matches(
+        &base_dir,
+        &relative_filter,
+        &absolute_filter,
+        root.as_ref(),
+        &readable_roots,
+    )? {
+        fast_matches
+    } else {
+        let mut matches = Vec::new();
+        let entries = glob::glob(&search_pattern)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error.to_string()))?;
+        for entry in entries.flatten() {
+            if !entry.is_file() {
                 continue;
-            };
-            if is_under_any_root(&canonical, &readable_roots) {
-                matches.push(canonical);
             }
-        } else {
-            matches.push(entry);
+            if root.is_some() {
+                let Ok(canonical) = entry.canonicalize() else {
+                    continue;
+                };
+                if is_under_any_root(&canonical, &readable_roots) {
+                    matches.push(canonical);
+                }
+            } else {
+                matches.push(entry);
+            }
         }
-    }
+        matches
+    };
 
     matches.sort_by_key(|path| {
         fs::metadata(path)
@@ -472,10 +488,10 @@ pub fn glob_search(pattern: &str, path: Option<&str>) -> io::Result<GlobSearchOu
             .map(Reverse)
     });
 
-    let truncated = matches.len() > 100;
+    let truncated = matches.len() > MAX_GLOB_SEARCH_RESULTS;
     let filenames = matches
         .into_iter()
-        .take(100)
+        .take(MAX_GLOB_SEARCH_RESULTS)
         .map(|path| display_path(&path))
         .collect::<Vec<_>>();
 
@@ -605,6 +621,14 @@ fn collect_search_files(base_path: &Path) -> io::Result<Vec<PathBuf>> {
         return Ok(vec![base_path.to_path_buf()]);
     }
 
+    if let Some(files) = collect_search_files_fast(base_path)? {
+        return Ok(files);
+    }
+
+    collect_search_files_walk(base_path)
+}
+
+fn collect_search_files_walk(base_path: &Path) -> io::Result<Vec<PathBuf>> {
     let mut files = Vec::new();
     for entry in WalkDir::new(base_path) {
         let entry = entry.map_err(|error| io::Error::other(error.to_string()))?;
@@ -613,6 +637,106 @@ fn collect_search_files(base_path: &Path) -> io::Result<Vec<PathBuf>> {
         }
     }
     Ok(files)
+}
+
+fn fast_glob_matches(
+    base_dir: &Path,
+    relative_filter: &Pattern,
+    absolute_filter: &Pattern,
+    workspace_root: Option<&PathBuf>,
+    readable_roots: &[PathBuf],
+) -> io::Result<Option<Vec<PathBuf>>> {
+    let Some(files) = collect_search_files_fast(base_dir)? else {
+        return Ok(None);
+    };
+
+    let mut matches = Vec::new();
+    for file in files {
+        let relative = file.strip_prefix(base_dir).unwrap_or(file.as_path());
+        if !relative_filter.matches(&display_path(relative))
+            && !relative_filter.matches_path(relative)
+            && !absolute_filter.matches(&display_path(&file))
+            && !absolute_filter.matches_path(&file)
+        {
+            continue;
+        }
+
+        if workspace_root.is_some() {
+            let Ok(canonical) = file.canonicalize() else {
+                continue;
+            };
+            if is_under_any_root(&canonical, readable_roots) {
+                matches.push(canonical);
+            }
+        } else {
+            matches.push(file);
+        }
+    }
+
+    Ok(Some(matches))
+}
+
+fn collect_search_files_fast(base_path: &Path) -> io::Result<Option<Vec<PathBuf>>> {
+    if let Some(files) = git_ls_files(base_path)? {
+        return Ok(Some(files));
+    }
+    rg_files(base_path)
+}
+
+fn git_ls_files(base_path: &Path) -> io::Result<Option<Vec<PathBuf>>> {
+    let output = match crate::hidden_command("git")
+        .args([
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "-z",
+        ])
+        .current_dir(base_path)
+        .output()
+    {
+        Ok(output) => output,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+
+    if !output.status.success() {
+        return Ok(None);
+    }
+
+    let files = output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| base_path.join(String::from_utf8_lossy(entry).as_ref()))
+        .filter(|path| path.is_file())
+        .collect::<Vec<_>>();
+    Ok(Some(files))
+}
+
+fn rg_files(base_path: &Path) -> io::Result<Option<Vec<PathBuf>>> {
+    let output = match crate::hidden_command("rg")
+        .args(["--files", "--hidden", "-g", "!.git", "-g", "!.git/**"])
+        .current_dir(base_path)
+        .output()
+    {
+        Ok(output) => output,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+
+    if !output.status.success() {
+        return Ok(None);
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let files = stdout
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| base_path.join(line))
+        .filter(|path| path.is_file())
+        .collect::<Vec<_>>();
+    Ok(Some(files))
 }
 
 fn display_path(path: &Path) -> String {
@@ -1791,6 +1915,7 @@ fn lexically_normalize(path: &Path) -> PathBuf {
 mod tests {
     use std::ffi::{OsStr, OsString};
     use std::io::Write;
+    use std::process::Command;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use flate2::{write::ZlibEncoder, Compression};
@@ -2148,6 +2273,56 @@ end
         })
         .expect("grep should succeed");
         assert!(grep_output.content.unwrap_or_default().contains("hello"));
+    }
+
+    #[test]
+    fn glob_and_grep_fast_paths_respect_gitignore() {
+        let _lock = crate::test_env_lock();
+        let _env = EnvGuard::unset("ARIS_WORKSPACE_ROOT");
+        let dir = temp_path("search-gitignore");
+        std::fs::create_dir_all(dir.join("src")).expect("src dir");
+        std::fs::create_dir_all(dir.join("ignored")).expect("ignored dir");
+        std::fs::write(dir.join(".gitignore"), "ignored/\n").expect("gitignore");
+        std::fs::write(dir.join("src").join("lib.rs"), "fn visible() {}\n").expect("visible file");
+        std::fs::write(dir.join("ignored").join("skip.rs"), "fn hidden() {}\n")
+            .expect("ignored file");
+
+        let init = Command::new("git")
+            .arg("init")
+            .arg("--quiet")
+            .current_dir(&dir)
+            .status();
+        if !init.is_ok_and(|status| status.success()) {
+            std::fs::remove_dir_all(dir).expect("cleanup temp dir");
+            return;
+        }
+
+        let globbed = glob_search("**/*.rs", Some(dir.to_string_lossy().as_ref()))
+            .expect("glob should succeed");
+        assert_eq!(globbed.num_files, 1);
+        assert!(globbed.filenames[0].ends_with("src/lib.rs"));
+
+        let grep_output = grep_search(&GrepSearchInput {
+            pattern: String::from("fn "),
+            path: Some(dir.to_string_lossy().into_owned()),
+            glob: Some(String::from("**/*.rs")),
+            output_mode: Some(String::from("files_with_matches")),
+            before: None,
+            after: None,
+            context_short: None,
+            context: None,
+            line_numbers: Some(true),
+            case_insensitive: Some(false),
+            file_type: None,
+            head_limit: None,
+            offset: None,
+            multiline: Some(false),
+        })
+        .expect("grep should succeed");
+        assert_eq!(grep_output.num_files, 1);
+        assert!(grep_output.filenames[0].ends_with("src/lib.rs"));
+
+        std::fs::remove_dir_all(dir).expect("cleanup temp dir");
     }
 
     #[test]

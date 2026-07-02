@@ -96,7 +96,8 @@ ARIS 桌面端从当前项目的 `.mcp.json` 读取 MCP 服务器，并在 **Ext
 **Settings → Permissions & MCP** 中提供配置入口。Windows 安装包会内置
 `aris-playwright-mcp` launcher、vendored `@playwright/mcp` 和 Node runtime，因此用户添加
 Playwright 预设时不需要自己安装 Node.js / npm。默认预设使用 Microsoft Edge
-（`--browser=msedge`）并启用 PDF 工具（`--caps=pdf`）；如需自定义浏览器参数，可在 MCP 页面编辑。
+（`--browser=msedge`）、启用 PDF 工具（`--caps=pdf`），并把浏览器 profile 与输出文件放在
+`.somniq/tmp/browser/`；如需自定义浏览器参数，可在 MCP 页面编辑。
 
 ---
 

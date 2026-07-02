@@ -2389,7 +2389,7 @@ export default function Settings() {
               <div className="sp-update-actions">
                 <button
                   className="sp-btn sp-btn-secondary"
-                  onClick={() => void loadEnvironmentChecks()}
+                  onClick={() => { void localEnvironmentChecks(true).then(setEnvironmentChecks).then(() => setEnvironmentCheckedAt(Math.floor(Date.now() / 1000))).catch((e) => setEnvironmentError(String(e))); }}
                   disabled={environmentLoading}
                   type="button"
                 >

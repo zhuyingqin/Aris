@@ -67,8 +67,8 @@ import type {
 } from "../types";
 
 export const stateDir = () => invoke<string>("state_dir");
-export const localEnvironmentChecks = () =>
-  invoke<LocalEnvironmentCheck[]>("local_environment_checks");
+export const localEnvironmentChecks = (forceRefresh?: boolean) =>
+  invoke<LocalEnvironmentCheck[]>("local_environment_checks", { forceRefresh: forceRefresh ?? false });
 export const projectsGet = () => invoke<ProjectView>("projects_get");
 export const projectAdd = (path: string) =>
   invoke<ProjectView>("project_add", { path });

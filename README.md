@@ -99,8 +99,9 @@ ARIS Desktop reads MCP servers from the current project's `.mcp.json` and surfac
 **Extensions → Plugins** and **Settings → Permissions & MCP**. The Windows bundle includes an
 `aris-playwright-mcp` launcher, vendored `@playwright/mcp`, and a Node runtime, so installed users
 can add the Playwright preset without installing Node.js or npm themselves. The default preset uses
-Microsoft Edge (`--browser=msedge`) and enables PDF tools (`--caps=pdf`); edit the arguments in the
-MCP page for custom browser options.
+Microsoft Edge (`--browser=msedge`), enables PDF tools (`--caps=pdf`), and stores browser profile
+and output files under `.somniq/tmp/browser/`; edit the arguments in the MCP page for custom
+browser options.
 
 ---
 

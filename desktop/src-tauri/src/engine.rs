@@ -944,9 +944,7 @@ fn persist_tool_output_if_large(
     if output.chars().count() <= TOOL_OUTPUT_ARTIFACT_THRESHOLD_CHARS {
         return None;
     }
-    let dir = crate::state::workspace_dir()
-        .join(".somniq")
-        .join("tool-output");
+    let dir = runtime::somniq_project_tmp_dir(crate::state::workspace_dir()).join("tool-output");
     if let Err(error) = fs::create_dir_all(&dir) {
         eprintln!("SomniQ desktop: could not create tool-output dir: {error}");
         return None;
@@ -1252,7 +1250,7 @@ fn build_system_prompt_uncached(key: &SystemPromptCacheKey) -> Vec<String> {
         )
     };
     let file_links = "When you create or modify files, include Markdown links to the relevant file paths in the final response so the desktop UI can open them directly.".to_string();
-    let artifact_layout = "Project artifact layout: place slide/PPT/PDF deck outputs under `slides/`, poster outputs under `poster/`, interactive web apps under `web/<name>/` with an `index.html` plus local CSS/assets, notebook programs under `experiments/`, and scratch/temp/cache files under `.somniq/`. Studio auto-discovers `slides/`, `poster/`, and `web/`; Lab lists notebooks from the workspace and defaults new notebooks into `experiments/`.".to_string();
+    let artifact_layout = "Project artifact layout: place slide/PPT/PDF deck outputs under `slides/`, poster outputs under `poster/`, interactive web apps under `web/<name>/` with an `index.html` plus local CSS/assets, notebook programs under `experiments/`, and scratch/temp/cache files under `.somniq/tmp/`. Studio auto-discovers `slides/`, `poster/`, and `web/`; Lab lists notebooks from the workspace and defaults new notebooks into `experiments/`.".to_string();
     let existing_artifact_edits = "Existing artifact edits: when the user asks to modify, revise, continue editing, polish, or fix a current/existing report, paper, slide deck, PDF source, or other generated artifact, first identify and reuse the existing source path from the user message, recent file links, tool outputs, or workspace search. Edit that source in place and rebuild derived outputs at the same base path. Do not create sibling version files such as `_v2`, `_v9`, `_new`, `_final`, or timestamped copies unless the user explicitly asks for a new version, backup, archive, or comparison copy. If the target file cannot be identified, ask for the path instead of creating a new artifact.".to_string();
     let diagram_output = "Diagram output: when explaining a workflow, process, call path, architecture, state machine, dependency graph, or decision tree, prefer a fenced `mermaid` code block over ASCII art. Keep diagrams compact, use semantic node ids, short readable labels, left-to-right flow for pipelines, meaningful edge labels when they clarify the flow, and avoid oversized text inside nodes. For publication-grade diagram files, use the `mermaid-diagram` skill and verify the rendered output.".to_string();
     let long_document_reading = "Long document reading: when working with books, chapters, transcripts, logs, or converted documents, do not read multiple large files in full. First get a file list and a read_file outline preview, then read one chapter or section window at a time with explicit offset/limit. Treat tool output as a preview, not as a source file; if full text is needed, keep it on disk and reopen precise windows.".to_string();
@@ -4300,7 +4298,7 @@ fn render_desktop_claude_md(cwd: &Path) -> String {
         "## Workspace".to_string(),
         format!("- Desktop workspace: `{}`.", cwd.display()),
         "- Keep generated files and research artifacts inside this workspace unless the user explicitly attaches or references external context.".to_string(),
-        "- Artifact layout: slides/PPT/PDF decks live in `slides/`, posters in `poster/`, interactive web apps in `web/<name>/`, notebooks in `experiments/`, and scratch/temp/cache files in `.somniq/`.".to_string(),
+        "- Artifact layout: slides/PPT/PDF decks live in `slides/`, posters in `poster/`, interactive web apps in `web/<name>/`, notebooks in `experiments/`, and scratch/temp/cache files in `.somniq/tmp/`.".to_string(),
         String::new(),
         "## Verification".to_string(),
         "- Record the commands or checks used to validate substantial changes.".to_string(),

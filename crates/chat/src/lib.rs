@@ -89,9 +89,9 @@ pub fn model_identity_section(model_id: Option<&str>, product_surface: &str) -> 
 #[must_use]
 pub fn language_preference_section(language: &str) -> String {
     if language == "cn" || language.eq_ignore_ascii_case("zh") {
-        "User language preference is Chinese. Always respond in Chinese unless the user explicitly writes in another language.".to_string()
+        "Default to the user's current language. If the user's language is unclear, use Chinese. Keep code, commands, identifiers, file paths, and technical terms in their original form.".to_string()
     } else {
-        "User language preference is English. Always respond in English unless the user explicitly writes in another language.".to_string()
+        "Default to the user's current language. If the user's language is unclear, use English. Keep code, commands, identifiers, file paths, and technical terms in their original form.".to_string()
     }
 }
 

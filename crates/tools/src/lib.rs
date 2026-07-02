@@ -124,7 +124,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "write_file",
-            description: "Write a complete text file in the workspace. Place generated artifacts in canonical project folders: slide/PPT/PDF deck outputs under slides/, posters under poster/, interactive web apps under web/<name>/ with index.html plus local CSS/assets, source notebooks under notebooks/, run artifacts under experiments/runs/, and scratch/temp/cache files under .somniq/. When the user asks to modify an existing/current artifact, reuse the existing path and update it in place; do not create sibling version files such as _v2, _new, _final, or timestamped copies unless explicitly requested. Keep content under 24000 characters in a single call; for longer generated files, write a small scaffold, append chunks with append_file, and verify the final file. Prefer edit_file for localized edits; use shell scripts only for justified bulk mechanical rewrites.",
+            description: "Write a complete text file in the workspace. Place generated artifacts in canonical project folders: slide/PPT/PDF deck outputs under slides/, posters under poster/, interactive web apps under web/<name>/ with index.html plus local CSS/assets, source notebooks under notebooks/, run artifacts under experiments/runs/, and scratch/temp/cache files under .somniq/tmp/. When the user asks to modify an existing/current artifact, reuse the existing path and update it in place; do not create sibling version files such as _v2, _new, _final, or timestamped copies unless explicitly requested. Keep content under 24000 characters in a single call; for longer generated files, write a small scaffold, append chunks with append_file, and verify the final file. Prefer edit_file for localized edits; use shell scripts only for justified bulk mechanical rewrites.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -138,7 +138,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "append_file",
-            description: "Append one text chunk to a workspace file without returning the full file. Keep generated artifacts in the same canonical folders as write_file: slides/, poster/, web/<name>/, notebooks/, experiments/runs/, or .somniq/ for scratch/temp/cache files. For existing/current artifacts, append only to the identified existing path and do not create a new versioned sibling unless explicitly requested. Keep content under 24000 characters; use this for long generated artifacts after a small write_file scaffold, then verify with read_file/compilation.",
+            description: "Append one text chunk to a workspace file without returning the full file. Keep generated artifacts in the same canonical folders as write_file: slides/, poster/, web/<name>/, notebooks/, experiments/runs/, or .somniq/tmp/ for scratch/temp/cache files. For existing/current artifacts, append only to the identified existing path and do not create a new versioned sibling unless explicitly requested. Keep content under 24000 characters; use this for long generated artifacts after a small write_file scaffold, then verify with read_file/compilation.",
             input_schema: json!({
                 "type": "object",
                 "properties": {

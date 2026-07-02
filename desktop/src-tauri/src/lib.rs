@@ -2,6 +2,7 @@ mod commands;
 mod config;
 mod connectors;
 mod engine;
+mod env;
 mod files;
 mod knowledge;
 mod lab;

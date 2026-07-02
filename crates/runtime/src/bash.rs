@@ -315,8 +315,8 @@ fn prepare_command(
         let mut prepared = hidden_command(&launcher.program);
         prepared.args(launcher.args).arg(command).current_dir(cwd);
         if launcher.posix {
-            prepared.env("HOME", cwd.join(".sandbox-home"));
-            prepared.env("TMPDIR", cwd.join(".sandbox-tmp"));
+            prepared.env("HOME", crate::somniq_sandbox_home_dir(cwd));
+            prepared.env("TMPDIR", crate::somniq_sandbox_tmp_dir(cwd));
         }
         return prepared;
     }
@@ -324,15 +324,15 @@ fn prepare_command(
     let mut prepared = hidden_command("sh");
     prepared.arg("-lc").arg(command).current_dir(cwd);
     if sandbox_status.filesystem_active {
-        prepared.env("HOME", cwd.join(".sandbox-home"));
-        prepared.env("TMPDIR", cwd.join(".sandbox-tmp"));
+        prepared.env("HOME", crate::somniq_sandbox_home_dir(cwd));
+        prepared.env("TMPDIR", crate::somniq_sandbox_tmp_dir(cwd));
     }
     prepared
 }
 
 fn prepare_sandbox_dirs(cwd: &std::path::Path) {
-    let _ = std::fs::create_dir_all(cwd.join(".sandbox-home"));
-    let _ = std::fs::create_dir_all(cwd.join(".sandbox-tmp"));
+    let _ = std::fs::create_dir_all(crate::somniq_sandbox_home_dir(cwd));
+    let _ = std::fs::create_dir_all(crate::somniq_sandbox_tmp_dir(cwd));
 }
 
 #[derive(Clone)]
@@ -443,6 +443,8 @@ fn check_dangerous_command(command: &str) -> Option<String> {
 mod tests {
     use super::{execute_bash, BashCommandInput};
     use crate::sandbox::FilesystemIsolationMode;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn executes_simple_command() {
@@ -480,5 +482,50 @@ mod tests {
         .expect("bash command should execute");
 
         assert!(!output.sandbox_status.expect("sandbox status").enabled);
+    }
+
+    #[test]
+    fn sandbox_dirs_are_under_somniq_tmp() {
+        let _guard = crate::test_env_lock();
+        let previous = std::env::current_dir().expect("current dir");
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("somniq-bash-sandbox-{nanos}"));
+        fs::create_dir_all(&root).expect("create temp workspace");
+        std::env::set_current_dir(&root).expect("enter temp workspace");
+
+        let output = execute_bash(BashCommandInput {
+            command: String::from("printf 'hello'"),
+            timeout: Some(1_000),
+            description: None,
+            run_in_background: Some(false),
+            dangerously_disable_sandbox: Some(false),
+            namespace_restrictions: Some(false),
+            isolate_network: Some(false),
+            filesystem_mode: Some(FilesystemIsolationMode::WorkspaceOnly),
+            allowed_mounts: None,
+        })
+        .expect("bash command should execute");
+
+        assert_eq!(output.stdout, "hello");
+        assert!(root
+            .join(".somniq")
+            .join("tmp")
+            .join("sandbox")
+            .join("home")
+            .is_dir());
+        assert!(root
+            .join(".somniq")
+            .join("tmp")
+            .join("sandbox")
+            .join("tmp")
+            .is_dir());
+        assert!(!root.join(".sandbox-home").exists());
+        assert!(!root.join(".sandbox-tmp").exists());
+
+        std::env::set_current_dir(previous).expect("restore cwd");
+        fs::remove_dir_all(root).expect("cleanup temp workspace");
     }
 }
