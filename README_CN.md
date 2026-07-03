@@ -47,6 +47,9 @@
 > stop+continue 中断架构 + `AskUserQuestion` 工具，runtime / cache / tools（knowledge、literature、
 > notebook、studio）更新。
 
+<details>
+<summary>📜 早期版本（v0.4.5 → v0.1.0，点击展开）</summary>
+
 > **v0.4.5** (2026-06) —— CI 修复：把 `TAURI_SIGNING_PRIVATE_KEY` 传给 macOS 桌面任务，否则 bundle 步骤
 > 会因为 updater-artifacts 检查报错。
 
@@ -101,6 +104,8 @@
 
 > **v0.1.0** (2026-05) —— 首个桌面应用：内置 Chat、带连通性检查的 Settings、skills 浏览器、持久化
 > Sessions、首版 Workflow Studio + 运行监控、NSIS 打包。
+
+</details>
 
 > [完整 CLI Changelog →](CHANGELOG.md)
 
