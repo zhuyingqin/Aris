@@ -18,7 +18,7 @@
 
 > **The desktop app for ARIS** — Executor acts · Reviewer critiques · Iterate to excellence.
 
-[![Version](https://img.shields.io/badge/version-0.2.0-blue?style=flat-square)](https://github.com/zhuyingqin/Aris/releases)
+[![Version](https://img.shields.io/badge/version-0.4.8-blue?style=flat-square)](https://github.com/zhuyingqin/Aris/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D6?style=flat-square&logo=windows)](https://github.com/zhuyingqin/Aris)
 [![Built with Tauri](https://img.shields.io/badge/built%20with-Tauri%202-FFC131?style=flat-square&logo=tauri)](https://tauri.app)
 [![UI](https://img.shields.io/badge/UI-React%20%2B%20Vite-61DAFB?style=flat-square&logo=react)](https://react.dev)
@@ -28,6 +28,76 @@
 
 
 ## 📰 What's New
+
+> **v0.4.8** (2026-07) — Env-probe extraction into `src-tauri/src/env/` (Python / Jupyter / MATLAB /
+> LaTeX with in-memory session cache + on-disk fingerprint cache), system prompt externalized to
+> `crates/runtime/assets/prompts/system.md` (edit as markdown, no Rust rebuild), prompt pipeline
+> rework (`prompt.rs` +419 lines), file-ops / bash / sandbox refinements, chat-stream hook extracted
+> (`useChatStream.{ts,test.tsx}`), newapi managed-login integration, RuntimeAccess UI panel,
+> MarkdownContent renderer fixes. Follow-up commit refreshed the release with process registry
+> wiring + chat-stream polish.
+
+> **v0.4.7** (2026-07) — Lab MATLAB auto-discovery (Windows registry `HKLM` / `HKCU` / `WOW6432Node`
+> MathWorks roots + program-files scan), chat i18n (`chat/i18n.ts` centralizes `CHAT_COPY`),
+> system-prompt + user-prompt inspectors (`systemPromptView` / `userPromptView` Tauri commands),
+> onboarding tutorial polish, MarkdownContent renderer fixes, `styles.css` overhaul (+652 lines),
+> `Language` type system.
+
+> **v0.4.6** (2026-07) — Mail integration (Gmail / Graph / IMAP + OAuth2 + `atomic_file.rs`),
+> scheduled tasks module rewrite, Settings rewrite (provider cards, role pickers, `auth.json` /
+> `config.toml` editors, two-view list + detail), newapi managed login + Settings-as-projection, Lab
+> updates (MATLAB REPL, kernel picker), Chat stop+continue interrupt architecture +
+> `AskUserQuestion` tool, runtime / cache / tools (knowledge, literature, notebook, studio)
+> updates.
+
+> **v0.4.5** (2026-06) — CI fix: pass `TAURI_SIGNING_PRIVATE_KEY` to the macOS desktop job so the
+> bundle step doesn't error out on the updater-artifacts check.
+
+> **v0.4.4** (2026-06) — Deps fix: refresh `package-lock.json` so `npm ci` succeeds in CI (lock was
+> missing transitive deps like `d3-*`, `hachure-fill`, `lodash-es`).
+
+> **v0.4.3** (2026-06) — Runtime: LLM-based context compaction summaries + ContextRing improvements;
+> knowledge memory + session robustness. Desktop: ErrorBoundary, LiteratureViewTabs, onboarding
+> tutorial wired into main nav. Research-review skill: LaTeX report template. Notebook: MATLAB
+> kernel + Jupyter manager robustness. CLI: timeline view.
+
+> **v0.4.2** (2026-06) — First-time onboarding tutorial: multi-step spotlight that walks new users
+> through sidebar, mobile menu, project switcher, and workspace; respects saved UI prefs via
+> `ONBOARDING_STORAGE_KEY` + prior-usage detection; dark / light accent tokens + reduced-motion
+> fallback.
+
+> **v0.4.1** (2026-06) — Release prep: packaging + dependency alignment for the v0.4.x line.
+
+> **v0.4.0** (2026-06) — Release prep: v0.4.x baseline.
+
+> **v0.3.6** (2026-06) — Patch release prep.
+
+> **v0.3.5** (2026-06) — Release fix: publish correct updater asset URLs.
+
+> **v0.3.4** (2026-06) — Desktop fix: prefer bundled Tectonic fallback when system LaTeX is unavailable.
+
+> **v0.3.2** (2026-06) — Scheduled task registry (`runtime::process_registry`, desktop `scheduled`
+> module), literature store (`literatureStore.ts`) + Literature UI updates, Chat test suite
+> (`Chat.test.tsx`), permissions + model switching + provider config fixes.
+
+> **v0.3.1** (2026-06) — Chat: surface permission requests as inline blocks, plumb respond /
+> resolved callbacks through `useChatStream`; model switch refreshes status, `activeModel` sync,
+> Browser-path-without-Tauri support. Settings: persist provider + `base_url` per entry, add
+> DeepSeek executor preset. CLI: `--model` honors saved executor config.
+
+> **v0.3.0** (2026-06) — Memory subsystem (`hot_memory`, `knowledge_memory`, `memory_provider`,
+> `session_index`), literature PDF reader (`pdfjs-dist` worker) + KaTeX math rendering, chat-stream
+> refactor (`useChatStream`), literature tool consolidation, CLI config / main rewritten around
+> kernel skills, NSIS webview install mode.
+
+> **v0.2.3** (2026-06) — MCP (Model Context Protocol) integration: stdio MCP client with
+> config-driven server registry + per-server lifecycle (`kernel::mcp.rs` + `runtime::mcp_stdio.rs`),
+> chat surface wires tool calls through dispatch, new MCP page + RuntimeAccess panel,
+> `docs/mcp.md`, CLI parity for MCP server registry.
+
+> **v0.2.2** (2026-06) — OpenAlex + Scopus search engines wired into the literature kernel
+> (`search_openalex` / `search_scopus`, `scopus_api_key`), new shared-governance skill, project
+> focus + briefs persisted through kernel save / load.
 
 > **v0.2.0** (2026-06) — Multi-project workspaces (each keeps its own sessions, runs, agents, and
 > workflows), PDF-readable attachments for auto-review, reasoning/"thinking" content in Chat, a
@@ -79,7 +149,7 @@ cd desktop
 npm run tauri build
 ```
 
-Outputs `aris-desktop.exe` and `ARIS Studio_0.2.0_x64-setup.exe` under `desktop\src-tauri\target\release\`.
+Outputs `aris-desktop.exe` and `SomniQ Studio_0.4.8_x64-setup.exe` under `desktop\src-tauri\target\release\`.
 
 ---
 

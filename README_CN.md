@@ -18,7 +18,7 @@
 
 > **ARIS 的桌面应用** —— Executor 执行 · Reviewer 审查 · 迭代精进。
 
-[![Version](https://img.shields.io/badge/version-0.2.0-blue?style=flat-square)](https://github.com/zhuyingqin/Aris/releases)
+[![Version](https://img.shields.io/badge/version-0.4.8-blue?style=flat-square)](https://github.com/zhuyingqin/Aris/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D6?style=flat-square&logo=windows)](https://github.com/zhuyingqin/Aris)
 [![Built with Tauri](https://img.shields.io/badge/built%20with-Tauri%202-FFC131?style=flat-square&logo=tauri)](https://tauri.app)
 [![UI](https://img.shields.io/badge/UI-React%20%2B%20Vite-61DAFB?style=flat-square&logo=react)](https://react.dev)
@@ -29,13 +29,78 @@
 
 ## 📰 最新动态
 
-> **v0.2.0** (2026-06) —— 多项目工作区（各自独立的 sessions、runs、agents、workflows）、可读取的 PDF 附件用于
-> 自动 Review、Chat 中的 reasoning/"thinking" 内容、带 in-chat `/model` 切换的命令中心，以及一系列加固
-> （`LlmReview` 走 Settings 配置的 reviewer、支持 Anthropic 兼容 endpoint、Windows 子进程不再弹控制台）。
+> **v0.4.8** (2026-07) —— 环境探测抽出到 `src-tauri/src/env/`（Python / Jupyter / MATLAB / LaTeX，含
+> 内存 session 缓存 + 磁盘指纹缓存），system prompt 外置到 `crates/runtime/assets/prompts/system.md`
+>（直接改 markdown，无需重新编译 Rust），prompt pipeline 重写（`prompt.rs` +419 行），file-ops /
+> bash / sandbox 打磨，把 chat-stream 逻辑抽出为 `useChatStream.{ts,test.tsx}` 钩子，接入 newapi
+> 托管登录，新增 RuntimeAccess UI 面板，MarkdownContent 渲染器修复。后续 follow-up 提交再补上了
+> process registry 接入 + chat-stream 细节。
+
+> **v0.4.7** (2026-07) —— Lab MATLAB 自动发现（扫描 Windows 注册表 `HKLM` / `HKCU` / `WOW6432Node`
+> 下的 MathWorks 根 + program-files 目录），Chat i18n（`chat/i18n.ts` 集中管理 `CHAT_COPY` 文案），
+> system-prompt + user-prompt 检查器（`systemPromptView` / `userPromptView` Tauri 命令），onboarding
+> tutorial 润色，MarkdownContent 渲染器修复，`styles.css` 大改（+652 行），新增 `Language` 类型体系。
+
+> **v0.4.6** (2026-07) —— 邮件集成（Gmail / Graph / IMAP + OAuth2 + `atomic_file.rs`），定时任务模块
+> 重写，Settings 重写（provider 卡片、role 选择器、`auth.json` / `config.toml` 编辑器、双视图 list +
+> detail），newapi 托管登录 + Settings-as-projection，Lab 升级（MATLAB REPL、kernel 选择器），Chat
+> stop+continue 中断架构 + `AskUserQuestion` 工具，runtime / cache / tools（knowledge、literature、
+> notebook、studio）更新。
+
+> **v0.4.5** (2026-06) —— CI 修复：把 `TAURI_SIGNING_PRIVATE_KEY` 传给 macOS 桌面任务，否则 bundle 步骤
+> 会因为 updater-artifacts 检查报错。
+
+> **v0.4.4** (2026-06) —— 依赖修复：刷新 `package-lock.json`，让 CI 的 `npm ci` 跑通（之前的 lock 文件缺
+> `d3-*`、`hachure-fill`、`lodash-es` 等传递依赖）。
+
+> **v0.4.3** (2026-06) —— Runtime：基于 LLM 的 context compaction 摘要 + ContextRing 改进；knowledge
+> memory 和 session 健壮性。Desktop：ErrorBoundary、LiteratureViewTabs、onboarding tutorial 接入主导航。
+> Research-review skill：LaTeX 报告模板。Notebook：MATLAB kernel + Jupyter manager 健壮性。CLI：时间线视图。
+
+> **v0.4.2** (2026-06) —— 首次使用的 onboarding tutorial：多步聚光灯式引导走通侧栏、移动菜单、项目切换器
+> 和工作区；通过 `ONBOARDING_STORAGE_KEY` + 已使用检测尊重用户的 UI 偏好；带 dark / light accent token
+> 和 reduced-motion 回退。
+
+> **v0.4.1** (2026-06) —— Release 准备：v0.4.x 线的打包与依赖对齐。
+
+> **v0.4.0** (2026-06) —— Release 准备：v0.4.x 基线。
+
+> **v0.3.6** (2026-06) —— 补丁发布准备。
+
+> **v0.3.5** (2026-06) —— 发布修复：发布正确的 updater 资源 URL。
+
+> **v0.3.4** (2026-06) —— 桌面端修复：系统未装 LaTeX 时优先使用打包内置的 Tectonic 兜底。
+
+> **v0.3.2** (2026-06) —— 定时任务注册表（`runtime::process_registry`、桌面端 `scheduled` 模块），
+> 文献库（`literatureStore.ts`）+ Literature UI 更新，Chat 测试套件（`Chat.test.tsx`），权限 / 模型
+> 切换 / provider 配置修复。
+
+> **v0.3.1** (2026-06) —— Chat：把权限请求以内联块呈现，通过 `useChatStream` 接 respond / resolved
+> 回调；模型切换时刷新状态、`activeModel` 跨 session / provider 同步、支持无 Tauri 的 Browser 路径。
+> Settings：每个条目持久化 provider + `base_url`，新增 DeepSeek executor preset。CLI：`--model` 在调用
+> 方未传值时遵循已保存的 executor 配置。
+
+> **v0.3.0** (2026-06) —— 记忆子系统（`hot_memory`、`knowledge_memory`、`memory_provider`、
+> `session_index`），文献 PDF 阅读器（`pdfjs-dist` worker）+ KaTeX 数学渲染，chat-stream 重构
+>（`useChatStream`），文献工具整合，CLI 的 config / main 围绕 kernel skills 重写，NSIS webview 安装模式。
+
+> **v0.2.3** (2026-06) —— MCP（Model Context Protocol）集成：基于 stdio 的 MCP 客户端，配置驱动的服务
+> 注册表 + 每个 server 的生命周期管理（`kernel::mcp.rs` + `runtime::mcp_stdio.rs`），Chat 接入通过调度
+> 层触发 tool call，新增 MCP 页面 + RuntimeAccess 面板，`docs/mcp.md`，CLI 端对 MCP 服务注册表的能力对齐。
+
+> **v0.2.2** (2026-06) —— 文献内核接入 OpenAlex + Scopus 搜索引擎（`search_openalex` /
+> `search_scopus`、`scopus_api_key`），新增 shared-governance skill，项目焦点 + briefs 通过 kernel
+> 的 save / load 持久化。
+
+> **v0.2.0** (2026-06) —— 多项目工作区（各自独立的 sessions、runs、agents、workflows）、可读取的 PDF
+> 附件用于自动 Review、Chat 中的 reasoning/"thinking" 内容、带 in-chat `/model` 切换的命令中心，以及
+> 一系列加固（`LlmReview` 走 Settings 配置的 reviewer、支持 Anthropic 兼容 endpoint、Windows 子进程
+> 不再弹控制台）。
 
 > **v0.1.1** (2026-05) —— Chat UI 大改：会话历史、markdown 渲染、`@` 文件提及、有序的流式工具输出。
 
-> **v0.1.0** (2026-05) —— 首个桌面应用：内置 Chat、带连通性检查的 Settings、skills 浏览器、持久化 Sessions、首版 Workflow Studio + 运行监控、NSIS 打包。
+> **v0.1.0** (2026-05) —— 首个桌面应用：内置 Chat、带连通性检查的 Settings、skills 浏览器、持久化
+> Sessions、首版 Workflow Studio + 运行监控、NSIS 打包。
 
 > [完整 CLI Changelog →](CHANGELOG.md)
 
@@ -77,7 +142,7 @@ cd desktop
 npm run tauri build
 ```
 
-产物在 `desktop\src-tauri\target\release\` 下：`aris-desktop.exe` 与 `ARIS Studio_0.2.0_x64-setup.exe`。
+产物在 `desktop\src-tauri\target\release\` 下：`aris-desktop.exe` 与 `SomniQ Studio_0.4.8_x64-setup.exe`。
 
 ---
 
