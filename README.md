@@ -50,6 +50,9 @@
 > `AskUserQuestion` tool, runtime / cache / tools (knowledge, literature, notebook, studio)
 > updates.
 
+<details>
+<summary>📜 Earlier releases (v0.4.5 → v0.1.0)</summary>
+
 > **v0.4.5** (2026-06) — CI fix: pass `TAURI_SIGNING_PRIVATE_KEY` to the macOS desktop job so the
 > bundle step doesn't error out on the updater-artifacts check.
 
@@ -107,6 +110,8 @@
 > **v0.1.1** (2026-05) — Chat UI overhaul: history, markdown rendering, `@`-file mentions, ordered streamed tool output.
 
 > **v0.1.0** (2026-05) — First desktop app: in-app Chat, Settings with connection checks, skills browser, persisted Sessions, first Workflow Studio + Run Monitor, NSIS bundling.
+
+</details>
 
 > [Full CLI Changelog →](CHANGELOG.md)
 
