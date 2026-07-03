@@ -12,6 +12,7 @@ import {
   onChatPermissionRequest,
   onChatPermissionResolved,
   onChatTool,
+  onChatToolProgress,
   onChatToolResult,
 } from "../api/tauri";
 import type { ChatSendRequest } from "../api/tauri";
@@ -135,6 +136,13 @@ export function useChatStream({
         patchAssistant(tool.sessionId, (turn) => ({
           ...turn,
           blocks: upsertToolCall(turn.blocks, tool),
+        }));
+      }),
+      onChatToolProgress((progress) => {
+        if (!isCurrentListener()) return;
+        patchAssistant(progress.sessionId, (turn) => ({
+          ...turn,
+          blocks: updateToolProgress(turn.blocks, progress),
         }));
       }),
       onChatToolResult((result) => {
@@ -332,5 +340,51 @@ export function upsertToolCall(
   if (existing.kind === "tool") {
     copy[index] = { ...existing, input: tool.input };
   }
+  return copy;
+}
+
+export function updateToolProgress(
+  blocks: ChatBlock[],
+  progress: {
+    id?: string;
+    name: string;
+    elapsedMs: number;
+    timeoutMs?: number | null;
+    pid?: number | null;
+    stdoutTail?: string | null;
+    stderrTail?: string | null;
+    nearTimeout?: boolean;
+    message?: string;
+  },
+): ChatBlock[] {
+  const copy = blocks.slice();
+  const matches = (block: ChatBlock) => (
+    block.kind === "tool"
+    && block.name === progress.name
+    && block.output === undefined
+    && (!progress.id || block.id === progress.id)
+  );
+  let index = -1;
+  for (let candidate = copy.length - 1; candidate >= 0; candidate -= 1) {
+    if (matches(copy[candidate])) {
+      index = candidate;
+      break;
+    }
+  }
+  if (index < 0) return blocks;
+  const block = copy[index];
+  if (block.kind !== "tool") return blocks;
+  copy[index] = {
+    ...block,
+    progress: {
+      elapsedMs: progress.elapsedMs,
+      timeoutMs: progress.timeoutMs ?? null,
+      pid: progress.pid ?? null,
+      stdoutTail: progress.stdoutTail ?? null,
+      stderrTail: progress.stderrTail ?? null,
+      nearTimeout: progress.nearTimeout ?? false,
+      message: progress.message,
+    },
+  };
   return copy;
 }

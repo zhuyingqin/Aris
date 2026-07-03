@@ -31,6 +31,13 @@ interface ExtractedThinking {
   thinkingOpen: boolean;
 }
 
+const DENSE_PARAGRAPH_MIN_CHARS = 360;
+const DENSE_PARAGRAPH_TARGET_CHARS = 260;
+
+function charCount(text: string): number {
+  return Array.from(text).length;
+}
+
 function largeTextExcerpt(text: string): string {
   if (text.length <= LARGE_MARKDOWN_HEAD_CHARS + LARGE_MARKDOWN_TAIL_CHARS) return text;
   const omitted = text.length - LARGE_MARKDOWN_HEAD_CHARS - LARGE_MARKDOWN_TAIL_CHARS;
@@ -88,6 +95,62 @@ function splitMarkdownFences(raw: string): MarkdownChunk[] {
   if (fence) flushCode();
   else flushMarkdown();
   return chunks;
+}
+
+function isMarkdownStructureBlock(block: string): boolean {
+  return /(^|\n)\s*(#{1,6}\s|[-*+]\s+|\d+[.)]\s+|>\s|\|)/.test(block)
+    || /^\s*(<\w|<\/\w|```|~~~)/.test(block);
+}
+
+function splitLongReadableParagraph(text: string): string {
+  if (charCount(text) <= DENSE_PARAGRAPH_MIN_CHARS) return text;
+  const sentences = text.match(/[^。！？!?；;]+[。！？!?；;]?/g);
+  if (!sentences || sentences.length < 3) return text;
+
+  const chunks: string[] = [];
+  let current = "";
+  for (const sentence of sentences) {
+    const next = sentence.trimStart();
+    if (current && charCount(current + next) > DENSE_PARAGRAPH_TARGET_CHARS) {
+      chunks.push(current.trim());
+      current = next;
+    } else {
+      current += next;
+    }
+  }
+  if (current.trim()) chunks.push(current.trim());
+  return chunks.length > 1 ? chunks.join("\n\n") : text;
+}
+
+function formatDenseParagraphBlock(block: string): string {
+  if (charCount(block.trim()) < DENSE_PARAGRAPH_MIN_CHARS || isMarkdownStructureBlock(block)) {
+    return block;
+  }
+
+  const prefix = block.match(/^\s*/)?.[0] ?? "";
+  const suffix = block.match(/\s*$/)?.[0] ?? "";
+  const transitionPattern =
+    "(?:第[一二三四五六七八九十\\d]+步|首先|其次|然后|最后|另外|不过|因此|所以|总体|总之|核心|关键|具体|效果|实验|消融|注意|换句话说|简单说|也就是说|只训|严格冻结)";
+  const withBreaks = block
+    .trim()
+    .replace(new RegExp(`([。！？!?；;])\\s*(?=${transitionPattern})`, "g"), "$1\n\n");
+  const paragraphs = withBreaks
+    .split(/\n{2,}/)
+    .map((paragraph) => splitLongReadableParagraph(paragraph.trim()))
+    .filter(Boolean);
+  return `${prefix}${paragraphs.join("\n\n")}${suffix}`;
+}
+
+function formatDenseMarkdown(raw: string): string {
+  return splitMarkdownFences(raw)
+    .map((chunk) => {
+      if (chunk.kind === "code") return chunk.content;
+      return chunk.content
+        .split(/(\n{2,})/)
+        .map((part) => (/^\n{2,}$/.test(part) ? part : formatDenseParagraphBlock(part)))
+        .join("");
+    })
+    .join("");
 }
 
 function normalizeMathDelimiters(raw: string): string {
@@ -470,7 +533,7 @@ function MarkdownContent({ text, streaming = false }: { text: string; streaming?
               },
             }}
           >
-            {normalizeMathDelimiters(segment.content)}
+            {normalizeMathDelimiters(formatDenseMarkdown(segment.content))}
           </ReactMarkdown>
         );
       })}

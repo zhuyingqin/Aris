@@ -99,7 +99,7 @@ const ONBOARDING_STEPS: OnboardingStep[] = [
       "权限控制会影响代理能否执行命令和改文件",
       "配置完成后再回到 Chat 开始任务",
     ],
-    targetSelectors: ['[data-onboarding-target="nav-settings"]', '[data-onboarding-target="sidebar"]'],
+    targetSelectors: ['[data-onboarding-target="user-settings"]', '[data-onboarding-target="user-menu"]'],
     placement: "right",
   },
 ];

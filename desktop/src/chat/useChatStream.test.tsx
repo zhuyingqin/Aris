@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   onChatDelta: vi.fn(),
   onChatThinkingDelta: vi.fn(),
   onChatTool: vi.fn(),
+  onChatToolProgress: vi.fn(),
   onChatToolResult: vi.fn(),
   onChatPermissionRequest: vi.fn(),
   onChatPermissionResolved: vi.fn(),
@@ -25,6 +26,7 @@ vi.mock("../api/tauri", () => ({
   onChatDelta: mocks.onChatDelta,
   onChatThinkingDelta: mocks.onChatThinkingDelta,
   onChatTool: mocks.onChatTool,
+  onChatToolProgress: mocks.onChatToolProgress,
   onChatToolResult: mocks.onChatToolResult,
   onChatPermissionRequest: mocks.onChatPermissionRequest,
   onChatPermissionResolved: mocks.onChatPermissionResolved,
@@ -34,12 +36,13 @@ vi.mock("../api/tauri", () => ({
   onChatContextWarning: mocks.onChatContextWarning,
 }));
 
-import { useChatStream } from "./useChatStream";
+import { updateToolProgress, useChatStream } from "./useChatStream";
 
 const listenerMocks = [
   mocks.onChatDelta,
   mocks.onChatThinkingDelta,
   mocks.onChatTool,
+  mocks.onChatToolProgress,
   mocks.onChatToolResult,
   mocks.onChatPermissionRequest,
   mocks.onChatPermissionResolved,
@@ -64,6 +67,33 @@ afterEach(() => {
 });
 
 describe("useChatStream concurrent sessions", () => {
+  it("updates progress on the matching running tool block", () => {
+    const blocks = updateToolProgress([
+      { kind: "tool", id: "older", name: "bash", input: "{}", output: "done" },
+      { kind: "tool", id: "run-1", name: "bash", input: "{}" },
+    ], {
+      id: "run-1",
+      name: "bash",
+      elapsedMs: 1_500,
+      timeoutMs: 10_000,
+      pid: 42,
+      stdoutTail: "halfway",
+      nearTimeout: false,
+      message: "Still running",
+    });
+
+    expect(blocks[0]).not.toHaveProperty("progress");
+    expect(blocks[1]).toMatchObject({
+      progress: {
+        elapsedMs: 1_500,
+        timeoutMs: 10_000,
+        pid: 42,
+        stdoutTail: "halfway",
+        nearTimeout: false,
+      },
+    });
+  });
+
   it("ignores stale Tauri listeners after a subscription refresh", () => {
     const deltaHandlers: Array<(event: { sessionId: string; text: string }) => void> = [];
     const doneHandlers: Array<(event: { sessionId: string; text: string }) => void> = [];

@@ -449,6 +449,10 @@ textarea {
   border-color: transparent;
 }
 
+.sidebar-user-menu-row.active {
+  background: var(--bg-3);
+}
+
 .sidebar-user-menu-row.muted {
   color: var(--text-dim);
   pointer-events: none;
@@ -477,6 +481,108 @@ textarea {
 .sidebar-user-shortcut {
   color: var(--text-dim);
   font-size: 10px;
+}
+
+.sidebar-user-usage-panel {
+  display: grid;
+  gap: 8px;
+  margin: 4px 2px 6px;
+  padding: 10px;
+  border: 1px solid color-mix(in srgb, var(--border) 72%, #fff 10%);
+  border-radius: 8px;
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--accent) 10%, transparent), transparent 68%),
+    color-mix(in srgb, var(--bg) 86%, var(--bg-2));
+  box-shadow: inset 0 1px 0 color-mix(in srgb, #fff 6%, transparent);
+}
+
+.sidebar-user-usage-primary {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+  padding-bottom: 8px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+}
+
+.sidebar-user-usage-primary span,
+.sidebar-user-usage-tile span {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-dim);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sidebar-user-usage-primary span {
+  padding-top: 3px;
+  font-size: 11px;
+}
+
+.sidebar-user-usage-primary strong {
+  min-width: 0;
+  overflow: hidden;
+  color: color-mix(in srgb, var(--text) 86%, #fff);
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1.15;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sidebar-user-usage-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.sidebar-user-usage-tile {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+  padding: 7px;
+  border: 1px solid color-mix(in srgb, var(--border) 58%, transparent);
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--bg-1) 72%, transparent);
+}
+
+.sidebar-user-usage-tile span {
+  font-size: 10px;
+}
+
+.sidebar-user-usage-tile strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sidebar-user-usage-tile:nth-child(2) {
+  grid-column: span 1;
+}
+
+.sidebar-user-usage-link {
+  width: 100%;
+  min-height: 28px;
+  margin-top: 1px;
+  padding: 4px 8px;
+  border: 1px solid color-mix(in srgb, var(--accent) 32%, var(--border));
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: color-mix(in srgb, var(--accent) 82%, #fff);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.sidebar-user-usage-link:hover {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 52%, var(--border));
 }
 
 .sidebar-user-menu-divider {
@@ -2682,6 +2788,10 @@ textarea {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .sp-account-group-control {
+    grid-template-columns: 1fr;
+  }
+
   .sp-inline-lang-grid {
     width: 100%;
   }
@@ -3657,6 +3767,41 @@ textarea {
   color: var(--text-dim);
   background: color-mix(in srgb, var(--bg-3) 80%, transparent);
   border-color: var(--border);
+}
+
+.sp-account-group-control {
+  display: grid;
+  grid-template-columns: minmax(220px, 360px) auto;
+  align-items: end;
+  gap: 8px;
+  max-width: 760px;
+  margin-top: 10px;
+}
+
+.sp-account-group-field {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.sp-account-group-field .sp-settings-select {
+  width: 100%;
+}
+
+.sp-account-group-hint {
+  grid-column: 1 / -1;
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.sp-account-group-control .sp-update-message-error {
+  grid-column: 1 / -1;
+  color: var(--red);
 }
 
 .sp-inline-lang-grid {
@@ -5392,8 +5537,8 @@ textarea {
   font-weight: 800;
 }
 
-.sp-usage-total span,
-.sp-usage-summary-pill span {
+.sp-usage-total > div > span,
+.sp-usage-summary-pill > span {
   display: block;
   color: #9aa3b5;
   font-size: 12px;
@@ -5410,7 +5555,7 @@ textarea {
   letter-spacing: 0;
 }
 
-.sp-usage-total small {
+.sp-usage-total > div > small {
   margin-left: 10px;
   color: #8d96a8;
   font-size: 12px;
@@ -6964,6 +7109,44 @@ textarea {
   border-color: var(--border);
 }
 
+.chat-tool-progress {
+  border-top: 1px solid var(--border);
+  padding: 6px 10px 8px;
+  background: color-mix(in srgb, var(--bg-2) 65%, transparent);
+}
+
+.chat-tool-progress.near-timeout {
+  background: color-mix(in srgb, var(--amber) 12%, var(--bg-2));
+}
+
+.chat-tool-progress-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  color: var(--text-dim);
+  font-family: ui-monospace, "Cascadia Code", monospace;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.chat-tool-progress.near-timeout .chat-tool-progress-line {
+  color: var(--amber);
+}
+
+.chat-tool-progress-tails {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-top: 6px;
+}
+
+.tool-progress-tail {
+  max-height: 120px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 /* Input wrapper + skills picker */
 .chat-input-wrap {
   position: absolute;
@@ -7456,6 +7639,8 @@ textarea {
   line-height: 1.7;
   color: var(--text);
   padding: 10px 14px;
+  overflow-wrap: break-word;
+  word-break: normal;
 }
 
 .md-content-large {
@@ -7486,7 +7671,8 @@ textarea {
 }
 
 .md-content p {
-  margin: 0 0 10px;
+  margin: 0 0 14px;
+  text-wrap: pretty;
 }
 
 .md-content p:last-child {
@@ -7534,6 +7720,7 @@ textarea {
 
 .md-content li {
   margin: 3px 0;
+  line-height: 1.7;
 }
 
 .md-content li>p {
@@ -8974,6 +9161,19 @@ textarea {
   border-radius: 0;
 }
 
+.chat-assistant .md-content {
+  max-width: min(100%, 760px);
+  font-size: 14.5px;
+  line-height: 1.82;
+}
+
+.chat-assistant .md-content h1,
+.chat-assistant .md-content h2,
+.chat-assistant .md-content h3 {
+  margin-top: 4px;
+  margin-bottom: 12px;
+}
+
 .chat-cursor {
   padding: 0;
 }
@@ -9628,10 +9828,10 @@ textarea {
 .sp-settings-page .sp-usage-page-sub,
 .sp-settings-page .sp-usage-card-range,
 .sp-settings-page .sp-usage-pagination,
-.sp-settings-page .sp-usage-total span,
-.sp-settings-page .sp-usage-summary-pill span,
+.sp-settings-page .sp-usage-total > div > span,
+.sp-settings-page .sp-usage-summary-pill > span,
 .sp-settings-page .sp-usage-metric span,
-.sp-settings-page .sp-usage-total small,
+.sp-settings-page .sp-usage-total > div > small,
 .sp-settings-page .sp-usage-metric small,
 .sp-settings-page .sp-usage-time,
 .sp-settings-page .sp-usage-foot,

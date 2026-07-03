@@ -139,6 +139,41 @@ function CopyButton({ text }: { text: string }) {
   );
 }
 
+function formatElapsed(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) return "0s";
+  const seconds = Math.floor(ms / 1000);
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds % 60;
+  return `${minutes}m ${rest}s`;
+}
+
+function ToolProgressView({ block }: { block: Extract<ChatBlock, { kind: "tool" }> }) {
+  const progress = block.progress;
+  if (!progress || block.output !== undefined) return null;
+  const hasTail = Boolean(progress.stdoutTail || progress.stderrTail);
+  const timeout = progress.timeoutMs ? ` / ${formatElapsed(progress.timeoutMs)}` : "";
+  return (
+    <div className={`chat-tool-progress${progress.nearTimeout ? " near-timeout" : ""}`}>
+      <div className="chat-tool-progress-line">
+        <span>{progress.message || "Still running"}</span>
+        <span>{formatElapsed(progress.elapsedMs)}{timeout}</span>
+        {progress.pid != null && <span>PID {progress.pid}</span>}
+      </div>
+      {hasTail && (
+        <div className="chat-tool-progress-tails">
+          {progress.stdoutTail && (
+            <pre className="md-view tool-detail tool-progress-tail">stdout: {progress.stdoutTail}</pre>
+          )}
+          {progress.stderrTail && (
+            <pre className="md-view tool-detail tool-progress-tail">stderr: {progress.stderrTail}</pre>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ToolCall({ block }: { block: Extract<ChatBlock, { kind: "tool" }> }) {
   const [open, setOpen] = useState(false);
   const change = useMemo(() => diffFromTool(block), [block]);
@@ -185,6 +220,7 @@ function ToolCall({ block }: { block: Extract<ChatBlock, { kind: "tool" }> }) {
         )}
         {!running && <span className="tool-collapse-btn">{open ? "▾" : "▸"}</span>}
       </div>
+      <ToolProgressView block={block} />
       {studioLinks.length > 0 && (
         <div className="chat-tool-studio-links">
           {studioLinks.map((link) => (

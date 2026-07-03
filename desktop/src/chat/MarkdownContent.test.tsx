@@ -70,6 +70,19 @@ describe("MarkdownContent Studio links", () => {
     expect(block?.textContent).toContain("const answer = 42;");
   });
 
+  it("splits dense explanatory prose into readable paragraphs", () => {
+    const dense = [
+      "### Time-LLM 是怎么做的",
+      "",
+      "Time-LLM 把时间序列预测重新表达为另一个语言任务，先把每条通道归一化，再切成多个重叠 patch，并用一个线性层投到语言模型隐藏维度，让冻结的语言模型可以处理这些片段。第一步是 Patching，把 RevIN 后的序列切成 patch，再投影到模型维度。第二步是 Patch Reprogramming，用一组可学习的 text prototype 和 cross-attention 让每个 patch 组合出时序提示。第三步是 Prompt-as-Prefix，把 dataset context、task instruction 和统计量拼到序列前面，送入冻结 LLM。最后只训练 patch embedder、reprogram cross-attention 和 output projection，LLM 主体保持冻结。这样做的好处是复用语言模型的表征能力，同时避免全量微调带来的成本。",
+    ].join("\n");
+
+    const { container } = render(<MarkdownContent text={dense} />);
+
+    expect(container.querySelectorAll(".md-content p").length).toBeGreaterThan(1);
+    expect(container.querySelector("h3")?.textContent).toBe("Time-LLM 是怎么做的");
+  });
+
   it("renders inline and display LaTeX formulas", () => {
     const { container } = render(
       <MarkdownContent text={"Inline $E=mc^2$.\n\n$$\\int_0^1 x^2\\,dx$$"} />,

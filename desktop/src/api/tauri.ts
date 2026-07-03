@@ -26,6 +26,7 @@ export const openExternalUrl = (url: string) => {
 import type {
   ChatCommandResult,
   ChatModelOptions,
+  ChatToolProgress,
   ChatStatus,
   ConnectorActionResult,
   ConnectorPluginView,
@@ -161,6 +162,12 @@ export interface NewApiUsageLogPage {
   pageSize: number;
 }
 
+export interface NewApiGroupOption {
+  name: string;
+  desc: string;
+  ratio: string;
+}
+
 export interface NewApiAccount {
   username: string;
   displayName: string;
@@ -193,6 +200,9 @@ export interface NewApiAccount {
 
 /** One-shot account/entitlements projection for the signed-in user. */
 export const newapiBootstrap = () => invoke<NewApiAccount>("newapi_bootstrap");
+export const newapiGroups = () => invoke<NewApiGroupOption[]>("newapi_groups");
+export const newapiUpdateGroup = (group: string) =>
+  invoke<NewApiAccount>("newapi_update_group", { group });
 export const newapiUsageLogs = (page: number, pageSize: number) =>
   invoke<NewApiUsageLogPage>("newapi_usage_logs", { page, pageSize });
 export const appUpdateCheck = async (): Promise<AppUpdateInfo> => {
@@ -718,6 +728,13 @@ export const onChatThinkingDelta = (handler: (event: ChatThinkingEvent) => void)
 export const onChatTool = (
   handler: (t: { sessionId: string; id?: string; name: string; input: string }) => void,
 ) => listen<{ sessionId: string; id?: string; name: string; input: string }>("chat-tool", (e) => handler(e.payload));
+export const onChatToolProgress = (
+  handler: (t: { sessionId: string; id?: string; name: string } & ChatToolProgress) => void,
+) =>
+  listen<{ sessionId: string; id?: string; name: string } & ChatToolProgress>(
+    "chat-tool-progress",
+    (e) => handler(e.payload),
+  );
 export const onChatToolResult = (
   handler: (t: { sessionId: string; id?: string; name: string; output: string; isError: boolean }) => void,
 ) =>

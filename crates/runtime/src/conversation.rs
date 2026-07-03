@@ -35,6 +35,7 @@ const MAX_OUTPUT_LIMIT_CONTINUATIONS: usize = 8;
 /// rejects the request for exceeding the model's context window. Bounded so an
 /// irreducible oversized turn surfaces the error instead of looping forever.
 const MAX_CONTEXT_OVERFLOW_RETRIES: usize = 3;
+const MAX_TRANSIENT_STREAM_RETRIES: usize = 1;
 const CONTINUATION_PROMPT_PREFIX: &str =
     "Continue the unfinished task from the exact point where the previous response stopped";
 /// How many times a turn that ended with no visible output at all (blank /
@@ -401,6 +402,7 @@ where
         let mut iterations = 0;
         let mut output_limit_continuations = 0;
         let mut context_overflow_retries = 0;
+        let mut transient_stream_retries = 0;
         let mut blank_response_continuations = 0;
         let mut auto_compaction = None;
 
@@ -449,8 +451,17 @@ where
                         None => return Err(error),
                     }
                 }
+                Err(error) if is_transient_runtime_error(&error) => {
+                    transient_stream_retries += 1;
+                    if transient_stream_retries > MAX_TRANSIENT_STREAM_RETRIES {
+                        return Err(error);
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(350));
+                    continue;
+                }
                 Err(error) => return Err(error),
             };
+            transient_stream_retries = 0;
             let (assistant_message, usage, stop_reason) = build_assistant_message(events)?;
             if let Some(usage) = usage {
                 self.usage_tracker.record(usage);
@@ -1182,6 +1193,24 @@ fn merge_auto_compaction_event(
         }
         None => *target = Some(event),
     }
+}
+
+fn is_transient_runtime_error(error: &RuntimeError) -> bool {
+    if error.is_context_overflow() || error.is_model_unavailable() {
+        return false;
+    }
+    let lower = error.to_string().to_ascii_lowercase();
+    lower.contains("timeout")
+        || lower.contains("timed out")
+        || lower.contains("connection")
+        || lower.contains("temporarily unavailable")
+        || lower.contains("rate limit")
+        || lower.contains("too many requests")
+        || lower.contains("429")
+        || lower.contains("500")
+        || lower.contains("502")
+        || lower.contains("503")
+        || lower.contains("504")
 }
 
 fn active_turn_message_count(session: &Session) -> usize {

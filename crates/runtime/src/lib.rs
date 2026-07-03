@@ -30,7 +30,10 @@ mod session_index;
 mod usage;
 
 pub use atomic_file::write_replace as write_file_atomically;
-pub use bash::{execute_bash, execute_bash_with_cancel, BashCommandInput, BashCommandOutput};
+pub use bash::{
+    execute_bash, execute_bash_with_cancel, execute_bash_with_cancel_and_progress,
+    resolve_foreground_shell_timeout_ms, BashCommandInput, BashCommandOutput,
+};
 pub use bootstrap::{BootstrapPhase, BootstrapPlan};
 pub use cache::{extract_bundle, extraction_report, ExtractionError, ExtractionReport};
 pub use compact::{
@@ -100,9 +103,11 @@ pub use permissions::{
 pub use process::{hidden_command, hidden_tokio_command, hide_window};
 pub use process_registry::{
     configure_managed_tokio_command, managed_processes_snapshot, register_managed_process,
-    run_managed_command, run_managed_command_with_cancel, spawn_managed_background,
+    run_managed_command, run_managed_command_with_cancel,
+    run_managed_command_with_cancel_and_progress, spawn_managed_background,
     terminate_all_managed_processes, terminate_managed_process_tree, unregister_managed_process,
-    ManagedCommandOutput, ManagedProcessGuard, ManagedProcessInfo, ManagedProcessKind,
+    ManagedCommandOutput, ManagedCommandProgress, ManagedProcessGuard, ManagedProcessInfo,
+    ManagedProcessKind,
 };
 pub use prompt::{
     load_system_prompt, prepend_bullets, team_orchestration_section, ContextFile, ProjectContext,

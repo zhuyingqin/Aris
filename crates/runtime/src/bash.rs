@@ -11,6 +11,13 @@ use crate::sandbox::{
 use crate::{hidden_command, ConfigLoader};
 use serde::{Deserialize, Serialize};
 
+const DEFAULT_FOREGROUND_SHELL_TIMEOUT_MS: u64 = 120_000;
+const SHELL_DEFAULT_TIMEOUT_ENV: &str = "ARIS_SHELL_DEFAULT_TIMEOUT_MS";
+
+#[cfg(test)]
+static TEST_FOREGROUND_SHELL_TIMEOUT_MS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BashCommandInput {
     pub command: String,
@@ -69,6 +76,14 @@ pub fn execute_bash_with_cancel(
     input: BashCommandInput,
     should_cancel: impl Fn() -> bool,
 ) -> io::Result<BashCommandOutput> {
+    execute_bash_with_cancel_and_progress(input, should_cancel, |_| {})
+}
+
+pub fn execute_bash_with_cancel_and_progress(
+    input: BashCommandInput,
+    should_cancel: impl Fn() -> bool,
+    on_progress: impl FnMut(crate::ManagedCommandProgress),
+) -> io::Result<BashCommandOutput> {
     // Pre-execution safety check
     if let Some(rejection) = check_dangerous_command(&input.command) {
         return Err(io::Error::new(io::ErrorKind::PermissionDenied, rejection));
@@ -115,7 +130,7 @@ pub fn execute_bash_with_cancel(
         });
     }
 
-    execute_bash_blocking(input, sandbox_status, cwd, should_cancel)
+    execute_bash_blocking(input, sandbox_status, cwd, should_cancel, on_progress)
 }
 
 fn execute_bash_blocking(
@@ -123,14 +138,17 @@ fn execute_bash_blocking(
     sandbox_status: SandboxStatus,
     cwd: std::path::PathBuf,
     should_cancel: impl Fn() -> bool,
+    on_progress: impl FnMut(crate::ManagedCommandProgress),
 ) -> io::Result<BashCommandOutput> {
     let mut command = prepare_command(&input.command, &cwd, &sandbox_status, true);
-    let result = crate::run_managed_command_with_cancel(
+    let timeout_ms = resolve_foreground_shell_timeout_ms(input.timeout);
+    let result = crate::run_managed_command_with_cancel_and_progress(
         &mut command,
         format!("bash: {}", truncate_label(&input.command)),
-        input.timeout.map(Duration::from_millis),
+        Some(Duration::from_millis(timeout_ms)),
         true,
         should_cancel,
+        on_progress,
     )?;
 
     if result.timed_out {
@@ -138,10 +156,7 @@ fn execute_bash_blocking(
             String::from_utf8_lossy(&result.stdout).into_owned(),
             append_status_message(
                 String::from_utf8_lossy(&result.stderr).into_owned(),
-                format!(
-                    "Command exceeded timeout of {} ms",
-                    input.timeout.unwrap_or_default()
-                ),
+                format!("Command exceeded timeout of {timeout_ms} ms"),
             ),
             Some(String::from("timeout")),
             input.dangerously_disable_sandbox,
@@ -287,6 +302,33 @@ fn warn_strict_sandbox_override() {
              in your config to allow LLM overrides."
         );
     });
+}
+
+#[must_use]
+pub fn resolve_foreground_shell_timeout_ms(timeout: Option<u64>) -> u64 {
+    timeout.unwrap_or_else(default_foreground_shell_timeout_ms)
+}
+
+fn default_foreground_shell_timeout_ms() -> u64 {
+    #[cfg(test)]
+    {
+        let override_ms =
+            TEST_FOREGROUND_SHELL_TIMEOUT_MS.load(std::sync::atomic::Ordering::SeqCst);
+        if override_ms > 0 {
+            return override_ms;
+        }
+    }
+
+    env::var(SHELL_DEFAULT_TIMEOUT_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_FOREGROUND_SHELL_TIMEOUT_MS)
+}
+
+#[cfg(test)]
+fn set_test_foreground_shell_timeout_ms(timeout_ms: u64) {
+    TEST_FOREGROUND_SHELL_TIMEOUT_MS.store(timeout_ms, std::sync::atomic::Ordering::SeqCst);
 }
 
 fn prepare_command(
@@ -441,7 +483,7 @@ fn check_dangerous_command(command: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{execute_bash, BashCommandInput};
+    use super::{execute_bash, set_test_foreground_shell_timeout_ms, BashCommandInput};
     use crate::sandbox::FilesystemIsolationMode;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -464,6 +506,32 @@ mod tests {
         assert_eq!(output.stdout, "hello");
         assert!(!output.interrupted);
         assert!(output.sandbox_status.is_some());
+    }
+
+    #[test]
+    fn default_timeout_prevents_foreground_hangs() {
+        let _guard = crate::test_env_lock();
+        set_test_foreground_shell_timeout_ms(10);
+        let output = execute_bash(BashCommandInput {
+            command: String::from("sleep 1"),
+            timeout: None,
+            description: None,
+            run_in_background: Some(false),
+            dangerously_disable_sandbox: Some(false),
+            namespace_restrictions: Some(false),
+            isolate_network: Some(false),
+            filesystem_mode: Some(FilesystemIsolationMode::WorkspaceOnly),
+            allowed_mounts: None,
+        })
+        .expect("bash command should return a timeout result");
+        set_test_foreground_shell_timeout_ms(0);
+
+        assert!(output.interrupted);
+        assert_eq!(
+            output.return_code_interpretation.as_deref(),
+            Some("timeout")
+        );
+        assert!(output.stderr.contains("Command exceeded timeout of 10 ms"));
     }
 
     #[test]

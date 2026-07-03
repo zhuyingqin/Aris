@@ -220,6 +220,8 @@ pub fn run() {
             newapi::newapi_send_verification,
             newapi::newapi_models,
             newapi::newapi_bootstrap,
+            newapi::newapi_groups,
+            newapi::newapi_update_group,
             newapi::newapi_usage_logs,
             connectors::connector_plugins_list,
             connectors::connector_connect,

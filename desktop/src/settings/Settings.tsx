@@ -10,11 +10,14 @@ import {
   isTauri,
   localEnvironmentChecks,
   newapiBootstrap,
+  newapiGroups,
   newapiModels,
+  newapiUpdateGroup,
   newapiUsageLogs,
   systemPromptView,
   userPromptView,
   type NewApiAccount,
+  type NewApiGroupOption,
   type NewApiUsageLogPage,
 } from "../api/tauri";
 import { isManagedAuthInvalidError, useStore, type Language } from "../store";
@@ -97,6 +100,11 @@ const PREVIEW_ACCOUNT: NewApiAccount = {
   models: ["MiniMax-M3", "MiniMax-M2.7", "gpt-5.5", "GLM-5", "deepseek-v4-pro"],
   model: "MiniMax-M3",
 };
+const PREVIEW_GROUP_OPTIONS: NewApiGroupOption[] = [
+  { name: "default", desc: "Standard group", ratio: "1" },
+  { name: "research", desc: "Research routing", ratio: "0.8" },
+  { name: "premium", desc: "Premium routing", ratio: "1.5" },
+];
 const PREVIEW_USAGE_LOGS: NewApiUsageLogPage = {
   page: 1,
   pageSize: USAGE_LOG_PAGE_SIZE,
@@ -1183,6 +1191,11 @@ export default function Settings() {
   const [account, setAccount] = useState<NewApiAccount | null>(() => isTauri() ? readCachedAccount() : PREVIEW_ACCOUNT);
   const [accountLoading, setAccountLoading] = useState(false);
   const [accountError, setAccountError] = useState("");
+  const [groupOptions, setGroupOptions] = useState<NewApiGroupOption[]>(() => isTauri() ? [] : PREVIEW_GROUP_OPTIONS);
+  const [groupDraft, setGroupDraft] = useState(() => isTauri() ? readCachedAccount()?.group ?? "" : PREVIEW_ACCOUNT.group);
+  const [groupLoading, setGroupLoading] = useState(false);
+  const [groupSaving, setGroupSaving] = useState(false);
+  const [groupError, setGroupError] = useState("");
   const [systemPrompt, setSystemPrompt] = useState<SystemPromptView | null>(() => isTauri() ? null : PREVIEW_SYSTEM_PROMPT);
   const [systemPromptOpen, setSystemPromptOpen] = useState(false);
   const [systemPromptLoading, setSystemPromptLoading] = useState(false);
@@ -1328,10 +1341,28 @@ export default function Settings() {
     }
   };
 
+  const loadGroupOptions = async () => {
+    if (!MANAGED_NEW_API_MODE) return;
+    if (!isTauri()) {
+      setGroupOptions(PREVIEW_GROUP_OPTIONS);
+      return;
+    }
+    setGroupLoading(true);
+    setGroupError("");
+    try {
+      setGroupOptions(await newapiGroups());
+    } catch (error) {
+      setGroupError(String(error));
+    } finally {
+      setGroupLoading(false);
+    }
+  };
+
   const loadAccount = async () => {
     if (!MANAGED_NEW_API_MODE) return;
     if (!isTauri()) {
       setAccount(PREVIEW_ACCOUNT);
+      setGroupDraft(PREVIEW_ACCOUNT.group);
       return;
     }
     setAccountLoading(true);
@@ -1339,6 +1370,7 @@ export default function Settings() {
     try {
       const next = await newapiBootstrap();
       setAccount(next);
+      setGroupDraft(next.group);
       if (next.models.length > 0) {
         setManagedModels(next.models);
       }
@@ -1355,9 +1387,34 @@ export default function Settings() {
     }
   };
 
+  const saveAccountGroup = async () => {
+    const nextGroup = groupDraft.trim();
+    if (!nextGroup || !account || nextGroup === account.group) return;
+    setGroupSaving(true);
+    setGroupError("");
+    try {
+      const next = isTauri()
+        ? await newapiUpdateGroup(nextGroup)
+        : { ...PREVIEW_ACCOUNT, group: nextGroup };
+      setAccount(next);
+      setGroupDraft(next.group);
+      if (next.models.length > 0) {
+        setManagedModels(next.models);
+      }
+      writeCachedAccount(next);
+    } catch (error) {
+      const message = String(error);
+      setGroupError(message);
+      setError(message);
+    } finally {
+      setGroupSaving(false);
+    }
+  };
+
   useEffect(() => {
     if (!isTauri()) return;
     void loadManagedModels();
+    void loadGroupOptions();
     void loadAccount();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -1708,6 +1765,26 @@ export default function Settings() {
   const subscriptionUsedQuota = account?.subscriptionUsedQuota ?? 0;
   const subscriptionRemainingQuota = account?.subscriptionQuota ?? 0;
   const subscriptionUsagePercent = account ? subscriptionQuotaPercent(account) : 0;
+  const groupCopy = language === "cn"
+    ? {
+      label: "后台分组",
+      hint: "切换后会更新 New API 后台里当前账号的分组，并重新同步额度与模型。",
+      save: "保存分组",
+      saving: "保存中...",
+      loading: "正在加载分组...",
+      empty: "暂无可选分组",
+    }
+    : {
+      label: "Backend group",
+      hint: "Saving updates this account's group in New API, then refreshes quota and models.",
+      save: "Save group",
+      saving: "Saving...",
+      loading: "Loading groups...",
+      empty: "No groups available",
+    };
+  const groupOptionsWithCurrent = account?.group && !groupOptions.some((option) => option.name === account.group)
+    ? [{ name: account.group, desc: account.groupDesc, ratio: account.groupRatio }, ...groupOptions]
+    : groupOptions;
   const usageLogTotal = usageLogs?.total ?? 0;
   const usageLogItems = usageLogs?.items ?? [];
   const usageLogPageCount = Math.max(1, Math.ceil(usageLogTotal / USAGE_LOG_PAGE_SIZE));
@@ -1986,6 +2063,37 @@ export default function Settings() {
                   {account && (account.groupRatio || account.groupDesc) && (
                     <div className="sp-update-message">
                       {copy.authGroupMeta(account.group, account.groupRatio, account.groupDesc)}
+                    </div>
+                  )}
+                  {account && (
+                    <div className="sp-account-group-control">
+                      <label className="sp-account-group-field">
+                        <span>{groupCopy.label}</span>
+                        <select
+                          className="sp-settings-select"
+                          value={groupDraft}
+                          onChange={(event) => setGroupDraft(event.currentTarget.value)}
+                          disabled={groupLoading || groupSaving || groupOptionsWithCurrent.length === 0}
+                        >
+                          {groupOptionsWithCurrent.map((option) => (
+                            <option value={option.name} key={option.name}>
+                              {option.name}{option.ratio ? ` · ${option.ratio}` : ""}{option.desc ? ` · ${option.desc}` : ""}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <button
+                        className="sp-btn sp-btn-secondary"
+                        type="button"
+                        onClick={() => void saveAccountGroup()}
+                        disabled={groupSaving || groupLoading || !groupDraft.trim() || groupDraft === account.group}
+                      >
+                        {groupSaving ? groupCopy.saving : groupCopy.save}
+                      </button>
+                      <div className="sp-account-group-hint">
+                        {groupLoading ? groupCopy.loading : groupOptionsWithCurrent.length === 0 ? groupCopy.empty : groupCopy.hint}
+                      </div>
+                      {groupError && <div className="sp-update-message sp-update-message-error">{groupError}</div>}
                     </div>
                   )}
                   {account && account.quota + account.usedQuota > 0 && (

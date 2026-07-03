@@ -11,15 +11,15 @@ use aris_executor::{
 };
 use reqwest::blocking::Client;
 use runtime::{
-    append_file, edit_file, execute_bash_with_cancel, glob_search, grep_search, load_system_prompt,
-    read_file, write_file, ApiClient, ApiRequest, AssistantEvent, BashCommandInput,
-    ConversationRuntime, GrepSearchInput, PermissionMode, PermissionPolicy, RuntimeError, Session,
-    ToolError, ToolExecutor,
+    append_file, edit_file, glob_search, grep_search, load_system_prompt, read_file, write_file,
+    ApiClient, ApiRequest, AssistantEvent, BashCommandInput, ConversationRuntime, GrepSearchInput,
+    PermissionMode, PermissionPolicy, RuntimeError, Session, ToolError, ToolExecutor,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 const MAX_WRITE_FILE_CONTENT_CHARS: usize = 24_000;
+const TOOL_PROGRESS_NEAR_TIMEOUT_RATIO: f64 = 0.80;
 
 pub mod knowledge;
 pub mod layout;
@@ -68,6 +68,22 @@ pub struct ToolSpec {
     pub required_permission: PermissionMode,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct ToolProgress {
+    #[serde(rename = "elapsedMs")]
+    pub elapsed_ms: u64,
+    #[serde(rename = "timeoutMs")]
+    pub timeout_ms: Option<u64>,
+    pub pid: Option<u32>,
+    #[serde(rename = "stdoutTail")]
+    pub stdout_tail: Option<String>,
+    #[serde(rename = "stderrTail")]
+    pub stderr_tail: Option<String>,
+    #[serde(rename = "nearTimeout")]
+    pub near_timeout: bool,
+    pub message: String,
+}
+
 #[must_use]
 #[allow(clippy::too_many_lines)]
 /// Render the active Agent Team as a readable terminal view (backs `/team`).
@@ -79,12 +95,19 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
     vec![
         ToolSpec {
             name: "bash",
-            description: "Execute a shell command in the current workspace.",
+            description: concat!(
+                "Execute a shell command in the current workspace for shell semantics, package managers, build/test runners, scripts, and process control. ",
+                "Prefer dedicated tools when they fit: read_file for known-path reads, glob_search for file discovery, grep_search for content search, and write_file/append_file/edit_file for file changes. ",
+                "Do not use shell redirection, heredocs, sed/awk in-place edits, or ad hoc scripts to modify files unless a justified bulk mechanical rewrite is safer than edit_file. ",
+                "Foreground commands default to a 120000 ms timeout; pass a larger timeout for legitimately long work. ",
+                "Use run_in_background only for long-running services or watchers whose immediate output is not needed; include a short description and do not start duplicate background processes. ",
+                "Run independent read-only investigations as separate parallel tool calls instead of chaining them with separators; chain commands only when they genuinely depend on each other."
+            ),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "command": { "type": "string" },
-                    "timeout": { "type": "integer", "minimum": 1 },
+                    "timeout": { "type": "integer", "minimum": 1, "description": "Timeout in milliseconds for foreground commands. Defaults to 120000." },
                     "description": { "type": "string" },
                     "run_in_background": { "type": "boolean" },
                     "dangerouslyDisableSandbox": {
@@ -124,7 +147,13 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "write_file",
-            description: "Write a complete text file in the workspace. Place generated artifacts in canonical project folders: slide/PPT/PDF deck outputs under slides/, posters under poster/, interactive web apps under web/<name>/ with index.html plus local CSS/assets, source notebooks under notebooks/, run artifacts under experiments/runs/, and scratch/temp/cache files under .somniq/tmp/. When the user asks to modify an existing/current artifact, reuse the existing path and update it in place; do not create sibling version files such as _v2, _new, _final, or timestamped copies unless explicitly requested. Keep content under 24000 characters in a single call; for longer generated files, write a small scaffold, append chunks with append_file, and verify the final file. Prefer edit_file for localized edits; use shell scripts only for justified bulk mechanical rewrites.",
+            description: concat!(
+                "Write a complete text file in the workspace. Use write_file for new files, full replacements, or generated content with little continuity from an existing file; read the target first before overwriting an existing path. ",
+                "For incremental edits to existing files, prefer edit_file; do not use write_file, append_file, shell redirection, heredocs, or scripts for small localized changes. ",
+                "Place generated artifacts in canonical project folders: slide/PPT/PDF deck outputs under slides/, posters under poster/, interactive web apps under web/<name>/ with index.html plus local CSS/assets, source notebooks under notebooks/, run artifacts under experiments/runs/, and scratch/temp/cache files under .somniq/tmp/. ",
+                "When the user asks to modify an existing/current artifact, reuse the existing path and update it in place; do not create sibling version files such as _v2, _new, _final, or timestamped copies unless explicitly requested. ",
+                "Keep content under 24000 characters in a single call; for longer generated files, write a small scaffold, append chunks with append_file, and verify the final file."
+            ),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -138,7 +167,12 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "append_file",
-            description: "Append one text chunk to a workspace file without returning the full file. Keep generated artifacts in the same canonical folders as write_file: slides/, poster/, web/<name>/, notebooks/, experiments/runs/, or .somniq/tmp/ for scratch/temp/cache files. For existing/current artifacts, append only to the identified existing path and do not create a new versioned sibling unless explicitly requested. Keep content under 24000 characters; use this for long generated artifacts after a small write_file scaffold, then verify with read_file/compilation.",
+            description: concat!(
+                "Append one text chunk to a workspace file without returning the full file. Use append_file mainly for long generated artifacts after a small write_file scaffold; do not use it for localized edits to existing files. ",
+                "For existing/current artifacts, append only to the identified existing path and do not create a new versioned sibling unless explicitly requested. ",
+                "Keep generated artifacts in the same canonical folders as write_file: slides/, poster/, web/<name>/, notebooks/, experiments/runs/, or .somniq/tmp/ for scratch/temp/cache files. ",
+                "Keep content under 24000 characters; after chunked writes, verify the final file with read_file, line counts, tests, or compilation as appropriate."
+            ),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -153,7 +187,12 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "edit_file",
-            description: "Replace text directly in a workspace file. Use this for small and medium edits to existing/current artifacts instead of creating new version files or generating helper scripts; it returns Codex-style structured file changes.",
+            description: concat!(
+                "Replace text directly in a workspace file. Use edit_file for small and medium edits to existing/current artifacts instead of write_file, append_file, new version files, shell redirection, sed/awk in-place edits, or generated helper scripts. ",
+                "Read the target file first and take old_string from the current file contents, not stale memory; old_string should be unique unless replace_all is intentional for every match. ",
+                "When multiple edits target the same file, apply one edit, read the file again, then make the next edit so old_string does not go stale. ",
+                "It returns Codex-style structured file changes."
+            ),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -978,12 +1017,19 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "PowerShell",
-            description: "Execute a PowerShell command with optional timeout.",
+            description: concat!(
+                "Execute a PowerShell command when Windows-specific shell semantics are needed. ",
+                "Prefer dedicated tools when they fit: read_file for known-path reads, glob_search for file discovery, grep_search for content search, and write_file/append_file/edit_file for file changes. ",
+                "Do not use shell redirection, here-strings, ad hoc scripts, or Set-Content/Add-Content for file edits unless a justified bulk mechanical rewrite is safer than edit_file. ",
+                "Foreground commands default to a 120000 ms timeout; pass a larger timeout for legitimately long work. ",
+                "Use run_in_background only for long-running services or watchers whose immediate output is not needed; include a short description and do not start duplicate background processes. ",
+                "Run independent read-only investigations as separate parallel tool calls instead of chaining them with separators; chain commands only when they genuinely depend on each other."
+            ),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "command": { "type": "string" },
-                    "timeout": { "type": "integer", "minimum": 1 },
+                    "timeout": { "type": "integer", "minimum": 1, "description": "Timeout in milliseconds for foreground commands. Defaults to 120000." },
                     "description": { "type": "string" },
                     "run_in_background": { "type": "boolean" }
                 },
@@ -1004,10 +1050,18 @@ pub fn execute_tool_with_cancel(
     input: &Value,
     should_cancel: &dyn Fn() -> bool,
 ) -> Result<String, String> {
+    execute_tool_with_cancel_and_progress(name, input, should_cancel, |_| {})
+}
+
+pub fn execute_tool_with_cancel_and_progress(
+    name: &str,
+    input: &Value,
+    should_cancel: &dyn Fn() -> bool,
+    mut on_progress: impl FnMut(ToolProgress),
+) -> Result<String, String> {
     match name {
-        "bash" => {
-            from_value::<BashCommandInput>(input).and_then(|input| run_bash(input, should_cancel))
-        }
+        "bash" => from_value::<BashCommandInput>(input)
+            .and_then(|input| run_bash(input, should_cancel, &mut on_progress)),
         "read_file" => from_value::<ReadFileInput>(input).and_then(run_read_file),
         "WorkspaceLayout" => to_pretty_json(layout::layout_json()),
         "write_file" => from_value::<WriteFileInput>(input).and_then(run_write_file),
@@ -1085,7 +1139,7 @@ pub fn execute_tool_with_cancel(
         }
         "REPL" => from_value::<ReplInput>(input).and_then(|input| run_repl(input, should_cancel)),
         "PowerShell" => from_value::<PowerShellInput>(input)
-            .and_then(|input| run_powershell(input, should_cancel)),
+            .and_then(|input| run_powershell(input, should_cancel, &mut on_progress)),
         _ => Err(format!("unsupported tool: {name}")),
     }
 }
@@ -1094,11 +1148,39 @@ fn from_value<T: for<'de> Deserialize<'de>>(input: &Value) -> Result<T, String> 
     serde_json::from_value(input.clone()).map_err(|error| error.to_string())
 }
 
-fn run_bash(input: BashCommandInput, should_cancel: &dyn Fn() -> bool) -> Result<String, String> {
+fn run_bash(
+    input: BashCommandInput,
+    should_cancel: &dyn Fn() -> bool,
+    on_progress: &mut dyn FnMut(ToolProgress),
+) -> Result<String, String> {
     serde_json::to_string_pretty(
-        &execute_bash_with_cancel(input, should_cancel).map_err(|error| error.to_string())?,
+        &runtime::execute_bash_with_cancel_and_progress(input, should_cancel, |progress| {
+            on_progress(managed_progress_to_tool_progress(progress));
+        })
+        .map_err(|error| error.to_string())?,
     )
     .map_err(|error| error.to_string())
+}
+
+fn managed_progress_to_tool_progress(progress: runtime::ManagedCommandProgress) -> ToolProgress {
+    let near_timeout = progress.timeout_ms.is_some_and(|timeout| {
+        timeout > 0
+            && (progress.elapsed_ms as f64) >= (timeout as f64 * TOOL_PROGRESS_NEAR_TIMEOUT_RATIO)
+    });
+    let message = if near_timeout {
+        "Still running; close to timeout".to_string()
+    } else {
+        "Still running".to_string()
+    };
+    ToolProgress {
+        elapsed_ms: progress.elapsed_ms,
+        timeout_ms: progress.timeout_ms,
+        pid: Some(progress.pid),
+        stdout_tail: (!progress.stdout_tail.is_empty()).then_some(progress.stdout_tail),
+        stderr_tail: (!progress.stderr_tail.is_empty()).then_some(progress.stderr_tail),
+        near_timeout,
+        message,
+    }
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -1327,9 +1409,11 @@ fn run_repl(input: ReplInput, should_cancel: &dyn Fn() -> bool) -> Result<String
 fn run_powershell(
     input: PowerShellInput,
     should_cancel: &dyn Fn() -> bool,
+    on_progress: &mut dyn FnMut(ToolProgress),
 ) -> Result<String, String> {
     to_pretty_json(
-        execute_powershell_with_cancel(input, should_cancel).map_err(|error| error.to_string())?,
+        execute_powershell_with_cancel(input, should_cancel, on_progress)
+            .map_err(|error| error.to_string())?,
     )
 }
 
@@ -4047,6 +4131,7 @@ fn iso8601_timestamp() -> String {
 fn execute_powershell_with_cancel(
     input: PowerShellInput,
     should_cancel: &dyn Fn() -> bool,
+    on_progress: &mut dyn FnMut(ToolProgress),
 ) -> std::io::Result<runtime::BashCommandOutput> {
     let _ = &input.description;
     let shell = detect_powershell_shell()?;
@@ -4056,6 +4141,7 @@ fn execute_powershell_with_cancel(
         input.timeout,
         input.run_in_background,
         should_cancel,
+        on_progress,
     )
 }
 
@@ -4102,6 +4188,7 @@ fn execute_shell_command(
     timeout: Option<u64>,
     run_in_background: Option<bool>,
     should_cancel: &dyn Fn() -> bool,
+    on_progress: &mut dyn FnMut(ToolProgress),
 ) -> std::io::Result<runtime::BashCommandOutput> {
     let command_arg = powershell_command_arg(command);
     if run_in_background.unwrap_or(false) {
@@ -4147,12 +4234,14 @@ fn execute_shell_command(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
 
-    let output = runtime::run_managed_command_with_cancel(
+    let timeout_ms = runtime::resolve_foreground_shell_timeout_ms(timeout);
+    let output = runtime::run_managed_command_with_cancel_and_progress(
         &mut process,
         format!("PowerShell: {}", truncate_process_label(command)),
-        timeout.map(Duration::from_millis),
+        Some(Duration::from_millis(timeout_ms)),
         true,
         should_cancel,
+        |progress| on_progress(managed_progress_to_tool_progress(progress)),
     )?;
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -4161,10 +4250,7 @@ fn execute_shell_command(
             stdout,
             stderr: append_process_status_message(
                 stderr,
-                &format!(
-                    "Command exceeded timeout of {} ms",
-                    timeout.unwrap_or_default()
-                ),
+                &format!("Command exceeded timeout of {timeout_ms} ms"),
             ),
             raw_output_path: None,
             interrupted: true,
@@ -5498,8 +5584,37 @@ mod tests {
         assert!(description("write_file").contains("reuse the existing path"));
         assert!(description("write_file").contains("_v2"));
         assert!(description("write_file").contains("unless explicitly requested"));
+        assert!(description("write_file").contains("read the target first"));
+        assert!(description("write_file").contains("prefer edit_file"));
         assert!(description("append_file").contains("existing/current artifacts"));
+        assert!(description("append_file").contains("long generated artifacts"));
         assert!(description("edit_file").contains("existing/current artifacts"));
+        assert!(description("edit_file").contains("Read the target file first"));
+        assert!(description("edit_file").contains("old_string should be unique"));
+    }
+
+    #[test]
+    fn shell_tool_descriptions_prefer_dedicated_tools_and_parallel_reads() {
+        let specs = mvp_tool_specs();
+        let description = |name: &str| {
+            specs
+                .iter()
+                .find(|spec| spec.name == name)
+                .unwrap_or_else(|| panic!("{name} spec should exist"))
+                .description
+        };
+
+        for name in ["bash", "PowerShell"] {
+            let desc = description(name);
+            assert!(desc.contains("Prefer dedicated tools"));
+            assert!(desc.contains("read_file"));
+            assert!(desc.contains("glob_search"));
+            assert!(desc.contains("grep_search"));
+            assert!(desc.contains("edit_file"));
+            assert!(desc.contains("run_in_background only for long-running services"));
+            assert!(desc.contains("separate parallel tool calls"));
+            assert!(desc.contains("chain commands only when they genuinely depend"));
+        }
     }
 
     #[test]
@@ -6209,6 +6324,9 @@ mod tests {
 
     #[test]
     fn bash_tool_reports_success_exit_failure_timeout_and_background() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let success = execute_tool("bash", &json!({ "command": "printf 'hello'" }))
             .expect("bash should succeed");
         let success_output: serde_json::Value = serde_json::from_str(&success).expect("json");
@@ -6727,7 +6845,7 @@ printf 'pwsh:%s' "$1"
 
         let result = execute_tool(
             "PowerShell",
-            &json!({"command": "Write-Output hello", "timeout": 1000}),
+            &json!({"command": "Write-Output hello", "timeout": 10_000}),
         )
         .expect("PowerShell should succeed");
 
@@ -6753,9 +6871,12 @@ printf 'pwsh:%s' "$1"
     #[cfg(windows)]
     #[test]
     fn powershell_runs_via_system_shell() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let result = execute_tool(
             "PowerShell",
-            &json!({"command": "Write-Output hello", "timeout": 1000}),
+            &json!({"command": "Write-Output hello", "timeout": 10_000}),
         )
         .expect("PowerShell should succeed");
 
@@ -6767,7 +6888,7 @@ printf 'pwsh:%s' "$1"
 
         let output: serde_json::Value = serde_json::from_str(&result).expect("json");
         assert!(output["stdout"].as_str().expect("stdout").contains("hello"));
-        assert!(output["stderr"].as_str().expect("stderr").is_empty());
+        assert_eq!(output["returnCodeInterpretation"], serde_json::Value::Null);
 
         let background_output: serde_json::Value = serde_json::from_str(&background).expect("json");
         assert!(background_output["backgroundTaskId"].as_str().is_some());

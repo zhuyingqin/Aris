@@ -15,7 +15,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex, OnceLock,
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use aris_commands::{slash_command_specs, SlashCommand};
@@ -136,6 +136,71 @@ fn denied_tool_message(tool_name: &str) -> String {
 struct KernelToolExecutor {
     extra_blocked_tools: &'static [&'static str],
     cancelled: Option<Arc<AtomicBool>>,
+    progress_sink: Option<ToolProgressSink>,
+}
+
+type ToolProgressSink = Arc<dyn Fn(&str, &str, tools::ToolProgress) + Send + Sync>;
+
+fn emit_tool_progress(
+    app: &AppHandle,
+    session_id: &str,
+    tool_use_id: &str,
+    tool_name: &str,
+    progress: &tools::ToolProgress,
+) {
+    let _ = app.emit(
+        "chat-tool-progress",
+        json!({
+            "sessionId": session_id,
+            "id": tool_use_id,
+            "name": tool_name,
+            "elapsedMs": progress.elapsed_ms,
+            "timeoutMs": progress.timeout_ms,
+            "pid": progress.pid,
+            "stdoutTail": progress.stdout_tail.as_deref().map(|value| truncate(value, MAX_TOOL_EVENT_CHARS)),
+            "stderrTail": progress.stderr_tail.as_deref().map(|value| truncate(value, MAX_TOOL_EVENT_CHARS)),
+            "nearTimeout": progress.near_timeout,
+            "message": progress.message,
+        }),
+    );
+}
+
+fn should_emit_generic_tool_progress(tool_name: &str) -> bool {
+    !matches!(tool_name, "bash" | "PowerShell" | ASK_USER_QUESTION_TOOL)
+}
+
+fn start_tool_heartbeat(
+    app: AppHandle,
+    session_id: String,
+    tool_use_id: String,
+    tool_name: String,
+    done: Arc<AtomicBool>,
+    cancelled: Arc<AtomicBool>,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        let started = Instant::now();
+        loop {
+            std::thread::sleep(Duration::from_millis(1_000));
+            if done.load(Ordering::SeqCst) || cancelled.load(Ordering::SeqCst) {
+                break;
+            }
+            emit_tool_progress(
+                &app,
+                &session_id,
+                &tool_use_id,
+                &tool_name,
+                &tools::ToolProgress {
+                    elapsed_ms: started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+                    timeout_ms: None,
+                    pid: None,
+                    stdout_tail: None,
+                    stderr_tail: None,
+                    near_timeout: false,
+                    message: "Still running".to_string(),
+                },
+            );
+        }
+    })
 }
 
 impl ToolExecutor for KernelToolExecutor {
@@ -166,7 +231,18 @@ impl ToolExecutor for KernelToolExecutor {
                     .as_ref()
                     .is_some_and(|flag| flag.load(Ordering::SeqCst))
         };
-        tools::execute_tool_with_cancel(tool_name, &value, &should_cancel).map_err(|error| {
+        let progress_sink = self.progress_sink.clone();
+        tools::execute_tool_with_cancel_and_progress(
+            tool_name,
+            &value,
+            &should_cancel,
+            |progress| {
+                if let Some(sink) = &progress_sink {
+                    sink(_tool_use_id, tool_name, progress);
+                }
+            },
+        )
+        .map_err(|error| {
             if should_cancel() || error.eq_ignore_ascii_case("interrupted by user") {
                 ToolError::interrupted_by_user()
             } else {
@@ -316,6 +392,17 @@ where
         if self.is_cancelled() {
             return Err(ToolError::interrupted_by_user());
         }
+        let heartbeat_done = Arc::new(AtomicBool::new(false));
+        let heartbeat = should_emit_generic_tool_progress(tool_name).then(|| {
+            start_tool_heartbeat(
+                self.app.clone(),
+                self.session_id.clone(),
+                tool_use_id.to_string(),
+                tool_name.to_string(),
+                heartbeat_done.clone(),
+                self.cancelled.clone(),
+            )
+        });
         // `AskUserQuestion` is handled here, not by the shared registry: it
         // blocks for the user's answer and resumes the turn with it. The
         // `chat-tool` card already rendered from the streamed call; the answer
@@ -325,6 +412,10 @@ where
         } else {
             self.inner.execute_with_id(tool_use_id, tool_name, input)
         };
+        heartbeat_done.store(true, Ordering::SeqCst);
+        if let Some(handle) = heartbeat {
+            let _ = handle.join();
+        }
         match inner_result {
             Ok(output) => {
                 // The tool already ran, so its output is real work that must not
@@ -334,10 +425,13 @@ where
                 // instead of acting as if the tool never ran. Only after
                 // emitting do we honor the interrupt.
                 let artifact = persist_tool_output_if_large(tool_use_id, tool_name, &output);
-                let context_output =
+                let mut context_output =
                     compact_tool_output_for_context(tool_name, output, artifact.as_ref());
-                let ui_output = tool_output_for_ui(&context_output, artifact.as_ref());
                 let is_error = tool_output_indicates_error(tool_name, &context_output);
+                if is_error {
+                    context_output = attach_recovery_hint(tool_name, &context_output);
+                }
+                let ui_output = tool_output_for_ui(&context_output, artifact.as_ref());
                 let _ = self.app.emit(
                     "chat-tool-result",
                     json!({ "sessionId": self.session_id, "id": tool_use_id, "name": tool_name, "output": ui_output, "isError": is_error }),
@@ -355,11 +449,12 @@ where
                 if err.is_interrupted() {
                     return Err(err);
                 }
+                let output = format_tool_error_with_recovery(tool_name, &err.to_string());
                 let _ = self.app.emit(
                     "chat-tool-result",
-                    json!({ "sessionId": self.session_id, "id": tool_use_id, "name": tool_name, "output": truncate(&err.to_string(), MAX_TOOL_EVENT_CHARS), "isError": true }),
+                    json!({ "sessionId": self.session_id, "id": tool_use_id, "name": tool_name, "output": truncate(&output, MAX_TOOL_EVENT_CHARS), "isError": true }),
                 );
-                Err(err)
+                Err(ToolError::new(output))
             }
         }
     }
@@ -915,6 +1010,62 @@ fn tool_output_indicates_error(tool_name: &str, output: &str) -> bool {
     matches!(tool_name, "bash" | "PowerShell") && shell_output_indicates_error(output)
 }
 
+fn attach_recovery_hint(tool_name: &str, output: &str) -> String {
+    let Some(hint) = tool_recovery_hint(tool_name, output) else {
+        return output.to_string();
+    };
+    if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(output) {
+        if let Some(object) = value.as_object_mut() {
+            object.insert(
+                "recoveryHint".to_string(),
+                serde_json::Value::String(hint),
+            );
+            return serde_json::to_string_pretty(&value).unwrap_or_else(|_| output.to_string());
+        }
+    }
+    format!("{output}\n\nRecovery hint: {hint}")
+}
+
+fn format_tool_error_with_recovery(tool_name: &str, error: &str) -> String {
+    let hint = tool_recovery_hint(tool_name, error)
+        .unwrap_or_else(|| "Use the error message to adjust the next step; if the operation is optional, explain the fallback and continue.".to_string());
+    format!("{error}\n\nRecovery hint: {hint}")
+}
+
+fn tool_recovery_hint(tool_name: &str, output: &str) -> Option<String> {
+    let lower = output.to_ascii_lowercase();
+    if matches!(tool_name, "bash" | "PowerShell") {
+        if lower.contains("timeout") || lower.contains("exceeded timeout") {
+            return Some("The shell command timed out. Retry with a narrower command, add pagination/filters, or use run_in_background for a genuine long-running service. Only increase timeout when the long run is intentional.".to_string());
+        }
+        if lower.contains("permission denied") || lower.contains("access is denied") {
+            return Some("The command hit a permission boundary. Prefer workspace-scoped tools or ask the user before requiring elevated access.".to_string());
+        }
+        if lower.contains("not recognized")
+            || lower.contains("command not found")
+            || lower.contains("executable not found")
+        {
+            return Some("The command or executable is unavailable. Check the local toolchain first, then choose an installed alternative or explain the missing dependency.".to_string());
+        }
+        if lower.contains("exit_code:") {
+            return Some("The command exited non-zero. Inspect stderr/stdout, fix the command or underlying issue, then retry only the smallest necessary step.".to_string());
+        }
+    }
+    if lower.contains("timed out") || lower.contains("timeout") {
+        return Some("The operation timed out. Retry once with a smaller request or a more specific query; avoid repeating the same broad call.".to_string());
+    }
+    if lower.contains("network")
+        || lower.contains("connection")
+        || lower.contains("temporarily unavailable")
+        || lower.contains("rate limit")
+        || lower.contains("429")
+        || lower.contains("503")
+    {
+        return Some("This looks transient. Retry once if useful; if it fails again, proceed with cached/local context and mention the degraded source.".to_string());
+    }
+    None
+}
+
 fn shell_output_indicates_error(output: &str) -> bool {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(output) else {
         return false;
@@ -1250,6 +1401,7 @@ fn build_system_prompt_uncached(key: &SystemPromptCacheKey) -> Vec<String> {
         )
     };
     let file_links = "When you create or modify files, include Markdown links to the relevant file paths in the final response so the desktop UI can open them directly.".to_string();
+    let readable_answers = "Readable answers: for explanatory answers, prefer short paragraphs, bullets, or numbered steps. Avoid dense single-paragraph technical summaries, especially in Chinese-English mixed explanations.".to_string();
     let artifact_layout = "Project artifact layout: place slide/PPT/PDF deck outputs under `slides/`, poster outputs under `poster/`, interactive web apps under `web/<name>/` with an `index.html` plus local CSS/assets, notebook programs under `experiments/`, and scratch/temp/cache files under `.somniq/tmp/`. Studio auto-discovers `slides/`, `poster/`, and `web/`; Lab lists notebooks from the workspace and defaults new notebooks into `experiments/`.".to_string();
     let existing_artifact_edits = "Existing artifact edits: when the user asks to modify, revise, continue editing, polish, or fix a current/existing report, paper, slide deck, PDF source, or other generated artifact, first identify and reuse the existing source path from the user message, recent file links, tool outputs, or workspace search. Edit that source in place and rebuild derived outputs at the same base path. Do not create sibling version files such as `_v2`, `_v9`, `_new`, `_final`, or timestamped copies unless the user explicitly asks for a new version, backup, archive, or comparison copy. If the target file cannot be identified, ask for the path instead of creating a new artifact.".to_string();
     let diagram_output = "Diagram output: when explaining a workflow, process, call path, architecture, state machine, dependency graph, or decision tree, prefer a fenced `mermaid` code block over ASCII art. Keep diagrams compact, use semantic node ids, short readable labels, left-to-right flow for pipelines, meaningful edge labels when they clarify the flow, and avoid oversized text inside nodes. For publication-grade diagram files, use the `mermaid-diagram` skill and verify the rendered output.".to_string();
@@ -1259,6 +1411,7 @@ fn build_system_prompt_uncached(key: &SystemPromptCacheKey) -> Vec<String> {
     let mut extra_sections = vec![
         access.clone(),
         file_links,
+        readable_answers,
         artifact_layout,
         existing_artifact_edits,
         diagram_output,
@@ -2809,10 +2962,22 @@ async fn run_chat_turn_with_context(
             }
         };
         let tool_specs = aris_chat::chat_tool_specs(tool_specs_for(extra_blocked_tools));
+        let progress_app = worker_app.clone();
+        let progress_session_id = worker_session_id.clone();
+        let progress_sink: ToolProgressSink = Arc::new(move |tool_use_id, tool_name, progress| {
+            emit_tool_progress(
+                &progress_app,
+                &progress_session_id,
+                tool_use_id,
+                tool_name,
+                &progress,
+            );
+        });
         let mcp_bundle = aris_chat::attach_mcp_tools_with_cancel(
             KernelToolExecutor {
                 extra_blocked_tools,
                 cancelled: Some(worker_cancelled.clone()),
+                progress_sink: Some(progress_sink),
             },
             tool_specs,
             &feature_config,

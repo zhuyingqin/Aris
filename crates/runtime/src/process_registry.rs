@@ -2,7 +2,7 @@ use std::{
     collections::BTreeMap,
     io::{self, Read},
     process::{Command, ExitStatus, Stdio},
-    sync::{Mutex, OnceLock},
+    sync::{Arc, Mutex, OnceLock},
     thread,
     time::{Duration, Instant, SystemTime},
 };
@@ -34,6 +34,20 @@ pub struct ManagedCommandOutput {
     pub status: ExitStatus,
     pub interrupted: bool,
     pub timed_out: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ManagedCommandProgress {
+    pub pid: u32,
+    pub elapsed_ms: u64,
+    pub timeout_ms: Option<u64>,
+    pub stdout_tail: String,
+    pub stderr_tail: String,
+}
+
+struct ManagedStreamReader {
+    handle: thread::JoinHandle<()>,
+    buffer: Arc<Mutex<Vec<u8>>>,
 }
 
 fn registry() -> &'static Mutex<BTreeMap<u32, ManagedProcessInfo>> {
@@ -130,6 +144,24 @@ pub fn run_managed_command_with_cancel(
     interruptible: bool,
     should_cancel: impl Fn() -> bool,
 ) -> io::Result<ManagedCommandOutput> {
+    run_managed_command_with_cancel_and_progress(
+        command,
+        label,
+        timeout,
+        interruptible,
+        should_cancel,
+        |_| {},
+    )
+}
+
+pub fn run_managed_command_with_cancel_and_progress(
+    command: &mut Command,
+    label: impl Into<String>,
+    timeout: Option<Duration>,
+    interruptible: bool,
+    should_cancel: impl Fn() -> bool,
+    mut on_progress: impl FnMut(ManagedCommandProgress),
+) -> io::Result<ManagedCommandOutput> {
     configure_managed_command(command);
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = command.spawn()?;
@@ -139,8 +171,21 @@ pub fn run_managed_command_with_cancel(
     let stdout_reader = child.stdout.take().map(read_stream_in_thread);
     let stderr_reader = child.stderr.take().map(read_stream_in_thread);
     let started = Instant::now();
+    let timeout_ms = timeout.map(duration_millis_u64);
+    let mut last_progress = None::<Instant>;
 
     loop {
+        if last_progress.is_none_or(|last| last.elapsed() >= Duration::from_millis(1_000)) {
+            emit_progress(
+                pid,
+                started,
+                timeout_ms,
+                stdout_reader.as_ref(),
+                stderr_reader.as_ref(),
+                &mut on_progress,
+            );
+            last_progress = Some(Instant::now());
+        }
         if let Some(status) = child.try_wait()? {
             return Ok(ManagedCommandOutput {
                 stdout: join_reader(stdout_reader),
@@ -211,21 +256,72 @@ fn terminate_child_and_wait(child: &mut std::process::Child) -> io::Result<ExitS
     child.wait()
 }
 
-fn read_stream_in_thread<R>(mut reader: R) -> thread::JoinHandle<Vec<u8>>
+fn read_stream_in_thread<R>(mut reader: R) -> ManagedStreamReader
 where
     R: Read + Send + 'static,
 {
-    thread::spawn(move || {
-        let mut buffer = Vec::new();
-        let _ = reader.read_to_end(&mut buffer);
-        buffer
-    })
+    let buffer = Arc::new(Mutex::new(Vec::new()));
+    let worker_buffer = Arc::clone(&buffer);
+    let handle = thread::spawn(move || {
+        let mut chunk = [0_u8; 8192];
+        loop {
+            match reader.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(size) => {
+                    if let Ok(mut buffer) = worker_buffer.lock() {
+                        buffer.extend_from_slice(&chunk[..size]);
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+    ManagedStreamReader { handle, buffer }
 }
 
-fn join_reader(reader: Option<thread::JoinHandle<Vec<u8>>>) -> Vec<u8> {
+fn join_reader(reader: Option<ManagedStreamReader>) -> Vec<u8> {
+    let Some(reader) = reader else {
+        return Vec::new();
+    };
+    let _ = reader.handle.join();
     reader
-        .and_then(|handle| handle.join().ok())
+        .buffer
+        .lock()
+        .map(|buffer| buffer.clone())
         .unwrap_or_default()
+}
+
+fn emit_progress(
+    pid: u32,
+    started: Instant,
+    timeout_ms: Option<u64>,
+    stdout_reader: Option<&ManagedStreamReader>,
+    stderr_reader: Option<&ManagedStreamReader>,
+    on_progress: &mut impl FnMut(ManagedCommandProgress),
+) {
+    on_progress(ManagedCommandProgress {
+        pid,
+        elapsed_ms: duration_millis_u64(started.elapsed()),
+        timeout_ms,
+        stdout_tail: stream_tail(stdout_reader),
+        stderr_tail: stream_tail(stderr_reader),
+    });
+}
+
+fn stream_tail(reader: Option<&ManagedStreamReader>) -> String {
+    const TAIL_BYTES: usize = 4_000;
+    let Some(reader) = reader else {
+        return String::new();
+    };
+    let Ok(buffer) = reader.buffer.lock() else {
+        return String::new();
+    };
+    let start = buffer.len().saturating_sub(TAIL_BYTES);
+    String::from_utf8_lossy(&buffer[start..]).into_owned()
+}
+
+fn duration_millis_u64(duration: Duration) -> u64 {
+    duration.as_millis().try_into().unwrap_or(u64::MAX)
 }
 
 fn terminate_process_tree(pid: u32) {

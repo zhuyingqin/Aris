@@ -552,7 +552,18 @@ export type ChatBlock =
       input: string;
       output?: string;
       isError?: boolean;
+      progress?: ChatToolProgress;
     };
+
+export interface ChatToolProgress {
+  elapsedMs: number;
+  timeoutMs?: number | null;
+  pid?: number | null;
+  stdoutTail?: string | null;
+  stderrTail?: string | null;
+  nearTimeout?: boolean;
+  message?: string;
+}
 
 // A single step of a TodoWrite plan, surfaced as the floating workflow box.
 export type ChatTodoStatus = "pending" | "in_progress" | "completed";

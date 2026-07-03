@@ -49,6 +49,14 @@ pub struct NewApiAuthStatus {
     pub privacy_policy_enabled: bool,
 }
 
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NewApiGroupOption {
+    pub name: String,
+    pub desc: String,
+    pub ratio: String,
+}
+
 fn trim_base(base: &str) -> String {
     let trimmed = base.trim().trim_end_matches('/');
     if trimmed.is_empty() {
@@ -1087,6 +1095,79 @@ fn ratio_to_string(value: &Value) -> String {
     }
 }
 
+fn group_options_from_user_groups(groups: &Value) -> Vec<NewApiGroupOption> {
+    let Some(object) = groups.as_object() else {
+        return Vec::new();
+    };
+    let mut options = object
+        .iter()
+        .map(|(name, detail)| NewApiGroupOption {
+            name: name.trim().to_string(),
+            desc: detail
+                .get("desc")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim()
+                .to_string(),
+            ratio: detail
+                .get("ratio")
+                .map(ratio_to_string)
+                .unwrap_or_default(),
+        })
+        .filter(|option| !option.name.is_empty())
+        .collect::<Vec<_>>();
+    options.sort_by(|left, right| left.name.cmp(&right.name));
+    options
+}
+
+fn group_options_from_admin_groups(groups: &Value, user_groups: &Value) -> Vec<NewApiGroupOption> {
+    let user_options = group_options_from_user_groups(user_groups);
+    let detail_for = |name: &str| {
+        user_options
+            .iter()
+            .find(|option| option.name == name)
+            .map(|option| (option.desc.clone(), option.ratio.clone()))
+            .unwrap_or_default()
+    };
+    let mut options = groups
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(value_as_string)
+                .map(|name| {
+                    let (desc, ratio) = detail_for(&name);
+                    NewApiGroupOption { name, desc, ratio }
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    options.sort_by(|left, right| left.name.cmp(&right.name));
+    options.dedup_by(|left, right| left.name == right.name);
+    options
+}
+
+async fn admin_groups(
+    client: &reqwest::Client,
+    base: &str,
+    session: &NewApiSession,
+) -> Result<Value, String> {
+    let response = with_session(client.get(format!("{base}/api/group/")), session)
+        .send()
+        .await
+        .map_err(|error| format!("鑾峰彇鍚庡彴鍒嗙粍澶辫触: {error}"))?;
+    let body = parse_json(response, "鍚庡彴鍒嗙粍").await?;
+    if !api_ok(&body) {
+        let message = api_message(&body);
+        return Err(if message.is_empty() {
+            "鑾峰彇鍚庡彴鍒嗙粍澶辫触".to_string()
+        } else {
+            message
+        });
+    }
+    Ok(body.get("data").cloned().unwrap_or(Value::Null))
+}
+
 /// Fetch the user's usable groups with their ratio + description. Best
 /// effort: any failure yields `Null` so bootstrap still returns core account
 /// state.
@@ -1315,6 +1396,96 @@ pub async fn newapi_bootstrap() -> Result<AccountState, String> {
         models,
         model,
     })
+}
+
+#[tauri::command]
+pub async fn newapi_groups() -> Result<Vec<NewApiGroupOption>, String> {
+    let (base, session) = stored_session().map_err(|_| SESSION_EXPIRED_MESSAGE.to_string())?;
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(20))
+        .build()
+        .map_err(|error| format!("HTTP 瀹㈡埛绔垱寤哄け璐? {error}"))?;
+    let user_group_data = user_groups(&client, &base, &session).await;
+    let mut options = match admin_groups(&client, &base, &session).await {
+        Ok(admin_group_data) => group_options_from_admin_groups(&admin_group_data, &user_group_data),
+        Err(_) => group_options_from_user_groups(&user_group_data),
+    };
+    if options.is_empty() {
+        let account = clear_session_if_invalid(user_self(&client, &base, &session).await)?;
+        if let Some(group) = account
+            .get("group")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            options.push(NewApiGroupOption {
+                name: group.to_string(),
+                desc: String::new(),
+                ratio: String::new(),
+            });
+        }
+    }
+    Ok(options)
+}
+
+#[tauri::command]
+pub async fn newapi_update_group(group: String) -> Result<AccountState, String> {
+    let group = group.trim().to_string();
+    if group.is_empty() {
+        return Err("分组不能为空".to_string());
+    }
+    let (base, session) = stored_session().map_err(|_| SESSION_EXPIRED_MESSAGE.to_string())?;
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(20))
+        .build()
+        .map_err(|error| format!("HTTP 瀹㈡埛绔垱寤哄け璐? {error}"))?;
+    let account = clear_session_if_invalid(user_self(&client, &base, &session).await)?;
+    let current_group = account
+        .get("group")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim();
+    if current_group == group {
+        return newapi_bootstrap().await;
+    }
+    let field = |key: &str| {
+        account
+            .get(key)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_string()
+    };
+    let payload = serde_json::json!({
+        "id": session.user_id,
+        "username": field("username"),
+        "display_name": field("display_name"),
+        "group": group,
+        "role": account
+            .get("role")
+            .or_else(|| account.get("user_role"))
+            .or_else(|| account.get("userRole"))
+            .and_then(value_as_i64)
+            .unwrap_or_default(),
+        "remark": field("remark"),
+    });
+    let response = with_session(client.put(format!("{base}/api/user/")), &session)
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|error| format!("更新后台分组失败: {error}"))?;
+    let body = parse_json(response, "后台分组更新").await?;
+    if !api_ok(&body) {
+        let message = api_message(&body);
+        return Err(if message.is_empty() {
+            "更新后台分组失败".to_string()
+        } else {
+            message
+        });
+    }
+    newapi_bootstrap().await
 }
 
 #[tauri::command]

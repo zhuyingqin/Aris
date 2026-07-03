@@ -385,15 +385,6 @@ const NAV_GROUPS: { group: string; items: NavItem[] }[] = [
         id: "extensions", label: "Extensions",
         icon: <IC d="M6 2.5H3.5a1 1 0 00-1 1V6M10 2.5h2.5a1 1 0 011 1V6M6 13.5H3.5a1 1 0 01-1-1V10M10 13.5h2.5a1 1 0 001-1V10M6.2 6.2h3.6v3.6H6.2z" />,
       },
-      {
-        id: "settings", label: "Settings",
-        icon: <svg width="16" height="16" viewBox="0 0 16 16" fill="none"
-          stroke="currentColor" strokeWidth="1.45" strokeLinecap="round" strokeLinejoin="round"
-          aria-hidden="true">
-          <circle cx="8" cy="8" r="2.3" />
-          <path d="M8 1.5V3M8 13v1.5M14.5 8H13M3 8H1.5M12.4 3.6l-1.1 1.1M4.7 11.3l-1.1 1.1M12.4 12.4l-1.1-1.1M4.7 4.7l-1.1-1.1" />
-        </svg>,
-      },
     ],
   },
 ];
@@ -463,6 +454,12 @@ function formatAccountQuota(credits: number): string {
   return `$${(credits / 500000).toFixed(2)}`;
 }
 
+function formatOptionalAccountQuota(credits?: number | null): string {
+  return typeof credits === "number" && Number.isFinite(credits)
+    ? formatAccountQuota(credits)
+    : "-";
+}
+
 function accountInitials(name: string, email: string, userFallback: string) {
   const source = (name && name !== userFallback ? name : email).trim();
   const local = source.includes("@") ? source.slice(0, source.indexOf("@")) : source;
@@ -518,6 +515,7 @@ export default function App() {
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [projectMenuOpen, setProjectMenuOpen] = useState(false);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
+  const [usageDetailsOpen, setUsageDetailsOpen] = useState(false);
   const [account, setAccount] = useState<NewApiAccount | null>(() => readCachedAccount());
   const [draggedProjectId, setDraggedProjectId] = useState<string | null>(null);
   const [projectOrderPreview, setProjectOrderPreview] = useState<string[] | null>(null);
@@ -544,6 +542,7 @@ export default function App() {
     startTabTransition(() => setTab(nextTab));
     setMobileNavOpen(false);
     setUserMenuOpen(false);
+    setUsageDetailsOpen(false);
   }, [setTab, startTabTransition]);
 
   const chooseProject = async () => {
@@ -685,6 +684,7 @@ export default function App() {
 
   const handleLogout = useCallback(() => {
     setUserMenuOpen(false);
+    setUsageDetailsOpen(false);
     logout();
   }, [logout]);
 
@@ -816,7 +816,10 @@ export default function App() {
   useEffect(() => {
     if (!userMenuOpen) return;
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setUserMenuOpen(false);
+      if (event.key === "Escape") {
+        setUserMenuOpen(false);
+        setUsageDetailsOpen(false);
+      }
     };
     const closeOnPointerDown = (event: PointerEvent) => {
       const target = event.target;
@@ -825,6 +828,7 @@ export default function App() {
         !userMenuRef.current?.contains(target)
       ) {
         setUserMenuOpen(false);
+        setUsageDetailsOpen(false);
       }
     };
     window.addEventListener("keydown", closeOnEscape);
@@ -909,6 +913,18 @@ export default function App() {
   const userEmail = accountEmail(account, copy.accountInfo);
   const userPlan = accountPlan(account, copy);
   const userInitials = accountInitials(userName, userEmail, copy.userFallback);
+  const usageMenuLabels = language === "cn"
+    ? { balance: "余额", used: "已用", plan: "套餐", subscriptionBalance: "套餐余额" }
+    : { balance: "Balance", used: "Used", plan: "Plan", subscriptionBalance: "Plan balance" };
+  const usageDetailsLabel = language === "cn" ? "\u4f7f\u7528\u7edf\u8ba1" : "Usage statistics";
+  const usageMenuItems = [
+    [usageMenuLabels.balance, formatOptionalAccountQuota(account?.quota)],
+    [usageMenuLabels.used, formatOptionalAccountQuota(account?.usedQuota)],
+    [usageMenuLabels.plan, userPlan],
+    [usageMenuLabels.subscriptionBalance, formatOptionalAccountQuota(account?.subscriptionQuota)],
+  ] as const;
+  const usagePrimary = usageMenuItems[0];
+  const usageMetrics = usageMenuItems.slice(1);
 
   return (
     <div
@@ -993,28 +1009,53 @@ export default function App() {
                 <span className="sidebar-user-menu-icon"><UserCircleIcon /></span>
                 <span className="sidebar-user-menu-email">{userEmail}</span>
               </div>
-              <button className="sidebar-user-menu-row" type="button" role="menuitem" onClick={() => openSettingsTab("general")}>
+              <button
+                className="sidebar-user-menu-row"
+                type="button"
+                role="menuitem"
+                data-onboarding-target="user-settings"
+                onClick={() => openSettingsTab("general")}
+              >
                 <span className="sidebar-user-menu-icon"><GearIcon /></span>
                 <span>{copy.settings}</span>
                 <span className="sidebar-user-shortcut">Ctrl+,</span>
               </button>
               <div className="sidebar-user-menu-divider" role="separator" />
-              <button className="sidebar-user-menu-row" type="button" role="menuitem" onClick={() => openSettingsTab("auth")}>
+              <button
+                className={`sidebar-user-menu-row${usageDetailsOpen ? " active" : ""}`}
+                type="button"
+                role="menuitem"
+                aria-expanded={usageDetailsOpen}
+                aria-controls="sidebar-user-usage-details"
+                onClick={() => setUsageDetailsOpen((open) => !open)}
+              >
                 <span className="sidebar-user-menu-icon"><UsageIcon /></span>
                 <span>{copy.remainingUsage}</span>
-                <span className="sidebar-user-chevron"><Chevron dir="right" size={13} /></span>
+                <span className="sidebar-user-chevron"><Chevron dir={usageDetailsOpen ? "down" : "right"} size={13} /></span>
               </button>
+              {usageDetailsOpen && (
+                <div className="sidebar-user-usage-panel" id="sidebar-user-usage-details" role="group" aria-label={copy.remainingUsage}>
+                  <div className="sidebar-user-usage-primary">
+                    <span>{usagePrimary[0]}</span>
+                    <strong>{usagePrimary[1]}</strong>
+                  </div>
+                  <div className="sidebar-user-usage-grid">
+                    {usageMetrics.map(([label, value]) => (
+                      <div className="sidebar-user-usage-tile" key={label}>
+                        <span>{label}</span>
+                        <strong>{value}</strong>
+                      </div>
+                    ))}
+                  </div>
+                  <button className="sidebar-user-usage-link" type="button" onClick={() => openSettingsTab("usage")}>
+                    {usageDetailsLabel}
+                  </button>
+                </div>
+              )}
               <button className="sidebar-user-menu-row" type="button" role="menuitem" onClick={handleLogout}>
                 <span className="sidebar-user-menu-icon"><LogoutIcon /></span>
                 <span>{copy.logout}</span>
               </button>
-              <div className="sidebar-user-menu-footer" role="presentation">
-                <span className="sidebar-user-avatar">{userInitials}</span>
-                <span className="sidebar-user-info">
-                  <span className="sidebar-user-name">{userName}</span>
-                  <span className="sidebar-user-plan">{userPlan}</span>
-                </span>
-              </div>
             </div>
           )}
           <button
@@ -1023,8 +1064,10 @@ export default function App() {
             aria-haspopup="menu"
             aria-expanded={userMenuOpen}
             aria-label={copy.user}
+            data-onboarding-target="user-menu"
             onClick={() => {
               setProjectMenuOpen(false);
+              setUsageDetailsOpen(false);
               setUserMenuOpen((open) => !open);
             }}
           >
