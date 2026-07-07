@@ -9,7 +9,15 @@ import {
   onLabFileOutput,
   type FileText,
 } from "../api/tauri";
-import CodeEditor, { type EditorLanguage } from "./CodeEditor";
+import CodeEditor from "./CodeEditor";
+import {
+  basename,
+  detectExternalFileChange,
+  editorSelectionOrLine,
+  languageForPath,
+  normalizePath,
+  runtimeChoiceForLanguage,
+} from "./labEditorCore";
 import { OutputView } from "./outputs";
 import type {
   CellOutput,
@@ -23,50 +31,6 @@ import { diffTextLines } from "./textDiff";
 
 type FileRunStatus = "idle" | "running" | "ok" | "error" | "timeout";
 const FILE_POLL_MS = 1800;
-
-function basename(path: string): string {
-  return path.replace(/\\/g, "/").replace(/\/+$/, "").split("/").pop() || path;
-}
-
-function extension(path: string): string {
-  const name = basename(path);
-  const index = name.lastIndexOf(".");
-  return index >= 0 ? name.slice(index).toLowerCase() : "";
-}
-
-function languageForPath(path: string): EditorLanguage {
-  const ext = extension(path);
-  if (ext === ".py" || ext === ".pyw") return "python";
-  if (ext === ".md" || ext === ".markdown") return "markdown";
-  if (ext === ".js" || ext === ".jsx" || ext === ".mjs" || ext === ".cjs") return "javascript";
-  if (ext === ".ts" || ext === ".tsx" || ext === ".mts" || ext === ".cts") return "typescript";
-  if (ext === ".css" || ext === ".scss") return "css";
-  if (ext === ".json" || ext === ".jsonl") return "json";
-  if (ext === ".html" || ext === ".htm" || ext === ".xml" || ext === ".svg") return "xml";
-  if (ext === ".rs") return "rust";
-  if (ext === ".m") return "matlab";
-  if (ext === ".sh" || ext === ".bash" || ext === ".zsh") return "bash";
-  if (ext === ".ps1" || ext === ".psm1") return "powershell";
-  if (ext === ".sql") return "sql";
-  if (ext === ".yaml" || ext === ".yml") return "yaml";
-  if (ext === ".toml" || ext === ".ini" || ext === ".env") return "ini";
-  if (ext === ".tex") return "latex";
-  return "text";
-}
-
-function normalizePath(path: string): string {
-  return path.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
-}
-
-function selectionOrLine(text: string, editor: HTMLTextAreaElement | null): string {
-  if (!editor) return text;
-  const start = editor.selectionStart;
-  const end = editor.selectionEnd;
-  if (end > start) return text.slice(start, end);
-  const lineStart = text.lastIndexOf("\n", Math.max(0, start - 1)) + 1;
-  const lineEnd = text.indexOf("\n", end);
-  return text.slice(lineStart, lineEnd >= 0 ? lineEnd : text.length);
-}
 
 function VariableRow({ variable }: { variable: VariableInfo }) {
   const shape = variable.shape?.length ? variable.shape.join(" x ") : null;
@@ -144,6 +108,7 @@ export default function FileEditorPane({
   const editorRef = useRef<HTMLTextAreaElement | null>(null);
   const draftRef = useRef("");
   const loadedRef = useRef<FileText | null>(null);
+  const reviewBaseRef = useRef<string | null>(null);
   const savingRef = useRef(false);
 
   const language = useMemo(() => languageForPath(path), [path]);
@@ -157,13 +122,10 @@ export default function FileEditorPane({
   const removedReviewLines = reviewDiffLines.filter((line) => line.type === "removed");
   const reviewRemoved = removedReviewLines.length;
   const running = runStatus === "running";
-  const pythonKernels = useMemo(
-    () => kernelspecs.filter((spec) => spec.language === "python" || spec.name.toLowerCase().includes("python")),
-    [kernelspecs],
+  const { runtimeSpecs, activeRuntime, activeSpec } = useMemo(
+    () => runtimeChoiceForLanguage(kernelspecs, selectedKernel, language),
+    [kernelspecs, language, selectedKernel],
   );
-  const runtimeSpecs = pythonKernels.length > 0 ? pythonKernels : kernelspecs;
-  const activeRuntime = runtimeSpecs.find((spec) => spec.name === selectedKernel)?.name ?? runtimeSpecs[0]?.name ?? selectedKernel;
-  const activeSpec = runtimeSpecs.find((spec) => spec.name === activeRuntime) ?? null;
 
   useEffect(() => {
     draftRef.current = draft;
@@ -171,6 +133,9 @@ export default function FileEditorPane({
   useEffect(() => {
     loadedRef.current = loaded;
   }, [loaded]);
+  useEffect(() => {
+    reviewBaseRef.current = reviewBase;
+  }, [reviewBase]);
   useEffect(() => {
     savingRef.current = saving;
   }, [saving]);
@@ -215,11 +180,17 @@ export default function FileEditorPane({
         .then((file) => {
           if (cancelled || savingRef.current) return;
           const current = loadedRef.current;
-          if (!current || file.content === current.content) return;
-          if (draftRef.current !== current.content) return;
-          setReviewBase((base) => base ?? current.content);
+          const change = detectExternalFileChange({
+            currentLoadedContent: current?.content ?? null,
+            incomingContent: file.content,
+            draft: draftRef.current,
+            reviewBase: reviewBaseRef.current,
+            saving: savingRef.current,
+          });
+          if (!change) return;
           setLoaded(file);
-          setDraft(file.content);
+          setReviewBase(change.reviewBase);
+          setDraft(change.draft);
           setExternalChangePending(true);
         })
         .catch(() => undefined);
@@ -296,7 +267,7 @@ export default function FileEditorPane({
 
   const runPython = async (scope: "file" | "selection") => {
     if (!isPython || running || loading || !loaded) return;
-    const code = scope === "selection" ? selectionOrLine(draft, editorRef.current) : undefined;
+    const code = scope === "selection" ? editorSelectionOrLine(draft, editorRef.current) : undefined;
     if (scope === "selection" && !code?.trim()) return;
     if (scope === "file" && !(await save())) return;
 

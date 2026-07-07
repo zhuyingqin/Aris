@@ -141,8 +141,11 @@ async function contextFromTurns(turns: ChatTurn[], context: string): Promise<Cha
       messages.push({ role: "user", text: request.text.trim() });
     } else {
       // Serialize the full transcript (tool calls + results, interrupted ones
-      // flagged) for stopped turns; completed turns only need their text.
-      const text = (turn.stopped ? transcriptFromTurn(turn) : textFromTurn(turn)).trim();
+      // flagged) for every completed and stopped turn. This context replaces the
+      // backend session wholesale, so text-only reconstruction would drop each
+      // turn's tool activity — making an edit/retry from an earlier turn forget
+      // everything the model learned by acting.
+      const text = transcriptFromTurn(turn).trim();
       if (!text) continue;
       messages.push({ role: "assistant", text });
     }

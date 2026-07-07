@@ -43,10 +43,12 @@ const mocks = vi.hoisted(() => ({
   onChatDone: vi.fn(),
   onChatError: vi.fn(),
   onChatContextCompacted: vi.fn(),
+  onChatContextWarning: vi.fn(),
   onChatPermissionRequest: vi.fn(),
   onChatPermissionResolved: vi.fn(),
   onChatThinkingDelta: vi.fn(),
   onChatTool: vi.fn(),
+  onChatToolProgress: vi.fn(),
   onChatToolResult: vi.fn(),
   onLabCellOutput: vi.fn(),
   onLabFileOutput: vi.fn(),
@@ -98,10 +100,12 @@ vi.mock("../api/tauri", () => ({
   onChatDone: mocks.onChatDone,
   onChatError: mocks.onChatError,
   onChatContextCompacted: mocks.onChatContextCompacted,
+  onChatContextWarning: mocks.onChatContextWarning,
   onChatPermissionRequest: mocks.onChatPermissionRequest,
   onChatPermissionResolved: mocks.onChatPermissionResolved,
   onChatThinkingDelta: mocks.onChatThinkingDelta,
   onChatTool: mocks.onChatTool,
+  onChatToolProgress: mocks.onChatToolProgress,
   onChatToolResult: mocks.onChatToolResult,
   onLabCellOutput: mocks.onLabCellOutput,
   onLabFileOutput: mocks.onLabFileOutput,
@@ -242,10 +246,12 @@ beforeEach(() => {
   mocks.onChatDone.mockReset().mockResolvedValue(unlisten);
   mocks.onChatError.mockReset().mockResolvedValue(unlisten);
   mocks.onChatContextCompacted.mockReset().mockResolvedValue(unlisten);
+  mocks.onChatContextWarning.mockReset().mockResolvedValue(unlisten);
   mocks.onChatPermissionRequest.mockReset().mockResolvedValue(unlisten);
   mocks.onChatPermissionResolved.mockReset().mockResolvedValue(unlisten);
   mocks.onChatThinkingDelta.mockReset().mockResolvedValue(unlisten);
   mocks.onChatTool.mockReset().mockResolvedValue(unlisten);
+  mocks.onChatToolProgress.mockReset().mockResolvedValue(unlisten);
   mocks.onChatToolResult.mockReset().mockResolvedValue(unlisten);
   mocks.onLabFileOutput.mockReset().mockResolvedValue(unlisten);
   mocks.projectAdd.mockReset();

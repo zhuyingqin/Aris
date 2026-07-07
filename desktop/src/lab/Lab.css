@@ -2175,6 +2175,10 @@
   flex-direction: column;
   background: var(--bg-1);
   color: var(--text);
+  --lab-explorer-hover-bg: color-mix(in srgb, var(--text) 7%, transparent);
+  --lab-explorer-active-bg: color-mix(in srgb, var(--text) 12%, transparent);
+  --lab-explorer-active-border: color-mix(in srgb, var(--accent) 85%, var(--text) 15%);
+  --lab-explorer-active-icon: color-mix(in srgb, var(--accent) 78%, var(--text) 22%);
 }
 
 .lab-explorer-title {
@@ -2232,7 +2236,7 @@
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding-bottom: 12px;
+  padding: 2px 6px 12px 4px;
 }
 
 .lab-explorer-body {
@@ -2247,12 +2251,31 @@
   min-height: 24px;
   display: flex;
   align-items: center;
-  padding-right: 6px;
+  margin: 1px 0;
+  padding-right: 2px;
+  border-radius: 4px;
+  color: var(--text);
+  transition: background 0.12s ease, color 0.12s ease;
 }
 
-.lab-explorer-row:hover,
+.lab-explorer-row:hover {
+  background: var(--lab-explorer-hover-bg);
+}
+
 .lab-explorer-row.active {
-  background: var(--bg-2);
+  background: var(--lab-explorer-active-bg);
+  color: var(--text);
+}
+
+.lab-explorer-row.active::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 4px;
+  bottom: 4px;
+  width: 2px;
+  border-radius: 2px;
+  background: var(--lab-explorer-active-border);
 }
 
 .lab-explorer-main {
@@ -2262,13 +2285,21 @@
   align-items: center;
   gap: 6px;
   border: 0;
+  border-radius: 4px;
   background: transparent;
-  color: var(--text);
+  color: inherit;
   cursor: pointer;
   padding: 3px 0;
   text-align: left;
   font: inherit;
   font-size: 12.5px;
+}
+
+.lab-explorer-main:focus-visible,
+.lab-explorer-attach:focus-visible,
+.lab-explorer-root:focus-visible {
+  outline: 1px solid color-mix(in srgb, var(--accent) 70%, transparent);
+  outline-offset: -1px;
 }
 
 .lab-explorer-caret {
@@ -2292,6 +2323,10 @@
   font-weight: 700;
 }
 
+.lab-explorer-row.active .lab-explorer-icon {
+  color: var(--lab-explorer-active-icon);
+}
+
 .lab-explorer-icon.folder::before {
   content: "";
   width: 12px;
@@ -2300,6 +2335,11 @@
   border: 1px solid color-mix(in srgb, var(--text-dim) 70%, transparent);
   border-radius: 2px;
   background: color-mix(in srgb, var(--text-dim) 12%, transparent);
+}
+
+.lab-explorer-row.active .lab-explorer-icon.folder::before {
+  border-color: var(--lab-explorer-active-icon);
+  background: color-mix(in srgb, var(--lab-explorer-active-icon) 14%, transparent);
 }
 
 .lab-explorer-name {
