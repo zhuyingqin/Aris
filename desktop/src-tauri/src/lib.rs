@@ -16,6 +16,7 @@ mod scheduled;
 mod sessions;
 mod state;
 mod studio;
+mod typeset;
 mod usage_log;
 mod watcher;
 
@@ -321,10 +322,13 @@ pub fn run() {
             files::file_list_dir,
             files::file_read_text,
             files::file_write_text,
+            files::file_create_text,
+            files::file_read_bytes,
             files::file_search,
             files::file_read,
             files::file_open,
             files::project_chat_starters,
+            typeset::latex_compile,
         ])
         .build(tauri::generate_context!())
         .expect("error while building SomniQ Studio")
