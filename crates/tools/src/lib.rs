@@ -506,6 +506,36 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             required_permission: PermissionMode::WorkspaceWrite,
         },
         ToolSpec {
+            name: "LaTeXCompile",
+            description: "Compile a LaTeX `.tex` root document inside the current workspace to PDF using the local TeX Live toolchain. This follows the Overleaf-style root-file compile model: resolve the root file safely inside the workspace, run latexmk when available, fall back to xelatex/pdflatex/lualatex, and return structured stdout/stderr diagnostics plus the output PDF path.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "inputPath": {
+                        "type": "string",
+                        "description": "Workspace-relative or in-workspace absolute path to the .tex root source file."
+                    },
+                    "outputPath": {
+                        "type": "string",
+                        "description": "Optional workspace-relative or in-workspace absolute output PDF path. Defaults to the input path with .pdf extension."
+                    },
+                    "compiler": {
+                        "type": "string",
+                        "enum": ["latexmk", "xelatex", "pdflatex", "lualatex"],
+                        "description": "Optional compiler override. Defaults to latexmk, then xelatex, pdflatex, and lualatex fallback."
+                    },
+                    "timeoutMs": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Foreground compile timeout in milliseconds. Defaults to the shell foreground timeout."
+                    }
+                },
+                "required": ["inputPath"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::WorkspaceWrite,
+        },
+        ToolSpec {
             name: "NotebookExecute",
             description: "Execute code against a live Jupyter kernel bound to a notebook and capture its outputs (stdout/stderr, execute results, errors, and rich display data). Source notebooks should live under notebooks/; legacy experiments/*.ipynb paths still work. Provide cell_index to run a specific 0-based cell of the .ipynb and write its outputs + execution count back into the file (set write_back=false to skip persisting), or provide code to evaluate a snippet REPL-style without touching the file. The kernel is keyed by notebook_path and persists state across calls, so variables defined in one execute are visible to the next; it auto-starts on first use. Use this to run cells edited with NotebookEdit and iterate on errors.",
             input_schema: json!({
@@ -1089,6 +1119,8 @@ pub fn execute_tool_with_cancel_and_progress(
             .and_then(knowledge::run_knowledge_upsert),
         "StudioLibraryUpsert" => from_value::<studio::StudioLibraryUpsertInput>(input)
             .and_then(studio::run_studio_library_upsert),
+        "LaTeXCompile" => from_value::<LatexCompileInput>(input)
+            .and_then(|input| run_latex_compile(input, should_cancel, &mut on_progress)),
         "NotebookExecute" => from_value::<notebook::NotebookExecuteInput>(input)
             .and_then(notebook::run_notebook_execute),
         "NotebookKernel" => from_value::<notebook::NotebookKernelInput>(input)
@@ -1402,6 +1434,14 @@ fn run_structured_output(input: StructuredOutputInput) -> Result<String, String>
     to_pretty_json(execute_structured_output(input))
 }
 
+fn run_latex_compile(
+    input: LatexCompileInput,
+    should_cancel: &dyn Fn() -> bool,
+    on_progress: &mut dyn FnMut(ToolProgress),
+) -> Result<String, String> {
+    to_pretty_json(execute_latex_compile(input, should_cancel, on_progress)?)
+}
+
 fn run_repl(input: ReplInput, should_cancel: &dyn Fn() -> bool) -> Result<String, String> {
     to_pretty_json(execute_repl(input, should_cancel)?)
 }
@@ -1598,6 +1638,31 @@ enum ConfigValue {
 #[derive(Debug, Deserialize)]
 #[serde(transparent)]
 struct StructuredOutputInput(BTreeMap<String, Value>);
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LatexCompileInput {
+    input_path: String,
+    output_path: Option<String>,
+    compiler: Option<String>,
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LatexCompileOutput {
+    success: bool,
+    input_path: String,
+    output_path: String,
+    engine: String,
+    stdout: String,
+    stderr: String,
+    exit_code: Option<i32>,
+    interrupted: bool,
+    timed_out: bool,
+    duration_ms: u128,
+    return_code_interpretation: Option<String>,
+}
 
 #[derive(Debug, Deserialize)]
 struct ReplInput {
@@ -4145,6 +4210,467 @@ fn execute_powershell_with_cancel(
     )
 }
 
+fn execute_latex_compile(
+    input: LatexCompileInput,
+    should_cancel: &dyn Fn() -> bool,
+    on_progress: &mut dyn FnMut(ToolProgress),
+) -> Result<LatexCompileOutput, String> {
+    let workspace = canonical_workspace_root()?;
+    let input_path = resolve_existing_workspace_path(&input.input_path, &workspace)?;
+    if !input_path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("tex"))
+    {
+        return Err("LaTeXCompile inputPath must point to a .tex file".to_string());
+    }
+    let output_path = match input.output_path.as_deref() {
+        Some(path) => resolve_output_workspace_path(path, &workspace)?,
+        None => input_path.with_extension("pdf"),
+    };
+    if !output_path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"))
+    {
+        return Err("LaTeXCompile outputPath must end with .pdf".to_string());
+    }
+    if let Some(parent) = output_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let output_dir = output_path
+        .parent()
+        .ok_or_else(|| "outputPath must include a file name".to_string())?;
+    let source_dir = input_path
+        .parent()
+        .ok_or_else(|| "inputPath must include a file name".to_string())?;
+
+    let timeout_ms = runtime::resolve_foreground_shell_timeout_ms(input.timeout_ms);
+    let started = Instant::now();
+    let (engine, output) = run_latex_compile_process(
+        input.compiler.as_deref(),
+        &input_path,
+        source_dir,
+        output_dir,
+        timeout_ms,
+        &workspace,
+        should_cancel,
+        on_progress,
+    )?;
+    let expected_pdf = output_dir.join(
+        input_path
+            .file_stem()
+            .ok_or_else(|| "inputPath must include a file name".to_string())?,
+    )
+    .with_extension("pdf");
+    if expected_pdf.is_file() && expected_pdf != output_path {
+        std::fs::copy(&expected_pdf, &output_path).map_err(|error| error.to_string())?;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let mut stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let mut return_code_interpretation = None;
+    if output.timed_out {
+        stderr = append_process_status_message(
+            stderr,
+            &format!("LaTeXCompile exceeded timeout of {timeout_ms} ms"),
+        );
+        return_code_interpretation = Some("timeout".to_string());
+    } else if output.interrupted {
+        stderr = append_process_status_message(stderr, "LaTeXCompile interrupted by user");
+        return_code_interpretation = Some("interrupted".to_string());
+    } else if let Some(code) = output.status.code().filter(|code| *code != 0) {
+        return_code_interpretation = Some(format!("exit_code:{code}"));
+    }
+
+    let mut success = output.status.success() && output_path.is_file();
+    if output.status.success() && !output_path.is_file() {
+        success = false;
+        stderr = append_process_status_message(stderr, "LaTeXCompile produced no output PDF");
+        return_code_interpretation = Some("missing_output".to_string());
+    }
+
+    Ok(LatexCompileOutput {
+        success,
+        input_path: workspace_relative_display(&input_path, &workspace),
+        output_path: workspace_relative_display(&output_path, &workspace),
+        engine,
+        stdout,
+        stderr,
+        exit_code: output.status.code(),
+        interrupted: output.interrupted,
+        timed_out: output.timed_out,
+        duration_ms: started.elapsed().as_millis(),
+        return_code_interpretation,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_latex_compile_process(
+    compiler: Option<&str>,
+    input_path: &Path,
+    source_dir: &Path,
+    output_dir: &Path,
+    timeout_ms: u64,
+    workspace: &Path,
+    should_cancel: &dyn Fn() -> bool,
+    on_progress: &mut dyn FnMut(ToolProgress),
+) -> Result<(String, runtime::ManagedCommandOutput), String> {
+    if let Some(compiler) = compiler.map(str::trim).filter(|value| !value.is_empty()) {
+        if !matches!(compiler, "latexmk" | "xelatex" | "pdflatex" | "lualatex") {
+            return Err(format!(
+                "unsupported LaTeX compiler `{compiler}`; expected latexmk, xelatex, pdflatex, or lualatex"
+            ));
+        }
+        let output = run_named_latex_compiler(
+            compiler,
+            input_path,
+            source_dir,
+            output_dir,
+            timeout_ms,
+            workspace,
+            should_cancel,
+            on_progress,
+        )
+        .map_err(|error| format!("LaTeX command `{compiler}` failed to start: {error}"))?;
+        return Ok((compiler.to_string(), output));
+    }
+
+    let mut not_found = Vec::new();
+    for compiler in ["latexmk", "xelatex", "pdflatex", "lualatex"] {
+        match run_named_latex_compiler(
+            compiler,
+            input_path,
+            source_dir,
+            output_dir,
+            timeout_ms,
+            workspace,
+            should_cancel,
+            on_progress,
+        ) {
+            Ok(output) => return Ok((compiler.to_string(), output)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                not_found.push(compiler.to_string());
+            }
+            Err(error) => {
+                return Err(format!("LaTeX command `{compiler}` failed to start: {error}"));
+            }
+        }
+    }
+
+    Err(format!(
+        "LaTeX command not found. Tried: {}. Install TeX Live and ensure latexmk/xelatex/pdflatex/lualatex are on PATH.",
+        not_found.join(", ")
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_named_latex_compiler(
+    compiler: &str,
+    input_path: &Path,
+    source_dir: &Path,
+    output_dir: &Path,
+    timeout_ms: u64,
+    workspace: &Path,
+    should_cancel: &dyn Fn() -> bool,
+    on_progress: &mut dyn FnMut(ToolProgress),
+) -> std::io::Result<runtime::ManagedCommandOutput> {
+    if compiler == "latexmk" {
+        return run_latexmk(
+            input_path,
+            source_dir,
+            output_dir,
+            timeout_ms,
+            workspace,
+            should_cancel,
+            on_progress,
+        );
+    }
+    run_latex_engine(
+        compiler,
+        input_path,
+        source_dir,
+        output_dir,
+        timeout_ms,
+        workspace,
+        should_cancel,
+        on_progress,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_latexmk(
+    input_path: &Path,
+    source_dir: &Path,
+    output_dir: &Path,
+    timeout_ms: u64,
+    workspace: &Path,
+    should_cancel: &dyn Fn() -> bool,
+    on_progress: &mut dyn FnMut(ToolProgress),
+) -> std::io::Result<runtime::ManagedCommandOutput> {
+    let mut process = runtime::hidden_command("latexmk");
+    process
+        .arg("-pdf")
+        .arg("-interaction=nonstopmode")
+        .arg("-halt-on-error")
+        .arg("-file-line-error")
+        .arg(format!("-outdir={}", output_dir.display()))
+        .arg(input_path)
+        .current_dir(source_dir)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    run_latex_process(
+        &mut process,
+        "latexmk",
+        input_path,
+        workspace,
+        timeout_ms,
+        should_cancel,
+        on_progress,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_latex_engine(
+    engine: &str,
+    input_path: &Path,
+    source_dir: &Path,
+    output_dir: &Path,
+    timeout_ms: u64,
+    workspace: &Path,
+    should_cancel: &dyn Fn() -> bool,
+    on_progress: &mut dyn FnMut(ToolProgress),
+) -> std::io::Result<runtime::ManagedCommandOutput> {
+    let first = run_single_latex_engine(
+        engine,
+        input_path,
+        source_dir,
+        output_dir,
+        timeout_ms,
+        workspace,
+        should_cancel,
+        on_progress,
+    )?;
+    if first.interrupted || first.timed_out || !first.status.success() {
+        return Ok(first);
+    }
+    let second = run_single_latex_engine(
+        engine,
+        input_path,
+        source_dir,
+        output_dir,
+        timeout_ms,
+        workspace,
+        should_cancel,
+        on_progress,
+    )?;
+    Ok(runtime::ManagedCommandOutput {
+        stdout: join_process_bytes(first.stdout, second.stdout),
+        stderr: join_process_bytes(first.stderr, second.stderr),
+        status: second.status,
+        interrupted: second.interrupted,
+        timed_out: second.timed_out,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_single_latex_engine(
+    engine: &str,
+    input_path: &Path,
+    source_dir: &Path,
+    output_dir: &Path,
+    timeout_ms: u64,
+    workspace: &Path,
+    should_cancel: &dyn Fn() -> bool,
+    on_progress: &mut dyn FnMut(ToolProgress),
+) -> std::io::Result<runtime::ManagedCommandOutput> {
+    let mut process = runtime::hidden_command(engine);
+    process
+        .arg("-interaction=nonstopmode")
+        .arg("-halt-on-error")
+        .arg("-file-line-error")
+        .arg(format!("-output-directory={}", output_dir.display()))
+        .arg(input_path)
+        .current_dir(source_dir)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    run_latex_process(
+        &mut process,
+        engine,
+        input_path,
+        workspace,
+        timeout_ms,
+        should_cancel,
+        on_progress,
+    )
+}
+
+fn run_latex_process(
+    process: &mut std::process::Command,
+    compiler: &str,
+    input_path: &Path,
+    workspace: &Path,
+    timeout_ms: u64,
+    should_cancel: &dyn Fn() -> bool,
+    on_progress: &mut dyn FnMut(ToolProgress),
+) -> std::io::Result<runtime::ManagedCommandOutput> {
+    runtime::run_managed_command_with_cancel_and_progress(
+        process,
+        format!(
+            "LaTeX compile ({compiler}): {}",
+            truncate_process_label(&workspace_relative_display(input_path, workspace))
+        ),
+        Some(Duration::from_millis(timeout_ms)),
+        true,
+        should_cancel,
+        |progress| on_progress(managed_progress_to_tool_progress(progress)),
+    )
+}
+
+fn join_process_bytes(mut first: Vec<u8>, second: Vec<u8>) -> Vec<u8> {
+    if first.is_empty() {
+        return second;
+    }
+    if !second.is_empty() {
+        if !first.ends_with(b"\n") {
+            first.push(b'\n');
+        }
+        first.extend(second);
+    }
+    first
+}
+
+fn canonical_workspace_root() -> Result<PathBuf, String> {
+    let root = std::env::var("ARIS_WORKSPACE_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    std::fs::create_dir_all(&root).map_err(|error| error.to_string())?;
+    std::fs::canonicalize(&root).map_err(|error| error.to_string())
+}
+
+fn resolve_existing_workspace_path(path: &str, workspace: &Path) -> Result<PathBuf, String> {
+    let candidate = lexically_normalize_path(&workspace_path_candidate(path, workspace)?);
+    let canonical = std::fs::canonicalize(&candidate).map_err(|error| {
+        format!(
+            "could not resolve workspace path `{}`: {error}",
+            candidate.display()
+        )
+    })?;
+    ensure_workspace_child(&canonical, workspace)?;
+    if !canonical.is_file() {
+        return Err(format!("{} is not a file", canonical.display()));
+    }
+    Ok(canonical)
+}
+
+fn resolve_output_workspace_path(path: &str, workspace: &Path) -> Result<PathBuf, String> {
+    let candidate = lexically_normalize_path(&workspace_path_candidate(path, workspace)?);
+    let parent = candidate
+        .parent()
+        .ok_or_else(|| "outputPath must include a file name".to_string())?;
+    let parent = canonicalize_path_allow_missing(parent)?;
+    ensure_workspace_child(&parent, workspace)?;
+    std::fs::create_dir_all(&parent).map_err(|error| error.to_string())?;
+    let file_name = candidate
+        .file_name()
+        .ok_or_else(|| "outputPath must include a file name".to_string())?;
+    Ok(parent.join(file_name))
+}
+
+fn workspace_path_candidate(path: &str, workspace: &Path) -> Result<PathBuf, String> {
+    let path = path.trim();
+    if path.is_empty() {
+        return Err("path cannot be empty".to_string());
+    }
+    let input = Path::new(path);
+    if input.is_absolute() {
+        return Ok(input.to_path_buf());
+    }
+
+    let mut normalized = PathBuf::new();
+    for component in input.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::Normal(part) => normalized.push(part),
+            std::path::Component::ParentDir => {
+                if !normalized.pop() {
+                    return Err(format!("path `{path}` escapes the current workspace"));
+                }
+            }
+            std::path::Component::Prefix(_) | std::path::Component::RootDir => {
+                return Err(format!("path `{path}` is not a workspace-relative path"));
+            }
+        }
+    }
+    Ok(workspace.join(normalized))
+}
+
+fn canonicalize_path_allow_missing(path: &Path) -> Result<PathBuf, String> {
+    if path.exists() {
+        return std::fs::canonicalize(path).map_err(|error| error.to_string());
+    }
+
+    let mut missing = Vec::new();
+    let mut ancestor = path;
+    while !ancestor.exists() {
+        let file_name = ancestor.file_name().ok_or_else(|| {
+            format!(
+                "could not resolve missing path ancestor for `{}`",
+                path.display()
+            )
+        })?;
+        missing.push(file_name.to_os_string());
+        ancestor = ancestor.parent().ok_or_else(|| {
+            format!(
+                "could not resolve missing path ancestor for `{}`",
+                path.display()
+            )
+        })?;
+    }
+
+    let mut canonical = std::fs::canonicalize(ancestor).map_err(|error| error.to_string())?;
+    for component in missing.iter().rev() {
+        canonical.push(component);
+    }
+    Ok(lexically_normalize_path(&canonical))
+}
+
+fn lexically_normalize_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            std::path::Component::RootDir => normalized.push(component.as_os_str()),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            std::path::Component::Normal(value) => normalized.push(value),
+        }
+    }
+    normalized
+}
+
+fn ensure_workspace_child(path: &Path, workspace: &Path) -> Result<(), String> {
+    if path.starts_with(workspace) {
+        Ok(())
+    } else {
+        Err(format!(
+            "path `{}` is outside the current workspace `{}`",
+            path.display(),
+            workspace.display()
+        ))
+    }
+}
+
+fn workspace_relative_display(path: &Path, workspace: &Path) -> String {
+    path.strip_prefix(workspace)
+        .unwrap_or(path)
+        .display()
+        .to_string()
+        .replace('\\', "/")
+}
+
 fn detect_powershell_shell() -> std::io::Result<&'static str> {
     if command_exists("pwsh") {
         Ok("pwsh")
@@ -4754,7 +5280,8 @@ mod tests {
         agent_permission_policy, allowed_tools_for_subagent, discover_skills,
         execute_agent_with_spawn, execute_tool, execute_tool_with_cancel, final_assistant_text,
         mvp_tool_specs, persist_agent_terminal_state, resolve_anthropic_compat_reviewer_model,
-        resolve_reviewer_model, route_openai_compat_model, run_llm_review, skill_markdown,
+        resolve_existing_workspace_path, resolve_output_workspace_path, resolve_reviewer_model,
+        route_openai_compat_model, run_llm_review, skill_markdown, workspace_path_candidate,
         AgentInput, AgentJob, LlmReviewInput, SubagentToolExecutor, MAX_WRITE_FILE_CONTENT_CHARS,
     };
     use runtime::{
@@ -4836,6 +5363,56 @@ mod tests {
         assert!(names.contains(&"StructuredOutput"));
         assert!(names.contains(&"REPL"));
         assert!(names.contains(&"PowerShell"));
+        assert!(names.contains(&"LaTeXCompile"));
+    }
+
+    #[test]
+    fn latex_workspace_paths_cannot_escape_workspace() {
+        let workspace = temp_path("latex-workspace");
+        fs::create_dir_all(&workspace).expect("workspace");
+
+        let inside = workspace_path_candidate("papers/main.tex", &workspace)
+            .expect("relative path inside workspace");
+        assert!(inside.ends_with("papers/main.tex"));
+
+        let escaped = workspace_path_candidate("../outside.tex", &workspace)
+            .expect_err("parent traversal should be rejected");
+        assert!(escaped.contains("escapes"));
+
+        let absolute_outside = temp_path("outside.tex");
+        fs::write(&absolute_outside, b"\\documentclass{article}").expect("outside file");
+        let error =
+            resolve_existing_workspace_path(&absolute_outside.display().to_string(), &workspace)
+                .expect_err("absolute path outside workspace should be rejected");
+        assert!(error.contains("outside the current workspace"));
+
+        let _ = fs::remove_dir_all(workspace);
+        let _ = fs::remove_file(absolute_outside);
+    }
+
+    #[test]
+    fn latex_output_parent_traversal_is_rejected_before_create() {
+        let root = temp_path("latex-output-root");
+        let workspace = root.join("workspace");
+        let outside = root.join("outside");
+        fs::create_dir_all(workspace.join("papers")).expect("workspace");
+        let workspace = fs::canonicalize(&workspace).expect("canonical workspace");
+
+        let escaped = workspace
+            .join("papers")
+            .join("..")
+            .join("..")
+            .join("outside")
+            .join("out.pdf");
+        let error = resolve_output_workspace_path(&escaped.display().to_string(), &workspace)
+            .expect_err("escaped output path should be rejected");
+        assert!(error.contains("outside the current workspace"));
+        assert!(
+            !outside.exists(),
+            "escaped output directory must not be created before rejection"
+        );
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

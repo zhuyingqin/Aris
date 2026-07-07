@@ -35,7 +35,7 @@ const MAX_OUTPUT_LIMIT_CONTINUATIONS: usize = 8;
 /// rejects the request for exceeding the model's context window. Bounded so an
 /// irreducible oversized turn surfaces the error instead of looping forever.
 const MAX_CONTEXT_OVERFLOW_RETRIES: usize = 3;
-const MAX_TRANSIENT_STREAM_RETRIES: usize = 1;
+const MAX_TRANSIENT_REQUEST_RETRIES: usize = 3;
 const CONTINUATION_PROMPT_PREFIX: &str =
     "Continue the unfinished task from the exact point where the previous response stopped";
 /// How many times a turn that ended with no visible output at all (blank /
@@ -402,7 +402,7 @@ where
         let mut iterations = 0;
         let mut output_limit_continuations = 0;
         let mut context_overflow_retries = 0;
-        let mut transient_stream_retries = 0;
+        let mut transient_request_retries = 0;
         let mut blank_response_continuations = 0;
         let mut auto_compaction = None;
 
@@ -452,8 +452,8 @@ where
                     }
                 }
                 Err(error) if is_transient_runtime_error(&error) => {
-                    transient_stream_retries += 1;
-                    if transient_stream_retries > MAX_TRANSIENT_STREAM_RETRIES {
+                    transient_request_retries += 1;
+                    if transient_request_retries > MAX_TRANSIENT_REQUEST_RETRIES {
                         return Err(error);
                     }
                     std::thread::sleep(std::time::Duration::from_millis(350));
@@ -461,7 +461,7 @@ where
                 }
                 Err(error) => return Err(error),
             };
-            transient_stream_retries = 0;
+            transient_request_retries = 0;
             let (assistant_message, usage, stop_reason) = build_assistant_message(events)?;
             if let Some(usage) = usage {
                 self.usage_tracker.record(usage);
@@ -1203,6 +1203,11 @@ fn is_transient_runtime_error(error: &RuntimeError) -> bool {
     lower.contains("timeout")
         || lower.contains("timed out")
         || lower.contains("connection")
+        || lower.contains("network")
+        || lower.contains("dns")
+        || lower.contains("reset")
+        || lower.contains("eof")
+        || lower.contains("broken pipe")
         || lower.contains("temporarily unavailable")
         || lower.contains("rate limit")
         || lower.contains("too many requests")
@@ -1833,6 +1838,44 @@ mod tests {
             .run_turn("only message", None)
             .expect_err("an irreducible overflow must surface");
         assert!(error.is_context_overflow());
+    }
+
+    #[test]
+    fn transient_network_errors_retry_three_times_before_success() {
+        struct NetworkFlakyClient {
+            calls: usize,
+        }
+        impl ApiClient for NetworkFlakyClient {
+            fn stream(
+                &mut self,
+                _request: ApiRequest,
+            ) -> Result<Vec<AssistantEvent>, RuntimeError> {
+                self.calls += 1;
+                if self.calls <= 3 {
+                    Err(RuntimeError::new("connection reset by peer"))
+                } else {
+                    Ok(vec![
+                        AssistantEvent::TextDelta("recovered".to_string()),
+                        AssistantEvent::MessageStop,
+                    ])
+                }
+            }
+        }
+
+        let mut runtime = ConversationRuntime::new(
+            Session::new(),
+            NetworkFlakyClient { calls: 0 },
+            StaticToolExecutor::new(),
+            PermissionPolicy::new(PermissionMode::WorkspaceWrite),
+            vec!["system".to_string()],
+        );
+
+        let summary = runtime
+            .run_turn("hello", None)
+            .expect("third retry should recover a transient network failure");
+
+        assert_eq!(assistant_text_from_turn_summary(&summary), "recovered");
+        assert_eq!(summary.iterations, 4);
     }
 
     #[test]
