@@ -29,6 +29,14 @@
 
 ## 📰 最新动态
 
+> **v0.4.9** (2026-07) —— Typeset 模块：Tectonic 驱动的 LaTeX 编译（`src-tauri/src/typeset.rs`）+
+> CodeMirror-6 可视化编辑器（`desktop/src/typeset/`，mathlive 数学输入，slides-main 测试样本）。
+> Lab：`labEditorCore` 抽出 + lab 预览 iframe（`desktop/src/api/labPreview.ts`，
+> `npm run dev:lab`）。Runtime / tools / executor 新增 tool 注册表 + OpenAI executor 打磨。Newapi
+> 托管登录完整接入（Login 跳过粘贴 key；Settings = 服务端状态的投影）。Chat-stream 钩子细化，新增
+> `onChatContextWarning` / `onChatToolProgress` 事件。MCP 接入 `claude` 服务端（与 `codex` 并列）。
+> 视觉系统 + 图标组刷新。
+
 > **v0.4.8** (2026-07) —— 环境探测抽出到 `src-tauri/src/env/`（Python / Jupyter / MATLAB / LaTeX，含
 > 内存 session 缓存 + 磁盘指纹缓存），system prompt 外置到 `crates/runtime/assets/prompts/system.md`
 >（直接改 markdown，无需重新编译 Rust），prompt pipeline 重写（`prompt.rs` +419 行），file-ops /

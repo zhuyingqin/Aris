@@ -29,6 +29,15 @@
 
 ## 📰 What's New
 
+> **v0.4.9** (2026-07) — Typeset module: Tectonic-backed LaTeX compile (`src-tauri/src/typeset.rs`) +
+> CodeMirror-6 visual editor (`desktop/src/typeset/`, mathlive math input, slides-main fixture).
+> Lab: `labEditorCore` extraction + lab preview iframe (`desktop/src/api/labPreview.ts`,
+> `npm run dev:lab`). Runtime / tools / executor surface added (tool registry + OpenAI executor
+> refinements). Newapi managed-login fully wired (Login bypasses pasted keys; Settings =
+> projection of server state). Chat-stream hook refinement + `onChatContextWarning` /
+> `onChatToolProgress` events. MCP `claude` server registered alongside `codex`. Visual identity +
+> icon set refresh.
+
 > **v0.4.8** (2026-07) — Env-probe extraction into `src-tauri/src/env/` (Python / Jupyter / MATLAB /
 > LaTeX with in-memory session cache + on-disk fingerprint cache), system prompt externalized to
 > `crates/runtime/assets/prompts/system.md` (edit as markdown, no Rust rebuild), prompt pipeline

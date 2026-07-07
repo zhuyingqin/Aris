@@ -31,3 +31,15 @@ desktop/internal-config*.json
 aris_output/
 127.0.0.1/
 tmp/
+
+# Tool caches / scratch dirs we never want tracked
+.vite-cache/
+logs/
+idea-stage/
+
+# LaTeX build artifacts (paper-write templates)
+*.aux
+*.fdb_latexmk
+*.fls
+*.synctex.gz
+*.toc

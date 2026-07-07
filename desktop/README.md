@@ -52,6 +52,8 @@ npm run dev
 ```
 
 Some features need the Tauri backend and will only work in `npm run tauri dev`.
+The browser preview uses bundled sample data; it does not read real project
+files or compile through the desktop backend.
 
 Lab UI changes can be previewed without compiling or launching the Tauri
 executable:
@@ -63,6 +65,16 @@ npm run dev:lab
 This opens Vite at `http://127.0.0.1:5173/?labPreview=1` and uses mock Lab data
 for notebooks, files, kernels, Python execution output, and variables. The same
 mode can be enabled on any Vite URL with `?labPreview=1`.
+
+Typeset UI changes can be previewed with:
+
+```powershell
+npm run dev:typeset
+```
+
+This opens Vite at `http://127.0.0.1:1420/?typesetPreview=1` and uses mock
+LaTeX/PDF files. Use `npm run tauri dev` or the built `aris-desktop.exe` to
+validate the Desktop App against real files such as `F:/F-CESN会议/root.tex`.
 
 ## Build
 
