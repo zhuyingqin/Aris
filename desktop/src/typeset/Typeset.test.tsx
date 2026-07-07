@@ -654,6 +654,37 @@ describe("Typeset start page", () => {
     });
   });
 
+  it("saves visual editor changes with Ctrl+S", async () => {
+    mockProjectFiles();
+    mocks.fileReadText.mockResolvedValueOnce({
+      path: "paper.tex",
+      content: "\\documentclass{article}\n\\begin{document}\nBody text\n\\end{document}",
+      bytes: 80,
+    });
+
+    render(<Typeset />);
+
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitFor(() => expect(mocks.fileReadText).toHaveBeenCalledWith("paper.tex"));
+
+    const toolbar = await waitFor(() => {
+      const item = document.querySelector<HTMLElement>(".typeset-visual-toolbar");
+      expect(item).toBeTruthy();
+      return item!;
+    });
+    fireEvent.click(within(toolbar).getByRole("button", { name: "Bold" }));
+    await waitFor(() => expect((within(toolbar).getByRole("button", { name: "Save" }) as HTMLButtonElement).disabled).toBe(false));
+
+    fireEvent.keyDown(window, { key: "s", ctrlKey: true });
+
+    await waitFor(() =>
+      expect(mocks.fileWriteText).toHaveBeenCalledWith(
+        "paper.tex",
+        expect.stringContaining("\\textbf{important text}"),
+      ),
+    );
+  });
+
   it("opens toolbar search and selects the matching source text", async () => {
     mockProjectFiles();
     mocks.fileReadText.mockResolvedValueOnce({
@@ -681,7 +712,7 @@ describe("Typeset start page", () => {
     });
   });
 
-  it("jumps from clicked PDF text to the matching LaTeX source", async () => {
+  it("jumps from clicked PDF text to the matching LaTeX source in Code mode", async () => {
     mockProjectFiles();
     mocks.fileReadText.mockResolvedValueOnce({
       path: "paper.tex",
@@ -695,6 +726,7 @@ describe("Typeset start page", () => {
     await waitFor(() => expect(mocks.fileReadText).toHaveBeenCalledWith("paper.tex"));
     // Let the open-time auto-compile (and its PDF refresh) settle first.
     await waitFor(() => expect(mocks.latexCompile).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("tab", { name: "Code" }));
 
     const pdfText = await screen.findByRole("button", { name: "Jump to source text: Body text" });
     fireEvent.click(pdfText);
@@ -704,6 +736,36 @@ describe("Typeset start page", () => {
       const start = editor?.value.indexOf("Body text") ?? -1;
       expect(editor?.selectionStart).toBe(start);
       expect(editor?.selectionEnd).toBe(start + "Body text".length);
+    });
+  });
+
+  it("jumps from clicked PDF text to the matching LaTeX source in Visual mode", async () => {
+    mockProjectFiles();
+    const source = "\\documentclass{article}\n\\begin{document}\nAlpha\nBody text\n\\end{document}";
+    mocks.fileReadText.mockResolvedValueOnce({
+      path: "paper.tex",
+      content: source,
+      bytes: 88,
+    });
+
+    const { container } = render(<Typeset />);
+
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitFor(() => expect(mocks.fileReadText).toHaveBeenCalledWith("paper.tex"));
+    await waitFor(() => expect(mocks.latexCompile).toHaveBeenCalled());
+
+    const pdfText = await screen.findByRole("button", { name: "Jump to source text: Body text" });
+    fireEvent.click(pdfText);
+
+    const expectedStart = source.indexOf("Body text");
+    await waitFor(() => {
+      const view = (window as unknown as {
+        __typesetView?: { state: { selection: { main: { from: number; to: number } } } };
+      }).__typesetView;
+      expect(container.querySelector(".typeset-editor-pane.visual-mode")).toBeTruthy();
+      expect(container.querySelector(".lab-editor-input")).toBeNull();
+      expect(view?.state.selection.main.from).toBe(expectedStart);
+      expect(view?.state.selection.main.to).toBe(expectedStart + "Body text".length);
     });
   });
 
@@ -735,6 +797,7 @@ describe("Typeset start page", () => {
     await waitFor(() => expect(mocks.fileReadText).toHaveBeenCalledWith("paper.tex"));
     // Let the open-time auto-compile (and its PDF refresh) settle first.
     await waitFor(() => expect(mocks.latexCompile).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("tab", { name: "Code" }));
 
     const pdfText = await screen.findByRole("button", { name: "Jump to source text: Body text" });
     fireEvent.click(pdfText);

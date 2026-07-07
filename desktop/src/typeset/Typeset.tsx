@@ -2327,23 +2327,29 @@ function TypesetEditorToolbar({
   mode,
   canRedo,
   canUndo,
+  dirty,
   onChange,
   onModeChange,
   onRedo,
+  onSave,
   onSearch,
   onUndo,
   path,
+  saving,
 }: {
   draft: string;
   mode: EditorMode;
   canRedo: boolean;
   canUndo: boolean;
+  dirty: boolean;
   onChange: (value: string) => void;
   onModeChange: (mode: EditorMode) => void;
   onRedo: () => void;
+  onSave: () => void;
   onSearch: (start: number, end: number) => void;
   onUndo: () => void;
   path: string | null;
+  saving: boolean;
 }) {
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
@@ -2395,6 +2401,16 @@ function TypesetEditorToolbar({
         <div className="ol-cm-toolbar-button-group" aria-label="Undo Redo actions">
           <button type="button" className="ol-cm-toolbar-button" title="Undo" aria-label="Undo" disabled={!canUndo} onClick={onUndo}><ToolIcon name="undo" /></button>
           <button type="button" className="ol-cm-toolbar-button" title="Redo" aria-label="Redo" disabled={!canRedo} onClick={onRedo}><ToolIcon name="redo" /></button>
+          <button
+            type="button"
+            className="ol-cm-toolbar-button"
+            title={dirty ? "Save" : "No unsaved changes"}
+            aria-label="Save"
+            disabled={saving || !dirty}
+            onClick={onSave}
+          >
+            <ToolIcon name="save" />
+          </button>
         </div>
         <div className="ol-cm-toolbar-button-group" aria-label="Text formatting">
           <VisualToolbarMenu
@@ -3507,7 +3523,7 @@ export default function Typeset() {
     void scanProject();
   }, [currentProject?.id, scanProject]);
 
-  const save = async (): Promise<FileText | null> => {
+  const save = useCallback(async (): Promise<FileText | null> => {
     if (!sourcePath || !loaded) return null;
     if (!dirty) return loaded;
     setSaving(true);
@@ -3524,7 +3540,7 @@ export default function Typeset() {
     } finally {
       setSaving(false);
     }
-  };
+  }, [dirty, draft, loaded, sourcePath]);
 
   const compile = async () => {
     if (!sourcePath || saving || compileStatus === "running") return;
@@ -3597,6 +3613,18 @@ export default function Typeset() {
     }
   };
 
+  useEffect(() => {
+    const handleSaveShortcut = (event: KeyboardEvent) => {
+      const shortcut = event.ctrlKey || event.metaKey;
+      if (!shortcut || event.key.toLowerCase() !== "s") return;
+      if (!sourcePath || !loaded) return;
+      event.preventDefault();
+      void save();
+    };
+    window.addEventListener("keydown", handleSaveShortcut, { capture: true });
+    return () => window.removeEventListener("keydown", handleSaveShortcut, { capture: true });
+  }, [loaded, save, sourcePath]);
+
   const openCodeAtLine = useCallback((line: number) => {
     const lines = draft.split("\n");
     const offset = lines.slice(0, Math.max(0, line - 1)).reduce((sum, item) => sum + item.length + 1, 0);
@@ -3618,15 +3646,22 @@ export default function Typeset() {
     }, 0);
   }, [draft.length]);
 
-  const openVisualForPdfText = useCallback((text: string, context = text) => {
+  const openSourceForPdfText = useCallback((text: string, context = text) => {
     const match = findLatexOffsetForPdfText(draft, text, context);
     if (!match) return;
-    setVisualPdfCursor({
+    const cursor = {
       line: lineNumberForOffset(draft, match.start),
+      start: match.start,
+      end: match.end,
       text: normalizePdfText(text),
-    });
+    };
+    setVisualPdfCursor(cursor);
+    if (editorMode === "visual") {
+      setEditorMode("visual");
+      return;
+    }
     openCodeRange(match.start, match.end);
-  }, [draft, openCodeRange]);
+  }, [draft, editorMode, openCodeRange]);
 
   const returnToStart = useCallback(() => {
     if (dirty && !window.confirm("Discard unsaved changes and return to the source list?")) {
@@ -3872,8 +3907,11 @@ export default function Typeset() {
                   onChange={changeDraft}
                   onModeChange={setEditorMode}
                   onRedo={redoDraft}
+                  onSave={() => void save()}
                   onSearch={openCodeRange}
                   onUndo={undoDraft}
+                  saving={saving}
+                  dirty={dirty}
                 />
               )}
               {error && <div className="typeset-error-bar">{error}</div>}
@@ -3938,7 +3976,7 @@ export default function Typeset() {
                     diagnosticsCount={diagnosticsCount}
                     onCompile={() => void compile()}
                     onToggleLog={() => setLogOpen((open) => !open)}
-                    onSourceTextClick={openVisualForPdfText}
+                    onSourceTextClick={openSourceForPdfText}
                     onHide={() => setPdfPanelVisible(false)}
                   />
                   {logOpen && <CompileLog result={compileResult} status={compileStatus} error={error} onClose={() => setLogOpen(false)} />}

@@ -1,4 +1,4 @@
-import { EditorSelection, RangeSetBuilder, StateField, type EditorState } from "@codemirror/state";
+import { EditorSelection, Facet, RangeSetBuilder, StateField, type EditorState } from "@codemirror/state";
 import {
   Decoration,
   EditorView,
@@ -6,6 +6,7 @@ import {
   type DecorationSet,
 } from "@codemirror/view";
 import katex from "katex";
+import { fileReadBytes } from "../api/tauri";
 
 /**
  * Marker class for "block" widgets (display math, figures, tables) whose source
@@ -20,6 +21,12 @@ import katex from "katex";
  * what's rendered at that line.
  */
 const BLOCK_TARGET_CLASS = "cm-vis-block-target";
+const HEADING_TARGET_SELECTOR = ".cm-vis-heading-line, .cm-vis-h1, .cm-vis-h2, .cm-vis-h3, .cm-vis-h4, .cm-vis-secnum";
+const pdfWorkerSrc = new URL("pdfjs-dist/build/pdf.worker.min.mjs", import.meta.url).toString();
+
+export const visualSourcePath = Facet.define<string | null, string | null>({
+  combine: (values) => values[values.length - 1] ?? null,
+});
 
 /** Shared `ignoreEvent`: let CM's own mouseup bookkeeping run, but nothing else. */
 function blockIgnoreEvent(event: Event): boolean {
@@ -68,6 +75,7 @@ const SECTION_LEVEL: Record<string, number> = {
   section: 1,
   subsection: 2,
   subsubsection: 3,
+  paragraph: 4,
 };
 
 /** Section command → the CSS class carrying its display size/weight. */
@@ -75,6 +83,7 @@ const SECTION_CLASS: Record<number, string> = {
   1: "cm-vis-h1",
   2: "cm-vis-h2",
   3: "cm-vis-h3",
+  4: "cm-vis-h4",
 };
 
 /** A hidden-syntax mark: zero-width, atomic so the caret steps over it. */
@@ -85,6 +94,7 @@ const headingLine: Record<number, Decoration> = {
   1: Decoration.line({ class: "cm-vis-heading-line cm-vis-heading-1" }),
   2: Decoration.line({ class: "cm-vis-heading-line cm-vis-heading-2" }),
   3: Decoration.line({ class: "cm-vis-heading-line cm-vis-heading-3" }),
+  4: Decoration.line({ class: "cm-vis-heading-line cm-vis-heading-4" }),
 };
 
 /** Dim a comment line so it reads as an annotation rather than body text. */
@@ -104,6 +114,11 @@ const alignLine = (cls: string): Decoration =>
 /** Strip simple inline markup (`\emph{x}` → `x`) for chip/title display text. */
 function stripMarkup(input: string): string {
   return input
+    .replace(/\\textsubscript\s*\{\$?\\infty\$?\}/g, "∞")
+    .replace(/\\textsubscript\s*\{([^{}]*)\}/g, "$1")
+    .replace(/\$\\infty\$/g, "∞")
+    .replace(/\$([^$]+)\$/g, "$1")
+    .replace(/\\infty/g, "∞")
     .replace(/\\(?:textbf|textit|emph|texttt|textsc|underline)\s*\{([^{}]*)\}/g, "$1")
     .replace(/\\\\/g, " ")
     .replace(/[{}]/g, "")
@@ -149,6 +164,7 @@ class SectionNumberWidget extends WidgetType {
     el.textContent = this.label;
     return el;
   }
+  ignoreEvent = blockIgnoreEvent;
 }
 
 /** A small pill chip — citations, cross-references, and standalone commands. */
@@ -213,7 +229,7 @@ class TitleWidget extends WidgetType {
   }
   toDOM() {
     const el = document.createElement("div");
-    el.className = "cm-vis-title";
+    el.className = `cm-vis-title ${BLOCK_TARGET_CLASS}`;
     const h = document.createElement("div");
     h.className = "cm-vis-title-name";
     h.textContent = this.title || "Untitled";
@@ -232,6 +248,88 @@ class TitleWidget extends WidgetType {
     }
     return el;
   }
+  ignoreEvent = blockIgnoreEvent;
+}
+
+function eventElement(target: EventTarget | null): Element | null {
+  if (target instanceof Element) return target;
+  if (target instanceof Node) return target.parentElement;
+  return null;
+}
+
+function headingTitleRangeAtLine(state: EditorState, lineFrom: number): Range | null {
+  const line = state.doc.lineAt(lineFrom);
+  const lineText = line.text;
+  const hm = /\\(section|subsection|subsubsection|paragraph)\*?\s*\{/.exec(lineText);
+  if (!hm) return null;
+  const openBrace = line.from + hm.index + hm[0].length - 1;
+  const close = matchBrace(state.doc.toString(), openBrace);
+  if (close < 0) return null;
+  return { from: openBrace + 1, to: close - 1 };
+}
+
+function distanceOutside(value: number, from: number, to: number): number {
+  if (value < from) return from - value;
+  if (value > to) return value - to;
+  return 0;
+}
+
+function positionInRangeAtCoords(view: EditorView, from: number, to: number, clientX: number, clientY: number): number {
+  let bestPos = from;
+  let bestScore = Number.POSITIVE_INFINITY;
+  for (let pos = from; pos <= to; pos += 1) {
+    const rect = view.coordsAtPos(pos);
+    if (!rect) continue;
+    const x = (rect.left + rect.right) / 2;
+    const verticalMiss = distanceOutside(clientY, rect.top, rect.bottom);
+    const horizontalMiss = Math.abs(clientX - x);
+    const score = verticalMiss * 1000 + horizontalMiss;
+    if (score < bestScore) {
+      bestScore = score;
+      bestPos = pos;
+    }
+  }
+  return bestPos;
+}
+
+function dirname(path: string | null): string {
+  if (!path) return "";
+  const normalized = path.replace(/\\/g, "/");
+  const slash = normalized.lastIndexOf("/");
+  return slash >= 0 ? normalized.slice(0, slash) : "";
+}
+
+function joinPath(base: string, child: string): string {
+  if (!base) return child;
+  if (/^[a-zA-Z]:[\\/]/.test(child) || child.startsWith("/") || child.startsWith("\\")) return child;
+  return `${base.replace(/\/+$/, "")}/${child.replace(/^\/+/, "")}`;
+}
+
+function mimeForImage(path: string): string {
+  const lower = path.toLowerCase();
+  if (lower.endsWith(".png")) return "image/png";
+  if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
+  if (lower.endsWith(".gif")) return "image/gif";
+  if (lower.endsWith(".svg")) return "image/svg+xml";
+  if (lower.endsWith(".webp")) return "image/webp";
+  if (lower.endsWith(".pdf")) return "application/pdf";
+  return "application/octet-stream";
+}
+
+async function readFigureBytes(imagePath: string, sourcePath: string | null): Promise<{ bytes: number[]; resolvedPath: string }> {
+  const base = dirname(sourcePath);
+  const candidates = Array.from(new Set([joinPath(base, imagePath), imagePath]));
+  let lastError: unknown = null;
+  for (const candidate of candidates) {
+    try {
+      const bytes = await fileReadBytes(candidate);
+      if (bytes.length > 0) return { bytes, resolvedPath: candidate };
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  if (lastError) throw lastError;
+  throw new Error(`Figure not found: ${imagePath}`);
 }
 
 /** Build the caption `<div>` shared by figure and table widgets. */
@@ -240,6 +338,41 @@ function buildCaptionEl(caption: string): HTMLDivElement {
   cap.className = "cm-vis-caption";
   cap.textContent = caption;
   return cap;
+}
+
+async function renderFigureInto(el: HTMLDivElement, imagePath: string, sourcePath: string | null) {
+  if (!imagePath) return;
+  const { bytes, resolvedPath } = await readFigureBytes(imagePath, sourcePath);
+  const mime = mimeForImage(resolvedPath);
+  el.replaceChildren();
+  if (mime === "application/pdf") {
+    const pdfjs = await import("pdfjs-dist");
+    pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerSrc;
+    const pdf = await pdfjs.getDocument({ data: new Uint8Array(bytes) }).promise;
+    const page = await pdf.getPage(1);
+    const viewport = page.getViewport({ scale: 1.15 });
+    const canvas = document.createElement("canvas");
+    canvas.className = "cm-vis-figure-pdf";
+    canvas.width = Math.ceil(viewport.width);
+    canvas.height = Math.ceil(viewport.height);
+    const context = canvas.getContext("2d");
+    if (!context) throw new Error("Canvas unavailable");
+    await page.render({ canvas, canvasContext: context, viewport }).promise;
+    el.append(canvas);
+    await pdf.destroy();
+  } else if (mime.startsWith("image/")) {
+    const blob = new Blob([new Uint8Array(bytes)], { type: mime });
+    const url = URL.createObjectURL(blob);
+    el.dataset.objectUrl = url;
+    const img = document.createElement("img");
+    img.src = url;
+    img.alt = imagePath;
+    el.append(img);
+  }
+  const name = document.createElement("div");
+  name.className = "cm-vis-figure-name";
+  name.textContent = imagePath;
+  el.append(name);
 }
 
 /**
@@ -255,11 +388,12 @@ class FigureWidget extends WidgetType {
   constructor(
     private readonly path: string,
     private readonly caption: string,
+    private readonly sourcePath: string | null,
   ) {
     super();
   }
   eq(other: FigureWidget) {
-    return other.path === this.path && other.caption === this.caption;
+    return other.path === this.path && other.caption === this.caption && other.sourcePath === this.sourcePath;
   }
   toDOM() {
     const el = document.createElement("div");
@@ -271,19 +405,32 @@ class FigureWidget extends WidgetType {
     name.className = "cm-vis-figure-name";
     name.textContent = this.path.split("/").pop() || this.path;
     el.append(icon, name);
-    if (this.caption) el.append(buildCaptionEl(this.caption));
+    void renderFigureInto(el, this.path, this.sourcePath)
+      .then(() => {
+        if (this.caption) el.append(buildCaptionEl(this.caption));
+      })
+      .catch(() => {
+        if (this.caption) el.append(buildCaptionEl(this.caption));
+      });
     return el;
+  }
+  destroy(dom: HTMLElement) {
+    const url = dom.dataset.objectUrl;
+    if (url) URL.revokeObjectURL(url);
   }
   ignoreEvent = blockIgnoreEvent;
 }
 
 /** Standalone `\includegraphics{…}` with no enclosing `figure` environment. */
 class GraphicsWidget extends WidgetType {
-  constructor(private readonly path: string) {
+  constructor(
+    private readonly path: string,
+    private readonly sourcePath: string | null,
+  ) {
     super();
   }
   eq(other: GraphicsWidget) {
-    return other.path === this.path;
+    return other.path === this.path && other.sourcePath === this.sourcePath;
   }
   toDOM() {
     const el = document.createElement("div");
@@ -295,7 +442,12 @@ class GraphicsWidget extends WidgetType {
     name.className = "cm-vis-figure-name";
     name.textContent = this.path.split("/").pop() || this.path;
     el.append(icon, name);
+    void renderFigureInto(el, this.path, this.sourcePath).catch(() => undefined);
     return el;
+  }
+  destroy(dom: HTMLElement) {
+    const url = dom.dataset.objectUrl;
+    if (url) URL.revokeObjectURL(url);
   }
   ignoreEvent = blockIgnoreEvent;
 }
@@ -341,21 +493,60 @@ class TableWidget extends WidgetType {
   ignoreEvent = blockIgnoreEvent;
 }
 
+type TabularMatch = { from: number; to: number; body: string; source: string };
+
+function findTabularMatches(text: string, from: number, to: number): TabularMatch[] {
+  const matches: TabularMatch[] = [];
+  const beginRe = /\\begin\{tabular\}/g;
+  beginRe.lastIndex = from;
+  let tm: RegExpExecArray | null;
+  while ((tm = beginRe.exec(text)) && tm.index < to) {
+    let cursor = tm.index + tm[0].length;
+    const option = /\s*\[[^\]]*\]/y;
+    option.lastIndex = cursor;
+    const opt = option.exec(text);
+    if (opt) cursor = option.lastIndex;
+    const ws = /\s*/y;
+    ws.lastIndex = cursor;
+    ws.exec(text);
+    cursor = ws.lastIndex;
+    if (text[cursor] !== "{") continue;
+    const specEnd = matchBrace(text, cursor);
+    if (specEnd < 0 || specEnd > to) continue;
+    const bodyFrom = specEnd;
+    const endMarker = "\\end{tabular}";
+    const end = text.indexOf(endMarker, bodyFrom);
+    if (end < 0 || end >= to) continue;
+    const matchTo = end + endMarker.length;
+    matches.push({
+      from: tm.index,
+      to: matchTo,
+      body: text.slice(bodyFrom, end),
+      source: text.slice(tm.index, matchTo),
+    });
+    beginRe.lastIndex = matchTo;
+  }
+  return matches;
+}
+
 /** Split a `tabular` body into a grid, dropping booktabs/hline rules. */
 function parseTabular(body: string): string[][] {
   const cleaned = body
     .replace(/\\(top|mid|bottom)rule/g, "")
+    .replace(/\\addlinespace(?:\[[^\]]*\])?/g, "")
     .replace(/\\hline/g, "")
     .replace(/\\cmidrule\s*(\([^)]*\))?\s*(\[[^\]]*\])?\s*\{[^}]*\}/g, "");
   return cleaned
     .split(/\\\\/)
     .map((row) => row.trim())
     .filter(Boolean)
-    .map((row) =>
-      row
+    .map((row) => {
+      const multicol = /\\multicolumn\s*\{\d+\}\s*\{[^}]*\}\s*\{([\s\S]*)\}/.exec(row);
+      if (multicol) return [stripMarkup(multicol[1]).replace(/\\([%&_#$])/g, "$1").trim()];
+      return row
         .split(/(?<!\\)&/)
-        .map((cell) => stripMarkup(cell).replace(/\\([%&_#$])/g, "$1").trim()),
-    );
+        .map((cell) => stripMarkup(cell).replace(/\\([%&_#$])/g, "$1").trim());
+    });
 }
 
 /** KaTeX-rendered math, shown in place of the `$…$` / `\[…\]` source. */
@@ -402,11 +593,18 @@ class MathWidget extends WidgetType {
  */
 export const visualBlockClick = EditorView.domEventHandlers({
   mouseup(event, view) {
-    const target = event.target;
-    if (!(target instanceof Element) || !target.closest(`.${BLOCK_TARGET_CLASS}`)) return false;
+    const target = eventElement(event.target);
+    if (!target) return false;
+    const isBlockTarget = Boolean(target.closest(`.${BLOCK_TARGET_CLASS}`));
+    const isHeadingTarget = Boolean(target.closest(HEADING_TARGET_SELECTOR));
+    if (!isBlockTarget && !isHeadingTarget) return false;
     event.preventDefault();
     const line = view.lineBlockAtHeight(event.clientY - view.documentTop);
-    view.dispatch({ selection: EditorSelection.cursor(line.to), scrollIntoView: true });
+    const headingRange = isHeadingTarget ? headingTitleRangeAtLine(view.state, line.from) : null;
+    const pos = headingRange
+      ? positionInRangeAtCoords(view, headingRange.from, headingRange.to, event.clientX, event.clientY)
+      : line.to;
+    view.dispatch({ selection: EditorSelection.cursor(pos), scrollIntoView: true });
     return true;
   },
 });
@@ -446,6 +644,7 @@ type VisualDecorations = { deco: DecorationSet; atomic: DecorationSet };
 
 function buildDecorations(state: EditorState): VisualDecorations {
   const text = state.doc.toString();
+  const sourcePath = state.facet(visualSourcePath);
   const marks: Decorated[] = [];
   // Only *hidden syntax* (replaced command markup, folded preamble) is atomic so
   // the caret steps over it. Styling marks (bold/italic/heading text) must NOT be
@@ -484,11 +683,20 @@ function buildDecorations(state: EditorState): VisualDecorations {
   // --- \end{document} and trailing content: hide the closing marker ---
   const endDoc = text.indexOf("\\end{document}");
   const scanEnd = endDoc >= 0 ? endDoc : text.length;
+  const floatEnvRanges: Range[] = [];
+  const floatRangeRe = /\\begin\{(figure\*?|table\*?)\}(?:\[[^\]]*\])?([\s\S]*?)\\end\{\1\}/g;
+  floatRangeRe.lastIndex = bodyStart;
+  let fr: RegExpExecArray | null;
+  while ((fr = floatRangeRe.exec(text)) && fr.index < scanEnd) {
+    floatEnvRanges.push({ from: fr.index, to: fr.index + fr[0].length });
+  }
+  const withinFloatEnv = (pos: number) => floatEnvRanges.some((r) => pos >= r.from && pos < r.to);
 
   // --- Math: display environments, \[…\], and inline $…$ (KaTeX widgets) ---
   const mathRanges: Range[] = [];
   const withinMath = (pos: number) => mathRanges.some((m) => pos >= m.from && pos < m.to);
   const addMath = (from: number, to: number, latex: string, display: boolean) => {
+    if (withinFloatEnv(from)) return;
     mathRanges.push({ from, to });
     // Both reveal their source on caret — display math used to stay permanently
     // rendered to avoid a page-shifting "jump", but the real bug was the CLICK
@@ -555,13 +763,13 @@ function buildDecorations(state: EditorState): VisualDecorations {
     const innerFrom = envTo - inner.length - `\\end{${fe[1]}}`.length;
     const caption = readCaption(inner, innerFrom);
     if (fe[1].startsWith("table")) {
-      const tabularMatch = /\\begin\{tabular\}(?:\[[^\]]*\])?\s*\{[^}]*\}([\s\S]*?)\\end\{tabular\}/.exec(inner);
-      const rows = tabularMatch ? parseTabular(tabularMatch[1]) : [];
+      const tabularMatch = findTabularMatches(text, innerFrom, envTo)[0];
+      const rows = tabularMatch ? parseTabular(tabularMatch.body) : [];
       if (tabularMatch && rows.length > 0) {
         hide(
           envFrom,
           envTo,
-          Decoration.replace({ widget: new TableWidget(rows, /\\toprule/.test(tabularMatch[0]), caption), block: true }),
+          Decoration.replace({ widget: new TableWidget(rows, /\\toprule/.test(tabularMatch.source), caption), block: true }),
         );
         continue;
       }
@@ -571,7 +779,7 @@ function buildDecorations(state: EditorState): VisualDecorations {
         hide(
           envFrom,
           envTo,
-          Decoration.replace({ widget: new FigureWidget(graphicsMatch[1].trim(), caption), block: true }),
+          Decoration.replace({ widget: new FigureWidget(graphicsMatch[1].trim(), caption, sourcePath), block: true }),
         );
         continue;
       }
@@ -582,17 +790,14 @@ function buildDecorations(state: EditorState): VisualDecorations {
   }
 
   // --- Tables: bare `tabular` with no enclosing `table` float ---
-  const tabularRe = /\\begin\{tabular\}(?:\[[^\]]*\])?\s*\{[^}]*\}([\s\S]*?)\\end\{tabular\}/g;
-  tabularRe.lastIndex = bodyStart;
-  let tb: RegExpExecArray | null;
-  while ((tb = tabularRe.exec(text)) && tb.index < scanEnd) {
-    const from = tb.index;
-    const to = from + tb[0].length;
+  for (const tb of findTabularMatches(text, bodyStart, scanEnd)) {
+    const from = tb.from;
+    const to = tb.to;
     if (withinOpenFloat(from)) continue;
     if (selectionTouches(state, from, to)) continue;
-    const rows = parseTabular(tb[1]);
+    const rows = parseTabular(tb.body);
     if (rows.length === 0) continue;
-    const hasHeader = /\\toprule/.test(tb[0]);
+    const hasHeader = /\\toprule/.test(tb.source);
     hide(from, to, Decoration.replace({ widget: new TableWidget(rows, hasHeader), block: true }));
   }
 
@@ -605,12 +810,12 @@ function buildDecorations(state: EditorState): VisualDecorations {
     const to = from + gm[0].length;
     if (withinOpenFloat(from)) continue;
     if (selectionTouches(state, from, to)) continue;
-    hide(from, to, Decoration.replace({ widget: new GraphicsWidget(gm[1].trim()), block: true }));
+    hide(from, to, Decoration.replace({ widget: new GraphicsWidget(gm[1].trim(), sourcePath), block: true }));
   }
 
   // --- Section headings (numbered) ---
   const counters = [0, 0, 0];
-  const headingRe = /\\(section|subsection|subsubsection)\*?\s*\{/g;
+  const headingRe = /\\(section|subsection|subsubsection|paragraph)\*?\s*\{/g;
   const headingBraces: Range[] = [];
   let hm: RegExpExecArray | null;
   headingRe.lastIndex = bodyStart;
@@ -622,7 +827,7 @@ function buildDecorations(state: EditorState): VisualDecorations {
     const starred = hm[0].includes("*");
     // Advance counters for numbering (starred sections are unnumbered).
     let label = "";
-    if (!starred) {
+    if (!starred && level <= counters.length) {
       counters[level - 1] += 1;
       for (let deeper = level; deeper < counters.length; deeper += 1) counters[deeper] = 0;
       label = counters.slice(0, level).join(".");
@@ -712,12 +917,12 @@ function buildDecorations(state: EditorState): VisualDecorations {
   }
 
   // --- Lists: bullet / number markers in place of \item ---
-  const listRe = /\\begin\{(itemize|enumerate)\}([\s\S]*?)\\end\{\1\}/g;
+  const listRe = /\\begin\{(itemize|enumerate)\}(\s*\[[^\]]*\])?([\s\S]*?)\\end\{\1\}/g;
   listRe.lastIndex = bodyStart;
   let lm: RegExpExecArray | null;
   while ((lm = listRe.exec(text)) && lm.index < scanEnd) {
     const ordered = lm[1] === "enumerate";
-    const bodyFrom = lm.index + `\\begin{${lm[1]}}`.length;
+    const bodyFrom = lm.index + `\\begin{${lm[1]}}`.length + (lm[2]?.length ?? 0);
     const bodyTo = lm.index + lm[0].length - `\\end{${lm[1]}}`.length;
     // Hide the \begin / \end environment lines themselves.
     hide(lm.index, bodyFrom);

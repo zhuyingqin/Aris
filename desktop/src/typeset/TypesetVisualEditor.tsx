@@ -1,8 +1,8 @@
 import { useEffect, useRef } from "react";
-import { EditorState } from "@codemirror/state";
-import { EditorView, keymap, drawSelection, dropCursor } from "@codemirror/view";
+import { Compartment, EditorState } from "@codemirror/state";
+import { EditorView, keymap, drawSelection, dropCursor, lineNumbers } from "@codemirror/view";
 import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
-import { visualBlockClick, visualDecorations } from "./visualDecorations";
+import { visualBlockClick, visualDecorations, visualSourcePath } from "./visualDecorations";
 import type { VisualPdfCursor } from "./visualModel";
 
 /**
@@ -15,7 +15,9 @@ import type { VisualPdfCursor } from "./visualModel";
  * CodeMirror decorations in later phases; Phase 0 is the editable surface.
  */
 export function TypesetVisualEditor({
+  path,
   draft,
+  pdfCursor,
   onChange,
 }: {
   path: string | null;
@@ -26,6 +28,7 @@ export function TypesetVisualEditor({
 }) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const viewRef = useRef<EditorView | null>(null);
+  const sourcePathCompartmentRef = useRef(new Compartment());
   // Keep the latest onChange without recreating the editor on every render.
   const onChangeRef = useRef(onChange);
   onChangeRef.current = onChange;
@@ -44,7 +47,9 @@ export function TypesetVisualEditor({
           history(),
           drawSelection(),
           dropCursor(),
+          lineNumbers(),
           EditorView.lineWrapping,
+          sourcePathCompartmentRef.current.of(visualSourcePath.of(path)),
           keymap.of([...defaultKeymap, ...historyKeymap]),
           visualDecorations,
           visualBlockClick,
@@ -68,6 +73,14 @@ export function TypesetVisualEditor({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    view.dispatch({
+      effects: sourcePathCompartmentRef.current.reconfigure(visualSourcePath.of(path)),
+    });
+  }, [path]);
+
   // Reconcile external `draft` changes into the document. When the change came
   // from the user typing, `draft` already equals the doc, so this is a no-op.
   useEffect(() => {
@@ -81,6 +94,18 @@ export function TypesetVisualEditor({
     }
   }, [draft]);
 
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view || !pdfCursor) return;
+    const safeStart = Math.max(0, Math.min(pdfCursor.start, view.state.doc.length));
+    const safeEnd = Math.max(safeStart, Math.min(pdfCursor.end, view.state.doc.length));
+    view.focus();
+    view.dispatch({
+      selection: { anchor: safeStart, head: safeEnd },
+      effects: EditorView.scrollIntoView(safeStart, { y: "center" }),
+    });
+  }, [pdfCursor]);
+
   return (
     <section className="typeset-visual-pane ide-redesign-editor-content" aria-label="Visual editor">
       <div className="typeset-visual-scroll">
@@ -92,29 +117,47 @@ export function TypesetVisualEditor({
 
 /**
  * Editor chrome that makes CodeMirror read as the printed "page" rather than a
- * code buffer: serif body font, generous line height, no gutter, transparent
- * background so the white page shows through. Rich-text decoration styles are
- * added alongside this theme in later phases.
+ * code buffer: TeX-like body font, source line numbers, and transparent
+ * background so the white page shows through.
  */
 const visualTheme = EditorView.theme({
   "&": {
     height: "100%",
     color: "#000",
     backgroundColor: "transparent",
-    fontFamily: '"Times New Roman", Times, serif',
-    fontSize: "20px",
+    fontFamily: '"KaTeX_Main", "Latin Modern Roman", "CMU Serif", "Times New Roman", Times, serif',
+    fontSize: "17.5px",
+    textRendering: "optimizeLegibility",
+    WebkitFontSmoothing: "antialiased",
   },
   "&.cm-focused": {
     outline: "none",
   },
   ".cm-scroller": {
     fontFamily: "inherit",
-    lineHeight: "1.34",
+    lineHeight: "1.33",
     overflow: "visible",
+  },
+  ".cm-gutters": {
+    paddingRight: "14px",
+    minWidth: "42px",
+    borderRight: "0",
+    backgroundColor: "transparent",
+    color: "#9aa0a6",
+    fontFamily: 'ui-monospace, "Cascadia Code", "SFMono-Regular", Consolas, monospace',
+    fontSize: "12px",
+    lineHeight: "inherit",
+  },
+  ".cm-gutterElement": {
+    padding: "0 8px 0 0",
+    minWidth: "32px",
+    textAlign: "right",
   },
   ".cm-content": {
     padding: "0",
     caretColor: "#000",
+    letterSpacing: "0",
+    fontKerning: "normal",
   },
   ".cm-line": {
     padding: "0",
@@ -169,7 +212,7 @@ const visualTheme = EditorView.theme({
     display: "inline-block",
     padding: "0 6px",
     borderRadius: "3px",
-    fontFamily: '"Helvetica Neue", Arial, sans-serif',
+    fontFamily: '"Segoe UI", system-ui, -apple-system, sans-serif',
     fontSize: "0.82em",
     lineHeight: "1.5",
     verticalAlign: "baseline",
@@ -182,11 +225,11 @@ const visualTheme = EditorView.theme({
   ".cm-vis-chip-toc": { background: "#f6f7f9", color: "#3c4043", borderLeft: "3px solid #1a73e8" },
 
   // Lists: hang the marker in the left margin of the indented line.
-  ".cm-vis-list-line": { paddingLeft: "1.8em", textIndent: "-1.1em" },
+  ".cm-vis-list-line": { paddingLeft: "1.45em", textIndent: "-1.05em" },
   ".cm-vis-item-marker": {
     display: "inline-block",
-    minWidth: "1.1em",
-    marginRight: "0.35em",
+    minWidth: "0.85em",
+    marginRight: "0.18em",
     color: "#000",
     fontWeight: "600",
   },
@@ -205,9 +248,14 @@ const visualTheme = EditorView.theme({
     borderRadius: "6px",
     background: "#fafbfc",
   },
+  ".cm-vis-figure img, .cm-vis-figure canvas": {
+    maxWidth: "100%",
+    maxHeight: "300px",
+    objectFit: "contain",
+  },
   ".cm-vis-figure-icon": { fontSize: "28px", lineHeight: "1" },
   ".cm-vis-figure-name": {
-    fontFamily: '"Helvetica Neue", Arial, sans-serif',
+    fontFamily: '"Segoe UI", system-ui, -apple-system, sans-serif',
     fontSize: "13px",
     color: "#5f6368",
   },
@@ -235,27 +283,29 @@ const visualTheme = EditorView.theme({
   ".cm-vis-caption": { fontSize: "0.88em", color: "#3c4043" },
 
   // \maketitle title block.
-  ".cm-vis-title": { textAlign: "center", padding: "8px 0 28px" },
-  ".cm-vis-title-name": { fontSize: "28px", fontWeight: "500", lineHeight: "1.2" },
-  ".cm-vis-title-author": { fontSize: "17px", marginTop: "12px" },
-  ".cm-vis-title-date": { fontSize: "15px", color: "#5f6368", marginTop: "6px" },
+  ".cm-vis-title": { textAlign: "center", padding: "8px 0 30px" },
+  ".cm-vis-title-name": { fontSize: "24px", fontWeight: "700", lineHeight: "1.18" },
+  ".cm-vis-title-author": { fontSize: "15px", marginTop: "10px" },
+  ".cm-vis-title-date": { fontSize: "13.5px", color: "#5f6368", marginTop: "6px" },
 
-  // Section headings: sans-serif, bold, generous spacing above. This is a LINE
+  // Section headings: same serif family as body, bold, with TeX-like spacing. This is a LINE
   // decoration (applied to `.cm-line` itself), so the margin→padding rule above
   // applies doubly here — margin on a `.cm-line` is the single biggest source of
   // click-position drift, since every line below inherits the accumulated error.
   ".cm-vis-heading-line": {
-    fontFamily: '"Helvetica Neue", Arial, sans-serif',
+    fontFamily: "inherit",
     fontWeight: "700",
     color: "#000",
-    lineHeight: "1.25",
+    lineHeight: "1.18",
   },
-  ".cm-vis-heading-1": { fontSize: "27px", paddingTop: "22px" },
-  ".cm-vis-heading-2": { fontSize: "22px", paddingTop: "18px" },
-  ".cm-vis-heading-3": { fontSize: "19px", paddingTop: "14px" },
-  ".cm-vis-h1": { fontSize: "27px" },
-  ".cm-vis-h2": { fontSize: "22px" },
-  ".cm-vis-h3": { fontSize: "19px" },
+  ".cm-vis-heading-1": { fontSize: "24.5px", paddingTop: "22px" },
+  ".cm-vis-heading-2": { fontSize: "20px", paddingTop: "16px" },
+  ".cm-vis-heading-3": { fontSize: "18px", paddingTop: "12px" },
+  ".cm-vis-heading-4": { fontSize: "17.5px", paddingTop: "10px" },
+  ".cm-vis-h1": { fontSize: "24.5px" },
+  ".cm-vis-h2": { fontSize: "20px" },
+  ".cm-vis-h3": { fontSize: "18px" },
+  ".cm-vis-h4": { fontSize: "17.5px" },
   ".cm-vis-secnum": {
     marginRight: "0.5em",
     fontVariantNumeric: "tabular-nums",

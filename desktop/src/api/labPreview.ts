@@ -29,6 +29,9 @@ const PREVIEW_TEX_FILE = "papers/article.tex";
 const PREVIEW_SLIDES_TEX_FILE = "slides/main.tex";
 const PREVIEW_SLIDES_PDF_FILE = "slides/main.pdf";
 const PREVIEW_FIGURE_FILE = "figures/visual-editor.svg";
+const PREVIEW_PNG_FIGURE_FILE = "figures/visual-editor.png";
+const previewPngFigureUrl =
+  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAGAAAAAoCAYAAAABk/85AAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAAEHSURBVGhD7dGxDQJBDERR6qAJctqiDBqlBkACbUDyA8BrL4N8E7zkpNuR/HfX2/1hOjt+sN9yADEHEHMAMQcQcwAxBxBzALFNBtifLl/jv9U+Bjicjz/F/Uo8bgTfqrKJADxmBt/Oah+AB6zAjYzWAXi4Stya1TYAD7YCN2c4QAI3Z7QMwEOtxO0oB0jidpQDJHE7ygGSuB3VLgAPtBr3o9oFGHiklbgd5QBJ3I5ygCRuRzlAErejWgYYeKgVuDnDARK4OaNtgIEHq8StWa0DDDxcBW5ktA8w8IAZfDvrY4BOeMwIvlVlUwFeeNx3+G+1TQb4Jw4g5gBiDiDmAGIOIOYAYg4g9gTTILK29jj45AAAAABJRU5ErkJggg==";
 
 const files = new Map<string, string>([
   [PREVIEW_SLIDES_TEX_FILE, slidesMainTex],
@@ -138,6 +141,7 @@ const files = new Map<string, string>([
 
 const binaryFiles = new Map<string, string>([
   [PREVIEW_SLIDES_PDF_FILE, slidesMainPdfUrl],
+  [PREVIEW_PNG_FIGURE_FILE, previewPngFigureUrl],
 ]);
 
 export function isLabPreviewMode(): boolean {
@@ -301,7 +305,10 @@ export function previewFileTree(path: string | null): PreviewFileTreeEntry[] {
     return [{ name: "article.tex", path: PREVIEW_TEX_FILE, isDir: false }];
   }
   if (path === "figures") {
-    return [{ name: "visual-editor.svg", path: PREVIEW_FIGURE_FILE, isDir: false }];
+    return [
+      { name: "visual-editor.svg", path: PREVIEW_FIGURE_FILE, isDir: false },
+      { name: "visual-editor.png", path: PREVIEW_PNG_FIGURE_FILE, isDir: false },
+    ];
   }
   if (path === "notebooks") {
     return [{ name: "lab-preview.ipynb", path: PREVIEW_NOTEBOOK, isDir: false }];
