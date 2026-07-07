@@ -4,6 +4,9 @@ use std::path::{Path, PathBuf};
 use runtime::{ConfigLoader, ConfigSource, McpServerConfig, McpServerManager};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use tauri::State;
+
+use crate::projects::{current_project_path, ProjectState};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -51,10 +54,8 @@ pub struct McpTestResult {
     servers: Vec<McpServerTestResult>,
 }
 
-fn project_mcp_path() -> Result<PathBuf, String> {
-    std::env::current_dir()
-        .map(|cwd| cwd.join(".mcp.json"))
-        .map_err(|error| error.to_string())
+fn project_mcp_path(project_root: &Path) -> PathBuf {
+    project_root.join(".mcp.json")
 }
 
 fn read_json_object(path: &Path) -> Result<Map<String, Value>, String> {
@@ -143,9 +144,8 @@ fn transport_label(config: &McpServerConfig) -> String {
     .to_string()
 }
 
-fn merged_server_summaries() -> Result<Vec<McpServerSummary>, String> {
-    let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
-    let config = ConfigLoader::default_for(cwd)
+fn merged_server_summaries(project_root: &Path) -> Result<Vec<McpServerSummary>, String> {
+    let config = ConfigLoader::default_for(project_root)
         .load()
         .map_err(|error| error.to_string())?;
     Ok(config
@@ -164,19 +164,27 @@ fn merged_server_summaries() -> Result<Vec<McpServerSummary>, String> {
         .collect())
 }
 
-#[tauri::command]
-pub fn mcp_config_get() -> Result<McpConfigView, String> {
-    let path = project_mcp_path()?;
+fn mcp_config_get_for(project_root: &Path) -> Result<McpConfigView, String> {
+    let path = project_mcp_path(project_root);
     let root = read_json_object(&path)?;
     Ok(McpConfigView {
         project_path: path.display().to_string(),
         servers: parse_project_stdio_servers(&root),
-        merged_servers: merged_server_summaries()?,
+        merged_servers: merged_server_summaries(project_root)?,
     })
 }
 
 #[tauri::command]
-pub fn mcp_config_set(servers: Vec<McpStdioServerInput>) -> Result<McpConfigView, String> {
+pub fn mcp_config_get(projects: State<ProjectState>) -> Result<McpConfigView, String> {
+    let project_root = current_project_path(projects.inner())?;
+    mcp_config_get_for(&project_root)
+}
+
+#[tauri::command]
+pub fn mcp_config_set(
+    projects: State<ProjectState>,
+    servers: Vec<McpStdioServerInput>,
+) -> Result<McpConfigView, String> {
     let mut names = BTreeSet::new();
     for server in &servers {
         if server.name.trim().is_empty() {
@@ -190,7 +198,8 @@ pub fn mcp_config_set(servers: Vec<McpStdioServerInput>) -> Result<McpConfigView
         }
     }
 
-    let path = project_mcp_path()?;
+    let project_root = current_project_path(projects.inner())?;
+    let path = project_mcp_path(&project_root);
     let mut root = read_json_object(&path)?;
     let mut existing = root
         .remove("mcpServers")
@@ -239,14 +248,14 @@ pub fn mcp_config_set(servers: Vec<McpStdioServerInput>) -> Result<McpConfigView
         serde_json::to_string_pretty(&Value::Object(root)).map_err(|error| error.to_string())?;
     std::fs::write(&path, format!("{json}\n")).map_err(|error| error.to_string())?;
     aris_chat::clear_mcp_discovery_cache();
-    mcp_config_get()
+    mcp_config_get_for(&project_root)
 }
 
 #[tauri::command]
-pub async fn mcp_config_test() -> Result<McpTestResult, String> {
+pub async fn mcp_config_test(projects: State<'_, ProjectState>) -> Result<McpTestResult, String> {
     aris_chat::clear_mcp_discovery_cache();
-    let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
-    let config = ConfigLoader::default_for(cwd)
+    let project_root = current_project_path(projects.inner())?;
+    let config = ConfigLoader::default_for(project_root)
         .load()
         .map_err(|error| error.to_string())?;
     let mut manager = McpServerManager::from_runtime_config(&config);

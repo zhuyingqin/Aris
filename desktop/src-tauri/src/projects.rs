@@ -204,6 +204,7 @@ fn activate(registry: &mut ProjectRegistry, id: &str) -> Result<(), String> {
         ));
     }
     state::apply_project_environment(&path, &project_id).map_err(|error| error.to_string())?;
+    aris_chat::clear_mcp_discovery_cache();
     registry.current_project_id = project_id;
     save_registry(registry)
 }

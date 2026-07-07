@@ -14,7 +14,7 @@ import {
   projectSetCurrent,
   stateDir as fetchStateDir,
 } from "./api/tauri";
-import { isLabPreviewMode } from "./api/labPreview";
+import { isLabPreviewMode, isTypesetPreviewMode } from "./api/labPreview";
 
 const PREVIEW_PROJECT: DesktopProject = {
   id: "default",
@@ -27,6 +27,7 @@ const PREVIEW_PROJECT: DesktopProject = {
 export type Tab =
   | "chat"
   | "lab"
+  | "typeset"
   | "literature"
   | "studio"
   | "mail"
@@ -44,6 +45,10 @@ const LANGUAGE_STORAGE_KEY = "somniq-ui-language";
 const LANGUAGE_LEGACY_STORAGE_KEY = "aris-ui-language";
 
 function readStoredTheme(): Theme {
+  if (typeof window !== "undefined") {
+    const requested = new URLSearchParams(window.location.search).get("theme");
+    if (requested === "light" || requested === "dark") return requested;
+  }
   try {
     return (localStorage.getItem(THEME_STORAGE_KEY) ?? localStorage.getItem(THEME_LEGACY_STORAGE_KEY)) === "light" ? "light" : "dark";
   } catch {
@@ -280,7 +285,7 @@ export const useStore = create<AppState>((set, get) => ({
     set({ authed: false });
   },
 
-  tab: isLabPreviewMode() ? "lab" : "chat",
+  tab: isTypesetPreviewMode() ? "typeset" : isLabPreviewMode() ? "lab" : "chat",
   setTab: (tab) => set({ tab }),
 
   theme: initialTheme,

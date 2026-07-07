@@ -207,7 +207,7 @@ function ContextRing({ used, max }: { used: number; max: number }) {
   const usedK = used >= 1000 ? `${(used / 1000).toFixed(0)}k` : String(used);
   const maxK = max >= 1000 ? `${(max / 1000).toFixed(0)}k` : String(max);
   return (
-    <div className="ctx-ring" title={`Auto-compact budget: ${label} used (${usedK} / ${maxK} tokens est.)`}>
+    <div className="ctx-ring" title={`Context window: ${label} used (${usedK} / ${maxK} tokens)`}>
       <svg width="22" height="22" viewBox="0 0 22 22" aria-hidden="true">
         <circle cx="11" cy="11" r={radius} fill="none" stroke="var(--border)" strokeWidth="2.5" />
         {pct > 0 && (
@@ -222,6 +222,14 @@ function ContextRing({ used, max }: { used: number; max: number }) {
       </svg>
       <span className="ctx-ring-label">{label}</span>
     </div>
+  );
+}
+
+function UploadPlusIcon() {
+  return (
+    <svg className="chat-upload-icon" width="14" height="14" viewBox="0 0 14 14" aria-hidden="true">
+      <path d="M7 2.75v8.5M2.75 7h8.5" />
+    </svg>
   );
 }
 
@@ -718,7 +726,7 @@ export default function ChatComposer({
               title={copy.attachFiles}
               aria-label={copy.attachFiles}
             >
-              +
+              <UploadPlusIcon />
             </button>
           </div>
           <div className="chat-footer-right">

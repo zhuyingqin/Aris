@@ -25,10 +25,12 @@ const apiMocks = vi.hoisted(() => ({
   fileSearch: vi.fn(() => Promise.resolve([])),
   chatSend: vi.fn((_sessionId: string, _message: unknown) => Promise.resolve("")),
   chatModelOptions: vi.fn(() => Promise.resolve({ provider: "anthropic-compat", current: "MiniMax-M3", options: [{ value: "MiniMax-M3", label: "MiniMax-M3", description: null }] })),
+  chatModelSet: vi.fn((model: string) => Promise.resolve({ ready: true, model, provider: "anthropic-compat" })),
   chatCancel: vi.fn(() => Promise.resolve()),
   onChatDelta: vi.fn(() => Promise.resolve(() => undefined)),
   onChatThinkingDelta: vi.fn(() => Promise.resolve(() => undefined)),
   onChatTool: vi.fn(() => Promise.resolve(() => undefined)),
+  onChatToolProgress: vi.fn(() => Promise.resolve(() => undefined)),
   onChatToolResult: vi.fn(() => Promise.resolve(() => undefined)),
   onChatPermissionRequest: vi.fn(() => Promise.resolve(() => undefined)),
   onChatPermissionResolved: vi.fn(() => Promise.resolve(() => undefined)),
@@ -170,7 +172,7 @@ describe("Chat export action", () => {
     render(<Chat />);
 
     await userEvent.click(await screen.findByRole("button", { name: "Export test" }));
-    const exportButton = await screen.findByRole("button", { name: "Export current chat" });
+    const exportButton = await screen.findByRole("button", { name: /Export current chat|导出当前对话/ });
     expect((exportButton as HTMLButtonElement).disabled).toBe(false);
 
     await userEvent.click(exportButton);
@@ -244,6 +246,45 @@ describe("Chat export action", () => {
     expect(request.text).not.toContain("Partial stopped response:");
     expect(request.text).toContain("already in the conversation above");
     expect(request.text).toContain("Do not repeat the completed portion");
+  });
+
+  it("rebuilds stopped transcript before sending a normal follow-up", async () => {
+    const session = makeSession("default");
+    session.id = "session-stopped-follow-up";
+    session.title = "Stopped follow-up";
+    session.turns = [
+      { id: "turn-user", role: "user", blocks: [{ kind: "text", text: "Inspect the repo" }] },
+      {
+        id: "turn-assistant",
+        role: "assistant",
+        stopped: true,
+        blocks: [{ kind: "text", text: "I found the chat context reset path." }],
+      },
+    ];
+    localStorage.setItem(SESSIONS_KEY, JSON.stringify([session]));
+    localStorage.setItem(CURRENT_KEY, session.id);
+    apiMocks.chatSetContext.mockResolvedValue(256);
+    apiMocks.chatSend.mockResolvedValue("Follow-up answer");
+
+    render(<Chat />);
+
+    await userEvent.type(screen.getByRole("textbox", { name: "Message SomniQ" }), "What should I change?");
+    await userEvent.click(screen.getByRole("button", { name: "Send message" }));
+
+    await waitFor(() => expect(apiMocks.chatSetContext).toHaveBeenCalledWith(
+      session.id,
+      [
+        { role: "user", text: "Inspect the repo", images: [] },
+        { role: "assistant", text: "I found the chat context reset path." },
+      ],
+      "replace",
+    ));
+    await waitFor(() => expect(apiMocks.chatSend).toHaveBeenCalledWith(
+      session.id,
+      expect.objectContaining({ text: "What should I change?", model: "MiniMax-M3" }),
+    ));
+    expect(apiMocks.chatSetContext.mock.invocationCallOrder[0])
+      .toBeLessThan(apiMocks.chatSend.mock.invocationCallOrder[0]);
   });
 
   it("uses the configured LLM to create a concise title after the first reply", async () => {

@@ -5,9 +5,22 @@ import react from "@vitejs/plugin-react";
 export default defineConfig({
   plugins: [react()],
   base: "./",
+  cacheDir: "../.vite-cache/desktop",
   clearScreen: false,
   resolve: {
-    dedupe: ["react", "react-dom"],
+    // Dedupe CodeMirror too: multiple @codemirror/state or @codemirror/view
+    // instances break decoration identity checks ("Block decorations may not be
+    // specified via plugins"), which surfaced as flaky Typeset test crashes.
+    dedupe: [
+      "react",
+      "react-dom",
+      "@codemirror/state",
+      "@codemirror/view",
+      "@codemirror/language",
+      "@codemirror/commands",
+      "@lezer/common",
+      "@lezer/highlight",
+    ],
   },
   server: {
     host: "127.0.0.1",

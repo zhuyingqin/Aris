@@ -30,11 +30,12 @@ import ChatSidebar from "./ChatSidebar";
 import ChatThread from "./ChatThread";
 import FilePathMenu from "./FilePathMenu";
 import { CHAT_COPY } from "./i18n";
-import { cleanChatTitle, latestFileChangesFromTurns, latestTodosFromTurns, makeId, patchLastAssistantTurn, textFromTurn, transcriptFromTurn, titleFromTurns } from "./model";
+import { cleanChatTitle, latestFileChangesFromTurns, latestTodosFromTurns, makeId, patchLastAssistantTurn, textFromTurn, titleFromTurns } from "./model";
 import WorkflowFlow from "./WorkflowFlow";
 import type { ChatSession } from "./types";
 import { useChatSessions } from "./useChatSessions";
 import { useChatStream } from "./useChatStream";
+import { onChatModelsUpdated } from "../modelEvents";
 
 const EMPTY_ASSISTANT_RESPONSE = "Model returned an empty response.";
 const IMAGE_UNSUPPORTED_MESSAGE = "(Image preview only. Vision input is not supported in desktop Chat yet.)";
@@ -110,15 +111,12 @@ type ContextNotice = {
 };
 
 // The ContextRing's "used" value. When an authoritative backend count is pinned
-// (after each turn, or after compaction), use it as the base and add only the
-// estimate of turns appended past the anchor — so the ring tracks the backend's
-// real token usage instead of the divergent transcript estimate. The anchor
-// guard self-heals if the transcript was later truncated below it (e.g. an
-// edited or retried turn).
+// (after each turn via the chat-done event with real API prompt_tokens), use it
+// directly — no local estimate stacking, which diverges from the backend's
+// compact_context_history truncation. Falls back to a transcript estimate only
+// before the first turn completes.
 function ringTokens(turns: ChatTurn[], override: ContextOverride | undefined): number {
-  return override && override.anchor <= turns.length
-    ? override.tokens + estimateTokens(turns.slice(override.anchor))
-    : estimateTokens(turns);
+  return override ? override.tokens : estimateTokens(turns);
 }
 
 function MemoryBadge({ count }: { count: number }) {
@@ -234,6 +232,31 @@ async function outgoingMessage(text: string, attachments: ChatAttachment[]): Pro
 
 export async function contextForRetry(turns: ChatTurn[]) {
   const messages: ChatContextMessage[] = [];
+  const pushAssistantText = (text: string) => {
+    if (text.trim()) messages.push({ role: "assistant", text });
+  };
+  const pushAssistantTool = (
+    turn: ChatTurn,
+    block: Extract<ChatBlock, { kind: "tool" }>,
+    index: number,
+    text: string,
+  ) => {
+    const id = block.id || `ui-tool-${turn.id}-${index}`;
+    messages.push({
+      role: "assistant",
+      text: text.trim() ? text : undefined,
+      toolCalls: [{ id, name: block.name, input: block.input || "{}" }],
+    });
+    messages.push({
+      role: "tool",
+      toolResults: [{
+        toolUseId: id,
+        toolName: block.name,
+        output: block.output ?? `${block.name} was interrupted before producing output.`,
+        isError: block.isError ?? block.output === undefined,
+      }],
+    });
+  };
   for (const turn of turns) {
     // Stopped (cleanly cancelled) turns are kept: their partial text and tool
     // activity is real conversation the model needs to continue coherently.
@@ -245,13 +268,27 @@ export async function contextForRetry(turns: ChatTurn[]) {
         messages.push({ role: "user", text: message.text, images: message.images });
       }
     } else {
-      // A stopped turn may have run tools whose results are not in the
-      // backend session (the interrupted turn is never persisted there), so
-      // serialize the full transcript — tool calls and results included,
-      // marking any that were interrupted before output — instead of text
-      // alone. Completed turns are backend-authoritative; their text suffices.
-      const text = turn.stopped ? transcriptFromTurn(turn) : textFromTurn(turn);
-      if (text.trim()) messages.push({ role: "assistant", text });
+      // Serialize the full transcript — tool calls and results included,
+      // marking any interrupted before output — not text alone. This context
+      // is fed to `chatSetContext(..., "replace")`, which discards the backend
+      // session and rebuilds it from these messages. Text-only reconstruction
+      // would drop every completed turn's tool activity (file reads, searches,
+      // command outputs), so an edit/retry from an earlier turn would make the
+      // model forget everything it learned by acting. Stopped turns need the
+      // transcript for the same reason plus their partial never reached the
+      // backend session at all.
+      let pendingText = "";
+      turn.blocks.forEach((block, index) => {
+        if (block.kind === "text") {
+          pendingText = pendingText ? `${pendingText}\n${block.text}` : block.text;
+          return;
+        }
+        if (block.kind === "tool") {
+          pushAssistantTool(turn, block, index, pendingText);
+          pendingText = "";
+        }
+      });
+      pushAssistantText(pendingText);
     }
   }
   return messages;
@@ -276,6 +313,8 @@ export function needsBackendContextReset(
   explicitReset = false,
 ): boolean {
   if (explicitReset) return true;
+  if (prefixTurns.some((turn) => turn.stopped)) return true;
+  if (prefixTurns.some((turn) => turn.error)) return true;
   if (currentTurns.length !== prefixTurns.length) return true;
   return prefixTurns.some((turn, index) => currentTurns[index]?.id !== turn.id);
 }
@@ -379,6 +418,7 @@ export default function Chat() {
   const sendLocks = useRef(new Set<string>());
   const commandSelectionLock = useRef(false);
   const syncedTurnIds = useRef(new Map<string, Set<string>>());
+  const dirtyBackendContext = useRef(new Set<string>());
   const currentSessionRef = useRef(currentSession);
   currentSessionRef.current = currentSession;
   const allSessionsRef = useRef(allSessions);
@@ -397,26 +437,9 @@ export default function Chat() {
     syncedTurnIds.current.set(sessionId, known);
   }, []);
 
-  const syncBackendContext = useCallback((sessionId: string, nextTurns: ChatTurn[]) => {
-    if (!isTauri()) return;
-    const known = syncedTurnIds.current.get(sessionId) ?? new Set<string>();
-    const deltaTurns = nextTurns.filter((turn) => (
-      !known.has(turn.id) && !turn.streaming && !turn.error
-    ));
-    if (deltaTurns.length === 0) return;
-    void contextForRetry(deltaTurns)
-      .then((messages) => {
-        if (messages.length === 0) return;
-        return chatSetContext(sessionId, messages, "append");
-      })
-      .then((tokens) => {
-        if (tokens != null) {
-          setContextOverrides((prev) => new Map(prev).set(sessionId, { tokens, anchor: nextTurns.length }));
-        }
-        markBackendContextSynced(sessionId, deltaTurns);
-      })
-      .catch((error) => setError(String(error)));
-  }, [markBackendContextSynced, setError]);
+  const markBackendContextDirty = useCallback((sessionId: string) => {
+    dirtyBackendContext.current.add(sessionId);
+  }, []);
 
   const patchAssistant = useCallback((
     sessionId: string,
@@ -482,9 +505,11 @@ export default function Chat() {
         error: visibleError,
         stopped,
       }),
-      stopped && !visibleError ? (nextTurns) => syncBackendContext(sessionId, nextTurns) : undefined,
+      stopped && !visibleError
+        ? () => markBackendContextDirty(sessionId)
+        : undefined,
     );
-  }, [patchAssistant, syncBackendContext]);
+  }, [markBackendContextDirty, patchAssistant]);
 
   // Pin the ContextRing to an authoritative backend token count — reported
   // after every turn (real usage) and after compaction — anchored at the
@@ -548,7 +573,7 @@ export default function Chat() {
   const turns = currentSession?.turns ?? [];
   const estimatedTokens = ringTokens(turns, contextOverrides.get(currentId));
   const contextMax = status?.ready
-    ? (status.compactionBudget ?? status.contextWindow ?? null)
+    ? (status.contextWindow ?? status.compactionBudget ?? null)
     : null;
   const currentContextNotice = contextNotice?.sessionId === currentId ? contextNotice : null;
   const workflowTodos = useMemo(() => latestTodosFromTurns(turns), [turns]);
@@ -570,6 +595,14 @@ export default function Chat() {
     request.then(setStatus).catch((error) => setStatus({ ready: false, message: String(error) }));
   }, [copy.browserProvider, copy.previewModel]);
 
+  const refreshModelOptions = useCallback(() => {
+    if (!isTauri()) {
+      setModelOptions([]);
+      return;
+    }
+    chatModelOptions().then((opts) => setModelOptions(opts.options)).catch(() => setModelOptions([]));
+  }, []);
+
   useEffect(() => {
     refreshStatus(currentSession?.model ?? null);
     if (!isTauri()) {
@@ -581,13 +614,18 @@ export default function Chat() {
       return;
     }
     chatPermissionGet(currentId).then(setPermission).catch(() => setPermission(null));
-    chatModelOptions().then((opts) => setModelOptions(opts.options)).catch(() => setModelOptions([]));
+    refreshModelOptions();
     chatCommandSpecs()
       .then((commands) => setDesktopCommands(visibleDesktopCommands(commands)))
       .catch(() => setDesktopCommands(FALLBACK_SLASH_COMMANDS));
     skillsList().then(setSkills).catch(() => undefined);
     projectChatStarters().then(setStarters).catch(() => undefined);
-  }, [copy.permissionLabels, copy.previewPermissionDescription, currentId, currentProject?.id, currentSession?.model, refreshStatus]);
+  }, [copy.permissionLabels, copy.previewPermissionDescription, currentId, currentProject?.id, currentSession?.model, refreshModelOptions, refreshStatus]);
+
+  useEffect(() => onChatModelsUpdated(() => {
+    refreshModelOptions();
+    refreshStatus(currentSessionRef.current?.model ?? null);
+  }), [refreshModelOptions, refreshStatus]);
 
   const activeModel = currentSession?.model || status?.model || null;
 
@@ -784,11 +822,13 @@ export default function Chat() {
       setEditingTurnId(null);
       return;
     }
-    const shouldResetContext = needsBackendContextReset(session.turns, prefix, resetContext);
+    const shouldResetContext = dirtyBackendContext.current.has(session.id)
+      || needsBackendContextReset(session.turns, prefix, resetContext);
     if (shouldResetContext) {
       const tokens = await chatSetContext(session.id, await contextForRetry(prefix), "replace");
       setContextOverrides((prev) => new Map(prev).set(session.id, { tokens, anchor: prefix.length }));
       markBackendContextSynced(session.id, prefix);
+      dirtyBackendContext.current.delete(session.id);
     } else {
       markBackendContextSynced(session.id, prefix);
     }

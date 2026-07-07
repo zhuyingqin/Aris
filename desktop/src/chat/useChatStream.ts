@@ -194,10 +194,16 @@ export function useChatStream({
           )),
         }));
       }),
-      onChatDone(({ sessionId, contextTokens }) => {
+      onChatDone(({ sessionId, contextTokens, providerUsage }) => {
         if (!isCurrentListener()) return;
         flush(sessionId);
-        if (contextTokens != null) onContextTokens?.(sessionId, contextTokens);
+        // Prefer the API-reported real prompt token count — it includes the
+        // full system prompt + tool schemas that the local heuristic cannot
+        // see, and reflects what the provider actually measured. Fall back
+        // to the backend's own session-history estimate when the API didn't
+        // return usage data (rare, but happens on stream truncation).
+        const realTokens = providerUsage?.promptTokens ?? contextTokens;
+        if (realTokens != null) onContextTokens?.(sessionId, realTokens);
       }),
       // Authoritative failure signal from the backend. The `chatSend` promise
       // also rejects, and `onError` is idempotent (it sets the same turn

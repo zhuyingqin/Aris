@@ -11,8 +11,11 @@ import { completedAssistantBlocks, contextForRetry, continueStoppedPrompt, needs
 import ChatSidebar from "./ChatSidebar";
 import CommandSelection from "./CommandSelection";
 import {
+  activeQuestionNumber,
   isNearBottom,
   isScrollbarPointer,
+  questionMarkersFromTurns,
+  questionPreviewFromTurn,
   shouldIgnoreProgrammaticFollowScroll,
   shouldPauseAutoFollowForWheel,
 } from "./ChatThread";
@@ -99,6 +102,55 @@ describe("Chat interaction helpers", () => {
     expect(shouldIgnoreProgrammaticFollowScroll(180, 100, true)).toBe(true);
     expect(shouldIgnoreProgrammaticFollowScroll(180, 220, true)).toBe(false);
     expect(shouldIgnoreProgrammaticFollowScroll(180, 100, false)).toBe(false);
+  });
+
+  it("builds a compact timeline from user questions only", () => {
+    const turns: ChatTurn[] = [
+      { id: "u1", role: "user", blocks: [{ kind: "text", text: "First question" }] },
+      { id: "a1", role: "assistant", blocks: [{ kind: "text", text: "Answer" }] },
+      { id: "u2", role: "user", blocks: [{ kind: "text", text: "Second question\nwith details" }] },
+    ];
+
+    expect(questionMarkersFromTurns(turns)).toEqual([
+      { id: "u1", turnIndex: 0, number: 1, preview: "First question" },
+      { id: "u2", turnIndex: 2, number: 2, preview: "Second question with details" },
+    ]);
+  });
+
+  it("summarizes long or attachment-only questions for the hover list", () => {
+    expect(questionPreviewFromTurn({
+      id: "long",
+      role: "user",
+      blocks: [{ kind: "text", text: "a".repeat(52) }],
+    })).toBe(`${"a".repeat(48)}...`);
+    expect(questionPreviewFromTurn({
+      id: "attachment",
+      role: "user",
+      blocks: [],
+      attachments: [{ id: "att-1", kind: "file", name: "notes.md" }],
+    })).toBe("附件：notes.md");
+    expect(questionPreviewFromTurn({
+      id: "attached-context",
+      role: "user",
+      blocks: [{ kind: "text", text: "Attached context" }],
+      attachments: [{ id: "att-2", kind: "file", name: "brief.md" }],
+    })).toBe("附件：brief.md");
+  });
+
+  it("keeps the active question aligned to the first visible turn", () => {
+    const markers = questionMarkersFromTurns([
+      { id: "u1", role: "user", blocks: [{ kind: "text", text: "First" }] },
+      { id: "a1", role: "assistant", blocks: [{ kind: "text", text: "Answer" }] },
+      { id: "u2", role: "user", blocks: [{ kind: "text", text: "Second" }] },
+      { id: "a2", role: "assistant", blocks: [{ kind: "text", text: "Answer" }] },
+      { id: "u3", role: "user", blocks: [{ kind: "text", text: "Third" }] },
+    ]);
+
+    expect(activeQuestionNumber(markers, 0)).toBe(1);
+    expect(activeQuestionNumber(markers, 1)).toBe(1);
+    expect(activeQuestionNumber(markers, 2)).toBe(2);
+    expect(activeQuestionNumber(markers, 99)).toBe(3);
+    expect(activeQuestionNumber([], 0)).toBeNull();
   });
 
   it("creates a readable diff for file edit tools", () => {
@@ -383,24 +435,74 @@ describe("Chat interaction helpers", () => {
       },
     ]);
 
-    expect(messages[0]).toEqual({ role: "user", text: "Read README", images: [] });
-    expect(messages).toHaveLength(2);
-    expect(messages[1].role).toBe("assistant");
-    // The interrupted turn's text AND tool result survive so the model does not
-    // act as if it never read the file.
-    expect(messages[1].text).toContain("I checked the file.");
-    expect(messages[1].text).toContain("[Tool call: read_file (tool-1)]");
-    expect(messages[1].text).toContain("README body");
+    expect(messages).toEqual([
+      { role: "user", text: "Read README", images: [] },
+      {
+        role: "assistant",
+        text: "I checked the file.",
+        toolCalls: [{ id: "tool-1", name: "read_file", input: "{\"path\":\"README.md\"}" }],
+      },
+      {
+        role: "tool",
+        toolResults: [{ toolUseId: "tool-1", toolName: "read_file", output: "README body", isError: false }],
+      },
+    ]);
+  });
+
+  it("rebuilds completed assistant turns with their tool activity, not text alone", async () => {
+    const messages = await contextForRetry([
+      { id: "user-1", role: "user", blocks: [{ kind: "text", text: "Read README" }] },
+      {
+        id: "assistant-1",
+        role: "assistant",
+        blocks: [
+          { kind: "text", text: "I checked the file." },
+          { kind: "tool", id: "tool-1", name: "read_file", input: "{\"path\":\"README.md\"}", output: "README body" },
+        ],
+      },
+    ]);
+
+    expect(messages).toEqual([
+      { role: "user", text: "Read README", images: [] },
+      {
+        role: "assistant",
+        text: "I checked the file.",
+        toolCalls: [{ id: "tool-1", name: "read_file", input: "{\"path\":\"README.md\"}" }],
+      },
+      {
+        role: "tool",
+        toolResults: [{ toolUseId: "tool-1", toolName: "read_file", output: "README body", isError: false }],
+      },
+    ]);
+    expect(JSON.stringify(messages)).not.toContain("[Tool call:");
   });
 
   it("still drops in-flight and failed turns from backend context", async () => {
     const messages = await contextForRetry([
       { id: "user-1", role: "user", blocks: [{ kind: "text", text: "Do it" }] },
       { id: "a-streaming", role: "assistant", streaming: true, blocks: [{ kind: "text", text: "partial" }] },
-      { id: "a-error", role: "assistant", error: "boom", blocks: [{ kind: "text", text: "failed" }] },
+      {
+        id: "a-error",
+        role: "assistant",
+        error: "boom",
+        blocks: [
+          { kind: "text", text: "failed partial answer" },
+          {
+            kind: "tool",
+            id: "tool-failed",
+            name: "read_file",
+            input: "{\"path\":\"missing.md\"}",
+            output: "read_file failed with stale context",
+            isError: true,
+          },
+        ],
+      },
     ]);
 
     expect(messages).toEqual([{ role: "user", text: "Do it", images: [] }]);
+    expect(JSON.stringify(messages)).not.toContain("failed partial answer");
+    expect(JSON.stringify(messages)).not.toContain("tool-failed");
+    expect(JSON.stringify(messages)).not.toContain("stale context");
   });
 
   it("continue prompt points at the rebuilt context without embedding the partial", () => {
@@ -430,6 +532,26 @@ describe("Chat interaction helpers", () => {
       current[3],
     ])).toBe(true);
     expect(needsBackendContextReset(current, current, true)).toBe(true);
+    expect(needsBackendContextReset(
+      [
+        current[0],
+        { ...current[1], stopped: true },
+      ],
+      [
+        current[0],
+        { ...current[1], stopped: true },
+      ],
+    )).toBe(true);
+    expect(needsBackendContextReset(
+      [
+        current[0],
+        { ...current[1], error: "provider failed" },
+      ],
+      [
+        current[0],
+        { ...current[1], error: "provider failed" },
+      ],
+    )).toBe(true);
   });
 
   it("hides expected cancel errors but preserves real failures after stop", () => {

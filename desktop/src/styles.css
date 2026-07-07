@@ -7550,8 +7550,16 @@ textarea {
   border-radius: 50%;
   background: var(--bg-3);
   color: var(--text);
-  font-size: 19px;
-  line-height: 1;
+}
+
+.chat-upload-icon {
+  display: block;
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
 }
 
 .chat-upload-btn:hover {
@@ -10729,6 +10737,127 @@ textarea {
   font-size: 12px;
 }
 
+.chat-question-timeline {
+  position: absolute;
+  z-index: 14;
+  top: 50%;
+  right: 18px;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  pointer-events: none;
+}
+
+.chat-question-timeline-rail {
+  pointer-events: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  width: 34px;
+  max-height: min(46vh, 260px);
+  padding: 8px 6px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  color: var(--text-dim);
+  box-shadow: none;
+}
+
+.chat-question-timeline.open .chat-question-timeline-rail,
+.chat-question-timeline-rail:hover,
+.chat-question-timeline-rail:focus-visible {
+  border-color: var(--border);
+  background: var(--bg-1);
+  color: var(--text);
+}
+
+.chat-question-count {
+  min-width: 20px;
+  height: 18px;
+  border-radius: 999px;
+  background: var(--bg-2);
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 18px;
+  text-align: center;
+}
+
+.chat-question-ticks {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  overflow: hidden;
+}
+
+.chat-question-tick {
+  width: 15px;
+  height: 2px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text-dim) 46%, transparent);
+}
+
+.chat-question-tick.active {
+  width: 20px;
+  height: 3px;
+  background: var(--text);
+}
+
+.chat-question-popover {
+  pointer-events: auto;
+  position: absolute;
+  top: 50%;
+  right: 44px;
+  width: min(360px, calc(100vw - 120px));
+  max-height: min(58vh, 520px);
+  padding: 8px;
+  overflow-y: auto;
+  transform: translateY(-50%);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-1);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.28);
+}
+
+.chat-question-popover button {
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr);
+  align-items: center;
+  width: 100%;
+  min-height: 34px;
+  padding: 6px 8px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  gap: 6px;
+}
+
+.chat-question-popover button:hover,
+.chat-question-popover button:focus-visible,
+.chat-question-popover button.active {
+  background: var(--bg-2);
+}
+
+.chat-question-item-number {
+  color: var(--text-dim);
+  font-size: 11px;
+  font-weight: 650;
+  text-align: center;
+}
+
+.chat-question-item-text {
+  overflow: hidden;
+  font-size: 13px;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* Floating workflow box — surfaces the latest TodoWrite plan as a step chip. */
 .chat-workflow {
   position: absolute;
@@ -11276,6 +11405,11 @@ button.chat-workflow-file-path:hover {
 
 @media (max-width: 1120px) {
   .app {
+    grid-template-columns: 58px minmax(0, 1fr);
+  }
+
+  .app.app-lab-workbench,
+  .app.app-typeset-workbench {
     grid-template-columns: 58px minmax(0, 1fr);
   }
 

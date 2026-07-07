@@ -30,15 +30,13 @@ pub(crate) struct CachedTool {
 #[derive(Serialize, Deserialize)]
 pub(crate) struct EnvironmentCache {
     pub schema_version: u32,
-    pub checked_at: String, // ISO 8601
+    pub checked_at: String,  // ISO 8601
     pub fingerprint: String, // sha256 hex
     pub tools: Vec<CachedTool>,
 }
 
 fn cache_path() -> PathBuf {
-    state::config_dir()
-        .join("cache")
-        .join("environment.json")
+    state::config_dir().join("cache").join("environment.json")
 }
 
 /// Compute a lightweight fingerprint that detects environment changes cheaply.
@@ -50,14 +48,12 @@ pub(crate) fn compute_lightweight_fingerprint() -> String {
 
     // PATH captures tool installs, renames, and PATH order changes.
     hasher.update(b"PATH:");
-    hasher.update(
-        std::env::var("PATH")
-            .unwrap_or_default()
-            .as_bytes(),
-    );
+    hasher.update(std::env::var("PATH").unwrap_or_default().as_bytes());
 
     // Binary location for each tool category — cheap (no --version subprocess).
-    for tool in &["python", "jupyter", "matlab", "tectonic"] {
+    for tool in &[
+        "python", "jupyter", "matlab", "latexmk", "xelatex", "pdflatex", "lualatex",
+    ] {
         hasher.update(format!("\n{tool}:").as_bytes());
         if let Some(path) = super::probe::command_path(tool) {
             hasher.update(path.as_bytes());
@@ -80,10 +76,7 @@ pub(crate) fn read_cache() -> Option<EnvironmentCache> {
 }
 
 /// Write current probe results to the on-disk cache.
-pub(crate) fn write_cache(
-    checks: &[super::LocalEnvironmentCheck],
-    fingerprint: &str,
-) {
+pub(crate) fn write_cache(checks: &[super::LocalEnvironmentCheck], fingerprint: &str) {
     let path = cache_path();
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -157,9 +150,7 @@ pub(crate) fn enrich_cached_labels(checks: &mut [super::LocalEnvironmentCheck]) 
         ("latex", "LaTeX", "论文排版"),
     ];
     for check in checks.iter_mut() {
-        if let Some((_, label, category)) =
-            mapping.iter().find(|(id, _, _)| *id == check.id)
-        {
+        if let Some((_, label, category)) = mapping.iter().find(|(id, _, _)| *id == check.id) {
             check.label = label.to_string();
             check.category = category.to_string();
         }
@@ -196,11 +187,10 @@ fn parse_iso8601(s: &str) -> Option<i64> {
         + (if month > 2 {
             // months March–December: formula counts from March 1; add 59 for Jan+Feb
             (153 * month - 457) / 5 + 59 + 365 * (year - 1970) + (year - 1969) / 4
-                - (year - 1901) / 100 + (year - 1601) / 400
+                - (year - 1901) / 100
+                + (year - 1601) / 400
         } else {
-            (153 * (month + 12) - 457) / 5
-                + 365 * (year - 1971)
-                + (year - 1969) / 4
+            (153 * (month + 12) - 457) / 5 + 365 * (year - 1971) + (year - 1969) / 4
                 - (year - 1901) / 100
                 + (year - 1601) / 400
         });
@@ -298,7 +288,15 @@ mod tests {
                 d -= md;
                 m += 1;
             }
-            format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", y, m, d + 1, hour, min, sec)
+            format!(
+                "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+                y,
+                m,
+                d + 1,
+                hour,
+                min,
+                sec
+            )
         };
         assert!(is_expired(&ts, 7));
     }

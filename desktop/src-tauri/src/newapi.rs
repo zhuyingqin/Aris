@@ -973,7 +973,13 @@ fn usage_log_items(data: &Value) -> Option<&Vec<Value>> {
     })
 }
 
-fn usage_log_total(body: &Value, data: &Value, item_count: usize, page: u32, page_size: u32) -> i64 {
+fn usage_log_total(
+    body: &Value,
+    data: &Value,
+    item_count: usize,
+    page: u32,
+    page_size: u32,
+) -> i64 {
     field_i64(data, &["total", "count", "totalCount", "total_count"])
         .or_else(|| field_i64(body, &["total", "count", "totalCount", "total_count"]))
         .unwrap_or_else(|| {
@@ -1014,15 +1020,25 @@ fn usage_log_entry(item: &Value, index: usize) -> NewApiUsageLogEntry {
         ],
     )
     .unwrap_or_default();
-    let request_id = field_string(item, &["request_id", "requestId", "requestID"]).unwrap_or_default();
+    let request_id =
+        field_string(item, &["request_id", "requestId", "requestID"]).unwrap_or_default();
     let upstream_request_id = field_string(
         item,
-        &["upstream_request_id", "upstreamRequestId", "upstreamRequestID"],
+        &[
+            "upstream_request_id",
+            "upstreamRequestId",
+            "upstreamRequestID",
+        ],
     )
     .unwrap_or_default();
     let prompt_tokens = field_i64(
         item,
-        &["prompt_tokens", "promptTokens", "input_tokens", "inputTokens"],
+        &[
+            "prompt_tokens",
+            "promptTokens",
+            "input_tokens",
+            "inputTokens",
+        ],
     )
     .unwrap_or_default();
     let completion_tokens = field_i64(
@@ -1045,12 +1061,21 @@ fn usage_log_entry(item: &Value, index: usize) -> NewApiUsageLogEntry {
     NewApiUsageLogEntry {
         id,
         created_at,
-        model: field_string(item, &["model_name", "modelName", "model", "model_id", "modelId"])
-            .unwrap_or_default(),
+        model: field_string(
+            item,
+            &["model_name", "modelName", "model", "model_id", "modelId"],
+        )
+        .unwrap_or_default(),
         token_name: field_string(item, &["token_name", "tokenName", "token"]).unwrap_or_default(),
         channel: field_string(
             item,
-            &["channel", "channel_name", "channelName", "channel_id", "channelId"],
+            &[
+                "channel",
+                "channel_name",
+                "channelName",
+                "channel_id",
+                "channelId",
+            ],
         )
         .unwrap_or_default(),
         request_id,
@@ -1109,10 +1134,7 @@ fn group_options_from_user_groups(groups: &Value) -> Vec<NewApiGroupOption> {
                 .unwrap_or_default()
                 .trim()
                 .to_string(),
-            ratio: detail
-                .get("ratio")
-                .map(ratio_to_string)
-                .unwrap_or_default(),
+            ratio: detail.get("ratio").map(ratio_to_string).unwrap_or_default(),
         })
         .filter(|option| !option.name.is_empty())
         .collect::<Vec<_>>();
@@ -1405,10 +1427,12 @@ pub async fn newapi_groups() -> Result<Vec<NewApiGroupOption>, String> {
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(20))
         .build()
-        .map_err(|error| format!("HTTP 瀹㈡埛绔垱寤哄け璐? {error}"))?;
+        .map_err(|error| format!("HTTP 客户端创建失败: {error}"))?;
     let user_group_data = user_groups(&client, &base, &session).await;
     let mut options = match admin_groups(&client, &base, &session).await {
-        Ok(admin_group_data) => group_options_from_admin_groups(&admin_group_data, &user_group_data),
+        Ok(admin_group_data) => {
+            group_options_from_admin_groups(&admin_group_data, &user_group_data)
+        }
         Err(_) => group_options_from_user_groups(&user_group_data),
     };
     if options.is_empty() {
@@ -1440,7 +1464,7 @@ pub async fn newapi_update_group(group: String) -> Result<AccountState, String> 
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(20))
         .build()
-        .map_err(|error| format!("HTTP 瀹㈡埛绔垱寤哄け璐? {error}"))?;
+        .map_err(|error| format!("HTTP 客户端初始化失败: {error}"))?;
     let account = clear_session_if_invalid(user_self(&client, &base, &session).await)?;
     let current_group = account
         .get("group")
@@ -1488,6 +1512,24 @@ pub async fn newapi_update_group(group: String) -> Result<AccountState, String> 
     newapi_bootstrap().await
 }
 
+async fn parse_usage_log_json(response: reqwest::Response) -> Result<Value, String> {
+    response
+        .json::<Value>()
+        .await
+        .map_err(|error| format!("调用明细响应解析失败: {error}"))
+}
+
+fn normalize_usage_log_error(error: String) -> String {
+    if error == SESSION_EXPIRED_MESSAGE {
+        return error;
+    }
+    let cause = error
+        .split_once(": ")
+        .map(|(_, cause)| cause)
+        .unwrap_or(error.as_str());
+    format!("获取调用明细失败: {cause}")
+}
+
 #[tauri::command]
 pub async fn newapi_usage_logs(page: u32, page_size: u32) -> Result<NewApiUsageLogPage, String> {
     let (base, session) = stored_session().map_err(|_| SESSION_EXPIRED_MESSAGE.to_string())?;
@@ -1497,24 +1539,22 @@ pub async fn newapi_usage_logs(page: u32, page_size: u32) -> Result<NewApiUsageL
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(20))
         .build()
-        .map_err(|error| format!("HTTP 瀹㈡埛绔垱寤哄け璐? {error}"))?;
-    let request = client
-        .get(format!("{base}/api/log/self"))
-        .query(&[
-            ("p", page.to_string()),
-            ("page_size", page_size.to_string()),
-            ("type", "2".to_string()),
-        ]);
+        .map_err(|error| format!("HTTP 客户端初始化失败: {error}"))?;
+    let request = client.get(format!("{base}/api/log/self")).query(&[
+        ("p", page.to_string()),
+        ("page_size", page_size.to_string()),
+        ("type", "2".to_string()),
+    ]);
     let response = with_session(request, &session)
         .send()
         .await
-        .map_err(|error| format!("鑾峰彇璋冪敤鏄庣粏澶辫触: {error}"));
-    let response = clear_session_if_invalid(response)?;
-    let body = parse_json(response, "璋冪敤鏄庣粏").await?;
+        .map_err(|error| format!("获取调用明细失败: {error}"));
+    let response = clear_session_if_invalid(response).map_err(normalize_usage_log_error)?;
+    let body = parse_usage_log_json(response).await?;
     if !api_ok(&body) {
         let message = api_message(&body);
         return clear_session_if_invalid(Err(if message.is_empty() {
-            "鑾峰彇璋冪敤鏄庣粏澶辫触".to_string()
+            "获取调用明细失败".to_string()
         } else {
             message
         }));

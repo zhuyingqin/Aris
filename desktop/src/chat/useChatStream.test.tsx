@@ -253,7 +253,7 @@ describe("useChatStream concurrent sessions", () => {
     });
   });
 
-  it("uses session contextTokens instead of provider usage to update context state", () => {
+  it("prefers providerUsage.promptTokens over contextTokens for real context ring", () => {
     let doneHandler:
       | ((event: {
         sessionId: string;
@@ -284,8 +284,9 @@ describe("useChatStream concurrent sessions", () => {
       });
     });
 
-    expect(onContextTokens).toHaveBeenCalledWith("chat-ctx", 900);
-    expect(onContextTokens).not.toHaveBeenCalledWith("chat-ctx", 500_000);
+    // Real API prompt_tokens should be preferred over the local estimate.
+    expect(onContextTokens).toHaveBeenCalledWith("chat-ctx", 420_000);
+    expect(onContextTokens).not.toHaveBeenCalledWith("chat-ctx", 900);
   });
 
   it("deduplicates repeated AskUserQuestion tool-call events by id", () => {
@@ -364,6 +365,78 @@ describe("useChatStream concurrent sessions", () => {
       "Error: provider stream failed",
       false,
     );
+  });
+
+  it("flushes queued deltas before surfacing a backend failure", () => {
+    let deltaHandler: ((event: { sessionId: string; text: string }) => void) | undefined;
+    let errorHandler: ((event: { sessionId: string; message: string }) => void) | undefined;
+    mocks.onChatDelta.mockImplementation((handler) => {
+      deltaHandler = handler;
+      return Promise.resolve(() => undefined);
+    });
+    mocks.onChatError.mockImplementation((handler) => {
+      errorHandler = handler;
+      return Promise.resolve(() => undefined);
+    });
+
+    const events: string[] = [];
+    let current = { id: "assistant", role: "assistant" as const, blocks: [], streaming: true };
+    const patchAssistant = vi.fn((_sessionId: string, patch) => {
+      events.push("patch");
+      current = patch(current);
+    });
+    const onError = vi.fn(() => events.push("error"));
+
+    renderHook(() => useChatStream({
+      patchAssistant,
+      onComplete: vi.fn(),
+      onError,
+    }));
+
+    act(() => {
+      deltaHandler?.({ sessionId: "chat-fail", text: "partial before failure" });
+      errorHandler?.({ sessionId: "chat-fail", message: "context window exceeded" });
+    });
+
+    expect(events).toEqual(["patch", "error"]);
+    expect(current.blocks).toEqual([{ kind: "text", text: "partial before failure" }]);
+    expect(onError).toHaveBeenCalledWith("chat-fail", "context window exceeded", false);
+  });
+
+  it("clears failed session state so the same chat can run again", async () => {
+    let attempt = 0;
+    mocks.chatSend.mockImplementation(async () => {
+      attempt += 1;
+      if (attempt === 1) throw new Error("unexpected provider failure");
+      return "recovered reply";
+    });
+
+    const onComplete = vi.fn();
+    const onError = vi.fn();
+    const { result } = renderHook(() => useChatStream({
+      patchAssistant: vi.fn(),
+      onComplete,
+      onError,
+    }));
+
+    let first!: boolean;
+    await act(async () => {
+      first = await result.current.run("chat-retry", "first");
+    });
+
+    expect(first).toBe(false);
+    expect(result.current.isRunning("chat-retry")).toBe(false);
+    expect(result.current.runningSessionIds).toEqual(new Set());
+
+    let second!: boolean;
+    await act(async () => {
+      second = await result.current.run("chat-retry", "second");
+    });
+
+    expect(second).toBe(true);
+    expect(mocks.chatSend).toHaveBeenNthCalledWith(2, "chat-retry", "second");
+    expect(onComplete).toHaveBeenCalledWith("chat-retry", "recovered reply");
+    expect(onError).toHaveBeenCalledTimes(1);
   });
 
   it("surfaces a backend chat-error event through onError", async () => {

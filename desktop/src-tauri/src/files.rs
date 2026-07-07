@@ -1,9 +1,11 @@
 use std::path::{Path, PathBuf};
 
+use encoding_rs::{GB18030, GBK};
 use serde::Serialize;
 use serde_json::json;
 
 const MAX_FILE_EDITOR_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_FILE_BINARY_BYTES: u64 = 40 * 1024 * 1024;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -19,6 +21,158 @@ pub struct FileText {
     path: String,
     content: String,
     bytes: u64,
+}
+
+fn mojibake_score(text: &str) -> usize {
+    text.chars()
+        .filter(|ch| {
+            if matches!(
+                ch,
+                '\u{fffd}' | '\u{e000}'..='\u{f8ff}' | '\u{f0000}'..='\u{ffffd}'
+                    | '\u{100000}'..='\u{10fffd}'
+            ) {
+                return true;
+            }
+            matches!(
+                ch,
+                '�' | '锛'
+                    | '銆'
+                    | '鈥'
+                    | '€'
+                    | '鎶'
+                    | '璁'
+                    | '绋'
+                    | '瀹'
+                    | ''
+                    | ''
+                    | ''
+                    | ''
+                    | ''
+                    | ''
+                    | ''
+                    | ''
+                    | ''
+            )
+        })
+        .count()
+}
+
+fn windows_936_private_use_bytes(ch: char) -> Option<[u8; 2]> {
+    let code = ch as u32;
+    if (0xe000..=0xe233).contains(&code) {
+        let offset = code - 0xe000;
+        return Some([0xaa + (offset / 94) as u8, 0xa1 + (offset % 94) as u8]);
+    }
+    if (0xe234..=0xe4c5).contains(&code) {
+        let offset = code - 0xe234;
+        return Some([0xf8 + (offset / 94) as u8, 0xa1 + (offset % 94) as u8]);
+    }
+    if (0xe4c6..=0xe765).contains(&code) {
+        let offset = code - 0xe4c6;
+        let mut low = 0x40 + (offset % 96) as u8;
+        if low >= 0x7f {
+            low += 1;
+        }
+        return Some([0xa1 + (offset / 96) as u8, low]);
+    }
+
+    const SINGLE_ROW_SEGMENTS: &[(u32, u32, u8, u8, bool)] = &[
+        (0xe766, 0xe76b, 0xa2, 0xab, false),
+        (0xe76c, 0xe76d, 0xa2, 0xe3, false),
+        (0xe76e, 0xe76f, 0xa2, 0xef, false),
+        (0xe770, 0xe771, 0xa2, 0xfd, false),
+        (0xe772, 0xe77c, 0xa4, 0xf4, false),
+        (0xe77d, 0xe784, 0xa5, 0xf7, false),
+        (0xe785, 0xe78c, 0xa6, 0xb9, false),
+        (0xe78d, 0xe793, 0xa6, 0xd9, false),
+        (0xe794, 0xe795, 0xa6, 0xec, false),
+        (0xe796, 0xe796, 0xa6, 0xf3, false),
+        (0xe797, 0xe79f, 0xa6, 0xf6, false),
+        (0xe7a0, 0xe7ae, 0xa7, 0xc2, false),
+        (0xe7af, 0xe7bb, 0xa7, 0xf2, false),
+        (0xe7bc, 0xe7c6, 0xa8, 0x96, false),
+        (0xe7c7, 0xe7c7, 0xa8, 0xbc, false),
+        (0xe7c8, 0xe7c8, 0xa8, 0xbf, false),
+        (0xe7c9, 0xe7cc, 0xa8, 0xc1, false),
+        (0xe7cd, 0xe7e1, 0xa8, 0xea, false),
+        (0xe7e2, 0xe7e2, 0xa9, 0x58, false),
+        (0xe7e3, 0xe7e3, 0xa9, 0x5b, false),
+        (0xe7e4, 0xe7e6, 0xa9, 0x5d, false),
+        (0xe7e7, 0xe7f3, 0xa9, 0x89, false),
+        (0xe7f4, 0xe800, 0xa9, 0x97, false),
+        (0xe801, 0xe80f, 0xa9, 0xf0, false),
+        (0xe810, 0xe814, 0xd7, 0xfa, false),
+        (0xe815, 0xe864, 0xfe, 0x50, true),
+    ];
+    for &(start, end, high, low_start, skip_7f) in SINGLE_ROW_SEGMENTS {
+        if (start..=end).contains(&code) {
+            let mut low = low_start + (code - start) as u8;
+            if skip_7f && low >= 0x7f {
+                low += 1;
+            }
+            return Some([high, low]);
+        }
+    }
+    None
+}
+
+fn encode_windows_936_mojibake(content: &str) -> Option<Vec<u8>> {
+    let mut bytes = Vec::with_capacity(content.len());
+    for ch in content.chars() {
+        if let Some(encoded) = windows_936_private_use_bytes(ch) {
+            bytes.extend_from_slice(&encoded);
+            continue;
+        }
+        let mut scalar = [0; 4];
+        let (encoded, _, had_errors) = GBK.encode(ch.encode_utf8(&mut scalar));
+        if had_errors {
+            return None;
+        }
+        bytes.extend_from_slice(&encoded);
+    }
+    Some(bytes)
+}
+
+fn repair_utf8_mojibake(content: &str) -> String {
+    let original_score = mojibake_score(content);
+    if original_score < 2 {
+        return content.to_string();
+    }
+    if let Some(encoded) = encode_windows_936_mojibake(content) {
+        if let Ok(repaired) = String::from_utf8(encoded) {
+            if mojibake_score(&repaired) < original_score {
+                return repaired;
+            }
+        }
+    }
+    for encoding in [GBK, GB18030] {
+        let (encoded, _, had_errors) = encoding.encode(content);
+        if had_errors {
+            continue;
+        }
+        let Ok(repaired) = String::from_utf8(encoded.into_owned()) else {
+            continue;
+        };
+        if mojibake_score(&repaired) < original_score {
+            return repaired;
+        }
+    }
+    content.to_string()
+}
+
+fn decode_text_bytes(bytes: &[u8]) -> Result<String, String> {
+    if let Ok(content) = std::str::from_utf8(bytes) {
+        return Ok(repair_utf8_mojibake(content));
+    }
+    let (content, _, had_errors) = GB18030.decode(bytes);
+    if !had_errors {
+        return Ok(content.into_owned());
+    }
+    let (content, _, had_errors) = GBK.decode(bytes);
+    if !had_errors {
+        return Ok(content.into_owned());
+    }
+    Err("file is not valid UTF-8/GB18030 text; open it in its native app".to_string())
 }
 
 fn strip_location_suffix(path: &str) -> &str {
@@ -70,7 +224,7 @@ fn workspace_root() -> Result<PathBuf, String> {
         .map_err(|error| error.to_string())
 }
 
-fn display_workspace_path(path: &Path, root: &Path) -> String {
+pub(crate) fn display_workspace_path(path: &Path, root: &Path) -> String {
     path.strip_prefix(root)
         .ok()
         .filter(|relative| !relative.as_os_str().is_empty())
@@ -106,7 +260,7 @@ fn resolve_workspace_dir(path: Option<String>) -> Result<PathBuf, String> {
     Ok(target)
 }
 
-fn resolve_workspace_file(path: &str) -> Result<(PathBuf, PathBuf), String> {
+pub(crate) fn resolve_workspace_file(path: &str) -> Result<(PathBuf, PathBuf), String> {
     let root = workspace_root()?;
     let raw = path.trim().trim_matches(|ch| matches!(ch, '`' | '<' | '>'));
     if raw.is_empty() {
@@ -130,6 +284,79 @@ fn resolve_workspace_file(path: &str) -> Result<(PathBuf, PathBuf), String> {
         return Err("file is outside the current workspace".to_string());
     }
     Ok((root, target))
+}
+
+pub(crate) fn resolve_workspace_output_file(path: &str) -> Result<(PathBuf, PathBuf), String> {
+    let root = workspace_root()?;
+    let raw = path.trim().trim_matches(|ch| matches!(ch, '`' | '<' | '>'));
+    if raw.is_empty() {
+        return Err("file path is empty".to_string());
+    }
+    let candidate = {
+        let path = Path::new(raw);
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            root.join(path)
+        }
+    };
+    let parent = candidate
+        .parent()
+        .ok_or_else(|| "file path must include a file name".to_string())?;
+    let canonical_parent = canonicalize_path_allow_missing(parent)?;
+    if !canonical_parent.starts_with(&root) {
+        return Err("file is outside the current workspace".to_string());
+    }
+    let file_name = candidate
+        .file_name()
+        .ok_or_else(|| "file path must include a file name".to_string())?;
+    Ok((root, canonical_parent.join(file_name)))
+}
+
+fn canonicalize_path_allow_missing(path: &Path) -> Result<PathBuf, String> {
+    if path.exists() {
+        return path.canonicalize().map_err(|error| error.to_string());
+    }
+
+    let mut missing = Vec::new();
+    let mut ancestor = path;
+    while !ancestor.exists() {
+        let file_name = ancestor.file_name().ok_or_else(|| {
+            format!(
+                "could not resolve missing path ancestor for `{}`",
+                path.display()
+            )
+        })?;
+        missing.push(file_name.to_os_string());
+        ancestor = ancestor.parent().ok_or_else(|| {
+            format!(
+                "could not resolve missing path ancestor for `{}`",
+                path.display()
+            )
+        })?;
+    }
+
+    let mut canonical = ancestor.canonicalize().map_err(|error| error.to_string())?;
+    for component in missing.iter().rev() {
+        canonical.push(component);
+    }
+    Ok(lexically_normalize_path(&canonical))
+}
+
+fn lexically_normalize_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            std::path::Component::RootDir => normalized.push(component.as_os_str()),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            std::path::Component::Normal(value) => normalized.push(value),
+        }
+    }
+    normalized
 }
 
 #[tauri::command]
@@ -195,8 +422,8 @@ pub fn file_read_text(path: String) -> Result<FileText, String> {
             MAX_FILE_EDITOR_BYTES
         ));
     }
-    let content = std::fs::read_to_string(&target)
-        .map_err(|_| "file is not valid UTF-8 text; open it in its native app".to_string())?;
+    let bytes = std::fs::read(&target).map_err(|error| error.to_string())?;
+    let content = decode_text_bytes(&bytes)?;
     Ok(FileText {
         path: display_workspace_path(&target, &root),
         content,
@@ -224,6 +451,68 @@ pub fn file_write_text(path: String, content: String) -> Result<FileText, String
         content,
         bytes,
     })
+}
+
+#[tauri::command]
+pub fn file_create_text(path: String, content: String) -> Result<FileText, String> {
+    if content.len() as u64 > MAX_FILE_EDITOR_BYTES {
+        return Err(format!(
+            "content is too large for the file editor ({} bytes, limit {} bytes)",
+            content.len(),
+            MAX_FILE_EDITOR_BYTES
+        ));
+    }
+    let (root, target) = resolve_workspace_output_file(&path)?;
+    if target.exists() {
+        return Err(format!("file already exists: {}", target.display()));
+    }
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    std::fs::write(&target, content).map_err(|error| error.to_string())?;
+    let metadata = std::fs::metadata(&target).map_err(|error| error.to_string())?;
+    let content = std::fs::read_to_string(&target).map_err(|error| error.to_string())?;
+    Ok(FileText {
+        path: display_workspace_path(&target, &root),
+        content,
+        bytes: metadata.len(),
+    })
+}
+
+#[tauri::command]
+pub fn file_read_bytes(path: String) -> Result<Vec<u8>, String> {
+    let (_root, target) = resolve_workspace_file(&path)?;
+    let metadata = std::fs::metadata(&target).map_err(|error| error.to_string())?;
+    if metadata.len() > MAX_FILE_BINARY_BYTES {
+        return Err(format!(
+            "file is too large to preview ({} bytes, limit {} bytes)",
+            metadata.len(),
+            MAX_FILE_BINARY_BYTES
+        ));
+    }
+    std::fs::read(&target).map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+mod text_decode_tests {
+    use super::*;
+
+    #[test]
+    fn repairs_common_utf8_as_gbk_mojibake() {
+        assert_eq!(repair_utf8_mojibake("鎶曠寤鸿鎸囧崡"), "投稿建议指南");
+    }
+
+    #[test]
+    fn keeps_normal_utf8_chinese_text() {
+        assert_eq!(repair_utf8_mojibake("投稿建议指南"), "投稿建议指南");
+    }
+
+    #[test]
+    fn decodes_gbk_text_bytes() {
+        let (bytes, _, had_errors) = GBK.encode("中文 LaTeX");
+        assert!(!had_errors);
+        assert_eq!(decode_text_bytes(&bytes).expect("decode gbk"), "中文 LaTeX");
+    }
 }
 
 /// Search files by glob pattern. Requires a non-empty query to avoid

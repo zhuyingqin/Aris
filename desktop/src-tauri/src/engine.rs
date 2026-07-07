@@ -1007,7 +1007,8 @@ impl OutputCompactor for DefaultOutputCompactor {
 }
 
 fn tool_output_indicates_error(tool_name: &str, output: &str) -> bool {
-    matches!(tool_name, "bash" | "PowerShell") && shell_output_indicates_error(output)
+    matches!(tool_name, "bash" | "PowerShell" | "LaTeXCompile")
+        && shell_output_indicates_error(output)
 }
 
 fn attach_recovery_hint(tool_name: &str, output: &str) -> String {
@@ -1016,10 +1017,7 @@ fn attach_recovery_hint(tool_name: &str, output: &str) -> String {
     };
     if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(output) {
         if let Some(object) = value.as_object_mut() {
-            object.insert(
-                "recoveryHint".to_string(),
-                serde_json::Value::String(hint),
-            );
+            object.insert("recoveryHint".to_string(), serde_json::Value::String(hint));
             return serde_json::to_string_pretty(&value).unwrap_or_else(|_| output.to_string());
         }
     }
@@ -1034,6 +1032,14 @@ fn format_tool_error_with_recovery(tool_name: &str, error: &str) -> String {
 
 fn tool_recovery_hint(tool_name: &str, output: &str) -> Option<String> {
     let lower = output.to_ascii_lowercase();
+    if tool_name == "LaTeXCompile" {
+        if lower.contains("not found") || lower.contains("failed to start") {
+            return Some("LaTeX is unavailable. Install TeX Live or ensure latexmk/xelatex/pdflatex/lualatex are on PATH.".to_string());
+        }
+        if lower.contains("exit_code:") || lower.contains("error:") {
+            return Some("LaTeX compilation failed. Inspect the diagnostics, edit the referenced .tex source, then rerun LaTeXCompile on the same root file.".to_string());
+        }
+    }
     if matches!(tool_name, "bash" | "PowerShell") {
         if lower.contains("timeout") || lower.contains("exceeded timeout") {
             return Some("The shell command timed out. Retry with a narrower command, add pagination/filters, or use run_in_background for a genuine long-running service. Only increase timeout when the long run is intentional.".to_string());
@@ -1333,7 +1339,7 @@ struct SystemPromptCacheKey {
     workspace: PathBuf,
     current_date: String,
     language: String,
-    tectonic: Option<String>,
+    texlive: Option<String>,
     hot_memory: String,
     knowledge_memory: String,
 }
@@ -1363,10 +1369,9 @@ fn build_system_prompt_inner(model: &str, full_tool_registry: bool) -> Vec<Strin
         workspace,
         current_date: runtime::today_iso(),
         language: std::env::var("ARIS_LANGUAGE").unwrap_or_else(|_| "cn".to_string()),
-        tectonic: std::env::var("SOMNIQ_TECTONIC")
-            .or_else(|_| std::env::var("ARIS_TECTONIC"))
-            .ok()
-            .filter(|value| !value.trim().is_empty()),
+        texlive: ["latexmk", "xelatex", "pdflatex", "lualatex"]
+            .iter()
+            .find_map(|program| crate::env::probe::command_path(program)),
         hot_memory,
         knowledge_memory,
     };
@@ -1402,12 +1407,12 @@ fn build_system_prompt_uncached(key: &SystemPromptCacheKey) -> Vec<String> {
     };
     let file_links = "When you create or modify files, include Markdown links to the relevant file paths in the final response so the desktop UI can open them directly.".to_string();
     let readable_answers = "Readable answers: for explanatory answers, prefer short paragraphs, bullets, or numbered steps. Avoid dense single-paragraph technical summaries, especially in Chinese-English mixed explanations.".to_string();
-    let artifact_layout = "Project artifact layout: place slide/PPT/PDF deck outputs under `slides/`, poster outputs under `poster/`, interactive web apps under `web/<name>/` with an `index.html` plus local CSS/assets, notebook programs under `experiments/`, and scratch/temp/cache files under `.somniq/tmp/`. Studio auto-discovers `slides/`, `poster/`, and `web/`; Lab lists notebooks from the workspace and defaults new notebooks into `experiments/`.".to_string();
+    let artifact_layout = "Project artifact layout: place LaTeX paper/report sources and PDFs under `papers/`, slide/PPT/PDF deck outputs under `slides/`, poster outputs under `poster/`, interactive web apps under `web/<name>/` with an `index.html` plus local CSS/assets, notebook programs under `experiments/`, and scratch/temp/cache files under `.somniq/tmp/`. Studio auto-discovers `slides/`, `poster/`, and `web/`; Lab lists notebooks from the workspace and defaults new notebooks into `experiments/`.".to_string();
     let existing_artifact_edits = "Existing artifact edits: when the user asks to modify, revise, continue editing, polish, or fix a current/existing report, paper, slide deck, PDF source, or other generated artifact, first identify and reuse the existing source path from the user message, recent file links, tool outputs, or workspace search. Edit that source in place and rebuild derived outputs at the same base path. Do not create sibling version files such as `_v2`, `_v9`, `_new`, `_final`, or timestamped copies unless the user explicitly asks for a new version, backup, archive, or comparison copy. If the target file cannot be identified, ask for the path instead of creating a new artifact.".to_string();
     let diagram_output = "Diagram output: when explaining a workflow, process, call path, architecture, state machine, dependency graph, or decision tree, prefer a fenced `mermaid` code block over ASCII art. Keep diagrams compact, use semantic node ids, short readable labels, left-to-right flow for pipelines, meaningful edge labels when they clarify the flow, and avoid oversized text inside nodes. For publication-grade diagram files, use the `mermaid-diagram` skill and verify the rendered output.".to_string();
     let long_document_reading = "Long document reading: when working with books, chapters, transcripts, logs, or converted documents, do not read multiple large files in full. First get a file list and a read_file outline preview, then read one chapter or section window at a time with explicit offset/limit. Treat tool output as a preview, not as a source file; if full text is needed, keep it on disk and reopen precise windows.".to_string();
     let long_file_generation = "Long file generation: do not call write_file with an entire long generated artifact such as a Beamer chapter, book chapter, or converted document. Keep single tool payloads small; for files over about 24000 characters, write a small scaffold, append smaller chunks with append_file, and verify line counts/compilation immediately instead of stopping to report an intermediate failure.".to_string();
-    let latex_toolchain = latex_toolchain_prompt_section(key.tectonic.as_deref());
+    let latex_toolchain = latex_toolchain_prompt_section(key.texlive.as_deref());
     let mut extra_sections = vec![
         access.clone(),
         file_links,
@@ -1418,9 +1423,7 @@ fn build_system_prompt_uncached(key: &SystemPromptCacheKey) -> Vec<String> {
         long_document_reading,
         long_file_generation,
     ];
-    if !latex_toolchain.is_empty() {
-        extra_sections.push(latex_toolchain);
-    }
+    extra_sections.push(latex_toolchain);
     extra_sections.push(key.hot_memory.clone());
     extra_sections.push(key.knowledge_memory.clone());
     aris_chat::build_common_system_prompt(aris_chat::CommonSystemPromptOptions {
@@ -1438,12 +1441,14 @@ fn build_system_prompt_uncached(key: &SystemPromptCacheKey) -> Vec<String> {
     .unwrap_or_else(|_| vec![access])
 }
 
-fn latex_toolchain_prompt_section(tectonic: Option<&str>) -> String {
-    tectonic.map_or_else(String::new, |tectonic| {
-        format!(
-            "Bundled LaTeX fallback: `SOMNIQ_TECTONIC` points to `{tectonic}`. When the user asks to compile LaTeX and `latexmk`/`pdflatex`/`xelatex` are unavailable, try this bundled Tectonic binary before telling the user to install a TeX distribution. Run it from the directory containing the entrypoint, for example: `\"$SOMNIQ_TECTONIC\" --keep-logs --keep-intermediates main.tex`."
-        )
-    })
+fn latex_toolchain_prompt_section(texlive: Option<&str>) -> String {
+    let detected = texlive.map_or_else(
+        || "No TeX Live command has been detected on PATH.".to_string(),
+        |path| format!("Detected TeX Live command: `{path}`."),
+    );
+    format!(
+        "LaTeX documents: compile `.tex` sources with TeX Live, preferably `latexmk -pdf -interaction=nonstopmode -halt-on-error -file-line-error main.tex`; otherwise use TeX Live `xelatex`, `pdflatex`, or `lualatex`. {detected} Do not use Tectonic or `SOMNIQ_TECTONIC` for `.tex` documents."
+    )
 }
 
 /// Read config.json and validate the executor is configured. Returns
@@ -1519,10 +1524,8 @@ fn permission_mode_view(mode: PermissionMode) -> PermissionModeView {
     }
 }
 
-fn project_permission_path() -> Result<PathBuf, String> {
-    std::env::current_dir()
-        .map(|cwd| cwd.join(".claude").join("settings.local.json"))
-        .map_err(|error| error.to_string())
+fn project_permission_path(project_root: &Path) -> PathBuf {
+    project_root.join(".claude").join("settings.local.json")
 }
 
 #[tauri::command]
@@ -1591,18 +1594,25 @@ pub fn chat_question_respond(
 }
 
 #[tauri::command]
-pub fn project_permission_get() -> PermissionModeView {
-    permission_mode_view(configured_default_permission_mode())
+pub fn project_permission_get(
+    projects: State<crate::projects::ProjectState>,
+) -> Result<PermissionModeView, String> {
+    let project_root = crate::projects::current_project_path(projects.inner())?;
+    Ok(permission_mode_view(
+        configured_default_permission_mode_for(&project_root),
+    ))
 }
 
 #[tauri::command]
 pub fn project_permission_set(
+    projects: State<crate::projects::ProjectState>,
     state: State<ChatState>,
     mode: String,
 ) -> Result<PermissionModeView, String> {
     let mode = normalize_permission_mode(&mode)
         .ok_or_else(|| format!("unsupported permission mode `{mode}`"))?;
-    let path = project_permission_path()?;
+    let project_root = crate::projects::current_project_path(projects.inner())?;
+    let path = project_permission_path(&project_root);
     let mut root = std::fs::read_to_string(&path)
         .ok()
         .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
@@ -1790,11 +1800,7 @@ fn permission_mode_for(state: &ChatState, session_id: &str) -> Result<Permission
 }
 
 fn configured_default_permission_mode() -> PermissionMode {
-    std::env::current_dir()
-        .ok()
-        .as_deref()
-        .map(configured_default_permission_mode_for)
-        .unwrap_or(PermissionMode::DangerFullAccess)
+    configured_default_permission_mode_for(&crate::state::workspace_dir())
 }
 
 fn configured_default_permission_mode_for(cwd: &Path) -> PermissionMode {
@@ -2947,14 +2953,12 @@ async fn run_chat_turn_with_context(
     let worker_app = app.clone();
     let worker_session_id = session_id.clone();
     let worker_cancelled = cancelled.clone();
+    let worker_workspace = crate::state::workspace_dir();
     let joined = tauri::async_runtime::spawn_blocking(move || {
-        let feature_config = match std::env::current_dir()
+        let feature_config = match ConfigLoader::default_for(&worker_workspace)
+            .load()
             .map_err(|error| error.to_string())
-            .and_then(|cwd| {
-                ConfigLoader::default_for(cwd)
-                    .load()
-                    .map_err(|error| error.to_string())
-            }) {
+        {
             Ok(config) => config.feature_config().clone(),
             Err(error) => {
                 eprintln!("SomniQ desktop: could not load settings: {error}");
@@ -3128,9 +3132,34 @@ pub fn chat_reset(state: State<ChatState>, session_id: String) -> Result<(), Str
 #[serde(rename_all = "camelCase")]
 pub struct ChatContextMessage {
     role: String,
+    #[serde(default)]
     text: String,
     #[serde(default)]
     images: Vec<ChatImageInput>,
+    #[serde(default)]
+    tool_calls: Vec<ChatContextToolCall>,
+    #[serde(default)]
+    tool_results: Vec<ChatContextToolResult>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatContextToolCall {
+    id: String,
+    name: String,
+    #[serde(default)]
+    input: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatContextToolResult {
+    tool_use_id: String,
+    tool_name: String,
+    #[serde(default)]
+    output: String,
+    #[serde(default)]
+    is_error: bool,
 }
 
 fn chat_context_messages_to_session(messages: Vec<ChatContextMessage>) -> Result<Session, String> {
@@ -3145,13 +3174,55 @@ fn chat_context_messages_to_session(messages: Vec<ChatContextMessage>) -> Result
                     model: None,
                 })?),
             "assistant" => {
-                session
-                    .messages
-                    .push(ConversationMessage::assistant(vec![ContentBlock::Text {
-                        text: message.text,
-                    }]))
+                let mut blocks = Vec::new();
+                if !message.text.trim().is_empty() {
+                    blocks.push(ContentBlock::Text { text: message.text });
+                }
+                for tool_call in message.tool_calls {
+                    if tool_call.id.trim().is_empty() || tool_call.name.trim().is_empty() {
+                        return Err("assistant tool calls require non-empty id and name".to_string());
+                    }
+                    blocks.push(ContentBlock::ToolUse {
+                        id: tool_call.id,
+                        name: tool_call.name,
+                        input: if tool_call.input.trim().is_empty() {
+                            "{}".to_string()
+                        } else {
+                            tool_call.input
+                        },
+                    });
+                }
+                if !blocks.is_empty() {
+                    session.messages.push(ConversationMessage::assistant(blocks));
+                }
             }
-            _ => return Err("chat context only supports user and assistant messages".to_string()),
+            "tool" => {
+                let mut blocks = Vec::new();
+                for tool_result in message.tool_results {
+                    if tool_result.tool_use_id.trim().is_empty()
+                        || tool_result.tool_name.trim().is_empty()
+                    {
+                        return Err(
+                            "tool context messages require non-empty toolUseId and toolName"
+                                .to_string(),
+                        );
+                    }
+                    blocks.push(ContentBlock::ToolResult {
+                        tool_use_id: tool_result.tool_use_id,
+                        tool_name: tool_result.tool_name,
+                        output: tool_result.output,
+                        is_error: tool_result.is_error,
+                    });
+                }
+                if !blocks.is_empty() {
+                    session.messages.push(ConversationMessage {
+                        role: MessageRole::Tool,
+                        blocks,
+                        usage: None,
+                    });
+                }
+            }
+            _ => return Err("chat context only supports user, assistant, and tool messages".to_string()),
         }
     }
     Ok(session)
@@ -4873,6 +4944,70 @@ mod tests {
     }
 
     #[test]
+    fn chat_context_rebuild_preserves_structured_tool_exchange() {
+        let session = chat_context_messages_to_session(vec![
+            ChatContextMessage {
+                role: "user".to_string(),
+                text: "Read README".to_string(),
+                images: Vec::new(),
+                tool_calls: Vec::new(),
+                tool_results: Vec::new(),
+            },
+            ChatContextMessage {
+                role: "assistant".to_string(),
+                text: "I checked the file.".to_string(),
+                images: Vec::new(),
+                tool_calls: vec![ChatContextToolCall {
+                    id: "tool-1".to_string(),
+                    name: "read_file".to_string(),
+                    input: r#"{"path":"README.md"}"#.to_string(),
+                }],
+                tool_results: Vec::new(),
+            },
+            ChatContextMessage {
+                role: "tool".to_string(),
+                text: String::new(),
+                images: Vec::new(),
+                tool_calls: Vec::new(),
+                tool_results: vec![ChatContextToolResult {
+                    tool_use_id: "tool-1".to_string(),
+                    tool_name: "read_file".to_string(),
+                    output: "README body".to_string(),
+                    is_error: false,
+                }],
+            },
+        ])
+        .expect("structured context should rebuild");
+
+        assert_eq!(session.messages.len(), 3);
+        assert!(matches!(
+            &session.messages[1].blocks[..],
+            [
+                ContentBlock::Text { text },
+                ContentBlock::ToolUse { id, name, input }
+            ] if text == "I checked the file."
+                && id == "tool-1"
+                && name == "read_file"
+                && input == r#"{"path":"README.md"}"#
+        ));
+        assert!(matches!(
+            &session.messages[2],
+            ConversationMessage {
+                role: MessageRole::Tool,
+                blocks,
+                usage: None,
+            } if matches!(
+                &blocks[..],
+                [ContentBlock::ToolResult { tool_use_id, tool_name, output, is_error }]
+                    if tool_use_id == "tool-1"
+                        && tool_name == "read_file"
+                        && output == "README body"
+                        && !is_error
+            )
+        ));
+    }
+
+    #[test]
     fn skill_prompt_routes_named_skill_to_skill_tool() {
         let prompt = skill_prompt("research-lit", "reservoir computing");
 
@@ -5218,20 +5353,15 @@ mod tests {
     }
 
     #[test]
-    fn latex_toolchain_prompt_mentions_bundled_tectonic() {
-        let _guard = env_lock();
-        let previous = std::env::var_os("SOMNIQ_TECTONIC");
-        std::env::set_var("SOMNIQ_TECTONIC", r"C:\Program Files\SomniQ\tectonic.exe");
+    fn latex_toolchain_prompt_prefers_texlive_over_tectonic() {
+        let prompt =
+            latex_toolchain_prompt_section(Some(r"C:\texlive\2026\bin\windows\latexmk.exe"));
 
-        let prompt = latex_toolchain_prompt_section(Some(r"C:\Program Files\SomniQ\tectonic.exe"));
-
-        assert!(prompt.contains("Bundled LaTeX fallback"));
-        assert!(prompt.contains("SOMNIQ_TECTONIC"));
-        assert!(prompt.contains("tectonic.exe"));
-        match previous {
-            Some(value) => std::env::set_var("SOMNIQ_TECTONIC", value),
-            None => std::env::remove_var("SOMNIQ_TECTONIC"),
-        }
+        assert!(prompt.contains("TeX Live"));
+        assert!(prompt.contains("latexmk"));
+        assert!(prompt.contains("pdflatex"));
+        assert!(prompt.contains("Do not use Tectonic"));
+        assert!(prompt.contains("latexmk.exe"));
     }
 
     #[test]

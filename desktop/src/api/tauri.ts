@@ -1,9 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
+  isFilePreviewMode,
   isLabPreviewMode,
   previewExecuteFile,
   previewFileTree,
+  previewReadBytes,
   previewKernelspecs,
   previewKernelInfo,
   previewNotebookList,
@@ -11,6 +13,7 @@ import {
   previewReadText,
   previewRunAll,
   previewRunsLibrary,
+  previewSearchFiles,
   previewVariables,
   previewWriteText,
 } from "./labPreview";
@@ -597,34 +600,78 @@ export interface FileText {
 }
 
 export const fileListDir = (path?: string | null) =>
-  isLabPreviewMode()
+  isFilePreviewMode()
     ? preview<FileTreeEntry[]>(previewFileTree(path ?? null))
     :
   invoke<FileTreeEntry[]>("file_list_dir", { path: path ?? null });
 
 export const fileReadText = (path: string) =>
-  isLabPreviewMode()
+  isFilePreviewMode()
     ? preview<FileText>(previewReadText(path))
     :
   invoke<FileText>("file_read_text", { path });
 
 export const fileWriteText = (path: string, content: string) =>
-  isLabPreviewMode()
+  isFilePreviewMode()
     ? preview<FileText>(previewWriteText(path, content))
     :
   invoke<FileText>("file_write_text", { path, content });
 
+export const fileCreateText = (path: string, content: string) =>
+  isFilePreviewMode()
+    ? preview<FileText>(previewWriteText(path, content))
+    :
+  invoke<FileText>("file_create_text", { path, content });
+
+export const fileReadBytes = (path: string) =>
+  isFilePreviewMode() ? previewReadBytes(path) :
+  invoke<number[]>("file_read_bytes", { path });
+
 export const fileSearch = (pattern: string, root?: string) =>
-  isLabPreviewMode() ? preview<string[]>([]) :
+  isFilePreviewMode() ? preview<string[]>(previewSearchFiles(pattern, root ?? null)) :
   invoke<string[]>("file_search", { pattern, root: root ?? null });
 
 export const fileRead = (path: string, limit?: number) =>
-  isLabPreviewMode() ? preview<string>(previewReadText(path).content) :
+  isFilePreviewMode() ? preview<string>(previewReadText(path).content) :
   invoke<string>("file_read", { path, limit: limit ?? null });
 export const fileOpen = (path: string) =>
-  isLabPreviewMode() ? Promise.resolve() :
+  isFilePreviewMode() ? Promise.resolve() :
   invoke<void>("file_open", { path });
 export const projectChatStarters = () => invoke<string[]>("project_chat_starters");
+
+export interface LatexCompileResult {
+  success: boolean;
+  inputPath: string;
+  outputPath: string;
+  engine: string;
+  stdout: string;
+  stderr: string;
+  exitCode?: number | null;
+  interrupted: boolean;
+  timedOut: boolean;
+  durationMs: number;
+  returnCodeInterpretation?: string | null;
+}
+
+export const latexCompile = (inputPath: string, outputPath?: string | null) =>
+  isFilePreviewMode()
+    ? preview<LatexCompileResult>({
+        success: true,
+        inputPath,
+        outputPath: outputPath ?? inputPath.replace(/\.tex$/i, ".pdf"),
+        engine: "xelatex",
+        stdout: "Browser preview is showing the bundled compiled PDF.",
+        stderr: "",
+        exitCode: 0,
+        interrupted: false,
+        timedOut: false,
+        durationMs: 0,
+        returnCodeInterpretation: null,
+      })
+    : invoke<LatexCompileResult>("latex_compile", {
+        inputPath,
+        outputPath: outputPath ?? null,
+      });
 
 // ── Chat engine (P2) ──────────────────────────────────────────────────────────
 
@@ -662,11 +709,23 @@ export interface ChatSendRequest {
   model?: string | null;
 }
 
-export interface ChatContextMessage {
-  role: "user" | "assistant";
-  text: string;
-  images?: ChatImageInput[];
+export interface ChatContextToolCall {
+  id: string;
+  name: string;
+  input: string;
 }
+
+export interface ChatContextToolResult {
+  toolUseId: string;
+  toolName: string;
+  output: string;
+  isError?: boolean;
+}
+
+export type ChatContextMessage =
+  | { role: "user"; text: string; images?: ChatImageInput[] }
+  | { role: "assistant"; text?: string; toolCalls?: ChatContextToolCall[] }
+  | { role: "tool"; toolResults: ChatContextToolResult[] };
 
 export type ChatContextSyncMode = "replace" | "append";
 

@@ -11,8 +11,7 @@ use std::sync::{Mutex, OnceLock};
 
 /// In-memory session cache — probe results are shared across all callers within
 /// the same process lifetime.
-static SESSION_CACHE: OnceLock<Mutex<Option<Vec<LocalEnvironmentCheck>>>> =
-    OnceLock::new();
+static SESSION_CACHE: OnceLock<Mutex<Option<Vec<LocalEnvironmentCheck>>>> = OnceLock::new();
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -34,9 +33,7 @@ pub struct LocalEnvironmentCheck {
 /// - Otherwise the in-memory session cache is checked first, then the on-disk
 ///   cache (validated via a lightweight fingerprint), falling back to a full
 ///   blocking probe only when the environment has genuinely changed.
-pub async fn get_or_probe(
-    force_refresh: bool,
-) -> Result<Vec<LocalEnvironmentCheck>, String> {
+pub async fn get_or_probe(force_refresh: bool) -> Result<Vec<LocalEnvironmentCheck>, String> {
     // ── Fast path: in-memory session cache ────────────────────────────────
     if !force_refresh {
         let guard = SESSION_CACHE
@@ -52,11 +49,10 @@ pub async fn get_or_probe(
     // ── Disk cache path: compute a cheap fingerprint that detects tool
     //    installs / PATH changes, then validate the on-disk cache. ─────────
     if !force_refresh {
-        let fingerprint = tauri::async_runtime::spawn_blocking(|| {
-            cache::compute_lightweight_fingerprint()
-        })
-        .await
-        .map_err(|e| e.to_string())?;
+        let fingerprint =
+            tauri::async_runtime::spawn_blocking(|| cache::compute_lightweight_fingerprint())
+                .await
+                .map_err(|e| e.to_string())?;
 
         if let Some(cached) = cache::read_cache() {
             if cache::is_cache_valid(&cached, &fingerprint) {
@@ -78,11 +74,9 @@ pub async fn get_or_probe(
     }
 
     // ── Full probe (expensive: runs version and MATLAB checks) ───────────
-    let checks = tauri::async_runtime::spawn_blocking(|| {
-        probe::environment_checks_blocking()
-    })
-    .await
-    .map_err(|e| e.to_string())?;
+    let checks = tauri::async_runtime::spawn_blocking(|| probe::environment_checks_blocking())
+        .await
+        .map_err(|e| e.to_string())?;
 
     // Persist to disk in background — don't block the response on I/O.
     {

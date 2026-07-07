@@ -1,7 +1,7 @@
-import { lazy, memo, Suspense, useCallback, useDeferredValue, useEffect, useRef, useState, useTransition, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+﻿import { lazy, memo, Suspense, useCallback, useDeferredValue, useEffect, useRef, useState, useTransition, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { appRelaunch, appUpdateCheck, appUpdateDownloadAndInstall, isTauri, newapiBootstrap, type NewApiAccount } from "./api/tauri";
+import { appRelaunch, appUpdateCheck, appUpdateDownloadAndInstall, isTauri, newapiBootstrap, onChatDone, type NewApiAccount } from "./api/tauri";
 import { isManagedAuthInvalidError, useStore, type Language, type Tab } from "./store";
 import type { AppUpdateInfo, AppUpdateProgress } from "./types";
 import ErrorBoundary from "./ErrorBoundary";
@@ -17,10 +17,12 @@ import OnboardingTutorial from "./OnboardingTutorial";
 const loadLiterature = () => import("./literature/Literature");
 const loadStudio = () => import("./studio/Studio");
 const loadMail = () => import("./mail/Mail");
+const loadTypeset = () => import("./typeset/Typeset");
 
 const Literature = lazy(loadLiterature);
 const Studio = lazy(loadStudio);
 const Mail = lazy(loadMail);
+const Typeset = lazy(loadTypeset);
 const ChatPane = memo(Chat);
 
 type AppShellCopy = {
@@ -73,6 +75,7 @@ const APP_COPY: Record<Language, AppShellCopy> = {
     nav: {
       chat: "对话",
       lab: "实验室",
+      typeset: "排版",
       literature: "文献",
       studio: "工作室",
       mail: "邮箱",
@@ -116,7 +119,7 @@ const APP_COPY: Record<Language, AppShellCopy> = {
     runStateDir: "运行状态目录",
     dismiss: "关闭",
     updateReady: (version) => `更新${version}已安装，点击重启 SomniQ Studio。`,
-    updateDownloading: (version, percent) => percent != null ? `正在安装更新${version}：${percent}%` : `正在安装更新${version}`,
+    updateDownloading: (version, percent) => percent != null ? `正在安装更新${version}: ${percent}%` : `正在安装更新${version}`,
     updateAvailable: (version) => `发现更新${version}，点击安装。`,
   },
   en: {
@@ -125,6 +128,7 @@ const APP_COPY: Record<Language, AppShellCopy> = {
     nav: {
       chat: "Chat",
       lab: "Lab",
+      typeset: "Typeset",
       literature: "Literature",
       studio: "Studio",
       mail: "Mail",
@@ -176,6 +180,7 @@ const APP_COPY: Record<Language, AppShellCopy> = {
 const TAB_MODULE_LABELS: Record<Tab, string> = {
   chat: "Chat",
   lab: "Lab",
+  typeset: "Typeset",
   literature: "Literature",
   studio: "Studio",
   mail: "Mail",
@@ -189,6 +194,7 @@ function preloadTabModule(tabId: string) {
   if (tabId === "literature") void loadLiterature();
   else if (tabId === "studio") void loadStudio();
   else if (tabId === "mail") void loadMail();
+  else if (tabId === "typeset") void loadTypeset();
 }
 
 function AppLoadingPane({ copy, label }: { copy: AppShellCopy; label: string }) {
@@ -219,6 +225,8 @@ interface NavItem {
 type UpdateIndicatorState = "idle" | "available" | "downloading" | "ready";
 
 const UPDATE_CHECK_INTERVAL_MS = 30 * 60 * 1000;
+const ACCOUNT_REFRESH_INTERVAL_MS = 60 * 1000;
+const ACCOUNT_REFRESH_MIN_INTERVAL_MS = 15 * 1000;
 const SIDEBAR_WIDTH_KEY = "somniq-sidebar-w";
 const SIDEBAR_WIDTH_LEGACY_KEY = "aris-sidebar-w";
 const SIDEBAR_COLLAPSED_KEY = "somniq-sidebar-collapsed";
@@ -240,7 +248,7 @@ const IC = (p: { d: string; extra?: string }) => (
 );
 
 // Chevron / control glyphs rendered as crisp SVG so they align on the pixel grid
-// instead of relying on font-dependent glyphs like "‹", "×" or "v".
+// instead of relying on font-dependent glyphs like "鈥?, "脳" or "v".
 const Chevron = (p: { dir: "left" | "right" | "down"; size?: number }) => {
   const s = p.size ?? 16;
   const d = p.dir === "left" ? "M10 3.5 5.5 8l4.5 4.5"
@@ -254,7 +262,7 @@ const Chevron = (p: { dir: "left" | "right" | "down"; size?: number }) => {
   );
 };
 
-// Windows-style window controls, 10×10 viewBox centered in a 46×36 hit area.
+// Windows-style window controls, 10脳10 viewBox centered in a 46脳36 hit area.
 const WinCtl = {
   minimize: (
     <svg className="win-ctl-glyph" width="10" height="10" viewBox="0 0 10 10"
@@ -347,6 +355,9 @@ const NAV_GROUPS: { group: string; items: NavItem[] }[] = [
     }, {
       id: "lab", label: "Lab",
       icon: <IC d="M3.5 2.5h9v11h-9zM5.5 6l2.2 1.6-2.2 1.6M9 9.7h2.5" />,
+    }, {
+      id: "typeset", label: "Typeset",
+      icon: <IC d="M3 2.8h7.2L13 5.6v7.6H3zM10.2 2.8v2.8H13M5.2 7.1h5.6M5.2 9.2h5.6M5.2 11.3h3.2" />,
     }],
   },
   {
@@ -528,6 +539,8 @@ export default function App() {
   const suppressProjectClickRef = useRef(false);
   const updateCheckInFlightRef = useRef(false);
   const updateStateRef = useRef<UpdateIndicatorState>("idle");
+  const accountRefreshInFlightRef = useRef(false);
+  const lastAccountRefreshAtRef = useRef(0);
   const projectDragRef = useRef<{
     id: string;
     pointerId: number;
@@ -685,30 +698,62 @@ export default function App() {
   const handleLogout = useCallback(() => {
     setUserMenuOpen(false);
     setUsageDetailsOpen(false);
+    setAccount(null);
+    writeCachedAccount(null);
     logout();
+  }, [logout]);
+
+  const refreshAccount = useCallback(async (options: { force?: boolean } = {}) => {
+    if (!isTauri()) return;
+    const now = Date.now();
+    if (accountRefreshInFlightRef.current) return;
+    if (!options.force && now - lastAccountRefreshAtRef.current < ACCOUNT_REFRESH_MIN_INTERVAL_MS) return;
+    accountRefreshInFlightRef.current = true;
+    lastAccountRefreshAtRef.current = now;
+    try {
+      const next = await newapiBootstrap();
+      setAccount(next);
+      writeCachedAccount(next);
+    } catch (err) {
+      if (isManagedAuthInvalidError(err)) {
+        setAccount(null);
+        writeCachedAccount(null);
+        logout();
+      }
+    } finally {
+      accountRefreshInFlightRef.current = false;
+    }
   }, [logout]);
 
   useEffect(() => init(), [init]);
   useEffect(() => {
     if (!isTauri()) return;
-    let active = true;
-    void newapiBootstrap()
-      .then((next) => {
-        if (!active) return;
-        setAccount(next);
-        writeCachedAccount(next);
-      })
-      .catch((err) => {
-        if (!active) return;
-        if (isManagedAuthInvalidError(err)) {
-          writeCachedAccount(null);
-          logout();
-        }
-      });
-    return () => {
-      active = false;
+    void refreshAccount({ force: true });
+    const timer = window.setInterval(() => {
+      void refreshAccount();
+    }, ACCOUNT_REFRESH_INTERVAL_MS);
+    const refreshOnFocus = () => {
+      void refreshAccount();
     };
-  }, [logout]);
+    window.addEventListener("focus", refreshOnFocus);
+    let disposed = false;
+    let unlistenChatDone: (() => void) | null = null;
+    void onChatDone(() => {
+      void refreshAccount({ force: true });
+    }).then((unlisten) => {
+      if (disposed) unlisten();
+      else unlistenChatDone = unlisten;
+    }).catch(() => {});
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+      window.removeEventListener("focus", refreshOnFocus);
+      unlistenChatDone?.();
+    };
+  }, [refreshAccount]);
+  useEffect(() => {
+    if (userMenuOpen) void refreshAccount();
+  }, [refreshAccount, userMenuOpen]);
   useEffect(() => {
     let disposed = false;
     const heavyTabs = ["literature", "studio", "mail"];
@@ -844,6 +889,7 @@ export default function App() {
     .filter((project): project is NonNullable<typeof project> => Boolean(project));
   const renderedTab = deferredTab;
   const labWorkbench = renderedTab === "lab";
+  const typesetWorkbench = renderedTab === "typeset";
   const chatShell = renderedTab === "chat";
   const showUpdateIndicator = updateState === "available" || updateState === "downloading" || updateState === "ready";
   const copy = APP_COPY[language];
@@ -914,21 +960,23 @@ export default function App() {
   const userPlan = accountPlan(account, copy);
   const userInitials = accountInitials(userName, userEmail, copy.userFallback);
   const usageMenuLabels = language === "cn"
-    ? { balance: "余额", used: "已用", plan: "套餐", subscriptionBalance: "套餐余额" }
+    ? { balance: "浣欓", used: "宸茬敤", plan: "濂楅", subscriptionBalance: "濂楅浣欓" }
     : { balance: "Balance", used: "Used", plan: "Plan", subscriptionBalance: "Plan balance" };
   const usageDetailsLabel = language === "cn" ? "\u4f7f\u7528\u7edf\u8ba1" : "Usage statistics";
-  const usageMenuItems = [
-    [usageMenuLabels.balance, formatOptionalAccountQuota(account?.quota)],
-    [usageMenuLabels.used, formatOptionalAccountQuota(account?.usedQuota)],
-    [usageMenuLabels.plan, userPlan],
-    [usageMenuLabels.subscriptionBalance, formatOptionalAccountQuota(account?.subscriptionQuota)],
-  ] as const;
-  const usagePrimary = usageMenuItems[0];
-  const usageMetrics = usageMenuItems.slice(1);
+  const showSubscriptionQuota = typeof account?.subscriptionQuota === "number"
+    && Number.isFinite(account.subscriptionQuota)
+    && account.subscriptionQuota !== account.quota;
+  const usagePrimary = [usageMenuLabels.balance, formatOptionalAccountQuota(account?.quota)] as const;
+  const usageMetrics = [
+    [usageMenuLabels.used, formatOptionalAccountQuota(account?.usedQuota)] as const,
+    ...(showSubscriptionQuota
+      ? [[usageMenuLabels.subscriptionBalance, formatOptionalAccountQuota(account?.subscriptionQuota)] as const]
+      : []),
+  ];
 
   return (
     <div
-      className={`app${sidebarCollapsed ? " sidebar-collapsed" : ""}${labWorkbench ? " app-lab-workbench" : ""}${chatShell ? " app-chat-shell" : ""}`}
+      className={`app${sidebarCollapsed ? " sidebar-collapsed" : ""}${labWorkbench ? " app-lab-workbench" : ""}${typesetWorkbench ? " app-typeset-workbench" : ""}${chatShell ? " app-chat-shell" : ""}`}
       style={{ "--app-sidebar-w": sidebarCollapsed ? "0px" : `${sidebarWidth}px` } as CSSProperties}
     >
       <div className="window-titlebar">
@@ -1112,7 +1160,7 @@ export default function App() {
               title={copy.sidebarExpandedTitle}
               aria-label={copy.sidebarExpandedLabel}
             >
-              ›
+              鈥?
             </button>
           )}
           <div className="app-title">{copy.nav[tab]}</div>
@@ -1229,6 +1277,11 @@ export default function App() {
             </ErrorBoundary>
           </div>
           {renderedTab === "lab" && <Lab />}
+          {renderedTab === "typeset" && (
+            <Suspense fallback={<AppLoadingPane copy={copy} label={TAB_MODULE_LABELS.typeset} />}>
+              <Typeset />
+            </Suspense>
+          )}
           {renderedTab === "literature" && (
             <Suspense fallback={<AppLoadingPane copy={copy} label={TAB_MODULE_LABELS.literature} />}>
               <Literature pageView={literaturePageView} onPageViewChange={setLiteraturePageView} />

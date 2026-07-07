@@ -107,6 +107,11 @@ const ONBOARDING_STEPS: OnboardingStep[] = [
 function readSeenFlag() {
   if (typeof window === "undefined") return true;
   try {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("typesetPreview") === "1" || params.get("labPreview") === "1") {
+      writeSeenFlag();
+      return true;
+    }
     if (window.localStorage.getItem(ONBOARDING_STORAGE_KEY) === "done") return true;
     if (PRIOR_USAGE_STORAGE_KEYS.some((key) => window.localStorage.getItem(key) != null)) {
       writeSeenFlag();

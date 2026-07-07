@@ -21,6 +21,7 @@ import {
   type NewApiUsageLogPage,
 } from "../api/tauri";
 import { isManagedAuthInvalidError, useStore, type Language } from "../store";
+import { notifyChatModelsUpdated } from "../modelEvents";
 import type {
   AppUpdateInfo,
   AppUpdateProgress,
@@ -55,6 +56,8 @@ type UpdateState = "idle" | "checking" | "available" | "current" | "downloading"
 type SettingsTab = "general" | "auth" | "usage" | "about";
 
 const MANAGED_NEW_API_MODE = true;
+const MANAGED_MODEL_SERVER_LABEL = "通用模型服务器";
+const MANAGED_MODEL_SERVER_BASE_URL = "http://106.53.28.124:18080";
 const ACCOUNT_CACHE_KEY = "somniq-account-v1";
 const LEGACY_ACCOUNT_CACHE_KEY = "aris-account-v1";
 const SETTINGS_TAB_REQUEST_KEY = "somniq-settings-tab-request";
@@ -65,7 +68,7 @@ const PREVIEW_CONFIG_VIEW: ConfigView = {
   configPath: "browser preview - Tauri config is not loaded",
   executorProvider: "openai",
   executorModel: "MiniMax-M3",
-  executorBaseUrl: "http://106.53.28.124:18080/v1",
+  executorBaseUrl: `${MANAGED_MODEL_SERVER_BASE_URL}/v1`,
   summarizerProvider: "",
   summarizerModel: "",
   summarizerBaseUrl: "",
@@ -74,7 +77,7 @@ const PREVIEW_CONFIG_VIEW: ConfigView = {
   executorKeyMasked: "sk-...preview",
   reviewerProvider: "openai",
   reviewerModel: "MiniMax-M3",
-  reviewerBaseUrl: "http://106.53.28.124:18080/v1",
+  reviewerBaseUrl: `${MANAGED_MODEL_SERVER_BASE_URL}/v1`,
   hasReviewerKey: true,
   reviewerKeyMasked: "sk-...preview",
   hasScopusKey: false,
@@ -157,6 +160,7 @@ const PREVIEW_USAGE_LOGS: NewApiUsageLogPage = {
     },
   ],
 };
+let usageLogPageCache: Record<number, NewApiUsageLogPage> = {};
 const PREVIEW_SYSTEM_PROMPT: SystemPromptView = {
   model: PREVIEW_CONFIG_VIEW.executorModel ?? "preview-model",
   fullToolRegistry: true,
@@ -676,7 +680,7 @@ const REVIEWER_MODELS: PresetOption[] = [
 ];
 
 const OPENAI_COMPAT_URLS: PresetOption[] = [
-  { label: "New API", value: "http://106.53.28.124:18080/v1" },
+  { label: MANAGED_MODEL_SERVER_LABEL, value: `${MANAGED_MODEL_SERVER_BASE_URL}/v1` },
   { label: "OpenAI", value: "https://api.openai.com/v1" },
   { label: "MiniMax", value: "https://api.minimaxi.com/v1" },
   { label: "Gemini", value: "https://generativelanguage.googleapis.com/v1beta/openai" },
@@ -972,9 +976,27 @@ function detectProtocol(url: string): string {
   return "openai";
 }
 
+function isManagedModelServerUrl(value: string | null | undefined): boolean {
+  const normalized = (value ?? "")
+    .trim()
+    .replace(/\/+$/, "")
+    .replace(/^https?:\/\//i, "")
+    .toLowerCase();
+  return normalized === "106.53.28.124:18080"
+    || normalized === "106.53.28.124:18080/v1";
+}
+
+function displayServerValue(value: string): string {
+  return isManagedModelServerUrl(value) ? MANAGED_MODEL_SERVER_LABEL : value;
+}
+
+function hideManagedServerAddress(value: string): string {
+  return value.replace(/(?:https?:\/\/)?106\.53\.28\.124:18080(?:\/v1)?/gi, MANAGED_MODEL_SERVER_LABEL);
+}
+
 function suggestModels(url: string): string[] {
   const lower = url.toLowerCase();
-  if (lower.includes("106.53.28.124:18080")) return ["MiniMax-M3", "MiniMax-M2.7", "gpt-5.5"];
+  if (isManagedModelServerUrl(lower)) return ["MiniMax-M3", "MiniMax-M2.7", "gpt-5.5"];
   if (lower.includes("minimaxi.com")) return ["MiniMax-M3", "MiniMax-M2.7"];
   if (lower.includes("deepseek.com")) return ["deepseek-v4-pro"];
   if (lower.includes("openai.com")) return ["gpt-5.5", "gpt-5.4", "gpt-4o"];
@@ -989,6 +1011,7 @@ function suggestModels(url: string): string[] {
 
 function formatServerLabel(server: string, provider?: string): string {
   const source = server.trim() || provider?.trim() || "unknown";
+  if (isManagedModelServerUrl(source)) return MANAGED_MODEL_SERVER_LABEL;
   if (source === "OpenAI-compatible" || source === "Anthropic-compatible" || source === "unknown") return source;
   try {
     const url = new URL(source);
@@ -1014,14 +1037,18 @@ function PresetTextInput({
   options,
   onChange,
   disabled = false,
+  formatValue,
 }: {
   value: string;
   placeholder: string;
   options: PresetOption[];
   onChange: (value: string) => void;
   disabled?: boolean;
+  formatValue?: (value: string) => string;
 }) {
   const currentPreset = options.find((option) => option.value === value)?.value ?? "__custom";
+  const inputValue = formatValue ? formatValue(value) : value;
+  const displayOnlyValue = inputValue !== value;
   return (
     <div className="st-preset-control">
       <select
@@ -1042,7 +1069,14 @@ function PresetTextInput({
           </option>
         ))}
       </select>
-      <input value={value} placeholder={placeholder} onChange={(event) => onChange(event.target.value)} spellCheck={false} disabled={disabled} />
+      <input
+        value={inputValue}
+        placeholder={placeholder}
+        onChange={(event) => onChange(event.target.value)}
+        spellCheck={false}
+        disabled={disabled}
+        readOnly={displayOnlyValue}
+      />
     </div>
   );
 }
@@ -1150,8 +1184,8 @@ function TestDetail({ detail }: { detail: ConfigTestResult["executor"] }) {
         <span className="st-test-label">{detail.label}</span>
         {detail.model && <span className="st-test-meta">{detail.model}</span>}
       </div>
-      <div className="st-test-message">{detail.message}</div>
-      {detail.baseUrl && <div className="st-test-url">{detail.baseUrl}</div>}
+      <div className="st-test-message">{hideManagedServerAddress(detail.message)}</div>
+      {detail.baseUrl && <div className="st-test-url">{formatServerLabel(detail.baseUrl)}</div>}
     </div>
   );
 }
@@ -1183,7 +1217,12 @@ export default function Settings() {
   const [environmentCheckedAt, setEnvironmentCheckedAt] = useState<number | null>(null);
   const [usageLoading, setUsageLoading] = useState(false);
   const [usageLogPage, setUsageLogPage] = useState(1);
-  const [usageLogs, setUsageLogs] = useState<NewApiUsageLogPage | null>(() => isTauri() ? null : PREVIEW_USAGE_LOGS);
+  const [usageLogPages, setUsageLogPages] = useState<Record<number, NewApiUsageLogPage>>(() =>
+    isTauri() ? usageLogPageCache : { [PREVIEW_USAGE_LOGS.page]: PREVIEW_USAGE_LOGS },
+  );
+  const [usageLogs, setUsageLogs] = useState<NewApiUsageLogPage | null>(() =>
+    isTauri() ? usageLogPageCache[1] ?? null : PREVIEW_USAGE_LOGS,
+  );
   const [usageLogError, setUsageLogError] = useState("");
   const [managedModels, setManagedModels] = useState<string[]>(() => isTauri() ? [] : PREVIEW_CONFIG_VIEW.managedModels ?? []);
   const [managedModelsLoading, setManagedModelsLoading] = useState(false);
@@ -1207,6 +1246,8 @@ export default function Settings() {
   const [activeSettingsTab, setActiveSettingsTab] = useState<SettingsTab>(() => readRequestedSettingsTab() ?? "general");
   const [mailDetailOpen, setMailDetailOpen] = useState(false);
   const savedTimer = useRef<number | null>(null);
+  const usageLogPagesRef = useRef(usageLogPages);
+  const usageRefreshPendingRef = useRef(false);
   const copy = SETTINGS_COPY[language];
 
   const loadConfig = (view: ConfigView) => {
@@ -1241,20 +1282,46 @@ export default function Settings() {
     if (savedTimer.current !== null) window.clearTimeout(savedTimer.current);
   }, []);
 
-  const loadUsageSummary = async (page = usageLogPage) => {
+  useEffect(() => {
+    usageLogPagesRef.current = usageLogPages;
+  }, [usageLogPages]);
+
+  const cacheUsageLogPage = (pageData: NewApiUsageLogPage, reset = false) => {
+    setUsageLogPages((current) => {
+      const next = reset ? {} : { ...current };
+      next[pageData.page] = pageData;
+      usageLogPagesRef.current = next;
+      usageLogPageCache = next;
+      return next;
+    });
+    setUsageLogs(pageData);
+  };
+
+  const loadUsageSummary = async (page = usageLogPage, options: { force?: boolean; refreshAccount?: boolean } = {}) => {
+    const cachedLogs = usageLogPagesRef.current[page];
+    if (!options.force && cachedLogs) {
+      setUsageLogs(cachedLogs);
+      setUsageLogError("");
+      return;
+    }
     if (!isTauri()) {
-      setUsageLogs({ ...PREVIEW_USAGE_LOGS, page });
+      cacheUsageLogPage({ ...PREVIEW_USAGE_LOGS, page });
       return;
     }
     setUsageLoading(true);
     setUsageLogError("");
     try {
-      await loadAccount();
+      if (options.refreshAccount || !account) {
+        await loadAccount();
+      }
       const nextLogs = await newapiUsageLogs(page, USAGE_LOG_PAGE_SIZE);
-      setUsageLogs(nextLogs);
+      cacheUsageLogPage(nextLogs, options.force);
     } catch (error) {
       const message = String(error);
       setUsageLogError(message);
+      if (cachedLogs) {
+        setUsageLogs(cachedLogs);
+      }
       setError(message);
     } finally {
       setUsageLoading(false);
@@ -1263,11 +1330,24 @@ export default function Settings() {
 
   const refreshUsage = () => {
     const firstPage = 1;
+    setUsageLogPages({});
+    usageLogPagesRef.current = {};
+    usageLogPageCache = {};
+    setUsageLogs(null);
+    usageRefreshPendingRef.current = true;
     if (usageLogPage === firstPage) {
-      void loadUsageSummary(firstPage);
+      void loadUsageSummary(firstPage, { force: true, refreshAccount: true });
+      usageRefreshPendingRef.current = false;
     } else {
       setUsageLogPage(firstPage);
     }
+  };
+
+  const goToUsageLogPage = (page: number) => {
+    const nextPage = Math.max(1, page);
+    setUsageLogs(usageLogPagesRef.current[nextPage] ?? null);
+    setUsageLogError("");
+    setUsageLogPage(nextPage);
   };
 
   const loadEnvironmentChecks = async () => {
@@ -1325,6 +1405,7 @@ export default function Settings() {
     if (!isTauri()) {
       setManagedModels(PREVIEW_CONFIG_VIEW.managedModels ?? []);
       setConfigView(PREVIEW_CONFIG_VIEW);
+      notifyChatModelsUpdated();
       return;
     }
     setManagedModelsLoading(true);
@@ -1333,6 +1414,7 @@ export default function Settings() {
       const models = await newapiModels();
       setManagedModels(models);
       setConfigView((current) => current ? { ...current, managedModels: models } : current);
+      notifyChatModelsUpdated();
     } catch (error) {
       setManagedModels([]);
       setManagedModelsError(String(error));
@@ -1373,6 +1455,7 @@ export default function Settings() {
       setGroupDraft(next.group);
       if (next.models.length > 0) {
         setManagedModels(next.models);
+        notifyChatModelsUpdated();
       }
       writeCachedAccount(next);
     } catch (error) {
@@ -1400,6 +1483,7 @@ export default function Settings() {
       setGroupDraft(next.group);
       if (next.models.length > 0) {
         setManagedModels(next.models);
+        notifyChatModelsUpdated();
       }
       writeCachedAccount(next);
     } catch (error) {
@@ -1468,7 +1552,9 @@ export default function Settings() {
 
   useEffect(() => {
     if (!isTauri() || activeSettingsTab !== "usage") return;
-    void loadUsageSummary(usageLogPage);
+    const refreshAccount = usageRefreshPendingRef.current;
+    usageRefreshPendingRef.current = false;
+    void loadUsageSummary(usageLogPage, refreshAccount ? { force: true, refreshAccount: true } : {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeSettingsTab, usageLogPage]);
 
@@ -1511,12 +1597,14 @@ export default function Settings() {
         setConfigView((current) => current ? { ...current, ...buildPatch({ includeExecutor: canConfigureExecutor, includeReviewer: canConfigureReviewerApi }) } : current);
         setSaveState("saved");
         savedTimer.current = window.setTimeout(() => setSaveState("idle"), 3000);
+        notifyChatModelsUpdated();
         return;
       }
       const next = await configSet(buildPatch({ includeExecutor: canConfigureExecutor, includeReviewer: canConfigureReviewerApi }));
       loadConfig(next);
       setSaveState("saved");
       savedTimer.current = window.setTimeout(() => setSaveState("idle"), 3000);
+      notifyChatModelsUpdated();
     } catch (error) {
       setError(String(error));
       setSaveState("error");
@@ -1541,6 +1629,7 @@ export default function Settings() {
       const result = await configTest(buildPatch({ includeExecutor: canConfigureExecutor, includeReviewer: canConfigureReviewerApi }));
       setTestResult(result);
       setTestState(result.ok ? "passed" : "failed");
+      if (result.ok) notifyChatModelsUpdated();
     } catch (error) {
       const message = String(error);
       setTestResult({ ok: false, message, executor: { ok: false, label: "Settings", message } });
@@ -1554,12 +1643,14 @@ export default function Settings() {
       setConfigView((current) => current ? { ...current, executorModel: model } : current);
       setAdvForm((current) => ({ ...current, executorModel: model }));
       setAccount((current) => (current ? { ...current, model } : current));
+      notifyChatModelsUpdated();
       return;
     }
     try {
       const next = await configSet({ executorModel: model });
       loadConfig(next);
       setAccount((current) => (current ? { ...current, model } : current));
+      notifyChatModelsUpdated();
     } catch (error) {
       setError(String(error));
     }
@@ -2217,7 +2308,7 @@ export default function Settings() {
                 </div>
                 <div className="sp-adv-rows">
                   <div className="st-row"><div className="st-row-label"><span className="st-label">Model</span></div><div className="st-row-control"><PresetTextInput value={advForm.executorModel ?? ""} placeholder={advExecMeta.defaultModel || "e.g. claude-sonnet-4-6"} options={advExecMeta.models ?? EXECUTOR_MODELS} onChange={(value) => { resetOpState(); setAdvForm((current) => ({ ...current, executorModel: value })); }} /></div></div>
-                  <div className="st-row"><div className="st-row-label"><span className="st-label">Base URL</span></div><div className="st-row-control"><PresetTextInput value={advForm.executorBaseUrl ?? ""} placeholder={advExecMeta.defaultBaseUrl || "(official default)"} options={advExecMeta.baseUrls ?? OPENAI_COMPAT_URLS} onChange={(value) => { resetOpState(); setAdvForm((current) => ({ ...current, executorBaseUrl: value })); }} /></div></div>
+                  <div className="st-row"><div className="st-row-label"><span className="st-label">Base URL</span></div><div className="st-row-control"><PresetTextInput value={advForm.executorBaseUrl ?? ""} placeholder={advExecMeta.defaultBaseUrl || "(official default)"} options={advExecMeta.baseUrls ?? OPENAI_COMPAT_URLS} formatValue={displayServerValue} onChange={(value) => { resetOpState(); setAdvForm((current) => ({ ...current, executorBaseUrl: value })); }} /></div></div>
                   <div className="st-row"><div className="st-row-label"><span className="st-label">API Key</span><span className="st-hint">{configView.hasExecutorKey ? `Saved: ${configView.executorKeyMasked ?? "configured"}` : "No key"}</span></div><div className="st-row-control"><KeyInput value={execKey} placeholder={configView.hasExecutorKey ? "leave blank to keep" : "paste API key"} masked={configView.executorKeyMasked} secretKind="executorApiKey" language={language} onChange={(value) => { resetOpState(); setExecKey(value); }} /></div></div>
                 </div>
               </div>
@@ -2240,7 +2331,7 @@ export default function Settings() {
                 {advReviewerProvider !== "" && (
                   <div className="sp-adv-rows">
                     <div className="st-row"><div className="st-row-label"><span className="st-label">Model</span></div><div className="st-row-control"><PresetTextInput value={advForm.reviewerModel ?? ""} placeholder={advReviewerMeta.defaultModel || "e.g. gpt-5.5"} options={advReviewerMeta.models ?? REVIEWER_MODELS} onChange={(value) => { resetOpState(); setAdvForm((current) => ({ ...current, reviewerModel: value })); }} /></div></div>
-                    <div className="st-row"><div className="st-row-label"><span className="st-label">Base URL</span></div><div className="st-row-control"><PresetTextInput value={advForm.reviewerBaseUrl ?? ""} placeholder={advReviewerMeta.defaultBaseUrl || "(provider default)"} options={advReviewerMeta.baseUrls ?? OPENAI_COMPAT_URLS} onChange={(value) => { resetOpState(); setAdvForm((current) => ({ ...current, reviewerBaseUrl: value })); }} /></div></div>
+                    <div className="st-row"><div className="st-row-label"><span className="st-label">Base URL</span></div><div className="st-row-control"><PresetTextInput value={advForm.reviewerBaseUrl ?? ""} placeholder={advReviewerMeta.defaultBaseUrl || "(provider default)"} options={advReviewerMeta.baseUrls ?? OPENAI_COMPAT_URLS} formatValue={displayServerValue} onChange={(value) => { resetOpState(); setAdvForm((current) => ({ ...current, reviewerBaseUrl: value })); }} /></div></div>
                     <div className="st-row"><div className="st-row-label"><span className="st-label">API Key</span><span className="st-hint">{configView.hasReviewerKey ? `Saved: ${configView.reviewerKeyMasked ?? "configured"}` : "No key"}</span></div><div className="st-row-control"><KeyInput value={reviewerKey} placeholder={configView.hasReviewerKey ? "leave blank to keep" : "paste reviewer key"} masked={configView.reviewerKeyMasked} secretKind="reviewerApiKey" language={language} onChange={(value) => { resetOpState(); setReviewerKey(value); }} /></div></div>
                   </div>
                 )}
@@ -2266,7 +2357,7 @@ export default function Settings() {
                   {isManualSummaryProvider && (
                     <>
                       <div className="st-row"><div className="st-row-label"><span className="st-label">{copy.summaryProtocol}</span></div><div className="st-row-control"><select value={advForm.summarizerProvider ?? "openai"} onChange={(event) => { resetOpState(); setAdvForm((current) => ({ ...current, summarizerProvider: event.target.value })); }}><option value="openai">OpenAI-compatible</option><option value="anthropic">Anthropic</option><option value="anthropic-compat">Anthropic-compatible</option></select></div></div>
-                      <div className="st-row"><div className="st-row-label"><span className="st-label">{copy.summaryBaseUrl}</span></div><div className="st-row-control"><PresetTextInput value={advForm.summarizerBaseUrl ?? ""} placeholder="https://api.openai.com/v1" options={[...OPENAI_COMPAT_URLS, ...ANTHROPIC_COMPAT_URLS]} onChange={(value) => { resetOpState(); setAdvForm((current) => ({ ...current, summarizerBaseUrl: value })); }} /></div></div>
+                      <div className="st-row"><div className="st-row-label"><span className="st-label">{copy.summaryBaseUrl}</span></div><div className="st-row-control"><PresetTextInput value={advForm.summarizerBaseUrl ?? ""} placeholder="https://api.openai.com/v1" options={[...OPENAI_COMPAT_URLS, ...ANTHROPIC_COMPAT_URLS]} formatValue={displayServerValue} onChange={(value) => { resetOpState(); setAdvForm((current) => ({ ...current, summarizerBaseUrl: value })); }} /></div></div>
                       <div className="st-row"><div className="st-row-label"><span className="st-label">{copy.summaryApiKey}</span><span className="st-hint">{configView.hasSummarizerKey ? `Saved: ${configView.summarizerKeyMasked ?? "configured"}` : "No key"}</span></div><div className="st-row-control"><KeyInput value={summaryKey} placeholder={configView.hasSummarizerKey ? "leave blank to keep" : "paste summary key"} masked={configView.summarizerKeyMasked} secretKind="summarizerApiKey" language={language} onChange={(value) => { resetOpState(); setSummaryKey(value); }} /></div></div>
                     </>
                   )}
@@ -2375,7 +2466,10 @@ export default function Settings() {
                     {usageLogTotal > 0 ? copy.usageRange(usageLogStart, usageLogEnd, usageLogTotal) : copy.usageNoRecords}
                   </div>
                 </div>
-                {usageLogError ? (
+                {usageLogError && usageLogItems.length > 0 && (
+                  <div className="sp-usage-foot">{usageLogError}</div>
+                )}
+                {usageLogError && usageLogItems.length === 0 ? (
                   <div className="sp-usage-empty">{usageLogError}</div>
                 ) : usageLoading && !usageLogs ? (
                   <div className="sp-usage-empty">{copy.usageLoading}</div>
@@ -2415,11 +2509,11 @@ export default function Settings() {
                         {copy.usagePageSummary(USAGE_LOG_PAGE_SIZE, usageLogPage, usageLogPageCount)}
                       </div>
                       <div className="sp-usage-page-controls">
-                        <button className="sp-usage-page-button" type="button" disabled={!canGoPrevUsageLogPage} onClick={() => setUsageLogPage((page) => Math.max(1, page - 1))}>
+                        <button className="sp-usage-page-button" type="button" disabled={!canGoPrevUsageLogPage} onClick={() => goToUsageLogPage(usageLogPage - 1)}>
                           {copy.usagePrev}
                         </button>
                         <span className="sp-usage-page-indicator">{usageLoading ? "..." : usageLogPage}</span>
-                        <button className="sp-usage-page-button" type="button" disabled={!canGoNextUsageLogPage} onClick={() => setUsageLogPage((page) => page + 1)}>
+                        <button className="sp-usage-page-button" type="button" disabled={!canGoNextUsageLogPage} onClick={() => goToUsageLogPage(usageLogPage + 1)}>
                           {copy.usageNext}
                         </button>
                       </div>

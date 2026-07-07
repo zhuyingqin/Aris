@@ -164,20 +164,12 @@ pub(crate) fn first_successful_probe(
 }
 
 fn latex_check() -> LocalEnvironmentCheck {
-    let mut candidates: Vec<(String, Vec<&'static str>)> = Vec::new();
-    let configured_tectonic =
-        std::env::var("SOMNIQ_TECTONIC").or_else(|_| std::env::var("ARIS_TECTONIC"));
-    if let Ok(tectonic) = configured_tectonic {
-        if !tectonic.trim().is_empty() {
-            candidates.push((tectonic, vec!["--version"]));
-        }
-    }
-    candidates.extend([
-        ("tectonic".to_string(), vec!["--version"]),
+    let candidates: Vec<(String, Vec<&'static str>)> = vec![
         ("latexmk".to_string(), vec!["--version"]),
         ("xelatex".to_string(), vec!["--version"]),
         ("pdflatex".to_string(), vec!["--version"]),
-    ]);
+        ("lualatex".to_string(), vec!["--version"]),
+    ];
 
     let borrowed = candidates
         .iter()
@@ -189,7 +181,7 @@ fn latex_check() -> LocalEnvironmentCheck {
         "论文排版",
         &borrowed,
         Duration::from_secs(3),
-        "未检测到 LaTeX/Tectonic，可安装 TeX Live、MiKTeX 或使用内置 Tectonic。",
+        "未检测到 TeX Live LaTeX 工具链。请安装 TeX Live，并确保 latexmk/xelatex/pdflatex/lualatex 位于 PATH。",
     )
 }
 
