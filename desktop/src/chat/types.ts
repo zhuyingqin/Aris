@@ -6,6 +6,10 @@ export interface ChatSession {
   title: string;
   model?: string | null;
   turns: ChatTurn[];
+  turnsLoaded?: boolean;
+  turnsPartial?: boolean;
+  turnCount?: number;
+  partialBaseTurnIds?: string[];
   draft: string;
   draftAttachments: ChatAttachment[];
   pinned: boolean;

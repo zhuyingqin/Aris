@@ -1,9 +1,90 @@
 import { useEffect, useRef } from "react";
-import { Compartment, EditorState } from "@codemirror/state";
+import { Compartment, EditorState, Prec } from "@codemirror/state";
 import { EditorView, keymap, drawSelection, dropCursor, lineNumbers } from "@codemirror/view";
 import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
 import { visualBlockClick, visualDecorations, visualSourcePath } from "./visualDecorations";
 import type { VisualPdfCursor } from "./visualModel";
+
+type LatexListEnterInsertion = {
+  insert: string;
+  selection: number;
+};
+
+type LatexListEnvironment = {
+  bodyFrom: number;
+  bodyTo: number;
+  from: number;
+  kind: "itemize" | "enumerate";
+};
+
+function activeLatexListEnvironment(source: string, cursor: number): LatexListEnvironment | null {
+  const stack: LatexListEnvironment[] = [];
+  const envRe = /\\(begin|end)\{(itemize|enumerate)\}(?:\s*\[[^\]]*\])?/g;
+  let active: LatexListEnvironment | null = null;
+  let match: RegExpExecArray | null;
+  while ((match = envRe.exec(source))) {
+    const action = match[1];
+    const kind = match[2] as "itemize" | "enumerate";
+    if (action === "begin") {
+      stack.push({ bodyFrom: envRe.lastIndex, bodyTo: source.length, from: match.index, kind });
+      continue;
+    }
+    const index = stack.map((item) => item.kind).lastIndexOf(kind);
+    if (index < 0) continue;
+    const opened = stack.splice(index, 1)[0];
+    const environment = { ...opened, bodyTo: match.index };
+    if (cursor >= environment.bodyFrom && cursor <= environment.bodyTo && (!active || environment.from > active.from)) {
+      active = environment;
+    }
+  }
+  for (const environment of stack) {
+    if (cursor >= environment.bodyFrom && cursor <= environment.bodyTo && (!active || environment.from > active.from)) {
+      active = environment;
+    }
+  }
+  return active;
+}
+
+function activeLatexListItem(source: string, cursor: number, environment: LatexListEnvironment): { indent: string; to: number } | null {
+  const itemRe = /\\item(?![A-Za-z])(?:\s*\[[^\]]*\])?/g;
+  itemRe.lastIndex = environment.bodyFrom;
+  let active: { indent: string; to: number } | null = null;
+  let match: RegExpExecArray | null;
+  while ((match = itemRe.exec(source)) && match.index < environment.bodyTo) {
+    if (match.index > cursor) break;
+    const lineStart = source.lastIndexOf("\n", match.index - 1) + 1;
+    const indent = /^[ \t]*/.exec(source.slice(lineStart, match.index))?.[0] ?? "";
+    active = { indent, to: match.index + match[0].length };
+  }
+  return active;
+}
+
+export function latexListEnterInsertion(source: string, cursor: number): LatexListEnterInsertion | null {
+  const safeCursor = Math.max(0, Math.min(cursor, source.length));
+  const environment = activeLatexListEnvironment(source, safeCursor);
+  if (!environment) return null;
+  const item = activeLatexListItem(source, safeCursor, environment);
+  if (!item) return null;
+  if (safeCursor < item.to) return null;
+
+  const insert = `\n${item.indent}\\item `;
+  return { insert, selection: safeCursor + insert.length };
+}
+
+function insertLatexListItemOnEnter(view: EditorView): boolean {
+  if (view.state.selection.ranges.length !== 1) return false;
+  const range = view.state.selection.main;
+  if (!range.empty) return false;
+  const source = view.state.doc.toString();
+  const insertion = latexListEnterInsertion(source, range.from);
+  if (!insertion) return false;
+  view.dispatch({
+    changes: { from: range.from, to: range.to, insert: insertion.insert },
+    selection: { anchor: insertion.selection },
+    scrollIntoView: true,
+  });
+  return true;
+}
 
 /**
  * Overleaf-style visual editor built on CodeMirror 6.
@@ -50,6 +131,7 @@ export function TypesetVisualEditor({
           lineNumbers(),
           EditorView.lineWrapping,
           sourcePathCompartmentRef.current.of(visualSourcePath.of(path)),
+          Prec.high(keymap.of([{ key: "Enter", run: insertLatexListItemOnEnter }])),
           keymap.of([...defaultKeymap, ...historyKeymap]),
           visualDecorations,
           visualBlockClick,

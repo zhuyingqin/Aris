@@ -94,7 +94,7 @@ describe("useChatStream concurrent sessions", () => {
     });
   });
 
-  it("ignores stale Tauri listeners after a subscription refresh", () => {
+  it("keeps one Tauri subscription and uses latest callbacks after rerender", () => {
     const deltaHandlers: Array<(event: { sessionId: string; text: string }) => void> = [];
     const doneHandlers: Array<(event: { sessionId: string; text: string }) => void> = [];
     mocks.onChatDelta.mockImplementation((handler) => {
@@ -141,8 +141,8 @@ describe("useChatStream concurrent sessions", () => {
       }
     });
 
-    expect(deltaHandlers).toHaveLength(2);
-    expect(doneHandlers).toHaveLength(2);
+    expect(deltaHandlers).toHaveLength(1);
+    expect(doneHandlers).toHaveLength(1);
     expect(firstPatchAssistant).not.toHaveBeenCalled();
     expect(secondPatchAssistant).toHaveBeenCalledTimes(1);
   });

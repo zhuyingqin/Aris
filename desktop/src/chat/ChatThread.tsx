@@ -30,6 +30,12 @@ interface QuestionMarker {
   preview: string;
 }
 
+interface VirtualTurnPosition {
+  index: number;
+  start: number;
+  size: number;
+}
+
 export function questionPreviewFromTurn(turn: ChatTurn): string {
   const attachments = turn.attachments ?? [];
   const attachmentPreview = attachments.length > 0
@@ -71,9 +77,21 @@ export function activeQuestionNumber(markers: QuestionMarker[], firstVisibleTurn
   return active.number;
 }
 
+export function firstVisibleTurnIndexFromVirtualItems(
+  items: readonly VirtualTurnPosition[],
+  scrollTop: number,
+  topInset = 8,
+): number {
+  if (items.length === 0) return 0;
+  const viewportTop = Math.max(0, scrollTop + topInset);
+  const visible = items.find((item) => item.start + item.size > viewportTop);
+  return visible?.index ?? items[items.length - 1].index;
+}
+
 interface Props {
   sessionId: string;
   turns: ChatTurn[];
+  loading?: boolean;
   composerHeight: number;
   starters: string[];
   onStarter: (prompt: string) => void;
@@ -108,6 +126,7 @@ function QuestionTimeline({
   const [open, setOpen] = useState(false);
   if (markers.length < 2) return null;
   const active = activeNumber ?? markers[markers.length - 1]?.number ?? null;
+  const activeLabel = active ?? markers.length;
   return (
     <div
       className={`chat-question-timeline${open ? " open" : ""}`}
@@ -122,13 +141,13 @@ function QuestionTimeline({
       <button
         type="button"
         className="chat-question-timeline-rail"
-        aria-label={`第 ${active ?? markers.length} / ${markers.length} 次提问`}
+        aria-label={`第 ${activeLabel} / ${markers.length} 次提问`}
         onClick={() => {
           const target = active != null ? markers[active - 1] : markers[markers.length - 1];
           if (target) onJump(target.turnIndex);
         }}
       >
-        <span className="chat-question-count">{markers.length}</span>
+        <span className="chat-question-count">{activeLabel}</span>
         <span className="chat-question-ticks" aria-hidden="true">
           {markers.map((marker) => (
             <span
@@ -172,6 +191,7 @@ function turnRenderKey(turn: ChatTurn): string {
 export default function ChatThread({
   sessionId,
   turns,
+  loading = false,
   composerHeight,
   starters,
   onStarter,
@@ -200,7 +220,9 @@ export default function ChatThread({
     getItemKey: (index) => turns[index]?.id ?? index,
   });
   const virtualItems = virtualizer.getVirtualItems();
-  const firstVirtualIndex = virtualItems[0]?.index ?? 0;
+  const firstVirtualItem = virtualItems[0];
+  const lastVirtualItem = virtualItems[virtualItems.length - 1];
+  const virtualWindowKey = `${firstVirtualItem?.index ?? -1}:${firstVirtualItem?.start ?? 0}:${firstVirtualItem?.size ?? 0}:${lastVirtualItem?.index ?? -1}:${lastVirtualItem?.start ?? 0}:${lastVirtualItem?.size ?? 0}`;
   const questionMarkers = useMemo(() => questionMarkersFromTurns(turns), [turns]);
   const activeQuestion = useMemo(
     () => activeQuestionNumber(questionMarkers, firstVisibleTurnIndex),
@@ -240,9 +262,14 @@ export default function ChatThread({
     setFollowingValue(false);
   }, [markProgrammaticScroll, setFollowingValue, virtualizer]);
 
+  const syncFirstVisibleTurnIndex = useCallback((scrollTop = scrollRef.current?.scrollTop ?? 0) => {
+    const next = firstVisibleTurnIndexFromVirtualItems(virtualizer.getVirtualItems(), scrollTop);
+    setFirstVisibleTurnIndex((current) => current === next ? current : next);
+  }, [virtualizer]);
+
   useEffect(() => {
-    setFirstVisibleTurnIndex((current) => current === firstVirtualIndex ? current : firstVirtualIndex);
-  }, [firstVirtualIndex]);
+    syncFirstVisibleTurnIndex();
+  }, [syncFirstVisibleTurnIndex, virtualWindowKey]);
 
   // Land at the latest message when a conversation opens, re-pinning across a few
   // frames so the scrollbar converges as rows measure instead of jumping around.
@@ -302,11 +329,16 @@ export default function ChatThread({
           if (shouldIgnoreProgrammaticFollowScroll(programmaticScrollUntilRef.current, now, followingRef.current)) {
             return;
           }
+          syncFirstVisibleTurnIndex(event.currentTarget.scrollTop);
           setFollowingValue(isNearBottom(event.currentTarget));
         }}
         style={{ paddingBottom: composerHeight + 24 }}
       >
-        {turns.length === 0 ? (
+        {turns.length === 0 && loading ? (
+          <div className="chat-thread-loading" aria-live="polite" aria-busy="true">
+            <span className="chat-thread-spinner" aria-hidden="true" />
+          </div>
+        ) : turns.length === 0 ? (
           <div className="chat-welcome">
             <div className="chat-welcome-inner">
               <div className="chat-welcome-mark">

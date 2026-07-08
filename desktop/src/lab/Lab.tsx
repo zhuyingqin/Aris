@@ -9,7 +9,7 @@ import { useLabStore } from "./labStore";
 import CodeEditor, { type CodeDiffLine, type EditorLanguage } from "./CodeEditor";
 import FileEditorPane from "./FileEditorPane";
 import LabAssistant from "./LabAssistant";
-import LabFiles from "./LabFiles";
+import LabFiles, { type LabFileChange } from "./LabFiles";
 import { OutputView } from "./outputs";
 import type {
   LabCellOutputEvent,
@@ -163,10 +163,36 @@ function basename(path: string | null | undefined): string {
   return path.replace(/\\/g, "/").replace(/\/+$/, "").split("/").pop() || path;
 }
 
+function normalizeLabPath(path: string): string {
+  return path.replace(/\\/g, "/").replace(/^\/+/, "").replace(/\/+$/, "");
+}
+
 function dirname(path: string): string {
-  const normalized = path.replace(/\\/g, "/");
+  const normalized = normalizeLabPath(path);
   const index = normalized.lastIndexOf("/");
   return index > 0 ? normalized.slice(0, index) : "";
+}
+
+function pathContains(parent: string, child: string): boolean {
+  const normalizedParent = normalizeLabPath(parent);
+  const normalizedChild = normalizeLabPath(child);
+  return normalizedChild === normalizedParent || normalizedChild.startsWith(`${normalizedParent}/`);
+}
+
+function remapPath(path: string, from: string, to: string): string {
+  const normalizedPath = normalizeLabPath(path);
+  const normalizedFrom = normalizeLabPath(from);
+  const normalizedTo = normalizeLabPath(to);
+  if (normalizedPath === normalizedFrom) return normalizedTo;
+  if (normalizedPath.startsWith(`${normalizedFrom}/`)) {
+    return `${normalizedTo}/${normalizedPath.slice(normalizedFrom.length + 1)}`;
+  }
+  return normalizedPath;
+}
+
+function renamedTab(tab: LabEditorTab, from: string, to: string): LabEditorTab {
+  const path = remapPath(tab.path, from, to);
+  return { ...tab, id: editorTabId(tab.kind, path), path };
 }
 
 function editorTabId(kind: LabEditorKind, path: string): string {
@@ -997,6 +1023,77 @@ export default function Lab() {
     setSelected(null);
   };
 
+  const clearActiveNotebook = () => {
+    useLabStore.setState({ activePath: null, view: null, variables: [], reviewBaseline: null });
+    setSelected(null);
+    setDrafts({});
+  };
+
+  const handleFileChanged = (change: LabFileChange) => {
+    if (change.type === "create") {
+      void refreshNotebooks();
+      return;
+    }
+
+    const sourcePath = normalizeLabPath(change.path);
+    if (!sourcePath) {
+      void refreshNotebooks();
+      return;
+    }
+
+    if (change.type === "rename") {
+      const targetPath = normalizeLabPath(change.newPath);
+      if (!targetPath || sourcePath === targetPath) {
+        void refreshNotebooks();
+        return;
+      }
+
+      setOpenTabs((tabs) => tabs.map((tab) => (pathContains(sourcePath, tab.path) ? renamedTab(tab, sourcePath, targetPath) : tab)));
+      setAssistantAttachments((items) =>
+        items.map((item) => {
+          if (!item.path || !pathContains(sourcePath, item.path)) return item;
+          const path = remapPath(item.path, sourcePath, targetPath);
+          return { ...item, path, name: basename(path) || item.name };
+        }),
+      );
+
+      if (activeFilePath && pathContains(sourcePath, activeFilePath)) {
+        setActiveFilePath(remapPath(activeFilePath, sourcePath, targetPath));
+      }
+      if (activePath && pathContains(sourcePath, activePath)) {
+        const nextActivePath = remapPath(activePath, sourcePath, targetPath);
+        if (activeFilePath) {
+          useLabStore.setState({ activePath: nextActivePath });
+          void refreshNotebooks();
+        } else {
+          void open(nextActivePath).then(() => refreshNotebooks());
+        }
+      } else {
+        void refreshNotebooks();
+      }
+      return;
+    }
+
+    const removedIds = new Set(openTabs.filter((tab) => pathContains(sourcePath, tab.path)).map((tab) => tab.id));
+    const nextTabs = openTabs.filter((tab) => !removedIds.has(tab.id));
+    const firstRemovedIndex = openTabs.findIndex((tab) => removedIds.has(tab.id));
+    const fallback = firstRemovedIndex >= 0 ? nextTabs[Math.min(firstRemovedIndex, nextTabs.length - 1)] ?? null : null;
+    const activeFileRemoved = Boolean(activeFilePath && pathContains(sourcePath, activeFilePath));
+    const activeNotebookRemoved = Boolean(activePath && pathContains(sourcePath, activePath));
+    const activeEditorRemoved = Boolean(activeEditorTabId && removedIds.has(activeEditorTabId));
+
+    setOpenTabs(nextTabs);
+    setAssistantAttachments((items) => items.filter((item) => !item.path || !pathContains(sourcePath, item.path)));
+
+    if (activeFileRemoved) setActiveFilePath(null);
+    if (activeNotebookRemoved && (!fallback || fallback.kind !== "notebook")) clearActiveNotebook();
+
+    if (activeEditorRemoved && fallback) {
+      window.setTimeout(() => void activateEditorTab(fallback), 0);
+    }
+    void refreshNotebooks();
+  };
+
   // Clicking an activity icon: expand to that view, collapse it when it's
   // already the open one, or just switch views. The activity bar always stays
   // visible, so a collapsed side panel can always be restored from here.
@@ -1160,6 +1257,7 @@ export default function Lab() {
                 onOpenNotebook={(path) => void handleOpenNotebook(path)}
                 onOpenFile={handleOpenFile}
                 onAttachToAssistant={attachToAssistant}
+                onFileChanged={handleFileChanged}
               />
             )}
 

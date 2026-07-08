@@ -919,26 +919,50 @@ function buildDecorations(state: EditorState): VisualDecorations {
   // --- Lists: bullet / number markers in place of \item ---
   const listRe = /\\begin\{(itemize|enumerate)\}(\s*\[[^\]]*\])?([\s\S]*?)\\end\{\1\}/g;
   listRe.lastIndex = bodyStart;
+  const openListRanges: Range[] = [];
+  const withinOpenList = (pos: number) => openListRanges.some((r) => pos >= r.from && pos < r.to);
   let lm: RegExpExecArray | null;
   while ((lm = listRe.exec(text)) && lm.index < scanEnd) {
     const ordered = lm[1] === "enumerate";
     const bodyFrom = lm.index + `\\begin{${lm[1]}}`.length + (lm[2]?.length ?? 0);
     const bodyTo = lm.index + lm[0].length - `\\end{${lm[1]}}`.length;
+    const listTo = lm.index + lm[0].length;
+    const listIsEditing = selectionTouches(state, lm.index, listTo);
+    if (listIsEditing) {
+      openListRanges.push({ from: lm.index, to: listTo });
+    }
     // Hide the \begin / \end environment lines themselves.
-    hide(lm.index, bodyFrom);
-    hide(bodyTo, lm.index + lm[0].length);
-    const itemRe = /\\item(?:\[[^\]]*\])?/g;
+    if (!listIsEditing) {
+      hide(lm.index, bodyFrom);
+      hide(bodyTo, listTo);
+    }
+    const listSpacingRe = /\\setlength\s*(?:\{\\itemsep\}|\\itemsep)\s*\{[^}]*\}/g;
+    listSpacingRe.lastIndex = bodyFrom;
+    let spacing: RegExpExecArray | null;
+    while ((spacing = listSpacingRe.exec(text)) && spacing.index < bodyTo) {
+      if (!listIsEditing && !selectionTouches(state, spacing.index, spacing.index + spacing[0].length)) {
+        hide(spacing.index, spacing.index + spacing[0].length);
+      }
+    }
+
+    const itemRe = /\\item(?![A-Za-z])(?:\s*\[([^\]]*)\])?/g;
     itemRe.lastIndex = bodyFrom;
+    const items: Array<{ match: RegExpExecArray; from: number; to: number; lineFrom: number }> = [];
     let it: RegExpExecArray | null;
-    let n = 0;
     while ((it = itemRe.exec(text)) && it.index < bodyTo) {
-      n += 1;
-      const itemEnd = it.index + it[0].length;
       const line = state.doc.lineAt(it.index);
-      marks.push({ from: line.from, to: line.from, value: listItemLine });
-      if (!selectionTouches(state, it.index, itemEnd)) {
-        const marker = ordered ? `${n}.` : "•";
-        hide(it.index, itemEnd, Decoration.replace({ widget: new ItemMarkerWidget(marker) }));
+      items.push({ match: it, from: it.index, to: it.index + it[0].length, lineFrom: line.from });
+    }
+    let n = 0;
+    for (let index = 0; index < items.length; index += 1) {
+      const item = items[index];
+      n += 1;
+      const itemRangeEnd = items[index + 1]?.from ?? bodyTo;
+      marks.push({ from: item.lineFrom, to: item.lineFrom, value: listItemLine });
+      if (!listIsEditing && !selectionTouches(state, item.from, itemRangeEnd)) {
+        const customMarker = item.match[1]?.trim();
+        const marker = customMarker || (ordered ? `${n}.` : "•");
+        hide(item.from, item.to, Decoration.replace({ widget: new ItemMarkerWidget(marker) }));
       }
     }
   }
@@ -1061,6 +1085,7 @@ function buildDecorations(state: EditorState): VisualDecorations {
   while ((em = envMarkerRe.exec(text))) {
     if (em[2] === "document") continue; // preamble fold / \end{document} handle these
     if (withinOpenFloat(em.index)) continue; // open float is fully raw
+    if (withinOpenList(em.index)) continue; // open list is fully raw while editing
     if (selectionTouches(state, em.index, em.index + em[0].length)) continue;
     hide(em.index, em.index + em[0].length);
   }

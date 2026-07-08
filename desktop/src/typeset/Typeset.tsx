@@ -3574,16 +3574,12 @@ export default function Typeset() {
     void compile();
   };
 
-  // Auto-compile the currently open tex once when it is opened, so viewing it in
-  // the Visual editor shows the compiled PDF for that file (the same target as
-  // Recompile) instead of a stale/empty preview. Manual edits still require an
-  // explicit Recompile.
+  // Auto-compile removed: shows last compiled PDF. Click Recompile when ready.
   useEffect(() => {
     if (!sourcePath || !loaded || loading || saving) return;
     if (autoCompiledPathRef.current === sourcePath) return;
     autoCompiledPathRef.current = sourcePath;
-    compileRef.current();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // auto-compile removed, click Recompile when ready
   }, [sourcePath, loaded, loading, saving]);
 
   const handleEditorKey = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -3808,20 +3804,20 @@ export default function Typeset() {
         style={gridStyle}
         onPointerDownCapture={beginGridResizeFromPointer}
       >
-        <nav className="typeset-rail ide-rail" aria-label="Typeset sections">
-          <div className="ide-rail-tabs-nav">
-            <div className="ide-rail-tabs-wrapper">
-              <button
-                type="button"
-                className={`ide-rail-tab-link${projectPanelVisible ? " open-rail active" : ""}`}
-                title={projectPanelVisible ? "Hide Project files" : "Show Project files"}
-                aria-label={projectPanelVisible ? "Hide Project files" : "Show Project files"}
-                aria-pressed={projectPanelVisible}
-                onClick={() => setProjectPanelVisible((visible) => !visible)}
-              >
-                <ToolIcon name="files" className="ide-rail-tab-link-icon" />
-              </button>
-              {(sourcePath || loaded) && (
+        {(sourcePath || loaded) && (
+          <nav className="typeset-rail ide-rail" aria-label="Typeset sections">
+            <div className="ide-rail-tabs-nav">
+              <div className="ide-rail-tabs-wrapper">
+                <button
+                  type="button"
+                  className={`ide-rail-tab-link${projectPanelVisible ? " open-rail active" : ""}`}
+                  title={projectPanelVisible ? "Hide Project files" : "Show Project files"}
+                  aria-label={projectPanelVisible ? "Hide Project files" : "Show Project files"}
+                  aria-pressed={projectPanelVisible}
+                  onClick={() => setProjectPanelVisible((visible) => !visible)}
+                >
+                  <ToolIcon name="files" className="ide-rail-tab-link-icon" />
+                </button>
                 <button
                   type="button"
                   className={`ide-rail-tab-link${pdfPanelVisible ? " open-rail active" : ""}`}
@@ -3832,8 +3828,6 @@ export default function Typeset() {
                 >
                   <ToolIcon name="visual" className="ide-rail-tab-link-icon" />
                 </button>
-              )}
-              {(sourcePath || loaded) && (
                 <button
                   type="button"
                   className="ide-rail-tab-link"
@@ -3844,15 +3838,15 @@ export default function Typeset() {
                 >
                   <ToolIcon name="home" className="ide-rail-tab-link-icon" />
                 </button>
-              )}
+              </div>
+              <nav aria-label="Settings">
+                <button type="button" className="ide-rail-tab-link" title="Settings" aria-label="Settings">
+                  <ToolIcon name="settings" className="ide-rail-tab-link-icon" />
+                </button>
+              </nav>
             </div>
-            <nav aria-label="Settings">
-              <button type="button" className="ide-rail-tab-link" title="Settings" aria-label="Settings">
-                <ToolIcon name="settings" className="ide-rail-tab-link-icon" />
-              </button>
-            </nav>
-          </div>
-        </nav>
+          </nav>
+        )}
         {!sourcePath && !loaded ? (
           <TypesetStartPage
             projectPath={currentProject?.path ?? null}

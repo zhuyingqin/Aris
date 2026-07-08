@@ -135,7 +135,7 @@ fn legacy_store_path() -> PathBuf {
 }
 
 fn chat_ui_sessions_path() -> PathBuf {
-    state::runtime_dir().join("chat-ui-sessions.json")
+    state::desktop_runtime_dir().join("chat-ui-sessions.json")
 }
 
 fn aris_automations_dir() -> PathBuf {

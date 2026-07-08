@@ -166,7 +166,7 @@ npm run tauri build
 - **Executor** 与 **Reviewer** —— provider、model、base URL、API key
 - **Scopus API key**、**语言**、**记忆写入审批** 与对当前模型配置的 **连通性检查**
 
-配置保存在本地 `~/.config/aris/config.json`。API key 默认在 UI 中脱敏；在本机 Settings 里点击“显示”可以临时查看明文，普通配置视图仍只返回 masked preview。
+配置保存在本地 `~/.config/SomniQ/config.json`。API key 默认在 UI 中脱敏；在本机 Settings 里点击“显示”可以临时查看明文，普通配置视图仍只返回 masked preview。
 
 ### MCP 与 Playwright
 
@@ -249,7 +249,7 @@ Playwright 预设时不需要自己安装 Node.js / npm。默认预设使用 Mic
 ## 📁 配置与项目数据
 
 ```text
-~/.config/aris/
+~/.config/SomniQ/
 ├── config.json                 # provider、model、base URL、key、语言
 ├── desktop-workspace           # 默认 workspace root
 └── desktop-runtime/
@@ -261,7 +261,7 @@ Playwright 预设时不需要自己安装 Node.js / npm。默认预设使用 Mic
         └── user-workflows/     # 用户手写草稿
 ```
 
-用 `ARIS_WORKSPACE_ROOT` 可覆盖默认 workspace root。
+用 `ARIS_WORKSPACE_ROOT` 可覆盖默认 workspace root。CLI/runtime 在任意 workspace 下的默认 fallback 是 `<workspace>/.somniq/runtime/`，除非设置了 `ARIS_RUNTIME_ROOT` 或更具体的 `ARIS_*_DIR` 变量。
 
 `config.json` 与 Settings 页使用同一组 snake_case 字段：
 

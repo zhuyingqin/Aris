@@ -4,10 +4,13 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("../api/tauri", () => ({
+const apiMocks = vi.hoisted(() => ({
   fileOpen: vi.fn(),
+  fileReadBytes: vi.fn(() => Promise.resolve([137, 80, 78, 71])),
   isTauri: vi.fn(() => false),
 }));
+
+vi.mock("../api/tauri", () => apiMocks);
 
 vi.mock("mermaid", () => ({
   default: {
@@ -21,6 +24,16 @@ import MarkdownContent from "./MarkdownContent";
 import { useStore } from "../store";
 
 beforeEach(() => {
+  vi.clearAllMocks();
+  apiMocks.fileReadBytes.mockResolvedValue([137, 80, 78, 71]);
+  Object.defineProperty(URL, "createObjectURL", {
+    configurable: true,
+    value: vi.fn(() => "blob:mock-image"),
+  });
+  Object.defineProperty(URL, "revokeObjectURL", {
+    configurable: true,
+    value: vi.fn(),
+  });
   useStore.setState({
     tab: "chat",
     pendingStudioArtifactId: null,
@@ -47,6 +60,23 @@ describe("MarkdownContent Studio links", () => {
 
     expect(screen.getByText("Large response preview")).toBeTruthy();
     expect(screen.getByText(/characters are hidden here/)).toBeTruthy();
+  });
+
+  it("renders Markdown data URL images inline", () => {
+    render(<MarkdownContent text="![plot](data:image/png;base64,ZmFrZQ==)" />);
+
+    const image = screen.getByRole("img", { name: "plot" }) as HTMLImageElement;
+    expect(image.src).toContain("data:image/png;base64,ZmFrZQ==");
+    expect(apiMocks.fileReadBytes).not.toHaveBeenCalled();
+  });
+
+  it("reads local Markdown image files as blob previews", async () => {
+    render(<MarkdownContent text="![plot](results/plot.png)" />);
+
+    const image = await screen.findByRole("img", { name: "plot" }) as HTMLImageElement;
+
+    expect(apiMocks.fileReadBytes).toHaveBeenCalledWith("results/plot.png");
+    expect(image.src).toBe("blob:mock-image");
   });
 
   it("renders Mermaid code blocks as diagrams", async () => {

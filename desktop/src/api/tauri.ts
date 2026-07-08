@@ -4,7 +4,10 @@ import {
   isFilePreviewMode,
   isLabPreviewMode,
   previewExecuteFile,
+  previewCreateDir,
+  previewDeletePath,
   previewFileTree,
+  previewRenamePath,
   previewReadBytes,
   previewKernelspecs,
   previewKernelInfo,
@@ -28,6 +31,9 @@ export const openExternalUrl = (url: string) => {
 };
 import type {
   ChatCommandResult,
+  ChatEventLogEntry,
+  ChatEventsReplay,
+  ChatEventsRestoreResult,
   ChatModelOptions,
   ChatToolProgress,
   ChatStatus,
@@ -346,6 +352,13 @@ export const skillView = (name: string) =>
 export const sessionsList = () => invoke<SessionSummary[]>("sessions_list");
 export const sessionGet = (id: string) =>
   invoke<SessionTranscript>("session_get", { id });
+export const chatUiSessionsList = <T>() => invoke<T[]>("chat_ui_sessions_list");
+export const chatUiSessionLoad = <T>(id: string) =>
+  invoke<T>("chat_ui_session_load", { id });
+export const chatUiSessionSave = <T>(session: T) =>
+  invoke<void>("chat_ui_session_save", { session });
+export const chatUiSessionDelete = (id: string) =>
+  invoke<void>("chat_ui_session_delete", { id });
 export const chatUiSessionsLoad = <T>() => invoke<T[]>("chat_ui_sessions_load");
 export const chatUiSessionsSave = <T>(sessions: T[]) =>
   invoke<void>("chat_ui_sessions_save", { sessions });
@@ -623,6 +636,22 @@ export const fileCreateText = (path: string, content: string) =>
     :
   invoke<FileText>("file_create_text", { path, content });
 
+export const fileCreateDir = (path: string) =>
+  isFilePreviewMode()
+    ? preview<FileTreeEntry>(previewCreateDir(path))
+    :
+  invoke<FileTreeEntry>("file_create_dir", { path });
+
+export const fileRename = (path: string, newPath: string) =>
+  isFilePreviewMode()
+    ? preview<FileTreeEntry>(previewRenamePath(path, newPath))
+    :
+  invoke<FileTreeEntry>("file_rename", { path, newPath });
+
+export const fileDelete = (path: string) =>
+  isFilePreviewMode() ? previewDeletePath(path) :
+  invoke<void>("file_delete", { path });
+
 export const fileReadBytes = (path: string) =>
   isFilePreviewMode() ? previewReadBytes(path) :
   invoke<number[]>("file_read_bytes", { path });
@@ -754,6 +783,14 @@ export const chatSetContext = (
 export const chatDelete = (sessionId: string, projectId?: string) =>
   invoke<void>("chat_delete", { sessionId, projectId: projectId ?? null });
 export const chatCancel = (sessionId: string) => invoke<void>("chat_cancel", { sessionId });
+export const chatEventsRead = (sessionId: string) =>
+  invoke<ChatEventLogEntry[]>("chat_events_read", { sessionId });
+export const chatEventsExport = (sessionId: string, path?: string | null) =>
+  invoke<string>("chat_events_export", { sessionId, path: path ?? null });
+export const chatEventsReplay = (sessionId: string) =>
+  invoke<ChatEventsReplay>("chat_events_replay", { sessionId });
+export const chatEventsRestore = (sessionId: string) =>
+  invoke<ChatEventsRestoreResult>("chat_events_restore", { sessionId });
 
 export interface ChatTextEvent {
   sessionId: string;

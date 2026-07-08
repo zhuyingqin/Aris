@@ -23,6 +23,25 @@ pub struct FileText {
     bytes: u64,
 }
 
+fn file_tree_entry_from_path(path: &Path, root: &Path) -> Result<FileTreeEntry, String> {
+    let metadata = std::fs::metadata(path).map_err(|error| error.to_string())?;
+    if !metadata.is_dir() && !metadata.is_file() {
+        return Err(format!(
+            "path is not a file or directory: {}",
+            path.display()
+        ));
+    }
+    let name = path
+        .file_name()
+        .map(|value| value.to_string_lossy().into_owned())
+        .unwrap_or_else(|| display_workspace_path(path, root));
+    Ok(FileTreeEntry {
+        name,
+        path: display_workspace_path(path, root),
+        is_dir: metadata.is_dir(),
+    })
+}
+
 fn mojibake_score(text: &str) -> usize {
     text.chars()
         .filter(|ch| {
@@ -286,11 +305,48 @@ pub(crate) fn resolve_workspace_file(path: &str) -> Result<(PathBuf, PathBuf), S
     Ok((root, target))
 }
 
-pub(crate) fn resolve_workspace_output_file(path: &str) -> Result<(PathBuf, PathBuf), String> {
+fn resolve_workspace_existing_path(path: &str) -> Result<(PathBuf, PathBuf), String> {
     let root = workspace_root()?;
     let raw = path.trim().trim_matches(|ch| matches!(ch, '`' | '<' | '>'));
     if raw.is_empty() {
-        return Err("file path is empty".to_string());
+        return Err("path is empty".to_string());
+    }
+    let candidate = {
+        let path = Path::new(raw);
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            root.join(path)
+        }
+    };
+    let target = candidate
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    if !target.starts_with(&root) {
+        return Err("path is outside the current workspace".to_string());
+    }
+    if target == root {
+        return Err("operation is not allowed on the workspace root".to_string());
+    }
+    let metadata = std::fs::metadata(&target).map_err(|error| error.to_string())?;
+    if !metadata.is_dir() && !metadata.is_file() {
+        return Err(format!(
+            "path is not a file or directory: {}",
+            target.display()
+        ));
+    }
+    Ok((root, target))
+}
+
+pub(crate) fn resolve_workspace_output_file(path: &str) -> Result<(PathBuf, PathBuf), String> {
+    resolve_workspace_output_path(path, "file")
+}
+
+fn resolve_workspace_output_path(path: &str, kind: &str) -> Result<(PathBuf, PathBuf), String> {
+    let root = workspace_root()?;
+    let raw = path.trim().trim_matches(|ch| matches!(ch, '`' | '<' | '>'));
+    if raw.is_empty() {
+        return Err(format!("{kind} path is empty"));
     }
     let candidate = {
         let path = Path::new(raw);
@@ -302,14 +358,14 @@ pub(crate) fn resolve_workspace_output_file(path: &str) -> Result<(PathBuf, Path
     };
     let parent = candidate
         .parent()
-        .ok_or_else(|| "file path must include a file name".to_string())?;
+        .ok_or_else(|| format!("{kind} path must include a name"))?;
     let canonical_parent = canonicalize_path_allow_missing(parent)?;
     if !canonical_parent.starts_with(&root) {
-        return Err("file is outside the current workspace".to_string());
+        return Err(format!("{kind} is outside the current workspace"));
     }
     let file_name = candidate
         .file_name()
-        .ok_or_else(|| "file path must include a file name".to_string())?;
+        .ok_or_else(|| format!("{kind} path must include a name"))?;
     Ok((root, canonical_parent.join(file_name)))
 }
 
@@ -477,6 +533,47 @@ pub fn file_create_text(path: String, content: String) -> Result<FileText, Strin
         content,
         bytes: metadata.len(),
     })
+}
+
+#[tauri::command]
+pub fn file_create_dir(path: String) -> Result<FileTreeEntry, String> {
+    let (root, target) = resolve_workspace_output_path(&path, "directory")?;
+    if target.exists() {
+        return Err(format!("directory already exists: {}", target.display()));
+    }
+    std::fs::create_dir_all(&target).map_err(|error| error.to_string())?;
+    file_tree_entry_from_path(&target, &root)
+}
+
+#[tauri::command]
+pub fn file_rename(path: String, new_path: String) -> Result<FileTreeEntry, String> {
+    let (root, source) = resolve_workspace_existing_path(&path)?;
+    let (_root, target) = resolve_workspace_output_path(&new_path, "target")?;
+    if source == target {
+        return file_tree_entry_from_path(&source, &root);
+    }
+    if target.exists() {
+        return Err(format!("target already exists: {}", target.display()));
+    }
+    if source.is_dir() && target.starts_with(&source) {
+        return Err("cannot move a directory inside itself".to_string());
+    }
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    std::fs::rename(&source, &target).map_err(|error| error.to_string())?;
+    file_tree_entry_from_path(&target, &root)
+}
+
+#[tauri::command]
+pub fn file_delete(path: String) -> Result<(), String> {
+    let (_root, target) = resolve_workspace_existing_path(&path)?;
+    let metadata = std::fs::metadata(&target).map_err(|error| error.to_string())?;
+    if metadata.is_dir() {
+        std::fs::remove_dir_all(&target).map_err(|error| error.to_string())
+    } else {
+        std::fs::remove_file(&target).map_err(|error| error.to_string())
+    }
 }
 
 #[tauri::command]

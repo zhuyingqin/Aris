@@ -63,7 +63,16 @@ impl LatexEnginePreference {
 }
 
 #[tauri::command]
-pub fn latex_compile(
+pub async fn latex_compile(
+    input_path: String,
+    output_path: Option<String>,
+) -> Result<LatexCompileResult, String> {
+    tauri::async_runtime::spawn_blocking(move || latex_compile_blocking(input_path, output_path))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+fn latex_compile_blocking(
     input_path: String,
     output_path: Option<String>,
 ) -> Result<LatexCompileResult, String> {

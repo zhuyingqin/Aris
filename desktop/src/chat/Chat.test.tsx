@@ -12,6 +12,7 @@ import ChatSidebar from "./ChatSidebar";
 import CommandSelection from "./CommandSelection";
 import {
   activeQuestionNumber,
+  firstVisibleTurnIndexFromVirtualItems,
   isNearBottom,
   isScrollbarPointer,
   questionMarkersFromTurns,
@@ -153,6 +154,21 @@ describe("Chat interaction helpers", () => {
     expect(activeQuestionNumber([], 0)).toBeNull();
   });
 
+  it("derives the visible turn from real scroll position instead of overscan", () => {
+    const items = [
+      { index: 0, start: 0, size: 120 },
+      { index: 1, start: 120, size: 180 },
+      { index: 2, start: 300, size: 160 },
+      { index: 3, start: 460, size: 220 },
+    ];
+
+    expect(firstVisibleTurnIndexFromVirtualItems(items, 0)).toBe(0);
+    expect(firstVisibleTurnIndexFromVirtualItems(items, 126)).toBe(1);
+    expect(firstVisibleTurnIndexFromVirtualItems(items, 300)).toBe(2);
+    expect(firstVisibleTurnIndexFromVirtualItems(items, 900)).toBe(3);
+    expect(firstVisibleTurnIndexFromVirtualItems([], 300)).toBe(0);
+  });
+
   it("creates a readable diff for file edit tools", () => {
     const change = diffFromTool({
       kind: "tool",
@@ -217,6 +233,56 @@ describe("Chat interaction helpers", () => {
     );
 
     expect(screen.getByRole("button", { name: "reports/result.md" })).toBeTruthy();
+  });
+
+  it("renders sent image attachments as image previews", () => {
+    render(
+      <ChatMessage
+        turn={{
+          id: "user-image",
+          role: "user",
+          blocks: [{ kind: "text", text: "see attached" }],
+          attachments: [{
+            id: "att-image",
+            kind: "image",
+            name: "shot.png",
+            preview: "data:image/png;base64,ZmFrZQ==",
+          }],
+        }}
+        canRetry={false}
+        onEdit={() => undefined}
+        onRetry={() => undefined}
+        onContinue={() => undefined}
+      />,
+    );
+
+    const image = screen.getByRole("img", { name: "shot.png" }) as HTMLImageElement;
+    expect(image.src).toContain("data:image/png;base64,ZmFrZQ==");
+    expect(screen.queryByText(/shot\.png$/)).toBeNull();
+  });
+
+  it("renders image paths mentioned by tool output as previews", () => {
+    render(
+      <ChatMessage
+        turn={{
+          id: "assistant-tool-image",
+          role: "assistant",
+          blocks: [{
+            kind: "tool",
+            name: "run_experiment",
+            input: "{}",
+            output: "saved figure to https://example.com/results/plot.png",
+          }],
+        }}
+        canRetry={false}
+        onEdit={() => undefined}
+        onRetry={() => undefined}
+        onContinue={() => undefined}
+      />,
+    );
+
+    const image = screen.getByRole("img", { name: "https://example.com/results/plot.png" }) as HTMLImageElement;
+    expect(image.src).toBe("https://example.com/results/plot.png");
   });
 
   it("renders assistant Markdown file references as local links", () => {

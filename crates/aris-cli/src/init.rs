@@ -9,7 +9,11 @@ const STARTER_CLAUDE_JSON: &str = concat!(
     "}\n",
 );
 const GITIGNORE_COMMENT: &str = "# ARIS-Code local artifacts";
-const GITIGNORE_ENTRIES: [&str; 2] = [".claude/settings.local.json", ".claude/sessions/"];
+const GITIGNORE_ENTRIES: [&str; 3] = [
+    ".claude/settings.local.json",
+    ".somniq/",
+    ".claude/sessions/",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InitStatus {
@@ -373,6 +377,7 @@ mod tests {
         );
         let gitignore = fs::read_to_string(root.join(".gitignore")).expect("read gitignore");
         assert!(gitignore.contains(".claude/settings.local.json"));
+        assert!(gitignore.contains(".somniq/"));
         assert!(gitignore.contains(".claude/sessions/"));
         let claude_md = fs::read_to_string(root.join("CLAUDE.md")).expect("read claude md");
         assert!(claude_md.contains("Languages: Rust."));
@@ -405,6 +410,7 @@ mod tests {
         );
         let gitignore = fs::read_to_string(root.join(".gitignore")).expect("read gitignore");
         assert_eq!(gitignore.matches(".claude/settings.local.json").count(), 1);
+        assert_eq!(gitignore.matches(".somniq/").count(), 1);
         assert_eq!(gitignore.matches(".claude/sessions/").count(), 1);
 
         fs::remove_dir_all(root).expect("cleanup temp dir");

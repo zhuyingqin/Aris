@@ -601,3 +601,27 @@ export interface ChatTurn {
   stopped?: boolean;
   attachments?: ChatAttachment[];
 }
+
+export interface ChatEventLogEntry {
+  version: number;
+  seq: number;
+  ts: number;
+  sessionId: string;
+  kind: string;
+  payload: unknown;
+}
+
+export interface ChatEventsReplay {
+  sessionId: string;
+  eventCount: number;
+  lastSeq: number;
+  turns: ChatTurn[];
+}
+
+export interface ChatEventsRestoreResult {
+  sessionId: string;
+  eventCount: number;
+  lastSeq: number;
+  messageCount: number;
+  restoredPath: string;
+}

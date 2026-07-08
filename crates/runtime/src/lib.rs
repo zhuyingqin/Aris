@@ -19,6 +19,7 @@ mod mcp_client;
 mod mcp_stdio;
 mod memory_provider;
 mod oauth;
+mod paths;
 mod permissions;
 mod process;
 mod process_registry;
@@ -95,6 +96,17 @@ pub use oauth::{
     parse_oauth_callback_request_target, save_oauth_credentials, OAuthAuthorizationRequest,
     OAuthCallbackParams, OAuthRefreshRequest, OAuthTokenExchangeRequest, OAuthTokenSet,
     PkceChallengeMethod, PkceCodePair,
+};
+pub use paths::{
+    migrate_legacy_project_runtime_dirs, project_agent_store_dir_from_env,
+    project_run_state_dir_from_env, project_runtime_dir_for, project_runtime_dir_from_env,
+    project_sessions_dir_from_env, project_workflows_dir_from_env, somniq_config_dir_from_env,
+    user_workflows_dir_from_env, workspace_root_from_env, AGENTS_DIR_NAME,
+    ARIS_AGENT_STORE_DIR_ENV, ARIS_RUNTIME_ROOT_ENV, ARIS_RUN_STATE_DIR_ENV, ARIS_SESSIONS_DIR_ENV,
+    ARIS_USER_WORKFLOWS_DIR_ENV, ARIS_WORKFLOWS_DIR_ENV, ARIS_WORKSPACE_ROOT_ENV,
+    CLAWD_AGENT_STORE_ENV, LEGACY_CLAUDE_DIR_NAME, LEGACY_CLAWD_AGENTS_DIR_NAME,
+    RUN_STATE_DIR_NAME, SESSIONS_DIR_NAME, SOMNIQ_RUNTIME_DIR_NAME, USER_WORKFLOWS_DIR_NAME,
+    WORKFLOWS_DIR_NAME,
 };
 pub use permissions::{
     PermissionMode, PermissionOutcome, PermissionPolicy, PermissionPromptDecision,

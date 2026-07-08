@@ -90,7 +90,7 @@ First launch opens **Settings**, where you configure:
 - **Executor** and **Reviewer** — provider, model, base URL, API key
 - **Language** and **connectivity checks** for the configured models
 
-Config is stored locally at `~/.config/aris/config.json`. API keys are masked in the UI — the Tauri
+Config is stored locally at `~/.config/SomniQ/config.json`. API keys are masked in the UI — the Tauri
 backend reads/writes them locally and never returns raw secrets to the frontend.
 
 ---
@@ -166,7 +166,7 @@ To run a workflow: design it in **Workflow Studio**, save the plan, then start a
 ## 📁 Configuration & Project Data
 
 ```text
-~/.config/aris/
+~/.config/SomniQ/
 ├── config.json                 # providers, models, base URLs, keys, language
 ├── desktop-workspace           # default workspace root
 └── desktop-runtime/
@@ -178,7 +178,9 @@ To run a workflow: design it in **Workflow Studio**, save the plan, then start a
         └── user-workflows/     # user-authored drafts
 ```
 
-Set `ARIS_WORKSPACE_ROOT` to override the default workspace root.
+Set `ARIS_WORKSPACE_ROOT` to override the default workspace root. CLI/runtime fallbacks for an
+arbitrary workspace use `<workspace>/.somniq/runtime/` unless `ARIS_RUNTIME_ROOT` or a more
+specific `ARIS_*_DIR` variable is set.
 
 ---
 

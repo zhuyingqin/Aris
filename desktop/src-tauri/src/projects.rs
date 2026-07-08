@@ -75,7 +75,7 @@ fn default_registry() -> ProjectRegistry {
 }
 
 fn registry_path() -> PathBuf {
-    state::runtime_dir().join(PROJECTS_FILE)
+    state::desktop_runtime_dir().join(PROJECTS_FILE)
 }
 
 fn normalize_path(path: &Path) -> String {

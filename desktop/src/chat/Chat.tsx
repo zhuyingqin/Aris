@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, 
 import { createPortal } from "react-dom";
 import {
   chatDelete,
+  chatUiSessionDelete,
   chatCommandSpecs,
   chatModelOptions,
   chatModelSet,
@@ -69,6 +70,9 @@ function detectFilePath(element: HTMLElement): string | null {
 // under-counted CJK-heavy text by roughly 3x — the ContextRing read low and
 // users hit the real window without warning. Weight CJK separately. Still a
 // heuristic; replace with a real tokenizer when one is wired up (#34 P0-3.1).
+const EXACT_TOKEN_ESTIMATE_CHAR_LIMIT = 80_000;
+const TOKEN_ESTIMATE_SAMPLE_CHARS = 24_000;
+
 function isCjkCharCode(code: number): boolean {
   return (
     (code >= 0x3000 && code <= 0x9fff) || // CJK symbols/punct, ideographs, Hangul/Kana
@@ -77,7 +81,7 @@ function isCjkCharCode(code: number): boolean {
   );
 }
 
-function estimateTextTokens(text: string): number {
+function estimateTextTokenBody(text: string): number {
   let cjk = 0;
   let other = 0;
   for (const char of text) {
@@ -85,7 +89,18 @@ function estimateTextTokens(text: string): number {
     if (isCjkCharCode(code)) cjk += 1;
     else other += 1;
   }
-  return cjk + Math.round(other / 3.5) + 1;
+  return cjk + Math.round(other / 3.5);
+}
+
+function estimateTextTokens(text: string): number {
+  if (text.length <= EXACT_TOKEN_ESTIMATE_CHAR_LIMIT) {
+    return estimateTextTokenBody(text) + 1;
+  }
+  const head = text.slice(0, TOKEN_ESTIMATE_SAMPLE_CHARS);
+  const tail = text.slice(-TOKEN_ESTIMATE_SAMPLE_CHARS);
+  const sampleLength = head.length + tail.length;
+  const sampleTokens = estimateTextTokenBody(head) + estimateTextTokenBody(tail);
+  return Math.max(1, Math.round((sampleTokens / sampleLength) * text.length) + 1);
 }
 
 function estimateTokens(turns: ChatTurn[]): number {
@@ -99,6 +114,15 @@ function estimateTokens(turns: ChatTurn[]): number {
     }
   }
   return tokens;
+}
+
+function deferHeavyUiWork(callback: () => void): () => void {
+  if (typeof window.requestIdleCallback === "function") {
+    const handle = window.requestIdleCallback(() => callback(), { timeout: 700 });
+    return () => window.cancelIdleCallback(handle);
+  }
+  const handle = window.setTimeout(callback, 100);
+  return () => window.clearTimeout(handle);
 }
 
 type ContextOverride = { tokens: number; anchor: number };
@@ -366,6 +390,7 @@ export default function Chat() {
     allSessions,
     currentId,
     currentSession,
+    currentSessionLoading,
     setCurrentId,
     materializeCurrentSession,
     createSession,
@@ -425,6 +450,10 @@ export default function Chat() {
   allSessionsRef.current = allSessions;
   const contextOverridesRef = useRef(contextOverrides);
   contextOverridesRef.current = contextOverrides;
+  const [estimatedContext, setEstimatedContext] = useState<{ sessionId: string; tokens: number }>({
+    sessionId: "",
+    tokens: 0,
+  });
   const focusComposer = useCallback(() => setFocusRequest((value) => value + 1), []);
 
   useEffect(() => {
@@ -571,7 +600,9 @@ export default function Chat() {
   });
   const currentChatBusy = runningSessionIds.has(currentId);
   const turns = currentSession?.turns ?? [];
-  const estimatedTokens = ringTokens(turns, contextOverrides.get(currentId));
+  const currentContextOverride = contextOverrides.get(currentId);
+  const estimatedTokens = currentContextOverride?.tokens
+    ?? (estimatedContext.sessionId === currentId ? estimatedContext.tokens : 0);
   const contextMax = status?.ready
     ? (status.contextWindow ?? status.compactionBudget ?? null)
     : null;
@@ -585,6 +616,19 @@ export default function Chat() {
   const attachments = currentSession?.draftAttachments ?? [];
   const runningSessionIdsRef = useRef(runningSessionIds);
   runningSessionIdsRef.current = runningSessionIds;
+
+  useEffect(() => {
+    if (currentContextOverride) {
+      setEstimatedContext({ sessionId: currentId, tokens: currentContextOverride.tokens });
+      return;
+    }
+    setEstimatedContext((current) => current.sessionId === currentId
+      ? current
+      : { sessionId: currentId, tokens: 0 });
+    return deferHeavyUiWork(() => {
+      setEstimatedContext({ sessionId: currentId, tokens: estimateTokens(turns) });
+    });
+  }, [currentContextOverride, currentId, turns]);
 
   const refreshStatus = useCallback((model?: string | null) => {
     if (!isTauri()) {
@@ -705,13 +749,21 @@ export default function Chat() {
     }
   }, [setError]);
 
+  const deletePersistedSession = useCallback((sessionId: string, projectId: string) => {
+    if (!isTauri()) return;
+    void Promise.all([
+      chatDelete(sessionId, projectId),
+      chatUiSessionDelete(sessionId),
+    ]).catch((error) => setError(String(error)));
+  }, [setError]);
+
   useEffect(() => () => {
     deleteTimers.current.forEach(({ timer, projectId }, sessionId) => {
       window.clearTimeout(timer);
-      if (isTauri()) void chatDelete(sessionId, projectId);
+      deletePersistedSession(sessionId, projectId);
     });
     deleteTimers.current.clear();
-  }, []);
+  }, [deletePersistedSession]);
 
   useEffect(() => {
     setPendingCommandSelection(null);
@@ -1093,7 +1145,7 @@ export default function Chat() {
     if (!removed) return;
     setDeleted(removed);
     const timer = window.setTimeout(() => {
-      if (isTauri()) void chatDelete(removed.id, removed.projectId);
+      deletePersistedSession(removed.id, removed.projectId);
       deleteTimers.current.delete(removed.id);
       setDeleted((current) => current?.id === removed.id ? null : current);
     }, 6000);
@@ -1254,6 +1306,7 @@ export default function Chat() {
           key={currentId}
           sessionId={currentId}
           turns={turns}
+          loading={currentSessionLoading}
           composerHeight={composerHeight}
           starters={starters}
           onStarter={(prompt) => {

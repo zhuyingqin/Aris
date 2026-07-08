@@ -74,8 +74,8 @@ const APP_COPY: Record<Language, AppShellCopy> = {
     groups: { Build: "构建", Library: "资料库", System: "系统" },
     nav: {
       chat: "对话",
-      lab: "实验室",
-      typeset: "排版",
+      lab: "代码",
+      typeset: "论文",
       literature: "文献",
       studio: "工作室",
       mail: "邮箱",
@@ -960,7 +960,7 @@ export default function App() {
   const userPlan = accountPlan(account, copy);
   const userInitials = accountInitials(userName, userEmail, copy.userFallback);
   const usageMenuLabels = language === "cn"
-    ? { balance: "浣欓", used: "宸茬敤", plan: "濂楅", subscriptionBalance: "濂楅浣欓" }
+    ? { balance: "余额", used: "已用", plan: "套餐", subscriptionBalance: "套餐余额" }
     : { balance: "Balance", used: "Used", plan: "Plan", subscriptionBalance: "Plan balance" };
   const usageDetailsLabel = language === "cn" ? "\u4f7f\u7528\u7edf\u8ba1" : "Usage statistics";
   const showSubscriptionQuota = typeof account?.subscriptionQuota === "number"
@@ -1160,7 +1160,7 @@ export default function App() {
               title={copy.sidebarExpandedTitle}
               aria-label={copy.sidebarExpandedLabel}
             >
-              鈥?
+              <PanelIcon />
             </button>
           )}
           <div className="app-title">{copy.nav[tab]}</div>

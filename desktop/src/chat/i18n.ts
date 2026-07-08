@@ -57,7 +57,7 @@ export const CHAT_COPY: Record<Language, {
   file: string;
 }> = {
   cn: {
-    newChat: "新线程",
+    newChat: "新对话",
     scheduledTasks: "定时任务",
     closeSidebar: "关闭对话侧栏",
     searchChats: "搜索对话",
@@ -68,7 +68,7 @@ export const CHAT_COPY: Record<Language, {
     newChatInProject: (project) => `在 ${project} 中新建对话`,
     newChatInThisProject: "在此项目中新建对话",
     unread: "未读",
-    messagePlaceholder: "向 SomniQ 发送消息",
+    messagePlaceholder: "给 SomniQ 发送消息",
     configurePlaceholder: "配置 API Key，或输入 /help",
     slashMenu: "斜杠菜单",
     files: "文件",
@@ -133,7 +133,7 @@ export const CHAT_COPY: Record<Language, {
     configurePlaceholder: "Configure an API key, or type /help",
     slashMenu: "Slash menu",
     files: "Files",
-    pickerHint: "Up/Down select · Enter use · Esc close",
+    pickerHint: "Up/Down select - Enter use - Esc close",
     noMatches: "No matches",
     recent: "Recent",
     searchResults: "Search results",

@@ -2182,30 +2182,53 @@
 }
 
 .lab-explorer-title {
-  height: 0;
-  display: none;
+  height: 30px;
+  display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 10px 0 14px;
+  padding: 0 8px 0 14px;
   color: var(--text-dim);
   font-size: 11px;
   letter-spacing: 0.02em;
   border-bottom: 1px solid var(--border);
 }
 
-.lab-explorer-title button {
+.lab-explorer-title-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.lab-explorer-title button,
+.lab-explorer-action {
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   border: 0;
   background: transparent;
   color: var(--text-dim);
   cursor: pointer;
-  padding: 2px 6px;
+  padding: 0;
   border-radius: 4px;
-  font-weight: 700;
 }
 
-.lab-explorer-title button:hover {
+.lab-explorer-title button:hover:not(:disabled),
+.lab-explorer-action:hover:not(:disabled) {
   background: var(--bg-2);
   color: var(--text);
+}
+
+.lab-explorer-action.danger:hover:not(:disabled) {
+  color: var(--red);
+}
+
+.lab-explorer-title button:disabled,
+.lab-explorer-action:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
 }
 
 .lab-explorer-root-row {
@@ -2296,7 +2319,7 @@
 }
 
 .lab-explorer-main:focus-visible,
-.lab-explorer-attach:focus-visible,
+.lab-explorer-action:focus-visible,
 .lab-explorer-root:focus-visible {
   outline: 1px solid color-mix(in srgb, var(--accent) 70%, transparent);
   outline-offset: -1px;
@@ -2349,31 +2372,17 @@
   white-space: nowrap;
 }
 
-.lab-explorer-attach {
-  width: 18px;
-  height: 18px;
-  flex-shrink: 0;
-  display: inline-flex;
+.lab-explorer-row-actions {
+  display: flex;
   align-items: center;
-  justify-content: center;
-  border: 0;
-  border-radius: 4px;
-  background: transparent;
-  color: var(--text-dim);
-  cursor: pointer;
+  gap: 1px;
   opacity: 0;
 }
 
-.lab-explorer-row:hover .lab-explorer-attach,
-.lab-explorer-row:focus-within .lab-explorer-attach,
-.lab-explorer-root-row:hover .lab-explorer-attach,
-.lab-explorer-root-row:focus-within .lab-explorer-attach {
+.lab-explorer-row:hover .lab-explorer-row-actions,
+.lab-explorer-row:focus-within .lab-explorer-row-actions,
+.lab-explorer-root-row .lab-explorer-action {
   opacity: 1;
-}
-
-.lab-explorer-attach:hover {
-  background: var(--bg-3);
-  color: var(--accent);
 }
 
 .lab-explorer-muted {

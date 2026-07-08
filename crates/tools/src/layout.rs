@@ -117,6 +117,7 @@ pub fn is_noisy_workspace_entry(name: &str) -> bool {
             | ".codex"
             | ".agents"
             | ".clawd-agents"
+            | ".somniq"
             | ".sandbox-home"
             | ".sandbox-tmp"
             | "node_modules"

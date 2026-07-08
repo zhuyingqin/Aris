@@ -19,6 +19,10 @@ const apiMocks = vi.hoisted(() => ({
   chatSuggestTitle: vi.fn(() => Promise.resolve("Concise title")),
   chatSetContext: vi.fn((_sessionId: string, _messages: unknown[], _mode?: string) => Promise.resolve(0)),
   chatDelete: vi.fn(() => Promise.resolve()),
+  chatUiSessionsList: vi.fn(() => Promise.resolve([])),
+  chatUiSessionLoad: vi.fn(() => Promise.resolve(null)),
+  chatUiSessionSave: vi.fn(() => Promise.resolve()),
+  chatUiSessionDelete: vi.fn(() => Promise.resolve()),
   chatUiSessionsLoad: vi.fn(() => Promise.resolve([])),
   chatUiSessionsSave: vi.fn(() => Promise.resolve()),
   fileRead: vi.fn(() => Promise.resolve("")),
@@ -139,6 +143,10 @@ describe("Chat export action", () => {
     apiMocks.chatCommandSpecs.mockResolvedValue([]);
     apiMocks.skillsList.mockResolvedValue([]);
     apiMocks.projectChatStarters.mockResolvedValue([]);
+    apiMocks.chatUiSessionsList.mockResolvedValue([]);
+    apiMocks.chatUiSessionLoad.mockResolvedValue(null);
+    apiMocks.chatUiSessionSave.mockResolvedValue(undefined);
+    apiMocks.chatUiSessionDelete.mockResolvedValue(undefined);
     apiMocks.chatUiSessionsLoad.mockResolvedValue([]);
     apiMocks.chatUiSessionsSave.mockResolvedValue(undefined);
     useStore.setState({
@@ -227,6 +235,7 @@ describe("Chat export action", () => {
 
     render(<Chat />);
 
+    await userEvent.click(await screen.findByRole("button", { name: "Stopped task" }));
     await userEvent.click(await screen.findByRole("button", { name: "Continue" }));
 
     // The stopped turn is now rebuilt into the backend context (not dropped),
@@ -268,6 +277,7 @@ describe("Chat export action", () => {
 
     render(<Chat />);
 
+    await userEvent.click(await screen.findByRole("button", { name: "Stopped follow-up" }));
     await userEvent.type(screen.getByRole("textbox", { name: "Message SomniQ" }), "What should I change?");
     await userEvent.click(screen.getByRole("button", { name: "Send message" }));
 

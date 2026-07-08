@@ -35,7 +35,7 @@ pub struct ChatState {
     sessions: Mutex<HashMap<String, Session>>,
     permission_modes: Mutex<HashMap<String, PermissionMode>>,
     running_turns: Mutex<HashMap<String, Arc<AtomicBool>>>,
-    permission_prompts: Arc<Mutex<HashMap<String, Sender<PermissionPromptDecision>>>>,
+    permission_prompts: PermissionPromptRegistry,
     // Pending `AskUserQuestion` tool calls, keyed by the model's tool-use id, so
     // `chat_question_respond` can deliver the user's answer to the blocked tool.
     question_prompts: QuestionPromptRegistry,
@@ -148,20 +148,24 @@ fn emit_tool_progress(
     tool_name: &str,
     progress: &tools::ToolProgress,
 ) {
-    let _ = app.emit(
+    let payload = json!({
+        "sessionId": session_id,
+        "id": tool_use_id,
+        "name": tool_name,
+        "elapsedMs": progress.elapsed_ms,
+        "timeoutMs": progress.timeout_ms,
+        "pid": progress.pid,
+        "stdoutTail": progress.stdout_tail.as_deref().map(|value| truncate(value, MAX_TOOL_EVENT_CHARS)),
+        "stderrTail": progress.stderr_tail.as_deref().map(|value| truncate(value, MAX_TOOL_EVENT_CHARS)),
+        "nearTimeout": progress.near_timeout,
+        "message": progress.message,
+    });
+    crate::chat_events::emit_chat_event(
+        app,
         "chat-tool-progress",
-        json!({
-            "sessionId": session_id,
-            "id": tool_use_id,
-            "name": tool_name,
-            "elapsedMs": progress.elapsed_ms,
-            "timeoutMs": progress.timeout_ms,
-            "pid": progress.pid,
-            "stdoutTail": progress.stdout_tail.as_deref().map(|value| truncate(value, MAX_TOOL_EVENT_CHARS)),
-            "stderrTail": progress.stderr_tail.as_deref().map(|value| truncate(value, MAX_TOOL_EVENT_CHARS)),
-            "nearTimeout": progress.near_timeout,
-            "message": progress.message,
-        }),
+        session_id,
+        "tool_progress",
+        payload,
     );
 }
 
@@ -311,14 +315,18 @@ fn validate_question_input(input: &str) -> Result<Value, ToolError> {
 
 impl<T> DesktopToolExecutor<T> {
     fn emit_question_tool_card(&self, tool_use_id: &str, input: &str) {
-        let _ = self.app.emit(
+        let payload = json!({
+            "sessionId": self.session_id,
+            "id": tool_use_id,
+            "name": ASK_USER_QUESTION_TOOL,
+            "input": tool_input_for_ui(ASK_USER_QUESTION_TOOL, input),
+        });
+        crate::chat_events::emit_chat_event(
+            &self.app,
             "chat-tool",
-            json!({
-                "sessionId": self.session_id,
-                "id": tool_use_id,
-                "name": ASK_USER_QUESTION_TOOL,
-                "input": tool_input_for_ui(ASK_USER_QUESTION_TOOL, input),
-            }),
+            &self.session_id,
+            "tool_call",
+            payload,
         );
     }
 
@@ -340,7 +348,13 @@ impl<T> DesktopToolExecutor<T> {
         let (tx, rx) = mpsc::channel::<String>();
         match self.questions.lock() {
             Ok(mut prompts) => {
-                prompts.insert(tool_use_id.to_string(), tx);
+                prompts.insert(
+                    tool_use_id.to_string(),
+                    QuestionPromptHandle {
+                        session_id: self.session_id.clone(),
+                        sender: tx,
+                    },
+                );
             }
             Err(_) => return Err(ToolError::new("question prompt registry is unavailable")),
         }
@@ -432,9 +446,13 @@ where
                     context_output = attach_recovery_hint(tool_name, &context_output);
                 }
                 let ui_output = tool_output_for_ui(&context_output, artifact.as_ref());
-                let _ = self.app.emit(
+                let payload = json!({ "sessionId": self.session_id, "id": tool_use_id, "name": tool_name, "output": ui_output, "isError": is_error });
+                crate::chat_events::emit_chat_event(
+                    &self.app,
                     "chat-tool-result",
-                    json!({ "sessionId": self.session_id, "id": tool_use_id, "name": tool_name, "output": ui_output, "isError": is_error }),
+                    &self.session_id,
+                    "tool_result",
+                    payload,
                 );
                 if self.is_cancelled() {
                     return Err(ToolError::interrupted_by_user());
@@ -450,9 +468,13 @@ where
                     return Err(err);
                 }
                 let output = format_tool_error_with_recovery(tool_name, &err.to_string());
-                let _ = self.app.emit(
+                let payload = json!({ "sessionId": self.session_id, "id": tool_use_id, "name": tool_name, "output": truncate(&output, MAX_TOOL_EVENT_CHARS), "isError": true });
+                crate::chat_events::emit_chat_event(
+                    &self.app,
                     "chat-tool-result",
-                    json!({ "sessionId": self.session_id, "id": tool_use_id, "name": tool_name, "output": truncate(&output, MAX_TOOL_EVENT_CHARS), "isError": true }),
+                    &self.session_id,
+                    "tool_result",
+                    payload,
                 );
                 Err(ToolError::new(output))
             }
@@ -475,9 +497,13 @@ impl aris_executor::StreamObserver for DesktopStreamObserver {
         if self.cancelled.load(Ordering::SeqCst) {
             return Err(RuntimeError::new("interrupted by user"));
         }
-        let _ = self.app.emit(
+        let payload = json!({ "sessionId": self.session_id, "text": text });
+        crate::chat_events::emit_chat_event(
+            &self.app,
             "chat-delta",
-            json!({ "sessionId": self.session_id, "text": text }),
+            &self.session_id,
+            "assistant_delta",
+            payload,
         );
         Ok(())
     }
@@ -486,18 +512,27 @@ impl aris_executor::StreamObserver for DesktopStreamObserver {
         if self.cancelled.load(Ordering::SeqCst) {
             return Err(RuntimeError::new("interrupted by user"));
         }
-        let _ = self.app.emit(
+        let payload = json!({ "sessionId": self.session_id, "thinking": thinking });
+        crate::chat_events::emit_chat_event(
+            &self.app,
             "chat-thinking-delta",
-            json!({ "sessionId": self.session_id, "thinking": thinking }),
+            &self.session_id,
+            "assistant_thinking_delta",
+            payload,
         );
         Ok(())
     }
 
     fn on_tool_call(&mut self, id: &str, name: &str, input: &str) -> Result<(), RuntimeError> {
         let ui_input = tool_input_for_ui(name, input);
-        let _ = self.app.emit(
+        let payload =
+            json!({ "sessionId": self.session_id, "id": id, "name": name, "input": ui_input });
+        crate::chat_events::emit_chat_event(
+            &self.app,
             "chat-tool",
-            json!({ "sessionId": self.session_id, "id": id, "name": name, "input": ui_input }),
+            &self.session_id,
+            "tool_call",
+            payload,
         );
         Ok(())
     }
@@ -507,11 +542,21 @@ impl aris_executor::StreamObserver for DesktopStreamObserver {
     }
 }
 
-type PermissionPromptRegistry = Arc<Mutex<HashMap<String, Sender<PermissionPromptDecision>>>>;
+struct PermissionPromptHandle {
+    session_id: String,
+    sender: Sender<PermissionPromptDecision>,
+}
+
+type PermissionPromptRegistry = Arc<Mutex<HashMap<String, PermissionPromptHandle>>>;
 
 /// Channels delivering `AskUserQuestion` answers from `chat_question_respond` to
 /// the tool call blocked in [`DesktopToolExecutor`], keyed by the tool-use id.
-type QuestionPromptRegistry = Arc<Mutex<HashMap<String, Sender<String>>>>;
+struct QuestionPromptHandle {
+    session_id: String,
+    sender: Sender<String>,
+}
+
+type QuestionPromptRegistry = Arc<Mutex<HashMap<String, QuestionPromptHandle>>>;
 
 fn next_permission_prompt_id() -> String {
     let nanos = SystemTime::now()
@@ -530,21 +575,30 @@ struct DesktopPermissionPrompter {
 
 impl DesktopPermissionPrompter {
     fn emit_resolved(&self, prompt_id: &str, decision: &str) {
-        let _ = self.app.emit(
+        let payload =
+            json!({ "sessionId": self.session_id, "promptId": prompt_id, "decision": decision });
+        crate::chat_events::emit_chat_event(
+            &self.app,
             "chat-permission-resolved",
-            json!({ "sessionId": self.session_id, "promptId": prompt_id, "decision": decision }),
+            &self.session_id,
+            "approval_resolved",
+            payload,
         );
     }
 
     fn emit_skipped_tool_result(&self, request: &PermissionRequest, reason: &str) {
-        let _ = self.app.emit(
+        let payload = json!({
+            "sessionId": self.session_id,
+            "name": &request.tool_name,
+            "output": truncate(reason, MAX_TOOL_EVENT_CHARS),
+            "isError": true
+        });
+        crate::chat_events::emit_chat_event(
+            &self.app,
             "chat-tool-result",
-            json!({
-                "sessionId": self.session_id,
-                "name": &request.tool_name,
-                "output": truncate(reason, MAX_TOOL_EVENT_CHARS),
-                "isError": true
-            }),
+            &self.session_id,
+            "tool_result",
+            payload,
         );
     }
 }
@@ -554,26 +608,28 @@ impl PermissionPrompter for DesktopPermissionPrompter {
         let prompt_id = next_permission_prompt_id();
         let (tx, rx) = mpsc::channel();
         if let Ok(mut prompts) = self.prompts.lock() {
-            prompts.insert(prompt_id.clone(), tx);
+            prompts.insert(
+                prompt_id.clone(),
+                PermissionPromptHandle {
+                    session_id: self.session_id.clone(),
+                    sender: tx,
+                },
+            );
         } else {
             return PermissionPromptDecision::Deny {
                 reason: "permission prompt registry is unavailable".to_string(),
             };
         }
-        let emitted = self
-            .app
-            .emit(
-                "chat-permission-request",
-                json!({
-                    "sessionId": self.session_id,
-                    "promptId": prompt_id,
-                    "toolName": &request.tool_name,
-                    "input": truncate(&request.input, MAX_TOOL_EVENT_CHARS),
-                    "currentMode": request.current_mode.as_str(),
-                    "requiredMode": request.required_mode.as_str()
-                }),
-            )
-            .is_ok();
+        let payload = json!({
+            "sessionId": self.session_id,
+            "promptId": prompt_id,
+            "toolName": &request.tool_name,
+            "input": truncate(&request.input, MAX_TOOL_EVENT_CHARS),
+            "currentMode": request.current_mode.as_str(),
+            "requiredMode": request.required_mode.as_str()
+        });
+        crate::chat_events::record_event(&self.session_id, "approval_request", payload.clone());
+        let emitted = self.app.emit("chat-permission-request", payload).is_ok();
         if !emitted {
             if let Ok(mut prompts) = self.prompts.lock() {
                 prompts.remove(&prompt_id);
@@ -1556,12 +1612,22 @@ pub fn chat_permission_respond(
     prompt_id: String,
     allow: bool,
 ) -> Result<(), String> {
-    let sender = state
+    let handle = state
         .permission_prompts
         .lock()
         .map_err(|_| "chat permission state poisoned".to_string())?
         .remove(&prompt_id)
         .ok_or_else(|| "permission prompt is no longer active".to_string())?;
+    let event_session_id = handle.session_id.clone();
+    crate::chat_events::record_event(
+        &event_session_id,
+        "approval_response",
+        json!({
+            "sessionId": event_session_id,
+            "promptId": prompt_id.clone(),
+            "decision": if allow { "allow" } else { "deny" },
+        }),
+    );
     let decision = if allow {
         PermissionPromptDecision::Allow
     } else {
@@ -1569,7 +1635,8 @@ pub fn chat_permission_respond(
             reason: "skipped by user".to_string(),
         }
     };
-    sender
+    handle
+        .sender
         .send(decision)
         .map_err(|_| "permission prompt is no longer waiting".to_string())
 }
@@ -1582,13 +1649,24 @@ pub fn chat_question_respond(
     tool_use_id: String,
     answer: String,
 ) -> Result<(), String> {
-    let sender = state
+    let handle = state
         .question_prompts
         .lock()
         .map_err(|_| "chat question state poisoned".to_string())?
         .remove(&tool_use_id)
         .ok_or_else(|| "question prompt is no longer active".to_string())?;
-    sender
+    let event_session_id = handle.session_id.clone();
+    crate::chat_events::record_event(
+        &event_session_id,
+        "question_response",
+        json!({
+            "sessionId": event_session_id,
+            "toolUseId": tool_use_id.clone(),
+            "answer": answer.clone(),
+        }),
+    );
+    handle
+        .sender
         .send(answer)
         .map_err(|_| "question prompt is no longer waiting".to_string())
 }
@@ -1761,7 +1839,7 @@ fn get_cached_or_disk_session(state: &ChatState, session_id: &str) -> Result<Ses
         .unwrap_or_else(|| load_chat_session(session_id))
 }
 
-fn store_chat_session(
+pub(crate) fn store_chat_session(
     state: &ChatState,
     session_id: String,
     session: Session,
@@ -1857,7 +1935,7 @@ pub struct ChatStatus {
     memory_files: Option<usize>,
 }
 
-#[derive(serde::Serialize)]
+#[derive(Clone, Copy, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ChatDoneProviderUsage {
     input_tokens: u32,
@@ -1951,15 +2029,19 @@ fn emit_context_warning(
     context_window: u64,
     compaction_budget: u64,
 ) {
-    let _ = app.emit(
+    let payload = json!({
+        "sessionId": session_id,
+        "usedTokens": used,
+        "contextWindow": context_window,
+        "compactionBudget": compaction_budget,
+        "usage": used as f64 / compaction_budget.max(1) as f64,
+    });
+    crate::chat_events::emit_chat_event(
+        app,
         "chat-context-warning",
-        json!({
-            "sessionId": session_id,
-            "usedTokens": used,
-            "contextWindow": context_window,
-            "compactionBudget": compaction_budget,
-            "usage": used as f64 / compaction_budget.max(1) as f64,
-        }),
+        session_id,
+        "context_warning",
+        payload,
     );
 }
 
@@ -2003,17 +2085,22 @@ fn maybe_auto_compact(
             }
             let compacted = result.compacted_session;
             store_chat_session(state, session_id.to_string(), compacted.clone())?;
+            crate::chat_events::record_session_snapshot(session_id, "auto_compact", &compacted);
             let after = runtime::estimate_session_tokens(&compacted) as u64;
-            let _ = app.emit(
+            let payload = json!({
+                "sessionId": session_id,
+                "removedMessageCount": result.removed_message_count,
+                "tokensBefore": used,
+                "tokensAfter": after,
+                "contextWindow": window,
+                "compactionBudget": budget,
+            });
+            crate::chat_events::emit_chat_event(
+                app,
                 "chat-context-compacted",
-                json!({
-                    "sessionId": session_id,
-                    "removedMessageCount": result.removed_message_count,
-                    "tokensBefore": used,
-                    "tokensAfter": after,
-                    "contextWindow": window,
-                    "compactionBudget": budget,
-                }),
+                session_id,
+                "context_compacted",
+                payload,
             );
             Ok(compacted)
         }
@@ -2455,6 +2542,14 @@ pub fn chat_run_command(
     let Some(command) = SlashCommand::parse(trimmed) else {
         return Ok(ChatCommandResult::unhandled());
     };
+    crate::chat_events::record_event(
+        &session_id,
+        "command",
+        json!({
+            "sessionId": &session_id,
+            "input": trimmed,
+        }),
+    );
     let session = get_cached_or_disk_session(&state, &session_id)?;
 
     match command {
@@ -2503,7 +2598,19 @@ pub fn chat_run_command(
             // estimate in place rather than pinning it.
             let context_tokens =
                 (removed > 0).then(|| runtime::estimate_session_tokens(&compacted) as u64);
-            store_chat_session(&state, session_id, compacted)?;
+            store_chat_session(&state, session_id.clone(), compacted.clone())?;
+            crate::chat_events::record_event(
+                &session_id,
+                "context_compacted",
+                json!({
+                    "sessionId": &session_id,
+                    "manual": true,
+                    "removedMessageCount": removed,
+                    "tokensAfter": context_tokens,
+                    "instruction": instruction,
+                }),
+            );
+            crate::chat_events::record_session_snapshot(&session_id, "manual_compact", &compacted);
             Ok(ChatCommandResult {
                 context_tokens,
                 ..ChatCommandResult::message(report)
@@ -2528,7 +2635,17 @@ pub fn chat_run_command(
                     "clear: confirmation required; run /clear --confirm to start a fresh desktop chat session.",
                 ));
             }
-            store_chat_session(&state, session_id, Session::new())?;
+            let fresh = Session::new();
+            store_chat_session(&state, session_id.clone(), fresh.clone())?;
+            crate::chat_events::record_event(
+                &session_id,
+                "reset",
+                json!({
+                    "sessionId": &session_id,
+                    "reason": "clear_command",
+                }),
+            );
+            crate::chat_events::record_session_snapshot(&session_id, "clear_command", &fresh);
             Ok(ChatCommandResult::replace(
                 "Session cleared\n  Mode             fresh desktop chat session",
             ))
@@ -2549,7 +2666,9 @@ pub fn chat_run_command(
         SlashCommand::Init => Ok(ChatCommandResult::message(init_desktop_repo()?)),
         SlashCommand::Diff => Ok(ChatCommandResult::message(render_diff_report()?)),
         SlashCommand::Version => Ok(ChatCommandResult::message(render_version_report())),
-        SlashCommand::Export { path } => handle_export_command(&session, path.as_deref()),
+        SlashCommand::Export { path } => {
+            handle_export_command(&session_id, &session, path.as_deref())
+        }
         SlashCommand::Session { action, target } => {
             handle_session_command(&session_id, action.as_deref(), target.as_deref())
         }
@@ -2915,6 +3034,7 @@ async fn run_chat_turn_with_context(
         "Restricted agent"
     };
     record_user_prompt(&session_id, surface, &user_message);
+    crate::chat_events::record_user_message(&session_id, surface, &user_message);
     let _busy = ChatBusyGuard {
         running_turns: &state.running_turns,
         session_id: session_id.clone(),
@@ -3073,10 +3193,8 @@ async fn run_chat_turn_with_context(
     ) = match outcome {
         Ok(value) => value,
         Err(message) => {
-            let _ = app.emit(
-                "chat-error",
-                json!({ "sessionId": session_id, "message": message }),
-            );
+            let payload = json!({ "sessionId": &session_id, "message": message });
+            crate::chat_events::emit_chat_event(&app, "chat-error", &session_id, "error", payload);
             return Err(message);
         }
     };
@@ -3089,7 +3207,8 @@ async fn run_chat_turn_with_context(
     let context_tokens = chat_done_context_tokens(&updated);
     let auto_compaction_tokens_after = auto_compaction.map(|_| context_tokens);
     let provider_usage = latest_provider_usage(&turn_usages);
-    store_chat_session(state, session_id.clone(), updated)?;
+    store_chat_session(state, session_id.clone(), updated.clone())?;
+    crate::chat_events::record_session_snapshot(&session_id, "turn_done", &updated);
     if let Err(error) = crate::usage_log::append_turn_usage(
         &session_id,
         &usage_model,
@@ -3099,25 +3218,39 @@ async fn run_chat_turn_with_context(
     ) {
         eprintln!("SomniQ desktop: failed to write usage log: {error}");
     }
-    if let Some(removed_message_count) = auto_compaction {
-        let _ = app.emit(
-            "chat-context-compacted",
-            json!({
-                "sessionId": &session_id,
-                "removedMessageCount": removed_message_count,
-                "tokensAfter": auto_compaction_tokens_after
-            }),
-        );
-    }
-    let _ = app.emit(
-        "chat-done",
+    crate::chat_events::record_event(
+        &session_id,
+        "usage",
         json!({
-            "sessionId": session_id,
-            "text": &text,
-            "contextTokens": context_tokens,
+            "sessionId": &session_id,
+            "model": &usage_model,
+            "provider": &usage_provider,
+            "server": &usage_server,
+            "turnUsages": crate::chat_events::token_usages_to_value(&turn_usages),
             "providerUsage": provider_usage,
         }),
     );
+    if let Some(removed_message_count) = auto_compaction {
+        let payload = json!({
+            "sessionId": &session_id,
+            "removedMessageCount": removed_message_count,
+            "tokensAfter": auto_compaction_tokens_after
+        });
+        crate::chat_events::emit_chat_event(
+            &app,
+            "chat-context-compacted",
+            &session_id,
+            "context_compacted",
+            payload,
+        );
+    }
+    let payload = json!({
+        "sessionId": &session_id,
+        "text": &text,
+        "contextTokens": context_tokens,
+        "providerUsage": provider_usage,
+    });
+    crate::chat_events::emit_chat_event(&app, "chat-done", &session_id, "done", payload);
     Ok(text)
 }
 
@@ -3125,7 +3258,17 @@ async fn run_chat_turn_with_context(
 pub fn chat_reset(state: State<ChatState>, session_id: String) -> Result<(), String> {
     validate_session_id(&session_id)?;
     let fresh = Session::new();
-    store_chat_session(&state, session_id, fresh)
+    store_chat_session(&state, session_id.clone(), fresh.clone())?;
+    crate::chat_events::record_event(
+        &session_id,
+        "reset",
+        json!({
+            "sessionId": &session_id,
+            "reason": "chat_reset",
+        }),
+    );
+    crate::chat_events::record_session_snapshot(&session_id, "chat_reset", &fresh);
+    Ok(())
 }
 
 #[derive(serde::Deserialize)]
@@ -3180,7 +3323,9 @@ fn chat_context_messages_to_session(messages: Vec<ChatContextMessage>) -> Result
                 }
                 for tool_call in message.tool_calls {
                     if tool_call.id.trim().is_empty() || tool_call.name.trim().is_empty() {
-                        return Err("assistant tool calls require non-empty id and name".to_string());
+                        return Err(
+                            "assistant tool calls require non-empty id and name".to_string()
+                        );
                     }
                     blocks.push(ContentBlock::ToolUse {
                         id: tool_call.id,
@@ -3193,7 +3338,9 @@ fn chat_context_messages_to_session(messages: Vec<ChatContextMessage>) -> Result
                     });
                 }
                 if !blocks.is_empty() {
-                    session.messages.push(ConversationMessage::assistant(blocks));
+                    session
+                        .messages
+                        .push(ConversationMessage::assistant(blocks));
                 }
             }
             "tool" => {
@@ -3222,7 +3369,11 @@ fn chat_context_messages_to_session(messages: Vec<ChatContextMessage>) -> Result
                     });
                 }
             }
-            _ => return Err("chat context only supports user, assistant, and tool messages".to_string()),
+            _ => {
+                return Err(
+                    "chat context only supports user, assistant, and tool messages".to_string(),
+                )
+            }
         }
     }
     Ok(session)
@@ -3241,11 +3392,35 @@ pub fn chat_set_context(
         let mut current = get_cached_or_disk_session(&state, &session_id)?;
         current.messages.append(&mut next.messages);
         let tokens = runtime::estimate_session_tokens(&current) as u64;
-        store_chat_session(&state, session_id, current)?;
+        store_chat_session(&state, session_id.clone(), current.clone())?;
+        crate::chat_events::record_event(
+            &session_id,
+            "context_set",
+            json!({
+                "sessionId": &session_id,
+                "mode": "append",
+                "messageCount": current.messages.len(),
+                "tokens": tokens,
+                "session": crate::chat_events::session_to_value(&current).unwrap_or(Value::Null),
+            }),
+        );
+        crate::chat_events::record_session_snapshot(&session_id, "context_append", &current);
         return Ok(tokens);
     }
     let tokens = runtime::estimate_session_tokens(&next) as u64;
-    store_chat_session(&state, session_id, next)?;
+    store_chat_session(&state, session_id.clone(), next.clone())?;
+    crate::chat_events::record_event(
+        &session_id,
+        "context_set",
+        json!({
+            "sessionId": &session_id,
+            "mode": mode.unwrap_or_else(|| "replace".to_string()),
+            "messageCount": next.messages.len(),
+            "tokens": tokens,
+            "session": crate::chat_events::session_to_value(&next).unwrap_or(Value::Null),
+        }),
+    );
+    crate::chat_events::record_session_snapshot(&session_id, "context_replace", &next);
     Ok(tokens)
 }
 
@@ -3278,6 +3453,11 @@ pub fn chat_delete(
     if path.exists() {
         std::fs::remove_file(path).map_err(|e| e.to_string())?;
     }
+    if let Ok(events_path) = crate::chat_events::chat_event_log_path(&session_id) {
+        if events_path.exists() {
+            std::fs::remove_file(events_path).map_err(|e| e.to_string())?;
+        }
+    }
     Ok(())
 }
 
@@ -3294,6 +3474,13 @@ pub fn chat_cancel(state: State<ChatState>, session_id: String) -> Result<(), St
     if let Some(cancelled) = running.get(&session_id) {
         cancelled.store(true, Ordering::SeqCst);
     }
+    crate::chat_events::record_event(
+        &session_id,
+        "cancel_requested",
+        json!({
+            "sessionId": &session_id,
+        }),
+    );
     Ok(())
 }
 
@@ -4040,7 +4227,18 @@ fn handle_resume_command(
     let (id, path) = resolve_session_reference(session_ref)?;
     let session = Session::load_from_path(&path).map_err(|e| e.to_string())?;
     let message_count = session.messages.len();
-    store_chat_session(state, current_session_id, session)?;
+    store_chat_session(state, current_session_id.clone(), session.clone())?;
+    crate::chat_events::record_event(
+        &current_session_id,
+        "resume",
+        json!({
+            "sessionId": &current_session_id,
+            "sourceSession": id,
+            "sourcePath": path.display().to_string(),
+            "messageCount": message_count,
+        }),
+    );
+    crate::chat_events::record_session_snapshot(&current_session_id, "resume", &session);
     Ok(ChatCommandResult::replace(format!(
         "Session resumed\n  Source session   {id}\n  File             {}\n  Messages         {}\n  Note             loaded into the current desktop chat slot",
         path.display(),
@@ -4049,15 +4247,24 @@ fn handle_resume_command(
 }
 
 fn handle_export_command(
+    session_id: &str,
     session: &Session,
     requested_path: Option<&str>,
 ) -> Result<ChatCommandResult, String> {
     let export_path = resolve_export_path(requested_path, session)?;
     fs::write(&export_path, render_export_text(session)).map_err(|e| e.to_string())?;
+    let event_export_path = export_path.with_extension("events.jsonl");
+    let event_line = if crate::chat_events::chat_event_log_exists(session_id) {
+        crate::chat_events::export_events_to_path(session_id, &event_export_path)?;
+        format!("\n  Event log        {}", event_export_path.display())
+    } else {
+        "\n  Event log        not available for this session yet".to_string()
+    };
     Ok(ChatCommandResult::message(format!(
-        "Export\n  Result           wrote transcript\n  File             {}\n  Messages         {}",
+        "Export\n  Result           wrote transcript\n  File             {}\n  Messages         {}{}",
         export_path.display(),
-        session.messages.len()
+        session.messages.len(),
+        event_line
     )))
 }
 
@@ -4498,7 +4705,11 @@ fn write_file_if_missing(path: &Path, content: &str) -> Result<&'static str, Str
 
 fn ensure_gitignore_entries(path: &Path) -> Result<&'static str, String> {
     const COMMENT: &str = "# ARIS-Code local artifacts";
-    const ENTRIES: [&str; 2] = [".claude/settings.local.json", ".claude/sessions/"];
+    const ENTRIES: [&str; 3] = [
+        ".claude/settings.local.json",
+        ".somniq/",
+        ".claude/sessions/",
+    ];
     if !path.exists() {
         let mut lines = vec![COMMENT.to_string()];
         lines.extend(ENTRIES.iter().map(|entry| (*entry).to_string()));

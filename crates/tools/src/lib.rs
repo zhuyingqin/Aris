@@ -3531,17 +3531,13 @@ fn canonical_tool_token(value: &str) -> String {
 }
 
 fn agent_store_dir() -> Result<std::path::PathBuf, String> {
-    if let Ok(path) = std::env::var("ARIS_AGENT_STORE_DIR") {
-        return Ok(std::path::PathBuf::from(path));
+    runtime::migrate_legacy_project_runtime_dirs(runtime::workspace_root_from_env())
+        .map_err(|error| error.to_string())?;
+    let dir = runtime::project_agent_store_dir_from_env();
+    if dir.as_os_str().is_empty() {
+        return Err("agent store path is empty".to_string());
     }
-    if let Ok(path) = std::env::var("CLAWD_AGENT_STORE") {
-        return Ok(std::path::PathBuf::from(path));
-    }
-    let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
-    if let Some(workspace_root) = cwd.ancestors().nth(2) {
-        return Ok(workspace_root.join(".clawd-agents"));
-    }
-    Ok(cwd.join(".clawd-agents"))
+    Ok(dir)
 }
 
 fn make_agent_id() -> String {
@@ -5951,7 +5947,7 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = temp_path("agent-store");
-        std::env::set_var("CLAWD_AGENT_STORE", &dir);
+        let _agent_store = EnvGuard::set("CLAWD_AGENT_STORE", &dir);
         let captured = Arc::new(Mutex::new(None::<AgentJob>));
         let captured_for_spawn = Arc::clone(&captured);
 
@@ -5971,7 +5967,6 @@ mod tests {
             },
         )
         .expect("Agent should succeed");
-        std::env::remove_var("CLAWD_AGENT_STORE");
 
         assert_eq!(manifest.name, "ship-audit");
         assert_eq!(manifest.subagent_type.as_deref(), Some("Explore"));

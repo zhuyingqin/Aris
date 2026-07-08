@@ -1,3 +1,4 @@
+mod chat_events;
 mod commands;
 mod config;
 mod connectors;
@@ -79,6 +80,27 @@ fn augment_path_for_desktop_tools() {
 
 #[cfg(not(windows))]
 fn augment_path_for_desktop_tools() {}
+
+#[cfg(windows)]
+fn configure_webview2_user_data_dir() {
+    if std::env::var_os("WEBVIEW2_USER_DATA_FOLDER").is_some() {
+        return;
+    }
+    let base = std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(runtime::home_dir())
+                .join("AppData")
+                .join("Local")
+        });
+    let dir = base.join("com.aris.studio").join("webview2-v2");
+    if std::fs::create_dir_all(&dir).is_ok() {
+        std::env::set_var("WEBVIEW2_USER_DATA_FOLDER", dir);
+    }
+}
+
+#[cfg(not(windows))]
+fn configure_webview2_user_data_dir() {}
 
 fn resource_dir(app: &tauri::App) -> Option<PathBuf> {
     app.path().resource_dir().ok()
@@ -165,8 +187,78 @@ fn hide_stray_console() {
 #[cfg(not(windows))]
 fn hide_stray_console() {}
 
+#[cfg(windows)]
+fn apply_windows_taskbar_icon(window: &tauri::WebviewWindow) {
+    use windows_sys::Win32::Foundation::{HWND, LPARAM, WPARAM};
+    use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetSystemMetrics, LoadImageW, SendMessageW, ICON_BIG, ICON_SMALL, ICON_SMALL2, IMAGE_ICON,
+        LR_DEFAULTCOLOR, LR_SHARED, SM_CXICON, SM_CXSMICON, SM_CYICON, SM_CYSMICON, WM_SETICON,
+    };
+
+    const APP_ICON_RESOURCE_ID: usize = 32512;
+
+    let Ok(hwnd) = window.hwnd() else {
+        return;
+    };
+    let hwnd = hwnd.0 as HWND;
+
+    unsafe {
+        let module = GetModuleHandleW(std::ptr::null());
+        if module.is_null() {
+            return;
+        }
+
+        set_window_icon_from_resource(
+            hwnd,
+            module,
+            ICON_BIG,
+            GetSystemMetrics(SM_CXICON),
+            GetSystemMetrics(SM_CYICON),
+        );
+        set_window_icon_from_resource(
+            hwnd,
+            module,
+            ICON_SMALL,
+            GetSystemMetrics(SM_CXSMICON),
+            GetSystemMetrics(SM_CYSMICON),
+        );
+        set_window_icon_from_resource(
+            hwnd,
+            module,
+            ICON_SMALL2,
+            GetSystemMetrics(SM_CXSMICON),
+            GetSystemMetrics(SM_CYSMICON),
+        );
+    }
+
+    unsafe fn set_window_icon_from_resource(
+        hwnd: HWND,
+        module: windows_sys::Win32::Foundation::HINSTANCE,
+        icon_type: u32,
+        width: i32,
+        height: i32,
+    ) {
+        let icon = LoadImageW(
+            module,
+            APP_ICON_RESOURCE_ID as *const u16,
+            IMAGE_ICON,
+            width,
+            height,
+            LR_DEFAULTCOLOR | LR_SHARED,
+        );
+        if !icon.is_null() {
+            SendMessageW(hwnd, WM_SETICON, icon_type as WPARAM, icon as LPARAM);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn apply_windows_taskbar_icon(_window: &tauri::WebviewWindow) {}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    configure_webview2_user_data_dir();
     hide_stray_console();
     augment_path_for_desktop_tools();
     tauri::Builder::default()
@@ -193,6 +285,7 @@ pub fn run() {
                 if let Ok(icon) = Image::from_bytes(include_bytes!("../icons/icon.png")) {
                     let _ = window.set_icon(icon);
                 }
+                apply_windows_taskbar_icon(&window);
             }
             watcher::spawn_event_watcher(app.handle().clone());
             mail::spawn_event_watchers(app.handle().clone());
@@ -249,8 +342,16 @@ pub fn run() {
             mail::mail_send,
             sessions::sessions_list,
             sessions::session_get,
+            sessions::chat_ui_sessions_list,
+            sessions::chat_ui_session_load,
+            sessions::chat_ui_session_save,
+            sessions::chat_ui_session_delete,
             sessions::chat_ui_sessions_load,
             sessions::chat_ui_sessions_save,
+            chat_events::chat_events_read,
+            chat_events::chat_events_export,
+            chat_events::chat_events_replay,
+            chat_events::chat_events_restore,
             literature::literature_load,
             literature::literature_save,
             literature::literature_search,
@@ -323,6 +424,9 @@ pub fn run() {
             files::file_read_text,
             files::file_write_text,
             files::file_create_text,
+            files::file_create_dir,
+            files::file_rename,
+            files::file_delete,
             files::file_read_bytes,
             files::file_search,
             files::file_read,

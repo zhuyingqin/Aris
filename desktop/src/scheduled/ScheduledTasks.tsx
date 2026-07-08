@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   chatModelOptions,
-  chatUiSessionsLoad,
+  chatUiSessionsList,
   isTauri,
   mailAccountsGet,
   scheduledTaskCreate,
@@ -235,7 +235,7 @@ function optionFromRuntimeSession(session: SessionSummary): SessionOption {
 
 async function loadSessionOptions(projectId?: string | null): Promise<SessionOption[]> {
   const byId = new Map<string, SessionOption>();
-  const uiSessions = await chatUiSessionsLoad<ChatSession>().catch(() => []);
+  const uiSessions = await chatUiSessionsList<ChatSession>().catch(() => []);
   for (const session of uiSessions) {
     if (projectId && session.projectId && session.projectId !== projectId) continue;
     byId.set(session.id, optionFromChatSession(session));

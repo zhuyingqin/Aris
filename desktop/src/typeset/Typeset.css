@@ -73,6 +73,7 @@
   --border-radius-full: 999px;
   --font-size-02: 12px;
   --line-height-02: 16px;
+  --mono: var(--font-mono);
   position: relative;
   display: grid;
   container-type: inline-size;
@@ -81,6 +82,7 @@
   min-height: 0;
   background: var(--ol-bg);
   color: var(--ol-text);
+  font-family: var(--font-sans);
   font-size: 12px;
 }
 
@@ -191,7 +193,11 @@
 }
 
 .typeset-main-grid.start-mode {
-  grid-template-columns: var(--typeset-rail-w) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.typeset-main-grid.start-mode .typeset-start {
+  grid-column: 1;
 }
 
 .typeset-main-grid.project-hidden {
@@ -3318,7 +3324,7 @@
   }
 
   .typeset-main-grid.start-mode {
-    grid-template-columns: var(--typeset-rail-w) minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr);
     grid-template-rows: minmax(0, 1fr);
   }
 
@@ -3478,12 +3484,12 @@
 
 @container (max-width: 520px) {
   .typeset-main-grid.start-mode {
-    grid-template-columns: var(--typeset-rail-w) minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr);
     grid-template-rows: minmax(0, 1fr);
   }
 
   .typeset-start {
-    grid-column: 2;
+    grid-column: 1;
     align-items: start;
     padding: 14px;
   }

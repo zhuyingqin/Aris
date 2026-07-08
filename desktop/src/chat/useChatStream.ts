@@ -80,6 +80,24 @@ export function useChatStream({
   const queues = useRef(new Map<string, Array<{ kind: "text" | "thinking"; delta: string }>>());
   const flushTimers = useRef(new Map<string, number>());
   const listenerGeneration = useRef(0);
+  const handlersRef = useRef<StreamHandlers>({
+    patchAssistant,
+    onComplete,
+    onError,
+    onContextCompacted,
+    onContextTokens,
+    onContextWarning,
+    getContextTokens,
+  });
+  handlersRef.current = {
+    patchAssistant,
+    onComplete,
+    onError,
+    onContextCompacted,
+    onContextTokens,
+    onContextWarning,
+    getContextTokens,
+  };
 
   const flush = useCallback((sessionId: string) => {
     const timer = flushTimers.current.get(sessionId);
@@ -88,7 +106,7 @@ export function useChatStream({
     const pending = queues.current.get(sessionId) ?? [];
     queues.current.delete(sessionId);
     if (pending.length === 0) return;
-    patchAssistant(sessionId, (turn) => {
+    handlersRef.current.patchAssistant(sessionId, (turn) => {
       let blocks = turn.blocks;
       for (const event of pending) {
         blocks = event.kind === "text"
@@ -97,7 +115,7 @@ export function useChatStream({
       }
       return { ...turn, blocks };
     });
-  }, [patchAssistant]);
+  }, []);
 
   const scheduleFlush = useCallback((sessionId: string) => {
     if (flushTimers.current.has(sessionId)) return;
@@ -133,14 +151,14 @@ export function useChatStream({
       onChatTool((tool) => {
         if (!isCurrentListener()) return;
         flush(tool.sessionId);
-        patchAssistant(tool.sessionId, (turn) => ({
+        handlersRef.current.patchAssistant(tool.sessionId, (turn) => ({
           ...turn,
           blocks: upsertToolCall(turn.blocks, tool),
         }));
       }),
       onChatToolProgress((progress) => {
         if (!isCurrentListener()) return;
-        patchAssistant(progress.sessionId, (turn) => ({
+        handlersRef.current.patchAssistant(progress.sessionId, (turn) => ({
           ...turn,
           blocks: updateToolProgress(turn.blocks, progress),
         }));
@@ -148,7 +166,7 @@ export function useChatStream({
       onChatToolResult((result) => {
         if (!isCurrentListener()) return;
         flush(result.sessionId);
-        patchAssistant(result.sessionId, (turn) => {
+        handlersRef.current.patchAssistant(result.sessionId, (turn) => {
           const blocks = appendToolOutput(
             turn.blocks,
             result.id,
@@ -162,7 +180,7 @@ export function useChatStream({
       onChatPermissionRequest((request) => {
         if (!isCurrentListener()) return;
         flush(request.sessionId);
-        patchAssistant(request.sessionId, (turn) => {
+        handlersRef.current.patchAssistant(request.sessionId, (turn) => {
           if (turn.blocks.some((block) => block.kind === "permission" && block.id === request.promptId)) {
             return turn;
           }
@@ -185,7 +203,7 @@ export function useChatStream({
       }),
       onChatPermissionResolved((event) => {
         if (!isCurrentListener()) return;
-        patchAssistant(event.sessionId, (turn) => ({
+        handlersRef.current.patchAssistant(event.sessionId, (turn) => ({
           ...turn,
           blocks: turn.blocks.map((block) => (
             block.kind === "permission" && block.id === event.promptId
@@ -203,33 +221,33 @@ export function useChatStream({
         // to the backend's own session-history estimate when the API didn't
         // return usage data (rare, but happens on stream truncation).
         const realTokens = providerUsage?.promptTokens ?? contextTokens;
-        if (realTokens != null) onContextTokens?.(sessionId, realTokens);
+        if (realTokens != null) handlersRef.current.onContextTokens?.(sessionId, realTokens);
       }),
       // Authoritative failure signal from the backend. The `chatSend` promise
       // also rejects, and `onError` is idempotent (it sets the same turn
       // error), so surfacing here is safe and guarantees the failure renders
       // even if the rejection path is delayed or the listener set was swapped
-      // mid-turn. `stopped: false` �?a real backend error is never an expected
+      // mid-turn. `stopped: false` means a real backend error is never an expected
       // user stop; `visibleTurnError` only hides cancellations when stopped.
       onChatError(({ sessionId, message }) => {
         if (!isCurrentListener()) return;
         flush(sessionId);
-        onError(sessionId, message, stopRequested.current.has(sessionId));
+        handlersRef.current.onError(sessionId, message, stopRequested.current.has(sessionId));
       }),
       onChatContextCompacted(({ sessionId, removedMessageCount, tokensAfter }) => {
         if (!isCurrentListener()) return;
         flush(sessionId);
-        const before = getContextTokens?.(sessionId) ?? null;
+        const before = handlersRef.current.getContextTokens?.(sessionId) ?? null;
         const message = compactionNoticeMessage(removedMessageCount, before, tokensAfter ?? null);
-        patchAssistant(sessionId, (turn) => ({
+        handlersRef.current.patchAssistant(sessionId, (turn) => ({
           ...turn,
           blocks: [...turn.blocks, { kind: "notice", message }],
         }));
-        if (tokensAfter != null) onContextCompacted?.(sessionId, tokensAfter);
+        if (tokensAfter != null) handlersRef.current.onContextCompacted?.(sessionId, tokensAfter);
       }),
       onChatContextWarning(({ sessionId, usedTokens, contextWindow, compactionBudget }) => {
         if (!isCurrentListener()) return;
-        onContextWarning?.({ sessionId, usedTokens, contextWindow, compactionBudget });
+        handlersRef.current.onContextWarning?.({ sessionId, usedTokens, contextWindow, compactionBudget });
       }),
     ];
     return () => {
@@ -239,7 +257,7 @@ export function useChatStream({
       flushTimers.current.clear();
       queues.current.clear();
     };
-  }, [enqueue, flush, onError, patchAssistant, onContextCompacted, onContextTokens, onContextWarning, getContextTokens]);
+  }, [enqueue, flush]);
 
   const run = useCallback(async (sessionId: string, message: string | ChatSendRequest) => {
     if (runningSessions.current.has(sessionId)) return false;
@@ -250,21 +268,21 @@ export function useChatStream({
       const reply = await chatSend(sessionId, message);
       flush(sessionId);
       if (stopRequested.current.has(sessionId)) {
-        onError(sessionId, "", true);
+        handlersRef.current.onError(sessionId, "", true);
         return false;
       }
-      onComplete(sessionId, reply);
+      handlersRef.current.onComplete(sessionId, reply);
       return true;
     } catch (error) {
       flush(sessionId);
-      onError(sessionId, String(error), stopRequested.current.has(sessionId));
+      handlersRef.current.onError(sessionId, String(error), stopRequested.current.has(sessionId));
       return false;
     } finally {
       runningSessions.current.delete(sessionId);
       stopRequested.current.delete(sessionId);
       setRunningSessionIds(new Set(runningSessions.current));
     }
-  }, [flush, onComplete, onError]);
+  }, [flush]);
 
   const stop = useCallback(async (sessionId: string) => {
     if (stopRequested.current.has(sessionId)) return;
@@ -272,14 +290,14 @@ export function useChatStream({
     flush(sessionId);
     runningSessions.current.delete(sessionId);
     setRunningSessionIds(new Set(runningSessions.current));
-    onError(sessionId, "", true);
+    handlersRef.current.onError(sessionId, "", true);
     try {
       await chatCancel(sessionId);
     } catch (error) {
       stopRequested.current.delete(sessionId);
       throw error;
     }
-  }, [flush, onError]);
+  }, [flush]);
 
   return {
     busy: runningSessionIds.size > 0,

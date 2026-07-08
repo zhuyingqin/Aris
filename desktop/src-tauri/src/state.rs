@@ -44,6 +44,10 @@ pub fn runtime_dir() -> PathBuf {
         .unwrap_or_else(|_| config_dir().join("desktop-runtime"))
 }
 
+pub fn desktop_runtime_dir() -> PathBuf {
+    config_dir().join("desktop-runtime")
+}
+
 pub fn config_dir() -> PathBuf {
     std::env::var("ARIS_CONFIG_ROOT")
         .map(PathBuf::from)
@@ -122,6 +126,7 @@ pub fn apply_project_environment(workspace: &PathBuf, project_id: &str) -> io::R
     configure_readonly_roots()?;
 
     std::env::set_var("ARIS_WORKSPACE_ROOT", workspace);
+    std::env::set_var("ARIS_RUNTIME_ROOT", &project_runtime);
     std::env::set_var("ARIS_DESKTOP_PROJECT_ID", project_id);
     std::env::set_var("ARIS_RUN_STATE_DIR", &run_state);
     std::env::set_var("ARIS_SESSIONS_DIR", &sessions);

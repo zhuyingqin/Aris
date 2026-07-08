@@ -32,7 +32,7 @@ sha2 = "0.10"
 rand = "0.8"
 urlencoding = "2"
 native-tls = "0.2"
-windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_System_Console", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_LibraryLoader", "Win32_UI_WindowsAndMessaging"] }
 # Coordination kernel + session/skills primitives + chat engine building
 # blocks — reused as libraries, no business logic duplicated.
 tools = { path = "../../crates/tools" }

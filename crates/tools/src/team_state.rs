@@ -1765,17 +1765,11 @@ pub(crate) fn append_event(event: RunEvent) -> Result<(), String> {
 }
 
 pub(crate) fn state_root() -> PathBuf {
-    if let Ok(path) = std::env::var("ARIS_RUN_STATE_DIR") {
-        return PathBuf::from(path);
-    }
-    std::env::current_dir()
-        .unwrap_or_else(|_| PathBuf::from("."))
-        .join(".claude")
-        .join("run-state")
+    runtime::project_run_state_dir_from_env()
 }
 
 pub(crate) fn workflows_dir() -> PathBuf {
-    state_root().join("workflows")
+    runtime::project_workflows_dir_from_env()
 }
 
 fn ensure_team(
@@ -1972,20 +1966,18 @@ fn tail_file(path: &str, max_bytes: usize) -> Result<String, String> {
 }
 
 fn agent_store_dir() -> Result<PathBuf, String> {
-    if let Ok(path) = std::env::var("ARIS_AGENT_STORE_DIR") {
-        return Ok(PathBuf::from(path));
+    runtime::migrate_legacy_project_runtime_dirs(runtime::workspace_root_from_env())
+        .map_err(|error| error.to_string())?;
+    let dir = runtime::project_agent_store_dir_from_env();
+    if dir.as_os_str().is_empty() {
+        return Err("agent store path is empty".to_string());
     }
-    if let Ok(path) = std::env::var("CLAWD_AGENT_STORE") {
-        return Ok(PathBuf::from(path));
-    }
-    let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
-    if let Some(workspace_root) = cwd.ancestors().nth(2) {
-        return Ok(workspace_root.join(".clawd-agents"));
-    }
-    Ok(cwd.join(".clawd-agents"))
+    Ok(dir)
 }
 
 fn ensure_state_dirs() -> Result<(), String> {
+    runtime::migrate_legacy_project_runtime_dirs(runtime::workspace_root_from_env())
+        .map_err(|error| error.to_string())?;
     for dir in [
         state_root(),
         teams_dir(),

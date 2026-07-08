@@ -1,14 +1,22 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { chatUiSessionsLoad, chatUiSessionsSave, isTauri } from "../api/tauri";
+import {
+  chatUiSessionLoad,
+  chatUiSessionSave,
+  chatUiSessionsList,
+  chatUiSessionsSave,
+  isTauri,
+} from "../api/tauri";
 import { useStore } from "../store";
 import type { ChatTurn } from "../types";
 import { CURRENT_KEY, LEGACY_CURRENT_KEY, LEGACY_SESSIONS_KEY, LEGACY_SESSIONS_KEY_V1, SESSIONS_KEY, makeSession, migrateSession, titleFromTurns } from "./model";
 import type { ChatSession } from "./types";
 
 const HOME_SESSION_ID = "chat-home";
+const SESSION_PERSIST_DELAY_MS = 250;
+const MAX_LEGACY_TAURI_LOCAL_SESSIONS_CHARS = 2_000_000;
 
 function isStartedSession(session: ChatSession) {
-  return session.turns.length > 0;
+  return session.turnsLoaded === false || session.turns.length > 0;
 }
 
 function isBlankSession(session: ChatSession) {
@@ -19,10 +27,11 @@ function isBlankSession(session: ChatSession) {
   );
 }
 
-function loadLocalSessions(): ChatSession[] {
+function loadLocalSessions(maxRawChars = Number.POSITIVE_INFINITY): ChatSession[] {
   try {
     const raw = localStorage.getItem(SESSIONS_KEY) ?? localStorage.getItem(LEGACY_SESSIONS_KEY) ?? localStorage.getItem(LEGACY_SESSIONS_KEY_V1);
     if (!raw) return [];
+    if (raw.length > maxRawChars) return [];
     return (JSON.parse(raw) as ChatSession[])
       .map((session) => migrateSession(session))
       .filter(isStartedSession);
@@ -62,6 +71,19 @@ function mergeSessions(...lists: ChatSession[][]): ChatSession[] {
   return [...byId.values()];
 }
 
+function mergeLoadedSession(current: ChatSession, loaded: ChatSession): ChatSession {
+  if (current.updatedAt <= loaded.updatedAt) return loaded;
+  return {
+    ...loaded,
+    title: current.title,
+    model: current.model ?? loaded.model,
+    draft: current.draft,
+    draftAttachments: current.draftAttachments,
+    pinned: current.pinned,
+    updatedAt: current.updatedAt,
+  };
+}
+
 function persistLocalSessions(sessions: ChatSession[]) {
   try {
     localStorage.setItem(SESSIONS_KEY, JSON.stringify(persistentSessions(sessions)));
@@ -69,6 +91,16 @@ function persistLocalSessions(sessions: ChatSession[]) {
     localStorage.removeItem(LEGACY_SESSIONS_KEY_V1);
   } catch {
     // Browser preview falls back to in-memory state when storage is full.
+  }
+}
+
+function clearLocalSessionSnapshots() {
+  try {
+    localStorage.removeItem(SESSIONS_KEY);
+    localStorage.removeItem(LEGACY_SESSIONS_KEY);
+    localStorage.removeItem(LEGACY_SESSIONS_KEY_V1);
+  } catch {
+    // Ignore storage failures; Tauri keeps the canonical copy on disk.
   }
 }
 
@@ -93,7 +125,7 @@ export function useChatSessions(projectId?: string | null) {
   const setError = useStore((state) => state.setError);
   const initial = useRef<ChatSession[] | null>(null);
   if (initial.current === null) {
-    initial.current = loadLocalSessions();
+    initial.current = isTauri() ? [] : loadLocalSessions();
   }
   const activeProjectId = projectId ?? "default";
   const projectKnown = projectId != null;
@@ -103,24 +135,35 @@ export function useChatSessions(projectId?: string | null) {
   const hydrated = useRef(!isTauri());
   const sessionsRef = useRef(allSessions);
   sessionsRef.current = allSessions;
+  const pendingPersistSessions = useRef<ChatSession[] | null>(null);
+  const persistTimer = useRef<number | null>(null);
+  const dirtySessionIds = useRef(new Set<string>());
+  const loadingSessionIds = useRef(new Set<string>());
   const visibleAllSessions = useMemo(() => persistentSessions(allSessions), [allSessions]);
   const visibleSessions = useMemo(
     () => visibleAllSessions.filter((session) => session.projectId === activeProjectId),
     [activeProjectId, visibleAllSessions],
   );
+  const markSessionDirty = useCallback((id: string) => {
+    if (id !== HOME_SESSION_ID) dirtySessionIds.current.add(id);
+  }, []);
 
   useEffect(() => {
     if (!isTauri()) return;
-    chatUiSessionsLoad<ChatSession>()
+    chatUiSessionsList<ChatSession>()
       .then((stored) => {
         const backendSessions = stored.map((session) => migrateSession(session)).filter(isStartedSession);
-        const merged = mergeSessions(backendSessions, loadLocalSessions(), sessionsRef.current);
+        const legacyLocalSessions = backendSessions.length === 0
+          ? loadLocalSessions(MAX_LEGACY_TAURI_LOCAL_SESSIONS_CHARS)
+          : [];
+        const merged = mergeSessions(backendSessions, legacyLocalSessions, sessionsRef.current);
         if (merged.length > 0) setAllSessions(merged);
-        setCurrentId(restoredCurrentId(merged));
         setHomeSession(makeHomeSession(activeProjectId));
         hydrated.current = true;
+        if (backendSessions.length > 0) clearLocalSessionSnapshots();
         if (backendSessions.length === 0 && merged.length > 0) {
           void chatUiSessionsSave(persistentSessions(merged))
+            .then(clearLocalSessionSnapshots)
             .catch((error) => setError(`Failed to save chat sessions: ${String(error)}`));
         }
       })
@@ -129,17 +172,59 @@ export function useChatSessions(projectId?: string | null) {
       });
   }, [setError]);
 
-  useEffect(() => {
-    persistLocalSessions(allSessions);
-    if (!hydrated.current || !isTauri()) return;
-    const timer = window.setTimeout(() => {
-      void chatUiSessionsSave(persistentSessions(allSessions))
-        .catch((error) => setError(`Failed to save chat sessions: ${String(error)}`));
-    }, 250);
-    return () => window.clearTimeout(timer);
-  }, [allSessions, setError]);
+  const flushPendingSessions = useCallback(() => {
+    const pending = pendingPersistSessions.current;
+    if (!pending) return;
+    pendingPersistSessions.current = null;
+    if (persistTimer.current != null) {
+      window.clearTimeout(persistTimer.current);
+      persistTimer.current = null;
+    }
+
+    if (!isTauri()) {
+      persistLocalSessions(pending);
+      return;
+    }
+    if (!hydrated.current) return;
+    const dirtyIds = new Set(dirtySessionIds.current);
+    if (dirtyIds.size === 0) return;
+    for (const id of dirtyIds) dirtySessionIds.current.delete(id);
+    const sessionsToSave = persistentSessions(pending)
+      .filter((session) => dirtyIds.has(session.id));
+    if (sessionsToSave.length === 0) return;
+    void Promise.all(sessionsToSave.map((session) => chatUiSessionSave(session)))
+      .then(clearLocalSessionSnapshots)
+      .catch((error) => {
+        for (const id of dirtyIds) dirtySessionIds.current.add(id);
+        setError(`Failed to save chat sessions: ${String(error)}`);
+      });
+  }, [setError]);
 
   useEffect(() => {
+    pendingPersistSessions.current = allSessions;
+    if (persistTimer.current != null) window.clearTimeout(persistTimer.current);
+    persistTimer.current = window.setTimeout(flushPendingSessions, SESSION_PERSIST_DELAY_MS);
+    return () => {
+      if (persistTimer.current != null) {
+        window.clearTimeout(persistTimer.current);
+        persistTimer.current = null;
+      }
+    };
+  }, [allSessions, flushPendingSessions]);
+
+  useEffect(() => {
+    const flush = () => flushPendingSessions();
+    window.addEventListener("pagehide", flush);
+    window.addEventListener("beforeunload", flush);
+    return () => {
+      window.removeEventListener("pagehide", flush);
+      window.removeEventListener("beforeunload", flush);
+      flushPendingSessions();
+    };
+  }, [flushPendingSessions]);
+
+  useEffect(() => {
+    if (isTauri() && !hydrated.current) return;
     persistCurrentId(currentId);
   }, [currentId]);
 
@@ -150,18 +235,54 @@ export function useChatSessions(projectId?: string | null) {
     }
     const current = allSessions.find((session) => session.id === currentId);
     if (current && (!projectKnown || current.projectId === activeProjectId)) return;
-    setCurrentId(HOME_SESSION_ID);
+    const fallback = latestSessionId(
+      projectKnown
+        ? allSessions.filter((session) => session.projectId === activeProjectId)
+        : allSessions,
+    ) ?? HOME_SESSION_ID;
+    setCurrentId(fallback);
     setHomeSession(makeHomeSession(activeProjectId));
   }, [activeProjectId, allSessions, currentId, homeSession.projectId, projectKnown]);
+
+  useEffect(() => {
+    if (!isTauri() || currentId === HOME_SESSION_ID) return;
+    const session = sessionsRef.current.find((item) => item.id === currentId);
+    if (!session || session.turnsLoaded !== false || loadingSessionIds.current.has(currentId)) return;
+    loadingSessionIds.current.add(currentId);
+    chatUiSessionLoad<ChatSession>(currentId)
+      .then((stored) => {
+        const loaded = { ...migrateSession(stored, session.projectId), turnsLoaded: true };
+        setAllSessions((previous) => previous.map((item) =>
+          item.id === currentId ? mergeLoadedSession(item, loaded) : item));
+      })
+      .catch((error) => setError(`Failed to load chat session: ${String(error)}`))
+      .finally(() => {
+        loadingSessionIds.current.delete(currentId);
+      });
+  }, [currentId, setError]);
 
   const currentSession = useMemo(
     () => {
       if (currentId === HOME_SESSION_ID) return homeSession;
       const current = allSessions.find((session) => session.id === currentId) ?? null;
       if (!current || (projectKnown && current.projectId !== activeProjectId)) return null;
+      if (current.turnsLoaded === false) return null;
       return current;
     },
     [activeProjectId, allSessions, currentId, homeSession, projectKnown],
+  );
+
+  // True while a real session exists but its turns are still being fetched from
+  // disk. Lets the UI show a quiet loading state instead of flashing the empty
+  // "new chat" welcome screen during the lazy-load roundtrip.
+  const currentSessionLoading = useMemo(
+    () => {
+      if (currentId === HOME_SESSION_ID) return false;
+      const current = allSessions.find((session) => session.id === currentId);
+      if (!current || (projectKnown && current.projectId !== activeProjectId)) return false;
+      return current.turnsLoaded === false;
+    },
+    [activeProjectId, allSessions, currentId, projectKnown],
   );
 
   const updateSession = useCallback((id: string, fn: (session: ChatSession) => ChatSession) => {
@@ -169,8 +290,9 @@ export function useChatSessions(projectId?: string | null) {
       setHomeSession((session) => fn(session));
       return;
     }
+    markSessionDirty(id);
     setAllSessions((previous) => previous.map((session) => session.id === id ? fn(session) : session));
-  }, []);
+  }, [markSessionDirty]);
 
   const materializeCurrentSession = useCallback(() => {
     if (currentId !== HOME_SESSION_ID) return currentSession;
@@ -214,24 +336,33 @@ export function useChatSessions(projectId?: string | null) {
         projectId: activeProjectId,
         createdAt: base.createdAt,
         turns,
+        turnsLoaded: true,
+        turnCount: turns.length,
         title: homeSession.title === "New chat" ? titleFromTurns(turns) : homeSession.title,
         updatedAt: Date.now(),
       };
       setAllSessions((previous) => [...previous, fresh]);
+      markSessionDirty(fresh.id);
       setCurrentId(fresh.id);
       setHomeSession(makeHomeSession(activeProjectId));
       return;
     }
     updateSession(id, (session) => {
       const turns = fn(session.turns);
+      const previousTurnCount = session.turnCount ?? session.turns.length;
+      const nextTurnCount = session.turnsPartial
+        ? previousTurnCount + Math.max(0, turns.length - session.turns.length)
+        : turns.length;
       return {
         ...session,
         turns,
+        turnsLoaded: true,
+        turnCount: nextTurnCount,
         title: session.title === "New chat" ? titleFromTurns(turns) : session.title,
         updatedAt: Date.now(),
       };
     });
-  }, [activeProjectId, homeSession, updateSession]);
+  }, [activeProjectId, homeSession, markSessionDirty, updateSession]);
 
   const newSession = useCallback(() => {
     if (currentId === HOME_SESSION_ID) {
@@ -276,6 +407,7 @@ export function useChatSessions(projectId?: string | null) {
     allSessions: visibleAllSessions,
     currentId,
     currentSession,
+    currentSessionLoading,
     setCurrentId,
     setSessions: setAllSessions,
     materializeCurrentSession,

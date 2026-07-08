@@ -144,6 +144,45 @@ const binaryFiles = new Map<string, string>([
   [PREVIEW_PNG_FIGURE_FILE, previewPngFigureUrl],
 ]);
 
+const explicitDirs = new Set<string>(["slides", "papers", "figures", "notebooks", "src"]);
+
+function normalizePreviewPath(path: string): string {
+  return path.replace(/\\/g, "/").replace(/^\/+/, "").replace(/\/+$/, "");
+}
+
+function previewBasename(path: string): string {
+  return normalizePreviewPath(path).split("/").pop() || path;
+}
+
+function previewDirname(path: string): string {
+  const normalized = normalizePreviewPath(path);
+  const index = normalized.lastIndexOf("/");
+  return index > 0 ? normalized.slice(0, index) : "";
+}
+
+function previewFileExists(path: string): boolean {
+  const normalized = normalizePreviewPath(path);
+  return files.has(normalized) || binaryFiles.has(normalized);
+}
+
+function previewDirExists(path: string): boolean {
+  const normalized = normalizePreviewPath(path);
+  if (!normalized) return true;
+  if (explicitDirs.has(normalized)) return true;
+  const prefix = `${normalized}/`;
+  return Array.from(files.keys()).some((key) => key.startsWith(prefix)) ||
+    Array.from(binaryFiles.keys()).some((key) => key.startsWith(prefix));
+}
+
+function ensurePreviewParentDirs(path: string) {
+  const parts = normalizePreviewPath(path).split("/");
+  let current = "";
+  for (let index = 0; index < parts.length - 1; index += 1) {
+    current = current ? `${current}/${parts[index]}` : parts[index];
+    if (current) explicitDirs.add(current);
+  }
+}
+
 export function isLabPreviewMode(): boolean {
   if (typeof window === "undefined") return false;
   const params = new URLSearchParams(window.location.search);
@@ -253,7 +292,11 @@ export function previewNotebookView(path = PREVIEW_NOTEBOOK): NotebookView {
 }
 
 export function previewNotebookList(): { notebooks: string[] } {
-  return { notebooks: [PREVIEW_NOTEBOOK] };
+  return {
+    notebooks: Array.from(files.keys())
+      .filter((path) => path.endsWith(".ipynb"))
+      .sort((left, right) => left.localeCompare(right)),
+  };
 }
 
 export function previewRunsLibrary(): RunsLibrary {
@@ -285,38 +328,37 @@ export function previewVariables(): VariablesResult {
 }
 
 export function previewFileTree(path: string | null): PreviewFileTreeEntry[] {
-  if (!path) {
-    return [
-      { name: "slides", path: "slides", isDir: true },
-      { name: "papers", path: "papers", isDir: true },
-      { name: "figures", path: "figures", isDir: true },
-      { name: "notebooks", path: "notebooks", isDir: true },
-      { name: "src", path: "src", isDir: true },
-      { name: "README.md", path: "README.md", isDir: false },
-    ];
+  const parent = normalizePreviewPath(path ?? "");
+  const entries = new Map<string, PreviewFileTreeEntry>();
+
+  for (const dir of explicitDirs) {
+    const entryParent = previewDirname(dir);
+    if (entryParent !== parent) continue;
+    entries.set(dir, { name: previewBasename(dir), path: dir, isDir: true });
   }
-  if (path === "slides") {
-    return [
-      { name: "main.tex", path: PREVIEW_SLIDES_TEX_FILE, isDir: false },
-      { name: "main.pdf", path: PREVIEW_SLIDES_PDF_FILE, isDir: false },
-    ];
+
+  for (const filePath of [...files.keys(), ...binaryFiles.keys()]) {
+    const normalized = normalizePreviewPath(filePath);
+    const dir = previewDirname(normalized);
+    if (dir === parent) {
+      entries.set(normalized, { name: previewBasename(normalized), path: normalized, isDir: false });
+      continue;
+    }
+    if (!parent && dir) {
+      const root = normalized.split("/")[0];
+      entries.set(root, { name: root, path: root, isDir: true });
+    } else if (dir.startsWith(`${parent}/`)) {
+      const next = normalized.slice(parent.length + 1).split("/")[0];
+      const childPath = `${parent}/${next}`;
+      entries.set(childPath, { name: next, path: childPath, isDir: true });
+    }
   }
-  if (path === "papers") {
-    return [{ name: "article.tex", path: PREVIEW_TEX_FILE, isDir: false }];
-  }
-  if (path === "figures") {
-    return [
-      { name: "visual-editor.svg", path: PREVIEW_FIGURE_FILE, isDir: false },
-      { name: "visual-editor.png", path: PREVIEW_PNG_FIGURE_FILE, isDir: false },
-    ];
-  }
-  if (path === "notebooks") {
-    return [{ name: "lab-preview.ipynb", path: PREVIEW_NOTEBOOK, isDir: false }];
-  }
-  if (path === "src") {
-    return [{ name: "analysis.py", path: PREVIEW_FILE, isDir: false }];
-  }
-  return [];
+
+  return Array.from(entries.values()).sort((left, right) =>
+    Number(right.isDir) - Number(left.isDir) ||
+    left.name.toLowerCase().localeCompare(right.name.toLowerCase()) ||
+    left.name.localeCompare(right.name),
+  );
 }
 
 export function previewSearchFiles(pattern: string, root?: string | null): string[] {
@@ -344,8 +386,89 @@ export async function previewReadBytes(path: string): Promise<number[]> {
 }
 
 export function previewWriteText(path: string, content: string): FileTextLike {
-  files.set(path, content);
-  return { path, content, bytes: new TextEncoder().encode(content).length };
+  const normalized = normalizePreviewPath(path);
+  ensurePreviewParentDirs(normalized);
+  files.set(normalized, content);
+  return { path: normalized, content, bytes: new TextEncoder().encode(content).length };
+}
+
+export function previewCreateDir(path: string): PreviewFileTreeEntry {
+  const normalized = normalizePreviewPath(path);
+  if (!normalized) throw new Error("Folder path is empty.");
+  if (previewFileExists(normalized) || previewDirExists(normalized)) {
+    throw new Error(`Path already exists: ${normalized}`);
+  }
+  ensurePreviewParentDirs(normalized);
+  explicitDirs.add(normalized);
+  return { name: previewBasename(normalized), path: normalized, isDir: true };
+}
+
+export function previewRenamePath(path: string, newPath: string): PreviewFileTreeEntry {
+  const source = normalizePreviewPath(path);
+  const target = normalizePreviewPath(newPath);
+  if (!source || !target) throw new Error("Path is empty.");
+  if (source === target) {
+    return { name: previewBasename(source), path: source, isDir: previewDirExists(source) && !previewFileExists(source) };
+  }
+  if (previewFileExists(target) || previewDirExists(target)) {
+    throw new Error(`Target already exists: ${target}`);
+  }
+  ensurePreviewParentDirs(target);
+
+  if (files.has(source)) {
+    const content = files.get(source) ?? "";
+    files.delete(source);
+    files.set(target, content);
+    return { name: previewBasename(target), path: target, isDir: false };
+  }
+  if (binaryFiles.has(source)) {
+    const content = binaryFiles.get(source) ?? "";
+    binaryFiles.delete(source);
+    binaryFiles.set(target, content);
+    return { name: previewBasename(target), path: target, isDir: false };
+  }
+  if (!previewDirExists(source)) throw new Error(`Path not found: ${source}`);
+  if (target.startsWith(`${source}/`)) throw new Error("Cannot move a folder inside itself.");
+
+  const prefix = `${source}/`;
+  for (const key of Array.from(files.keys())) {
+    if (!key.startsWith(prefix)) continue;
+    const content = files.get(key) ?? "";
+    files.delete(key);
+    files.set(`${target}/${key.slice(prefix.length)}`, content);
+  }
+  for (const key of Array.from(binaryFiles.keys())) {
+    if (!key.startsWith(prefix)) continue;
+    const content = binaryFiles.get(key) ?? "";
+    binaryFiles.delete(key);
+    binaryFiles.set(`${target}/${key.slice(prefix.length)}`, content);
+  }
+  for (const dir of Array.from(explicitDirs)) {
+    if (dir === source || dir.startsWith(prefix)) {
+      explicitDirs.delete(dir);
+      explicitDirs.add(dir === source ? target : `${target}/${dir.slice(prefix.length)}`);
+    }
+  }
+  explicitDirs.add(target);
+  return { name: previewBasename(target), path: target, isDir: true };
+}
+
+export function previewDeletePath(path: string): Promise<void> {
+  const normalized = normalizePreviewPath(path);
+  if (!normalized) return Promise.reject(new Error("Path is empty."));
+  if (files.delete(normalized) || binaryFiles.delete(normalized)) return Promise.resolve();
+  if (!previewDirExists(normalized)) return Promise.reject(new Error(`Path not found: ${normalized}`));
+  const prefix = `${normalized}/`;
+  for (const key of Array.from(files.keys())) {
+    if (key.startsWith(prefix)) files.delete(key);
+  }
+  for (const key of Array.from(binaryFiles.keys())) {
+    if (key.startsWith(prefix)) binaryFiles.delete(key);
+  }
+  for (const dir of Array.from(explicitDirs)) {
+    if (dir === normalized || dir.startsWith(prefix)) explicitDirs.delete(dir);
+  }
+  return Promise.resolve();
 }
 
 function outputFor(code: string, path: string): CellOutput[] {
