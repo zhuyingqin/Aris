@@ -355,6 +355,8 @@ export const sessionGet = (id: string) =>
 export const chatUiSessionsList = <T>() => invoke<T[]>("chat_ui_sessions_list");
 export const chatUiSessionLoad = <T>(id: string) =>
   invoke<T>("chat_ui_session_load", { id });
+export const chatUiTurnLoad = <T>(id: string, turnIndex: number) =>
+  invoke<T>("chat_ui_turn_load", { id, turnIndex });
 export const chatUiSessionSave = <T>(session: T) =>
   invoke<void>("chat_ui_session_save", { session });
 export const chatUiSessionDelete = (id: string) =>

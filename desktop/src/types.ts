@@ -596,6 +596,8 @@ export interface ChatTurn {
   id: string;
   role: "user" | "assistant";
   blocks: ChatBlock[];
+  omittedTurnIndex?: number;
+  omittedBytes?: number;
   streaming?: boolean;
   error?: string;
   stopped?: boolean;

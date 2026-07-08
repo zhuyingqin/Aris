@@ -38,7 +38,6 @@ type BeginRun = (
 
 interface UseChatCommandsArgs {
   currentId: string;
-  currentSession: ChatSession | null;
   currentSessionRef: React.MutableRefObject<ChatSession | null>;
   runningSessionIdsRef: React.MutableRefObject<Set<string>>;
   currentChatBusy: boolean;
@@ -54,7 +53,6 @@ interface UseChatCommandsArgs {
 
 export function useChatCommands({
   currentId,
-  currentSession,
   currentSessionRef,
   runningSessionIdsRef,
   currentChatBusy,

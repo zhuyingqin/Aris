@@ -4,7 +4,7 @@
 // menu, and drag-and-drop file attaching. Nothing here talks to the run/stream
 // backend — it only reads the current session and mutates its draft.
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { attachmentFromFile } from "./ChatComposer";
 import { isTauri } from "../api/tauri";
 import { useStore } from "../store";

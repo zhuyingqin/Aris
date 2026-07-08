@@ -4253,12 +4253,13 @@ fn execute_latex_compile(
         should_cancel,
         on_progress,
     )?;
-    let expected_pdf = output_dir.join(
-        input_path
-            .file_stem()
-            .ok_or_else(|| "inputPath must include a file name".to_string())?,
-    )
-    .with_extension("pdf");
+    let expected_pdf = output_dir
+        .join(
+            input_path
+                .file_stem()
+                .ok_or_else(|| "inputPath must include a file name".to_string())?,
+        )
+        .with_extension("pdf");
     if expected_pdf.is_file() && expected_pdf != output_path {
         std::fs::copy(&expected_pdf, &output_path).map_err(|error| error.to_string())?;
     }
@@ -4349,7 +4350,9 @@ fn run_latex_compile_process(
                 not_found.push(compiler.to_string());
             }
             Err(error) => {
-                return Err(format!("LaTeX command `{compiler}` failed to start: {error}"));
+                return Err(format!(
+                    "LaTeX command `{compiler}` failed to start: {error}"
+                ));
             }
         }
     }

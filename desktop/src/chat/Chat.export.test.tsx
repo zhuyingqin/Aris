@@ -21,6 +21,7 @@ const apiMocks = vi.hoisted(() => ({
   chatDelete: vi.fn(() => Promise.resolve()),
   chatUiSessionsList: vi.fn(() => Promise.resolve([])),
   chatUiSessionLoad: vi.fn(() => Promise.resolve(null)),
+  chatUiTurnLoad: vi.fn(() => Promise.resolve(null)),
   chatUiSessionSave: vi.fn(() => Promise.resolve()),
   chatUiSessionDelete: vi.fn(() => Promise.resolve()),
   chatUiSessionsLoad: vi.fn(() => Promise.resolve([])),

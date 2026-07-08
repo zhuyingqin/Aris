@@ -608,6 +608,8 @@ function renderSingleBlock(
   turn: ChatTurn,
   onPermissionRespond: (promptId: string, allow: boolean) => void,
   onQuestionRespond: (toolUseId: string, answer: string) => void,
+  onLoadOmittedTurn: ((turnIndex: number) => void) | undefined,
+  omittedTurnLoading: boolean,
 ) {
   if (block.kind === "text") {
     if (!block.text) return null;
@@ -633,9 +635,20 @@ function renderSingleBlock(
     ) : null;
   }
   if (block.kind === "notice") {
+    const omittedTurnIndex = typeof turn.omittedTurnIndex === "number" ? turn.omittedTurnIndex : null;
     return block.message ? (
       <div key={index} className="chat-context-notice">
-        {block.message}
+        <span className="chat-context-notice-message">{block.message}</span>
+        {omittedTurnIndex != null && onLoadOmittedTurn && (
+          <button
+            type="button"
+            className="chat-context-notice-action"
+            disabled={omittedTurnLoading}
+            onClick={() => onLoadOmittedTurn(omittedTurnIndex)}
+          >
+            {omittedTurnLoading ? "Loading..." : "Load full turn"}
+          </button>
+        )}
       </div>
     ) : null;
   }
@@ -695,6 +708,8 @@ function renderBlocks(
   turn: ChatTurn,
   onPermissionRespond: (promptId: string, allow: boolean) => void,
   onQuestionRespond: (toolUseId: string, answer: string) => void,
+  onLoadOmittedTurn: ((turnIndex: number) => void) | undefined,
+  omittedTurnLoading: boolean,
 ) {
   const blocks = turn.blocks;
   const out: ReactNode[] = [];
@@ -725,7 +740,15 @@ function renderBlocks(
         continue;
       }
     }
-    out.push(renderSingleBlock(block, i, turn, onPermissionRespond, onQuestionRespond));
+    out.push(renderSingleBlock(
+      block,
+      i,
+      turn,
+      onPermissionRespond,
+      onQuestionRespond,
+      onLoadOmittedTurn,
+      omittedTurnLoading,
+    ));
     i += 1;
   }
   return out;
@@ -766,6 +789,8 @@ interface Props {
   onEdit: (turn: ChatTurn) => void;
   onRetry: (turn: ChatTurn) => void;
   onContinue: () => void;
+  onLoadOmittedTurn?: (turnIndex: number) => void;
+  omittedTurnLoading?: boolean;
   onPermissionRespond?: (promptId: string, allow: boolean) => void;
   onQuestionRespond?: (toolUseId: string, answer: string) => void;
 }
@@ -776,6 +801,8 @@ function ChatMessage({
   onEdit,
   onRetry,
   onContinue,
+  onLoadOmittedTurn,
+  omittedTurnLoading = false,
   onPermissionRespond = () => undefined,
   onQuestionRespond = () => undefined,
 }: Props) {
@@ -784,7 +811,13 @@ function ChatMessage({
   const [showEarlierBlocks, setShowEarlierBlocks] = useState(false);
   const text = textFromTurn(turn);
   const hasContent = hasRenderableContent(turn);
-  const blockNodes = renderBlocks(turn, onPermissionRespond, onQuestionRespond);
+  const blockNodes = renderBlocks(
+    turn,
+    onPermissionRespond,
+    onQuestionRespond,
+    onLoadOmittedTurn,
+    omittedTurnLoading,
+  );
   // Hide the earlier steps of an oversized turn so it doesn't mount hundreds of
   // components at once. Keep the tail (where the final answer lives) visible.
   const overCap = blockNodes.length > MAX_TURN_RENDER_UNITS && !showEarlierBlocks;

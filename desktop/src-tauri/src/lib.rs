@@ -344,6 +344,7 @@ pub fn run() {
             sessions::session_get,
             sessions::chat_ui_sessions_list,
             sessions::chat_ui_session_load,
+            sessions::chat_ui_turn_load,
             sessions::chat_ui_session_save,
             sessions::chat_ui_session_delete,
             sessions::chat_ui_sessions_load,

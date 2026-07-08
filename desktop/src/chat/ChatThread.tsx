@@ -98,6 +98,8 @@ interface Props {
   onEdit: (turn: ChatTurn) => void;
   onRetry: (turn: ChatTurn) => void;
   onContinue: () => void;
+  onLoadOmittedTurn?: (turnIndex: number) => void;
+  isOmittedTurnLoading?: (turnIndex: number) => boolean;
   onPermissionRespond: (promptId: string, allow: boolean) => void;
   onQuestionRespond: (toolUseId: string, answer: string) => void;
 }
@@ -198,6 +200,8 @@ export default function ChatThread({
   onEdit,
   onRetry,
   onContinue,
+  onLoadOmittedTurn,
+  isOmittedTurnLoading = () => false,
   onPermissionRespond,
   onQuestionRespond,
 }: Props) {
@@ -386,6 +390,8 @@ export default function ChatThread({
                       onEdit={onEdit}
                       onRetry={onRetry}
                       onContinue={onContinue}
+                      onLoadOmittedTurn={onLoadOmittedTurn}
+                      omittedTurnLoading={turn.omittedTurnIndex != null && isOmittedTurnLoading(turn.omittedTurnIndex)}
                       onPermissionRespond={onPermissionRespond}
                       onQuestionRespond={onQuestionRespond}
                     />

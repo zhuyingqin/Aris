@@ -364,6 +364,20 @@ export function useChatSessions(projectId?: string | null) {
     });
   }, [activeProjectId, homeSession, markSessionDirty, updateSession]);
 
+  const hydrateOmittedTurn = useCallback((id: string, turnIndex: number, turn: ChatTurn) => {
+    if (id === HOME_SESSION_ID) return;
+    setAllSessions((previous) => previous.map((session) => {
+      if (session.id !== id) return session;
+      let replaced = false;
+      const turns = session.turns.map((item) => {
+        if (item.omittedTurnIndex !== turnIndex) return item;
+        replaced = true;
+        return turn;
+      });
+      return replaced ? { ...session, turns, turnsLoaded: true } : session;
+    }));
+  }, []);
+
   const newSession = useCallback(() => {
     if (currentId === HOME_SESSION_ID) {
       if (!isBlankSession(homeSession)) setHomeSession(makeHomeSession(activeProjectId));
@@ -415,6 +429,7 @@ export function useChatSessions(projectId?: string | null) {
     createSessionInProject,
     updateSession,
     patchTurns,
+    hydrateOmittedTurn,
     newSession,
     setDraft,
     renameSession,

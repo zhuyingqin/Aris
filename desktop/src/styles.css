@@ -10808,6 +10808,32 @@ textarea {
   line-height: 1;
 }
 
+.chat-context-notice-message {
+  flex: 1;
+  min-width: 0;
+}
+
+.chat-context-notice-action {
+  flex: 0 0 auto;
+  padding: 5px 9px;
+  border: 1px solid color-mix(in srgb, var(--amber) 44%, var(--border));
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--amber) 14%, var(--bg-2));
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.chat-context-notice-action:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--amber) 70%, var(--border));
+}
+
+.chat-context-notice-action:disabled {
+  cursor: default;
+  opacity: 0.62;
+}
+
 .chat-empty-response {
   display: flex;
   align-items: center;

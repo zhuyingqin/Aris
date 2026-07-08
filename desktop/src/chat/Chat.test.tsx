@@ -684,6 +684,34 @@ describe("Chat interaction helpers", () => {
     expect(screen.getByText("Model returned an empty response.")).toBeTruthy();
   });
 
+  it("offers to load omitted saved turns from the notice", async () => {
+    const user = userEvent.setup();
+    const onLoadOmittedTurn = vi.fn();
+    render(
+      <ChatMessage
+        turn={{
+          id: "chat-large-turn-1",
+          role: "assistant",
+          omittedTurnIndex: 1,
+          omittedBytes: 596_000,
+          blocks: [{
+            kind: "notice",
+            message: "A large saved turn was omitted from the quick preview.",
+          }],
+        }}
+        canRetry={false}
+        onEdit={() => undefined}
+        onRetry={() => undefined}
+        onContinue={() => undefined}
+        onLoadOmittedTurn={onLoadOmittedTurn}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Load full turn" }));
+
+    expect(onLoadOmittedTurn).toHaveBeenCalledWith(1);
+  });
+
   it("keeps streamed thinking from splitting assistant Markdown text", () => {
     const { container } = render(
       <ChatMessage
