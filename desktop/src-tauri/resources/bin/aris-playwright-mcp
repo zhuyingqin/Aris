@@ -7,6 +7,16 @@ NODE="$ROOT/node/node"
 SCRIPT="$ROOT/mcp/playwright/node_modules/@playwright/mcp/cli.js"
 VERSION="0.0.76"
 
+if [ -z "${PLAYWRIGHT_MCP_USER_DATA_DIR:-}" ]; then
+  PLAYWRIGHT_MCP_USER_DATA_DIR=".somniq/tmp/browser/profile"
+  export PLAYWRIGHT_MCP_USER_DATA_DIR
+fi
+if [ -z "${PLAYWRIGHT_MCP_OUTPUT_DIR:-}" ]; then
+  PLAYWRIGHT_MCP_OUTPUT_DIR=".somniq/tmp/browser/output"
+  export PLAYWRIGHT_MCP_OUTPUT_DIR
+fi
+mkdir -p "$PLAYWRIGHT_MCP_USER_DATA_DIR" "$PLAYWRIGHT_MCP_OUTPUT_DIR" 2>/dev/null || true
+
 if [ -f "$SCRIPT" ]; then
   if [ -x "$NODE" ]; then
     exec "$NODE" "$SCRIPT" "$@"

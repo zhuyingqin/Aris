@@ -11,6 +11,13 @@ use crate::sandbox::{
 use crate::{hidden_command, ConfigLoader};
 use serde::{Deserialize, Serialize};
 
+const DEFAULT_FOREGROUND_SHELL_TIMEOUT_MS: u64 = 120_000;
+const SHELL_DEFAULT_TIMEOUT_ENV: &str = "ARIS_SHELL_DEFAULT_TIMEOUT_MS";
+
+#[cfg(test)]
+static TEST_FOREGROUND_SHELL_TIMEOUT_MS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BashCommandInput {
     pub command: String,
@@ -69,6 +76,14 @@ pub fn execute_bash_with_cancel(
     input: BashCommandInput,
     should_cancel: impl Fn() -> bool,
 ) -> io::Result<BashCommandOutput> {
+    execute_bash_with_cancel_and_progress(input, should_cancel, |_| {})
+}
+
+pub fn execute_bash_with_cancel_and_progress(
+    input: BashCommandInput,
+    should_cancel: impl Fn() -> bool,
+    on_progress: impl FnMut(crate::ManagedCommandProgress),
+) -> io::Result<BashCommandOutput> {
     // Pre-execution safety check
     if let Some(rejection) = check_dangerous_command(&input.command) {
         return Err(io::Error::new(io::ErrorKind::PermissionDenied, rejection));
@@ -115,7 +130,7 @@ pub fn execute_bash_with_cancel(
         });
     }
 
-    execute_bash_blocking(input, sandbox_status, cwd, should_cancel)
+    execute_bash_blocking(input, sandbox_status, cwd, should_cancel, on_progress)
 }
 
 fn execute_bash_blocking(
@@ -123,14 +138,17 @@ fn execute_bash_blocking(
     sandbox_status: SandboxStatus,
     cwd: std::path::PathBuf,
     should_cancel: impl Fn() -> bool,
+    on_progress: impl FnMut(crate::ManagedCommandProgress),
 ) -> io::Result<BashCommandOutput> {
     let mut command = prepare_command(&input.command, &cwd, &sandbox_status, true);
-    let result = crate::run_managed_command_with_cancel(
+    let timeout_ms = resolve_foreground_shell_timeout_ms(input.timeout);
+    let result = crate::run_managed_command_with_cancel_and_progress(
         &mut command,
         format!("bash: {}", truncate_label(&input.command)),
-        input.timeout.map(Duration::from_millis),
+        Some(Duration::from_millis(timeout_ms)),
         true,
         should_cancel,
+        on_progress,
     )?;
 
     if result.timed_out {
@@ -138,10 +156,7 @@ fn execute_bash_blocking(
             String::from_utf8_lossy(&result.stdout).into_owned(),
             append_status_message(
                 String::from_utf8_lossy(&result.stderr).into_owned(),
-                format!(
-                    "Command exceeded timeout of {} ms",
-                    input.timeout.unwrap_or_default()
-                ),
+                format!("Command exceeded timeout of {timeout_ms} ms"),
             ),
             Some(String::from("timeout")),
             input.dangerously_disable_sandbox,
@@ -289,6 +304,33 @@ fn warn_strict_sandbox_override() {
     });
 }
 
+#[must_use]
+pub fn resolve_foreground_shell_timeout_ms(timeout: Option<u64>) -> u64 {
+    timeout.unwrap_or_else(default_foreground_shell_timeout_ms)
+}
+
+fn default_foreground_shell_timeout_ms() -> u64 {
+    #[cfg(test)]
+    {
+        let override_ms =
+            TEST_FOREGROUND_SHELL_TIMEOUT_MS.load(std::sync::atomic::Ordering::SeqCst);
+        if override_ms > 0 {
+            return override_ms;
+        }
+    }
+
+    env::var(SHELL_DEFAULT_TIMEOUT_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_FOREGROUND_SHELL_TIMEOUT_MS)
+}
+
+#[cfg(test)]
+fn set_test_foreground_shell_timeout_ms(timeout_ms: u64) {
+    TEST_FOREGROUND_SHELL_TIMEOUT_MS.store(timeout_ms, std::sync::atomic::Ordering::SeqCst);
+}
+
 fn prepare_command(
     command: &str,
     cwd: &std::path::Path,
@@ -315,8 +357,8 @@ fn prepare_command(
         let mut prepared = hidden_command(&launcher.program);
         prepared.args(launcher.args).arg(command).current_dir(cwd);
         if launcher.posix {
-            prepared.env("HOME", cwd.join(".sandbox-home"));
-            prepared.env("TMPDIR", cwd.join(".sandbox-tmp"));
+            prepared.env("HOME", crate::somniq_sandbox_home_dir(cwd));
+            prepared.env("TMPDIR", crate::somniq_sandbox_tmp_dir(cwd));
         }
         return prepared;
     }
@@ -324,15 +366,15 @@ fn prepare_command(
     let mut prepared = hidden_command("sh");
     prepared.arg("-lc").arg(command).current_dir(cwd);
     if sandbox_status.filesystem_active {
-        prepared.env("HOME", cwd.join(".sandbox-home"));
-        prepared.env("TMPDIR", cwd.join(".sandbox-tmp"));
+        prepared.env("HOME", crate::somniq_sandbox_home_dir(cwd));
+        prepared.env("TMPDIR", crate::somniq_sandbox_tmp_dir(cwd));
     }
     prepared
 }
 
 fn prepare_sandbox_dirs(cwd: &std::path::Path) {
-    let _ = std::fs::create_dir_all(cwd.join(".sandbox-home"));
-    let _ = std::fs::create_dir_all(cwd.join(".sandbox-tmp"));
+    let _ = std::fs::create_dir_all(crate::somniq_sandbox_home_dir(cwd));
+    let _ = std::fs::create_dir_all(crate::somniq_sandbox_tmp_dir(cwd));
 }
 
 #[derive(Clone)]
@@ -441,8 +483,10 @@ fn check_dangerous_command(command: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{execute_bash, BashCommandInput};
+    use super::{execute_bash, set_test_foreground_shell_timeout_ms, BashCommandInput};
     use crate::sandbox::FilesystemIsolationMode;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn executes_simple_command() {
@@ -465,6 +509,32 @@ mod tests {
     }
 
     #[test]
+    fn default_timeout_prevents_foreground_hangs() {
+        let _guard = crate::test_env_lock();
+        set_test_foreground_shell_timeout_ms(10);
+        let output = execute_bash(BashCommandInput {
+            command: String::from("sleep 1"),
+            timeout: None,
+            description: None,
+            run_in_background: Some(false),
+            dangerously_disable_sandbox: Some(false),
+            namespace_restrictions: Some(false),
+            isolate_network: Some(false),
+            filesystem_mode: Some(FilesystemIsolationMode::WorkspaceOnly),
+            allowed_mounts: None,
+        })
+        .expect("bash command should return a timeout result");
+        set_test_foreground_shell_timeout_ms(0);
+
+        assert!(output.interrupted);
+        assert_eq!(
+            output.return_code_interpretation.as_deref(),
+            Some("timeout")
+        );
+        assert!(output.stderr.contains("Command exceeded timeout of 10 ms"));
+    }
+
+    #[test]
     fn disables_sandbox_when_requested() {
         let output = execute_bash(BashCommandInput {
             command: String::from("printf 'hello'"),
@@ -480,5 +550,50 @@ mod tests {
         .expect("bash command should execute");
 
         assert!(!output.sandbox_status.expect("sandbox status").enabled);
+    }
+
+    #[test]
+    fn sandbox_dirs_are_under_somniq_tmp() {
+        let _guard = crate::test_env_lock();
+        let previous = std::env::current_dir().expect("current dir");
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("somniq-bash-sandbox-{nanos}"));
+        fs::create_dir_all(&root).expect("create temp workspace");
+        std::env::set_current_dir(&root).expect("enter temp workspace");
+
+        let output = execute_bash(BashCommandInput {
+            command: String::from("printf 'hello'"),
+            timeout: Some(1_000),
+            description: None,
+            run_in_background: Some(false),
+            dangerously_disable_sandbox: Some(false),
+            namespace_restrictions: Some(false),
+            isolate_network: Some(false),
+            filesystem_mode: Some(FilesystemIsolationMode::WorkspaceOnly),
+            allowed_mounts: None,
+        })
+        .expect("bash command should execute");
+
+        assert_eq!(output.stdout, "hello");
+        assert!(root
+            .join(".somniq")
+            .join("tmp")
+            .join("sandbox")
+            .join("home")
+            .is_dir());
+        assert!(root
+            .join(".somniq")
+            .join("tmp")
+            .join("sandbox")
+            .join("tmp")
+            .is_dir());
+        assert!(!root.join(".sandbox-home").exists());
+        assert!(!root.join(".sandbox-tmp").exists());
+
+        std::env::set_current_dir(previous).expect("restore cwd");
+        fs::remove_dir_all(root).expect("cleanup temp workspace");
     }
 }

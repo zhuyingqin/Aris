@@ -9,8 +9,11 @@ import type {
 } from "../types";
 import type { ChatSession } from "./types";
 
-export const SESSIONS_KEY = "aris-chat-sessions-v2";
-export const CURRENT_KEY = "aris-chat-current-id";
+export const SESSIONS_KEY = "somniq-chat-sessions-v2";
+export const LEGACY_SESSIONS_KEY = "aris-chat-sessions-v2";
+export const LEGACY_SESSIONS_KEY_V1 = "aris-chat-sessions";
+export const CURRENT_KEY = "somniq-chat-current-id";
+export const LEGACY_CURRENT_KEY = "aris-chat-current-id";
 
 export function makeId(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -24,6 +27,9 @@ export function makeSession(projectId = "default"): ChatSession {
     title: "New chat",
     model: null,
     turns: [],
+    turnsLoaded: true,
+    turnsPartial: false,
+    turnCount: 0,
     draft: "",
     draftAttachments: [],
     pinned: false,
@@ -83,12 +89,24 @@ export function migrateSession(raw: Partial<ChatSession>, fallbackProjectId = "d
   const rawTitle = typeof raw.title === "string" ? raw.title : "";
   const cleanedTitle = cleanChatTitle(rawTitle);
   const title = cleanedTitle && cleanedTitle !== "New chat" ? cleanedTitle : titleFromTurns(turns);
+  const turnsLoaded = raw.turnsLoaded === false ? false : true;
+  const turnsPartial = Boolean(raw.turnsPartial);
+  const turnCount = typeof raw.turnCount === "number" && Number.isFinite(raw.turnCount)
+    ? raw.turnCount
+    : turns.length;
+  const partialBaseTurnIds = Array.isArray(raw.partialBaseTurnIds)
+    ? raw.partialBaseTurnIds.filter((id): id is string => typeof id === "string")
+    : undefined;
   return {
     id: raw.id || makeId("chat"),
     projectId: raw.projectId || fallbackProjectId,
     title,
     model: typeof raw.model === "string" && raw.model.trim() ? raw.model : null,
     turns,
+    turnsLoaded,
+    turnsPartial,
+    turnCount,
+    partialBaseTurnIds,
     draft: raw.draft || "",
     draftAttachments: Array.isArray(raw.draftAttachments) ? raw.draftAttachments : [],
     pinned: Boolean(raw.pinned),

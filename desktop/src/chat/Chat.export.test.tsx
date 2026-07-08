@@ -17,18 +17,24 @@ const apiMocks = vi.hoisted(() => ({
   projectChatStarters: vi.fn(() => Promise.resolve([])),
   chatRunCommand: vi.fn(),
   chatSuggestTitle: vi.fn(() => Promise.resolve("Concise title")),
-  chatSetContext: vi.fn(() => Promise.resolve()),
+  chatSetContext: vi.fn((_sessionId: string, _messages: unknown[], _mode?: string) => Promise.resolve(0)),
   chatDelete: vi.fn(() => Promise.resolve()),
+  chatUiSessionsList: vi.fn(() => Promise.resolve([])),
+  chatUiSessionLoad: vi.fn(() => Promise.resolve(null)),
+  chatUiSessionSave: vi.fn(() => Promise.resolve()),
+  chatUiSessionDelete: vi.fn(() => Promise.resolve()),
   chatUiSessionsLoad: vi.fn(() => Promise.resolve([])),
   chatUiSessionsSave: vi.fn(() => Promise.resolve()),
   fileRead: vi.fn(() => Promise.resolve("")),
   fileSearch: vi.fn(() => Promise.resolve([])),
-  chatSend: vi.fn(() => Promise.resolve("")),
+  chatSend: vi.fn((_sessionId: string, _message: unknown) => Promise.resolve("")),
   chatModelOptions: vi.fn(() => Promise.resolve({ provider: "anthropic-compat", current: "MiniMax-M3", options: [{ value: "MiniMax-M3", label: "MiniMax-M3", description: null }] })),
+  chatModelSet: vi.fn((model: string) => Promise.resolve({ ready: true, model, provider: "anthropic-compat" })),
   chatCancel: vi.fn(() => Promise.resolve()),
   onChatDelta: vi.fn(() => Promise.resolve(() => undefined)),
   onChatThinkingDelta: vi.fn(() => Promise.resolve(() => undefined)),
   onChatTool: vi.fn(() => Promise.resolve(() => undefined)),
+  onChatToolProgress: vi.fn(() => Promise.resolve(() => undefined)),
   onChatToolResult: vi.fn(() => Promise.resolve(() => undefined)),
   onChatPermissionRequest: vi.fn(() => Promise.resolve(() => undefined)),
   onChatPermissionResolved: vi.fn(() => Promise.resolve(() => undefined)),
@@ -41,13 +47,20 @@ const apiMocks = vi.hoisted(() => ({
 vi.mock("../api/tauri", () => apiMocks);
 
 vi.mock("./ChatThread", () => ({
-  default: ({ turns }: { turns: ChatTurn[] }) => (
+  default: ({
+    turns,
+    onContinue,
+  }: {
+    turns: ChatTurn[];
+    onContinue: () => void;
+  }) => (
     <div data-testid="chat-thread">
       {turns.map((turn) => (
         <article key={turn.id} data-role={turn.role}>
           {turn.blocks.map((block, index) => (
             block.kind === "text" ? <div key={index}>{block.text}</div> : null
           ))}
+          {turn.stopped && <button onClick={onContinue}>Continue</button>}
         </article>
       ))}
     </div>
@@ -130,6 +143,10 @@ describe("Chat export action", () => {
     apiMocks.chatCommandSpecs.mockResolvedValue([]);
     apiMocks.skillsList.mockResolvedValue([]);
     apiMocks.projectChatStarters.mockResolvedValue([]);
+    apiMocks.chatUiSessionsList.mockResolvedValue([]);
+    apiMocks.chatUiSessionLoad.mockResolvedValue(null);
+    apiMocks.chatUiSessionSave.mockResolvedValue(undefined);
+    apiMocks.chatUiSessionDelete.mockResolvedValue(undefined);
     apiMocks.chatUiSessionsLoad.mockResolvedValue([]);
     apiMocks.chatUiSessionsSave.mockResolvedValue(undefined);
     useStore.setState({
@@ -163,7 +180,7 @@ describe("Chat export action", () => {
     render(<Chat />);
 
     await userEvent.click(await screen.findByRole("button", { name: "Export test" }));
-    const exportButton = await screen.findByRole("button", { name: "Export current chat" });
+    const exportButton = await screen.findByRole("button", { name: /Export current chat|导出当前对话/ });
     expect((exportButton as HTMLButtonElement).disabled).toBe(false);
 
     await userEvent.click(exportButton);
@@ -196,6 +213,88 @@ describe("Chat export action", () => {
     expect(apiMocks.chatRunCommand.mock.calls[0][0]).not.toBe(session.id);
     expect(useStore.getState().pendingChatRunInput).toBeNull();
     expect(await screen.findByText("Agent search started")).toBeTruthy();
+  });
+
+  it("continues a stopped assistant turn by rebuilding the partial into backend history", async () => {
+    const session = makeSession("default");
+    session.id = "session-stopped";
+    session.title = "Stopped task";
+    session.turns = [
+      { id: "turn-user", role: "user", blocks: [{ kind: "text", text: "Draft the implementation plan" }] },
+      {
+        id: "turn-assistant",
+        role: "assistant",
+        stopped: true,
+        blocks: [{ kind: "text", text: "Partial answer: first finish the context reset path" }],
+      },
+    ];
+    localStorage.setItem(SESSIONS_KEY, JSON.stringify([session]));
+    localStorage.setItem(CURRENT_KEY, session.id);
+    apiMocks.chatSetContext.mockResolvedValue(128);
+    apiMocks.chatSend.mockResolvedValue("Continued answer");
+
+    render(<Chat />);
+
+    await userEvent.click(await screen.findByRole("button", { name: "Stopped task" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Continue" }));
+
+    // The stopped turn is now rebuilt into the backend context (not dropped),
+    // so the model sees the partial response it is meant to continue.
+    await waitFor(() => expect(apiMocks.chatSetContext).toHaveBeenCalledWith(
+      session.id,
+      [
+        { role: "user", text: "Draft the implementation plan", images: [] },
+        { role: "assistant", text: "Partial answer: first finish the context reset path" },
+      ],
+      "replace",
+    ));
+    await waitFor(() => expect(apiMocks.chatSend).toHaveBeenCalled());
+    const request = apiMocks.chatSend.mock.calls[0][1] as { text: string };
+    // The continue prompt no longer embeds (or truncates) the partial — it
+    // points at the rebuilt conversation instead.
+    expect(request.text).not.toContain("Partial stopped response:");
+    expect(request.text).toContain("already in the conversation above");
+    expect(request.text).toContain("Do not repeat the completed portion");
+  });
+
+  it("rebuilds stopped transcript before sending a normal follow-up", async () => {
+    const session = makeSession("default");
+    session.id = "session-stopped-follow-up";
+    session.title = "Stopped follow-up";
+    session.turns = [
+      { id: "turn-user", role: "user", blocks: [{ kind: "text", text: "Inspect the repo" }] },
+      {
+        id: "turn-assistant",
+        role: "assistant",
+        stopped: true,
+        blocks: [{ kind: "text", text: "I found the chat context reset path." }],
+      },
+    ];
+    localStorage.setItem(SESSIONS_KEY, JSON.stringify([session]));
+    localStorage.setItem(CURRENT_KEY, session.id);
+    apiMocks.chatSetContext.mockResolvedValue(256);
+    apiMocks.chatSend.mockResolvedValue("Follow-up answer");
+
+    render(<Chat />);
+
+    await userEvent.click(await screen.findByRole("button", { name: "Stopped follow-up" }));
+    await userEvent.type(screen.getByRole("textbox", { name: "Message SomniQ" }), "What should I change?");
+    await userEvent.click(screen.getByRole("button", { name: "Send message" }));
+
+    await waitFor(() => expect(apiMocks.chatSetContext).toHaveBeenCalledWith(
+      session.id,
+      [
+        { role: "user", text: "Inspect the repo", images: [] },
+        { role: "assistant", text: "I found the chat context reset path." },
+      ],
+      "replace",
+    ));
+    await waitFor(() => expect(apiMocks.chatSend).toHaveBeenCalledWith(
+      session.id,
+      expect.objectContaining({ text: "What should I change?", model: "MiniMax-M3" }),
+    ));
+    expect(apiMocks.chatSetContext.mock.invocationCallOrder[0])
+      .toBeLessThan(apiMocks.chatSend.mock.invocationCallOrder[0]);
   });
 
   it("uses the configured LLM to create a concise title after the first reply", async () => {

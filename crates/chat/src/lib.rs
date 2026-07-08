@@ -89,9 +89,9 @@ pub fn model_identity_section(model_id: Option<&str>, product_surface: &str) -> 
 #[must_use]
 pub fn language_preference_section(language: &str) -> String {
     if language == "cn" || language.eq_ignore_ascii_case("zh") {
-        "User language preference is Chinese. Always respond in Chinese unless the user explicitly writes in another language.".to_string()
+        "Default to the user's current language. If the user's language is unclear, use Chinese. Keep code, commands, identifiers, file paths, and technical terms in their original form.".to_string()
     } else {
-        "User language preference is English. Always respond in English unless the user explicitly writes in another language.".to_string()
+        "Default to the user's current language. If the user's language is unclear, use English. Keep code, commands, identifiers, file paths, and technical terms in their original form.".to_string()
     }
 }
 
@@ -453,7 +453,9 @@ fn mcp_discovery_cache() -> &'static Mutex<BTreeMap<String, CachedMcpDiscovery>>
 }
 
 fn mcp_discovery_cache_key(feature_config: &runtime::RuntimeFeatureConfig) -> String {
-    let cwd = std::env::current_dir()
+    let cwd = std::env::var_os("ARIS_WORKSPACE_ROOT")
+        .map(PathBuf::from)
+        .or_else(|| std::env::current_dir().ok())
         .map(|path| path.display().to_string())
         .unwrap_or_default();
     let servers = feature_config
@@ -1067,7 +1069,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("time should be after epoch")
             .as_nanos();
-        std::env::temp_dir().join(format!("aris-chat-mcp-{nanos}"))
+        std::env::temp_dir().join(format!("somniq-chat-mcp-{nanos}"))
     }
 
     fn write_mcp_server_script(root: &Path) -> PathBuf {

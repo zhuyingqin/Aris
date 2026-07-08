@@ -3109,8 +3109,9 @@ impl LiveCli {
 }
 
 fn sessions_dir() -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let cwd = env::current_dir()?;
-    let path = cwd.join(".claude").join("sessions");
+    let cwd = runtime::workspace_root_from_env();
+    runtime::migrate_legacy_project_runtime_dirs(&cwd)?;
+    let path = runtime::project_sessions_dir_from_env();
     fs::create_dir_all(&path)?;
     Ok(path)
 }
@@ -4512,9 +4513,10 @@ fn slash_command_completion_candidates() -> Vec<(String, String)> {
 
 fn discover_saved_workflow_names() -> Vec<String> {
     let mut names = BTreeSet::new();
-    if let Ok(cwd) = env::current_dir() {
-        collect_workflow_names(&cwd.join(".claude").join("workflows"), &mut names);
-    }
+    collect_workflow_names(&runtime::project_workflows_dir_from_env(), &mut names);
+    collect_workflow_names(&runtime::user_workflows_dir_from_env(), &mut names);
+    let cwd = runtime::workspace_root_from_env();
+    collect_workflow_names(&cwd.join(".claude").join("workflows"), &mut names);
     collect_workflow_names(
         &PathBuf::from(runtime::home_dir())
             .join(".claude")

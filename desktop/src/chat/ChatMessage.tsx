@@ -1,11 +1,31 @@
 import { Fragment, memo, useMemo, useState, type ReactNode } from "react";
 import type { ChatBlock, ChatTurn } from "../types";
 import { fileOpen } from "../api/tauri";
+import ChatImagePreview, { isDirectImageSource, isPreviewableImagePath } from "./ChatImagePreview";
 import MarkdownContent, { ThinkBlock } from "./MarkdownContent";
+import { CHAT_COPY } from "./i18n";
 import { textFromTurn } from "./model";
 import { useStore } from "../store";
 
 const FILE_WRITE_TOOLS = new Set(["write_file", "append_file", "edit_file", "str_replace_based_edit_tool"]);
+// A single agent turn can hold hundreds of interleaved reasoning + tool blocks.
+// The thread virtualizes per turn, so a mega-turn is one row that would mount
+// every block at once (200+ components) and freeze the UI. We render only the
+// most recent units and hide earlier ones behind a toggle; the final answer is
+// at the tail, so the tail is what the user needs on open.
+const MAX_TURN_RENDER_UNITS = 60;
+const TURN_RENDER_TAIL = 40;
+const MAX_TOOL_IMAGE_PREVIEWS = 6;
+const MAX_TOOL_IMAGE_SCAN_CHARS = 8_000;
+// Match any non-whitespace run ending in an image extension. The previous
+// pattern used nested/overlapping quantifiers (`[A-Za-z0-9_.-]+(?:[\\/]...)*`
+// inside an alternation) which caused CATASTROPHIC backtracking — a single
+// slash/path-heavy tool output with no image extension could hang the main
+// thread for minutes, freezing the whole conversation on open. A single greedy
+// character class with one required suffix backtracks linearly, not
+// exponentially, and still captures URLs, Windows/relative paths, and bare
+// filenames.
+const TOOL_IMAGE_PATH_RE = /[^\s"'`<>|]*\.(?:png|jpe?g|gif|webp|svg|bmp)(?::\d+(?::\d+)?)?/gi;
 
 interface FileChange {
   path: string;
@@ -53,6 +73,73 @@ function parseOutput(output: string | undefined): Record<string, unknown> | null
   } catch {
     return null;
   }
+}
+
+function parseJsonValue(value: string | undefined): unknown {
+  if (!value) return null;
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+function cleanImageCandidate(value: string): string {
+  return value
+    .trim()
+    .replace(/^[([{<]+/, "")
+    .replace(/[)\],.;]+$/, "");
+}
+
+function addImagePath(candidate: string, paths: string[], seen: Set<string>) {
+  const path = cleanImageCandidate(candidate);
+  if (!isPreviewableImagePath(path) || seen.has(path) || paths.length >= MAX_TOOL_IMAGE_PREVIEWS) return;
+  seen.add(path);
+  paths.push(path);
+}
+
+function collectImagePathsFromText(text: string, paths: string[], seen: Set<string>) {
+  const excerpt = text.slice(0, MAX_TOOL_IMAGE_SCAN_CHARS);
+  TOOL_IMAGE_PATH_RE.lastIndex = 0;
+  let match: RegExpExecArray | null;
+  while ((match = TOOL_IMAGE_PATH_RE.exec(excerpt)) !== null) {
+    addImagePath(match[0], paths, seen);
+    if (paths.length >= MAX_TOOL_IMAGE_PREVIEWS) return;
+  }
+}
+
+function collectImagePathsFromValue(value: unknown, paths: string[], seen: Set<string>, depth = 0) {
+  if (paths.length >= MAX_TOOL_IMAGE_PREVIEWS || depth > 5 || value === null || value === undefined) return;
+  if (typeof value === "string") {
+    collectImagePathsFromText(value, paths, seen);
+    return;
+  }
+  if (typeof value !== "object") return;
+  if (Array.isArray(value)) {
+    for (const item of value) collectImagePathsFromValue(item, paths, seen, depth + 1);
+    return;
+  }
+  for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+    collectImagePathsFromText(key, paths, seen);
+    collectImagePathsFromValue(item, paths, seen, depth + 1);
+    if (paths.length >= MAX_TOOL_IMAGE_PREVIEWS) return;
+  }
+}
+
+function imagePathsFromTool(
+  block: Extract<ChatBlock, { kind: "tool" }>,
+  change: FileChange | null,
+): string[] {
+  const paths: string[] = [];
+  const seen = new Set<string>();
+  if (change) addImagePath(change.path, paths, seen);
+  collectImagePathsFromValue(parseJsonValue(block.input), paths, seen);
+  collectImagePathsFromValue(parseJsonValue(block.output), paths, seen);
+  if (block.input) collectImagePathsFromText(block.input, paths, seen);
+  if (block.output) collectImagePathsFromText(block.output, paths, seen);
+  if (block.progress?.stdoutTail) collectImagePathsFromText(block.progress.stdoutTail, paths, seen);
+  if (block.progress?.stderrTail) collectImagePathsFromText(block.progress.stderrTail, paths, seen);
+  return paths;
 }
 
 function diffFromCodexChanges(output: Record<string, unknown> | null): FileChange | null {
@@ -122,6 +209,8 @@ export function diffFromTool(block: Extract<ChatBlock, { kind: "tool" }>): FileC
 
 function CopyButton({ text }: { text: string }) {
   const [copied, setCopied] = useState(false);
+  const language = useStore((state) => state.language);
+  const copy = CHAT_COPY[language];
   return (
     <button
       onClick={() => {
@@ -131,14 +220,50 @@ function CopyButton({ text }: { text: string }) {
         });
       }}
     >
-      {copied ? "Copied" : "Copy"}
+      {copied ? copy.copied : copy.copy}
     </button>
+  );
+}
+
+function formatElapsed(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) return "0s";
+  const seconds = Math.floor(ms / 1000);
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds % 60;
+  return `${minutes}m ${rest}s`;
+}
+
+function ToolProgressView({ block }: { block: Extract<ChatBlock, { kind: "tool" }> }) {
+  const progress = block.progress;
+  if (!progress || block.output !== undefined) return null;
+  const hasTail = Boolean(progress.stdoutTail || progress.stderrTail);
+  const timeout = progress.timeoutMs ? ` / ${formatElapsed(progress.timeoutMs)}` : "";
+  return (
+    <div className={`chat-tool-progress${progress.nearTimeout ? " near-timeout" : ""}`}>
+      <div className="chat-tool-progress-line">
+        <span>{progress.message || "Still running"}</span>
+        <span>{formatElapsed(progress.elapsedMs)}{timeout}</span>
+        {progress.pid != null && <span>PID {progress.pid}</span>}
+      </div>
+      {hasTail && (
+        <div className="chat-tool-progress-tails">
+          {progress.stdoutTail && (
+            <pre className="md-view tool-detail tool-progress-tail">stdout: {progress.stdoutTail}</pre>
+          )}
+          {progress.stderrTail && (
+            <pre className="md-view tool-detail tool-progress-tail">stderr: {progress.stderrTail}</pre>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 
 function ToolCall({ block }: { block: Extract<ChatBlock, { kind: "tool" }> }) {
   const [open, setOpen] = useState(false);
   const change = useMemo(() => diffFromTool(block), [block]);
+  const imagePaths = useMemo(() => imagePathsFromTool(block, change), [block, change]);
   const studioLinks = useMemo(() => studioLinksFromTool(block), [block]);
   const setTab = useStore((state) => state.setTab);
   const setPendingStudioArtifactId = useStore((state) => state.setPendingStudioArtifactId);
@@ -182,6 +307,7 @@ function ToolCall({ block }: { block: Extract<ChatBlock, { kind: "tool" }> }) {
         )}
         {!running && <span className="tool-collapse-btn">{open ? "▾" : "▸"}</span>}
       </div>
+      <ToolProgressView block={block} />
       {studioLinks.length > 0 && (
         <div className="chat-tool-studio-links">
           {studioLinks.map((link) => (
@@ -195,6 +321,20 @@ function ToolCall({ block }: { block: Extract<ChatBlock, { kind: "tool" }> }) {
             >
               Open {link.title} in Studio
             </button>
+          ))}
+        </div>
+      )}
+      {imagePaths.length > 0 && (
+        <div className="chat-tool-images">
+          {imagePaths.map((path) => (
+            <ChatImagePreview
+              key={path}
+              src={path}
+              alt={path}
+              title={path}
+              openPath={isDirectImageSource(path) ? undefined : path}
+              className="chat-tool-image"
+            />
           ))}
         </div>
       )}
@@ -599,6 +739,27 @@ function hasRenderableContent(turn: ChatTurn): boolean {
   });
 }
 
+function renderAttachment(attachment: NonNullable<ChatTurn["attachments"]>[number], imageLabel: string, fileLabel: string) {
+  if (attachment.kind === "image" && (attachment.preview || attachment.path)) {
+    const src = attachment.preview ?? attachment.path!;
+    return (
+      <ChatImagePreview
+        key={attachment.id}
+        src={src}
+        alt={attachment.name}
+        title={attachment.name}
+        openPath={attachment.path}
+        className="chat-user-image"
+      />
+    );
+  }
+  return (
+    <span key={attachment.id} className="chat-message-attachment-badge">
+      {attachment.kind === "image" ? imageLabel : fileLabel}: {attachment.name}
+    </span>
+  );
+}
+
 interface Props {
   turn: ChatTurn;
   canRetry: boolean;
@@ -618,38 +779,56 @@ function ChatMessage({
   onPermissionRespond = () => undefined,
   onQuestionRespond = () => undefined,
 }: Props) {
+  const language = useStore((state) => state.language);
+  const copy = CHAT_COPY[language];
+  const [showEarlierBlocks, setShowEarlierBlocks] = useState(false);
   const text = textFromTurn(turn);
   const hasContent = hasRenderableContent(turn);
+  const blockNodes = renderBlocks(turn, onPermissionRespond, onQuestionRespond);
+  // Hide the earlier steps of an oversized turn so it doesn't mount hundreds of
+  // components at once. Keep the tail (where the final answer lives) visible.
+  const overCap = blockNodes.length > MAX_TURN_RENDER_UNITS && !showEarlierBlocks;
+  const hiddenCount = overCap ? blockNodes.length - TURN_RENDER_TAIL : 0;
+  const visibleBlockNodes = overCap ? blockNodes.slice(-TURN_RENDER_TAIL) : blockNodes;
   return (
     <article className={`chat-turn chat-${turn.role}${turn.error ? " chat-turn-error" : ""}`}>
       {turn.role === "user" && turn.attachments && turn.attachments.length > 0 && (
         <div className="chat-message-attachments">
-          {turn.attachments.map((attachment) => <span key={attachment.id}>{attachment.kind === "image" ? "Image" : "File"}: {attachment.name}</span>)}
+          {turn.attachments.map((attachment) => renderAttachment(attachment, copy.image, copy.file))}
         </div>
       )}
-      {renderBlocks(turn, onPermissionRespond, onQuestionRespond)}
+      {overCap && (
+        <button
+          type="button"
+          className="chat-turn-earlier-toggle"
+          onClick={() => setShowEarlierBlocks(true)}
+        >
+          {language === "cn" ? `显示更早的 ${hiddenCount} 个步骤` : `Show ${hiddenCount} earlier steps`}
+        </button>
+      )}
+      {visibleBlockNodes}
       {!turn.streaming && !turn.error && !turn.stopped && !hasContent && turn.role === "assistant" && (
-        <div className="chat-empty-response">Model returned an empty response.</div>
+        <div className="chat-empty-response">{copy.emptyResponse}</div>
       )}
       {!turn.streaming && !turn.error && turn.stopped && turn.role === "assistant" && (
         <div className="chat-stopped-card">
-          <strong>Response stopped</strong>
-          <span>Stopped by user.</span>
+          <strong>{copy.responseStopped}</strong>
+          <span>{copy.stoppedByUser}</span>
         </div>
       )}
       {turn.streaming && <span className="chat-inline-cursor">▌</span>}
       {turn.error && (
         <div className="chat-error-card">
-          <strong>Response failed</strong>
+          <strong>{copy.responseFailed}</strong>
           <span>{turn.error}</span>
-          <button onClick={() => onRetry(turn)}>Retry</button>
+          <button onClick={() => onRetry(turn)}>{copy.retry}</button>
         </div>
       )}
       <div className="chat-message-actions">
         {text && <CopyButton text={text} />}
-        {turn.role === "user" && !turn.streaming && <button onClick={() => onEdit(turn)}>Edit and resend</button>}
-        {turn.role === "assistant" && canRetry && !turn.streaming && !turn.error && <button onClick={() => onRetry(turn)}>Retry</button>}
-        {turn.role === "assistant" && turn.stopped && <button onClick={onContinue}>Continue</button>}
+        {turn.role === "user" && !turn.streaming && <button onClick={() => onEdit(turn)}>{copy.editAndResend}</button>}
+        {turn.role === "assistant" && canRetry && !turn.streaming && !turn.error && <button onClick={() => onRetry(turn)}>{copy.retry}</button>}
+        {turn.role === "assistant" && turn.stopped && <button onClick={onContinue}>{copy.continue}</button>}
       </div>
     </article>
   );

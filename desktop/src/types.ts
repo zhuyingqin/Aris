@@ -72,6 +72,7 @@ export interface ScheduledTask {
   scheduleLabel?: string;
   status?: string; // "active" | "paused"
   sessionId?: string | null;
+  model?: string | null;
   prompt?: string;
   rrule?: string;
   intervalValue?: number;
@@ -90,6 +91,7 @@ export interface ScheduledTaskInput {
   title: string;
   prompt: string;
   sessionId: string;
+  model?: string;
   intervalValue: number;
   intervalUnit: "minutes" | "hours" | "days";
   status?: "active" | "paused";
@@ -498,6 +500,24 @@ export interface ChatStatus {
   memoryFiles?: number | null;
 }
 
+export interface SystemPromptView {
+  model: string;
+  fullToolRegistry: boolean;
+  sections: number;
+  characters: number;
+  prompt: string;
+}
+
+export interface UserPromptView {
+  sessionId: string;
+  surface: string;
+  capturedAt: number;
+  blocks: number;
+  images: number;
+  characters: number;
+  prompt: string;
+}
+
 export interface ChatModelOption {
   value: string;
   label: string;
@@ -532,7 +552,18 @@ export type ChatBlock =
       input: string;
       output?: string;
       isError?: boolean;
+      progress?: ChatToolProgress;
     };
+
+export interface ChatToolProgress {
+  elapsedMs: number;
+  timeoutMs?: number | null;
+  pid?: number | null;
+  stdoutTail?: string | null;
+  stderrTail?: string | null;
+  nearTimeout?: boolean;
+  message?: string;
+}
 
 // A single step of a TodoWrite plan, surfaced as the floating workflow box.
 export type ChatTodoStatus = "pending" | "in_progress" | "completed";
@@ -569,4 +600,28 @@ export interface ChatTurn {
   error?: string;
   stopped?: boolean;
   attachments?: ChatAttachment[];
+}
+
+export interface ChatEventLogEntry {
+  version: number;
+  seq: number;
+  ts: number;
+  sessionId: string;
+  kind: string;
+  payload: unknown;
+}
+
+export interface ChatEventsReplay {
+  sessionId: string;
+  eventCount: number;
+  lastSeq: number;
+  turns: ChatTurn[];
+}
+
+export interface ChatEventsRestoreResult {
+  sessionId: string;
+  eventCount: number;
+  lastSeq: number;
+  messageCount: number;
+  restoredPath: string;
 }

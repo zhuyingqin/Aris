@@ -1281,6 +1281,8 @@ fn convert_messages_openai(
     kimi_reasoning_cache: &std::collections::HashMap<usize, String>,
 ) -> Vec<Value> {
     let mut result: Vec<Value> = Vec::new();
+    let mut pending_tool_call_ids: Vec<String> = Vec::new();
+    let mut orphan_tool_results: Vec<String> = Vec::new();
 
     // System message first
     if let Some(prompt) = system_prompt {
@@ -1296,23 +1298,30 @@ fn convert_messages_openai(
                 // Already handled above
             }
             MessageRole::User => {
-                let content = openai_user_content(&message.blocks);
-
-                // Also emit tool_result blocks as separate "tool" role messages
                 for block in &message.blocks {
                     if let ContentBlock::ToolResult {
                         tool_use_id,
+                        tool_name,
                         output,
                         ..
                     } = block
                     {
-                        result.push(json!({
-                            "role": "tool",
-                            "tool_call_id": tool_use_id,
-                            "content": output,
-                        }));
+                        push_openai_tool_result_or_recover(
+                            &mut result,
+                            &mut pending_tool_call_ids,
+                            &mut orphan_tool_results,
+                            tool_use_id,
+                            tool_name,
+                            output,
+                        );
                     }
                 }
+                recover_openai_tool_call_sequence(
+                    &mut result,
+                    &mut pending_tool_call_ids,
+                    &mut orphan_tool_results,
+                );
+                let content = openai_user_content(&message.blocks);
 
                 if let Some(content) = content {
                     result.push(json!({
@@ -1326,19 +1335,28 @@ fn convert_messages_openai(
                 for block in &message.blocks {
                     if let ContentBlock::ToolResult {
                         tool_use_id,
+                        tool_name,
                         output,
                         ..
                     } = block
                     {
-                        result.push(json!({
-                            "role": "tool",
-                            "tool_call_id": tool_use_id,
-                            "content": output,
-                        }));
+                        push_openai_tool_result_or_recover(
+                            &mut result,
+                            &mut pending_tool_call_ids,
+                            &mut orphan_tool_results,
+                            tool_use_id,
+                            tool_name,
+                            output,
+                        );
                     }
                 }
             }
             MessageRole::Assistant => {
+                recover_openai_tool_call_sequence(
+                    &mut result,
+                    &mut pending_tool_call_ids,
+                    &mut orphan_tool_results,
+                );
                 let mut content_text = String::new();
                 let mut tool_calls: Vec<Value> = Vec::new();
 
@@ -1348,6 +1366,7 @@ fn convert_messages_openai(
                             content_text.push_str(text);
                         }
                         ContentBlock::ToolUse { id, name, input } => {
+                            pending_tool_call_ids.push(id.clone());
                             tool_calls.push(json!({
                                 "id": id,
                                 "type": "function",
@@ -1381,8 +1400,59 @@ fn convert_messages_openai(
             }
         }
     }
+    recover_openai_tool_call_sequence(
+        &mut result,
+        &mut pending_tool_call_ids,
+        &mut orphan_tool_results,
+    );
 
     result
+}
+
+fn recover_openai_tool_call_sequence(
+    result: &mut Vec<Value>,
+    pending_tool_call_ids: &mut Vec<String>,
+    orphan_tool_results: &mut Vec<String>,
+) {
+    for tool_call_id in pending_tool_call_ids.drain(..) {
+        result.push(json!({
+            "role": "tool",
+            "tool_call_id": tool_call_id,
+            "content": "Tool execution stopped before ARIS recorded a result. Treat this as an interrupted or failed tool call and continue from the available context.",
+        }));
+    }
+    for content in orphan_tool_results.drain(..) {
+        result.push(json!({
+            "role": "user",
+            "content": content,
+        }));
+    }
+}
+
+fn push_openai_tool_result_or_recover(
+    result: &mut Vec<Value>,
+    pending_tool_call_ids: &mut Vec<String>,
+    orphan_tool_results: &mut Vec<String>,
+    tool_use_id: &str,
+    tool_name: &str,
+    output: &str,
+) {
+    if let Some(index) = pending_tool_call_ids
+        .iter()
+        .position(|pending| pending == tool_use_id)
+    {
+        pending_tool_call_ids.remove(index);
+        result.push(json!({
+            "role": "tool",
+            "tool_call_id": tool_use_id,
+            "content": output,
+        }));
+        return;
+    }
+
+    orphan_tool_results.push(format!(
+        "[ARIS recovered an orphan tool result not attached to a pending assistant tool call: {tool_name} ({tool_use_id})]\n{output}"
+    ));
 }
 
 fn openai_user_content(blocks: &[ContentBlock]) -> Option<Value> {
@@ -1434,7 +1504,7 @@ fn convert_tool_spec_openai(spec: &ExecutorToolSpec) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use runtime::{ContentBlock, ConversationMessage, MessageRole};
+    use runtime::{ApiClient, ApiRequest, ContentBlock, ConversationMessage, MessageRole};
 
     #[test]
     fn detects_context_window_exceeded_errors() {
@@ -1562,6 +1632,75 @@ mod tests {
     }
 
     #[test]
+    fn convert_messages_preserves_valid_failed_tool_result() {
+        let messages = vec![
+            ConversationMessage::user_text("run the tool"),
+            ConversationMessage::assistant(vec![ContentBlock::ToolUse {
+                id: "call-valid".to_string(),
+                name: "probe".to_string(),
+                input: "{}".to_string(),
+            }]),
+            ConversationMessage::tool_result("call-valid", "probe", "tool failed", true),
+            ConversationMessage::user_text("continue"),
+        ];
+
+        let result = convert_messages_openai(&messages, None, &std::collections::HashMap::new());
+
+        assert_eq!(result.len(), 4);
+        assert_eq!(result[1]["role"], "assistant");
+        assert_eq!(result[1]["tool_calls"][0]["id"], "call-valid");
+        assert_eq!(result[2]["role"], "tool");
+        assert_eq!(result[2]["tool_call_id"], "call-valid");
+        assert_eq!(result[2]["content"], "tool failed");
+        assert_eq!(result[3]["role"], "user");
+    }
+
+    #[test]
+    fn convert_messages_repairs_dangling_tool_call_before_next_user() {
+        let messages = vec![
+            ConversationMessage::user_text("run the tool"),
+            ConversationMessage::assistant(vec![ContentBlock::ToolUse {
+                id: "call-dangling".to_string(),
+                name: "probe".to_string(),
+                input: "{}".to_string(),
+            }]),
+            ConversationMessage::user_text("continue after the crash"),
+        ];
+
+        let result = convert_messages_openai(&messages, None, &std::collections::HashMap::new());
+
+        assert_eq!(result.len(), 4);
+        assert_eq!(result[1]["role"], "assistant");
+        assert_eq!(result[1]["tool_calls"][0]["id"], "call-dangling");
+        assert_eq!(result[2]["role"], "tool");
+        assert_eq!(result[2]["tool_call_id"], "call-dangling");
+        assert!(result[2]["content"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("stopped before ARIS recorded a result"));
+        assert_eq!(result[3]["role"], "user");
+        assert_eq!(result[3]["content"], "continue after the crash");
+    }
+
+    #[test]
+    fn convert_messages_downgrades_orphan_tool_result() {
+        let messages = vec![
+            ConversationMessage::tool_result("call-orphan", "probe", "late output", false),
+            ConversationMessage::user_text("continue"),
+        ];
+
+        let result = convert_messages_openai(&messages, None, &std::collections::HashMap::new());
+
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0]["role"], "user");
+        let recovered = result[0]["content"].as_str().unwrap_or_default();
+        assert!(recovered.contains("orphan tool result"));
+        assert!(recovered.contains("late output"));
+        assert_eq!(result[1]["role"], "user");
+        assert_eq!(result[1]["content"], "continue");
+    }
+
+    #[test]
     fn convert_messages_maps_images_to_openai_image_url_blocks() {
         let messages = vec![ConversationMessage::user_blocks(vec![
             ContentBlock::Text {
@@ -1584,6 +1723,271 @@ mod tests {
             result[0]["content"][1]["image_url"]["url"],
             "data:image/png;base64,ZmFrZQ=="
         );
+    }
+
+    #[test]
+    #[ignore = "requires ARIS_LIVE_LLM_TEST=1 and real OpenAI-compatible executor credentials"]
+    fn live_openai_failure_context_diagnostics() {
+        let Some((config, model)) = live_openai_test_config() else {
+            eprintln!(
+                "skipping live diagnostic: set ARIS_LIVE_LLM_TEST=1 and configure EXECUTOR_API_KEY/OPENAI_API_KEY plus EXECUTOR_MODEL, or ~/.config/aris/config.json"
+            );
+            return;
+        };
+        eprintln!(
+            "live diagnostic using model `{model}` at `{}`",
+            config.base_url
+        );
+
+        let baseline = run_live_openai_case(
+            &config,
+            &model,
+            false,
+            vec![ConversationMessage::user_text(
+                "Reply with one short sentence containing the token ARIS_LIVE_BASELINE_OK.",
+            )],
+        )
+        .expect("baseline live call should succeed");
+        eprintln!("baseline accepted: {}", short_for_log(&baseline));
+        assert!(
+            !baseline.trim().is_empty(),
+            "baseline should return visible assistant text"
+        );
+
+        let valid_failed_tool_history = vec![
+            ConversationMessage::user_text(
+                "Use the prior tool result as context. Do not call another tool.",
+            ),
+            ConversationMessage::assistant(vec![ContentBlock::ToolUse {
+                id: "call_aris_probe_1".to_string(),
+                name: "aris_probe".to_string(),
+                input: r#"{"action":"simulate_unexpected_failure"}"#.to_string(),
+            }]),
+            ConversationMessage::tool_result(
+                "call_aris_probe_1",
+                "aris_probe",
+                "simulated unexpected tool failure: process exited with status 1",
+                true,
+            ),
+            ConversationMessage::user_text(
+                "Acknowledge that the failed tool result is present, then answer with ARIS_LIVE_TOOL_FAILURE_OK.",
+            ),
+        ];
+        let recovered = run_live_openai_case(&config, &model, true, valid_failed_tool_history)
+            .expect("valid failed-tool history should be accepted by the provider");
+        eprintln!(
+            "failed-tool history accepted: {}",
+            short_for_log(&recovered)
+        );
+        assert!(
+            !recovered.trim().is_empty(),
+            "valid failed-tool history should produce visible assistant text"
+        );
+
+        let dangling_tool_call_history = vec![
+            ConversationMessage::user_text("Prepare to call the diagnostic tool."),
+            ConversationMessage::assistant(vec![ContentBlock::ToolUse {
+                id: "call_aris_probe_dangling".to_string(),
+                name: "aris_probe".to_string(),
+                input: r#"{"action":"left_without_tool_result"}"#.to_string(),
+            }]),
+            ConversationMessage::user_text(
+                "Continue after the failed task. This intentionally omits the required tool result.",
+            ),
+        ];
+        let raw_dangling_body = json!({
+            "model": model,
+            "stream": true,
+            "messages": [
+                {"role": "system", "content": live_openai_system_prompt()},
+                {"role": "user", "content": "Prepare to call the diagnostic tool."},
+                {
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": "call_aris_probe_dangling",
+                        "type": "function",
+                        "function": {
+                            "name": "aris_probe",
+                            "arguments": r#"{"action":"left_without_tool_result"}"#,
+                        },
+                    }],
+                },
+                {"role": "user", "content": "Continue after the failed task. This intentionally omits the required tool result."},
+            ],
+            "tools": live_openai_tool_specs_json(),
+            "tool_choice": "auto",
+        });
+        let (raw_status, raw_error) = post_raw_live_openai_body(&config, raw_dangling_body)
+            .expect("raw live diagnostic request should complete");
+        eprintln!(
+            "raw dangling tool-call history rejected: status={raw_status} error={}",
+            short_for_log(&raw_error)
+        );
+        assert_eq!(
+            raw_status, 400,
+            "raw dangling tool-call history should be rejected before executor repair"
+        );
+        assert!(raw_error.to_ascii_lowercase().contains("tool"));
+
+        let repaired = run_live_openai_case(&config, &model, true, dangling_tool_call_history)
+            .expect("executor should repair dangling tool-call history before sending");
+        eprintln!(
+            "dangling tool-call history repaired and accepted: {}",
+            short_for_log(&repaired)
+        );
+        assert!(!repaired.trim().is_empty());
+    }
+
+    fn live_openai_test_config() -> Option<(OpenAIExecutorConfig, String)> {
+        if std::env::var("ARIS_LIVE_LLM_TEST").ok().as_deref() != Some("1") {
+            return None;
+        }
+
+        let config_json = read_aris_config_json();
+        let from_config = |key: &str| -> Option<String> {
+            config_json
+                .as_ref()
+                .and_then(|value| value.get(key))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+        };
+        let env_value = |key: &str| -> Option<String> {
+            std::env::var(key)
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        };
+
+        let api_key = env_value("EXECUTOR_API_KEY")
+            .or_else(|| env_value("OPENAI_API_KEY"))
+            .or_else(|| from_config("executor_api_key"))?;
+        let base_url = env_value("EXECUTOR_BASE_URL")
+            .or_else(|| from_config("executor_base_url"))
+            .unwrap_or_else(|| DEFAULT_OPENAI_BASE_URL.to_string());
+        let model = env_value("ARIS_LIVE_LLM_MODEL")
+            .or_else(|| env_value("EXECUTOR_MODEL"))
+            .or_else(|| from_config("executor_model"))?;
+
+        Some((OpenAIExecutorConfig { api_key, base_url }, model))
+    }
+
+    fn read_aris_config_json() -> Option<Value> {
+        let path = std::path::PathBuf::from(runtime::home_dir())
+            .join(".config")
+            .join("aris")
+            .join("config.json");
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|content| serde_json::from_str::<Value>(&content).ok())
+    }
+
+    fn run_live_openai_case(
+        config: &OpenAIExecutorConfig,
+        model: &str,
+        enable_tools: bool,
+        messages: Vec<ConversationMessage>,
+    ) -> Result<String, RuntimeError> {
+        let mut client = live_openai_client(config, model, enable_tools);
+        let events = client.stream(ApiRequest {
+            system_prompt: vec![live_openai_system_prompt()],
+            messages,
+        })?;
+        Ok(assistant_text_from_events(&events))
+    }
+
+    fn live_openai_client(
+        config: &OpenAIExecutorConfig,
+        model: &str,
+        enable_tools: bool,
+    ) -> OpenAIRuntimeClient {
+        let tool_specs = enable_tools
+            .then(|| {
+                vec![crate::ExecutorToolSpec::new(
+                    "aris_probe",
+                    "Diagnostic no-op tool used only to validate OpenAI-compatible tool-call history.",
+                    live_openai_tool_schema_json(),
+                )]
+            })
+            .unwrap_or_default();
+        OpenAIRuntimeClient::new(
+            config.clone(),
+            model.to_string(),
+            enable_tools,
+            tool_specs,
+            Box::new(crate::NoopStreamObserver),
+        )
+        .expect("live OpenAI runtime client should construct")
+    }
+
+    fn live_openai_tool_schema_json() -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "action": { "type": "string" }
+            },
+            "additionalProperties": true
+        })
+    }
+
+    fn live_openai_tool_specs_json() -> Value {
+        json!([{
+            "type": "function",
+            "function": {
+                "name": "aris_probe",
+                "description": "Diagnostic no-op tool used only to validate OpenAI-compatible tool-call history.",
+                "parameters": live_openai_tool_schema_json(),
+            },
+        }])
+    }
+
+    fn post_raw_live_openai_body(
+        config: &OpenAIExecutorConfig,
+        body: Value,
+    ) -> Result<(u16, String), String> {
+        let url = format!("{}/chat/completions", config.base_url.trim_end_matches('/'));
+        let runtime = tokio::runtime::Runtime::new().map_err(|error| error.to_string())?;
+        runtime.block_on(async {
+            let response = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .map_err(|error| error.to_string())?
+                .post(url)
+                .bearer_auth(&config.api_key)
+                .header("content-type", "application/json")
+                .json(&body)
+                .send()
+                .await
+                .map_err(|error| error.to_string())?;
+            let status = response.status().as_u16();
+            let text = response.text().await.map_err(|error| error.to_string())?;
+            Ok((status, text))
+        })
+    }
+
+    fn live_openai_system_prompt() -> String {
+        "You are running a live diagnostic for ARIS. Keep replies under 20 words. Do not call tools unless the user explicitly asks you to.".to_string()
+    }
+
+    fn assistant_text_from_events(events: &[AssistantEvent]) -> String {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                AssistantEvent::TextDelta(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("")
+    }
+
+    fn short_for_log(value: &str) -> String {
+        const MAX_CHARS: usize = 500;
+        let mut shortened = value.chars().take(MAX_CHARS).collect::<String>();
+        if value.chars().count() > MAX_CHARS {
+            shortened.push_str("...");
+        }
+        shortened.replace('\n', "\\n")
     }
 
     // v0.4.13 regression — v0.4.12 P1.B promoted the o-series detector

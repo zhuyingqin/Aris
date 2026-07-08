@@ -75,7 +75,7 @@ fn default_registry() -> ProjectRegistry {
 }
 
 fn registry_path() -> PathBuf {
-    state::runtime_dir().join(PROJECTS_FILE)
+    state::desktop_runtime_dir().join(PROJECTS_FILE)
 }
 
 fn normalize_path(path: &Path) -> String {
@@ -166,13 +166,8 @@ fn save_registry(registry: &ProjectRegistry) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
-    let temp = path.with_extension("json.tmp");
     let data = serde_json::to_vec_pretty(registry).map_err(|error| error.to_string())?;
-    std::fs::write(&temp, data).map_err(|error| error.to_string())?;
-    if path.exists() {
-        std::fs::remove_file(&path).map_err(|error| error.to_string())?;
-    }
-    std::fs::rename(temp, path).map_err(|error| error.to_string())
+    runtime::write_file_atomically(&path, data).map_err(|error| error.to_string())
 }
 
 fn current_project(registry: &ProjectRegistry) -> Result<DesktopProject, String> {
@@ -209,6 +204,7 @@ fn activate(registry: &mut ProjectRegistry, id: &str) -> Result<(), String> {
         ));
     }
     state::apply_project_environment(&path, &project_id).map_err(|error| error.to_string())?;
+    aris_chat::clear_mcp_discovery_cache();
     registry.current_project_id = project_id;
     save_registry(registry)
 }

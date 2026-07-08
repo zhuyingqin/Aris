@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import type { ChatTurn } from "../types";
 import ErrorBoundary from "../ErrorBoundary";
 import ChatMessage from "./ChatMessage";
 import arisIcon from "../assets/app-logo.png";
+import { textFromTurn } from "./model";
 
 export function isNearBottom(element: Pick<HTMLElement, "scrollHeight" | "scrollTop" | "clientHeight">, threshold = 140) {
   return element.scrollHeight - element.scrollTop - element.clientHeight <= threshold;
@@ -22,9 +23,75 @@ export function shouldIgnoreProgrammaticFollowScroll(programmaticUntil: number, 
   return following && now <= programmaticUntil;
 }
 
+interface QuestionMarker {
+  id: string;
+  turnIndex: number;
+  number: number;
+  preview: string;
+}
+
+interface VirtualTurnPosition {
+  index: number;
+  start: number;
+  size: number;
+}
+
+export function questionPreviewFromTurn(turn: ChatTurn): string {
+  const attachments = turn.attachments ?? [];
+  const attachmentPreview = attachments.length > 0
+    ? `附件：${attachments[0].name}${attachments.length > 1 ? ` + ${attachments.length - 1} 个文件` : ""}`
+    : "";
+  const text = textFromTurn(turn)
+    .replace(/\s+/g, " ")
+    .trim();
+  const previewText = text === "Attached context" && attachmentPreview ? "" : text;
+  if (previewText) {
+    const chars = [...previewText];
+    return chars.length > 48 ? `${chars.slice(0, 48).join("")}...` : previewText;
+  }
+  if (attachmentPreview) return attachmentPreview;
+  return "未命名提问";
+}
+
+export function questionMarkersFromTurns(turns: ChatTurn[]): QuestionMarker[] {
+  const markers: QuestionMarker[] = [];
+  turns.forEach((turn, turnIndex) => {
+    if (turn.role !== "user") return;
+    markers.push({
+      id: turn.id,
+      turnIndex,
+      number: markers.length + 1,
+      preview: questionPreviewFromTurn(turn),
+    });
+  });
+  return markers;
+}
+
+export function activeQuestionNumber(markers: QuestionMarker[], firstVisibleTurnIndex: number): number | null {
+  if (markers.length === 0) return null;
+  let active = markers[0];
+  for (const marker of markers) {
+    if (marker.turnIndex > firstVisibleTurnIndex) break;
+    active = marker;
+  }
+  return active.number;
+}
+
+export function firstVisibleTurnIndexFromVirtualItems(
+  items: readonly VirtualTurnPosition[],
+  scrollTop: number,
+  topInset = 8,
+): number {
+  if (items.length === 0) return 0;
+  const viewportTop = Math.max(0, scrollTop + topInset);
+  const visible = items.find((item) => item.start + item.size > viewportTop);
+  return visible?.index ?? items[items.length - 1].index;
+}
+
 interface Props {
   sessionId: string;
   turns: ChatTurn[];
+  loading?: boolean;
   composerHeight: number;
   starters: string[];
   onStarter: (prompt: string) => void;
@@ -47,6 +114,69 @@ function ChatMessageFallback({ error, reset }: { error: Error; reset: () => void
   );
 }
 
+function QuestionTimeline({
+  markers,
+  activeNumber,
+  onJump,
+}: {
+  markers: QuestionMarker[];
+  activeNumber: number | null;
+  onJump: (turnIndex: number) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  if (markers.length < 2) return null;
+  const active = activeNumber ?? markers[markers.length - 1]?.number ?? null;
+  const activeLabel = active ?? markers.length;
+  return (
+    <div
+      className={`chat-question-timeline${open ? " open" : ""}`}
+      onMouseEnter={() => setOpen(true)}
+      onMouseLeave={() => setOpen(false)}
+      onFocus={() => setOpen(true)}
+      onBlur={(event) => {
+        const nextTarget = event.relatedTarget as Node | null;
+        if (!nextTarget || !event.currentTarget.contains(nextTarget)) setOpen(false);
+      }}
+    >
+      <button
+        type="button"
+        className="chat-question-timeline-rail"
+        aria-label={`第 ${activeLabel} / ${markers.length} 次提问`}
+        onClick={() => {
+          const target = active != null ? markers[active - 1] : markers[markers.length - 1];
+          if (target) onJump(target.turnIndex);
+        }}
+      >
+        <span className="chat-question-count">{activeLabel}</span>
+        <span className="chat-question-ticks" aria-hidden="true">
+          {markers.map((marker) => (
+            <span
+              key={marker.id}
+              className={`chat-question-tick${marker.number === active ? " active" : ""}`}
+            />
+          ))}
+        </span>
+      </button>
+      {open && (
+        <div className="chat-question-popover" role="list" aria-label="本轮对话提问">
+          {markers.map((marker) => (
+            <button
+              key={marker.id}
+              type="button"
+              className={marker.number === active ? "active" : ""}
+              role="listitem"
+              onClick={() => onJump(marker.turnIndex)}
+            >
+              <span className="chat-question-item-number">{marker.number}</span>
+              <span className="chat-question-item-text">{marker.preview}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function turnRenderKey(turn: ChatTurn): string {
   const blockSignature = turn.blocks.map((block) => {
     if (block.kind === "text") return `t:${block.text.length}`;
@@ -61,6 +191,7 @@ function turnRenderKey(turn: ChatTurn): string {
 export default function ChatThread({
   sessionId,
   turns,
+  loading = false,
   composerHeight,
   starters,
   onStarter,
@@ -72,6 +203,7 @@ export default function ChatThread({
 }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [following, setFollowing] = useState(true);
+  const [firstVisibleTurnIndex, setFirstVisibleTurnIndex] = useState(0);
   const followingRef = useRef(true);
   const programmaticScrollUntilRef = useRef(0);
   // True while the initial scroll for a session is still settling. Dynamic row
@@ -87,6 +219,15 @@ export default function ChatThread({
     overscan: 5,
     getItemKey: (index) => turns[index]?.id ?? index,
   });
+  const virtualItems = virtualizer.getVirtualItems();
+  const firstVirtualItem = virtualItems[0];
+  const lastVirtualItem = virtualItems[virtualItems.length - 1];
+  const virtualWindowKey = `${firstVirtualItem?.index ?? -1}:${firstVirtualItem?.start ?? 0}:${firstVirtualItem?.size ?? 0}:${lastVirtualItem?.index ?? -1}:${lastVirtualItem?.start ?? 0}:${lastVirtualItem?.size ?? 0}`;
+  const questionMarkers = useMemo(() => questionMarkersFromTurns(turns), [turns]);
+  const activeQuestion = useMemo(
+    () => activeQuestionNumber(questionMarkers, firstVisibleTurnIndex),
+    [firstVisibleTurnIndex, questionMarkers],
+  );
 
   const setFollowingValue = useCallback((next: boolean) => {
     followingRef.current = next;
@@ -114,6 +255,21 @@ export default function ChatThread({
     }
     setFollowingValue(true);
   }, [markProgrammaticScroll, setFollowingValue, turns.length, virtualizer]);
+
+  const scrollToTurn = useCallback((turnIndex: number) => {
+    markProgrammaticScroll();
+    virtualizer.scrollToIndex(turnIndex, { align: "start", behavior: "smooth" });
+    setFollowingValue(false);
+  }, [markProgrammaticScroll, setFollowingValue, virtualizer]);
+
+  const syncFirstVisibleTurnIndex = useCallback((scrollTop = scrollRef.current?.scrollTop ?? 0) => {
+    const next = firstVisibleTurnIndexFromVirtualItems(virtualizer.getVirtualItems(), scrollTop);
+    setFirstVisibleTurnIndex((current) => current === next ? current : next);
+  }, [virtualizer]);
+
+  useEffect(() => {
+    syncFirstVisibleTurnIndex();
+  }, [syncFirstVisibleTurnIndex, virtualWindowKey]);
 
   // Land at the latest message when a conversation opens, re-pinning across a few
   // frames so the scrollbar converges as rows measure instead of jumping around.
@@ -173,11 +329,16 @@ export default function ChatThread({
           if (shouldIgnoreProgrammaticFollowScroll(programmaticScrollUntilRef.current, now, followingRef.current)) {
             return;
           }
+          syncFirstVisibleTurnIndex(event.currentTarget.scrollTop);
           setFollowingValue(isNearBottom(event.currentTarget));
         }}
         style={{ paddingBottom: composerHeight + 24 }}
       >
-        {turns.length === 0 ? (
+        {turns.length === 0 && loading ? (
+          <div className="chat-thread-loading" aria-live="polite" aria-busy="true">
+            <span className="chat-thread-spinner" aria-hidden="true" />
+          </div>
+        ) : turns.length === 0 ? (
           <div className="chat-welcome">
             <div className="chat-welcome-inner">
               <div className="chat-welcome-mark">
@@ -204,7 +365,7 @@ export default function ChatThread({
           </div>
         ) : (
           <div className="chat-virtual-list" style={{ height: virtualizer.getTotalSize() }}>
-            {virtualizer.getVirtualItems().map((item) => {
+            {virtualItems.map((item) => {
               const turn = turns[item.index];
               if (!turn) return null;
               return (
@@ -244,6 +405,11 @@ export default function ChatThread({
           ↓ Back to bottom
         </button>
       )}
+      <QuestionTimeline
+        markers={questionMarkers}
+        activeNumber={activeQuestion}
+        onJump={scrollToTurn}
+      />
     </div>
   );
 }

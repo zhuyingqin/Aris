@@ -1,7 +1,9 @@
+mod chat_events;
 mod commands;
 mod config;
 mod connectors;
 mod engine;
+mod env;
 mod files;
 mod knowledge;
 mod lab;
@@ -15,6 +17,7 @@ mod scheduled;
 mod sessions;
 mod state;
 mod studio;
+mod typeset;
 mod usage_log;
 mod watcher;
 
@@ -78,6 +81,27 @@ fn augment_path_for_desktop_tools() {
 #[cfg(not(windows))]
 fn augment_path_for_desktop_tools() {}
 
+#[cfg(windows)]
+fn configure_webview2_user_data_dir() {
+    if std::env::var_os("WEBVIEW2_USER_DATA_FOLDER").is_some() {
+        return;
+    }
+    let base = std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(runtime::home_dir())
+                .join("AppData")
+                .join("Local")
+        });
+    let dir = base.join("com.aris.studio").join("webview2-v2");
+    if std::fs::create_dir_all(&dir).is_ok() {
+        std::env::set_var("WEBVIEW2_USER_DATA_FOLDER", dir);
+    }
+}
+
+#[cfg(not(windows))]
+fn configure_webview2_user_data_dir() {}
+
 fn resource_dir(app: &tauri::App) -> Option<PathBuf> {
     app.path().resource_dir().ok()
 }
@@ -91,14 +115,14 @@ fn augment_resource_path_for_mcp(resource_dir: &std::path::Path) {
 /// Point Tectonic's on-demand package cache at a user-writable directory. The
 /// bundled `tectonic.exe` lives under the read-only install directory on
 /// Windows, so its CTAN package downloads must land elsewhere. Mirrors the
-/// `~/.config/aris/cache` layout used for the extracted skill bundle.
+/// `~/.config/SomniQ/cache` layout used for the extracted skill bundle.
 fn configure_tectonic_environment() {
     if std::env::var_os("TECTONIC_CACHE_DIR").is_some() {
         return;
     }
     let cache = PathBuf::from(runtime::home_dir())
         .join(".config")
-        .join("aris")
+        .join("SomniQ")
         .join("cache")
         .join("tectonic");
     if std::fs::create_dir_all(&cache).is_ok() {
@@ -111,6 +135,7 @@ fn configure_bundled_tectonic_environment(resource_dir: &std::path::Path) {
     if !bundled.is_file() || valid_tectonic_override_exists() {
         return;
     }
+    std::env::set_var("SOMNIQ_TECTONIC", &bundled);
     std::env::set_var("ARIS_TECTONIC", bundled);
 }
 
@@ -123,7 +148,9 @@ fn tectonic_binary_name() -> &'static str {
 }
 
 fn valid_tectonic_override_exists() -> bool {
-    std::env::var_os("ARIS_TECTONIC").is_some_and(|value| PathBuf::from(value).is_file())
+    std::env::var_os("SOMNIQ_TECTONIC")
+        .or_else(|| std::env::var_os("ARIS_TECTONIC"))
+        .is_some_and(|value| PathBuf::from(value).is_file())
 }
 
 fn cleanup_before_exit(app_handle: &tauri::AppHandle) {
@@ -160,8 +187,78 @@ fn hide_stray_console() {
 #[cfg(not(windows))]
 fn hide_stray_console() {}
 
+#[cfg(windows)]
+fn apply_windows_taskbar_icon(window: &tauri::WebviewWindow) {
+    use windows_sys::Win32::Foundation::{HWND, LPARAM, WPARAM};
+    use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetSystemMetrics, LoadImageW, SendMessageW, ICON_BIG, ICON_SMALL, ICON_SMALL2, IMAGE_ICON,
+        LR_DEFAULTCOLOR, LR_SHARED, SM_CXICON, SM_CXSMICON, SM_CYICON, SM_CYSMICON, WM_SETICON,
+    };
+
+    const APP_ICON_RESOURCE_ID: usize = 32512;
+
+    let Ok(hwnd) = window.hwnd() else {
+        return;
+    };
+    let hwnd = hwnd.0 as HWND;
+
+    unsafe {
+        let module = GetModuleHandleW(std::ptr::null());
+        if module.is_null() {
+            return;
+        }
+
+        set_window_icon_from_resource(
+            hwnd,
+            module,
+            ICON_BIG,
+            GetSystemMetrics(SM_CXICON),
+            GetSystemMetrics(SM_CYICON),
+        );
+        set_window_icon_from_resource(
+            hwnd,
+            module,
+            ICON_SMALL,
+            GetSystemMetrics(SM_CXSMICON),
+            GetSystemMetrics(SM_CYSMICON),
+        );
+        set_window_icon_from_resource(
+            hwnd,
+            module,
+            ICON_SMALL2,
+            GetSystemMetrics(SM_CXSMICON),
+            GetSystemMetrics(SM_CYSMICON),
+        );
+    }
+
+    unsafe fn set_window_icon_from_resource(
+        hwnd: HWND,
+        module: windows_sys::Win32::Foundation::HINSTANCE,
+        icon_type: u32,
+        width: i32,
+        height: i32,
+    ) {
+        let icon = LoadImageW(
+            module,
+            APP_ICON_RESOURCE_ID as *const u16,
+            IMAGE_ICON,
+            width,
+            height,
+            LR_DEFAULTCOLOR | LR_SHARED,
+        );
+        if !icon.is_null() {
+            SendMessageW(hwnd, WM_SETICON, icon_type as WPARAM, icon as LPARAM);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn apply_windows_taskbar_icon(_window: &tauri::WebviewWindow) {}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    configure_webview2_user_data_dir();
     hide_stray_console();
     augment_path_for_desktop_tools();
     tauri::Builder::default()
@@ -188,6 +285,7 @@ pub fn run() {
                 if let Ok(icon) = Image::from_bytes(include_bytes!("../icons/icon.png")) {
                     let _ = window.set_icon(icon);
                 }
+                apply_windows_taskbar_icon(&window);
             }
             watcher::spawn_event_watcher(app.handle().clone());
             mail::spawn_event_watchers(app.handle().clone());
@@ -210,11 +308,15 @@ pub fn run() {
             config::config_test,
             config::provider_test,
             newapi::newapi_auth_status,
+            newapi::newapi_logout,
             newapi::newapi_login,
             newapi::newapi_register,
             newapi::newapi_send_verification,
             newapi::newapi_models,
             newapi::newapi_bootstrap,
+            newapi::newapi_groups,
+            newapi::newapi_update_group,
+            newapi::newapi_usage_logs,
             connectors::connector_plugins_list,
             connectors::connector_connect,
             scheduled::scheduled_tasks_list,
@@ -240,8 +342,16 @@ pub fn run() {
             mail::mail_send,
             sessions::sessions_list,
             sessions::session_get,
+            sessions::chat_ui_sessions_list,
+            sessions::chat_ui_session_load,
+            sessions::chat_ui_session_save,
+            sessions::chat_ui_session_delete,
             sessions::chat_ui_sessions_load,
             sessions::chat_ui_sessions_save,
+            chat_events::chat_events_read,
+            chat_events::chat_events_export,
+            chat_events::chat_events_replay,
+            chat_events::chat_events_restore,
             literature::literature_load,
             literature::literature_save,
             literature::literature_search,
@@ -288,6 +398,8 @@ pub fn run() {
             lab::lab_run_sweep,
             lab::lab_export_sweep_manifest,
             engine::chat_status,
+            engine::system_prompt_view,
+            engine::user_prompt_view,
             engine::chat_model_options,
             engine::chat_model_set,
             engine::chat_permission_get,
@@ -311,10 +423,16 @@ pub fn run() {
             files::file_list_dir,
             files::file_read_text,
             files::file_write_text,
+            files::file_create_text,
+            files::file_create_dir,
+            files::file_rename,
+            files::file_delete,
+            files::file_read_bytes,
             files::file_search,
             files::file_read,
             files::file_open,
             files::project_chat_starters,
+            typeset::latex_compile,
         ])
         .build(tauri::generate_context!())
         .expect("error while building SomniQ Studio")
@@ -342,14 +460,21 @@ mod tests {
 
     fn temp_resource_dir(name: &str) -> std::path::PathBuf {
         let dir =
-            std::env::temp_dir().join(format!("aris-tectonic-env-{name}-{}", std::process::id()));
+            std::env::temp_dir().join(format!("somniq-tectonic-env-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("bin")).expect("create temp resource bin");
         dir
     }
 
-    fn restore_env(previous: Option<std::ffi::OsString>) {
-        match previous {
+    fn restore_env(
+        previous_somniq: Option<std::ffi::OsString>,
+        previous_aris: Option<std::ffi::OsString>,
+    ) {
+        match previous_somniq {
+            Some(value) => std::env::set_var("SOMNIQ_TECTONIC", value),
+            None => std::env::remove_var("SOMNIQ_TECTONIC"),
+        }
+        match previous_aris {
             Some(value) => std::env::set_var("ARIS_TECTONIC", value),
             None => std::env::remove_var("ARIS_TECTONIC"),
         }
@@ -358,7 +483,9 @@ mod tests {
     #[test]
     fn bundled_tectonic_sets_env_when_present() {
         let _guard = env_lock();
-        let previous = std::env::var_os("ARIS_TECTONIC");
+        let previous_somniq = std::env::var_os("SOMNIQ_TECTONIC");
+        let previous_aris = std::env::var_os("ARIS_TECTONIC");
+        std::env::remove_var("SOMNIQ_TECTONIC");
         std::env::remove_var("ARIS_TECTONIC");
         let dir = temp_resource_dir("sets");
         let bundled = dir.join("bin").join(tectonic_binary_name());
@@ -367,31 +494,38 @@ mod tests {
         configure_bundled_tectonic_environment(&dir);
 
         assert_eq!(
+            std::env::var_os("SOMNIQ_TECTONIC").as_deref(),
+            Some(bundled.as_os_str())
+        );
+        assert_eq!(
             std::env::var_os("ARIS_TECTONIC").as_deref(),
             Some(bundled.as_os_str())
         );
         let _ = std::fs::remove_dir_all(dir);
-        restore_env(previous);
+        restore_env(previous_somniq, previous_aris);
     }
 
     #[test]
     fn bundled_tectonic_preserves_valid_override() {
         let _guard = env_lock();
-        let previous = std::env::var_os("ARIS_TECTONIC");
+        let previous_somniq = std::env::var_os("SOMNIQ_TECTONIC");
+        let previous_aris = std::env::var_os("ARIS_TECTONIC");
         let dir = temp_resource_dir("preserves");
         let bundled = dir.join("bin").join(tectonic_binary_name());
         std::fs::write(&bundled, b"tectonic").expect("write bundled tectonic marker");
         let override_path = dir.join("custom-tectonic.exe");
         std::fs::write(&override_path, b"custom").expect("write override marker");
-        std::env::set_var("ARIS_TECTONIC", &override_path);
+        std::env::set_var("SOMNIQ_TECTONIC", &override_path);
+        std::env::remove_var("ARIS_TECTONIC");
 
         configure_bundled_tectonic_environment(&dir);
 
         assert_eq!(
-            std::env::var_os("ARIS_TECTONIC").as_deref(),
+            std::env::var_os("SOMNIQ_TECTONIC").as_deref(),
             Some(override_path.as_os_str())
         );
+        assert!(std::env::var_os("ARIS_TECTONIC").is_none());
         let _ = std::fs::remove_dir_all(dir);
-        restore_env(previous);
+        restore_env(previous_somniq, previous_aris);
     }
 }

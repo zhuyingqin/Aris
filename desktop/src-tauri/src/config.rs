@@ -1,4 +1,4 @@
-//! Read/write `~/.config/aris/config.json` for the Settings page.
+//! Read/write `~/.config/SomniQ/config.json` for the Settings page.
 //!
 //! Operates on the raw JSON object (snake_case keys, matching aris-cli's
 //! `ArisConfig`) so unmodelled fields (e.g. `meta_logging`) survive a round trip,
@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::path::Path;
 
-use crate::state;
+use crate::{newapi, state};
 
 pub(crate) fn load_object() -> Map<String, Value> {
     std::fs::read_to_string(state::config_path())
@@ -321,15 +321,31 @@ pub fn config_get() -> ConfigView {
     build_view(&managed_config_object().unwrap_or_else(|_| load_object()))
 }
 
+const ADMIN_API_SETTINGS_MESSAGE: &str =
+    "Only administrators can manage executor or reviewer API settings.";
+
+async fn ensure_admin_api_settings_access() -> Result<(), String> {
+    match newapi::stored_user_is_admin().await {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(ADMIN_API_SETTINGS_MESSAGE.to_string()),
+        Err(_) => Err(format!(
+            "{ADMIN_API_SETTINGS_MESSAGE} Please sign in as an administrator."
+        )),
+    }
+}
+
 #[tauri::command]
-pub fn config_secret_get(kind: String) -> Result<Option<String>, String> {
-    let key = match kind.as_str() {
-        "executorApiKey" | "executor_api_key" => "executor_api_key",
-        "summarizerApiKey" | "summarizer_api_key" => "summarizer_api_key",
-        "reviewerApiKey" | "reviewer_api_key" => "reviewer_api_key",
-        "scopusApiKey" | "scopus_api_key" => "scopus_api_key",
+pub async fn config_secret_get(kind: String) -> Result<Option<String>, String> {
+    let (key, admin_only) = match kind.as_str() {
+        "executorApiKey" | "executor_api_key" => ("executor_api_key", true),
+        "summarizerApiKey" | "summarizer_api_key" => ("summarizer_api_key", false),
+        "reviewerApiKey" | "reviewer_api_key" => ("reviewer_api_key", true),
+        "scopusApiKey" | "scopus_api_key" => ("scopus_api_key", false),
         _ => return Err(format!("Unsupported secret field: {kind}")),
     };
+    if admin_only {
+        ensure_admin_api_settings_access().await?;
+    }
     Ok(get_non_empty(&load_object(), key))
 }
 
@@ -354,6 +370,95 @@ pub(crate) fn persist_values(values: &[(&str, Value)]) -> Result<(), String> {
     save_object(&obj)
 }
 
+fn slot_matches_managed(
+    obj: &Map<String, Value>,
+    base_key: &str,
+    api_key: &str,
+    managed_base: Option<&str>,
+    managed_key: Option<&str>,
+) -> bool {
+    let base_matches = managed_base
+        .and_then(|base| get_non_empty(obj, base_key).map(|value| url_match_key(&value) == base))
+        .unwrap_or(false);
+    let key_matches = managed_key
+        .and_then(|key| get_non_empty(obj, api_key).map(|value| value == key))
+        .unwrap_or(false);
+    base_matches || key_matches
+}
+
+fn clear_provider_slot(obj: &mut Map<String, Value>, prefix: &str) {
+    obj.remove(&format!("{prefix}_provider"));
+    obj.remove(&format!("{prefix}_model"));
+    obj.remove(&format!("{prefix}_base_url"));
+    obj.remove(&format!("{prefix}_api_key"));
+}
+
+/// Clear only credentials created by the managed New API login flow.
+pub(crate) fn clear_newapi_session() -> Result<(), String> {
+    let mut obj = load_object();
+    let managed_base = managed_executor_base_url(&obj).map(|base| url_match_key(&base));
+    let managed_key = managed_executor_api_key(&obj);
+
+    for key in [
+        "newapi_base_url",
+        "newapi_user_id",
+        "newapi_username",
+        "newapi_access_token",
+        "newapi_executor_base_url",
+        "newapi_executor_api_key",
+        "managed_models",
+    ] {
+        obj.remove(key);
+    }
+
+    if slot_matches_managed(
+        &obj,
+        "executor_base_url",
+        "executor_api_key",
+        managed_base.as_deref(),
+        managed_key.as_deref(),
+    ) {
+        clear_provider_slot(&mut obj, "executor");
+    }
+    if slot_matches_managed(
+        &obj,
+        "reviewer_base_url",
+        "reviewer_api_key",
+        managed_base.as_deref(),
+        managed_key.as_deref(),
+    ) {
+        clear_provider_slot(&mut obj, "reviewer");
+    }
+    if slot_matches_managed(
+        &obj,
+        "summarizer_base_url",
+        "summarizer_api_key",
+        managed_base.as_deref(),
+        managed_key.as_deref(),
+    ) {
+        clear_provider_slot(&mut obj, "summarizer");
+    }
+
+    if obj.get("verified_executors").is_some() {
+        let mut verified = read_verified(&obj);
+        let before = verified.len();
+        verified.retain(|entry| {
+            let base_matches = managed_base.as_deref().is_some_and(|base| {
+                !entry.base_url.trim().is_empty() && url_match_key(&entry.base_url) == base
+            });
+            let key_matches = managed_key
+                .as_deref()
+                .is_some_and(|key| entry.api_key == key);
+            !(base_matches || key_matches)
+        });
+        if verified.len() != before {
+            write_verified(&mut obj, &verified);
+        }
+    }
+
+    save_object(&obj)
+}
+
 fn value_is_missing_or_empty(value: Option<&Value>) -> bool {
     match value {
         None | Some(Value::Null) => true,
@@ -374,7 +479,7 @@ fn internal_overwrite_enabled(obj: &Map<String, Value>) -> bool {
 
 /// Apply an optional bundled internal configuration from the app resources.
 ///
-/// This is used by internal installers to seed `~/.config/aris/config.json` on
+/// This is used by internal installers to seed `~/.config/SomniQ/config.json` on
 /// first launch. By default it only fills missing fields, so installing an
 /// internal build does not silently replace a user's existing LLM settings.
 pub(crate) fn apply_bundled_internal_config(resource_dir: &Path) -> Result<bool, String> {
@@ -761,7 +866,7 @@ pub(crate) fn switch_to_builtin_executor(model: &str) -> Result<bool, String> {
     Ok(true)
 }
 
-#[derive(Deserialize, Default)]
+#[derive(Clone, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ConfigPatch {
     pub executor_provider: Option<String>,
@@ -779,6 +884,180 @@ pub struct ConfigPatch {
     pub scopus_api_key: Option<String>,
     pub language: Option<String>,
     pub memory_write_approval: Option<bool>,
+}
+
+impl ConfigPatch {
+    fn is_managed_executor_update(&self, obj: &Map<String, Value>) -> bool {
+        let Some(model) = self.executor_model.as_deref().map(str::trim) else {
+            return false;
+        };
+        if model.is_empty() {
+            return false;
+        }
+        if let Some(provider) = self.executor_provider.as_deref() {
+            if provider.trim() != "openai" {
+                return false;
+            }
+        }
+        if let Some(base_url) = self.executor_base_url.as_deref() {
+            let Some(managed_base) = managed_executor_base_url(obj) else {
+                return false;
+            };
+            if url_match_key(base_url) != url_match_key(&managed_base) {
+                return false;
+            }
+        }
+        if let Some(api_key) = self.executor_api_key.as_deref() {
+            let Some(managed_key) = managed_executor_api_key(obj) else {
+                return false;
+            };
+            if api_key.trim().is_empty() || api_key != managed_key {
+                return false;
+            }
+        }
+        managed_model_contains(obj, model)
+            || self.executor_base_url.is_some()
+            || self.executor_api_key.is_some()
+    }
+
+    fn changes_executor_api_settings(&self, obj: &Map<String, Value>) -> bool {
+        let touches_connection = self.executor_provider.is_some()
+            || self.executor_base_url.is_some()
+            || self.executor_api_key.is_some();
+        if touches_connection {
+            !self.is_managed_executor_update(obj)
+        } else {
+            self.executor_model.as_deref().is_some_and(|model| {
+                let model = model.trim();
+                model.is_empty() || !managed_model_contains(obj, model)
+            })
+        }
+    }
+
+    fn current_reviewer_slot_is_empty(obj: &Map<String, Value>) -> bool {
+        [
+            "reviewer_provider",
+            "reviewer_model",
+            "reviewer_base_url",
+            "reviewer_api_key",
+        ]
+        .into_iter()
+        .all(|key| get_non_empty(obj, key).is_none())
+    }
+
+    fn current_reviewer_slot_matches_managed(obj: &Map<String, Value>) -> bool {
+        let managed_base = managed_executor_base_url(obj).map(|base| url_match_key(&base));
+        let managed_key = managed_executor_api_key(obj);
+        let base_matches = match (
+            get_non_empty(obj, "reviewer_base_url"),
+            managed_base.as_deref(),
+        ) {
+            (Some(base_url), Some(managed_base)) => url_match_key(&base_url) == managed_base,
+            _ => false,
+        };
+        let key_matches = match (
+            get_non_empty(obj, "reviewer_api_key"),
+            managed_key.as_deref(),
+        ) {
+            (Some(api_key), Some(managed_key)) => api_key == managed_key,
+            _ => false,
+        };
+        base_matches || key_matches
+    }
+
+    fn is_managed_reviewer_disable(&self, obj: &Map<String, Value>) -> bool {
+        if !self
+            .reviewer_provider
+            .as_deref()
+            .is_some_and(|provider| provider.trim().is_empty())
+        {
+            return false;
+        }
+        for value in [
+            self.reviewer_model.as_deref(),
+            self.reviewer_base_url.as_deref(),
+            self.reviewer_api_key.as_deref(),
+        ] {
+            if value.is_some_and(|value| !value.trim().is_empty()) {
+                return false;
+            }
+        }
+        Self::current_reviewer_slot_is_empty(obj)
+            || Self::current_reviewer_slot_matches_managed(obj)
+    }
+
+    fn is_managed_reviewer_update(&self, obj: &Map<String, Value>) -> bool {
+        if self.is_managed_reviewer_disable(obj) {
+            return true;
+        }
+        if self
+            .reviewer_provider
+            .as_deref()
+            .is_some_and(|provider| provider.trim().is_empty())
+        {
+            return false;
+        }
+        let Some(model) = self
+            .reviewer_model
+            .as_deref()
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+        else {
+            return false;
+        };
+        if !managed_model_contains(obj, model) {
+            return false;
+        }
+        if let Some(provider) = self
+            .reviewer_provider
+            .as_deref()
+            .map(str::trim)
+            .filter(|provider| !provider.is_empty())
+        {
+            if provider != "custom" && provider != "openai" {
+                return false;
+            }
+        }
+        if let Some(base_url) = self
+            .reviewer_base_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|base_url| !base_url.is_empty())
+        {
+            let Some(managed_base) = managed_executor_base_url(obj) else {
+                return false;
+            };
+            if url_match_key(base_url) != url_match_key(&managed_base) {
+                return false;
+            }
+        }
+        if let Some(api_key) = self
+            .reviewer_api_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|api_key| !api_key.is_empty())
+        {
+            let Some(managed_key) = managed_executor_api_key(obj) else {
+                return false;
+            };
+            if api_key != managed_key {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn changes_reviewer_api_settings(&self, obj: &Map<String, Value>) -> bool {
+        let touches_reviewer = self.reviewer_provider.is_some()
+            || self.reviewer_model.is_some()
+            || self.reviewer_base_url.is_some()
+            || self.reviewer_api_key.is_some();
+        touches_reviewer && !self.is_managed_reviewer_update(obj)
+    }
+
+    fn changes_admin_api_settings(&self, obj: &Map<String, Value>) -> bool {
+        self.changes_executor_api_settings(obj) || self.changes_reviewer_api_settings(obj)
+    }
 }
 
 #[derive(Serialize)]
@@ -880,8 +1159,11 @@ fn apply_patch(obj: &mut Map<String, Value>, patch: ConfigPatch) {
 }
 
 #[tauri::command]
-pub fn config_set(patch: ConfigPatch) -> Result<ConfigView, String> {
+pub async fn config_set(patch: ConfigPatch) -> Result<ConfigView, String> {
     let mut obj = load_object();
+    if patch.changes_admin_api_settings(&obj) {
+        ensure_admin_api_settings_access().await?;
+    }
     apply_patch(&mut obj, patch);
     normalize_managed_model_slots(&mut obj)?;
     save_object(&obj)?;
@@ -1265,6 +1547,7 @@ fn is_anthropic_url(base_url: &str) -> bool {
 
 #[tauri::command]
 pub async fn provider_test(input: ProviderTestInput) -> Result<ConfigTestDetail, String> {
+    ensure_admin_api_settings_access().await?;
     let base_url = input.base_url.trim().to_string();
     if base_url.is_empty() {
         return Err("Base URL is required to test this provider.".to_string());
@@ -1307,6 +1590,9 @@ pub async fn provider_test(input: ProviderTestInput) -> Result<ConfigTestDetail,
 #[tauri::command]
 pub async fn config_test(patch: ConfigPatch) -> Result<ConfigTestResult, String> {
     let mut obj = load_object();
+    if patch.changes_admin_api_settings(&obj) {
+        ensure_admin_api_settings_access().await?;
+    }
     apply_patch(&mut obj, patch);
     normalize_managed_model_slots(&mut obj)?;
 
@@ -1376,9 +1662,9 @@ pub async fn config_test(patch: ConfigPatch) -> Result<ConfigTestResult, String>
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_bundled_internal_config, apply_reviewer_environment_from, deepseek_executor_key,
-        normalize_managed_model_slots, read_verified, upsert_verified, write_verified,
-        VerifiedExecutor,
+        apply_bundled_internal_config, apply_reviewer_environment_from, clear_newapi_session,
+        deepseek_executor_key, normalize_managed_model_slots, read_verified, upsert_verified,
+        write_verified, ConfigPatch, VerifiedExecutor,
     };
     use serde_json::{Map, Value};
     use std::sync::Mutex;
@@ -1386,8 +1672,10 @@ mod tests {
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn temp_dir(name: &str) -> std::path::PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("aris-desktop-config-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "somniq-desktop-config-{name}-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create temp dir");
         dir
@@ -1465,6 +1753,104 @@ mod tests {
         let parsed = read_verified(&obj);
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].model, "gpt-5.5");
+    }
+
+    #[test]
+    fn managed_executor_update_does_not_require_admin_api_access() {
+        let obj = serde_json::json!({
+            "newapi_base_url": "http://gateway.example",
+            "newapi_executor_base_url": "http://gateway.example/v1",
+            "newapi_executor_api_key": "gateway-token",
+            "managed_models": ["MiniMax-M3"]
+        })
+        .as_object()
+        .expect("object")
+        .clone();
+        let patch = ConfigPatch {
+            executor_provider: Some("openai".to_string()),
+            executor_model: Some("MiniMax-M3".to_string()),
+            executor_base_url: Some("http://gateway.example/v1".to_string()),
+            executor_api_key: Some("gateway-token".to_string()),
+            ..Default::default()
+        };
+
+        assert!(!patch.changes_admin_api_settings(&obj));
+    }
+
+    #[test]
+    fn manual_executor_api_update_requires_admin_api_access() {
+        let obj = serde_json::json!({
+            "newapi_base_url": "http://gateway.example",
+            "newapi_executor_base_url": "http://gateway.example/v1",
+            "newapi_executor_api_key": "gateway-token",
+            "managed_models": ["MiniMax-M3"]
+        })
+        .as_object()
+        .expect("object")
+        .clone();
+        let patch = ConfigPatch {
+            executor_provider: Some("openai".to_string()),
+            executor_model: Some("gpt-5.5".to_string()),
+            executor_base_url: Some("https://api.openai.com/v1".to_string()),
+            executor_api_key: Some("manual-token".to_string()),
+            ..Default::default()
+        };
+
+        assert!(patch.changes_admin_api_settings(&obj));
+    }
+
+    #[test]
+    fn managed_reviewer_update_does_not_require_admin_api_access() {
+        let obj = serde_json::json!({
+            "newapi_base_url": "http://gateway.example",
+            "newapi_executor_base_url": "http://gateway.example/v1",
+            "newapi_executor_api_key": "gateway-token",
+            "managed_models": ["MiniMax-M3", "gpt-5.5"]
+        })
+        .as_object()
+        .expect("object")
+        .clone();
+        let patch = ConfigPatch {
+            reviewer_model: Some("gpt-5.5".to_string()),
+            ..Default::default()
+        };
+
+        assert!(!patch.changes_admin_api_settings(&obj));
+    }
+
+    #[test]
+    fn managed_reviewer_disable_does_not_require_admin_api_access() {
+        let obj = serde_json::json!({
+            "newapi_base_url": "http://gateway.example",
+            "newapi_executor_base_url": "http://gateway.example/v1",
+            "newapi_executor_api_key": "gateway-token",
+            "managed_models": ["MiniMax-M3"]
+        })
+        .as_object()
+        .expect("object")
+        .clone();
+        let patch = ConfigPatch {
+            reviewer_provider: Some(String::new()),
+            reviewer_model: Some(String::new()),
+            reviewer_base_url: Some(String::new()),
+            ..Default::default()
+        };
+
+        assert!(!patch.changes_admin_api_settings(&obj));
+    }
+
+    #[test]
+    fn reviewer_api_update_requires_admin_api_access() {
+        let obj = Map::new();
+        let patch = ConfigPatch {
+            reviewer_provider: Some("openai".to_string()),
+            reviewer_model: Some("gpt-5.5".to_string()),
+            reviewer_base_url: Some("https://api.openai.com/v1".to_string()),
+            reviewer_api_key: Some("reviewer-token".to_string()),
+            ..Default::default()
+        };
+
+        assert!(patch.changes_admin_api_settings(&obj));
     }
 
     #[test]
@@ -1600,6 +1986,75 @@ mod tests {
         assert_eq!(obj["reviewer_model"], "deepseek-v4-pro");
         assert_eq!(obj["reviewer_base_url"], "http://gateway.example/v1");
         assert_eq!(obj["reviewer_api_key"], "gateway-token");
+    }
+
+    #[test]
+    fn clear_newapi_session_removes_only_managed_credentials() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let previous_home = std::env::var("HOME").ok();
+        let previous_userprofile = std::env::var("USERPROFILE").ok();
+        let home = temp_dir("clear-newapi");
+        std::env::set_var("HOME", &home);
+        std::env::set_var("USERPROFILE", &home);
+
+        let config_path = crate::state::config_path();
+        std::fs::create_dir_all(config_path.parent().expect("config parent"))
+            .expect("create config parent");
+        std::fs::write(
+            &config_path,
+            serde_json::json!({
+                "newapi_base_url": "http://gateway.example",
+                "newapi_user_id": 7,
+                "newapi_username": "user",
+                "newapi_access_token": "access-token",
+                "newapi_executor_base_url": "http://gateway.example/v1",
+                "newapi_executor_api_key": "gateway-token",
+                "managed_models": ["MiniMax-M3"],
+                "executor_provider": "openai",
+                "executor_model": "MiniMax-M3",
+                "executor_base_url": "http://gateway.example/v1",
+                "executor_api_key": "gateway-token",
+                "reviewer_provider": "custom",
+                "reviewer_model": "deepseek-v4-pro",
+                "reviewer_base_url": "http://gateway.example/v1",
+                "reviewer_api_key": "gateway-token",
+                "summarizer_provider": "openai",
+                "summarizer_model": "MiniMax-M2.7",
+                "summarizer_base_url": "https://api.minimaxi.com/v1",
+                "summarizer_api_key": "summarizer-token",
+                "verified_executors": [
+                    {
+                        "provider": "openai",
+                        "model": "MiniMax-M3",
+                        "base_url": "http://gateway.example/v1",
+                        "api_key": "gateway-token"
+                    },
+                    {
+                        "provider": "openai",
+                        "model": "gpt-5.5",
+                        "base_url": "https://api.openai.com/v1",
+                        "api_key": "openai-token"
+                    }
+                ]
+            })
+            .to_string(),
+        )
+        .expect("write config");
+
+        clear_newapi_session().expect("clear newapi");
+        let saved = crate::config::load_object();
+        assert!(saved.get("newapi_access_token").is_none());
+        assert!(saved.get("newapi_executor_api_key").is_none());
+        assert!(saved.get("executor_api_key").is_none());
+        assert!(saved.get("reviewer_api_key").is_none());
+        assert_eq!(saved["summarizer_api_key"], "summarizer-token");
+
+        let verified = read_verified(&saved);
+        assert_eq!(verified.len(), 1);
+        assert_eq!(verified[0].api_key, "openai-token");
+
+        let _ = std::fs::remove_dir_all(&home);
+        restore_home(previous_home, previous_userprofile);
     }
 
     #[test]

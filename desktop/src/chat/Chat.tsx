@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, 
 import { createPortal } from "react-dom";
 import {
   chatDelete,
+  chatUiSessionDelete,
   chatCommandSpecs,
   chatModelOptions,
   chatModelSet,
@@ -29,17 +30,25 @@ import CommandSelection from "./CommandSelection";
 import ChatSidebar from "./ChatSidebar";
 import ChatThread from "./ChatThread";
 import FilePathMenu from "./FilePathMenu";
+import { CHAT_COPY } from "./i18n";
 import { cleanChatTitle, latestFileChangesFromTurns, latestTodosFromTurns, makeId, patchLastAssistantTurn, textFromTurn, titleFromTurns } from "./model";
 import WorkflowFlow from "./WorkflowFlow";
 import type { ChatSession } from "./types";
 import { useChatSessions } from "./useChatSessions";
 import { useChatStream } from "./useChatStream";
+import { onChatModelsUpdated } from "../modelEvents";
 
 const EMPTY_ASSISTANT_RESPONSE = "Model returned an empty response.";
 const IMAGE_UNSUPPORTED_MESSAGE = "(Image preview only. Vision input is not supported in desktop Chat yet.)";
+const CHAT_SIDEBAR_WIDTH_KEY = "somniq-chat-sidebar-w";
+const CHAT_SIDEBAR_WIDTH_LEGACY_KEY = "aris-chat-sidebar-w";
 
 // Matches relative file paths like `desktop/src/chat/Chat.tsx` or `./src/lib.rs:42`
 const FILE_PATH_RE = /^(\.\.?\/)?([a-zA-Z0-9_\-.]+\/)+[a-zA-Z0-9_\-.]+(:\d+)?$/;
+
+function basename(path: string): string {
+  return path.replace(/\\/g, "/").split("/").pop() || path;
+}
 
 function detectFilePath(element: HTMLElement): string | null {
   // Local markdown link — use the href (already decoded by MarkdownLink)
@@ -61,6 +70,9 @@ function detectFilePath(element: HTMLElement): string | null {
 // under-counted CJK-heavy text by roughly 3x — the ContextRing read low and
 // users hit the real window without warning. Weight CJK separately. Still a
 // heuristic; replace with a real tokenizer when one is wired up (#34 P0-3.1).
+const EXACT_TOKEN_ESTIMATE_CHAR_LIMIT = 80_000;
+const TOKEN_ESTIMATE_SAMPLE_CHARS = 24_000;
+
 function isCjkCharCode(code: number): boolean {
   return (
     (code >= 0x3000 && code <= 0x9fff) || // CJK symbols/punct, ideographs, Hangul/Kana
@@ -69,7 +81,7 @@ function isCjkCharCode(code: number): boolean {
   );
 }
 
-function estimateTextTokens(text: string): number {
+function estimateTextTokenBody(text: string): number {
   let cjk = 0;
   let other = 0;
   for (const char of text) {
@@ -77,7 +89,18 @@ function estimateTextTokens(text: string): number {
     if (isCjkCharCode(code)) cjk += 1;
     else other += 1;
   }
-  return cjk + Math.round(other / 3.5) + 1;
+  return cjk + Math.round(other / 3.5);
+}
+
+function estimateTextTokens(text: string): number {
+  if (text.length <= EXACT_TOKEN_ESTIMATE_CHAR_LIMIT) {
+    return estimateTextTokenBody(text) + 1;
+  }
+  const head = text.slice(0, TOKEN_ESTIMATE_SAMPLE_CHARS);
+  const tail = text.slice(-TOKEN_ESTIMATE_SAMPLE_CHARS);
+  const sampleLength = head.length + tail.length;
+  const sampleTokens = estimateTextTokenBody(head) + estimateTextTokenBody(tail);
+  return Math.max(1, Math.round((sampleTokens / sampleLength) * text.length) + 1);
 }
 
 function estimateTokens(turns: ChatTurn[]): number {
@@ -93,6 +116,15 @@ function estimateTokens(turns: ChatTurn[]): number {
   return tokens;
 }
 
+function deferHeavyUiWork(callback: () => void): () => void {
+  if (typeof window.requestIdleCallback === "function") {
+    const handle = window.requestIdleCallback(() => callback(), { timeout: 700 });
+    return () => window.cancelIdleCallback(handle);
+  }
+  const handle = window.setTimeout(callback, 100);
+  return () => window.clearTimeout(handle);
+}
+
 type ContextOverride = { tokens: number; anchor: number };
 type ContextNotice = {
   kind: "warning" | "compacted";
@@ -103,15 +135,12 @@ type ContextNotice = {
 };
 
 // The ContextRing's "used" value. When an authoritative backend count is pinned
-// (after each turn, or after compaction), use it as the base and add only the
-// estimate of turns appended past the anchor — so the ring tracks the backend's
-// real token usage instead of the divergent transcript estimate. The anchor
-// guard self-heals if the transcript was later truncated below it (e.g. an
-// edited or retried turn).
+// (after each turn via the chat-done event with real API prompt_tokens), use it
+// directly — no local estimate stacking, which diverges from the backend's
+// compact_context_history truncation. Falls back to a transcript estimate only
+// before the first turn completes.
 function ringTokens(turns: ChatTurn[], override: ContextOverride | undefined): number {
-  return override && override.anchor <= turns.length
-    ? override.tokens + estimateTokens(turns.slice(override.anchor))
-    : estimateTokens(turns);
+  return override ? override.tokens : estimateTokens(turns);
 }
 
 function MemoryBadge({ count }: { count: number }) {
@@ -227,7 +256,35 @@ async function outgoingMessage(text: string, attachments: ChatAttachment[]): Pro
 
 export async function contextForRetry(turns: ChatTurn[]) {
   const messages: ChatContextMessage[] = [];
+  const pushAssistantText = (text: string) => {
+    if (text.trim()) messages.push({ role: "assistant", text });
+  };
+  const pushAssistantTool = (
+    turn: ChatTurn,
+    block: Extract<ChatBlock, { kind: "tool" }>,
+    index: number,
+    text: string,
+  ) => {
+    const id = block.id || `ui-tool-${turn.id}-${index}`;
+    messages.push({
+      role: "assistant",
+      text: text.trim() ? text : undefined,
+      toolCalls: [{ id, name: block.name, input: block.input || "{}" }],
+    });
+    messages.push({
+      role: "tool",
+      toolResults: [{
+        toolUseId: id,
+        toolName: block.name,
+        output: block.output ?? `${block.name} was interrupted before producing output.`,
+        isError: block.isError ?? block.output === undefined,
+      }],
+    });
+  };
   for (const turn of turns) {
+    // Stopped (cleanly cancelled) turns are kept: their partial text and tool
+    // activity is real conversation the model needs to continue coherently.
+    // Only in-flight (streaming) and genuinely failed (error) turns are dropped.
     if (turn.streaming || turn.error) continue;
     if (turn.role === "user") {
       const message = await outgoingMessage(textFromTurn(turn), turn.attachments ?? []);
@@ -235,11 +292,43 @@ export async function contextForRetry(turns: ChatTurn[]) {
         messages.push({ role: "user", text: message.text, images: message.images });
       }
     } else {
-      const text = textFromTurn(turn);
-      if (text.trim()) messages.push({ role: "assistant", text });
+      // Serialize the full transcript — tool calls and results included,
+      // marking any interrupted before output — not text alone. This context
+      // is fed to `chatSetContext(..., "replace")`, which discards the backend
+      // session and rebuilds it from these messages. Text-only reconstruction
+      // would drop every completed turn's tool activity (file reads, searches,
+      // command outputs), so an edit/retry from an earlier turn would make the
+      // model forget everything it learned by acting. Stopped turns need the
+      // transcript for the same reason plus their partial never reached the
+      // backend session at all.
+      let pendingText = "";
+      turn.blocks.forEach((block, index) => {
+        if (block.kind === "text") {
+          pendingText = pendingText ? `${pendingText}\n${block.text}` : block.text;
+          return;
+        }
+        if (block.kind === "tool") {
+          pushAssistantTool(turn, block, index, pendingText);
+          pendingText = "";
+        }
+      });
+      pushAssistantText(pendingText);
     }
   }
   return messages;
+}
+
+// The stopped turn's partial response (and any tool calls/results) is now
+// rebuilt into the backend context by `contextForRetry`, so the continue prompt
+// no longer needs to embed — and truncate — the partial itself. It just points
+// the model at the conversation above, avoiding the old 12k cutoff that dropped
+// everything past the seam on long generations.
+export function continueStoppedPrompt(): string {
+  return [
+    "Continue from where you stopped.",
+    "Your partial response from the interrupted turn — including any tool calls and their results — is already in the conversation above.",
+    "Do not repeat the completed portion unless a short overlap is needed for continuity.",
+  ].join("\n");
 }
 
 export function needsBackendContextReset(
@@ -248,6 +337,8 @@ export function needsBackendContextReset(
   explicitReset = false,
 ): boolean {
   if (explicitReset) return true;
+  if (prefixTurns.some((turn) => turn.stopped)) return true;
+  if (prefixTurns.some((turn) => turn.error)) return true;
   if (currentTurns.length !== prefixTurns.length) return true;
   return prefixTurns.some((turn, index) => currentTurns[index]?.id !== turn.id);
 }
@@ -286,6 +377,8 @@ interface PendingCommandSelection {
 }
 
 export default function Chat() {
+  const language = useStore((state) => state.language);
+  const copy = CHAT_COPY[language];
   const setTab = useStore((state) => state.setTab);
   const setError = useStore((state) => state.setError);
   const projects = useStore((state) => state.projects);
@@ -297,6 +390,7 @@ export default function Chat() {
     allSessions,
     currentId,
     currentSession,
+    currentSessionLoading,
     setCurrentId,
     materializeCurrentSession,
     createSession,
@@ -324,7 +418,7 @@ export default function Chat() {
   ]);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [chatSidebarWidth, setChatSidebarWidth] = useState<number>(() => {
-    const v = Number(localStorage.getItem("aris-chat-sidebar-w"));
+    const v = Number(localStorage.getItem(CHAT_SIDEBAR_WIDTH_KEY) ?? localStorage.getItem(CHAT_SIDEBAR_WIDTH_LEGACY_KEY));
     return v >= 150 && v <= 400 ? v : 218;
   });
   const chatSidebarResizeRef = useRef<{ startX: number; startWidth: number } | null>(null);
@@ -349,12 +443,17 @@ export default function Chat() {
   const sendLocks = useRef(new Set<string>());
   const commandSelectionLock = useRef(false);
   const syncedTurnIds = useRef(new Map<string, Set<string>>());
+  const dirtyBackendContext = useRef(new Set<string>());
   const currentSessionRef = useRef(currentSession);
   currentSessionRef.current = currentSession;
   const allSessionsRef = useRef(allSessions);
   allSessionsRef.current = allSessions;
   const contextOverridesRef = useRef(contextOverrides);
   contextOverridesRef.current = contextOverrides;
+  const [estimatedContext, setEstimatedContext] = useState<{ sessionId: string; tokens: number }>({
+    sessionId: "",
+    tokens: 0,
+  });
   const focusComposer = useCallback(() => setFocusRequest((value) => value + 1), []);
 
   useEffect(() => {
@@ -367,26 +466,9 @@ export default function Chat() {
     syncedTurnIds.current.set(sessionId, known);
   }, []);
 
-  const syncBackendContext = useCallback((sessionId: string, nextTurns: ChatTurn[]) => {
-    if (!isTauri()) return;
-    const known = syncedTurnIds.current.get(sessionId) ?? new Set<string>();
-    const deltaTurns = nextTurns.filter((turn) => (
-      !known.has(turn.id) && !turn.streaming && !turn.error
-    ));
-    if (deltaTurns.length === 0) return;
-    void contextForRetry(deltaTurns)
-      .then((messages) => {
-        if (messages.length === 0) return;
-        return chatSetContext(sessionId, messages, "append");
-      })
-      .then((tokens) => {
-        if (tokens != null) {
-          setContextOverrides((prev) => new Map(prev).set(sessionId, { tokens, anchor: nextTurns.length }));
-        }
-        markBackendContextSynced(sessionId, deltaTurns);
-      })
-      .catch((error) => setError(String(error)));
-  }, [markBackendContextSynced, setError]);
+  const markBackendContextDirty = useCallback((sessionId: string) => {
+    dirtyBackendContext.current.add(sessionId);
+  }, []);
 
   const patchAssistant = useCallback((
     sessionId: string,
@@ -452,9 +534,11 @@ export default function Chat() {
         error: visibleError,
         stopped,
       }),
-      stopped && !visibleError ? (nextTurns) => syncBackendContext(sessionId, nextTurns) : undefined,
+      stopped && !visibleError
+        ? () => markBackendContextDirty(sessionId)
+        : undefined,
     );
-  }, [patchAssistant, syncBackendContext]);
+  }, [markBackendContextDirty, patchAssistant]);
 
   // Pin the ContextRing to an authoritative backend token count — reported
   // after every turn (real usage) and after compaction — anchored at the
@@ -516,9 +600,11 @@ export default function Chat() {
   });
   const currentChatBusy = runningSessionIds.has(currentId);
   const turns = currentSession?.turns ?? [];
-  const estimatedTokens = ringTokens(turns, contextOverrides.get(currentId));
+  const currentContextOverride = contextOverrides.get(currentId);
+  const estimatedTokens = currentContextOverride?.tokens
+    ?? (estimatedContext.sessionId === currentId ? estimatedContext.tokens : 0);
   const contextMax = status?.ready
-    ? (status.compactionBudget ?? status.contextWindow ?? null)
+    ? (status.contextWindow ?? status.compactionBudget ?? null)
     : null;
   const currentContextNotice = contextNotice?.sessionId === currentId ? contextNotice : null;
   const workflowTodos = useMemo(() => latestTodosFromTurns(turns), [turns]);
@@ -531,29 +617,59 @@ export default function Chat() {
   const runningSessionIdsRef = useRef(runningSessionIds);
   runningSessionIdsRef.current = runningSessionIds;
 
+  useEffect(() => {
+    if (currentContextOverride) {
+      setEstimatedContext({ sessionId: currentId, tokens: currentContextOverride.tokens });
+      return;
+    }
+    setEstimatedContext((current) => current.sessionId === currentId
+      ? current
+      : { sessionId: currentId, tokens: 0 });
+    return deferHeavyUiWork(() => {
+      setEstimatedContext({ sessionId: currentId, tokens: estimateTokens(turns) });
+    });
+  }, [currentContextOverride, currentId, turns]);
+
   const refreshStatus = useCallback((model?: string | null) => {
     if (!isTauri()) {
-      setStatus({ ready: true, model: "Preview", provider: "Browser" });
+      setStatus({ ready: true, model: copy.previewModel, provider: copy.browserProvider });
       return;
     }
     const request = model ? chatModelSet(model, false) : chatStatus();
     request.then(setStatus).catch((error) => setStatus({ ready: false, message: String(error) }));
+  }, [copy.browserProvider, copy.previewModel]);
+
+  const refreshModelOptions = useCallback(() => {
+    if (!isTauri()) {
+      setModelOptions([]);
+      return;
+    }
+    chatModelOptions().then((opts) => setModelOptions(opts.options)).catch(() => setModelOptions([]));
   }, []);
 
   useEffect(() => {
     refreshStatus(currentSession?.model ?? null);
     if (!isTauri()) {
-      setPermission({ mode: "danger-full-access", label: "Auto-approve", description: "Auto-approve tool calls; no OS administrator elevation" });
+      setPermission({
+        mode: "danger-full-access",
+        label: copy.permissionLabels["danger-full-access"],
+        description: copy.previewPermissionDescription,
+      });
       return;
     }
     chatPermissionGet(currentId).then(setPermission).catch(() => setPermission(null));
-    chatModelOptions().then((opts) => setModelOptions(opts.options)).catch(() => setModelOptions([]));
+    refreshModelOptions();
     chatCommandSpecs()
       .then((commands) => setDesktopCommands(visibleDesktopCommands(commands)))
       .catch(() => setDesktopCommands(FALLBACK_SLASH_COMMANDS));
     skillsList().then(setSkills).catch(() => undefined);
     projectChatStarters().then(setStarters).catch(() => undefined);
-  }, [currentId, currentProject?.id, currentSession?.model, refreshStatus]);
+  }, [copy.permissionLabels, copy.previewPermissionDescription, currentId, currentProject?.id, currentSession?.model, refreshModelOptions, refreshStatus]);
+
+  useEffect(() => onChatModelsUpdated(() => {
+    refreshModelOptions();
+    refreshStatus(currentSessionRef.current?.model ?? null);
+  }), [refreshModelOptions, refreshStatus]);
 
   const activeModel = currentSession?.model || status?.model || null;
 
@@ -601,7 +717,7 @@ export default function Chat() {
 
   const changePermission = async (mode: string) => {
     if (!isTauri()) {
-      const label = mode === "read-only" ? "Plan" : mode === "danger-full-access" ? "Auto-approve" : mode === "prompt" ? "Ask" : "Accept edits";
+      const label = copy.permissionLabels[mode] ?? mode;
       setPermission({ mode, label, description: "" });
       return;
     }
@@ -633,13 +749,21 @@ export default function Chat() {
     }
   }, [setError]);
 
+  const deletePersistedSession = useCallback((sessionId: string, projectId: string) => {
+    if (!isTauri()) return;
+    void Promise.all([
+      chatDelete(sessionId, projectId),
+      chatUiSessionDelete(sessionId),
+    ]).catch((error) => setError(String(error)));
+  }, [setError]);
+
   useEffect(() => () => {
     deleteTimers.current.forEach(({ timer, projectId }, sessionId) => {
       window.clearTimeout(timer);
-      if (isTauri()) void chatDelete(sessionId, projectId);
+      deletePersistedSession(sessionId, projectId);
     });
     deleteTimers.current.clear();
-  }, []);
+  }, [deletePersistedSession]);
 
   useEffect(() => {
     setPendingCommandSelection(null);
@@ -676,6 +800,53 @@ export default function Chat() {
     focusComposer();
   }, [currentSession, focusComposer, updateSession]);
 
+  const addPathsToChat = useCallback((paths: string[]) => {
+    if (!currentSession || paths.length === 0) return;
+    const next = paths
+      .map((path) => path.trim())
+      .filter(Boolean)
+      .slice(0, 20)
+      .map((path): ChatAttachment => ({
+        id: makeId("att"),
+        kind: "file",
+        name: basename(path),
+        path,
+      }));
+    if (next.length === 0) return;
+    updateSession(currentSession.id, (session) => ({
+      ...session,
+      draftAttachments: [...(session.draftAttachments ?? []), ...next],
+    }));
+    focusComposer();
+  }, [currentSession, focusComposer, updateSession]);
+
+  useEffect(() => {
+    if (!isTauri()) return;
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+    void import("@tauri-apps/api/webview")
+      .then(({ getCurrentWebview }) => getCurrentWebview().onDragDropEvent((event) => {
+        if (disposed) return;
+        if (event.payload.type === "enter" || event.payload.type === "over") {
+          setChatDragging(true);
+          return;
+        }
+        setChatDragging(false);
+        if (event.payload.type === "drop") {
+          addPathsToChat(event.payload.paths);
+        }
+      }))
+      .then((cleanup) => {
+        if (disposed) cleanup();
+        else unlisten = cleanup;
+      })
+      .catch(() => undefined);
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [addPathsToChat]);
+
   const beginRun = useCallback(async (
     session: ChatSession,
     prefix: ChatTurn[],
@@ -696,18 +867,20 @@ export default function Chat() {
         {
           id: makeId("turn"),
           role: "assistant",
-          blocks: [{ kind: "text", text: "Browser preview response. Run the Tauri app for live Chat." }],
+          blocks: [{ kind: "text", text: copy.previewResponse }],
         },
       ]);
       updateSession(session.id, (item) => ({ ...item, draft: "", draftAttachments: [] }));
       setEditingTurnId(null);
       return;
     }
-    const shouldResetContext = needsBackendContextReset(session.turns, prefix, resetContext);
+    const shouldResetContext = dirtyBackendContext.current.has(session.id)
+      || needsBackendContextReset(session.turns, prefix, resetContext);
     if (shouldResetContext) {
       const tokens = await chatSetContext(session.id, await contextForRetry(prefix), "replace");
       setContextOverrides((prev) => new Map(prev).set(session.id, { tokens, anchor: prefix.length }));
       markBackendContextSynced(session.id, prefix);
+      dirtyBackendContext.current.delete(session.id);
     } else {
       markBackendContextSynced(session.id, prefix);
     }
@@ -715,7 +888,7 @@ export default function Chat() {
     updateSession(session.id, (item) => ({ ...item, draft: "", draftAttachments: [] }));
     setEditingTurnId(null);
     await run(session.id, request);
-  }, [markBackendContextSynced, patchTurns, run, status?.model, updateSession]);
+  }, [copy.previewResponse, markBackendContextSynced, patchTurns, run, status?.model, updateSession]);
 
   const runSlashCommand = useCallback(async (
     session: ChatSession,
@@ -729,7 +902,7 @@ export default function Chat() {
       patchTurns(session.id, (turns) => [
         ...turns,
         userTurn(text, []),
-        assistantTextTurn("This desktop command is disabled in this build."),
+        assistantTextTurn(copy.disabledCommand),
       ]);
       updateSession(session.id, (item) => ({ ...item, draft: "", draftAttachments: [] }));
       setEditingTurnId(null);
@@ -744,7 +917,7 @@ export default function Chat() {
         ? FALLBACK_SLASH_COMMANDS
           .map((item) => `/${item.name}${item.argumentHint ? ` ${item.argumentHint}` : ""} - ${item.description}`)
           .join("\n")
-        : "Desktop slash commands run inside the Tauri app.";
+        : copy.previewCommandReply;
       patchTurns(session.id, (turns) => [...turns, userTurn(text, []), assistantTextTurn(reply)]);
       updateSession(session.id, (item) => ({ ...item, draft: "", draftAttachments: [] }));
       setEditingTurnId(null);
@@ -802,7 +975,7 @@ export default function Chat() {
       setEditingTurnId(null);
       return true;
     }
-  }, [beginRun, patchTurns, refreshStatus, setError, setTab, skills, updateSession]);
+  }, [beginRun, copy.disabledCommand, copy.previewCommandReply, patchTurns, refreshStatus, setError, setTab, skills, updateSession]);
 
   useEffect(() => {
     const text = pendingChatRunInput?.trim();
@@ -886,7 +1059,14 @@ export default function Chat() {
     if (!session || runningSessionIdsRef.current.has(session.id) || sendLocks.current.has(session.id)) return;
     sendLocks.current.add(session.id);
     try {
-      await beginRun(session, session.turns, "Continue from where you stopped.", [], true);
+      await beginRun(
+        session,
+        session.turns,
+        "Continue from where you stopped.",
+        [],
+        true,
+        continueStoppedPrompt(),
+      );
     } finally {
       sendLocks.current.delete(session.id);
     }
@@ -965,7 +1145,7 @@ export default function Chat() {
     if (!removed) return;
     setDeleted(removed);
     const timer = window.setTimeout(() => {
-      if (isTauri()) void chatDelete(removed.id, removed.projectId);
+      deletePersistedSession(removed.id, removed.projectId);
       deleteTimers.current.delete(removed.id);
       setDeleted((current) => current?.id === removed.id ? null : current);
     }, 6000);
@@ -996,7 +1176,8 @@ export default function Chat() {
     const w = Math.max(150, Math.min(400, chatSidebarResizeRef.current.startWidth + (e.clientX - chatSidebarResizeRef.current.startX)));
     chatSidebarResizeRef.current = null;
     setChatSidebarWidth(w);
-    localStorage.setItem("aris-chat-sidebar-w", String(w));
+    localStorage.setItem(CHAT_SIDEBAR_WIDTH_KEY, String(w));
+    localStorage.removeItem(CHAT_SIDEBAR_WIDTH_LEGACY_KEY);
   };
   useEffect(() => {
     document.body.style.setProperty("--chat-sidebar-w", `${chatSidebarWidth}px`);
@@ -1097,14 +1278,14 @@ export default function Chat() {
               fontSize: "12px",
               fontWeight: 500
             }}>
-              {status?.ready ? status.provider : (status?.message ?? "Checking...")}
+              {status?.ready ? status.provider : (status?.message ?? copy.checking)}
             </div>
             <button
               className="chat-export-btn"
               onClick={() => void exportCurrentChat()}
               disabled={currentChatBusy || exporting || turns.length === 0}
-              title="Export current chat"
-              aria-label="Export current chat"
+              title={copy.exportChat}
+              aria-label={copy.exportChat}
               style={{ background: "transparent", border: "none", color: "var(--text-dim)", padding: "4px", cursor: "pointer", display: "flex", alignItems: "center" }}
             >
               {exporting ? (
@@ -1117,7 +1298,7 @@ export default function Chat() {
                 </svg>
               )}
             </button>
-            {!status?.ready && <button onClick={() => setTab("settings")}>Settings</button>}
+            {!status?.ready && <button onClick={() => setTab("settings")}>{copy.settings}</button>}
           </div>,
           document.getElementById("app-chat-actions-portal")!
         )}
@@ -1125,6 +1306,7 @@ export default function Chat() {
           key={currentId}
           sessionId={currentId}
           turns={turns}
+          loading={currentSessionLoading}
           composerHeight={composerHeight}
           starters={starters}
           onStarter={(prompt) => {
@@ -1191,8 +1373,8 @@ export default function Chat() {
       </main>
       {deleted && (
         <div className="chat-undo">
-          {`Deleted "${deleted.title}"`}
-          <button onClick={undoDelete}>Undo</button>
+          {copy.deleted(deleted.title)}
+          <button onClick={undoDelete}>{copy.undo}</button>
         </div>
       )}
       {fileMenu && (

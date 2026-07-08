@@ -5,6 +5,10 @@ set "ROOT=%~dp0.."
 set "NODE=%ROOT%\node\node.exe"
 set "SCRIPT=%ROOT%\mcp\playwright\node_modules\@playwright\mcp\cli.js"
 set "VERSION=0.0.76"
+if not defined PLAYWRIGHT_MCP_USER_DATA_DIR set "PLAYWRIGHT_MCP_USER_DATA_DIR=.somniq\tmp\browser\profile"
+if not defined PLAYWRIGHT_MCP_OUTPUT_DIR set "PLAYWRIGHT_MCP_OUTPUT_DIR=.somniq\tmp\browser\output"
+if not exist "%PLAYWRIGHT_MCP_USER_DATA_DIR%" mkdir "%PLAYWRIGHT_MCP_USER_DATA_DIR%" >nul 2>nul
+if not exist "%PLAYWRIGHT_MCP_OUTPUT_DIR%" mkdir "%PLAYWRIGHT_MCP_OUTPUT_DIR%" >nul 2>nul
 
 if exist "%SCRIPT%" (
   if exist "%NODE%" (

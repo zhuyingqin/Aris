@@ -3,7 +3,6 @@ import {
   appRelaunch,
   appUpdateCheck,
   appUpdateDownloadAndInstall,
-  chatUsageSummary,
   configGet,
   configSecretGet,
   configSet,
@@ -11,11 +10,18 @@ import {
   isTauri,
   localEnvironmentChecks,
   newapiBootstrap,
+  newapiGroups,
   newapiModels,
+  newapiUpdateGroup,
+  newapiUsageLogs,
+  systemPromptView,
+  userPromptView,
   type NewApiAccount,
+  type NewApiGroupOption,
+  type NewApiUsageLogPage,
 } from "../api/tauri";
-import arisIcon from "../assets/app-logo.png";
-import { useStore } from "../store";
+import { isManagedAuthInvalidError, useStore, type Language } from "../store";
+import { notifyChatModelsUpdated } from "../modelEvents";
 import type {
   AppUpdateInfo,
   AppUpdateProgress,
@@ -24,7 +30,8 @@ import type {
   ConfigTestResult,
   ConfigView,
   LocalEnvironmentCheck,
-  TokenUsageSummary,
+  SystemPromptView,
+  UserPromptView,
 } from "../types";
 import MailSettings, { MailSettingsDetail } from "./MailSettings";
 
@@ -47,11 +54,136 @@ type SaveState = "idle" | "saving" | "saved" | "error";
 type TestState = "idle" | "testing" | "passed" | "failed";
 type UpdateState = "idle" | "checking" | "available" | "current" | "downloading" | "ready" | "error";
 type SettingsTab = "general" | "auth" | "usage" | "about";
-type UsageDetailTab = "logs" | "providers" | "models";
 
 const MANAGED_NEW_API_MODE = true;
-const ACCOUNT_CACHE_KEY = "aris-account-v1";
+const MANAGED_MODEL_SERVER_LABEL = "通用模型服务器";
+const MANAGED_MODEL_SERVER_BASE_URL = "http://106.53.28.124:18080";
+const ACCOUNT_CACHE_KEY = "somniq-account-v1";
+const LEGACY_ACCOUNT_CACHE_KEY = "aris-account-v1";
+const SETTINGS_TAB_REQUEST_KEY = "somniq-settings-tab-request";
+const SETTINGS_TAB_REQUEST_EVENT = "somniq-settings-tab-request";
 const USAGE_LOG_PAGE_SIZE = 12;
+const PREVIEW_CONFIG_VIEW: ConfigView = {
+  appVersion: "0.4.5",
+  configPath: "browser preview - Tauri config is not loaded",
+  executorProvider: "openai",
+  executorModel: "MiniMax-M3",
+  executorBaseUrl: `${MANAGED_MODEL_SERVER_BASE_URL}/v1`,
+  summarizerProvider: "",
+  summarizerModel: "",
+  summarizerBaseUrl: "",
+  hasSummarizerKey: false,
+  hasExecutorKey: true,
+  executorKeyMasked: "sk-...preview",
+  reviewerProvider: "openai",
+  reviewerModel: "MiniMax-M3",
+  reviewerBaseUrl: `${MANAGED_MODEL_SERVER_BASE_URL}/v1`,
+  hasReviewerKey: true,
+  reviewerKeyMasked: "sk-...preview",
+  hasScopusKey: false,
+  language: "cn",
+  memoryWriteApproval: true,
+  managedModels: ["MiniMax-M3", "MiniMax-M2.7", "gpt-5.5", "GLM-5", "deepseek-v4-pro"],
+  verifiedExecutors: [],
+};
+const PREVIEW_ACCOUNT: NewApiAccount = {
+  username: "preview-user",
+  displayName: "Preview User",
+  role: 10,
+  isAdmin: true,
+  subscriptionName: "Team Plan",
+  subscriptionDesc: "Browser preview data",
+  subscriptionQuota: 1_850_000,
+  subscriptionUsedQuota: 650_000,
+  group: "default",
+  groupDesc: "Standard group",
+  groupRatio: "1",
+  quota: 1_250_000,
+  usedQuota: 750_000,
+  models: ["MiniMax-M3", "MiniMax-M2.7", "gpt-5.5", "GLM-5", "deepseek-v4-pro"],
+  model: "MiniMax-M3",
+};
+const PREVIEW_GROUP_OPTIONS: NewApiGroupOption[] = [
+  { name: "default", desc: "Standard group", ratio: "1" },
+  { name: "research", desc: "Research routing", ratio: "0.8" },
+  { name: "premium", desc: "Premium routing", ratio: "1.5" },
+];
+const PREVIEW_USAGE_LOGS: NewApiUsageLogPage = {
+  page: 1,
+  pageSize: USAGE_LOG_PAGE_SIZE,
+  total: 3,
+  items: [
+    {
+      id: "preview-1",
+      createdAt: Math.floor(Date.now() / 1000) - 240,
+      model: "MiniMax-M3",
+      tokenName: "somniq-desktop",
+      channel: "MiniMax",
+      requestId: "req_preview_001928374",
+      upstreamRequestId: "",
+      promptTokens: 4180,
+      completionTokens: 920,
+      totalTokens: 5100,
+      quota: 6200,
+      status: "success",
+      typeLabel: "Consume",
+    },
+    {
+      id: "preview-2",
+      createdAt: Math.floor(Date.now() / 1000) - 3600,
+      model: "gpt-5.5",
+      tokenName: "somniq-desktop",
+      channel: "OpenAI-compatible",
+      requestId: "req_preview_001928375",
+      upstreamRequestId: "",
+      promptTokens: 2310,
+      completionTokens: 780,
+      totalTokens: 3090,
+      quota: 4100,
+      status: "success",
+      typeLabel: "Consume",
+    },
+    {
+      id: "preview-3",
+      createdAt: Math.floor(Date.now() / 1000) - 7200,
+      model: "deepseek-v4-pro",
+      tokenName: "somniq-desktop",
+      channel: "DeepSeek",
+      requestId: "req_preview_001928376",
+      upstreamRequestId: "",
+      promptTokens: 1490,
+      completionTokens: 530,
+      totalTokens: 2020,
+      quota: 2400,
+      status: "success",
+      typeLabel: "Consume",
+    },
+  ],
+};
+let usageLogPageCache: Record<number, NewApiUsageLogPage> = {};
+const PREVIEW_SYSTEM_PROMPT: SystemPromptView = {
+  model: PREVIEW_CONFIG_VIEW.executorModel ?? "preview-model",
+  fullToolRegistry: true,
+  sections: 3,
+  characters: 214,
+  prompt:
+    "# System\nPreview mode: Tauri is not connected, so the live system prompt is unavailable.\n\n# Environment context\n - Model: MiniMax-M3\n - Working directory: browser preview\n\n# Desktop Chat\nFull tool registry: enabled.",
+};
+const PREVIEW_USER_PROMPT: UserPromptView = {
+  sessionId: "preview-session",
+  surface: "Chat",
+  capturedAt: Math.floor(Date.now() / 1000),
+  blocks: 1,
+  images: 0,
+  characters: 86,
+  prompt: "Preview mode: this panel shows the most recent user prompt sent from the Chat composer.",
+};
+const ENVIRONMENT_CHECK_PLACEHOLDERS = [
+  { id: "python", label: "Python", category: "运行环境" },
+  { id: "jupyter", label: "Jupyter", category: "Notebook" },
+  { id: "matlab", label: "MATLAB", category: "数值计算" },
+  { id: "latex", label: "LaTeX", category: "论文排版" },
+];
 
 const SETTINGS_TABS: Array<{ id: SettingsTab; label: string }> = [
   { id: "general", label: "通用" },
@@ -59,6 +191,460 @@ const SETTINGS_TABS: Array<{ id: SettingsTab; label: string }> = [
   { id: "usage", label: "使用统计" },
   { id: "about", label: "关于" },
 ];
+
+const SETTINGS_COPY: Record<Language, {
+  tabs: Record<SettingsTab, string>;
+  settingsCategories: string;
+  loading: string;
+  statusModelService: string;
+  statusVersion: string;
+  languageTitle: string;
+  languageSub: string;
+  saveSaving: string;
+  saveSaved: string;
+  savePrefs: string;
+  appearanceTitle: string;
+  appearanceSub: string;
+  themeLabel: string;
+  light: string;
+  dark: string;
+  localBehaviorTitle: string;
+  localBehaviorSub: string;
+  confirmBeforeWrite: string;
+  autoWrite: string;
+  saveBehavior: string;
+  systemPromptTitle: string;
+  systemPromptSub: string;
+  userPromptTitle: string;
+  userPromptSub: string;
+  promptView: string;
+  promptHide: string;
+  promptModel: string;
+  promptUnknown: string;
+  promptSections: (count: number) => string;
+  promptChars: (count: string) => string;
+  promptFullTools: string;
+  promptLimitedTools: string;
+  promptLoading: string;
+  promptRefresh: string;
+  systemPromptLoading: string;
+  userPromptEmpty: string;
+  userPromptSource: string;
+  userPromptNoSource: string;
+  userPromptNotCaptured: string;
+  userPromptBlocks: (count: number) => string;
+  userPromptImages: (count: number) => string;
+  userPromptLoading: string;
+  creditUnit: string;
+  usageTitle: string;
+  usageSub: string;
+  usageRefresh: string;
+  usageRefreshing: string;
+  accountUsedQuota: string;
+  accountBalance: string;
+  accountTotalQuota: string;
+  accountUsageRatio: string;
+  usedQuota: string;
+  remainingQuota: string;
+  subscriptionUsed: string;
+  subscriptionBalance: string;
+  subscriptionUsageRatio: string;
+  callDetails: string;
+  usageRange: (start: number, end: number, total: number) => string;
+  usageNoRecords: string;
+  usageLoading: string;
+  usageHeaders: {
+    time: string;
+    model: string;
+    token: string;
+    tokens: string;
+    quota: string;
+    request: string;
+  };
+  usagePageSummary: (pageSize: number, page: number, pageCount: number) => string;
+  usagePrev: string;
+  usageNext: string;
+  usageEmpty: string;
+  usageRefreshFailed: (error: string) => string;
+  usageNotSignedIn: string;
+  currentModelFallback: string;
+  authAccountTitle: string;
+  authAccountSub: string;
+  authRefresh: string;
+  authRefreshing: string;
+  authLogout: string;
+  authSignedIn: string;
+  authSignedOut: string;
+  authSignedOutSub: string;
+  authBalanceMeta: (quota: string, used: string) => string;
+  authSubscriptionLabel: string;
+  authSubscriptionEmpty: string;
+  authSubscriptionSource: string;
+  authSubscriptionBalance: string;
+  authAccountBalance: string;
+  authAccountBalanceHint: string;
+  authUsedQuota: string;
+  authUsedQuotaMeta: (percent: number, ratio: string) => string;
+  authGroupTag: (group: string) => string;
+  authGroupMeta: (group: string, ratio?: string, desc?: string) => string;
+  authRefreshFailed: (error: string) => string;
+  modelServiceTitle: string;
+  modelServiceSub: string;
+  modelSync: string;
+  modelSyncing: string;
+  executorModel: string;
+  reviewerModel: string;
+  reviewerModelOff: string;
+  modelSyncAfterLogin: string;
+  currentExecutor: (model: string) => string;
+  currentReviewer: (model: string) => string;
+  reviewerOff: string;
+  modelSyncingStatus: string;
+  modelSynced: (count: number) => string;
+  modelSyncAfterLoginStatus: string;
+  integratedAuthTitle: string;
+  integratedAuthSub: string;
+  mailBack: string;
+  mailTitle: string;
+  aboutUpdateTitle: string;
+  aboutUpdateSub: string;
+  aboutCheck: string;
+  aboutChecking: string;
+  aboutDownloadInstall: string;
+  aboutRestart: string;
+  aboutUpdateAvailable: (version: string) => string;
+  aboutUpdateReady: (version: string) => string;
+  aboutInstalling: string;
+  aboutConnected: string;
+  aboutCurrentVersion: (version: string) => string;
+  aboutRemoteVersion: (version: string) => string;
+  envTitle: string;
+  envDetectingSub: string;
+  envReadySummary: (ready: number, total: number, checkedAt?: string) => string;
+  envSub: string;
+  envRefresh: string;
+  envDetecting: string;
+  envEmpty: string;
+  advancedExecutor: string;
+  advancedReviewer: string;
+  advancedProviderType: string;
+  advancedSummaryTools: string;
+  advancedSummaryToolsSub: string;
+  advancedCollapse: string;
+  advancedExpand: string;
+  summaryProvider: string;
+  summaryProviderHint: string;
+  summaryFollowExecutor: string;
+  summaryManual: string;
+  summaryProtocol: string;
+  summaryBaseUrl: string;
+  summaryApiKey: string;
+  summaryModel: string;
+  summaryModelHint: string;
+  testTesting: string;
+  testConnectionConfig: string;
+  saveConnectionConfig: string;
+  saveConnectionSavedInfo: string;
+}> = {
+  cn: {
+    tabs: { general: "通用", auth: "认证", usage: "使用统计", about: "关于" },
+    settingsCategories: "设置分类",
+    loading: "加载中...",
+    statusModelService: "模型服务",
+    statusVersion: "版本",
+    languageTitle: "界面语言",
+    languageSub: "立即切换桌面界面语言；保存后也会作为助手回复偏好。",
+    saveSaving: "保存中...",
+    saveSaved: "已保存",
+    savePrefs: "保存偏好",
+    appearanceTitle: "外观主题",
+    appearanceSub: "选择应用的明暗主题，立即生效。",
+    themeLabel: "主题",
+    light: "浅色",
+    dark: "深色",
+    localBehaviorTitle: "本地行为",
+    localBehaviorSub: "记忆写入策略仅保存在这台设备。",
+    confirmBeforeWrite: "写入前确认",
+    autoWrite: "自动写入",
+    saveBehavior: "保存行为",
+    systemPromptTitle: "系统提示词",
+    systemPromptSub: "普通对话使用的只读提示词预览。",
+    userPromptTitle: "用户提示词",
+    userPromptSub: "最近一次从对话或代理界面实际发送的用户提示词。",
+    promptView: "查看",
+    promptHide: "收起",
+    promptModel: "模型",
+    promptUnknown: "未知",
+    promptSections: (count) => `${count} 个段落`,
+    promptChars: (count) => `${count} 字符`,
+    promptFullTools: "完整工具",
+    promptLimitedTools: "有限工具",
+    promptLoading: "加载中...",
+    promptRefresh: "刷新",
+    systemPromptLoading: "正在加载系统提示词...",
+    userPromptEmpty: "这个应用会话中还没有发送过用户提示词。",
+    userPromptSource: "来源",
+    userPromptNoSource: "无",
+    userPromptNotCaptured: "尚未捕获",
+    userPromptBlocks: (count) => `${count} 个文本块`,
+    userPromptImages: (count) => `${count} 张图片`,
+    userPromptLoading: "正在加载用户提示词...",
+    creditUnit: "额度",
+    usageTitle: "使用统计",
+    usageSub: "显示当前登录账号在服务器侧的额度和使用量，不再读取本地项目 usage log。",
+    usageRefresh: "刷新",
+    usageRefreshing: "刷新中...",
+    accountUsedQuota: "当前账号已用额度",
+    accountBalance: "账户余额",
+    accountTotalQuota: "账户总额度",
+    accountUsageRatio: "账户消耗比例",
+    usedQuota: "已用额度",
+    remainingQuota: "剩余额度",
+    subscriptionUsed: "订阅已用",
+    subscriptionBalance: "订阅余额",
+    subscriptionUsageRatio: "订阅消耗比例",
+    callDetails: "调用明细",
+    usageRange: (start, end, total) => `第 ${start}-${end} 条 / 共 ${total} 条`,
+    usageNoRecords: "暂无记录",
+    usageLoading: "加载中...",
+    usageHeaders: { time: "时间", model: "模型", token: "令牌", tokens: "令牌数", quota: "额度", request: "请求" },
+    usagePageSummary: (pageSize, page, pageCount) => `每页 ${pageSize} 条，当前第 ${page} / ${pageCount} 页`,
+    usagePrev: "上一页",
+    usageNext: "下一页",
+    usageEmpty: "暂无调用记录。",
+    usageRefreshFailed: (error) => `账号额度刷新失败，当前显示上次缓存 · ${error}`,
+    usageNotSignedIn: "未登录或账号信息未加载。登录后点击刷新获取当前用户使用量。",
+    currentModelFallback: "未选择",
+    authAccountTitle: "账号服务",
+    authAccountSub: "账号、订阅、分组与额度由服务器下发，本地只保留最近一次投影。",
+    authRefresh: "刷新",
+    authRefreshing: "刷新中...",
+    authLogout: "退出登录",
+    authSignedIn: "已登录",
+    authSignedOut: "未登录",
+    authSignedOutSub: "登录后显示账号信息",
+    authBalanceMeta: (quota, used) => `余额 ${quota} · 已用 ${used}`,
+    authSubscriptionLabel: "订阅套餐",
+    authSubscriptionEmpty: "无有效订阅",
+    authSubscriptionSource: "来自 /api/subscription/self",
+    authSubscriptionBalance: "订阅余额",
+    authAccountBalance: "账户余额",
+    authAccountBalanceHint: "可继续用于模型调用",
+    authUsedQuota: "已用额度",
+    authUsedQuotaMeta: (percent, ratio) => `${percent}% 已消耗 · 倍率 ${ratio || "-"}`,
+    authGroupTag: (group) => `分组 ${group}`,
+    authGroupMeta: (group, ratio, desc) => `分组 ${group || "-"}${ratio ? ` · 倍率 ${ratio}` : ""}${desc ? ` · ${desc}` : ""}`,
+    authRefreshFailed: (error) => `刷新失败，当前显示上次缓存 · ${error}`,
+    modelServiceTitle: "模型服务",
+    modelServiceSub: "从账号已有模型中分别选择对话执行模型和审核模型；对话中也可以临时切换任意已同步模型。",
+    modelSync: "同步模型",
+    modelSyncing: "同步中...",
+    executorModel: "执行模型",
+    reviewerModel: "审核模型",
+    reviewerModelOff: "关闭审核模型",
+    modelSyncAfterLogin: "登录后同步模型",
+    currentExecutor: (model) => `当前执行：${model}`,
+    currentReviewer: (model) => ` · 审核：${model}`,
+    reviewerOff: " · 审核：关闭",
+    modelSyncingStatus: "正在同步模型",
+    modelSynced: (count) => `已同步 ${count} 个模型`,
+    modelSyncAfterLoginStatus: "登录后将自动同步模型",
+    integratedAuthTitle: "集成认证",
+    integratedAuthSub: "邮箱连接，将 SomniQ 接入 Gmail / Outlook / IMAP。",
+    mailBack: "返回",
+    mailTitle: "邮箱",
+    aboutUpdateTitle: "应用更新",
+    aboutUpdateSub: "通过 GitHub Release 检查、下载并安装 SomniQ Studio 更新。",
+    aboutCheck: "检查更新",
+    aboutChecking: "检查中...",
+    aboutDownloadInstall: "下载并安装",
+    aboutRestart: "重启应用",
+    aboutUpdateAvailable: (version) => `可更新到 v${version}`,
+    aboutUpdateReady: (version) => `v${version} 已安装`,
+    aboutInstalling: "正在安装更新",
+    aboutConnected: "SomniQ Studio 已连接更新通道",
+    aboutCurrentVersion: (version) => `当前版本 v${version}`,
+    aboutRemoteVersion: (version) => `远端版本 v${version}`,
+    envTitle: "本地环境检查",
+    envDetectingSub: "正在检测本机运行环境...",
+    envReadySummary: (ready, total, checkedAt) => `${ready}/${total} 项可用${checkedAt ? ` · 上次检测 ${checkedAt}` : ""}`,
+    envSub: "查看 Python、MATLAB、LaTeX 等运行环境。",
+    envRefresh: "刷新",
+    envDetecting: "检测中...",
+    envEmpty: "点击刷新后显示本机可用的科研与排版运行环境。",
+    advancedExecutor: "执行器",
+    advancedReviewer: "审阅",
+    advancedProviderType: "Provider 类型",
+    advancedSummaryTools: "摘要与工具",
+    advancedSummaryToolsSub: "摘要模型、Scopus Key 与配置文件路径",
+    advancedCollapse: "收起",
+    advancedExpand: "展开",
+    summaryProvider: "摘要供应商",
+    summaryProviderHint: "Auto 会使用这里选择的供应商和已保存 key",
+    summaryFollowExecutor: "跟随执行器",
+    summaryManual: "手动配置",
+    summaryProtocol: "摘要协议",
+    summaryBaseUrl: "摘要 Base URL",
+    summaryApiKey: "摘要 API Key",
+    summaryModel: "摘要模型",
+    summaryModelHint: "压缩上下文时生成摘要所用的模型；留空 = 自动",
+    testTesting: "测试中...",
+    testConnectionConfig: "测试连接配置",
+    saveConnectionConfig: "保存连接配置",
+    saveConnectionSavedInfo: "已保存。下次对话时生效。",
+  },
+  en: {
+    tabs: { general: "General", auth: "Auth", usage: "Usage", about: "About" },
+    settingsCategories: "Settings categories",
+    loading: "Loading...",
+    statusModelService: "Model service",
+    statusVersion: "Version",
+    languageTitle: "Interface Language",
+    languageSub: "Switch the desktop UI immediately; save to also use it as the assistant reply preference.",
+    saveSaving: "Saving...",
+    saveSaved: "Saved",
+    savePrefs: "Save preference",
+    appearanceTitle: "Appearance",
+    appearanceSub: "Choose the light or dark theme. Changes apply immediately.",
+    themeLabel: "Theme",
+    light: "Light",
+    dark: "Dark",
+    localBehaviorTitle: "Local Behavior",
+    localBehaviorSub: "Memory write behavior is stored only on this device.",
+    confirmBeforeWrite: "Confirm before writing",
+    autoWrite: "Write automatically",
+    saveBehavior: "Save behavior",
+    systemPromptTitle: "System Prompt",
+    systemPromptSub: "Read-only preview of the prompt used by normal Chat sessions.",
+    userPromptTitle: "User Prompt",
+    userPromptSub: "Most recent user prompt actually sent from Chat or an agent surface.",
+    promptView: "View",
+    promptHide: "Hide",
+    promptModel: "Model",
+    promptUnknown: "unknown",
+    promptSections: (count) => `${count} sections`,
+    promptChars: (count) => `${count} chars`,
+    promptFullTools: "Full tools",
+    promptLimitedTools: "Limited tools",
+    promptLoading: "Loading...",
+    promptRefresh: "Refresh",
+    systemPromptLoading: "Loading system prompt...",
+    userPromptEmpty: "No user prompt has been sent in this app session yet.",
+    userPromptSource: "Source",
+    userPromptNoSource: "none",
+    userPromptNotCaptured: "Not captured",
+    userPromptBlocks: (count) => `${count} blocks`,
+    userPromptImages: (count) => `${count} images`,
+    userPromptLoading: "Loading user prompt...",
+    creditUnit: "credits",
+    usageTitle: "Usage",
+    usageSub: "Server-side quota and usage for the signed-in account.",
+    usageRefresh: "Refresh",
+    usageRefreshing: "Refreshing...",
+    accountUsedQuota: "Account used",
+    accountBalance: "Balance",
+    accountTotalQuota: "Total quota",
+    accountUsageRatio: "Account usage",
+    usedQuota: "Used quota",
+    remainingQuota: "Remaining quota",
+    subscriptionUsed: "Subscription used",
+    subscriptionBalance: "Subscription balance",
+    subscriptionUsageRatio: "Subscription usage",
+    callDetails: "Call Details",
+    usageRange: (start, end, total) => `${start}-${end} of ${total}`,
+    usageNoRecords: "No records",
+    usageLoading: "Loading...",
+    usageHeaders: { time: "Time", model: "Model", token: "Token", tokens: "Tokens", quota: "Quota", request: "Request" },
+    usagePageSummary: (pageSize, page, pageCount) => `${pageSize} per page, page ${page} of ${pageCount}`,
+    usagePrev: "Previous",
+    usageNext: "Next",
+    usageEmpty: "No usage records yet.",
+    usageRefreshFailed: (error) => `Failed to refresh account quota. Showing cached data. ${error}`,
+    usageNotSignedIn: "Not signed in, or account information is not loaded. Sign in, then refresh usage.",
+    currentModelFallback: "Not selected",
+    authAccountTitle: "Account Service",
+    authAccountSub: "Account, subscription, group, and quota are provided by the server. This device keeps only the latest snapshot.",
+    authRefresh: "Refresh",
+    authRefreshing: "Refreshing...",
+    authLogout: "Sign out",
+    authSignedIn: "Signed in",
+    authSignedOut: "Not signed in",
+    authSignedOutSub: "Sign in to show account information",
+    authBalanceMeta: (quota, used) => `Balance ${quota} · Used ${used}`,
+    authSubscriptionLabel: "Subscription",
+    authSubscriptionEmpty: "No active subscription",
+    authSubscriptionSource: "From /api/subscription/self",
+    authSubscriptionBalance: "Subscription balance",
+    authAccountBalance: "Account balance",
+    authAccountBalanceHint: "Available for model calls",
+    authUsedQuota: "Used quota",
+    authUsedQuotaMeta: (percent, ratio) => `${percent}% used · ratio ${ratio || "-"}`,
+    authGroupTag: (group) => `Group ${group}`,
+    authGroupMeta: (group, ratio, desc) => `Group ${group || "-"}${ratio ? ` · ratio ${ratio}` : ""}${desc ? ` · ${desc}` : ""}`,
+    authRefreshFailed: (error) => `Refresh failed. Showing cached data. ${error}`,
+    modelServiceTitle: "Model Service",
+    modelServiceSub: "Choose the chat execution model and review model from synced account models. Chat can also switch to any synced model temporarily.",
+    modelSync: "Sync models",
+    modelSyncing: "Syncing...",
+    executorModel: "Execution model",
+    reviewerModel: "Review model",
+    reviewerModelOff: "Disable review model",
+    modelSyncAfterLogin: "Sync models after sign-in",
+    currentExecutor: (model) => `Current executor: ${model}`,
+    currentReviewer: (model) => ` · reviewer: ${model}`,
+    reviewerOff: " · reviewer: off",
+    modelSyncingStatus: "Syncing models",
+    modelSynced: (count) => `${count} models synced`,
+    modelSyncAfterLoginStatus: "Models will sync automatically after sign-in",
+    integratedAuthTitle: "Integrated Auth",
+    integratedAuthSub: "Connect mail accounts and link SomniQ with Gmail, Outlook, or IMAP.",
+    mailBack: "Back",
+    mailTitle: "Mail",
+    aboutUpdateTitle: "App Updates",
+    aboutUpdateSub: "Check, download, and install SomniQ Studio updates from GitHub Releases.",
+    aboutCheck: "Check for updates",
+    aboutChecking: "Checking...",
+    aboutDownloadInstall: "Download and install",
+    aboutRestart: "Restart app",
+    aboutUpdateAvailable: (version) => `Update available: v${version}`,
+    aboutUpdateReady: (version) => `v${version} installed`,
+    aboutInstalling: "Installing update",
+    aboutConnected: "SomniQ Studio is connected to the update channel",
+    aboutCurrentVersion: (version) => `Current version v${version}`,
+    aboutRemoteVersion: (version) => `Remote version v${version}`,
+    envTitle: "Local Environment",
+    envDetectingSub: "Checking local runtime environment...",
+    envReadySummary: (ready, total, checkedAt) => `${ready}/${total} available${checkedAt ? ` · last checked ${checkedAt}` : ""}`,
+    envSub: "Check Python, MATLAB, LaTeX, and other runtime tools.",
+    envRefresh: "Refresh",
+    envDetecting: "Checking...",
+    envEmpty: "Refresh to show available local research and typesetting tools.",
+    advancedExecutor: "Executor",
+    advancedReviewer: "Reviewer",
+    advancedProviderType: "Provider Type",
+    advancedSummaryTools: "Summary and Tools",
+    advancedSummaryToolsSub: "Summary model, Scopus key, and config file path",
+    advancedCollapse: "Collapse",
+    advancedExpand: "Expand",
+    summaryProvider: "Summary provider",
+    summaryProviderHint: "Auto uses the provider selected here and the saved key.",
+    summaryFollowExecutor: "Follow executor",
+    summaryManual: "Manual config",
+    summaryProtocol: "Summary protocol",
+    summaryBaseUrl: "Summary Base URL",
+    summaryApiKey: "Summary API Key",
+    summaryModel: "Summary model",
+    summaryModelHint: "Model used to summarize compressed context; leave blank for Auto.",
+    testTesting: "Testing...",
+    testConnectionConfig: "Test connection config",
+    saveConnectionConfig: "Save connection config",
+    saveConnectionSavedInfo: "Saved. Applies to the next chat.",
+  },
+};
+
+function normalizeLanguage(value: string | null | undefined): Language {
+  return value === "en" ? "en" : "cn";
+}
 
 const SUMMARIZER_MODELS: PresetOption[] = [
   { label: "Auto", value: "", hint: "自动选择" },
@@ -94,7 +680,7 @@ const REVIEWER_MODELS: PresetOption[] = [
 ];
 
 const OPENAI_COMPAT_URLS: PresetOption[] = [
-  { label: "New API", value: "http://106.53.28.124:18080/v1" },
+  { label: MANAGED_MODEL_SERVER_LABEL, value: `${MANAGED_MODEL_SERVER_BASE_URL}/v1` },
   { label: "OpenAI", value: "https://api.openai.com/v1" },
   { label: "MiniMax", value: "https://api.minimaxi.com/v1" },
   { label: "Gemini", value: "https://generativelanguage.googleapis.com/v1beta/openai" },
@@ -226,7 +812,7 @@ const REVIEWER_PROVIDERS: Record<string, ProviderMeta> = {
 
 function readCachedAccount(): NewApiAccount | null {
   try {
-    const raw = localStorage.getItem(ACCOUNT_CACHE_KEY);
+    const raw = localStorage.getItem(ACCOUNT_CACHE_KEY) ?? localStorage.getItem(LEGACY_ACCOUNT_CACHE_KEY);
     return raw ? (JSON.parse(raw) as NewApiAccount) : null;
   } catch {
     return null;
@@ -235,11 +821,33 @@ function readCachedAccount(): NewApiAccount | null {
 
 function writeCachedAccount(account: NewApiAccount | null) {
   try {
-    if (account) localStorage.setItem(ACCOUNT_CACHE_KEY, JSON.stringify(account));
-    else localStorage.removeItem(ACCOUNT_CACHE_KEY);
+    if (account) {
+      localStorage.setItem(ACCOUNT_CACHE_KEY, JSON.stringify(account));
+      localStorage.removeItem(LEGACY_ACCOUNT_CACHE_KEY);
+    } else {
+      localStorage.removeItem(ACCOUNT_CACHE_KEY);
+      localStorage.removeItem(LEGACY_ACCOUNT_CACHE_KEY);
+    }
   } catch {
     // Local storage can be disabled; the in-memory state is still useful.
   }
+}
+
+function isSettingsTab(value: unknown): value is SettingsTab {
+  return value === "general" || value === "auth" || value === "usage" || value === "about";
+}
+
+function readRequestedSettingsTab(): SettingsTab | null {
+  try {
+    const value = sessionStorage.getItem(SETTINGS_TAB_REQUEST_KEY);
+    if (isSettingsTab(value)) {
+      sessionStorage.removeItem(SETTINGS_TAB_REQUEST_KEY);
+      return value;
+    }
+  } catch {
+    // Session storage can be disabled in embedded browser contexts.
+  }
+  return null;
 }
 
 function uniqueModelList(...groups: Array<Array<string | null | undefined> | null | undefined>): string[] {
@@ -260,6 +868,35 @@ function formatQuota(credits: number): string {
   return `$${(credits / 500000).toFixed(2)}`;
 }
 
+function quotaPercent(account: NewApiAccount): number {
+  const total = account.quota + account.usedQuota;
+  if (!Number.isFinite(total) || total <= 0) return 0;
+  return Math.min(100, Math.round((account.usedQuota / total) * 100));
+}
+
+function subscriptionQuotaPercent(account: NewApiAccount): number {
+  const used = account.subscriptionUsedQuota ?? 0;
+  const remaining = account.subscriptionQuota ?? 0;
+  const total = used + remaining;
+  if (!Number.isFinite(total) || total <= 0) return 0;
+  return Math.min(100, Math.round((used / total) * 100));
+}
+
+function isAdminAccount(account: NewApiAccount | null): boolean {
+  if (!account) return false;
+  if (account.isAdmin === true) return true;
+  if (typeof account.role === "number" && account.role >= 10) return true;
+  const markers = [account.group, account.groupDesc, account.subscriptionName, account.subscriptionDesc];
+  return markers.some((value) => {
+    const text = value?.trim();
+    if (!text) return false;
+    const lower = text.toLowerCase();
+    return ["admin", "administrator", "root", "superuser", "super-admin", "owner"].includes(lower)
+      || text.includes("管理员")
+      || text.includes("管理員");
+  });
+}
+
 function formatUpdateBytes(value: number): string {
   if (!Number.isFinite(value) || value <= 0) return "0 B";
   const units = ["B", "KB", "MB", "GB"];
@@ -272,38 +909,33 @@ function formatUpdateBytes(value: number): string {
   return `${size.toFixed(index === 0 ? 0 : 1)} ${units[index]}`;
 }
 
-function formatUsageTokens(value: number): string {
-  if (!Number.isFinite(value) || value <= 0) return "0";
-  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(2)}M`;
-  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}K`;
-  return `${Math.round(value)}`;
-}
-
 function formatUsageExact(value: number): string {
   if (!Number.isFinite(value) || value <= 0) return "0";
   return Math.round(value).toLocaleString();
 }
 
-function formatUsageChinese(value: number): string {
-  if (!Number.isFinite(value) || value <= 0) return "0";
-  if (value >= 100_000_000) return `${(value / 100_000_000).toFixed(2)} 亿`;
-  if (value >= 10_000) return `${(value / 10_000).toFixed(value >= 100_000 ? 1 : 2)} 万`;
-  return Math.round(value).toLocaleString();
+function formatUsageDate(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return "-";
+  const millis = value > 10_000_000_000 ? value : value * 1000;
+  const date = new Date(millis);
+  if (Number.isNaN(date.getTime())) return "-";
+  return date.toLocaleString(undefined, {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 
-function formatUsageCost(value: number): string {
-  if (!Number.isFinite(value) || value <= 0) return "$0.0000";
-  return `$${value.toFixed(4)}`;
+function shortUsageId(value: string): string {
+  const text = value.trim();
+  if (!text) return "-";
+  if (text.length <= 14) return text;
+  return `${text.slice(0, 8)}...${text.slice(-4)}`;
 }
 
-function formatUsageTime(epochSeconds: number): string {
-  if (!Number.isFinite(epochSeconds) || epochSeconds <= 0) return "-";
-  return new Date(epochSeconds * 1000).toLocaleString();
-}
-
-function formatUsageDay(epochSeconds: number): string {
-  const date = new Date(epochSeconds * 1000);
-  return `${String(date.getMonth() + 1).padStart(2, "0")}/${String(date.getDate()).padStart(2, "0")}`;
+function usageLogMeta(status: string, typeLabel: string): string {
+  return [typeLabel, status].map((value) => value.trim()).filter(Boolean).join(" · ");
 }
 
 function environmentMark(id: string): string {
@@ -318,82 +950,6 @@ function environmentStatusLabel(item: LocalEnvironmentCheck): string {
   if (item.status === "ready") return "可用";
   if (item.status === "warning") return "需检查";
   return item.available ? "可用" : "未检测到";
-}
-
-function usageRangeCutoff(days: number): number {
-  const date = new Date();
-  date.setHours(0, 0, 0, 0);
-  date.setDate(date.getDate() - (days - 1));
-  return Math.floor(date.getTime() / 1000);
-}
-
-function makeUsageTrend(entries: TokenUsageSummary["recent"], days: number) {
-  const buckets = new Map<string, {
-    label: string;
-    input: number;
-    output: number;
-    cache: number;
-    total: number;
-    cost: number;
-    requests: number;
-  }>();
-  const start = new Date();
-  start.setHours(0, 0, 0, 0);
-  start.setDate(start.getDate() - (days - 1));
-  for (let index = 0; index < days; index += 1) {
-    const date = new Date(start);
-    date.setDate(start.getDate() + index);
-    const key = date.toISOString().slice(0, 10);
-    buckets.set(key, {
-      label: `${String(date.getMonth() + 1).padStart(2, "0")}/${String(date.getDate()).padStart(2, "0")}`,
-      input: 0,
-      output: 0,
-      cache: 0,
-      total: 0,
-      cost: 0,
-      requests: 0,
-    });
-  }
-  for (const entry of entries) {
-    const date = new Date(entry.createdAt * 1000);
-    date.setHours(0, 0, 0, 0);
-    const key = date.toISOString().slice(0, 10);
-    const bucket = buckets.get(key);
-    if (!bucket) continue;
-    bucket.input += entry.inputTokens;
-    bucket.output += entry.outputTokens;
-    bucket.cache += entry.cacheReadInputTokens + entry.cacheCreationInputTokens;
-    bucket.total += entry.totalTokens;
-    bucket.cost += entry.estimatedCostUsd;
-    bucket.requests += 1;
-  }
-  return Array.from(buckets.values());
-}
-
-function usageChartX(index: number, total: number) {
-  const left = 48;
-  const width = 820;
-  return left + (total <= 1 ? 0 : (index / (total - 1)) * width);
-}
-
-function usageChartY(value: number, max: number) {
-  const top = 18;
-  const height = 210;
-  return top + height - (Math.max(0, value) / Math.max(1, max)) * height;
-}
-
-function usageLinePath(points: ReturnType<typeof makeUsageTrend>, key: "input" | "output" | "cache" | "total" | "cost", max: number) {
-  return points
-    .map((point, index) => `${index === 0 ? "M" : "L"} ${usageChartX(index, points.length).toFixed(1)} ${usageChartY(point[key], max).toFixed(1)}`)
-    .join(" ");
-}
-
-function usageAreaPath(points: ReturnType<typeof makeUsageTrend>, key: "total", max: number) {
-  if (points.length === 0) return "";
-  const baseline = usageChartY(0, max).toFixed(1);
-  const firstX = usageChartX(0, points.length).toFixed(1);
-  const lastX = usageChartX(points.length - 1, points.length).toFixed(1);
-  return `${usageLinePath(points, key, max)} L ${lastX} ${baseline} L ${firstX} ${baseline} Z`;
 }
 
 function normalizeExecutorProvider(provider: string | null | undefined, baseUrl: string | null | undefined): string {
@@ -420,9 +976,27 @@ function detectProtocol(url: string): string {
   return "openai";
 }
 
+function isManagedModelServerUrl(value: string | null | undefined): boolean {
+  const normalized = (value ?? "")
+    .trim()
+    .replace(/\/+$/, "")
+    .replace(/^https?:\/\//i, "")
+    .toLowerCase();
+  return normalized === "106.53.28.124:18080"
+    || normalized === "106.53.28.124:18080/v1";
+}
+
+function displayServerValue(value: string): string {
+  return isManagedModelServerUrl(value) ? MANAGED_MODEL_SERVER_LABEL : value;
+}
+
+function hideManagedServerAddress(value: string): string {
+  return value.replace(/(?:https?:\/\/)?106\.53\.28\.124:18080(?:\/v1)?/gi, MANAGED_MODEL_SERVER_LABEL);
+}
+
 function suggestModels(url: string): string[] {
   const lower = url.toLowerCase();
-  if (lower.includes("106.53.28.124:18080")) return ["MiniMax-M3", "MiniMax-M2.7", "gpt-5.5"];
+  if (isManagedModelServerUrl(lower)) return ["MiniMax-M3", "MiniMax-M2.7", "gpt-5.5"];
   if (lower.includes("minimaxi.com")) return ["MiniMax-M3", "MiniMax-M2.7"];
   if (lower.includes("deepseek.com")) return ["deepseek-v4-pro"];
   if (lower.includes("openai.com")) return ["gpt-5.5", "gpt-5.4", "gpt-4o"];
@@ -437,6 +1011,7 @@ function suggestModels(url: string): string[] {
 
 function formatServerLabel(server: string, provider?: string): string {
   const source = server.trim() || provider?.trim() || "unknown";
+  if (isManagedModelServerUrl(source)) return MANAGED_MODEL_SERVER_LABEL;
   if (source === "OpenAI-compatible" || source === "Anthropic-compatible" || source === "unknown") return source;
   try {
     const url = new URL(source);
@@ -461,17 +1036,24 @@ function PresetTextInput({
   placeholder,
   options,
   onChange,
+  disabled = false,
+  formatValue,
 }: {
   value: string;
   placeholder: string;
   options: PresetOption[];
   onChange: (value: string) => void;
+  disabled?: boolean;
+  formatValue?: (value: string) => string;
 }) {
   const currentPreset = options.find((option) => option.value === value)?.value ?? "__custom";
+  const inputValue = formatValue ? formatValue(value) : value;
+  const displayOnlyValue = inputValue !== value;
   return (
     <div className="st-preset-control">
       <select
         value={currentPreset}
+        disabled={disabled}
         onChange={(event) => {
           if (event.target.value === "__custom") {
             onChange("");
@@ -487,7 +1069,14 @@ function PresetTextInput({
           </option>
         ))}
       </select>
-      <input value={value} placeholder={placeholder} onChange={(event) => onChange(event.target.value)} spellCheck={false} />
+      <input
+        value={inputValue}
+        placeholder={placeholder}
+        onChange={(event) => onChange(event.target.value)}
+        spellCheck={false}
+        disabled={disabled}
+        readOnly={displayOnlyValue}
+      />
     </div>
   );
 }
@@ -498,13 +1087,33 @@ function KeyInput({
   masked,
   secretKind,
   onChange,
+  language,
+  disabled = false,
 }: {
   value: string;
   placeholder: string;
   masked: string | null | undefined;
   secretKind: ConfigSecretKind;
   onChange: (value: string) => void;
+  language: Language;
+  disabled?: boolean;
 }) {
+  const keyCopy = {
+    cn: {
+      noSavedSecret: "没有可显示的已保存密钥",
+      hideSecret: "隐藏密钥",
+      showSecret: "显示密钥",
+      hide: "隐藏",
+      show: "显示",
+    },
+    en: {
+      noSavedSecret: "No saved key to reveal",
+      hideSecret: "Hide key",
+      showSecret: "Show key",
+      hide: "Hide",
+      show: "Show",
+    },
+  }[language];
   const [visible, setVisible] = useState(false);
   const [savedSecret, setSavedSecret] = useState("");
   const [loading, setLoading] = useState(false);
@@ -528,7 +1137,7 @@ function KeyInput({
       try {
         const secret = await configSecretGet(secretKind);
         if (secret) setSavedSecret(secret);
-        else setError("没有可显示的已保存密钥");
+        else setError(keyCopy.noSavedSecret);
       } catch (err) {
         setError(String(err));
       } finally {
@@ -551,15 +1160,16 @@ function KeyInput({
         className="st-key-input"
         spellCheck={false}
         autoComplete="off"
+        disabled={disabled}
       />
       <button
         type="button"
         className="st-key-eye"
         onClick={() => void toggleVisible()}
-        disabled={loading || (!value && !masked)}
-        title={error || (visible ? "隐藏密钥" : "显示密钥")}
+        disabled={disabled || loading || (!value && !masked)}
+        title={error || (visible ? keyCopy.hideSecret : keyCopy.showSecret)}
       >
-        {loading ? "..." : visible ? "隐藏" : "显示"}
+        {loading ? "..." : visible ? keyCopy.hide : keyCopy.show}
       </button>
       {error && <span className="st-key-error">{error}</span>}
     </div>
@@ -574,8 +1184,8 @@ function TestDetail({ detail }: { detail: ConfigTestResult["executor"] }) {
         <span className="st-test-label">{detail.label}</span>
         {detail.model && <span className="st-test-meta">{detail.model}</span>}
       </div>
-      <div className="st-test-message">{detail.message}</div>
-      {detail.baseUrl && <div className="st-test-url">{detail.baseUrl}</div>}
+      <div className="st-test-message">{hideManagedServerAddress(detail.message)}</div>
+      {detail.baseUrl && <div className="st-test-url">{formatServerLabel(detail.baseUrl)}</div>}
     </div>
   );
 }
@@ -584,13 +1194,16 @@ export default function Settings() {
   const setError = useStore((state) => state.setError);
   const theme = useStore((state) => state.theme);
   const setTheme = useStore((state) => state.setTheme);
+  const language = useStore((state) => state.language);
+  const setLanguage = useStore((state) => state.setLanguage);
   const logout = useStore((state) => state.logout);
-  const [configView, setConfigView] = useState<ConfigView | null>(null);
+  const [configView, setConfigView] = useState<ConfigView | null>(() => isTauri() ? null : PREVIEW_CONFIG_VIEW);
   const [advForm, setAdvForm] = useState<ConfigPatch>({});
   const [execKey, setExecKey] = useState("");
   const [summaryKey, setSummaryKey] = useState("");
   const [reviewerKey, setReviewerKey] = useState("");
   const [scopusKey, setScopusKey] = useState("");
+  const [summaryToolsOpen, setSummaryToolsOpen] = useState(false);
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [testState, setTestState] = useState<TestState>("idle");
   const [testResult, setTestResult] = useState<ConfigTestResult | null>(null);
@@ -601,24 +1214,45 @@ export default function Settings() {
   const [environmentChecks, setEnvironmentChecks] = useState<LocalEnvironmentCheck[]>([]);
   const [environmentLoading, setEnvironmentLoading] = useState(false);
   const [environmentError, setEnvironmentError] = useState("");
-  const [usageSummary, setUsageSummary] = useState<TokenUsageSummary | null>(null);
+  const [environmentCheckedAt, setEnvironmentCheckedAt] = useState<number | null>(null);
   const [usageLoading, setUsageLoading] = useState(false);
-  const [usageDetailTab, setUsageDetailTab] = useState<UsageDetailTab>("logs");
-  const [usageRangeDays, setUsageRangeDays] = useState(30);
-  const [usageServerFilter, setUsageServerFilter] = useState("all");
-  const [usageModelFilter, setUsageModelFilter] = useState("all");
   const [usageLogPage, setUsageLogPage] = useState(1);
-  const [managedModels, setManagedModels] = useState<string[]>([]);
+  const [usageLogPages, setUsageLogPages] = useState<Record<number, NewApiUsageLogPage>>(() =>
+    isTauri() ? usageLogPageCache : { [PREVIEW_USAGE_LOGS.page]: PREVIEW_USAGE_LOGS },
+  );
+  const [usageLogs, setUsageLogs] = useState<NewApiUsageLogPage | null>(() =>
+    isTauri() ? usageLogPageCache[1] ?? null : PREVIEW_USAGE_LOGS,
+  );
+  const [usageLogError, setUsageLogError] = useState("");
+  const [managedModels, setManagedModels] = useState<string[]>(() => isTauri() ? [] : PREVIEW_CONFIG_VIEW.managedModels ?? []);
   const [managedModelsLoading, setManagedModelsLoading] = useState(false);
   const [managedModelsError, setManagedModelsError] = useState("");
-  const [account, setAccount] = useState<NewApiAccount | null>(() => readCachedAccount());
+  const [account, setAccount] = useState<NewApiAccount | null>(() => isTauri() ? readCachedAccount() : PREVIEW_ACCOUNT);
   const [accountLoading, setAccountLoading] = useState(false);
   const [accountError, setAccountError] = useState("");
-  const [activeSettingsTab, setActiveSettingsTab] = useState<SettingsTab>("general");
+  const [groupOptions, setGroupOptions] = useState<NewApiGroupOption[]>(() => isTauri() ? [] : PREVIEW_GROUP_OPTIONS);
+  const [groupDraft, setGroupDraft] = useState(() => isTauri() ? readCachedAccount()?.group ?? "" : PREVIEW_ACCOUNT.group);
+  const [groupLoading, setGroupLoading] = useState(false);
+  const [groupSaving, setGroupSaving] = useState(false);
+  const [groupError, setGroupError] = useState("");
+  const [systemPrompt, setSystemPrompt] = useState<SystemPromptView | null>(() => isTauri() ? null : PREVIEW_SYSTEM_PROMPT);
+  const [systemPromptOpen, setSystemPromptOpen] = useState(false);
+  const [systemPromptLoading, setSystemPromptLoading] = useState(false);
+  const [systemPromptError, setSystemPromptError] = useState("");
+  const [userPrompt, setUserPrompt] = useState<UserPromptView | null>(() => isTauri() ? null : PREVIEW_USER_PROMPT);
+  const [userPromptOpen, setUserPromptOpen] = useState(false);
+  const [userPromptLoading, setUserPromptLoading] = useState(false);
+  const [userPromptError, setUserPromptError] = useState("");
+  const [activeSettingsTab, setActiveSettingsTab] = useState<SettingsTab>(() => readRequestedSettingsTab() ?? "general");
   const [mailDetailOpen, setMailDetailOpen] = useState(false);
   const savedTimer = useRef<number | null>(null);
+  const usageLogPagesRef = useRef(usageLogPages);
+  const usageRefreshPendingRef = useRef(false);
+  const copy = SETTINGS_COPY[language];
 
   const loadConfig = (view: ConfigView) => {
+    const nextLanguage = normalizeLanguage(view.language);
+    setLanguage(nextLanguage);
     setConfigView(view);
     setAdvForm({
       executorProvider: normalizeExecutorProvider(view.executorProvider, view.executorBaseUrl),
@@ -630,7 +1264,7 @@ export default function Settings() {
       reviewerProvider: normalizeReviewerProvider(view.reviewerProvider),
       reviewerModel: view.reviewerModel ?? "",
       reviewerBaseUrl: view.reviewerBaseUrl ?? "",
-      language: view.language ?? "cn",
+      language: nextLanguage,
       memoryWriteApproval: view.memoryWriteApproval,
     });
     setExecKey("");
@@ -648,15 +1282,72 @@ export default function Settings() {
     if (savedTimer.current !== null) window.clearTimeout(savedTimer.current);
   }, []);
 
-  const loadUsageSummary = async () => {
+  useEffect(() => {
+    usageLogPagesRef.current = usageLogPages;
+  }, [usageLogPages]);
+
+  const cacheUsageLogPage = (pageData: NewApiUsageLogPage, reset = false) => {
+    setUsageLogPages((current) => {
+      const next = reset ? {} : { ...current };
+      next[pageData.page] = pageData;
+      usageLogPagesRef.current = next;
+      usageLogPageCache = next;
+      return next;
+    });
+    setUsageLogs(pageData);
+  };
+
+  const loadUsageSummary = async (page = usageLogPage, options: { force?: boolean; refreshAccount?: boolean } = {}) => {
+    const cachedLogs = usageLogPagesRef.current[page];
+    if (!options.force && cachedLogs) {
+      setUsageLogs(cachedLogs);
+      setUsageLogError("");
+      return;
+    }
+    if (!isTauri()) {
+      cacheUsageLogPage({ ...PREVIEW_USAGE_LOGS, page });
+      return;
+    }
     setUsageLoading(true);
+    setUsageLogError("");
     try {
-      setUsageSummary(await chatUsageSummary());
+      if (options.refreshAccount || !account) {
+        await loadAccount();
+      }
+      const nextLogs = await newapiUsageLogs(page, USAGE_LOG_PAGE_SIZE);
+      cacheUsageLogPage(nextLogs, options.force);
     } catch (error) {
-      setError(String(error));
+      const message = String(error);
+      setUsageLogError(message);
+      if (cachedLogs) {
+        setUsageLogs(cachedLogs);
+      }
+      setError(message);
     } finally {
       setUsageLoading(false);
     }
+  };
+
+  const refreshUsage = () => {
+    const firstPage = 1;
+    setUsageLogPages({});
+    usageLogPagesRef.current = {};
+    usageLogPageCache = {};
+    setUsageLogs(null);
+    usageRefreshPendingRef.current = true;
+    if (usageLogPage === firstPage) {
+      void loadUsageSummary(firstPage, { force: true, refreshAccount: true });
+      usageRefreshPendingRef.current = false;
+    } else {
+      setUsageLogPage(firstPage);
+    }
+  };
+
+  const goToUsageLogPage = (page: number) => {
+    const nextPage = Math.max(1, page);
+    setUsageLogs(usageLogPagesRef.current[nextPage] ?? null);
+    setUsageLogError("");
+    setUsageLogPage(nextPage);
   };
 
   const loadEnvironmentChecks = async () => {
@@ -665,6 +1356,7 @@ export default function Settings() {
     setEnvironmentError("");
     try {
       setEnvironmentChecks(await localEnvironmentChecks());
+      setEnvironmentCheckedAt(Math.floor(Date.now() / 1000));
     } catch (error) {
       setEnvironmentError(String(error));
     } finally {
@@ -672,14 +1364,57 @@ export default function Settings() {
     }
   };
 
+  const loadSystemPrompt = async () => {
+    if (!isTauri()) {
+      setSystemPrompt(PREVIEW_SYSTEM_PROMPT);
+      return;
+    }
+    setSystemPromptLoading(true);
+    setSystemPromptError("");
+    try {
+      setSystemPrompt(await systemPromptView());
+    } catch (error) {
+      const message = String(error);
+      setSystemPromptError(message);
+      setError(message);
+    } finally {
+      setSystemPromptLoading(false);
+    }
+  };
+
+  const loadUserPrompt = async () => {
+    if (!isTauri()) {
+      setUserPrompt(PREVIEW_USER_PROMPT);
+      return;
+    }
+    setUserPromptLoading(true);
+    setUserPromptError("");
+    try {
+      setUserPrompt(await userPromptView());
+    } catch (error) {
+      const message = String(error);
+      setUserPromptError(message);
+      setError(message);
+    } finally {
+      setUserPromptLoading(false);
+    }
+  };
+
   const loadManagedModels = async () => {
     if (!MANAGED_NEW_API_MODE) return;
+    if (!isTauri()) {
+      setManagedModels(PREVIEW_CONFIG_VIEW.managedModels ?? []);
+      setConfigView(PREVIEW_CONFIG_VIEW);
+      notifyChatModelsUpdated();
+      return;
+    }
     setManagedModelsLoading(true);
     setManagedModelsError("");
     try {
       const models = await newapiModels();
       setManagedModels(models);
       setConfigView((current) => current ? { ...current, managedModels: models } : current);
+      notifyChatModelsUpdated();
     } catch (error) {
       setManagedModels([]);
       setManagedModelsError(String(error));
@@ -688,48 +1423,160 @@ export default function Settings() {
     }
   };
 
+  const loadGroupOptions = async () => {
+    if (!MANAGED_NEW_API_MODE) return;
+    if (!isTauri()) {
+      setGroupOptions(PREVIEW_GROUP_OPTIONS);
+      return;
+    }
+    setGroupLoading(true);
+    setGroupError("");
+    try {
+      setGroupOptions(await newapiGroups());
+    } catch (error) {
+      setGroupError(String(error));
+    } finally {
+      setGroupLoading(false);
+    }
+  };
+
   const loadAccount = async () => {
     if (!MANAGED_NEW_API_MODE) return;
+    if (!isTauri()) {
+      setAccount(PREVIEW_ACCOUNT);
+      setGroupDraft(PREVIEW_ACCOUNT.group);
+      return;
+    }
     setAccountLoading(true);
     setAccountError("");
     try {
       const next = await newapiBootstrap();
       setAccount(next);
+      setGroupDraft(next.group);
       if (next.models.length > 0) {
         setManagedModels(next.models);
+        notifyChatModelsUpdated();
       }
       writeCachedAccount(next);
     } catch (error) {
-      setAccountError(String(error));
+      const message = String(error);
+      setAccountError(message);
+      if (isManagedAuthInvalidError(error)) {
+        writeCachedAccount(null);
+        logout();
+      }
     } finally {
       setAccountLoading(false);
     }
   };
 
+  const saveAccountGroup = async () => {
+    const nextGroup = groupDraft.trim();
+    if (!nextGroup || !account || nextGroup === account.group) return;
+    setGroupSaving(true);
+    setGroupError("");
+    try {
+      const next = isTauri()
+        ? await newapiUpdateGroup(nextGroup)
+        : { ...PREVIEW_ACCOUNT, group: nextGroup };
+      setAccount(next);
+      setGroupDraft(next.group);
+      if (next.models.length > 0) {
+        setManagedModels(next.models);
+        notifyChatModelsUpdated();
+      }
+      writeCachedAccount(next);
+    } catch (error) {
+      const message = String(error);
+      setGroupError(message);
+      setError(message);
+    } finally {
+      setGroupSaving(false);
+    }
+  };
+
   useEffect(() => {
     if (!isTauri()) return;
-    void loadUsageSummary();
     void loadManagedModels();
+    void loadGroupOptions();
     void loadAccount();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
-    setUsageLogPage(1);
-  }, [usageRangeDays, usageServerFilter, usageModelFilter]);
+    const openRequestedTab = (tab: SettingsTab) => {
+      setActiveSettingsTab(tab);
+      try {
+        sessionStorage.removeItem(SETTINGS_TAB_REQUEST_KEY);
+      } catch {
+        // Session storage may be unavailable.
+      }
+    };
+    const onSettingsTabRequest = (event: Event) => {
+      const detail = (event as CustomEvent<unknown>).detail;
+      if (isSettingsTab(detail)) {
+        openRequestedTab(detail);
+        return;
+      }
+      const requested = readRequestedSettingsTab();
+      if (requested) openRequestedTab(requested);
+    };
+    const requested = readRequestedSettingsTab();
+    if (requested) openRequestedTab(requested);
+    window.addEventListener(SETTINGS_TAB_REQUEST_EVENT, onSettingsTabRequest);
+    return () => {
+      window.removeEventListener(SETTINGS_TAB_REQUEST_EVENT, onSettingsTabRequest);
+    };
+  }, []);
 
   useEffect(() => {
-    if (activeSettingsTab === "about" && environmentChecks.length === 0 && !environmentLoading) {
+    if (activeSettingsTab === "about" && environmentChecks.length === 0 && !environmentError && !environmentLoading) {
       void loadEnvironmentChecks();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeSettingsTab]);
+  }, [activeSettingsTab, environmentChecks.length, environmentError, environmentLoading]);
 
-  const buildPatch = () => {
+  useEffect(() => {
+    if (activeSettingsTab === "general" && systemPromptOpen && !systemPrompt && !systemPromptLoading) {
+      void loadSystemPrompt();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeSettingsTab, systemPromptOpen]);
+
+  useEffect(() => {
+    if (activeSettingsTab === "general" && userPromptOpen && !userPrompt && !userPromptLoading) {
+      void loadUserPrompt();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeSettingsTab, userPromptOpen]);
+
+  useEffect(() => {
+    if (!isTauri() || activeSettingsTab !== "usage") return;
+    const refreshAccount = usageRefreshPendingRef.current;
+    usageRefreshPendingRef.current = false;
+    void loadUsageSummary(usageLogPage, refreshAccount ? { force: true, refreshAccount: true } : {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeSettingsTab, usageLogPage]);
+
+  const buildPatch = (options: { includeExecutor?: boolean; includeReviewer?: boolean } = {}) => {
     const patch: ConfigPatch = { ...advForm };
-    if (execKey.trim()) patch.executorApiKey = execKey.trim();
+    if (options.includeExecutor === false) {
+      delete patch.executorProvider;
+      delete patch.executorModel;
+      delete patch.executorBaseUrl;
+      delete patch.executorApiKey;
+    } else if (execKey.trim()) {
+      patch.executorApiKey = execKey.trim();
+    }
+    if (options.includeReviewer === false) {
+      delete patch.reviewerProvider;
+      delete patch.reviewerModel;
+      delete patch.reviewerBaseUrl;
+      delete patch.reviewerApiKey;
+    } else if (reviewerKey.trim()) {
+      patch.reviewerApiKey = reviewerKey.trim();
+    }
     if (summaryKey.trim()) patch.summarizerApiKey = summaryKey.trim();
-    if (reviewerKey.trim()) patch.reviewerApiKey = reviewerKey.trim();
     if (scopusKey.trim()) patch.scopusApiKey = scopusKey.trim();
     return patch;
   };
@@ -746,10 +1593,18 @@ export default function Settings() {
     setTestState("idle");
     setTestResult(null);
     try {
-      const next = await configSet(buildPatch());
+      if (!isTauri()) {
+        setConfigView((current) => current ? { ...current, ...buildPatch({ includeExecutor: canConfigureExecutor, includeReviewer: canConfigureReviewerApi }) } : current);
+        setSaveState("saved");
+        savedTimer.current = window.setTimeout(() => setSaveState("idle"), 3000);
+        notifyChatModelsUpdated();
+        return;
+      }
+      const next = await configSet(buildPatch({ includeExecutor: canConfigureExecutor, includeReviewer: canConfigureReviewerApi }));
       loadConfig(next);
       setSaveState("saved");
       savedTimer.current = window.setTimeout(() => setSaveState("idle"), 3000);
+      notifyChatModelsUpdated();
     } catch (error) {
       setError(String(error));
       setSaveState("error");
@@ -760,9 +1615,21 @@ export default function Settings() {
     setTestState("testing");
     setTestResult(null);
     try {
-      const result = await configTest(buildPatch());
+      if (!isTauri()) {
+        const result: ConfigTestResult = {
+          ok: true,
+          message: "Browser preview: connection test is simulated.",
+          executor: { ok: true, label: "Executor", model: advForm.executorModel, baseUrl: advForm.executorBaseUrl, message: "Preview mode" },
+          reviewer: canConfigureReviewerApi ? { ok: true, label: "Reviewer", model: advForm.reviewerModel, baseUrl: advForm.reviewerBaseUrl, message: "Preview mode" } : null,
+        };
+        setTestResult(result);
+        setTestState("passed");
+        return;
+      }
+      const result = await configTest(buildPatch({ includeExecutor: canConfigureExecutor, includeReviewer: canConfigureReviewerApi }));
       setTestResult(result);
       setTestState(result.ok ? "passed" : "failed");
+      if (result.ok) notifyChatModelsUpdated();
     } catch (error) {
       const message = String(error);
       setTestResult({ ok: false, message, executor: { ok: false, label: "Settings", message } });
@@ -772,24 +1639,34 @@ export default function Settings() {
 
   const applyManagedModel = async (model: string) => {
     if (!model || model === configView?.executorModel) return;
+    if (!isTauri()) {
+      setConfigView((current) => current ? { ...current, executorModel: model } : current);
+      setAdvForm((current) => ({ ...current, executorModel: model }));
+      setAccount((current) => (current ? { ...current, model } : current));
+      notifyChatModelsUpdated();
+      return;
+    }
     try {
       const next = await configSet({ executorModel: model });
       loadConfig(next);
       setAccount((current) => (current ? { ...current, model } : current));
+      notifyChatModelsUpdated();
     } catch (error) {
       setError(String(error));
     }
   };
 
   const applyManagedReviewerModel = async (model: string) => {
+    if (!canSelectManagedReviewer) return;
     if (model === (configView?.reviewerModel ?? "")) return;
+    if (!isTauri()) {
+      setConfigView((current) => current ? { ...current, reviewerModel: model } : current);
+      setAdvForm((current) => ({ ...current, reviewerModel: model }));
+      return;
+    }
     try {
       const patch: ConfigPatch = model
-        ? {
-          reviewerProvider: "custom",
-          reviewerModel: model,
-          reviewerBaseUrl: configView?.executorBaseUrl ?? "http://106.53.28.124:18080/v1",
-        }
+        ? { reviewerModel: model }
         : { reviewerProvider: "", reviewerModel: "", reviewerBaseUrl: "" };
       const next = await configSet(patch);
       loadConfig(next);
@@ -856,14 +1733,12 @@ export default function Settings() {
     }
   };
 
-  if (!isTauri()) return <div className="board"><div className="empty">Settings need the Tauri backend.</div></div>;
-
   if (mailDetailOpen) {
     return (
       <div className="st-page sp-detail-page">
         <div className="sp-detail-head">
-          <button className="sp-back-btn" onClick={() => setMailDetailOpen(false)} type="button">返回</button>
-          <div className="sp-detail-title">邮箱</div>
+          <button className="sp-back-btn" onClick={() => setMailDetailOpen(false)} type="button">{copy.mailBack}</button>
+          <div className="sp-detail-title">{copy.mailTitle}</div>
           <div className="sp-detail-badges">
             <span className="sp-role-badge sp-role-mail">IMAP/SMTP</span>
           </div>
@@ -873,10 +1748,13 @@ export default function Settings() {
     );
   }
 
-  if (!configView) return <div className="board"><div className="empty">Loading...</div></div>;
+  if (!configView) return <div className="board"><div className="empty">{copy.loading}</div></div>;
 
   const advExecProvider = advForm.executorProvider ?? "anthropic";
   const advExecMeta = EXECUTOR_PROVIDERS[advExecProvider] ?? EXECUTOR_PROVIDERS.custom;
+  const canConfigureExecutor = isAdminAccount(account);
+  const canConfigureReviewerApi = canConfigureExecutor;
+  const canSelectManagedReviewer = MANAGED_NEW_API_MODE;
   const advReviewerProvider = advForm.reviewerProvider ?? "";
   const advReviewerMeta = REVIEWER_PROVIDERS[advReviewerProvider] ?? REVIEWER_PROVIDERS.custom;
   const summaryProviderOptions = (() => {
@@ -889,7 +1767,7 @@ export default function Settings() {
       options.push({ key, label, provider: protocol, baseUrl: url, model: model?.trim() ?? "" });
     };
     addOption("Executor", configView.executorProvider, configView.executorBaseUrl, configView.executorModel);
-    addOption("Reviewer", configView.reviewerProvider, configView.reviewerBaseUrl, configView.reviewerModel);
+    if (canConfigureReviewerApi) addOption("Reviewer", configView.reviewerProvider, configView.reviewerBaseUrl, configView.reviewerModel);
     for (const item of configView.verifiedExecutors ?? []) {
       addOption(`${formatServerLabel(item.baseUrl)} · ${item.model}`, item.provider, item.baseUrl, item.model);
     }
@@ -906,7 +1784,7 @@ export default function Settings() {
       selectedSummaryProvider?.model,
       ...suggestModels(summarySuggestionBaseUrl),
       advForm.executorProvider === advForm.summarizerProvider ? advForm.executorModel : "",
-      advForm.reviewerProvider === advForm.summarizerProvider ? advForm.reviewerModel : "",
+      canConfigureReviewerApi && advForm.reviewerProvider === advForm.summarizerProvider ? advForm.reviewerModel : "",
     ].filter((model): model is string => Boolean(model?.trim())))).map((model) => ({
       label: model,
       value: model,
@@ -971,97 +1849,41 @@ export default function Settings() {
       : `${formatUpdateBytes(updateProgress.downloadedBytes)} downloaded`
     : "";
   const environmentReadyCount = environmentChecks.filter((item) => item.available).length;
-  const usageCutoff = usageRangeCutoff(usageRangeDays);
-  const usageServerOptions = usageSummary?.byServer ?? [];
-  const usageModelOptions = (() => {
-    const seen = new Set<string>();
-    const models: string[] = [];
-    for (const item of usageSummary?.byModel ?? []) {
-      const model = item.model.trim();
-      if (!model || seen.has(model)) continue;
-      seen.add(model);
-      models.push(model);
+  const accountUsedQuota = account?.usedQuota ?? 0;
+  const accountRemainingQuota = account?.quota ?? 0;
+  const accountTotalQuota = accountUsedQuota + accountRemainingQuota;
+  const accountUsagePercent = account ? quotaPercent(account) : 0;
+  const subscriptionUsedQuota = account?.subscriptionUsedQuota ?? 0;
+  const subscriptionRemainingQuota = account?.subscriptionQuota ?? 0;
+  const subscriptionUsagePercent = account ? subscriptionQuotaPercent(account) : 0;
+  const groupCopy = language === "cn"
+    ? {
+      label: "后台分组",
+      hint: "切换后会更新 New API 后台里当前账号的分组，并重新同步额度与模型。",
+      save: "保存分组",
+      saving: "保存中...",
+      loading: "正在加载分组...",
+      empty: "暂无可选分组",
     }
-    return models;
-  })();
-  const usageFilteredEntries = (usageSummary?.recent ?? [])
-    .filter((item) => item.createdAt >= usageCutoff)
-    .filter((item) => usageServerFilter === "all" || `${item.provider}:${item.server}` === usageServerFilter)
-    .filter((item) => usageModelFilter === "all" || item.model === usageModelFilter);
-  const usageVisibleTotals = usageFilteredEntries.reduce(
-    (acc, item) => ({
-      requests: acc.requests + 1,
-      inputTokens: acc.inputTokens + item.inputTokens,
-      outputTokens: acc.outputTokens + item.outputTokens,
-      cacheCreationInputTokens: acc.cacheCreationInputTokens + item.cacheCreationInputTokens,
-      cacheReadInputTokens: acc.cacheReadInputTokens + item.cacheReadInputTokens,
-      promptTokens: acc.promptTokens + item.promptTokens,
-      totalTokens: acc.totalTokens + item.totalTokens,
-      estimatedCostUsd: acc.estimatedCostUsd + item.estimatedCostUsd,
-    }),
-    {
-      requests: 0,
-      inputTokens: 0,
-      outputTokens: 0,
-      cacheCreationInputTokens: 0,
-      cacheReadInputTokens: 0,
-      promptTokens: 0,
-      totalTokens: 0,
-      estimatedCostUsd: 0,
-    },
-  );
-  const usageTrend = makeUsageTrend(usageFilteredEntries, usageRangeDays);
-  const usageLogPageCount = Math.max(1, Math.ceil(usageFilteredEntries.length / USAGE_LOG_PAGE_SIZE));
-  const usageCurrentLogPage = Math.min(usageLogPage, usageLogPageCount);
-  const usageRecent = usageFilteredEntries.slice(
-    (usageCurrentLogPage - 1) * USAGE_LOG_PAGE_SIZE,
-    usageCurrentLogPage * USAGE_LOG_PAGE_SIZE,
-  );
-  const usageServers = Array.from(usageFilteredEntries.reduce((map, item) => {
-    const key = `${item.provider}:${item.server}`;
-    const current = map.get(key) ?? {
-      server: item.server,
-      provider: item.provider,
-      requests: 0,
-      inputTokens: 0,
-      outputTokens: 0,
-      totalTokens: 0,
-      estimatedCostUsd: 0,
+    : {
+      label: "Backend group",
+      hint: "Saving updates this account's group in New API, then refreshes quota and models.",
+      save: "Save group",
+      saving: "Saving...",
+      loading: "Loading groups...",
+      empty: "No groups available",
     };
-    current.requests += 1;
-    current.inputTokens += item.inputTokens;
-    current.outputTokens += item.outputTokens;
-    current.totalTokens += item.totalTokens;
-    current.estimatedCostUsd += item.estimatedCostUsd;
-    map.set(key, current);
-    return map;
-  }, new Map<string, { server: string; provider: string; requests: number; inputTokens: number; outputTokens: number; totalTokens: number; estimatedCostUsd: number; }>()).values())
-    .sort((left, right) => right.totalTokens - left.totalTokens)
-    .slice(0, 12);
-  const usageModels = Array.from(usageFilteredEntries.reduce((map, item) => {
-    const key = `${item.provider}:${item.server}:${item.model}`;
-    const current = map.get(key) ?? {
-      server: item.server,
-      provider: item.provider,
-      model: item.model,
-      requests: 0,
-      totalTokens: 0,
-      estimatedCostUsd: 0,
-    };
-    current.requests += 1;
-    current.totalTokens += item.totalTokens;
-    current.estimatedCostUsd += item.estimatedCostUsd;
-    map.set(key, current);
-    return map;
-  }, new Map<string, { server: string; provider: string; model: string; requests: number; totalTokens: number; estimatedCostUsd: number; }>()).values())
-    .sort((left, right) => right.totalTokens - left.totalTokens)
-    .slice(0, 20);
-  const usageCacheRate = usageVisibleTotals.promptTokens > 0
-    ? Math.min(100, Math.round((usageVisibleTotals.cacheReadInputTokens / usageVisibleTotals.promptTokens) * 1000) / 10)
-    : 0;
-  const usageTrendMaxTokens = Math.max(1, ...usageTrend.map((point) => point.total));
-  const usageTrendMaxCost = Math.max(0.0001, ...usageTrend.map((point) => point.cost));
-  const currentManagedModel = configView.executorModel?.trim() || "未选择";
+  const groupOptionsWithCurrent = account?.group && !groupOptions.some((option) => option.name === account.group)
+    ? [{ name: account.group, desc: account.groupDesc, ratio: account.groupRatio }, ...groupOptions]
+    : groupOptions;
+  const usageLogTotal = usageLogs?.total ?? 0;
+  const usageLogItems = usageLogs?.items ?? [];
+  const usageLogPageCount = Math.max(1, Math.ceil(usageLogTotal / USAGE_LOG_PAGE_SIZE));
+  const usageLogStart = usageLogTotal > 0 ? (usageLogPage - 1) * USAGE_LOG_PAGE_SIZE + 1 : 0;
+  const usageLogEnd = usageLogTotal > 0 ? Math.min(usageLogStart + usageLogItems.length - 1, usageLogTotal) : 0;
+  const canGoPrevUsageLogPage = usageLogPage > 1 && !usageLoading;
+  const canGoNextUsageLogPage = usageLogPage < usageLogPageCount && !usageLoading;
+  const currentManagedModel = configView.executorModel?.trim() || copy.currentModelFallback;
   const availableManagedModels = uniqueModelList(
     managedModels,
     configView.managedModels,
@@ -1074,7 +1896,7 @@ export default function Settings() {
 
   return (
     <div className="st-page sp-list-page sp-settings-page">
-      <div className="sp-settings-tabs" role="tablist" aria-label="设置分类">
+      <div className="sp-settings-tabs" role="tablist" aria-label={copy.settingsCategories}>
         {SETTINGS_TABS.map((item) => (
           <button
             key={item.id}
@@ -1084,7 +1906,7 @@ export default function Settings() {
             className={`sp-settings-tab${activeSettingsTab === item.id ? " active" : ""}`}
             onClick={() => setActiveSettingsTab(item.id)}
           >
-            {item.label}
+            {copy.tabs[item.id]}
           </button>
         ))}
       </div>
@@ -1093,14 +1915,14 @@ export default function Settings() {
         <>
           <div className="sp-status-bar">
             <div className="sp-status-slot">
-              <span className="sp-status-tag sp-status-tag-exec">模型服务</span>
+              <span className="sp-status-tag sp-status-tag-exec">{copy.statusModelService}</span>
               <span className="sp-status-model">{currentManagedModel}</span>
               {configView.hasExecutorKey && <span className="sp-status-key">●</span>}
               <span className="sp-status-url">{currentServerLabel}</span>
             </div>
             <div className="sp-status-sep" />
             <div className="sp-status-slot sp-status-version">
-              <span className="sp-status-tag sp-status-tag-version">版本</span>
+              <span className="sp-status-tag sp-status-tag-version">{copy.statusVersion}</span>
               <span className="sp-status-model">SomniQ Studio v{configView.appVersion}</span>
             </div>
           </div>
@@ -1108,8 +1930,8 @@ export default function Settings() {
           <div className="sp-update-section">
             <div className="sp-section-head">
               <div className="sp-section-head-text">
-                <div className="sp-section-title">界面语言</div>
-                <div className="sp-section-sub">切换后作为助手回复偏好保存，下次对话生效。</div>
+                <div className="sp-section-title">{copy.languageTitle}</div>
+                <div className="sp-section-sub">{copy.languageSub}</div>
               </div>
               <div className="sp-update-actions">
                 <div className="st-lang-grid sp-inline-lang-grid">
@@ -1123,7 +1945,9 @@ export default function Settings() {
                       className={`st-lang-card${advForm.language === item.value ? " active" : ""}`}
                       onClick={() => {
                         resetOpState();
-                        setAdvForm((current) => ({ ...current, language: item.value }));
+                        const next = normalizeLanguage(item.value);
+                        setLanguage(next);
+                        setAdvForm((current) => ({ ...current, language: next }));
                       }}
                     >
                       <span className="st-lang-label">{item.label}</span>
@@ -1131,7 +1955,7 @@ export default function Settings() {
                   ))}
                 </div>
                 <button className="sp-btn sp-btn-primary" onClick={save} disabled={saveState === "saving"} type="button">
-                  {saveState === "saving" ? "保存中..." : saveState === "saved" ? "已保存" : "保存偏好"}
+                  {saveState === "saving" ? copy.saveSaving : saveState === "saved" ? copy.saveSaved : copy.savePrefs}
                 </button>
               </div>
             </div>
@@ -1140,13 +1964,13 @@ export default function Settings() {
           <div className="sp-appearance-section">
             <div className="sp-section-head">
               <div className="sp-section-head-text">
-                <div className="sp-section-title">外观主题</div>
-                <div className="sp-section-sub">选择应用的明暗主题，立即生效。</div>
+                <div className="sp-section-title">{copy.appearanceTitle}</div>
+                <div className="sp-section-sub">{copy.appearanceSub}</div>
               </div>
-              <div className="sp-theme-toggle" role="radiogroup" aria-label="主题">
+              <div className="sp-theme-toggle" role="radiogroup" aria-label={copy.themeLabel}>
                 {([
-                  { value: "light", label: "浅色" },
-                  { value: "dark", label: "深色" },
+                  { value: "light", label: copy.light },
+                  { value: "dark", label: copy.dark },
                 ] as const).map((option) => (
                   <button
                     key={option.value}
@@ -1167,8 +1991,8 @@ export default function Settings() {
           <div className="sp-update-section">
             <div className="sp-section-head">
               <div className="sp-section-head-text">
-                <div className="sp-section-title">本地行为</div>
-                <div className="sp-section-sub">记忆写入策略仅保存在这台设备。</div>
+                <div className="sp-section-title">{copy.localBehaviorTitle}</div>
+                <div className="sp-section-sub">{copy.localBehaviorSub}</div>
               </div>
               <div className="sp-update-actions">
                 <button
@@ -1179,13 +2003,97 @@ export default function Settings() {
                     setAdvForm((current) => ({ ...current, memoryWriteApproval: !current.memoryWriteApproval }));
                   }}
                 >
-                  <span className="st-lang-label">{advForm.memoryWriteApproval ? "写入前确认" : "自动写入"}</span>
+                  <span className="st-lang-label">{advForm.memoryWriteApproval ? copy.confirmBeforeWrite : copy.autoWrite}</span>
                 </button>
                 <button className="sp-btn sp-btn-primary" onClick={save} disabled={saveState === "saving"} type="button">
-                  {saveState === "saving" ? "保存中..." : saveState === "saved" ? "已保存" : "保存行为"}
+                  {saveState === "saving" ? copy.saveSaving : saveState === "saved" ? copy.saveSaved : copy.saveBehavior}
                 </button>
               </div>
             </div>
+          </div>
+
+          <div className="sp-update-section">
+            <button
+              type="button"
+              className="sp-system-prompt-toggle"
+              onClick={() => {
+                const nextOpen = !systemPromptOpen;
+                setSystemPromptOpen(nextOpen);
+                if (nextOpen && !systemPrompt) void loadSystemPrompt();
+              }}
+            >
+              <span>
+                <span className="sp-section-title">{copy.systemPromptTitle}</span>
+                <span className="sp-section-sub">{copy.systemPromptSub}</span>
+              </span>
+              <span className="sp-system-prompt-toggle-state">{systemPromptOpen ? copy.promptHide : copy.promptView}</span>
+            </button>
+            {systemPromptOpen && (
+              <div className="sp-system-prompt-panel">
+                <div className="sp-system-prompt-toolbar">
+                  <div className="sp-system-prompt-meta">
+                    <span>{copy.promptModel}: {systemPrompt?.model ?? (advForm.executorModel || copy.promptUnknown)}</span>
+                    <span>{copy.promptSections(systemPrompt?.sections ?? 0)}</span>
+                    <span>{copy.promptChars(formatUsageExact(systemPrompt?.characters ?? 0))}</span>
+                    <span>{systemPrompt?.fullToolRegistry ? copy.promptFullTools : copy.promptLimitedTools}</span>
+                  </div>
+                  <button className="sp-btn sp-btn-secondary" type="button" onClick={() => void loadSystemPrompt()} disabled={systemPromptLoading}>
+                    {systemPromptLoading ? copy.promptLoading : copy.promptRefresh}
+                  </button>
+                </div>
+                {systemPromptError && <div className="sp-system-prompt-error">{systemPromptError}</div>}
+                <textarea
+                  className="sp-system-prompt-text"
+                  value={systemPrompt?.prompt ?? (systemPromptLoading ? copy.systemPromptLoading : "")}
+                  readOnly
+                  spellCheck={false}
+                />
+              </div>
+            )}
+          </div>
+
+          <div className="sp-update-section">
+            <button
+              type="button"
+              className="sp-system-prompt-toggle"
+              onClick={() => {
+                const nextOpen = !userPromptOpen;
+                setUserPromptOpen(nextOpen);
+                if (nextOpen && !userPrompt) void loadUserPrompt();
+              }}
+            >
+              <span>
+                <span className="sp-section-title">{copy.userPromptTitle}</span>
+                <span className="sp-section-sub">{copy.userPromptSub}</span>
+              </span>
+              <span className="sp-system-prompt-toggle-state">{userPromptOpen ? copy.promptHide : copy.promptView}</span>
+            </button>
+            {userPromptOpen && (
+              <div className="sp-system-prompt-panel">
+                <div className="sp-system-prompt-toolbar">
+                  <div className="sp-system-prompt-meta">
+                    <span>{copy.userPromptSource}: {userPrompt?.surface ?? copy.userPromptNoSource}</span>
+                    <span>{userPrompt ? formatUsageDate(userPrompt.capturedAt) : copy.userPromptNotCaptured}</span>
+                    <span>{copy.userPromptBlocks(userPrompt?.blocks ?? 0)}</span>
+                    <span>{copy.userPromptImages(userPrompt?.images ?? 0)}</span>
+                    <span>{copy.promptChars(formatUsageExact(userPrompt?.characters ?? 0))}</span>
+                  </div>
+                  <button className="sp-btn sp-btn-secondary" type="button" onClick={() => void loadUserPrompt()} disabled={userPromptLoading}>
+                    {userPromptLoading ? copy.promptLoading : copy.promptRefresh}
+                  </button>
+                </div>
+                {userPromptError && <div className="sp-system-prompt-error">{userPromptError}</div>}
+                {!userPrompt && !userPromptLoading && (
+                  <div className="sp-system-prompt-empty">{copy.userPromptEmpty}</div>
+                )}
+                <textarea
+                  className="sp-system-prompt-text"
+                  value={userPrompt?.prompt ?? (userPromptLoading ? copy.userPromptLoading : "")}
+                  readOnly
+                  spellCheck={false}
+                />
+              </div>
+            )}
           </div>
         </>
       )}
@@ -1195,14 +2103,14 @@ export default function Settings() {
           <div className="sp-update-section">
             <div className="sp-section-head">
               <div className="sp-section-head-text">
-                <div className="sp-section-title">账号服务</div>
-                <div className="sp-section-sub">账号、套餐与额度由服务器下发；本地只保留最近一次投影。</div>
+                <div className="sp-section-title">{copy.authAccountTitle}</div>
+                <div className="sp-section-sub">{copy.authAccountSub}</div>
               </div>
               <div className="sp-update-actions">
                 <button className="sp-btn sp-btn-secondary" onClick={() => void loadAccount()} disabled={accountLoading} type="button">
-                  {accountLoading ? "刷新中..." : "刷新"}
+                  {accountLoading ? copy.authRefreshing : copy.authRefresh}
                 </button>
-                <button className="sp-btn sp-btn-secondary" onClick={() => logout()} type="button">退出登录</button>
+                <button className="sp-btn sp-btn-secondary" onClick={() => logout()} type="button">{copy.authLogout}</button>
               </div>
             </div>
             <div className={`sp-update-panel ${accountError && !account ? "sp-update-panel-error" : "sp-update-panel-current"}`}>
@@ -1210,27 +2118,81 @@ export default function Settings() {
                 <span className={`sp-update-dot ${accountError && !account ? "sp-update-dot-error" : "sp-update-dot-current"}`} />
                 <div className="sp-update-copy">
                   <div className="sp-update-title">
-                    {account ? (account.displayName || account.username || "已登录") : "未登录"}
-                    {account?.group ? <span className="sp-status-tag sp-status-tag-version" style={{ marginLeft: 8 }}>{account.group}</span> : null}
+                    {account ? (account.displayName || account.username || copy.authSignedIn) : copy.authSignedOut}
+                    {account?.subscriptionName ? <span className="sp-status-tag sp-status-tag-version" style={{ marginLeft: 8 }}>{account.subscriptionName}</span> : null}
+                    {account?.group ? <span className="sp-status-tag sp-status-tag-version sp-account-group-tag" style={{ marginLeft: 8 }}>{copy.authGroupTag(account.group)}</span> : null}
                   </div>
                   <div className="sp-update-meta">
                     {account
-                      ? `已用 ${formatQuota(account.usedQuota)} · 剩余 ${formatQuota(account.quota)}`
-                      : (accountError || "登录后显示账号信息")}
+                      ? copy.authBalanceMeta(formatQuota(account.quota), formatQuota(account.usedQuota))
+                      : (accountError || copy.authSignedOutSub)}
                   </div>
+                  {account && (
+                      <div className="sp-account-summary" aria-label={copy.authAccountTitle}>
+                        <div className="sp-account-metric">
+                          <span>{copy.authSubscriptionLabel}</span>
+                          <strong>{account.subscriptionName || copy.authSubscriptionEmpty}</strong>
+                          <small>{account.subscriptionDesc || copy.authSubscriptionSource}</small>
+                        </div>
+                        <div className="sp-account-metric subscription">
+                          <span>{copy.authSubscriptionBalance}</span>
+                          <strong>{formatQuota(account.subscriptionQuota ?? 0)}</strong>
+                          <small>{copy.authUsedQuotaMeta(subscriptionQuotaPercent(account), account.groupRatio || "-")}</small>
+                        </div>
+                        <div className="sp-account-metric balance">
+                          <span>{copy.authAccountBalance}</span>
+                          <strong>{formatQuota(account.quota)}</strong>
+                          <small>{copy.authAccountBalanceHint}</small>
+                        </div>
+                        <div className="sp-account-metric">
+                          <span>{copy.authUsedQuota}</span>
+                          <strong>{formatQuota(account.usedQuota)}</strong>
+                          <small>{copy.authUsedQuotaMeta(quotaPercent(account), account.groupRatio || "-")}</small>
+                        </div>
+                    </div>
+                  )}
                   {account && (account.groupRatio || account.groupDesc) && (
                     <div className="sp-update-message">
-                      套餐 {account.group || "-"}
-                      {account.groupRatio ? ` · 倍率 ${account.groupRatio}` : ""}
-                      {account.groupDesc ? ` · ${account.groupDesc}` : ""}
+                      {copy.authGroupMeta(account.group, account.groupRatio, account.groupDesc)}
+                    </div>
+                  )}
+                  {account && (
+                    <div className="sp-account-group-control">
+                      <label className="sp-account-group-field">
+                        <span>{groupCopy.label}</span>
+                        <select
+                          className="sp-settings-select"
+                          value={groupDraft}
+                          onChange={(event) => setGroupDraft(event.currentTarget.value)}
+                          disabled={groupLoading || groupSaving || groupOptionsWithCurrent.length === 0}
+                        >
+                          {groupOptionsWithCurrent.map((option) => (
+                            <option value={option.name} key={option.name}>
+                              {option.name}{option.ratio ? ` · ${option.ratio}` : ""}{option.desc ? ` · ${option.desc}` : ""}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <button
+                        className="sp-btn sp-btn-secondary"
+                        type="button"
+                        onClick={() => void saveAccountGroup()}
+                        disabled={groupSaving || groupLoading || !groupDraft.trim() || groupDraft === account.group}
+                      >
+                        {groupSaving ? groupCopy.saving : groupCopy.save}
+                      </button>
+                      <div className="sp-account-group-hint">
+                        {groupLoading ? groupCopy.loading : groupOptionsWithCurrent.length === 0 ? groupCopy.empty : groupCopy.hint}
+                      </div>
+                      {groupError && <div className="sp-update-message sp-update-message-error">{groupError}</div>}
                     </div>
                   )}
                   {account && account.quota + account.usedQuota > 0 && (
                     <div className="sp-quota-bar">
-                      <div style={{ width: `${Math.min(100, Math.round((account.usedQuota / (account.usedQuota + account.quota)) * 100))}%` }} />
+                      <div style={{ width: `${quotaPercent(account)}%` }} />
                     </div>
                   )}
-                  {account && accountError && <div className="sp-update-message">刷新失败，当前显示上次缓存 · {accountError}</div>}
+                  {account && accountError && <div className="sp-update-message">{copy.authRefreshFailed(accountError)}</div>}
                 </div>
               </div>
             </div>
@@ -1239,18 +2201,18 @@ export default function Settings() {
           <div className="sp-update-section">
             <div className="sp-section-head">
               <div className="sp-section-head-text">
-                <div className="sp-section-title">模型服务</div>
-                <div className="sp-section-sub">从账号已有模型中分别选择 Chat 执行模型和审核模型；Chat 里也可以临时切换任意已同步模型。</div>
+                <div className="sp-section-title">{copy.modelServiceTitle}</div>
+                <div className="sp-section-sub">{copy.modelServiceSub}</div>
               </div>
               <div className="sp-update-actions">
                 <button className="sp-btn sp-btn-secondary" onClick={() => void loadManagedModels()} disabled={managedModelsLoading} type="button">
-                  {managedModelsLoading ? "同步中..." : "同步模型"}
+                  {managedModelsLoading ? copy.modelSyncing : copy.modelSync}
                 </button>
               </div>
             </div>
             <div className="sp-model-pair">
               <label className="sp-model-select-row">
-                <span>执行模型</span>
+                <span>{copy.executorModel}</span>
                 {availableManagedModels.length > 0 ? (
                   <select
                     value={configView.executorModel ?? ""}
@@ -1262,40 +2224,45 @@ export default function Settings() {
                     ))}
                   </select>
                 ) : (
-                  <span className="sp-model-select-empty">登录后同步模型</span>
+                  <span className="sp-model-select-empty">{copy.modelSyncAfterLogin}</span>
                 )}
               </label>
-              <label className="sp-model-select-row">
-                <span>审核模型</span>
-                {availableManagedModels.length > 0 ? (
-                  <select
-                    value={currentReviewerModel}
-                    onChange={(event) => void applyManagedReviewerModel(event.target.value)}
-                    className="sp-settings-select"
-                  >
-                    <option value="">关闭审核模型</option>
-                    {availableManagedModels.map((model) => (
-                      <option key={model} value={model}>{model}</option>
-                    ))}
-                  </select>
-                ) : (
-                  <span className="sp-model-select-empty">登录后同步模型</span>
-                )}
-              </label>
+              {canSelectManagedReviewer && (
+                <label className="sp-model-select-row">
+                  <span>{copy.reviewerModel}</span>
+                  {availableManagedModels.length > 0 ? (
+                    <select
+                      value={currentReviewerModel}
+                      onChange={(event) => void applyManagedReviewerModel(event.target.value)}
+                      className="sp-settings-select"
+                    >
+                      <option value="">{copy.reviewerModelOff}</option>
+                      {availableManagedModels.map((model) => (
+                        <option key={model} value={model}>{model}</option>
+                      ))}
+                    </select>
+                  ) : (
+                    <span className="sp-model-select-empty">{copy.modelSyncAfterLogin}</span>
+                  )}
+                </label>
+              )}
             </div>
             <div className={`sp-update-panel ${managedModelsError ? "sp-update-panel-error" : "sp-update-panel-current"}`}>
               <div className="sp-update-main">
                 <span className={`sp-update-dot ${managedModelsError ? "sp-update-dot-error" : "sp-update-dot-current"}`} />
                 <div className="sp-update-copy">
-                  <div className="sp-update-title">当前执行：{currentManagedModel}{currentReviewerModel ? ` · 审核：${currentReviewerModel}` : " · 审核：关闭"}</div>
+                  <div className="sp-update-title">
+                    {copy.currentExecutor(currentManagedModel)}
+                    {canSelectManagedReviewer ? (currentReviewerModel ? copy.currentReviewer(currentReviewerModel) : copy.reviewerOff) : ""}
+                  </div>
                   <div className="sp-update-meta">
                     {managedModelsLoading
-                      ? "正在同步模型"
+                      ? copy.modelSyncingStatus
                       : managedModelsError
                         ? managedModelsError
                         : availableManagedModels.length > 0
-                          ? `已同步 ${availableManagedModels.length} 个模型`
-                          : "登录后将自动同步模型"}
+                          ? copy.modelSynced(availableManagedModels.length)
+                          : copy.modelSyncAfterLoginStatus}
                   </div>
                   {managedModelPreview.length > 0 && (
                     <div className="sp-update-message">
@@ -1311,8 +2278,8 @@ export default function Settings() {
           <div className="sp-providers-section">
             <div className="sp-section-head">
               <div className="sp-section-head-text">
-                <div className="sp-section-title">集成认证</div>
-                <div className="sp-section-sub">邮箱连接，将 SomniQ 接入 Gmail / Outlook / IMAP。</div>
+                <div className="sp-section-title">{copy.integratedAuthTitle}</div>
+                <div className="sp-section-sub">{copy.integratedAuthSub}</div>
               </div>
             </div>
             <div className="sp-card-list">
@@ -1325,82 +2292,99 @@ export default function Settings() {
       {activeSettingsTab === "auth" && (
         <div className="sp-advanced-wrap sp-advanced-wrap-tab">
           <div className="sp-advanced-body">
-            <div className="sp-adv-section">
-              <div className="sp-adv-section-title">执行器</div>
-              <div className="sp-field-group">
-                <div className="st-field-label">Provider 类型</div>
-                <div className="st-provider-grid">
-                  {Object.entries(EXECUTOR_PROVIDERS).map(([key, meta]) => (
-                    <button key={key} type="button" className={`st-provider-card${advExecProvider === key ? " active" : ""}`} onClick={() => chooseExecProvider(key)}>
-                      <span className="st-provider-label">{meta.label}</span>
-                      <span className="st-provider-hint">{meta.hint}</span>
-                    </button>
-                  ))}
+            {canConfigureExecutor && (
+              <div className="sp-adv-section">
+                <div className="sp-adv-section-title">{copy.advancedExecutor}</div>
+                <div className="sp-field-group">
+                  <div className="st-field-label">{copy.advancedProviderType}</div>
+                  <div className="st-provider-grid">
+                    {Object.entries(EXECUTOR_PROVIDERS).map(([key, meta]) => (
+                      <button key={key} type="button" className={`st-provider-card${advExecProvider === key ? " active" : ""}`} onClick={() => chooseExecProvider(key)}>
+                        <span className="st-provider-label">{meta.label}</span>
+                        <span className="st-provider-hint">{meta.hint}</span>
+                      </button>
+                    ))}
+                  </div>
                 </div>
-              </div>
-              <div className="sp-adv-rows">
-                <div className="st-row"><div className="st-row-label"><span className="st-label">Model</span></div><div className="st-row-control"><PresetTextInput value={advForm.executorModel ?? ""} placeholder={advExecMeta.defaultModel || "e.g. claude-sonnet-4-6"} options={advExecMeta.models ?? EXECUTOR_MODELS} onChange={(value) => { resetOpState(); setAdvForm((current) => ({ ...current, executorModel: value })); }} /></div></div>
-                <div className="st-row"><div className="st-row-label"><span className="st-label">Base URL</span></div><div className="st-row-control"><PresetTextInput value={advForm.executorBaseUrl ?? ""} placeholder={advExecMeta.defaultBaseUrl || "(official default)"} options={advExecMeta.baseUrls ?? OPENAI_COMPAT_URLS} onChange={(value) => { resetOpState(); setAdvForm((current) => ({ ...current, executorBaseUrl: value })); }} /></div></div>
-                <div className="st-row"><div className="st-row-label"><span className="st-label">API Key</span><span className="st-hint">{configView.hasExecutorKey ? `Saved: ${configView.executorKeyMasked ?? "configured"}` : "No key"}</span></div><div className="st-row-control"><KeyInput value={execKey} placeholder={configView.hasExecutorKey ? "leave blank to keep" : "paste API key"} masked={configView.executorKeyMasked} secretKind="executorApiKey" onChange={(value) => { resetOpState(); setExecKey(value); }} /></div></div>
-              </div>
-            </div>
-
-            <div className="sp-adv-section">
-              <div className="sp-adv-section-title">审阅</div>
-              <div className="sp-field-group">
-                <div className="st-field-label">Provider 类型</div>
-                <div className="st-provider-grid">
-                  {Object.entries(REVIEWER_PROVIDERS).map(([key, meta]) => (
-                    <button key={key} type="button" className={`st-provider-card${advReviewerProvider === key ? " active" : ""}`} onClick={() => chooseReviewerProvider(key)}>
-                      <span className="st-provider-label">{meta.label}</span>
-                      <span className="st-provider-hint">{meta.hint}</span>
-                    </button>
-                  ))}
-                </div>
-              </div>
-              {advReviewerProvider !== "" && (
                 <div className="sp-adv-rows">
-                  <div className="st-row"><div className="st-row-label"><span className="st-label">Model</span></div><div className="st-row-control"><PresetTextInput value={advForm.reviewerModel ?? ""} placeholder={advReviewerMeta.defaultModel || "e.g. gpt-5.5"} options={advReviewerMeta.models ?? REVIEWER_MODELS} onChange={(value) => { resetOpState(); setAdvForm((current) => ({ ...current, reviewerModel: value })); }} /></div></div>
-                  <div className="st-row"><div className="st-row-label"><span className="st-label">Base URL</span></div><div className="st-row-control"><PresetTextInput value={advForm.reviewerBaseUrl ?? ""} placeholder={advReviewerMeta.defaultBaseUrl || "(provider default)"} options={advReviewerMeta.baseUrls ?? OPENAI_COMPAT_URLS} onChange={(value) => { resetOpState(); setAdvForm((current) => ({ ...current, reviewerBaseUrl: value })); }} /></div></div>
-                  <div className="st-row"><div className="st-row-label"><span className="st-label">API Key</span><span className="st-hint">{configView.hasReviewerKey ? `Saved: ${configView.reviewerKeyMasked ?? "configured"}` : "No key"}</span></div><div className="st-row-control"><KeyInput value={reviewerKey} placeholder={configView.hasReviewerKey ? "leave blank to keep" : "paste reviewer key"} masked={configView.reviewerKeyMasked} secretKind="reviewerApiKey" onChange={(value) => { resetOpState(); setReviewerKey(value); }} /></div></div>
+                  <div className="st-row"><div className="st-row-label"><span className="st-label">Model</span></div><div className="st-row-control"><PresetTextInput value={advForm.executorModel ?? ""} placeholder={advExecMeta.defaultModel || "e.g. claude-sonnet-4-6"} options={advExecMeta.models ?? EXECUTOR_MODELS} onChange={(value) => { resetOpState(); setAdvForm((current) => ({ ...current, executorModel: value })); }} /></div></div>
+                  <div className="st-row"><div className="st-row-label"><span className="st-label">Base URL</span></div><div className="st-row-control"><PresetTextInput value={advForm.executorBaseUrl ?? ""} placeholder={advExecMeta.defaultBaseUrl || "(official default)"} options={advExecMeta.baseUrls ?? OPENAI_COMPAT_URLS} formatValue={displayServerValue} onChange={(value) => { resetOpState(); setAdvForm((current) => ({ ...current, executorBaseUrl: value })); }} /></div></div>
+                  <div className="st-row"><div className="st-row-label"><span className="st-label">API Key</span><span className="st-hint">{configView.hasExecutorKey ? `Saved: ${configView.executorKeyMasked ?? "configured"}` : "No key"}</span></div><div className="st-row-control"><KeyInput value={execKey} placeholder={configView.hasExecutorKey ? "leave blank to keep" : "paste API key"} masked={configView.executorKeyMasked} secretKind="executorApiKey" language={language} onChange={(value) => { resetOpState(); setExecKey(value); }} /></div></div>
+                </div>
+              </div>
+            )}
+
+            {canConfigureReviewerApi && (
+              <div className="sp-adv-section">
+                <div className="sp-adv-section-title">{copy.advancedReviewer}</div>
+                <div className="sp-field-group">
+                  <div className="st-field-label">{copy.advancedProviderType}</div>
+                  <div className="st-provider-grid">
+                    {Object.entries(REVIEWER_PROVIDERS).map(([key, meta]) => (
+                      <button key={key} type="button" className={`st-provider-card${advReviewerProvider === key ? " active" : ""}`} onClick={() => chooseReviewerProvider(key)}>
+                        <span className="st-provider-label">{meta.label}</span>
+                        <span className="st-provider-hint">{meta.hint}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                {advReviewerProvider !== "" && (
+                  <div className="sp-adv-rows">
+                    <div className="st-row"><div className="st-row-label"><span className="st-label">Model</span></div><div className="st-row-control"><PresetTextInput value={advForm.reviewerModel ?? ""} placeholder={advReviewerMeta.defaultModel || "e.g. gpt-5.5"} options={advReviewerMeta.models ?? REVIEWER_MODELS} onChange={(value) => { resetOpState(); setAdvForm((current) => ({ ...current, reviewerModel: value })); }} /></div></div>
+                    <div className="st-row"><div className="st-row-label"><span className="st-label">Base URL</span></div><div className="st-row-control"><PresetTextInput value={advForm.reviewerBaseUrl ?? ""} placeholder={advReviewerMeta.defaultBaseUrl || "(provider default)"} options={advReviewerMeta.baseUrls ?? OPENAI_COMPAT_URLS} formatValue={displayServerValue} onChange={(value) => { resetOpState(); setAdvForm((current) => ({ ...current, reviewerBaseUrl: value })); }} /></div></div>
+                    <div className="st-row"><div className="st-row-label"><span className="st-label">API Key</span><span className="st-hint">{configView.hasReviewerKey ? `Saved: ${configView.reviewerKeyMasked ?? "configured"}` : "No key"}</span></div><div className="st-row-control"><KeyInput value={reviewerKey} placeholder={configView.hasReviewerKey ? "leave blank to keep" : "paste reviewer key"} masked={configView.reviewerKeyMasked} secretKind="reviewerApiKey" language={language} onChange={(value) => { resetOpState(); setReviewerKey(value); }} /></div></div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            <div className={`sp-adv-section sp-adv-section-collapsible${summaryToolsOpen ? " open" : ""}`}>
+              <button
+                type="button"
+                className="sp-adv-section-toggle"
+                aria-expanded={summaryToolsOpen}
+                onClick={() => setSummaryToolsOpen((open) => !open)}
+              >
+                <span className="sp-adv-section-toggle-main">
+                  <span className="sp-adv-section-title">{copy.advancedSummaryTools}</span>
+                  <span className="sp-adv-section-sub">{copy.advancedSummaryToolsSub}</span>
+                </span>
+                <span className="sp-adv-section-toggle-state">{summaryToolsOpen ? copy.advancedCollapse : copy.advancedExpand}</span>
+              </button>
+              {summaryToolsOpen && (
+                <div className="sp-adv-rows">
+                  <div className="st-row"><div className="st-row-label"><span className="st-label">{copy.summaryProvider}</span><span className="st-hint">{copy.summaryProviderHint}</span></div><div className="st-row-control"><select value={summarySelectValue} onChange={(event) => chooseSummaryProvider(event.target.value)}><option value="">{copy.summaryFollowExecutor}</option><option value="__manual">{copy.summaryManual}</option>{summaryProviderOptions.map((item) => <option key={item.key} value={item.key}>{item.label}{item.model ? ` · ${item.model}` : ""}</option>)}</select></div></div>
+                  {isManualSummaryProvider && (
+                    <>
+                      <div className="st-row"><div className="st-row-label"><span className="st-label">{copy.summaryProtocol}</span></div><div className="st-row-control"><select value={advForm.summarizerProvider ?? "openai"} onChange={(event) => { resetOpState(); setAdvForm((current) => ({ ...current, summarizerProvider: event.target.value })); }}><option value="openai">OpenAI-compatible</option><option value="anthropic">Anthropic</option><option value="anthropic-compat">Anthropic-compatible</option></select></div></div>
+                      <div className="st-row"><div className="st-row-label"><span className="st-label">{copy.summaryBaseUrl}</span></div><div className="st-row-control"><PresetTextInput value={advForm.summarizerBaseUrl ?? ""} placeholder="https://api.openai.com/v1" options={[...OPENAI_COMPAT_URLS, ...ANTHROPIC_COMPAT_URLS]} formatValue={displayServerValue} onChange={(value) => { resetOpState(); setAdvForm((current) => ({ ...current, summarizerBaseUrl: value })); }} /></div></div>
+                      <div className="st-row"><div className="st-row-label"><span className="st-label">{copy.summaryApiKey}</span><span className="st-hint">{configView.hasSummarizerKey ? `Saved: ${configView.summarizerKeyMasked ?? "configured"}` : "No key"}</span></div><div className="st-row-control"><KeyInput value={summaryKey} placeholder={configView.hasSummarizerKey ? "leave blank to keep" : "paste summary key"} masked={configView.summarizerKeyMasked} secretKind="summarizerApiKey" language={language} onChange={(value) => { resetOpState(); setSummaryKey(value); }} /></div></div>
+                    </>
+                  )}
+                  <div className="st-row"><div className="st-row-label"><span className="st-label">{copy.summaryModel}</span><span className="st-hint">{copy.summaryModelHint}</span></div><div className="st-row-control"><PresetTextInput value={advForm.summarizerModel ?? ""} placeholder="Auto" options={summaryModelOptions} onChange={(value) => { resetOpState(); setAdvForm((current) => ({ ...current, summarizerModel: value })); }} /></div></div>
+                  <div className="st-row"><div className="st-row-label"><span className="st-label">Scopus Key</span><span className="st-hint">{configView.hasScopusKey ? `Saved: ${configView.scopusKeyMasked ?? "configured"}` : "No key"}</span></div><div className="st-row-control"><KeyInput value={scopusKey} placeholder={configView.hasScopusKey ? "leave blank to keep" : "paste Elsevier key"} masked={configView.scopusKeyMasked} secretKind="scopusApiKey" language={language} onChange={(value) => { resetOpState(); setScopusKey(value); }} /></div></div>
+                  <div className="st-row"><div className="st-row-label"><span className="st-label">Config file</span></div><div className="st-row-control"><input className="st-readonly-input" value={configView.configPath} readOnly /></div></div>
                 </div>
               )}
-            </div>
-
-            <div className="sp-adv-section">
-              <div className="sp-adv-section-title">摘要与工具</div>
-              <div className="sp-adv-rows">
-                <div className="st-row"><div className="st-row-label"><span className="st-label">摘要供应商</span><span className="st-hint">Auto 会使用这里选择的供应商和已保存 key</span></div><div className="st-row-control"><select value={summarySelectValue} onChange={(event) => chooseSummaryProvider(event.target.value)}><option value="">跟随执行器</option><option value="__manual">手动配置</option>{summaryProviderOptions.map((item) => <option key={item.key} value={item.key}>{item.label}{item.model ? ` · ${item.model}` : ""}</option>)}</select></div></div>
-                {isManualSummaryProvider && (
-                  <>
-                    <div className="st-row"><div className="st-row-label"><span className="st-label">摘要协议</span></div><div className="st-row-control"><select value={advForm.summarizerProvider ?? "openai"} onChange={(event) => { resetOpState(); setAdvForm((current) => ({ ...current, summarizerProvider: event.target.value })); }}><option value="openai">OpenAI-compatible</option><option value="anthropic">Anthropic</option><option value="anthropic-compat">Anthropic-compatible</option></select></div></div>
-                    <div className="st-row"><div className="st-row-label"><span className="st-label">摘要 Base URL</span></div><div className="st-row-control"><PresetTextInput value={advForm.summarizerBaseUrl ?? ""} placeholder="https://api.openai.com/v1" options={[...OPENAI_COMPAT_URLS, ...ANTHROPIC_COMPAT_URLS]} onChange={(value) => { resetOpState(); setAdvForm((current) => ({ ...current, summarizerBaseUrl: value })); }} /></div></div>
-                    <div className="st-row"><div className="st-row-label"><span className="st-label">摘要 API Key</span><span className="st-hint">{configView.hasSummarizerKey ? `Saved: ${configView.summarizerKeyMasked ?? "configured"}` : "No key"}</span></div><div className="st-row-control"><KeyInput value={summaryKey} placeholder={configView.hasSummarizerKey ? "leave blank to keep" : "paste summary key"} masked={configView.summarizerKeyMasked} secretKind="summarizerApiKey" onChange={(value) => { resetOpState(); setSummaryKey(value); }} /></div></div>
-                  </>
-                )}
-                <div className="st-row"><div className="st-row-label"><span className="st-label">摘要模型</span><span className="st-hint">压缩上下文时生成摘要所用的模型；留空 = 自动</span></div><div className="st-row-control"><PresetTextInput value={advForm.summarizerModel ?? ""} placeholder="Auto" options={summaryModelOptions} onChange={(value) => { resetOpState(); setAdvForm((current) => ({ ...current, summarizerModel: value })); }} /></div></div>
-                <div className="st-row"><div className="st-row-label"><span className="st-label">Scopus Key</span><span className="st-hint">{configView.hasScopusKey ? `Saved: ${configView.scopusKeyMasked ?? "configured"}` : "No key"}</span></div><div className="st-row-control"><KeyInput value={scopusKey} placeholder={configView.hasScopusKey ? "leave blank to keep" : "paste Elsevier key"} masked={configView.scopusKeyMasked} secretKind="scopusApiKey" onChange={(value) => { resetOpState(); setScopusKey(value); }} /></div></div>
-                <div className="st-row"><div className="st-row-label"><span className="st-label">Config file</span></div><div className="st-row-control"><input className="st-readonly-input" value={configView.configPath} readOnly /></div></div>
-              </div>
             </div>
 
             {testResult && (
               <div className={`st-test-panel${testResult.ok ? " ok" : " failed"}`}>
                 <div className="st-test-summary">{testResult.message}</div>
                 <div className="st-test-grid">
-                  <TestDetail detail={testResult.executor} />
-                  {testResult.reviewer && <TestDetail detail={testResult.reviewer} />}
+                  {canConfigureExecutor && <TestDetail detail={testResult.executor} />}
+                  {canConfigureReviewerApi && testResult.reviewer && <TestDetail detail={testResult.reviewer} />}
                 </div>
               </div>
             )}
             <div className="sp-detail-actions sp-advanced-actions">
               <button className="sp-btn sp-btn-secondary" onClick={test} disabled={testState === "testing" || saveState === "saving"} type="button">
-                {testState === "testing" ? "测试中..." : "测试连接配置"}
+                {testState === "testing" ? copy.testTesting : copy.testConnectionConfig}
               </button>
               <button className="sp-btn sp-btn-primary" onClick={save} disabled={saveState === "saving" || testState === "testing"} type="button">
-                {saveState === "saving" ? "保存中..." : saveState === "saved" ? "已保存" : "保存连接配置"}
+                {saveState === "saving" ? copy.saveSaving : saveState === "saved" ? copy.saveSaved : copy.saveConnectionConfig}
               </button>
-              {saveState === "saved" && <span className="st-save-info">已保存。下次对话时生效。</span>}
+              {saveState === "saved" && <span className="st-save-info">{copy.saveConnectionSavedInfo}</span>}
             </div>
           </div>
         </div>
@@ -1410,217 +2394,142 @@ export default function Settings() {
         <div className="sp-usage-section">
           <div className="sp-usage-page-head">
             <div>
-              <div className="sp-usage-page-title">使用统计</div>
-              <div className="sp-usage-page-sub">查看 AI 模型的使用情况和成本统计</div>
+              <div className="sp-usage-page-title">{copy.usageTitle}</div>
+              <div className="sp-usage-page-sub">{copy.usageSub}</div>
             </div>
             <div className="sp-usage-toolbar">
-              <select value={usageServerFilter} onChange={(event) => setUsageServerFilter(event.target.value)}>
-                <option value="all">全部来源</option>
-                {usageServerOptions.map((item) => (
-                  <option key={`${item.provider}:${item.server}`} value={`${item.provider}:${item.server}`}>
-                    {formatServerLabel(item.server, item.provider)}
-                  </option>
-                ))}
-              </select>
-              <select value={usageModelFilter} onChange={(event) => setUsageModelFilter(event.target.value)}>
-                <option value="all">全部模型</option>
-                {usageModelOptions.map((model) => (
-                  <option key={model} value={model}>{model}</option>
-                ))}
-              </select>
-              <button className="sp-btn sp-btn-secondary" onClick={() => void loadUsageSummary()} disabled={usageLoading} type="button">
-                {usageLoading ? "刷新中..." : "刷新"}
+              <button className="sp-btn sp-btn-secondary" onClick={refreshUsage} disabled={usageLoading} type="button">
+                {usageLoading ? copy.usageRefreshing : copy.usageRefresh}
               </button>
-              <select value={usageRangeDays} onChange={(event) => setUsageRangeDays(Number(event.target.value))}>
-                <option value={7}>7d</option>
-                <option value={30}>30d</option>
-                <option value={90}>90d</option>
-              </select>
             </div>
           </div>
 
-          <div className="sp-usage-hero">
-            <div className="sp-usage-hero-top">
-              <div className="sp-usage-total">
-                <span className="sp-usage-total-icon">↯</span>
-                <div>
-                  <span>真实消耗 Tokens</span>
-                  <strong>{formatUsageExact(usageVisibleTotals.totalTokens)}</strong>
-                  <small>≈ {formatUsageChinese(usageVisibleTotals.totalTokens)}</small>
+          {account ? (
+            <>
+              <div className="sp-usage-hero">
+                <div className="sp-usage-hero-top">
+                  <div className="sp-usage-total">
+                    <span className="sp-usage-total-icon">$</span>
+                    <div>
+                      <span>{copy.accountUsedQuota}</span>
+                      <strong>{formatQuota(accountUsedQuota)}</strong>
+                      <small>{formatUsageExact(accountUsedQuota)} {copy.creditUnit}</small>
+                    </div>
+                  </div>
+                  <div className="sp-usage-summary-pill">
+                    <span>{copy.accountBalance}</span>
+                    <strong>{formatQuota(accountRemainingQuota)}</strong>
+                  </div>
+                  <div className="sp-usage-summary-pill accent">
+                    <span>{copy.accountTotalQuota}</span>
+                    <strong>{formatQuota(accountTotalQuota)}</strong>
+                  </div>
+                </div>
+
+                <div className="sp-usage-metrics">
+                  <div className="sp-usage-metric sp-usage-hit-card">
+                    <span>{copy.accountUsageRatio}</span>
+                    <strong>{accountUsagePercent}%</strong>
+                    <div className="sp-usage-progress"><div style={{ width: `${accountUsagePercent}%` }} /></div>
+                  </div>
+                  <div className="sp-usage-metric">
+                    <span>{copy.usedQuota}</span>
+                    <strong>{formatQuota(accountUsedQuota)}</strong>
+                    <small>{formatUsageExact(accountUsedQuota)} {copy.creditUnit}</small>
+                  </div>
+                  <div className="sp-usage-metric balance">
+                    <span>{copy.remainingQuota}</span>
+                    <strong>{formatQuota(accountRemainingQuota)}</strong>
+                    <small>{formatUsageExact(accountRemainingQuota)} {copy.creditUnit}</small>
+                  </div>
+                  <div className="sp-usage-metric subscription">
+                    <span>{copy.subscriptionUsed}</span>
+                    <strong>{formatQuota(subscriptionUsedQuota)}</strong>
+                    <small>{formatUsageExact(subscriptionUsedQuota)} {copy.creditUnit}</small>
+                  </div>
+                  <div className="sp-usage-metric subscription">
+                    <span>{copy.subscriptionBalance}</span>
+                    <strong>{formatQuota(subscriptionRemainingQuota)}</strong>
+                    <small>{formatUsageExact(subscriptionRemainingQuota)} {copy.creditUnit}</small>
+                  </div>
+                  <div className="sp-usage-metric sp-usage-hit-card">
+                    <span>{copy.subscriptionUsageRatio}</span>
+                    <strong>{subscriptionUsagePercent}%</strong>
+                    <div className="sp-usage-progress"><div style={{ width: `${subscriptionUsagePercent}%` }} /></div>
+                  </div>
                 </div>
               </div>
-              <div className="sp-usage-summary-pill">
-                <span>总请求数</span>
-                <strong>{formatUsageExact(usageVisibleTotals.requests)}</strong>
-              </div>
-              <div className="sp-usage-summary-pill accent">
-                <span>总成本</span>
-                <strong>{formatUsageCost(usageVisibleTotals.estimatedCostUsd)}</strong>
-              </div>
-            </div>
-
-            <div className="sp-usage-metrics">
-              <div className="sp-usage-metric"><span>新增输入</span><strong>{formatUsageChinese(usageVisibleTotals.inputTokens)}</strong></div>
-              <div className="sp-usage-metric"><span>Output</span><strong>{formatUsageChinese(usageVisibleTotals.outputTokens)}</strong></div>
-              <div className="sp-usage-metric"><span>缓存创建</span><strong>{formatUsageChinese(usageVisibleTotals.cacheCreationInputTokens)}</strong></div>
-              <div className="sp-usage-metric"><span>缓存命中</span><strong>{formatUsageChinese(usageVisibleTotals.cacheReadInputTokens)}</strong></div>
-              <div className="sp-usage-metric sp-usage-hit-card">
-                <span>缓存命中率</span>
-                <strong>{usageCacheRate.toFixed(1)}%</strong>
-                <div className="sp-usage-progress"><div style={{ width: `${usageCacheRate}%` }} /></div>
-              </div>
-            </div>
-          </div>
-
-          <div className="sp-usage-chart-card">
-            <div className="sp-usage-card-head">
-              <div className="sp-usage-card-title">使用趋势</div>
-              <div className="sp-usage-card-range">{usageRangeDays}d</div>
-            </div>
-            {usageVisibleTotals.requests > 0 ? (
-              <>
-                <svg className="sp-usage-chart" viewBox="0 0 920 270" role="img" aria-label="使用趋势">
-                  <defs>
-                    <linearGradient id="usageArea" x1="0" x2="0" y1="0" y2="1">
-                      <stop offset="0%" stopColor="#9a4cff" stopOpacity="0.32" />
-                      <stop offset="100%" stopColor="#9a4cff" stopOpacity="0" />
-                    </linearGradient>
-                  </defs>
-                  {[0, 0.25, 0.5, 0.75, 1].map((tick) => {
-                    const value = usageTrendMaxTokens * (1 - tick);
-                    const y = usageChartY(value, usageTrendMaxTokens);
-                    return (
-                      <g key={tick}>
-                        <line x1="48" x2="868" y1={y} y2={y} />
-                        <text x="12" y={y + 4}>{formatUsageTokens(value)}</text>
-                      </g>
-                    );
-                  })}
-                  <path className="sp-usage-area" d={usageAreaPath(usageTrend, "total", usageTrendMaxTokens)} />
-                  <path className="sp-usage-line total" d={usageLinePath(usageTrend, "total", usageTrendMaxTokens)} />
-                  <path className="sp-usage-line cost" d={usageLinePath(usageTrend, "cost", usageTrendMaxCost)} />
-                  <path className="sp-usage-line input" d={usageLinePath(usageTrend, "input", usageTrendMaxTokens)} />
-                  <path className="sp-usage-line output" d={usageLinePath(usageTrend, "output", usageTrendMaxTokens)} />
-                  <path className="sp-usage-line cache" d={usageLinePath(usageTrend, "cache", usageTrendMaxTokens)} />
-                  {usageTrend.map((point, index) => (
-                    <text key={`${point.label}:${index}`} className="sp-usage-x-label" x={usageChartX(index, usageTrend.length)} y="258">
-                      {index === 0 || index === usageTrend.length - 1 || index % Math.ceil(usageTrend.length / 8) === 0 ? point.label : ""}
-                    </text>
-                  ))}
-                </svg>
-                <div className="sp-usage-legend">
-                  <span className="cost">成本</span>
-                  <span className="cache">缓存命中</span>
-                  <span className="input">输入</span>
-                  <span className="output">输出</span>
+              <div className="sp-usage-detail-panel">
+                <div className="sp-usage-card-head">
+                  <div className="sp-usage-card-title">{copy.callDetails}</div>
+                  <div className="sp-usage-card-range">
+                    {usageLogTotal > 0 ? copy.usageRange(usageLogStart, usageLogEnd, usageLogTotal) : copy.usageNoRecords}
+                  </div>
                 </div>
-              </>
-            ) : (
-              <div className="sp-usage-empty">暂无 token 记录。下一次模型响应完成后会写入 usage log，并按服务器汇总。</div>
-            )}
-          </div>
-
-          <div className="sp-usage-tabs" role="tablist" aria-label="统计明细">
-            {([
-              ["logs", "请求日志"],
-              ["providers", "Provider 统计"],
-              ["models", "模型统计"],
-            ] as const).map(([value, label]) => (
-              <button
-                key={value}
-                type="button"
-                role="tab"
-                aria-selected={usageDetailTab === value}
-                className={`sp-usage-tab${usageDetailTab === value ? " active" : ""}`}
-                onClick={() => setUsageDetailTab(value)}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-
-          <div className="sp-usage-detail-panel">
-            {usageVisibleTotals.requests > 0 ? (
-              <>
-                {usageDetailTab === "logs" && (
+                {usageLogError && usageLogItems.length > 0 && (
+                  <div className="sp-usage-foot">{usageLogError}</div>
+                )}
+                {usageLogError && usageLogItems.length === 0 ? (
+                  <div className="sp-usage-empty">{usageLogError}</div>
+                ) : usageLoading && !usageLogs ? (
+                  <div className="sp-usage-empty">{copy.usageLoading}</div>
+                ) : usageLogItems.length > 0 ? (
                   <>
                     <div className="sp-usage-table">
-                      <div className="sp-usage-row sp-usage-row-head sp-usage-row-recent"><span>时间</span><span>来源</span><span>模型</span><span>Tokens</span><span>成本</span></div>
-                      {usageRecent.map((item, index) => (
-                        <div className="sp-usage-row sp-usage-row-recent" key={`${item.sessionId}:${item.createdAt}:${item.totalTokens}:${index}`}>
-                          <span className="sp-usage-time" title={formatUsageTime(item.createdAt)}>{formatUsageDay(item.createdAt)}</span>
-                          <span className="sp-usage-model" title={`${item.server} · ${item.provider}`}>{formatServerLabel(item.server, item.provider)}</span>
-                          <span className="sp-usage-model" title={item.model}>{item.model}</span>
-                          <span>{formatUsageTokens(item.totalTokens)}</span>
-                          <span>{formatUsageCost(item.estimatedCostUsd)}</span>
-                        </div>
-                      ))}
+                      <div className="sp-usage-row sp-usage-row-call sp-usage-row-head">
+                        <span>{copy.usageHeaders.time}</span>
+                        <span>{copy.usageHeaders.model}</span>
+                        <span>{copy.usageHeaders.token}</span>
+                        <span>{copy.usageHeaders.tokens}</span>
+                        <span>{copy.usageHeaders.quota}</span>
+                        <span>{copy.usageHeaders.request}</span>
+                      </div>
+                      {usageLogItems.map((entry) => {
+                        const requestId = entry.requestId || entry.upstreamRequestId;
+                        const meta = usageLogMeta(entry.status, entry.typeLabel);
+                        const createdAt = entry.createdAt > 10_000_000_000 ? entry.createdAt : entry.createdAt * 1000;
+                        return (
+                          <div className="sp-usage-row sp-usage-row-call" key={entry.id}>
+                            <span className="sp-usage-time" title={entry.createdAt ? new Date(createdAt).toLocaleString() : undefined}>
+                              {formatUsageDate(entry.createdAt)}
+                            </span>
+                            <span className="sp-usage-model" title={entry.model || undefined}>{entry.model || "-"}</span>
+                            <span title={entry.tokenName || undefined}>{entry.tokenName || "-"}</span>
+                            <span title={`${copy.systemPromptTitle} ${formatUsageExact(entry.promptTokens)} / ${copy.userPromptTitle} ${formatUsageExact(entry.completionTokens)}`}>
+                              {formatUsageExact(entry.totalTokens)}
+                            </span>
+                            <span title={`${formatUsageExact(entry.quota)} ${copy.creditUnit}${meta ? ` · ${meta}` : ""}`}>{formatQuota(entry.quota)}</span>
+                            <span title={requestId || undefined}>{shortUsageId(requestId)}</span>
+                          </div>
+                        );
+                      })}
                     </div>
-                    <div className="sp-usage-pagination" aria-label="请求日志分页">
-                      <span className="sp-usage-pagination-summary">
-                        共 {usageFilteredEntries.length} 条 · 每页 {USAGE_LOG_PAGE_SIZE} 条
-                      </span>
+                    <div className="sp-usage-pagination">
+                      <div className="sp-usage-pagination-summary">
+                        {copy.usagePageSummary(USAGE_LOG_PAGE_SIZE, usageLogPage, usageLogPageCount)}
+                      </div>
                       <div className="sp-usage-page-controls">
-                        <button
-                          type="button"
-                          className="sp-usage-page-button"
-                          onClick={() => setUsageLogPage(Math.max(1, usageCurrentLogPage - 1))}
-                          disabled={usageCurrentLogPage <= 1}
-                        >
-                          上一页
+                        <button className="sp-usage-page-button" type="button" disabled={!canGoPrevUsageLogPage} onClick={() => goToUsageLogPage(usageLogPage - 1)}>
+                          {copy.usagePrev}
                         </button>
-                        <span className="sp-usage-page-indicator">
-                          {usageCurrentLogPage} / {usageLogPageCount}
-                        </span>
-                        <button
-                          type="button"
-                          className="sp-usage-page-button"
-                          onClick={() => setUsageLogPage(Math.min(usageLogPageCount, usageCurrentLogPage + 1))}
-                          disabled={usageCurrentLogPage >= usageLogPageCount}
-                        >
-                          下一页
+                        <span className="sp-usage-page-indicator">{usageLoading ? "..." : usageLogPage}</span>
+                        <button className="sp-usage-page-button" type="button" disabled={!canGoNextUsageLogPage} onClick={() => goToUsageLogPage(usageLogPage + 1)}>
+                          {copy.usageNext}
                         </button>
                       </div>
                     </div>
                   </>
+                ) : (
+                  <div className="sp-usage-empty">{copy.usageEmpty}</div>
                 )}
-                {usageDetailTab === "providers" && (
-                  <div className="sp-usage-table">
-                    <div className="sp-usage-row sp-usage-row-head sp-usage-row-server"><span>来源</span><span>请求</span><span>输入</span><span>输出</span><span>成本</span></div>
-                    {usageServers.map((item) => (
-                      <div className="sp-usage-row sp-usage-row-server" key={`${item.provider}:${item.server}`}>
-                        <span className="sp-usage-model" title={`${item.server} · ${item.provider}`}>{formatServerLabel(item.server, item.provider)}</span>
-                        <span>{item.requests}</span>
-                        <span>{formatUsageTokens(item.inputTokens)}</span>
-                        <span>{formatUsageTokens(item.outputTokens)}</span>
-                        <span>{formatUsageCost(item.estimatedCostUsd)}</span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-                {usageDetailTab === "models" && (
-                  <div className="sp-usage-table">
-                    <div className="sp-usage-row sp-usage-row-head sp-usage-row-model"><span>模型</span><span>来源</span><span>请求</span><span>Tokens</span><span>成本</span></div>
-                    {usageModels.map((item) => (
-                      <div className="sp-usage-row sp-usage-row-model" key={`${item.provider}:${item.server}:${item.model}`}>
-                        <span className="sp-usage-model" title={item.model}>{item.model}</span>
-                        <span className="sp-usage-model" title={`${item.server} · ${item.provider}`}>{formatServerLabel(item.server, item.provider)}</span>
-                        <span>{item.requests}</span>
-                        <span>{formatUsageTokens(item.totalTokens)}</span>
-                        <span>{formatUsageCost(item.estimatedCostUsd)}</span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-                <div className="sp-usage-foot">
-                  账本：{usageSummary?.logPath ?? "-"}
-                  {(usageSummary?.unpricedRequests ?? 0) > 0 ? ` · ${usageSummary?.unpricedRequests ?? 0} 条使用默认价格估算` : ""}
-                </div>
-              </>
-            ) : (
-              <div className="sp-usage-empty">暂无明细。</div>
-            )}
-          </div>
+                {accountError && <div className="sp-usage-foot">{copy.usageRefreshFailed(accountError)}</div>}
+              </div>
+            </>
+          ) : (
+            <div className="sp-usage-detail-panel">
+              <div className="sp-usage-empty">{accountError || copy.usageNotSignedIn}</div>
+            </div>
+          )}
         </div>
       )}
 
@@ -1628,15 +2537,15 @@ export default function Settings() {
         <div className="sp-update-section">
           <div className="sp-section-head">
             <div className="sp-section-head-text">
-              <div className="sp-section-title">应用更新</div>
-              <div className="sp-section-sub">通过 GitHub Release 检查、下载并安装 SomniQ Studio 更新。</div>
+              <div className="sp-section-title">{copy.aboutUpdateTitle}</div>
+              <div className="sp-section-sub">{copy.aboutUpdateSub}</div>
             </div>
             <div className="sp-update-actions">
               <button className="sp-btn sp-btn-secondary" onClick={() => void checkForUpdates()} disabled={updateBusy} type="button">
-                {updateState === "checking" ? "检查中..." : "检查更新"}
+                {updateState === "checking" ? copy.aboutChecking : copy.aboutCheck}
               </button>
-              {updateCanInstall && <button className="sp-btn sp-btn-primary" onClick={() => void installUpdate()} disabled={updateBusy} type="button">下载并安装</button>}
-              {updateCanRestart && <button className="sp-btn sp-btn-primary" onClick={() => void restartForUpdate()} type="button">重启应用</button>}
+              {updateCanInstall && <button className="sp-btn sp-btn-primary" onClick={() => void installUpdate()} disabled={updateBusy} type="button">{copy.aboutDownloadInstall}</button>}
+              {updateCanRestart && <button className="sp-btn sp-btn-primary" onClick={() => void restartForUpdate()} type="button">{copy.aboutRestart}</button>}
             </div>
           </div>
           <div className={`sp-update-panel sp-update-panel-${updateState}`}>
@@ -1645,16 +2554,16 @@ export default function Settings() {
               <div className="sp-update-copy">
                 <div className="sp-update-title">
                   {updateState === "available"
-                    ? `可更新到 v${updateInfo?.version ?? ""}`
+                    ? copy.aboutUpdateAvailable(updateInfo?.version ?? "")
                     : updateState === "ready"
-                      ? `v${updateInfo?.version ?? ""} 已安装`
+                      ? copy.aboutUpdateReady(updateInfo?.version ?? "")
                       : updateState === "downloading"
-                        ? "正在安装更新"
-                        : "SomniQ Studio 已连接更新通道"}
+                        ? copy.aboutInstalling
+                        : copy.aboutConnected}
                 </div>
                 <div className="sp-update-meta">
-                  当前版本 v{configView.appVersion}
-                  {updateInfo?.version && updateState !== "current" ? ` -> 远端版本 v${updateInfo.version}` : ""}
+                  {copy.aboutCurrentVersion(configView.appVersion)}
+                  {updateInfo?.version && updateState !== "current" ? ` -> ${copy.aboutRemoteVersion(updateInfo.version)}` : ""}
                   {updateInfo?.date ? ` · ${updateInfo.date}` : ""}
                 </div>
                 {(updateMessage || updateProgressLabel) && (
@@ -1670,28 +2579,48 @@ export default function Settings() {
           <div className="sp-env-section">
             <div className="sp-section-head sp-env-head">
               <div className="sp-section-head-text">
-                <div className="sp-section-title">本地环境检查</div>
+                <div className="sp-section-title">{copy.envTitle}</div>
                 <div className="sp-section-sub">
-                  {environmentChecks.length > 0
-                    ? `${environmentReadyCount}/${environmentChecks.length} 项可用`
-                    : "查看 Python、MATLAB、LaTeX 等运行环境。"}
+                  {environmentLoading
+                    ? copy.envDetectingSub
+                    : environmentChecks.length > 0
+                    ? copy.envReadySummary(environmentReadyCount, environmentChecks.length, environmentCheckedAt ? formatUsageDate(environmentCheckedAt) : undefined)
+                    : copy.envSub}
                 </div>
               </div>
               <div className="sp-update-actions">
                 <button
                   className="sp-btn sp-btn-secondary"
-                  onClick={() => void loadEnvironmentChecks()}
+                  onClick={() => { void localEnvironmentChecks(true).then(setEnvironmentChecks).then(() => setEnvironmentCheckedAt(Math.floor(Date.now() / 1000))).catch((e) => setEnvironmentError(String(e))); }}
                   disabled={environmentLoading}
                   type="button"
                 >
-                  {environmentLoading ? "检测中..." : "刷新"}
+                  {environmentLoading ? copy.envDetecting : copy.envRefresh}
                 </button>
               </div>
             </div>
             {environmentError && <div className="sp-env-error">{environmentError}</div>}
             <div className="sp-env-grid">
-              {environmentChecks.length === 0 && !environmentLoading ? (
-                <div className="sp-env-empty">点击刷新后显示本机可用的科研与排版运行环境。</div>
+              {environmentLoading ? (
+                ENVIRONMENT_CHECK_PLACEHOLDERS.map((item) => (
+                  <div className="sp-env-card sp-env-card-loading" key={item.id}>
+                    <div className="sp-env-card-top">
+                      <span className="sp-env-mark">{environmentMark(item.id)}</span>
+                      <div className="sp-env-title-block">
+                        <div className="sp-env-title">{item.label}</div>
+                        <div className="sp-env-category">{item.category}</div>
+                      </div>
+                      <span className="sp-env-badge sp-env-badge-loading">
+                        <span className="sp-env-spinner" />
+                        {copy.envDetecting}
+                      </span>
+                    </div>
+                    <div className="sp-env-loading-line" />
+                    <div className="sp-env-loading-line short" />
+                  </div>
+                ))
+              ) : environmentChecks.length === 0 ? (
+                <div className="sp-env-empty">{copy.envEmpty}</div>
               ) : (
                 environmentChecks.map((item) => (
                   <div className={`sp-env-card sp-env-card-${item.status}`} key={item.id}>
@@ -1712,10 +2641,6 @@ export default function Settings() {
                 ))
               )}
             </div>
-          </div>
-          <div className="sp-brand-footer">
-            <img className="sp-brand-logo" src={arisIcon} alt="ARIS" />
-            <span className="sp-brand-copy">SomniQ Studio</span>
           </div>
         </div>
       )}

@@ -399,7 +399,7 @@ mod tests {
     fn temp_usage_path(name: &str) -> PathBuf {
         let suffix = now_epoch_secs();
         std::env::temp_dir().join(format!(
-            "aris-usage-log-{name}-{}-{suffix}.jsonl",
+            "somniq-usage-log-{name}-{}-{suffix}.jsonl",
             std::process::id()
         ))
     }

@@ -224,14 +224,7 @@ pub fn search_sessions(
 
 #[must_use]
 pub fn sessions_dir_from_env() -> PathBuf {
-    std::env::var("ARIS_SESSIONS_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            std::env::current_dir()
-                .unwrap_or_else(|_| PathBuf::from("."))
-                .join(".claude")
-                .join("sessions")
-        })
+    crate::project_sessions_dir_from_env()
 }
 
 fn open_index(sessions_dir: &Path) -> Result<Connection, String> {

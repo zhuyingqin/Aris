@@ -1,8 +1,22 @@
 import { useEffect, useMemo, useState, type CSSProperties } from "react";
 
-export const ONBOARDING_STORAGE_KEY = "aris-onboarding-v2";
+export const ONBOARDING_STORAGE_KEY = "somniq-onboarding-v2";
 
 const PRIOR_USAGE_STORAGE_KEYS = [
+  "somniq-sidebar-w",
+  "somniq-sidebar-collapsed",
+  "somniq-chat-sessions-v2",
+  "somniq-chat-current-id",
+  "somniq-chat-sidebar-w",
+  "somniq-chat-recent-files",
+  "somniq-chat-recent-skills",
+  "somniq-lab-side-w",
+  "somniq-lab-assistant-w",
+  "somniq-lab-assistant-sessions-v1",
+  "somniq-mail-list-width",
+  "somniq-mail-assistant-width",
+  "somniq-providers-v1",
+  "aris-onboarding-v2",
   "aris-sidebar-w",
   "aris-sidebar-collapsed",
   "aris-chat-sessions-v2",
@@ -85,7 +99,7 @@ const ONBOARDING_STEPS: OnboardingStep[] = [
       "权限控制会影响代理能否执行命令和改文件",
       "配置完成后再回到 Chat 开始任务",
     ],
-    targetSelectors: ['[data-onboarding-target="nav-settings"]', '[data-onboarding-target="sidebar"]'],
+    targetSelectors: ['[data-onboarding-target="user-settings"]', '[data-onboarding-target="user-menu"]'],
     placement: "right",
   },
 ];
@@ -93,6 +107,11 @@ const ONBOARDING_STEPS: OnboardingStep[] = [
 function readSeenFlag() {
   if (typeof window === "undefined") return true;
   try {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("typesetPreview") === "1" || params.get("labPreview") === "1") {
+      writeSeenFlag();
+      return true;
+    }
     if (window.localStorage.getItem(ONBOARDING_STORAGE_KEY) === "done") return true;
     if (PRIOR_USAGE_STORAGE_KEYS.some((key) => window.localStorage.getItem(key) != null)) {
       writeSeenFlag();
@@ -108,6 +127,7 @@ function writeSeenFlag() {
   if (typeof window === "undefined") return;
   try {
     window.localStorage.setItem(ONBOARDING_STORAGE_KEY, "done");
+    window.localStorage.removeItem("aris-onboarding-v2");
   } catch {
     // The tutorial can still close for the current session if storage is unavailable.
   }
@@ -213,6 +233,7 @@ export default function OnboardingTutorial() {
   const [index, setIndex] = useState(0);
   const [targetRect, setTargetRect] = useState<TargetRect | null>(null);
   const step = ONBOARDING_STEPS[index];
+  const isFirstStep = index === 0;
   const isLastStep = index === ONBOARDING_STEPS.length - 1;
   const progressLabel = useMemo(
     () => `${index + 1} / ${ONBOARDING_STEPS.length}`,
@@ -236,6 +257,10 @@ export default function OnboardingTutorial() {
     setIndex((current) => Math.min(current + 1, ONBOARDING_STEPS.length - 1));
   };
 
+  const previous = () => {
+    setIndex((current) => Math.max(current - 1, 0));
+  };
+
   useEffect(() => {
     if (!open) return;
 
@@ -257,6 +282,7 @@ export default function OnboardingTutorial() {
     if (!open) return;
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") close();
+      if (event.key === "ArrowLeft") previous();
       if (event.key === "ArrowRight") next();
     };
     window.addEventListener("keydown", onKeyDown);
@@ -305,6 +331,14 @@ export default function OnboardingTutorial() {
         </ul>
 
         <div className="onboarding-actions">
+          <button
+            type="button"
+            className="onboarding-back"
+            onClick={previous}
+            disabled={isFirstStep}
+          >
+            上一步
+          </button>
           <button type="button" className="onboarding-skip" onClick={close}>
             跳过
           </button>

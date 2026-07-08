@@ -1,5 +1,5 @@
 //! Local persistence for mail accounts, OAuth client credentials, and refresh
-//! tokens. Everything lives in `~/.aris/mail/accounts.json`. Tokens are
+//! tokens. Everything lives in `~/.config/SomniQ/mail/accounts.json`. Tokens are
 //! secrets: they are written to disk but never serialized into the
 //! frontend-facing view types in `model.rs`.
 //!
@@ -90,14 +90,8 @@ pub struct StoreFile {
     pub identities: Vec<MailIdentityConfig>,
 }
 
-fn mail_dir() -> PathBuf {
-    PathBuf::from(runtime::home_dir())
-        .join(".aris")
-        .join("mail")
-}
-
 fn store_path() -> PathBuf {
-    mail_dir().join("accounts.json")
+    crate::state::mail_dir().join("accounts.json")
 }
 
 pub fn load() -> StoreFile {

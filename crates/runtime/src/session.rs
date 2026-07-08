@@ -128,14 +128,10 @@ impl Session {
             }
         }
 
-        // Atomic write: temp file + rename
-        // On Windows, rename fails if target exists — remove first
-        let tmp_path = path.with_extension("json.tmp");
-        fs::write(&tmp_path, &data)?;
-        if path.exists() {
-            let _ = fs::remove_file(path);
-        }
-        fs::rename(&tmp_path, path)?;
+        // Publish through a same-directory temp file. On Windows this uses
+        // MoveFileExW(REPLACE_EXISTING), avoiding the old remove-then-rename
+        // crash window where a killed process could leave no session file.
+        crate::write_file_atomically(path, data.as_bytes())?;
         if crate::session_index::should_index_session_path(path) {
             let _ = crate::session_index::index_session(path, self);
         }

@@ -1,25 +1,41 @@
 {
   "mcpServers": {
+    "claude": {
+      "args": [
+        "mcp",
+        "serve"
+      ],
+      "command": "claude",
+      "env": {},
+      "requestTimeoutSecs": 900,
+      "type": "stdio"
+    },
     "codex": {
-      "type": "stdio",
-      "command": "cmd",
       "args": [
         "/c",
         "codex",
         "mcp-server"
       ],
+      "command": "cmd",
       "env": {},
-      "requestTimeoutSecs": 900
+      "requestTimeoutSecs": 900,
+      "type": "stdio"
     },
-    "claude": {
-      "type": "stdio",
-      "command": "claude",
+    "playwright": {
       "args": [
-        "mcp",
-        "serve"
+        "/c",
+        "aris-playwright-mcp.cmd",
+        "--browser=msedge",
+        "--caps=pdf",
+        "--user-data-dir",
+        ".somniq/tmp/browser/profile",
+        "--output-dir",
+        ".somniq/tmp/browser/output"
       ],
+      "command": "cmd",
       "env": {},
-      "requestTimeoutSecs": 900
+      "requestTimeoutSecs": 900,
+      "type": "stdio"
     }
   }
 }

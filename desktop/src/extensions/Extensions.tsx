@@ -53,6 +53,10 @@ function tileGlyph(name: string) {
   return (name.trim()[0] ?? "?").toUpperCase();
 }
 
+function skillSourceLabel(skill: SkillMeta) {
+  return skill.path.startsWith("<bundled") ? "内置" : "本地";
+}
+
 const NEW_KEY = "__new__";
 
 const emptyDraft = (): McpStdioServerInput => ({
@@ -69,6 +73,10 @@ const isWindows =
 const playwrightArgs = () => [
   isWindows ? "--browser=msedge" : "--browser=chrome",
   "--caps=pdf",
+  "--user-data-dir",
+  ".somniq/tmp/browser/profile",
+  "--output-dir",
+  ".somniq/tmp/browser/output",
 ];
 
 interface CatalogItem {
@@ -169,7 +177,7 @@ export default function Extensions() {
       return;
     }
     let cancelled = false;
-    setSkillContent("Loading…");
+    setSkillContent("正在读取 SKILL.md…");
     skillView(selectedSkill)
       .then((value) => !cancelled && setSkillContent(value))
       .catch((error) => !cancelled && setSkillContent(`Error: ${error}`));
@@ -298,8 +306,14 @@ export default function Extensions() {
   const shownCatalog = MCP_CATALOG.filter((c) => matchesQuery(c.name, c.description, c.id));
   const shownSkills = useMemo(() => {
     if (!query) return skills;
-    return skills.filter((s) => matchesQuery(s.name, s.description));
+    return skills.filter((s) =>
+      matchesQuery(s.name, s.description, s.argument_hint, s.allowed_tools, s.path),
+    );
   }, [skills, query]);
+  const selectedSkillMeta = useMemo(
+    () => (selectedSkill ? skills.find((skill) => skill.name === selectedSkill) ?? null : null),
+    [selectedSkill, skills],
+  );
 
   if (!isTauri()) {
     return (
@@ -431,9 +445,12 @@ export default function Extensions() {
             </>
           )
         ) : (
-          <section className="ext-section">
+          <section className="ext-section ext-skills-section">
             <div className="ext-section-head">
-              <h2>技能</h2>
+              <div>
+                <h2>技能</h2>
+                <p className="ext-section-sub">点击一个技能查看说明、路径和完整 SKILL.md。</p>
+              </div>
               <span className="ext-section-count">{skills.length}</span>
             </div>
             {shownSkills.length === 0 ? (
@@ -441,26 +458,77 @@ export default function Extensions() {
                 {query ? "没有匹配的技能" : "未发现可用技能"}
               </div>
             ) : (
-              <div className="ext-catalog">
-                {shownSkills.map((skill) => (
-                  <button
-                    type="button"
-                    className="ext-card ext-card-btn"
-                    key={skill.name}
-                    onClick={() => setSelectedSkill(skill.name)}
-                  >
-                    <span className="ext-card-icon ext-card-icon-skill" aria-hidden="true">
-                      /
-                    </span>
-                    <div className="ext-card-copy">
-                      <strong>/{skill.name}</strong>
-                      {skill.description && <span>{skill.description}</span>}
+              <div className="ext-skills-layout">
+                <div className="ext-catalog ext-skills-list" role="list">
+                  {shownSkills.map((skill) => (
+                    <button
+                      type="button"
+                      className={`ext-card ext-card-btn ext-skill-card${
+                        selectedSkill === skill.name ? " active" : ""
+                      }`}
+                      key={skill.name}
+                      onClick={() => setSelectedSkill(skill.name)}
+                      aria-pressed={selectedSkill === skill.name}
+                    >
+                      <span className="ext-card-icon ext-card-icon-skill" aria-hidden="true">
+                        /
+                      </span>
+                      <div className="ext-card-copy">
+                        <strong>/{skill.name}</strong>
+                        {skill.description && <span>{skill.description}</span>}
+                        {skill.argument_hint && (
+                          <span className="ext-card-muted">参数：{skill.argument_hint}</span>
+                        )}
+                      </div>
+                      <span className="ext-card-stack">
+                        <span className="ext-card-tag">{skillSourceLabel(skill)}</span>
+                        <span className="ext-card-action">查看</span>
+                      </span>
+                    </button>
+                  ))}
+                </div>
+
+                {selectedSkillMeta ? (
+                  <aside className="ext-skill-detail" aria-label="技能详情">
+                    <div className="ext-skill-detail-head">
+                      <div>
+                        <span className="ext-drawer-eyebrow">SKILL.md</span>
+                        <h3>/{selectedSkillMeta.name}</h3>
+                      </div>
+                      <span className="ext-card-tag">{skillSourceLabel(selectedSkillMeta)}</span>
                     </div>
-                    <span className="ext-card-tag">
-                      {skill.path.startsWith("<bundled") ? "内置" : "项目"}
-                    </span>
-                  </button>
-                ))}
+
+                    {selectedSkillMeta.description && (
+                      <p className="ext-skill-description">{selectedSkillMeta.description}</p>
+                    )}
+
+                    <dl className="ext-skill-meta">
+                      <div>
+                        <dt>路径</dt>
+                        <dd>{selectedSkillMeta.path}</dd>
+                      </div>
+                      {selectedSkillMeta.argument_hint && (
+                        <div>
+                          <dt>参数</dt>
+                          <dd>{selectedSkillMeta.argument_hint}</dd>
+                        </div>
+                      )}
+                      {selectedSkillMeta.allowed_tools && (
+                        <div>
+                          <dt>工具</dt>
+                          <dd>{selectedSkillMeta.allowed_tools}</dd>
+                        </div>
+                      )}
+                    </dl>
+
+                    <pre className="md-view ext-skill-content">{skillContent}</pre>
+                  </aside>
+                ) : (
+                  <aside className="ext-skill-placeholder" aria-label="技能详情">
+                    <strong>选择一个技能</strong>
+                    <span>点开左侧列表后，会在这里查看技能说明和完整 SKILL.md。</span>
+                  </aside>
+                )}
               </div>
             )}
           </section>
@@ -614,26 +682,6 @@ export default function Extensions() {
         </>
       )}
 
-      {/* ── Skill viewer drawer ───────────────────────────────────────────── */}
-      {selectedSkill && (
-        <>
-          <button className="ext-overlay" aria-label="关闭" onClick={() => setSelectedSkill(null)} />
-          <aside className="ext-drawer" aria-label="技能详情">
-            <div className="ext-drawer-head">
-              <div>
-                <span className="ext-drawer-eyebrow">SKILL.md</span>
-                <h2>/{selectedSkill}</h2>
-              </div>
-              <button type="button" className="ext-drawer-close" onClick={() => setSelectedSkill(null)}>
-                ×
-              </button>
-            </div>
-            <div className="ext-drawer-body">
-              <pre className="md-view">{skillContent}</pre>
-            </div>
-          </aside>
-        </>
-      )}
     </div>
   );
 }

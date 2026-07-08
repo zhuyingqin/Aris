@@ -1,7 +1,7 @@
 //! ARIS-owned scheduled task registry for the Chat-side page.
 //!
 //! The on-disk shape intentionally mirrors the Codex automation TOML shape, but
-//! lives under ARIS config: `~/.config/aris/automations/<id>/automation.toml`.
+//! lives under SomniQ config: `~/.config/SomniQ/automations/<id>/automation.toml`.
 
 use std::collections::HashSet;
 use std::fs;
@@ -43,6 +43,8 @@ pub struct ScheduledTask {
     #[serde(default)]
     pub session_id: Option<String>,
     #[serde(default)]
+    pub model: String,
+    #[serde(default)]
     pub prompt: String,
     #[serde(default)]
     pub rrule: String,
@@ -78,6 +80,8 @@ struct ArisScheduledRecord {
     status: String,
     rrule: String,
     target_thread_id: String,
+    #[serde(default)]
+    model: String,
     created_at: i64,
     updated_at: i64,
     #[serde(default)]
@@ -99,6 +103,8 @@ pub struct ScheduledTaskInput {
     prompt: String,
     session_id: String,
     #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
     interval_value: u32,
     #[serde(default)]
     interval_unit: String,
@@ -115,6 +121,7 @@ struct NormalizedTaskInput {
     title: String,
     prompt: String,
     session_id: String,
+    model: String,
     interval_value: u32,
     interval_unit: String,
     status: String,
@@ -128,7 +135,7 @@ fn legacy_store_path() -> PathBuf {
 }
 
 fn chat_ui_sessions_path() -> PathBuf {
-    state::runtime_dir().join("chat-ui-sessions.json")
+    state::desktop_runtime_dir().join("chat-ui-sessions.json")
 }
 
 fn aris_automations_dir() -> PathBuf {
@@ -179,13 +186,8 @@ fn write_record(record: &ArisScheduledRecord) -> Result<(), String> {
     let dir = task_dir(&record.id)?;
     fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
     let path = dir.join("automation.toml");
-    let tmp = dir.join("automation.toml.tmp");
     let text = toml::to_string_pretty(record).map_err(|error| error.to_string())?;
-    fs::write(&tmp, text).map_err(|error| error.to_string())?;
-    // `fs::rename` atomically replaces an existing file on both Unix and Windows
-    // (MoveFileExW + MOVEFILE_REPLACE_EXISTING); removing the destination first
-    // would open a crash window where neither the old nor the new file exists.
-    fs::rename(tmp, path).map_err(|error| error.to_string())
+    runtime::write_file_atomically(&path, text.as_bytes()).map_err(|error| error.to_string())
 }
 
 fn validate_task_id(id: &str) -> Result<(), String> {
@@ -226,6 +228,13 @@ fn normalize_input(
     if !session_exists(&session_id) {
         return Err("scheduled task must be bound to an existing chat session".to_string());
     }
+    let model = input.model.unwrap_or_default().trim().to_string();
+    if !model.is_empty() && crate::config::executor_object_for_model(&model)?.is_none() {
+        return Err(
+            "scheduled task model must be current, managed, built-in, or verified in Settings"
+                .to_string(),
+        );
+    }
     let trigger_kind = normalize_trigger_kind(input.trigger_kind.as_deref())?;
     // Mail-triggered tasks don't run on a clock, so the interval is irrelevant —
     // we keep a placeholder rrule only so the on-disk record stays uniform.
@@ -256,6 +265,7 @@ fn normalize_input(
         },
         prompt,
         session_id,
+        model,
         interval_value,
         interval_unit,
         status,
@@ -346,6 +356,15 @@ fn new_task_id() -> String {
     format!("task-{}-{}", now_millis(), std::process::id())
 }
 
+fn non_empty_model(model: &str) -> Option<String> {
+    let value = model.trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
+}
+
 fn rrule_for_interval(value: u32, unit: &str) -> String {
     let frequency = match unit {
         "minutes" => "MINUTELY",
@@ -415,6 +434,7 @@ impl From<ArisScheduledRecord> for ScheduledTask {
                 "active".to_string()
             },
             session_id: Some(record.target_thread_id),
+            model: record.model,
             prompt: record.prompt,
             rrule: record.rrule,
             interval_value,
@@ -495,6 +515,7 @@ pub fn spawn_runner(app: AppHandle) {
                     app.clone(),
                     record.target_thread_id.clone(),
                     record.prompt.clone(),
+                    non_empty_model(&record.model),
                 )
                 .await;
                 if let Err(error) = result {
@@ -537,6 +558,7 @@ pub fn on_new_mail(app: AppHandle, ctx: MailTriggerContext) {
                 app.clone(),
                 record.target_thread_id.clone(),
                 prompt,
+                non_empty_model(&record.model),
             )
             .await;
             if let Err(error) = result {
@@ -587,7 +609,7 @@ fn build_mail_trigger_prompt(prompt: &str, ctx: &MailTriggerContext) -> String {
 }
 
 /// Every scheduled task currently on disk. Legacy JSON is listed read-only;
-/// new ARIS-owned tasks live in TOML files under `~/.config/aris/automations`.
+/// new SomniQ-owned tasks live in TOML files under `~/.config/SomniQ/automations`.
 #[tauri::command]
 pub fn scheduled_tasks_list() -> Vec<ScheduledTask> {
     let mut tasks = aris_scheduled_tasks();
@@ -619,6 +641,7 @@ pub fn scheduled_task_create(input: ScheduledTaskInput) -> Result<ScheduledTask,
         status: normalized.status,
         rrule: rrule_for_interval(normalized.interval_value, &normalized.interval_unit),
         target_thread_id: normalized.session_id,
+        model: normalized.model,
         created_at: now,
         updated_at: now,
         last_run_at: None,
@@ -648,6 +671,7 @@ pub fn scheduled_task_update(
         status: normalized.status,
         rrule: rrule_for_interval(normalized.interval_value, &normalized.interval_unit),
         target_thread_id: normalized.session_id,
+        model: normalized.model,
         created_at: existing.created_at,
         updated_at: now_millis(),
         last_run_at: existing.last_run_at,
@@ -697,6 +721,7 @@ mod tests {
             status: STATUS_ACTIVE.to_string(),
             rrule: "FREQ=MINUTELY;INTERVAL=1".to_string(),
             target_thread_id: "chat-1".to_string(),
+            model: String::new(),
             created_at: 0,
             updated_at: 0,
             last_run_at: None,
@@ -729,6 +754,7 @@ mod tests {
             status: STATUS_PAUSED.to_string(),
             rrule: "FREQ=MINUTELY;INTERVAL=15".to_string(),
             target_thread_id: "chat-1".to_string(),
+            model: "gpt-5.5".to_string(),
             created_at: 10,
             updated_at: 20,
             last_run_at: None,
@@ -743,6 +769,7 @@ mod tests {
         assert_eq!(task.schedule_label, "每 15 分钟");
         assert_eq!(task.status, "paused");
         assert_eq!(task.session_id.as_deref(), Some("chat-1"));
+        assert_eq!(task.model, "gpt-5.5");
         assert_eq!(task.interval_value, 15);
         assert_eq!(task.interval_unit, "minutes");
     }

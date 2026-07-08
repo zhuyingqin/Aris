@@ -1,6 +1,7 @@
 // Bundled ARIS skills compiled in from assets/skills/ via build.rs
 include!(concat!(env!("OUT_DIR"), "/bundled_skills.rs"));
 
+mod atomic_file;
 mod bash;
 mod bootstrap;
 mod cache;
@@ -18,6 +19,7 @@ mod mcp_client;
 mod mcp_stdio;
 mod memory_provider;
 mod oauth;
+mod paths;
 mod permissions;
 mod process;
 mod process_registry;
@@ -28,7 +30,11 @@ mod session;
 mod session_index;
 mod usage;
 
-pub use bash::{execute_bash, execute_bash_with_cancel, BashCommandInput, BashCommandOutput};
+pub use atomic_file::write_replace as write_file_atomically;
+pub use bash::{
+    execute_bash, execute_bash_with_cancel, execute_bash_with_cancel_and_progress,
+    resolve_foreground_shell_timeout_ms, BashCommandInput, BashCommandOutput,
+};
 pub use bootstrap::{BootstrapPhase, BootstrapPlan};
 pub use cache::{extract_bundle, extraction_report, ExtractionError, ExtractionReport};
 pub use compact::{
@@ -91,6 +97,17 @@ pub use oauth::{
     OAuthCallbackParams, OAuthRefreshRequest, OAuthTokenExchangeRequest, OAuthTokenSet,
     PkceChallengeMethod, PkceCodePair,
 };
+pub use paths::{
+    migrate_legacy_project_runtime_dirs, project_agent_store_dir_from_env,
+    project_run_state_dir_from_env, project_runtime_dir_for, project_runtime_dir_from_env,
+    project_sessions_dir_from_env, project_workflows_dir_from_env, somniq_config_dir_from_env,
+    user_workflows_dir_from_env, workspace_root_from_env, AGENTS_DIR_NAME,
+    ARIS_AGENT_STORE_DIR_ENV, ARIS_RUNTIME_ROOT_ENV, ARIS_RUN_STATE_DIR_ENV, ARIS_SESSIONS_DIR_ENV,
+    ARIS_USER_WORKFLOWS_DIR_ENV, ARIS_WORKFLOWS_DIR_ENV, ARIS_WORKSPACE_ROOT_ENV,
+    CLAWD_AGENT_STORE_ENV, LEGACY_CLAUDE_DIR_NAME, LEGACY_CLAWD_AGENTS_DIR_NAME,
+    RUN_STATE_DIR_NAME, SESSIONS_DIR_NAME, SOMNIQ_RUNTIME_DIR_NAME, USER_WORKFLOWS_DIR_NAME,
+    WORKFLOWS_DIR_NAME,
+};
 pub use permissions::{
     PermissionMode, PermissionOutcome, PermissionPolicy, PermissionPromptDecision,
     PermissionPrompter, PermissionRequest,
@@ -98,9 +115,11 @@ pub use permissions::{
 pub use process::{hidden_command, hidden_tokio_command, hide_window};
 pub use process_registry::{
     configure_managed_tokio_command, managed_processes_snapshot, register_managed_process,
-    run_managed_command, run_managed_command_with_cancel, spawn_managed_background,
+    run_managed_command, run_managed_command_with_cancel,
+    run_managed_command_with_cancel_and_progress, spawn_managed_background,
     terminate_all_managed_processes, terminate_managed_process_tree, unregister_managed_process,
-    ManagedCommandOutput, ManagedProcessGuard, ManagedProcessInfo, ManagedProcessKind,
+    ManagedCommandOutput, ManagedCommandProgress, ManagedProcessGuard, ManagedProcessInfo,
+    ManagedProcessKind,
 };
 pub use prompt::{
     load_system_prompt, prepend_bullets, team_orchestration_section, ContextFile, ProjectContext,
@@ -131,20 +150,46 @@ pub fn home_dir() -> String {
 }
 
 pub const ARIS_ENABLE_CLAUDE_SKILLS_ENV: &str = "ARIS_ENABLE_CLAUDE_SKILLS";
+pub const SOMNIQ_PROJECT_DIR_NAME: &str = ".somniq";
+pub const SOMNIQ_PROJECT_TMP_DIR_NAME: &str = "tmp";
 
-/// ARIS user-level skills directory.
+/// SomniQ user-level skills directory.
 #[must_use]
 pub fn aris_user_skills_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(home_dir())
         .join(".config")
-        .join("aris")
+        .join("SomniQ")
         .join("skills")
 }
 
-/// ARIS project-level skills directory.
+/// SomniQ project-level skills directory.
 #[must_use]
 pub fn aris_project_skills_dir(cwd: impl AsRef<std::path::Path>) -> std::path::PathBuf {
-    cwd.as_ref().join(".aris").join("skills")
+    somniq_project_dir(cwd).join("skills")
+}
+
+/// SomniQ project metadata and scratch directory.
+#[must_use]
+pub fn somniq_project_dir(cwd: impl AsRef<std::path::Path>) -> std::path::PathBuf {
+    cwd.as_ref().join(SOMNIQ_PROJECT_DIR_NAME)
+}
+
+/// SomniQ-owned project-local temporary directory.
+#[must_use]
+pub fn somniq_project_tmp_dir(cwd: impl AsRef<std::path::Path>) -> std::path::PathBuf {
+    somniq_project_dir(cwd).join(SOMNIQ_PROJECT_TMP_DIR_NAME)
+}
+
+/// HOME used by sandboxed commands when they need a writable project-local home.
+#[must_use]
+pub fn somniq_sandbox_home_dir(cwd: impl AsRef<std::path::Path>) -> std::path::PathBuf {
+    somniq_project_tmp_dir(cwd).join("sandbox").join("home")
+}
+
+/// TMPDIR used by sandboxed commands.
+#[must_use]
+pub fn somniq_sandbox_tmp_dir(cwd: impl AsRef<std::path::Path>) -> std::path::PathBuf {
+    somniq_project_tmp_dir(cwd).join("sandbox").join("tmp")
 }
 
 /// Legacy Claude Code user-level skills directory.

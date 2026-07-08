@@ -29,6 +29,14 @@
 
 ## 📰 最新动态
 
+> **v0.4.9** (2026-07) —— Typeset 模块：Tectonic 驱动的 LaTeX 编译（`src-tauri/src/typeset.rs`）+
+> CodeMirror-6 可视化编辑器（`desktop/src/typeset/`，mathlive 数学输入，slides-main 测试样本）。
+> Lab：`labEditorCore` 抽出 + lab 预览 iframe（`desktop/src/api/labPreview.ts`，
+> `npm run dev:lab`）。Runtime / tools / executor 新增 tool 注册表 + OpenAI executor 打磨。Newapi
+> 托管登录完整接入（Login 跳过粘贴 key；Settings = 服务端状态的投影）。Chat-stream 钩子细化，新增
+> `onChatContextWarning` / `onChatToolProgress` 事件。MCP 接入 `claude` 服务端（与 `codex` 并列）。
+> 视觉系统 + 图标组刷新。
+
 > **v0.4.8** (2026-07) —— 环境探测抽出到 `src-tauri/src/env/`（Python / Jupyter / MATLAB / LaTeX，含
 > 内存 session 缓存 + 磁盘指纹缓存），system prompt 外置到 `crates/runtime/assets/prompts/system.md`
 >（直接改 markdown，无需重新编译 Rust），prompt pipeline 重写（`prompt.rs` +419 行），file-ops /
@@ -158,7 +166,7 @@ npm run tauri build
 - **Executor** 与 **Reviewer** —— provider、model、base URL、API key
 - **Scopus API key**、**语言**、**记忆写入审批** 与对当前模型配置的 **连通性检查**
 
-配置保存在本地 `~/.config/aris/config.json`。API key 默认在 UI 中脱敏；在本机 Settings 里点击“显示”可以临时查看明文，普通配置视图仍只返回 masked preview。
+配置保存在本地 `~/.config/SomniQ/config.json`。API key 默认在 UI 中脱敏；在本机 Settings 里点击“显示”可以临时查看明文，普通配置视图仍只返回 masked preview。
 
 ### MCP 与 Playwright
 
@@ -166,7 +174,8 @@ ARIS 桌面端从当前项目的 `.mcp.json` 读取 MCP 服务器，并在 **Ext
 **Settings → Permissions & MCP** 中提供配置入口。Windows 安装包会内置
 `aris-playwright-mcp` launcher、vendored `@playwright/mcp` 和 Node runtime，因此用户添加
 Playwright 预设时不需要自己安装 Node.js / npm。默认预设使用 Microsoft Edge
-（`--browser=msedge`）并启用 PDF 工具（`--caps=pdf`）；如需自定义浏览器参数，可在 MCP 页面编辑。
+（`--browser=msedge`）、启用 PDF 工具（`--caps=pdf`），并把浏览器 profile 与输出文件放在
+`.somniq/tmp/browser/`；如需自定义浏览器参数，可在 MCP 页面编辑。
 
 ---
 
@@ -240,7 +249,7 @@ Playwright 预设时不需要自己安装 Node.js / npm。默认预设使用 Mic
 ## 📁 配置与项目数据
 
 ```text
-~/.config/aris/
+~/.config/SomniQ/
 ├── config.json                 # provider、model、base URL、key、语言
 ├── desktop-workspace           # 默认 workspace root
 └── desktop-runtime/
@@ -252,7 +261,7 @@ Playwright 预设时不需要自己安装 Node.js / npm。默认预设使用 Mic
         └── user-workflows/     # 用户手写草稿
 ```
 
-用 `ARIS_WORKSPACE_ROOT` 可覆盖默认 workspace root。
+用 `ARIS_WORKSPACE_ROOT` 可覆盖默认 workspace root。CLI/runtime 在任意 workspace 下的默认 fallback 是 `<workspace>/.somniq/runtime/`，除非设置了 `ARIS_RUNTIME_ROOT` 或更具体的 `ARIS_*_DIR` 变量。
 
 `config.json` 与 Settings 页使用同一组 snake_case 字段：
 

@@ -1,15 +1,25 @@
 import { isValidElement, memo, useEffect, useRef, useState, type ReactNode } from "react";
-import ReactMarkdown from "react-markdown";
+import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
 import rehypeHighlight from "rehype-highlight";
+import rehypeKatex from "rehype-katex";
+import "katex/dist/katex.min.css";
 import "highlight.js/styles/github-dark.css";
 import { fileOpen } from "../api/tauri";
 import { useStore } from "../store";
+import ChatImagePreview, { isDirectImageSource, isPreviewableImagePath } from "./ChatImagePreview";
 import MermaidDiagram from "./MermaidDiagram";
 
 const MAX_MARKDOWN_RENDER_CHARS = 80_000;
 const LARGE_MARKDOWN_HEAD_CHARS = 48_000;
 const LARGE_MARKDOWN_TAIL_CHARS = 16_000;
+// Above this size we render full Markdown (structure, tables, math) but drop
+// syntax highlighting. highlight.js runs synchronously inside the react-markdown
+// pipeline and is the dominant blocking cost when opening a large conversation
+// (several big blocks in the initial viewport get highlighted at once). Skipping
+// it keeps code readable — just uncolored — and removes the open-time freeze.
+const HIGHLIGHT_MAX_CHARS = 12_000;
 
 interface Segment {
   kind: "text" | "think";
@@ -26,6 +36,13 @@ interface ExtractedThinking {
   visibleText: string;
   thinkingText: string;
   thinkingOpen: boolean;
+}
+
+const DENSE_PARAGRAPH_MIN_CHARS = 360;
+const DENSE_PARAGRAPH_TARGET_CHARS = 260;
+
+function charCount(text: string): number {
+  return Array.from(text).length;
 }
 
 function largeTextExcerpt(text: string): string {
@@ -85,6 +102,74 @@ function splitMarkdownFences(raw: string): MarkdownChunk[] {
   if (fence) flushCode();
   else flushMarkdown();
   return chunks;
+}
+
+function isMarkdownStructureBlock(block: string): boolean {
+  return /(^|\n)\s*(#{1,6}\s|[-*+]\s+|\d+[.)]\s+|>\s|\|)/.test(block)
+    || /^\s*(<\w|<\/\w|```|~~~)/.test(block);
+}
+
+function splitLongReadableParagraph(text: string): string {
+  if (charCount(text) <= DENSE_PARAGRAPH_MIN_CHARS) return text;
+  const sentences = text.match(/[^。！？!?；;]+[。！？!?；;]?/g);
+  if (!sentences || sentences.length < 3) return text;
+
+  const chunks: string[] = [];
+  let current = "";
+  for (const sentence of sentences) {
+    const next = sentence.trimStart();
+    if (current && charCount(current + next) > DENSE_PARAGRAPH_TARGET_CHARS) {
+      chunks.push(current.trim());
+      current = next;
+    } else {
+      current += next;
+    }
+  }
+  if (current.trim()) chunks.push(current.trim());
+  return chunks.length > 1 ? chunks.join("\n\n") : text;
+}
+
+function formatDenseParagraphBlock(block: string): string {
+  if (charCount(block.trim()) < DENSE_PARAGRAPH_MIN_CHARS || isMarkdownStructureBlock(block)) {
+    return block;
+  }
+
+  const prefix = block.match(/^\s*/)?.[0] ?? "";
+  const suffix = block.match(/\s*$/)?.[0] ?? "";
+  const transitionPattern =
+    "(?:第[一二三四五六七八九十\\d]+步|首先|其次|然后|最后|另外|不过|因此|所以|总体|总之|核心|关键|具体|效果|实验|消融|注意|换句话说|简单说|也就是说|只训|严格冻结)";
+  const withBreaks = block
+    .trim()
+    .replace(new RegExp(`([。！？!?；;])\\s*(?=${transitionPattern})`, "g"), "$1\n\n");
+  const paragraphs = withBreaks
+    .split(/\n{2,}/)
+    .map((paragraph) => splitLongReadableParagraph(paragraph.trim()))
+    .filter(Boolean);
+  return `${prefix}${paragraphs.join("\n\n")}${suffix}`;
+}
+
+function formatDenseMarkdown(raw: string): string {
+  return splitMarkdownFences(raw)
+    .map((chunk) => {
+      if (chunk.kind === "code") return chunk.content;
+      return chunk.content
+        .split(/(\n{2,})/)
+        .map((part) => (/^\n{2,}$/.test(part) ? part : formatDenseParagraphBlock(part)))
+        .join("");
+    })
+    .join("");
+}
+
+function normalizeMathDelimiters(raw: string): string {
+  return splitMarkdownFences(raw)
+    .map((chunk) => {
+      if (chunk.kind === "code") return chunk.content;
+      return chunk.content
+        .replace(/\\\[([\s\S]+?)\\\]/g, (_match, formula: string) => `\n$$\n${formula.trim()}\n$$\n`)
+        .replace(/(^|\n)[ \t]*\$\$([^\n][\s\S]*?[^\n])\$\$[ \t]*(?=\n|$)/g, (_match, prefix: string, formula: string) => `${prefix}$$\n${formula.trim()}\n$$`)
+        .replace(/\\\(([\s\S]+?)\\\)/g, (_match, formula: string) => `$${formula}$`);
+    })
+    .join("");
 }
 
 function extractThinking(raw: string): ExtractedThinking {
@@ -278,6 +363,12 @@ function decodeLocalHref(href: string): string {
   }
 }
 
+function markdownUrlTransform(url: string, key: string): string {
+  if (key === "src" && /^(data:image\/|blob:)/i.test(url)) return url;
+  if (key === "href" && /^(data:image\/|blob:)/i.test(url) && isPreviewableImagePath(url)) return url;
+  return defaultUrlTransform(url);
+}
+
 export function studioArtifactIdFromHref(href: string): string | null {
   const normalized = href.replace(/^\.\//, "");
   const prefix = "studio/artifact/";
@@ -310,6 +401,18 @@ function MarkdownLink({
       >
         {children}
       </a>
+    );
+  }
+  if (href && isPreviewableImagePath(href)) {
+    const title = textFromReactNode(children) || decodeLocalHref(href);
+    return (
+      <ChatImagePreview
+        src={href}
+        alt={title}
+        title={title}
+        openPath={isDirectImageSource(href) ? undefined : decodeLocalHref(href)}
+        className="chat-markdown-image-link"
+      />
     );
   }
   if (!href || isExternalHref(href)) {
@@ -393,7 +496,13 @@ export const ThinkBlock = memo(function ThinkBlock({
       </button>
       {open && (
         <div className="md-think-body" ref={bodyRef}>
-          <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
+          <ReactMarkdown
+            remarkPlugins={[remarkGfm, remarkMath]}
+            rehypePlugins={[[rehypeKatex, { throwOnError: false }]]}
+            urlTransform={markdownUrlTransform}
+          >
+            {normalizeMathDelimiters(content)}
+          </ReactMarkdown>
         </div>
       )}
     </div>
@@ -426,11 +535,19 @@ function MarkdownContent({ text, streaming = false }: { text: string; streaming?
           );
         }
         if (!segment.content.trim()) return null;
+        // Drop highlight.js on large blocks — it is the main synchronous cost
+        // when a big conversation mounts its recent turns. Small blocks (the
+        // common case) keep full syntax highlighting.
+        const rehypePlugins: Parameters<typeof ReactMarkdown>[0]["rehypePlugins"] =
+          segment.content.length > HIGHLIGHT_MAX_CHARS
+            ? [[rehypeKatex, { throwOnError: false }]]
+            : [[rehypeKatex, { throwOnError: false }], rehypeHighlight];
         return (
           <ReactMarkdown
             key={index}
-            remarkPlugins={[remarkGfm]}
-            rehypePlugins={[rehypeHighlight]}
+            remarkPlugins={[remarkGfm, remarkMath]}
+            rehypePlugins={rehypePlugins}
+            urlTransform={markdownUrlTransform}
             components={{
               pre({ children }) {
                 return <>{children}</>;
@@ -448,9 +565,21 @@ function MarkdownContent({ text, streaming = false }: { text: string; streaming?
               a({ href, children }) {
                 return <MarkdownLink href={href}>{children}</MarkdownLink>;
               },
+              img({ src, alt, title }) {
+                if (!src) return null;
+                return (
+                  <ChatImagePreview
+                    src={src}
+                    alt={alt ?? title ?? ""}
+                    title={title ?? alt ?? src}
+                    openPath={isDirectImageSource(src) ? undefined : decodeLocalHref(src)}
+                    className="chat-markdown-image"
+                  />
+                );
+              },
             }}
           >
-            {segment.content}
+            {normalizeMathDelimiters(formatDenseMarkdown(segment.content))}
           </ReactMarkdown>
         );
       })}

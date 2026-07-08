@@ -903,7 +903,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .map(|duration| duration.as_nanos())
             .unwrap_or_default();
-        let base = std::env::temp_dir().join(format!("aris-knowledge-{name}-{unique}"));
+        let base = std::env::temp_dir().join(format!("somniq-knowledge-{name}-{unique}"));
         std::fs::create_dir_all(&base).expect("create temp base");
         base
     }

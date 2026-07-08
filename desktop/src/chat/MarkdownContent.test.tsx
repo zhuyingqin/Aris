@@ -4,9 +4,13 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("../api/tauri", () => ({
+const apiMocks = vi.hoisted(() => ({
   fileOpen: vi.fn(),
+  fileReadBytes: vi.fn(() => Promise.resolve([137, 80, 78, 71])),
+  isTauri: vi.fn(() => false),
 }));
+
+vi.mock("../api/tauri", () => apiMocks);
 
 vi.mock("mermaid", () => ({
   default: {
@@ -20,6 +24,16 @@ import MarkdownContent from "./MarkdownContent";
 import { useStore } from "../store";
 
 beforeEach(() => {
+  vi.clearAllMocks();
+  apiMocks.fileReadBytes.mockResolvedValue([137, 80, 78, 71]);
+  Object.defineProperty(URL, "createObjectURL", {
+    configurable: true,
+    value: vi.fn(() => "blob:mock-image"),
+  });
+  Object.defineProperty(URL, "revokeObjectURL", {
+    configurable: true,
+    value: vi.fn(),
+  });
   useStore.setState({
     tab: "chat",
     pendingStudioArtifactId: null,
@@ -48,6 +62,23 @@ describe("MarkdownContent Studio links", () => {
     expect(screen.getByText(/characters are hidden here/)).toBeTruthy();
   });
 
+  it("renders Markdown data URL images inline", () => {
+    render(<MarkdownContent text="![plot](data:image/png;base64,ZmFrZQ==)" />);
+
+    const image = screen.getByRole("img", { name: "plot" }) as HTMLImageElement;
+    expect(image.src).toContain("data:image/png;base64,ZmFrZQ==");
+    expect(apiMocks.fileReadBytes).not.toHaveBeenCalled();
+  });
+
+  it("reads local Markdown image files as blob previews", async () => {
+    render(<MarkdownContent text="![plot](results/plot.png)" />);
+
+    const image = await screen.findByRole("img", { name: "plot" }) as HTMLImageElement;
+
+    expect(apiMocks.fileReadBytes).toHaveBeenCalledWith("results/plot.png");
+    expect(image.src).toBe("blob:mock-image");
+  });
+
   it("renders Mermaid code blocks as diagrams", async () => {
     render(
       <MarkdownContent text={"```mermaid\nflowchart LR\n  A[Start] --> B[Done]\n```"} />,
@@ -67,6 +98,50 @@ describe("MarkdownContent Studio links", () => {
     expect(block).toBeTruthy();
     expect(block?.textContent).toContain("text");
     expect(block?.textContent).toContain("const answer = 42;");
+  });
+
+  it("splits dense explanatory prose into readable paragraphs", () => {
+    const dense = [
+      "### Time-LLM 是怎么做的",
+      "",
+      "Time-LLM 把时间序列预测重新表达为另一个语言任务，先把每条通道归一化，再切成多个重叠 patch，并用一个线性层投到语言模型隐藏维度，让冻结的语言模型可以处理这些片段。第一步是 Patching，把 RevIN 后的序列切成 patch，再投影到模型维度。第二步是 Patch Reprogramming，用一组可学习的 text prototype 和 cross-attention 让每个 patch 组合出时序提示。第三步是 Prompt-as-Prefix，把 dataset context、task instruction 和统计量拼到序列前面，送入冻结 LLM。最后只训练 patch embedder、reprogram cross-attention 和 output projection，LLM 主体保持冻结。这样做的好处是复用语言模型的表征能力，同时避免全量微调带来的成本。",
+    ].join("\n");
+
+    const { container } = render(<MarkdownContent text={dense} />);
+
+    expect(container.querySelectorAll(".md-content p").length).toBeGreaterThan(1);
+    expect(container.querySelector("h3")?.textContent).toBe("Time-LLM 是怎么做的");
+  });
+
+  it("renders inline and display LaTeX formulas", () => {
+    const { container } = render(
+      <MarkdownContent text={"Inline $E=mc^2$.\n\n$$\\int_0^1 x^2\\,dx$$"} />,
+    );
+
+    expect(container.querySelectorAll(".katex").length).toBeGreaterThanOrEqual(2);
+    expect(container.querySelector(".katex-display")).toBeTruthy();
+    expect(container.textContent).not.toContain("$E=mc^2$");
+  });
+
+  it("renders backslash-delimited LaTeX formulas from model output", () => {
+    const { container } = render(
+      <MarkdownContent text={"Use \\(a^2+b^2=c^2\\) and then:\n\n\\[x=\\frac{-b}{2a}\\]"} />,
+    );
+
+    expect(container.querySelectorAll(".katex").length).toBeGreaterThanOrEqual(2);
+    expect(container.querySelector(".katex-display")).toBeTruthy();
+    expect(container.textContent).not.toContain("\\(");
+    expect(container.textContent).not.toContain("\\[");
+  });
+
+  it("does not render LaTeX delimiters inside fenced code", () => {
+    const { container } = render(
+      <MarkdownContent text={"```tex\n\\(x+y\\)\n$$z$$\n```"} />,
+    );
+
+    expect(container.querySelector(".katex")).toBeNull();
+    expect(container.querySelector(".md-code-block")?.textContent).toContain("\\(x+y\\)");
+    expect(container.querySelector(".md-code-block")?.textContent).toContain("$$z$$");
   });
 
   it("keeps an open streaming think tag inside a bounded thinking block", async () => {

@@ -1,5 +1,8 @@
 use std::{env, io, path::PathBuf};
 
+const CONFIG_HOME_DIR: &str = "SomniQ";
+const LEGACY_CONFIG_HOME_DIR: &str = "aris";
+
 const DESKTOP_ALLOWED_AGENT_TOOLS: &[&str] = &[
     "read_file",
     "write_file",
@@ -13,6 +16,7 @@ const DESKTOP_ALLOWED_AGENT_TOOLS: &[&str] = &[
     "LiteratureLibraryUpsert",
     "LiteraturePdfDownload",
     "StudioLibraryUpsert",
+    "LaTeXCompile",
     "TodoWrite",
     "memory",
     "session_search",
@@ -25,10 +29,7 @@ const DESKTOP_ALLOWED_AGENT_TOOLS: &[&str] = &[
 ];
 
 pub fn default_workspace_dir() -> PathBuf {
-    PathBuf::from(runtime::home_dir())
-        .join(".config")
-        .join("aris")
-        .join("desktop-workspace")
+    config_dir().join("desktop-workspace")
 }
 
 pub fn workspace_dir() -> PathBuf {
@@ -40,26 +41,39 @@ pub fn workspace_dir() -> PathBuf {
 pub fn runtime_dir() -> PathBuf {
     std::env::var("ARIS_RUNTIME_ROOT")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            PathBuf::from(runtime::home_dir())
-                .join(".config")
-                .join("aris")
-                .join("desktop-runtime")
-        })
+        .unwrap_or_else(|_| config_dir().join("desktop-runtime"))
+}
+
+pub fn desktop_runtime_dir() -> PathBuf {
+    config_dir().join("desktop-runtime")
 }
 
 pub fn config_dir() -> PathBuf {
     std::env::var("ARIS_CONFIG_ROOT")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
-            PathBuf::from(runtime::home_dir())
+            let dir = PathBuf::from(runtime::home_dir())
                 .join(".config")
-                .join("aris")
+                .join(CONFIG_HOME_DIR);
+            let legacy = PathBuf::from(runtime::home_dir())
+                .join(".config")
+                .join(LEGACY_CONFIG_HOME_DIR);
+            let _ = migrate_dir(&legacy, &dir);
+            dir
         })
 }
 
 pub fn skills_dir() -> PathBuf {
     config_dir().join("skills")
+}
+
+pub fn mail_dir() -> PathBuf {
+    let dir = config_dir().join("mail");
+    let legacy = PathBuf::from(runtime::home_dir())
+        .join(".aris")
+        .join("mail");
+    let _ = migrate_dir(&legacy, &dir);
+    dir
 }
 
 pub fn apply_bundle_cache_environment() {
@@ -112,6 +126,7 @@ pub fn apply_project_environment(workspace: &PathBuf, project_id: &str) -> io::R
     configure_readonly_roots()?;
 
     std::env::set_var("ARIS_WORKSPACE_ROOT", workspace);
+    std::env::set_var("ARIS_RUNTIME_ROOT", &project_runtime);
     std::env::set_var("ARIS_DESKTOP_PROJECT_ID", project_id);
     std::env::set_var("ARIS_RUN_STATE_DIR", &run_state);
     std::env::set_var("ARIS_SESSIONS_DIR", &sessions);
@@ -216,10 +231,7 @@ pub fn sessions_dir() -> PathBuf {
     runtime_dir().join("sessions")
 }
 
-/// `~/.config/aris/config.json` — mirror of `ArisConfig::config_path()`.
+/// `~/.config/SomniQ/config.json` — mirror of `ArisConfig::config_path()`.
 pub fn config_path() -> PathBuf {
-    PathBuf::from(runtime::home_dir())
-        .join(".config")
-        .join("aris")
-        .join("config.json")
+    config_dir().join("config.json")
 }

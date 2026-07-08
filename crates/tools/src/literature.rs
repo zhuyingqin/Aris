@@ -1213,8 +1213,7 @@ pub fn browser_download_pdf_for_paper_at(
         ));
     }
 
-    let work_dir = base
-        .join("tmp")
+    let work_dir = crate::layout::scratch_tmp_dir_at(base)
         .join("paper-browser-download")
         .join(format!("{:x}", epoch_millis()));
     std::fs::create_dir_all(&work_dir).map_err(|error| error.to_string())?;
@@ -1676,7 +1675,7 @@ mod tests {
 
     fn temp_base(name: &str) -> PathBuf {
         let unique = epoch_millis();
-        let base = std::env::temp_dir().join(format!("aris-lit-{name}-{unique}"));
+        let base = std::env::temp_dir().join(format!("somniq-lit-{name}-{unique}"));
         std::fs::create_dir_all(&base).expect("create temp base");
         base
     }

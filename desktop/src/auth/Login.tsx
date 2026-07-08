@@ -123,6 +123,7 @@ const brandName: CSSProperties = {
 };
 
 type AuthMode = "login" | "register";
+const MANAGED_MODEL_SERVER_LABEL = "通用模型服务器";
 
 function trimServer(server: string) {
   return (server.trim() || DEFAULT_AUTH_SERVER).replace(/\/+$/, "");
@@ -142,7 +143,8 @@ function readAffCode(): string | undefined {
 }
 
 function errorMessage(error: unknown) {
-  return error instanceof Error ? error.message : String(error);
+  return (error instanceof Error ? error.message : String(error))
+    .replace(/(?:https?:\/\/)?106\.53\.28\.124:18080(?:\/v1)?/gi, MANAGED_MODEL_SERVER_LABEL);
 }
 
 export default function Login() {

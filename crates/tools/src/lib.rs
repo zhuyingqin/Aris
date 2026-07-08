@@ -11,15 +11,15 @@ use aris_executor::{
 };
 use reqwest::blocking::Client;
 use runtime::{
-    append_file, edit_file, execute_bash_with_cancel, glob_search, grep_search, load_system_prompt,
-    read_file, write_file, ApiClient, ApiRequest, AssistantEvent, BashCommandInput,
-    ConversationRuntime, GrepSearchInput, PermissionMode, PermissionPolicy, RuntimeError, Session,
-    ToolError, ToolExecutor,
+    append_file, edit_file, glob_search, grep_search, load_system_prompt, read_file, write_file,
+    ApiClient, ApiRequest, AssistantEvent, BashCommandInput, ConversationRuntime, GrepSearchInput,
+    PermissionMode, PermissionPolicy, RuntimeError, Session, ToolError, ToolExecutor,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 const MAX_WRITE_FILE_CONTENT_CHARS: usize = 24_000;
+const TOOL_PROGRESS_NEAR_TIMEOUT_RATIO: f64 = 0.80;
 
 pub mod knowledge;
 pub mod layout;
@@ -68,6 +68,22 @@ pub struct ToolSpec {
     pub required_permission: PermissionMode,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct ToolProgress {
+    #[serde(rename = "elapsedMs")]
+    pub elapsed_ms: u64,
+    #[serde(rename = "timeoutMs")]
+    pub timeout_ms: Option<u64>,
+    pub pid: Option<u32>,
+    #[serde(rename = "stdoutTail")]
+    pub stdout_tail: Option<String>,
+    #[serde(rename = "stderrTail")]
+    pub stderr_tail: Option<String>,
+    #[serde(rename = "nearTimeout")]
+    pub near_timeout: bool,
+    pub message: String,
+}
+
 #[must_use]
 #[allow(clippy::too_many_lines)]
 /// Render the active Agent Team as a readable terminal view (backs `/team`).
@@ -79,12 +95,19 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
     vec![
         ToolSpec {
             name: "bash",
-            description: "Execute a shell command in the current workspace.",
+            description: concat!(
+                "Execute a shell command in the current workspace for shell semantics, package managers, build/test runners, scripts, and process control. ",
+                "Prefer dedicated tools when they fit: read_file for known-path reads, glob_search for file discovery, grep_search for content search, and write_file/append_file/edit_file for file changes. ",
+                "Do not use shell redirection, heredocs, sed/awk in-place edits, or ad hoc scripts to modify files unless a justified bulk mechanical rewrite is safer than edit_file. ",
+                "Foreground commands default to a 120000 ms timeout; pass a larger timeout for legitimately long work. ",
+                "Use run_in_background only for long-running services or watchers whose immediate output is not needed; include a short description and do not start duplicate background processes. ",
+                "Run independent read-only investigations as separate parallel tool calls instead of chaining them with separators; chain commands only when they genuinely depend on each other."
+            ),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "command": { "type": "string" },
-                    "timeout": { "type": "integer", "minimum": 1 },
+                    "timeout": { "type": "integer", "minimum": 1, "description": "Timeout in milliseconds for foreground commands. Defaults to 120000." },
                     "description": { "type": "string" },
                     "run_in_background": { "type": "boolean" },
                     "dangerouslyDisableSandbox": {
@@ -124,7 +147,13 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "write_file",
-            description: "Write a complete text file in the workspace. Place generated artifacts in canonical project folders: slide/PPT/PDF deck outputs under slides/, posters under poster/, interactive web apps under web/<name>/ with index.html plus local CSS/assets, source notebooks under notebooks/, run artifacts under experiments/runs/, and scratch/temp/cache files under .aris/. When the user asks to modify an existing/current artifact, reuse the existing path and update it in place; do not create sibling version files such as _v2, _new, _final, or timestamped copies unless explicitly requested. Keep content under 24000 characters in a single call; for longer generated files, write a small scaffold, append chunks with append_file, and verify the final file. Prefer edit_file for localized edits; use shell scripts only for justified bulk mechanical rewrites.",
+            description: concat!(
+                "Write a complete text file in the workspace. Use write_file for new files, full replacements, or generated content with little continuity from an existing file; read the target first before overwriting an existing path. ",
+                "For incremental edits to existing files, prefer edit_file; do not use write_file, append_file, shell redirection, heredocs, or scripts for small localized changes. ",
+                "Place generated artifacts in canonical project folders: slide/PPT/PDF deck outputs under slides/, posters under poster/, interactive web apps under web/<name>/ with index.html plus local CSS/assets, source notebooks under notebooks/, run artifacts under experiments/runs/, and scratch/temp/cache files under .somniq/tmp/. ",
+                "When the user asks to modify an existing/current artifact, reuse the existing path and update it in place; do not create sibling version files such as _v2, _new, _final, or timestamped copies unless explicitly requested. ",
+                "Keep content under 24000 characters in a single call; for longer generated files, write a small scaffold, append chunks with append_file, and verify the final file."
+            ),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -138,7 +167,12 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "append_file",
-            description: "Append one text chunk to a workspace file without returning the full file. Keep generated artifacts in the same canonical folders as write_file: slides/, poster/, web/<name>/, notebooks/, experiments/runs/, or .aris/ for scratch/temp/cache files. For existing/current artifacts, append only to the identified existing path and do not create a new versioned sibling unless explicitly requested. Keep content under 24000 characters; use this for long generated artifacts after a small write_file scaffold, then verify with read_file/compilation.",
+            description: concat!(
+                "Append one text chunk to a workspace file without returning the full file. Use append_file mainly for long generated artifacts after a small write_file scaffold; do not use it for localized edits to existing files. ",
+                "For existing/current artifacts, append only to the identified existing path and do not create a new versioned sibling unless explicitly requested. ",
+                "Keep generated artifacts in the same canonical folders as write_file: slides/, poster/, web/<name>/, notebooks/, experiments/runs/, or .somniq/tmp/ for scratch/temp/cache files. ",
+                "Keep content under 24000 characters; after chunked writes, verify the final file with read_file, line counts, tests, or compilation as appropriate."
+            ),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -153,7 +187,12 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "edit_file",
-            description: "Replace text directly in a workspace file. Use this for small and medium edits to existing/current artifacts instead of creating new version files or generating helper scripts; it returns Codex-style structured file changes.",
+            description: concat!(
+                "Replace text directly in a workspace file. Use edit_file for small and medium edits to existing/current artifacts instead of write_file, append_file, new version files, shell redirection, sed/awk in-place edits, or generated helper scripts. ",
+                "Read the target file first and take old_string from the current file contents, not stale memory; old_string should be unique unless replace_all is intentional for every match. ",
+                "When multiple edits target the same file, apply one edit, read the file again, then make the next edit so old_string does not go stale. ",
+                "It returns Codex-style structured file changes."
+            ),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -462,6 +501,36 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                     }
                 },
                 "required": ["artifacts"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::WorkspaceWrite,
+        },
+        ToolSpec {
+            name: "LaTeXCompile",
+            description: "Compile a LaTeX `.tex` root document inside the current workspace to PDF using the local TeX Live toolchain. This follows the Overleaf-style root-file compile model: resolve the root file safely inside the workspace, run latexmk when available, fall back to xelatex/pdflatex/lualatex, and return structured stdout/stderr diagnostics plus the output PDF path.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "inputPath": {
+                        "type": "string",
+                        "description": "Workspace-relative or in-workspace absolute path to the .tex root source file."
+                    },
+                    "outputPath": {
+                        "type": "string",
+                        "description": "Optional workspace-relative or in-workspace absolute output PDF path. Defaults to the input path with .pdf extension."
+                    },
+                    "compiler": {
+                        "type": "string",
+                        "enum": ["latexmk", "xelatex", "pdflatex", "lualatex"],
+                        "description": "Optional compiler override. Defaults to latexmk, then xelatex, pdflatex, and lualatex fallback."
+                    },
+                    "timeoutMs": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Foreground compile timeout in milliseconds. Defaults to the shell foreground timeout."
+                    }
+                },
+                "required": ["inputPath"],
                 "additionalProperties": false
             }),
             required_permission: PermissionMode::WorkspaceWrite,
@@ -978,12 +1047,19 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "PowerShell",
-            description: "Execute a PowerShell command with optional timeout.",
+            description: concat!(
+                "Execute a PowerShell command when Windows-specific shell semantics are needed. ",
+                "Prefer dedicated tools when they fit: read_file for known-path reads, glob_search for file discovery, grep_search for content search, and write_file/append_file/edit_file for file changes. ",
+                "Do not use shell redirection, here-strings, ad hoc scripts, or Set-Content/Add-Content for file edits unless a justified bulk mechanical rewrite is safer than edit_file. ",
+                "Foreground commands default to a 120000 ms timeout; pass a larger timeout for legitimately long work. ",
+                "Use run_in_background only for long-running services or watchers whose immediate output is not needed; include a short description and do not start duplicate background processes. ",
+                "Run independent read-only investigations as separate parallel tool calls instead of chaining them with separators; chain commands only when they genuinely depend on each other."
+            ),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "command": { "type": "string" },
-                    "timeout": { "type": "integer", "minimum": 1 },
+                    "timeout": { "type": "integer", "minimum": 1, "description": "Timeout in milliseconds for foreground commands. Defaults to 120000." },
                     "description": { "type": "string" },
                     "run_in_background": { "type": "boolean" }
                 },
@@ -1004,10 +1080,18 @@ pub fn execute_tool_with_cancel(
     input: &Value,
     should_cancel: &dyn Fn() -> bool,
 ) -> Result<String, String> {
+    execute_tool_with_cancel_and_progress(name, input, should_cancel, |_| {})
+}
+
+pub fn execute_tool_with_cancel_and_progress(
+    name: &str,
+    input: &Value,
+    should_cancel: &dyn Fn() -> bool,
+    mut on_progress: impl FnMut(ToolProgress),
+) -> Result<String, String> {
     match name {
-        "bash" => {
-            from_value::<BashCommandInput>(input).and_then(|input| run_bash(input, should_cancel))
-        }
+        "bash" => from_value::<BashCommandInput>(input)
+            .and_then(|input| run_bash(input, should_cancel, &mut on_progress)),
         "read_file" => from_value::<ReadFileInput>(input).and_then(run_read_file),
         "WorkspaceLayout" => to_pretty_json(layout::layout_json()),
         "write_file" => from_value::<WriteFileInput>(input).and_then(run_write_file),
@@ -1035,6 +1119,8 @@ pub fn execute_tool_with_cancel(
             .and_then(knowledge::run_knowledge_upsert),
         "StudioLibraryUpsert" => from_value::<studio::StudioLibraryUpsertInput>(input)
             .and_then(studio::run_studio_library_upsert),
+        "LaTeXCompile" => from_value::<LatexCompileInput>(input)
+            .and_then(|input| run_latex_compile(input, should_cancel, &mut on_progress)),
         "NotebookExecute" => from_value::<notebook::NotebookExecuteInput>(input)
             .and_then(notebook::run_notebook_execute),
         "NotebookKernel" => from_value::<notebook::NotebookKernelInput>(input)
@@ -1085,7 +1171,7 @@ pub fn execute_tool_with_cancel(
         }
         "REPL" => from_value::<ReplInput>(input).and_then(|input| run_repl(input, should_cancel)),
         "PowerShell" => from_value::<PowerShellInput>(input)
-            .and_then(|input| run_powershell(input, should_cancel)),
+            .and_then(|input| run_powershell(input, should_cancel, &mut on_progress)),
         _ => Err(format!("unsupported tool: {name}")),
     }
 }
@@ -1094,11 +1180,39 @@ fn from_value<T: for<'de> Deserialize<'de>>(input: &Value) -> Result<T, String> 
     serde_json::from_value(input.clone()).map_err(|error| error.to_string())
 }
 
-fn run_bash(input: BashCommandInput, should_cancel: &dyn Fn() -> bool) -> Result<String, String> {
+fn run_bash(
+    input: BashCommandInput,
+    should_cancel: &dyn Fn() -> bool,
+    on_progress: &mut dyn FnMut(ToolProgress),
+) -> Result<String, String> {
     serde_json::to_string_pretty(
-        &execute_bash_with_cancel(input, should_cancel).map_err(|error| error.to_string())?,
+        &runtime::execute_bash_with_cancel_and_progress(input, should_cancel, |progress| {
+            on_progress(managed_progress_to_tool_progress(progress));
+        })
+        .map_err(|error| error.to_string())?,
     )
     .map_err(|error| error.to_string())
+}
+
+fn managed_progress_to_tool_progress(progress: runtime::ManagedCommandProgress) -> ToolProgress {
+    let near_timeout = progress.timeout_ms.is_some_and(|timeout| {
+        timeout > 0
+            && (progress.elapsed_ms as f64) >= (timeout as f64 * TOOL_PROGRESS_NEAR_TIMEOUT_RATIO)
+    });
+    let message = if near_timeout {
+        "Still running; close to timeout".to_string()
+    } else {
+        "Still running".to_string()
+    };
+    ToolProgress {
+        elapsed_ms: progress.elapsed_ms,
+        timeout_ms: progress.timeout_ms,
+        pid: Some(progress.pid),
+        stdout_tail: (!progress.stdout_tail.is_empty()).then_some(progress.stdout_tail),
+        stderr_tail: (!progress.stderr_tail.is_empty()).then_some(progress.stderr_tail),
+        near_timeout,
+        message,
+    }
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -1320,6 +1434,14 @@ fn run_structured_output(input: StructuredOutputInput) -> Result<String, String>
     to_pretty_json(execute_structured_output(input))
 }
 
+fn run_latex_compile(
+    input: LatexCompileInput,
+    should_cancel: &dyn Fn() -> bool,
+    on_progress: &mut dyn FnMut(ToolProgress),
+) -> Result<String, String> {
+    to_pretty_json(execute_latex_compile(input, should_cancel, on_progress)?)
+}
+
 fn run_repl(input: ReplInput, should_cancel: &dyn Fn() -> bool) -> Result<String, String> {
     to_pretty_json(execute_repl(input, should_cancel)?)
 }
@@ -1327,9 +1449,11 @@ fn run_repl(input: ReplInput, should_cancel: &dyn Fn() -> bool) -> Result<String
 fn run_powershell(
     input: PowerShellInput,
     should_cancel: &dyn Fn() -> bool,
+    on_progress: &mut dyn FnMut(ToolProgress),
 ) -> Result<String, String> {
     to_pretty_json(
-        execute_powershell_with_cancel(input, should_cancel).map_err(|error| error.to_string())?,
+        execute_powershell_with_cancel(input, should_cancel, on_progress)
+            .map_err(|error| error.to_string())?,
     )
 }
 
@@ -1514,6 +1638,31 @@ enum ConfigValue {
 #[derive(Debug, Deserialize)]
 #[serde(transparent)]
 struct StructuredOutputInput(BTreeMap<String, Value>);
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LatexCompileInput {
+    input_path: String,
+    output_path: Option<String>,
+    compiler: Option<String>,
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LatexCompileOutput {
+    success: bool,
+    input_path: String,
+    output_path: String,
+    engine: String,
+    stdout: String,
+    stderr: String,
+    exit_code: Option<i32>,
+    interrupted: bool,
+    timed_out: bool,
+    duration_ms: u128,
+    return_code_interpretation: Option<String>,
+}
 
 #[derive(Debug, Deserialize)]
 struct ReplInput {
@@ -2140,14 +2289,9 @@ fn execute_todo_write(input: TodoWriteInput) -> Result<TodoWriteOutput, String> 
         input.todos.clone()
     };
 
-    if let Some(parent) = store_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    }
-    std::fs::write(
-        &store_path,
-        serde_json::to_string_pretty(&persisted).map_err(|error| error.to_string())?,
-    )
-    .map_err(|error| error.to_string())?;
+    let payload = serde_json::to_string_pretty(&persisted).map_err(|error| error.to_string())?;
+    runtime::write_file_atomically(&store_path, payload.as_bytes())
+        .map_err(|error| error.to_string())?;
 
     let verification_nudge_needed = (all_done
         && input.todos.len() >= 3
@@ -2318,7 +2462,7 @@ fn inject_resolver_preamble(
         layer += 1;
     }
     preamble.push_str(&format!(
-        "{layer}. `~/.config/aris/<bundle-key>` (user-customised location; e.g. `~/.config/aris/tools/foo.py` for shared helpers, `~/.config/aris/skills/<name>/<rel>` for skill-local)\n"
+        "{layer}. `~/.config/SomniQ/<bundle-key>` (user-customised location; e.g. `~/.config/SomniQ/tools/foo.py` for shared helpers, `~/.config/SomniQ/skills/<name>/<rel>` for skill-local)\n"
     ));
     layer += 1;
     preamble.push_str(&format!(
@@ -2379,10 +2523,10 @@ fn todo_store_path() -> Result<std::path::PathBuf, String> {
 fn skill_search_roots() -> Vec<std::path::PathBuf> {
     let mut roots = Vec::new();
 
-    // 1. ~/.config/aris/skills/ (ARIS user-level, highest priority)
+    // 1. ~/.config/SomniQ/skills/ (SomniQ user-level, highest priority)
     roots.push(runtime::aris_user_skills_dir());
 
-    // 2. Project-level .aris/skills/
+    // 2. Project-level .somniq/skills/
     if let Ok(cwd) = std::env::current_dir() {
         roots.push(runtime::aris_project_skills_dir(&cwd));
     }
@@ -3387,17 +3531,13 @@ fn canonical_tool_token(value: &str) -> String {
 }
 
 fn agent_store_dir() -> Result<std::path::PathBuf, String> {
-    if let Ok(path) = std::env::var("ARIS_AGENT_STORE_DIR") {
-        return Ok(std::path::PathBuf::from(path));
+    runtime::migrate_legacy_project_runtime_dirs(runtime::workspace_root_from_env())
+        .map_err(|error| error.to_string())?;
+    let dir = runtime::project_agent_store_dir_from_env();
+    if dir.as_os_str().is_empty() {
+        return Err("agent store path is empty".to_string());
     }
-    if let Ok(path) = std::env::var("CLAWD_AGENT_STORE") {
-        return Ok(std::path::PathBuf::from(path));
-    }
-    let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
-    if let Some(workspace_root) = cwd.ancestors().nth(2) {
-        return Ok(workspace_root.join(".clawd-agents"));
-    }
-    Ok(cwd.join(".clawd-agents"))
+    Ok(dir)
 }
 
 fn make_agent_id() -> String {
@@ -4052,6 +4192,7 @@ fn iso8601_timestamp() -> String {
 fn execute_powershell_with_cancel(
     input: PowerShellInput,
     should_cancel: &dyn Fn() -> bool,
+    on_progress: &mut dyn FnMut(ToolProgress),
 ) -> std::io::Result<runtime::BashCommandOutput> {
     let _ = &input.description;
     let shell = detect_powershell_shell()?;
@@ -4061,7 +4202,469 @@ fn execute_powershell_with_cancel(
         input.timeout,
         input.run_in_background,
         should_cancel,
+        on_progress,
     )
+}
+
+fn execute_latex_compile(
+    input: LatexCompileInput,
+    should_cancel: &dyn Fn() -> bool,
+    on_progress: &mut dyn FnMut(ToolProgress),
+) -> Result<LatexCompileOutput, String> {
+    let workspace = canonical_workspace_root()?;
+    let input_path = resolve_existing_workspace_path(&input.input_path, &workspace)?;
+    if !input_path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("tex"))
+    {
+        return Err("LaTeXCompile inputPath must point to a .tex file".to_string());
+    }
+    let output_path = match input.output_path.as_deref() {
+        Some(path) => resolve_output_workspace_path(path, &workspace)?,
+        None => input_path.with_extension("pdf"),
+    };
+    if !output_path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"))
+    {
+        return Err("LaTeXCompile outputPath must end with .pdf".to_string());
+    }
+    if let Some(parent) = output_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let output_dir = output_path
+        .parent()
+        .ok_or_else(|| "outputPath must include a file name".to_string())?;
+    let source_dir = input_path
+        .parent()
+        .ok_or_else(|| "inputPath must include a file name".to_string())?;
+
+    let timeout_ms = runtime::resolve_foreground_shell_timeout_ms(input.timeout_ms);
+    let started = Instant::now();
+    let (engine, output) = run_latex_compile_process(
+        input.compiler.as_deref(),
+        &input_path,
+        source_dir,
+        output_dir,
+        timeout_ms,
+        &workspace,
+        should_cancel,
+        on_progress,
+    )?;
+    let expected_pdf = output_dir.join(
+        input_path
+            .file_stem()
+            .ok_or_else(|| "inputPath must include a file name".to_string())?,
+    )
+    .with_extension("pdf");
+    if expected_pdf.is_file() && expected_pdf != output_path {
+        std::fs::copy(&expected_pdf, &output_path).map_err(|error| error.to_string())?;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let mut stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let mut return_code_interpretation = None;
+    if output.timed_out {
+        stderr = append_process_status_message(
+            stderr,
+            &format!("LaTeXCompile exceeded timeout of {timeout_ms} ms"),
+        );
+        return_code_interpretation = Some("timeout".to_string());
+    } else if output.interrupted {
+        stderr = append_process_status_message(stderr, "LaTeXCompile interrupted by user");
+        return_code_interpretation = Some("interrupted".to_string());
+    } else if let Some(code) = output.status.code().filter(|code| *code != 0) {
+        return_code_interpretation = Some(format!("exit_code:{code}"));
+    }
+
+    let mut success = output.status.success() && output_path.is_file();
+    if output.status.success() && !output_path.is_file() {
+        success = false;
+        stderr = append_process_status_message(stderr, "LaTeXCompile produced no output PDF");
+        return_code_interpretation = Some("missing_output".to_string());
+    }
+
+    Ok(LatexCompileOutput {
+        success,
+        input_path: workspace_relative_display(&input_path, &workspace),
+        output_path: workspace_relative_display(&output_path, &workspace),
+        engine,
+        stdout,
+        stderr,
+        exit_code: output.status.code(),
+        interrupted: output.interrupted,
+        timed_out: output.timed_out,
+        duration_ms: started.elapsed().as_millis(),
+        return_code_interpretation,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_latex_compile_process(
+    compiler: Option<&str>,
+    input_path: &Path,
+    source_dir: &Path,
+    output_dir: &Path,
+    timeout_ms: u64,
+    workspace: &Path,
+    should_cancel: &dyn Fn() -> bool,
+    on_progress: &mut dyn FnMut(ToolProgress),
+) -> Result<(String, runtime::ManagedCommandOutput), String> {
+    if let Some(compiler) = compiler.map(str::trim).filter(|value| !value.is_empty()) {
+        if !matches!(compiler, "latexmk" | "xelatex" | "pdflatex" | "lualatex") {
+            return Err(format!(
+                "unsupported LaTeX compiler `{compiler}`; expected latexmk, xelatex, pdflatex, or lualatex"
+            ));
+        }
+        let output = run_named_latex_compiler(
+            compiler,
+            input_path,
+            source_dir,
+            output_dir,
+            timeout_ms,
+            workspace,
+            should_cancel,
+            on_progress,
+        )
+        .map_err(|error| format!("LaTeX command `{compiler}` failed to start: {error}"))?;
+        return Ok((compiler.to_string(), output));
+    }
+
+    let mut not_found = Vec::new();
+    for compiler in ["latexmk", "xelatex", "pdflatex", "lualatex"] {
+        match run_named_latex_compiler(
+            compiler,
+            input_path,
+            source_dir,
+            output_dir,
+            timeout_ms,
+            workspace,
+            should_cancel,
+            on_progress,
+        ) {
+            Ok(output) => return Ok((compiler.to_string(), output)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                not_found.push(compiler.to_string());
+            }
+            Err(error) => {
+                return Err(format!("LaTeX command `{compiler}` failed to start: {error}"));
+            }
+        }
+    }
+
+    Err(format!(
+        "LaTeX command not found. Tried: {}. Install TeX Live and ensure latexmk/xelatex/pdflatex/lualatex are on PATH.",
+        not_found.join(", ")
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_named_latex_compiler(
+    compiler: &str,
+    input_path: &Path,
+    source_dir: &Path,
+    output_dir: &Path,
+    timeout_ms: u64,
+    workspace: &Path,
+    should_cancel: &dyn Fn() -> bool,
+    on_progress: &mut dyn FnMut(ToolProgress),
+) -> std::io::Result<runtime::ManagedCommandOutput> {
+    if compiler == "latexmk" {
+        return run_latexmk(
+            input_path,
+            source_dir,
+            output_dir,
+            timeout_ms,
+            workspace,
+            should_cancel,
+            on_progress,
+        );
+    }
+    run_latex_engine(
+        compiler,
+        input_path,
+        source_dir,
+        output_dir,
+        timeout_ms,
+        workspace,
+        should_cancel,
+        on_progress,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_latexmk(
+    input_path: &Path,
+    source_dir: &Path,
+    output_dir: &Path,
+    timeout_ms: u64,
+    workspace: &Path,
+    should_cancel: &dyn Fn() -> bool,
+    on_progress: &mut dyn FnMut(ToolProgress),
+) -> std::io::Result<runtime::ManagedCommandOutput> {
+    let mut process = runtime::hidden_command("latexmk");
+    process
+        .arg("-pdf")
+        .arg("-interaction=nonstopmode")
+        .arg("-halt-on-error")
+        .arg("-file-line-error")
+        .arg(format!("-outdir={}", output_dir.display()))
+        .arg(input_path)
+        .current_dir(source_dir)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    run_latex_process(
+        &mut process,
+        "latexmk",
+        input_path,
+        workspace,
+        timeout_ms,
+        should_cancel,
+        on_progress,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_latex_engine(
+    engine: &str,
+    input_path: &Path,
+    source_dir: &Path,
+    output_dir: &Path,
+    timeout_ms: u64,
+    workspace: &Path,
+    should_cancel: &dyn Fn() -> bool,
+    on_progress: &mut dyn FnMut(ToolProgress),
+) -> std::io::Result<runtime::ManagedCommandOutput> {
+    let first = run_single_latex_engine(
+        engine,
+        input_path,
+        source_dir,
+        output_dir,
+        timeout_ms,
+        workspace,
+        should_cancel,
+        on_progress,
+    )?;
+    if first.interrupted || first.timed_out || !first.status.success() {
+        return Ok(first);
+    }
+    let second = run_single_latex_engine(
+        engine,
+        input_path,
+        source_dir,
+        output_dir,
+        timeout_ms,
+        workspace,
+        should_cancel,
+        on_progress,
+    )?;
+    Ok(runtime::ManagedCommandOutput {
+        stdout: join_process_bytes(first.stdout, second.stdout),
+        stderr: join_process_bytes(first.stderr, second.stderr),
+        status: second.status,
+        interrupted: second.interrupted,
+        timed_out: second.timed_out,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_single_latex_engine(
+    engine: &str,
+    input_path: &Path,
+    source_dir: &Path,
+    output_dir: &Path,
+    timeout_ms: u64,
+    workspace: &Path,
+    should_cancel: &dyn Fn() -> bool,
+    on_progress: &mut dyn FnMut(ToolProgress),
+) -> std::io::Result<runtime::ManagedCommandOutput> {
+    let mut process = runtime::hidden_command(engine);
+    process
+        .arg("-interaction=nonstopmode")
+        .arg("-halt-on-error")
+        .arg("-file-line-error")
+        .arg(format!("-output-directory={}", output_dir.display()))
+        .arg(input_path)
+        .current_dir(source_dir)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    run_latex_process(
+        &mut process,
+        engine,
+        input_path,
+        workspace,
+        timeout_ms,
+        should_cancel,
+        on_progress,
+    )
+}
+
+fn run_latex_process(
+    process: &mut std::process::Command,
+    compiler: &str,
+    input_path: &Path,
+    workspace: &Path,
+    timeout_ms: u64,
+    should_cancel: &dyn Fn() -> bool,
+    on_progress: &mut dyn FnMut(ToolProgress),
+) -> std::io::Result<runtime::ManagedCommandOutput> {
+    runtime::run_managed_command_with_cancel_and_progress(
+        process,
+        format!(
+            "LaTeX compile ({compiler}): {}",
+            truncate_process_label(&workspace_relative_display(input_path, workspace))
+        ),
+        Some(Duration::from_millis(timeout_ms)),
+        true,
+        should_cancel,
+        |progress| on_progress(managed_progress_to_tool_progress(progress)),
+    )
+}
+
+fn join_process_bytes(mut first: Vec<u8>, second: Vec<u8>) -> Vec<u8> {
+    if first.is_empty() {
+        return second;
+    }
+    if !second.is_empty() {
+        if !first.ends_with(b"\n") {
+            first.push(b'\n');
+        }
+        first.extend(second);
+    }
+    first
+}
+
+fn canonical_workspace_root() -> Result<PathBuf, String> {
+    let root = std::env::var("ARIS_WORKSPACE_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    std::fs::create_dir_all(&root).map_err(|error| error.to_string())?;
+    std::fs::canonicalize(&root).map_err(|error| error.to_string())
+}
+
+fn resolve_existing_workspace_path(path: &str, workspace: &Path) -> Result<PathBuf, String> {
+    let candidate = lexically_normalize_path(&workspace_path_candidate(path, workspace)?);
+    let canonical = std::fs::canonicalize(&candidate).map_err(|error| {
+        format!(
+            "could not resolve workspace path `{}`: {error}",
+            candidate.display()
+        )
+    })?;
+    ensure_workspace_child(&canonical, workspace)?;
+    if !canonical.is_file() {
+        return Err(format!("{} is not a file", canonical.display()));
+    }
+    Ok(canonical)
+}
+
+fn resolve_output_workspace_path(path: &str, workspace: &Path) -> Result<PathBuf, String> {
+    let candidate = lexically_normalize_path(&workspace_path_candidate(path, workspace)?);
+    let parent = candidate
+        .parent()
+        .ok_or_else(|| "outputPath must include a file name".to_string())?;
+    let parent = canonicalize_path_allow_missing(parent)?;
+    ensure_workspace_child(&parent, workspace)?;
+    std::fs::create_dir_all(&parent).map_err(|error| error.to_string())?;
+    let file_name = candidate
+        .file_name()
+        .ok_or_else(|| "outputPath must include a file name".to_string())?;
+    Ok(parent.join(file_name))
+}
+
+fn workspace_path_candidate(path: &str, workspace: &Path) -> Result<PathBuf, String> {
+    let path = path.trim();
+    if path.is_empty() {
+        return Err("path cannot be empty".to_string());
+    }
+    let input = Path::new(path);
+    if input.is_absolute() {
+        return Ok(input.to_path_buf());
+    }
+
+    let mut normalized = PathBuf::new();
+    for component in input.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::Normal(part) => normalized.push(part),
+            std::path::Component::ParentDir => {
+                if !normalized.pop() {
+                    return Err(format!("path `{path}` escapes the current workspace"));
+                }
+            }
+            std::path::Component::Prefix(_) | std::path::Component::RootDir => {
+                return Err(format!("path `{path}` is not a workspace-relative path"));
+            }
+        }
+    }
+    Ok(workspace.join(normalized))
+}
+
+fn canonicalize_path_allow_missing(path: &Path) -> Result<PathBuf, String> {
+    if path.exists() {
+        return std::fs::canonicalize(path).map_err(|error| error.to_string());
+    }
+
+    let mut missing = Vec::new();
+    let mut ancestor = path;
+    while !ancestor.exists() {
+        let file_name = ancestor.file_name().ok_or_else(|| {
+            format!(
+                "could not resolve missing path ancestor for `{}`",
+                path.display()
+            )
+        })?;
+        missing.push(file_name.to_os_string());
+        ancestor = ancestor.parent().ok_or_else(|| {
+            format!(
+                "could not resolve missing path ancestor for `{}`",
+                path.display()
+            )
+        })?;
+    }
+
+    let mut canonical = std::fs::canonicalize(ancestor).map_err(|error| error.to_string())?;
+    for component in missing.iter().rev() {
+        canonical.push(component);
+    }
+    Ok(lexically_normalize_path(&canonical))
+}
+
+fn lexically_normalize_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            std::path::Component::RootDir => normalized.push(component.as_os_str()),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            std::path::Component::Normal(value) => normalized.push(value),
+        }
+    }
+    normalized
+}
+
+fn ensure_workspace_child(path: &Path, workspace: &Path) -> Result<(), String> {
+    if path.starts_with(workspace) {
+        Ok(())
+    } else {
+        Err(format!(
+            "path `{}` is outside the current workspace `{}`",
+            path.display(),
+            workspace.display()
+        ))
+    }
+}
+
+fn workspace_relative_display(path: &Path, workspace: &Path) -> String {
+    path.strip_prefix(workspace)
+        .unwrap_or(path)
+        .display()
+        .to_string()
+        .replace('\\', "/")
 }
 
 fn detect_powershell_shell() -> std::io::Result<&'static str> {
@@ -4107,6 +4710,7 @@ fn execute_shell_command(
     timeout: Option<u64>,
     run_in_background: Option<bool>,
     should_cancel: &dyn Fn() -> bool,
+    on_progress: &mut dyn FnMut(ToolProgress),
 ) -> std::io::Result<runtime::BashCommandOutput> {
     let command_arg = powershell_command_arg(command);
     if run_in_background.unwrap_or(false) {
@@ -4152,12 +4756,14 @@ fn execute_shell_command(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
 
-    let output = runtime::run_managed_command_with_cancel(
+    let timeout_ms = runtime::resolve_foreground_shell_timeout_ms(timeout);
+    let output = runtime::run_managed_command_with_cancel_and_progress(
         &mut process,
         format!("PowerShell: {}", truncate_process_label(command)),
-        timeout.map(Duration::from_millis),
+        Some(Duration::from_millis(timeout_ms)),
         true,
         should_cancel,
+        |progress| on_progress(managed_progress_to_tool_progress(progress)),
     )?;
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -4166,10 +4772,7 @@ fn execute_shell_command(
             stdout,
             stderr: append_process_status_message(
                 stderr,
-                &format!(
-                    "Command exceeded timeout of {} ms",
-                    timeout.unwrap_or_default()
-                ),
+                &format!("Command exceeded timeout of {timeout_ms} ms"),
             ),
             raw_output_path: None,
             interrupted: true,
@@ -4673,7 +5276,8 @@ mod tests {
         agent_permission_policy, allowed_tools_for_subagent, discover_skills,
         execute_agent_with_spawn, execute_tool, execute_tool_with_cancel, final_assistant_text,
         mvp_tool_specs, persist_agent_terminal_state, resolve_anthropic_compat_reviewer_model,
-        resolve_reviewer_model, route_openai_compat_model, run_llm_review, skill_markdown,
+        resolve_existing_workspace_path, resolve_output_workspace_path, resolve_reviewer_model,
+        route_openai_compat_model, run_llm_review, skill_markdown, workspace_path_candidate,
         AgentInput, AgentJob, LlmReviewInput, SubagentToolExecutor, MAX_WRITE_FILE_CONTENT_CHARS,
     };
     use runtime::{
@@ -4755,6 +5359,56 @@ mod tests {
         assert!(names.contains(&"StructuredOutput"));
         assert!(names.contains(&"REPL"));
         assert!(names.contains(&"PowerShell"));
+        assert!(names.contains(&"LaTeXCompile"));
+    }
+
+    #[test]
+    fn latex_workspace_paths_cannot_escape_workspace() {
+        let workspace = temp_path("latex-workspace");
+        fs::create_dir_all(&workspace).expect("workspace");
+
+        let inside = workspace_path_candidate("papers/main.tex", &workspace)
+            .expect("relative path inside workspace");
+        assert!(inside.ends_with("papers/main.tex"));
+
+        let escaped = workspace_path_candidate("../outside.tex", &workspace)
+            .expect_err("parent traversal should be rejected");
+        assert!(escaped.contains("escapes"));
+
+        let absolute_outside = temp_path("outside.tex");
+        fs::write(&absolute_outside, b"\\documentclass{article}").expect("outside file");
+        let error =
+            resolve_existing_workspace_path(&absolute_outside.display().to_string(), &workspace)
+                .expect_err("absolute path outside workspace should be rejected");
+        assert!(error.contains("outside the current workspace"));
+
+        let _ = fs::remove_dir_all(workspace);
+        let _ = fs::remove_file(absolute_outside);
+    }
+
+    #[test]
+    fn latex_output_parent_traversal_is_rejected_before_create() {
+        let root = temp_path("latex-output-root");
+        let workspace = root.join("workspace");
+        let outside = root.join("outside");
+        fs::create_dir_all(workspace.join("papers")).expect("workspace");
+        let workspace = fs::canonicalize(&workspace).expect("canonical workspace");
+
+        let escaped = workspace
+            .join("papers")
+            .join("..")
+            .join("..")
+            .join("outside")
+            .join("out.pdf");
+        let error = resolve_output_workspace_path(&escaped.display().to_string(), &workspace)
+            .expect_err("escaped output path should be rejected");
+        assert!(error.contains("outside the current workspace"));
+        assert!(
+            !outside.exists(),
+            "escaped output directory must not be created before rejection"
+        );
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -5107,18 +5761,18 @@ mod tests {
         )
         .expect("write SKILL.md");
 
-        // Point HOME/USERPROFILE to temp dir so ~/.config/aris/skills resolves there.
+        // Point HOME/USERPROFILE to temp dir so ~/.config/SomniQ/skills resolves there.
         let _guard = env_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let aris_home = tmp.parent().unwrap().join("aris-home");
-        let aris_skills = aris_home.join(".config").join("aris").join("skills");
+        let aris_home = tmp.parent().unwrap().join("somniq-home");
+        let aris_skills = aris_home.join(".config").join("SomniQ").join("skills");
         let _home_guard = EnvGuard::set("HOME", &aris_home);
         let _userprofile_guard = EnvGuard::set("USERPROFILE", &aris_home);
         let _claude_compat_guard = EnvGuard::unset("ARIS_ENABLE_CLAUDE_SKILLS");
-        fs::create_dir_all(&aris_skills).expect("create aris skills dir");
+        fs::create_dir_all(&aris_skills).expect("create SomniQ skills dir");
 
-        // Copy the skill into the ARIS skills dir.
+        // Copy the skill into the SomniQ skills dir.
         let target_skill = aris_skills.join("test-skill");
         fs::create_dir_all(&target_skill).expect("create target skill dir");
         fs::copy(skill_dir.join("SKILL.md"), target_skill.join("SKILL.md")).expect("copy skill");
@@ -5293,7 +5947,7 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = temp_path("agent-store");
-        std::env::set_var("CLAWD_AGENT_STORE", &dir);
+        let _agent_store = EnvGuard::set("CLAWD_AGENT_STORE", &dir);
         let captured = Arc::new(Mutex::new(None::<AgentJob>));
         let captured_for_spawn = Arc::clone(&captured);
 
@@ -5313,7 +5967,6 @@ mod tests {
             },
         )
         .expect("Agent should succeed");
-        std::env::remove_var("CLAWD_AGENT_STORE");
 
         assert_eq!(manifest.name, "ship-audit");
         assert_eq!(manifest.subagent_type.as_deref(), Some("Explore"));
@@ -5503,8 +6156,37 @@ mod tests {
         assert!(description("write_file").contains("reuse the existing path"));
         assert!(description("write_file").contains("_v2"));
         assert!(description("write_file").contains("unless explicitly requested"));
+        assert!(description("write_file").contains("read the target first"));
+        assert!(description("write_file").contains("prefer edit_file"));
         assert!(description("append_file").contains("existing/current artifacts"));
+        assert!(description("append_file").contains("long generated artifacts"));
         assert!(description("edit_file").contains("existing/current artifacts"));
+        assert!(description("edit_file").contains("Read the target file first"));
+        assert!(description("edit_file").contains("old_string should be unique"));
+    }
+
+    #[test]
+    fn shell_tool_descriptions_prefer_dedicated_tools_and_parallel_reads() {
+        let specs = mvp_tool_specs();
+        let description = |name: &str| {
+            specs
+                .iter()
+                .find(|spec| spec.name == name)
+                .unwrap_or_else(|| panic!("{name} spec should exist"))
+                .description
+        };
+
+        for name in ["bash", "PowerShell"] {
+            let desc = description(name);
+            assert!(desc.contains("Prefer dedicated tools"));
+            assert!(desc.contains("read_file"));
+            assert!(desc.contains("glob_search"));
+            assert!(desc.contains("grep_search"));
+            assert!(desc.contains("edit_file"));
+            assert!(desc.contains("run_in_background only for long-running services"));
+            assert!(desc.contains("separate parallel tool calls"));
+            assert!(desc.contains("chain commands only when they genuinely depend"));
+        }
     }
 
     #[test]
@@ -6214,6 +6896,9 @@ mod tests {
 
     #[test]
     fn bash_tool_reports_success_exit_failure_timeout_and_background() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let success = execute_tool("bash", &json!({ "command": "printf 'hello'" }))
             .expect("bash should succeed");
         let success_output: serde_json::Value = serde_json::from_str(&success).expect("json");
@@ -6732,7 +7417,7 @@ printf 'pwsh:%s' "$1"
 
         let result = execute_tool(
             "PowerShell",
-            &json!({"command": "Write-Output hello", "timeout": 1000}),
+            &json!({"command": "Write-Output hello", "timeout": 10_000}),
         )
         .expect("PowerShell should succeed");
 
@@ -6758,9 +7443,12 @@ printf 'pwsh:%s' "$1"
     #[cfg(windows)]
     #[test]
     fn powershell_runs_via_system_shell() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let result = execute_tool(
             "PowerShell",
-            &json!({"command": "Write-Output hello", "timeout": 1000}),
+            &json!({"command": "Write-Output hello", "timeout": 10_000}),
         )
         .expect("PowerShell should succeed");
 
@@ -6772,7 +7460,7 @@ printf 'pwsh:%s' "$1"
 
         let output: serde_json::Value = serde_json::from_str(&result).expect("json");
         assert!(output["stdout"].as_str().expect("stdout").contains("hello"));
-        assert!(output["stderr"].as_str().expect("stderr").is_empty());
+        assert_eq!(output["returnCodeInterpretation"], serde_json::Value::Null);
 
         let background_output: serde_json::Value = serde_json::from_str(&background).expect("json");
         assert!(background_output["backgroundTaskId"].as_str().is_some());

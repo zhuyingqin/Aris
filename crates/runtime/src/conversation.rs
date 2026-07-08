@@ -35,6 +35,7 @@ const MAX_OUTPUT_LIMIT_CONTINUATIONS: usize = 8;
 /// rejects the request for exceeding the model's context window. Bounded so an
 /// irreducible oversized turn surfaces the error instead of looping forever.
 const MAX_CONTEXT_OVERFLOW_RETRIES: usize = 3;
+const MAX_TRANSIENT_REQUEST_RETRIES: usize = 3;
 const CONTINUATION_PROMPT_PREFIX: &str =
     "Continue the unfinished task from the exact point where the previous response stopped";
 /// How many times a turn that ended with no visible output at all (blank /
@@ -401,6 +402,7 @@ where
         let mut iterations = 0;
         let mut output_limit_continuations = 0;
         let mut context_overflow_retries = 0;
+        let mut transient_request_retries = 0;
         let mut blank_response_continuations = 0;
         let mut auto_compaction = None;
 
@@ -449,8 +451,17 @@ where
                         None => return Err(error),
                     }
                 }
+                Err(error) if is_transient_runtime_error(&error) => {
+                    transient_request_retries += 1;
+                    if transient_request_retries > MAX_TRANSIENT_REQUEST_RETRIES {
+                        return Err(error);
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(350));
+                    continue;
+                }
                 Err(error) => return Err(error),
             };
+            transient_request_retries = 0;
             let (assistant_message, usage, stop_reason) = build_assistant_message(events)?;
             if let Some(usage) = usage {
                 self.usage_tracker.record(usage);
@@ -512,11 +523,29 @@ where
                 break;
             }
 
+            // When the user cancels mid-tool-loop we must NOT throw away the
+            // results of tools that already ran. Dropping them leaves the
+            // freshly-pushed assistant message (which holds the `tool_use`
+            // blocks) without matching `tool_result`s — a malformed history the
+            // provider rejects on the next request, and the visible symptom the
+            // user sees as "the model forgot it just read the file". Instead we
+            // collect every executed result, synthesize an interrupted result
+            // for the tool we were on plus any not-yet-reached tools (so every
+            // `tool_use` is answered), flush the complete tool message into the
+            // session, and only then surface the interrupt.
             let mut turn_tool_results = Vec::new();
-            for (tool_use_id, tool_name, input) in pending_tool_uses {
+            let mut pending_iter = pending_tool_uses.into_iter();
+            let mut interrupted = false;
+            for (tool_use_id, tool_name, input) in pending_iter.by_ref() {
                 if self.cancellation_requested() {
-                    return Err(Self::interrupted_error());
+                    turn_tool_results.push(Self::interrupted_tool_result(tool_use_id, tool_name));
+                    interrupted = true;
+                    break;
                 }
+                // Preserved for the interrupted-result fallback: the match arms
+                // below move `tool_use_id`/`tool_name` into the result blocks.
+                let interrupt_id = tool_use_id.clone();
+                let interrupt_name = tool_name.clone();
                 let permission_outcome = if let Some(prompt) = prompter.as_mut() {
                     self.permission_policy
                         .authorize(&tool_name, &input, Some(*prompt))
@@ -524,98 +553,126 @@ where
                     self.permission_policy.authorize(&tool_name, &input, None)
                 };
 
-                let result_blocks = match permission_outcome {
+                // `None` means the tool was interrupted before producing a
+                // result; the caller below records a synthetic interrupted
+                // result and stops the loop.
+                let result_blocks: Option<Vec<ContentBlock>> = match permission_outcome {
                     PermissionOutcome::Allow => {
                         if self.cancellation_requested() {
-                            return Err(Self::interrupted_error());
-                        }
-                        let pre_hook_result = self.hook_runner.run_pre_tool_use(&tool_name, &input);
-                        if pre_hook_result.is_denied() {
-                            let deny_message = format!("PreToolUse hook denied tool `{tool_name}`");
-                            vec![ContentBlock::ToolResult {
-                                tool_use_id,
-                                tool_name,
-                                output: format_hook_message(&pre_hook_result, &deny_message),
-                                is_error: true,
-                            }]
+                            None
                         } else {
-                            let (mut output, mut is_error) = match self
-                                .tool_executor
-                                .execute_with_id(&tool_use_id, &tool_name, &input)
-                            {
-                                Ok(output) => (output, false),
-                                Err(error) if error.is_interrupted() => {
-                                    return Err(RuntimeError::new(error.to_string()));
+                            let pre_hook_result =
+                                self.hook_runner.run_pre_tool_use(&tool_name, &input);
+                            if pre_hook_result.is_denied() {
+                                let deny_message =
+                                    format!("PreToolUse hook denied tool `{tool_name}`");
+                                Some(vec![ContentBlock::ToolResult {
+                                    tool_use_id,
+                                    tool_name,
+                                    output: format_hook_message(&pre_hook_result, &deny_message),
+                                    is_error: true,
+                                }])
+                            } else {
+                                let (mut output, mut is_error) = match self
+                                    .tool_executor
+                                    .execute_with_id(&tool_use_id, &tool_name, &input)
+                                {
+                                    Ok(output) => (output, false),
+                                    Err(error) if error.is_interrupted() => {
+                                        turn_tool_results.push(Self::interrupted_tool_result(
+                                            interrupt_id,
+                                            interrupt_name,
+                                        ));
+                                        interrupted = true;
+                                        break;
+                                    }
+                                    Err(error) => (error.to_string(), true),
+                                };
+                                output =
+                                    merge_hook_feedback(pre_hook_result.messages(), output, false);
+
+                                let post_hook_result = self
+                                    .hook_runner
+                                    .run_post_tool_use(&tool_name, &input, &output, is_error);
+                                if post_hook_result.is_denied() {
+                                    is_error = true;
                                 }
-                                Err(error) => (error.to_string(), true),
-                            };
-                            output = merge_hook_feedback(pre_hook_result.messages(), output, false);
+                                output = merge_hook_feedback(
+                                    post_hook_result.messages(),
+                                    output,
+                                    post_hook_result.is_denied(),
+                                );
+                                output = bound_tool_result(output, MAX_TOOL_RESULT_CHARS);
 
-                            let post_hook_result = self
-                                .hook_runner
-                                .run_post_tool_use(&tool_name, &input, &output, is_error);
-                            if post_hook_result.is_denied() {
-                                is_error = true;
-                            }
-                            output = merge_hook_feedback(
-                                post_hook_result.messages(),
-                                output,
-                                post_hook_result.is_denied(),
-                            );
-                            output = bound_tool_result(output, MAX_TOOL_RESULT_CHARS);
-
-                            // Emit tool call event
-                            if tool_name == "Skill" {
-                                // Parse skill name from input JSON for dedicated event
-                                let skill_name = serde_json::from_str::<serde_json::Value>(&input)
-                                    .ok()
-                                    .and_then(|v| {
-                                        v.get("skill").and_then(|s| s.as_str().map(String::from))
-                                    })
-                                    .unwrap_or_default();
-                                let skill_args = serde_json::from_str::<serde_json::Value>(&input)
-                                    .ok()
-                                    .and_then(|v| {
-                                        v.get("args").and_then(|s| s.as_str().map(String::from))
-                                    })
-                                    .unwrap_or_default();
+                                // Emit tool call event
+                                if tool_name == "Skill" {
+                                    // Parse skill name from input JSON for dedicated event
+                                    let skill_name =
+                                        serde_json::from_str::<serde_json::Value>(&input)
+                                            .ok()
+                                            .and_then(|v| {
+                                                v.get("skill")
+                                                    .and_then(|s| s.as_str().map(String::from))
+                                            })
+                                            .unwrap_or_default();
+                                    let skill_args =
+                                        serde_json::from_str::<serde_json::Value>(&input)
+                                            .ok()
+                                            .and_then(|v| {
+                                                v.get("args")
+                                                    .and_then(|s| s.as_str().map(String::from))
+                                            })
+                                            .unwrap_or_default();
+                                    self.event_sink.emit(&RuntimeEvent {
+                                        timestamp: now_iso8601(),
+                                        session_id: String::new(),
+                                        event_type: EventType::SkillInvoke {
+                                            skill_name,
+                                            args: skill_args,
+                                        },
+                                    });
+                                }
                                 self.event_sink.emit(&RuntimeEvent {
                                     timestamp: now_iso8601(),
                                     session_id: String::new(),
-                                    event_type: EventType::SkillInvoke {
-                                        skill_name,
-                                        args: skill_args,
+                                    event_type: EventType::ToolCall {
+                                        tool_name: tool_name.clone(),
+                                        input_summary: input.chars().take(200).collect(),
+                                        is_error,
                                     },
                                 });
-                            }
-                            self.event_sink.emit(&RuntimeEvent {
-                                timestamp: now_iso8601(),
-                                session_id: String::new(),
-                                event_type: EventType::ToolCall {
-                                    tool_name: tool_name.clone(),
-                                    input_summary: input.chars().take(200).collect(),
-                                    is_error,
-                                },
-                            });
 
-                            vec![ContentBlock::ToolResult {
-                                tool_use_id,
-                                tool_name,
-                                output,
-                                is_error,
-                            }]
+                                Some(vec![ContentBlock::ToolResult {
+                                    tool_use_id,
+                                    tool_name,
+                                    output,
+                                    is_error,
+                                }])
+                            }
                         }
                     }
-                    PermissionOutcome::Deny { reason } => {
-                        vec![ContentBlock::ToolResult {
-                            tool_use_id,
-                            tool_name,
-                            output: reason,
-                            is_error: true,
-                        }]
-                    }
+                    PermissionOutcome::Deny { reason } => Some(vec![ContentBlock::ToolResult {
+                        tool_use_id,
+                        tool_name,
+                        output: reason,
+                        is_error: true,
+                    }]),
                 };
-                turn_tool_results.extend(result_blocks);
+                if let Some(blocks) = result_blocks {
+                    turn_tool_results.extend(blocks);
+                } else {
+                    turn_tool_results
+                        .push(Self::interrupted_tool_result(interrupt_id, interrupt_name));
+                    interrupted = true;
+                    break;
+                }
+            }
+            // Cancellation broke out mid-loop: answer every tool_use we never
+            // reached so the assistant/tool message pair stays well-formed.
+            if interrupted {
+                for (tool_use_id, tool_name, _input) in pending_iter {
+                    turn_tool_results.push(Self::interrupted_tool_result(tool_use_id, tool_name));
+                }
             }
             if !turn_tool_results.is_empty() {
                 let result_message = ConversationMessage {
@@ -625,6 +682,12 @@ where
                 };
                 self.session.messages.push(result_message.clone());
                 tool_results.push(result_message);
+            }
+            // The interrupted turn is now fully recorded in the session
+            // (assistant tool_use + complete tool_result message); surface the
+            // interrupt to the caller.
+            if interrupted {
+                return Err(Self::interrupted_error());
             }
         }
 
@@ -701,6 +764,20 @@ where
             crate::clear_interrupt();
         }
         RuntimeError::new("interrupted by user")
+    }
+
+    /// Synthetic `tool_result` for a `tool_use` that was cancelled before it
+    /// produced output. Keeps every `tool_use` answered so the recorded
+    /// assistant/tool message pair is a valid conversation the provider accepts
+    /// when the turn is resumed.
+    fn interrupted_tool_result(tool_use_id: String, tool_name: String) -> ContentBlock {
+        ContentBlock::ToolResult {
+            tool_use_id,
+            tool_name,
+            output: "Tool execution was interrupted by the user before it produced a result."
+                .to_string(),
+            is_error: true,
+        }
     }
 
     fn maybe_auto_compact(&mut self) -> Option<AutoCompactionEvent> {
@@ -1118,6 +1195,29 @@ fn merge_auto_compaction_event(
     }
 }
 
+fn is_transient_runtime_error(error: &RuntimeError) -> bool {
+    if error.is_context_overflow() || error.is_model_unavailable() {
+        return false;
+    }
+    let lower = error.to_string().to_ascii_lowercase();
+    lower.contains("timeout")
+        || lower.contains("timed out")
+        || lower.contains("connection")
+        || lower.contains("network")
+        || lower.contains("dns")
+        || lower.contains("reset")
+        || lower.contains("eof")
+        || lower.contains("broken pipe")
+        || lower.contains("temporarily unavailable")
+        || lower.contains("rate limit")
+        || lower.contains("too many requests")
+        || lower.contains("429")
+        || lower.contains("500")
+        || lower.contains("502")
+        || lower.contains("503")
+        || lower.contains("504")
+}
+
 fn active_turn_message_count(session: &Session) -> usize {
     session
         .messages
@@ -1364,7 +1464,7 @@ mod tests {
         assistant_output_looks_degenerate, assistant_text_from_turn_summary,
         build_assistant_message, is_internal_continuation_message, parse_auto_compaction_threshold,
         ApiClient, ApiRequest, AssistantEvent, AutoCompactionEvent, ConversationRuntime,
-        RuntimeError, StaticToolExecutor, TurnSummary,
+        RuntimeError, StaticToolExecutor, ToolError, ToolExecutor, TurnSummary,
         DEFAULT_AUTO_COMPACTION_INPUT_TOKENS_THRESHOLD,
     };
     // The CLI's Opus 4.8 to 4.7 fallback keys off this flag.
@@ -1557,6 +1657,7 @@ mod tests {
                 current_date: "2026-03-31".to_string(),
                 git_status: None,
                 git_diff: None,
+                directory_tree: None,
                 instruction_files: Vec::new(),
             })
             .with_os("linux", "6.8")
@@ -1740,6 +1841,44 @@ mod tests {
     }
 
     #[test]
+    fn transient_network_errors_retry_three_times_before_success() {
+        struct NetworkFlakyClient {
+            calls: usize,
+        }
+        impl ApiClient for NetworkFlakyClient {
+            fn stream(
+                &mut self,
+                _request: ApiRequest,
+            ) -> Result<Vec<AssistantEvent>, RuntimeError> {
+                self.calls += 1;
+                if self.calls <= 3 {
+                    Err(RuntimeError::new("connection reset by peer"))
+                } else {
+                    Ok(vec![
+                        AssistantEvent::TextDelta("recovered".to_string()),
+                        AssistantEvent::MessageStop,
+                    ])
+                }
+            }
+        }
+
+        let mut runtime = ConversationRuntime::new(
+            Session::new(),
+            NetworkFlakyClient { calls: 0 },
+            StaticToolExecutor::new(),
+            PermissionPolicy::new(PermissionMode::WorkspaceWrite),
+            vec!["system".to_string()],
+        );
+
+        let summary = runtime
+            .run_turn("hello", None)
+            .expect("third retry should recover a transient network failure");
+
+        assert_eq!(assistant_text_from_turn_summary(&summary), "recovered");
+        assert_eq!(summary.iterations, 4);
+    }
+
+    #[test]
     fn runtime_error_context_overflow_flag() {
         assert!(!RuntimeError::new("boom").is_context_overflow());
         assert!(RuntimeError::context_overflow("too long").is_context_overflow());
@@ -1877,6 +2016,114 @@ mod tests {
         assert!(
             output.contains("post hook ran"),
             "tool output missing post hook feedback: {output:?}"
+        );
+    }
+
+    #[test]
+    fn cancelling_mid_tool_loop_preserves_executed_results() {
+        // One assistant turn asks for two tools. The executor runs the first
+        // successfully, then arms cancellation so the loop is interrupted before
+        // the second runs. The already-executed result must survive in the
+        // session, and the un-run tool must still get an answer, so the
+        // assistant/tool message pair stays valid for resumption.
+        struct OneTurnTwoToolsClient {
+            called: bool,
+        }
+        impl ApiClient for OneTurnTwoToolsClient {
+            fn stream(
+                &mut self,
+                _request: ApiRequest,
+            ) -> Result<Vec<AssistantEvent>, RuntimeError> {
+                if self.called {
+                    return Err(RuntimeError::new("unexpected API call after interrupt"));
+                }
+                self.called = true;
+                Ok(vec![
+                    AssistantEvent::ToolUse {
+                        id: "tool-1".to_string(),
+                        name: "first".to_string(),
+                        input: "{}".to_string(),
+                    },
+                    AssistantEvent::ToolUse {
+                        id: "tool-2".to_string(),
+                        name: "second".to_string(),
+                        input: "{}".to_string(),
+                    },
+                    AssistantEvent::MessageStop,
+                ])
+            }
+        }
+
+        struct CancelAfterFirstTool {
+            cancel: bool,
+        }
+        impl ToolExecutor for CancelAfterFirstTool {
+            fn execute(&mut self, tool_name: &str, _input: &str) -> Result<String, ToolError> {
+                self.cancel = true;
+                Ok(format!("{tool_name} output"))
+            }
+            fn is_cancelled(&self) -> bool {
+                self.cancel
+            }
+        }
+
+        let mut runtime = ConversationRuntime::new_with_features(
+            Session::new(),
+            OneTurnTwoToolsClient { called: false },
+            CancelAfterFirstTool { cancel: false },
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            vec!["system".to_string()],
+            RuntimeFeatureConfig::default(),
+        );
+
+        let result = runtime.run_turn("do two things", None);
+        let error = result.expect_err("cancellation should surface as an error");
+        assert!(
+            error.to_string().contains("interrupted"),
+            "unexpected error: {error}"
+        );
+
+        let tool_message = runtime
+            .session()
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == MessageRole::Tool)
+            .expect("interrupted turn should still record a tool-result message");
+        assert_eq!(
+            tool_message.blocks.len(),
+            2,
+            "every tool_use must be answered so the history is valid"
+        );
+
+        let ContentBlock::ToolResult {
+            tool_use_id,
+            output,
+            is_error,
+            ..
+        } = &tool_message.blocks[0]
+        else {
+            panic!("expected first tool result block");
+        };
+        assert_eq!(tool_use_id, "tool-1");
+        assert!(!*is_error, "executed tool result should not be an error");
+        assert!(
+            output.contains("first output"),
+            "executed tool result must be preserved: {output:?}"
+        );
+
+        let ContentBlock::ToolResult {
+            tool_use_id,
+            is_error,
+            ..
+        } = &tool_message.blocks[1]
+        else {
+            panic!("expected second tool result block");
+        };
+        assert_eq!(tool_use_id, "tool-2");
+        assert!(
+            *is_error,
+            "the un-run tool must receive a synthetic interrupted result"
         );
     }
 

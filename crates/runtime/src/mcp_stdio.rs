@@ -681,6 +681,12 @@ impl McpStdioProcess {
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
         apply_env(&mut command, &transport.env);
+        if let Some(workspace) = std::env::var_os("ARIS_WORKSPACE_ROOT") {
+            let workspace = std::path::PathBuf::from(workspace);
+            if !workspace.as_os_str().is_empty() {
+                command.current_dir(workspace);
+            }
+        }
         crate::configure_managed_tokio_command(&mut command);
 
         let mut child = command.spawn()?;

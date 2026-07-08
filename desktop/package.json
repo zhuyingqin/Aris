@@ -1,12 +1,13 @@
 {
   "name": "aris-studio",
   "private": true,
-  "version": "0.4.5",
+  "version": "0.4.10",
   "type": "module",
   "description": "SomniQ Studio - desktop UI for Chat, literature, skills, sessions, and settings",
   "scripts": {
     "dev": "vite",
     "dev:lab": "vite --host 127.0.0.1 --port 5173 --strictPort --open /?labPreview=1",
+    "dev:typeset": "vite --host 127.0.0.1 --port 1420 --strictPort --open /?typesetPreview=1",
     "build": "vite build",
     "build:cli": "node scripts/build-cli-resource.cjs",
     "build:playwright-mcp": "node scripts/build-playwright-mcp-resource.cjs",
@@ -20,6 +21,9 @@
     "tauri": "tauri"
   },
   "dependencies": {
+    "@codemirror/commands": "^6.10.4",
+    "@codemirror/state": "^6.7.1",
+    "@codemirror/view": "^6.43.6",
     "@tanstack/react-virtual": "^3.14.2",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-dialog": "^2.7.1",
@@ -27,13 +31,16 @@
     "@tauri-apps/plugin-updater": "^2.10.1",
     "highlight.js": "^11.11.1",
     "katex": "^0.17.0",
+    "mathlive": "^0.110.0",
     "mermaid": "^11.15.0",
     "pdfjs-dist": "^5.7.284",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-markdown": "^10.1.0",
     "rehype-highlight": "^7.0.2",
+    "rehype-katex": "^7.0.1",
     "remark-gfm": "^4.0.1",
+    "remark-math": "^6.0.0",
     "zustand": "^4.5.5"
   },
   "devDependencies": {

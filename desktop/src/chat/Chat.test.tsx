@@ -7,12 +7,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChatAttachment, ChatCommandSelection, ChatTurn, DesktopCommandSpec, DesktopProject, SkillMeta } from "../types";
 import ChatComposer, { attachmentFromFile, resizeComposerTextarea } from "./ChatComposer";
 import ChatMessage, { diffFromTool } from "./ChatMessage";
-import { completedAssistantBlocks, contextForRetry, needsBackendContextReset, visibleTurnError } from "./Chat";
+import { completedAssistantBlocks, contextForRetry, continueStoppedPrompt, needsBackendContextReset, visibleTurnError } from "./Chat";
 import ChatSidebar from "./ChatSidebar";
 import CommandSelection from "./CommandSelection";
 import {
+  activeQuestionNumber,
+  firstVisibleTurnIndexFromVirtualItems,
   isNearBottom,
   isScrollbarPointer,
+  questionMarkersFromTurns,
+  questionPreviewFromTurn,
   shouldIgnoreProgrammaticFollowScroll,
   shouldPauseAutoFollowForWheel,
 } from "./ChatThread";
@@ -101,6 +105,70 @@ describe("Chat interaction helpers", () => {
     expect(shouldIgnoreProgrammaticFollowScroll(180, 100, false)).toBe(false);
   });
 
+  it("builds a compact timeline from user questions only", () => {
+    const turns: ChatTurn[] = [
+      { id: "u1", role: "user", blocks: [{ kind: "text", text: "First question" }] },
+      { id: "a1", role: "assistant", blocks: [{ kind: "text", text: "Answer" }] },
+      { id: "u2", role: "user", blocks: [{ kind: "text", text: "Second question\nwith details" }] },
+    ];
+
+    expect(questionMarkersFromTurns(turns)).toEqual([
+      { id: "u1", turnIndex: 0, number: 1, preview: "First question" },
+      { id: "u2", turnIndex: 2, number: 2, preview: "Second question with details" },
+    ]);
+  });
+
+  it("summarizes long or attachment-only questions for the hover list", () => {
+    expect(questionPreviewFromTurn({
+      id: "long",
+      role: "user",
+      blocks: [{ kind: "text", text: "a".repeat(52) }],
+    })).toBe(`${"a".repeat(48)}...`);
+    expect(questionPreviewFromTurn({
+      id: "attachment",
+      role: "user",
+      blocks: [],
+      attachments: [{ id: "att-1", kind: "file", name: "notes.md" }],
+    })).toBe("附件：notes.md");
+    expect(questionPreviewFromTurn({
+      id: "attached-context",
+      role: "user",
+      blocks: [{ kind: "text", text: "Attached context" }],
+      attachments: [{ id: "att-2", kind: "file", name: "brief.md" }],
+    })).toBe("附件：brief.md");
+  });
+
+  it("keeps the active question aligned to the first visible turn", () => {
+    const markers = questionMarkersFromTurns([
+      { id: "u1", role: "user", blocks: [{ kind: "text", text: "First" }] },
+      { id: "a1", role: "assistant", blocks: [{ kind: "text", text: "Answer" }] },
+      { id: "u2", role: "user", blocks: [{ kind: "text", text: "Second" }] },
+      { id: "a2", role: "assistant", blocks: [{ kind: "text", text: "Answer" }] },
+      { id: "u3", role: "user", blocks: [{ kind: "text", text: "Third" }] },
+    ]);
+
+    expect(activeQuestionNumber(markers, 0)).toBe(1);
+    expect(activeQuestionNumber(markers, 1)).toBe(1);
+    expect(activeQuestionNumber(markers, 2)).toBe(2);
+    expect(activeQuestionNumber(markers, 99)).toBe(3);
+    expect(activeQuestionNumber([], 0)).toBeNull();
+  });
+
+  it("derives the visible turn from real scroll position instead of overscan", () => {
+    const items = [
+      { index: 0, start: 0, size: 120 },
+      { index: 1, start: 120, size: 180 },
+      { index: 2, start: 300, size: 160 },
+      { index: 3, start: 460, size: 220 },
+    ];
+
+    expect(firstVisibleTurnIndexFromVirtualItems(items, 0)).toBe(0);
+    expect(firstVisibleTurnIndexFromVirtualItems(items, 126)).toBe(1);
+    expect(firstVisibleTurnIndexFromVirtualItems(items, 300)).toBe(2);
+    expect(firstVisibleTurnIndexFromVirtualItems(items, 900)).toBe(3);
+    expect(firstVisibleTurnIndexFromVirtualItems([], 300)).toBe(0);
+  });
+
   it("creates a readable diff for file edit tools", () => {
     const change = diffFromTool({
       kind: "tool",
@@ -165,6 +233,56 @@ describe("Chat interaction helpers", () => {
     );
 
     expect(screen.getByRole("button", { name: "reports/result.md" })).toBeTruthy();
+  });
+
+  it("renders sent image attachments as image previews", () => {
+    render(
+      <ChatMessage
+        turn={{
+          id: "user-image",
+          role: "user",
+          blocks: [{ kind: "text", text: "see attached" }],
+          attachments: [{
+            id: "att-image",
+            kind: "image",
+            name: "shot.png",
+            preview: "data:image/png;base64,ZmFrZQ==",
+          }],
+        }}
+        canRetry={false}
+        onEdit={() => undefined}
+        onRetry={() => undefined}
+        onContinue={() => undefined}
+      />,
+    );
+
+    const image = screen.getByRole("img", { name: "shot.png" }) as HTMLImageElement;
+    expect(image.src).toContain("data:image/png;base64,ZmFrZQ==");
+    expect(screen.queryByText(/shot\.png$/)).toBeNull();
+  });
+
+  it("renders image paths mentioned by tool output as previews", () => {
+    render(
+      <ChatMessage
+        turn={{
+          id: "assistant-tool-image",
+          role: "assistant",
+          blocks: [{
+            kind: "tool",
+            name: "run_experiment",
+            input: "{}",
+            output: "saved figure to https://example.com/results/plot.png",
+          }],
+        }}
+        canRetry={false}
+        onEdit={() => undefined}
+        onRetry={() => undefined}
+        onContinue={() => undefined}
+      />,
+    );
+
+    const image = screen.getByRole("img", { name: "https://example.com/results/plot.png" }) as HTMLImageElement;
+    expect(image.src).toBe("https://example.com/results/plot.png");
   });
 
   it("renders assistant Markdown file references as local links", () => {
@@ -369,7 +487,7 @@ describe("Chat interaction helpers", () => {
     expect(transcript).toContain("README body");
   });
 
-  it("omits assistant tool transcripts from retry and continue context", async () => {
+  it("rebuilds stopped assistant turns into backend context with tool activity", async () => {
     const messages = await contextForRetry([
       { id: "user-1", role: "user", blocks: [{ kind: "text", text: "Read README" }] },
       {
@@ -385,8 +503,82 @@ describe("Chat interaction helpers", () => {
 
     expect(messages).toEqual([
       { role: "user", text: "Read README", images: [] },
-      { role: "assistant", text: "I checked the file." },
+      {
+        role: "assistant",
+        text: "I checked the file.",
+        toolCalls: [{ id: "tool-1", name: "read_file", input: "{\"path\":\"README.md\"}" }],
+      },
+      {
+        role: "tool",
+        toolResults: [{ toolUseId: "tool-1", toolName: "read_file", output: "README body", isError: false }],
+      },
     ]);
+  });
+
+  it("rebuilds completed assistant turns with their tool activity, not text alone", async () => {
+    const messages = await contextForRetry([
+      { id: "user-1", role: "user", blocks: [{ kind: "text", text: "Read README" }] },
+      {
+        id: "assistant-1",
+        role: "assistant",
+        blocks: [
+          { kind: "text", text: "I checked the file." },
+          { kind: "tool", id: "tool-1", name: "read_file", input: "{\"path\":\"README.md\"}", output: "README body" },
+        ],
+      },
+    ]);
+
+    expect(messages).toEqual([
+      { role: "user", text: "Read README", images: [] },
+      {
+        role: "assistant",
+        text: "I checked the file.",
+        toolCalls: [{ id: "tool-1", name: "read_file", input: "{\"path\":\"README.md\"}" }],
+      },
+      {
+        role: "tool",
+        toolResults: [{ toolUseId: "tool-1", toolName: "read_file", output: "README body", isError: false }],
+      },
+    ]);
+    expect(JSON.stringify(messages)).not.toContain("[Tool call:");
+  });
+
+  it("still drops in-flight and failed turns from backend context", async () => {
+    const messages = await contextForRetry([
+      { id: "user-1", role: "user", blocks: [{ kind: "text", text: "Do it" }] },
+      { id: "a-streaming", role: "assistant", streaming: true, blocks: [{ kind: "text", text: "partial" }] },
+      {
+        id: "a-error",
+        role: "assistant",
+        error: "boom",
+        blocks: [
+          { kind: "text", text: "failed partial answer" },
+          {
+            kind: "tool",
+            id: "tool-failed",
+            name: "read_file",
+            input: "{\"path\":\"missing.md\"}",
+            output: "read_file failed with stale context",
+            isError: true,
+          },
+        ],
+      },
+    ]);
+
+    expect(messages).toEqual([{ role: "user", text: "Do it", images: [] }]);
+    expect(JSON.stringify(messages)).not.toContain("failed partial answer");
+    expect(JSON.stringify(messages)).not.toContain("tool-failed");
+    expect(JSON.stringify(messages)).not.toContain("stale context");
+  });
+
+  it("continue prompt points at the rebuilt context without embedding the partial", () => {
+    const prompt = continueStoppedPrompt();
+
+    expect(prompt).toContain("Continue from where you stopped.");
+    expect(prompt).toContain("already in the conversation above");
+    expect(prompt).toContain("Do not repeat");
+    // No partial text is embedded (and therefore never truncated at 12k).
+    expect(prompt).not.toContain("Partial stopped response:");
   });
 
   it("requires backend context reset when rerunning from an earlier turn", () => {
@@ -406,6 +598,26 @@ describe("Chat interaction helpers", () => {
       current[3],
     ])).toBe(true);
     expect(needsBackendContextReset(current, current, true)).toBe(true);
+    expect(needsBackendContextReset(
+      [
+        current[0],
+        { ...current[1], stopped: true },
+      ],
+      [
+        current[0],
+        { ...current[1], stopped: true },
+      ],
+    )).toBe(true);
+    expect(needsBackendContextReset(
+      [
+        current[0],
+        { ...current[1], error: "provider failed" },
+      ],
+      [
+        current[0],
+        { ...current[1], error: "provider failed" },
+      ],
+    )).toBe(true);
   });
 
   it("hides expected cancel errors but preserves real failures after stop", () => {
@@ -1167,7 +1379,7 @@ describe("ChatComposer picker keyboard operation", () => {
   });
 
   it("attaches a recent @ file with Enter instead of inserting its body", async () => {
-    localStorage.setItem("aris-chat-recent-files", JSON.stringify(["src/chat/Chat.tsx"]));
+    localStorage.setItem("somniq-chat-recent-files", JSON.stringify(["src/chat/Chat.tsx"]));
     const user = userEvent.setup();
     render(<ComposerHarness />);
     const textbox = screen.getByRole("textbox");

@@ -3,3 +3,6 @@ dist/
 src-tauri/target/
 src-tauri/gen/
 *.log
+# One-off smoke-test scripts kept at the repo root, not part of the
+# shipped surface area (see `npm test` for the canonical suite).
+/test-*.mjs

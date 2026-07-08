@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   onChatDelta: vi.fn(),
   onChatThinkingDelta: vi.fn(),
   onChatTool: vi.fn(),
+  onChatToolProgress: vi.fn(),
   onChatToolResult: vi.fn(),
   onChatPermissionRequest: vi.fn(),
   onChatPermissionResolved: vi.fn(),
@@ -25,6 +26,7 @@ vi.mock("../api/tauri", () => ({
   onChatDelta: mocks.onChatDelta,
   onChatThinkingDelta: mocks.onChatThinkingDelta,
   onChatTool: mocks.onChatTool,
+  onChatToolProgress: mocks.onChatToolProgress,
   onChatToolResult: mocks.onChatToolResult,
   onChatPermissionRequest: mocks.onChatPermissionRequest,
   onChatPermissionResolved: mocks.onChatPermissionResolved,
@@ -34,12 +36,13 @@ vi.mock("../api/tauri", () => ({
   onChatContextWarning: mocks.onChatContextWarning,
 }));
 
-import { useChatStream } from "./useChatStream";
+import { updateToolProgress, useChatStream } from "./useChatStream";
 
 const listenerMocks = [
   mocks.onChatDelta,
   mocks.onChatThinkingDelta,
   mocks.onChatTool,
+  mocks.onChatToolProgress,
   mocks.onChatToolResult,
   mocks.onChatPermissionRequest,
   mocks.onChatPermissionResolved,
@@ -64,7 +67,34 @@ afterEach(() => {
 });
 
 describe("useChatStream concurrent sessions", () => {
-  it("ignores stale Tauri listeners after a subscription refresh", () => {
+  it("updates progress on the matching running tool block", () => {
+    const blocks = updateToolProgress([
+      { kind: "tool", id: "older", name: "bash", input: "{}", output: "done" },
+      { kind: "tool", id: "run-1", name: "bash", input: "{}" },
+    ], {
+      id: "run-1",
+      name: "bash",
+      elapsedMs: 1_500,
+      timeoutMs: 10_000,
+      pid: 42,
+      stdoutTail: "halfway",
+      nearTimeout: false,
+      message: "Still running",
+    });
+
+    expect(blocks[0]).not.toHaveProperty("progress");
+    expect(blocks[1]).toMatchObject({
+      progress: {
+        elapsedMs: 1_500,
+        timeoutMs: 10_000,
+        pid: 42,
+        stdoutTail: "halfway",
+        nearTimeout: false,
+      },
+    });
+  });
+
+  it("keeps one Tauri subscription and uses latest callbacks after rerender", () => {
     const deltaHandlers: Array<(event: { sessionId: string; text: string }) => void> = [];
     const doneHandlers: Array<(event: { sessionId: string; text: string }) => void> = [];
     mocks.onChatDelta.mockImplementation((handler) => {
@@ -111,8 +141,8 @@ describe("useChatStream concurrent sessions", () => {
       }
     });
 
-    expect(deltaHandlers).toHaveLength(2);
-    expect(doneHandlers).toHaveLength(2);
+    expect(deltaHandlers).toHaveLength(1);
+    expect(doneHandlers).toHaveLength(1);
     expect(firstPatchAssistant).not.toHaveBeenCalled();
     expect(secondPatchAssistant).toHaveBeenCalledTimes(1);
   });
@@ -223,7 +253,7 @@ describe("useChatStream concurrent sessions", () => {
     });
   });
 
-  it("uses session contextTokens instead of provider usage to update context state", () => {
+  it("prefers providerUsage.promptTokens over contextTokens for real context ring", () => {
     let doneHandler:
       | ((event: {
         sessionId: string;
@@ -254,8 +284,9 @@ describe("useChatStream concurrent sessions", () => {
       });
     });
 
-    expect(onContextTokens).toHaveBeenCalledWith("chat-ctx", 900);
-    expect(onContextTokens).not.toHaveBeenCalledWith("chat-ctx", 500_000);
+    // Real API prompt_tokens should be preferred over the local estimate.
+    expect(onContextTokens).toHaveBeenCalledWith("chat-ctx", 420_000);
+    expect(onContextTokens).not.toHaveBeenCalledWith("chat-ctx", 900);
   });
 
   it("deduplicates repeated AskUserQuestion tool-call events by id", () => {
@@ -334,6 +365,78 @@ describe("useChatStream concurrent sessions", () => {
       "Error: provider stream failed",
       false,
     );
+  });
+
+  it("flushes queued deltas before surfacing a backend failure", () => {
+    let deltaHandler: ((event: { sessionId: string; text: string }) => void) | undefined;
+    let errorHandler: ((event: { sessionId: string; message: string }) => void) | undefined;
+    mocks.onChatDelta.mockImplementation((handler) => {
+      deltaHandler = handler;
+      return Promise.resolve(() => undefined);
+    });
+    mocks.onChatError.mockImplementation((handler) => {
+      errorHandler = handler;
+      return Promise.resolve(() => undefined);
+    });
+
+    const events: string[] = [];
+    let current = { id: "assistant", role: "assistant" as const, blocks: [], streaming: true };
+    const patchAssistant = vi.fn((_sessionId: string, patch) => {
+      events.push("patch");
+      current = patch(current);
+    });
+    const onError = vi.fn(() => events.push("error"));
+
+    renderHook(() => useChatStream({
+      patchAssistant,
+      onComplete: vi.fn(),
+      onError,
+    }));
+
+    act(() => {
+      deltaHandler?.({ sessionId: "chat-fail", text: "partial before failure" });
+      errorHandler?.({ sessionId: "chat-fail", message: "context window exceeded" });
+    });
+
+    expect(events).toEqual(["patch", "error"]);
+    expect(current.blocks).toEqual([{ kind: "text", text: "partial before failure" }]);
+    expect(onError).toHaveBeenCalledWith("chat-fail", "context window exceeded", false);
+  });
+
+  it("clears failed session state so the same chat can run again", async () => {
+    let attempt = 0;
+    mocks.chatSend.mockImplementation(async () => {
+      attempt += 1;
+      if (attempt === 1) throw new Error("unexpected provider failure");
+      return "recovered reply";
+    });
+
+    const onComplete = vi.fn();
+    const onError = vi.fn();
+    const { result } = renderHook(() => useChatStream({
+      patchAssistant: vi.fn(),
+      onComplete,
+      onError,
+    }));
+
+    let first!: boolean;
+    await act(async () => {
+      first = await result.current.run("chat-retry", "first");
+    });
+
+    expect(first).toBe(false);
+    expect(result.current.isRunning("chat-retry")).toBe(false);
+    expect(result.current.runningSessionIds).toEqual(new Set());
+
+    let second!: boolean;
+    await act(async () => {
+      second = await result.current.run("chat-retry", "second");
+    });
+
+    expect(second).toBe(true);
+    expect(mocks.chatSend).toHaveBeenNthCalledWith(2, "chat-retry", "second");
+    expect(onComplete).toHaveBeenCalledWith("chat-retry", "recovered reply");
+    expect(onError).toHaveBeenCalledTimes(1);
   });
 
   it("surfaces a backend chat-error event through onError", async () => {

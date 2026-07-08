@@ -7,7 +7,8 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
-pub const SCRATCH_DIR: &str = ".aris";
+pub const SCRATCH_DIR: &str = ".somniq";
+pub const TMP_SUBDIR: &str = "tmp";
 pub const SLIDES_DIR: &str = "slides";
 pub const POSTER_DIR: &str = "poster";
 pub const WEB_DIR: &str = "web";
@@ -55,6 +56,10 @@ pub fn runs_dir_at(base: &Path) -> PathBuf {
 
 pub fn scratch_dir_at(base: &Path) -> PathBuf {
     base.join(SCRATCH_DIR)
+}
+
+pub fn scratch_tmp_dir_at(base: &Path) -> PathBuf {
+    scratch_dir_at(base).join(TMP_SUBDIR)
 }
 
 pub fn studio_library_path_at(base: &Path) -> PathBuf {
@@ -112,6 +117,7 @@ pub fn is_noisy_workspace_entry(name: &str) -> bool {
             | ".codex"
             | ".agents"
             | ".clawd-agents"
+            | ".somniq"
             | ".sandbox-home"
             | ".sandbox-tmp"
             | "node_modules"
@@ -155,7 +161,7 @@ pub fn layout_json() -> Value {
             },
             {
                 "kind": "scratch",
-                "directory": SCRATCH_DIR,
+                "directory": format!("{SCRATCH_DIR}/{TMP_SUBDIR}"),
                 "description": "Temporary files, caches, and other non-user-facing intermediates."
             },
             {

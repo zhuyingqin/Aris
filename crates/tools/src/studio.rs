@@ -605,7 +605,7 @@ mod tests {
 
     fn temp_dir(label: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
-            "aris-studio-{label}-{}-{}",
+            "somniq-studio-{label}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

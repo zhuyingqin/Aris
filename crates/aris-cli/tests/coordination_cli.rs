@@ -43,7 +43,7 @@ fn cli_runs_approved_workflow_through_tool_and_persists_timeline() {
         "stdout should contain final model text"
     );
 
-    let manifest = only_workflow_manifest(case.run_state_dir());
+    let manifest = only_workflow_manifest(case.workflows_dir());
     assert_eq!(manifest["status"], "completed");
     assert_eq!(manifest["result"], "CLI workflow final");
     assert_eq!(manifest["phases"][0]["status"], "completed");
@@ -77,7 +77,7 @@ fn cli_approval_gate_keeps_workflow_result_uncommitted() {
     );
     assert_success(&output);
 
-    let manifest = only_workflow_manifest(case.run_state_dir());
+    let manifest = only_workflow_manifest(case.workflows_dir());
     assert_eq!(manifest["status"], "approval_required");
     assert!(manifest.get("result").is_none_or(Value::is_null));
     assert_eq!(
@@ -347,11 +347,19 @@ impl TestCase {
     }
 
     fn run_state_dir(&self) -> PathBuf {
-        self.cwd.join(".claude").join("run-state")
+        self.runtime_dir().join("run-state")
+    }
+
+    fn workflows_dir(&self) -> PathBuf {
+        self.runtime_dir().join("workflows")
+    }
+
+    fn runtime_dir(&self) -> PathBuf {
+        self.cwd.join(".somniq").join("runtime")
     }
 
     fn agent_store_dir(&self) -> PathBuf {
-        self.root.join(".clawd-agents")
+        self.runtime_dir().join("agents")
     }
 }
 
@@ -416,7 +424,6 @@ fn run_aris_prompt(case: &TestCase, base_url: String, prompt: &str) -> std::proc
         .env("HOME", &case.home)
         .env("USERPROFILE", &case.home)
         .env("CLAUDE_CONFIG_HOME", case.home.join(".claude"))
-        .env("CLAWD_AGENT_STORE", case.agent_store_dir())
         .env("EXECUTOR_PROVIDER", "openai")
         .env("EXECUTOR_API_KEY", "sk-test")
         .env("EXECUTOR_BASE_URL", base_url)
@@ -572,9 +579,8 @@ fn find_header_end(buffer: &[u8]) -> Option<usize> {
     buffer.windows(4).position(|window| window == b"\r\n\r\n")
 }
 
-fn only_workflow_manifest(run_state_dir: PathBuf) -> Value {
-    let workflow_dir = run_state_dir.join("workflows");
-    let manifests = fs::read_dir(&workflow_dir)
+fn only_workflow_manifest(workflows_dir: PathBuf) -> Value {
+    let manifests = fs::read_dir(&workflows_dir)
         .expect("workflow dir")
         .filter_map(Result::ok)
         .map(|entry| entry.path().join("manifest.json"))
@@ -612,7 +618,7 @@ fn json_lines(path: PathBuf) -> Vec<Value> {
 }
 
 fn session_files(cwd: &Path) -> Vec<PathBuf> {
-    let session_dir = cwd.join(".claude").join("sessions");
+    let session_dir = cwd.join(".somniq").join("runtime").join("sessions");
     let mut files = fs::read_dir(session_dir)
         .expect("sessions dir")
         .filter_map(Result::ok)

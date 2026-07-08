@@ -27,6 +27,10 @@ const isWindows =
 const playwrightArgs = () => [
   isWindows ? "--browser=msedge" : "--browser=chrome",
   "--caps=pdf",
+  "--user-data-dir",
+  ".somniq/tmp/browser/profile",
+  "--output-dir",
+  ".somniq/tmp/browser/output",
 ];
 
 const PRESETS: Record<string, McpStdioServerInput> = {
@@ -88,6 +92,7 @@ function uniqueName(base: string, servers: McpStdioServerInput[]) {
 
 export default function RuntimeAccess() {
   const setError = useStore((state) => state.setError);
+  const currentProject = useStore((state) => state.currentProject);
   const [permission, setPermission] = useState<PermissionModeView | null>(null);
   const [view, setView] = useState<McpConfigView | null>(null);
   const [servers, setServers] = useState<McpStdioServerInput[]>([]);
@@ -106,7 +111,7 @@ export default function RuntimeAccess() {
       .catch((error) => setError(String(error)));
   };
 
-  useEffect(load, [setError]);
+  useEffect(load, [currentProject?.id, setError]);
 
   const setProjectPermission = async (mode: string) => {
     try {

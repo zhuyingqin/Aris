@@ -1,8 +1,8 @@
-import { lazy, memo, Suspense, useCallback, useDeferredValue, useEffect, useRef, useState, useTransition, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+﻿import { lazy, memo, Suspense, useCallback, useDeferredValue, useEffect, useRef, useState, useTransition, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { appRelaunch, appUpdateCheck, appUpdateDownloadAndInstall, isTauri } from "./api/tauri";
-import { useStore, type Tab } from "./store";
+import { appRelaunch, appUpdateCheck, appUpdateDownloadAndInstall, isTauri, newapiBootstrap, onChatDone, type NewApiAccount } from "./api/tauri";
+import { isManagedAuthInvalidError, useStore, type Language, type Tab } from "./store";
 import type { AppUpdateInfo, AppUpdateProgress } from "./types";
 import ErrorBoundary from "./ErrorBoundary";
 import Chat from "./chat/Chat";
@@ -17,33 +17,201 @@ import OnboardingTutorial from "./OnboardingTutorial";
 const loadLiterature = () => import("./literature/Literature");
 const loadStudio = () => import("./studio/Studio");
 const loadMail = () => import("./mail/Mail");
+const loadTypeset = () => import("./typeset/Typeset");
 
 const Literature = lazy(loadLiterature);
 const Studio = lazy(loadStudio);
 const Mail = lazy(loadMail);
+const Typeset = lazy(loadTypeset);
 const ChatPane = memo(Chat);
+
+type AppShellCopy = {
+  appMenu: string[];
+  groups: Record<"Build" | "Library" | "System", string>;
+  nav: Record<Tab, string>;
+  loading: (label: string) => string;
+  viewErrorTitle: string;
+  viewErrorBody: string;
+  tryAgain: string;
+  userFallback: string;
+  accountInfo: string;
+  account: string;
+  balance: (value: string) => string;
+  sidebarExpandedTitle: string;
+  sidebarCollapsedTitle: string;
+  sidebarExpandedLabel: string;
+  sidebarCollapsedLabel: string;
+  back: string;
+  forward: string;
+  appMenuLabel: string;
+  minimizeWindow: string;
+  maximizeWindow: string;
+  closeWindow: string;
+  userMenu: string;
+  settings: string;
+  remainingUsage: string;
+  logout: string;
+  user: string;
+  closeNavigation: string;
+  toggleNavigation: string;
+  menu: string;
+  currentProject: string;
+  noProject: string;
+  projects: string;
+  dragToReorder: string;
+  addProject: string;
+  add: string;
+  runStateDir: string;
+  dismiss: string;
+  updateReady: (version: string) => string;
+  updateDownloading: (version: string, percent?: number | null) => string;
+  updateAvailable: (version: string) => string;
+};
+
+const APP_COPY: Record<Language, AppShellCopy> = {
+  cn: {
+    appMenu: ["文件", "编辑", "视图", "帮助"],
+    groups: { Build: "构建", Library: "资料库", System: "系统" },
+    nav: {
+      chat: "对话",
+      lab: "代码",
+      typeset: "论文",
+      literature: "文献",
+      studio: "工作室",
+      mail: "邮箱",
+      extensions: "扩展",
+      settings: "设置",
+      sessions: "会话",
+      scheduled: "定时任务",
+    },
+    loading: (label) => `正在加载${label}...`,
+    viewErrorTitle: "当前视图出现界面错误。",
+    viewErrorBody: "当前页面无法渲染。",
+    tryAgain: "重试",
+    userFallback: "用户",
+    accountInfo: "账户信息",
+    account: "账户",
+    balance: (value) => `余额 ${value}`,
+    sidebarExpandedTitle: "展开侧栏",
+    sidebarCollapsedTitle: "折叠侧栏",
+    sidebarExpandedLabel: "展开导航侧栏",
+    sidebarCollapsedLabel: "折叠导航侧栏",
+    back: "后退",
+    forward: "前进",
+    appMenuLabel: "应用菜单",
+    minimizeWindow: "最小化窗口",
+    maximizeWindow: "最大化窗口",
+    closeWindow: "关闭窗口",
+    userMenu: "用户菜单",
+    settings: "设置",
+    remainingUsage: "剩余用量",
+    logout: "退出登录",
+    user: "用户",
+    closeNavigation: "关闭导航",
+    toggleNavigation: "切换导航",
+    menu: "菜单",
+    currentProject: "当前项目",
+    noProject: "无项目",
+    projects: "项目",
+    dragToReorder: "拖动排序",
+    addProject: "添加 SomniQ 项目",
+    add: "添加",
+    runStateDir: "运行状态目录",
+    dismiss: "关闭",
+    updateReady: (version) => `更新${version}已安装，点击重启 SomniQ Studio。`,
+    updateDownloading: (version, percent) => percent != null ? `正在安装更新${version}: ${percent}%` : `正在安装更新${version}`,
+    updateAvailable: (version) => `发现更新${version}，点击安装。`,
+  },
+  en: {
+    appMenu: ["File", "Edit", "View", "Help"],
+    groups: { Build: "Build", Library: "Library", System: "System" },
+    nav: {
+      chat: "Chat",
+      lab: "Lab",
+      typeset: "Typeset",
+      literature: "Literature",
+      studio: "Studio",
+      mail: "Mail",
+      extensions: "Extensions",
+      settings: "Settings",
+      sessions: "Sessions",
+      scheduled: "Scheduled",
+    },
+    loading: (label) => `Loading ${label}...`,
+    viewErrorTitle: "This view hit a UI error.",
+    viewErrorBody: "The current screen could not render.",
+    tryAgain: "Try again",
+    userFallback: "User",
+    accountInfo: "Account info",
+    account: "Account",
+    balance: (value) => `Balance ${value}`,
+    sidebarExpandedTitle: "Expand sidebar",
+    sidebarCollapsedTitle: "Collapse sidebar",
+    sidebarExpandedLabel: "Expand navigation sidebar",
+    sidebarCollapsedLabel: "Collapse navigation sidebar",
+    back: "Back",
+    forward: "Forward",
+    appMenuLabel: "Application menu",
+    minimizeWindow: "Minimize window",
+    maximizeWindow: "Maximize window",
+    closeWindow: "Close window",
+    userMenu: "User menu",
+    settings: "Settings",
+    remainingUsage: "Remaining usage",
+    logout: "Sign out",
+    user: "User",
+    closeNavigation: "Close navigation",
+    toggleNavigation: "Toggle navigation",
+    menu: "Menu",
+    currentProject: "Current project",
+    noProject: "No project",
+    projects: "Projects",
+    dragToReorder: "Drag to reorder",
+    addProject: "Add SomniQ project",
+    add: "Add",
+    runStateDir: "run-state directory",
+    dismiss: "Dismiss",
+    updateReady: (version) => `Update${version} installed. Restart SomniQ Studio.`,
+    updateDownloading: (version, percent) => percent != null ? `Installing update${version}: ${percent}%` : `Installing update${version}`,
+    updateAvailable: (version) => `Update${version} available. Click to install.`,
+  },
+};
+
+const TAB_MODULE_LABELS: Record<Tab, string> = {
+  chat: "Chat",
+  lab: "Lab",
+  typeset: "Typeset",
+  literature: "Literature",
+  studio: "Studio",
+  mail: "Mail",
+  extensions: "Extensions",
+  settings: "Settings",
+  sessions: "Sessions",
+  scheduled: "Scheduled",
+};
 
 function preloadTabModule(tabId: string) {
   if (tabId === "literature") void loadLiterature();
   else if (tabId === "studio") void loadStudio();
   else if (tabId === "mail") void loadMail();
+  else if (tabId === "typeset") void loadTypeset();
 }
 
-function AppLoadingPane({ label }: { label: string }) {
+function AppLoadingPane({ copy, label }: { copy: AppShellCopy; label: string }) {
   return (
     <div className="app-loading-pane" role="status" aria-live="polite">
       <span className="app-loading-spinner" aria-hidden="true" />
-      <span>Loading {label}...</span>
+      <span>{copy.loading(label)}</span>
     </div>
   );
 }
 
-function AppViewFallback({ error, reset }: { error: Error; reset: () => void }) {
+function AppViewFallback({ copy, error, reset }: { copy: AppShellCopy; error: Error; reset: () => void }) {
   return (
     <div className="app-view-error" role="alert">
-      <strong>This view hit a UI error.</strong>
-      <span>{error.message || "The current screen could not render."}</span>
-      <button type="button" onClick={reset}>Try again</button>
+      <strong>{copy.viewErrorTitle}</strong>
+      <span>{error.message || copy.viewErrorBody}</span>
+      <button type="button" onClick={reset}>{copy.tryAgain}</button>
     </div>
   );
 }
@@ -57,8 +225,18 @@ interface NavItem {
 type UpdateIndicatorState = "idle" | "available" | "downloading" | "ready";
 
 const UPDATE_CHECK_INTERVAL_MS = 30 * 60 * 1000;
+const ACCOUNT_REFRESH_INTERVAL_MS = 60 * 1000;
+const ACCOUNT_REFRESH_MIN_INTERVAL_MS = 15 * 1000;
+const SIDEBAR_WIDTH_KEY = "somniq-sidebar-w";
+const SIDEBAR_WIDTH_LEGACY_KEY = "aris-sidebar-w";
+const SIDEBAR_COLLAPSED_KEY = "somniq-sidebar-collapsed";
+const SIDEBAR_COLLAPSED_LEGACY_KEY = "aris-sidebar-collapsed";
+const ACCOUNT_CACHE_KEY = "somniq-account-v1";
+const ACCOUNT_LEGACY_CACHE_KEY = "aris-account-v1";
+const SETTINGS_TAB_REQUEST_KEY = "somniq-settings-tab-request";
+const SETTINGS_TAB_REQUEST_EVENT = "somniq-settings-tab-request";
 
-const WINDOW_MENUS = ["文件", "编辑", "视图", "帮助"];
+type RequestedSettingsTab = "general" | "auth" | "usage" | "about";
 
 const IC = (p: { d: string; extra?: string }) => (
   <svg width="16" height="16" viewBox="0 0 16 16" fill="none"
@@ -70,7 +248,7 @@ const IC = (p: { d: string; extra?: string }) => (
 );
 
 // Chevron / control glyphs rendered as crisp SVG so they align on the pixel grid
-// instead of relying on font-dependent glyphs like "‹", "×" or "v".
+// instead of relying on font-dependent glyphs like "鈥?, "脳" or "v".
 const Chevron = (p: { dir: "left" | "right" | "down"; size?: number }) => {
   const s = p.size ?? 16;
   const d = p.dir === "left" ? "M10 3.5 5.5 8l4.5 4.5"
@@ -84,7 +262,7 @@ const Chevron = (p: { dir: "left" | "right" | "down"; size?: number }) => {
   );
 };
 
-// Windows-style window controls, 10×10 viewBox centered in a 46×36 hit area.
+// Windows-style window controls, 10脳10 viewBox centered in a 46脳36 hit area.
 const WinCtl = {
   minimize: (
     <svg className="win-ctl-glyph" width="10" height="10" viewBox="0 0 10 10"
@@ -130,6 +308,44 @@ const PlusIcon = () => (
   </svg>
 );
 
+const UserCircleIcon = () => (
+  <svg width="16" height="16" viewBox="0 0 16 16" fill="none"
+    stroke="currentColor" strokeWidth="1.45" strokeLinecap="round" strokeLinejoin="round"
+    aria-hidden="true">
+    <circle cx="8" cy="8" r="6" />
+    <circle cx="8" cy="6.3" r="1.8" />
+    <path d="M4.8 12c.8-1.7 5.6-1.7 6.4 0" />
+  </svg>
+);
+
+const GearIcon = () => (
+  <svg width="16" height="16" viewBox="0 0 16 16" fill="none"
+    stroke="currentColor" strokeWidth="1.45" strokeLinecap="round" strokeLinejoin="round"
+    aria-hidden="true">
+    <circle cx="8" cy="8" r="2.3" />
+    <path d="M8 1.8v1.5M8 12.7v1.5M14.2 8h-1.5M3.3 8H1.8M12.4 3.6l-1.1 1.1M4.7 11.3l-1.1 1.1M12.4 12.4l-1.1-1.1M4.7 4.7l-1.1-1.1" />
+  </svg>
+);
+
+const UsageIcon = () => (
+  <svg width="16" height="16" viewBox="0 0 16 16" fill="none"
+    stroke="currentColor" strokeWidth="1.45" strokeLinecap="round" strokeLinejoin="round"
+    aria-hidden="true">
+    <path d="M3.3 11.8a5.8 5.8 0 119.4 0" />
+    <path d="M8 8.4l2.6-2.6" />
+    <path d="M5 12.8h6" />
+  </svg>
+);
+
+const LogoutIcon = () => (
+  <svg width="16" height="16" viewBox="0 0 16 16" fill="none"
+    stroke="currentColor" strokeWidth="1.45" strokeLinecap="round" strokeLinejoin="round"
+    aria-hidden="true">
+    <path d="M6.5 3H3.8a1 1 0 00-1 1v8a1 1 0 001 1h2.7" />
+    <path d="M9.5 5.2L12.3 8l-2.8 2.8M12.1 8H6.2" />
+  </svg>
+);
+
 const NAV_GROUPS: { group: string; items: NavItem[] }[] = [
   {
     group: "Build",
@@ -139,6 +355,9 @@ const NAV_GROUPS: { group: string; items: NavItem[] }[] = [
     }, {
       id: "lab", label: "Lab",
       icon: <IC d="M3.5 2.5h9v11h-9zM5.5 6l2.2 1.6-2.2 1.6M9 9.7h2.5" />,
+    }, {
+      id: "typeset", label: "Typeset",
+      icon: <IC d="M3 2.8h7.2L13 5.6v7.6H3zM10.2 2.8v2.8H13M5.2 7.1h5.6M5.2 9.2h5.6M5.2 11.3h3.2" />,
     }],
   },
   {
@@ -177,22 +396,9 @@ const NAV_GROUPS: { group: string; items: NavItem[] }[] = [
         id: "extensions", label: "Extensions",
         icon: <IC d="M6 2.5H3.5a1 1 0 00-1 1V6M10 2.5h2.5a1 1 0 011 1V6M6 13.5H3.5a1 1 0 01-1-1V10M10 13.5h2.5a1 1 0 001-1V10M6.2 6.2h3.6v3.6H6.2z" />,
       },
-      {
-        id: "settings", label: "Settings",
-        icon: <svg width="16" height="16" viewBox="0 0 16 16" fill="none"
-          stroke="currentColor" strokeWidth="1.45" strokeLinecap="round" strokeLinejoin="round"
-          aria-hidden="true">
-          <circle cx="8" cy="8" r="2.3" />
-          <path d="M8 1.5V3M8 13v1.5M14.5 8H13M3 8H1.5M12.4 3.6l-1.1 1.1M4.7 11.3l-1.1 1.1M12.4 12.4l-1.1-1.1M4.7 4.7l-1.1-1.1" />
-        </svg>,
-      },
     ],
   },
 ];
-
-const LABELS: Record<Tab, string> = Object.fromEntries(
-  NAV_GROUPS.flatMap((g) => g.items).map((i) => [i.id, i.label]),
-) as Record<Tab, string>;
 
 function moveProjectId(
   ids: string[],
@@ -212,6 +418,78 @@ function sameProjectOrder(left: string[], right: string[]) {
   return left.length === right.length && left.every((id, index) => id === right[index]);
 }
 
+function readCachedAccount(): NewApiAccount | null {
+  try {
+    const raw = localStorage.getItem(ACCOUNT_CACHE_KEY) ?? localStorage.getItem(ACCOUNT_LEGACY_CACHE_KEY);
+    return raw ? (JSON.parse(raw) as NewApiAccount) : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeCachedAccount(account: NewApiAccount | null) {
+  try {
+    if (account) {
+      localStorage.setItem(ACCOUNT_CACHE_KEY, JSON.stringify(account));
+      localStorage.removeItem(ACCOUNT_LEGACY_CACHE_KEY);
+    } else {
+      localStorage.removeItem(ACCOUNT_CACHE_KEY);
+      localStorage.removeItem(ACCOUNT_LEGACY_CACHE_KEY);
+    }
+  } catch {
+    // Storage may be unavailable in restricted browser contexts.
+  }
+}
+
+function accountName(account: NewApiAccount | null, fallback: string) {
+  const displayName = account?.displayName?.trim();
+  if (displayName) return displayName;
+  const username = account?.username?.trim();
+  if (!username) return fallback;
+  const at = username.indexOf("@");
+  return at > 0 ? username.slice(0, at) : username;
+}
+
+function accountEmail(account: NewApiAccount | null, fallback: string) {
+  return account?.username?.trim() || account?.displayName?.trim() || fallback;
+}
+
+function accountPlan(account: NewApiAccount | null, copy: AppShellCopy) {
+  const subscription = account?.subscriptionName?.trim();
+  if (subscription) return subscription;
+  if (account && Number.isFinite(account.quota)) return copy.balance(formatAccountQuota(account.quota));
+  return copy.account;
+}
+
+function formatAccountQuota(credits: number): string {
+  return `$${(credits / 500000).toFixed(2)}`;
+}
+
+function formatOptionalAccountQuota(credits?: number | null): string {
+  return typeof credits === "number" && Number.isFinite(credits)
+    ? formatAccountQuota(credits)
+    : "-";
+}
+
+function accountInitials(name: string, email: string, userFallback: string) {
+  const source = (name && name !== userFallback ? name : email).trim();
+  const local = source.includes("@") ? source.slice(0, source.indexOf("@")) : source;
+  const parts = local.split(/[\s._-]+/).filter(Boolean);
+  const chars = parts.length > 1
+    ? [parts[0][0], parts[1][0]]
+    : Array.from(parts[0] ?? local).slice(0, 2);
+  return chars.join("").toUpperCase() || "U";
+}
+
+function requestSettingsTab(tab: RequestedSettingsTab) {
+  try {
+    sessionStorage.setItem(SETTINGS_TAB_REQUEST_KEY, tab);
+  } catch {
+    // A live event below still handles the already-mounted settings page.
+  }
+  window.dispatchEvent(new CustomEvent<RequestedSettingsTab>(SETTINGS_TAB_REQUEST_EVENT, { detail: tab }));
+}
+
 function windowAction(action: "minimize" | "maximize" | "close") {
   if (!isTauri()) return;
   const currentWindow = getCurrentWindow();
@@ -221,8 +499,10 @@ function windowAction(action: "minimize" | "maximize" | "close") {
 }
 
 export default function App() {
+  const language = useStore((s) => s.language);
   const tab = useStore((s) => s.tab);
   const setTab = useStore((s) => s.setTab);
+  const logout = useStore((s) => s.logout);
   const deferredTab = useDeferredValue(tab);
   const [, startTabTransition] = useTransition();
   const stateDir = useStore((s) => s.stateDir);
@@ -236,15 +516,18 @@ export default function App() {
   const switchProject = useStore((s) => s.switchProject);
   const reorderProjects = useStore((s) => s.reorderProjects);
   const [sidebarWidth, setSidebarWidth] = useState<number>(() => {
-    const v = Number(localStorage.getItem("aris-sidebar-w"));
+    const v = Number(localStorage.getItem(SIDEBAR_WIDTH_KEY) ?? localStorage.getItem(SIDEBAR_WIDTH_LEGACY_KEY));
     return v >= 140 && v <= 400 ? v : 192;
   });
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(
-    () => localStorage.getItem("aris-sidebar-collapsed") === "true",
+    () => (localStorage.getItem(SIDEBAR_COLLAPSED_KEY) ?? localStorage.getItem(SIDEBAR_COLLAPSED_LEGACY_KEY)) === "true",
   );
   const sidebarResizeDragRef = useRef<{ startX: number; startWidth: number } | null>(null);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [projectMenuOpen, setProjectMenuOpen] = useState(false);
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
+  const [usageDetailsOpen, setUsageDetailsOpen] = useState(false);
+  const [account, setAccount] = useState<NewApiAccount | null>(() => readCachedAccount());
   const [draggedProjectId, setDraggedProjectId] = useState<string | null>(null);
   const [projectOrderPreview, setProjectOrderPreview] = useState<string[] | null>(null);
   const [updateState, setUpdateState] = useState<UpdateIndicatorState>("idle");
@@ -256,6 +539,8 @@ export default function App() {
   const suppressProjectClickRef = useRef(false);
   const updateCheckInFlightRef = useRef(false);
   const updateStateRef = useRef<UpdateIndicatorState>("idle");
+  const accountRefreshInFlightRef = useRef(false);
+  const lastAccountRefreshAtRef = useRef(0);
   const projectDragRef = useRef<{
     id: string;
     pointerId: number;
@@ -263,11 +548,14 @@ export default function App() {
     startY: number;
     moved: boolean;
   } | null>(null);
+  const userMenuRef = useRef<HTMLDivElement | null>(null);
 
   const selectTab = useCallback((nextTab: Tab) => {
     preloadTabModule(nextTab);
     startTabTransition(() => setTab(nextTab));
     setMobileNavOpen(false);
+    setUserMenuOpen(false);
+    setUsageDetailsOpen(false);
   }, [setTab, startTabTransition]);
 
   const chooseProject = async () => {
@@ -392,15 +680,80 @@ export default function App() {
     const w = Math.max(140, Math.min(400, sidebarResizeDragRef.current.startWidth + (e.clientX - sidebarResizeDragRef.current.startX)));
     sidebarResizeDragRef.current = null;
     setSidebarWidth(w);
-    localStorage.setItem("aris-sidebar-w", String(w));
+    localStorage.setItem(SIDEBAR_WIDTH_KEY, String(w));
+    localStorage.removeItem(SIDEBAR_WIDTH_LEGACY_KEY);
   };
   const toggleSidebar = () => {
     const next = !sidebarCollapsed;
     setSidebarCollapsed(next);
-    localStorage.setItem("aris-sidebar-collapsed", String(next));
+    localStorage.setItem(SIDEBAR_COLLAPSED_KEY, String(next));
+    localStorage.removeItem(SIDEBAR_COLLAPSED_LEGACY_KEY);
   };
 
+  const openSettingsTab = useCallback((settingsTab: RequestedSettingsTab = "general") => {
+    requestSettingsTab(settingsTab);
+    selectTab("settings");
+  }, [selectTab]);
+
+  const handleLogout = useCallback(() => {
+    setUserMenuOpen(false);
+    setUsageDetailsOpen(false);
+    setAccount(null);
+    writeCachedAccount(null);
+    logout();
+  }, [logout]);
+
+  const refreshAccount = useCallback(async (options: { force?: boolean } = {}) => {
+    if (!isTauri()) return;
+    const now = Date.now();
+    if (accountRefreshInFlightRef.current) return;
+    if (!options.force && now - lastAccountRefreshAtRef.current < ACCOUNT_REFRESH_MIN_INTERVAL_MS) return;
+    accountRefreshInFlightRef.current = true;
+    lastAccountRefreshAtRef.current = now;
+    try {
+      const next = await newapiBootstrap();
+      setAccount(next);
+      writeCachedAccount(next);
+    } catch (err) {
+      if (isManagedAuthInvalidError(err)) {
+        setAccount(null);
+        writeCachedAccount(null);
+        logout();
+      }
+    } finally {
+      accountRefreshInFlightRef.current = false;
+    }
+  }, [logout]);
+
   useEffect(() => init(), [init]);
+  useEffect(() => {
+    if (!isTauri()) return;
+    void refreshAccount({ force: true });
+    const timer = window.setInterval(() => {
+      void refreshAccount();
+    }, ACCOUNT_REFRESH_INTERVAL_MS);
+    const refreshOnFocus = () => {
+      void refreshAccount();
+    };
+    window.addEventListener("focus", refreshOnFocus);
+    let disposed = false;
+    let unlistenChatDone: (() => void) | null = null;
+    void onChatDone(() => {
+      void refreshAccount({ force: true });
+    }).then((unlisten) => {
+      if (disposed) unlisten();
+      else unlistenChatDone = unlisten;
+    }).catch(() => {});
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+      window.removeEventListener("focus", refreshOnFocus);
+      unlistenChatDone?.();
+    };
+  }, [refreshAccount]);
+  useEffect(() => {
+    if (userMenuOpen) void refreshAccount();
+  }, [refreshAccount, userMenuOpen]);
   useEffect(() => {
     let disposed = false;
     const heavyTabs = ["literature", "studio", "mail"];
@@ -475,6 +828,16 @@ export default function App() {
     return () => window.removeEventListener("keydown", closeOnEscape);
   }, [mobileNavOpen]);
   useEffect(() => {
+    const openSettingsShortcut = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.key === ",") {
+        event.preventDefault();
+        openSettingsTab("general");
+      }
+    };
+    window.addEventListener("keydown", openSettingsShortcut);
+    return () => window.removeEventListener("keydown", openSettingsShortcut);
+  }, [openSettingsTab]);
+  useEffect(() => {
     if (!projectMenuOpen) return;
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape") setProjectMenuOpen(false);
@@ -495,22 +858,47 @@ export default function App() {
       document.removeEventListener("pointerdown", closeOnPointerDown);
     };
   }, [projectMenuOpen]);
+  useEffect(() => {
+    if (!userMenuOpen) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setUserMenuOpen(false);
+        setUsageDetailsOpen(false);
+      }
+    };
+    const closeOnPointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (
+        target instanceof Node &&
+        !userMenuRef.current?.contains(target)
+      ) {
+        setUserMenuOpen(false);
+        setUsageDetailsOpen(false);
+      }
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    document.addEventListener("pointerdown", closeOnPointerDown);
+    return () => {
+      window.removeEventListener("keydown", closeOnEscape);
+      document.removeEventListener("pointerdown", closeOnPointerDown);
+    };
+  }, [userMenuOpen]);
   const projectById = new Map(projects.map((project) => [project.id, project]));
   const orderedProjects = (projectOrderPreview ?? projects.map((project) => project.id))
     .map((id) => projectById.get(id))
     .filter((project): project is NonNullable<typeof project> => Boolean(project));
   const renderedTab = deferredTab;
   const labWorkbench = renderedTab === "lab";
+  const typesetWorkbench = renderedTab === "typeset";
   const chatShell = renderedTab === "chat";
   const showUpdateIndicator = updateState === "available" || updateState === "downloading" || updateState === "ready";
+  const copy = APP_COPY[language];
   const updateVersionLabel = updateInfo?.version ? ` v${updateInfo.version}` : "";
   const updateTitle = updateState === "ready"
-    ? `Update${updateVersionLabel} installed. Restart SomniQ Studio.`
+    ? copy.updateReady(updateVersionLabel)
     : updateState === "downloading"
-      ? updateProgress?.percent != null
-        ? `Installing update${updateVersionLabel}: ${updateProgress.percent}%`
-        : `Installing update${updateVersionLabel}`
-      : `Update${updateVersionLabel} available. Click to install.`;
+      ? copy.updateDownloading(updateVersionLabel, updateProgress?.percent)
+      : copy.updateAvailable(updateVersionLabel);
   const handleUpdateIndicatorClick = async () => {
     if (updateState === "ready") {
       try {
@@ -567,10 +955,28 @@ export default function App() {
       <span className="app-update-badge" aria-hidden="true" />
     </button>
   ) : null;
+  const userName = accountName(account, copy.userFallback);
+  const userEmail = accountEmail(account, copy.accountInfo);
+  const userPlan = accountPlan(account, copy);
+  const userInitials = accountInitials(userName, userEmail, copy.userFallback);
+  const usageMenuLabels = language === "cn"
+    ? { balance: "余额", used: "已用", plan: "套餐", subscriptionBalance: "套餐余额" }
+    : { balance: "Balance", used: "Used", plan: "Plan", subscriptionBalance: "Plan balance" };
+  const usageDetailsLabel = language === "cn" ? "\u4f7f\u7528\u7edf\u8ba1" : "Usage statistics";
+  const showSubscriptionQuota = typeof account?.subscriptionQuota === "number"
+    && Number.isFinite(account.subscriptionQuota)
+    && account.subscriptionQuota !== account.quota;
+  const usagePrimary = [usageMenuLabels.balance, formatOptionalAccountQuota(account?.quota)] as const;
+  const usageMetrics = [
+    [usageMenuLabels.used, formatOptionalAccountQuota(account?.usedQuota)] as const,
+    ...(showSubscriptionQuota
+      ? [[usageMenuLabels.subscriptionBalance, formatOptionalAccountQuota(account?.subscriptionQuota)] as const]
+      : []),
+  ];
 
   return (
     <div
-      className={`app${sidebarCollapsed ? " sidebar-collapsed" : ""}${labWorkbench ? " app-lab-workbench" : ""}${chatShell ? " app-chat-shell" : ""}`}
+      className={`app${sidebarCollapsed ? " sidebar-collapsed" : ""}${labWorkbench ? " app-lab-workbench" : ""}${typesetWorkbench ? " app-typeset-workbench" : ""}${chatShell ? " app-chat-shell" : ""}`}
       style={{ "--app-sidebar-w": sidebarCollapsed ? "0px" : `${sidebarWidth}px` } as CSSProperties}
     >
       <div className="window-titlebar">
@@ -579,19 +985,19 @@ export default function App() {
             className="window-titlebar-sidebar"
             type="button"
             onClick={toggleSidebar}
-            title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
-            aria-label={sidebarCollapsed ? "Expand navigation sidebar" : "Collapse navigation sidebar"}
+            title={sidebarCollapsed ? copy.sidebarExpandedTitle : copy.sidebarCollapsedTitle}
+            aria-label={sidebarCollapsed ? copy.sidebarExpandedLabel : copy.sidebarCollapsedLabel}
           >
             <PanelIcon />
           </button>
-          <button className="window-nav-btn" type="button" disabled aria-label="Back">
+          <button className="window-nav-btn" type="button" disabled aria-label={copy.back}>
             <Chevron dir="left" />
           </button>
-          <button className="window-nav-btn" type="button" disabled aria-label="Forward">
+          <button className="window-nav-btn" type="button" disabled aria-label={copy.forward}>
             <Chevron dir="right" />
           </button>
-          <nav className="window-menu" aria-label="Application menu">
-            {WINDOW_MENUS.map((item) => (
+          <nav className="window-menu" aria-label={copy.appMenuLabel}>
+            {copy.appMenu.map((item) => (
               <button key={item} type="button">
                 {item}
               </button>
@@ -607,13 +1013,13 @@ export default function App() {
         </div>
         <div className="window-titlebar-controls">
           {renderUpdateIndicator()}
-          <button type="button" aria-label="Minimize window" onClick={() => windowAction("minimize")}>
+          <button type="button" aria-label={copy.minimizeWindow} onClick={() => windowAction("minimize")}>
             {WinCtl.minimize}
           </button>
-          <button type="button" aria-label="Maximize window" onClick={() => windowAction("maximize")}>
+          <button type="button" aria-label={copy.maximizeWindow} onClick={() => windowAction("maximize")}>
             {WinCtl.maximize}
           </button>
-          <button type="button" className="close" aria-label="Close window" onClick={() => windowAction("close")}>
+          <button type="button" className="close" aria-label={copy.closeWindow} onClick={() => windowAction("close")}>
             {WinCtl.close}
           </button>
         </div>
@@ -622,26 +1028,104 @@ export default function App() {
         className={`sidebar${mobileNavOpen ? " mobile-open" : ""}${sidebarCollapsed ? " sidebar-collapsed" : ""}`}
         data-onboarding-target="sidebar"
       >
-        {NAV_GROUPS.map((g) => (
-          <div className="nav-group" key={g.group}>
-            <div className="nav-group-label">{g.group}</div>
-            {g.items.map((t) => (
+        <div className="sidebar-nav-scroll">
+          {NAV_GROUPS.map((g) => (
+            <div className="nav-group" key={g.group}>
+              <div className="nav-group-label">{copy.groups[g.group as keyof AppShellCopy["groups"]]}</div>
+              {g.items.map((t) => (
+                <button
+                  key={t.id}
+                  className={`nav-item${tab === t.id ? " active" : ""}`}
+                  data-onboarding-target={`nav-${t.id}`}
+                  onPointerEnter={() => preloadTabModule(t.id)}
+                  onFocus={() => preloadTabModule(t.id)}
+                  onClick={() => {
+                    selectTab(t.id as Tab);
+                  }}
+                >
+                  <span className="nav-icon">{t.icon}</span>
+                  {copy.nav[t.id as Tab]}
+                </button>
+              ))}
+            </div>
+          ))}
+        </div>
+        <div className="sidebar-user-area" ref={userMenuRef}>
+          {userMenuOpen && (
+            <div className="sidebar-user-menu" role="menu" aria-label={copy.userMenu}>
+              <div className="sidebar-user-menu-row muted" role="presentation">
+                <span className="sidebar-user-menu-icon"><UserCircleIcon /></span>
+                <span className="sidebar-user-menu-email">{userEmail}</span>
+              </div>
               <button
-                key={t.id}
-                className={`nav-item${tab === t.id ? " active" : ""}`}
-                data-onboarding-target={`nav-${t.id}`}
-                onPointerEnter={() => preloadTabModule(t.id)}
-                onFocus={() => preloadTabModule(t.id)}
-                onClick={() => {
-                  selectTab(t.id as Tab);
-                }}
+                className="sidebar-user-menu-row"
+                type="button"
+                role="menuitem"
+                data-onboarding-target="user-settings"
+                onClick={() => openSettingsTab("general")}
               >
-                <span className="nav-icon">{t.icon}</span>
-                {t.label}
+                <span className="sidebar-user-menu-icon"><GearIcon /></span>
+                <span>{copy.settings}</span>
+                <span className="sidebar-user-shortcut">Ctrl+,</span>
               </button>
-            ))}
-          </div>
-        ))}
+              <div className="sidebar-user-menu-divider" role="separator" />
+              <button
+                className={`sidebar-user-menu-row${usageDetailsOpen ? " active" : ""}`}
+                type="button"
+                role="menuitem"
+                aria-expanded={usageDetailsOpen}
+                aria-controls="sidebar-user-usage-details"
+                onClick={() => setUsageDetailsOpen((open) => !open)}
+              >
+                <span className="sidebar-user-menu-icon"><UsageIcon /></span>
+                <span>{copy.remainingUsage}</span>
+                <span className="sidebar-user-chevron"><Chevron dir={usageDetailsOpen ? "down" : "right"} size={13} /></span>
+              </button>
+              {usageDetailsOpen && (
+                <div className="sidebar-user-usage-panel" id="sidebar-user-usage-details" role="group" aria-label={copy.remainingUsage}>
+                  <div className="sidebar-user-usage-primary">
+                    <span>{usagePrimary[0]}</span>
+                    <strong>{usagePrimary[1]}</strong>
+                  </div>
+                  <div className="sidebar-user-usage-grid">
+                    {usageMetrics.map(([label, value]) => (
+                      <div className="sidebar-user-usage-tile" key={label}>
+                        <span>{label}</span>
+                        <strong>{value}</strong>
+                      </div>
+                    ))}
+                  </div>
+                  <button className="sidebar-user-usage-link" type="button" onClick={() => openSettingsTab("usage")}>
+                    {usageDetailsLabel}
+                  </button>
+                </div>
+              )}
+              <button className="sidebar-user-menu-row" type="button" role="menuitem" onClick={handleLogout}>
+                <span className="sidebar-user-menu-icon"><LogoutIcon /></span>
+                <span>{copy.logout}</span>
+              </button>
+            </div>
+          )}
+          <button
+            className="sidebar-user-button"
+            type="button"
+            aria-haspopup="menu"
+            aria-expanded={userMenuOpen}
+            aria-label={copy.user}
+            data-onboarding-target="user-menu"
+            onClick={() => {
+              setProjectMenuOpen(false);
+              setUsageDetailsOpen(false);
+              setUserMenuOpen((open) => !open);
+            }}
+          >
+            <span className="sidebar-user-avatar">{userInitials}</span>
+            <span className="sidebar-user-info">
+              <span className="sidebar-user-name">{userName}</span>
+              <span className="sidebar-user-plan">{userPlan}</span>
+            </span>
+          </button>
+        </div>
         <div
           className="sidebar-resize-handle"
           onPointerDown={onSidebarResizeStart}
@@ -654,7 +1138,7 @@ export default function App() {
         <button
           className="app-nav-backdrop"
           onClick={() => setMobileNavOpen(false)}
-          aria-label="Close navigation"
+          aria-label={copy.closeNavigation}
         />
       )}
 
@@ -664,22 +1148,22 @@ export default function App() {
             className="app-nav-toggle"
             data-onboarding-target="mobile-menu"
             onClick={() => setMobileNavOpen((open) => !open)}
-            aria-label="Toggle navigation"
+            aria-label={copy.toggleNavigation}
             aria-expanded={mobileNavOpen}
           >
-            Menu
+            {copy.menu}
           </button>
           {sidebarCollapsed && (
             <button
               className="sidebar-expand-btn"
               onClick={toggleSidebar}
-              title="Expand sidebar"
-              aria-label="Expand navigation sidebar"
+              title={copy.sidebarExpandedTitle}
+              aria-label={copy.sidebarExpandedLabel}
             >
-              ›
+              <PanelIcon />
             </button>
           )}
-          <div className="app-title">{LABELS[tab]}</div>
+          <div className="app-title">{copy.nav[tab]}</div>
           {tab === "literature" && (
             <LiteratureViewTabs
               pageView={literaturePageView}
@@ -697,7 +1181,7 @@ export default function App() {
             <button
               className="project-switcher-trigger"
               type="button"
-              aria-label="Current project"
+              aria-label={copy.currentProject}
               aria-haspopup="listbox"
               aria-expanded={projectMenuOpen}
               disabled={projectBusy || projects.length === 0}
@@ -705,14 +1189,14 @@ export default function App() {
               title={currentProject?.path}
             >
               <span className="project-switcher-current">
-                {currentProject?.name ?? "No project"}
+                {currentProject?.name ?? copy.noProject}
               </span>
               <span className="project-switcher-caret" aria-hidden="true">
                 <Chevron dir="down" size={13} />
               </span>
             </button>
             {projectMenuOpen && (
-              <div className="project-menu" role="listbox" aria-label="Projects">
+              <div className="project-menu" role="listbox" aria-label={copy.projects}>
                 {orderedProjects.map((project) => (
                   <div
                     key={project.id}
@@ -745,7 +1229,7 @@ export default function App() {
                     <span
                       className="project-drag-handle"
                       aria-hidden="true"
-                      title="Drag to reorder"
+                      title={copy.dragToReorder}
                       onClick={(event) => {
                         event.preventDefault();
                         event.stopPropagation();
@@ -766,14 +1250,14 @@ export default function App() {
               className="project-add-btn"
               onClick={() => void chooseProject()}
               disabled={projectBusy}
-              title="Add SomniQ project"
-              aria-label="Add project"
+              title={copy.addProject}
+              aria-label={copy.addProject}
             >
               <PlusIcon />
-              <span>Add</span>
+              <span>{copy.add}</span>
             </button>
           </div>
-          <div className="dir" title={stateDir || "run-state directory"}>
+          <div className="dir" title={stateDir || copy.runStateDir}>
             {currentProject?.path ?? stateDir}
           </div>
         </div>
@@ -782,29 +1266,34 @@ export default function App() {
       <main className="app-main" data-onboarding-target="workspace">
         <ErrorBoundary
           resetKey={renderedTab}
-          fallback={(viewError, reset) => <AppViewFallback error={viewError} reset={reset} />}
+          fallback={(viewError, reset) => <AppViewFallback copy={copy} error={viewError} reset={reset} />}
         >
           <div hidden={renderedTab !== "chat"}>
             <ErrorBoundary
               resetKey="chat"
-              fallback={(viewError, reset) => <AppViewFallback error={viewError} reset={reset} />}
+              fallback={(viewError, reset) => <AppViewFallback copy={copy} error={viewError} reset={reset} />}
             >
               <ChatPane />
             </ErrorBoundary>
           </div>
           {renderedTab === "lab" && <Lab />}
+          {renderedTab === "typeset" && (
+            <Suspense fallback={<AppLoadingPane copy={copy} label={TAB_MODULE_LABELS.typeset} />}>
+              <Typeset />
+            </Suspense>
+          )}
           {renderedTab === "literature" && (
-            <Suspense fallback={<AppLoadingPane label="Literature" />}>
+            <Suspense fallback={<AppLoadingPane copy={copy} label={TAB_MODULE_LABELS.literature} />}>
               <Literature pageView={literaturePageView} onPageViewChange={setLiteraturePageView} />
             </Suspense>
           )}
           {renderedTab === "studio" && (
-            <Suspense fallback={<AppLoadingPane label="Studio" />}>
+            <Suspense fallback={<AppLoadingPane copy={copy} label={TAB_MODULE_LABELS.studio} />}>
               <Studio />
             </Suspense>
           )}
           {renderedTab === "mail" && (
-            <Suspense fallback={<AppLoadingPane label="Mail" />}>
+            <Suspense fallback={<AppLoadingPane copy={copy} label={TAB_MODULE_LABELS.mail} />}>
               <Mail />
             </Suspense>
           )}
@@ -817,7 +1306,7 @@ export default function App() {
         {error && (
           <div className="toast" role="alert" aria-live="assertive">
             {error}
-            <button onClick={() => setError(null)}>dismiss</button>
+            <button onClick={() => setError(null)}>{copy.dismiss}</button>
           </div>
         )}
       </main>

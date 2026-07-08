@@ -1895,7 +1895,7 @@ fn build_message(identity: &MailIdentityConfig, draft: &MailDraft) -> Result<Str
         return Ok(message);
     }
 
-    let boundary = "aris-mail-boundary-7b3c9a31";
+    let boundary = "somniq-mail-boundary-7b3c9a31";
     message.push_str(&format!(
         "Content-Type: multipart/mixed; boundary=\"{boundary}\"\r\n\r\n"
     ));
@@ -2061,7 +2061,7 @@ A0003 OK FETCH completed\r\n";
                 .id
         });
         let path = std::env::temp_dir().join(format!(
-            "aris-mail-attachment-smoke-{}.txt",
+            "somniq-mail-attachment-smoke-{}.txt",
             std::process::id()
         ));
         std::fs::write(
@@ -2079,7 +2079,7 @@ A0003 OK FETCH completed\r\n";
                 body: "This is an ARIS test message with a small attachment.".to_string(),
                 attachments: vec![super::super::model::MailDraftAttachment {
                     path: path.to_string_lossy().into_owned(),
-                    filename: "aris-mail-attachment-smoke.txt".to_string(),
+                    filename: "somniq-mail-attachment-smoke.txt".to_string(),
                     mime_type: "text/plain".to_string(),
                 }],
             },
@@ -2110,8 +2110,10 @@ A0003 OK FETCH completed\r\n";
             .find(|paper| paper.pdf_url.is_some())
             .expect("search result with direct PDF");
         let pdf_url = paper.pdf_url.as_deref().expect("PDF URL");
-        let base =
-            std::env::temp_dir().join(format!("aris-literature-mail-smoke-{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!(
+            "somniq-literature-mail-smoke-{}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&base).expect("create smoke directory");
         let file_name = paper
             .arxiv_id

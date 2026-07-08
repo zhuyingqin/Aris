@@ -403,14 +403,18 @@ function messageTime(message: MailMessageSummary): number {
 
 const PANE_MIN = 220;
 const PANE_MAX = 480;
+const MAIL_LIST_WIDTH_KEY = "somniq-mail-list-width";
+const MAIL_LIST_WIDTH_LEGACY_KEY = "aris-mail-list-width";
+const MAIL_ASSISTANT_WIDTH_KEY = "somniq-mail-assistant-width";
+const MAIL_ASSISTANT_WIDTH_LEGACY_KEY = "aris-mail-assistant-width";
 
 function clampPane(value: number): number {
   return Math.min(PANE_MAX, Math.max(PANE_MIN, value));
 }
 
-function readStoredWidth(key: string, fallback: number): number {
+function readStoredWidth(key: string, legacyKey: string, fallback: number): number {
   if (typeof localStorage === "undefined") return fallback;
-  const raw = Number(localStorage.getItem(key));
+  const raw = Number(localStorage.getItem(key) ?? localStorage.getItem(legacyKey));
   return Number.isFinite(raw) && raw > 0 ? clampPane(raw) : fallback;
 }
 
@@ -661,17 +665,19 @@ export default function Mail() {
   const [compose, setCompose] = useState<ComposeState | null>(null);
   const [sending, setSending] = useState(false);
   const [assistantOpen, setAssistantOpen] = useState(() => MAIL_VIEW_CACHE.assistantOpen);
-  const [listWidth, setListWidth] = useState(() => readStoredWidth("aris-mail-list-width", 300));
+  const [listWidth, setListWidth] = useState(() => readStoredWidth(MAIL_LIST_WIDTH_KEY, MAIL_LIST_WIDTH_LEGACY_KEY, 300));
   const [assistantWidth, setAssistantWidth] = useState(() =>
-    readStoredWidth("aris-mail-assistant-width", 260),
+    readStoredWidth(MAIL_ASSISTANT_WIDTH_KEY, MAIL_ASSISTANT_WIDTH_LEGACY_KEY, 260),
   );
   const listLoadingRef = useRef(false);
 
   useEffect(() => {
-    localStorage.setItem("aris-mail-list-width", String(listWidth));
+    localStorage.setItem(MAIL_LIST_WIDTH_KEY, String(listWidth));
+    localStorage.removeItem(MAIL_LIST_WIDTH_LEGACY_KEY);
   }, [listWidth]);
   useEffect(() => {
-    localStorage.setItem("aris-mail-assistant-width", String(assistantWidth));
+    localStorage.setItem(MAIL_ASSISTANT_WIDTH_KEY, String(assistantWidth));
+    localStorage.removeItem(MAIL_ASSISTANT_WIDTH_LEGACY_KEY);
   }, [assistantWidth]);
 
   const connected = useMemo(() => accounts.filter((account) => account.connected), [accounts]);

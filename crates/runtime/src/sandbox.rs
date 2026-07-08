@@ -279,8 +279,8 @@ pub fn build_linux_sandbox_command(
     args.push("-lc".to_string());
     args.push(command.to_string());
 
-    let sandbox_home = cwd.join(".sandbox-home");
-    let sandbox_tmp = cwd.join(".sandbox-tmp");
+    let sandbox_home = crate::somniq_sandbox_home_dir(cwd);
+    let sandbox_tmp = crate::somniq_sandbox_tmp_dir(cwd);
     let mut env = vec![
         ("HOME".to_string(), sandbox_home.display().to_string()),
         ("TMPDIR".to_string(), sandbox_tmp.display().to_string()),

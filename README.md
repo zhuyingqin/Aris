@@ -29,6 +29,15 @@
 
 ## 📰 What's New
 
+> **v0.4.9** (2026-07) — Typeset module: Tectonic-backed LaTeX compile (`src-tauri/src/typeset.rs`) +
+> CodeMirror-6 visual editor (`desktop/src/typeset/`, mathlive math input, slides-main fixture).
+> Lab: `labEditorCore` extraction + lab preview iframe (`desktop/src/api/labPreview.ts`,
+> `npm run dev:lab`). Runtime / tools / executor surface added (tool registry + OpenAI executor
+> refinements). Newapi managed-login fully wired (Login bypasses pasted keys; Settings =
+> projection of server state). Chat-stream hook refinement + `onChatContextWarning` /
+> `onChatToolProgress` events. MCP `claude` server registered alongside `codex`. Visual identity +
+> icon set refresh.
+
 > **v0.4.8** (2026-07) — Env-probe extraction into `src-tauri/src/env/` (Python / Jupyter / MATLAB /
 > LaTeX with in-memory session cache + on-disk fingerprint cache), system prompt externalized to
 > `crates/runtime/assets/prompts/system.md` (edit as markdown, no Rust rebuild), prompt pipeline
@@ -165,7 +174,7 @@ First launch opens **Settings**, where you configure:
 - **Executor** and **Reviewer** — provider, model, base URL, API key
 - **Scopus API key**, **Language**, **memory write approval**, and **connectivity checks** for the configured models
 
-Config is stored locally at `~/.config/aris/config.json`. API keys are masked by default in the UI.
+Config is stored locally at `~/.config/SomniQ/config.json`. API keys are masked by default in the UI.
 Click **Show** in local Settings to reveal a key temporarily; the normal config view still returns only masked previews.
 
 ### MCP & Playwright
@@ -174,8 +183,9 @@ ARIS Desktop reads MCP servers from the current project's `.mcp.json` and surfac
 **Extensions → Plugins** and **Settings → Permissions & MCP**. The Windows bundle includes an
 `aris-playwright-mcp` launcher, vendored `@playwright/mcp`, and a Node runtime, so installed users
 can add the Playwright preset without installing Node.js or npm themselves. The default preset uses
-Microsoft Edge (`--browser=msedge`) and enables PDF tools (`--caps=pdf`); edit the arguments in the
-MCP page for custom browser options.
+Microsoft Edge (`--browser=msedge`), enables PDF tools (`--caps=pdf`), and stores browser profile
+and output files under `.somniq/tmp/browser/`; edit the arguments in the MCP page for custom
+browser options.
 
 ---
 
@@ -250,7 +260,7 @@ To run a workflow: design it in **Workflow Studio**, save the plan, then start a
 ## 📁 Configuration & Project Data
 
 ```text
-~/.config/aris/
+~/.config/SomniQ/
 ├── config.json                 # providers, models, base URLs, keys, language
 ├── desktop-workspace           # default workspace root
 └── desktop-runtime/
@@ -262,7 +272,9 @@ To run a workflow: design it in **Workflow Studio**, save the plan, then start a
         └── user-workflows/     # user-authored drafts
 ```
 
-Set `ARIS_WORKSPACE_ROOT` to override the default workspace root.
+Set `ARIS_WORKSPACE_ROOT` to override the default workspace root. CLI/runtime fallbacks for an
+arbitrary workspace use `<workspace>/.somniq/runtime/` unless `ARIS_RUNTIME_ROOT` or a more
+specific `ARIS_*_DIR` variable is set.
 
 `config.json` and the Settings page use the same snake_case fields:
 

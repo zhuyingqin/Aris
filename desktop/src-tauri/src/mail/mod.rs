@@ -4,7 +4,7 @@
 //!
 //! Layering mirrors the rest of the desktop crate:
 //!   - `model`    — provider-neutral, `camelCase` view/patch types.
-//!   - `store`    — `~/.aris/mail/accounts.json` persistence (tokens + config).
+//!   - `store`    — `~/.config/SomniQ/mail/accounts.json` persistence (tokens + config).
 //!   - `oauth`    — PKCE loopback consent + token refresh.
 //!   - `provider` — token resolution + dispatch to a provider client.
 //!   - `gmail` / `graph` — the two concrete API clients.

@@ -1,9 +1,14 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
+  isFilePreviewMode,
   isLabPreviewMode,
   previewExecuteFile,
+  previewCreateDir,
+  previewDeletePath,
   previewFileTree,
+  previewRenamePath,
+  previewReadBytes,
   previewKernelspecs,
   previewKernelInfo,
   previewNotebookList,
@@ -11,6 +16,7 @@ import {
   previewReadText,
   previewRunAll,
   previewRunsLibrary,
+  previewSearchFiles,
   previewVariables,
   previewWriteText,
 } from "./labPreview";
@@ -25,7 +31,11 @@ export const openExternalUrl = (url: string) => {
 };
 import type {
   ChatCommandResult,
+  ChatEventLogEntry,
+  ChatEventsReplay,
+  ChatEventsRestoreResult,
   ChatModelOptions,
+  ChatToolProgress,
   ChatStatus,
   ConnectorActionResult,
   ConnectorPluginView,
@@ -61,12 +71,14 @@ import type {
   SessionSummary,
   SessionTranscript,
   SkillMeta,
+  SystemPromptView,
   TokenUsageSummary,
+  UserPromptView,
 } from "../types";
 
 export const stateDir = () => invoke<string>("state_dir");
-export const localEnvironmentChecks = () =>
-  invoke<LocalEnvironmentCheck[]>("local_environment_checks");
+export const localEnvironmentChecks = (forceRefresh?: boolean) =>
+  invoke<LocalEnvironmentCheck[]>("local_environment_checks", { forceRefresh: forceRefresh ?? false });
 export const projectsGet = () => invoke<ProjectView>("projects_get");
 export const projectAdd = (path: string) =>
   invoke<ProjectView>("project_add", { path });
@@ -110,6 +122,7 @@ export interface NewApiAuthStatus {
 
 export const newapiAuthStatus = (baseUrl: string) =>
   invoke<NewApiAuthStatus>("newapi_auth_status", { baseUrl });
+export const newapiLogout = () => invoke<void>("newapi_logout");
 
 /** Sign in to a new-api gateway; returns an executor config for the user. */
 export const newapiLogin = (
@@ -135,12 +148,53 @@ export const newapiSendVerification = (input: {
 }) => invoke<void>("newapi_send_verification", { input });
 export const newapiModels = () => invoke<string[]>("newapi_models");
 
+export interface NewApiUsageLogEntry {
+  id: string;
+  createdAt: number;
+  model: string;
+  tokenName: string;
+  channel: string;
+  requestId: string;
+  upstreamRequestId: string;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  quota: number;
+  status: string;
+  typeLabel: string;
+}
+
+export interface NewApiUsageLogPage {
+  items: NewApiUsageLogEntry[];
+  total: number;
+  page: number;
+  pageSize: number;
+}
+
+export interface NewApiGroupOption {
+  name: string;
+  desc: string;
+  ratio: string;
+}
+
 export interface NewApiAccount {
   username: string;
   displayName: string;
-  /** new-api user group, shown as the plan / 套餐. */
+  /** new-api numeric role, when exposed by the gateway. */
+  role?: number;
+  /** True when the account can manage administrator-only settings. */
+  isAdmin?: boolean;
+  /** Human-facing subscription/plan name if the gateway exposes one. */
+  subscriptionName?: string;
+  /** Human-facing subscription/plan description if the gateway exposes one. */
+  subscriptionDesc?: string;
+  /** Remaining active subscription quota, in new-api credit units. */
+  subscriptionQuota?: number;
+  /** Active subscription quota consumed so far, in new-api credit units. */
+  subscriptionUsedQuota?: number;
+  /** new-api user group. */
   group: string;
-  /** Human description of the current group (套餐说明). */
+  /** Human description of the current group. */
   groupDesc: string;
   /** Price multiplier of the current group ("1.5", "自动"). */
   groupRatio: string;
@@ -155,6 +209,11 @@ export interface NewApiAccount {
 
 /** One-shot account/entitlements projection for the signed-in user. */
 export const newapiBootstrap = () => invoke<NewApiAccount>("newapi_bootstrap");
+export const newapiGroups = () => invoke<NewApiGroupOption[]>("newapi_groups");
+export const newapiUpdateGroup = (group: string) =>
+  invoke<NewApiAccount>("newapi_update_group", { group });
+export const newapiUsageLogs = (page: number, pageSize: number) =>
+  invoke<NewApiUsageLogPage>("newapi_usage_logs", { page, pageSize });
 export const appUpdateCheck = async (): Promise<AppUpdateInfo> => {
   if (!isTauri()) return { available: false };
   const { check } = await import("@tauri-apps/plugin-updater");
@@ -293,6 +352,13 @@ export const skillView = (name: string) =>
 export const sessionsList = () => invoke<SessionSummary[]>("sessions_list");
 export const sessionGet = (id: string) =>
   invoke<SessionTranscript>("session_get", { id });
+export const chatUiSessionsList = <T>() => invoke<T[]>("chat_ui_sessions_list");
+export const chatUiSessionLoad = <T>(id: string) =>
+  invoke<T>("chat_ui_session_load", { id });
+export const chatUiSessionSave = <T>(session: T) =>
+  invoke<void>("chat_ui_session_save", { session });
+export const chatUiSessionDelete = (id: string) =>
+  invoke<void>("chat_ui_session_delete", { id });
 export const chatUiSessionsLoad = <T>() => invoke<T[]>("chat_ui_sessions_load");
 export const chatUiSessionsSave = <T>(sessions: T[]) =>
   invoke<void>("chat_ui_sessions_save", { sessions });
@@ -547,38 +613,100 @@ export interface FileText {
 }
 
 export const fileListDir = (path?: string | null) =>
-  isLabPreviewMode()
+  isFilePreviewMode()
     ? preview<FileTreeEntry[]>(previewFileTree(path ?? null))
     :
   invoke<FileTreeEntry[]>("file_list_dir", { path: path ?? null });
 
 export const fileReadText = (path: string) =>
-  isLabPreviewMode()
+  isFilePreviewMode()
     ? preview<FileText>(previewReadText(path))
     :
   invoke<FileText>("file_read_text", { path });
 
 export const fileWriteText = (path: string, content: string) =>
-  isLabPreviewMode()
+  isFilePreviewMode()
     ? preview<FileText>(previewWriteText(path, content))
     :
   invoke<FileText>("file_write_text", { path, content });
 
+export const fileCreateText = (path: string, content: string) =>
+  isFilePreviewMode()
+    ? preview<FileText>(previewWriteText(path, content))
+    :
+  invoke<FileText>("file_create_text", { path, content });
+
+export const fileCreateDir = (path: string) =>
+  isFilePreviewMode()
+    ? preview<FileTreeEntry>(previewCreateDir(path))
+    :
+  invoke<FileTreeEntry>("file_create_dir", { path });
+
+export const fileRename = (path: string, newPath: string) =>
+  isFilePreviewMode()
+    ? preview<FileTreeEntry>(previewRenamePath(path, newPath))
+    :
+  invoke<FileTreeEntry>("file_rename", { path, newPath });
+
+export const fileDelete = (path: string) =>
+  isFilePreviewMode() ? previewDeletePath(path) :
+  invoke<void>("file_delete", { path });
+
+export const fileReadBytes = (path: string) =>
+  isFilePreviewMode() ? previewReadBytes(path) :
+  invoke<number[]>("file_read_bytes", { path });
+
 export const fileSearch = (pattern: string, root?: string) =>
-  isLabPreviewMode() ? preview<string[]>([]) :
+  isFilePreviewMode() ? preview<string[]>(previewSearchFiles(pattern, root ?? null)) :
   invoke<string[]>("file_search", { pattern, root: root ?? null });
 
 export const fileRead = (path: string, limit?: number) =>
-  isLabPreviewMode() ? preview<string>(previewReadText(path).content) :
+  isFilePreviewMode() ? preview<string>(previewReadText(path).content) :
   invoke<string>("file_read", { path, limit: limit ?? null });
 export const fileOpen = (path: string) =>
-  isLabPreviewMode() ? Promise.resolve() :
+  isFilePreviewMode() ? Promise.resolve() :
   invoke<void>("file_open", { path });
 export const projectChatStarters = () => invoke<string[]>("project_chat_starters");
+
+export interface LatexCompileResult {
+  success: boolean;
+  inputPath: string;
+  outputPath: string;
+  engine: string;
+  stdout: string;
+  stderr: string;
+  exitCode?: number | null;
+  interrupted: boolean;
+  timedOut: boolean;
+  durationMs: number;
+  returnCodeInterpretation?: string | null;
+}
+
+export const latexCompile = (inputPath: string, outputPath?: string | null) =>
+  isFilePreviewMode()
+    ? preview<LatexCompileResult>({
+        success: true,
+        inputPath,
+        outputPath: outputPath ?? inputPath.replace(/\.tex$/i, ".pdf"),
+        engine: "xelatex",
+        stdout: "Browser preview is showing the bundled compiled PDF.",
+        stderr: "",
+        exitCode: 0,
+        interrupted: false,
+        timedOut: false,
+        durationMs: 0,
+        returnCodeInterpretation: null,
+      })
+    : invoke<LatexCompileResult>("latex_compile", {
+        inputPath,
+        outputPath: outputPath ?? null,
+      });
 
 // ── Chat engine (P2) ──────────────────────────────────────────────────────────
 
 export const chatStatus = () => invoke<ChatStatus>("chat_status");
+export const systemPromptView = () => invoke<SystemPromptView>("system_prompt_view");
+export const userPromptView = () => invoke<UserPromptView | null>("user_prompt_view");
 export const chatModelOptions = () =>
   invoke<ChatModelOptions>("chat_model_options");
 export const chatModelSet = (model: string, persist = true) =>
@@ -610,11 +738,23 @@ export interface ChatSendRequest {
   model?: string | null;
 }
 
-export interface ChatContextMessage {
-  role: "user" | "assistant";
-  text: string;
-  images?: ChatImageInput[];
+export interface ChatContextToolCall {
+  id: string;
+  name: string;
+  input: string;
 }
+
+export interface ChatContextToolResult {
+  toolUseId: string;
+  toolName: string;
+  output: string;
+  isError?: boolean;
+}
+
+export type ChatContextMessage =
+  | { role: "user"; text: string; images?: ChatImageInput[] }
+  | { role: "assistant"; text?: string; toolCalls?: ChatContextToolCall[] }
+  | { role: "tool"; toolResults: ChatContextToolResult[] };
 
 export type ChatContextSyncMode = "replace" | "append";
 
@@ -643,6 +783,14 @@ export const chatSetContext = (
 export const chatDelete = (sessionId: string, projectId?: string) =>
   invoke<void>("chat_delete", { sessionId, projectId: projectId ?? null });
 export const chatCancel = (sessionId: string) => invoke<void>("chat_cancel", { sessionId });
+export const chatEventsRead = (sessionId: string) =>
+  invoke<ChatEventLogEntry[]>("chat_events_read", { sessionId });
+export const chatEventsExport = (sessionId: string, path?: string | null) =>
+  invoke<string>("chat_events_export", { sessionId, path: path ?? null });
+export const chatEventsReplay = (sessionId: string) =>
+  invoke<ChatEventsReplay>("chat_events_replay", { sessionId });
+export const chatEventsRestore = (sessionId: string) =>
+  invoke<ChatEventsRestoreResult>("chat_events_restore", { sessionId });
 
 export interface ChatTextEvent {
   sessionId: string;
@@ -676,6 +824,13 @@ export const onChatThinkingDelta = (handler: (event: ChatThinkingEvent) => void)
 export const onChatTool = (
   handler: (t: { sessionId: string; id?: string; name: string; input: string }) => void,
 ) => listen<{ sessionId: string; id?: string; name: string; input: string }>("chat-tool", (e) => handler(e.payload));
+export const onChatToolProgress = (
+  handler: (t: { sessionId: string; id?: string; name: string } & ChatToolProgress) => void,
+) =>
+  listen<{ sessionId: string; id?: string; name: string } & ChatToolProgress>(
+    "chat-tool-progress",
+    (e) => handler(e.payload),
+  );
 export const onChatToolResult = (
   handler: (t: { sessionId: string; id?: string; name: string; output: string; isError: boolean }) => void,
 ) =>

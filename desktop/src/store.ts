@@ -3,7 +3,9 @@ import type { DesktopProject } from "./types";
 import {
   configSet,
   isTauri,
+  newapiBootstrap,
   newapiLogin,
+  newapiLogout,
   newapiRegister,
   type NewApiLoginResult,
   projectAdd,
@@ -12,7 +14,7 @@ import {
   projectSetCurrent,
   stateDir as fetchStateDir,
 } from "./api/tauri";
-import { isLabPreviewMode } from "./api/labPreview";
+import { isLabPreviewMode, isTypesetPreviewMode } from "./api/labPreview";
 
 const PREVIEW_PROJECT: DesktopProject = {
   id: "default",
@@ -25,6 +27,7 @@ const PREVIEW_PROJECT: DesktopProject = {
 export type Tab =
   | "chat"
   | "lab"
+  | "typeset"
   | "literature"
   | "studio"
   | "mail"
@@ -34,12 +37,20 @@ export type Tab =
   | "scheduled";
 
 export type Theme = "dark" | "light";
+export type Language = "cn" | "en";
 
-const THEME_STORAGE_KEY = "aris-theme";
+const THEME_STORAGE_KEY = "somniq-theme";
+const THEME_LEGACY_STORAGE_KEY = "aris-theme";
+const LANGUAGE_STORAGE_KEY = "somniq-ui-language";
+const LANGUAGE_LEGACY_STORAGE_KEY = "aris-ui-language";
 
 function readStoredTheme(): Theme {
+  if (typeof window !== "undefined") {
+    const requested = new URLSearchParams(window.location.search).get("theme");
+    if (requested === "light" || requested === "dark") return requested;
+  }
   try {
-    return localStorage.getItem(THEME_STORAGE_KEY) === "light" ? "light" : "dark";
+    return (localStorage.getItem(THEME_STORAGE_KEY) ?? localStorage.getItem(THEME_LEGACY_STORAGE_KEY)) === "light" ? "light" : "dark";
   } catch {
     return "dark";
   }
@@ -51,8 +62,34 @@ function applyTheme(theme: Theme) {
   }
   try {
     localStorage.setItem(THEME_STORAGE_KEY, theme);
+    localStorage.removeItem(THEME_LEGACY_STORAGE_KEY);
   } catch {
     // Private mode / storage disabled — theme still applies for this session.
+  }
+}
+
+function normalizeLanguage(value: string | null | undefined): Language {
+  return value === "en" ? "en" : "cn";
+}
+
+function readStoredLanguage(): Language {
+  try {
+    return normalizeLanguage(localStorage.getItem(LANGUAGE_STORAGE_KEY) ?? localStorage.getItem(LANGUAGE_LEGACY_STORAGE_KEY));
+  } catch {
+    return "cn";
+  }
+}
+
+function applyLanguage(language: Language) {
+  if (typeof document !== "undefined") {
+    document.documentElement.lang = language === "cn" ? "zh-CN" : "en";
+    document.documentElement.dataset.language = language;
+  }
+  try {
+    localStorage.setItem(LANGUAGE_STORAGE_KEY, language);
+    localStorage.removeItem(LANGUAGE_LEGACY_STORAGE_KEY);
+  } catch {
+    // Storage may be unavailable; the current render still uses the in-memory value.
   }
 }
 
@@ -61,14 +98,31 @@ function applyTheme(theme: Theme) {
 // token written into the executor config. Browser preview has no backend, so it
 // is never gated.
 
-const AUTH_FLAG_KEY = "aris-auth-v1";
-const AUTH_SERVER_KEY = "aris-auth-server-v1";
+const AUTH_FLAG_KEY = "somniq-auth-v1";
+const AUTH_LEGACY_FLAG_KEY = "aris-auth-v1";
+const AUTH_SERVER_KEY = "somniq-auth-server-v1";
+const AUTH_LEGACY_SERVER_KEY = "aris-auth-server-v1";
+const ACCOUNT_CACHE_KEY = "somniq-account-v1";
+const ACCOUNT_LEGACY_CACHE_KEY = "aris-account-v1";
 export const DEFAULT_AUTH_SERVER = "http://106.53.28.124:18080";
 const DEFAULT_MODEL = "MiniMax-M3";
 
+export function isManagedAuthInvalidError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  const lower = message.toLowerCase();
+  return (
+    lower.includes("login expired") ||
+    lower.includes("sign in again") ||
+    lower.includes("invalid access token") ||
+    lower.includes("invalid token") ||
+    lower.includes("401 unauthorized") ||
+    (lower.includes("unauthorized") && lower.includes("token"))
+  );
+}
+
 function readStoredServer(): string {
   try {
-    return localStorage.getItem(AUTH_SERVER_KEY) ?? DEFAULT_AUTH_SERVER;
+    return localStorage.getItem(AUTH_SERVER_KEY) ?? localStorage.getItem(AUTH_LEGACY_SERVER_KEY) ?? DEFAULT_AUTH_SERVER;
   } catch {
     return DEFAULT_AUTH_SERVER;
   }
@@ -77,7 +131,7 @@ function readStoredServer(): string {
 function initialAuthed(): boolean {
   if (!isTauri()) return true; // no gateway in plain-browser preview
   try {
-    return localStorage.getItem(AUTH_FLAG_KEY) === "1";
+    return (localStorage.getItem(AUTH_FLAG_KEY) ?? localStorage.getItem(AUTH_LEGACY_FLAG_KEY)) === "1";
   } catch {
     return false;
   }
@@ -96,6 +150,8 @@ function markAuthed(server: string) {
   try {
     localStorage.setItem(AUTH_FLAG_KEY, "1");
     localStorage.setItem(AUTH_SERVER_KEY, server);
+    localStorage.removeItem(AUTH_LEGACY_FLAG_KEY);
+    localStorage.removeItem(AUTH_LEGACY_SERVER_KEY);
   } catch {
     // Storage disabled — session still authed for this run.
   }
@@ -104,6 +160,18 @@ function markAuthed(server: string) {
 function rememberAuthServer(server: string) {
   try {
     localStorage.setItem(AUTH_SERVER_KEY, server);
+    localStorage.removeItem(AUTH_LEGACY_SERVER_KEY);
+  } catch {
+    // ignore
+  }
+}
+
+function clearStoredAuth() {
+  try {
+    localStorage.removeItem(AUTH_FLAG_KEY);
+    localStorage.removeItem(AUTH_LEGACY_FLAG_KEY);
+    localStorage.removeItem(ACCOUNT_CACHE_KEY);
+    localStorage.removeItem(ACCOUNT_LEGACY_CACHE_KEY);
   } catch {
     // ignore
   }
@@ -116,6 +184,7 @@ interface AppState {
   authServer: string;
   /** Sign in, then persist the returned executor config. Throws on failure. */
   login: (server: string, username: string, password: string) => Promise<void>;
+  validateAuth: () => Promise<boolean>;
   register: (
     server: string,
     username: string,
@@ -129,6 +198,9 @@ interface AppState {
 
   theme: Theme;
   setTheme: (theme: Theme) => void;
+
+  language: Language;
+  setLanguage: (language: Language) => void;
 
   /** One-shot composer prefill consumed by Chat (e.g. Literature → /arxiv). */
   pendingChatInput: string | null;
@@ -162,7 +234,9 @@ interface AppState {
 }
 
 const initialTheme = readStoredTheme();
+const initialLanguage = readStoredLanguage();
 applyTheme(initialTheme);
+applyLanguage(initialLanguage);
 
 export const useStore = create<AppState>((set, get) => ({
   authed: initialAuthed(),
@@ -174,6 +248,19 @@ export const useStore = create<AppState>((set, get) => ({
     await persistManagedAuthResult(result);
     markAuthed(trimmedServer);
     set({ authed: true, authServer: trimmedServer });
+  },
+  validateAuth: async () => {
+    if (!isTauri() || !get().authed) return true;
+    try {
+      await newapiBootstrap();
+      return true;
+    } catch (error) {
+      if (isManagedAuthInvalidError(error)) {
+        get().logout();
+        return false;
+      }
+      return true;
+    }
   },
   register: async (server, username, password, options = {}) => {
     const trimmedServer = (server.trim() || DEFAULT_AUTH_SERVER).replace(/\/+$/, "");
@@ -191,21 +278,27 @@ export const useStore = create<AppState>((set, get) => ({
     set({ authServer: trimmedServer });
   },
   logout: () => {
-    try {
-      localStorage.removeItem(AUTH_FLAG_KEY);
-    } catch {
-      // ignore
+    clearStoredAuth();
+    if (isTauri()) {
+      void newapiLogout().catch(() => undefined);
     }
     set({ authed: false });
   },
 
-  tab: isLabPreviewMode() ? "lab" : "chat",
+  tab: isTypesetPreviewMode() ? "typeset" : isLabPreviewMode() ? "lab" : "chat",
   setTab: (tab) => set({ tab }),
 
   theme: initialTheme,
   setTheme: (theme) => {
     applyTheme(theme);
     set({ theme });
+  },
+
+  language: initialLanguage,
+  setLanguage: (language) => {
+    const next = normalizeLanguage(language);
+    applyLanguage(next);
+    set({ language: next });
   },
 
   pendingChatInput: null,
