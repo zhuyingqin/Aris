@@ -29,6 +29,24 @@
 
 ## 📰 What's New
 
+> **v0.4.11** (2026-07) — Runtime / tools / executor surface refactor (~60 Rust files in
+> `crates/runtime` + `crates/tools` + `crates/executor` + `crates/chat` + `crates/commands` +
+> `crates/compat-harness` + `crates/notebook`): hooks, process registry, cache, hot-memory,
+> change-ledger, oauth, remote, usage, permissions, and session_index refinements. Test
+> reorganisation: ~14 new `src/<area>/tests/` sub-directories move inline tests into a single
+> `tests/` namespace per crate (knowledge / lab / literature / studio / typeset / chat / aris-cli
+> / api / etc.). Tauri backend (`commands.rs`, `config.rs`, `engine.rs`, `env/cache.rs`,
+> `files.rs`, `knowledge.rs`, `lab.rs`, `lib.rs`, `literature.rs`, `mail/*.rs`, `projects.rs`,
+> `scheduled.rs`, `sessions.rs`, `state.rs`, `studio.rs`, `usage_log.rs`, `chat_events.rs`,
+> new `change_ledger.rs`) wires the runtime surface into desktop commands. Frontend (`App.tsx`,
+> `api/tauri.ts`, chat / lab / literature / studio / typeset, `styles.css`, `types.ts`) adapts to
+> the runtime refactor.
+
+> **v0.4.10** (2026-07) — Chat: image preview component, run/command helpers, expanded test
+> coverage. Lab: file operations + lab preview polish. Typeset: CodeMirror-6 decoration-based
+> visual editor. Runtime / tools / executor surface additions. aris-cli + Tauri backend tweaks.
+> Cleanup: dropped stale `idea-stage/v0.4.10..v0.4.13` planning docs.
+
 > **v0.4.9** (2026-07) — Typeset module: Tectonic-backed LaTeX compile (`src-tauri/src/typeset.rs`) +
 > CodeMirror-6 visual editor (`desktop/src/typeset/`, mathlive math input, slides-main fixture).
 > Lab: `labEditorCore` extraction + lab preview iframe (`desktop/src/api/labPreview.ts`,

@@ -29,6 +29,23 @@
 
 ## 📰 最新动态
 
+> **v0.4.11** (2026-07) —— Runtime / tools / executor 表面重构（`crates/runtime` +
+> `crates/tools` + `crates/executor` + `crates/chat` + `crates/commands` +
+> `crates/compat-harness` + `crates/notebook` 约 60 个 Rust 文件）：hooks、process registry、
+> cache、hot-memory、change-ledger、oauth、remote、usage、permissions、session_index 全面打磨。
+> 测试重组：~14 个新的 `src/<area>/tests/` 子目录，把散落在源文件旁的内联测试集中到每个 crate
+> 的单一 `tests/` 命名空间（knowledge / lab / literature / studio / typeset / chat / aris-cli /
+> api 等）。Tauri 后端（`commands.rs`、`config.rs`、`engine.rs`、`env/cache.rs`、`files.rs`、
+> `knowledge.rs`、`lab.rs`、`lib.rs`、`literature.rs`、`mail/*.rs`、`projects.rs`、
+> `scheduled.rs`、`sessions.rs`、`state.rs`、`studio.rs`、`usage_log.rs`、`chat_events.rs`、
+> 新增 `change_ledger.rs`）把 runtime 表面接入 desktop 命令。前端（`App.tsx`、`api/tauri.ts`、
+> chat / lab / literature / studio / typeset、`styles.css`、`types.ts`）适配 runtime 重构。
+
+> **v0.4.10** (2026-07) —— Chat：image preview 组件、run/command helpers、扩充测试覆盖。Lab：
+> 文件操作 + lab 预览润色。Typeset：CodeMirror-6 decoration-based 可视化编辑器。Runtime / tools
+> / executor 表面新增。aris-cli + Tauri 后端微调。清理：删除过时的 `idea-stage/v0.4.10..v0.4.13`
+> 计划文档。
+
 > **v0.4.9** (2026-07) —— Typeset 模块：Tectonic 驱动的 LaTeX 编译（`src-tauri/src/typeset.rs`）+
 > CodeMirror-6 可视化编辑器（`desktop/src/typeset/`，mathlive 数学输入，slides-main 测试样本）。
 > Lab：`labEditorCore` 抽出 + lab 预览 iframe（`desktop/src/api/labPreview.ts`，
