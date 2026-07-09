@@ -1,8 +1,8 @@
-# ARIS Studio Desktop
+# SomniQ Studio Desktop
 
-This directory contains the Tauri desktop application for ARIS Studio.
+This directory contains the Tauri desktop application for SomniQ Studio.
 
-The desktop app is the primary user-facing product in this repository. It wraps the shared ARIS runtime and tool crates with a local UI for chat, skills, project switching, workflow design, run monitoring, settings, and persisted sessions.
+The desktop app is the primary user-facing product in this repository. It wraps the shared SomniQ runtime and tool crates with a local UI for chat, skills, project switching, workflow design, run monitoring, settings, and persisted sessions.
 
 ## Architecture
 
@@ -86,7 +86,7 @@ npm run tauri build
 Build outputs:
 
 - `src-tauri\target\release\aris-desktop.exe`
-- `src-tauri\target\release\bundle\nsis\ARIS Studio_0.2.0_x64-setup.exe`
+- `src-tauri\target\release\bundle\nsis\SomniQ Studio_0.2.0_x64-setup.exe`
 
 ## Internal Installer
 
@@ -97,7 +97,7 @@ default.
 
 ```powershell
 cd desktop
-$env:ARIS_INTERNAL_PRODUCT_NAME = "ARIS Studio Internal"
+$env:ARIS_INTERNAL_PRODUCT_NAME = "SomniQ Studio Internal"
 $env:ARIS_INTERNAL_IDENTIFIER = "com.aris.studio.internal"
 $env:ARIS_INTERNAL_EXECUTOR_PROVIDER = "openai"
 $env:ARIS_INTERNAL_EXECUTOR_MODEL = "gpt-5.5"
@@ -134,10 +134,10 @@ finishes and is ignored by git.
 
 ## GitHub Updater Releases
 
-ARIS Studio uses the Tauri updater plugin and checks:
+SomniQ Studio uses the Tauri updater plugin and checks:
 
 ```text
-https://github.com/zhuyingqin/Aris/releases/latest/download/latest.json
+https://github.com/zhuyingqin/SomniQ/releases/latest/download/latest.json
 ```
 
 The updater public key is embedded in `src-tauri/tauri.conf.json`. Keep the matching private key out of git and set it as the GitHub repository secret `TAURI_SIGNING_PRIVATE_KEY` before publishing tagged releases. Store the private key as one line with whitespace removed. If the key was generated with a password, also set `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
@@ -175,7 +175,7 @@ cargo test -p runtime reads_pdf
 
 ## Runtime Data
 
-ARIS Studio stores configuration and runtime state locally:
+SomniQ Studio stores configuration and runtime state locally:
 
 ```text
 ~/.config/aris/config.json
