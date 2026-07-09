@@ -46,6 +46,10 @@
 > / executor 表面新增。aris-cli + Tauri 后端微调。清理：删除过时的 `idea-stage/v0.4.10..v0.4.13`
 > 计划文档。
 
+
+<details>
+<summary>📜 早期版本（v0.4.9 → v0.1.0，点击展开）</summary>
+
 > **v0.4.9** (2026-07) —— Typeset 模块：Tectonic 驱动的 LaTeX 编译（`src-tauri/src/typeset.rs`）+
 > CodeMirror-6 可视化编辑器（`desktop/src/typeset/`，mathlive 数学输入，slides-main 测试样本）。
 > Lab：`labEditorCore` 抽出 + lab 预览 iframe（`desktop/src/api/labPreview.ts`，
@@ -71,9 +75,6 @@
 > detail），newapi 托管登录 + Settings-as-projection，Lab 升级（MATLAB REPL、kernel 选择器），Chat
 > stop+continue 中断架构 + `AskUserQuestion` 工具，runtime / cache / tools（knowledge、literature、
 > notebook、studio）更新。
-
-<details>
-<summary>📜 早期版本（v0.4.5 → v0.1.0，点击展开）</summary>
 
 > **v0.4.5** (2026-06) —— CI 修复：把 `TAURI_SIGNING_PRIVATE_KEY` 传给 macOS 桌面任务，否则 bundle 步骤
 > 会因为 updater-artifacts 检查报错。

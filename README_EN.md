@@ -47,9 +47,14 @@
 > slash-command center with in-chat `/model` switching, and hardening (Settings-routed `LlmReview`,
 > Anthropic-compatible endpoints, no Windows console flashes).
 
+<details>
+<summary>📜 Earlier releases (v0.1.1 → v0.1.0)</summary>
+
 > **v0.1.1** (2026-05) — Chat UI overhaul: history, markdown rendering, `@`-file mentions, ordered streamed tool output.
 
 > **v0.1.0** (2026-05) — First desktop app: in-app Chat, Settings with connection checks, skills browser, persisted Sessions, first Workflow Studio + Run Monitor, NSIS bundling.
+
+</details>
 
 > [Full CLI Changelog →](CHANGELOG.md)
 

@@ -47,6 +47,9 @@
 > visual editor. Runtime / tools / executor surface additions. aris-cli + Tauri backend tweaks.
 > Cleanup: dropped stale `idea-stage/v0.4.10..v0.4.13` planning docs.
 
+<details>
+<summary>📜 Earlier releases (v0.4.9 → v0.1.0)</summary>
+
 > **v0.4.9** (2026-07) — Typeset module: Tectonic-backed LaTeX compile (`src-tauri/src/typeset.rs`) +
 > CodeMirror-6 visual editor (`desktop/src/typeset/`, mathlive math input, slides-main fixture).
 > Lab: `labEditorCore` extraction + lab preview iframe (`desktop/src/api/labPreview.ts`,
@@ -76,9 +79,6 @@
 > updates (MATLAB REPL, kernel picker), Chat stop+continue interrupt architecture +
 > `AskUserQuestion` tool, runtime / cache / tools (knowledge, literature, notebook, studio)
 > updates.
-
-<details>
-<summary>📜 Earlier releases (v0.4.5 → v0.1.0)</summary>
 
 > **v0.4.5** (2026-06) — CI fix: pass `TAURI_SIGNING_PRIVATE_KEY` to the macOS desktop job so the
 > bundle step doesn't error out on the updater-artifacts check.
