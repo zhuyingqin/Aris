@@ -1,6 +1,6 @@
 import { Fragment, memo, useMemo, useState, type ReactNode } from "react";
 import type { ChatBlock, ChatTurn } from "../types";
-import { fileOpen } from "../api/tauri";
+import { chatChangeRevert, fileOpen } from "../api/tauri";
 import ChatImagePreview, { isDirectImageSource, isPreviewableImagePath } from "./ChatImagePreview";
 import MarkdownContent, { ThinkBlock } from "./MarkdownContent";
 import { CHAT_COPY } from "./i18n";
@@ -30,6 +30,56 @@ const TOOL_IMAGE_PATH_RE = /[^\s"'`<>|]*\.(?:png|jpe?g|gif|webp|svg|bmp)(?::\d+(
 interface FileChange {
   path: string;
   diff: string;
+  changeId?: string;
+}
+
+export interface CountedFileChange extends FileChange {
+  addedLines: number;
+  removedLines: number;
+  sourceTool: string;
+  toolUseId?: string;
+}
+
+export interface TurnFileSummary {
+  path: string;
+  addedLines: number;
+  removedLines: number;
+  changes: CountedFileChange[];
+}
+
+export interface TurnFileChangeSummary {
+  fileCount: number;
+  addedLines: number;
+  removedLines: number;
+  files: TurnFileSummary[];
+  changes: CountedFileChange[];
+  changeIds: string[];
+}
+
+function nonEmptyString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+function attachChangeId(change: Omit<FileChange, "changeId">, changeId?: string): FileChange {
+  return changeId ? { ...change, changeId } : change;
+}
+
+function changeIdFromOutput(output: Record<string, unknown> | null): string | undefined {
+  return nonEmptyString(output?.changeId) ?? nonEmptyString(output?.change_id);
+}
+
+function diffLineStats(diff: string): Pick<CountedFileChange, "addedLines" | "removedLines"> {
+  let addedLines = 0;
+  let removedLines = 0;
+  for (const line of diff.split("\n")) {
+    if (line.startsWith("+") && !line.startsWith("+++")) addedLines += 1;
+    if (line.startsWith("-") && !line.startsWith("---")) removedLines += 1;
+  }
+  return { addedLines, removedLines };
+}
+
+function formatCount(value: number, sign: "+" | "-") {
+  return `${sign}${value.toLocaleString()}`;
 }
 
 interface StudioLink {
@@ -145,27 +195,30 @@ function imagePathsFromTool(
 function diffFromCodexChanges(output: Record<string, unknown> | null): FileChange | null {
   const changes = output?.changes;
   if (!changes || typeof changes !== "object" || Array.isArray(changes)) return null;
+  const outputChangeId = changeIdFromOutput(output);
   for (const [path, rawChange] of Object.entries(changes as Record<string, unknown>)) {
     if (!path || !rawChange || typeof rawChange !== "object" || Array.isArray(rawChange)) continue;
     const change = rawChange as Record<string, unknown>;
+    const changeId =
+      nonEmptyString(change.changeId) ?? nonEmptyString(change.change_id) ?? outputChangeId;
     const type = typeof change.type === "string" ? change.type : "";
     if (type === "update") {
       const diff = typeof change.unified_diff === "string" ? change.unified_diff : "";
-      if (diff) return { path, diff };
+      if (diff) return attachChangeId({ path, diff }, changeId);
     }
     if (type === "add") {
       const content = typeof change.content === "string" ? change.content : "";
-      return {
+      return attachChangeId({
         path,
         diff: [`--- /dev/null`, `+++ ${path}`, ...content.split("\n").map((line) => `+${line}`)].join("\n"),
-      };
+      }, changeId);
     }
     if (type === "delete") {
       const content = typeof change.content === "string" ? change.content : "";
-      return {
+      return attachChangeId({
         path,
         diff: [`--- ${path}`, `+++ /dev/null`, ...content.split("\n").map((line) => `-${line}`)].join("\n"),
-      };
+      }, changeId);
     }
   }
   return null;
@@ -180,23 +233,24 @@ export function diffFromTool(block: Extract<ChatBlock, { kind: "tool" }>): FileC
   const input = parseInput(block.input);
   const path = String(output?.filePath ?? input.path ?? input.file_path ?? input.target_file ?? "");
   if (!path) return null;
+  const changeId = changeIdFromOutput(output);
   if (block.name === "write_file") {
     const content = String(input.content ?? "");
-    return {
+    return attachChangeId({
       path,
       diff: [`--- /dev/null`, `+++ ${path}`, ...content.split("\n").map((line) => `+${line}`)].join("\n"),
-    };
+    }, changeId);
   }
   if (block.name === "append_file") {
     const content = String(input.content ?? "");
-    return {
+    return attachChangeId({
       path,
       diff: [`--- ${path}`, `+++ ${path}`, ...content.split("\n").map((line) => `+${line}`)].join("\n"),
-    };
+    }, changeId);
   }
   const before = String(input.old_string ?? input.old_str ?? input.old_text ?? "");
   const after = String(input.new_string ?? input.new_str ?? input.new_text ?? "");
-  return {
+  return attachChangeId({
     path,
     diff: [
       `--- ${path}`,
@@ -204,6 +258,97 @@ export function diffFromTool(block: Extract<ChatBlock, { kind: "tool" }>): FileC
       ...before.split("\n").map((line) => `-${line}`),
       ...after.split("\n").map((line) => `+${line}`),
     ].join("\n"),
+  }, changeId);
+}
+
+export function fileChangesFromTurn(turn: ChatTurn): TurnFileChangeSummary | null {
+  if (turn.role !== "assistant") return null;
+  const files = new Map<string, TurnFileSummary>();
+  const changes: CountedFileChange[] = [];
+  const changeIds: string[] = [];
+  const seenChangeIds = new Set<string>();
+
+  for (const block of turn.blocks) {
+    if (block.kind !== "tool" || block.output === undefined) continue;
+    const change = diffFromTool(block);
+    if (!change) continue;
+    const counted: CountedFileChange = {
+      ...change,
+      ...diffLineStats(change.diff),
+      sourceTool: block.name,
+      toolUseId: block.id,
+    };
+    changes.push(counted);
+    if (counted.changeId && !seenChangeIds.has(counted.changeId)) {
+      seenChangeIds.add(counted.changeId);
+      changeIds.push(counted.changeId);
+    }
+    const existing = files.get(counted.path) ?? {
+      path: counted.path,
+      addedLines: 0,
+      removedLines: 0,
+      changes: [],
+    };
+    existing.addedLines += counted.addedLines;
+    existing.removedLines += counted.removedLines;
+    existing.changes.push(counted);
+    files.set(counted.path, existing);
+  }
+
+  if (changes.length === 0) return null;
+  return {
+    fileCount: files.size,
+    addedLines: changes.reduce((total, change) => total + change.addedLines, 0),
+    removedLines: changes.reduce((total, change) => total + change.removedLines, 0),
+    files: Array.from(files.values()),
+    changes,
+    changeIds,
+  };
+}
+
+export function fileChangeSummaryFromTurns(turns: ChatTurn[]): TurnFileChangeSummary | null {
+  let start = 0;
+  for (let index = turns.length - 1; index >= 0; index -= 1) {
+    if (turns[index].role === "user") {
+      start = index;
+      break;
+    }
+  }
+
+  const files = new Map<string, TurnFileSummary>();
+  const changes: CountedFileChange[] = [];
+  const changeIds: string[] = [];
+  const seenChangeIds = new Set<string>();
+  for (const turn of turns.slice(start)) {
+    const summary = fileChangesFromTurn(turn);
+    if (!summary) continue;
+    for (const change of summary.changes) {
+      changes.push(change);
+      if (change.changeId && !seenChangeIds.has(change.changeId)) {
+        seenChangeIds.add(change.changeId);
+        changeIds.push(change.changeId);
+      }
+      const existing = files.get(change.path) ?? {
+        path: change.path,
+        addedLines: 0,
+        removedLines: 0,
+        changes: [],
+      };
+      existing.addedLines += change.addedLines;
+      existing.removedLines += change.removedLines;
+      existing.changes.push(change);
+      files.set(change.path, existing);
+    }
+  }
+
+  if (changes.length === 0) return null;
+  return {
+    fileCount: files.size,
+    addedLines: changes.reduce((total, change) => total + change.addedLines, 0),
+    removedLines: changes.reduce((total, change) => total + change.removedLines, 0),
+    files: Array.from(files.values()),
+    changes,
+    changeIds,
   };
 }
 
@@ -351,6 +496,151 @@ function ToolCall({ block }: { block: Extract<ChatBlock, { kind: "tool" }> }) {
         </div>
       )}
     </div>
+  );
+}
+
+type ChangeRevertPhase = "idle" | "reverting" | "reverted" | "conflict" | "error";
+
+interface ChangeRevertState {
+  phase: ChangeRevertPhase;
+  message?: string;
+}
+
+function reviewDiffForFile(file: TurnFileSummary): string {
+  if (file.changes.length === 1) return file.changes[0].diff;
+  return file.changes
+    .map((change, index) => {
+      const toolId = change.toolUseId ? ` ${change.toolUseId}` : "";
+      return [`# ${index + 1}. ${change.sourceTool}${toolId}`, change.diff].join("\n");
+    })
+    .join("\n\n");
+}
+
+export function EditedFilesSummary({ summary }: { summary: TurnFileChangeSummary }) {
+  const language = useStore((state) => state.language);
+  const [reviewOpen, setReviewOpen] = useState(false);
+  const [showAll, setShowAll] = useState(false);
+  const [selectedPath, setSelectedPath] = useState(summary.files[0]?.path ?? "");
+  const [revertState, setRevertState] = useState<ChangeRevertState>({ phase: "idle" });
+  const visibleLimit = 3;
+  const visibleFiles = showAll ? summary.files : summary.files.slice(0, visibleLimit);
+  const hiddenCount = Math.max(0, summary.files.length - visibleFiles.length);
+  const selectedFile = summary.files.find((file) => file.path === selectedPath) ?? summary.files[0];
+  const hasRevertIds = summary.changeIds.length > 0;
+  const isChinese = language === "cn";
+  const title = isChinese
+    ? `已编辑 ${summary.fileCount} 个文件`
+    : `Edited ${summary.fileCount} ${summary.fileCount === 1 ? "file" : "files"}`;
+  const undoLabel = isChinese
+    ? revertState.phase === "reverting" ? "撤销中" : revertState.phase === "reverted" ? "已撤销" : "撤销"
+    : revertState.phase === "reverting" ? "Undoing" : revertState.phase === "reverted" ? "Reverted" : "Undo";
+  const reviewLabel = isChinese ? "审核" : "Review";
+
+  const revertChanges = async () => {
+    if (!hasRevertIds || revertState.phase === "reverting" || revertState.phase === "reverted") return;
+    setRevertState({ phase: "reverting" });
+    try {
+      for (const changeId of [...summary.changeIds].reverse()) {
+        const result = await chatChangeRevert(changeId);
+        if (result.conflict) {
+          setRevertState({ phase: "conflict", message: result.conflict });
+          return;
+        }
+        if (!result.reverted) {
+          setRevertState({
+            phase: "error",
+            message: result.reason ?? (isChinese ? "该改动无法撤销" : "This change could not be reverted"),
+          });
+          return;
+        }
+      }
+      setRevertState({ phase: "reverted", message: isChinese ? "已回撤本轮文件改动" : "Reverted this turn's file edits" });
+    } catch (error) {
+      setRevertState({ phase: "error", message: error instanceof Error ? error.message : String(error) });
+    }
+  };
+
+  return (
+    <section className="chat-change-summary" aria-label={title}>
+      <div className="chat-change-summary-head">
+        <span className="chat-change-summary-icon" aria-hidden="true">+/-</span>
+        <div className="chat-change-summary-title">
+          <strong>{title}</strong>
+          <span>
+            <span className="chat-change-added">{formatCount(summary.addedLines, "+")}</span>
+            <span className="chat-change-removed">{formatCount(summary.removedLines, "-")}</span>
+          </span>
+        </div>
+        <div className="chat-change-summary-actions">
+          <button
+            type="button"
+            disabled={!hasRevertIds || revertState.phase === "reverting" || revertState.phase === "reverted"}
+            title={hasRevertIds ? undefined : (isChinese ? "此记录缺少 changeId" : "This record has no changeId")}
+            onClick={() => void revertChanges()}
+          >
+            {undoLabel}
+          </button>
+          <button
+            type="button"
+            aria-expanded={reviewOpen}
+            onClick={() => setReviewOpen((value) => !value)}
+          >
+            {reviewLabel}
+          </button>
+        </div>
+      </div>
+      <div className="chat-change-file-list">
+        {visibleFiles.map((file) => (
+          <div key={file.path} className="chat-change-file-row">
+            <button
+              type="button"
+              className="chat-change-file-path"
+              title={file.path}
+              onClick={() => void fileOpen(file.path).catch((error) => console.error("Unable to open file", error))}
+            >
+              {file.path}
+            </button>
+            <span className="chat-change-file-stats">
+              <span className="chat-change-added">{formatCount(file.addedLines, "+")}</span>
+              <span className="chat-change-removed">{formatCount(file.removedLines, "-")}</span>
+            </span>
+          </div>
+        ))}
+      </div>
+      {summary.files.length > visibleLimit && (
+        <button type="button" className="chat-change-more" onClick={() => setShowAll((value) => !value)}>
+          {showAll
+            ? (isChinese ? "收起文件" : "Show fewer files")
+            : (isChinese ? `再显示 ${hiddenCount} 个文件` : `Show ${hiddenCount} more files`)}
+        </button>
+      )}
+      {revertState.message && (
+        <div className={`chat-change-revert-note ${revertState.phase}`}>
+          {revertState.message}
+        </div>
+      )}
+      {reviewOpen && selectedFile && (
+        <div className="chat-change-review">
+          {summary.files.length > 1 && (
+            <div className="chat-change-review-tabs" role="tablist" aria-label={isChinese ? "文件 diff" : "File diffs"}>
+              {summary.files.map((file) => (
+                <button
+                  key={file.path}
+                  type="button"
+                  role="tab"
+                  aria-selected={file.path === selectedFile.path}
+                  title={file.path}
+                  onClick={() => setSelectedPath(file.path)}
+                >
+                  {file.path}
+                </button>
+              ))}
+            </div>
+          )}
+          <pre className="tool-diff chat-change-review-diff">{reviewDiffForFile(selectedFile)}</pre>
+        </div>
+      )}
+    </section>
   );
 }
 

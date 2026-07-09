@@ -10,6 +10,7 @@ import ChatThread from "./ChatThread";
 import FilePathMenu from "./FilePathMenu";
 import { CHAT_COPY } from "./i18n";
 import { latestFileChangesFromTurns, latestTodosFromTurns, migrateTurn, textFromTurn } from "./model";
+import { fileChangeSummaryFromTurns } from "./ChatMessage";
 import WorkflowFlow from "./WorkflowFlow";
 import { useChatSessions } from "./useChatSessions";
 import { useChatComposer } from "./useChatComposer";
@@ -128,6 +129,10 @@ export default function Chat() {
   const workflowFileChanges = useMemo(
     () => latestFileChangesFromTurns(turns, currentProject?.path),
     [currentProject?.path, turns],
+  );
+  const workflowFileChangeSummary = useMemo(
+    () => fileChangeSummaryFromTurns(turns),
+    [turns],
   );
 
   const send = async () => {
@@ -291,7 +296,7 @@ export default function Chat() {
             <button
               className="chat-export-btn"
               onClick={() => void commands.exportCurrentChat()}
-              disabled={currentChatBusy || commands.exporting || turns.length === 0}
+              disabled={currentChatBusy || commands.exporting || commands.debugExporting || turns.length === 0}
               title={copy.exportChat}
               aria-label={copy.exportChat}
               style={{ background: "transparent", border: "none", color: "var(--text-dim)", padding: "4px", cursor: "pointer", display: "flex", alignItems: "center" }}
@@ -303,6 +308,24 @@ export default function Chat() {
               ) : (
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
                   <path d="M12 15V3M12 15L8 11M12 15L16 11M21 21H3" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                </svg>
+              )}
+            </button>
+            <button
+              className="chat-export-btn"
+              onClick={() => void commands.exportDebugZip()}
+              disabled={commands.exporting || commands.debugExporting || turns.length === 0}
+              title={copy.exportDebugZip ?? "Export debug zip"}
+              aria-label={copy.exportDebugZip ?? "Export debug zip"}
+              style={{ background: "transparent", border: "none", color: "var(--text-dim)", padding: "4px", cursor: "pointer", display: "flex", alignItems: "center" }}
+            >
+              {commands.debugExporting ? (
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" className="spinner">
+                  <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="2" strokeDasharray="31.4 31.4" strokeLinecap="round" opacity="0.5"/>
+                </svg>
+              ) : (
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                  <path d="M4 7H20M6 7L7 20H17L18 7M9 7V4H15V7M9 11H15M9 15H13" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
                 </svg>
               )}
             </button>
@@ -330,10 +353,11 @@ export default function Chat() {
           onPermissionRespond={(promptId, allow) => void run.respondPermission(promptId, allow)}
           onQuestionRespond={(toolUseId, answer) => void run.respondQuestion(toolUseId, answer)}
         />
-        {(workflowTodos.length > 0 || workflowFileChanges.length > 0) && !pendingCommandSelection && (
+        {(workflowTodos.length > 0 || workflowFileChanges.length > 0 || workflowFileChangeSummary) && !pendingCommandSelection && (
           <WorkflowFlow
             todos={workflowTodos}
             fileChanges={workflowFileChanges}
+            fileChangeSummary={workflowFileChangeSummary}
             bottomOffset={composer.composerHeight + 14}
             active={currentChatBusy}
             onOpenFile={openWorkflowFile}

@@ -3,6 +3,7 @@ import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
 import { memo } from "react";
 import katex from "katex";
 import type { PDFDocumentProxy, PDFPageProxy, RenderTask } from "pdfjs-dist";
+import type { EditorView } from "@codemirror/view";
 import "katex/dist/katex.min.css";
 
 
@@ -54,6 +55,8 @@ type CompileResult = LatexCompileResult;
 type EditorMode = "code" | "visual";
 type TypesetResizePanel = "project" | "pdf";
 type TypesetResizeAxis = "x" | "y";
+type OutlineItem = { line: number; level: number; title: string };
+type NumberedOutlineItem = OutlineItem & { number: string };
 
 const PROJECT_PANEL_DEFAULT_W = 204;
 const PROJECT_PANEL_MIN_W = 136;
@@ -61,6 +64,9 @@ const PROJECT_PANEL_MAX_W = 360;
 const PDF_PANEL_DEFAULT_W = 760;
 const PDF_PANEL_MIN_W = 220;
 const PDF_PANEL_MAX_W = 1040;
+const OUTLINE_PANEL_DEFAULT_H = 184;
+const OUTLINE_PANEL_MIN_H = 72;
+const OUTLINE_PANEL_MAX_H = 420;
 const RESIZE_HOT_ZONE_PX = 32;
 const SCROLLBAR_GUTTER_PX = 18;
 
@@ -1426,6 +1432,167 @@ function replaceSourceRange(source: string, startLine: number, endLine: number, 
   return [...before, ...replacementLines, ...after].join("\n");
 }
 
+/**
+ * Applies toolbar commands at whichever editor's real cursor/selection is
+ * current, instead of always inserting near `\end{document}` (the old
+ * `insertSourceSnippet` behavior — selecting text and clicking Bold did
+ * nothing to that text). `replace` is the only mode-specific part: Code mode
+ * splices the whole `draft` string and re-focuses the textarea; Visual mode
+ * dispatches an incremental CodeMirror change, mirroring Overleaf's
+ * `wrapRanges` (`extensions/toolbar/commands.ts`) minus its Lezer-syntax-tree
+ * "detect already-wrapped and unwrap" logic, which needs a real LaTeX grammar
+ * we don't have.
+ */
+type EditorAdapter = {
+  from: number;
+  to: number;
+  text: string;
+  replace: (from: number, to: number, insert: string, selStart: number, selEnd: number) => void;
+};
+
+function activeEditorAdapter(
+  mode: EditorMode,
+  editorRef: { current: HTMLTextAreaElement | null },
+  visualViewRef: { current: EditorView | null },
+  draft: string,
+  onChange: (value: string) => void,
+): EditorAdapter | null {
+  if (mode === "code") {
+    const editor = editorRef.current;
+    if (!editor) return null;
+    const from = editor.selectionStart ?? draft.length;
+    const to = editor.selectionEnd ?? from;
+    return {
+      from,
+      to,
+      text: draft,
+      replace: (rFrom, rTo, insert, selStart, selEnd) => {
+        onChange(draft.slice(0, rFrom) + insert + draft.slice(rTo));
+        window.setTimeout(() => {
+          editor.focus();
+          editor.setSelectionRange(selStart, selEnd);
+        }, 0);
+      },
+    };
+  }
+  const view = visualViewRef.current;
+  if (!view) return null;
+  const range = view.state.selection.main;
+  return {
+    from: range.from,
+    to: range.to,
+    text: view.state.doc.toString(),
+    replace: (rFrom, rTo, insert, selStart, selEnd) => {
+      view.dispatch({
+        changes: { from: rFrom, to: rTo, insert },
+        selection: { anchor: selStart, head: selEnd },
+        scrollIntoView: true,
+      });
+      view.focus();
+    },
+  };
+}
+
+/** Wraps the selection in `prefix`/`suffix`; an empty selection wraps `placeholder` instead, pre-selected. */
+function wrapSelection(adapter: EditorAdapter, prefix: string, suffix: string, placeholder: string) {
+  const hasSelection = adapter.to > adapter.from;
+  const content = hasSelection ? adapter.text.slice(adapter.from, adapter.to) : placeholder;
+  const selStart = adapter.from + prefix.length;
+  adapter.replace(adapter.from, adapter.to, `${prefix}${content}${suffix}`, selStart, selStart + content.length);
+}
+
+/**
+ * Inserts a snippet at the selection anchor without consuming any selected
+ * text (matches Overleaf's `insertCite`/`insertRef`, which insert at
+ * `state.selection.main.anchor` — a citation/reference key isn't a sensible
+ * substitute for whatever prose happened to be selected).
+ */
+function insertSnippetAtCursor(adapter: EditorAdapter, before: string, placeholder: string, after: string) {
+  const pos = adapter.from;
+  const selStart = pos + before.length;
+  adapter.replace(pos, pos, `${before}${placeholder}${after}`, selStart, selStart + placeholder.length);
+}
+
+/** Blank-line padding so a block insert (table/figure) doesn't run into surrounding text. */
+function ensureEmptyLine(text: string, pos: number): { prefix: string; suffix: string } {
+  const before = text.slice(0, pos);
+  const after = text.slice(pos);
+  return {
+    prefix: /(^|\n)[ \t]*$/.test(before) ? "" : "\n\n",
+    suffix: /^[ \t]*(\n|$)/.test(after) ? "" : "\n\n",
+  };
+}
+
+function insertBlockAtCursor(adapter: EditorAdapter, template: string) {
+  const { prefix, suffix } = ensureEmptyLine(adapter.text, adapter.from);
+  const pos = adapter.from;
+  adapter.replace(pos, pos, `${prefix}${template}${suffix}`, pos + prefix.length, pos + prefix.length + template.length);
+}
+
+const HEADING_LINE_RE = /^(\s*)\\(section|subsection|subsubsection|paragraph|subparagraph)\*?\{([\s\S]*?)\}\s*$/;
+
+/**
+ * Simplified, line-based version of Overleaf's tree-based `setSectionHeadingLevel`
+ * (`extensions/toolbar/sections.ts`): if the current line already is a section
+ * command, swap just the command keyword (or strip it, for "text"); otherwise
+ * wrap the selection or the current line's text in the chosen level.
+ */
+function applyHeadingLevel(adapter: EditorAdapter, key: string, label: string) {
+  const { text } = adapter;
+  const lineStart = text.lastIndexOf("\n", adapter.from - 1) + 1;
+  const lineEnd = text.indexOf("\n", adapter.from) === -1 ? text.length : text.indexOf("\n", adapter.from);
+  const line = text.slice(lineStart, lineEnd);
+  const match = HEADING_LINE_RE.exec(line);
+
+  if (match) {
+    const [, indent, , arg] = match;
+    const replacement = key === "text" ? `${indent}${arg}` : `${indent}\\${key}{${arg}}`;
+    const selStart = key === "text" ? lineStart + indent.length : lineStart + indent.length + key.length + 2;
+    adapter.replace(lineStart, lineEnd, replacement, selStart, selStart + arg.length);
+    return;
+  }
+  if (key === "text") return; // already plain text
+
+  const hasSelection = adapter.to > adapter.from;
+  const content = hasSelection ? text.slice(adapter.from, adapter.to) : line.trim();
+  if (content) {
+    const from = hasSelection ? adapter.from : lineStart;
+    const to = hasSelection ? adapter.to : lineEnd;
+    const selStart = from + key.length + 2;
+    adapter.replace(from, to, `\\${key}{${content}}`, selStart, selStart + content.length);
+    return;
+  }
+
+  const placeholder = `New ${label.toLowerCase()}`;
+  insertBlockAtCursor(adapter, `\\${key}{${placeholder}}`);
+}
+
+/**
+ * Simplified version of Overleaf's `wrapRangeInList` (`extensions/toolbar/lists.ts`):
+ * wraps the selected line range in `\begin{itemize}`/`\begin{enumerate}`, one
+ * `\item` per line. No nested-list/indent-context awareness (needs the tree).
+ */
+function applyListWrap(adapter: EditorAdapter, environment: "itemize" | "enumerate") {
+  const { text } = adapter;
+  const hasSelection = adapter.to > adapter.from;
+  const fromLine = text.lastIndexOf("\n", adapter.from - 1) + 1;
+  const searchFrom = Math.max(adapter.to - 1, adapter.from);
+  const toLineEnd = text.indexOf("\n", searchFrom) === -1 ? text.length : text.indexOf("\n", searchFrom);
+  const block = text.slice(fromLine, toLineEnd);
+  const lines = block.split("\n");
+  const blockHasContent = lines.some((line) => line.trim().length > 0);
+
+  if (!hasSelection && !blockHasContent) {
+    const insert = `\\begin{${environment}}\n\\item \n\\end{${environment}}`;
+    const itemPos = fromLine + `\\begin{${environment}}\n\\item `.length;
+    adapter.replace(fromLine, toLineEnd, insert, itemPos, itemPos);
+    return;
+  }
+
+  const insert = [`\\begin{${environment}}`, ...lines.map((line) => `\\item ${line.trim()}`), `\\end{${environment}}`].join("\n");
+  adapter.replace(fromLine, toLineEnd, insert, fromLine, fromLine + insert.length);
+}
+
 function insertSourceSnippet(source: string, snippet: string, path: string | null): string {
   const cleanSnippet = snippet.replace(/\r/g, "");
   if (extension(path ?? "") !== ".tex") {
@@ -2127,41 +2294,90 @@ function CompileLog({
 }
 
 function TypesetOutlinePanel({
+  activeLine,
+  collapsed,
   outline,
-  draft,
-  editorRef,
+  height,
+  onJumpToLine,
+  onResizeKeyDown,
+  onResizePointerDown,
+  onToggleCollapsed,
 }: {
-  outline: Array<{ line: number; level: number; title: string }>;
-  draft: string;
-  editorRef: { current: HTMLTextAreaElement | null };
+  activeLine: number | null;
+  collapsed: boolean;
+  outline: NumberedOutlineItem[];
+  height: number;
+  onJumpToLine: (line: number) => void;
+  onResizeKeyDown: (event: React.KeyboardEvent<HTMLDivElement>) => void;
+  onResizePointerDown: (event: ReactPointerEvent<HTMLDivElement>) => void;
+  onToggleCollapsed: () => void;
 }) {
-  if (outline.length === 0) return null;
+  if (outline.length === 0) {
+    return (
+      <section className="typeset-outline empty" aria-label="Document outline">
+        <div className="typeset-outline-head">
+          <strong>Outline</strong>
+          <span>0</span>
+        </div>
+        <span className="typeset-outline-empty">No sections found.</span>
+      </section>
+    );
+  }
+
+  if (collapsed) {
+    return (
+      <section className="typeset-outline-collapsed" aria-label="Document outline">
+        <button type="button" onClick={onToggleCollapsed}>
+          <ToolIcon name="list" />
+          <span>Outline</span>
+          <em>{outline.length}</em>
+        </button>
+      </section>
+    );
+  }
 
   return (
-    <section className="typeset-outline" aria-label="Document outline">
+    <>
+      <div
+        className="typeset-outline-resize"
+        role="separator"
+        aria-label="Resize Outline"
+        aria-orientation="horizontal"
+        aria-valuemin={OUTLINE_PANEL_MIN_H}
+        aria-valuemax={OUTLINE_PANEL_MAX_H}
+        aria-valuenow={height}
+        title="Drag to resize Outline"
+        tabIndex={0}
+        onKeyDown={onResizeKeyDown}
+        onPointerDown={onResizePointerDown}
+      >
+        <span aria-hidden="true" />
+      </div>
+      <section className="typeset-outline" aria-label="Document outline" style={{ flexBasis: `${height}px` }}>
       <div className="typeset-outline-head">
         <strong>Outline</strong>
         <span>{outline.length}</span>
+        <button type="button" className="typeset-outline-toggle" title="Hide Outline" aria-label="Hide Outline" onClick={onToggleCollapsed}>
+          <ToolIcon name="clear" />
+        </button>
       </div>
       <div className="typeset-outline-list">
         {outline.map((item) => (
           <button
             key={`${item.line}:${item.title}`}
             type="button"
+            className={activeLine === item.line ? "active" : ""}
+            aria-current={activeLine === item.line ? "location" : undefined}
             style={{ paddingLeft: `${8 + (item.level - 1) * 12}px` }}
-            onClick={() => {
-              const lines = draft.split("\n");
-              const offset = lines.slice(0, item.line - 1).reduce((sum, line) => sum + line.length + 1, 0);
-              editorRef.current?.focus();
-              editorRef.current?.setSelectionRange(offset, offset);
-            }}
+            onClick={() => onJumpToLine(item.line)}
           >
-            <span>{item.title}</span>
+            <span><b>{item.number}</b>{item.title}</span>
             <em>{item.line}</em>
           </button>
         ))}
       </div>
     </section>
+    </>
   );
 }
 
@@ -2323,11 +2539,14 @@ const VISUAL_SECTION_LEVELS: Array<{ key: string; label: string }> = [
 ];
 
 function TypesetEditorToolbar({
+  activeOutlineItem,
   draft,
   mode,
   canRedo,
   canUndo,
   dirty,
+  editorRef,
+  visualViewRef,
   onChange,
   onModeChange,
   onRedo,
@@ -2337,11 +2556,14 @@ function TypesetEditorToolbar({
   path,
   saving,
 }: {
+  activeOutlineItem: NumberedOutlineItem | null;
   draft: string;
   mode: EditorMode;
   canRedo: boolean;
   canUndo: boolean;
   dirty: boolean;
+  editorRef: { current: HTMLTextAreaElement | null };
+  visualViewRef: { current: EditorView | null };
   onChange: (value: string) => void;
   onModeChange: (mode: EditorMode) => void;
   onRedo: () => void;
@@ -2356,25 +2578,39 @@ function TypesetEditorToolbar({
   const [searchIndex, setSearchIndex] = useState(0);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const searchMatches = useMemo(() => textSearchMatches(draft, searchQuery), [draft, searchQuery]);
-  const insert = (snippet: string) => onChange(insertSourceSnippet(draft, snippet, path));
-  const insertSection = (key: string, label: string) => {
-    if (key === "text") {
-      insert("New paragraph text.\n\n");
-      return;
-    }
-    insert(`\\${key}{New ${label.toLowerCase()}}\n\n`);
+  // Every command below reads/writes at the *live* selection of whichever
+  // editor is active — see `activeEditorAdapter` for why Code mode (a plain
+  // textarea) and Visual mode (CodeMirror) need different `replace` backends.
+  const withSelection = (run: (adapter: EditorAdapter) => void) => {
+    const adapter = activeEditorAdapter(mode, editorRef, visualViewRef, draft, onChange);
+    if (!adapter) return;
+    run(adapter);
   };
-  const insertBold = () => insert("\\textbf{important text}\n");
-  const insertItalic = () => insert("\\emph{emphasis}\n");
-  const insertBulletList = () => insert("\\begin{itemize}\n\\item First point\n\\item Second point\n\\end{itemize}\n\n");
-  const insertNumberedList = () => insert("\\begin{enumerate}\n\\item First point\n\\item Second point\n\\end{enumerate}\n\n");
-  const insertInlineMath = () => insert("$E = mc^2$\n");
-  const insertMath = () => insert("\\[\nE = mc^2\n\\]\n\n");
-  const insertHref = () => insert("\\href{https://example.com}{link text}\n");
-  const insertRef = () => insert("\\ref{sec:label}\n");
-  const insertCitation = () => insert("\\cite{reference}\n");
-  const insertTable = () => insert("\\begin{tabular}{ll}\nA & B \\\\\n1 & 2\n\\end{tabular}\n\n");
-  const insertFigure = () => insert("\\begin{figure}[h]\n\\centering\n\\includegraphics[width=.8\\linewidth]{figure.png}\n\\caption{Caption}\n\\end{figure}\n\n");
+  const insertSection = (key: string, label: string) =>
+    withSelection((adapter) => applyHeadingLevel(adapter, key, label));
+  const insertBold = () => withSelection((adapter) => wrapSelection(adapter, "\\textbf{", "}", "bold text"));
+  const insertItalic = () => withSelection((adapter) => wrapSelection(adapter, "\\emph{", "}", "emphasis"));
+  const insertBulletList = () => withSelection((adapter) => applyListWrap(adapter, "itemize"));
+  const insertNumberedList = () => withSelection((adapter) => applyListWrap(adapter, "enumerate"));
+  const insertInlineMath = () => withSelection((adapter) => wrapSelection(adapter, "$", "$", "x"));
+  const insertMath = () => withSelection((adapter) => wrapSelection(adapter, "\\[\n", "\n\\]", "x"));
+  const insertHref = () =>
+    withSelection((adapter) => {
+      const hasSelection = adapter.to > adapter.from;
+      const linkText = hasSelection ? adapter.text.slice(adapter.from, adapter.to) : "link text";
+      insertSnippetAtCursor(adapter, "\\href{", "https://example.com", `}{${linkText}}`);
+    });
+  const insertRef = () => withSelection((adapter) => insertSnippetAtCursor(adapter, "\\ref{", "sec:label", "}"));
+  const insertCitation = () => withSelection((adapter) => insertSnippetAtCursor(adapter, "\\cite{", "reference", "}"));
+  const insertTable = () =>
+    withSelection((adapter) => insertBlockAtCursor(adapter, "\\begin{tabular}{ll}\nA & B \\\\\n1 & 2\n\\end{tabular}"));
+  const insertFigure = () =>
+    withSelection((adapter) =>
+      insertBlockAtCursor(
+        adapter,
+        "\\begin{figure}[h]\n\\centering\n\\includegraphics[width=.8\\linewidth]{figure.png}\n\\caption{Caption}\n\\end{figure}",
+      ),
+    );
   const runSearch = (direction = 0) => {
     if (!searchMatches.length) return;
     setSearchIndex((current) => {
@@ -2496,6 +2732,10 @@ function TypesetEditorToolbar({
         <div className="typeset-visual-filetab editor-tab" role="tab" aria-selected="true">
           <FileIcon path={path || "untitled.tex"} />
           <strong>{path ? basename(path) : "Untitled"}</strong>
+        </div>
+        <div className="typeset-current-section" aria-live="polite" title={activeOutlineItem?.title ?? "No section selected"}>
+          <ToolIcon name="list" />
+          <span>{activeOutlineItem ? `Section ${activeOutlineItem.number} ${activeOutlineItem.title}` : "No section"}</span>
         </div>
         <div className="typeset-visual-mode-switch editor-switch" role="tablist" aria-label="Editor mode">
           <button type="button" role="tab" aria-selected={mode === "code"} className={mode === "code" ? "active" : ""} onClick={() => onModeChange("code")}>Code</button>
@@ -3317,7 +3557,7 @@ function TypesetStartPage({
   );
 }
 
-function outlineFor(source: string): Array<{ line: number; level: number; title: string }> {
+function outlineFor(source: string): OutlineItem[] {
   const latexLevels: Record<string, number> = {
     chapter: 1,
     section: 2,
@@ -3334,6 +3574,59 @@ function outlineFor(source: string): Array<{ line: number; level: number; title:
       return null;
     })
     .filter((item): item is { line: number; level: number; title: string } => Boolean(item));
+}
+
+function numberedOutlineFor(outline: OutlineItem[]): NumberedOutlineItem[] {
+  const counters: number[] = [];
+  return outline.map((item) => {
+    const levelIndex = Math.max(0, item.level - 1);
+    counters[levelIndex] = (counters[levelIndex] ?? 0) + 1;
+    counters.length = levelIndex + 1;
+    const number = counters.filter((value) => value > 0).join(".");
+    return { ...item, number };
+  });
+}
+
+function activeOutlineItemForLine(outline: NumberedOutlineItem[], line: number): NumberedOutlineItem | null {
+  let active: NumberedOutlineItem | null = null;
+  for (const item of outline) {
+    if (item.line > line) break;
+    active = item;
+  }
+  return active;
+}
+
+function lineOffsetFor(source: string, line: number): number {
+  const lines = source.split("\n");
+  return lines.slice(0, Math.max(0, line - 1)).reduce((sum, item) => sum + item.length + 1, 0);
+}
+
+function editorLineMetrics(textarea: HTMLTextAreaElement): { lineHeight: number; paddingTop: number } {
+  const style = window.getComputedStyle(textarea);
+  const fontSize = Number.parseFloat(style.fontSize) || 13;
+  const rawLineHeight = style.lineHeight;
+  const parsedLineHeight = Number.parseFloat(rawLineHeight);
+  const lineHeight = rawLineHeight.endsWith("px")
+    ? parsedLineHeight || fontSize * 1.58
+    : parsedLineHeight > 0
+      ? parsedLineHeight * fontSize
+      : fontSize * 1.58;
+  const paddingTop = Number.parseFloat(style.paddingTop) || 0;
+  return { lineHeight, paddingTop };
+}
+
+function codeVisibleLineForScroll(scrollTarget: HTMLElement, textarea: HTMLTextAreaElement, source: string): number {
+  const { lineHeight, paddingTop } = editorLineMetrics(textarea);
+  const lineCount = Math.max(1, source.split("\n").length);
+  return clampNumber(Math.floor((scrollTarget.scrollTop - paddingTop) / lineHeight) + 1, 1, lineCount);
+}
+
+function scrollCodeEditorToLine(textarea: HTMLTextAreaElement, line: number): void {
+  const scrollTarget = textarea.closest<HTMLElement>(".lab-editor");
+  if (!scrollTarget) return;
+  const { lineHeight, paddingTop } = editorLineMetrics(textarea);
+  const targetTop = paddingTop + Math.max(0, line - 1) * lineHeight;
+  scrollTarget.scrollTop = Math.max(0, targetTop - scrollTarget.clientHeight * 0.28);
 }
 
 export default function Typeset() {
@@ -3359,16 +3652,28 @@ export default function Typeset() {
   const [pdfPanelVisible, setPdfPanelVisible] = useState(true);
   const [projectPanelWidth, setProjectPanelWidth] = useState(PROJECT_PANEL_DEFAULT_W);
   const [pdfPanelWidth, setPdfPanelWidth] = useState(PDF_PANEL_DEFAULT_W);
+  const [outlinePanelHeight, setOutlinePanelHeight] = useState(OUTLINE_PANEL_DEFAULT_H);
+  const [outlineCollapsed, setOutlineCollapsed] = useState(false);
+  const [currentSourceLine, setCurrentSourceLine] = useState(1);
   // Mirror the panel widths into refs so the drag callbacks can read the current
   // size without listing the widths as dependencies. Keeping the callbacks stable
   // stops the window/document listener effect from tearing down (and aborting the
   // active drag) every time a resize updates the width state.
   const projectPanelWidthRef = useRef(projectPanelWidth);
   const pdfPanelWidthRef = useRef(pdfPanelWidth);
+  const outlinePanelHeightRef = useRef(outlinePanelHeight);
   const resizeCleanupRef = useRef<(() => void) | null>(null);
   projectPanelWidthRef.current = projectPanelWidth;
   pdfPanelWidthRef.current = pdfPanelWidth;
+  outlinePanelHeightRef.current = outlinePanelHeight;
   const editorRef = useRef<HTMLTextAreaElement | null>(null);
+  // Live CodeMirror view for Visual mode, mirroring `editorRef` for Code mode —
+  // lets the toolbar apply edits at whichever editor's real selection is
+  // current, instead of always inserting near `\end{document}`.
+  const visualViewRef = useRef<EditorView | null>(null);
+  const onVisualViewReady = useCallback((view: EditorView | null) => {
+    visualViewRef.current = view;
+  }, []);
   const previewAutoOpenedRef = useRef(false);
   // Tracks the last source path we auto-compiled so opening a tex compiles it
   // once (matching Recompile), instead of leaving the PDF stale/empty until the
@@ -3378,6 +3683,11 @@ export default function Typeset() {
 
   const dirty = Boolean(loaded && draft !== loaded.content);
   const outline = useMemo(() => outlineFor(draft), [draft]);
+  const numberedOutline = useMemo(() => numberedOutlineFor(outline), [outline]);
+  const activeOutlineItem = useMemo(
+    () => activeOutlineItemForLine(numberedOutline, currentSourceLine),
+    [currentSourceLine, numberedOutline],
+  );
   const activeWorkDir = useMemo(() => workDirForSource(sourcePath), [sourcePath]);
   const browserPreviewMode = !isTauri();
   const diagnosticsCount = useMemo(() => {
@@ -3439,6 +3749,7 @@ export default function Typeset() {
       setLoaded(file);
       resetDraft(file.content);
       setVisualPdfCursor(null);
+      setCurrentSourceLine(1);
       setCompileStatus("idle");
       setCompileResult(null);
     } catch (openError) {
@@ -3470,6 +3781,7 @@ export default function Typeset() {
       setLoaded(file);
       resetDraft(file.content);
       setVisualPdfCursor(null);
+      setCurrentSourceLine(1);
       setCompileStatus("idle");
       setCompileResult(null);
     } catch (createError) {
@@ -3488,6 +3800,7 @@ export default function Typeset() {
     setCompileResult(null);
     setLogOpen(false);
     setVisualPdfCursor(null);
+    setCurrentSourceLine(1);
     autoCompiledPathRef.current = null;
     try {
       const [latexMatches, rootEntries] = await Promise.all([
@@ -3508,6 +3821,7 @@ export default function Typeset() {
           setLoaded(file);
           resetDraft(file.content);
           setVisualPdfCursor(null);
+          setCurrentSourceLine(1);
         }
       }
     } catch (scanError) {
@@ -3522,6 +3836,11 @@ export default function Typeset() {
   useEffect(() => {
     void scanProject();
   }, [currentProject?.id, scanProject]);
+
+  useEffect(() => {
+    const lineCount = Math.max(1, draft.split("\n").length);
+    setCurrentSourceLine((line) => clampNumber(line, 1, lineCount));
+  }, [draft]);
 
   const save = useCallback(async (): Promise<FileText | null> => {
     if (!sourcePath || !loaded) return null;
@@ -3622,25 +3941,34 @@ export default function Typeset() {
   }, [loaded, save, sourcePath]);
 
   const openCodeAtLine = useCallback((line: number) => {
-    const lines = draft.split("\n");
-    const offset = lines.slice(0, Math.max(0, line - 1)).reduce((sum, item) => sum + item.length + 1, 0);
+    const offset = lineOffsetFor(draft, line);
+    setCurrentSourceLine(line);
     setEditorMode("code");
     window.setTimeout(() => {
-      editorRef.current?.focus();
-      editorRef.current?.setSelectionRange(offset, offset);
+      const editor = editorRef.current;
+      editor?.focus();
+      editor?.setSelectionRange(offset, offset);
+      if (editor) scrollCodeEditorToLine(editor, line);
+      setCurrentSourceLine(line);
+      window.requestAnimationFrame(() => setCurrentSourceLine(line));
     }, 0);
   }, [draft]);
 
   const openCodeRange = useCallback((start: number, end: number) => {
     const safeStart = clampNumber(start, 0, draft.length);
     const safeEnd = clampNumber(end, safeStart, draft.length);
+    const line = lineNumberForOffset(draft, safeStart);
+    setCurrentSourceLine(line);
     setEditorMode("code");
     window.setTimeout(() => {
-      editorRef.current?.focus();
-      editorRef.current?.setSelectionRange(safeStart, safeEnd);
-      editorRef.current?.scrollIntoView?.({ block: "center", inline: "nearest" });
+      const editor = editorRef.current;
+      editor?.focus();
+      editor?.setSelectionRange(safeStart, safeEnd);
+      if (editor) scrollCodeEditorToLine(editor, line);
+      setCurrentSourceLine(line);
+      window.requestAnimationFrame(() => setCurrentSourceLine(line));
     }, 0);
-  }, [draft.length]);
+  }, [draft]);
 
   const openSourceForPdfText = useCallback((text: string, context = text) => {
     const match = findLatexOffsetForPdfText(draft, text, context);
@@ -3652,6 +3980,7 @@ export default function Typeset() {
       text: normalizePdfText(text),
     };
     setVisualPdfCursor(cursor);
+    setCurrentSourceLine(cursor.line);
     if (editorMode === "visual") {
       setEditorMode("visual");
       return;
@@ -3665,6 +3994,38 @@ export default function Typeset() {
     }
     void scanProject();
   }, [dirty, scanProject]);
+
+  useEffect(() => {
+    if (editorMode !== "code") return;
+    const editor = editorRef.current;
+    const scrollTarget = editor?.closest<HTMLElement>(".lab-editor");
+    if (!editor || !scrollTarget) return;
+    let frame = 0;
+    const updateLine = (preferSelection = false) => {
+      window.cancelAnimationFrame(frame);
+      frame = window.requestAnimationFrame(() => {
+        if (preferSelection && document.activeElement === editor) {
+          setCurrentSourceLine(lineNumberForOffset(draft, editor.selectionStart));
+          return;
+        }
+        setCurrentSourceLine(codeVisibleLineForScroll(scrollTarget, editor, draft));
+      });
+    };
+    const updateFromScroll = () => updateLine(false);
+    const updateFromSelection = () => updateLine(true);
+    scrollTarget.addEventListener("scroll", updateFromScroll, { passive: true });
+    editor.addEventListener("click", updateFromSelection);
+    editor.addEventListener("keyup", updateFromSelection);
+    editor.addEventListener("select", updateFromSelection);
+    updateLine(true);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      scrollTarget.removeEventListener("scroll", updateFromScroll);
+      editor.removeEventListener("click", updateFromSelection);
+      editor.removeEventListener("keyup", updateFromSelection);
+      editor.removeEventListener("select", updateFromSelection);
+    };
+  }, [draft, editorMode]);
 
   const beginPanelResize = useCallback((
     panel: TypesetResizePanel,
@@ -3755,6 +4116,78 @@ export default function Typeset() {
     beginPanelResize(panel, resizeAxisForTarget(event.currentTarget), event.clientX, event.clientY);
   }, [beginPanelResize]);
 
+  const beginOutlineResizeFromPointer = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.pointerType === "mouse" && event.button !== 0) return;
+    if (typeof document === "undefined" || typeof window === "undefined") return;
+    event.preventDefault();
+    event.stopPropagation();
+    resizeCleanupRef.current?.();
+
+    const startY = event.clientY;
+    const startHeight = outlinePanelHeightRef.current;
+    const root = document.documentElement;
+    const body = document.body;
+    const previousBodyCursor = body.style.cursor;
+    const previousBodyUserSelect = body.style.userSelect;
+    const captureOptions: AddEventListenerOptions = { capture: true };
+    const pointerMoveOptions: AddEventListenerOptions = { capture: true, passive: false };
+    let active = true;
+
+    const applyMove = (clientY: number) => {
+      const delta = clientY - startY;
+      setOutlinePanelHeight(clampNumber(startHeight - delta, OUTLINE_PANEL_MIN_H, OUTLINE_PANEL_MAX_H));
+    };
+
+    const cleanup = () => {
+      if (!active) return;
+      active = false;
+      window.removeEventListener("pointermove", onPointerMove, pointerMoveOptions);
+      window.removeEventListener("pointerup", cleanup, captureOptions);
+      window.removeEventListener("pointercancel", cleanup, captureOptions);
+      window.removeEventListener("mousemove", onMouseMove, captureOptions);
+      window.removeEventListener("mouseup", cleanup, captureOptions);
+      window.removeEventListener("blur", cleanup);
+      document.removeEventListener("keydown", onEscape, captureOptions);
+      root.classList.remove("typeset-resizing-y");
+      body.style.cursor = previousBodyCursor;
+      body.style.userSelect = previousBodyUserSelect;
+      if (resizeCleanupRef.current === cleanup) {
+        resizeCleanupRef.current = null;
+      }
+    };
+
+    const prevent = (moveEvent: Event) => {
+      if (moveEvent.cancelable) moveEvent.preventDefault();
+    };
+
+    function onMouseMove(moveEvent: MouseEvent) {
+      prevent(moveEvent);
+      applyMove(moveEvent.clientY);
+    }
+
+    function onPointerMove(moveEvent: PointerEvent) {
+      prevent(moveEvent);
+      applyMove(moveEvent.clientY);
+    }
+
+    function onEscape(keyEvent: KeyboardEvent) {
+      if (keyEvent.key === "Escape") cleanup();
+    }
+
+    root.classList.add("typeset-resizing-y");
+    body.style.cursor = "row-resize";
+    body.style.userSelect = "none";
+    resizeCleanupRef.current = cleanup;
+
+    window.addEventListener("pointermove", onPointerMove, pointerMoveOptions);
+    window.addEventListener("pointerup", cleanup, captureOptions);
+    window.addEventListener("pointercancel", cleanup, captureOptions);
+    window.addEventListener("mousemove", onMouseMove, captureOptions);
+    window.addEventListener("mouseup", cleanup, captureOptions);
+    window.addEventListener("blur", cleanup);
+    document.addEventListener("keydown", onEscape, captureOptions);
+  }, []);
+
   const beginGridResizeFromPointer = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
     if (event.pointerType === "mouse" && event.button !== 0) return;
     if (isEditorScrollbarGutterPointer(event.target, event.clientX, event.clientY)) return;
@@ -3779,6 +4212,14 @@ export default function Typeset() {
       return;
     }
     setPdfPanelWidth((width) => clampNumber(width - direction * step, PDF_PANEL_MIN_W, PDF_PANEL_MAX_W));
+  }, []);
+
+  const handleOutlineResizeKey = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+    event.preventDefault();
+    const step = event.shiftKey ? 40 : 16;
+    const direction = event.key === "ArrowUp" ? 1 : -1;
+    setOutlinePanelHeight((height) => clampNumber(height + direction * step, OUTLINE_PANEL_MIN_H, OUTLINE_PANEL_MAX_H));
   }, []);
 
   const gridClassName = [
@@ -3870,7 +4311,16 @@ export default function Typeset() {
                     refreshKey={treeRefreshKey}
                     onOpenPath={openPath}
                   />
-                  <TypesetOutlinePanel outline={outline} draft={draft} editorRef={editorRef} />
+                  <TypesetOutlinePanel
+                    activeLine={activeOutlineItem?.line ?? null}
+                    collapsed={outlineCollapsed}
+                    outline={numberedOutline}
+                    height={outlinePanelHeight}
+                    onJumpToLine={openCodeAtLine}
+                    onResizeKeyDown={handleOutlineResizeKey}
+                    onResizePointerDown={beginOutlineResizeFromPointer}
+                    onToggleCollapsed={() => setOutlineCollapsed((collapsed) => !collapsed)}
+                  />
                 </div>
                 <div
                   className="typeset-resize-handle project"
@@ -3893,11 +4343,14 @@ export default function Typeset() {
             <section className={`typeset-editor-pane ide-redesign-editor-container ${editorMode === "visual" ? "visual-mode" : "code-mode"}`} aria-label="Source editor">
               {loaded && (
                 <TypesetEditorToolbar
+                  activeOutlineItem={activeOutlineItem}
                   path={sourcePath}
                   draft={draft}
                   mode={editorMode}
                   canRedo={canRedoDraft}
                   canUndo={canUndoDraft}
+                  editorRef={editorRef}
+                  visualViewRef={visualViewRef}
                   onChange={changeDraft}
                   onModeChange={setEditorMode}
                   onRedo={redoDraft}
@@ -3932,7 +4385,10 @@ export default function Typeset() {
                     draft={draft}
                     pdfCursor={visualPdfCursor}
                     onChange={changeDraft}
+                    onVisibleLineChange={setCurrentSourceLine}
                     onOpenCodeAtLine={openCodeAtLine}
+                    onOpenCodeRange={openCodeRange}
+                    onViewReady={onVisualViewReady}
                   />
                 )
               ) : (

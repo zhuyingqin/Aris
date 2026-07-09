@@ -7,6 +7,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   chatCommandSpecs,
+  chatDebugZipExport,
   chatRunCommand,
   isTauri,
   skillsList,
@@ -75,6 +76,7 @@ export function useChatCommands({
   const [desktopCommands, setDesktopCommands] = useState<DesktopCommandSpec[]>(FALLBACK_SLASH_COMMANDS);
   const [pendingCommandSelection, setPendingCommandSelection] = useState<PendingCommandSelection | null>(null);
   const [exporting, setExporting] = useState(false);
+  const [debugExporting, setDebugExporting] = useState(false);
   const commandSelectionLock = useRef(false);
 
   useEffect(() => {
@@ -222,6 +224,35 @@ export function useChatCommands({
     }
   }, [exporting, patchTurns, refreshStatus, setError, setTab, currentSessionRef, runningSessionIdsRef]);
 
+  const exportDebugZip = useCallback(async () => {
+    const session = currentSessionRef.current;
+    if (!session || exporting || debugExporting || session.turns.length === 0) return;
+    setDebugExporting(true);
+    try {
+      if (!isTauri()) {
+        patchTurns(session.id, (turns) => [
+          ...turns,
+          assistantTextTurn("Debug export is available in the Tauri app."),
+        ]);
+        return;
+      }
+      const path = await chatDebugZipExport(session.id);
+      patchTurns(session.id, (turns) => [
+        ...turns,
+        assistantTextTurn(`Debug Export\n  Result           wrote bug-report bundle\n  File             ${path}\n  Use              attach this zip when reporting stuck, empty, truncated, or mis-restored sessions\n  Includes         transcript, events, wire trace, runtime session, usage log, diagnostics, tool-output artifacts`),
+      ]);
+    } catch (error) {
+      const message = String(error);
+      setError(message);
+      patchTurns(session.id, (turns) => [
+        ...turns,
+        assistantTextTurn(`Debug export failed: ${message}`),
+      ]);
+    } finally {
+      setDebugExporting(false);
+    }
+  }, [debugExporting, exporting, patchTurns, setError, currentSessionRef]);
+
   // One-shot "run this input" hand-off from other views (e.g. Literature).
   const pendingChatRunInput = useStore((state) => state.pendingChatRunInput);
   const setPendingChatRunInput = useStore((state) => state.setPendingChatRunInput);
@@ -245,6 +276,8 @@ export function useChatCommands({
     runSlashCommand,
     selectCommandOption,
     exporting,
+    debugExporting,
     exportCurrentChat,
+    exportDebugZip,
   };
 }

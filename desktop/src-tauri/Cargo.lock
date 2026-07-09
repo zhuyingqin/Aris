@@ -119,6 +119,7 @@ dependencies = [
  "tools",
  "urlencoding",
  "windows-sys 0.61.2",
+ "zip",
 ]
 
 [[package]]

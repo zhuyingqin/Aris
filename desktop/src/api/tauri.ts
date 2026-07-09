@@ -721,6 +721,19 @@ export const chatPermissionRespond = (promptId: string, allow: boolean) =>
   invoke<void>("chat_permission_respond", { promptId, allow });
 export const chatQuestionRespond = (toolUseId: string, answer: string) =>
   invoke<void>("chat_question_respond", { toolUseId, answer });
+
+export interface ChatChangeRevertOutput {
+  changeId: string;
+  filePath: string;
+  reverted: boolean;
+  revertChangeId?: string | null;
+  conflict?: string | null;
+  reason?: string | null;
+}
+
+export const chatChangeRevert = (changeId: string, sessionId?: string | null) =>
+  invoke<ChatChangeRevertOutput>("chat_change_revert", { changeId, sessionId: sessionId ?? null });
+
 export const chatCommandSpecs = () =>
   invoke<DesktopCommandSpec[]>("chat_command_specs");
 export const chatRunCommand = (sessionId: string, input: string) =>
@@ -738,6 +751,7 @@ export interface ChatSendRequest {
   text: string;
   images?: ChatImageInput[];
   model?: string | null;
+  projectId?: string | null;
 }
 
 export interface ChatContextToolCall {
@@ -793,6 +807,8 @@ export const chatEventsReplay = (sessionId: string) =>
   invoke<ChatEventsReplay>("chat_events_replay", { sessionId });
 export const chatEventsRestore = (sessionId: string) =>
   invoke<ChatEventsRestoreResult>("chat_events_restore", { sessionId });
+export const chatDebugZipExport = (sessionId: string, path?: string | null) =>
+  invoke<string>("chat_debug_zip_export", { sessionId, path: path ?? null });
 
 export interface ChatTextEvent {
   sessionId: string;

@@ -387,7 +387,11 @@ export function useChatRun({
       ? { text: promptOverride }
       : promptOverride ?? (await outgoingMessage(text, attached));
     const selectedModel = session.model || status?.model || undefined;
-    const request = selectedModel ? { ...prompt, model: selectedModel } : prompt;
+    const request: ChatSendRequest = {
+      ...prompt,
+      projectId: session.projectId,
+      ...(selectedModel ? { model: selectedModel } : {}),
+    };
     if (!isTauri()) {
       patchTurns(session.id, () => [
         ...prefix,

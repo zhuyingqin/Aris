@@ -24,6 +24,10 @@ const Studio = lazy(loadStudio);
 const Mail = lazy(loadMail);
 const Typeset = lazy(loadTypeset);
 const ChatPane = memo(Chat);
+// Lab renders every notebook cell/output unvirtualized, so an unmemoized
+// <Lab/> re-renders (and re-diffs) that whole tree on every unrelated App
+// re-render (nav clicks, sidebar resize, etc.), not just tab switches.
+const LabPane = memo(Lab);
 
 type AppShellCopy = {
   appMenu: string[];
@@ -534,6 +538,9 @@ export default function App() {
   const [updateInfo, setUpdateInfo] = useState<AppUpdateInfo | null>(null);
   const [updateProgress, setUpdateProgress] = useState<AppUpdateProgress | null>(null);
   const [literaturePageView, setLiteraturePageView] = useState<LiteraturePageView>("library");
+  // Mount Lab once on first visit, then keep it alive (hidden) like Chat
+  // instead of conditionally mounting per tab — see LabPane above for why.
+  const [labMounted, setLabMounted] = useState(false);
   const projectSwitcherRef = useRef<HTMLDivElement | null>(null);
   const projectOrderPreviewRef = useRef<string[] | null>(null);
   const suppressProjectClickRef = useRef(false);
@@ -754,6 +761,9 @@ export default function App() {
   useEffect(() => {
     if (userMenuOpen) void refreshAccount();
   }, [refreshAccount, userMenuOpen]);
+  useEffect(() => {
+    if (tab === "lab") setLabMounted(true);
+  }, [tab]);
   useEffect(() => {
     let disposed = false;
     const heavyTabs = ["literature", "studio", "mail"];
@@ -1276,7 +1286,16 @@ export default function App() {
               <ChatPane />
             </ErrorBoundary>
           </div>
-          {renderedTab === "lab" && <Lab />}
+          {labMounted && (
+            <div hidden={renderedTab !== "lab"}>
+              <ErrorBoundary
+                resetKey="lab"
+                fallback={(viewError, reset) => <AppViewFallback copy={copy} error={viewError} reset={reset} />}
+              >
+                <LabPane />
+              </ErrorBoundary>
+            </div>
+          )}
           {renderedTab === "typeset" && (
             <Suspense fallback={<AppLoadingPane copy={copy} label={TAB_MODULE_LABELS.typeset} />}>
               <Typeset />

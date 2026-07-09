@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import type { ChatFileChange, ChatTodoItem } from "../types";
+import { EditedFilesSummary, type TurnFileChangeSummary } from "./ChatMessage";
 
 interface Props {
   todos: ChatTodoItem[];
   fileChanges: ChatFileChange[];
+  fileChangeSummary?: TurnFileChangeSummary | null;
   bottomOffset: number;
   /** True while the assistant is still streaming this turn. */
   active: boolean;
@@ -43,6 +45,7 @@ function currentIndex(todos: ChatTodoItem[]): number {
 export default function WorkflowFlow({
   todos,
   fileChanges,
+  fileChangeSummary,
   bottomOffset,
   active,
   onOpenFile,
@@ -51,7 +54,7 @@ export default function WorkflowFlow({
   const rootRef = useRef<HTMLDivElement>(null);
 
   const total = todos.length;
-  const fileCount = fileChanges.length;
+  const fileCount = fileChangeSummary?.fileCount ?? fileChanges.length;
   const hasTodos = total > 0;
   const allDone = total > 0 && todos.every((todo) => todo.status === "completed");
   const index = hasTodos ? currentIndex(todos) : -1;
@@ -80,7 +83,9 @@ export default function WorkflowFlow({
     : `已变更 ${fileCount} 文件`;
   const title = current
     ? current.status === "in_progress" ? current.activeForm : current.content
-    : fileChanges.map((change) => change.path).join("\n");
+    : fileChangeSummary
+      ? fileChangeSummary.files.map((change) => change.path).join("\n")
+      : fileChanges.map((change) => change.path).join("\n");
   const chipIcon = hasTodos ? (allDone ? "✓" : "◌") : "±";
 
   return (
@@ -110,7 +115,11 @@ export default function WorkflowFlow({
               </div>
             </div>
           )}
-          {fileCount > 0 && (
+          {fileChangeSummary ? (
+            <div className="chat-workflow-section chat-workflow-files">
+              <EditedFilesSummary summary={fileChangeSummary} />
+            </div>
+          ) : fileCount > 0 && (
             <div className="chat-workflow-section chat-workflow-files">
               <div className="chat-workflow-panel-head">本次文件</div>
               {fileChanges.map((change) => (

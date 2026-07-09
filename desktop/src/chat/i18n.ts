@@ -36,6 +36,7 @@ export const CHAT_COPY: Record<Language, {
   checking: string;
   settings: string;
   exportChat: string;
+  exportDebugZip: string;
   undo: string;
   deleted: (title: string) => string;
   previewModel: string;
@@ -97,6 +98,7 @@ export const CHAT_COPY: Record<Language, {
     checking: "检查中...",
     settings: "设置",
     exportChat: "导出当前对话",
+    exportDebugZip: "导出故障调试包（运行中可用）",
     undo: "撤销",
     deleted: (title) => `已删除“${title}”`,
     previewModel: "预览",
@@ -158,6 +160,7 @@ export const CHAT_COPY: Record<Language, {
     checking: "Checking...",
     settings: "Settings",
     exportChat: "Export current chat",
+    exportDebugZip: "Export debug bundle (available while running)",
     undo: "Undo",
     deleted: (title) => `Deleted "${title}"`,
     previewModel: "Preview",

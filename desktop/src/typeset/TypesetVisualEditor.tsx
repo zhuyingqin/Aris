@@ -2,7 +2,12 @@ import { useEffect, useRef } from "react";
 import { Compartment, EditorState, Prec } from "@codemirror/state";
 import { EditorView, keymap, drawSelection, dropCursor, lineNumbers } from "@codemirror/view";
 import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
-import { visualBlockClick, visualDecorations, visualSourcePath } from "./visualDecorations";
+import {
+  onOpenCodeRange as onOpenCodeRangeFacet,
+  visualBlockClick,
+  visualDecorations,
+  visualSourcePath,
+} from "./visualDecorations";
 import type { VisualPdfCursor } from "./visualModel";
 
 type LatexListEnterInsertion = {
@@ -100,19 +105,53 @@ export function TypesetVisualEditor({
   draft,
   pdfCursor,
   onChange,
+  onVisibleLineChange,
+  onOpenCodeRange,
+  onViewReady,
 }: {
   path: string | null;
   draft: string;
   pdfCursor: VisualPdfCursor | null;
   onChange: (value: string) => void;
   onOpenCodeAtLine: (line: number) => void;
+  onOpenCodeRange: (start: number, end: number) => void;
+  onVisibleLineChange?: (line: number) => void;
+  // Hands the live CodeMirror view up to the host so the toolbar can read/apply
+  // the current selection (mirrors `editorRef` for the plain Code-mode textarea).
+  onViewReady?: (view: EditorView | null) => void;
 }) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const viewRef = useRef<EditorView | null>(null);
   const sourcePathCompartmentRef = useRef(new Compartment());
+  const onOpenCodeRangeCompartmentRef = useRef(new Compartment());
   // Keep the latest onChange without recreating the editor on every render.
   const onChangeRef = useRef(onChange);
+  const onVisibleLineChangeRef = useRef(onVisibleLineChange);
+  const onViewReadyRef = useRef(onViewReady);
   onChangeRef.current = onChange;
+  onVisibleLineChangeRef.current = onVisibleLineChange;
+  onViewReadyRef.current = onViewReady;
+
+  const reportVisibleLine = () => {
+    const view = viewRef.current;
+    const scroll = hostRef.current?.closest<HTMLElement>(".typeset-visual-scroll");
+    if (!view || !scroll) return;
+    const scrollRect = scroll.getBoundingClientRect();
+    const hostRect = hostRef.current?.getBoundingClientRect();
+    let pos = view.visibleRanges[0]?.from ?? view.viewport.from;
+    try {
+      const measuredPos = view.posAtCoords({
+        x: (hostRect?.left ?? scrollRect.left) + 84,
+        y: scrollRect.top + 32,
+      }, false);
+      if (typeof measuredPos === "number") pos = measuredPos;
+    } catch {
+      // jsdom does not implement the text range geometry CodeMirror uses here.
+      // Browser builds take the precise branch above; tests use visibleRanges.
+    }
+    const line = view.state.doc.lineAt(pos).number;
+    onVisibleLineChangeRef.current?.(line);
+  };
 
   // Create the editor once; the doc is reconciled from `draft` in a separate
   // effect so external edits (Code mode, undo/redo, compile) flow in without
@@ -131,6 +170,7 @@ export function TypesetVisualEditor({
           lineNumbers(),
           EditorView.lineWrapping,
           sourcePathCompartmentRef.current.of(visualSourcePath.of(path)),
+          onOpenCodeRangeCompartmentRef.current.of(onOpenCodeRangeFacet.of(onOpenCodeRange)),
           Prec.high(keymap.of([{ key: "Enter", run: insertLatexListItemOnEnter }])),
           keymap.of([...defaultKeymap, ...historyKeymap]),
           visualDecorations,
@@ -140,6 +180,9 @@ export function TypesetVisualEditor({
             if (update.docChanged) {
               onChangeRef.current(update.state.doc.toString());
             }
+            if (update.selectionSet || update.viewportChanged || update.focusChanged) {
+              window.requestAnimationFrame(reportVisibleLine);
+            }
           }),
         ],
       }),
@@ -148,7 +191,9 @@ export function TypesetVisualEditor({
     if (import.meta.env.DEV) {
       (window as unknown as { __typesetView?: EditorView }).__typesetView = view;
     }
+    onViewReadyRef.current?.(view);
     return () => {
+      onViewReadyRef.current?.(null);
       view.destroy();
       viewRef.current = null;
     };
@@ -162,6 +207,31 @@ export function TypesetVisualEditor({
       effects: sourcePathCompartmentRef.current.reconfigure(visualSourcePath.of(path)),
     });
   }, [path]);
+
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    view.dispatch({
+      effects: onOpenCodeRangeCompartmentRef.current.reconfigure(onOpenCodeRangeFacet.of(onOpenCodeRange)),
+    });
+  }, [onOpenCodeRange]);
+
+  useEffect(() => {
+    const scroll = hostRef.current?.closest<HTMLElement>(".typeset-visual-scroll");
+    if (!scroll) return;
+    let frame = 0;
+    const onScroll = () => {
+      window.cancelAnimationFrame(frame);
+      frame = window.requestAnimationFrame(reportVisibleLine);
+    };
+    scroll.addEventListener("scroll", onScroll, { passive: true });
+    onScroll();
+    return () => {
+      window.cancelAnimationFrame(frame);
+      scroll.removeEventListener("scroll", onScroll);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Reconcile external `draft` changes into the document. When the change came
   // from the user typing, `draft` already equals the doc, so this is a no-op.
@@ -288,6 +358,45 @@ const visualTheme = EditorView.theme({
     padding: "0.6em 0",
   },
   ".cm-vis-math-display .katex-display": { margin: "0" },
+  // Active math source ("reveal raw LaTeX while the caret is inside a formula").
+  // The callout band below is the *only* background layer for display math: a
+  // mark decoration spanning several lines renders as one `<span>` per line, so
+  // giving the mark its own fill+radius drew a stack of disconnected rounded
+  // rectangles (one per source line) — a "brick of green boxes". Here the line
+  // band alone carries the tint/accent, its outer corners rounded only on the
+  // first/last line, so a multi-line formula reads as one continuous panel.
+  ".cm-line.cm-vis-active-math-line": {
+    backgroundColor: "rgba(47, 139, 58, 0.06)",
+    boxShadow: "inset 2px 0 0 rgba(47, 139, 58, 0.45)",
+    paddingLeft: "10px",
+  },
+  ".cm-line.cm-vis-active-math-line-first": {
+    borderTopLeftRadius: "5px",
+    borderTopRightRadius: "5px",
+    paddingTop: "3px",
+  },
+  ".cm-line.cm-vis-active-math-line-last": {
+    borderBottomLeftRadius: "5px",
+    borderBottomRightRadius: "5px",
+    paddingBottom: "3px",
+  },
+  // Shared text treatment: monospace + a muted ink tone (not flat black) so
+  // revealed source reads as "raw markup", distinct from the serif prose
+  // around it, without needing a filled box.
+  ".cm-vis-active-math-source": {
+    fontFamily: 'ui-monospace, "Cascadia Code", "SFMono-Regular", Consolas, monospace',
+    fontSize: "0.88em",
+    color: "rgba(26, 74, 40, 0.86)",
+  },
+  // Inline math ($…$) is always a single short run — no multi-line seam risk —
+  // so it gets its own soft pill background for extra legibility inside prose.
+  ".cm-vis-active-math-source-inline": {
+    borderRadius: "4px",
+    backgroundColor: "rgba(47, 139, 58, 0.09)",
+    padding: "0.05em 0.25em",
+    boxDecorationBreak: "clone",
+    WebkitBoxDecorationBreak: "clone",
+  },
 
   // Citation / reference / label / toc chips.
   ".cm-vis-chip": {
@@ -301,7 +410,21 @@ const visualTheme = EditorView.theme({
     cursor: "text",
     whiteSpace: "nowrap",
   },
-  ".cm-vis-chip-cite": { background: "#e8f0fe", color: "#1a56c4" },
+  ".cm-vis-chip-cite": {
+    padding: "0 3px",
+    borderRadius: "2px",
+    background: "transparent",
+    boxShadow: "inset 0 -0.13em 0 rgba(26, 86, 196, 0.2)",
+    color: "#1a56c4",
+    fontFamily: "inherit",
+    fontSize: "0.95em",
+    fontWeight: "600",
+    lineHeight: "1.25",
+  },
+  ".cm-vis-chip-cite:hover": {
+    background: "rgba(26, 86, 196, 0.08)",
+    boxShadow: "inset 0 -0.16em 0 rgba(26, 86, 196, 0.28)",
+  },
   ".cm-vis-chip-ref": { background: "#e6f4ea", color: "#1e7e34" },
   ".cm-vis-chip-label": { background: "#f1f3f4", color: "#80868b", fontSize: "0.76em" },
   ".cm-vis-chip-toc": { background: "#f6f7f9", color: "#3c4043", borderLeft: "3px solid #1a73e8" },
@@ -367,8 +490,30 @@ const visualTheme = EditorView.theme({
   // \maketitle title block.
   ".cm-vis-title": { textAlign: "center", padding: "8px 0 30px" },
   ".cm-vis-title-name": { fontSize: "24px", fontWeight: "700", lineHeight: "1.18" },
-  ".cm-vis-title-author": { fontSize: "15px", marginTop: "10px" },
+  // IEEE-style `\authorblockN{…}\authorblockA{…}` extraction is newline-joined
+  // (one line per name/affiliation block) — `pre-line` renders those breaks
+  // instead of collapsing them into one run-on line.
+  ".cm-vis-title-author": { fontSize: "15px", marginTop: "10px", lineHeight: "1.5", whiteSpace: "pre-line" },
   ".cm-vis-title-date": { fontSize: "13.5px", color: "#5f6368", marginTop: "6px" },
+  // `\title{}`/`\author{}`/`\date{}` live in the always-folded preamble, so a
+  // click here jumps to Code mode with that source selected (see TitleWidget)
+  // rather than revealing inline like math/abstract do. Underline-on-hover
+  // signals "editable, but elsewhere" instead of implying an inline reveal.
+  ".cm-vis-title-editable": { cursor: "pointer", borderRadius: "3px" },
+  ".cm-vis-title-editable:hover": {
+    boxShadow: "inset 0 -0.1em 0 rgba(47, 139, 58, 0.45)",
+  },
+
+  // \begin{abstract}: a bold label in place of the hidden \begin marker, then
+  // an italicized, gently indented body so it reads as a distinct block quote
+  // rather than a plain paragraph.
+  ".cm-vis-section-label": { fontWeight: "700", fontSize: "0.95em", margin: "18px 0 4px" },
+  ".cm-vis-abstract-line": {
+    fontStyle: "italic",
+    paddingLeft: "22px",
+    paddingRight: "22px",
+    color: "#3c3f42",
+  },
 
   // Section headings: same serif family as body, bold, with TeX-like spacing. This is a LINE
   // decoration (applied to `.cm-line` itself), so the margin→padding rule above

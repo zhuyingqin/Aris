@@ -19,6 +19,8 @@ import type { ChatSendRequest } from "../api/tauri";
 import type { ChatBlock, ChatTurn } from "../types";
 import { appendTextDelta, appendThinkingDelta } from "./model";
 
+export const MAX_RUNNING_CHAT_SESSIONS = 5;
+
 /** Compact a token count for display: 320, 1.2k, 45.0k. */
 function formatTokenCount(tokens: number): string {
   return tokens >= 1000 ? `${(tokens / 1000).toFixed(1)}k` : String(tokens);
@@ -261,6 +263,14 @@ export function useChatStream({
 
   const run = useCallback(async (sessionId: string, message: string | ChatSendRequest) => {
     if (runningSessions.current.has(sessionId)) return false;
+    if (runningSessions.current.size >= MAX_RUNNING_CHAT_SESSIONS) {
+      handlersRef.current.onError(
+        sessionId,
+        `at most ${MAX_RUNNING_CHAT_SESSIONS} chat turns can run at once`,
+        false,
+      );
+      return false;
+    }
     runningSessions.current.add(sessionId);
     setRunningSessionIds(new Set(runningSessions.current));
     stopRequested.current.delete(sessionId);

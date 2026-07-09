@@ -5,6 +5,7 @@ mod atomic_file;
 mod bash;
 mod bootstrap;
 mod cache;
+mod change_ledger;
 mod compact;
 mod config;
 mod conversation;
@@ -37,6 +38,13 @@ pub use bash::{
 };
 pub use bootstrap::{BootstrapPhase, BootstrapPlan};
 pub use cache::{extract_bundle, extraction_report, ExtractionError, ExtractionReport};
+pub use change_ledger::{
+    change_ledger_root_for_path, change_ledger_root_from_env, get_file_change, list_file_changes,
+    record_text_file_change, revert_file_change, FileChangeGetInput, FileChangeGetOutput,
+    FileChangeListInput, FileChangeListOutput, FileChangeOperation, FileChangeRecord,
+    FileChangeRevertInput, FileChangeRevertOutput, FileChangeStatus, FileMutationContext,
+    FileSnapshot,
+};
 pub use compact::{
     estimate_session_tokens, format_compact_summary, get_compact_continuation_message,
     should_compact, CompactionConfig, CompactionResult, CompactionSource, CompactionSummarySource,
@@ -58,9 +66,10 @@ pub use event_sink::{
     RuntimeEvent,
 };
 pub use file_ops::{
-    append_file, edit_file, glob_search, grep_search, read_file, write_file, AppendFileOutput,
-    EditFileOutput, FileChange, GlobSearchOutput, GrepSearchInput, GrepSearchOutput,
-    ReadFileOutput, StructuredPatchHunk, TextFilePayload, WriteFileOutput,
+    append_file, append_file_with_context, edit_file, edit_file_with_context, glob_search,
+    grep_search, read_file, write_file, write_file_with_context, AppendFileOutput, EditFileOutput,
+    FileChange, GlobSearchOutput, GrepSearchInput, GrepSearchOutput, ReadFileOutput,
+    StructuredPatchHunk, TextFilePayload, WriteFileOutput,
 };
 pub use hooks::{HookEvent, HookRunResult, HookRunner};
 pub use hot_memory::{

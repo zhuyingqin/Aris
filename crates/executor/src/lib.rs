@@ -13,7 +13,8 @@ use runtime::{
     ApiClient, ApiRequest, AssistantEvent, ContentBlock, ConversationMessage, MessageRole,
     RuntimeError, TokenUsage,
 };
-use serde_json::json;
+use serde_json::{json, Value};
+use std::sync::Arc;
 
 mod openai;
 
@@ -66,6 +67,212 @@ pub trait StreamObserver: Send {
 pub struct NoopStreamObserver;
 
 impl StreamObserver for NoopStreamObserver {}
+
+pub trait ExecutorTraceSink: Send + Sync {
+    fn record(&self, kind: &str, payload: Value);
+}
+
+fn trace_record(trace_sink: &Option<Arc<dyn ExecutorTraceSink>>, kind: &str, payload: Value) {
+    if !wire_trace_enabled() {
+        return;
+    }
+    if let Some(sink) = trace_sink {
+        sink.record(kind, govern_trace_payload(payload));
+    }
+}
+
+struct ApiTraceSinkAdapter {
+    inner: Arc<dyn ExecutorTraceSink>,
+}
+
+impl api::ApiTraceSink for ApiTraceSinkAdapter {
+    fn record(&self, kind: &str, payload: Value) {
+        if wire_trace_enabled() {
+            self.inner.record(kind, govern_trace_payload(payload));
+        }
+    }
+}
+
+fn api_trace_sink_adapter(
+    trace_sink: &Option<Arc<dyn ExecutorTraceSink>>,
+) -> Option<Arc<dyn api::ApiTraceSink>> {
+    trace_sink.as_ref().map(|sink| {
+        Arc::new(ApiTraceSinkAdapter {
+            inner: sink.clone(),
+        }) as Arc<dyn api::ApiTraceSink>
+    })
+}
+
+fn wire_trace_enabled() -> bool {
+    std::env::var("ARIS_WIRE_TRACE")
+        .ok()
+        .map(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            !matches!(normalized.as_str(), "0" | "false" | "off" | "no")
+        })
+        .unwrap_or(true)
+}
+
+fn trace_max_string_chars() -> usize {
+    std::env::var("ARIS_WIRE_TRACE_MAX_STRING_CHARS")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(64_000)
+}
+
+fn govern_trace_payload(payload: Value) -> Value {
+    govern_trace_value(payload, None, trace_max_string_chars())
+}
+
+fn govern_trace_value(value: Value, key: Option<&str>, max_string_chars: usize) -> Value {
+    if key.is_some_and(is_sensitive_trace_key) {
+        return Value::String("<redacted>".to_string());
+    }
+    match value {
+        Value::Object(object) => Value::Object(
+            object
+                .into_iter()
+                .map(|(key, value)| {
+                    let governed = govern_trace_value(value, Some(&key), max_string_chars);
+                    (key, governed)
+                })
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(
+            items
+                .into_iter()
+                .map(|item| govern_trace_value(item, key, max_string_chars))
+                .collect(),
+        ),
+        Value::String(text) => govern_trace_string(key, text, max_string_chars),
+        other => other,
+    }
+}
+
+fn govern_trace_string(key: Option<&str>, text: String, max_string_chars: usize) -> Value {
+    if key.is_some_and(is_binary_trace_key) && text.chars().count() > 256 {
+        return json!({
+            "redacted": true,
+            "reason": "binary_or_base64_payload",
+            "chars": text.chars().count(),
+        });
+    }
+    if looks_like_secret_bearing_string(&text) {
+        return Value::String("<redacted>".to_string());
+    }
+    truncate_trace_string(text, max_string_chars)
+}
+
+fn truncate_trace_string(text: String, max_string_chars: usize) -> Value {
+    let char_count = text.chars().count();
+    if char_count <= max_string_chars {
+        return Value::String(text);
+    }
+    let preview: String = text.chars().take(max_string_chars).collect();
+    json!({
+        "truncated": true,
+        "chars": char_count,
+        "preview": preview,
+    })
+}
+
+fn is_sensitive_trace_key(key: &str) -> bool {
+    let lower = key.to_ascii_lowercase();
+    lower.contains("api_key")
+        || lower.contains("apikey")
+        || lower.contains("authorization")
+        || lower.contains("password")
+        || lower.contains("secret")
+        || lower.contains("token")
+        || lower.ends_with("_key")
+        || lower.ends_with("_secret")
+        || lower.ends_with("_token")
+}
+
+fn is_binary_trace_key(key: &str) -> bool {
+    let lower = key.to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "data" | "image" | "bytes" | "base64" | "content_bytes"
+    )
+}
+
+fn looks_like_secret_bearing_string(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("bearer ")
+        || lower.contains("authorization:")
+        || lower.contains("api_key=")
+        || lower.contains("apikey=")
+        || lower.contains("access_token=")
+        || lower.contains("refresh_token=")
+        || lower.contains("token=")
+        || lower.contains("sk-")
+}
+
+fn token_usage_to_value(usage: &TokenUsage) -> Value {
+    json!({
+        "inputTokens": usage.input_tokens,
+        "outputTokens": usage.output_tokens,
+        "cacheCreationInputTokens": usage.cache_creation_input_tokens,
+        "cacheReadInputTokens": usage.cache_read_input_tokens,
+        "promptTokens": usage.prompt_tokens(),
+        "totalTokens": usage.total_tokens(),
+    })
+}
+
+fn assistant_event_to_value(event: &AssistantEvent) -> Value {
+    match event {
+        AssistantEvent::TextDelta(text) => json!({
+            "type": "text_delta",
+            "text": text,
+        }),
+        AssistantEvent::ToolUse { id, name, input } => json!({
+            "type": "tool_use",
+            "id": id,
+            "name": name,
+            "input": input,
+        }),
+        AssistantEvent::Thinking {
+            thinking,
+            signature,
+        } => json!({
+            "type": "thinking",
+            "thinking": thinking,
+            "signature": signature,
+        }),
+        AssistantEvent::Usage(usage) => json!({
+            "type": "usage",
+            "usage": token_usage_to_value(usage),
+        }),
+        AssistantEvent::StopReason(reason) => json!({
+            "type": "stop_reason",
+            "reason": reason,
+        }),
+        AssistantEvent::MessageStop => json!({
+            "type": "message_stop",
+        }),
+    }
+}
+
+fn assistant_events_to_value(events: &[AssistantEvent]) -> Value {
+    Value::Array(events.iter().map(assistant_event_to_value).collect())
+}
+
+fn tool_specs_to_value(tool_specs: &[ExecutorToolSpec]) -> Value {
+    Value::Array(
+        tool_specs
+            .iter()
+            .map(|spec| {
+                json!({
+                    "name": &spec.name,
+                    "description": &spec.description,
+                    "inputSchema": &spec.input_schema,
+                })
+            })
+            .collect(),
+    )
+}
 
 pub(crate) fn stream_cancel_requested(observer: &dyn StreamObserver) -> bool {
     runtime::is_interrupted() || observer.is_cancelled()
@@ -174,6 +381,9 @@ pub struct AnthropicRuntimeClient {
     tool_specs: Vec<ExecutorToolSpec>,
     max_tokens: u32,
     observer: Box<dyn StreamObserver>,
+    base_url: String,
+    send_betas: bool,
+    trace_sink: Option<Arc<dyn ExecutorTraceSink>>,
 }
 
 impl AnthropicRuntimeClient {
@@ -190,14 +400,26 @@ impl AnthropicRuntimeClient {
         Ok(Self {
             runtime: tokio::runtime::Runtime::new().map_err(|error| error.to_string())?,
             client: AnthropicClient::from_auth(auth)
-                .with_base_url(base_url)
+                .with_base_url(base_url.clone())
                 .with_send_betas(send_betas),
             model,
             enable_tools,
             tool_specs,
             max_tokens,
             observer,
+            base_url,
+            send_betas,
+            trace_sink: None,
         })
+    }
+
+    #[must_use]
+    pub fn with_trace_sink(mut self, trace_sink: Arc<dyn ExecutorTraceSink>) -> Self {
+        if let Some(api_trace_sink) = api_trace_sink_adapter(&Some(trace_sink.clone())) {
+            self.client = self.client.clone().with_trace_sink(api_trace_sink);
+        }
+        self.trace_sink = Some(trace_sink);
+        self
     }
 }
 
@@ -239,9 +461,38 @@ impl ApiClient for AnthropicRuntimeClient {
             stream: true,
         };
 
+        trace_record(
+            &self.trace_sink,
+            "llm.tools_snapshot",
+            json!({
+                "provider": "anthropic",
+                "model": &self.model,
+                "enabled": self.enable_tools,
+                "toolCount": self.tool_specs.len(),
+                "tools": tool_specs_to_value(&self.tool_specs),
+            }),
+        );
+        trace_record(
+            &self.trace_sink,
+            "llm.request",
+            json!({
+                "provider": "anthropic",
+                "model": &self.model,
+                "baseUrl": &self.base_url,
+                "endpoint": "/v1/messages",
+                "stream": true,
+                "sendBetas": self.send_betas,
+                "systemPromptPartCount": request.system_prompt.len(),
+                "messageCount": request.messages.len(),
+                "request": serde_json::to_value(&message_request).unwrap_or(Value::Null),
+            }),
+        );
+
         let client = &self.client;
         let observer = &mut self.observer;
-        self.runtime.block_on(async {
+        let trace_sink = self.trace_sink.clone();
+        let trace_model = self.model.clone();
+        let result = self.runtime.block_on(async {
             // Tag a "model unavailable on this account" failure (404
             // not_found_error from the initial POST) so the CLI can fall back
             // from the default Opus 4.8 to 4.7.
@@ -264,6 +515,16 @@ impl ApiClient for AnthropicRuntimeClient {
                     return Err(interrupted_error());
                 }
             };
+            trace_record(
+                &trace_sink,
+                "llm.response_start",
+                json!({
+                    "provider": "anthropic",
+                    "model": &trace_model,
+                    "requestId": stream.request_id(),
+                    "stream": true,
+                }),
+            );
             let mut events = Vec::new();
             let mut pending_tool: Option<(String, String, String)> = None;
             let mut pending_thinking: Option<(String, String)> = None;
@@ -274,12 +535,12 @@ impl ApiClient for AnthropicRuntimeClient {
 
             loop {
                 let next_event = tokio::select! {
-                    result = stream.next_event() => result,
+                    result = stream.next_event_with_raw() => result,
                     () = wait_for_stream_cancel(observer.as_ref()) => {
                         return Err(interrupted_error());
                     }
                 };
-                let event = match next_event {
+                let parsed_event = match next_event {
                     Ok(Some(event)) => event,
                     Ok(None) => break,
                     Err(_error)
@@ -295,6 +556,27 @@ impl ApiClient for AnthropicRuntimeClient {
                 if stream_cancel_requested(observer.as_ref()) {
                     return Err(interrupted_error());
                 }
+                trace_record(
+                    &trace_sink,
+                    "llm.raw_sse",
+                    json!({
+                        "provider": "anthropic",
+                        "model": &trace_model,
+                        "requestId": stream.request_id(),
+                        "raw": &parsed_event.raw_data,
+                    }),
+                );
+                trace_record(
+                    &trace_sink,
+                    "llm.provider_event",
+                    json!({
+                        "provider": "anthropic",
+                        "model": &trace_model,
+                        "requestId": stream.request_id(),
+                        "event": serde_json::to_value(&parsed_event.event).unwrap_or(Value::Null),
+                    }),
+                );
+                let event = parsed_event.event;
                 match event {
                     ApiStreamEvent::MessageStart(start) => {
                         start_usage = Some(start.message.usage.clone());
@@ -429,8 +711,44 @@ impl ApiClient for AnthropicRuntimeClient {
                     return Err(interrupted_error());
                 }
             };
+            trace_record(
+                &trace_sink,
+                "llm.response_start",
+                json!({
+                    "provider": "anthropic",
+                    "model": &trace_model,
+                    "requestId": response.request_id.as_deref(),
+                    "stream": false,
+                    "responseId": &response.id,
+                    "stopReason": response.stop_reason.as_deref(),
+                }),
+            );
             response_to_events(response, observer)
-        })
+        });
+        match &result {
+            Ok(events) => trace_record(
+                &self.trace_sink,
+                "llm.response",
+                json!({
+                    "provider": "anthropic",
+                    "model": &self.model,
+                    "eventCount": events.len(),
+                    "events": assistant_events_to_value(events),
+                }),
+            ),
+            Err(error) => trace_record(
+                &self.trace_sink,
+                "llm.error",
+                json!({
+                    "provider": "anthropic",
+                    "model": &self.model,
+                    "message": error.to_string(),
+                    "modelUnavailable": error.is_model_unavailable(),
+                    "contextOverflow": error.is_context_overflow(),
+                }),
+            ),
+        }
+        result
     }
 }
 
@@ -570,159 +888,5 @@ fn convert_messages(messages: &[ConversationMessage]) -> Vec<InputMessage> {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::sync::{Arc, Mutex};
-
-    use api::{InputContentBlock, MessageResponse, OutputContentBlock, Usage};
-    use runtime::{AssistantEvent, ContentBlock, ConversationMessage, RuntimeError};
-
-    use super::{
-        convert_messages, merge_anthropic_stream_usage, push_text_event, response_to_events,
-        StreamObserver,
-    };
-
-    struct RecordingObserver {
-        deltas: Arc<Mutex<Vec<String>>>,
-    }
-
-    impl StreamObserver for RecordingObserver {
-        fn on_text_delta(&mut self, text: &str) -> Result<(), RuntimeError> {
-            self.deltas.lock().unwrap().push(format!("text:{text}"));
-            Ok(())
-        }
-
-        fn on_thinking_delta(&mut self, thinking: &str) -> Result<(), RuntimeError> {
-            self.deltas
-                .lock()
-                .unwrap()
-                .push(format!("thinking:{thinking}"));
-            Ok(())
-        }
-    }
-
-    #[test]
-    fn response_notifies_observer_about_thinking_blocks() {
-        let deltas = Arc::new(Mutex::new(Vec::new()));
-        let mut observer: Box<dyn StreamObserver> = Box::new(RecordingObserver {
-            deltas: Arc::clone(&deltas),
-        });
-        let response = MessageResponse {
-            id: "msg-test".to_string(),
-            kind: "message".to_string(),
-            role: "assistant".to_string(),
-            content: vec![
-                OutputContentBlock::Thinking {
-                    thinking: "inspect".to_string(),
-                    signature: String::new(),
-                },
-                OutputContentBlock::Text {
-                    text: "answer".to_string(),
-                },
-            ],
-            model: "test-model".to_string(),
-            stop_reason: Some("end_turn".to_string()),
-            stop_sequence: None,
-            usage: Usage {
-                input_tokens: 1,
-                cache_creation_input_tokens: 0,
-                cache_read_input_tokens: 0,
-                output_tokens: 2,
-            },
-            request_id: None,
-        };
-
-        response_to_events(response, &mut observer).unwrap();
-
-        assert_eq!(
-            *deltas.lock().unwrap(),
-            vec!["thinking:inspect".to_string(), "text:answer".to_string()]
-        );
-    }
-
-    #[test]
-    fn anthropic_stream_usage_prefers_corrected_delta_input() {
-        let start = Usage {
-            input_tokens: 180_000,
-            cache_creation_input_tokens: 2_000,
-            cache_read_input_tokens: 120_000,
-            output_tokens: 0,
-        };
-        let delta = Usage {
-            input_tokens: 12_000,
-            cache_creation_input_tokens: 500,
-            cache_read_input_tokens: 110_000,
-            output_tokens: 42,
-        };
-        let mut input_from_delta = false;
-
-        let usage = merge_anthropic_stream_usage(Some(&start), &delta, &mut input_from_delta);
-
-        assert_eq!(usage.input_tokens, 12_000);
-        assert_eq!(usage.output_tokens, 42);
-        assert_eq!(usage.cache_creation_input_tokens, 500);
-        assert_eq!(usage.cache_read_input_tokens, 110_000);
-        assert!(input_from_delta);
-    }
-
-    #[test]
-    fn anthropic_stream_usage_keeps_start_cache_when_delta_omits_it() {
-        let start = Usage {
-            input_tokens: 180_000,
-            cache_creation_input_tokens: 2_000,
-            cache_read_input_tokens: 120_000,
-            output_tokens: 0,
-        };
-        let delta = Usage {
-            input_tokens: 12_000,
-            cache_creation_input_tokens: 0,
-            cache_read_input_tokens: 0,
-            output_tokens: 42,
-        };
-        let mut input_from_delta = false;
-
-        let usage = merge_anthropic_stream_usage(Some(&start), &delta, &mut input_from_delta);
-
-        assert_eq!(usage.input_tokens, 12_000);
-        assert_eq!(usage.cache_creation_input_tokens, 2_000);
-        assert_eq!(usage.cache_read_input_tokens, 120_000);
-    }
-
-    #[test]
-    fn convert_messages_maps_images_to_anthropic_image_blocks() {
-        let messages = vec![ConversationMessage::user_blocks(vec![
-            ContentBlock::Text {
-                text: "describe this".to_string(),
-            },
-            ContentBlock::Image {
-                media_type: "image/png".to_string(),
-                data: "ZmFrZQ==".to_string(),
-            },
-        ])];
-
-        let converted = convert_messages(&messages);
-
-        assert_eq!(converted.len(), 1);
-        assert_eq!(converted[0].role, "user");
-        assert!(matches!(
-            &converted[0].content[1],
-            InputContentBlock::Image { source }
-                if source.kind == "base64"
-                    && source.media_type == "image/png"
-                    && source.data == "ZmFrZQ=="
-        ));
-    }
-
-    #[test]
-    fn coalesces_large_streams_into_one_text_event() {
-        let mut events = Vec::new();
-        for _ in 0..100_000 {
-            push_text_event(&mut events, "x".to_string());
-        }
-
-        assert_eq!(events.len(), 1);
-        assert!(matches!(
-            &events[0],
-            AssistantEvent::TextDelta(text) if text.len() == 100_000
-        ));
-    }
-}
+#[path = "tests/lib.rs"]
+mod tests;

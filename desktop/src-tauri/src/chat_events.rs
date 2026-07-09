@@ -17,8 +17,32 @@ use tauri::{AppHandle, Emitter, State};
 use crate::engine::ChatState;
 
 const EVENT_VERSION: u32 = 1;
+const DEFAULT_WIRE_TRACE_MAX_STRING_CHARS: usize = 64_000;
+const DEFAULT_WIRE_TRACE_MAX_BYTES: u64 = 50 * 1024 * 1024;
+const DEFAULT_WIRE_TRACE_ROTATIONS: usize = 3;
+const MAX_WIRE_TRACE_ROTATIONS: usize = 10;
 
-static EVENT_SEQS: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
+#[derive(Debug, Clone, Copy)]
+struct EventSeqState {
+    seq: u64,
+    bytes: u64,
+}
+
+static EVENT_SEQS: OnceLock<Mutex<HashMap<String, EventSeqState>>> = OnceLock::new();
+static WIRE_SEQS: OnceLock<Mutex<HashMap<String, EventSeqState>>> = OnceLock::new();
+static SESSION_EVENT_DIRS: OnceLock<Mutex<HashMap<String, PathBuf>>> = OnceLock::new();
+
+pub struct SessionEventDirGuard {
+    session_id: String,
+}
+
+impl Drop for SessionEventDirGuard {
+    fn drop(&mut self) {
+        if let Ok(mut dirs) = session_event_dirs().lock() {
+            dirs.remove(&self.session_id);
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -50,8 +74,38 @@ pub struct ChatEventsRestoreResult {
     pub restored_path: String,
 }
 
-fn event_seqs() -> &'static Mutex<HashMap<String, u64>> {
+fn event_seqs() -> &'static Mutex<HashMap<String, EventSeqState>> {
     EVENT_SEQS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn wire_seqs() -> &'static Mutex<HashMap<String, EventSeqState>> {
+    WIRE_SEQS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn session_event_dirs() -> &'static Mutex<HashMap<String, PathBuf>> {
+    SESSION_EVENT_DIRS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+pub fn bind_session_event_dir(
+    session_id: &str,
+    sessions_dir: PathBuf,
+) -> Result<SessionEventDirGuard, String> {
+    validate_session_id(session_id)?;
+    session_event_dirs()
+        .lock()
+        .map_err(|_| "chat event state poisoned".to_string())?
+        .insert(session_id.to_string(), sessions_dir);
+    Ok(SessionEventDirGuard {
+        session_id: session_id.to_string(),
+    })
+}
+
+fn session_events_dir(session_id: &str) -> PathBuf {
+    session_event_dirs()
+        .lock()
+        .ok()
+        .and_then(|dirs| dirs.get(session_id).cloned())
+        .unwrap_or_else(crate::state::sessions_dir)
 }
 
 fn now_millis() -> u64 {
@@ -74,11 +128,27 @@ fn validate_session_id(session_id: &str) -> Result<(), String> {
 
 pub fn chat_event_log_path(session_id: &str) -> Result<PathBuf, String> {
     validate_session_id(session_id)?;
-    Ok(crate::state::sessions_dir().join(format!("{session_id}.events.jsonl")))
+    Ok(session_events_dir(session_id).join(format!("{session_id}.events.jsonl")))
 }
 
 pub fn chat_event_log_exists(session_id: &str) -> bool {
     chat_event_log_path(session_id).is_ok_and(|path| path.exists())
+}
+
+pub fn chat_wire_log_path(session_id: &str) -> Result<PathBuf, String> {
+    validate_session_id(session_id)?;
+    Ok(session_events_dir(session_id).join(format!("{session_id}.wire.jsonl")))
+}
+
+pub fn chat_wire_rotated_log_paths(session_id: &str) -> Result<Vec<PathBuf>, String> {
+    let path = chat_wire_log_path(session_id)?;
+    Ok((1..=wire_trace_rotation_count())
+        .map(|index| rotated_wire_log_path(&path, index))
+        .collect())
+}
+
+pub fn chat_wire_log_exists(session_id: &str) -> bool {
+    chat_wire_log_path(session_id).is_ok_and(|path| path.exists())
 }
 
 fn read_last_seq(path: &Path) -> Result<u64, String> {
@@ -110,15 +180,35 @@ pub fn append_event(
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
+    let current_bytes = fs::metadata(&path)
+        .map(|meta| meta.len())
+        .unwrap_or_default();
 
     let mut seqs = event_seqs()
         .lock()
         .map_err(|_| "chat event state poisoned".to_string())?;
     let last = match seqs.get(session_id).copied() {
-        Some(seq) => seq,
+        Some(state) if state.bytes == current_bytes => state.seq,
         None => {
             let seq = read_last_seq(&path)?;
-            seqs.insert(session_id.to_string(), seq);
+            seqs.insert(
+                session_id.to_string(),
+                EventSeqState {
+                    seq,
+                    bytes: current_bytes,
+                },
+            );
+            seq
+        }
+        Some(_) => {
+            let seq = read_last_seq(&path)?;
+            seqs.insert(
+                session_id.to_string(),
+                EventSeqState {
+                    seq,
+                    bytes: current_bytes,
+                },
+            );
             seq
         }
     };
@@ -138,7 +228,93 @@ pub fn append_event(
     serde_json::to_writer(&mut file, &entry).map_err(|error| error.to_string())?;
     file.write_all(b"\n").map_err(|error| error.to_string())?;
     file.flush().map_err(|error| error.to_string())?;
-    seqs.insert(session_id.to_string(), entry.seq);
+    let bytes = file
+        .metadata()
+        .map(|meta| meta.len())
+        .unwrap_or(current_bytes);
+    seqs.insert(
+        session_id.to_string(),
+        EventSeqState {
+            seq: entry.seq,
+            bytes,
+        },
+    );
+    Ok(entry)
+}
+
+pub fn append_wire_event(
+    session_id: &str,
+    kind: impl Into<String>,
+    payload: Value,
+) -> Result<ChatEventLogEntry, String> {
+    if !wire_trace_enabled() {
+        return Err("chat wire trace disabled".to_string());
+    }
+    validate_session_id(session_id)?;
+    let path = chat_wire_log_path(session_id)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    rotate_wire_log_if_needed(&path)?;
+    let current_bytes = fs::metadata(&path)
+        .map(|meta| meta.len())
+        .unwrap_or_default();
+
+    let mut seqs = wire_seqs()
+        .lock()
+        .map_err(|_| "chat wire trace state poisoned".to_string())?;
+    let last = match seqs.get(session_id).copied() {
+        Some(state) if state.bytes == current_bytes => state.seq,
+        None => {
+            let seq = read_last_seq(&path)?;
+            seqs.insert(
+                session_id.to_string(),
+                EventSeqState {
+                    seq,
+                    bytes: current_bytes,
+                },
+            );
+            seq
+        }
+        Some(_) => {
+            let seq = read_last_seq(&path)?;
+            seqs.insert(
+                session_id.to_string(),
+                EventSeqState {
+                    seq,
+                    bytes: current_bytes,
+                },
+            );
+            seq
+        }
+    };
+    let entry = ChatEventLogEntry {
+        version: EVENT_VERSION,
+        seq: last.saturating_add(1),
+        ts: now_millis(),
+        session_id: session_id.to_string(),
+        kind: kind.into(),
+        payload: govern_wire_payload(payload),
+    };
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|error| error.to_string())?;
+    serde_json::to_writer(&mut file, &entry).map_err(|error| error.to_string())?;
+    file.write_all(b"\n").map_err(|error| error.to_string())?;
+    file.flush().map_err(|error| error.to_string())?;
+    let bytes = file
+        .metadata()
+        .map(|meta| meta.len())
+        .unwrap_or(current_bytes);
+    seqs.insert(
+        session_id.to_string(),
+        EventSeqState {
+            seq: entry.seq,
+            bytes,
+        },
+    );
     Ok(entry)
 }
 
@@ -146,6 +322,167 @@ pub fn record_event(session_id: &str, kind: &str, payload: Value) {
     if let Err(error) = append_event(session_id, kind, payload) {
         eprintln!("SomniQ desktop: failed to write chat event log: {error}");
     }
+}
+
+pub fn record_wire_event(session_id: &str, kind: &str, payload: Value) {
+    if !wire_trace_enabled() {
+        return;
+    }
+    if let Err(error) = append_wire_event(session_id, kind, payload) {
+        eprintln!("SomniQ desktop: failed to write chat wire trace: {error}");
+    }
+}
+
+fn wire_trace_enabled() -> bool {
+    std::env::var("ARIS_WIRE_TRACE")
+        .ok()
+        .map(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            !matches!(normalized.as_str(), "0" | "false" | "off" | "no")
+        })
+        .unwrap_or(true)
+}
+
+fn wire_trace_max_string_chars() -> usize {
+    std::env::var("ARIS_WIRE_TRACE_MAX_STRING_CHARS")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_WIRE_TRACE_MAX_STRING_CHARS)
+}
+
+fn wire_trace_max_bytes() -> u64 {
+    std::env::var("ARIS_WIRE_TRACE_MAX_BYTES")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_WIRE_TRACE_MAX_BYTES)
+}
+
+fn wire_trace_rotation_count() -> usize {
+    std::env::var("ARIS_WIRE_TRACE_ROTATIONS")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .map(|value| value.min(MAX_WIRE_TRACE_ROTATIONS))
+        .unwrap_or(DEFAULT_WIRE_TRACE_ROTATIONS)
+}
+
+fn rotated_wire_log_path(path: &Path, index: usize) -> PathBuf {
+    path.with_extension(format!("wire.jsonl.{index}"))
+}
+
+fn rotate_wire_log_if_needed(path: &Path) -> Result<(), String> {
+    let max_bytes = wire_trace_max_bytes();
+    if max_bytes == 0 || !path.exists() {
+        return Ok(());
+    }
+    let current_bytes = fs::metadata(path)
+        .map(|meta| meta.len())
+        .unwrap_or_default();
+    if current_bytes < max_bytes {
+        return Ok(());
+    }
+    for index in (1..=wire_trace_rotation_count()).rev() {
+        let source = if index == 1 {
+            path.to_path_buf()
+        } else {
+            rotated_wire_log_path(path, index - 1)
+        };
+        if !source.exists() {
+            continue;
+        }
+        let destination = rotated_wire_log_path(path, index);
+        if destination.exists() {
+            fs::remove_file(&destination).map_err(|error| error.to_string())?;
+        }
+        fs::rename(source, destination).map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+fn govern_wire_payload(payload: Value) -> Value {
+    govern_wire_value(payload, None, wire_trace_max_string_chars())
+}
+
+fn govern_wire_value(value: Value, key: Option<&str>, max_string_chars: usize) -> Value {
+    if key.is_some_and(is_sensitive_wire_key) {
+        return Value::String("<redacted>".to_string());
+    }
+    match value {
+        Value::Object(object) => Value::Object(
+            object
+                .into_iter()
+                .map(|(key, value)| {
+                    let value = govern_wire_value(value, Some(&key), max_string_chars);
+                    (key, value)
+                })
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(
+            items
+                .into_iter()
+                .map(|item| govern_wire_value(item, key, max_string_chars))
+                .collect(),
+        ),
+        Value::String(text) => govern_wire_string(key, text, max_string_chars),
+        other => other,
+    }
+}
+
+fn govern_wire_string(key: Option<&str>, text: String, max_string_chars: usize) -> Value {
+    let char_count = text.chars().count();
+    if key.is_some_and(is_binary_wire_key) && char_count > 256 {
+        return json!({
+            "redacted": true,
+            "reason": "binary_or_base64_payload",
+            "chars": char_count,
+        });
+    }
+    if looks_like_secret_bearing_string(&text) {
+        return Value::String("<redacted>".to_string());
+    }
+    if char_count <= max_string_chars {
+        return Value::String(text);
+    }
+    json!({
+        "truncated": true,
+        "chars": char_count,
+        "preview": text.chars().take(max_string_chars).collect::<String>(),
+    })
+}
+
+fn is_sensitive_wire_key(key: &str) -> bool {
+    let lower = key.to_ascii_lowercase();
+    lower.contains("api_key")
+        || lower.contains("apikey")
+        || lower.contains("authorization")
+        || lower.contains("password")
+        || lower.contains("secret")
+        || lower.contains("token")
+        || lower.ends_with("_key")
+        || lower.ends_with("_secret")
+        || lower.ends_with("_token")
+}
+
+fn is_binary_wire_key(key: &str) -> bool {
+    let lower = key.to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "data" | "image" | "bytes" | "base64" | "content_bytes"
+    )
+}
+
+fn looks_like_secret_bearing_string(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("bearer ")
+        || lower.contains("authorization:")
+        || lower.contains("api_key=")
+        || lower.contains("apikey=")
+        || lower.contains("access_token=")
+        || lower.contains("refresh_token=")
+        || lower.contains("token=")
+        || lower.contains("sk-")
 }
 
 pub fn emit_chat_event(
@@ -157,10 +494,6 @@ pub fn emit_chat_event(
 ) {
     record_event(session_id, kind, payload.clone());
     let _ = app.emit(event_name, payload);
-}
-
-pub fn session_to_value(session: &Session) -> Result<Value, String> {
-    serde_json::from_str(&session.to_json().render()).map_err(|error| error.to_string())
 }
 
 pub fn conversation_message_to_value(message: &ConversationMessage) -> Result<Value, String> {
@@ -194,9 +527,10 @@ pub fn record_session_snapshot(session_id: &str, reason: &str, session: &Session
     let payload = json!({
         "reason": reason,
         "messageCount": session.messages.len(),
-        "session": session_to_value(session).unwrap_or(Value::Null),
+        "compactionCount": session.compactions.len(),
+        "storage": "event_log",
     });
-    record_event(session_id, "session_snapshot", payload);
+    record_event(session_id, "session_checkpoint", payload);
 }
 
 pub fn read_events_for_session(session_id: &str) -> Result<Vec<ChatEventLogEntry>, String> {
@@ -225,6 +559,18 @@ pub fn export_events_to_path(session_id: &str, target: &Path) -> Result<(), Stri
     let source = chat_event_log_path(session_id)?;
     if !source.exists() {
         return Err("chat event log not found".to_string());
+    }
+    let data = fs::read(source).map_err(|error| error.to_string())?;
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    runtime::write_file_atomically(target, data).map_err(|error| error.to_string())
+}
+
+pub fn export_wire_to_path(session_id: &str, target: &Path) -> Result<(), String> {
+    let source = chat_wire_log_path(session_id)?;
+    if !source.exists() {
+        return Err("chat wire trace not found".to_string());
     }
     let data = fs::read(source).map_err(|error| error.to_string())?;
     if let Some(parent) = target.parent() {
@@ -298,6 +644,18 @@ pub fn chat_events_restore(
 }
 
 fn replay_events(session_id: &str, events: &[ChatEventLogEntry]) -> ChatEventsReplay {
+    if !events.iter().any(is_ui_replay_event) && events.iter().any(is_canonical_session_event) {
+        let turns = canonical_session_from_events(events)
+            .map(|session| turns_from_session(&session))
+            .unwrap_or_default();
+        return ChatEventsReplay {
+            session_id: session_id.to_string(),
+            event_count: events.len(),
+            last_seq: events.last().map(|event| event.seq).unwrap_or_default(),
+            turns,
+        };
+    }
+
     let mut turns = Vec::new();
     for event in events {
         match event.kind.as_str() {
@@ -394,6 +752,131 @@ fn replay_events(session_id: &str, events: &[ChatEventLogEntry]) -> ChatEventsRe
         event_count: events.len(),
         last_seq: events.last().map(|event| event.seq).unwrap_or_default(),
         turns,
+    }
+}
+
+fn is_ui_replay_event(event: &ChatEventLogEntry) -> bool {
+    matches!(
+        event.kind.as_str(),
+        "reset"
+            | "user_message"
+            | "assistant_delta"
+            | "assistant_thinking_delta"
+            | "tool_call"
+            | "tool_progress"
+            | "tool_result"
+            | "approval_request"
+            | "approval_resolved"
+            | "context_warning"
+            | "context_compacted"
+            | "error"
+            | "done"
+    )
+}
+
+fn is_canonical_session_event(event: &ChatEventLogEntry) -> bool {
+    matches!(
+        event.kind.as_str(),
+        "session_reset" | "session_message" | "session_compaction" | "session_usage"
+    )
+}
+
+fn turns_from_session(session: &Session) -> Vec<Value> {
+    let mut turns = Vec::new();
+    for (message_index, message) in session.messages.iter().enumerate() {
+        match message.role {
+            MessageRole::User => turns.push(json!({
+                "id": format!("session-{message_index}-user"),
+                "role": "user",
+                "blocks": ui_blocks_from_message(message),
+                "streaming": false,
+            })),
+            MessageRole::Assistant => turns.push(json!({
+                "id": format!("session-{message_index}-assistant"),
+                "role": "assistant",
+                "blocks": ui_blocks_from_message(message),
+                "streaming": false,
+            })),
+            MessageRole::Tool => merge_tool_message_into_turns(&mut turns, message, message_index),
+            MessageRole::System => {}
+        }
+    }
+    turns
+}
+
+fn ui_blocks_from_message(message: &ConversationMessage) -> Vec<Value> {
+    message
+        .blocks
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => Some(json!({ "kind": "text", "text": text })),
+            ContentBlock::Thinking { thinking, .. } => {
+                Some(json!({ "kind": "thinking", "thinking": thinking }))
+            }
+            ContentBlock::Image { media_type, .. } => Some(json!({
+                "kind": "notice",
+                "message": format!("[Image: {media_type}]"),
+            })),
+            ContentBlock::ToolUse { id, name, input } => Some(json!({
+                "kind": "tool",
+                "id": id,
+                "name": name,
+                "input": input,
+            })),
+            ContentBlock::ToolResult {
+                tool_use_id,
+                tool_name,
+                output,
+                is_error,
+            } => Some(json!({
+                "kind": "tool",
+                "id": tool_use_id,
+                "name": tool_name,
+                "input": "{}",
+                "output": output,
+                "isError": is_error,
+            })),
+        })
+        .collect()
+}
+
+fn merge_tool_message_into_turns(
+    turns: &mut Vec<Value>,
+    message: &ConversationMessage,
+    message_index: usize,
+) {
+    if !turns
+        .last()
+        .and_then(Value::as_object)
+        .and_then(|object| object.get("role"))
+        .and_then(Value::as_str)
+        .is_some_and(|role| role == "assistant")
+    {
+        turns.push(json!({
+            "id": format!("session-{message_index}-assistant"),
+            "role": "assistant",
+            "blocks": [],
+            "streaming": false,
+        }));
+    }
+    let blocks = ensure_assistant_turn(turns, message_index as u64);
+    for block in &message.blocks {
+        let ContentBlock::ToolResult {
+            tool_use_id,
+            tool_name,
+            output,
+            is_error,
+        } = block
+        else {
+            continue;
+        };
+        let payload = json!({
+            "id": tool_use_id,
+            "name": tool_name,
+            "output": output,
+            "isError": is_error,
+        });
+        append_tool_result(blocks, &payload);
     }
 }
 
@@ -593,6 +1076,10 @@ fn update_permission_block(blocks: &mut [Value], payload: &Value) {
 }
 
 fn session_from_events(events: &[ChatEventLogEntry]) -> Result<Session, String> {
+    if events.iter().any(is_canonical_session_event) {
+        return canonical_session_from_events(events);
+    }
+
     let mut session = Session::new();
     for event in events {
         match event.kind.as_str() {
@@ -671,6 +1158,43 @@ fn session_from_events(events: &[ChatEventLogEntry]) -> Result<Session, String> 
                             text: text.to_string(),
                         },
                     ]));
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(session)
+}
+
+fn canonical_session_from_events(events: &[ChatEventLogEntry]) -> Result<Session, String> {
+    let mut session = Session::new();
+    for event in events {
+        match event.kind.as_str() {
+            "session_reset" => session = Session::new(),
+            "session_message" => {
+                if let Some(value) = event.payload.get("message") {
+                    session.messages.push(message_from_value(value)?);
+                }
+            }
+            "session_compaction" => {
+                if let Some(value) = event.payload.get("compaction") {
+                    session.compactions.push(compaction_from_value(value)?);
+                }
+            }
+            "session_usage" => {
+                let Some(message_index) = event
+                    .payload
+                    .get("messageIndex")
+                    .and_then(Value::as_u64)
+                    .and_then(|value| usize::try_from(value).ok())
+                else {
+                    continue;
+                };
+                let Some(usage) = event.payload.get("usage").and_then(usage_from_value) else {
+                    continue;
+                };
+                if let Some(message) = session.messages.get_mut(message_index) {
+                    message.usage = Some(usage);
                 }
             }
             _ => {}
@@ -892,72 +1416,5 @@ fn u32_field(object: &Map<String, Value>, key: &str) -> Option<u32> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{replay_events, session_from_events, ChatEventLogEntry};
-    use serde_json::json;
-
-    fn event(seq: u64, kind: &str, payload: serde_json::Value) -> ChatEventLogEntry {
-        ChatEventLogEntry {
-            version: 1,
-            seq,
-            ts: 1,
-            session_id: "chat-test".to_string(),
-            kind: kind.to_string(),
-            payload,
-        }
-    }
-
-    #[test]
-    fn replay_projects_stream_events_into_turns() {
-        let events = vec![
-            event(
-                1,
-                "user_message",
-                json!({"message":{"role":"user","blocks":[{"type":"text","text":"hi"}]}}),
-            ),
-            event(
-                2,
-                "assistant_delta",
-                json!({"sessionId":"chat-test","text":"hello"}),
-            ),
-            event(
-                3,
-                "tool_call",
-                json!({"sessionId":"chat-test","id":"t1","name":"bash","input":"{}"}),
-            ),
-            event(
-                4,
-                "tool_result",
-                json!({"sessionId":"chat-test","id":"t1","name":"bash","output":"ok","isError":false}),
-            ),
-            event(5, "done", json!({"sessionId":"chat-test","text":"hello"})),
-        ];
-        let replay = replay_events("chat-test", &events);
-        assert_eq!(replay.turns.len(), 2);
-        assert_eq!(replay.last_seq, 5);
-    }
-
-    #[test]
-    fn restore_rebuilds_runtime_session_from_basic_events() {
-        let events = vec![
-            event(
-                1,
-                "user_message",
-                json!({"message":{"role":"user","blocks":[{"type":"text","text":"hi"}]}}),
-            ),
-            event(2, "assistant_delta", json!({"text":"hello"})),
-            event(
-                3,
-                "tool_call",
-                json!({"id":"t1","name":"bash","input":"{}"}),
-            ),
-            event(
-                4,
-                "tool_result",
-                json!({"id":"t1","name":"bash","output":"ok","isError":false}),
-            ),
-        ];
-        let session = session_from_events(&events).expect("session restores");
-        assert_eq!(session.messages.len(), 3);
-    }
-}
+#[path = "tests/chat_events.rs"]
+mod tests;
