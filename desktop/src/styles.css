@@ -13,7 +13,7 @@
   --red: #f85149;
   --blue: #58a6ff;
   --gray: #6e7681;
-  --font-sans: "Segoe UI Variable", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-sans: "Inter", "SF Pro Text", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
   --font-mono: "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", ui-monospace, monospace;
   /* Code editor syntax tokens — VSCode Dark+ palette. */
   --code-fg: #d4d4d4;
@@ -26,6 +26,8 @@
   --code-variable: #9cdcfe;
   --code-meta: #c586c0;
   font-family: var(--font-sans);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
   color-scheme: dark;
   --scrollbar-size: 8px;
   --scrollbar-thumb: color-mix(in srgb, var(--text-dim) 42%, transparent);
@@ -639,8 +641,8 @@ textarea {
   border-radius: 7px;
   background: color-mix(in srgb, var(--accent-2) 9%, transparent);
   color: var(--text);
-  font-size: 14px;
-  font-weight: 650;
+  font-size: 16px;
+  font-weight: 700;
   white-space: nowrap;
 }
 
@@ -748,19 +750,6 @@ textarea {
   height: 1px;
   margin: 6px 7px;
   background: var(--border);
-}
-
-.app.app-chat-shell .product-switcher {
-  width: 100%;
-}
-
-.app.app-chat-shell .product-switcher-trigger {
-  width: 100%;
-  justify-content: flex-start;
-}
-
-.app.app-chat-shell .product-switcher-caret {
-  margin-left: auto;
 }
 
 .app-account {
@@ -3813,6 +3802,299 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   .sched-run-panel {
     grid-template-columns: 1fr 1fr;
   }
+}
+
+/* Homepage polish foundation: let spacing and tonal layers carry hierarchy
+   instead of outlining every surface. */
+:root {
+  --bg: #0c1016;
+  --bg-1: #111821;
+  --bg-2: #18222d;
+  --bg-3: #202c38;
+  --border: color-mix(in srgb, #a7b7c9 18%, transparent);
+  --text: #e5edf7;
+  --text-dim: #8593a5;
+  --accent: #71b5ff;
+  --accent-2: #a895ff;
+}
+
+.window-titlebar {
+  background: #0a0e13;
+  border-bottom: 0;
+}
+
+.app-head {
+  background: var(--bg);
+  border-bottom: 0;
+}
+
+.app-head .dir {
+  border: 0;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--bg-2) 72%, transparent);
+}
+
+.app.app-chat-shell {
+  --chat-sidebar-bg: #101720;
+}
+
+.app.app-chat-shell .app-head {
+  background: var(--bg);
+}
+
+.app.app-chat-shell .app-head-title {
+  background: var(--chat-sidebar-bg);
+  border-right: 0;
+}
+
+.product-switcher-trigger {
+  background: transparent;
+  border-color: transparent;
+}
+
+.product-switcher-trigger:hover,
+.product-switcher-trigger[aria-expanded="true"] {
+  border-color: transparent;
+  background: color-mix(in srgb, var(--accent-2) 12%, transparent);
+}
+
+.chat-sidebar {
+  border-right: 0;
+  background: var(--chat-sidebar-bg, #101720);
+}
+
+.chat-sidebar-container {
+  background: var(--chat-sidebar-bg, #101720);
+}
+
+.chat-new-btn {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  border: 0;
+  box-shadow: none;
+}
+
+.chat-new-btn:hover {
+  background: color-mix(in srgb, var(--accent) 16%, var(--bg-2));
+  border-color: transparent;
+}
+
+.chat-new-icon {
+  border: 0;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--accent);
+}
+
+.chat-scheduled-btn:hover,
+.chat-scheduled-btn.active {
+  background: color-mix(in srgb, var(--bg-3) 70%, transparent);
+  border-color: transparent;
+}
+
+.chat-session-item.active {
+  border: 0;
+  background: color-mix(in srgb, var(--accent) 12%, var(--bg-2));
+  box-shadow: inset 2px 0 0 color-mix(in srgb, var(--accent) 68%, transparent);
+}
+
+.chat-sidebar-label {
+  color: color-mix(in srgb, var(--text-dim) 82%, transparent);
+}
+
+.chat-scroll {
+  background:
+    radial-gradient(circle at 68% 0%, color-mix(in srgb, var(--accent) 7%, transparent), transparent 30%),
+    var(--bg);
+}
+
+.chat-starters button {
+  border: 0;
+  background: color-mix(in srgb, var(--bg-2) 76%, transparent);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+}
+
+.chat-starters button:hover {
+  border-color: transparent;
+  background: color-mix(in srgb, var(--accent) 13%, var(--bg-2));
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.2);
+}
+
+.chat-input-wrap {
+  right: 16px;
+  background: linear-gradient(to bottom, transparent, color-mix(in srgb, var(--bg) 94%, transparent) 30%);
+}
+
+.chat-input {
+  border: 0;
+  background: color-mix(in srgb, var(--bg-2) 88%, #000 12%);
+  box-shadow:
+    0 18px 46px rgba(0, 0, 0, 0.28),
+    inset 0 1px 0 rgba(255, 255, 255, 0.035);
+}
+
+.chat-input:focus-within {
+  border-color: transparent;
+  box-shadow:
+    0 20px 52px rgba(0, 0, 0, 0.34),
+    0 0 0 2px color-mix(in srgb, var(--accent) 16%, transparent),
+    inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+@media (max-width: 720px) {
+  .app.app-chat-shell .app-head-title {
+    background: transparent;
+  }
+
+  .chat-input-wrap {
+    right: 0;
+  }
+}
+
+:root[data-theme="light"] {
+  --border: color-mix(in srgb, #718096 20%, transparent);
+}
+
+:root[data-theme="light"] .window-titlebar,
+:root[data-theme="light"] .app-head,
+:root[data-theme="light"] .app.app-chat-shell .app-head {
+  border-bottom: 0;
+}
+
+:root[data-theme="light"] .app.app-chat-shell {
+  --chat-sidebar-bg: #f5f8fb;
+}
+
+:root[data-theme="light"] .app.app-chat-shell .app-head-title {
+  border-right: 0;
+}
+
+:root[data-theme="light"] .chat-starters button,
+:root[data-theme="light"] .chat-input {
+  box-shadow: 0 10px 26px rgba(56, 74, 96, 0.08);
+}
+
+/* Keep the four fixed entry points balanced after the legacy responsive rules. */
+.chat-starters {
+  width: min(100%, 760px) !important;
+  grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+}
+
+@media (max-width: 720px) {
+  .chat-starters {
+    grid-template-columns: 1fr !important;
+  }
+}
+
+/* Fixed research entry points on the empty Chat home. */
+.chat-starters {
+  display: grid;
+  width: min(100%, 760px);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.chat-starters .chat-starter {
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr) 16px;
+  align-items: start;
+  gap: 11px;
+  min-height: 88px;
+  padding: 13px 14px;
+  border: 0;
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--bg-2) 78%, transparent);
+  color: var(--text);
+  text-align: left;
+  transition: background 0.16s ease, box-shadow 0.16s ease, transform 0.16s ease;
+}
+
+.chat-starters .chat-starter:hover {
+  border-color: transparent;
+  background: color-mix(in srgb, var(--accent) 12%, var(--bg-2));
+  box-shadow: 0 14px 30px rgba(0, 0, 0, 0.2);
+  transform: translateY(-2px);
+}
+
+.chat-starter-icon {
+  display: grid;
+  width: 36px;
+  height: 36px;
+  place-items: center;
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+  color: var(--accent);
+}
+
+.chat-starter-research .chat-starter-icon {
+  background: color-mix(in srgb, #60d7b0 16%, transparent);
+  color: #76d9b9;
+}
+
+.chat-starter-review .chat-starter-icon {
+  background: color-mix(in srgb, #f3bd68 16%, transparent);
+  color: #f3bd68;
+}
+
+.chat-starter-writing .chat-starter-icon {
+  background: color-mix(in srgb, var(--accent-2) 16%, transparent);
+  color: #b7a8ff;
+}
+
+.chat-starter-content {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.chat-starter-label {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.25;
+}
+
+.chat-starter-hint {
+  color: var(--text-dim);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+
+.chat-starters .chat-starter-arrow {
+  align-self: center;
+  color: var(--text-dim);
+  opacity: 0.36;
+  transform: none;
+  transition: opacity 0.16s ease, color 0.16s ease, transform 0.16s ease;
+}
+
+.chat-starters .chat-starter:hover .chat-starter-arrow {
+  color: var(--accent);
+  opacity: 1;
+  transform: translateX(2px);
+}
+
+:root[data-theme="light"] .chat-starters .chat-starter {
+  background: color-mix(in srgb, var(--bg-2) 78%, #fff);
+}
+
+:root[data-theme="light"] .chat-starters .chat-starter:hover {
+  background: color-mix(in srgb, var(--accent) 10%, #fff);
+}
+
+@media (max-width: 720px) {
+  .chat-starters {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+
+  .chat-starters .chat-starter {
+    min-height: 76px;
+  }
+}
+
+:root[data-theme="light"] .chat-session-item.active {
+  background: color-mix(in srgb, var(--accent) 10%, #fff);
 }
 
 .sp-settings-page {
@@ -6873,9 +7155,10 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
 }
 
 .chat-session-title {
-  font-size: 12px;
-  font-weight: 500;
+  font-size: 13.5px;
+  font-weight: 450;
   color: var(--text);
+  letter-spacing: -0.01em;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -8508,7 +8791,7 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   border: 1px solid transparent;
   border-radius: 8px;
   color: var(--text);
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 600;
   text-align: left;
   text-transform: none;
@@ -9048,18 +9331,19 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
 }
 
 .chat-sidebar-label {
-  padding: 10px 20px 6px;
+  padding: 12px 20px 7px;
   color: #758293;
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.7px;
-  text-transform: uppercase;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0;
+  text-transform: none;
 }
 
 .chat-project-label {
   display: flex;
   align-items: center;
   gap: 6px;
+  padding-left: 0;
   border-radius: 6px;
   user-select: none;
   transition:
@@ -9093,12 +9377,11 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
 
 .chat-project-caret {
   display: inline-flex;
-  width: 12px;
-  flex: 0 0 12px;
+  width: 14px;
+  flex: 0 0 14px;
+  align-items: center;
   justify-content: center;
   color: var(--text-dim);
-  font-size: 13px;
-  line-height: 1;
 }
 
 .chat-project-label.can-reorder {
@@ -9125,10 +9408,15 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
 .chat-project-label-text {
   min-width: 0;
   flex: 1;
+  margin-left: -3px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  color: var(--text);
   font-size: 12.5px;
+  font-weight: 650;
+  text-transform: none;
+  letter-spacing: normal;
 }
 
 .chat-project-add {
@@ -10698,7 +10986,7 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
 
 .chat-session-item {
   min-height: 36px;
-  padding: 8px 30px 8px 10px;
+  padding: 8px 30px 8px 22px;
   border-bottom: none;
 }
 
@@ -12526,4 +12814,74 @@ button.chat-workflow-file-path:hover {
   .sched-run-panel {
     grid-template-columns: 1fr 1fr;
   }
+}
+
+/* Final homepage cascade: prefer tonal separation and whitespace over rules. */
+.chat-sidebar {
+  border-right: 0;
+  background: var(--chat-sidebar-bg, #101720);
+}
+
+.chat-sidebar-container {
+  background: var(--chat-sidebar-bg, #101720);
+}
+
+.chat-session-item.active {
+  border: 0;
+  background: color-mix(in srgb, var(--accent) 12%, var(--bg-2));
+  box-shadow: inset 2px 0 0 color-mix(in srgb, var(--accent) 68%, transparent);
+}
+
+.chat-starters button {
+  border: 0;
+  background: color-mix(in srgb, var(--bg-2) 76%, transparent);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+}
+
+.chat-starters button:hover {
+  border-color: transparent;
+  background: color-mix(in srgb, var(--accent) 13%, var(--bg-2));
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.2);
+}
+
+.chat-input {
+  border: 0;
+  background: color-mix(in srgb, var(--bg-2) 88%, #000 12%);
+  box-shadow:
+    0 18px 46px rgba(0, 0, 0, 0.28),
+    inset 0 1px 0 rgba(255, 255, 255, 0.035);
+}
+
+.chat-input:focus-within {
+  border-color: transparent;
+  box-shadow:
+    0 20px 52px rgba(0, 0, 0, 0.34),
+    0 0 0 2px color-mix(in srgb, var(--accent) 16%, transparent),
+    inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+.chat-input-wrap {
+  right: 16px;
+  background: linear-gradient(to bottom, transparent, color-mix(in srgb, var(--bg) 94%, transparent) 30%);
+}
+
+.chat-new-btn {
+  border: 0;
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+.chat-new-btn:hover {
+  border-color: transparent;
+  background: color-mix(in srgb, var(--accent) 16%, var(--bg-2));
+}
+
+.chat-new-icon {
+  border: 0;
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--accent);
+}
+
+:root[data-theme="light"] .chat-starters button,
+:root[data-theme="light"] .chat-input {
+  box-shadow: 0 10px 26px rgba(56, 74, 96, 0.08);
 }

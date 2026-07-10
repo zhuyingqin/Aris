@@ -11,8 +11,6 @@ import Lab from "./lab/Lab";
 import LiteratureViewTabs, { type LiteraturePageView } from "./literature/LiteratureViewTabs";
 import Extensions from "./extensions/Extensions";
 import Settings from "./settings/Settings";
-import Sessions from "./sessions/Sessions";
-import ScheduledTasks from "./scheduled/ScheduledTasks";
 import OnboardingTutorial from "./OnboardingTutorial";
 
 const loadLiterature = () => import("./literature/Literature");
@@ -79,7 +77,6 @@ const APP_COPY: Record<Language, AppShellCopy> = {
       mail: "邮箱",
       extensions: "扩展",
       settings: "设置",
-      sessions: "会话",
       scheduled: "定时任务",
     },
     loading: (label) => `正在加载${label}...`,
@@ -126,7 +123,6 @@ const APP_COPY: Record<Language, AppShellCopy> = {
       mail: "Mail",
       extensions: "Extensions",
       settings: "Settings",
-      sessions: "Sessions",
       scheduled: "Scheduled",
     },
     loading: (label) => `Loading ${label}...`,
@@ -173,7 +169,6 @@ const TAB_MODULE_LABELS: Record<Tab, string> = {
   mail: "Mail",
   extensions: "Extensions",
   settings: "Settings",
-  sessions: "Sessions",
   scheduled: "Scheduled",
 };
 
@@ -355,16 +350,6 @@ const PRIMARY_NAV_ITEMS: NavItem[] = [
 ];
 
 const UTILITY_NAV_ITEMS: NavItem[] = [
-  {
-    id: "sessions",
-    label: "Sessions",
-    icon: <IC d="M8 2.5a5.5 5.5 0 105.5 5.5A5.5 5.5 0 008 2.5zM8 5.5V8l2 1.5" />,
-  },
-  {
-    id: "scheduled",
-    label: "Scheduled",
-    icon: <IC d="M3 4.5h10v9H3zM5 2.5v4M11 2.5v4M3 7h10M8 9v2l1.5 1" />,
-  },
   {
     id: "settings",
     label: "Settings",
@@ -863,7 +848,8 @@ export default function App() {
     .map((id) => projectById.get(id))
     .filter((project): project is NonNullable<typeof project> => Boolean(project));
   const renderedTab = deferredTab;
-  const chatShell = renderedTab === "chat";
+  const chatShell = renderedTab === "chat" || renderedTab === "scheduled";
+  const productTab: Tab = renderedTab === "scheduled" ? "chat" : renderedTab;
   const showUpdateIndicator = updateState === "available" || updateState === "downloading" || updateState === "ready";
   const copy = APP_COPY[language];
   const updateVersionLabel = updateInfo?.version ? ` v${updateInfo.version}` : "";
@@ -1014,7 +1000,7 @@ export default function App() {
               type="button"
               aria-haspopup="menu"
               aria-expanded={productMenuOpen}
-              aria-label={copy.switchProduct(PRODUCT_NAMES[tab])}
+              aria-label={copy.switchProduct(PRODUCT_NAMES[productTab])}
               data-onboarding-target="product-switcher"
               onKeyDown={(event) => {
                 if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
@@ -1029,7 +1015,7 @@ export default function App() {
               }}
             >
               <span className="product-switcher-name">SomniQ</span>
-              <span className="product-switcher-module">{PRODUCT_NAMES[tab]}</span>
+              <span className="product-switcher-module">{PRODUCT_NAMES[productTab]}</span>
               <span className="product-switcher-caret" aria-hidden="true">
                 <Chevron dir="down" size={13} />
               </span>
@@ -1268,7 +1254,7 @@ export default function App() {
           resetKey={renderedTab}
           fallback={(viewError, reset) => <AppViewFallback copy={copy} error={viewError} reset={reset} />}
         >
-          <div hidden={renderedTab !== "chat"}>
+          <div hidden={renderedTab !== "chat" && renderedTab !== "scheduled"}>
             <ErrorBoundary
               resetKey="chat"
               fallback={(viewError, reset) => <AppViewFallback copy={copy} error={viewError} reset={reset} />}
@@ -1307,8 +1293,6 @@ export default function App() {
             </Suspense>
           )}
           {renderedTab === "extensions" && <Extensions />}
-          {renderedTab === "sessions" && <Sessions />}
-          {renderedTab === "scheduled" && <ScheduledTasks />}
           {renderedTab === "settings" && <Settings />}
         </ErrorBoundary>
 

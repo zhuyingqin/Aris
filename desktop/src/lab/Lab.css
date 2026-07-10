@@ -1,7 +1,8 @@
 .lab {
   display: flex;
   flex-direction: column;
-  height: 100%;
+  position: absolute;
+  inset: 0;
   overflow: hidden;
   color: var(--text);
   --lab-activity-w: 48px;
@@ -2699,6 +2700,287 @@
   .lab-file-output-panel {
     border-right: 0;
     border-bottom: 1px solid var(--border);
+  }
+}
+
+/* SomniQ Code workbench polish: CodeMirror-inspired density with a lighter
+   surface treatment, while keeping the existing editor implementation small. */
+.lab {
+  --lab-panel: color-mix(in srgb, var(--bg-1) 92%, #0b1020 8%);
+  --lab-panel-raised: color-mix(in srgb, var(--bg-2) 88%, #18233c 12%);
+  --lab-editor-bg: color-mix(in srgb, var(--bg) 94%, #070b13 6%);
+  --lab-divider: color-mix(in srgb, var(--border) 76%, transparent);
+}
+
+.lab-workspace {
+  background: var(--lab-editor-bg);
+}
+
+.lab-activitybar {
+  width: 46px;
+  flex-basis: 46px;
+  padding: 7px 0;
+  border-right-color: var(--lab-divider);
+  background: color-mix(in srgb, var(--bg-1) 84%, #080c15 16%);
+}
+
+.lab-activity {
+  height: 44px;
+  color: color-mix(in srgb, var(--text-dim) 82%, transparent);
+}
+
+.lab-activity:hover {
+  color: var(--text);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+
+.lab-activity.active {
+  color: var(--accent-2);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+.lab-activity.active::before {
+  inset: 5px auto 5px 0;
+  width: 2px;
+  background: var(--accent-2);
+  box-shadow: 0 0 10px color-mix(in srgb, var(--accent-2) 60%, transparent);
+}
+
+.lab-side {
+  background: var(--lab-panel);
+  border-right-color: var(--lab-divider);
+}
+
+.lab-side-content.files {
+  background: var(--lab-panel);
+}
+
+.lab-explorer-title {
+  height: 38px;
+  padding: 0 9px 0 14px;
+  border-bottom-color: var(--lab-divider);
+  color: var(--text-dim);
+  font-size: 10.5px;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+}
+
+.lab-explorer-root-row {
+  margin: 4px 7px 2px;
+  padding: 2px 2px 2px 0;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+}
+
+.lab-explorer-root-row:hover {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+.lab-explorer-root {
+  padding: 0 8px;
+  font-size: 12px;
+}
+
+.lab-explorer-tree {
+  padding: 4px 7px 14px 5px;
+}
+
+.lab-explorer-row {
+  min-height: 28px;
+  margin: 1px 0;
+  border-radius: 5px;
+}
+
+.lab-explorer-row.active {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+.lab-explorer-row.active::before {
+  top: 3px;
+  bottom: 3px;
+  background: var(--accent-2);
+}
+
+.lab-explorer-main {
+  padding-block: 4px;
+  font-size: 12px;
+}
+
+.lab-main {
+  background: var(--lab-editor-bg);
+}
+
+.lab-editor-tabs {
+  height: 38px;
+  flex-basis: 38px;
+  border-bottom-color: var(--lab-divider);
+  background: color-mix(in srgb, var(--bg-1) 72%, #080c15 28%);
+}
+
+.lab-editor-tab,
+.lab-editor-tab-empty {
+  height: 38px;
+  border-right-color: var(--lab-divider);
+  background: transparent;
+  font-size: 12px;
+}
+
+.lab-editor-tab:hover {
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+
+.lab-editor-tab.active {
+  background: var(--lab-editor-bg);
+}
+
+.lab-editor-tab.active::after {
+  height: 2px;
+  background: var(--accent-2);
+  box-shadow: 0 0 10px color-mix(in srgb, var(--accent-2) 52%, transparent);
+}
+
+.lab-editor-body {
+  background: var(--lab-editor-bg);
+}
+
+.lab-empty-state {
+  width: min(520px, calc(100% - 48px));
+  margin: auto;
+  padding: 34px 36px 30px;
+  text-align: center;
+  border: 1px solid color-mix(in srgb, var(--accent-2) 18%, var(--border));
+  border-radius: 14px;
+  background: radial-gradient(circle at 50% 0%, color-mix(in srgb, var(--accent-2) 10%, transparent), transparent 58%), var(--lab-panel);
+  box-shadow: 0 18px 50px rgb(0 0 0 / 16%);
+}
+
+.lab-empty-state-mark {
+  width: 48px;
+  height: 48px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 16px;
+  border: 1px solid color-mix(in srgb, var(--accent-2) 34%, var(--border));
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--accent-2) 13%, var(--bg-2));
+  color: var(--accent-2);
+  font: 700 15px/1 ui-monospace, "SF Mono", Consolas, monospace;
+}
+
+.lab-empty-state-kicker {
+  display: block;
+  color: var(--accent-2);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+}
+
+.lab-empty-state h2 {
+  margin: 10px 0 8px;
+  color: var(--text);
+  font-size: 21px;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+}
+
+.lab-empty-state p {
+  max-width: 410px;
+  margin: 0 auto;
+  color: var(--text-dim);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.lab-empty-state-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 24px;
+}
+
+.lab-empty-state-action {
+  min-height: 66px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 10px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg-2) 76%, transparent);
+  color: var(--text-dim);
+  font-size: 11px;
+  cursor: pointer;
+  transition: 140ms ease;
+}
+
+.lab-empty-state-action svg {
+  width: 17px;
+  height: 17px;
+  color: var(--accent-2);
+}
+
+.lab-empty-state-action:hover {
+  border-color: color-mix(in srgb, var(--accent-2) 46%, var(--border));
+  background: color-mix(in srgb, var(--accent-2) 10%, var(--bg-2));
+  color: var(--text);
+  transform: translateY(-1px);
+}
+
+.lab-empty-state-action.primary {
+  border-color: color-mix(in srgb, var(--accent-2) 44%, var(--border));
+  background: color-mix(in srgb, var(--accent-2) 12%, var(--bg-2));
+  color: var(--text);
+}
+
+.lab-empty-state-hint {
+  display: block;
+  margin-top: 19px;
+  color: color-mix(in srgb, var(--text-dim) 76%, transparent);
+  font-size: 11px;
+}
+
+.lab-assistant-side {
+  border-left-color: var(--lab-divider);
+  background: var(--lab-panel);
+}
+
+.lab-assistant,
+.lab-assistant-head,
+.lab-assistant-context-bar {
+  background: var(--lab-panel);
+}
+
+.lab-assistant-head,
+.lab-assistant-context-bar {
+  border-color: var(--lab-divider);
+}
+
+.lab-assistant-turns {
+  background: var(--lab-editor-bg);
+}
+
+.lab-assistant-empty button {
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--bg-2) 72%, transparent);
+}
+
+.lab-statusbar {
+  height: 24px;
+  padding-inline: 12px;
+  background: color-mix(in srgb, var(--accent) 78%, #101827 22%);
+  border-top-color: transparent;
+}
+
+@media (max-width: 760px) {
+  .lab-empty-state {
+    padding: 28px 20px 24px;
+  }
+
+  .lab-empty-state-actions {
+    grid-template-columns: 1fr;
   }
 }
 

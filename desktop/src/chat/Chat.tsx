@@ -1,17 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
-import { chatUiTurnLoad, fileOpen, isTauri, projectChatStarters } from "../api/tauri";
-import { useStore } from "../store";
+import { chatUiTurnLoad, fileOpen, isTauri } from "../api/tauri";
+import { useStore, type Language } from "../store";
 import type { ChatTurn } from "../types";
 import ChatComposer from "./ChatComposer";
 import CommandSelection from "./CommandSelection";
 import ChatSidebar from "./ChatSidebar";
-import ChatThread from "./ChatThread";
+import ChatThread, { type ChatStarter } from "./ChatThread";
 import FilePathMenu from "./FilePathMenu";
 import { CHAT_COPY } from "./i18n";
 import { latestFileChangesFromTurns, latestTodosFromTurns, migrateTurn, textFromTurn } from "./model";
 import { fileChangeSummaryFromTurns } from "./ChatMessage";
 import WorkflowFlow from "./WorkflowFlow";
+import ScheduledTasks from "../scheduled/ScheduledTasks";
 import { useChatSessions } from "./useChatSessions";
 import { useChatComposer } from "./useChatComposer";
 import { useChatRun } from "./useChatRun";
@@ -27,6 +28,61 @@ export {
   needsBackendContextReset,
   visibleTurnError,
 } from "./chatRunHelpers";
+
+const CHAT_STARTERS: Record<Language, ChatStarter[]> = {
+  cn: [
+    {
+      id: "literature",
+      label: "文献检索",
+      hint: "搜索近年论文，梳理研究脉络",
+      prompt: "请围绕当前项目主题检索近5年的高相关论文，筛选权威来源并梳理研究脉络、代表性方法与尚未解决的问题。",
+    },
+    {
+      id: "research",
+      label: "资料搜集",
+      hint: "汇总资料、数据与可靠来源",
+      prompt: "请搜集与当前项目相关的权威资料、数据集和公开来源，按主题整理，并标注每条资料可以支持的研究判断。",
+    },
+    {
+      id: "review",
+      label: "论文审查",
+      hint: "检查逻辑、方法与表达",
+      prompt: "请审查当前论文，重点检查研究问题、方法设计、证据链、逻辑结构和语言表达，并给出可执行的修改建议。",
+    },
+    {
+      id: "writing",
+      label: "论文写作",
+      hint: "搭建结构并完善关键段落",
+      prompt: "请根据当前项目材料梳理论文结构，补全章节大纲，明确每一节的核心论点和下一步需要写作的段落。",
+    },
+  ],
+  en: [
+    {
+      id: "literature",
+      label: "Literature search",
+      hint: "Find recent papers and map the field",
+      prompt: "Search for highly relevant papers from the last five years on this project's topic, prioritize authoritative sources, and map methods, themes, and open problems.",
+    },
+    {
+      id: "research",
+      label: "Research materials",
+      hint: "Collect sources, data, and evidence",
+      prompt: "Collect authoritative sources, datasets, and public materials related to this project, organize them by theme, and explain what each source can support.",
+    },
+    {
+      id: "review",
+      label: "Paper review",
+      hint: "Check logic, methods, and clarity",
+      prompt: "Review the current paper for its research question, method design, evidence chain, structure, and writing quality, then give actionable revision suggestions.",
+    },
+    {
+      id: "writing",
+      label: "Paper writing",
+      hint: "Build the outline and key sections",
+      prompt: "Use the current project materials to build a paper outline, define the core claim of each section, and identify the next paragraphs to write.",
+    },
+  ],
+};
 
 function MemoryBadge({ count }: { count: number }) {
   if (count === 0) return null;
@@ -47,6 +103,7 @@ function MemoryBadge({ count }: { count: number }) {
  */
 export default function Chat() {
   const language = useStore((state) => state.language);
+  const tab = useStore((state) => state.tab);
   const copy = CHAT_COPY[language];
   const setTab = useStore((state) => state.setTab);
   const setError = useStore((state) => state.setError);
@@ -123,16 +180,17 @@ export default function Chat() {
     return () => document.body.classList.remove("somniq-chat-sidebar-open");
   }, [sessionCtl.sidebarOpen]);
 
-  const [starters, setStarters] = useState([
-    "Explain this project's architecture and key modules.",
-    "Check the uncommitted changes and identify risks.",
-    "Run the relevant tests and fix any failures.",
-  ]);
+  const starters = CHAT_STARTERS[language];
+  const welcomeCopy = language === "cn"
+    ? {
+      title: "让科研问题持续向前",
+      description: "SomniQ 在后台持续推理、检索、分析与生成，把问题推进成答案。",
+    }
+    : {
+      title: "Keep Research Questions Moving",
+      description: "SomniQ keeps reasoning, searching, analyzing, and generating in the background—turning questions into progress.",
+    };
   const [loadingOmittedTurns, setLoadingOmittedTurns] = useState<Set<string>>(() => new Set());
-  useEffect(() => {
-    if (!isTauri()) return;
-    projectChatStarters().then(setStarters).catch(() => undefined);
-  }, [currentProject?.id]);
 
   const turns = currentSession?.turns ?? [];
   const { editingTurnId, focusComposer } = composer;
@@ -294,7 +352,7 @@ export default function Chat() {
             <path d="M6.25 3v10" />
           </svg>
         </button>
-        {composer.chatDragging && (
+        {tab === "chat" && composer.chatDragging && (
           <div
             className="chat-drop-full"
             onDragOver={(e) => e.preventDefault()}
@@ -315,7 +373,7 @@ export default function Chat() {
           </div>
         )}
 
-        {document.getElementById("app-chat-actions-portal") && createPortal(
+        {tab === "chat" && document.getElementById("app-chat-actions-portal") && createPortal(
           <div className="chat-head-actions" data-tauri-drag-region style={{ display: "flex", alignItems: "center", gap: "8px" }}>
             {status?.memoryFiles != null && status.memoryFiles > 0 && (
               <MemoryBadge count={status.memoryFiles} />
@@ -370,6 +428,10 @@ export default function Chat() {
           </div>,
           document.getElementById("app-chat-actions-portal")!
         )}
+        {tab === "scheduled" ? (
+          <ScheduledTasks />
+        ) : (
+          <>
         <ChatThread
           key={currentId}
           sessionId={currentId}
@@ -377,6 +439,8 @@ export default function Chat() {
           loading={currentSessionLoading}
           composerHeight={composer.composerHeight}
           starters={starters}
+          welcomeTitle={welcomeCopy.title}
+          welcomeDescription={welcomeCopy.description}
           onStarter={(prompt) => {
             if (!currentSession) return;
             setDraft(currentSession.id, prompt);
@@ -441,6 +505,8 @@ export default function Chat() {
           onCancelEdit={() => composer.setEditingTurnId(null)}
           onHeightChange={composer.setComposerHeight}
         />
+          </>
+        )}
       </main>
       {sessionCtl.deleted && (
         <div className="chat-undo">

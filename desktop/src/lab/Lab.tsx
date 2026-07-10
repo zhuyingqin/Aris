@@ -1245,9 +1245,11 @@ export default function Lab() {
 
         {!sideCollapsed && (
         <aside className="lab-side">
-          <div className="lab-side-title">
-            <span>{sideTitle}</span>
-          </div>
+          {sideTab !== "files" && (
+            <div className="lab-side-title">
+              <span>{sideTitle}</span>
+            </div>
+          )}
           <div className={cx("lab-side-content", sideTab === "files" && "files")}>
             {sideTab === "files" && (
               <LabFiles
@@ -1648,7 +1650,27 @@ export default function Lab() {
           />
         ) : !activePath ? (
           <div className="lab-cells">
-            <div className="lab-empty">Pick a notebook from Explorer or the Notebook panel to start experimenting.</div>
+            <div className="lab-empty-state">
+              <div className="lab-empty-state-mark" aria-hidden="true">&lt;/&gt;</div>
+              <span className="lab-empty-state-kicker">SOMNIQ CODE</span>
+              <h2>Start from a research file</h2>
+              <p>Open a notebook or code file, then let SomniQ help you inspect, run, and improve it.</p>
+              <div className="lab-empty-state-actions">
+                <button type="button" className="lab-empty-state-action primary" onClick={() => handleActivitySelect("notebook")}>
+                  <IconNotebook />
+                  <span>Open notebook</span>
+                </button>
+                <button type="button" className="lab-empty-state-action" onClick={() => handleActivitySelect("files")}>
+                  <IconFiles />
+                  <span>Browse files</span>
+                </button>
+                <button type="button" className="lab-empty-state-action" onClick={() => setAssistantOpen(true)}>
+                  <IconAssistant />
+                  <span>Ask SomniQ</span>
+                </button>
+              </div>
+              <span className="lab-empty-state-hint">Python · Jupyter Notebook · project files</span>
+            </div>
           </div>
         ) : (
           <div

@@ -172,7 +172,6 @@ export default function Studio() {
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [filter, setFilter] = useState<ArtifactFilter>("all");
-  const [query, setQuery] = useState("");
   const [view, setView] = useState<StudioView>("review");
   const [readerPage, setReaderPage] = useState(1);
   const [requestedPage, setRequestedPage] = useState(1);
@@ -190,23 +189,14 @@ export default function Studio() {
   }, [load, projectId]);
 
   const visibleArtifacts = useMemo(() => {
-    const needle = query.trim().toLowerCase();
     return sortArtifacts(
       library.artifacts.filter((artifact) => {
         if (filter === "feedback" && activeReviewCount(artifact) === 0) return false;
         if (filter !== "all" && filter !== "feedback" && artifact.kind !== filter) return false;
-        if (!needle) return true;
-        return [
-          artifact.title,
-          artifact.kind,
-          artifact.venue ?? "",
-          artifact.pdfPath ?? "",
-          artifact.pptxPath ?? "",
-          artifact.htmlPath ?? "",
-        ].some((value) => value.toLowerCase().includes(needle));
+        return true;
       }),
     );
-  }, [filter, library.artifacts, query]);
+  }, [filter, library.artifacts]);
 
   const filterCounts = useMemo<Record<ArtifactFilter, number>>(() => ({
     all: library.artifacts.length,
@@ -225,7 +215,6 @@ export default function Studio() {
     if (!loaded || !pendingStudioArtifactId) return;
     if (library.artifacts.some((artifact) => artifact.id === pendingStudioArtifactId)) {
       setFilter("all");
-      setQuery("");
       setSelectedId(pendingStudioArtifactId);
     }
     setPendingStudioArtifactId(null);
@@ -316,22 +305,6 @@ export default function Studio() {
 
   return (
     <div className="studio-page">
-      <header className="studio-header">
-        <div>
-          <div className="studio-title">Studio</div>
-          <div className="studio-subtitle">
-            Review results, leave page feedback, request revisions.
-          </div>
-        </div>
-        <input
-          className="studio-search"
-          value={query}
-          onChange={(event) => setQuery(event.target.value)}
-          placeholder="Search results..."
-          aria-label="Search Studio results"
-        />
-      </header>
-
       {error && (
         <div className="studio-error" role="alert">
           {error}

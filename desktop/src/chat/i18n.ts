@@ -9,6 +9,10 @@ export const CHAT_COPY: Record<Language, {
   chatsCount: (count: number) => string;
   collapsed: string;
   expanded: string;
+  pinnedSection: string;
+  projectsSection: string;
+  showMoreChats: string;
+  showFewerChats: string;
   newChatInProject: (project: string) => string;
   newChatInThisProject: string;
   unread: string;
@@ -66,6 +70,10 @@ export const CHAT_COPY: Record<Language, {
     chatsCount: (count) => `${count} 个对话`,
     collapsed: "已折叠",
     expanded: "已展开",
+    pinnedSection: "置顶",
+    projectsSection: "项目",
+    showMoreChats: "展开显示",
+    showFewerChats: "收起显示",
     newChatInProject: (project) => `在 ${project} 中新建对话`,
     newChatInThisProject: "在此项目中新建对话",
     unread: "未读",
@@ -128,6 +136,10 @@ export const CHAT_COPY: Record<Language, {
     chatsCount: (count) => `${count} chats`,
     collapsed: "collapsed",
     expanded: "expanded",
+    pinnedSection: "Pinned",
+    projectsSection: "Projects",
+    showMoreChats: "Show more",
+    showFewerChats: "Show less",
     newChatInProject: (project) => `New chat in ${project}`,
     newChatInThisProject: "New chat in this project",
     unread: "Unread",
