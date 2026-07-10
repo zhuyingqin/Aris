@@ -14,7 +14,6 @@ const apiMocks = vi.hoisted(() => ({
   chatQuestionRespond: vi.fn(() => Promise.resolve()),
   chatCommandSpecs: vi.fn(() => Promise.resolve([])),
   skillsList: vi.fn(() => Promise.resolve([])),
-  projectChatStarters: vi.fn(() => Promise.resolve([])),
   chatRunCommand: vi.fn(),
   chatSuggestTitle: vi.fn(() => Promise.resolve("Concise title")),
   chatSetContext: vi.fn((_sessionId: string, _messages: unknown[], _mode?: string) => Promise.resolve(0)),
@@ -144,7 +143,6 @@ describe("Chat export action", () => {
     apiMocks.chatPermissionGet.mockResolvedValue({ mode: "workspace-write", label: "Accept edits", description: "Read and edit workspace files" });
     apiMocks.chatCommandSpecs.mockResolvedValue([]);
     apiMocks.skillsList.mockResolvedValue([]);
-    apiMocks.projectChatStarters.mockResolvedValue([]);
     apiMocks.chatUiSessionsList.mockResolvedValue([]);
     apiMocks.chatEventsReplay.mockResolvedValue({ sessionId: "chat", eventCount: 0, lastSeq: 0, turns: [] });
     apiMocks.chatUiSessionLoad.mockResolvedValue(null);
