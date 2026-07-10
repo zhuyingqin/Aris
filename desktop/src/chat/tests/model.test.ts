@@ -149,6 +149,32 @@ describe("latestFileChangesFromTurns", () => {
     ]);
   });
 
+  it("extracts files changed by REPL write scripts", () => {
+    const turns: ChatTurn[] = [
+      userTurn("fix latex overflow"),
+      toolTurn(
+        "REPL",
+        {
+          language: "python",
+          code: String.raw`
+from pathlib import Path
+p = r"C:\Users\wt\.config\aris\desktop-workspace\papers\longyoung\chap3_6_copper_foil_peers.tex"
+with open(p, "w", encoding="utf-8") as f:
+    f.write(updated)
+Path(r"C:\Users\wt\.config\aris\desktop-workspace\papers\longyoung\chap4_valuation.tex").write_text(updated, encoding="utf-8")
+Path(r"C:\Users\wt\.config\aris\desktop-workspace\papers\longyoung\report.pdf").read_bytes()
+`,
+        },
+        { stdout: "fixed overflow" },
+      ),
+    ];
+
+    expect(latestFileChangesFromTurns(turns, "C:\\Users\\wt\\.config\\aris\\desktop-workspace")).toEqual([
+      { path: "papers/longyoung/chap3_6_copper_foil_peers.tex", status: "modified", sourceTool: "REPL" },
+      { path: "papers/longyoung/chap4_valuation.tex", status: "modified", sourceTool: "REPL" },
+    ]);
+  });
+
   it("extracts Codex-style structured file changes from tool output", () => {
     const turns: ChatTurn[] = [
       userTurn("codex changes"),

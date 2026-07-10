@@ -5042,6 +5042,8 @@ impl ToolExecutor for BuiltinCliToolExecutor {
             .map_err(|error| ToolError::new(format!("invalid tool input JSON: {error}")))?;
         let context = ToolRunContext {
             tool_use_id: (!tool_use_id.trim().is_empty()).then(|| tool_use_id.to_string()),
+            session_id: std::env::var("ARIS_SESSION_ID").ok(),
+            turn_id: std::env::var("ARIS_TURN_ID").ok(),
         };
         execute_tool_with_context(tool_name, &value, context).map_err(ToolError::new)
     }

@@ -54,7 +54,9 @@ export default function WorkflowFlow({
   const rootRef = useRef<HTMLDivElement>(null);
 
   const total = todos.length;
-  const fileCount = fileChangeSummary?.fileCount ?? fileChanges.length;
+  const auditedPaths = new Set(fileChangeSummary?.files.map((change) => change.path) ?? []);
+  const fallbackFileChanges = fileChanges.filter((change) => !auditedPaths.has(change.path));
+  const fileCount = (fileChangeSummary?.fileCount ?? 0) + fallbackFileChanges.length;
   const hasTodos = total > 0;
   const allDone = total > 0 && todos.every((todo) => todo.status === "completed");
   const index = hasTodos ? currentIndex(todos) : -1;
@@ -81,11 +83,13 @@ export default function WorkflowFlow({
   const label = stepLabel
     ? `${stepLabel}${fileCount > 0 ? ` · ${fileCount} 文件` : ""}`
     : `已变更 ${fileCount} 文件`;
+  const titlePaths = [
+    ...(fileChangeSummary?.files.map((change) => change.path) ?? []),
+    ...fallbackFileChanges.map((change) => change.path),
+  ];
   const title = current
     ? current.status === "in_progress" ? current.activeForm : current.content
-    : fileChangeSummary
-      ? fileChangeSummary.files.map((change) => change.path).join("\n")
-      : fileChanges.map((change) => change.path).join("\n");
+    : titlePaths.join("\n");
   const chipIcon = hasTodos ? (allDone ? "✓" : "◌") : "±";
 
   return (
@@ -115,14 +119,15 @@ export default function WorkflowFlow({
               </div>
             </div>
           )}
-          {fileChangeSummary ? (
+          {fileChangeSummary && (
             <div className="chat-workflow-section chat-workflow-files">
               <EditedFilesSummary summary={fileChangeSummary} />
             </div>
-          ) : fileCount > 0 && (
+          )}
+          {fallbackFileChanges.length > 0 && (
             <div className="chat-workflow-section chat-workflow-files">
               <div className="chat-workflow-panel-head">本次文件</div>
-              {fileChanges.map((change) => (
+              {fallbackFileChanges.map((change) => (
                 <div key={`${change.status}:${change.path}`} className={`chat-workflow-file status-${change.status}`}>
                   <span className="chat-workflow-file-icon">{fileStatusIcon(change.status)}</span>
                   <span className="chat-workflow-file-status">{fileStatusLabel(change.status)}</span>

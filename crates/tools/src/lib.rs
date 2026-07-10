@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -12,17 +13,41 @@ use aris_executor::{
 use reqwest::blocking::Client;
 use runtime::{
     append_file_with_context, edit_file_with_context, get_file_change, glob_search, grep_search,
-    list_file_changes, load_system_prompt, read_file, revert_file_change, write_file_with_context,
-    ApiClient, ApiRequest, AssistantEvent, BashCommandInput, ConversationRuntime,
-    FileChangeGetInput, FileChangeListInput, FileChangeRevertInput, FileMutationContext,
-    GrepSearchInput, PermissionMode, PermissionPolicy, RuntimeError, Session, ToolError,
-    ToolExecutor,
+    list_file_changes, load_system_prompt, read_file, record_text_file_change, revert_file_change,
+    write_file_with_context, ApiClient, ApiRequest, AssistantEvent, BashCommandInput,
+    ConversationRuntime, FileChangeGetInput, FileChangeListInput, FileChangeOperation,
+    FileChangeRecord, FileChangeRevertInput, FileMutationContext, GrepSearchInput, PermissionMode,
+    PermissionPolicy, RuntimeError, Session, StructuredPatchHunk, ToolError, ToolExecutor,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 const MAX_WRITE_FILE_CONTENT_CHARS: usize = 24_000;
 const TOOL_PROGRESS_NEAR_TIMEOUT_RATIO: f64 = 0.80;
+const WORKSPACE_AUDIT_MAX_FILE_BYTES: u64 = 2_000_000;
+const WORKSPACE_AUDIT_MAX_FILES: usize = 8_000;
+const WORKSPACE_AUDIT_EXTENSIONS: &[&str] = &[
+    "bib", "c", "cc", "conf", "cpp", "cs", "css", "csv", "go", "h", "hpp", "html", "ipynb", "java",
+    "js", "json", "jsx", "kt", "latex", "lua", "md", "mjs", "mmd", "py", "r", "rs", "scss", "sh",
+    "sql", "svg", "tex", "toml", "ts", "tsx", "txt", "yaml", "yml",
+];
+const WORKSPACE_AUDIT_IGNORED_DIRS: &[&str] = &[
+    ".git",
+    ".hg",
+    ".svn",
+    ".somniq",
+    ".aris",
+    ".next",
+    ".nuxt",
+    ".turbo",
+    ".venv",
+    "build",
+    "coverage",
+    "dist",
+    "node_modules",
+    "target",
+    "__pycache__",
+];
 
 pub mod knowledge;
 pub mod layout;
@@ -90,6 +115,8 @@ pub struct ToolProgress {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ToolRunContext {
     pub tool_use_id: Option<String>,
+    pub session_id: Option<String>,
+    pub turn_id: Option<String>,
 }
 
 impl ToolRunContext {
@@ -97,11 +124,29 @@ impl ToolRunContext {
     pub fn new(tool_use_id: impl Into<Option<String>>) -> Self {
         Self {
             tool_use_id: tool_use_id.into(),
+            session_id: None,
+            turn_id: None,
         }
     }
 
     fn mutation_context(&self, tool_name: &str) -> FileMutationContext {
-        FileMutationContext::from_env(tool_name).with_tool_use_id(self.tool_use_id.clone())
+        let mut context =
+            FileMutationContext::from_env(tool_name).with_tool_use_id(self.tool_use_id.clone());
+        if self
+            .session_id
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+        {
+            context.session_id = self.session_id.clone();
+        }
+        if self
+            .turn_id
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+        {
+            context.turn_id = self.turn_id.clone();
+        }
+        context
     }
 }
 
@@ -1177,7 +1222,7 @@ pub fn execute_tool_with_cancel_and_progress_with_context(
 ) -> Result<String, String> {
     match name {
         "bash" => from_value::<BashCommandInput>(input)
-            .and_then(|input| run_bash(input, should_cancel, &mut on_progress)),
+            .and_then(|input| run_bash(input, should_cancel, &mut on_progress, &context)),
         "read_file" => from_value::<ReadFileInput>(input).and_then(run_read_file),
         "WorkspaceLayout" => to_pretty_json(layout::layout_json()),
         "write_file" => {
@@ -1265,9 +1310,10 @@ pub fn execute_tool_with_cancel_and_progress_with_context(
         "StructuredOutput" => {
             from_value::<StructuredOutputInput>(input).and_then(run_structured_output)
         }
-        "REPL" => from_value::<ReplInput>(input).and_then(|input| run_repl(input, should_cancel)),
+        "REPL" => from_value::<ReplInput>(input)
+            .and_then(|input| run_repl(input, should_cancel, &context)),
         "PowerShell" => from_value::<PowerShellInput>(input)
-            .and_then(|input| run_powershell(input, should_cancel, &mut on_progress)),
+            .and_then(|input| run_powershell(input, should_cancel, &mut on_progress, &context)),
         _ => Err(format!("unsupported tool: {name}")),
     }
 }
@@ -1280,14 +1326,17 @@ fn run_bash(
     input: BashCommandInput,
     should_cancel: &dyn Fn() -> bool,
     on_progress: &mut dyn FnMut(ToolProgress),
+    context: &ToolRunContext,
 ) -> Result<String, String> {
-    serde_json::to_string_pretty(
-        &runtime::execute_bash_with_cancel_and_progress(input, should_cancel, |progress| {
-            on_progress(managed_progress_to_tool_progress(progress));
-        })
-        .map_err(|error| error.to_string())?,
-    )
-    .map_err(|error| error.to_string())
+    run_json_with_workspace_audit("bash", context, || {
+        serde_json::to_value(
+            runtime::execute_bash_with_cancel_and_progress(input, should_cancel, |progress| {
+                on_progress(managed_progress_to_tool_progress(progress));
+            })
+            .map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())
+    })
 }
 
 fn managed_progress_to_tool_progress(progress: runtime::ManagedCommandProgress) -> ToolProgress {
@@ -1568,19 +1617,29 @@ fn run_latex_compile(
     to_pretty_json(execute_latex_compile(input, should_cancel, on_progress)?)
 }
 
-fn run_repl(input: ReplInput, should_cancel: &dyn Fn() -> bool) -> Result<String, String> {
-    to_pretty_json(execute_repl(input, should_cancel)?)
+fn run_repl(
+    input: ReplInput,
+    should_cancel: &dyn Fn() -> bool,
+    context: &ToolRunContext,
+) -> Result<String, String> {
+    run_json_with_workspace_audit("REPL", context, || {
+        serde_json::to_value(execute_repl(input, should_cancel)?).map_err(|error| error.to_string())
+    })
 }
 
 fn run_powershell(
     input: PowerShellInput,
     should_cancel: &dyn Fn() -> bool,
     on_progress: &mut dyn FnMut(ToolProgress),
+    context: &ToolRunContext,
 ) -> Result<String, String> {
-    to_pretty_json(
-        execute_powershell_with_cancel(input, should_cancel, on_progress)
-            .map_err(|error| error.to_string())?,
-    )
+    run_json_with_workspace_audit("PowerShell", context, || {
+        serde_json::to_value(
+            execute_powershell_with_cancel(input, should_cancel, on_progress)
+                .map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())
+    })
 }
 
 fn to_pretty_json<T: serde::Serialize>(value: T) -> Result<String, String> {
@@ -1594,6 +1653,299 @@ fn io_to_string(error: std::io::Error) -> String {
 
 fn is_symlink(path: &std::path::Path) -> bool {
     std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink())
+}
+
+#[derive(Debug, Clone)]
+struct WorkspaceTextSnapshot {
+    files: BTreeMap<PathBuf, String>,
+}
+
+#[derive(Debug, Clone)]
+struct AuditedWorkspaceChange {
+    record: FileChangeRecord,
+    before: Option<String>,
+    after: Option<String>,
+}
+
+fn run_json_with_workspace_audit(
+    tool_name: &str,
+    context: &ToolRunContext,
+    run: impl FnOnce() -> Result<Value, String>,
+) -> Result<String, String> {
+    let before = capture_workspace_text_snapshot().ok();
+    let mut output = run()?;
+    if let Some(before) = before {
+        if let Ok(after) = capture_workspace_text_snapshot() {
+            let changes = record_workspace_snapshot_changes(tool_name, context, before, after);
+            inject_workspace_audit_changes(&mut output, &changes);
+        }
+    }
+    to_pretty_json(output)
+}
+
+fn capture_workspace_text_snapshot() -> std::io::Result<WorkspaceTextSnapshot> {
+    let root = workspace_root_for_audit()?;
+    let mut files = BTreeMap::new();
+    collect_workspace_text_files(&root, &mut files)?;
+    Ok(WorkspaceTextSnapshot { files })
+}
+
+fn workspace_root_for_audit() -> std::io::Result<PathBuf> {
+    std::env::var("ARIS_WORKSPACE_ROOT")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .map(PathBuf::from)
+        .unwrap_or(std::env::current_dir()?)
+        .canonicalize()
+}
+
+fn collect_workspace_text_files(
+    dir: &Path,
+    files: &mut BTreeMap<PathBuf, String>,
+) -> std::io::Result<()> {
+    if files.len() >= WORKSPACE_AUDIT_MAX_FILES {
+        return Ok(());
+    }
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return Ok(()),
+        Err(error) => return Err(error),
+    };
+
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
+        let path = entry.path();
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(_) => continue,
+        };
+        if file_type.is_dir() {
+            if should_skip_audit_dir(&path) {
+                continue;
+            }
+            collect_workspace_text_files(&path, files)?;
+            continue;
+        }
+        if !file_type.is_file() || !is_auditable_text_path(&path) {
+            continue;
+        }
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if metadata.len() > WORKSPACE_AUDIT_MAX_FILE_BYTES {
+            continue;
+        }
+        let Ok(content) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let canonical = path.canonicalize().unwrap_or(path);
+        files.insert(canonical, content);
+        if files.len() >= WORKSPACE_AUDIT_MAX_FILES {
+            return Ok(());
+        }
+    }
+    Ok(())
+}
+
+fn should_skip_audit_dir(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    WORKSPACE_AUDIT_IGNORED_DIRS
+        .iter()
+        .any(|ignored| name.eq_ignore_ascii_case(ignored))
+}
+
+fn is_auditable_text_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| {
+            WORKSPACE_AUDIT_EXTENSIONS
+                .iter()
+                .any(|allowed| ext.eq_ignore_ascii_case(allowed))
+        })
+        .unwrap_or(false)
+}
+
+fn record_workspace_snapshot_changes(
+    tool_name: &str,
+    context: &ToolRunContext,
+    before: WorkspaceTextSnapshot,
+    after: WorkspaceTextSnapshot,
+) -> Vec<AuditedWorkspaceChange> {
+    let mut paths = before.files.keys().cloned().collect::<BTreeSet<_>>();
+    paths.extend(after.files.keys().cloned());
+
+    let mutation_context = context.mutation_context(tool_name);
+    let mut changes = Vec::new();
+    for path in paths {
+        let before_content = before.files.get(&path).cloned();
+        let after_content = after.files.get(&path).cloned();
+        if before_content == after_content {
+            continue;
+        }
+        let operation = match (before_content.as_ref(), after_content.as_ref()) {
+            (None, Some(_)) => FileChangeOperation::Create,
+            (Some(_), None) => FileChangeOperation::Delete,
+            (Some(_), Some(_)) => FileChangeOperation::Update,
+            (None, None) => continue,
+        };
+        let original = before_content.as_deref().unwrap_or("");
+        let updated = after_content.as_deref().unwrap_or("");
+        let structured_patch = make_audit_patch(original, updated);
+        let unified_diff = make_audit_unified_diff(&display_audit_path(&path), original, updated);
+        let Ok(record) = record_text_file_change(
+            &mutation_context,
+            &path,
+            operation,
+            before_content.as_deref(),
+            after_content.as_deref(),
+            structured_patch,
+            unified_diff,
+            None,
+        ) else {
+            continue;
+        };
+        if let Some(record) = record {
+            changes.push(AuditedWorkspaceChange {
+                record,
+                before: before_content,
+                after: after_content,
+            });
+        }
+    }
+    changes
+}
+
+fn inject_workspace_audit_changes(output: &mut Value, changes: &[AuditedWorkspaceChange]) {
+    if changes.is_empty() {
+        return;
+    }
+    let Some(object) = output.as_object_mut() else {
+        return;
+    };
+
+    let changes_entry = object.entry("changes").or_insert_with(|| json!({}));
+    if !changes_entry.is_object() {
+        *changes_entry = json!({});
+    }
+    let Some(changes_object) = changes_entry.as_object_mut() else {
+        return;
+    };
+
+    let mut change_ids = Vec::new();
+    for change in changes {
+        let path = change.record.path.clone();
+        change_ids.push(Value::String(change.record.change_id.clone()));
+        changes_object.insert(path, audited_change_json(change));
+    }
+    if changes.len() == 1 {
+        object.insert(
+            "changeId".to_string(),
+            Value::String(changes[0].record.change_id.clone()),
+        );
+    }
+    object.insert("changeIds".to_string(), Value::Array(change_ids));
+}
+
+fn audited_change_json(change: &AuditedWorkspaceChange) -> Value {
+    match (change.before.as_ref(), change.after.as_ref()) {
+        (None, Some(after)) => json!({
+            "type": "add",
+            "content": after,
+            "changeId": change.record.change_id,
+        }),
+        (Some(before), None) => json!({
+            "type": "delete",
+            "content": before,
+            "changeId": change.record.change_id,
+        }),
+        (Some(_), Some(_)) => json!({
+            "type": "update",
+            "unified_diff": change.record.unified_diff,
+            "changeId": change.record.change_id,
+        }),
+        (None, None) => json!({}),
+    }
+}
+
+fn make_audit_patch(original: &str, updated: &str) -> Vec<StructuredPatchHunk> {
+    if original == updated {
+        return Vec::new();
+    }
+
+    let original_lines = original.lines().collect::<Vec<_>>();
+    let updated_lines = updated.lines().collect::<Vec<_>>();
+    let mut start = 0usize;
+    while start < original_lines.len()
+        && start < updated_lines.len()
+        && original_lines[start] == updated_lines[start]
+    {
+        start += 1;
+    }
+
+    let mut old_end = original_lines.len();
+    let mut new_end = updated_lines.len();
+    while old_end > start
+        && new_end > start
+        && original_lines[old_end - 1] == updated_lines[new_end - 1]
+    {
+        old_end -= 1;
+        new_end -= 1;
+    }
+
+    let mut lines = Vec::new();
+    for line in &original_lines[start..old_end] {
+        lines.push(format!("-{line}"));
+    }
+    for line in &updated_lines[start..new_end] {
+        lines.push(format!("+{line}"));
+    }
+
+    vec![StructuredPatchHunk {
+        old_start: start + 1,
+        old_lines: old_end.saturating_sub(start),
+        new_start: start + 1,
+        new_lines: new_end.saturating_sub(start),
+        lines,
+    }]
+}
+
+fn make_audit_unified_diff(file_path: &str, original: &str, updated: &str) -> String {
+    let hunks = make_audit_patch(original, updated);
+    if hunks.is_empty() {
+        return String::new();
+    }
+
+    let mut diff = format!("--- {file_path}\n+++ {file_path}");
+    for hunk in hunks {
+        diff.push('\n');
+        diff.push_str(&format!(
+            "@@ -{} +{} @@",
+            audit_unified_range(hunk.old_start, hunk.old_lines),
+            audit_unified_range(hunk.new_start, hunk.new_lines),
+        ));
+        for line in hunk.lines {
+            diff.push('\n');
+            diff.push_str(&line);
+        }
+    }
+    diff
+}
+
+fn audit_unified_range(start: usize, lines: usize) -> String {
+    if lines == 1 {
+        start.to_string()
+    } else {
+        format!("{start},{lines}")
+    }
+}
+
+fn display_audit_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
 }
 
 #[derive(Debug, Deserialize)]

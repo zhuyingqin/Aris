@@ -154,10 +154,48 @@ fn with_session(
 }
 
 async fn parse_json(response: reqwest::Response, label: &str) -> Result<Value, String> {
-    response
-        .json::<Value>()
+    let status = response.status();
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("unknown")
+        .to_string();
+    let bytes = response
+        .bytes()
         .await
-        .map_err(|error| format!("{label}响应解析失败: {error}"))
+        .map_err(|error| format!("{label}响应读取失败: {error}"))?;
+
+    parse_json_bytes(&bytes).map_err(|error| {
+        let preview = response_preview(&bytes);
+        format!(
+            "{label}响应解析失败: HTTP {status}, Content-Type {content_type}: {error}; 响应内容: {preview}"
+        )
+    })
+}
+
+fn parse_json_bytes(bytes: &[u8]) -> Result<Value, serde_json::Error> {
+    // Some reverse proxies prepend a UTF-8 BOM even though JSON responses
+    // should not contain one. Strip it before handing the body to serde_json.
+    let bytes = bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes);
+    serde_json::from_slice(bytes)
+}
+
+fn response_preview(bytes: &[u8]) -> String {
+    const MAX_RESPONSE_PREVIEW_CHARS: usize = 300;
+    let mut preview = String::from_utf8_lossy(bytes).trim().to_string();
+    if preview.chars().count() > MAX_RESPONSE_PREVIEW_CHARS {
+        preview = preview
+            .chars()
+            .take(MAX_RESPONSE_PREVIEW_CHARS)
+            .collect::<String>();
+        preview.push('…');
+    }
+    if preview.is_empty() {
+        "<empty>".to_string()
+    } else {
+        preview
+    }
 }
 
 fn value_as_i64(value: &Value) -> Option<i64> {
@@ -1513,10 +1551,7 @@ pub async fn newapi_update_group(group: String) -> Result<AccountState, String> 
 }
 
 async fn parse_usage_log_json(response: reqwest::Response) -> Result<Value, String> {
-    response
-        .json::<Value>()
-        .await
-        .map_err(|error| format!("调用明细响应解析失败: {error}"))
+    parse_json(response, "调用明细").await
 }
 
 fn normalize_usage_log_error(error: String) -> String {
@@ -1625,4 +1660,24 @@ pub async fn newapi_models() -> Result<Vec<String>, String> {
         let _ = config::persist_managed_models(&models);
     }
     Ok(models)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_json_bytes, response_preview};
+
+    #[test]
+    fn parses_json_with_utf8_bom() {
+        let value = parse_json_bytes(b"\xef\xbb\xbf{\"success\":true}").expect("valid JSON");
+        assert_eq!(value["success"], true);
+    }
+
+    #[test]
+    fn previews_empty_and_truncates_large_bodies() {
+        assert_eq!(response_preview(b"  \n\t"), "<empty>");
+
+        let preview = response_preview("x".repeat(301).as_bytes());
+        assert_eq!(preview.chars().count(), 301);
+        assert!(preview.ends_with('…'));
+    }
 }

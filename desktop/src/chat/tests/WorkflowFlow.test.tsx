@@ -157,6 +157,53 @@ describe("WorkflowFlow", () => {
     expect(apiMocks.chatChangeRevert.mock.calls.map((call) => call[0])).toEqual(["change-2", "change-1"]);
   });
 
+  it("keeps non-audited fallback files when an audited summary exists", async () => {
+    const user = userEvent.setup();
+    const summary: TurnFileChangeSummary = {
+      fileCount: 1,
+      addedLines: 1,
+      removedLines: 0,
+      changeIds: ["change-1"],
+      changes: [
+        {
+          path: "src/a.ts",
+          diff: "--- src/a.ts\n+++ src/a.ts\n+new",
+          changeId: "change-1",
+          addedLines: 1,
+          removedLines: 0,
+          sourceTool: "write_file",
+          toolUseId: "tool-1",
+        },
+      ],
+      files: [
+        {
+          path: "src/a.ts",
+          addedLines: 1,
+          removedLines: 0,
+          changes: [],
+        },
+      ],
+    };
+    summary.files[0].changes = [summary.changes[0]];
+
+    render(
+      <WorkflowFlow
+        todos={[]}
+        fileChanges={[{ path: "scripts/fix_overflow.py", status: "modified", sourceTool: "REPL" }]}
+        fileChangeSummary={summary}
+        bottomOffset={120}
+        active={false}
+      />,
+    );
+
+    const chip = screen.getByRole("button", { expanded: false });
+    expect(chip.textContent).toContain("2");
+    await user.click(chip);
+
+    expect(screen.getByText("Edited 1 file")).toBeTruthy();
+    expect(screen.getByText("scripts/fix_overflow.py")).toBeTruthy();
+  });
+
   it("renders nothing without todos or file changes", () => {
     const { container } = render(<WorkflowFlow todos={[]} fileChanges={[]} bottomOffset={120} active={false} />);
     expect(container.firstChild).toBeNull();

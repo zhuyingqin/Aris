@@ -126,6 +126,39 @@ describe("ChatMessage rendering", () => {
     expect(summary?.changeIds).toEqual(["change-1", "change-2"]);
   });
 
+  it("summarizes multiple audited files from one REPL output", () => {
+    const summary = fileChangesFromTurn({
+      id: "assistant-repl-files",
+      role: "assistant",
+      blocks: [{
+        kind: "tool",
+        id: "tool-repl",
+        name: "REPL",
+        input: JSON.stringify({ language: "python", code: "write files" }),
+        output: JSON.stringify({
+          stdout: "done",
+          changes: {
+            "src/a.ts": {
+              type: "update",
+              unified_diff: "--- src/a.ts\n+++ src/a.ts\n@@ -1 +1 @@\n-old\n+new",
+              changeId: "change-a",
+            },
+            "src/b.ts": {
+              type: "add",
+              content: "one\ntwo",
+              changeId: "change-b",
+            },
+          },
+        }),
+      }],
+    });
+
+    expect(summary?.fileCount).toBe(2);
+    expect(summary?.addedLines).toBe(3);
+    expect(summary?.removedLines).toBe(1);
+    expect(summary?.changeIds).toEqual(["change-a", "change-b"]);
+  });
+
   it("renders generated file paths as openable links", () => {
     render(
       <ChatMessage

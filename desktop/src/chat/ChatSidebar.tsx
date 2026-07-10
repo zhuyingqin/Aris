@@ -12,7 +12,7 @@ import { createPortal } from "react-dom";
 import type { DesktopProject } from "../types";
 import { useStore } from "../store";
 import { CHAT_COPY } from "./i18n";
-import { fuzzyMatch, groupSessionsByProject } from "./model";
+import { groupSessionsByProject } from "./model";
 import type { ChatSession } from "./types";
 
 interface Props {
@@ -82,7 +82,6 @@ export default function ChatSidebar({
   onDelete,
   onReorderProjects,
 }: Props) {
-  const [query, setQuery] = useState("");
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
   const [draggedProjectId, setDraggedProjectId] = useState<string | null>(null);
@@ -111,11 +110,8 @@ export default function ChatSidebar({
   const suppressProjectToggleClickRef = useRef<string | null>(null);
   const openMenuId = openMenu?.id ?? null;
   const groups = useMemo(
-    () => groupSessionsByProject(
-      sessions.filter((session) => fuzzyMatch(query, session.title)),
-      projects,
-    ),
-    [projects, query, sessions],
+    () => groupSessionsByProject(sessions, projects),
+    [projects, sessions],
   );
   const orderedGroups = useMemo(() => {
     const order = new Map(
@@ -412,10 +408,9 @@ export default function ChatSidebar({
   };
 
   const groupHasOverflow = (sessionCount: number) =>
-    !query.trim() && sessionCount > AUTO_COLLAPSE_SESSION_COUNT;
+    sessionCount > AUTO_COLLAPSE_SESSION_COUNT;
 
   const groupCollapsed = (groupId: string, sessionCount: number) => {
-    if (query.trim()) return false;
     if (sessionCount <= AUTO_COLLAPSE_SESSION_COUNT) return false;
     const manual = manualGroupState[groupId];
     return manual !== "expanded";
@@ -439,7 +434,10 @@ export default function ChatSidebar({
     : undefined;
 
   return (
-    <aside className={`chat-sidebar${open ? " open" : ""}`} aria-label={copy.searchChats}>
+    <aside
+      id="chat-session-sidebar"
+      className={`chat-sidebar${open ? " open" : ""}`}
+    >
       <div className="chat-sidebar-container">
         <div className="chat-sidebar-top-group">
       <div className="chat-sidebar-head">
@@ -459,14 +457,6 @@ export default function ChatSidebar({
         </button>
       </div>
         </div>
-      <div className="chat-session-search">
-        <input
-          value={query}
-          onChange={(event) => setQuery(event.target.value)}
-          placeholder={copy.searchChats}
-          aria-label={copy.searchChats}
-        />
-      </div>
       <div className="chat-session-list" ref={sessionListRef}>
         {groups.length === 0 && <div className="chat-session-empty">{copy.noMatchingChats}</div>}
         {orderedGroups.map((group) => {

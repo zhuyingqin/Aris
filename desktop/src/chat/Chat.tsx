@@ -109,6 +109,20 @@ export default function Chat() {
   });
   const sessionCtl = useChatSessionController({ removeSession, restoreSession });
 
+  useEffect(() => {
+    if (!sessionCtl.sidebarOpen) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") sessionCtl.setSidebarOpen(false);
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [sessionCtl.sidebarOpen, sessionCtl.setSidebarOpen]);
+
+  useEffect(() => {
+    document.body.classList.toggle("somniq-chat-sidebar-open", sessionCtl.sidebarOpen);
+    return () => document.body.classList.remove("somniq-chat-sidebar-open");
+  }, [sessionCtl.sidebarOpen]);
+
   const [starters, setStarters] = useState([
     "Explain this project's architecture and key modules.",
     "Check the uncommitted changes and identify risks.",
@@ -203,6 +217,14 @@ export default function Chat() {
       className="chat-root"
       style={{ "--chat-sidebar-w": `${sessionCtl.chatSidebarWidth}px` } as CSSProperties}
     >
+      {sessionCtl.sidebarOpen && (
+        <button
+          className="chat-sidebar-backdrop"
+          type="button"
+          aria-label={copy.closeSidebar}
+          onClick={() => sessionCtl.setSidebarOpen(false)}
+        />
+      )}
       <ChatSidebar
         sessions={allSessions}
         projects={projects}
@@ -236,6 +258,7 @@ export default function Chat() {
           }
           composer.setEditingTurnId(null);
           setCurrentId(id);
+          sessionCtl.setSidebarOpen(false);
         }}
         onRename={renameSession}
         onTogglePinned={togglePinned}
@@ -257,6 +280,20 @@ export default function Chat() {
         onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) composer.setChatDragging(false); }}
         onDrop={(e) => { e.preventDefault(); composer.setChatDragging(false); void composer.addFilesToChat(Array.from(e.dataTransfer.files)); }}
       >
+        <button
+          className={`chat-sidebar-open${sessionCtl.sidebarOpen ? " is-open" : ""}`}
+          type="button"
+          aria-label={copy.openSidebar}
+          aria-controls="chat-session-sidebar"
+          aria-expanded={sessionCtl.sidebarOpen}
+          onClick={() => sessionCtl.setSidebarOpen(true)}
+        >
+          <svg width="17" height="17" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+            strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <rect x="2.25" y="3" width="11.5" height="10" rx="2" />
+            <path d="M6.25 3v10" />
+          </svg>
+        </button>
         {composer.chatDragging && (
           <div
             className="chat-drop-full"

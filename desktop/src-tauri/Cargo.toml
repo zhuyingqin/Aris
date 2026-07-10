@@ -26,7 +26,7 @@ serde_json = "1"
 toml = "0.8"
 encoding_rs = "0.8"
 zip = { version = "4.6.1", default-features = false }
-reqwest = { version = "0.12", default-features = false, features = ["json", "blocking", "rustls-tls", "cookies"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "blocking", "rustls-tls", "cookies", "gzip", "brotli", "deflate"] }
 # Mail integration (Gmail API + Microsoft Graph): OAuth2 PKCE + RFC822 encoding.
 base64 = "0.22"
 sha2 = "0.10"

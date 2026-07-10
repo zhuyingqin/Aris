@@ -1854,6 +1854,8 @@ fn change_tools_list_and_revert_audited_file_writes() {
         &json!({ "path": "tracked.txt", "content": "hello\n" }),
         ToolRunContext {
             tool_use_id: Some("toolu-ledger-1".to_string()),
+            session_id: None,
+            turn_id: None,
         },
     )
     .expect("write should succeed");
@@ -1879,6 +1881,73 @@ fn change_tools_list_and_revert_audited_file_writes() {
     let reverted: serde_json::Value = serde_json::from_str(&reverted).expect("json");
     assert_eq!(reverted["reverted"], true);
     assert!(!root.join("tracked.txt").exists());
+
+    std::env::set_current_dir(&original_dir).expect("restore cwd");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn repl_file_writes_are_audited_and_revertible() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let root = temp_path("repl-change-audit");
+    fs::create_dir_all(&root).expect("create root");
+    let original_dir = std::env::current_dir().expect("cwd");
+    let _workspace = EnvGuard::set("ARIS_WORKSPACE_ROOT", &root);
+    let _session = EnvGuard::set("ARIS_SESSION_ID", "tool-repl-session");
+    std::env::set_current_dir(&root).expect("set cwd");
+    fs::write(root.join("tracked.txt"), "before\n").expect("write initial file");
+
+    let file_literal =
+        serde_json::to_string(&root.join("tracked.txt").display().to_string()).expect("path json");
+    let output = execute_tool_with_context(
+        "REPL",
+        &json!({
+            "language": "python",
+            "code": format!(
+                "from pathlib import Path\nPath({file_literal}).write_text('after\\n', encoding='utf-8')\n"
+            )
+        }),
+        ToolRunContext {
+            tool_use_id: Some("toolu-repl-1".to_string()),
+            session_id: Some("tool-repl-session".to_string()),
+            turn_id: None,
+        },
+    );
+    let output = match output {
+        Ok(output) => output,
+        Err(error) if error.contains("python runtime not found") => {
+            std::env::set_current_dir(&original_dir).expect("restore cwd");
+            let _ = fs::remove_dir_all(root);
+            return;
+        }
+        Err(error) => panic!("REPL write should succeed: {error}"),
+    };
+    let output: serde_json::Value = serde_json::from_str(&output).expect("json");
+    let change_id = output["changeId"].as_str().expect("change id").to_string();
+    let changes = output["changes"].as_object().expect("changes");
+    assert_eq!(changes.len(), 1);
+    assert_eq!(
+        fs::read_to_string(root.join("tracked.txt"))
+            .unwrap()
+            .replace("\r\n", "\n"),
+        "after\n"
+    );
+
+    let reverted = execute_tool(
+        "change_revert",
+        &json!({ "change_id": change_id, "session_id": "tool-repl-session" }),
+    )
+    .expect("revert change");
+    let reverted: serde_json::Value = serde_json::from_str(&reverted).expect("json");
+    assert_eq!(reverted["reverted"], true);
+    assert_eq!(
+        fs::read_to_string(root.join("tracked.txt"))
+            .unwrap()
+            .replace("\r\n", "\n"),
+        "before\n"
+    );
 
     std::env::set_current_dir(&original_dir).expect("restore cwd");
     let _ = fs::remove_dir_all(root);

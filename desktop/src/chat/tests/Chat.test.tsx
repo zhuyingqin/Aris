@@ -154,6 +154,7 @@ describe("Chat export action", () => {
     apiMocks.chatUiSessionsSave.mockResolvedValue(undefined);
     useStore.setState({
       tab: "chat",
+      language: "en",
       pendingChatInput: null,
       pendingChatRunInput: null,
       error: null,
@@ -316,5 +317,20 @@ describe("Chat export action", () => {
       ),
     );
     expect((await screen.findAllByText("贝叶斯写作计划")).length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("opens and closes the conversation list from the compact-layout control", async () => {
+    render(<Chat />);
+
+    const openButton = screen.getByRole("button", { name: "Open chat list" });
+    expect(openButton.getAttribute("aria-expanded")).toBe("false");
+
+    await userEvent.click(openButton);
+    expect(openButton.getAttribute("aria-expanded")).toBe("true");
+    expect(document.body.classList.contains("somniq-chat-sidebar-open")).toBe(true);
+
+    await userEvent.click(screen.getByRole("button", { name: "Close chat sidebar" }));
+    expect(openButton.getAttribute("aria-expanded")).toBe("false");
+    expect(document.body.classList.contains("somniq-chat-sidebar-open")).toBe(false);
   });
 });

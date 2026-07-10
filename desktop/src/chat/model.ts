@@ -223,8 +223,23 @@ const FILE_CHANGE_TOOL_NAMES = new Set([
   "edit_file",
   "str_replace_based_edit_tool",
   "NotebookEdit",
+  "bash",
+  "PowerShell",
+  "REPL",
 ]);
 const SHELL_TOOL_NAMES = new Set(["bash", "PowerShell"]);
+const REPL_TOOL_NAMES = new Set(["REPL", "node_repl", "mcp__node_repl__js"]);
+const REPL_SOURCE_EXTENSIONS = "tex|bib|json|md|txt|csv|ts|tsx|js|jsx|css|html|py|ipynb|mmd|svg";
+const REPL_ABSOLUTE_FILE_RE = new RegExp(
+  String.raw`[A-Za-z]:[\\/][^\r\n"'` + "`" + String.raw`<>|]+?\.(?:${REPL_SOURCE_EXTENSIONS})\b`,
+  "gi",
+);
+const REPL_RELATIVE_FILE_RE = new RegExp(
+  String.raw`(?:\.{1,2}[\\/])?[A-Za-z0-9_.-]+(?:[\\/][A-Za-z0-9_.-]+)*\.(?:${REPL_SOURCE_EXTENSIONS})\b`,
+  "gi",
+);
+const REPL_WRITE_RE =
+  /(?:\bopen\s*\([^)]*,\s*(?:mode\s*=\s*)?["'][^"']*[wax]|\.(?:write_text|write_bytes)\s*\()/i;
 
 function parseTodoList(input: string): ChatTodoItem[] | null {
   let parsed: unknown;
@@ -416,6 +431,69 @@ function changesFromShellTool(
   return parseGitStatusChanges(stdout, projectRoot);
 }
 
+function replCodeFromTool(block: Extract<ChatBlock, { kind: "tool" }>): string {
+  const input = parseJsonObject(block.input);
+  return stringField(input, ["code", "script", "source", "command"]) ?? block.input ?? "";
+}
+
+function addReplPath(
+  rawPath: string,
+  paths: string[],
+  seen: Set<string>,
+  projectRoot?: string | null,
+) {
+  const cleaned = rawPath
+    .trim()
+    .replace(/\\(["'`])/g, "$1")
+    .replace(/^[([{<]+/, "")
+    .replace(/[)\],.;:]+$/, "");
+  if (!cleaned || cleaned.includes("{") || cleaned.includes("}")) return;
+  const path = normalizeFileChangePath(cleaned, projectRoot);
+  if (!path || seen.has(path)) return;
+  seen.add(path);
+  paths.push(path);
+}
+
+function collectReplFilePaths(text: string, projectRoot?: string | null): string[] {
+  if (!text) return [];
+  const paths: string[] = [];
+  const seen = new Set<string>();
+  const masked = [...text];
+
+  REPL_ABSOLUTE_FILE_RE.lastIndex = 0;
+  let absoluteMatch: RegExpExecArray | null;
+  while ((absoluteMatch = REPL_ABSOLUTE_FILE_RE.exec(text)) !== null) {
+    addReplPath(absoluteMatch[0], paths, seen, projectRoot);
+    const end = absoluteMatch.index + absoluteMatch[0].length;
+    for (let index = absoluteMatch.index; index < end; index += 1) {
+      masked[index] = " ";
+    }
+  }
+
+  const relativeText = masked.join("");
+  REPL_RELATIVE_FILE_RE.lastIndex = 0;
+  let relativeMatch: RegExpExecArray | null;
+  while ((relativeMatch = REPL_RELATIVE_FILE_RE.exec(relativeText)) !== null) {
+    addReplPath(relativeMatch[0], paths, seen, projectRoot);
+  }
+  return paths;
+}
+
+function changesFromReplTool(
+  block: Extract<ChatBlock, { kind: "tool" }>,
+  projectRoot?: string | null,
+): ChatFileChange[] {
+  if (!REPL_TOOL_NAMES.has(block.name) || block.isError || block.output === undefined) return [];
+  const code = replCodeFromTool(block);
+  if (!REPL_WRITE_RE.test(code)) return [];
+
+  const output = parseJsonObject(block.output);
+  const stdout = stringField(output, ["stdout"]);
+  const stderr = stringField(output, ["stderr"]);
+  const paths = collectReplFilePaths([code, stdout, stderr].filter(Boolean).join("\n"), projectRoot);
+  return paths.map((path) => ({ path, status: "modified", sourceTool: block.name }));
+}
+
 function mergedStatus(
   previous: ChatFileChangeStatus | undefined,
   next: ChatFileChangeStatus,
@@ -458,6 +536,9 @@ export function latestFileChangesFromTurns(
       }
       for (const shellChange of changesFromShellTool(block, projectRoot)) {
         rememberFileChange(changes, shellChange);
+      }
+      for (const replChange of changesFromReplTool(block, projectRoot)) {
+        rememberFileChange(changes, replChange);
       }
     }
   }

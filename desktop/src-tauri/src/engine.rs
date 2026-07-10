@@ -241,6 +241,7 @@ fn denied_tool_message(tool_name: &str) -> String {
 }
 
 struct KernelToolExecutor {
+    session_id: String,
     extra_blocked_tools: &'static [&'static str],
     cancelled: Option<Arc<AtomicBool>>,
     progress_sink: Option<ToolProgressSink>,
@@ -354,6 +355,8 @@ impl ToolExecutor for KernelToolExecutor {
             },
             tools::ToolRunContext {
                 tool_use_id: (!_tool_use_id.trim().is_empty()).then(|| _tool_use_id.to_string()),
+                session_id: Some(self.session_id.clone()),
+                turn_id: None,
             },
         )
         .map_err(|error| {
@@ -3269,6 +3272,7 @@ async fn run_chat_turn_with_context(
         });
         let mcp_bundle = aris_chat::attach_mcp_tools_with_cancel(
             KernelToolExecutor {
+                session_id: worker_session_id.clone(),
                 extra_blocked_tools,
                 cancelled: Some(worker_cancelled.clone()),
                 progress_sink: Some(progress_sink),

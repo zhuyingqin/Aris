@@ -18,7 +18,7 @@ describe("OnboardingTutorial", () => {
   it("shows component-level guidance for first-time users", () => {
     render(<OnboardingTutorial />);
 
-    expect(screen.getByRole("dialog", { name: /左侧导航/ })).toBeTruthy();
+    expect(screen.getByRole("dialog", { name: /左上角菜单/ })).toBeTruthy();
     expect(screen.getByRole("button", { name: "跳过" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "下一步" })).toBeTruthy();
   });
@@ -77,7 +77,7 @@ describe("OnboardingTutorial", () => {
 
     await user.click(previousButton);
 
-    expect(screen.getByRole("dialog", { name: /左侧导航/ })).toBeTruthy();
+    expect(screen.getByRole("dialog", { name: /左上角菜单/ })).toBeTruthy();
   });
 
   it("supports left-arrow navigation", async () => {
@@ -87,6 +87,6 @@ describe("OnboardingTutorial", () => {
     await user.click(screen.getByRole("button", { name: "下一步" }));
     await user.keyboard("{ArrowLeft}");
 
-    expect(screen.getByRole("dialog", { name: /左侧导航/ })).toBeTruthy();
+    expect(screen.getByRole("dialog", { name: /左上角菜单/ })).toBeTruthy();
   });
 });

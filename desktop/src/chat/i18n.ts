@@ -4,7 +4,7 @@ export const CHAT_COPY: Record<Language, {
   newChat: string;
   scheduledTasks: string;
   closeSidebar: string;
-  searchChats: string;
+  openSidebar: string;
   noMatchingChats: string;
   chatsCount: (count: number) => string;
   collapsed: string;
@@ -61,8 +61,8 @@ export const CHAT_COPY: Record<Language, {
     newChat: "新对话",
     scheduledTasks: "定时任务",
     closeSidebar: "关闭对话侧栏",
-    searchChats: "搜索对话",
-    noMatchingChats: "无匹配对话",
+    openSidebar: "打开对话列表",
+    noMatchingChats: "暂无对话",
     chatsCount: (count) => `${count} 个对话`,
     collapsed: "已折叠",
     expanded: "已展开",
@@ -123,8 +123,8 @@ export const CHAT_COPY: Record<Language, {
     newChat: "New chat",
     scheduledTasks: "Scheduled tasks",
     closeSidebar: "Close chat sidebar",
-    searchChats: "Search chats",
-    noMatchingChats: "No matching chats",
+    openSidebar: "Open chat list",
+    noMatchingChats: "No chats yet",
     chatsCount: (count) => `${count} chats`,
     collapsed: "collapsed",
     expanded: "expanded",

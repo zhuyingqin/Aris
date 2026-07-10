@@ -55,16 +55,16 @@ interface OnboardingStep {
 
 const ONBOARDING_STEPS: OnboardingStep[] = [
   {
-    kicker: "导航栏",
-    title: "左侧导航：每个模块去哪",
-    body: "这里是功能入口，不同模块负责不同工作。先看清楚左侧，后面遇到任务就知道该去哪里。",
+    kicker: "功能入口",
+    title: "左上角菜单：在各个模块间切换",
+    body: "点击 SomniQ Chat 就能打开功能菜单。不同模块负责不同工作，当前模块会用紫色显示。",
     points: [
-      "Chat：提出任务，让代理读代码、改文件、跑命令",
-      "Lab：运行 notebook、脚本和实验",
-      "Literature / Studio：读论文、看生成成果",
+      "对话：提出任务，让代理读代码、改文件、跑命令",
+      "代码 / LaTeX：编写程序、运行实验和排版论文",
+      "文献 / 工作室：阅读论文、整理资料和查看生成成果",
     ],
-    targetSelectors: ['[data-onboarding-target="sidebar"]', '[data-onboarding-target="mobile-menu"]'],
-    placement: "right",
+    targetSelectors: ['[data-onboarding-target="product-switcher"]'],
+    placement: "bottom",
   },
   {
     kicker: "主工作区",
@@ -100,7 +100,7 @@ const ONBOARDING_STEPS: OnboardingStep[] = [
       "配置完成后再回到 Chat 开始任务",
     ],
     targetSelectors: ['[data-onboarding-target="user-settings"]', '[data-onboarding-target="user-menu"]'],
-    placement: "right",
+    placement: "bottom",
   },
 ];
 

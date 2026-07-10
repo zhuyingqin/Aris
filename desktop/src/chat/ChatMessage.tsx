@@ -7,7 +7,15 @@ import { CHAT_COPY } from "./i18n";
 import { textFromTurn } from "./model";
 import { useStore } from "../store";
 
-const FILE_WRITE_TOOLS = new Set(["write_file", "append_file", "edit_file", "str_replace_based_edit_tool"]);
+const FILE_WRITE_TOOLS = new Set([
+  "write_file",
+  "append_file",
+  "edit_file",
+  "str_replace_based_edit_tool",
+  "bash",
+  "PowerShell",
+  "REPL",
+]);
 // A single agent turn can hold hundreds of interleaved reasoning + tool blocks.
 // The thread virtualizes per turn, so a mega-turn is one row that would mount
 // every block at once (200+ components) and freeze the UI. We render only the
@@ -192,10 +200,11 @@ function imagePathsFromTool(
   return paths;
 }
 
-function diffFromCodexChanges(output: Record<string, unknown> | null): FileChange | null {
+function diffsFromCodexChanges(output: Record<string, unknown> | null): FileChange[] {
   const changes = output?.changes;
-  if (!changes || typeof changes !== "object" || Array.isArray(changes)) return null;
+  if (!changes || typeof changes !== "object" || Array.isArray(changes)) return [];
   const outputChangeId = changeIdFromOutput(output);
+  const parsed: FileChange[] = [];
   for (const [path, rawChange] of Object.entries(changes as Record<string, unknown>)) {
     if (!path || !rawChange || typeof rawChange !== "object" || Array.isArray(rawChange)) continue;
     const change = rawChange as Record<string, unknown>;
@@ -204,53 +213,56 @@ function diffFromCodexChanges(output: Record<string, unknown> | null): FileChang
     const type = typeof change.type === "string" ? change.type : "";
     if (type === "update") {
       const diff = typeof change.unified_diff === "string" ? change.unified_diff : "";
-      if (diff) return attachChangeId({ path, diff }, changeId);
+      if (diff) parsed.push(attachChangeId({ path, diff }, changeId));
+      continue;
     }
     if (type === "add") {
       const content = typeof change.content === "string" ? change.content : "";
-      return attachChangeId({
+      parsed.push(attachChangeId({
         path,
         diff: [`--- /dev/null`, `+++ ${path}`, ...content.split("\n").map((line) => `+${line}`)].join("\n"),
-      }, changeId);
+      }, changeId));
+      continue;
     }
     if (type === "delete") {
       const content = typeof change.content === "string" ? change.content : "";
-      return attachChangeId({
+      parsed.push(attachChangeId({
         path,
         diff: [`--- ${path}`, `+++ /dev/null`, ...content.split("\n").map((line) => `-${line}`)].join("\n"),
-      }, changeId);
+      }, changeId));
     }
   }
-  return null;
+  return parsed;
 }
 
-export function diffFromTool(block: Extract<ChatBlock, { kind: "tool" }>): FileChange | null {
-  if (!FILE_WRITE_TOOLS.has(block.name) || block.isError) return null;
+function diffsFromTool(block: Extract<ChatBlock, { kind: "tool" }>): FileChange[] {
+  if (!FILE_WRITE_TOOLS.has(block.name) || block.isError) return [];
   const output = parseOutput(block.output);
-  const codexChange = diffFromCodexChanges(output);
-  if (codexChange) return codexChange;
+  const codexChanges = diffsFromCodexChanges(output);
+  if (codexChanges.length > 0) return codexChanges;
 
   const input = parseInput(block.input);
   const path = String(output?.filePath ?? input.path ?? input.file_path ?? input.target_file ?? "");
-  if (!path) return null;
+  if (!path) return [];
   const changeId = changeIdFromOutput(output);
   if (block.name === "write_file") {
     const content = String(input.content ?? "");
-    return attachChangeId({
+    return [attachChangeId({
       path,
       diff: [`--- /dev/null`, `+++ ${path}`, ...content.split("\n").map((line) => `+${line}`)].join("\n"),
-    }, changeId);
+    }, changeId)];
   }
   if (block.name === "append_file") {
     const content = String(input.content ?? "");
-    return attachChangeId({
+    return [attachChangeId({
       path,
       diff: [`--- ${path}`, `+++ ${path}`, ...content.split("\n").map((line) => `+${line}`)].join("\n"),
-    }, changeId);
+    }, changeId)];
   }
+  if (block.name !== "edit_file" && block.name !== "str_replace_based_edit_tool") return [];
   const before = String(input.old_string ?? input.old_str ?? input.old_text ?? "");
   const after = String(input.new_string ?? input.new_str ?? input.new_text ?? "");
-  return attachChangeId({
+  return [attachChangeId({
     path,
     diff: [
       `--- ${path}`,
@@ -258,7 +270,11 @@ export function diffFromTool(block: Extract<ChatBlock, { kind: "tool" }>): FileC
       ...before.split("\n").map((line) => `-${line}`),
       ...after.split("\n").map((line) => `+${line}`),
     ].join("\n"),
-  }, changeId);
+  }, changeId)];
+}
+
+export function diffFromTool(block: Extract<ChatBlock, { kind: "tool" }>): FileChange | null {
+  return diffsFromTool(block)[0] ?? null;
 }
 
 export function fileChangesFromTurn(turn: ChatTurn): TurnFileChangeSummary | null {
@@ -270,29 +286,29 @@ export function fileChangesFromTurn(turn: ChatTurn): TurnFileChangeSummary | nul
 
   for (const block of turn.blocks) {
     if (block.kind !== "tool" || block.output === undefined) continue;
-    const change = diffFromTool(block);
-    if (!change) continue;
-    const counted: CountedFileChange = {
-      ...change,
-      ...diffLineStats(change.diff),
-      sourceTool: block.name,
-      toolUseId: block.id,
-    };
-    changes.push(counted);
-    if (counted.changeId && !seenChangeIds.has(counted.changeId)) {
-      seenChangeIds.add(counted.changeId);
-      changeIds.push(counted.changeId);
+    for (const change of diffsFromTool(block)) {
+      const counted: CountedFileChange = {
+        ...change,
+        ...diffLineStats(change.diff),
+        sourceTool: block.name,
+        toolUseId: block.id,
+      };
+      changes.push(counted);
+      if (counted.changeId && !seenChangeIds.has(counted.changeId)) {
+        seenChangeIds.add(counted.changeId);
+        changeIds.push(counted.changeId);
+      }
+      const existing = files.get(counted.path) ?? {
+        path: counted.path,
+        addedLines: 0,
+        removedLines: 0,
+        changes: [],
+      };
+      existing.addedLines += counted.addedLines;
+      existing.removedLines += counted.removedLines;
+      existing.changes.push(counted);
+      files.set(counted.path, existing);
     }
-    const existing = files.get(counted.path) ?? {
-      path: counted.path,
-      addedLines: 0,
-      removedLines: 0,
-      changes: [],
-    };
-    existing.addedLines += counted.addedLines;
-    existing.removedLines += counted.removedLines;
-    existing.changes.push(counted);
-    files.set(counted.path, existing);
   }
 
   if (changes.length === 0) return null;
