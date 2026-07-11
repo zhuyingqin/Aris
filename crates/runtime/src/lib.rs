@@ -24,6 +24,7 @@ mod paths;
 mod permissions;
 mod process;
 mod process_registry;
+mod project_goal;
 mod prompt;
 mod remote;
 pub mod sandbox;
@@ -48,6 +49,7 @@ pub use change_ledger::{
 pub use compact::{
     estimate_session_tokens, format_compact_summary, get_compact_continuation_message,
     should_compact, CompactionConfig, CompactionResult, CompactionSource, CompactionSummarySource,
+    CompactionTokenEstimateSource,
 };
 pub use config::{
     ConfigEntry, ConfigError, ConfigLoader, ConfigSource, McpClaudeAiProxyServerConfig,
@@ -57,9 +59,10 @@ pub use config::{
     ScopedMcpServerConfig, CLAUDE_CODE_SETTINGS_SCHEMA_NAME,
 };
 pub use conversation::{
-    assistant_text_from_turn_summary, auto_compaction_threshold_from_env, ApiClient, ApiRequest,
-    AssistantEvent, AutoCompactionEvent, ConversationRuntime, RuntimeError, StaticToolExecutor,
-    ToolError, ToolExecutor, TurnSummary,
+    assistant_text_from_turn_summary, auto_compaction_threshold_from_env,
+    strip_trailing_internal_continuation_messages, ApiClient, ApiRequest, AssistantEvent,
+    AutoCompactionEvent, ConversationRuntime, RuntimeError, StaticToolExecutor, ToolError,
+    ToolExecutor, TurnSummary,
 };
 pub use event_sink::{
     now_iso8601, today_iso, EventSink, EventType, JsonlEventSink, MetaLoggingLevel, NoopEventSink,
@@ -130,9 +133,16 @@ pub use process_registry::{
     ManagedCommandOutput, ManagedCommandProgress, ManagedProcessGuard, ManagedProcessInfo,
     ManagedProcessKind,
 };
+pub use project_goal::{
+    complete_project_goal, load_project_goal, pause_project_goal, project_brief, project_goal_path,
+    render_project_goal_prompt, render_project_goal_report, replace_project_goal,
+    resume_project_goal, start_project_goal, update_project_goal_progress, ProjectBrief,
+    ProjectGoal, ProjectGoalDraft, ProjectGoalStatus,
+};
 pub use prompt::{
-    load_system_prompt, prepend_bullets, team_orchestration_section, ContextFile, ProjectContext,
-    PromptBuildError, SystemPromptBuilder, SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
+    instruction_files_fingerprint, load_system_prompt, prepend_bullets, team_orchestration_section,
+    ContextFile, ProjectContext, PromptBuildError, SystemPromptBuilder,
+    SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
 };
 pub use remote::{
     inherited_upstream_proxy_env, no_proxy_list, read_token, upstream_proxy_ws_url,

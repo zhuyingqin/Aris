@@ -256,6 +256,10 @@ interface Props {
   modelBusy?: boolean;
   canSwitchModel?: boolean;
   onModelChange?: (model: string) => void;
+  reasoningSupported?: boolean;
+  reasoningEffort?: string;
+  reasoningBusy?: boolean;
+  onReasoningEffortChange?: (effort: string) => void;
   contextUsed?: number;
   contextMax?: number | null;
   contextStatus?: ContextStatusView | null;
@@ -284,6 +288,10 @@ export default function ChatComposer({
   modelBusy,
   canSwitchModel,
   onModelChange,
+  reasoningSupported = false,
+  reasoningEffort = "high",
+  reasoningBusy = false,
+  onReasoningEffortChange,
   contextUsed,
   contextMax,
   contextStatus,
@@ -762,6 +770,23 @@ export default function ChatComposer({
                   </div>
                 )}
               </div>
+            )}
+            {reasoningSupported && (
+              <label className="chat-reasoning-select" title="Reasoning effort">
+                <span>Reasoning</span>
+                <select
+                  aria-label="Reasoning effort"
+                  value={reasoningEffort}
+                  disabled={busy || reasoningBusy}
+                  onChange={(event) => onReasoningEffortChange?.(event.target.value)}
+                >
+                  <option value="minimal">Minimal</option>
+                  <option value="low">Low</option>
+                  <option value="medium">Medium</option>
+                  <option value="high">High</option>
+                  <option value="xhigh">Extra high</option>
+                </select>
+              </label>
             )}
             {busy ? (
               <button className="chat-send-btn chat-stop-btn" onClick={onStop} aria-label={copy.stopResponse}>■</button>

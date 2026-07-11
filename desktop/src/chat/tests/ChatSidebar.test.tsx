@@ -9,6 +9,9 @@ import ChatSidebar from "../ChatSidebar";
 import { makeSession } from "../model";
 
 beforeEach(() => {
+  // Keep this suite deterministic when Vitest reuses a jsdom environment after
+  // another UI suite has left a mounted portal/root behind.
+  cleanup();
   localStorage.clear();
   useStore.setState({ language: "en" });
 });

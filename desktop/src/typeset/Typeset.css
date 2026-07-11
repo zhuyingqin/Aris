@@ -3139,6 +3139,25 @@
   outline-offset: 0;
 }
 
+/* Forward-search flash: briefly marks where a Code/Visual double-click landed
+   in the compiled PDF (SyncTeX), then fades out — same affordance as
+   TeXstudio/VS Code's LaTeX Workshop "jump to PDF" highlight. */
+.typeset-pdf-forward-highlight {
+  position: absolute;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--ol-green) 32%, transparent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--ol-green) 55%, transparent);
+  pointer-events: none;
+  animation: typeset-pdf-forward-highlight-fade 2.2s ease-out forwards;
+}
+
+@keyframes typeset-pdf-forward-highlight-fade {
+  0% { opacity: 0; }
+  15% { opacity: 1; }
+  70% { opacity: 1; }
+  100% { opacity: 0; }
+}
+
 .typeset-pdf-unavailable {
   display: grid;
   width: min(100%, 520px);

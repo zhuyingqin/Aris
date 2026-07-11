@@ -16,6 +16,10 @@ const apiMocks = vi.hoisted(() => ({
   skillsList: vi.fn(() => Promise.resolve([])),
   chatRunCommand: vi.fn(),
   chatSuggestTitle: vi.fn(() => Promise.resolve("Concise title")),
+  projectBriefGet: vi.fn(() => Promise.resolve({ mission: "Test project mission", goal: null })),
+  projectGoalInfer: vi.fn(() => Promise.resolve({ mission: "Test project mission", goal: null })),
+  projectGoalProgress: vi.fn(() => Promise.resolve({ mission: "Test project mission", goal: null })),
+  chatRewindToUserMessage: vi.fn(() => Promise.resolve<number | null>(null)),
   chatSetContext: vi.fn((_sessionId: string, _messages: unknown[], _mode?: string) => Promise.resolve(0)),
   chatDelete: vi.fn(() => Promise.resolve()),
   chatEventsReplay: vi.fn(() => Promise.resolve({ sessionId: "chat", eventCount: 0, lastSeq: 0, turns: [] })),
@@ -40,7 +44,9 @@ const apiMocks = vi.hoisted(() => ({
   onChatPermissionRequest: vi.fn(() => Promise.resolve(() => undefined)),
   onChatPermissionResolved: vi.fn(() => Promise.resolve(() => undefined)),
   onChatDone: vi.fn(() => Promise.resolve(() => undefined)),
-  onChatError: vi.fn(() => Promise.resolve(() => undefined)),
+  onChatError: vi.fn<(
+    handler: (event: { sessionId: string; message: string; sessionPreserved?: boolean }) => void,
+  ) => Promise<() => void>>(() => Promise.resolve(() => undefined)),
   onChatContextCompacted: vi.fn(() => Promise.resolve(() => undefined)),
   onChatContextWarning: vi.fn(() => Promise.resolve(() => undefined)),
 }));
@@ -51,9 +57,11 @@ vi.mock("../ChatThread", () => ({
   default: ({
     turns,
     onContinue,
+    onRetry,
   }: {
     turns: ChatTurn[];
     onContinue: () => void;
+    onRetry: (turn: ChatTurn) => void;
   }) => (
     <div data-testid="chat-thread">
       {turns.map((turn) => (
@@ -62,6 +70,7 @@ vi.mock("../ChatThread", () => ({
             block.kind === "text" ? <div key={index}>{block.text}</div> : null
           ))}
           {turn.stopped && <button onClick={onContinue}>Continue</button>}
+          {turn.role === "assistant" && turn.error && <button onClick={() => onRetry(turn)}>Retry</button>}
         </article>
       ))}
     </div>
@@ -217,7 +226,7 @@ describe("Chat export action", () => {
     expect(await screen.findByText("Agent search started")).toBeTruthy();
   });
 
-  it("continues a stopped assistant turn by rebuilding the partial into backend history", async () => {
+  it("continues a stopped assistant turn from the preserved backend session", async () => {
     const session = makeSession("default");
     session.id = "session-stopped";
     session.title = "Stopped task";
@@ -232,7 +241,6 @@ describe("Chat export action", () => {
     ];
     localStorage.setItem(SESSIONS_KEY, JSON.stringify([session]));
     localStorage.setItem(CURRENT_KEY, session.id);
-    apiMocks.chatSetContext.mockResolvedValue(128);
     apiMocks.chatSend.mockResolvedValue("Continued answer");
 
     render(<Chat />);
@@ -240,16 +248,9 @@ describe("Chat export action", () => {
     await userEvent.click(await screen.findByRole("button", { name: "Stopped task" }));
     await userEvent.click(await screen.findByRole("button", { name: "Continue" }));
 
-    // The stopped turn is now rebuilt into the backend context (not dropped),
-    // so the model sees the partial response it is meant to continue.
-    await waitFor(() => expect(apiMocks.chatSetContext).toHaveBeenCalledWith(
-      session.id,
-      [
-        { role: "user", text: "Draft the implementation plan", images: [] },
-        { role: "assistant", text: "Partial answer: first finish the context reset path" },
-      ],
-      "replace",
-    ));
+    // A cancelled turn's full session is already durable in the backend.
+    // Continue must not replace it with the UI's shortened transcript.
+    expect(apiMocks.chatSetContext).not.toHaveBeenCalled();
     await waitFor(() => expect(apiMocks.chatSend).toHaveBeenCalled());
     const request = apiMocks.chatSend.mock.calls[0][1] as { text: string };
     // The continue prompt no longer embeds (or truncates) the partial — it
@@ -259,7 +260,88 @@ describe("Chat export action", () => {
     expect(request.text).toContain("Do not repeat the completed portion");
   });
 
-  it("rebuilds stopped transcript before sending a normal follow-up", async () => {
+  it("retries from the backend's authoritative context before the failed user turn", async () => {
+    const session = makeSession("default");
+    session.id = "session-retry";
+    session.title = "Retry task";
+    session.turns = [
+      { id: "turn-user", role: "user", blocks: [{ kind: "text", text: "Inspect the implementation" }] },
+      {
+        id: "turn-assistant",
+        role: "assistant",
+        error: "provider failed",
+        blocks: [{ kind: "text", text: "Partial diagnostic" }],
+      },
+    ];
+    localStorage.setItem(SESSIONS_KEY, JSON.stringify([session]));
+    localStorage.setItem(CURRENT_KEY, session.id);
+    apiMocks.chatRewindToUserMessage.mockResolvedValue(321);
+    apiMocks.chatSend.mockResolvedValue("Retried answer");
+
+    render(<Chat />);
+
+    await userEvent.click(await screen.findByRole("button", { name: "Retry task" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Retry" }));
+
+    await waitFor(() => expect(apiMocks.chatRewindToUserMessage).toHaveBeenCalledWith(
+      session.id,
+      { text: "Inspect the implementation", images: [] },
+    ));
+    expect(apiMocks.chatSetContext).not.toHaveBeenCalled();
+    await waitFor(() => expect(apiMocks.chatSend).toHaveBeenCalledWith(
+      session.id,
+      expect.objectContaining({ text: "Inspect the implementation", model: "MiniMax-M3" }),
+    ));
+  });
+
+  it("appends only an unpreserved failed turn instead of replacing backend history", async () => {
+    let errorHandler:
+      | ((event: { sessionId: string; message: string; sessionPreserved?: boolean }) => void)
+      | undefined;
+    apiMocks.onChatError.mockImplementation((handler) => {
+      errorHandler = handler;
+      return Promise.resolve(() => undefined);
+    });
+    const session = makeSession("default");
+    session.id = "session-unsaved";
+    session.title = "Unsaved failure";
+    session.turns = [
+      { id: "turn-user", role: "user", blocks: [{ kind: "text", text: "Keep this user request" }] },
+      {
+        id: "turn-assistant",
+        role: "assistant",
+        error: "invalid API key",
+        blocks: [{ kind: "text", text: "Partial answer" }],
+      },
+    ];
+    localStorage.setItem(SESSIONS_KEY, JSON.stringify([session]));
+    localStorage.setItem(CURRENT_KEY, session.id);
+    apiMocks.chatSetContext.mockResolvedValue(99);
+    apiMocks.chatSend.mockResolvedValue("Follow-up answer");
+
+    render(<Chat />);
+    await waitFor(() => expect(apiMocks.onChatError).toHaveBeenCalled());
+    errorHandler?.({
+      sessionId: session.id,
+      message: "invalid API key",
+      sessionPreserved: false,
+    });
+
+    await userEvent.click(await screen.findByRole("button", { name: "Unsaved failure" }));
+    await userEvent.type(screen.getByRole("textbox", { name: "Message SomniQ" }), "What next?");
+    await userEvent.click(screen.getByRole("button", { name: "Send message" }));
+
+    await waitFor(() => expect(apiMocks.chatSetContext).toHaveBeenCalledWith(
+      session.id,
+      [
+        { role: "user", text: "Keep this user request", images: [] },
+        { role: "assistant", text: "Partial answer" },
+      ],
+      "append",
+    ));
+  });
+
+  it("keeps a stopped turn's backend transcript for a normal follow-up", async () => {
     const session = makeSession("default");
     session.id = "session-stopped-follow-up";
     session.title = "Stopped follow-up";
@@ -274,7 +356,6 @@ describe("Chat export action", () => {
     ];
     localStorage.setItem(SESSIONS_KEY, JSON.stringify([session]));
     localStorage.setItem(CURRENT_KEY, session.id);
-    apiMocks.chatSetContext.mockResolvedValue(256);
     apiMocks.chatSend.mockResolvedValue("Follow-up answer");
 
     render(<Chat />);
@@ -283,20 +364,11 @@ describe("Chat export action", () => {
     await userEvent.type(screen.getByRole("textbox", { name: "Message SomniQ" }), "What should I change?");
     await userEvent.click(screen.getByRole("button", { name: "Send message" }));
 
-    await waitFor(() => expect(apiMocks.chatSetContext).toHaveBeenCalledWith(
-      session.id,
-      [
-        { role: "user", text: "Inspect the repo", images: [] },
-        { role: "assistant", text: "I found the chat context reset path." },
-      ],
-      "replace",
-    ));
+    expect(apiMocks.chatSetContext).not.toHaveBeenCalled();
     await waitFor(() => expect(apiMocks.chatSend).toHaveBeenCalledWith(
       session.id,
       expect.objectContaining({ text: "What should I change?", model: "MiniMax-M3" }),
     ));
-    expect(apiMocks.chatSetContext.mock.invocationCallOrder[0])
-      .toBeLessThan(apiMocks.chatSend.mock.invocationCallOrder[0]);
   });
 
   it("uses the configured LLM to create a concise title after the first reply", async () => {

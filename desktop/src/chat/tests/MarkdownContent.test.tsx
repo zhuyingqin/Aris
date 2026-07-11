@@ -25,6 +25,7 @@ import { useStore } from "../../store";
 
 beforeEach(() => {
   vi.clearAllMocks();
+  apiMocks.fileOpen.mockResolvedValue(undefined);
   apiMocks.fileReadBytes.mockResolvedValue([137, 80, 78, 71]);
   Object.defineProperty(URL, "createObjectURL", {
     configurable: true,
@@ -182,5 +183,17 @@ describe("MarkdownContent Studio links", () => {
     expect(await screen.findByText("Mermaid syntax error")).toBeTruthy();
     expect(screen.queryByTestId("mermaid-diagram")).toBeNull();
     expect(screen.getByText(/The diagram was not rendered/)).toBeTruthy();
+  });
+});
+
+describe("MarkdownContent local links", () => {
+  it("opens an encoded Windows export directory", async () => {
+    render(
+      <MarkdownContent text="[Open export folder](C%3A/Users/wt/.config/SomniQ/desktop-runtime)" />,
+    );
+
+    screen.getByRole("link", { name: "Open export folder" }).click();
+
+    expect(apiMocks.fileOpen).toHaveBeenCalledWith("C:/Users/wt/.config/SomniQ/desktop-runtime");
   });
 });

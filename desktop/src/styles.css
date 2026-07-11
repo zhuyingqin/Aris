@@ -29,9 +29,9 @@
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   color-scheme: dark;
-  --scrollbar-size: 8px;
-  --scrollbar-thumb: color-mix(in srgb, var(--text-dim) 42%, transparent);
-  --scrollbar-thumb-hover: color-mix(in srgb, var(--text-dim) 68%, transparent);
+  --scrollbar-size: 12px;
+  --scrollbar-thumb: color-mix(in srgb, var(--text-dim) 55%, transparent);
+  --scrollbar-thumb-hover: color-mix(in srgb, var(--text-dim) 80%, transparent);
 }
 
 * {
@@ -51,7 +51,7 @@
 }
 
 ::-webkit-scrollbar-thumb {
-  min-height: 32px;
+  min-height: 36px;
   border: 2px solid transparent;
   border-radius: 999px;
   background: var(--scrollbar-thumb);
@@ -8005,6 +8005,32 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   position: relative;
 }
 
+.chat-reasoning-select {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg-2);
+  color: var(--text-dim);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.chat-reasoning-select select {
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.chat-reasoning-select:has(select:disabled) {
+  opacity: 0.55;
+}
+
 .chat-pill {
   display: inline-flex;
   align-items: center;
@@ -8469,13 +8495,13 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   max-height: min(520px, 62vh);
   overflow: auto;
   scrollbar-width: thin;
-  scrollbar-color: rgba(255, 255, 255, 0.22) transparent;
+  scrollbar-color: rgba(255, 255, 255, 0.32) transparent;
   overscroll-behavior: contain;
 }
 
 .md-code-body::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+  width: 11px;
+  height: 11px;
 }
 
 .md-code-body::-webkit-scrollbar-track {
@@ -8483,12 +8509,15 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
 }
 
 .md-code-body::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.18);
-  border-radius: 4px;
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.28);
+  background-clip: padding-box;
 }
 
 .md-code-body::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.3);
+  background: rgba(255, 255, 255, 0.42);
+  background-clip: padding-box;
 }
 
 .md-code-gutter {
@@ -11194,6 +11223,186 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   flex: 1;
 }
 
+/* Project continuity summary: pinned above the message scroller so it remains
+   visible across new conversations without becoming part of chat history. */
+.project-brief-card {
+  position: relative;
+  z-index: 12;
+  flex: 0 0 auto;
+  align-self: center;
+  width: min(900px, calc(100% - 48px));
+  margin: 12px 24px 0;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--accent) 18%, var(--border));
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--bg-1) 94%, var(--accent) 6%);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.16);
+}
+
+.project-brief-card.collapsed {
+  border-radius: 12px;
+}
+
+.project-brief-head {
+  display: flex;
+  align-items: center;
+  min-height: 42px;
+  padding: 0 10px 0 14px;
+  gap: 8px;
+}
+
+.project-brief-toggle {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 0;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+}
+
+.project-brief-toggle:hover {
+  border: none;
+  background: transparent;
+}
+
+.project-brief-toggle svg {
+  flex: 0 0 auto;
+  color: var(--text-dim);
+}
+
+.project-brief-title {
+  flex: 0 0 auto;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+}
+
+.project-brief-preview {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-dim);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-brief-status {
+  flex: 0 0 auto;
+  padding: 3px 8px;
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--border));
+  border-radius: 999px;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.project-brief-status.paused {
+  border-color: color-mix(in srgb, var(--amber) 32%, var(--border));
+  color: var(--amber);
+  background: color-mix(in srgb, var(--amber) 8%, transparent);
+}
+
+.project-brief-status.complete {
+  border-color: color-mix(in srgb, var(--green) 32%, var(--border));
+  color: var(--green);
+  background: color-mix(in srgb, var(--green) 8%, transparent);
+}
+
+.project-brief-hide {
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 18px;
+  line-height: 1;
+}
+
+.project-brief-hide:hover {
+  border: none;
+  background: var(--bg-2);
+  color: var(--text);
+}
+
+.project-brief-body {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  max-height: min(360px, 42vh);
+  padding: 0 12px 12px;
+  overflow-y: auto;
+}
+
+.project-brief-row {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  gap: 8px;
+  min-width: 0;
+  padding: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.project-brief-row > svg {
+  margin-top: 2px;
+  color: var(--text-dim);
+}
+
+.project-brief-row > div {
+  min-width: 0;
+}
+
+.project-brief-row span {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--text-dim);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.35px;
+  text-transform: uppercase;
+}
+
+.project-brief-row p,
+.project-brief-row ul {
+  margin: 0;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.project-brief-row ul {
+  padding-left: 16px;
+}
+
+.project-brief-row li + li {
+  margin-top: 3px;
+}
+
+.chat-project-brief-show {
+  padding: 4px !important;
+}
+
+@media (max-width: 760px) {
+  .project-brief-card {
+    width: calc(100% - 24px);
+    margin: 8px 12px 0;
+  }
+
+  .project-brief-body {
+    grid-template-columns: 1fr;
+  }
+}
+
 .chat-empty .chat-scroll {
   overflow: auto;
 }
@@ -11449,7 +11658,7 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   position: absolute;
   z-index: 14;
   top: 50%;
-  right: 10px;
+  left: 10px;
   transform: translateY(-50%);
   display: flex;
   align-items: center;
@@ -11472,6 +11681,9 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   background: color-mix(in srgb, var(--bg) 88%, transparent);
   color: var(--text-dim);
   box-shadow: none;
+  transition: background-color 160ms cubic-bezier(0.2, 0, 0, 1),
+    border-color 160ms cubic-bezier(0.2, 0, 0, 1),
+    color 160ms cubic-bezier(0.2, 0, 0, 1);
 }
 
 .chat-question-timeline.open .chat-question-timeline-rail,
@@ -11518,16 +11730,33 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
 .chat-question-popover {
   position: absolute;
   top: 50%;
-  right: 48px;
+  left: 48px;
   width: min(360px, calc(100vw - 120px));
   max-height: min(58vh, 520px);
   padding: 8px;
   overflow-y: auto;
-  transform: translateY(-50%);
+  transform-origin: left center;
+  transform: translateY(-50%) translateX(-6px) scale(0.96);
   border: 1px solid var(--border);
   border-radius: 12px;
   background: var(--bg-1);
   box-shadow: 0 18px 48px rgba(0, 0, 0, 0.28);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity 160ms cubic-bezier(0.2, 0, 0, 1),
+    transform 160ms cubic-bezier(0.2, 0, 0, 1),
+    visibility 0s linear 160ms;
+}
+
+.chat-question-timeline.open .chat-question-popover {
+  transform: translateY(-50%) translateX(0) scale(1);
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transition: opacity 160ms cubic-bezier(0.2, 0, 0, 1),
+    transform 160ms cubic-bezier(0.2, 0, 0, 1),
+    visibility 0s linear 0s;
 }
 
 .chat-question-popover button {

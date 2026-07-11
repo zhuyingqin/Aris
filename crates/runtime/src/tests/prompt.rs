@@ -1,9 +1,9 @@
 use super::{
-    collapse_blank_lines, display_context_path, normalize_instruction_content,
-    redact_url_to_origin, render_available_skills, render_config_section, render_hooks_summary,
-    render_instruction_content, render_instruction_files, render_mcp_servers_summary,
-    truncate_instruction_content, ContextFile, ProjectContext, SystemPromptBuilder,
-    SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
+    collapse_blank_lines, display_context_path, instruction_files_fingerprint,
+    normalize_instruction_content, redact_url_to_origin, render_available_skills,
+    render_config_section, render_hooks_summary, render_instruction_content,
+    render_instruction_files, render_mcp_servers_summary, truncate_instruction_content,
+    ContextFile, ProjectContext, SystemPromptBuilder, SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
 };
 use crate::config::ConfigLoader;
 use crate::json::JsonValue;
@@ -27,26 +27,18 @@ fn env_lock() -> std::sync::MutexGuard<'static, ()> {
 fn discovers_instruction_files_from_ancestor_chain() {
     let root = temp_dir();
     let nested = root.join("apps").join("api");
-    fs::create_dir_all(nested.join(".claude")).expect("nested claude dir");
-    fs::write(root.join("CLAUDE.md"), "root instructions").expect("write root instructions");
-    fs::write(root.join("CLAUDE.local.md"), "local instructions")
-        .expect("write local instructions");
+    fs::create_dir_all(root.join(".git")).expect("git marker");
+    fs::create_dir_all(nested.join(".somniq")).expect("nested somniq dir");
+    fs::write(root.join("AGENTS.md"), "root instructions").expect("write root instructions");
     fs::create_dir_all(root.join("apps")).expect("apps dir");
-    fs::create_dir_all(root.join("apps").join(".claude")).expect("apps claude dir");
-    fs::write(root.join("apps").join("CLAUDE.md"), "apps instructions")
+    fs::write(root.join("apps").join("AGENTS.md"), "apps instructions")
         .expect("write apps instructions");
     fs::write(
-        root.join("apps").join(".claude").join("instructions.md"),
-        "apps dot claude instructions",
+        nested.join(".somniq").join("AGENTS.md"),
+        "nested somniq instructions",
     )
-    .expect("write apps dot claude instructions");
-    fs::write(nested.join(".claude").join("CLAUDE.md"), "nested rules")
-        .expect("write nested rules");
-    fs::write(
-        nested.join(".claude").join("instructions.md"),
-        "nested instructions",
-    )
-    .expect("write nested instructions");
+    .expect("write nested somniq instructions");
+    fs::write(nested.join("AGENTS.md"), "nested instructions").expect("write nested instructions");
 
     let context = ProjectContext::discover(&nested, "2026-03-31").expect("context should load");
     let contents = context
@@ -59,10 +51,8 @@ fn discovers_instruction_files_from_ancestor_chain() {
         contents,
         vec![
             "root instructions",
-            "local instructions",
             "apps instructions",
-            "apps dot claude instructions",
-            "nested rules",
+            "nested somniq instructions",
             "nested instructions"
         ]
     );
@@ -74,8 +64,9 @@ fn dedupes_identical_instruction_content_across_scopes() {
     let root = temp_dir();
     let nested = root.join("apps").join("api");
     fs::create_dir_all(&nested).expect("nested dir");
-    fs::write(root.join("CLAUDE.md"), "same rules\n\n").expect("write root");
-    fs::write(nested.join("CLAUDE.md"), "same rules\n").expect("write nested");
+    fs::create_dir_all(root.join(".git")).expect("git marker");
+    fs::write(root.join("AGENTS.md"), "same rules\n\n").expect("write root");
+    fs::write(nested.join("AGENTS.md"), "same rules\n").expect("write nested");
 
     let context = ProjectContext::discover(&nested, "2026-03-31").expect("context should load");
     assert_eq!(context.instruction_files.len(), 1);
@@ -103,8 +94,8 @@ fn normalizes_and_collapses_blank_lines() {
 #[test]
 fn displays_context_paths_compactly() {
     assert_eq!(
-        display_context_path(Path::new("/tmp/project/.claude/CLAUDE.md")),
-        "CLAUDE.md"
+        display_context_path(Path::new("/tmp/project/AGENTS.md")),
+        "AGENTS.md"
     );
 }
 
@@ -117,7 +108,7 @@ fn discover_with_git_includes_status_snapshot() {
         .current_dir(&root)
         .status()
         .expect("git init should run");
-    fs::write(root.join("CLAUDE.md"), "rules").expect("write instructions");
+    fs::write(root.join("AGENTS.md"), "rules").expect("write instructions");
     fs::write(root.join("tracked.txt"), "hello").expect("write tracked file");
 
     let context =
@@ -125,7 +116,7 @@ fn discover_with_git_includes_status_snapshot() {
 
     let status = context.git_status.expect("git status should be present");
     assert!(status.contains("## No commits yet on") || status.contains("## "));
-    assert!(status.contains("?? CLAUDE.md"));
+    assert!(status.contains("?? AGENTS.md"));
     assert!(status.contains("?? tracked.txt"));
     assert!(context.git_diff.is_none());
 
@@ -175,10 +166,10 @@ fn discover_with_git_includes_diff_snapshot_for_tracked_changes() {
 }
 
 #[test]
-fn load_system_prompt_reads_claude_files_and_config() {
+fn load_system_prompt_reads_agents_and_runtime_config() {
     let root = temp_dir();
     fs::create_dir_all(root.join(".claude")).expect("claude dir");
-    fs::write(root.join("CLAUDE.md"), "Project rules").expect("write instructions");
+    fs::write(root.join("AGENTS.md"), "Project rules").expect("write instructions");
     fs::write(
         root.join(".claude").join("settings.json"),
         r#"{"permissionMode":"acceptEdits"}"#,
@@ -220,7 +211,7 @@ fn load_system_prompt_reads_claude_files_and_config() {
 fn renders_prompt_sections_with_project_context() {
     let root = temp_dir();
     fs::create_dir_all(root.join(".claude")).expect("claude dir");
-    fs::write(root.join("CLAUDE.md"), "Project rules").expect("write CLAUDE.md");
+    fs::write(root.join("AGENTS.md"), "Project rules").expect("write AGENTS.md");
     fs::write(
         root.join(".claude").join("settings.json"),
         r#"{"permissionMode":"acceptEdits"}"#,
@@ -295,7 +286,7 @@ fn render_instruction_files_warns_when_content_is_truncated() {
 }
 
 #[test]
-fn discovers_dot_claude_instructions_markdown() {
+fn ignores_legacy_claude_instruction_files() {
     let root = temp_dir();
     let nested = root.join("apps").join("api");
     fs::create_dir_all(nested.join(".claude")).expect("nested claude dir");
@@ -306,11 +297,7 @@ fn discovers_dot_claude_instructions_markdown() {
     .expect("write instructions.md");
 
     let context = ProjectContext::discover(&nested, "2026-03-31").expect("context should load");
-    assert!(context
-        .instruction_files
-        .iter()
-        .any(|file| file.path.ends_with(".claude/instructions.md")));
-    assert!(render_instruction_files(&context.instruction_files).contains("instruction markdown"));
+    assert!(context.instruction_files.is_empty());
 
     fs::remove_dir_all(root).expect("cleanup temp dir");
 }
@@ -332,6 +319,70 @@ fn discovers_agents_markdown_instruction_files() {
     assert!(rendered.contains("Root agent rules"));
     assert!(rendered.contains("SomniQ agent rules"));
     assert!(rendered.contains("<!-- From:"));
+
+    fs::remove_dir_all(root).expect("cleanup temp dir");
+}
+
+#[test]
+fn instruction_discovery_stops_at_nearest_git_root() {
+    let outer = temp_dir();
+    let root = outer.join("repo");
+    let nested = root.join("apps").join("api");
+    fs::create_dir_all(root.join(".git")).expect("git marker");
+    fs::create_dir_all(&nested).expect("nested dir");
+    fs::write(outer.join("AGENTS.md"), "outside instructions").expect("outer agents");
+    fs::write(root.join("AGENTS.md"), "repo instructions").expect("repo agents");
+
+    let context = ProjectContext::discover(&nested, "2026-03-31").expect("context");
+    let rendered = render_instruction_files(&context.instruction_files);
+    assert!(rendered.contains("repo instructions"));
+    assert!(!rendered.contains("outside instructions"));
+
+    fs::remove_dir_all(outer).expect("cleanup temp dir");
+}
+
+#[test]
+fn instruction_budget_preserves_closest_files_and_fingerprint_changes() {
+    let root = temp_dir();
+    let nested = root.join("app");
+    fs::create_dir_all(root.join(".git")).expect("git marker");
+    fs::create_dir_all(root.join(".somniq")).expect("root somniq");
+    fs::create_dir_all(nested.join(".somniq")).expect("nested somniq");
+    fs::write(
+        root.join("AGENTS.md"),
+        format!("root-one {}", "a".repeat(4_500)),
+    )
+    .expect("root agents");
+    fs::write(
+        root.join(".somniq").join("AGENTS.md"),
+        format!("root-two {}", "b".repeat(4_500)),
+    )
+    .expect("root somniq agents");
+    fs::write(
+        nested.join("AGENTS.md"),
+        format!("leaf-one {}", "c".repeat(4_500)),
+    )
+    .expect("leaf agents");
+    fs::write(
+        nested.join(".somniq").join("AGENTS.md"),
+        "leaf-most-specific",
+    )
+    .expect("leaf somniq agents");
+
+    let context = ProjectContext::discover(&nested, "2026-03-31").expect("context");
+    let rendered = render_instruction_files(&context.instruction_files);
+    assert!(rendered.contains("leaf-most-specific"));
+    assert!(rendered.contains("leaf-one"));
+    assert!(rendered.contains("project instruction content exceeded the prompt budget"));
+
+    let before = instruction_files_fingerprint(&nested).expect("fingerprint");
+    fs::write(
+        nested.join(".somniq").join("AGENTS.md"),
+        "leaf-most-specific-updated",
+    )
+    .expect("update agents");
+    let after = instruction_files_fingerprint(&nested).expect("updated fingerprint");
+    assert_ne!(before, after);
 
     fs::remove_dir_all(root).expect("cleanup temp dir");
 }
@@ -368,12 +419,12 @@ argument-hint: <topic>
 #[test]
 fn renders_instruction_file_metadata() {
     let rendered = render_instruction_files(&[ContextFile {
-        path: PathBuf::from("/tmp/project/CLAUDE.md"),
+        path: PathBuf::from("/tmp/project/AGENTS.md"),
         content: "Project rules".to_string(),
     }]);
     assert!(rendered.contains("# Project instructions"));
     assert!(rendered.contains("scope: /tmp/project"));
-    assert!(rendered.contains("<!-- From: /tmp/project/CLAUDE.md -->"));
+    assert!(rendered.contains("<!-- From: /tmp/project/AGENTS.md -->"));
     assert!(rendered.contains("Project rules"));
 }
 

@@ -1,6 +1,37 @@
 use super::*;
 
 #[test]
+fn debug_export_paths_are_markdown_safe_and_linkable() {
+    let path = Path::new(r"C:\Users\wt\.config\SomniQ\desktop-runtime");
+
+    assert_eq!(
+        markdown_inline_code(&path.display().to_string()),
+        r"`C:\Users\wt\.config\SomniQ\desktop-runtime`"
+    );
+    assert_eq!(
+        markdown_local_link("Open export folder", path),
+        "[Open export folder](C%3A/Users/wt/.config/SomniQ/desktop-runtime)"
+    );
+}
+
+#[test]
+fn extracts_structured_goal_json_and_has_safe_fallbacks() {
+    let raw = "```json\n{\"objective\":\"Ship continuity\",\"successCriteria\":[\"tests pass\"],\"recentStatus\":\"implemented\"}\n```";
+    assert_eq!(
+        extract_json_object(raw),
+        Some("{\"objective\":\"Ship continuity\",\"successCriteria\":[\"tests pass\"],\"recentStatus\":\"implemented\"}")
+    );
+    assert_eq!(
+        fallback_goal_objective("  keep   the goal  "),
+        "keep the goal"
+    );
+    assert_eq!(
+        fallback_goal_status("\nFirst useful status\nMore"),
+        "First useful status"
+    );
+}
+
+#[test]
 fn rich_chat_request_maps_data_url_to_image_block() {
     let message = user_message_from_request(ChatSendRequest {
         text: "look".to_string(),
@@ -104,6 +135,48 @@ fn chat_context_rebuild_preserves_structured_tool_exchange() {
                     && !is_error
         )
     ));
+}
+
+#[test]
+fn rewind_to_unique_user_keeps_authoritative_prefix_and_compaction_data() {
+    let target = ConversationMessage::user_text("retry this request");
+    let mut session = Session::new();
+    session
+        .messages
+        .push(ConversationMessage::user_text("older context"));
+    session
+        .messages
+        .push(ConversationMessage::assistant(vec![ContentBlock::Text {
+            text: "full backend-only tool-derived detail".repeat(2_000),
+        }]));
+    session.messages.push(target.clone());
+    session
+        .messages
+        .push(ConversationMessage::assistant(vec![ContentBlock::Text {
+            text: "failed answer".to_string(),
+        }]));
+
+    assert!(rewind_session_before_unique_user(&mut session, &target));
+    assert_eq!(session.messages.len(), 2);
+    assert!(matches!(
+        &session.messages[1].blocks[0],
+        ContentBlock::Text { text } if text.len() > 64_000
+    ));
+}
+
+#[test]
+fn rewind_rejects_ambiguous_user_messages_without_mutating_session() {
+    let repeated = ConversationMessage::user_text("same request");
+    let mut session = Session::new();
+    session.messages.push(repeated.clone());
+    session
+        .messages
+        .push(ConversationMessage::assistant(vec![]));
+    session.messages.push(repeated.clone());
+    let before = session.clone();
+
+    assert!(!rewind_session_before_unique_user(&mut session, &repeated));
+    assert_eq!(session, before);
 }
 
 #[test]

@@ -65,7 +65,7 @@ describe("chatRunHelpers", () => {
     expect(JSON.stringify(messages)).not.toContain("[Tool call:");
   });
 
-  it("still drops in-flight and failed turns from backend context", async () => {
+  it("keeps persisted failed-turn context but drops in-flight turns", async () => {
     const messages = await contextForRetry([
       { id: "user-1", role: "user", blocks: [{ kind: "text", text: "Do it" }] },
       { id: "a-streaming", role: "assistant", streaming: true, blocks: [{ kind: "text", text: "partial" }] },
@@ -87,10 +87,23 @@ describe("chatRunHelpers", () => {
       },
     ]);
 
-    expect(messages).toEqual([{ role: "user", text: "Do it", images: [] }]);
-    expect(JSON.stringify(messages)).not.toContain("failed partial answer");
-    expect(JSON.stringify(messages)).not.toContain("tool-failed");
-    expect(JSON.stringify(messages)).not.toContain("stale context");
+    expect(messages).toEqual([
+      { role: "user", text: "Do it", images: [] },
+      {
+        role: "assistant",
+        text: "failed partial answer",
+        toolCalls: [{ id: "tool-failed", name: "read_file", input: "{\"path\":\"missing.md\"}" }],
+      },
+      {
+        role: "tool",
+        toolResults: [{
+          toolUseId: "tool-failed",
+          toolName: "read_file",
+          output: "read_file failed with stale context",
+          isError: true,
+        }],
+      },
+    ]);
   });
 
   it("continue prompt points at the rebuilt context without embedding the partial", () => {
@@ -129,7 +142,7 @@ describe("chatRunHelpers", () => {
         current[0],
         { ...current[1], stopped: true },
       ],
-    )).toBe(true);
+    )).toBe(false);
     expect(needsBackendContextReset(
       [
         current[0],
@@ -139,7 +152,7 @@ describe("chatRunHelpers", () => {
         current[0],
         { ...current[1], error: "provider failed" },
       ],
-    )).toBe(true);
+    )).toBe(false);
   });
 
   it("hides expected cancel errors but preserves real failures after stop", () => {
@@ -148,6 +161,8 @@ describe("chatRunHelpers", () => {
     expect(visibleTurnError("provider stream error after partial output", true))
       .toBe("provider stream error after partial output");
     expect(visibleTurnError("provider stream error", false)).toBe("provider stream error");
+    expect(visibleTurnError("", false)).toBe("Response stopped unexpectedly before completion.");
+    expect(visibleTurnError("", true)).toBeUndefined();
   });
 
   it("promotes thinking-only completed output to visible text", () => {

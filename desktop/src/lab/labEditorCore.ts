@@ -1,4 +1,5 @@
 import type { EditorLanguage } from "./CodeEditor";
+import type { SharedEditorHandle } from "../editor/editorTypes";
 import type { KernelSpecInfo } from "./labTypes";
 
 export interface TextSelection {
@@ -81,12 +82,10 @@ export function selectedTextOrCurrentLine(text: string, selection: TextSelection
   return text.slice(lineStart, lineEnd >= 0 ? lineEnd : text.length);
 }
 
-export function editorSelectionOrLine(text: string, editor: HTMLTextAreaElement | null): string {
+export function editorSelectionOrLine(text: string, editor: SharedEditorHandle | null): string {
   if (!editor) return text;
-  return selectedTextOrCurrentLine(text, {
-    start: editor.selectionStart,
-    end: editor.selectionEnd,
-  });
+  const { from, to } = editor.getSelection().main;
+  return selectedTextOrCurrentLine(text, { start: from, end: to });
 }
 
 export function runtimeChoiceForLanguage(

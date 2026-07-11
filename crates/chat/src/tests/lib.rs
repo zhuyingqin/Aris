@@ -49,11 +49,16 @@ fn summarizer_model_honors_explicit_setting_over_defaults() {
         resolve_summarizer_model(&anthropic, "claude-haiku-4-5-20251001", Some("auto")),
         Some("claude-haiku-4-5-20251001".to_string())
     );
-    // OpenAI-compatible "auto" uses the active model rather than the
-    // deterministic text-assembly fallback.
+    // OpenAI-compatible "auto" uses a cheap sibling when the model family is
+    // known; unknown gateway model names use deterministic fallback rather
+    // than silently sending the main model a second large request.
     assert_eq!(
         resolve_summarizer_model(&openai, "MiniMax-M3", Some("default")),
-        Some("MiniMax-M3".to_string())
+        None
+    );
+    assert_eq!(
+        resolve_summarizer_model(&openai, "gpt-5", Some("default")),
+        Some("gpt-5-mini".to_string())
     );
 }
 

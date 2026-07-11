@@ -3,7 +3,8 @@ import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
 import { memo } from "react";
 import katex from "katex";
 import type { PDFDocumentProxy, PDFPageProxy, RenderTask } from "pdfjs-dist";
-import type { EditorView } from "@codemirror/view";
+import type { EditorView, KeyBinding } from "@codemirror/view";
+import { redo, redoDepth, undo, undoDepth } from "@codemirror/commands";
 import "katex/dist/katex.min.css";
 
 
@@ -17,14 +18,17 @@ import {
   fileWriteText,
   isTauri,
   latexCompile,
+  latexForwardSearch,
   type FileText,
   type FileTreeEntry,
   type LatexCompileResult,
+  type SyncTexLocation,
 } from "../api/tauri";
 import { isTypesetPreviewMode } from "../api/labPreview";
 import CodeEditor from "../lab/CodeEditor";
 import { TypesetVisualEditor } from "./TypesetVisualEditor";
 import type { VisualPdfCursor } from "./visualModel";
+import type { SharedEditorHandle } from "../editor/editorTypes";
 import { useStore } from "../store";
 import "./Typeset.css";
 
@@ -53,6 +57,9 @@ Edit the source and compile to refresh the PDF preview.
 type CompileStatus = "idle" | "running" | "success" | "error";
 type CompileResult = LatexCompileResult;
 type EditorMode = "code" | "visual";
+// `nonce` forces PdfPage's highlight-flash animation to restart even when the
+// user double-clicks the exact same source position twice in a row.
+type PdfForwardTarget = { location: SyncTexLocation; nonce: number };
 type TypesetResizePanel = "project" | "pdf";
 type TypesetResizeAxis = "x" | "y";
 type OutlineItem = { line: number; level: number; title: string };
@@ -104,11 +111,6 @@ type VisualBlock =
 type VisualDocument = {
   contentBlocks: VisualBlock[];
   preambleBlocks: VisualBlock[];
-};
-
-type DraftHistory = {
-  past: string[];
-  future: string[];
 };
 
 type PdfTextRun = {
@@ -1452,7 +1454,7 @@ type EditorAdapter = {
 
 function activeEditorAdapter(
   mode: EditorMode,
-  editorRef: { current: HTMLTextAreaElement | null },
+  editorRef: { current: SharedEditorHandle | null },
   visualViewRef: { current: EditorView | null },
   draft: string,
   onChange: (value: string) => void,
@@ -1460,8 +1462,7 @@ function activeEditorAdapter(
   if (mode === "code") {
     const editor = editorRef.current;
     if (!editor) return null;
-    const from = editor.selectionStart ?? draft.length;
-    const to = editor.selectionEnd ?? from;
+    const { from, to } = editor.getSelection().main;
     return {
       from,
       to,
@@ -1470,7 +1471,7 @@ function activeEditorAdapter(
         onChange(draft.slice(0, rFrom) + insert + draft.slice(rTo));
         window.setTimeout(() => {
           editor.focus();
-          editor.setSelectionRange(selStart, selEnd);
+          editor.dispatch({ selection: { anchor: selStart, head: selEnd } });
         }, 0);
       },
     };
@@ -1925,11 +1926,21 @@ function TypesetExplorer({
   );
 }
 
+interface PdfPageHighlight {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+  nonce: number;
+}
+
 interface PdfPageProps {
   pdf: PDFDocumentProxy;
   page: number;
   zoom: number;
   onSourceTextClick: (text: string, context: string) => void;
+  pageRef?: (page: number, el: HTMLDivElement | null) => void;
+  highlight?: PdfPageHighlight | null;
 }
 
 function multiplyPdfTransform(left: number[], right: number[]): number[] {
@@ -1966,7 +1977,7 @@ function textRunsFromPdfContent(textContent: unknown, viewport: { transform: num
   });
 }
 
-const PdfPage = memo(function PdfPage({ pdf, page, zoom, onSourceTextClick }: PdfPageProps) {
+const PdfPage = memo(function PdfPage({ pdf, page, zoom, onSourceTextClick, pageRef, highlight }: PdfPageProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const renderTask = useRef<RenderTask | null>(null);
   const [pageSize, setPageSize] = useState<{ width: number; height: number } | null>(null);
@@ -2018,7 +2029,7 @@ const PdfPage = memo(function PdfPage({ pdf, page, zoom, onSourceTextClick }: Pd
   }, [page, pdf, zoom]);
 
   return (
-    <div className="typeset-pdf-page">
+    <div className="typeset-pdf-page" ref={(el) => pageRef?.(page, el)}>
       <canvas ref={canvasRef} aria-label={`PDF page ${page}`} />
       {pageSize && (
         <div
@@ -2051,6 +2062,19 @@ const PdfPage = memo(function PdfPage({ pdf, page, zoom, onSourceTextClick }: Pd
           ))}
         </div>
       )}
+      {highlight && (
+        <div
+          key={highlight.nonce}
+          className="typeset-pdf-forward-highlight"
+          style={{
+            left: `${highlight.left}px`,
+            top: `${highlight.top}px`,
+            width: `${highlight.width}px`,
+            height: `${highlight.height}px`,
+          }}
+          aria-hidden="true"
+        />
+      )}
       {error && <div className="typeset-pdf-page-error">{error}</div>}
     </div>
   );
@@ -2070,6 +2094,8 @@ interface PdfPreviewProps {
   onToggleLog: () => void;
   onSourceTextClick: (text: string, context: string) => void;
   onHide?: () => void;
+  forwardTarget?: PdfForwardTarget | null;
+  forwardSearchNotice?: string | null;
 }
 
 function PdfFallbackPage({ error, outputPath, sourcePath }: { error: string; outputPath: string | null; sourcePath: string | null }) {
@@ -2098,6 +2124,8 @@ function TypesetPdfPreview({
   onToggleLog,
   onSourceTextClick,
   onHide,
+  forwardTarget,
+  forwardSearchNotice,
 }: PdfPreviewProps) {
   const [pdf, setPdf] = useState<PDFDocumentProxy | null>(null);
   const [numPages, setNumPages] = useState(0);
@@ -2106,6 +2134,11 @@ function TypesetPdfPreview({
   const [error, setError] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const userZoomedRef = useRef(false);
+  const pageElementsRef = useRef(new Map<number, HTMLDivElement>());
+  const registerPageRef = useCallback((page: number, el: HTMLDivElement | null) => {
+    if (el) pageElementsRef.current.set(page, el);
+    else pageElementsRef.current.delete(page);
+  }, []);
 
   useEffect(() => {
     let disposed = false;
@@ -2177,6 +2210,29 @@ function TypesetPdfPreview({
     };
   }, [pdf]);
 
+  // Forward search: scroll the compiled PDF to the page/point SyncTeX
+  // resolved for the last double-click in the source editor. Runs after the
+  // target page has had a chance to mount/register its ref (double rAF: one
+  // for this render's DOM commit, one for the page's own render effect).
+  useEffect(() => {
+    if (!forwardTarget) return;
+    let frame1 = 0;
+    let frame2 = 0;
+    frame1 = window.requestAnimationFrame(() => {
+      frame2 = window.requestAnimationFrame(() => {
+        const pageEl = pageElementsRef.current.get(forwardTarget.location.page);
+        const scroll = scrollRef.current;
+        if (!pageEl || !scroll) return;
+        const targetTop = pageEl.offsetTop + forwardTarget.location.pointY * zoom - scroll.clientHeight / 2;
+        scroll.scrollTo({ top: Math.max(0, targetTop), behavior: "smooth" });
+      });
+    });
+    return () => {
+      window.cancelAnimationFrame(frame1);
+      window.cancelAnimationFrame(frame2);
+    };
+  }, [forwardTarget, zoom]);
+
   const changeZoom = (delta: number) => {
     userZoomedRef.current = true;
     setZoom((value) => clampNumber(value + delta, 0.45, 2.2));
@@ -2219,6 +2275,7 @@ function TypesetPdfPreview({
             {diagnosticsCount > 0 && <span>{diagnosticsCount}</span>}
           </button>
           {statusText && <span className={`typeset-pdf-status ${status}`}>{statusText}</span>}
+          {forwardSearchNotice && <span className="typeset-pdf-status error" role="status">{forwardSearchNotice}</span>}
         </div>
         <div className="typeset-preview-actions toolbar-pdf-right">
           <span className="typeset-preview-file" title={path ?? ""}>{path ? basename(path) : "Preview"}</span>
@@ -2249,15 +2306,29 @@ function TypesetPdfPreview({
         ) : (
           null
         )}
-        {pdf && !error && Array.from({ length: numPages }, (_, index) => (
-          <PdfPage
-            key={`${path}:${refreshKey}:${index + 1}`}
-            pdf={pdf}
-            page={index + 1}
-            zoom={zoom}
-            onSourceTextClick={onSourceTextClick}
-          />
-        ))}
+        {pdf && !error && Array.from({ length: numPages }, (_, index) => {
+          const page = index + 1;
+          const highlight = forwardTarget && forwardTarget.location.page === page
+            ? {
+                left: forwardTarget.location.boxLeft * zoom,
+                top: forwardTarget.location.boxTop * zoom,
+                width: forwardTarget.location.boxWidth * zoom,
+                height: forwardTarget.location.boxHeight * zoom,
+                nonce: forwardTarget.nonce,
+              }
+            : null;
+          return (
+            <PdfPage
+              key={`${path}:${refreshKey}:${page}`}
+              pdf={pdf}
+              page={page}
+              zoom={zoom}
+              onSourceTextClick={onSourceTextClick}
+              pageRef={registerPageRef}
+              highlight={highlight}
+            />
+          );
+        })}
       </div>
     </section>
   );
@@ -2562,7 +2633,7 @@ function TypesetEditorToolbar({
   canRedo: boolean;
   canUndo: boolean;
   dirty: boolean;
-  editorRef: { current: HTMLTextAreaElement | null };
+  editorRef: { current: SharedEditorHandle | null };
   visualViewRef: { current: EditorView | null };
   onChange: (value: string) => void;
   onModeChange: (mode: EditorMode) => void;
@@ -3601,32 +3672,18 @@ function lineOffsetFor(source: string, line: number): number {
   return lines.slice(0, Math.max(0, line - 1)).reduce((sum, item) => sum + item.length + 1, 0);
 }
 
-function editorLineMetrics(textarea: HTMLTextAreaElement): { lineHeight: number; paddingTop: number } {
-  const style = window.getComputedStyle(textarea);
-  const fontSize = Number.parseFloat(style.fontSize) || 13;
-  const rawLineHeight = style.lineHeight;
-  const parsedLineHeight = Number.parseFloat(rawLineHeight);
-  const lineHeight = rawLineHeight.endsWith("px")
-    ? parsedLineHeight || fontSize * 1.58
-    : parsedLineHeight > 0
-      ? parsedLineHeight * fontSize
-      : fontSize * 1.58;
-  const paddingTop = Number.parseFloat(style.paddingTop) || 0;
-  return { lineHeight, paddingTop };
+/** First fully-visible source line, from CodeMirror's own block layout — exact
+ * even with wrapped lines, unlike the old textarea version's uniform-line-height
+ * pixel math. */
+function codeVisibleLineForView(view: EditorView): number {
+  const block = view.lineBlockAtHeight(Math.max(0, view.scrollDOM.scrollTop));
+  return view.state.doc.lineAt(block.from).number;
 }
 
-function codeVisibleLineForScroll(scrollTarget: HTMLElement, textarea: HTMLTextAreaElement, source: string): number {
-  const { lineHeight, paddingTop } = editorLineMetrics(textarea);
-  const lineCount = Math.max(1, source.split("\n").length);
-  return clampNumber(Math.floor((scrollTarget.scrollTop - paddingTop) / lineHeight) + 1, 1, lineCount);
-}
-
-function scrollCodeEditorToLine(textarea: HTMLTextAreaElement, line: number): void {
-  const scrollTarget = textarea.closest<HTMLElement>(".lab-editor");
-  if (!scrollTarget) return;
-  const { lineHeight, paddingTop } = editorLineMetrics(textarea);
-  const targetTop = paddingTop + Math.max(0, line - 1) * lineHeight;
-  scrollTarget.scrollTop = Math.max(0, targetTop - scrollTarget.clientHeight * 0.28);
+function scrollCodeEditorToLine(view: EditorView, line: number): void {
+  const clampedLine = Math.max(1, Math.min(line, view.state.doc.lines));
+  const block = view.lineBlockAt(view.state.doc.line(clampedLine).from);
+  view.scrollDOM.scrollTop = Math.max(0, block.top - view.scrollDOM.clientHeight * 0.28);
 }
 
 export default function Typeset() {
@@ -3635,7 +3692,6 @@ export default function Typeset() {
   const [previewPath, setPreviewPath] = useState<string | null>(null);
   const [loaded, setLoaded] = useState<FileText | null>(null);
   const [draft, setDraft] = useState("");
-  const [draftHistory, setDraftHistory] = useState<DraftHistory>({ past: [], future: [] });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [compileStatus, setCompileStatus] = useState<CompileStatus>("idle");
@@ -3648,6 +3704,8 @@ export default function Typeset() {
   const [logOpen, setLogOpen] = useState(false);
   const [editorMode, setEditorMode] = useState<EditorMode>("visual");
   const [visualPdfCursor, setVisualPdfCursor] = useState<VisualPdfCursor | null>(null);
+  const [pdfForwardTarget, setPdfForwardTarget] = useState<PdfForwardTarget | null>(null);
+  const [forwardSearchNotice, setForwardSearchNotice] = useState<string | null>(null);
   const [projectPanelVisible, setProjectPanelVisible] = useState(true);
   const [pdfPanelVisible, setPdfPanelVisible] = useState(true);
   const [projectPanelWidth, setProjectPanelWidth] = useState(PROJECT_PANEL_DEFAULT_W);
@@ -3666,7 +3724,7 @@ export default function Typeset() {
   projectPanelWidthRef.current = projectPanelWidth;
   pdfPanelWidthRef.current = pdfPanelWidth;
   outlinePanelHeightRef.current = outlinePanelHeight;
-  const editorRef = useRef<HTMLTextAreaElement | null>(null);
+  const editorRef = useRef<SharedEditorHandle | null>(null);
   // Live CodeMirror view for Visual mode, mirroring `editorRef` for Code mode —
   // lets the toolbar apply edits at whichever editor's real selection is
   // current, instead of always inserting near `\end{document}`.
@@ -3696,48 +3754,40 @@ export default function Typeset() {
     const count = text.split(/\r?\n/).filter((line) => line.trim()).length;
     return Math.min(count, 9);
   }, [compileResult?.stderr, error]);
-  const canUndoDraft = draftHistory.past.length > 0;
-  const canRedoDraft = draftHistory.future.length > 0;
+  const activeEditorView = editorMode === "code" ? editorRef.current?.view : visualViewRef.current;
+  const canUndoDraft = Boolean(activeEditorView && undoDepth(activeEditorView.state) > 0);
+  const canRedoDraft = Boolean(activeEditorView && redoDepth(activeEditorView.state) > 0);
 
   const resetDraft = useCallback((nextDraft: string) => {
     setDraft(nextDraft);
-    setDraftHistory({ past: [], future: [] });
   }, []);
 
   const changeDraft = useCallback((nextDraft: string) => {
-    setDraft((current) => {
-      if (nextDraft === current) return current;
-      setDraftHistory((history) => ({
-        past: [...history.past, current].slice(-100),
-        future: [],
-      }));
-      return nextDraft;
-    });
+    const codeView = editorRef.current?.view;
+    const visualView = visualViewRef.current;
+    // Both surfaces stay mounted and mirror intentional edits into their own
+    // CodeMirror history stacks. Switching Code/Visual therefore preserves the
+    // same undo point without reintroducing a React-level DraftHistory.
+    if (codeView && codeView.state.doc.toString() !== nextDraft) {
+      editorRef.current?.setDocument(nextDraft, { addToHistory: true, preserveSelection: true });
+    }
+    if (visualView && visualView.state.doc.toString() !== nextDraft) {
+      visualView.dispatch({
+        changes: { from: 0, to: visualView.state.doc.length, insert: nextDraft },
+      });
+    }
+    setDraft(nextDraft);
   }, []);
 
   const undoDraft = useCallback(() => {
-    setDraftHistory((history) => {
-      if (!history.past.length) return history;
-      const previous = history.past[history.past.length - 1];
-      setDraft(previous);
-      return {
-        past: history.past.slice(0, -1),
-        future: [draft, ...history.future].slice(0, 100),
-      };
-    });
-  }, [draft]);
+    const view = editorMode === "code" ? editorRef.current?.view : visualViewRef.current;
+    if (view) undo(view);
+  }, [editorMode]);
 
   const redoDraft = useCallback(() => {
-    setDraftHistory((history) => {
-      if (!history.future.length) return history;
-      const next = history.future[0];
-      setDraft(next);
-      return {
-        past: [...history.past, draft].slice(-100),
-        future: history.future.slice(1),
-      };
-    });
-  }, [draft]);
+    const view = editorMode === "code" ? editorRef.current?.view : visualViewRef.current;
+    if (view) redo(view);
+  }, [editorMode]);
 
   const openSource = useCallback(async (path: string) => {
     setLoading(true);
@@ -3901,32 +3951,16 @@ export default function Typeset() {
     // auto-compile removed, click Recompile when ready
   }, [sourcePath, loaded, loading, saving]);
 
-  const handleEditorKey = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    const shortcut = event.ctrlKey || event.metaKey;
-    const key = event.key.toLowerCase();
-    if (shortcut && key === "z") {
-      event.preventDefault();
-      if (event.shiftKey) {
-        redoDraft();
-      } else {
-        undoDraft();
-      }
-      return;
-    }
-    if (shortcut && key === "y") {
-      event.preventDefault();
-      redoDraft();
-      return;
-    }
-    if ((event.ctrlKey || event.metaKey) && event.key === "s") {
-      event.preventDefault();
-      void save();
-    }
-    if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
-      event.preventDefault();
-      void compile();
-    }
-  };
+  // CodeEditor captures `extraKeymap` once at mount, so route through refs kept
+  // fresh every render rather than closing over these (non-memoized, in `compile`'s
+  // case) callbacks directly.
+  const saveRef = useRef(save);
+  saveRef.current = save;
+  const codeEditorKeymapRef = useRef<KeyBinding[]>([
+    { key: "Mod-s", run: () => { void saveRef.current(); return true; } },
+    // `compileRef` (defined above, near `compile`) is already a stable wrapper.
+    { key: "Mod-Enter", run: () => { compileRef.current(); return true; } },
+  ]);
 
   useEffect(() => {
     const handleSaveShortcut = (event: KeyboardEvent) => {
@@ -3947,8 +3981,8 @@ export default function Typeset() {
     window.setTimeout(() => {
       const editor = editorRef.current;
       editor?.focus();
-      editor?.setSelectionRange(offset, offset);
-      if (editor) scrollCodeEditorToLine(editor, line);
+      editor?.dispatch({ selection: { anchor: offset, head: offset } });
+      if (editor) scrollCodeEditorToLine(editor.view, line);
       setCurrentSourceLine(line);
       window.requestAnimationFrame(() => setCurrentSourceLine(line));
     }, 0);
@@ -3963,8 +3997,8 @@ export default function Typeset() {
     window.setTimeout(() => {
       const editor = editorRef.current;
       editor?.focus();
-      editor?.setSelectionRange(safeStart, safeEnd);
-      if (editor) scrollCodeEditorToLine(editor, line);
+      editor?.dispatch({ selection: { anchor: safeStart, head: safeEnd } });
+      if (editor) scrollCodeEditorToLine(editor.view, line);
       setCurrentSourceLine(line);
       window.requestAnimationFrame(() => setCurrentSourceLine(line));
     }, 0);
@@ -3988,6 +4022,50 @@ export default function Typeset() {
     openCodeRange(match.start, match.end);
   }, [draft, editorMode, openCodeRange]);
 
+  // Forward search: double-click in Code or Visual jumps the PDF preview to
+  // the exact compiled position, via the real SyncTeX data latexmk/xelatex
+  // now emit (-synctex=1). Reports back through `forwardSearchNotice` instead
+  // of failing silently — a stale (pre-synctex) PDF, a missing `synctex`
+  // binary, or a line with no typeset material (blank lines, comments) are
+  // all real, visible-to-the-user reasons the jump didn't happen.
+  const jumpToPdfForLine = useCallback((line: number, column: number) => {
+    // eslint-disable-next-line no-console -- temporary forward-search diagnostic, see conversation
+    console.debug("[typeset] jumpToPdfForLine", { line, column, sourcePath, previewPath });
+    if (!sourcePath || !previewPath) {
+      setForwardSearchNotice("Compile the PDF before jumping to it.");
+      return;
+    }
+    void latexForwardSearch(sourcePath, previewPath, line, column)
+      .then((result) => {
+        // eslint-disable-next-line no-console -- temporary forward-search diagnostic, see conversation
+        console.debug("[typeset] latexForwardSearch result", result);
+        const location = result.locations[0];
+        if (location) {
+          setPdfForwardTarget({ location, nonce: Date.now() });
+          setForwardSearchNotice(null);
+        } else {
+          setForwardSearchNotice("No PDF match for this line yet — recompile and try again.");
+        }
+      })
+      .catch((forwardError) => {
+        // eslint-disable-next-line no-console -- temporary forward-search diagnostic, see conversation
+        console.error("[typeset] latexForwardSearch error", forwardError);
+        setForwardSearchNotice(String(forwardError));
+      });
+  }, [sourcePath, previewPath]);
+
+  useEffect(() => {
+    if (!pdfForwardTarget) return;
+    const timeout = window.setTimeout(() => setPdfForwardTarget(null), 2500);
+    return () => window.clearTimeout(timeout);
+  }, [pdfForwardTarget]);
+
+  useEffect(() => {
+    if (!forwardSearchNotice) return;
+    const timeout = window.setTimeout(() => setForwardSearchNotice(null), 4500);
+    return () => window.clearTimeout(timeout);
+  }, [forwardSearchNotice]);
+
   const returnToStart = useCallback(() => {
     if (dirty && !window.confirm("Discard unsaved changes and return to the source list?")) {
       return;
@@ -3997,33 +4075,33 @@ export default function Typeset() {
 
   useEffect(() => {
     if (editorMode !== "code") return;
-    const editor = editorRef.current;
-    const scrollTarget = editor?.closest<HTMLElement>(".lab-editor");
-    if (!editor || !scrollTarget) return;
+    const view = editorRef.current?.view;
+    if (!view) return;
+    const scrollTarget = view.scrollDOM;
     let frame = 0;
     const updateLine = (preferSelection = false) => {
       window.cancelAnimationFrame(frame);
       frame = window.requestAnimationFrame(() => {
-        if (preferSelection && document.activeElement === editor) {
-          setCurrentSourceLine(lineNumberForOffset(draft, editor.selectionStart));
+        if (preferSelection && view.hasFocus) {
+          setCurrentSourceLine(view.state.doc.lineAt(view.state.selection.main.head).number);
           return;
         }
-        setCurrentSourceLine(codeVisibleLineForScroll(scrollTarget, editor, draft));
+        setCurrentSourceLine(codeVisibleLineForView(view));
       });
     };
     const updateFromScroll = () => updateLine(false);
     const updateFromSelection = () => updateLine(true);
     scrollTarget.addEventListener("scroll", updateFromScroll, { passive: true });
-    editor.addEventListener("click", updateFromSelection);
-    editor.addEventListener("keyup", updateFromSelection);
-    editor.addEventListener("select", updateFromSelection);
+    view.contentDOM.addEventListener("click", updateFromSelection);
+    view.contentDOM.addEventListener("keyup", updateFromSelection);
+    document.addEventListener("selectionchange", updateFromSelection);
     updateLine(true);
     return () => {
       window.cancelAnimationFrame(frame);
       scrollTarget.removeEventListener("scroll", updateFromScroll);
-      editor.removeEventListener("click", updateFromSelection);
-      editor.removeEventListener("keyup", updateFromSelection);
-      editor.removeEventListener("select", updateFromSelection);
+      view.contentDOM.removeEventListener("click", updateFromSelection);
+      view.contentDOM.removeEventListener("keyup", updateFromSelection);
+      document.removeEventListener("selectionchange", updateFromSelection);
     };
   }, [draft, editorMode]);
 
@@ -4365,32 +4443,45 @@ export default function Typeset() {
               {loading ? (
                 <div className="typeset-empty">Loading source...</div>
               ) : loaded ? (
-                editorMode === "code" ? (
-                  <div className="typeset-editor-body ide-redesign-editor-content">
+                <>
+                  <div
+                    className="typeset-editor-body ide-redesign-editor-content"
+                    hidden={editorMode !== "code"}
+                    aria-hidden={editorMode !== "code"}
+                  >
                     <CodeEditor
                       value={draft}
                       language="latex"
                       onChange={changeDraft}
-                      onKeyDown={handleEditorKey}
-                      inputRef={(node) => {
-                        editorRef.current = node;
+                      extraKeymap={codeEditorKeymapRef.current}
+                      onReady={(handle) => {
+                        editorRef.current = handle;
                       }}
+                      onDoubleClickPos={jumpToPdfForLine}
                       readOnly={saving}
+                      wrap={false}
+                      dataEditor="typeset-code"
                       placeholder="\\section{Title}"
                     />
                   </div>
-                ) : (
-                  <TypesetVisualEditor
-                    path={sourcePath}
-                    draft={draft}
-                    pdfCursor={visualPdfCursor}
-                    onChange={changeDraft}
-                    onVisibleLineChange={setCurrentSourceLine}
-                    onOpenCodeAtLine={openCodeAtLine}
-                    onOpenCodeRange={openCodeRange}
-                    onViewReady={onVisualViewReady}
-                  />
-                )
+                  <div
+                    className="typeset-editor-body typeset-visual-editor-host"
+                    hidden={editorMode !== "visual"}
+                    aria-hidden={editorMode !== "visual"}
+                  >
+                    <TypesetVisualEditor
+                      path={sourcePath}
+                      draft={draft}
+                      pdfCursor={visualPdfCursor}
+                      onChange={changeDraft}
+                      onVisibleLineChange={setCurrentSourceLine}
+                      onOpenCodeAtLine={openCodeAtLine}
+                      onOpenCodeRange={openCodeRange}
+                      onForwardSearch={jumpToPdfForLine}
+                      onViewReady={onVisualViewReady}
+                    />
+                  </div>
+                </>
               ) : (
                 <div className="typeset-empty">Create or open a .tex file.</div>
               )}
@@ -4428,6 +4519,8 @@ export default function Typeset() {
                     onToggleLog={() => setLogOpen((open) => !open)}
                     onSourceTextClick={openSourceForPdfText}
                     onHide={() => setPdfPanelVisible(false)}
+                    forwardTarget={pdfForwardTarget}
+                    forwardSearchNotice={forwardSearchNotice}
                   />
                   {logOpen && <CompileLog result={compileResult} status={compileStatus} error={error} onClose={() => setLogOpen(false)} />}
                 </div>

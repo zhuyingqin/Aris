@@ -40,6 +40,16 @@ export const onOpenCodeRange = Facet.define<OpenCodeRange, OpenCodeRange>({
   combine: (values) => values[values.length - 1] ?? null,
 });
 
+/**
+ * Injects the host's "forward-search this source position into the compiled
+ * PDF" callback (`Typeset.tsx`'s `jumpToPdfForLine`), fired on double-click —
+ * mirrors `onOpenCodeRange` above, just for the opposite direction.
+ */
+type ForwardSearch = ((line: number, column: number) => void) | null;
+export const onForwardSearch = Facet.define<ForwardSearch, ForwardSearch>({
+  combine: (values) => values[values.length - 1] ?? null,
+});
+
 /** Shared `ignoreEvent`: let CM's own mouseup bookkeeping run, but nothing else. */
 function blockIgnoreEvent(event: Event): boolean {
   return event.type !== "mouseup";
@@ -725,6 +735,31 @@ export const visualBlockClick = EditorView.domEventHandlers({
       : line.to;
     view.dispatch({ selection: EditorSelection.cursor(pos), scrollIntoView: true });
     return true;
+  },
+});
+
+/**
+ * Double-click anywhere in the visual editor forward-searches into the
+ * compiled PDF. Block widgets (display math, tables, figures) have no
+ * reliable DOM→offset mapping, so this reuses `visualBlockClick`'s
+ * `lineBlockAtHeight` fallback for those; everything else uses the exact
+ * click position via `posAtCoords`.
+ */
+export const visualForwardSearchClick = EditorView.domEventHandlers({
+  dblclick(event, view) {
+    const handler = view.state.facet(onForwardSearch);
+    const target = eventElement(event.target);
+    const isBlockTarget = Boolean(target?.closest(`.${BLOCK_TARGET_CLASS}`));
+    const pos = isBlockTarget
+      ? view.lineBlockAtHeight(event.clientY - view.documentTop).to
+      : view.posAtCoords({ x: event.clientX, y: event.clientY });
+    // eslint-disable-next-line no-console -- temporary forward-search diagnostic, see conversation
+    console.debug("[typeset] Visual dblclick", { hasHandler: Boolean(handler), isBlockTarget, pos });
+    if (!handler) return false;
+    if (pos == null) return false;
+    const line = view.state.doc.lineAt(pos);
+    handler(line.number, pos - line.from + 1);
+    return false;
   },
 });
 

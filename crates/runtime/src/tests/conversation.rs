@@ -1,9 +1,11 @@
 use super::{
     assistant_output_looks_degenerate, assistant_text_from_turn_summary, build_assistant_message,
-    is_internal_continuation_message, parse_auto_compaction_threshold, ApiClient, ApiRequest,
-    AssistantEvent, AutoCompactionEvent, ConversationRuntime, RuntimeError, StaticToolExecutor,
-    ToolError, ToolExecutor, TurnSummary, DEFAULT_AUTO_COMPACTION_INPUT_TOKENS_THRESHOLD,
+    is_internal_continuation_message, parse_auto_compaction_threshold,
+    strip_trailing_internal_continuation_messages, ApiClient, ApiRequest, AssistantEvent,
+    ConversationRuntime, RuntimeError, StaticToolExecutor, ToolError, ToolExecutor, TurnSummary,
+    DEFAULT_AUTO_COMPACTION_INPUT_TOKENS_THRESHOLD,
 };
+use crate::compact::CompactionTokenEstimateSource;
 // The CLI's Opus 4.8 to 4.7 fallback keys off this flag.
 #[test]
 fn runtime_error_model_unavailable_flag() {
@@ -548,6 +550,100 @@ fn appends_post_tool_hook_feedback_to_tool_result() {
 }
 
 #[test]
+fn blank_terminal_message_after_tool_use_is_nudged() {
+    struct ToolThenBlankApi {
+        calls: usize,
+    }
+
+    impl ApiClient for ToolThenBlankApi {
+        fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+            self.calls += 1;
+            match self.calls {
+                1 => Ok(vec![
+                    AssistantEvent::TextDelta("I will inspect that first.".to_string()),
+                    AssistantEvent::ToolUse {
+                        id: "probe-1".to_string(),
+                        name: "probe".to_string(),
+                        input: "{}".to_string(),
+                    },
+                    AssistantEvent::MessageStop,
+                ]),
+                2 => Ok(vec![
+                    AssistantEvent::StopReason("end_turn".to_string()),
+                    AssistantEvent::MessageStop,
+                ]),
+                3 => {
+                    assert!(request.messages.iter().any(|message| {
+                        message.blocks.iter().any(|block| {
+                            matches!(block, ContentBlock::Text { text }
+                                if text.starts_with("Your latest assistant message is empty"))
+                        })
+                    }));
+                    assert!(request.messages.iter().any(|message| {
+                        message.blocks.iter().any(|block| {
+                            matches!(block, ContentBlock::Text { text }
+                                if text.contains("do not repeat earlier visible answer text"))
+                        })
+                    }));
+                    Ok(vec![
+                        AssistantEvent::TextDelta("The probe completed successfully.".to_string()),
+                        AssistantEvent::MessageStop,
+                    ])
+                }
+                _ => Err(RuntimeError::new("unexpected extra API call")),
+            }
+        }
+    }
+
+    let mut runtime = ConversationRuntime::new(
+        Session::new(),
+        ToolThenBlankApi { calls: 0 },
+        StaticToolExecutor::new().register("probe", |_| Ok("ok".to_string())),
+        PermissionPolicy::new(PermissionMode::DangerFullAccess),
+        vec!["system".to_string()],
+    );
+
+    let summary = runtime
+        .run_turn("inspect the state", None)
+        .expect("tool followed by blank terminal response should recover");
+    assert_eq!(summary.iterations, 3);
+    assert_eq!(
+        assistant_text_from_turn_summary(&summary),
+        "I will inspect that first.\n\nThe probe completed successfully."
+    );
+}
+
+#[test]
+fn runtime_error_keeps_user_and_partial_session_history() {
+    struct FailingApi;
+    impl ApiClient for FailingApi {
+        fn stream(&mut self, _request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+            Err(RuntimeError::new(
+                "provider stream failed after partial output",
+            ))
+        }
+    }
+
+    let mut runtime = ConversationRuntime::new(
+        Session::new(),
+        FailingApi,
+        StaticToolExecutor::new(),
+        PermissionPolicy::new(PermissionMode::DangerFullAccess),
+        vec!["system".to_string()],
+    );
+
+    let error = runtime
+        .run_turn("keep this request in history", None)
+        .expect_err("the provider failure should surface");
+    assert!(error.to_string().contains("provider stream failed"));
+    assert!(runtime.session().messages.iter().any(|message| {
+        message.blocks.iter().any(|block| {
+            matches!(block, ContentBlock::Text { text } if text == "keep this request in history")
+        })
+    }));
+}
+
+#[test]
 fn cancelling_mid_tool_loop_preserves_executed_results() {
     // One assistant turn asks for two tools. The executor runs the first
     // successfully, then arms cancellation so the loop is interrupted before
@@ -783,11 +879,12 @@ fn auto_compacts_when_latest_input_threshold_is_crossed_and_history_near_budget(
         .run_turn("trigger", None)
         .expect("turn should succeed");
 
+    let compaction = summary.auto_compaction.expect("compaction should fire");
+    assert_eq!(compaction.removed_message_count, 2);
+    assert!(compaction.tokens_after > 0);
     assert_eq!(
-        summary.auto_compaction,
-        Some(AutoCompactionEvent {
-            removed_message_count: 2,
-        })
+        compaction.token_estimate_source,
+        CompactionTokenEstimateSource::Heuristic
     );
     assert_eq!(runtime.session().messages[0].role, MessageRole::User);
 }
@@ -1031,6 +1128,40 @@ fn truncated_tool_call_is_retried_without_executing_partial_json() {
 }
 
 #[test]
+fn stripping_trailing_internal_prompts_keeps_real_turn_history() {
+    let mut session = Session::new();
+    session
+        .messages
+        .push(ConversationMessage::user_text("real user request"));
+    session
+        .messages
+        .push(ConversationMessage::assistant(vec![ContentBlock::Text {
+            text: "partial but useful answer".to_string(),
+        }]));
+    session.messages.push(ConversationMessage::user_text(
+        "Continue the unfinished task from the exact point where the previous response stopped (length).",
+    ));
+    session.messages.push(ConversationMessage::user_text(
+        "Your previous response contained no visible text. Continue now.",
+    ));
+    session.messages.push(ConversationMessage::user_text(
+        "Your latest assistant message is empty. Continue now.",
+    ));
+
+    strip_trailing_internal_continuation_messages(&mut session);
+
+    assert_eq!(session.messages.len(), 2);
+    assert!(matches!(
+        &session.messages[0].blocks[0],
+        ContentBlock::Text { text } if text == "real user request"
+    ));
+    assert!(matches!(
+        &session.messages[1].blocks[0],
+        ContentBlock::Text { text } if text == "partial but useful answer"
+    ));
+}
+
+#[test]
 fn bounds_large_tool_results_and_shrinks_consumed_results() {
     struct ToolLoopApi {
         calls: usize,
@@ -1235,6 +1366,7 @@ fn proactively_compacts_old_context_before_request() {
 /// fallback path can be exercised.
 struct SummaryAwareApi {
     summary_text: Option<String>,
+    summary_output_tokens: Option<u32>,
 }
 impl ApiClient for SummaryAwareApi {
     fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
@@ -1246,6 +1378,14 @@ impl ApiClient for SummaryAwareApi {
             return match &self.summary_text {
                 Some(text) => Ok(vec![
                     AssistantEvent::TextDelta(text.clone()),
+                    self.summary_output_tokens
+                        .map(|tokens| {
+                            AssistantEvent::Usage(TokenUsage {
+                                output_tokens: tokens,
+                                ..TokenUsage::default()
+                            })
+                        })
+                        .unwrap_or(AssistantEvent::MessageStop),
                     AssistantEvent::MessageStop,
                 ]),
                 None => Err(RuntimeError::new("summarizer unavailable")),
@@ -1298,7 +1438,10 @@ fn first_message_text(session: &Session) -> String {
 fn llm_summarizer_replaces_text_assembly_when_attached() {
     let mut runtime = ConversationRuntime::new(
         preloaded_session_over_budget(),
-        SummaryAwareApi { summary_text: None },
+        SummaryAwareApi {
+            summary_text: None,
+            summary_output_tokens: None,
+        },
         StaticToolExecutor::new(),
         PermissionPolicy::new(PermissionMode::DangerFullAccess),
         vec!["system".to_string()],
@@ -1306,6 +1449,7 @@ fn llm_summarizer_replaces_text_assembly_when_attached() {
     .with_context_compaction_estimated_tokens_threshold(1_000)
     .with_summarizer(SummaryAwareApi {
         summary_text: Some("<summary>\nLLM-CONDENSED GOALS AND STATE\n</summary>".to_string()),
+        summary_output_tokens: None,
     });
 
     let summary = runtime.run_turn("trigger", None).expect("turn succeeds");
@@ -1328,13 +1472,17 @@ fn llm_summarizer_replaces_text_assembly_when_attached() {
 fn manual_compact_uses_llm_summarizer_when_attached() {
     let mut runtime = ConversationRuntime::new(
         preloaded_session_over_budget(),
-        SummaryAwareApi { summary_text: None },
+        SummaryAwareApi {
+            summary_text: None,
+            summary_output_tokens: None,
+        },
         StaticToolExecutor::new(),
         PermissionPolicy::new(PermissionMode::DangerFullAccess),
         vec!["system".to_string()],
     )
     .with_summarizer(SummaryAwareApi {
         summary_text: Some("<summary>\nMANUAL LLM SUMMARY\n</summary>".to_string()),
+        summary_output_tokens: None,
     });
 
     let result = runtime.compact(CompactionConfig {
@@ -1349,17 +1497,54 @@ fn manual_compact_uses_llm_summarizer_when_attached() {
 }
 
 #[test]
+fn compaction_uses_summarizer_output_usage_for_tokens_after() {
+    let mut runtime = ConversationRuntime::new(
+        preloaded_session_over_budget(),
+        SummaryAwareApi {
+            summary_text: None,
+            summary_output_tokens: None,
+        },
+        StaticToolExecutor::new(),
+        PermissionPolicy::new(PermissionMode::DangerFullAccess),
+        vec!["system".to_string()],
+    )
+    .with_summarizer(SummaryAwareApi {
+        summary_text: Some("<summary>\nUSAGE-BACKED SUMMARY\n</summary>".to_string()),
+        summary_output_tokens: Some(37),
+    });
+
+    let result = runtime.compact(CompactionConfig {
+        preserve_recent_messages: 2,
+        max_estimated_tokens: 1,
+        ..CompactionConfig::default()
+    });
+
+    assert_eq!(result.summary_output_tokens, Some(37));
+    assert_eq!(
+        result.token_estimate_source,
+        CompactionTokenEstimateSource::ProviderSummaryUsage
+    );
+    assert!(result.tokens_after > 37);
+}
+
+#[test]
 fn compaction_falls_back_to_text_assembly_when_summarizer_fails() {
     let mut runtime = ConversationRuntime::new(
         preloaded_session_over_budget(),
-        SummaryAwareApi { summary_text: None },
+        SummaryAwareApi {
+            summary_text: None,
+            summary_output_tokens: None,
+        },
         StaticToolExecutor::new(),
         PermissionPolicy::new(PermissionMode::DangerFullAccess),
         vec!["system".to_string()],
     )
     .with_context_compaction_estimated_tokens_threshold(1_000)
     // Summarizer errors on every summary request → must fall back.
-    .with_summarizer(SummaryAwareApi { summary_text: None });
+    .with_summarizer(SummaryAwareApi {
+        summary_text: None,
+        summary_output_tokens: None,
+    });
 
     let summary = runtime.run_turn("trigger", None).expect("turn succeeds");
     assert!(
@@ -1579,7 +1764,7 @@ fn persistently_blank_response_ends_with_visible_placeholder() {
                     request.messages.iter().any(|message| {
                         message.blocks.iter().any(|block| {
                             matches!(block, ContentBlock::Text { text }
-                            if text.starts_with("Your previous response contained no visible text"))
+                            if text.starts_with("Your latest assistant message is empty"))
                         })
                     }),
                     "expected the blank-response continuation nudge on retry {}",
@@ -1739,6 +1924,104 @@ fn compaction_then_blank_response_recovers_not_silent() {
     assert!(
         !assistant_text_from_turn_summary(&summary).trim().is_empty(),
         "blank reply after compaction must recover into visible text, never a silent stop"
+    );
+}
+
+/// Regression for providers that emit a terminal `end_turn` without a text
+/// delta after compaction. The empty stream must enter the same continuation
+/// path as a whitespace-only response, and a later turn must still be able to
+/// use the compacted session and return visible text.
+#[test]
+fn compaction_then_empty_stream_recovers_and_next_turn_replies() {
+    struct CompactThenEmptyApi {
+        calls: usize,
+    }
+
+    impl ApiClient for CompactThenEmptyApi {
+        fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+            self.calls += 1;
+            assert!(
+                request.messages.iter().any(|message| {
+                    message.blocks.iter().any(|block| {
+                        matches!(block, ContentBlock::Text { text }
+                            if text.contains("This session is being continued"))
+                    })
+                }),
+                "every request in this regression must retain the compaction continuation"
+            );
+
+            match self.calls {
+                1 => Ok(vec![
+                    // No TextDelta: this is the provider response shape that
+                    // previously escaped the blank-response continuation path.
+                    AssistantEvent::StopReason("stop".to_string()),
+                    AssistantEvent::MessageStop,
+                ]),
+                2 => {
+                    assert!(
+                        request.messages.iter().any(|message| {
+                            message.blocks.iter().any(|block| {
+                                matches!(block, ContentBlock::Text { text }
+                                    if text.starts_with("Your latest assistant message is empty"))
+                            })
+                        }),
+                        "empty terminal response must trigger a continuation prompt"
+                    );
+                    Ok(vec![
+                        AssistantEvent::TextDelta("recovered after compaction".to_string()),
+                        AssistantEvent::StopReason("end_turn".to_string()),
+                        AssistantEvent::MessageStop,
+                    ])
+                }
+                3 => Ok(vec![
+                    AssistantEvent::TextDelta("next turn still replies".to_string()),
+                    AssistantEvent::StopReason("end_turn".to_string()),
+                    AssistantEvent::MessageStop,
+                ]),
+                _ => Err(RuntimeError::new("unexpected extra call")),
+            }
+        }
+    }
+
+    let mut session = Session::new();
+    for index in 0..40 {
+        session
+            .messages
+            .push(ConversationMessage::user_text(format!(
+                "old-{index} {}",
+                "x".repeat(500)
+            )));
+        session
+            .messages
+            .push(ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "y".repeat(500),
+            }]));
+    }
+
+    let mut runtime = ConversationRuntime::new(
+        session,
+        CompactThenEmptyApi { calls: 0 },
+        StaticToolExecutor::new(),
+        PermissionPolicy::new(PermissionMode::DangerFullAccess),
+        vec!["system".to_string()],
+    )
+    .with_context_compaction_estimated_tokens_threshold(1_000);
+
+    let first = runtime
+        .run_turn("first request after compaction", None)
+        .expect("empty terminal response should recover");
+    assert_eq!(
+        assistant_text_from_turn_summary(&first),
+        "recovered after compaction"
+    );
+    assert!(first.auto_compaction.is_some());
+
+    let second = runtime
+        .run_turn("second request", None)
+        .expect("a later turn must still reply after compaction");
+    assert_eq!(
+        assistant_text_from_turn_summary(&second),
+        "next turn still replies"
     );
 }
 

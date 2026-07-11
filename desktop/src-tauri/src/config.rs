@@ -1220,6 +1220,11 @@ fn apply_reviewer_environment_from(obj: &Map<String, Value>, force: bool) {
     set_env_if_allowed("ARIS_REVIEWER_MODEL", model, force);
     set_env_if_allowed("ARIS_REVIEWER_BASE_URL", base_url, force);
     set_env_if_allowed("ARIS_LANGUAGE", get_non_empty(obj, "language"), force);
+    set_env_if_allowed(
+        "ARIS_REASONING_EFFORT",
+        get_non_empty(obj, "reasoning_effort"),
+        force,
+    );
     if force || std::env::var("ARIS_MEMORY_WRITE_APPROVAL").is_err() {
         let enabled = obj
             .get("memory_write_approval")
@@ -1270,6 +1275,28 @@ pub(crate) fn set_memory_write_approval(enabled: bool) -> Result<(), String> {
         "ARIS_MEMORY_WRITE_APPROVAL",
         if enabled { "true" } else { "false" },
     );
+    Ok(())
+}
+
+pub(crate) fn reasoning_effort() -> String {
+    get_non_empty(&load_object(), "reasoning_effort").unwrap_or_else(|| "high".to_string())
+}
+
+pub(crate) fn set_reasoning_effort(effort: &str) -> Result<(), String> {
+    let effort = effort.trim().to_ascii_lowercase();
+    if !matches!(
+        effort.as_str(),
+        "none" | "minimal" | "low" | "medium" | "high" | "xhigh"
+    ) {
+        return Err("unsupported reasoning effort".to_string());
+    }
+    let mut obj = load_object();
+    obj.insert(
+        "reasoning_effort".to_string(),
+        Value::String(effort.clone()),
+    );
+    save_object(&obj)?;
+    std::env::set_var("ARIS_REASONING_EFFORT", effort);
     Ok(())
 }
 

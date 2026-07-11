@@ -104,6 +104,13 @@ fn parses_supported_slash_commands() {
             target: Some("mem-1".to_string())
         })
     );
+    assert_eq!(
+        SlashCommand::parse("/goal replace ship durable continuity"),
+        Some(SlashCommand::Goal {
+            action: Some("replace".to_string()),
+            objective: Some("ship durable continuity".to_string())
+        })
+    );
     assert_eq!(SlashCommand::parse("/init"), Some(SlashCommand::Init));
     assert_eq!(SlashCommand::parse("/diff"), Some(SlashCommand::Diff));
     assert_eq!(SlashCommand::parse("/version"), Some(SlashCommand::Version));
@@ -164,6 +171,7 @@ fn renders_help_from_shared_specs() {
     assert!(help.contains("/resume <session-path>"));
     assert!(help.contains("/config [env|hooks|model]"));
     assert!(help.contains("/memory"));
+    assert!(help.contains("/goal"));
     assert!(help.contains("/init"));
     assert!(help.contains("/diff"));
     assert!(help.contains("/version"));
@@ -176,8 +184,8 @@ fn renders_help_from_shared_specs() {
     assert!(help.contains(
         "/workflows [list|inspect|pause|resume|stop|restart|save|discover|start|allow-once|always|deny|inject]"
     ));
-    assert_eq!(slash_command_specs().len(), 31);
-    assert_eq!(resume_supported_slash_commands().len(), 12);
+    assert_eq!(slash_command_specs().len(), 32);
+    assert_eq!(resume_supported_slash_commands().len(), 13);
 }
 
 #[test]

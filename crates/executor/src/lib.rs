@@ -6,8 +6,8 @@
 
 use api::{
     AnthropicClient, AuthSource, ContentBlockDelta, ImageSource, InputContentBlock, InputMessage,
-    MessageRequest, MessageResponse, OutputContentBlock, StreamEvent as ApiStreamEvent, ToolChoice,
-    ToolDefinition, ToolResultContentBlock,
+    MessageRequest, MessageResponse, OutputContentBlock, StreamEvent as ApiStreamEvent,
+    ThinkingConfig, ToolChoice, ToolDefinition, ToolResultContentBlock,
 };
 use runtime::{
     ApiClient, ApiRequest, AssistantEvent, ContentBlock, ConversationMessage, MessageRole,
@@ -423,6 +423,33 @@ impl AnthropicRuntimeClient {
     }
 }
 
+fn anthropic_thinking_config(model: &str, max_tokens: u32) -> Option<ThinkingConfig> {
+    if !model.to_ascii_lowercase().contains("claude") {
+        return None;
+    }
+    let effort = std::env::var("ARIS_REASONING_EFFORT")
+        .ok()
+        .unwrap_or_else(|| "high".to_string())
+        .trim()
+        .to_ascii_lowercase();
+    let requested = match effort.as_str() {
+        "none" | "minimal" => return None,
+        "low" => 1_024,
+        "medium" => 4_096,
+        "high" => 8_192,
+        "xhigh" => 16_384,
+        _ => 8_192,
+    };
+    // Anthropic requires the thinking budget to fit below max_tokens. Keep a
+    // small visible-output allowance and omit thinking when the model's turn
+    // budget is too small to satisfy the protocol minimum.
+    let budget_tokens = requested.min(max_tokens.saturating_sub(1_024));
+    (budget_tokens >= 1_024).then_some(ThinkingConfig {
+        kind: "enabled".to_string(),
+        budget_tokens,
+    })
+}
+
 impl ApiClient for AnthropicRuntimeClient {
     #[allow(clippy::too_many_lines)]
     fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
@@ -458,6 +485,7 @@ impl ApiClient for AnthropicRuntimeClient {
                     .collect()
             }),
             tool_choice: self.enable_tools.then_some(ToolChoice::Auto),
+            thinking: anthropic_thinking_config(&self.model, self.max_tokens),
             stream: true,
         };
 
@@ -848,35 +876,39 @@ fn convert_messages(messages: &[ConversationMessage]) -> Vec<InputMessage> {
             let content = message
                 .blocks
                 .iter()
-                .map(|block| match block {
-                    ContentBlock::Text { text } => InputContentBlock::Text { text: text.clone() },
-                    ContentBlock::Image { media_type, data } => InputContentBlock::Image {
-                        source: ImageSource::base64(media_type.clone(), data.clone()),
-                    },
-                    ContentBlock::ToolUse { id, name, input } => InputContentBlock::ToolUse {
-                        id: id.clone(),
-                        name: name.clone(),
-                        input: serde_json::from_str(input).unwrap_or_else(|_| json!({})),
-                    },
-                    ContentBlock::ToolResult {
-                        tool_use_id,
-                        output,
-                        is_error,
-                        ..
-                    } => InputContentBlock::ToolResult {
-                        tool_use_id: tool_use_id.clone(),
-                        content: vec![ToolResultContentBlock::Text {
-                            text: output.clone(),
-                        }],
-                        is_error: *is_error,
-                    },
-                    ContentBlock::Thinking {
-                        thinking,
-                        signature,
-                    } => InputContentBlock::Thinking {
-                        thinking: thinking.clone(),
-                        signature: signature.clone(),
-                    },
+                .filter_map(|block| match block {
+                    ContentBlock::Thinking { .. } => None,
+                    block => Some(match block {
+                        ContentBlock::Text { text } => {
+                            InputContentBlock::Text { text: text.clone() }
+                        }
+                        ContentBlock::Image { media_type, data } => InputContentBlock::Image {
+                            source: ImageSource::base64(media_type.clone(), data.clone()),
+                        },
+                        ContentBlock::ToolUse { id, name, input } => InputContentBlock::ToolUse {
+                            id: id.clone(),
+                            name: name.clone(),
+                            input: serde_json::from_str(input).unwrap_or_else(|_| json!({})),
+                        },
+                        ContentBlock::ToolResult {
+                            tool_use_id,
+                            output,
+                            is_error,
+                            ..
+                        } => InputContentBlock::ToolResult {
+                            tool_use_id: tool_use_id.clone(),
+                            content: vec![ToolResultContentBlock::Text {
+                                text: output.clone(),
+                            }],
+                            is_error: *is_error,
+                        },
+                        // This request does not enable Anthropic extended
+                        // thinking. Replaying a thinking block (especially one
+                        // injected by an OpenAI-compatible upstream) with its
+                        // signature can make the next request fail validation.
+                        // Visible text and tool exchanges remain authoritative.
+                        ContentBlock::Thinking { .. } => unreachable!("thinking filtered above"),
+                    }),
                 })
                 .collect::<Vec<_>>();
             (!content.is_empty()).then(|| InputMessage {

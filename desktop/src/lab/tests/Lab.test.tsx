@@ -163,6 +163,14 @@ const fixtureView = (notebookPath = "F:/Agent/Aris/notebooks/demo.ipynb"): Noteb
 });
 
 beforeEach(() => {
+  // CodeMirror measures a hidden editor during mount. JSDOM exposes Range but
+  // does not implement its layout methods, so return an empty rect list just
+  // as a browser would for a detached/zero-size test surface.
+  Object.defineProperty(Range.prototype, "getClientRects", {
+    configurable: true,
+    writable: true,
+    value: vi.fn(() => []),
+  });
   localStorage.removeItem("somniq-lab-side-w");
   localStorage.removeItem("somniq-lab-assistant-w");
   localStorage.removeItem("somniq-lab-assistant-sessions-v1");
@@ -302,7 +310,15 @@ describe("Lab", () => {
     expect(outputs).toBeTruthy();
     expect(outputs?.textContent).toContain("hello");
     expect(outputs?.textContent).toContain("42");
-    expect(container.querySelector(".lab-editor-lines")?.textContent).toContain("1");
+    // CodeMirror's gutter also renders a hidden width-measurement "spacer"
+    // sharing the same `.cm-gutterElement` class — filter it out to reach the
+    // real, visible line-number elements.
+    await waitFor(() => {
+      const numbers = Array.from(container.querySelectorAll<HTMLElement>(".lab-editor .cm-gutterElement"))
+        .filter((el) => el.style.visibility !== "hidden")
+        .map((el) => el.textContent);
+      expect(numbers).toContain("1");
+    });
     await waitFor(() => expect(mocks.labLoadNotebook).toHaveBeenCalledWith("notebooks/demo.ipynb"));
   });
 
@@ -381,19 +397,17 @@ describe("Lab", () => {
     const { container } = render(<Lab />);
     fireEvent.click(await screen.findByText("main.css"));
 
-    const editor = await waitFor(() => {
-      const input = container.querySelector<HTMLTextAreaElement>(".lab-file-editor .lab-editor-input");
-      expect(input).toBeTruthy();
-      expect(input!.value).toBe(original);
-      return input!;
+    await waitFor(() => {
+      const view = window.__somniqEditors?.get("file");
+      expect(view).toBeTruthy();
+      expect(view!.state.doc.toString()).toBe(original);
     });
 
     mocks.fileReadText.mockResolvedValue({ path, content: changed, bytes: changed.length });
 
     await waitFor(() => expect(screen.getByText("检测到 AI 修改")).toBeTruthy(), { timeout: 3000 });
-    expect(editor.value).toBe(changed);
-    expect(container.querySelector(".lab-editor-lines span.diff-added")).toBeTruthy();
-    expect(container.querySelector(".lab-editor-diff-line.diff-added")).toBeTruthy();
+    expect(window.__somniqEditors?.get("file")?.state.doc.toString()).toBe(changed);
+    expect(container.querySelector(".cm-diff-added")).toBeTruthy();
     expect(screen.getByLabelText("新增 3 行，移除 0 行")).toBeTruthy();
 
     await act(async () => {
@@ -445,9 +459,8 @@ describe("Lab", () => {
     });
     const modifiedCell = container.querySelector(".lab-cell.cell-modified");
     const addedCell = container.querySelector(".lab-cell.cell-added");
-    expect(modifiedCell?.querySelector(".lab-editor-lines span.diff-added")).toBeTruthy();
-    expect(modifiedCell?.querySelector(".lab-editor-diff-line.diff-added")).toBeTruthy();
-    expect(addedCell?.querySelector(".lab-editor-lines span.diff-added")).toBeTruthy();
+    expect(modifiedCell?.querySelector(".cm-diff-added")).toBeTruthy();
+    expect(addedCell?.querySelector(".cm-diff-added")).toBeTruthy();
 
     // 保留 accepts the changes and clears the review highlighting.
     fireEvent.click(screen.getByRole("button", { name: "保留" }));
@@ -468,16 +481,18 @@ describe("Lab", () => {
     const { container } = render(<Lab />);
     fireEvent.click(await screen.findByText("main.py"));
 
-    const editor = await waitFor(() => {
-      const input = container.querySelector<HTMLTextAreaElement>(".lab-file-editor .lab-editor-input");
-      expect(input).toBeTruthy();
-      return input!;
+    const view = await waitFor(() => {
+      const v = window.__somniqEditors?.get("file");
+      expect(v).toBeTruthy();
+      return v!;
     });
     const toolbarButtons = container.querySelectorAll(".lab-file-editor-actions .lab-file-tool");
     expect(toolbarButtons).toHaveLength(1);
     expect(toolbarButtons[0].getAttribute("aria-label")).toBe("Run Python File");
 
-    fireEvent.change(editor, { target: { value: "x = 1\nprint(x)" } });
+    act(() => {
+      view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: "x = 1\nprint(x)" } });
+    });
     const runButton = container.querySelector<HTMLButtonElement>(".lab-run-file-btn");
     expect(runButton).toBeTruthy();
     fireEvent.click(runButton!);

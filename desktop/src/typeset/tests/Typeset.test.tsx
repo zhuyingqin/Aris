@@ -15,6 +15,7 @@ const mocks = vi.hoisted(() => ({
   fileSearch: vi.fn(),
   fileWriteText: vi.fn(),
   latexCompile: vi.fn(),
+  latexForwardSearch: vi.fn(),
   newapiBootstrap: vi.fn(),
   newapiLogin: vi.fn(),
   newapiLogout: vi.fn(),
@@ -67,6 +68,7 @@ vi.mock("../../api/tauri", () => ({
   fileWriteText: mocks.fileWriteText,
   isTauri: () => true,
   latexCompile: mocks.latexCompile,
+  latexForwardSearch: mocks.latexForwardSearch,
   newapiBootstrap: mocks.newapiBootstrap,
   newapiLogin: mocks.newapiLogin,
   newapiLogout: mocks.newapiLogout,
@@ -168,6 +170,11 @@ beforeEach(() => {
   });
   mocks.fileWriteText.mockReset().mockImplementation((path: string, content: string) => Promise.resolve({ path, content, bytes: content.length }));
   mocks.latexCompile.mockReset().mockResolvedValue({ success: true, outputPath: "paper.pdf" });
+  mocks.latexForwardSearch.mockReset().mockResolvedValue({
+    found: true,
+    locations: [{ page: 1, pointX: 50, pointY: 60, boxLeft: 40, boxTop: 55, boxWidth: 100, boxHeight: 12 }],
+    stderr: "",
+  });
 });
 
 afterEach(() => {
@@ -202,6 +209,15 @@ describe("Typeset start page", () => {
     await waitFor(() => expect(container.querySelector(".typeset-visual-filebar strong")?.textContent).toBe(label));
   }
 
+  // Code mode is now a CodeMirror instance (see desktop/src/lab/CodeEditor.tsx),
+  // registered under this id (`dataEditor="typeset-code"` in Typeset.tsx) in the
+  // DEV-only test registry — the same pattern `window.__typesetView` already
+  // uses for Visual mode, since there's no other way to reach a CodeMirror view
+  // mounted deep inside the component tree from a black-box render test.
+  function typesetCodeView() {
+    return window.__somniqEditors?.get("typeset-code");
+  }
+
   async function recompileOpenSource() {
     const button = await screen.findByRole("button", { name: "Recompile" });
     await waitFor(() => expect((button as HTMLButtonElement).disabled).toBe(false));
@@ -233,13 +249,13 @@ describe("Typeset start page", () => {
   it("returns to the source start page after opening a file", async () => {
     mockProjectFiles();
 
-    const { container } = render(<Typeset />);
+    render(<Typeset />);
 
     fireEvent.click(await screen.findByText("local.tex"));
     await waitFor(() => expect(mocks.fileReadText).toHaveBeenCalledWith("sections/local.tex"));
     expect(await screen.findByRole("button", { name: "Home" })).toBeTruthy();
     fireEvent.click(screen.getByRole("tab", { name: "Code" }));
-    expect(container.querySelector<HTMLTextAreaElement>(".lab-editor-input")?.value).toContain("\\section{Local}");
+    await waitFor(() => expect(typesetCodeView()?.state.doc.toString()).toContain("\\section{Local}"));
 
     fireEvent.click(screen.getByRole("button", { name: "Home" }));
 
@@ -326,7 +342,7 @@ describe("Typeset start page", () => {
     fireEvent.click(screen.getByRole("tab", { name: "Code" }));
 
     await waitFor(() =>
-      expect(container.querySelector<HTMLTextAreaElement>(".lab-editor-input")?.value).toContain("\\section{Edited title}"),
+      expect(typesetCodeView()?.state.doc.toString()).toContain("\\section{Edited title}"),
     );
   });
 
@@ -390,9 +406,10 @@ describe("Typeset start page", () => {
 
     await waitFor(() => expect(screen.getByRole("tab", { name: "Code" }).getAttribute("aria-selected")).toBe("true"));
     await waitFor(() => {
-      const ta = container.querySelector<HTMLTextAreaElement>(".lab-editor-input");
-      expect(ta).toBeTruthy();
-      expect(ta!.value.slice(ta!.selectionStart ?? 0, ta!.selectionEnd ?? 0)).toBe("My Paper Title");
+      const view = typesetCodeView();
+      expect(view).toBeTruthy();
+      const { from, to } = view!.state.selection.main;
+      expect(view!.state.doc.toString().slice(from, to)).toBe("My Paper Title");
     });
   });
 
@@ -424,9 +441,10 @@ describe("Typeset start page", () => {
 
     await waitFor(() => expect(screen.getByRole("tab", { name: "Code" }).getAttribute("aria-selected")).toBe("true"));
     await waitFor(() => {
-      const ta = container.querySelector<HTMLTextAreaElement>(".lab-editor-input");
-      expect(ta).toBeTruthy();
-      expect(ta!.value.slice(ta!.selectionStart ?? 0, ta!.selectionEnd ?? 0)).toBe("Jane Doe");
+      const view = typesetCodeView();
+      expect(view).toBeTruthy();
+      const { from, to } = view!.state.selection.main;
+      expect(view!.state.doc.toString().slice(from, to)).toBe("Jane Doe");
     });
   });
 
@@ -459,9 +477,9 @@ describe("Typeset start page", () => {
 
     fireEvent.click(screen.getByRole("tab", { name: "Code" }));
     await waitFor(() => {
-      const ta = container.querySelector<HTMLTextAreaElement>(".lab-editor-input");
-      expect(ta!.value).toContain("Hello \\textbf{world}");
-      expect(ta!.value).not.toContain("\\end{document}\\textbf");
+      const text = typesetCodeView()?.state.doc.toString() ?? "";
+      expect(text).toContain("Hello \\textbf{world}");
+      expect(text).not.toContain("\\end{document}\\textbf");
     });
   });
 
@@ -476,19 +494,19 @@ describe("Typeset start page", () => {
     await waitForSourceOpen(container, "paper.tex");
     fireEvent.click(screen.getByRole("tab", { name: "Code" }));
 
-    const editor = await waitFor(() => {
-      const ta = container.querySelector<HTMLTextAreaElement>(".lab-editor-input");
-      expect(ta).toBeTruthy();
-      return ta!;
+    const view = await waitFor(() => {
+      const v = typesetCodeView();
+      expect(v).toBeTruthy();
+      return v!;
     });
-    const from = editor.value.indexOf("Hello");
-    editor.setSelectionRange(from, from + "Hello".length);
+    const from = view.state.doc.toString().indexOf("Hello");
+    view.dispatch({ selection: { anchor: from, head: from + "Hello".length } });
 
     const toolbar = container.querySelector<HTMLElement>(".typeset-visual-toolbar");
     fireEvent.click(within(toolbar!).getByRole("button", { name: "Bold" }));
 
     await waitFor(() => {
-      expect(container.querySelector<HTMLTextAreaElement>(".lab-editor-input")?.value).toContain("\\textbf{Hello} world");
+      expect(typesetCodeView()?.state.doc.toString()).toContain("\\textbf{Hello} world");
     });
   });
 
@@ -503,21 +521,22 @@ describe("Typeset start page", () => {
     await waitForSourceOpen(container, "paper.tex");
     fireEvent.click(screen.getByRole("tab", { name: "Code" }));
 
-    const editor = await waitFor(() => {
-      const ta = container.querySelector<HTMLTextAreaElement>(".lab-editor-input");
-      expect(ta).toBeTruthy();
-      return ta!;
+    const view = await waitFor(() => {
+      const v = typesetCodeView();
+      expect(v).toBeTruthy();
+      return v!;
     });
-    const cursorPos = editor.value.indexOf("First.") + "First.".length;
-    editor.setSelectionRange(cursorPos, cursorPos);
+    const cursorPos = view.state.doc.toString().indexOf("First.") + "First.".length;
+    view.dispatch({ selection: { anchor: cursorPos, head: cursorPos } });
 
     const toolbar = container.querySelector<HTMLElement>(".typeset-visual-toolbar");
     fireEvent.click(within(toolbar!).getByRole("button", { name: "Insert citation" }));
 
     await waitFor(() => {
-      const ta = container.querySelector<HTMLTextAreaElement>(".lab-editor-input");
-      expect(ta!.value).toBe(`${source.slice(0, cursorPos)}\\cite{reference}${source.slice(cursorPos)}`);
-      expect(ta!.value.slice(ta!.selectionStart ?? 0, ta!.selectionEnd ?? 0)).toBe("reference");
+      const after = typesetCodeView()!;
+      expect(after.state.doc.toString()).toBe(`${source.slice(0, cursorPos)}\\cite{reference}${source.slice(cursorPos)}`);
+      const { from, to } = after.state.selection.main;
+      expect(after.state.doc.toString().slice(from, to)).toBe("reference");
     });
   });
 
@@ -532,20 +551,20 @@ describe("Typeset start page", () => {
     await waitForSourceOpen(container, "paper.tex");
     fireEvent.click(screen.getByRole("tab", { name: "Code" }));
 
-    const editor = await waitFor(() => {
-      const ta = container.querySelector<HTMLTextAreaElement>(".lab-editor-input");
-      expect(ta).toBeTruthy();
-      return ta!;
+    const view = await waitFor(() => {
+      const v = typesetCodeView();
+      expect(v).toBeTruthy();
+      return v!;
     });
-    const cursorPos = editor.value.indexOf("Introduction");
-    editor.setSelectionRange(cursorPos, cursorPos);
+    const cursorPos = view.state.doc.toString().indexOf("Introduction");
+    view.dispatch({ selection: { anchor: cursorPos, head: cursorPos } });
 
     const toolbar = container.querySelector<HTMLElement>(".typeset-visual-toolbar");
     fireEvent.click(within(toolbar!).getByRole("button", { name: "Section heading" }));
     fireEvent.click(screen.getByRole("menuitem", { name: "Section" }));
 
     await waitFor(() => {
-      expect(container.querySelector<HTMLTextAreaElement>(".lab-editor-input")?.value).toContain("\\section{Introduction}");
+      expect(typesetCodeView()?.state.doc.toString()).toContain("\\section{Introduction}");
     });
   });
 
@@ -571,17 +590,17 @@ describe("Typeset start page", () => {
     fireEvent.click(within(toolbar!).getByRole("button", { name: "Bold" }));
     expect(undo.disabled).toBe(false);
     fireEvent.click(screen.getByRole("tab", { name: "Code" }));
-    expect(container.querySelector<HTMLTextAreaElement>(".lab-editor-input")?.value).toContain("\\textbf{bold text}");
+    await waitFor(() => expect(typesetCodeView()?.state.doc.toString()).toContain("\\textbf{bold text}"));
 
     fireEvent.click(undo);
     await waitFor(() => {
-      expect(container.querySelector<HTMLTextAreaElement>(".lab-editor-input")?.value).not.toContain("\\textbf{bold text}");
+      expect(typesetCodeView()?.state.doc.toString()).not.toContain("\\textbf{bold text}");
     });
     expect(redo.disabled).toBe(false);
 
     fireEvent.click(redo);
     await waitFor(() => {
-      expect(container.querySelector<HTMLTextAreaElement>(".lab-editor-input")?.value).toContain("\\textbf{bold text}");
+      expect(typesetCodeView()?.state.doc.toString()).toContain("\\textbf{bold text}");
     });
   });
 
@@ -637,9 +656,11 @@ describe("Typeset start page", () => {
     fireEvent.submit(searchInput.closest("form")!);
 
     await waitFor(() => {
-      const editor = container.querySelector<HTMLTextAreaElement>(".lab-editor-input");
-      expect(editor?.selectionStart).toBe(editor?.value.indexOf("Body"));
-      expect(editor?.selectionEnd).toBe((editor?.value.indexOf("Body") ?? 0) + "Body".length);
+      const view = typesetCodeView();
+      const text = view?.state.doc.toString() ?? "";
+      const { from, to } = view?.state.selection.main ?? { from: -1, to: -1 };
+      expect(from).toBe(text.indexOf("Body"));
+      expect(to).toBe(text.indexOf("Body") + "Body".length);
     });
   });
 
@@ -663,10 +684,11 @@ describe("Typeset start page", () => {
     fireEvent.click(pdfText);
 
     await waitFor(() => {
-      const editor = container.querySelector<HTMLTextAreaElement>(".lab-editor-input");
-      const start = editor?.value.indexOf("Body text") ?? -1;
-      expect(editor?.selectionStart).toBe(start);
-      expect(editor?.selectionEnd).toBe(start + "Body text".length);
+      const view = typesetCodeView();
+      const start = view?.state.doc.toString().indexOf("Body text") ?? -1;
+      const { from, to } = view?.state.selection.main ?? { from: -1, to: -1 };
+      expect(from).toBe(start);
+      expect(to).toBe(start + "Body text".length);
     });
   });
 
@@ -735,12 +757,70 @@ describe("Typeset start page", () => {
     fireEvent.click(pdfText);
 
     await waitFor(() => {
-      const editor = container.querySelector<HTMLTextAreaElement>(".lab-editor-input");
-      const first = editor?.value.indexOf("Body text") ?? -1;
-      const second = editor?.value.indexOf("Body text", first + 1) ?? -1;
-      expect(editor?.selectionStart).toBe(second);
-      expect(editor?.selectionEnd).toBe(second + "Body text".length);
+      const view = typesetCodeView();
+      const text = view?.state.doc.toString() ?? "";
+      const first = text.indexOf("Body text");
+      const second = text.indexOf("Body text", first + 1);
+      const { from, to } = view?.state.selection.main ?? { from: -1, to: -1 };
+      expect(from).toBe(second);
+      expect(to).toBe(second + "Body text".length);
     });
+  });
+
+  it("forward-searches a double-click in Code mode into the compiled PDF (SyncTeX)", async () => {
+    mockProjectFiles();
+    const source = "\\documentclass{article}\n\\begin{document}\nAlpha\nBody text\n\\end{document}";
+    mocks.fileReadText.mockResolvedValueOnce({ path: "paper.tex", content: source, bytes: source.length });
+
+    const { container } = render(<Typeset />);
+
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+    await recompileOpenSource();
+    await waitFor(() => expect(mocks.latexCompile).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("tab", { name: "Code" }));
+
+    const view = await waitFor(() => {
+      const codeView = typesetCodeView();
+      expect(codeView).toBeTruthy();
+      return codeView!;
+    });
+    const bodyTextOffset = source.indexOf("Body text");
+    vi.spyOn(view, "posAtCoords").mockReturnValue(bodyTextOffset);
+    fireEvent.dblClick(view.contentDOM, { clientX: 5, clientY: 5 });
+
+    await waitFor(() => expect(mocks.latexForwardSearch).toHaveBeenCalledWith("paper.tex", "paper.pdf", 4, 1));
+    await waitFor(() => expect(container.querySelector(".typeset-pdf-forward-highlight")).toBeTruthy());
+  });
+
+  it("forward-searches a double-click in Visual mode into the compiled PDF (SyncTeX)", async () => {
+    mockProjectFiles();
+    const source = "\\documentclass{article}\n\\begin{document}\nAlpha\nBody text\n\\end{document}";
+    mocks.fileReadText.mockResolvedValueOnce({ path: "paper.tex", content: source, bytes: source.length });
+
+    const { container } = render(<Typeset />);
+
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+    await recompileOpenSource();
+    await waitFor(() => expect(mocks.latexCompile).toHaveBeenCalled());
+
+    const view = await waitFor(() => {
+      const visualView = (window as unknown as {
+        __typesetView?: {
+          contentDOM: HTMLElement;
+          posAtCoords: (coords: { x: number; y: number }) => number | null;
+        };
+      }).__typesetView;
+      expect(visualView).toBeTruthy();
+      return visualView!;
+    });
+    const bodyTextOffset = source.indexOf("Body text");
+    vi.spyOn(view, "posAtCoords").mockReturnValue(bodyTextOffset);
+    fireEvent.dblClick(view.contentDOM, { clientX: 5, clientY: 5 });
+
+    await waitFor(() => expect(mocks.latexForwardSearch).toHaveBeenCalledWith("paper.tex", "paper.pdf", 4, 1));
+    await waitFor(() => expect(container.querySelector(".typeset-pdf-forward-highlight")).toBeTruthy());
   });
 
   it("jumps from the outline to the matching LaTeX section and shows the active section", async () => {
@@ -780,9 +860,9 @@ describe("Typeset start page", () => {
     const expectedOffset = source.indexOf("\\section{Method}");
     await waitFor(() => expect(screen.getByRole("tab", { name: "Code" }).getAttribute("aria-selected")).toBe("true"));
     await waitFor(() => {
-      const editor = container.querySelector<HTMLTextAreaElement>(".lab-editor-input");
-      expect(editor?.selectionStart).toBe(expectedOffset);
-      expect(editor?.selectionEnd).toBe(expectedOffset);
+      const { from, to } = typesetCodeView()?.state.selection.main ?? { from: -1, to: -1 };
+      expect(from).toBe(expectedOffset);
+      expect(to).toBe(expectedOffset);
     });
     expect(container.querySelector<HTMLElement>(".typeset-current-section")?.textContent).toContain("Section 2 Method");
     expect(within(outline).getByRole("button", { name: /Method/ }).getAttribute("aria-current")).toBe("location");
@@ -807,8 +887,10 @@ describe("Typeset start page", () => {
     await waitForSourceOpen(container, "paper.tex");
     fireEvent.click(screen.getByRole("tab", { name: "Code" }));
 
+    // CodeMirror owns its own internal scroller (`.cm-scroller`) now — the
+    // outer `.lab-editor` wrapper is `overflow: hidden` and no longer scrolls.
     const scroller = await waitFor(() => {
-      const item = container.querySelector<HTMLElement>(".typeset-editor-body .lab-editor");
+      const item = container.querySelector<HTMLElement>(".typeset-editor-body .lab-editor .cm-scroller");
       expect(item).toBeTruthy();
       return item!;
     });

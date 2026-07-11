@@ -192,22 +192,20 @@ function QuestionTimeline({
           ))}
         </span>
       </button>
-      {open && (
-        <div className="chat-question-popover" role="list" aria-label="本轮对话提问">
-          {markers.map((marker) => (
-            <button
-              key={marker.id}
-              type="button"
-              className={marker.number === active ? "active" : ""}
-              role="listitem"
-              onClick={() => onJump(marker.turnIndex)}
-            >
-              <span className="chat-question-item-number">{marker.number}</span>
-              <span className="chat-question-item-text">{marker.preview}</span>
-            </button>
-          ))}
-        </div>
-      )}
+      <div className="chat-question-popover" role="list" aria-label="本轮对话提问">
+        {markers.map((marker) => (
+          <button
+            key={marker.id}
+            type="button"
+            className={marker.number === active ? "active" : ""}
+            role="listitem"
+            onClick={() => onJump(marker.turnIndex)}
+          >
+            <span className="chat-question-item-number">{marker.number}</span>
+            <span className="chat-question-item-text">{marker.preview}</span>
+          </button>
+        ))}
+      </div>
     </div>
   );
 }

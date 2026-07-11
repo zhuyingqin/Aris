@@ -482,7 +482,7 @@ describe("useChatStream concurrent sessions", () => {
 
     expect(events).toEqual(["patch", "error"]);
     expect(current.blocks).toEqual([{ kind: "text", text: "partial before failure" }]);
-    expect(onError).toHaveBeenCalledWith("chat-fail", "context window exceeded", false);
+    expect(onError).toHaveBeenCalledWith("chat-fail", "context window exceeded", false, undefined);
   });
 
   it("clears failed session state so the same chat can run again", async () => {
@@ -543,6 +543,70 @@ describe("useChatStream concurrent sessions", () => {
       "chat-net",
       "OpenAI request failed: connection reset",
       false,
+      undefined,
+    );
+  });
+
+  it("forwards an unpreserved-session marker from a backend error", async () => {
+    let errorHandler:
+      | ((event: { sessionId: string; message: string; sessionPreserved?: boolean }) => void)
+      | undefined;
+    mocks.onChatError.mockImplementation((handler) => {
+      errorHandler = handler;
+      return Promise.resolve(() => undefined);
+    });
+
+    const onError = vi.fn();
+    renderHook(() => useChatStream({
+      patchAssistant: vi.fn(),
+      onComplete: vi.fn(),
+      onError,
+    }));
+
+    act(() => {
+      errorHandler?.({
+        sessionId: "chat-build-failure",
+        message: "invalid API key",
+        sessionPreserved: false,
+      });
+    });
+
+    expect(onError).toHaveBeenCalledWith(
+      "chat-build-failure",
+      "invalid API key",
+      false,
+      false,
+    );
+  });
+
+  it("does not hide a backend error when it races with a user stop", async () => {
+    let errorHandler: ((event: { sessionId: string; message: string }) => void) | undefined;
+    mocks.onChatError.mockImplementation((handler) => {
+      errorHandler = handler;
+      return Promise.resolve(() => undefined);
+    });
+    mocks.chatSend.mockReturnValue(new Promise(() => undefined));
+
+    const onError = vi.fn();
+    const { result } = renderHook(() => useChatStream({
+      patchAssistant: vi.fn(),
+      onComplete: vi.fn(),
+      onError,
+    }));
+
+    await act(async () => {
+      void result.current.run("chat-race", "go");
+      await result.current.stop("chat-race");
+    });
+    act(() => {
+      errorHandler?.({ sessionId: "chat-race", message: "provider stream closed unexpectedly" });
+    });
+
+    expect(onError).toHaveBeenLastCalledWith(
+      "chat-race",
+      "provider stream closed unexpectedly",
+      false,
+      undefined,
     );
   });
 
@@ -612,6 +676,52 @@ describe("useChatStream concurrent sessions", () => {
     });
 
     expect(noticeMessage).toContain("45.0k -> 12.0k tokens (-73%)");
+  });
+
+  it("keeps the final reply after a compaction event arrives before chat-done", async () => {
+    let compactedHandler:
+      | ((event: { sessionId: string; removedMessageCount: number; tokensAfter?: number | null }) => void)
+      | undefined;
+    let doneHandler:
+      | ((event: { sessionId: string; text: string; contextTokens?: number | null }) => void)
+      | undefined;
+    mocks.onChatContextCompacted.mockImplementation((handler) => {
+      compactedHandler = handler;
+      return Promise.resolve(() => undefined);
+    });
+    mocks.onChatDone.mockImplementation((handler) => {
+      doneHandler = handler;
+      return Promise.resolve(() => undefined);
+    });
+
+    let current = { id: "assistant-1", role: "assistant" as const, blocks: [], streaming: true };
+    const patchAssistant = vi.fn((_sessionId: string, patch) => {
+      current = patch(current);
+    });
+    const onComplete = vi.fn();
+    mocks.chatSend.mockImplementation(async () => {
+      compactedHandler?.({ sessionId: "chat-after-compact", removedMessageCount: 10, tokensAfter: 1_200 });
+      doneHandler?.({ sessionId: "chat-after-compact", text: "reply after compaction", contextTokens: 1_200 });
+      return "reply after compaction";
+    });
+
+    const { result } = renderHook(() => useChatStream({
+      patchAssistant,
+      onComplete,
+      onError: vi.fn(),
+    }));
+
+    await act(async () => {
+      await result.current.run("chat-after-compact", "continue");
+    });
+
+    expect(current.blocks).toEqual([
+      {
+        kind: "notice",
+        message: "Context compacted automatically; 10 earlier messages were summarized.",
+      },
+    ]);
+    expect(onComplete).toHaveBeenCalledWith("chat-after-compact", "reply after compaction");
   });
 
   it("surfaces context warning events to the host", async () => {

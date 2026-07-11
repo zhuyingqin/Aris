@@ -540,6 +540,18 @@ fn openai_usage_clamps_malformed_cache_counts() {
 }
 
 #[test]
+fn openai_usage_accepts_new_api_output_tokens_alias() {
+    let usage = token_usage_from_openai_usage(&json!({
+        "input_tokens": 120,
+        "output_tokens": 37,
+    }));
+
+    assert_eq!(usage.input_tokens, 120);
+    assert_eq!(usage.output_tokens, 37);
+    assert_eq!(usage.prompt_tokens(), 120);
+}
+
+#[test]
 fn is_stream_options_unknown_field_error_classification() {
     // JSON path: error.param == "stream_options" (exact match).
     assert!(is_stream_options_unknown_field_error(

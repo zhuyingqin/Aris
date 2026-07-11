@@ -847,8 +847,8 @@ pub fn build_executor_client_with_trace(
 /// back to the deterministic text-assembly summary. Precedence:
 /// 1. `configured` — the explicit Settings value (`summarizer_model`).
 /// 2. `ARIS_SUMMARIZER_MODEL` env var.
-/// 3. a per-provider default (Haiku for larger Anthropic chats; otherwise the
-///    active chat model).
+/// 3. a per-provider default (Haiku for larger Anthropic chats; a known small
+///    sibling for OpenAI models, otherwise deterministic fallback).
 ///
 /// At any layer, a value of `off`/`none`/`disabled` turns the LLM summary off,
 /// and `auto`/`default` forces the per-provider default. A specific model id is
@@ -947,8 +947,27 @@ fn default_summarizer_model(config: &ChatExecutorConfig, model: &str) -> Option<
                 Some("claude-haiku-4-5-20251001".to_string())
             }
         }
-        ChatExecutorConfig::OpenAiCompatible { .. } => Some(model.to_string()),
+        ChatExecutorConfig::OpenAiCompatible { .. } => {
+            // There is no portable "small model" name across arbitrary
+            // OpenAI-compatible gateways. Use a cheap sibling only where the
+            // model family makes the name unambiguous; unknown providers use
+            // the deterministic compact summary instead of accidentally
+            // spending the main model on a 120k-character summarization call.
+            if model_lower_starts_with(model, "gpt-5") {
+                Some("gpt-5-mini".to_string())
+            } else if model_lower_starts_with(model, "gpt-4o") {
+                Some("gpt-4o-mini".to_string())
+            } else if model_lower_starts_with(model, "gpt-4.1") {
+                Some("gpt-4.1-mini".to_string())
+            } else {
+                None
+            }
+        }
     }
+}
+
+fn model_lower_starts_with(model: &str, prefix: &str) -> bool {
+    model.to_ascii_lowercase().starts_with(prefix)
 }
 
 pub fn build_conversation_runtime<T>(

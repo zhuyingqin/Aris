@@ -35,6 +35,7 @@ import type {
   ChatEventsReplay,
   ChatEventsRestoreResult,
   ChatModelOptions,
+  ChatReasoningEffortView,
   ChatToolProgress,
   ChatStatus,
   ConnectorActionResult,
@@ -704,6 +705,36 @@ export const latexCompile = (inputPath: string, outputPath?: string | null) =>
         outputPath: outputPath ?? null,
       });
 
+/** A SyncTeX match: `pointX/pointY` is the exact synchronized point (for
+ * centering the viewport), `box*` is the enclosing typeset box (for drawing a
+ * highlight rectangle). Both are in PDF points, origin at the page's top-left
+ * corner — the same convention pdfjs-dist viewports use at zoom 1. */
+export interface SyncTexLocation {
+  page: number;
+  pointX: number;
+  pointY: number;
+  boxLeft: number;
+  boxTop: number;
+  boxWidth: number;
+  boxHeight: number;
+}
+
+export interface ForwardSearchResult {
+  found: boolean;
+  locations: SyncTexLocation[];
+  stderr: string;
+}
+
+export const latexForwardSearch = (sourcePath: string, pdfPath: string, line: number, column?: number) =>
+  isFilePreviewMode()
+    ? Promise.resolve<ForwardSearchResult>({ found: false, locations: [], stderr: "" })
+    : invoke<ForwardSearchResult>("latex_forward_search", {
+        sourcePath,
+        pdfPath,
+        line,
+        column: column ?? null,
+      });
+
 // ── Chat engine (P2) ──────────────────────────────────────────────────────────
 
 export const chatStatus = () => invoke<ChatStatus>("chat_status");
@@ -713,6 +744,10 @@ export const chatModelOptions = () =>
   invoke<ChatModelOptions>("chat_model_options");
 export const chatModelSet = (model: string, persist = true) =>
   invoke<ChatStatus>("chat_model_set", { model, persist });
+export const chatReasoningEffortGet = (model: string) =>
+  invoke<ChatReasoningEffortView>("chat_reasoning_effort_get", { model });
+export const chatReasoningEffortSet = (effort: string) =>
+  invoke<ChatReasoningEffortView>("chat_reasoning_effort_set", { effort });
 export const chatPermissionGet = (sessionId: string) =>
   invoke<PermissionModeView>("chat_permission_get", { sessionId });
 export const chatPermissionSet = (sessionId: string, mode: string) =>
@@ -740,6 +775,34 @@ export const chatRunCommand = (sessionId: string, input: string) =>
   invoke<ChatCommandResult>("chat_run_command", { sessionId, input });
 export const chatSuggestTitle = (user: string, assistant: string) =>
   invoke<string>("chat_suggest_title", { user, assistant });
+
+export type ProjectGoalStatus = "active" | "paused" | "complete";
+
+export interface ProjectGoalView {
+  objective: string;
+  successCriteria: string[];
+  recentStatus: string;
+  status: ProjectGoalStatus;
+  sourceSessionId?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ProjectBriefView {
+  mission: string;
+  goal?: ProjectGoalView | null;
+}
+
+export const projectBriefGet = (projectId: string) =>
+  invoke<ProjectBriefView>("project_brief_get", { projectId });
+export const projectGoalInfer = (
+  projectId: string,
+  sessionId: string,
+  user: string,
+  assistant: string,
+) => invoke<ProjectBriefView>("project_goal_infer", { projectId, sessionId, user, assistant });
+export const projectGoalProgress = (projectId: string, recentStatus: string) =>
+  invoke<ProjectBriefView>("project_goal_progress", { projectId, recentStatus });
 
 export interface ChatImageInput {
   name?: string;
@@ -772,6 +835,11 @@ export type ChatContextMessage =
   | { role: "assistant"; text?: string; toolCalls?: ChatContextToolCall[] }
   | { role: "tool"; toolResults: ChatContextToolResult[] };
 
+export interface ChatContextUserMessage {
+  text: string;
+  images?: ChatImageInput[];
+}
+
 export type ChatContextSyncMode = "replace" | "append";
 
 export const chatSend = (sessionId: string, message: string | ChatSendRequest) => {
@@ -796,6 +864,10 @@ export const chatSetContext = (
   messages: ChatContextMessage[],
   mode: ChatContextSyncMode = "replace",
 ) => invoke<number>("chat_set_context", { sessionId, messages, mode });
+/** Rewind to the server's full context before this one unambiguous user
+ * message. `null` means an older/ambiguous session must use the UI fallback. */
+export const chatRewindToUserMessage = (sessionId: string, message: ChatContextUserMessage) =>
+  invoke<number | null>("chat_rewind_to_user_message", { sessionId, message });
 export const chatDelete = (sessionId: string, projectId?: string) =>
   invoke<void>("chat_delete", { sessionId, projectId: projectId ?? null });
 export const chatCancel = (sessionId: string) => invoke<void>("chat_cancel", { sessionId });
@@ -881,6 +953,8 @@ export const onChatDone = (handler: (event: ChatDoneEvent) => void) =>
 export interface ChatErrorEvent {
   sessionId: string;
   message: string;
+  /** False when the backend could not durably retain the current user turn. */
+  sessionPreserved?: boolean;
 }
 export const onChatError = (handler: (event: ChatErrorEvent) => void) =>
   listen<ChatErrorEvent>("chat-error", (e) => handler(e.payload));
@@ -892,6 +966,9 @@ export interface ChatContextCompactedEvent {
   /** Post-compaction session-history estimate in the same unit used by the
    * auto-compaction budget. Absent/null leaves the transcript estimate. */
   tokensAfter?: number | null;
+  /** `provider_summary_usage` when the compaction model reported output tokens,
+   * otherwise `heuristic`. */
+  tokensAfterSource?: string | null;
   contextWindow?: number | null;
   compactionBudget?: number | null;
 }

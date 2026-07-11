@@ -1018,8 +1018,9 @@ fn format_compact_report(result: &CompactionResult) -> String {
     } else {
         let saved = result.tokens_before.saturating_sub(result.tokens_after);
         format!(
-            "Compact\n  Result           compacted\n  Summary source   {}\n  Messages removed {removed}\n  Messages kept    {resulting_messages}\n  Tail preserved   {}\n  Tokens before    {}\n  Tokens after     {}\n  Tokens saved     {saved}",
+            "Compact\n  Result           compacted\n  Summary source   {}\n  Token estimate   {}\n  Messages removed {removed}\n  Messages kept    {resulting_messages}\n  Tail preserved   {}\n  Tokens before    {}\n  Tokens after     {}\n  Tokens saved     {saved}",
             result.summary_source.as_str(),
+            result.token_estimate_source.as_str(),
             result.preserved_message_count,
             result.tokens_before,
             result.tokens_after
@@ -1146,9 +1147,16 @@ fn run_resume_command(
             session: session.clone(),
             message: Some(render_memory_report()?),
         }),
+        SlashCommand::Goal { action, objective } => Ok(ResumeCommandOutcome {
+            session: session.clone(),
+            message: Some(handle_goal_command(
+                action.as_deref(),
+                objective.as_deref(),
+            )?),
+        }),
         SlashCommand::Init => Ok(ResumeCommandOutcome {
             session: session.clone(),
-            message: Some(init_claude_md()?),
+            message: Some(init_agents_md()?),
         }),
         SlashCommand::Diff => Ok(ResumeCommandOutcome {
             session: session.clone(),
@@ -1815,6 +1823,13 @@ impl LiveCli {
             }
             SlashCommand::Memory { action, target } => {
                 Self::handle_memory(action.as_deref(), target.as_deref())?;
+                false
+            }
+            SlashCommand::Goal { action, objective } => {
+                println!(
+                    "{}",
+                    handle_goal_command(action.as_deref(), objective.as_deref())?
+                );
                 false
             }
             SlashCommand::Init => {
@@ -3464,40 +3479,49 @@ fn render_memory_report() -> Result<String, Box<dyn std::error::Error>> {
     ))
 }
 
-fn init_claude_md() -> Result<String, Box<dyn std::error::Error>> {
+fn handle_goal_command(
+    action: Option<&str>,
+    objective: Option<&str>,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let workspace = env::current_dir()?;
+    let draft = |value: &str| runtime::ProjectGoalDraft {
+        objective: value.to_string(),
+        success_criteria: Vec::new(),
+        recent_status: "Goal captured from /goal; work has not been verified complete yet."
+            .to_string(),
+    };
+    let goal = match action {
+        None | Some("status") | Some("show") => runtime::load_project_goal(&workspace)?,
+        Some("start") => Some(runtime::start_project_goal(
+            &workspace,
+            draft(objective.ok_or("Usage: /goal start <objective>")?),
+            None,
+        )?),
+        Some("replace") => Some(runtime::replace_project_goal(
+            &workspace,
+            draft(objective.ok_or("Usage: /goal replace <objective>")?),
+            None,
+        )?),
+        Some("pause") => Some(runtime::pause_project_goal(&workspace)?),
+        Some("resume") => Some(runtime::resume_project_goal(&workspace)?),
+        Some("complete") => Some(runtime::complete_project_goal(&workspace, objective)?),
+        Some(other) => {
+            return Err(format!(
+                "Unknown /goal action `{other}`. Use start, status, pause, resume, replace, or complete."
+            )
+            .into());
+        }
+    };
+    Ok(runtime::render_project_goal_report(goal.as_ref()))
+}
+
+fn init_agents_md() -> Result<String, Box<dyn std::error::Error>> {
     let cwd = env::current_dir()?;
     Ok(initialize_repo(&cwd)?.render())
 }
 
 fn run_init() -> Result<(), Box<dyn std::error::Error>> {
-    println!("{}", init_claude_md()?);
-
-    // v0.4.13: deploy bundled meta_opt hooks to ~/.claude/hooks/ and merge
-    // their entries into ~/.claude/settings.json so /meta-optimize starts
-    // accumulating events from the next Claude Code run.
-    //
-    // extract_bundled_helpers() (run at startup, see main()) already wrote
-    // tools/meta_opt/{log_event,check_ready}.sh into
-    // ~/.config/aris/cache/<version>/. We copy from there to ~/.claude/hooks/
-    // (overwrite OK — bytes are versioned by aris release), then merge the
-    // hook config into ~/.claude/settings.json without clobbering existing
-    // user fields or hook entries.
-    match deploy_meta_opt_hooks() {
-        Ok(report) => {
-            if !report.is_empty() {
-                println!("{report}");
-            }
-        }
-        Err(e) => {
-            // Non-fatal: init succeeded for CLAUDE.md, hooks deploy is a
-            // nice-to-have. Surface as warning so users can investigate.
-            eprintln!(
-                "\x1b[33mwarning\x1b[0m: failed to deploy meta_opt hooks: {e}\n\
-                 \x1b[2m(CLAUDE.md was still initialized successfully.)\x1b[0m"
-            );
-        }
-    }
-
+    println!("{}", init_agents_md()?);
     Ok(())
 }
 
@@ -3508,16 +3532,6 @@ fn run_init() -> Result<(), Box<dyn std::error::Error>> {
 /// `runtime::extraction_report()` (set by `runtime::extract_bundle()` at
 /// startup), then delegates to [`deploy_meta_opt_hooks_to`] for the actual
 /// file ops so tests can drive it with a tmp HOME.
-fn deploy_meta_opt_hooks() -> Result<String, Box<dyn std::error::Error>> {
-    let home = PathBuf::from(runtime::home_dir());
-    let cache_dir = runtime::extraction_report()
-        .and_then(|r| r.used_dir.clone())
-        .ok_or_else(|| {
-            "bundled helper cache unavailable; cannot deploy meta_opt hooks".to_string()
-        })?;
-    deploy_meta_opt_hooks_to(&home, &cache_dir)
-}
-
 /// v0.4.13 meta_opt hook scripts that get deployed from the cache to
 /// `~/.claude/hooks/`. Tuple order: (cache-relative path, destination basename).
 ///
@@ -3526,6 +3540,7 @@ fn deploy_meta_opt_hooks() -> Result<String, Box<dyn std::error::Error>> {
 /// own `log_event.sh` / `check_ready.sh` in `~/.claude/hooks/`. ARIS-owned
 /// files are visibly ours, impossible to collide with a hand-rolled hook,
 /// and safe to overwrite on every `aris init` since only we put them there.
+#[cfg(test)]
 const META_OPT_HOOK_SCRIPTS: &[(&str, &str)] = &[
     ("tools/meta_opt/log_event.sh", "aris-meta-opt-log-event.sh"),
     (
@@ -3548,6 +3563,7 @@ const META_OPT_HOOK_SCRIPTS: &[(&str, &str)] = &[
 /// 4. Backup the existing settings.json to
 ///    `<home>/.claude/settings.json.bak.<unix-millis>` before overwriting (only
 ///    when there was a previous file).
+#[cfg(test)]
 fn deploy_meta_opt_hooks_to(
     home: &Path,
     cache_dir: &Path,
@@ -3724,6 +3740,7 @@ fn deploy_meta_opt_hooks_to(
 /// the same script already exists (anywhere under `hooks.<event>[*].hooks[*]`),
 /// returns `false` (no-op). Otherwise inserts a new matcher entry and returns
 /// `true`.
+#[cfg(test)]
 fn ensure_hook_entry(
     settings: &mut serde_json::Value,
     event: &str,
@@ -4166,6 +4183,7 @@ fn build_system_prompt(model_id: Option<&str>) -> Result<Vec<String>, Box<dyn st
     runtime::migrate_legacy_knowledge_memory();
     prompt.push(runtime::render_hot_memory_prompt(&workspace)?);
     prompt.push(runtime::render_knowledge_memory_prompt());
+    prompt.push(runtime::render_project_goal_prompt(&workspace));
 
     // ARIS persistent tasks (uses TodoWrite tool, stored as JSON)
     let tasks_path = aris_tasks_path();

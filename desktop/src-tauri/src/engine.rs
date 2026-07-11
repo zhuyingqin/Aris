@@ -21,7 +21,7 @@ use std::{
 };
 
 use aris_commands::{slash_command_specs, SlashCommand};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -193,6 +193,31 @@ impl Drop for ChatBusyGuard<'_> {
         if let Ok(mut running) = self.running_turns.lock() {
             running.remove(&self.session_id);
         }
+    }
+}
+
+/// A Stop request resolves as soon as cancellation is signalled, while the
+/// worker still needs time to preserve its partial session.  A follow-up or
+/// context replacement for that same session must wait for the worker's guard
+/// to drop; otherwise its later session write can overwrite the new context.
+async fn wait_for_cancelled_turn_to_finish(
+    state: &ChatState,
+    session_id: &str,
+) -> Result<(), String> {
+    loop {
+        let cancelled = state
+            .running_turns
+            .lock()
+            .map_err(|_| "chat state poisoned".to_string())?
+            .get(session_id)
+            .cloned();
+        let Some(cancelled) = cancelled else {
+            return Ok(());
+        };
+        if !cancelled.load(Ordering::SeqCst) {
+            return Err("this chat already has a running turn".to_string());
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
 
@@ -1533,6 +1558,8 @@ struct SystemPromptCacheKey {
     texlive: Option<String>,
     hot_memory: String,
     knowledge_memory: String,
+    project_goal: String,
+    instruction_fingerprint: String,
 }
 
 #[derive(Clone)]
@@ -1554,6 +1581,9 @@ fn build_system_prompt_inner(model: &str, full_tool_registry: bool) -> Vec<Strin
     runtime::migrate_legacy_knowledge_memory();
     let hot_memory = runtime::render_hot_memory_prompt(&workspace).unwrap_or_default();
     let knowledge_memory = runtime::render_knowledge_memory_prompt();
+    let project_goal = runtime::render_project_goal_prompt(&workspace);
+    let instruction_fingerprint =
+        runtime::instruction_files_fingerprint(&workspace).unwrap_or_default();
     let key = SystemPromptCacheKey {
         model: model.to_string(),
         full_tool_registry,
@@ -1565,6 +1595,8 @@ fn build_system_prompt_inner(model: &str, full_tool_registry: bool) -> Vec<Strin
             .find_map(|program| crate::env::probe::command_path(program)),
         hot_memory,
         knowledge_memory,
+        project_goal,
+        instruction_fingerprint,
     };
 
     if let Ok(cache) = system_prompt_cache().lock() {
@@ -1617,6 +1649,7 @@ fn build_system_prompt_uncached(key: &SystemPromptCacheKey) -> Vec<String> {
     extra_sections.push(latex_toolchain);
     extra_sections.push(key.hot_memory.clone());
     extra_sections.push(key.knowledge_memory.clone());
+    extra_sections.push(key.project_goal.clone());
     aris_chat::build_common_system_prompt(aris_chat::CommonSystemPromptOptions {
         workspace,
         current_date: key.current_date.clone(),
@@ -2316,6 +2349,43 @@ pub struct ChatModelOptions {
     options: Vec<ChatModelOption>,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatReasoningEffortView {
+    supported: bool,
+    effort: String,
+}
+
+fn model_supports_reasoning_effort(model: &str) -> bool {
+    let model = model.to_ascii_lowercase();
+    model.contains("claude")
+        || model.contains("gpt-5")
+        || model.starts_with("o1")
+        || model.starts_with("o3")
+        || model.starts_with("o4")
+        || model.contains("-o1")
+        || model.contains("-o3")
+        || model.contains("-o4")
+}
+
+#[tauri::command]
+pub fn chat_reasoning_effort_get(model: String) -> ChatReasoningEffortView {
+    ChatReasoningEffortView {
+        supported: model_supports_reasoning_effort(&model),
+        effort: crate::config::reasoning_effort(),
+    }
+}
+
+#[tauri::command]
+pub fn chat_reasoning_effort_set(effort: String) -> Result<ChatReasoningEffortView, String> {
+    crate::config::set_reasoning_effort(&effort)?;
+    let model = config_string("executor_model").unwrap_or_default();
+    Ok(ChatReasoningEffortView {
+        supported: model_supports_reasoning_effort(&model),
+        effort: crate::config::reasoning_effort(),
+    })
+}
+
 /// Models offered by the Chat header dropdown — only executors that have passed
 /// the Settings "Test" (the verified registry), so the dropdown never offers a
 /// model that would fail because its endpoint/key isn't configured. The active
@@ -2563,6 +2633,7 @@ pub struct ChatCommandResult {
     replace_turns: bool,
     open_settings: bool,
     refresh_status: bool,
+    refresh_project_brief: bool,
     /// Authoritative post-command context size in tokens, set by `/compact` so
     /// the frontend ContextRing can drop to the real backend value instead of
     /// the stale visible-transcript estimate. `None` leaves the ring untouched.
@@ -2579,6 +2650,7 @@ impl ChatCommandResult {
             replace_turns: false,
             open_settings: false,
             refresh_status: false,
+            refresh_project_brief: false,
             context_tokens: None,
         }
     }
@@ -2592,6 +2664,7 @@ impl ChatCommandResult {
             replace_turns: false,
             open_settings: false,
             refresh_status: false,
+            refresh_project_brief: false,
             context_tokens: None,
         }
     }
@@ -2605,6 +2678,7 @@ impl ChatCommandResult {
             replace_turns: false,
             open_settings: false,
             refresh_status: false,
+            refresh_project_brief: false,
             context_tokens: None,
         }
     }
@@ -2618,6 +2692,7 @@ impl ChatCommandResult {
             replace_turns: false,
             open_settings: false,
             refresh_status: false,
+            refresh_project_brief: false,
             context_tokens: None,
         }
     }
@@ -2639,6 +2714,13 @@ impl ChatCommandResult {
     fn refresh(message: impl Into<String>) -> Self {
         Self {
             refresh_status: true,
+            ..Self::message(message)
+        }
+    }
+
+    fn project_brief_refresh(message: impl Into<String>) -> Self {
+        Self {
+            refresh_project_brief: true,
             ..Self::message(message)
         }
     }
@@ -2799,6 +2881,9 @@ pub fn chat_run_command(
         SlashCommand::Memory { action, target } => Ok(ChatCommandResult::message(
             handle_memory_command(action.as_deref(), target.as_deref())?,
         )),
+        SlashCommand::Goal { action, objective } => Ok(ChatCommandResult::project_brief_refresh(
+            handle_goal_command(action.as_deref(), objective.as_deref())?,
+        )),
         SlashCommand::Init => Ok(ChatCommandResult::message(init_desktop_repo()?)),
         SlashCommand::Diff => Ok(ChatCommandResult::message(render_diff_report()?)),
         SlashCommand::Version => Ok(ChatCommandResult::message(render_version_report())),
@@ -2939,6 +3024,147 @@ pub async fn chat_suggest_title(user: String, assistant: String) -> Result<Strin
     tauri::async_runtime::spawn_blocking(move || suggest_chat_title(&user, &assistant))
         .await
         .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub fn project_brief_get(project_id: String) -> Result<runtime::ProjectBrief, String> {
+    let workspace = active_project_workspace(&project_id)?;
+    runtime::project_brief(&workspace)
+}
+
+#[tauri::command]
+pub async fn project_goal_infer(
+    project_id: String,
+    session_id: String,
+    user: String,
+    assistant: String,
+) -> Result<runtime::ProjectBrief, String> {
+    validate_session_id(&session_id)?;
+    let workspace = active_project_workspace(&project_id)?;
+    if let Some(existing) = runtime::load_project_goal(&workspace)? {
+        if existing.status != runtime::ProjectGoalStatus::Complete {
+            if existing.status == runtime::ProjectGoalStatus::Active {
+                runtime::update_project_goal_progress(
+                    &workspace,
+                    &fallback_goal_status(&assistant),
+                )?;
+            }
+            return runtime::project_brief(&workspace);
+        }
+    }
+    let fallback_user = user.clone();
+    let fallback_assistant = assistant.clone();
+    let draft = tauri::async_runtime::spawn_blocking(move || infer_project_goal(&user, &assistant))
+        .await
+        .map_err(|error| error.to_string())?
+        .unwrap_or_else(|_| runtime::ProjectGoalDraft {
+            objective: fallback_goal_objective(&fallback_user),
+            success_criteria: Vec::new(),
+            recent_status: fallback_goal_status(&fallback_assistant),
+        });
+    runtime::start_project_goal(&workspace, draft, Some(session_id))?;
+    runtime::project_brief(&workspace)
+}
+
+#[tauri::command]
+pub fn project_goal_progress(
+    project_id: String,
+    recent_status: String,
+) -> Result<runtime::ProjectBrief, String> {
+    let workspace = active_project_workspace(&project_id)?;
+    runtime::update_project_goal_progress(&workspace, &recent_status)?;
+    runtime::project_brief(&workspace)
+}
+
+fn active_project_workspace(project_id: &str) -> Result<PathBuf, String> {
+    if !crate::state::valid_project_id(project_id) {
+        return Err("invalid project id".to_string());
+    }
+    let active = std::env::var("ARIS_DESKTOP_PROJECT_ID").unwrap_or_else(|_| "default".to_string());
+    if active != project_id {
+        return Err(format!(
+            "project `{project_id}` is not active; switch projects before reading its goal"
+        ));
+    }
+    std::env::var("ARIS_WORKSPACE_ROOT")
+        .map(PathBuf::from)
+        .or_else(|_| std::env::current_dir())
+        .map_err(|error| error.to_string())
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GeneratedProjectGoal {
+    objective: String,
+    #[serde(default)]
+    success_criteria: Vec<String>,
+    #[serde(default)]
+    recent_status: String,
+}
+
+fn infer_project_goal(user: &str, assistant: &str) -> Result<runtime::ProjectGoalDraft, String> {
+    crate::config::apply_reviewer_environment(true);
+    let (model, _provider, executor_config) = resolve_executor()?;
+    runtime::clear_interrupt();
+    let system = "Summarize the user's substantive project outcome into durable project-goal state. Return one JSON object only with camelCase fields: objective (one concise outcome, not a topic), successCriteria (2-4 observable checks), and recentStatus (one short sentence describing what the assistant just accomplished or proposed). Use the user's language. Base the objective primarily on the user request. Do not include markdown, reasoning, labels, secrets, temporary paths, or implementation trivia.";
+    let prompt = format!(
+        "User request:\n{}\n\nAssistant response:\n{}\n\nJSON:",
+        truncate_for_prompt(user, 4_000),
+        truncate_for_prompt(assistant, 2_400)
+    );
+    let observer: Box<dyn aris_executor::StreamObserver> = Box::new(SilentStreamObserver);
+    let mut conversation = aris_chat::build_conversation_runtime(
+        Session::new(),
+        executor_config,
+        model,
+        false,
+        Vec::new(),
+        observer,
+        NoToolsExecutor,
+        aris_chat::permission_policy_for_tools(Vec::new(), PermissionMode::ReadOnly),
+        vec![system.to_string()],
+        runtime::RuntimeFeatureConfig::default(),
+        None,
+        None,
+    )?;
+    let summary = conversation
+        .run_turn_message(ConversationMessage::user_text(prompt), None)
+        .map_err(|error| error.to_string())?;
+    let raw = strip_reasoning_markup(&aris_chat::final_assistant_text(&summary));
+    let json =
+        extract_json_object(&raw).ok_or_else(|| "goal summary did not contain JSON".to_string())?;
+    let generated: GeneratedProjectGoal = serde_json::from_str(json)
+        .map_err(|error| format!("invalid goal summary JSON: {error}"))?;
+    Ok(runtime::ProjectGoalDraft {
+        objective: generated.objective,
+        success_criteria: generated.success_criteria,
+        recent_status: generated.recent_status,
+    })
+}
+
+fn extract_json_object(raw: &str) -> Option<&str> {
+    let start = raw.find('{')?;
+    let end = raw.rfind('}')?;
+    (end >= start).then_some(&raw[start..=end])
+}
+
+fn fallback_goal_objective(user: &str) -> String {
+    let cleaned = user.split_whitespace().collect::<Vec<_>>().join(" ");
+    let objective = cleaned.chars().take(320).collect::<String>();
+    if objective.is_empty() {
+        "Advance the current project request to a verifiable outcome.".to_string()
+    } else {
+        objective
+    }
+}
+
+fn fallback_goal_status(assistant: &str) -> String {
+    let cleaned = assistant
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("Goal captured; continue with the next verifiable step.");
+    cleaned.chars().take(260).collect()
 }
 
 fn suggest_chat_title(user: &str, assistant: &str) -> Result<String, String> {
@@ -3159,6 +3385,32 @@ async fn run_literature_chat_turn(
     .await
 }
 
+struct ChatTurnWorkerFailure {
+    message: String,
+    /// The runtime is still alive when `run_turn_message` fails. Preserve its
+    /// session so partial assistant output, tool results, and any compaction
+    /// completed earlier in the turn are not rolled back with the error.
+    session: Option<Session>,
+}
+
+impl From<String> for ChatTurnWorkerFailure {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            session: None,
+        }
+    }
+}
+
+fn emit_chat_error(app: &AppHandle, session_id: &str, message: &str, session_preserved: bool) {
+    let payload = json!({
+        "sessionId": session_id,
+        "message": message,
+        "sessionPreserved": session_preserved,
+    });
+    crate::chat_events::emit_chat_event(app, "chat-error", session_id, "error", payload);
+}
+
 async fn run_chat_turn_with_context(
     app: AppHandle,
     state: &ChatState,
@@ -3170,11 +3422,33 @@ async fn run_chat_turn_with_context(
     full_tool_registry: bool,
 ) -> Result<String, String> {
     validate_session_id(&session_id)?;
+    if let Err(error) = wait_for_cancelled_turn_to_finish(state, &session_id).await {
+        emit_chat_error(&app, &session_id, &error, false);
+        return Err(error);
+    }
     runtime::clear_interrupt();
-    let sessions_dir = chat_sessions_dir_for_project(project_id.as_deref())?;
-    let _session_storage_guard = bind_session_storage_dir(&session_id, sessions_dir.clone())?;
+    let sessions_dir = match chat_sessions_dir_for_project(project_id.as_deref()) {
+        Ok(sessions_dir) => sessions_dir,
+        Err(error) => {
+            emit_chat_error(&app, &session_id, &error, false);
+            return Err(error);
+        }
+    };
+    let _session_storage_guard = match bind_session_storage_dir(&session_id, sessions_dir.clone()) {
+        Ok(guard) => guard,
+        Err(error) => {
+            emit_chat_error(&app, &session_id, &error, false);
+            return Err(error);
+        }
+    };
     let _session_event_guard =
-        crate::chat_events::bind_session_event_dir(&session_id, sessions_dir)?;
+        match crate::chat_events::bind_session_event_dir(&session_id, sessions_dir) {
+            Ok(guard) => guard,
+            Err(error) => {
+                emit_chat_error(&app, &session_id, &error, false);
+                return Err(error);
+            }
+        };
     let cancelled = Arc::new(AtomicBool::new(false));
     {
         let mut running = state
@@ -3205,11 +3479,24 @@ async fn run_chat_turn_with_context(
         session_id: session_id.clone(),
     };
     crate::config::apply_reviewer_environment(true);
-    let (model, provider, executor_config) = resolve_executor_for_model(model_override.as_deref())?;
+    let (model, provider, executor_config) =
+        match resolve_executor_for_model(model_override.as_deref()) {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                emit_chat_error(&app, &session_id, &error, false);
+                return Err(error);
+            }
+        };
     let usage_model = model.clone();
     let usage_provider = provider.clone();
     let usage_server = executor_server_label(&executor_config);
-    let session = get_cached_or_disk_session(&state, &session_id)?;
+    let session = match get_cached_or_disk_session(&state, &session_id) {
+        Ok(session) => session,
+        Err(error) => {
+            emit_chat_error(&app, &session_id, &error, false);
+            return Err(error);
+        }
+    };
     let config_obj = crate::config::load_object();
     let summarizer_model = config_object_string(&config_obj, "summarizer_model");
     let summarizer_config = match resolve_summarizer_config(&config_obj) {
@@ -3219,7 +3506,7 @@ async fn run_chat_turn_with_context(
             None
         }
     };
-    let session = maybe_auto_compact(
+    let session = match maybe_auto_compact(
         &app,
         state,
         &session_id,
@@ -3228,8 +3515,20 @@ async fn run_chat_turn_with_context(
         summarizer_model.clone(),
         summarizer_config.clone(),
         session,
-    )?;
-    let permission_mode = permission_mode_for(&state, &session_id)?;
+    ) {
+        Ok(session) => session,
+        Err(error) => {
+            emit_chat_error(&app, &session_id, &error, false);
+            return Err(error);
+        }
+    };
+    let permission_mode = match permission_mode_for(&state, &session_id) {
+        Ok(permission_mode) => permission_mode,
+        Err(error) => {
+            emit_chat_error(&app, &session_id, &error, false);
+            return Err(error);
+        }
+    };
     let permission_prompts = state.permission_prompts.clone();
     let question_prompts = state.question_prompts.clone();
 
@@ -3337,6 +3636,12 @@ async fn run_chat_turn_with_context(
         ) {
             system_prompt.push(status);
         }
+        // Building a provider runtime can fail before `run_turn_message` gets
+        // a chance to append the user message. Keep a pre-build copy with that
+        // message so a bad API key/model configuration cannot make the next
+        // turn silently lose the user's request.
+        let mut build_failure_session = session.clone();
+        build_failure_session.messages.push(user_message.clone());
         let mut runtime = aris_chat::build_conversation_runtime_with_trace(
             session,
             executor_config,
@@ -3351,25 +3656,28 @@ async fn run_chat_turn_with_context(
             summarizer_model,
             summarizer_config,
             Some(trace_sink),
-        )?;
-        let summary = runtime
-            .run_turn_message(user_message, Some(&mut permission_prompter))
-            .map_err(|e| e.to_string())?;
-        let auto_compaction = summary
-            .auto_compaction
-            .map(|event| event.removed_message_count);
+        )
+        .map_err(|error| ChatTurnWorkerFailure {
+            message: error.to_string(),
+            session: Some(build_failure_session),
+        })?;
+        let summary = match runtime.run_turn_message(user_message, Some(&mut permission_prompter)) {
+            Ok(summary) => summary,
+            Err(error) => {
+                return Err(ChatTurnWorkerFailure {
+                    message: error.to_string(),
+                    session: Some(runtime.into_session()),
+                });
+            }
+        };
+        let auto_compaction = summary.auto_compaction;
         let turn_usages = summary
             .assistant_messages
             .iter()
             .filter_map(|message| message.usage)
             .collect::<Vec<_>>();
         let text = aris_chat::final_assistant_text(&summary);
-        Ok::<(String, Session, Option<usize>, Vec<TokenUsage>), String>((
-            text,
-            runtime.into_session(),
-            auto_compaction,
-            turn_usages,
-        ))
+        Ok((text, runtime.into_session(), auto_compaction, turn_usages))
     })
     .await;
 
@@ -3380,21 +3688,50 @@ async fn run_chat_turn_with_context(
     // which the UI can miss on paths like a network drop that ends the turn
     // without a streamed assistant turn to attach the error to. Emitting an
     // explicit event guarantees the failure is always visible.
-    let outcome = match joined {
+    let outcome: Result<
+        (
+            String,
+            Session,
+            Option<runtime::AutoCompactionEvent>,
+            Vec<TokenUsage>,
+        ),
+        ChatTurnWorkerFailure,
+    > = match joined {
         Ok(inner) => inner,
-        Err(join_error) => Err(join_error.to_string()),
+        Err(join_error) => Err(ChatTurnWorkerFailure {
+            message: join_error.to_string(),
+            session: None,
+        }),
     };
     let (text, updated, auto_compaction, turn_usages): (
         String,
         Session,
-        Option<usize>,
+        Option<runtime::AutoCompactionEvent>,
         Vec<TokenUsage>,
     ) = match outcome {
         Ok(value) => value,
-        Err(message) => {
-            let payload = json!({ "sessionId": &session_id, "message": message });
-            crate::chat_events::emit_chat_event(&app, "chat-error", &session_id, "error", payload);
-            return Err(message);
+        Err(failure) => {
+            let mut session_preserved = false;
+            if let Some(mut failed_session) = failure.session {
+                runtime::strip_trailing_internal_continuation_messages(&mut failed_session);
+                match store_chat_session(state, session_id.clone(), failed_session.clone()) {
+                    Ok(()) => {
+                        session_preserved = true;
+                        crate::chat_events::record_session_snapshot(
+                            &session_id,
+                            "turn_error",
+                            &failed_session,
+                        );
+                    }
+                    Err(store_error) => {
+                        eprintln!(
+                            "SomniQ desktop: failed to preserve session after turn error: {store_error}"
+                        );
+                    }
+                }
+            }
+            emit_chat_error(&app, &session_id, &failure.message, session_preserved);
+            return Err(failure.message);
         }
     };
 
@@ -3404,9 +3741,14 @@ async fn run_chat_turn_with_context(
     // it may include fixed system/tool prompt overhead, cached prompt tokens,
     // and generated output.
     let context_tokens = chat_done_context_tokens(&updated);
-    let auto_compaction_tokens_after = auto_compaction.map(|_| context_tokens);
+    let auto_compaction_tokens_after = auto_compaction.map(|event| event.tokens_after);
+    let auto_compaction_token_estimate_source =
+        auto_compaction.map(|event| event.token_estimate_source.as_str());
     let provider_usage = latest_provider_usage(&turn_usages);
-    store_chat_session(state, session_id.clone(), updated.clone())?;
+    if let Err(error) = store_chat_session(state, session_id.clone(), updated.clone()) {
+        emit_chat_error(&app, &session_id, &error, false);
+        return Err(error);
+    }
     crate::chat_events::record_session_snapshot(&session_id, "turn_done", &updated);
     if let Err(error) = crate::usage_log::append_turn_usage(
         &session_id,
@@ -3429,11 +3771,12 @@ async fn run_chat_turn_with_context(
             "providerUsage": provider_usage,
         }),
     );
-    if let Some(removed_message_count) = auto_compaction {
+    if let Some(compaction) = auto_compaction {
         let payload = json!({
             "sessionId": &session_id,
-            "removedMessageCount": removed_message_count,
-            "tokensAfter": auto_compaction_tokens_after
+            "removedMessageCount": compaction.removed_message_count,
+            "tokensAfter": auto_compaction_tokens_after,
+            "tokensAfterSource": auto_compaction_token_estimate_source,
         });
         crate::chat_events::emit_chat_event(
             &app,
@@ -3579,14 +3922,77 @@ fn chat_context_messages_to_session(messages: Vec<ChatContextMessage>) -> Result
     Ok(session)
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatContextUserMessage {
+    text: String,
+    #[serde(default)]
+    images: Vec<ChatImageInput>,
+}
+
+fn rewind_session_before_unique_user(session: &mut Session, target: &ConversationMessage) -> bool {
+    let mut matches = session
+        .messages
+        .iter()
+        .enumerate()
+        .filter(|(_, candidate)| *candidate == target);
+    let Some((index, _)) = matches.next() else {
+        return false;
+    };
+    if matches.next().is_some() {
+        return false;
+    }
+    session.messages.truncate(index);
+    true
+}
+
+/// Rewind to the authoritative backend session immediately before one unique
+/// user message. This is the lossless path for retry/edit: it retains compacted
+/// summaries and full tool payloads rather than rebuilding them from the UI's
+/// intentionally shortened transcript. Ambiguous or absent messages return
+/// `None` so the caller can use its conservative compatibility fallback.
 #[tauri::command]
-pub fn chat_set_context(
-    state: State<ChatState>,
+pub async fn chat_rewind_to_user_message(
+    state: State<'_, ChatState>,
+    session_id: String,
+    message: ChatContextUserMessage,
+) -> Result<Option<u64>, String> {
+    validate_session_id(&session_id)?;
+    wait_for_cancelled_turn_to_finish(&state, &session_id).await?;
+    let target = user_message_from_request(ChatSendRequest {
+        text: message.text,
+        images: message.images,
+        model: None,
+        project_id: None,
+    })?;
+    let mut current = get_cached_or_disk_session(&state, &session_id)?;
+    if !rewind_session_before_unique_user(&mut current, &target) {
+        return Ok(None);
+    }
+    let tokens = runtime::estimate_session_tokens(&current) as u64;
+    store_chat_session(&state, session_id.clone(), current.clone())?;
+    crate::chat_events::record_event(
+        &session_id,
+        "context_rewind",
+        json!({
+            "sessionId": &session_id,
+            "messageCount": current.messages.len(),
+            "tokens": tokens,
+        }),
+    );
+    crate::chat_events::record_session_snapshot(&session_id, "context_rewind", &current);
+    Ok(Some(tokens))
+}
+
+#[tauri::command]
+pub async fn chat_set_context(
+    state: State<'_, ChatState>,
     session_id: String,
     messages: Vec<ChatContextMessage>,
     mode: Option<String>,
 ) -> Result<u64, String> {
     validate_session_id(&session_id)?;
+    wait_for_cancelled_turn_to_finish(&state, &session_id).await?;
     let mut next = chat_context_messages_to_session(messages)?;
     if mode.as_deref() == Some("append") {
         let mut current = get_cached_or_disk_session(&state, &session_id)?;
@@ -4459,20 +4865,28 @@ fn handle_export_command(
     let event_export_path = export_path.with_extension("events.jsonl");
     let event_line = if crate::chat_events::chat_event_log_exists(session_id) {
         crate::chat_events::export_events_to_path(session_id, &event_export_path)?;
-        format!("\n  Event log        {}", event_export_path.display())
+        format!(
+            "\n  Event log        {}",
+            markdown_inline_code(&event_export_path.display().to_string())
+        )
     } else {
         "\n  Event log        not available for this session yet".to_string()
     };
     let wire_export_path = export_path.with_extension("wire.jsonl");
     let wire_line = if crate::chat_events::chat_wire_log_exists(session_id) {
         crate::chat_events::export_wire_to_path(session_id, &wire_export_path)?;
-        format!("\n  Wire trace       {}", wire_export_path.display())
+        format!(
+            "\n  Wire trace       {}",
+            markdown_inline_code(&wire_export_path.display().to_string())
+        )
     } else {
         "\n  Wire trace       not available for this session yet".to_string()
     };
+    let display_path = markdown_inline_code(&export_path.display().to_string());
+    let export_folder = export_path.parent().unwrap_or(&export_path);
+    let folder_link = markdown_local_link("Open export folder", export_folder);
     Ok(ChatCommandResult::message(format!(
-        "Export\n  Result           wrote transcript\n  File             {}\n  Messages         {}{}{}",
-        export_path.display(),
+        "Export\n  Result           wrote transcript\n  File             {display_path}\n  Folder           {folder_link}\n  Messages         {}{}{}",
         session.messages.len(),
         event_line,
         wire_line
@@ -4485,9 +4899,11 @@ fn handle_export_debug_zip_command(
     requested_path: Option<&str>,
 ) -> Result<ChatCommandResult, String> {
     let export_path = export_debug_zip(session_id, session, requested_path)?;
+    let display_path = markdown_inline_code(&export_path.display().to_string());
+    let export_folder = export_path.parent().unwrap_or(&export_path);
+    let folder_link = markdown_local_link("Open export folder", export_folder);
     Ok(ChatCommandResult::message(format!(
-        "Debug Export\n  Result           wrote bug-report bundle\n  File             {}\n  Messages         {}\n  Includes         transcript, events, wire trace, runtime session, usage log, diagnostics",
-        export_path.display(),
+        "Debug Export\n  Result           wrote bug-report bundle\n  File             {display_path}\n  Folder           {folder_link}\n  Messages         {}\n  Includes         transcript, events, wire trace, runtime session, usage log, diagnostics",
         session.messages.len()
     )))
 }
@@ -4691,6 +5107,34 @@ fn resolve_debug_zip_path(
         "conversation-debug-{}-{millis}.zip",
         session.messages.len()
     )))
+}
+
+fn markdown_inline_code(value: &str) -> String {
+    let longest_ticks = value
+        .split(|ch| ch != '`')
+        .map(str::len)
+        .max()
+        .unwrap_or_default();
+    let fence = "`".repeat(longest_ticks + 1);
+    if value.starts_with('`') || value.ends_with('`') {
+        format!("{fence} {value} {fence}")
+    } else {
+        format!("{fence}{value}{fence}")
+    }
+}
+
+fn markdown_local_link(label: &str, path: &Path) -> String {
+    let normalized = path.display().to_string().replace('\\', "/");
+    let mut href = String::with_capacity(normalized.len());
+    for byte in normalized.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'-' | b'_' | b'.' | b'~') {
+            href.push(char::from(byte));
+        } else {
+            use std::fmt::Write as _;
+            let _ = write!(href, "%{byte:02X}");
+        }
+    }
+    format!("[{label}]({href})")
 }
 
 struct DebugToolOutputArtifact {
@@ -5237,8 +5681,9 @@ fn format_compact_report(result: &CompactionResult) -> String {
     } else {
         let saved = result.tokens_before.saturating_sub(result.tokens_after);
         format!(
-            "Compact\n  Result           compacted\n  Summary source   {}\n  Messages removed {removed}\n  Messages kept    {resulting_messages}\n  Tail preserved   {}\n  Tokens before    {}\n  Tokens after     {}\n  Tokens saved     {saved}",
+            "Compact\n  Result           compacted\n  Summary source   {}\n  Token estimate   {}\n  Messages removed {removed}\n  Messages kept    {resulting_messages}\n  Tail preserved   {}\n  Tokens before    {}\n  Tokens after     {}\n  Tokens saved     {saved}",
             result.summary_source.as_str(),
+            result.token_estimate_source.as_str(),
             result.preserved_message_count,
             result.tokens_before,
             result.tokens_after
@@ -5390,26 +5835,50 @@ fn handle_memory_command(action: Option<&str>, target: Option<&str>) -> Result<S
     }
 }
 
+fn handle_goal_command(action: Option<&str>, objective: Option<&str>) -> Result<String, String> {
+    let workspace = std::env::var("ARIS_WORKSPACE_ROOT")
+        .map(PathBuf::from)
+        .or_else(|_| std::env::current_dir())
+        .map_err(|error| error.to_string())?;
+    let manual_draft = |value: &str| runtime::ProjectGoalDraft {
+        objective: value.to_string(),
+        success_criteria: Vec::new(),
+        recent_status: "Goal captured from /goal; work has not been verified complete yet."
+            .to_string(),
+    };
+    let goal = match action {
+        None | Some("status") | Some("show") => runtime::load_project_goal(&workspace)?,
+        Some("start") => Some(runtime::start_project_goal(
+            &workspace,
+            manual_draft(objective.ok_or_else(|| "Usage: /goal start <objective>".to_string())?),
+            None,
+        )?),
+        Some("replace") => Some(runtime::replace_project_goal(
+            &workspace,
+            manual_draft(objective.ok_or_else(|| "Usage: /goal replace <objective>".to_string())?),
+            None,
+        )?),
+        Some("pause") => Some(runtime::pause_project_goal(&workspace)?),
+        Some("resume") => Some(runtime::resume_project_goal(&workspace)?),
+        Some("complete") => Some(runtime::complete_project_goal(&workspace, objective)?),
+        Some(other) => {
+            return Err(format!(
+                "Unknown /goal action `{other}`. Use start, status, pause, resume, replace, or complete."
+            ));
+        }
+    };
+    Ok(runtime::render_project_goal_report(goal.as_ref()))
+}
+
 fn init_desktop_repo() -> Result<String, String> {
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
-    let claude_dir = cwd.join(".claude");
-    let claude_json = cwd.join(".claude.json");
     let gitignore = cwd.join(".gitignore");
-    let claude_md = cwd.join("CLAUDE.md");
+    let agents_md = cwd.join("AGENTS.md");
     let mut lines = vec![
         "Init".to_string(),
         format!("  Project          {}", cwd.display()),
     ];
 
-    lines.push(format!("  {:<16} {}", ".claude/", ensure_dir(&claude_dir)?));
-    lines.push(format!(
-        "  {:<16} {}",
-        ".claude.json",
-        write_file_if_missing(
-            &claude_json,
-            "{\n  \"permissions\": {\n    \"defaultMode\": \"dontAsk\"\n  }\n}\n",
-        )?
-    ));
     lines.push(format!(
         "  {:<16} {}",
         ".gitignore",
@@ -5417,19 +5886,11 @@ fn init_desktop_repo() -> Result<String, String> {
     ));
     lines.push(format!(
         "  {:<16} {}",
-        "CLAUDE.md",
-        write_file_if_missing(&claude_md, &render_desktop_claude_md(&cwd))?
+        "AGENTS.md",
+        write_file_if_missing(&agents_md, &render_desktop_agents_md(&cwd))?
     ));
     lines.push("  Next step        Review and tailor the generated guidance".to_string());
     Ok(lines.join("\n"))
-}
-
-fn ensure_dir(path: &Path) -> Result<&'static str, String> {
-    if path.is_dir() {
-        return Ok("skipped (already exists)");
-    }
-    fs::create_dir_all(path).map_err(|e| e.to_string())?;
-    Ok("created")
 }
 
 fn write_file_if_missing(path: &Path, content: &str) -> Result<&'static str, String> {
@@ -5442,11 +5903,7 @@ fn write_file_if_missing(path: &Path, content: &str) -> Result<&'static str, Str
 
 fn ensure_gitignore_entries(path: &Path) -> Result<&'static str, String> {
     const COMMENT: &str = "# ARIS-Code local artifacts";
-    const ENTRIES: [&str; 3] = [
-        ".claude/settings.local.json",
-        ".somniq/",
-        ".claude/sessions/",
-    ];
+    const ENTRIES: [&str; 1] = [".somniq/"];
     if !path.exists() {
         let mut lines = vec![COMMENT.to_string()];
         lines.extend(ENTRIES.iter().map(|entry| (*entry).to_string()));
@@ -5473,11 +5930,15 @@ fn ensure_gitignore_entries(path: &Path) -> Result<&'static str, String> {
     Ok("updated")
 }
 
-fn render_desktop_claude_md(cwd: &Path) -> String {
+fn render_desktop_agents_md(cwd: &Path) -> String {
     let lines = vec![
-        "# CLAUDE.md".to_string(),
+        "# Project guidance".to_string(),
         String::new(),
-        "This file provides guidance to SomniQ desktop Chat when working in this isolated workspace.".to_string(),
+        "This `AGENTS.md` is loaded by SomniQ at the start of every conversation in this workspace.".to_string(),
+        String::new(),
+        "## Project mission".to_string(),
+        "- Replace this line with the stable outcome this project exists to achieve.".to_string(),
+        "- Keep the active milestone in project goal state so it can change without rewriting the mission.".to_string(),
         String::new(),
         "## Workspace".to_string(),
         format!("- Desktop workspace: `{}`.", cwd.display()),
@@ -5490,7 +5951,7 @@ fn render_desktop_claude_md(cwd: &Path) -> String {
         String::new(),
         "## Working agreement".to_string(),
         "- Prefer small, reviewable changes and explain meaningful tradeoffs.".to_string(),
-        "- Do not overwrite existing guidance automatically; update it intentionally when workflows change.".to_string(),
+        "- Do not overwrite existing `AGENTS.md` automatically; update it intentionally when workflows change.".to_string(),
         String::new(),
     ];
     lines.join("\n")

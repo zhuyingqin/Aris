@@ -2,8 +2,9 @@ use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
 
 use crate::compact::{
-    assemble_compacted_session, estimate_session_tokens, plan_compaction, summarize_messages,
-    CompactionConfig, CompactionResult, CompactionSummarySource,
+    assemble_compacted_session_with_usage, estimate_session_tokens, plan_compaction,
+    summarize_messages, CompactionConfig, CompactionResult, CompactionSummarySource,
+    CompactionTokenEstimateSource,
 };
 use crate::config::RuntimeFeatureConfig;
 use crate::event_sink::{now_iso8601, EventSink, EventType, NoopEventSink, RuntimeEvent};
@@ -44,7 +45,9 @@ const CONTINUATION_PROMPT_PREFIX: &str =
 /// model to actually respond before giving up. Bounded so a model that is
 /// genuinely done — or repeatedly filtered — does not loop forever.
 const MAX_BLANK_RESPONSE_CONTINUATIONS: usize = 2;
-const BLANK_RESPONSE_PROMPT_PREFIX: &str = "Your previous response contained no visible text";
+const BLANK_RESPONSE_PROMPT_PREFIX: &str = "Your latest assistant message is empty";
+const LEGACY_BLANK_RESPONSE_PROMPT_PREFIX: &str =
+    "Your previous response contained no visible text";
 /// Shown as the assistant's reply when, after retries, the model still
 /// produced nothing visible. Guarantees the turn returns non-empty text
 /// instead of finishing silently with an empty bubble.
@@ -257,6 +260,8 @@ pub fn assistant_text_from_turn_summary(summary: &TurnSummary) -> String {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AutoCompactionEvent {
     pub removed_message_count: usize,
+    pub tokens_after: usize,
+    pub token_estimate_source: CompactionTokenEstimateSource,
 }
 
 pub struct ConversationRuntime<C, T> {
@@ -504,7 +509,10 @@ where
                 // bubble with no error, nudge the model to respond; only after
                 // repeated failure do we stop, and even then with a visible
                 // explanation so the turn is never silent.
-                if !assistant_messages.iter().any(message_has_visible_output) {
+                if assistant_messages
+                    .last()
+                    .is_none_or(|message| !message_has_visible_output(message))
+                {
                     blank_response_continuations += 1;
                     if blank_response_continuations > MAX_BLANK_RESPONSE_CONTINUATIONS {
                         let placeholder =
@@ -716,19 +724,28 @@ where
                 tokens_before: tokens,
                 tokens_after: tokens,
                 summary_source: CompactionSummarySource::Skipped,
+                summary_output_tokens: None,
+                token_estimate_source: CompactionTokenEstimateSource::Heuristic,
             };
         };
-        let (summary, summary_source) = if let Some(summary) =
+        let (summary, summary_source, summary_output_tokens) = if let Some((summary, usage)) =
             self.llm_summarize(&plan.removed, config.instruction.as_deref())
         {
-            (summary, CompactionSummarySource::Llm)
+            (summary, CompactionSummarySource::Llm, usage)
         } else {
             (
                 summarize_messages(&plan.removed),
                 CompactionSummarySource::Fallback,
+                None,
             )
         };
-        let result = assemble_compacted_session(&self.session, summary, summary_source, &plan);
+        let result = assemble_compacted_session_with_usage(
+            &self.session,
+            summary,
+            summary_source,
+            summary_output_tokens,
+            &plan,
+        );
         self.session = result.compacted_session.clone();
         self.api_client
             .on_session_compacted(result.removed_message_count);
@@ -863,6 +880,8 @@ where
         if estimate_session_tokens(&self.session) < before {
             Some(AutoCompactionEvent {
                 removed_message_count: 0,
+                tokens_after: estimate_session_tokens(&self.session),
+                token_estimate_source: CompactionTokenEstimateSource::Heuristic,
             })
         } else {
             None
@@ -882,6 +901,8 @@ where
         }
         Some(AutoCompactionEvent {
             removed_message_count,
+            tokens_after: result.tokens_after,
+            token_estimate_source: result.token_estimate_source,
         })
     }
 
@@ -894,20 +915,36 @@ where
         &mut self,
         removed: &[ConversationMessage],
         instruction: Option<&str>,
-    ) -> Option<String> {
+    ) -> Option<(String, Option<u32>)> {
         let summarizer = self.summarizer.as_mut()?;
         let request = build_summary_request(removed, instruction);
-        let events = summarizer.stream(request).ok()?;
-        let text = collect_assistant_text(&events);
-        let trimmed = text.trim();
-        if trimmed.is_empty() {
-            return None;
+        // Compaction is best-effort, but a single transient gateway failure
+        // should not immediately fall back to the bulky audit summary. Retry
+        // once with the same bounded request; the runtime still falls back
+        // safely if both attempts fail or return empty content.
+        for _attempt in 0..2 {
+            let Ok(events) = summarizer.stream(request.clone()) else {
+                continue;
+            };
+            let summary_output_tokens = events.iter().find_map(|event| match event {
+                AssistantEvent::Usage(usage) if usage.output_tokens > 0 => {
+                    Some(usage.output_tokens)
+                }
+                _ => None,
+            });
+            let text = collect_assistant_text(&events);
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let summary = if trimmed.contains("<summary>") {
+                trimmed.to_string()
+            } else {
+                format!("<summary>\n{trimmed}\n</summary>")
+            };
+            return Some((summary, summary_output_tokens));
         }
-        if trimmed.contains("<summary>") {
-            Some(trimmed.to_string())
-        } else {
-            Some(format!("<summary>\n{trimmed}\n</summary>"))
-        }
+        None
     }
 }
 
@@ -920,7 +957,9 @@ The summary must preserve the information needed to continue development after e
 Prefer concrete paths, commands, errors, decisions, constraints, and current task state over generic narration.
 Do not invent details. If something is unknown, omit it.
 If the transcript contains a previous context-compaction continuation or summary, merge its useful Current Focus, Active Issues, Code State, Commands & Test Results, User Intent, and Important Context forward into the new summary. Do not treat the wrapper text itself as a user request.
-Ignore Aris-generated continuation prompts such as "Continue the unfinished task..." or "Your previous response contained no visible text" when identifying the user's active goal.
+Ignore Aris-generated continuation prompts such as "Continue the unfinished task..." or "Your latest assistant message is empty" when identifying the user's active goal.
+If a custom compaction instruction is supplied, prioritize it above the default compression priorities while still preserving the active task state and safety constraints.
+If the transcript contains a TodoWrite result, preserve its latest structured task statuses and unfinished items.
 
 Inside <summary>, use this exact structure:
 
@@ -937,6 +976,12 @@ Inside <summary>, use this exact structure:
 
 ## Active Issues
 - [Issue]: [Status and next steps.]
+
+## Todo State
+- [Latest structured task status, if available.]
+
+## Forward Plan
+- [Concrete next step, settled decision, or foreseeable obstacle.]
 
 ## Code State
 ### [Critical file name]
@@ -1128,7 +1173,15 @@ fn build_assistant_message(
         ));
     }
     if blocks.is_empty() {
-        return Err(RuntimeError::new("assistant stream produced no content"));
+        // Some providers/proxies finish a filtered or otherwise empty answer
+        // with only a stop reason (`end_turn`, `stop`, or no reason at all)
+        // and `message_stop`. Treat that as a blank answer so the conversation
+        // loop can issue its bounded continuation prompt. Returning an error
+        // here bypasses the blank-response guard and makes the desktop turn
+        // appear to stop after compaction.
+        blocks.push(ContentBlock::Text {
+            text: String::new(),
+        });
     }
     if assistant_output_looks_degenerate(&blocks) {
         return Err(RuntimeError::new(
@@ -1163,21 +1216,18 @@ fn continuation_prompt(reason: &str) -> String {
 
 fn blank_response_continuation_prompt() -> String {
     format!(
-        "{BLANK_RESPONSE_PROMPT_PREFIX}. If the task is already complete, state the result or a brief confirmation. Otherwise continue the work now. Do not reply with an empty or whitespace-only message."
+        "{BLANK_RESPONSE_PROMPT_PREFIX}. If this followed tool results, provide only the missing user-facing conclusion; do not repeat earlier visible answer text. If the task is already complete, state the result or a brief confirmation. Otherwise continue the work now. Do not reply with an empty or whitespace-only message."
     )
 }
 
-/// Whether a single assistant message carries anything the user can see: real
-/// (non-whitespace) text or thinking, or any tool/image activity. Used to
-/// detect a turn that produced nothing at all so the loop can drive a
-/// continuation instead of finishing silently.
+/// Whether a terminal assistant message carries visible answer content.
+/// ToolUse/ToolResult blocks deliberately do not count as an answer.
 fn message_has_visible_output(message: &ConversationMessage) -> bool {
     message.blocks.iter().any(|block| match block {
         ContentBlock::Text { text } => !text.trim().is_empty(),
         ContentBlock::Thinking { thinking, .. } => !thinking.trim().is_empty(),
-        ContentBlock::ToolUse { .. }
-        | ContentBlock::ToolResult { .. }
-        | ContentBlock::Image { .. } => true,
+        ContentBlock::Image { .. } => true,
+        ContentBlock::ToolUse { .. } | ContentBlock::ToolResult { .. } => false,
     })
 }
 
@@ -1190,6 +1240,8 @@ fn merge_auto_compaction_event(
             existing.removed_message_count = existing
                 .removed_message_count
                 .saturating_add(event.removed_message_count);
+            existing.tokens_after = event.tokens_after;
+            existing.token_estimate_source = event.token_estimate_source;
         }
         None => *target = Some(event),
     }
@@ -1211,11 +1263,18 @@ fn is_transient_runtime_error(error: &RuntimeError) -> bool {
         || lower.contains("temporarily unavailable")
         || lower.contains("rate limit")
         || lower.contains("too many requests")
-        || lower.contains("429")
-        || lower.contains("500")
-        || lower.contains("502")
-        || lower.contains("503")
-        || lower.contains("504")
+        || contains_http_status(&lower, 429)
+        || contains_http_status(&lower, 500)
+        || contains_http_status(&lower, 502)
+        || contains_http_status(&lower, 503)
+        || contains_http_status(&lower, 504)
+}
+
+fn contains_http_status(message: &str, status: u16) -> bool {
+    let status = status.to_string();
+    message
+        .split(|character: char| !character.is_ascii_digit())
+        .any(|token| token == status)
 }
 
 fn active_turn_message_count(session: &Session) -> usize {
@@ -1237,8 +1296,23 @@ fn is_internal_continuation_message(message: &ConversationMessage) -> bool {
             ContentBlock::Text { text }
                 if text.starts_with(CONTINUATION_PROMPT_PREFIX)
                     || text.starts_with(BLANK_RESPONSE_PROMPT_PREFIX)
+                    || text.starts_with(LEGACY_BLANK_RESPONSE_PROMPT_PREFIX)
         )
     })
+}
+
+/// Removes retry-only prompts that were appended by the runtime after a
+/// partial or empty response. They are useful only while recovering the
+/// current request; persisting one after a later failure can make the next
+/// real user message look like a continuation of stale work.
+pub fn strip_trailing_internal_continuation_messages(session: &mut Session) {
+    while session
+        .messages
+        .last()
+        .is_some_and(is_internal_continuation_message)
+    {
+        session.messages.pop();
+    }
 }
 
 fn bound_incoming_user_message(message: &mut ConversationMessage) {

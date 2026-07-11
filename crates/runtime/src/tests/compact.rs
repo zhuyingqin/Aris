@@ -2,7 +2,7 @@ use super::{
     assemble_compacted_session, collect_key_files, estimate_session_tokens, format_compact_summary,
     get_compact_continuation_message, infer_latest_user_request, infer_pending_work,
     plan_compaction, summarize_messages, CompactionConfig, CompactionResult,
-    CompactionSummarySource,
+    CompactionSummarySource, CompactionTokenEstimateSource,
 };
 use crate::session::{ContentBlock, ConversationMessage, MessageRole, Session};
 
@@ -17,6 +17,8 @@ fn compact_session_for_test(session: &Session, config: CompactionConfig) -> Comp
             tokens_before: estimate_session_tokens(session),
             tokens_after: estimate_session_tokens(session),
             summary_source: CompactionSummarySource::Skipped,
+            summary_output_tokens: None,
+            token_estimate_source: CompactionTokenEstimateSource::Heuristic,
         },
         Some(plan) => {
             let summary = summarize_messages(&plan.removed);
@@ -29,6 +31,54 @@ fn compact_session_for_test(session: &Session, config: CompactionConfig) -> Comp
 fn formats_compact_summary_like_upstream() {
     let summary = "<analysis>scratch</analysis>\n<summary>Kept work</summary>";
     assert_eq!(format_compact_summary(summary), "Summary:\nKept work");
+}
+
+#[test]
+fn manual_compaction_keeps_a_single_completed_turn_intact() {
+    let session = Session {
+        version: 1,
+        messages: vec![
+            ConversationMessage::user_text("implement the requested change"),
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "implemented and verified".to_string(),
+            }]),
+        ],
+        compactions: Vec::new(),
+    };
+
+    let result = compact_session_for_test(&session, CompactionConfig::manual(None));
+
+    assert_eq!(result.removed_message_count, 0);
+    assert_eq!(result.compacted_session.messages, session.messages);
+}
+
+#[test]
+fn fallback_summary_carries_latest_todowrite_state_and_forward_plan() {
+    let session = Session {
+        version: 1,
+        messages: vec![
+            ConversationMessage::user_text("finish the migration and run tests"),
+            ConversationMessage::tool_result(
+                "todo-1",
+                "TodoWrite",
+                r#"{"oldTodos":[],"newTodos":[{"content":"Run migration tests","activeForm":"Running migration tests","status":"in_progress"},{"content":"Update the release notes","activeForm":"Updating release notes","status":"pending"}]}"#,
+                false,
+            ),
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "Next: run the migration tests, then update the release notes.".to_string(),
+            }]),
+            ConversationMessage::user_text("continue"),
+        ],
+        compactions: Vec::new(),
+    };
+
+    let summary = summarize_messages(&session.messages);
+
+    assert!(summary.contains("## Todo State"));
+    assert!(summary.contains("[in_progress] Run migration tests"));
+    assert!(summary.contains("[pending] Update the release notes"));
+    assert!(summary.contains("## Forward Plan"));
+    assert!(summary.contains("Next: run the migration tests"));
 }
 
 #[test]
@@ -284,7 +334,7 @@ fn latest_user_request_ignores_internal_resume_messages() {
             "Continue the unfinished task from the exact point where the previous response stopped (max_tokens).",
         ),
         ConversationMessage::user_text(
-            "Your previous response contained no visible text. Otherwise continue the work now.",
+            "Your latest assistant message is empty. Otherwise continue the work now.",
         ),
         ConversationMessage::user_text(prior),
     ]);

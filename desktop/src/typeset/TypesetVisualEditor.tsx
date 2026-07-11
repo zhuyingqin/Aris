@@ -1,11 +1,14 @@
 import { useEffect, useRef } from "react";
-import { Compartment, EditorState, Prec } from "@codemirror/state";
-import { EditorView, keymap, drawSelection, dropCursor, lineNumbers } from "@codemirror/view";
-import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
+import { Compartment, Prec } from "@codemirror/state";
+import { EditorView, keymap } from "@codemirror/view";
+import { createSharedEditorView } from "../editor/editorView";
+import type { SharedEditorHandle } from "../editor/editorTypes";
 import {
+  onForwardSearch as onForwardSearchFacet,
   onOpenCodeRange as onOpenCodeRangeFacet,
   visualBlockClick,
   visualDecorations,
+  visualForwardSearchClick,
   visualSourcePath,
 } from "./visualDecorations";
 import type { VisualPdfCursor } from "./visualModel";
@@ -107,6 +110,7 @@ export function TypesetVisualEditor({
   onChange,
   onVisibleLineChange,
   onOpenCodeRange,
+  onForwardSearch,
   onViewReady,
 }: {
   path: string | null;
@@ -116,14 +120,19 @@ export function TypesetVisualEditor({
   onOpenCodeAtLine: (line: number) => void;
   onOpenCodeRange: (start: number, end: number) => void;
   onVisibleLineChange?: (line: number) => void;
+  // Double-click forward-search: jump the compiled PDF preview to this
+  // source line/column (see `visualForwardSearchClick` in visualDecorations).
+  onForwardSearch?: (line: number, column: number) => void;
   // Hands the live CodeMirror view up to the host so the toolbar can read/apply
   // the current selection (mirrors `editorRef` for the plain Code-mode textarea).
   onViewReady?: (view: EditorView | null) => void;
 }) {
   const hostRef = useRef<HTMLDivElement | null>(null);
+  const handleRef = useRef<SharedEditorHandle | null>(null);
   const viewRef = useRef<EditorView | null>(null);
   const sourcePathCompartmentRef = useRef(new Compartment());
   const onOpenCodeRangeCompartmentRef = useRef(new Compartment());
+  const onForwardSearchCompartmentRef = useRef(new Compartment());
   // Keep the latest onChange without recreating the editor on every render.
   const onChangeRef = useRef(onChange);
   const onVisibleLineChangeRef = useRef(onVisibleLineChange);
@@ -153,48 +162,51 @@ export function TypesetVisualEditor({
     onVisibleLineChangeRef.current?.(line);
   };
 
-  // Create the editor once; the doc is reconciled from `draft` in a separate
-  // effect so external edits (Code mode, undo/redo, compile) flow in without
-  // tearing down the view or losing the caret.
+  // Create the editor once, via the shared kernel factory (history, selection,
+  // bracket/search/keymap base extensions — see desktop/src/editor/editorState.ts);
+  // the doc is reconciled from `draft` in a separate effect so external edits
+  // (Code mode, undo/redo, compile) flow in without tearing down the view or
+  // losing the caret. `language: "text"` is deliberate: `visualDecorations`
+  // already fully owns rich-text rendering here, so no lezer grammar is loaded
+  // for this surface (avoids the shared syntaxHighlighting tinting raw markup
+  // underneath the decoration layer, which would change today's visual output).
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
-    const view = new EditorView({
-      parent: host,
-      state: EditorState.create({
-        doc: draft,
-        extensions: [
-          history(),
-          drawSelection(),
-          dropCursor(),
-          lineNumbers(),
-          EditorView.lineWrapping,
-          sourcePathCompartmentRef.current.of(visualSourcePath.of(path)),
-          onOpenCodeRangeCompartmentRef.current.of(onOpenCodeRangeFacet.of(onOpenCodeRange)),
-          Prec.high(keymap.of([{ key: "Enter", run: insertLatexListItemOnEnter }])),
-          keymap.of([...defaultKeymap, ...historyKeymap]),
-          visualDecorations,
-          visualBlockClick,
-          visualTheme,
-          EditorView.updateListener.of((update) => {
-            if (update.docChanged) {
-              onChangeRef.current(update.state.doc.toString());
-            }
-            if (update.selectionSet || update.viewportChanged || update.focusChanged) {
-              window.requestAnimationFrame(reportVisibleLine);
-            }
-          }),
-        ],
-      }),
+    const handle = createSharedEditorView(host, {
+      doc: draft,
+      language: "text",
+      surface: "typeset",
+      extensions: [
+        EditorView.lineWrapping,
+        sourcePathCompartmentRef.current.of(visualSourcePath.of(path)),
+        onOpenCodeRangeCompartmentRef.current.of(onOpenCodeRangeFacet.of(onOpenCodeRange)),
+        onForwardSearchCompartmentRef.current.of(onForwardSearchFacet.of(onForwardSearch ?? null)),
+        Prec.high(keymap.of([{ key: "Enter", run: insertLatexListItemOnEnter }])),
+        visualDecorations,
+        visualBlockClick,
+        visualForwardSearchClick,
+        visualTheme,
+        EditorView.updateListener.of((update) => {
+          if (update.docChanged) {
+            onChangeRef.current(update.state.doc.toString());
+          }
+          if (update.selectionSet || update.viewportChanged || update.focusChanged) {
+            window.requestAnimationFrame(reportVisibleLine);
+          }
+        }),
+      ],
     });
-    viewRef.current = view;
+    handleRef.current = handle;
+    viewRef.current = handle.view;
     if (import.meta.env.DEV) {
-      (window as unknown as { __typesetView?: EditorView }).__typesetView = view;
+      (window as unknown as { __typesetView?: EditorView }).__typesetView = handle.view;
     }
-    onViewReadyRef.current?.(view);
+    onViewReadyRef.current?.(handle.view);
     return () => {
       onViewReadyRef.current?.(null);
-      view.destroy();
+      handle.destroy();
+      handleRef.current = null;
       viewRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -217,6 +229,14 @@ export function TypesetVisualEditor({
   }, [onOpenCodeRange]);
 
   useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    view.dispatch({
+      effects: onForwardSearchCompartmentRef.current.reconfigure(onForwardSearchFacet.of(onForwardSearch ?? null)),
+    });
+  }, [onForwardSearch]);
+
+  useEffect(() => {
     const scroll = hostRef.current?.closest<HTMLElement>(".typeset-visual-scroll");
     if (!scroll) return;
     let frame = 0;
@@ -235,15 +255,10 @@ export function TypesetVisualEditor({
 
   // Reconcile external `draft` changes into the document. When the change came
   // from the user typing, `draft` already equals the doc, so this is a no-op.
+  // `setDocument` diffs the common prefix/suffix so an external edit maps the
+  // caret through the *changed* range instead of resetting it (see editorView.ts).
   useEffect(() => {
-    const view = viewRef.current;
-    if (!view) return;
-    const current = view.state.doc.toString();
-    if (current !== draft) {
-      view.dispatch({
-        changes: { from: 0, to: current.length, insert: draft },
-      });
-    }
+    handleRef.current?.setDocument(draft, { addToHistory: false, preserveSelection: true });
   }, [draft]);
 
   useEffect(() => {

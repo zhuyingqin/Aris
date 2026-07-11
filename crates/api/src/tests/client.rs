@@ -294,6 +294,7 @@ fn message_request_stream_helper_sets_stream_true() {
         system: None,
         tools: None,
         tool_choice: None,
+        thinking: None,
         stream: false,
     };
 

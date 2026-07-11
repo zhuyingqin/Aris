@@ -315,6 +315,8 @@ fn compact_report_uses_structured_output() {
         tokens_before: 100,
         tokens_after: 40,
         summary_source: CompactionSummarySource::Llm,
+        summary_output_tokens: Some(24),
+        token_estimate_source: runtime::CompactionTokenEstimateSource::ProviderSummaryUsage,
     });
     assert!(compacted.contains("Compact"));
     assert!(compacted.contains("Result           compacted"));
@@ -329,6 +331,8 @@ fn compact_report_uses_structured_output() {
         tokens_before: 12,
         tokens_after: 12,
         summary_source: CompactionSummarySource::Skipped,
+        summary_output_tokens: None,
+        token_estimate_source: runtime::CompactionTokenEstimateSource::Heuristic,
     });
     assert!(skipped.contains("Result           skipped"));
 }
@@ -538,13 +542,20 @@ fn parses_resume_and_config_slash_commands() {
             target: None
         })
     );
+    assert_eq!(
+        SlashCommand::parse("/goal status"),
+        Some(SlashCommand::Goal {
+            action: Some("status".to_string()),
+            objective: None,
+        })
+    );
     assert_eq!(SlashCommand::parse("/init"), Some(SlashCommand::Init));
 }
 
 #[test]
 fn init_template_mentions_detected_rust_workspace() {
-    let rendered = crate::init::render_init_claude_md(std::path::Path::new("."));
-    assert!(rendered.contains("# CLAUDE.md"));
+    let rendered = crate::init::render_init_agents_md(std::path::Path::new("."));
+    assert!(rendered.contains("# Project guidance"));
     assert!(rendered.contains("cargo clippy --workspace --all-targets -- -D warnings"));
 }
 

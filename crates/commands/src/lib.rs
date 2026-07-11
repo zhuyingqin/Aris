@@ -132,8 +132,14 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
         resume_supported: true,
     },
     SlashCommandSpec {
+        name: "goal",
+        summary: "Inspect or manage the active project goal",
+        argument_hint: Some("[start|status|pause|resume|replace|complete] [objective]"),
+        resume_supported: true,
+    },
+    SlashCommandSpec {
         name: "init",
-        summary: "Create a starter CLAUDE.md for this repo",
+        summary: "Create a starter AGENTS.md for this repo",
         argument_hint: None,
         resume_supported: true,
     },
@@ -278,6 +284,10 @@ pub enum SlashCommand {
         action: Option<String>,
         target: Option<String>,
     },
+    Goal {
+        action: Option<String>,
+        objective: Option<String>,
+    },
     Init,
     Diff,
     Version,
@@ -376,6 +386,14 @@ impl SlashCommand {
                 action: parts.next().map(ToOwned::to_owned),
                 target: parts.next().map(ToOwned::to_owned),
             },
+            "goal" => {
+                let action = parts.next().map(ToOwned::to_owned);
+                let objective = {
+                    let rest = parts.collect::<Vec<_>>().join(" ");
+                    (!rest.is_empty()).then_some(rest)
+                };
+                Self::Goal { action, objective }
+            }
             "init" => Self::Init,
             "diff" => Self::Diff,
             "version" => Self::Version,

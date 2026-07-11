@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { KeyBinding } from "@codemirror/view";
 
 import {
   fileReadText,
@@ -10,6 +11,7 @@ import {
   type FileText,
 } from "../api/tauri";
 import CodeEditor from "./CodeEditor";
+import type { SharedEditorHandle } from "../editor/editorTypes";
 import {
   basename,
   detectExternalFileChange,
@@ -105,7 +107,7 @@ export default function FileEditorPane({
   const [variablesBusy, setVariablesBusy] = useState(false);
   const [reviewBase, setReviewBase] = useState<string | null>(null);
   const [externalChangePending, setExternalChangePending] = useState(false);
-  const editorRef = useRef<HTMLTextAreaElement | null>(null);
+  const editorRef = useRef<SharedEditorHandle | null>(null);
   const draftRef = useRef("");
   const loadedRef = useRef<FileText | null>(null);
   const reviewBaseRef = useRef<string | null>(null);
@@ -304,13 +306,23 @@ export default function FileEditorPane({
     }
   };
 
-  const handleEditorKey = (event: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (!isPython) return;
-    if (event.key === "Enter" && event.shiftKey) {
-      event.preventDefault();
-      void runPython("selection");
-    }
-  };
+  // Stable refs so the keymap (captured once by CodeEditor at mount, see its
+  // "extensions are creation-time only" contract) always calls the *latest*
+  // isPython/runPython instead of closing over the values from first render.
+  const isPythonRef = useRef(isPython);
+  isPythonRef.current = isPython;
+  const runSelectionRef = useRef<() => void>(() => undefined);
+  runSelectionRef.current = () => void runPython("selection");
+  const extraKeymapRef = useRef<KeyBinding[]>([
+    {
+      key: "Shift-Enter",
+      run: () => {
+        if (!isPythonRef.current) return false;
+        runSelectionRef.current();
+        return true;
+      },
+    },
+  ]);
 
   return (
     <div className="lab-file-editor">
@@ -405,12 +417,14 @@ export default function FileEditorPane({
           language={language}
           onChange={setDraft}
           diffLines={reviewDiffLines}
-          onKeyDown={handleEditorKey}
-          inputRef={(node) => {
-            editorRef.current = node;
+          extraKeymap={extraKeymapRef.current}
+          onReady={(handle) => {
+            editorRef.current = handle;
           }}
           placeholder="Start typing..."
           readOnly={saving}
+          wrap={false}
+          dataEditor="file"
         />
       ) : !error ? (
         <div className="lab-empty">Select a text file from Files to open it here.</div>

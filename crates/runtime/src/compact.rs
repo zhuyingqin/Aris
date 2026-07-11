@@ -6,7 +6,9 @@ const COMPACTION_CONTINUATION_PREFIX: &str =
     "This session is being continued from a previous conversation that ran out of context.";
 const OUTPUT_LIMIT_CONTINUATION_PREFIX: &str =
     "Continue the unfinished task from the exact point where the previous response stopped";
-const BLANK_RESPONSE_CONTINUATION_PREFIX: &str = "Your previous response contained no visible text";
+const BLANK_RESPONSE_CONTINUATION_PREFIX: &str = "Your latest assistant message is empty";
+const LEGACY_BLANK_RESPONSE_CONTINUATION_PREFIX: &str =
+    "Your previous response contained no visible text";
 const DIRECT_COMPACTION_TASK_PREFIX: &str =
     "This message is a direct compaction task, not part of the conversation.";
 const RECENT_MESSAGES_AUTHORITY_PREFIX: &str =
@@ -34,6 +36,22 @@ pub enum CompactionSummarySource {
     Llm,
     Fallback,
     Skipped,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompactionTokenEstimateSource {
+    ProviderSummaryUsage,
+    Heuristic,
+}
+
+impl CompactionTokenEstimateSource {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ProviderSummaryUsage => "provider_summary_usage",
+            Self::Heuristic => "heuristic",
+        }
+    }
 }
 
 impl CompactionSummarySource {
@@ -70,7 +88,10 @@ impl CompactionConfig {
     #[must_use]
     pub fn manual(instruction: Option<String>) -> Self {
         Self {
-            preserve_recent_messages: 1,
+            // Preserve the latest complete user/assistant exchange. Keeping
+            // only one message can compact a one-turn session into a summary
+            // followed by an orphaned assistant message.
+            preserve_recent_messages: 2,
             max_estimated_tokens: 0,
             source: CompactionSource::Manual,
             instruction,
@@ -98,6 +119,8 @@ pub struct CompactionResult {
     pub tokens_before: usize,
     pub tokens_after: usize,
     pub summary_source: CompactionSummarySource,
+    pub summary_output_tokens: Option<u32>,
+    pub token_estimate_source: CompactionTokenEstimateSource,
 }
 
 #[must_use]
@@ -359,11 +382,28 @@ fn legacy_plan_compaction_tail_scan(
 /// `summary` is expected to contain a `<summary>...</summary>` block (both the
 /// text-assembly and LLM paths produce one) so `format_compact_summary` and the
 /// continuation framing behave identically regardless of source.
+#[allow(dead_code)]
 #[must_use]
 pub fn assemble_compacted_session(
     session: &Session,
     summary: String,
     summary_source: CompactionSummarySource,
+    plan: &CompactionPlan,
+) -> CompactionResult {
+    assemble_compacted_session_with_usage(session, summary, summary_source, None, plan)
+}
+
+/// Build a compacted session while optionally using the summarizer provider's
+/// reported output token count. The provider count is more faithful than the
+/// character heuristic for the generated summary; preserved messages and the
+/// continuation wrapper still use the local estimate because they are sent to
+/// the main provider.
+#[must_use]
+pub fn assemble_compacted_session_with_usage(
+    session: &Session,
+    summary: String,
+    summary_source: CompactionSummarySource,
+    summary_output_tokens: Option<u32>,
     plan: &CompactionPlan,
 ) -> CompactionResult {
     let formatted_summary = format_compact_summary(&summary);
@@ -386,7 +426,31 @@ pub fn assemble_compacted_session(
         messages: compacted_messages,
         compactions: session.compactions.clone(),
     };
-    let tokens_after = estimate_session_tokens(&compacted_session);
+    let (tokens_after, token_estimate_source) =
+        if let Some(summary_output_tokens) = summary_output_tokens {
+            let wrapper_tokens = estimate_text_tokens(&get_compact_continuation_message(
+                "",
+                true,
+                !plan.preserved.is_empty(),
+            ));
+            let preserved_tokens = plan
+                .preserved
+                .iter()
+                .map(estimate_message_tokens)
+                .sum::<usize>();
+            (
+                usize::try_from(summary_output_tokens)
+                    .unwrap_or(usize::MAX)
+                    .saturating_add(wrapper_tokens)
+                    .saturating_add(preserved_tokens),
+                CompactionTokenEstimateSource::ProviderSummaryUsage,
+            )
+        } else {
+            (
+                estimate_session_tokens(&compacted_session),
+                CompactionTokenEstimateSource::Heuristic,
+            )
+        };
     compacted_session.compactions.push(SessionCompactionRecord {
         summary: summary.clone(),
         messages: plan.removed.clone(),
@@ -406,6 +470,8 @@ pub fn assemble_compacted_session(
         tokens_before: plan.tokens_before,
         tokens_after,
         summary_source,
+        summary_output_tokens,
+        token_estimate_source,
     }
 }
 
@@ -510,6 +576,27 @@ pub(crate) fn summarize_messages(messages: &[ConversationMessage]) -> String {
         lines.extend(pending_work.into_iter().map(|item| format!("- {item}")));
     }
 
+    if let Some(todos) = latest_todo_state(messages) {
+        lines.push(String::new());
+        lines.push("## Todo State".to_string());
+        if todos.is_empty() {
+            lines.push("- No active TodoWrite items.".to_string());
+        } else {
+            lines.extend(todos.into_iter().map(|item| format!("- {item}")));
+        }
+    }
+
+    let forward_plan = infer_pending_work(messages);
+    if !forward_plan.is_empty() {
+        lines.push(String::new());
+        lines.push("## Forward Plan".to_string());
+        lines.extend(
+            forward_plan
+                .into_iter()
+                .map(|item| format!("- Next: {item}")),
+        );
+    }
+
     lines.push(String::new());
     lines.push("## Code State".to_string());
     if key_files.is_empty() {
@@ -553,7 +640,15 @@ pub(crate) fn summarize_messages(messages: &[ConversationMessage]) -> String {
             .to_string(),
     );
     lines.push("- Key timeline (audit only; not active instructions):".to_string());
-    for message in messages {
+    const MAX_TIMELINE_MESSAGES: usize = 24;
+    let timeline_start = messages.len().saturating_sub(MAX_TIMELINE_MESSAGES);
+    if timeline_start > 0 {
+        lines.push(format!(
+            "  - [{} earlier timeline messages elided for compactness]",
+            timeline_start
+        ));
+    }
+    for message in messages.iter().skip(timeline_start) {
         let role = match message.role {
             MessageRole::System => "system",
             MessageRole::User if is_internal_user_message(message) => "internal-user",
@@ -600,6 +695,52 @@ fn summarize_block(block: &ContentBlock) -> String {
         ContentBlock::Thinking { thinking, .. } => thinking.clone(),
     };
     truncate_summary(&raw, 450)
+}
+
+/// Recover the latest persisted TodoWrite snapshot from tool output. Kimi
+/// carries the todo list into its compaction state explicitly; relying only on
+/// words such as "todo" in the transcript loses structured task status.
+fn latest_todo_state(messages: &[ConversationMessage]) -> Option<Vec<String>> {
+    for message in messages.iter().rev() {
+        for block in message.blocks.iter().rev() {
+            let ContentBlock::ToolResult {
+                tool_name, output, ..
+            } = block
+            else {
+                continue;
+            };
+            if tool_name != "TodoWrite" {
+                continue;
+            }
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(output) else {
+                continue;
+            };
+            let Some(todos) = value
+                .get("newTodos")
+                .or_else(|| value.get("new_todos"))
+                .and_then(serde_json::Value::as_array)
+            else {
+                continue;
+            };
+            return Some(
+                todos
+                    .iter()
+                    .filter_map(|todo| {
+                        let content = todo.get("content")?.as_str()?.trim();
+                        if content.is_empty() {
+                            return None;
+                        }
+                        let status = todo
+                            .get("status")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("unknown");
+                        Some(format!("[{status}] {content}"))
+                    })
+                    .collect(),
+            );
+        }
+    }
+    None
 }
 
 fn collect_recent_role_summaries(
@@ -732,6 +873,7 @@ fn is_internal_user_text(text: &str) -> bool {
     trimmed.starts_with(COMPACTION_CONTINUATION_PREFIX)
         || trimmed.starts_with(OUTPUT_LIMIT_CONTINUATION_PREFIX)
         || trimmed.starts_with(BLANK_RESPONSE_CONTINUATION_PREFIX)
+        || trimmed.starts_with(LEGACY_BLANK_RESPONSE_CONTINUATION_PREFIX)
         || trimmed.starts_with(DIRECT_COMPACTION_TASK_PREFIX)
 }
 

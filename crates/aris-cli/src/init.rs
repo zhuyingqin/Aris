@@ -1,19 +1,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const STARTER_CLAUDE_JSON: &str = concat!(
-    "{\n",
-    "  \"permissions\": {\n",
-    "    \"defaultMode\": \"dontAsk\"\n",
-    "  }\n",
-    "}\n",
-);
 const GITIGNORE_COMMENT: &str = "# ARIS-Code local artifacts";
-const GITIGNORE_ENTRIES: [&str; 3] = [
-    ".claude/settings.local.json",
-    ".somniq/",
-    ".claude/sessions/",
-];
+const GITIGNORE_ENTRIES: [&str; 1] = [".somniq/"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InitStatus {
@@ -84,43 +73,23 @@ struct RepoDetection {
 pub(crate) fn initialize_repo(cwd: &Path) -> Result<InitReport, Box<dyn std::error::Error>> {
     let mut artifacts = Vec::new();
 
-    let claude_dir = cwd.join(".claude");
-    artifacts.push(InitArtifact {
-        name: ".claude/",
-        status: ensure_dir(&claude_dir)?,
-    });
-
-    let claude_json = cwd.join(".claude.json");
-    artifacts.push(InitArtifact {
-        name: ".claude.json",
-        status: write_file_if_missing(&claude_json, STARTER_CLAUDE_JSON)?,
-    });
-
     let gitignore = cwd.join(".gitignore");
     artifacts.push(InitArtifact {
         name: ".gitignore",
         status: ensure_gitignore_entries(&gitignore)?,
     });
 
-    let claude_md = cwd.join("CLAUDE.md");
-    let content = render_init_claude_md(cwd);
+    let agents_md = cwd.join("AGENTS.md");
+    let content = render_init_agents_md(cwd);
     artifacts.push(InitArtifact {
-        name: "CLAUDE.md",
-        status: write_file_if_missing(&claude_md, &content)?,
+        name: "AGENTS.md",
+        status: write_file_if_missing(&agents_md, &content)?,
     });
 
     Ok(InitReport {
         project_root: cwd.to_path_buf(),
         artifacts,
     })
-}
-
-fn ensure_dir(path: &Path) -> Result<InitStatus, std::io::Error> {
-    if path.is_dir() {
-        return Ok(InitStatus::Skipped);
-    }
-    fs::create_dir_all(path)?;
-    Ok(InitStatus::Created)
 }
 
 fn write_file_if_missing(path: &Path, content: &str) -> Result<InitStatus, std::io::Error> {
@@ -163,12 +132,16 @@ fn ensure_gitignore_entries(path: &Path) -> Result<InitStatus, std::io::Error> {
     Ok(InitStatus::Updated)
 }
 
-pub(crate) fn render_init_claude_md(cwd: &Path) -> String {
+pub(crate) fn render_init_agents_md(cwd: &Path) -> String {
     let detection = detect_repo(cwd);
     let mut lines = vec![
-        "# CLAUDE.md".to_string(),
+        "# Project guidance".to_string(),
         String::new(),
-        "This file provides guidance to ARIS-Code (Auto Research in Sleep) when working with code in this repository.".to_string(),
+        "This `AGENTS.md` is the durable project contract loaded by SomniQ and other compatible coding agents at the start of every conversation.".to_string(),
+        String::new(),
+        "## Project mission".to_string(),
+        "- Replace this line with the concrete outcome this repository exists to achieve.".to_string(),
+        "- Keep the mission stable; put the current milestone in SomniQ project goal state instead of rewriting this section for every task.".to_string(),
         String::new(),
     ];
 
@@ -213,8 +186,8 @@ pub(crate) fn render_init_claude_md(cwd: &Path) -> String {
 
     lines.push("## Working agreement".to_string());
     lines.push("- Prefer small, reviewable changes and keep generated bootstrap files aligned with actual repo workflows.".to_string());
-    lines.push("- Keep shared defaults in `.claude.json`; reserve `.claude/settings.local.json` for machine-local overrides.".to_string());
-    lines.push("- Do not overwrite existing `CLAUDE.md` content automatically; update it intentionally when repo workflows change.".to_string());
+    lines.push("- Keep active milestones and progress in project goal state; keep detailed history in saved sessions.".to_string());
+    lines.push("- Do not overwrite existing `AGENTS.md` content automatically; update it intentionally when repo workflows change.".to_string());
     lines.push(String::new());
 
     lines.join("\n")

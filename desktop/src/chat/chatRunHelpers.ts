@@ -20,6 +20,7 @@ import type {
 import { makeId, textFromTurn } from "./model";
 
 export const EMPTY_ASSISTANT_RESPONSE = "Model returned an empty response.";
+export const UNEXPECTED_RESPONSE_STOP = "Response stopped unexpectedly before completion.";
 export const IMAGE_UNSUPPORTED_MESSAGE =
   "(Image preview only. Vision input is not supported in desktop Chat yet.)";
 
@@ -139,7 +140,7 @@ export function completedAssistantBlocks(turn: ChatTurn, reply: string): ChatBlo
   return [{ kind: "text", text: EMPTY_ASSISTANT_RESPONSE }];
 }
 
-function isExpectedStopError(message: string): boolean {
+export function isExpectedStopError(message: string): boolean {
   const normalized = message.toLowerCase();
   return [
     "interrupted by user",
@@ -154,7 +155,10 @@ function isExpectedStopError(message: string): boolean {
 
 export function visibleTurnError(error: string, stopped: boolean): string | undefined {
   const message = error.trim();
-  if (!message) return undefined;
+  // An abnormal stop can arrive without an error body (for example, when a
+  // provider closes the stream before sending a terminal event). Keep the
+  // turn visibly failed instead of silently turning it into a stopped card.
+  if (!message) return stopped ? undefined : UNEXPECTED_RESPONSE_STOP;
   if (stopped && isExpectedStopError(message)) return undefined;
   return message;
 }
@@ -230,10 +234,10 @@ export async function contextForRetry(turns: ChatTurn[]) {
     });
   };
   for (const turn of turns) {
-    // Stopped (cleanly cancelled) turns are kept: their partial text and tool
-    // activity is real conversation the model needs to continue coherently.
-    // Only in-flight (streaming) and genuinely failed (error) turns are dropped.
-    if (turn.streaming || turn.error) continue;
+    // Failed/cancelled turns are persisted by the backend too, so their
+    // streamed partial text and completed tool exchange are real context.
+    // Only an actually in-flight turn is unsafe to serialize.
+    if (turn.streaming) continue;
     if (turn.role === "user") {
       const message = await outgoingMessage(textFromTurn(turn), turn.attachments ?? []);
       if (message.text.trim() || (message.images?.length ?? 0) > 0) {
@@ -285,8 +289,6 @@ export function needsBackendContextReset(
   explicitReset = false,
 ): boolean {
   if (explicitReset) return true;
-  if (prefixTurns.some((turn) => turn.stopped)) return true;
-  if (prefixTurns.some((turn) => turn.error)) return true;
   if (currentTurns.length !== prefixTurns.length) return true;
   return prefixTurns.some((turn, index) => currentTurns[index]?.id !== turn.id);
 }

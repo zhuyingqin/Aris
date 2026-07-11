@@ -18,6 +18,7 @@ import { useChatComposer } from "./useChatComposer";
 import { useChatRun } from "./useChatRun";
 import { useChatCommands } from "./useChatCommands";
 import { useChatSessionController } from "./useChatSessionController";
+import ProjectBriefCard, { useProjectBrief } from "./ProjectBriefCard";
 
 // Pure helpers live in `chatRunHelpers`; re-exported here for existing tests
 // that import them from `./Chat`.
@@ -165,6 +166,7 @@ export default function Chat() {
     setContextOverrides: run.setContextOverrides,
   });
   const sessionCtl = useChatSessionController({ removeSession, restoreSession });
+  const projectBrief = useProjectBrief(currentProject?.id);
 
   useEffect(() => {
     if (!sessionCtl.sidebarOpen) return;
@@ -219,7 +221,18 @@ export default function Chat() {
       if (editingTurnId) {
         const index = session.turns.findIndex((turn) => turn.id === editingTurnId);
         const prefix = index >= 0 ? session.turns.slice(0, index) : session.turns;
-        await run.beginRun(session, prefix, composer.input, composer.attachments, true);
+        const editedUser = index >= 0 && session.turns[index]?.role === "user"
+          ? session.turns[index]
+          : undefined;
+        await run.beginRun(
+          session,
+          prefix,
+          composer.input,
+          composer.attachments,
+          true,
+          undefined,
+          editedUser,
+        );
         return;
       }
       await run.beginRun(session, session.turns, composer.input, composer.attachments);
@@ -292,6 +305,7 @@ export default function Chat() {
         onClose={() => sessionCtl.setSidebarOpen(false)}
         onNew={async (projectId) => {
           composer.setEditingTurnId(null);
+          if (tab === "scheduled") setTab("chat");
           if (!projectId || projectId === currentProject?.id) {
             setCurrentId(newSession());
           } else {
@@ -315,6 +329,7 @@ export default function Chat() {
             }
           }
           composer.setEditingTurnId(null);
+          if (tab === "scheduled") setTab("chat");
           setCurrentId(id);
           sessionCtl.setSidebarOpen(false);
         }}
@@ -375,6 +390,19 @@ export default function Chat() {
 
         {tab === "chat" && document.getElementById("app-chat-actions-portal") && createPortal(
           <div className="chat-head-actions" data-tauri-drag-region style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+            {projectBrief.hidden && projectBrief.brief && (
+              <button
+                type="button"
+                className="chat-project-brief-show"
+                onClick={() => projectBrief.setHidden(false)}
+                title={language === "cn" ? "显示项目摘要" : "Show project summary"}
+                aria-label={language === "cn" ? "显示项目摘要" : "Show project summary"}
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M5 4h14v16H5z" /><path d="M8 8h8M8 12h8M8 16h5" />
+                </svg>
+              </button>
+            )}
             {status?.memoryFiles != null && status.memoryFiles > 0 && (
               <MemoryBadge count={status.memoryFiles} />
             )}
@@ -432,6 +460,15 @@ export default function Chat() {
           <ScheduledTasks />
         ) : (
           <>
+        {!projectBrief.hidden && projectBrief.brief && (
+          <ProjectBriefCard
+            brief={projectBrief.brief}
+            language={language}
+            collapsed={projectBrief.collapsed}
+            onCollapsedChange={projectBrief.setCollapsed}
+            onHide={() => projectBrief.setHidden(true)}
+          />
+        )}
         <ChatThread
           key={currentId}
           sessionId={currentId}
@@ -492,6 +529,10 @@ export default function Chat() {
           modelBusy={run.modelBusy}
           canSwitchModel={run.canSwitchModel}
           onModelChange={(model) => void run.changeModel(model)}
+          reasoningSupported={run.reasoning.supported}
+          reasoningEffort={run.reasoning.effort}
+          reasoningBusy={run.reasoningBusy}
+          onReasoningEffortChange={(effort) => void run.changeReasoningEffort(effort)}
           contextUsed={run.estimatedTokens}
           contextMax={run.contextMax}
           contextStatus={run.currentContextNotice}

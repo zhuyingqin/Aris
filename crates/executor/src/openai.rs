@@ -43,8 +43,7 @@ fn supports_reasoning_effort(model: &str) -> bool {
     word_match(&m, "o1")
         || word_match(&m, "o3")
         || word_match(&m, "o4")
-        || m.contains("gpt-5.5")
-        || m.contains("gpt-5.6")
+        || m.contains("gpt-5")
         || m.contains("reasoner")
         || m.contains("thinking")
 }
@@ -187,7 +186,7 @@ fn supports_reasoning_content_replay(model: &str) -> bool {
 }
 
 /// Effort tier sent alongside reasoning-capable models. Reads
-/// `ARIS_REASONING_EFFORT` and falls back to `xhigh`. Valid values per OpenAI
+/// `ARIS_REASONING_EFFORT` and falls back to `high`. Valid values per OpenAI
 /// reasoning API: `none` / `minimal` / `low` / `medium` / `high` / `xhigh`.
 #[must_use]
 fn reasoning_effort() -> String {
@@ -195,7 +194,7 @@ fn reasoning_effort() -> String {
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "xhigh".to_string())
+        .unwrap_or_else(|| "high".to_string())
 }
 
 /// Number of whole-stream restarts to attempt when chunk read fails (or
@@ -274,10 +273,12 @@ fn stream_eof_action(
 fn token_usage_from_openai_usage(usage: &Value) -> TokenUsage {
     let prompt_tokens = usage
         .get("prompt_tokens")
+        .or_else(|| usage.get("input_tokens"))
         .and_then(|v| v.as_u64())
         .unwrap_or(0) as u32;
     let output_tokens = usage
         .get("completion_tokens")
+        .or_else(|| usage.get("output_tokens"))
         .and_then(|v| v.as_u64())
         .unwrap_or(0) as u32;
     let cached_tokens = usage

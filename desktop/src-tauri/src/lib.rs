@@ -403,6 +403,8 @@ pub fn run() {
             engine::user_prompt_view,
             engine::chat_model_options,
             engine::chat_model_set,
+            engine::chat_reasoning_effort_get,
+            engine::chat_reasoning_effort_set,
             engine::chat_permission_get,
             engine::chat_permission_set,
             engine::chat_permission_respond,
@@ -416,7 +418,11 @@ pub fn run() {
             engine::literature_agent_send_rich,
             engine::studio_agent_send_rich,
             engine::chat_suggest_title,
+            engine::project_brief_get,
+            engine::project_goal_infer,
+            engine::project_goal_progress,
             engine::chat_reset,
+            engine::chat_rewind_to_user_message,
             engine::chat_set_context,
             engine::chat_delete,
             engine::chat_cancel,
@@ -436,6 +442,7 @@ pub fn run() {
             files::file_open,
             files::project_chat_starters,
             typeset::latex_compile,
+            typeset::latex_forward_search,
         ])
         .build(tauri::generate_context!())
         .expect("error while building SomniQ Studio")

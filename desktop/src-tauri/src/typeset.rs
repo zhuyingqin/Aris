@@ -166,6 +166,180 @@ fn latex_compile_blocking(
     })
 }
 
+/// A single SyncTeX match: `pointX`/`pointY` is the exact synchronized point
+/// (for centering the viewport), `box*` is the enclosing typeset box (for
+/// drawing a highlight rectangle) — see `synctex help view`, which documents
+/// these as two related but distinct readings. Both are in PDF points,
+/// origin at the page's top-left corner, same convention `pdfjs-dist`
+/// viewports use, so the frontend only has to multiply by its current zoom.
+#[derive(Debug, Serialize, Clone, Copy)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncTexLocation {
+    page: u32,
+    point_x: f64,
+    point_y: f64,
+    box_left: f64,
+    box_top: f64,
+    box_width: f64,
+    box_height: f64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForwardSearchResult {
+    found: bool,
+    locations: Vec<SyncTexLocation>,
+    stderr: String,
+}
+
+#[tauri::command]
+pub async fn latex_forward_search(
+    source_path: String,
+    pdf_path: String,
+    line: u32,
+    column: Option<u32>,
+) -> Result<ForwardSearchResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        latex_forward_search_blocking(source_path, pdf_path, line, column)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+fn latex_forward_search_blocking(
+    source_path: String,
+    pdf_path: String,
+    line: u32,
+    column: Option<u32>,
+) -> Result<ForwardSearchResult, String> {
+    let (_root, source_path) = crate::files::resolve_workspace_file(&source_path)?;
+    let (_root, pdf_path) = crate::files::resolve_workspace_file(&pdf_path)?;
+    ensure_extension(
+        &source_path,
+        "tex",
+        "latex_forward_search sourcePath must point to a .tex file",
+    )?;
+    ensure_extension(
+        &pdf_path,
+        "pdf",
+        "latex_forward_search pdfPath must point to a .pdf file",
+    )?;
+    if !pdf_path.is_file() {
+        return Err("Compiled PDF not found. Recompile before jumping to the PDF.".to_string());
+    }
+    let pdf_dir = pdf_path
+        .parent()
+        .ok_or_else(|| "pdfPath must include a file name".to_string())?;
+    let target = format!(
+        "{line}:{}:{}",
+        column.unwrap_or(0),
+        tex_input_name(&source_path).to_string_lossy()
+    );
+
+    let mut command = runtime::hidden_command("synctex");
+    command
+        .arg("view")
+        .arg("-i")
+        .arg(&target)
+        .arg("-o")
+        .arg(tex_tool_path(&pdf_path))
+        .current_dir(tex_tool_path(pdf_dir));
+    let output = command.output().map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            "synctex executable not found. It ships with the same TeX Live install as \
+             latexmk/xelatex — make sure it's on PATH."
+                .to_string()
+        } else {
+            format!("Failed to run synctex: {error}")
+        }
+    })?;
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let locations = parse_synctex_view_output(&stdout);
+    Ok(ForwardSearchResult {
+        found: !locations.is_empty(),
+        locations,
+        stderr,
+    })
+}
+
+/// Parses `synctex view` stdout, e.g.:
+/// ```text
+/// SyncTeX result begin
+/// Output:main.pdf
+/// Page:1
+/// x:95.089378
+/// y:263.465210
+/// h:62.362118
+/// v:266.192474
+/// W:470.551361
+/// H:11.718735
+/// before:
+/// offset:-1
+/// middle:
+/// after:
+/// SyncTeX result end
+/// ```
+/// A query can return several result blocks (one per typeset box touching the
+/// line); the first is documented as "in general ... the most accurate" so we
+/// keep them all but the caller picks `locations[0]`.
+fn parse_synctex_view_output(stdout: &str) -> Vec<SyncTexLocation> {
+    let mut locations = Vec::new();
+    let mut page: Option<u32> = None;
+    let mut x: Option<f64> = None;
+    let mut y: Option<f64> = None;
+    let mut h: Option<f64> = None;
+    let mut v: Option<f64> = None;
+    let mut w: Option<f64> = None;
+    let mut tall: Option<f64> = None;
+
+    for raw_line in stdout.lines() {
+        let line = raw_line.trim();
+        if line == "SyncTeX result begin" {
+            page = None;
+            x = None;
+            y = None;
+            h = None;
+            v = None;
+            w = None;
+            tall = None;
+            continue;
+        }
+        if line == "SyncTeX result end" {
+            if let (Some(page), Some(x), Some(y)) = (page, x, y) {
+                let box_width = w.unwrap_or(0.0);
+                let box_height = tall.unwrap_or(0.0);
+                locations.push(SyncTexLocation {
+                    page,
+                    point_x: x,
+                    point_y: y,
+                    box_left: h.unwrap_or(x),
+                    box_top: v.unwrap_or(y) - box_height,
+                    box_width,
+                    box_height,
+                });
+            }
+            continue;
+        }
+        if let Some(value) = line.strip_prefix("Page:") {
+            page = value.trim().parse().ok();
+        } else if let Some(value) = line.strip_prefix("x:") {
+            x = value.trim().parse().ok();
+        } else if let Some(value) = line.strip_prefix("y:") {
+            y = value.trim().parse().ok();
+        } else if let Some(value) = line.strip_prefix("h:") {
+            h = value.trim().parse().ok();
+        } else if let Some(value) = line.strip_prefix("v:") {
+            v = value.trim().parse().ok();
+        } else if let Some(value) = line.strip_prefix("W:") {
+            w = value.trim().parse().ok();
+        } else if let Some(value) = line.strip_prefix("H:") {
+            tall = value.trim().parse().ok();
+        }
+    }
+    locations
+}
+
 fn run_texlive_compile(
     input_path: &Path,
     source_dir: &Path,
@@ -288,6 +462,7 @@ fn run_latexmk(
         .arg("-interaction=nonstopmode")
         .arg("-halt-on-error")
         .arg("-file-line-error")
+        .arg("-synctex=1")
         .arg(format!("-outdir={}", output_dir.display()))
         .arg(tex_input_name(input_path))
         .current_dir(source_dir);
@@ -329,6 +504,7 @@ fn run_single_latex_engine(
         .arg("-interaction=nonstopmode")
         .arg("-halt-on-error")
         .arg("-file-line-error")
+        .arg("-synctex=1")
         .arg(format!("-output-directory={}", output_dir.display()))
         .arg(tex_input_name(input_path))
         .current_dir(source_dir);

@@ -7,7 +7,6 @@ import { isManagedAuthInvalidError, useStore, type Language, type Tab } from "./
 import type { AppUpdateInfo, AppUpdateProgress } from "./types";
 import ErrorBoundary from "./ErrorBoundary";
 import Chat from "./chat/Chat";
-import Lab from "./lab/Lab";
 import LiteratureViewTabs, { type LiteraturePageView } from "./literature/LiteratureViewTabs";
 import Extensions from "./extensions/Extensions";
 import Settings from "./settings/Settings";
@@ -17,16 +16,14 @@ const loadLiterature = () => import("./literature/Literature");
 const loadStudio = () => import("./studio/Studio");
 const loadMail = () => import("./mail/Mail");
 const loadTypeset = () => import("./typeset/Typeset");
+const loadLab = () => import("./lab/Lab");
 
 const Literature = lazy(loadLiterature);
 const Studio = lazy(loadStudio);
 const Mail = lazy(loadMail);
 const Typeset = lazy(loadTypeset);
+const LabPane = lazy(loadLab);
 const ChatPane = memo(Chat);
-// Lab renders every notebook cell/output unvirtualized, so an unmemoized
-// <Lab/> re-renders (and re-diffs) that whole tree on every unrelated App
-// re-render (nav clicks, sidebar resize, etc.), not just tab switches.
-const LabPane = memo(Lab);
 
 type AppShellCopy = {
   appMenu: string[];
@@ -1268,7 +1265,9 @@ export default function App() {
                 resetKey="lab"
                 fallback={(viewError, reset) => <AppViewFallback copy={copy} error={viewError} reset={reset} />}
               >
-                <LabPane />
+                <Suspense fallback={<AppLoadingPane copy={copy} label={TAB_MODULE_LABELS.lab} />}>
+                  <LabPane />
+                </Suspense>
               </ErrorBoundary>
             </div>
           )}

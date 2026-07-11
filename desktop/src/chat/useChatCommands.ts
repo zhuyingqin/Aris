@@ -17,6 +17,7 @@ import { useStore } from "../store";
 import type { ChatAttachment, ChatTurn, DesktopCommandSpec, SkillMeta } from "../types";
 import { CHAT_COPY } from "./i18n";
 import type { ChatSession } from "./types";
+import { notifyProjectBriefUpdated } from "./ProjectBriefCard";
 import {
   assistantTextTurn,
   DISABLED_DESKTOP_COMMANDS,
@@ -36,6 +37,17 @@ type BeginRun = (
   resetContext?: boolean,
   promptOverride?: string | ChatSendRequest,
 ) => Promise<void>;
+
+function debugExportResult(path: string): string {
+  const separator = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+  const folder = separator > 0 ? path.slice(0, separator) : path;
+  const folderHref = folder
+    .replace(/\\/g, "/")
+    .split("/")
+    .map((segment) => encodeURIComponent(segment))
+    .join("/");
+  return `Debug Export\n  Result           wrote bug-report bundle\n  File             \`${path}\`\n  Folder           [Open export folder](${folderHref})\n  Use              attach this zip when reporting stuck, empty, truncated, or mis-restored sessions\n  Includes         transcript, events, wire trace, runtime session, usage log, diagnostics, tool-output artifacts`;
+}
 
 interface UseChatCommandsArgs {
   currentId: string;
@@ -130,6 +142,7 @@ export function useChatCommands({
       if (!result.handled) return false;
       if (result.openSettings) setTab("settings");
       if (result.refreshStatus) refreshStatus(session.model ?? null);
+      if (result.refreshProjectBrief) notifyProjectBriefUpdated();
       if (result.selection) {
         setPendingCommandSelection({ sessionId: session.id, selection: result.selection });
         setEditingTurnId(null);
@@ -239,7 +252,7 @@ export function useChatCommands({
       const path = await chatDebugZipExport(session.id);
       patchTurns(session.id, (turns) => [
         ...turns,
-        assistantTextTurn(`Debug Export\n  Result           wrote bug-report bundle\n  File             ${path}\n  Use              attach this zip when reporting stuck, empty, truncated, or mis-restored sessions\n  Includes         transcript, events, wire trace, runtime session, usage log, diagnostics, tool-output artifacts`),
+        assistantTextTurn(debugExportResult(path)),
       ]);
     } catch (error) {
       const message = String(error);

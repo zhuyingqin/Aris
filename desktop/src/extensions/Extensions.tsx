@@ -138,7 +138,6 @@ export default function Extensions() {
   const currentProject = useStore((state) => state.currentProject);
 
   const [extTab, setExtTab] = useState<ExtTab>("plugins");
-  const [search, setSearch] = useState("");
 
   // MCP state
   const [view, setView] = useState<McpConfigView | null>(null);
@@ -297,19 +296,9 @@ export default function Extensions() {
 
   const showForm = isNew || (selectedProjectServer !== null && draft !== null);
 
-  // ── Search filtering ─────────────────────────────────────────────────────────
-  const query = search.trim().toLowerCase();
-  const matchesQuery = (...fields: (string | null | undefined)[]) =>
-    !query || fields.some((f) => (f ?? "").toLowerCase().includes(query));
-
-  const shownConnected = servers.filter((s) => matchesQuery(s.name, s.source, s.transport));
-  const shownCatalog = MCP_CATALOG.filter((c) => matchesQuery(c.name, c.description, c.id));
-  const shownSkills = useMemo(() => {
-    if (!query) return skills;
-    return skills.filter((s) =>
-      matchesQuery(s.name, s.description, s.argument_hint, s.allowed_tools, s.path),
-    );
-  }, [skills, query]);
+  const shownConnected = servers;
+  const shownCatalog = MCP_CATALOG;
+  const shownSkills = skills;
   const selectedSkillMeta = useMemo(
     () => (selectedSkill ? skills.find((skill) => skill.name === selectedSkill) ?? null : null),
     [selectedSkill, skills],
@@ -346,28 +335,6 @@ export default function Extensions() {
             技能
           </button>
         </div>
-
-        <div className="ext-headline">
-          <h1>{extTab === "plugins" ? "插件" : "技能"}</h1>
-          <p>
-            {extTab === "plugins"
-              ? "在 SomniQ 中接入并管理 MCP 工具"
-              : "浏览并查看当前可用的技能"}
-          </p>
-        </div>
-
-        <div className="ext-search">
-          <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor"
-            strokeWidth="1.6" strokeLinecap="round" aria-hidden="true">
-            <circle cx="7" cy="7" r="4.5" />
-            <path d="M10.5 10.5L14 14" />
-          </svg>
-          <input
-            placeholder="搜索插件和技能"
-            value={search}
-            onChange={(event) => setSearch(event.currentTarget.value)}
-          />
-        </div>
       </header>
 
       <div className="ext-scroll">
@@ -384,9 +351,7 @@ export default function Extensions() {
                   <span className="ext-section-count">{servers.length}</span>
                 </div>
                 {shownConnected.length === 0 ? (
-                  <div className="ext-empty">
-                    {query ? "没有匹配的已连接插件" : "还没有连接任何 MCP 插件"}
-                  </div>
+                  <div className="ext-empty">还没有连接任何 MCP 插件</div>
                 ) : (
                   <div className="ext-connected">
                     {shownConnected.map((server) => (
@@ -454,9 +419,7 @@ export default function Extensions() {
               <span className="ext-section-count">{skills.length}</span>
             </div>
             {shownSkills.length === 0 ? (
-              <div className="ext-empty">
-                {query ? "没有匹配的技能" : "未发现可用技能"}
-              </div>
+              <div className="ext-empty">未发现可用技能</div>
             ) : (
               <div className="ext-skills-layout">
                 <div className="ext-catalog ext-skills-list" role="list">
