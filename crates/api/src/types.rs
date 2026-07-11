@@ -54,8 +54,18 @@ pub struct MessageRequest {
     pub tools: Option<Vec<ToolDefinition>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<ToolChoice>,
+    /// Anthropic extended-thinking configuration. Omitted for ordinary turns.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<ThinkingConfig>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub stream: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThinkingConfig {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub budget_tokens: u32,
 }
 
 impl MessageRequest {

@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type MutableRefObject, type PointerEvent as ReactPointerEvent } from "react";
+import type { KeyBinding } from "@codemirror/view";
 
 import MarkdownContent from "../chat/MarkdownContent";
 import { isTauri, onLabCellOutput } from "../api/tauri";
@@ -23,8 +24,24 @@ import "./Lab.css";
 
 type Mode = "command" | "edit";
 type CellPhase = "idle" | "queued" | "running";
+/** The four Escape/modifier+Enter situations `CellView`'s editor keymap reports upward. */
+type EditorKeyAction = "exit" | "run-advance" | "run-stay" | "run-insert";
 type LabSideTab = "files" | "notebook" | "runtime";
 type LabEditorKind = "notebook" | "file";
+
+type CellActions = {
+  onChange: (index: number, value: string) => void;
+  onBlurCode: (index: number) => void;
+  onSelect: (index: number, mode: Mode) => void;
+  onCommandKey: (event: React.KeyboardEvent, index: number) => void;
+  onEditorKey: (action: EditorKeyAction, index: number) => void;
+  onRun: (index: number) => void;
+  onMoveUp: (index: number) => void;
+  onMoveDown: (index: number) => void;
+  onDuplicate: (index: number) => void;
+  onDelete: (index: number) => void;
+  onChangeType: (index: number, type: "code" | "markdown") => void;
+};
 
 interface LabEditorTab {
   id: string;
@@ -320,22 +337,39 @@ interface CellViewProps {
   diffLines?: CodeDiffLine[];
   disabled: boolean;
   editorLanguage: EditorLanguage;
-  onChange: (index: number, value: string) => void;
-  onBlurCode: (index: number) => void;
-  onSelect: (index: number, mode: Mode) => void;
-  onCommandKey: (event: React.KeyboardEvent, index: number) => void;
-  onEditorKey: (event: React.KeyboardEvent<HTMLTextAreaElement>, index: number) => void;
-  onRun: (index: number) => void;
-  onMoveUp: (index: number) => void;
-  onMoveDown: (index: number) => void;
-  onDuplicate: (index: number) => void;
-  onDelete: (index: number) => void;
-  onChangeType: (index: number, type: "code" | "markdown") => void;
+  actions: MutableRefObject<CellActions>;
 }
 
-function CellView(props: CellViewProps) {
+function areCellPropsEqual(previous: CellViewProps, next: CellViewProps): boolean {
+  return previous.cell === next.cell
+    && previous.index === next.index
+    && previous.total === next.total
+    && previous.selected === next.selected
+    && previous.mode === next.mode
+    && previous.phase === next.phase
+    && previous.elapsedMs === next.elapsedMs
+    && previous.source === next.source
+    && previous.changeStatus === next.changeStatus
+    && previous.diffLines === next.diffLines
+    && previous.disabled === next.disabled
+    && previous.editorLanguage === next.editorLanguage;
+}
+
+const CellView = memo(function CellView(props: CellViewProps) {
   const { cell, index, total, selected, mode, phase, elapsedMs, source, disabled, changeStatus, diffLines } = props;
   const code = !isMarkdown(cell);
+  // CodeMirror captures `extraKeymap` once at mount (see CodeEditor's "extensions
+  // are creation-time only" contract), so the binding bodies read through this
+  // ref rather than closing over `props`/`index` directly — otherwise cell
+  // reordering or a stale `onEditorKey` closure would silently go stale.
+  const editorKeyRef = useRef<(action: EditorKeyAction) => void>(() => undefined);
+  editorKeyRef.current = (action) => props.actions.current.onEditorKey(action, index);
+  const extraKeymapRef = useRef<KeyBinding[]>([
+    { key: "Escape", run: () => { editorKeyRef.current("exit"); return true; } },
+    { key: "Shift-Enter", run: () => { editorKeyRef.current("run-advance"); return true; } },
+    { key: "Ctrl-Enter", run: () => { editorKeyRef.current("run-stay"); return true; } },
+    { key: "Alt-Enter", run: () => { editorKeyRef.current("run-insert"); return true; } },
+  ]);
   const running = phase === "running";
   const queued = phase === "queued";
   const editing = selected && mode === "edit";
@@ -365,9 +399,9 @@ function CellView(props: CellViewProps) {
       data-cell={index}
       tabIndex={0}
       onFocus={(event) => {
-        if (event.target === event.currentTarget) props.onSelect(index, "command");
+        if (event.target === event.currentTarget) props.actions.current.onSelect(index, "command");
       }}
-      onKeyDown={(event) => props.onCommandKey(event, index)}
+      onKeyDown={(event) => props.actions.current.onCommandKey(event, index)}
     >
       <div className={cx("lab-rail", railClass)} aria-hidden="true" />
       <div className="lab-gutter">
@@ -391,26 +425,26 @@ function CellView(props: CellViewProps) {
 
       <div className="lab-cell-body">
         <div className="lab-cell-toolbar" role="toolbar" aria-label="Cell actions">
-          <button className="lab-tool" title="Run (Shift+Enter)" disabled={disabled} onClick={() => props.onRun(index)}>
+          <button className="lab-tool" title="Run (Shift+Enter)" disabled={disabled} onClick={() => props.actions.current.onRun(index)}>
             <IconRun />
           </button>
-          <button className="lab-tool" title="Move up" disabled={index === 0} onClick={() => props.onMoveUp(index)}>
+          <button className="lab-tool" title="Move up" disabled={index === 0} onClick={() => props.actions.current.onMoveUp(index)}>
             <IconUp />
           </button>
-          <button className="lab-tool" title="Move down" disabled={index === total - 1} onClick={() => props.onMoveDown(index)}>
+          <button className="lab-tool" title="Move down" disabled={index === total - 1} onClick={() => props.actions.current.onMoveDown(index)}>
             <IconDown />
           </button>
-          <button className="lab-tool" title="Duplicate" onClick={() => props.onDuplicate(index)}>
+          <button className="lab-tool" title="Duplicate" onClick={() => props.actions.current.onDuplicate(index)}>
             <IconCopy />
           </button>
           <button
             className="lab-tool lab-tool-type"
             title={code ? "Convert to Markdown (m)" : "Convert to Code (y)"}
-            onClick={() => props.onChangeType(index, code ? "markdown" : "code")}
+            onClick={() => props.actions.current.onChangeType(index, code ? "markdown" : "code")}
           >
             {code ? "MD" : "</>"}
           </button>
-          <button className="lab-tool danger" title="Delete (dd)" onClick={() => props.onDelete(index)}>
+          <button className="lab-tool danger" title="Delete (dd)" onClick={() => props.actions.current.onDelete(index)}>
             <IconTrash />
           </button>
         </div>
@@ -418,7 +452,7 @@ function CellView(props: CellViewProps) {
         {showRendered ? (
           <div
             className="lab-md"
-            onDoubleClick={() => props.onSelect(index, "edit")}
+            onDoubleClick={() => props.actions.current.onSelect(index, "edit")}
             title="Double-click to edit"
           >
             {source.trim() ? (
@@ -434,10 +468,10 @@ function CellView(props: CellViewProps) {
             placeholder={code ? "Type code here..." : "Type Markdown here..."}
             dataEditor={index}
             diffLines={diffLines}
-            onChange={(value) => props.onChange(index, value)}
-            onFocus={() => props.onSelect(index, "edit")}
-            onBlur={() => code && props.onBlurCode(index)}
-            onKeyDown={(event) => props.onEditorKey(event, index)}
+            onChange={(value) => props.actions.current.onChange(index, value)}
+            onFocus={() => props.actions.current.onSelect(index, "edit")}
+            onBlur={() => code && props.actions.current.onBlurCode(index)}
+            extraKeymap={extraKeymapRef.current}
           />
         )}
 
@@ -451,7 +485,7 @@ function CellView(props: CellViewProps) {
       </div>
     </div>
   );
-}
+}, areCellPropsEqual);
 
 function InsertBar({ at, onInsert }: { at: number; onInsert: (type: "code" | "markdown", at: number) => void }) {
   return (
@@ -880,16 +914,12 @@ export default function Lab() {
     select(nextCount <= 0 ? null : Math.min(index, nextCount - 1), "command");
   };
 
-  const handleEditorKey = (event: React.KeyboardEvent<HTMLTextAreaElement>, index: number) => {
-    if (event.key === "Escape") {
-      event.preventDefault();
+  const handleEditorKey = (action: EditorKeyAction, index: number) => {
+    if (action === "exit") {
       select(index, "command");
       return;
     }
-    if (event.key === "Enter" && (event.shiftKey || event.ctrlKey || event.altKey)) {
-      event.preventDefault();
-      void runWithShortcut(index, event.shiftKey ? "advance" : event.altKey ? "insert" : "stay");
-    }
+    void runWithShortcut(index, action === "run-advance" ? "advance" : action === "run-insert" ? "insert" : "stay");
   };
 
   const handleCommandKey = (event: React.KeyboardEvent, index: number) => {
@@ -1189,6 +1219,35 @@ export default function Lab() {
     "--lab-side-w": `${sideWidth}px`,
     "--lab-assistant-w": `${assistantWidth}px`,
   } as CSSProperties;
+  // Cell actions live behind one stable ref. This lets memoized cells skip
+  // rerendering when another cell, the kernel status, or the side panels update
+  // while still invoking the newest closures when a user acts on a cell.
+  const cellActionsRef = useRef<CellActions>({
+    onChange: () => undefined,
+    onBlurCode: () => undefined,
+    onSelect: () => undefined,
+    onCommandKey: () => undefined,
+    onEditorKey: () => undefined,
+    onRun: () => undefined,
+    onMoveUp: () => undefined,
+    onMoveDown: () => undefined,
+    onDuplicate: () => undefined,
+    onDelete: () => undefined,
+    onChangeType: () => undefined,
+  });
+  cellActionsRef.current = {
+    onChange: (index, value) => setDrafts((draft) => ({ ...draft, [index]: value })),
+    onBlurCode,
+    onSelect: select,
+    onCommandKey: handleCommandKey,
+    onEditorKey: handleEditorKey,
+    onRun: runSelected,
+    onMoveUp: (index) => void doMoveUp(index),
+    onMoveDown: (index) => void doMoveDown(index),
+    onDuplicate: (index) => void doDuplicate(index),
+    onDelete: (index) => void doDelete(index),
+    onChangeType: (index, type) => void doChangeType(index, type),
+  };
 
   return (
     <div className={cx("lab", resizingPanel && "lab-resizing")} style={labStyle}>
@@ -1245,9 +1304,11 @@ export default function Lab() {
 
         {!sideCollapsed && (
         <aside className="lab-side">
-          <div className="lab-side-title">
-            <span>{sideTitle}</span>
-          </div>
+          {sideTab !== "files" && (
+            <div className="lab-side-title">
+              <span>{sideTitle}</span>
+            </div>
+          )}
           <div className={cx("lab-side-content", sideTab === "files" && "files")}>
             {sideTab === "files" && (
               <LabFiles
@@ -1648,7 +1709,27 @@ export default function Lab() {
           />
         ) : !activePath ? (
           <div className="lab-cells">
-            <div className="lab-empty">Pick a notebook from Explorer or the Notebook panel to start experimenting.</div>
+            <div className="lab-empty-state">
+              <div className="lab-empty-state-mark" aria-hidden="true">&lt;/&gt;</div>
+              <span className="lab-empty-state-kicker">SOMNIQ CODE</span>
+              <h2>Start from a research file</h2>
+              <p>Open a notebook or code file, then let SomniQ help you inspect, run, and improve it.</p>
+              <div className="lab-empty-state-actions">
+                <button type="button" className="lab-empty-state-action primary" onClick={() => handleActivitySelect("notebook")}>
+                  <IconNotebook />
+                  <span>Open notebook</span>
+                </button>
+                <button type="button" className="lab-empty-state-action" onClick={() => handleActivitySelect("files")}>
+                  <IconFiles />
+                  <span>Browse files</span>
+                </button>
+                <button type="button" className="lab-empty-state-action" onClick={() => setAssistantOpen(true)}>
+                  <IconAssistant />
+                  <span>Ask SomniQ</span>
+                </button>
+              </div>
+              <span className="lab-empty-state-hint">Python · Jupyter Notebook · project files</span>
+            </div>
           </div>
         ) : (
           <div
@@ -1730,17 +1811,7 @@ export default function Lab() {
                       diffLines={review?.lineDiffs.get(index)}
                       disabled={busyRunning}
                       editorLanguage={codeLanguage}
-                      onChange={(i, value) => setDrafts((d) => ({ ...d, [i]: value }))}
-                      onBlurCode={onBlurCode}
-                      onSelect={select}
-                      onCommandKey={handleCommandKey}
-                      onEditorKey={handleEditorKey}
-                      onRun={runSelected}
-                      onMoveUp={(i) => void doMoveUp(i)}
-                      onMoveDown={(i) => void doMoveDown(i)}
-                      onDuplicate={(i) => void doDuplicate(i)}
-                      onDelete={(i) => void doDelete(i)}
-                      onChangeType={(i, type) => void doChangeType(i, type)}
+                      actions={cellActionsRef}
                     />
                     <InsertBar at={index + 1} onInsert={(type, at) => void insertAndSelect(type, at, "edit")} />
                   </div>

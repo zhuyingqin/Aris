@@ -88,9 +88,9 @@ pub fn apply_bundle_cache_environment() {
 
 pub fn project_runtime_dir(project_id: &str) -> PathBuf {
     if project_id == "default" {
-        runtime_dir()
+        desktop_runtime_dir()
     } else {
-        runtime_dir().join("projects").join(project_id)
+        desktop_runtime_dir().join("projects").join(project_id)
     }
 }
 
@@ -235,3 +235,7 @@ pub fn sessions_dir() -> PathBuf {
 pub fn config_path() -> PathBuf {
     config_dir().join("config.json")
 }
+
+#[cfg(test)]
+#[path = "tests/state.rs"]
+mod tests;

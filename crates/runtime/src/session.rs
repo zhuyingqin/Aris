@@ -1,10 +1,15 @@
 use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
-use std::fs;
-use std::path::Path;
+use std::fs::{self, OpenOptions};
+use std::io::{BufRead, BufReader, Write};
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::json::{JsonError, JsonValue};
 use crate::usage::TokenUsage;
+use serde_json::{json, Value as SerdeValue};
+
+const SESSION_EVENT_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MessageRole {
@@ -106,32 +111,20 @@ impl Session {
         }
     }
 
-    /// Save session to disk with atomic write (temp + rename) and rotation.
-    /// Files exceeding 256 KB are archived (up to 3 backups).
+    /// Save session as an append-only event stream.
+    ///
+    /// The `<session>.json` file is now a small manifest/projection marker; the
+    /// recoverable source of truth is the sibling `<session>.events.jsonl`.
     pub fn save_to_path(&self, path: impl AsRef<Path>) -> Result<(), SessionError> {
         let path = path.as_ref();
-        let data = self.to_json().render();
-
-        // Ensure parent directory exists
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
 
-        // Rotate if existing file exceeds 256 KB
-        const MAX_SESSION_BYTES: u64 = 256 * 1024;
-        const MAX_ARCHIVES: usize = 3;
-        if path.exists() {
-            if let Ok(meta) = fs::metadata(path) {
-                if meta.len() > MAX_SESSION_BYTES {
-                    rotate_session_file(path, MAX_ARCHIVES);
-                }
-            }
-        }
-
-        // Publish through a same-directory temp file. On Windows this uses
-        // MoveFileExW(REPLACE_EXISTING), avoiding the old remove-then-rename
-        // crash window where a killed process could leave no session file.
-        crate::write_file_atomically(path, data.as_bytes())?;
+        let event_path = session_event_log_path(path);
+        append_canonical_session_events(path, &event_path, self)?;
+        let manifest = session_manifest_json(path, self).render();
+        crate::write_file_atomically(path, manifest.as_bytes())?;
         if crate::session_index::should_index_session_path(path) {
             let _ = crate::session_index::index_session(path, self);
         }
@@ -139,8 +132,21 @@ impl Session {
     }
 
     pub fn load_from_path(path: impl AsRef<Path>) -> Result<Self, SessionError> {
+        let path = path.as_ref();
+        let event_path = session_event_log_path(path);
+        if event_path.exists() {
+            let replayed = replay_canonical_session_events(&event_path)?;
+            if replayed.saw_canonical {
+                return Ok(replayed.session);
+            }
+        }
+
         let contents = fs::read_to_string(path)?;
-        Self::from_json(&JsonValue::parse(&contents)?)
+        let value = JsonValue::parse(&contents)?;
+        if is_session_event_manifest(&value) {
+            return Ok(Session::new());
+        }
+        Self::from_json(&value)
     }
 
     #[must_use]
@@ -588,6 +594,7 @@ fn usize_to_i64(value: usize) -> i64 {
 
 /// Rotate a session file: foo.json → foo.json.1, foo.json.1 → foo.json.2, etc.
 /// Keeps at most `max_archives` backups.
+#[allow(dead_code)]
 fn rotate_session_file(path: &Path, max_archives: usize) {
     // Shift existing archives: .3 → delete, .2 → .3, .1 → .2
     for i in (1..max_archives).rev() {
@@ -602,68 +609,296 @@ fn rotate_session_file(path: &Path, max_archives: usize) {
     let _ = fs::rename(path, &first_archive);
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{ContentBlock, ConversationMessage, MessageRole, Session};
-    use crate::usage::TokenUsage;
-    use std::fs;
-    use std::time::{SystemTime, UNIX_EPOCH};
+fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().try_into().unwrap_or(u64::MAX))
+        .unwrap_or_default()
+}
 
-    #[test]
-    fn persists_and_restores_session_json() {
-        let mut session = Session::new();
-        session.messages.push(ConversationMessage::user_blocks(vec![
-            ContentBlock::Text {
-                text: "hello".to_string(),
-            },
-            ContentBlock::Image {
-                media_type: "image/png".to_string(),
-                data: "ZmFrZQ==".to_string(),
-            },
-        ]));
-        session
+fn session_event_log_path(path: &Path) -> PathBuf {
+    path.with_extension("events.jsonl")
+}
+
+fn session_id_from_path(path: &Path) -> String {
+    path.file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("session")
+        .to_string()
+}
+
+fn session_manifest_json(path: &Path, session: &Session) -> JsonValue {
+    let mut object = BTreeMap::new();
+    object.insert("version".to_string(), JsonValue::Number(2));
+    object.insert(
+        "storage".to_string(),
+        JsonValue::String("event_log".to_string()),
+    );
+    object.insert(
+        "event_log".to_string(),
+        JsonValue::String(
+            session_event_log_path(path)
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("session.events.jsonl")
+                .to_string(),
+        ),
+    );
+    object.insert(
+        "message_count".to_string(),
+        JsonValue::Number(usize_to_i64(session.messages.len())),
+    );
+    object.insert(
+        "compaction_count".to_string(),
+        JsonValue::Number(usize_to_i64(session.compactions.len())),
+    );
+    JsonValue::Object(object)
+}
+
+fn is_session_event_manifest(value: &JsonValue) -> bool {
+    value
+        .as_object()
+        .and_then(|object| object.get("storage"))
+        .and_then(JsonValue::as_str)
+        == Some("event_log")
+}
+
+#[derive(Debug, Clone)]
+struct CanonicalReplay {
+    session: Session,
+    saw_canonical: bool,
+    last_seq: u64,
+}
+
+fn replay_canonical_session_events(path: &Path) -> Result<CanonicalReplay, SessionError> {
+    let file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(CanonicalReplay {
+                session: Session::new(),
+                saw_canonical: false,
+                last_seq: 0,
+            });
+        }
+        Err(error) => return Err(SessionError::Io(error)),
+    };
+
+    let mut session = Session::new();
+    let mut saw_canonical = false;
+    let mut last_seq = 0;
+    for (line_index, line) in BufReader::new(file).lines().enumerate() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let entry: SerdeValue = serde_json::from_str(&line).map_err(|error| {
+            SessionError::Format(format!(
+                "invalid session event at line {}: {error}",
+                line_index + 1
+            ))
+        })?;
+        last_seq = last_seq.max(entry.get("seq").and_then(SerdeValue::as_u64).unwrap_or(0));
+        let kind = entry
+            .get("kind")
+            .and_then(SerdeValue::as_str)
+            .unwrap_or_default();
+        let payload = entry.get("payload").unwrap_or(&SerdeValue::Null);
+        match kind {
+            "session_reset" => {
+                session = Session::new();
+                saw_canonical = true;
+            }
+            "session_message" => {
+                if let Some(message) = payload.get("message") {
+                    session.messages.push(message_from_serde_value(message)?);
+                    saw_canonical = true;
+                }
+            }
+            "session_compaction" => {
+                if let Some(compaction) = payload.get("compaction") {
+                    session
+                        .compactions
+                        .push(compaction_from_serde_value(compaction)?);
+                    saw_canonical = true;
+                }
+            }
+            "session_usage" => {
+                let Some(message_index) = payload
+                    .get("messageIndex")
+                    .and_then(SerdeValue::as_u64)
+                    .and_then(|value| usize::try_from(value).ok())
+                else {
+                    continue;
+                };
+                let Some(usage) = payload.get("usage").and_then(usage_from_serde_value) else {
+                    continue;
+                };
+                if let Some(message) = session.messages.get_mut(message_index) {
+                    message.usage = Some(usage);
+                    saw_canonical = true;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Ok(CanonicalReplay {
+        session,
+        saw_canonical,
+        last_seq,
+    })
+}
+
+fn append_canonical_session_events(
+    session_path: &Path,
+    event_path: &Path,
+    session: &Session,
+) -> Result<(), SessionError> {
+    let replayed = replay_canonical_session_events(event_path)?;
+    let mut events = Vec::new();
+    let append_only = replayed.saw_canonical
+        && has_prefix(&session.messages, &replayed.session.messages)
+        && has_prefix(&session.compactions, &replayed.session.compactions);
+
+    if append_only {
+        for (index, message) in session
             .messages
-            .push(ConversationMessage::assistant_with_usage(
-                vec![
-                    ContentBlock::Text {
-                        text: "thinking".to_string(),
-                    },
-                    ContentBlock::ToolUse {
-                        id: "tool-1".to_string(),
-                        name: "bash".to_string(),
-                        input: "echo hi".to_string(),
-                    },
-                ],
-                Some(TokenUsage {
-                    input_tokens: 10,
-                    output_tokens: 4,
-                    cache_creation_input_tokens: 1,
-                    cache_read_input_tokens: 2,
+            .iter()
+            .enumerate()
+            .skip(replayed.session.messages.len())
+        {
+            events.push((
+                "session_message",
+                json!({
+                    "index": index,
+                    "message": message_to_serde_value(message)?,
                 }),
             ));
-        session.messages.push(ConversationMessage::tool_result(
-            "tool-1", "bash", "hi", false,
+        }
+        for (index, compaction) in session
+            .compactions
+            .iter()
+            .enumerate()
+            .skip(replayed.session.compactions.len())
+        {
+            events.push((
+                "session_compaction",
+                json!({
+                    "index": index,
+                    "compaction": compaction_to_serde_value(compaction)?,
+                }),
+            ));
+        }
+    } else {
+        events.push((
+            "session_reset",
+            json!({
+                "reason": if replayed.saw_canonical { "replace" } else { "initial" },
+            }),
         ));
-
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system time should be after epoch")
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!("runtime-session-{nanos}.json"));
-        session.save_to_path(&path).expect("session should save");
-        let restored = Session::load_from_path(&path).expect("session should load");
-        fs::remove_file(&path).expect("temp file should be removable");
-
-        assert_eq!(restored, session);
-        assert!(matches!(
-            &restored.messages[0].blocks[1],
-            ContentBlock::Image { media_type, data }
-                if media_type == "image/png" && data == "ZmFrZQ=="
-        ));
-        assert_eq!(restored.messages[2].role, MessageRole::Tool);
-        assert_eq!(
-            restored.messages[1].usage.expect("usage").total_tokens(),
-            17
-        );
+        for (index, message) in session.messages.iter().enumerate() {
+            events.push((
+                "session_message",
+                json!({
+                    "index": index,
+                    "message": message_to_serde_value(message)?,
+                }),
+            ));
+        }
+        for (index, compaction) in session.compactions.iter().enumerate() {
+            events.push((
+                "session_compaction",
+                json!({
+                    "index": index,
+                    "compaction": compaction_to_serde_value(compaction)?,
+                }),
+            ));
+        }
     }
+
+    if events.is_empty() {
+        return Ok(());
+    }
+    if let Some(parent) = event_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let mut seq = replayed.last_seq;
+    let session_id = session_id_from_path(session_path);
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(event_path)?;
+    for (kind, payload) in events {
+        seq = seq.saturating_add(1);
+        let entry = json!({
+            "version": SESSION_EVENT_VERSION,
+            "seq": seq,
+            "ts": now_millis(),
+            "sessionId": session_id,
+            "kind": kind,
+            "payload": payload,
+        });
+        serde_json::to_writer(&mut file, &entry).map_err(|error| {
+            SessionError::Format(format!("failed to encode session event: {error}"))
+        })?;
+        file.write_all(b"\n")?;
+    }
+    file.flush()?;
+    Ok(())
 }
+
+fn has_prefix<T: PartialEq>(values: &[T], prefix: &[T]) -> bool {
+    values.len() >= prefix.len() && values.iter().zip(prefix).all(|(left, right)| left == right)
+}
+
+fn message_to_serde_value(message: &ConversationMessage) -> Result<SerdeValue, SessionError> {
+    serde_json::from_str(&message.to_json().render())
+        .map_err(|error| SessionError::Format(format!("failed to encode message: {error}")))
+}
+
+fn message_from_serde_value(value: &SerdeValue) -> Result<ConversationMessage, SessionError> {
+    let raw = serde_json::to_string(value)
+        .map_err(|error| SessionError::Format(format!("failed to decode message: {error}")))?;
+    ConversationMessage::from_json(&JsonValue::parse(&raw)?)
+}
+
+fn compaction_to_serde_value(
+    compaction: &SessionCompactionRecord,
+) -> Result<SerdeValue, SessionError> {
+    serde_json::from_str(&compaction.to_json().render())
+        .map_err(|error| SessionError::Format(format!("failed to encode compaction: {error}")))
+}
+
+fn compaction_from_serde_value(
+    value: &SerdeValue,
+) -> Result<SessionCompactionRecord, SessionError> {
+    let raw = serde_json::to_string(value)
+        .map_err(|error| SessionError::Format(format!("failed to decode compaction: {error}")))?;
+    SessionCompactionRecord::from_json(&JsonValue::parse(&raw)?)
+}
+
+fn usage_from_serde_value(value: &SerdeValue) -> Option<TokenUsage> {
+    let object = value.as_object()?;
+    Some(TokenUsage {
+        input_tokens: serde_u32_field(object, "inputTokens")
+            .or_else(|| serde_u32_field(object, "input_tokens"))?,
+        output_tokens: serde_u32_field(object, "outputTokens")
+            .or_else(|| serde_u32_field(object, "output_tokens"))?,
+        cache_creation_input_tokens: serde_u32_field(object, "cacheCreationInputTokens")
+            .or_else(|| serde_u32_field(object, "cache_creation_input_tokens"))?,
+        cache_read_input_tokens: serde_u32_field(object, "cacheReadInputTokens")
+            .or_else(|| serde_u32_field(object, "cache_read_input_tokens"))?,
+    })
+}
+
+fn serde_u32_field(object: &serde_json::Map<String, SerdeValue>, key: &str) -> Option<u32> {
+    object
+        .get(key)
+        .and_then(SerdeValue::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+}
+
+#[cfg(test)]
+#[path = "tests/session.rs"]
+mod tests;

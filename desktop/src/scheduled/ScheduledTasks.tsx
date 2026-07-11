@@ -384,7 +384,6 @@ function normalizeModelOptions(current: string | undefined, options: ChatModelOp
 export default function ScheduledTasks() {
   const setTab = useStore((s) => s.setTab);
   const setError = useStore((s) => s.setError);
-  const setPendingSessionViewId = useStore((s) => s.setPendingSessionViewId);
   const currentProject = useStore((s) => s.currentProject);
   const projectId = currentProject?.id;
   const [pane, setPane] = useState<Pane>("tasks");
@@ -497,8 +496,9 @@ export default function ScheduledTasks() {
 
   const openBoundSession = (sessionId: string | null | undefined) => {
     if (!sessionId) return;
-    setPendingSessionViewId(sessionId);
-    setTab("sessions");
+    // Session transcripts now live in the main Chat workspace; there is no
+    // separate Sessions page to route through.
+    setTab("chat");
   };
 
   const applyTemplate = (template: TaskTemplate) => {

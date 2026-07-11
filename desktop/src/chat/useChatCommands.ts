@@ -7,6 +7,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   chatCommandSpecs,
+  chatDebugZipExport,
   chatRunCommand,
   isTauri,
   skillsList,
@@ -16,6 +17,7 @@ import { useStore } from "../store";
 import type { ChatAttachment, ChatTurn, DesktopCommandSpec, SkillMeta } from "../types";
 import { CHAT_COPY } from "./i18n";
 import type { ChatSession } from "./types";
+import { notifyProjectBriefUpdated } from "./ProjectBriefCard";
 import {
   assistantTextTurn,
   DISABLED_DESKTOP_COMMANDS,
@@ -36,9 +38,19 @@ type BeginRun = (
   promptOverride?: string | ChatSendRequest,
 ) => Promise<void>;
 
+function debugExportResult(path: string): string {
+  const separator = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+  const folder = separator > 0 ? path.slice(0, separator) : path;
+  const folderHref = folder
+    .replace(/\\/g, "/")
+    .split("/")
+    .map((segment) => encodeURIComponent(segment))
+    .join("/");
+  return `Debug Export\n  Result           wrote bug-report bundle\n  File             \`${path}\`\n  Folder           [Open export folder](${folderHref})\n  Use              attach this zip when reporting stuck, empty, truncated, or mis-restored sessions\n  Includes         transcript, events, wire trace, runtime session, usage log, diagnostics, tool-output artifacts`;
+}
+
 interface UseChatCommandsArgs {
   currentId: string;
-  currentSession: ChatSession | null;
   currentSessionRef: React.MutableRefObject<ChatSession | null>;
   runningSessionIdsRef: React.MutableRefObject<Set<string>>;
   currentChatBusy: boolean;
@@ -54,7 +66,6 @@ interface UseChatCommandsArgs {
 
 export function useChatCommands({
   currentId,
-  currentSession,
   currentSessionRef,
   runningSessionIdsRef,
   currentChatBusy,
@@ -77,6 +88,7 @@ export function useChatCommands({
   const [desktopCommands, setDesktopCommands] = useState<DesktopCommandSpec[]>(FALLBACK_SLASH_COMMANDS);
   const [pendingCommandSelection, setPendingCommandSelection] = useState<PendingCommandSelection | null>(null);
   const [exporting, setExporting] = useState(false);
+  const [debugExporting, setDebugExporting] = useState(false);
   const commandSelectionLock = useRef(false);
 
   useEffect(() => {
@@ -130,6 +142,7 @@ export function useChatCommands({
       if (!result.handled) return false;
       if (result.openSettings) setTab("settings");
       if (result.refreshStatus) refreshStatus(session.model ?? null);
+      if (result.refreshProjectBrief) notifyProjectBriefUpdated();
       if (result.selection) {
         setPendingCommandSelection({ sessionId: session.id, selection: result.selection });
         setEditingTurnId(null);
@@ -224,6 +237,35 @@ export function useChatCommands({
     }
   }, [exporting, patchTurns, refreshStatus, setError, setTab, currentSessionRef, runningSessionIdsRef]);
 
+  const exportDebugZip = useCallback(async () => {
+    const session = currentSessionRef.current;
+    if (!session || exporting || debugExporting || session.turns.length === 0) return;
+    setDebugExporting(true);
+    try {
+      if (!isTauri()) {
+        patchTurns(session.id, (turns) => [
+          ...turns,
+          assistantTextTurn("Debug export is available in the Tauri app."),
+        ]);
+        return;
+      }
+      const path = await chatDebugZipExport(session.id);
+      patchTurns(session.id, (turns) => [
+        ...turns,
+        assistantTextTurn(debugExportResult(path)),
+      ]);
+    } catch (error) {
+      const message = String(error);
+      setError(message);
+      patchTurns(session.id, (turns) => [
+        ...turns,
+        assistantTextTurn(`Debug export failed: ${message}`),
+      ]);
+    } finally {
+      setDebugExporting(false);
+    }
+  }, [debugExporting, exporting, patchTurns, setError, currentSessionRef]);
+
   // One-shot "run this input" hand-off from other views (e.g. Literature).
   const pendingChatRunInput = useStore((state) => state.pendingChatRunInput);
   const setPendingChatRunInput = useStore((state) => state.setPendingChatRunInput);
@@ -247,6 +289,8 @@ export function useChatCommands({
     runSlashCommand,
     selectCommandOption,
     exporting,
+    debugExporting,
     exportCurrentChat,
+    exportDebugZip,
   };
 }

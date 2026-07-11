@@ -1,7 +1,8 @@
 .lab {
   display: flex;
   flex-direction: column;
-  height: 100%;
+  position: absolute;
+  inset: 0;
   overflow: hidden;
   color: var(--text);
   --lab-activity-w: 48px;
@@ -551,7 +552,7 @@
   flex: 1;
   min-width: 0;
   overflow-y: auto;
-  padding: 12px 18px 80px;
+  padding: 14px 20px 80px;
   display: flex;
   flex-direction: column;
   background: var(--bg);
@@ -624,11 +625,11 @@
   position: relative;
   display: grid;
   grid-template-columns: 46px minmax(0, 1fr);
-  gap: 6px;
+  gap: 8px;
   border: 1px solid transparent;
   border-radius: 9px;
   background: var(--bg-1);
-  padding: 9px 10px 9px 6px;
+  padding: 10px 12px 10px 6px;
   transition: border-color 0.12s, box-shadow 0.12s, background 0.12s;
 }
 
@@ -836,7 +837,7 @@
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 7px;
+  gap: 8px;
 }
 
 /* Per-cell hover toolbar */
@@ -867,9 +868,9 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 24px;
-  height: 22px;
-  padding: 0 5px;
+  min-width: 26px;
+  height: 24px;
+  padding: 0 6px;
   background: transparent;
   border: 0;
   border-radius: 5px;
@@ -897,11 +898,9 @@
   font-weight: 600;
 }
 
-/* Code editor */
+/* Code editor (CodeMirror 6, via desktop/src/editor's shared kernel) */
 .lab-editor {
   position: relative;
-  display: grid;
-  grid-template-columns: 38px minmax(0, 1fr);
   border: 1px solid var(--border);
   border-radius: 7px;
   background: var(--bg);
@@ -913,191 +912,93 @@
   border-color: color-mix(in srgb, var(--green) 55%, var(--border));
 }
 
-.lab-editor-lines,
-.lab-editor-pre,
-.lab-editor-input {
-  margin: 0;
-  border: 0;
+.lab-editor .cm-editor {
+  background: transparent;
+  color: var(--code-fg);
   font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   font-size: 12.5px;
   line-height: 1.55;
-  tab-size: 4;
-  white-space: pre-wrap;
-  overflow-wrap: break-word;
-  word-break: normal;
 }
 
-.lab-editor-lines {
-  grid-column: 1;
-  padding: 9px 8px 9px 4px;
-  border-right: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
-  background: color-mix(in srgb, var(--bg-1) 72%, transparent);
-  color: color-mix(in srgb, var(--text-dim) 78%, transparent);
-  text-align: right;
-  user-select: none;
-  pointer-events: none;
-}
-
-.lab-editor-lines span {
-  display: block;
-  min-height: 1.55em;
-}
-
-.lab-editor-code {
-  position: relative;
-  grid-column: 2;
-  min-width: 0;
-  display: grid;
-}
-
-.lab-editor-pre,
-.lab-editor-input,
-.lab-editor-diff-overlay {
-  grid-area: 1 / 1 / 2 / 2;
-  padding: 9px 12px;
-}
-
-.lab-editor-pre {
-  pointer-events: none;
-  user-select: none;
-  min-height: 1.55em;
-}
-
-.lab-editor-diff-overlay {
-  pointer-events: none;
-  z-index: 1;
-  color: transparent;
-  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-  font-size: 12.5px;
-  line-height: 1.55;
-  tab-size: 4;
-  white-space: pre;
-}
-
-.lab-editor-diff-line {
-  display: block;
-  min-height: 1.55em;
-  margin: 0 -12px;
-  padding: 0 12px;
-}
-
-.lab-editor-diff-line.diff-added,
-.lab-editor-lines span.diff-added {
-  background: color-mix(in srgb, var(--green) 16%, transparent);
-}
-
-.lab-editor-lines span.diff-added {
-  color: var(--green);
-  box-shadow: inset 2px 0 0 var(--green);
-}
-
-.lab-editor-diff-line.diff-removed,
-.lab-editor-lines span.diff-removed {
-  background: color-mix(in srgb, var(--red) 13%, transparent);
-}
-
-.lab-editor-lines span.diff-removed {
-  color: var(--red);
-  box-shadow: inset 2px 0 0 var(--red);
-}
-
-.lab-editor-pre code.hljs {
-  display: block;
-  padding: 0;
-  background: transparent;
-  color: var(--text);
-  font: inherit;
-}
-
-.lab-editor-input {
-  position: relative;
-  z-index: 2;
-  resize: none;
-  overflow: hidden;
-  background: transparent;
-  color: transparent;
-  caret-color: var(--accent);
+.lab-editor .cm-editor.cm-focused {
   outline: none;
 }
 
-.lab-editor-input::placeholder {
+.lab-editor .cm-scroller {
+  font-family: inherit;
+  line-height: inherit;
+}
+
+.lab-editor .cm-content {
+  padding: 10px 13px;
+  caret-color: var(--accent);
+}
+
+.lab-editor .cm-gutters {
+  border-right: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+  background: color-mix(in srgb, var(--bg-1) 85%, transparent);
+  color: var(--text-dim);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 12.5px;
+}
+
+.lab-editor .cm-gutterElement {
+  padding: 0 10px 0 6px;
+}
+
+.lab-editor .cm-activeLine {
+  background: color-mix(in srgb, var(--text) 7%, transparent);
+}
+
+.lab-editor .cm-activeLineGutter {
+  background: color-mix(in srgb, var(--text) 9%, transparent);
+  color: var(--text);
+  font-weight: 600;
+}
+
+.lab-editor .cm-selectionBackground {
+  background: color-mix(in srgb, var(--accent) 30%, transparent) !important;
+}
+
+.lab-editor .cm-matchingBracket,
+.lab-editor .cm-nonmatchingBracket {
+  background: color-mix(in srgb, var(--accent) 24%, transparent);
+  outline: 1px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  border-radius: 2px;
+}
+
+.lab-editor .cm-placeholder {
   color: var(--text-dim);
 }
 
-.lab-editor-input::selection {
-  background: color-mix(in srgb, var(--accent) 30%, transparent);
+/* AI-diff review markers (see desktop/src/editor/editorDecorations.ts). */
+.lab-editor .cm-diff-added {
+  background: color-mix(in srgb, var(--green) 16%, transparent);
+  box-shadow: inset 2px 0 0 var(--green);
 }
 
-/* VSCode-style syntax tokens, theme-aware via the --code-* palette (Dark+ in the
-   dark theme, Light+ under [data-theme="light"]). highlight.js is regex-based, so
-   user-defined type names aren't semantically detected the way VSCode does, but
-   keywords, built-in types, functions, strings, numbers and comments all match. */
-.lab-editor .hljs {
-  background: transparent;
-  color: var(--code-fg);
+.lab-editor .cm-diff-removed {
+  background: color-mix(in srgb, var(--red) 13%, transparent);
+  box-shadow: inset 2px 0 0 var(--red);
 }
-/* Keywords and language constants. */
-.lab-editor .hljs-keyword,
-.lab-editor .hljs-literal,
-.lab-editor .hljs-selector-tag,
-.lab-editor .hljs-name {
-  color: var(--code-keyword);
+
+.lab-editor .cm-diff-gutter {
+  width: 5px;
 }
-/* Types, classes, and built-ins. */
-.lab-editor .hljs-built_in,
-.lab-editor .hljs-type,
-.lab-editor .hljs-title.class_,
-.lab-editor .hljs-class .hljs-title,
-.lab-editor .hljs-selector-class,
-.lab-editor .hljs-selector-id {
-  color: var(--code-entity);
+
+.lab-editor .cm-diff-marker {
+  display: block;
+  width: 3px;
+  height: 100%;
+  min-height: 1.35em;
 }
-/* Function and method names. */
-.lab-editor .hljs-title,
-.lab-editor .hljs-title.function_,
-.lab-editor .hljs-section {
-  color: var(--code-func);
+
+.lab-editor .cm-diff-marker-added {
+  background: var(--green);
 }
-/* Strings and regex. */
-.lab-editor .hljs-string,
-.lab-editor .hljs-regexp,
-.lab-editor .hljs-char.escape_,
-.lab-editor .hljs-meta .hljs-string {
-  color: var(--code-string);
-}
-.lab-editor .hljs-number {
-  color: var(--code-number);
-}
-.lab-editor .hljs-comment,
-.lab-editor .hljs-quote {
-  color: var(--code-comment);
-  font-style: italic;
-}
-/* Variables, parameters, object fields, and attributes. */
-.lab-editor .hljs-variable,
-.lab-editor .hljs-template-variable,
-.lab-editor .hljs-params,
-.lab-editor .hljs-attr,
-.lab-editor .hljs-attribute,
-.lab-editor .hljs-property,
-.lab-editor .hljs-symbol {
-  color: var(--code-variable);
-}
-/* Decorators and attributes. */
-.lab-editor .hljs-meta,
-.lab-editor .hljs-meta .hljs-keyword,
-.lab-editor .hljs-decorator {
-  color: var(--code-meta);
-}
-.lab-editor .hljs-bullet,
-.lab-editor .hljs-link {
-  color: var(--code-entity);
-}
-.lab-editor .hljs-emphasis {
-  font-style: italic;
-}
-.lab-editor .hljs-strong {
-  font-weight: 600;
+
+.lab-editor .cm-diff-marker-removed {
+  background: var(--red);
 }
 
 /* Main file editor */
@@ -1324,37 +1225,21 @@
   min-height: 0;
   border: 0;
   border-radius: 0;
-  overflow: auto;
+  overflow: hidden;
 }
 
-.lab-file-editor > .lab-editor {
-  grid-template-columns: 52px minmax(0, 1fr);
-}
-
-.lab-file-editor > .lab-editor .lab-editor-lines {
-  padding: 14px 10px 80px 4px;
+.lab-file-editor > .lab-editor .cm-editor {
+  height: 100%;
   font-size: 13px;
-  line-height: 1.55;
-  position: sticky;
-  left: 0;
-  z-index: 2;
 }
 
-.lab-file-editor > .lab-editor .lab-editor-pre,
-.lab-file-editor > .lab-editor .lab-editor-input,
-.lab-file-editor > .lab-editor .lab-editor-diff-overlay {
-  padding: 14px 16px 80px;
+.lab-file-editor > .lab-editor .cm-content {
+  padding: 16px 18px 80px;
+}
+
+.lab-file-editor > .lab-editor .cm-gutters {
+  padding: 16px 10px 80px 6px;
   font-size: 13px;
-  line-height: 1.55;
-  white-space: pre;
-  overflow-wrap: normal;
-}
-
-.lab-file-editor > .lab-editor .lab-editor-diff-line {
-  margin-left: -16px;
-  margin-right: -16px;
-  padding-left: 16px;
-  padding-right: 16px;
 }
 
 .lab-file-runtime {
@@ -2699,6 +2584,287 @@
   .lab-file-output-panel {
     border-right: 0;
     border-bottom: 1px solid var(--border);
+  }
+}
+
+/* SomniQ Code workbench polish: CodeMirror-inspired density with a lighter
+   surface treatment, while keeping the existing editor implementation small. */
+.lab {
+  --lab-panel: color-mix(in srgb, var(--bg-1) 92%, #0b1020 8%);
+  --lab-panel-raised: color-mix(in srgb, var(--bg-2) 88%, #18233c 12%);
+  --lab-editor-bg: color-mix(in srgb, var(--bg) 94%, #070b13 6%);
+  --lab-divider: color-mix(in srgb, var(--border) 76%, transparent);
+}
+
+.lab-workspace {
+  background: var(--lab-editor-bg);
+}
+
+.lab-activitybar {
+  width: 46px;
+  flex-basis: 46px;
+  padding: 7px 0;
+  border-right-color: var(--lab-divider);
+  background: color-mix(in srgb, var(--bg-1) 84%, #080c15 16%);
+}
+
+.lab-activity {
+  height: 44px;
+  color: color-mix(in srgb, var(--text-dim) 82%, transparent);
+}
+
+.lab-activity:hover {
+  color: var(--text);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+
+.lab-activity.active {
+  color: var(--accent-2);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+.lab-activity.active::before {
+  inset: 5px auto 5px 0;
+  width: 2px;
+  background: var(--accent-2);
+  box-shadow: 0 0 10px color-mix(in srgb, var(--accent-2) 60%, transparent);
+}
+
+.lab-side {
+  background: var(--lab-panel);
+  border-right-color: var(--lab-divider);
+}
+
+.lab-side-content.files {
+  background: var(--lab-panel);
+}
+
+.lab-explorer-title {
+  height: 38px;
+  padding: 0 9px 0 14px;
+  border-bottom-color: var(--lab-divider);
+  color: var(--text-dim);
+  font-size: 10.5px;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+}
+
+.lab-explorer-root-row {
+  margin: 4px 7px 2px;
+  padding: 2px 2px 2px 0;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+}
+
+.lab-explorer-root-row:hover {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+.lab-explorer-root {
+  padding: 0 8px;
+  font-size: 12px;
+}
+
+.lab-explorer-tree {
+  padding: 4px 7px 14px 5px;
+}
+
+.lab-explorer-row {
+  min-height: 28px;
+  margin: 1px 0;
+  border-radius: 5px;
+}
+
+.lab-explorer-row.active {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+.lab-explorer-row.active::before {
+  top: 3px;
+  bottom: 3px;
+  background: var(--accent-2);
+}
+
+.lab-explorer-main {
+  padding-block: 4px;
+  font-size: 12px;
+}
+
+.lab-main {
+  background: var(--lab-editor-bg);
+}
+
+.lab-editor-tabs {
+  height: 38px;
+  flex-basis: 38px;
+  border-bottom-color: var(--lab-divider);
+  background: color-mix(in srgb, var(--bg-1) 72%, #080c15 28%);
+}
+
+.lab-editor-tab,
+.lab-editor-tab-empty {
+  height: 38px;
+  border-right-color: var(--lab-divider);
+  background: transparent;
+  font-size: 12px;
+}
+
+.lab-editor-tab:hover {
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+
+.lab-editor-tab.active {
+  background: var(--lab-editor-bg);
+}
+
+.lab-editor-tab.active::after {
+  height: 2px;
+  background: var(--accent-2);
+  box-shadow: 0 0 10px color-mix(in srgb, var(--accent-2) 52%, transparent);
+}
+
+.lab-editor-body {
+  background: var(--lab-editor-bg);
+}
+
+.lab-empty-state {
+  width: min(520px, calc(100% - 48px));
+  margin: auto;
+  padding: 34px 36px 30px;
+  text-align: center;
+  border: 1px solid color-mix(in srgb, var(--accent-2) 18%, var(--border));
+  border-radius: 14px;
+  background: radial-gradient(circle at 50% 0%, color-mix(in srgb, var(--accent-2) 10%, transparent), transparent 58%), var(--lab-panel);
+  box-shadow: 0 18px 50px rgb(0 0 0 / 16%);
+}
+
+.lab-empty-state-mark {
+  width: 48px;
+  height: 48px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 16px;
+  border: 1px solid color-mix(in srgb, var(--accent-2) 34%, var(--border));
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--accent-2) 13%, var(--bg-2));
+  color: var(--accent-2);
+  font: 700 15px/1 ui-monospace, "SF Mono", Consolas, monospace;
+}
+
+.lab-empty-state-kicker {
+  display: block;
+  color: var(--accent-2);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+}
+
+.lab-empty-state h2 {
+  margin: 10px 0 8px;
+  color: var(--text);
+  font-size: 21px;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+}
+
+.lab-empty-state p {
+  max-width: 410px;
+  margin: 0 auto;
+  color: var(--text-dim);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.lab-empty-state-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 24px;
+}
+
+.lab-empty-state-action {
+  min-height: 66px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 10px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg-2) 76%, transparent);
+  color: var(--text-dim);
+  font-size: 11px;
+  cursor: pointer;
+  transition: 140ms ease;
+}
+
+.lab-empty-state-action svg {
+  width: 17px;
+  height: 17px;
+  color: var(--accent-2);
+}
+
+.lab-empty-state-action:hover {
+  border-color: color-mix(in srgb, var(--accent-2) 46%, var(--border));
+  background: color-mix(in srgb, var(--accent-2) 10%, var(--bg-2));
+  color: var(--text);
+  transform: translateY(-1px);
+}
+
+.lab-empty-state-action.primary {
+  border-color: color-mix(in srgb, var(--accent-2) 44%, var(--border));
+  background: color-mix(in srgb, var(--accent-2) 12%, var(--bg-2));
+  color: var(--text);
+}
+
+.lab-empty-state-hint {
+  display: block;
+  margin-top: 19px;
+  color: color-mix(in srgb, var(--text-dim) 76%, transparent);
+  font-size: 11px;
+}
+
+.lab-assistant-side {
+  border-left-color: var(--lab-divider);
+  background: var(--lab-panel);
+}
+
+.lab-assistant,
+.lab-assistant-head,
+.lab-assistant-context-bar {
+  background: var(--lab-panel);
+}
+
+.lab-assistant-head,
+.lab-assistant-context-bar {
+  border-color: var(--lab-divider);
+}
+
+.lab-assistant-turns {
+  background: var(--lab-editor-bg);
+}
+
+.lab-assistant-empty button {
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--bg-2) 72%, transparent);
+}
+
+.lab-statusbar {
+  height: 24px;
+  padding-inline: 12px;
+  background: color-mix(in srgb, var(--accent) 78%, #101827 22%);
+  border-top-color: transparent;
+}
+
+@media (max-width: 760px) {
+  .lab-empty-state {
+    padding: 28px 20px 24px;
+  }
+
+  .lab-empty-state-actions {
+    grid-template-columns: 1fr;
   }
 }
 

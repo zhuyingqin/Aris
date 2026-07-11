@@ -4,11 +4,15 @@ export const CHAT_COPY: Record<Language, {
   newChat: string;
   scheduledTasks: string;
   closeSidebar: string;
-  searchChats: string;
+  openSidebar: string;
   noMatchingChats: string;
   chatsCount: (count: number) => string;
   collapsed: string;
   expanded: string;
+  pinnedSection: string;
+  projectsSection: string;
+  showMoreChats: string;
+  showFewerChats: string;
   newChatInProject: (project: string) => string;
   newChatInThisProject: string;
   unread: string;
@@ -36,6 +40,7 @@ export const CHAT_COPY: Record<Language, {
   checking: string;
   settings: string;
   exportChat: string;
+  exportDebugZip: string;
   undo: string;
   deleted: (title: string) => string;
   previewModel: string;
@@ -60,11 +65,15 @@ export const CHAT_COPY: Record<Language, {
     newChat: "新对话",
     scheduledTasks: "定时任务",
     closeSidebar: "关闭对话侧栏",
-    searchChats: "搜索对话",
-    noMatchingChats: "无匹配对话",
+    openSidebar: "打开对话列表",
+    noMatchingChats: "暂无对话",
     chatsCount: (count) => `${count} 个对话`,
     collapsed: "已折叠",
     expanded: "已展开",
+    pinnedSection: "置顶",
+    projectsSection: "项目",
+    showMoreChats: "展开显示",
+    showFewerChats: "收起显示",
     newChatInProject: (project) => `在 ${project} 中新建对话`,
     newChatInThisProject: "在此项目中新建对话",
     unread: "未读",
@@ -97,6 +106,7 @@ export const CHAT_COPY: Record<Language, {
     checking: "检查中...",
     settings: "设置",
     exportChat: "导出当前对话",
+    exportDebugZip: "导出故障调试包（运行中可用）",
     undo: "撤销",
     deleted: (title) => `已删除“${title}”`,
     previewModel: "预览",
@@ -121,11 +131,15 @@ export const CHAT_COPY: Record<Language, {
     newChat: "New chat",
     scheduledTasks: "Scheduled tasks",
     closeSidebar: "Close chat sidebar",
-    searchChats: "Search chats",
-    noMatchingChats: "No matching chats",
+    openSidebar: "Open chat list",
+    noMatchingChats: "No chats yet",
     chatsCount: (count) => `${count} chats`,
     collapsed: "collapsed",
     expanded: "expanded",
+    pinnedSection: "Pinned",
+    projectsSection: "Projects",
+    showMoreChats: "Show more",
+    showFewerChats: "Show less",
     newChatInProject: (project) => `New chat in ${project}`,
     newChatInThisProject: "New chat in this project",
     unread: "Unread",
@@ -158,6 +172,7 @@ export const CHAT_COPY: Record<Language, {
     checking: "Checking...",
     settings: "Settings",
     exportChat: "Export current chat",
+    exportDebugZip: "Export debug bundle (available while running)",
     undo: "Undo",
     deleted: (title) => `Deleted "${title}"`,
     previewModel: "Preview",

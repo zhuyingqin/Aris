@@ -28,6 +28,28 @@ export const visualSourcePath = Facet.define<string | null, string | null>({
   combine: (values) => values[values.length - 1] ?? null,
 });
 
+/**
+ * Injects the host's "switch to Code mode and select this source range"
+ * callback (`Typeset.tsx`'s `openCodeRange`, already used for PDF-click and
+ * search jumps) so widgets built from preamble metadata — `\title{}` /
+ * `\author{}` have no rendered position of their own, only the `\maketitle`
+ * widget does — can send a click straight to their real source location.
+ */
+type OpenCodeRange = ((start: number, end: number) => void) | null;
+export const onOpenCodeRange = Facet.define<OpenCodeRange, OpenCodeRange>({
+  combine: (values) => values[values.length - 1] ?? null,
+});
+
+/**
+ * Injects the host's "forward-search this source position into the compiled
+ * PDF" callback (`Typeset.tsx`'s `jumpToPdfForLine`), fired on double-click —
+ * mirrors `onOpenCodeRange` above, just for the opposite direction.
+ */
+type ForwardSearch = ((line: number, column: number) => void) | null;
+export const onForwardSearch = Facet.define<ForwardSearch, ForwardSearch>({
+  combine: (values) => values[values.length - 1] ?? null,
+});
+
 /** Shared `ignoreEvent`: let CM's own mouseup bookkeeping run, but nothing else. */
 function blockIgnoreEvent(event: Event): boolean {
   return event.type !== "mouseup";
@@ -66,10 +88,12 @@ const INLINE_TEXT_COMMANDS: Record<string, string> = {
  * or alignment for the rest of their group. We can't easily scope them, so in the
  * visual view they are simply hidden — they were pure formatting noise as raw text
  * (e.g. `\Huge\bfseries\coloraccent` on a hand-built title). `coloraccent` is a
- * common custom accent-color macro; harmless to hide when absent.
+ * common custom accent-color macro; harmless to hide when absent. Includes the
+ * classic short-form aliases (`\bf`, `\it`, …) alongside the LaTeX2e names —
+ * both show up on hand-built titles like `{\LARGE \bf My Title}`.
  */
 const DECLARATION_RE =
-  /\\(Huge|huge|LARGE|Large|large|normalsize|small|footnotesize|scriptsize|tiny|bfseries|mdseries|itshape|upshape|slshape|scshape|rmfamily|sffamily|ttfamily|normalfont|selectfont|centering|raggedright|raggedleft|coloraccent|boldmath|unboldmath|noindent|par)(?![a-zA-Z])/g;
+  /\\(Huge|huge|LARGE|Large|large|normalsize|small|footnotesize|scriptsize|tiny|bfseries|mdseries|itshape|upshape|slshape|scshape|rmfamily|sffamily|ttfamily|normalfont|selectfont|centering|raggedright|raggedleft|coloraccent|boldmath|unboldmath|noindent|par|bf|it|rm|sc|sl|em|tt)(?![a-zA-Z])/g;
 
 const SECTION_LEVEL: Record<string, number> = {
   section: 1,
@@ -105,24 +129,71 @@ const listItemLine = Decoration.line({ class: "cm-vis-list-line" });
 
 /** Center + shrink a caption line. */
 const captionLine = Decoration.line({ class: "cm-vis-caption-line" });
+/** Italicized, indented body line inside `\begin{abstract}`. */
+const abstractLine = Decoration.line({ class: "cm-vis-abstract-line" });
+const activeMathLine = Decoration.line({ class: "cm-vis-active-math-line" });
+const activeMathLineFirst = Decoration.line({ class: "cm-vis-active-math-line-first" });
+const activeMathLineLast = Decoration.line({ class: "cm-vis-active-math-line-last" });
+// Display math source spans one mark per visual line (CodeMirror splits a
+// multi-line mark decoration at line boundaries), so it must not carry its own
+// fill/radius — that renders as a stack of disconnected rounded rectangles.
+// The callout band (`cm-vis-active-math-line*`, below) carries the background
+// instead. Inline math is always a single short run, so it gets its own soft
+// pill background — there's no multi-line seam to worry about.
+const activeMathSourceDisplay = Decoration.mark({ class: "cm-vis-active-math-source" });
+const activeMathSourceInline = Decoration.mark({
+  class: "cm-vis-active-math-source cm-vis-active-math-source-inline",
+});
 
 /** Memoized alignment line decorations (center / flushleft / flushright). */
 const alignLineCache: Record<string, Decoration> = {};
 const alignLine = (cls: string): Decoration =>
   (alignLineCache[cls] ??= Decoration.line({ class: cls }));
 
-/** Strip simple inline markup (`\emph{x}` → `x`) for chip/title display text. */
+/**
+ * Replace each `\authorblockN{…}`/`\authorblockA{…}` (IEEEtran's per-line
+ * name/affiliation macro) with a leading newline + its content, so each block
+ * starts its own output line instead of running into the next one. Their
+ * content routinely contains nested braces (`Name$^{1}$`), so this needs real
+ * brace matching (`matchBrace`) rather than a `[^{}]*` regex, which stops at
+ * the first inner `{` and fails to find the macro's true closing brace.
+ */
+function replaceAuthorBlocks(input: string): string {
+  const re = /\\authorblock[NA]\s*\{/g;
+  let result = "";
+  let i = 0;
+  for (let match = re.exec(input); match; match = re.exec(input)) {
+    const openBrace = match.index + match[0].length - 1;
+    const close = matchBrace(input, openBrace);
+    if (close < 0) break; // unbalanced — leave the remainder as-is below
+    result += input.slice(i, match.index) + "\n" + input.slice(openBrace + 1, close - 1);
+    i = close;
+    re.lastIndex = close;
+  }
+  return result + input.slice(i);
+}
+
+/**
+ * Strip simple inline markup (`\emph{x}` → `x`) for chip/title display text.
+ * Whitespace is normalized per-line (not globally) so the line breaks inserted
+ * by `replaceAuthorBlocks` and `\\` forced breaks survive, while incidental
+ * multi-space/wrap noise within a line still collapses.
+ */
 function stripMarkup(input: string): string {
-  return input
+  return replaceAuthorBlocks(input.replace(/%[^\n]*\n?/g, ""))
     .replace(/\\textsubscript\s*\{\$?\\infty\$?\}/g, "∞")
     .replace(/\\textsubscript\s*\{([^{}]*)\}/g, "$1")
     .replace(/\$\\infty\$/g, "∞")
     .replace(/\$([^$]+)\$/g, "$1")
     .replace(/\\infty/g, "∞")
     .replace(/\\(?:textbf|textit|emph|texttt|textsc|underline)\s*\{([^{}]*)\}/g, "$1")
-    .replace(/\\\\/g, " ")
+    .replace(DECLARATION_RE, "")
+    .replace(/\\\\/g, "\n")
     .replace(/[{}]/g, "")
-    .replace(/\s+/g, " ")
+    .split("\n")
+    .map((line) => line.replace(/\s+/g, " ").trim())
+    .filter(Boolean)
+    .join("\n")
     .trim();
 }
 
@@ -150,6 +221,23 @@ class PreambleWidget extends WidgetType {
   }
 }
 
+/** Small bold label block in place of a hidden environment marker (e.g. "Abstract"). */
+class SectionLabelWidget extends WidgetType {
+  constructor(private readonly label: string) {
+    super();
+  }
+  eq(other: SectionLabelWidget) {
+    return other.label === this.label;
+  }
+  toDOM() {
+    const el = document.createElement("div");
+    el.className = `cm-vis-section-label ${BLOCK_TARGET_CLASS}`;
+    el.textContent = this.label;
+    return el;
+  }
+  ignoreEvent = blockIgnoreEvent;
+}
+
 /** Auto section-number badge rendered before a heading's text. */
 class SectionNumberWidget extends WidgetType {
   constructor(private readonly label: string) {
@@ -172,17 +260,22 @@ class ChipWidget extends WidgetType {
   constructor(
     private readonly label: string,
     private readonly variant: string,
+    private readonly title: string = "",
   ) {
     super();
   }
   eq(other: ChipWidget) {
-    return other.label === this.label && other.variant === this.variant;
+    return other.label === this.label && other.variant === this.variant && other.title === this.title;
   }
   toDOM() {
     const el = document.createElement("span");
     el.className = `cm-vis-chip cm-vis-chip-${this.variant}`;
     el.textContent = this.label;
+    if (this.title) el.title = this.title;
     return el;
+  }
+  ignoreEvent() {
+    return false;
   }
 }
 
@@ -215,40 +308,76 @@ class ItemMarkerWidget extends WidgetType {
   }
 }
 
-/** Centered title block rendered in place of `\maketitle`. */
+function rangesEqual(a: Range | null, b: Range | null): boolean {
+  if (a === null || b === null) return a === b;
+  return a.from === b.from && a.to === b.to;
+}
+
+/**
+ * Centered title block rendered in place of `\maketitle`. Unlike every other
+ * `BLOCK_TARGET_CLASS` widget, this one has no source range of its own to
+ * reveal: `\title{}`/`\author{}`/`\date{}` live in the preamble (folded
+ * unconditionally in Visual mode, regardless of caret position), while this
+ * widget sits at `\maketitle`'s position — a different part of the document.
+ * So instead of the generic block-click reveal, each line jumps straight to
+ * its real source range in Code mode via `onJump` (`Typeset.tsx`'s
+ * `openCodeRange`, threaded in through the `onOpenCodeRange` facet).
+ */
 class TitleWidget extends WidgetType {
   constructor(
     private readonly title: string,
     private readonly author: string,
     private readonly date: string,
+    private readonly titleRange: Range | null,
+    private readonly authorRange: Range | null,
+    private readonly dateRange: Range | null,
+    private readonly onJump: OpenCodeRange,
   ) {
     super();
   }
   eq(other: TitleWidget) {
-    return other.title === this.title && other.author === this.author && other.date === this.date;
+    return other.title === this.title
+      && other.author === this.author
+      && other.date === this.date
+      && rangesEqual(other.titleRange, this.titleRange)
+      && rangesEqual(other.authorRange, this.authorRange)
+      && rangesEqual(other.dateRange, this.dateRange);
+  }
+  private jumpTarget(el: HTMLElement, range: Range | null) {
+    if (!range || !this.onJump) return;
+    const onJump = this.onJump;
+    el.classList.add("cm-vis-title-editable");
+    el.title = "Click to edit in Code mode";
+    el.addEventListener("mousedown", (event) => event.preventDefault());
+    el.addEventListener("click", () => onJump(range.from, range.to));
   }
   toDOM() {
     const el = document.createElement("div");
-    el.className = `cm-vis-title ${BLOCK_TARGET_CLASS}`;
+    el.className = "cm-vis-title";
     const h = document.createElement("div");
     h.className = "cm-vis-title-name";
     h.textContent = this.title || "Untitled";
+    this.jumpTarget(h, this.titleRange);
     el.append(h);
     if (this.author) {
       const a = document.createElement("div");
       a.className = "cm-vis-title-author";
       a.textContent = this.author;
+      this.jumpTarget(a, this.authorRange);
       el.append(a);
     }
     if (this.date) {
       const d = document.createElement("div");
       d.className = "cm-vis-title-date";
       d.textContent = this.date;
+      this.jumpTarget(d, this.dateRange);
       el.append(d);
     }
     return el;
   }
-  ignoreEvent = blockIgnoreEvent;
+  ignoreEvent() {
+    return true;
+  }
 }
 
 function eventElement(target: EventTarget | null): Element | null {
@@ -609,6 +738,31 @@ export const visualBlockClick = EditorView.domEventHandlers({
   },
 });
 
+/**
+ * Double-click anywhere in the visual editor forward-searches into the
+ * compiled PDF. Block widgets (display math, tables, figures) have no
+ * reliable DOM→offset mapping, so this reuses `visualBlockClick`'s
+ * `lineBlockAtHeight` fallback for those; everything else uses the exact
+ * click position via `posAtCoords`.
+ */
+export const visualForwardSearchClick = EditorView.domEventHandlers({
+  dblclick(event, view) {
+    const handler = view.state.facet(onForwardSearch);
+    const target = eventElement(event.target);
+    const isBlockTarget = Boolean(target?.closest(`.${BLOCK_TARGET_CLASS}`));
+    const pos = isBlockTarget
+      ? view.lineBlockAtHeight(event.clientY - view.documentTop).to
+      : view.posAtCoords({ x: event.clientX, y: event.clientY });
+    // eslint-disable-next-line no-console -- temporary forward-search diagnostic, see conversation
+    console.debug("[typeset] Visual dblclick", { hasHandler: Boolean(handler), isBlockTarget, pos });
+    if (!handler) return false;
+    if (pos == null) return false;
+    const line = view.state.doc.lineAt(pos);
+    handler(line.number, pos - line.from + 1);
+    return false;
+  },
+});
+
 /** True when a selection range touches [from, to] — used to reveal raw syntax. */
 function selectionTouches(state: EditorState, from: number, to: number): boolean {
   for (const range of state.selection.ranges) {
@@ -663,6 +817,24 @@ function buildDecorations(state: EditorState): VisualDecorations {
     marks.push({ from, to, value });
     atomicMarks.push({ from, to, value });
   };
+  // Applies the active-math line decoration to every visual line spanned by
+  // `[from, to)`, also tagging the first/last line of the run so the CSS can
+  // round only the outer corners of the callout band — the block then reads
+  // as one continuous panel instead of a flat-edged strip.
+  const markMathLines = (from: number, to: number) => {
+    let pos = from;
+    let isFirst = true;
+    while (pos <= to && pos <= state.doc.length) {
+      const line = state.doc.lineAt(pos);
+      const isLast = line.to >= to || line.to >= state.doc.length;
+      marks.push({ from: line.from, to: line.from, value: activeMathLine });
+      if (isFirst) marks.push({ from: line.from, to: line.from, value: activeMathLineFirst });
+      if (isLast) marks.push({ from: line.from, to: line.from, value: activeMathLineLast });
+      if (isLast) break;
+      isFirst = false;
+      pos = line.to + 1;
+    }
+  };
 
   // --- Preamble: fold everything up to and including \begin{document} ---
   const beginDoc = text.search(/\\begin\{document\}/);
@@ -703,7 +875,11 @@ function buildDecorations(state: EditorState): VisualDecorations {
     // landing at the wrong position (see `visualBlockClick`), not the reveal
     // itself. With clicks fixed, display math can safely support in-place editing
     // like Overleaf's own visual editor does.
-    if (selectionTouches(state, from, to)) return;
+    if (selectionTouches(state, from, to)) {
+      if (display) markMathLines(from, to);
+      marks.push({ from, to, value: display ? activeMathSourceDisplay : activeMathSourceInline });
+      return;
+    }
     hide(from, to, Decoration.replace({ widget: new MathWidget(latex.trim(), display) }));
   };
 
@@ -888,11 +1064,18 @@ function buildDecorations(state: EditorState): VisualDecorations {
   let ce: RegExpExecArray | null;
   while ((ce = citeRe.exec(text)) && ce.index < scanEnd) {
     if (withinHeading(ce.index) || withinMath(ce.index)) continue;
+    const command = ce[1];
     const openBrace = ce.index + ce[0].length - 1;
     chipCommand(ce.index, openBrace, (arg) => {
       const keys = arg.split(",").map((k) => k.trim()).filter(Boolean);
-      const label = keys.length > 1 ? `${keys[0]} +${keys.length - 1}` : keys[0] || "cite";
-      return new ChipWidget(label, "cite");
+      const label = keys.length === 0
+        ? "[cite]"
+        : keys.length === 1
+          ? `[${keys[0]}]`
+          : keys.length === 2
+            ? `[${keys.join("; ")}]`
+            : `[${keys[0]}; ${keys[1]}; +${keys.length - 2}]`;
+      return new ChipWidget(label, "cite", `\\${command}{${arg}} - click to edit LaTeX source`);
     });
   }
 
@@ -971,19 +1154,32 @@ function buildDecorations(state: EditorState): VisualDecorations {
   // \maketitle → centered title block built from the preamble metadata.
   const makeTitle = text.indexOf("\\maketitle");
   if (makeTitle >= 0 && !selectionTouches(state, makeTitle, makeTitle + "\\maketitle".length)) {
-    const readArg = (cmd: string) => {
+    const readArgRange = (cmd: string): { text: string; range: Range | null } => {
       const at = text.search(new RegExp(`\\\\${cmd}\\s*\\{`));
-      if (at < 0) return "";
+      if (at < 0) return { text: "", range: null };
       const brace = text.indexOf("{", at);
       const end = matchBrace(text, brace);
-      return end < 0 ? "" : stripMarkup(text.slice(brace + 1, end - 1));
+      if (end < 0) return { text: "", range: null };
+      return { text: stripMarkup(text.slice(brace + 1, end - 1)), range: { from: brace + 1, to: end - 1 } };
     };
-    const dateRaw = readArg("date");
-    const date = /\\today/.test(dateRaw) ? "" : dateRaw;
+    const titleArg = readArgRange("title");
+    const authorArg = readArgRange("author");
+    const dateArg = readArgRange("date");
+    const date = /\\today/.test(dateArg.text) ? "" : dateArg.text;
     hide(
       makeTitle,
       makeTitle + "\\maketitle".length,
-      Decoration.replace({ widget: new TitleWidget(readArg("title"), readArg("author"), date) }),
+      Decoration.replace({
+        widget: new TitleWidget(
+          titleArg.text,
+          authorArg.text,
+          date,
+          titleArg.range,
+          authorArg.range,
+          date ? dateArg.range : null,
+          state.facet(onOpenCodeRange),
+        ),
+      }),
     );
   }
 
@@ -1024,6 +1220,50 @@ function buildDecorations(state: EditorState): VisualDecorations {
     while (pos < innerTo) {
       const line = state.doc.lineAt(pos);
       marks.push({ from: line.from, to: line.from, value: alignLine(alignClass[ae[1]]) });
+      pos = line.to + 1;
+    }
+  }
+
+  // --- Abstract environment → "Abstract" label + italic indented body ---
+  // Without this it fell through to the generic "unknown environment" pass
+  // below, which just hides the markers with no label — the abstract read as
+  // an unstyled paragraph indistinguishable from the rest of the body.
+  const abstractRe = /\\begin\{abstract\}([\s\S]*?)\\end\{abstract\}/g;
+  abstractRe.lastIndex = bodyStart;
+  const abstractBeginLen = "\\begin{abstract}".length;
+  const abstractEndLen = "\\end{abstract}".length;
+  const abstractRanges: Range[] = [];
+  const withinAbstract = (pos: number) => abstractRanges.some((r) => pos >= r.from && pos < r.to);
+  let ab: RegExpExecArray | null;
+  while ((ab = abstractRe.exec(text)) && ab.index < scanEnd) {
+    const innerFrom = ab.index + abstractBeginLen;
+    const innerTo = ab.index + ab[0].length - abstractEndLen;
+    // Tracked unconditionally (reveal or not) so the generic unknown-environment
+    // fallback below — which processes every `\begin{}`/`\end{}` in the document
+    // one marker at a time — knows to leave both markers alone here. Without
+    // this, revealing (caret inside) still let that fallback independently
+    // re-hide whichever marker the caret *wasn't* literally touching (e.g. the
+    // caret sits on `\begin{abstract}`, so only that marker's own selection
+    // check passes there; `\end{abstract}` has no caret on it and gets hidden
+    // anyway) — an inconsistent half-reveal. Math avoids the same trap via its
+    // own `withinMath` exclusion; this mirrors that.
+    abstractRanges.push({ from: ab.index, to: ab.index + ab[0].length });
+    // Touching *any part* of the environment reveals it whole, like math/lists.
+    if (selectionTouches(state, ab.index, ab.index + ab[0].length)) {
+      continue;
+    }
+    hide(ab.index, innerFrom, Decoration.replace({ widget: new SectionLabelWidget("Abstract") }));
+    hide(innerTo, ab.index + ab[0].length);
+    // `innerFrom` sits exactly at the end of the `\begin{abstract}` line (right
+    // before its own newline) when the marker is alone on its line — `lineAt`
+    // resolves a position at a line's `to` to that same line, so starting the
+    // scan there would (mis)style the marker's own line as body. Skip past it;
+    // if the marker instead has body text trailing it on the same line,
+    // `innerFrom` is already mid-line and this is a no-op.
+    let pos = Math.max(innerFrom, state.doc.lineAt(ab.index).to + 1);
+    while (pos < innerTo) {
+      const line = state.doc.lineAt(pos);
+      marks.push({ from: line.from, to: line.from, value: abstractLine });
       pos = line.to + 1;
     }
   }
@@ -1084,8 +1324,10 @@ function buildDecorations(state: EditorState): VisualDecorations {
   let em: RegExpExecArray | null;
   while ((em = envMarkerRe.exec(text))) {
     if (em[2] === "document") continue; // preamble fold / \end{document} handle these
+    if (withinMath(em.index)) continue; // selected math envs must reveal complete source
     if (withinOpenFloat(em.index)) continue; // open float is fully raw
     if (withinOpenList(em.index)) continue; // open list is fully raw while editing
+    if (withinAbstract(em.index)) continue; // abstract handles both its own markers above
     if (selectionTouches(state, em.index, em.index + em[0].length)) continue;
     hide(em.index, em.index + em[0].length);
   }

@@ -1141,6 +1141,31 @@
   align-self: center;
 }
 
+.typeset-current-section {
+  display: inline-flex;
+  min-width: 96px;
+  max-width: min(42cqw, 360px);
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  color: var(--ol-muted-2);
+  font-size: 12px;
+  line-height: 1;
+}
+
+.typeset-current-section svg {
+  flex: 0 0 15px;
+  width: 15px;
+  height: 15px;
+  color: var(--ol-green);
+}
+
+.typeset-current-section span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .typeset-visual-file-icon {
   color: #79b8ff;
   font-size: 13px;
@@ -3114,6 +3139,25 @@
   outline-offset: 0;
 }
 
+/* Forward-search flash: briefly marks where a Code/Visual double-click landed
+   in the compiled PDF (SyncTeX), then fades out — same affordance as
+   TeXstudio/VS Code's LaTeX Workshop "jump to PDF" highlight. */
+.typeset-pdf-forward-highlight {
+  position: absolute;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--ol-green) 32%, transparent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--ol-green) 55%, transparent);
+  pointer-events: none;
+  animation: typeset-pdf-forward-highlight-fade 2.2s ease-out forwards;
+}
+
+@keyframes typeset-pdf-forward-highlight-fade {
+  0% { opacity: 0; }
+  15% { opacity: 1; }
+  70% { opacity: 1; }
+  100% { opacity: 0; }
+}
+
 .typeset-pdf-unavailable {
   display: grid;
   width: min(100%, 520px);
@@ -3240,11 +3284,104 @@
 
 .typeset-outline {
   display: grid;
-  flex: 0 1 min(32%, 220px);
-  max-height: min(32%, 220px);
-  min-height: 92px;
+  flex: 0 0 184px;
+  max-height: 420px;
+  min-height: 72px;
   grid-template-rows: 32px minmax(0, 1fr);
+  border-top: 0;
+}
+
+.typeset-outline.empty {
+  flex-basis: 92px;
+  min-height: 92px;
+}
+
+.typeset-outline-resize {
+  position: relative;
+  flex: 0 0 10px;
+  min-height: 10px;
   border-top: 1px solid var(--ol-border);
+  border-bottom: 1px solid var(--ol-border);
+  background: color-mix(in srgb, var(--ol-bg) 90%, var(--ol-border-strong));
+  cursor: row-resize;
+  outline: none;
+  touch-action: none;
+  user-select: none;
+  -webkit-app-region: no-drag;
+}
+
+.typeset-outline-resize span,
+.typeset-outline-resize::after {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+}
+
+.typeset-outline-resize span {
+  inset-block: 0;
+  width: 100%;
+  cursor: inherit;
+}
+
+.typeset-outline-resize::after {
+  content: "";
+  top: 50%;
+  width: 40px;
+  height: 3px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--ol-muted) 50%, transparent);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
+.typeset-outline-resize:hover,
+.typeset-outline-resize:focus-visible {
+  background: color-mix(in srgb, var(--ol-green) 10%, var(--ol-bg));
+}
+
+.typeset-outline-collapsed {
+  flex: 0 0 auto;
+  border-top: 1px solid var(--ol-border);
+  background: var(--ol-bg);
+}
+
+.typeset-outline-collapsed button {
+  display: grid;
+  width: 100%;
+  min-height: 34px;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+  border: 0;
+  background: transparent;
+  color: var(--ol-text);
+  cursor: pointer;
+  padding: 0 8px;
+  text-align: left;
+}
+
+.typeset-outline-collapsed button:hover {
+  background: var(--ol-bg-2);
+}
+
+.typeset-outline-collapsed svg {
+  width: 16px;
+  height: 16px;
+  color: var(--ol-green);
+}
+
+.typeset-outline-collapsed span {
+  overflow: hidden;
+  font-size: 12px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.typeset-outline-collapsed em {
+  color: var(--ol-muted);
+  font-size: 11px;
+  font-style: normal;
 }
 
 .typeset-outline-list {
@@ -3285,10 +3422,34 @@
   background: var(--ol-bg-2);
 }
 
+.typeset-outline-list button.active {
+  background: color-mix(in srgb, var(--ol-green) 22%, transparent);
+  color: #fff;
+  box-shadow: inset 3px 0 0 var(--ol-green);
+}
+
 .typeset-outline-list button span {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.typeset-outline-list button span b {
+  display: inline-flex;
+  min-width: 22px;
+  justify-content: flex-end;
+  color: var(--ol-muted);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.typeset-outline-list button.active span b,
+.typeset-outline-list button.active em {
+  color: color-mix(in srgb, #fff 72%, var(--ol-green-soft));
 }
 
 .typeset-outline-list button em,
@@ -3301,6 +3462,30 @@
 .typeset-outline-empty {
   display: block;
   padding: 8px;
+}
+
+.typeset-outline-toggle {
+  display: inline-flex;
+  width: 24px;
+  height: 24px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--ol-muted);
+  cursor: pointer;
+}
+
+.typeset-outline-toggle:hover {
+  background: var(--ol-bg-2);
+  color: var(--ol-text);
+}
+
+.typeset-outline-toggle svg {
+  width: 15px;
+  height: 15px;
 }
 
 .typeset-empty,

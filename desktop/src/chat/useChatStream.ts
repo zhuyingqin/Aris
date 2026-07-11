@@ -18,6 +18,9 @@ import {
 import type { ChatSendRequest } from "../api/tauri";
 import type { ChatBlock, ChatTurn } from "../types";
 import { appendTextDelta, appendThinkingDelta } from "./model";
+import { isExpectedStopError } from "./chatRunHelpers";
+
+export const MAX_RUNNING_CHAT_SESSIONS = 5;
 
 /** Compact a token count for display: 320, 1.2k, 45.0k. */
 function formatTokenCount(tokens: number): string {
@@ -46,7 +49,12 @@ function compactionNoticeMessage(
 interface StreamHandlers {
   patchAssistant: (sessionId: string, fn: (turn: ChatTurn) => ChatTurn) => void;
   onComplete: (sessionId: string, reply: string) => void;
-  onError: (sessionId: string, error: string, stopped: boolean) => void;
+  onError: (
+    sessionId: string,
+    error: string,
+    stopped: boolean,
+    sessionPreserved?: boolean,
+  ) => void;
   /** Mid-turn auto-compaction reported the real post-compaction token count.
    * Lets the host pin the ContextRing to it (same as the manual `/compact`
    * path). Only called when the backend supplies a token count. */
@@ -229,10 +237,14 @@ export function useChatStream({
       // even if the rejection path is delayed or the listener set was swapped
       // mid-turn. `stopped: false` means a real backend error is never an expected
       // user stop; `visibleTurnError` only hides cancellations when stopped.
-      onChatError(({ sessionId, message }) => {
+      onChatError(({ sessionId, message, sessionPreserved }) => {
         if (!isCurrentListener()) return;
         flush(sessionId);
-        handlersRef.current.onError(sessionId, message, stopRequested.current.has(sessionId));
+        // The backend's explicit error event is authoritative. Only the
+        // canonical interruption message from an active user stop is expected;
+        // a provider/tool failure that races with Stop must remain visible.
+        const expectedStop = stopRequested.current.has(sessionId) && isExpectedStopError(message);
+        handlersRef.current.onError(sessionId, message, expectedStop, sessionPreserved);
       }),
       onChatContextCompacted(({ sessionId, removedMessageCount, tokensAfter }) => {
         if (!isCurrentListener()) return;
@@ -261,6 +273,14 @@ export function useChatStream({
 
   const run = useCallback(async (sessionId: string, message: string | ChatSendRequest) => {
     if (runningSessions.current.has(sessionId)) return false;
+    if (runningSessions.current.size >= MAX_RUNNING_CHAT_SESSIONS) {
+      handlersRef.current.onError(
+        sessionId,
+        `at most ${MAX_RUNNING_CHAT_SESSIONS} chat turns can run at once`,
+        false,
+      );
+      return false;
+    }
     runningSessions.current.add(sessionId);
     setRunningSessionIds(new Set(runningSessions.current));
     stopRequested.current.delete(sessionId);
@@ -275,7 +295,9 @@ export function useChatStream({
       return true;
     } catch (error) {
       flush(sessionId);
-      handlersRef.current.onError(sessionId, String(error), stopRequested.current.has(sessionId));
+      const failure = String(error);
+      const expectedStop = stopRequested.current.has(sessionId) && isExpectedStopError(failure);
+      handlersRef.current.onError(sessionId, failure, expectedStop);
       return false;
     } finally {
       runningSessions.current.delete(sessionId);

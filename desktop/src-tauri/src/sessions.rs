@@ -84,11 +84,80 @@ fn remove_client_chat_ui_fields(session: &mut Value) {
     }
 }
 
+fn is_large_turn_placeholder(turn: &Value) -> bool {
+    turn.get("omittedTurnIndex")
+        .and_then(Value::as_u64)
+        .is_some()
+}
+
 /// Read the summary index that backs the sidebar list. One entry per started
 /// session, without any turn bodies, so listing never touches conversation data.
 fn read_chat_ui_index() -> Result<Vec<Value>, String> {
     ensure_chat_ui_migrated()?;
-    read_json_array(&chat_ui_index_path())
+    reconcile_chat_ui_index(read_json_array(&chat_ui_index_path())?)
+}
+
+/// Self-heal the summary index against `chat-ui-sessions/*.json`: recover
+/// entries for per-session files the index doesn't know about (e.g. the index
+/// file was lost or corrupted while the session data survived), and drop
+/// entries whose backing file is gone. Cheap in the common case — only a
+/// directory listing (no JSON parsing) unless drift is actually found.
+fn reconcile_chat_ui_index(index: Vec<Value>) -> Result<Vec<Value>, String> {
+    let Ok(entries) = fs::read_dir(chat_ui_sessions_dir()) else {
+        return Ok(index);
+    };
+    let disk_ids: HashSet<String> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                return None;
+            }
+            path.file_stem()
+                .and_then(|s| s.to_str())
+                .map(str::to_string)
+        })
+        .collect();
+
+    let (mut reconciled, missing_ids, mut changed) = partition_chat_ui_index(index, &disk_ids);
+    for id in missing_ids {
+        if let Some(session) = read_chat_ui_session_file(&id)? {
+            if let Some(summary) = summarize_chat_ui_session(&session) {
+                reconciled.push(summary);
+                changed = true;
+            }
+        }
+    }
+
+    if changed {
+        write_chat_ui_index(reconciled.clone())?;
+    }
+    Ok(reconciled)
+}
+
+/// Split the stored index against the ids actually present on disk: keep
+/// entries whose backing file still exists, drop stale ones, and report which
+/// disk-only ids still need a freshly summarized entry. Pure and file-free so
+/// the recovery decision is unit-testable without touching the filesystem.
+fn partition_chat_ui_index(
+    index: Vec<Value>,
+    disk_ids: &HashSet<String>,
+) -> (Vec<Value>, Vec<String>, bool) {
+    let mut indexed_ids: HashSet<String> = HashSet::new();
+    let mut reconciled: Vec<Value> = Vec::new();
+    let mut changed = false;
+    for entry in index {
+        match chat_ui_session_id(&entry).map(str::to_string) {
+            Some(id) if disk_ids.contains(&id) => {
+                indexed_ids.insert(id);
+                reconciled.push(entry);
+            }
+            // Stale entry: the backing per-session file is gone.
+            _ => changed = true,
+        }
+    }
+    let missing_ids = disk_ids.difference(&indexed_ids).cloned().collect();
+    (reconciled, missing_ids, changed)
 }
 
 fn write_chat_ui_index(index: Vec<Value>) -> Result<(), String> {
@@ -275,12 +344,24 @@ fn truncate_chat_ui_turn_for_preview(turn: &Value) -> (Value, bool) {
     (next, truncated)
 }
 
-fn chat_ui_preview_turns(turns: &[Value]) -> (Vec<Value>, bool, Vec<String>) {
+fn chat_ui_preview_turns(id: &str, turns: &[Value]) -> (Vec<Value>, bool, Vec<String>) {
     let mut selected = Vec::new();
     let mut selected_bytes = 2;
     let mut partial = turns.len() > CHAT_UI_SESSION_PREVIEW_MAX_TURNS;
-    for turn in turns.iter().rev().take(CHAT_UI_SESSION_PREVIEW_MAX_TURNS) {
-        let (preview_turn, was_truncated) = truncate_chat_ui_turn_for_preview(turn);
+    for (turn_index, turn) in turns
+        .iter()
+        .enumerate()
+        .rev()
+        .take(CHAT_UI_SESSION_PREVIEW_MAX_TURNS)
+    {
+        let raw_turn_bytes = serde_json::to_vec(turn)
+            .map(|data| data.len())
+            .unwrap_or(usize::MAX / 2);
+        let (preview_turn, was_truncated) = if raw_turn_bytes > CHAT_UI_RAW_TURN_PARSE_MAX_BYTES {
+            (large_turn_placeholder(id, turn_index, raw_turn_bytes), true)
+        } else {
+            truncate_chat_ui_turn_for_preview(turn)
+        };
         partial |= was_truncated;
         let turn_bytes = serde_json::to_vec(&preview_turn)
             .map(|data| data.len())
@@ -303,7 +384,8 @@ fn chat_ui_preview_turns(turns: &[Value]) -> (Vec<Value>, bool, Vec<String>) {
 }
 
 fn chat_ui_preview_session(mut session: Value, turns: &[Value], turn_count: usize) -> Value {
-    let (preview_turns, turns_partial, partial_base_turn_ids) = chat_ui_preview_turns(turns);
+    let id = chat_ui_session_id(&session).unwrap_or("chat").to_string();
+    let (preview_turns, turns_partial, partial_base_turn_ids) = chat_ui_preview_turns(&id, turns);
     if let Value::Object(object) = &mut session {
         object.insert("turns".to_string(), Value::Array(preview_turns));
         object.insert("turnsLoaded".to_string(), Value::Bool(true));
@@ -327,6 +409,8 @@ fn large_turn_placeholder(id: &str, index: usize, bytes: usize) -> Value {
     json!({
         "id": format!("{id}-large-turn-{index}"),
         "role": "assistant",
+        "omittedTurnIndex": index,
+        "omittedBytes": bytes,
         "blocks": [{
             "kind": "notice",
             "message": format!(
@@ -500,6 +584,64 @@ fn tail_turns_from_array(
     (turn_count, tail.into_iter().collect())
 }
 
+fn turn_from_array_index(
+    raw: &str,
+    array_start: usize,
+    array_end: usize,
+    turn_index: usize,
+) -> Result<Option<Value>, String> {
+    let bytes = raw.as_bytes();
+    let mut index = array_start + 1;
+    let mut object_depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut turn_start = None;
+    let mut current_turn_index = 0usize;
+
+    while index < array_end {
+        let byte = bytes[index];
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+            index += 1;
+            continue;
+        }
+
+        match byte {
+            b'"' => in_string = true,
+            b'{' => {
+                if object_depth == 0 {
+                    turn_start = Some(index);
+                }
+                object_depth = object_depth.saturating_add(1);
+            }
+            b'}' => {
+                object_depth = object_depth.saturating_sub(1);
+                if object_depth == 0 {
+                    if let Some(start) = turn_start.take() {
+                        let end = index + 1;
+                        if current_turn_index == turn_index {
+                            let value = serde_json::from_str::<Value>(&raw[start..end])
+                                .map_err(|e| e.to_string())?;
+                            return Ok(Some(value));
+                        }
+                        current_turn_index += 1;
+                    }
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+
+    Ok(None)
+}
+
 fn read_chat_ui_session_fast_preview(id: &str) -> Result<Option<Value>, String> {
     let raw = match fs::read_to_string(chat_ui_session_file_path(id)) {
         Ok(raw) => raw,
@@ -540,6 +682,9 @@ fn merge_partial_chat_ui_turns(next: &mut Value, stored: &Value) {
         .collect();
     let mut merged = existing_turns.clone();
     for incoming in incoming_turns {
+        if is_large_turn_placeholder(&incoming) {
+            continue;
+        }
         let Some(id) = chat_ui_turn_id(&incoming).map(str::to_string) else {
             continue;
         };
@@ -749,6 +894,24 @@ pub fn chat_ui_session_load(id: String) -> Result<Value, String> {
 }
 
 #[tauri::command]
+pub fn chat_ui_turn_load(id: String, turn_index: usize) -> Result<Value, String> {
+    validate_chat_ui_session_id(&id)?;
+    ensure_chat_ui_migrated()?;
+    let raw = match fs::read_to_string(chat_ui_session_file_path(&id)) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            return Err("chat UI session not found".to_string());
+        }
+        Err(error) => return Err(error.to_string()),
+    };
+    let Some((array_start, array_end)) = find_turns_array_bounds(&raw) else {
+        return Err("chat UI session has no turns array".to_string());
+    };
+    turn_from_array_index(&raw, array_start, array_end, turn_index)?
+        .ok_or_else(|| "chat UI turn not found".to_string())
+}
+
+#[tauri::command]
 pub fn chat_ui_session_save(session: Value) -> Result<(), String> {
     let id = chat_ui_session_id(&session)
         .ok_or_else(|| "chat UI session must include an id".to_string())?
@@ -860,53 +1023,5 @@ pub fn chat_ui_sessions_save(sessions: Value) -> Result<(), String> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{
-        chat_ui_preview_turns, find_turns_array_bounds, tail_turns_from_array,
-        CHAT_UI_RAW_TURN_PARSE_MAX_BYTES, CHAT_UI_SESSION_PREVIEW_MAX_BYTES,
-        CHAT_UI_SESSION_PREVIEW_MAX_TURNS,
-    };
-    use serde_json::{json, Value};
-
-    fn text_turn(index: usize, text: impl Into<String>) -> Value {
-        json!({
-            "id": format!("turn-{index}"),
-            "role": if index % 2 == 0 { "user" } else { "assistant" },
-            "blocks": [{ "kind": "text", "text": text.into() }],
-        })
-    }
-
-    #[test]
-    fn chat_ui_preview_limits_tail_turns_and_bytes() {
-        let turns = (0..40)
-            .map(|index| text_turn(index, "x".repeat(30_000)))
-            .collect::<Vec<_>>();
-        let (preview, partial, base_ids) = chat_ui_preview_turns(&turns);
-
-        assert!(partial);
-        assert!(preview.len() <= CHAT_UI_SESSION_PREVIEW_MAX_TURNS);
-        assert!(serde_json::to_vec(&preview).unwrap().len() <= CHAT_UI_SESSION_PREVIEW_MAX_BYTES);
-        assert_eq!(base_ids.last().map(String::as_str), Some("turn-39"));
-        assert!(!base_ids.iter().any(|id| id == "turn-0"));
-    }
-
-    #[test]
-    fn fast_tail_loader_omits_single_huge_turn_payload() {
-        let huge = "x".repeat(CHAT_UI_RAW_TURN_PARSE_MAX_BYTES + 16_000);
-        let raw = serde_json::to_string(&json!({
-            "id": "chat-large",
-            "turns": [
-                text_turn(0, "small"),
-                text_turn(1, huge),
-            ],
-        }))
-        .unwrap();
-        let (start, end) = find_turns_array_bounds(&raw).expect("turns array");
-        let (count, tail) = tail_turns_from_array(&raw, start, end, "chat-large");
-
-        assert_eq!(count, 2);
-        assert_eq!(tail.len(), 2);
-        let last_message = tail[1]["blocks"][0]["message"].as_str().unwrap();
-        assert!(last_message.contains("omitted from the quick preview"));
-    }
-}
+#[path = "tests/sessions.rs"]
+mod tests;

@@ -6,32 +6,6 @@
   overflow: hidden;
 }
 
-.studio-header {
-  display: flex;
-  align-items: center;
-  gap: 18px;
-  min-height: 62px;
-  padding: 9px 16px;
-  border-bottom: 1px solid var(--border);
-  background: var(--bg-1);
-}
-
-.studio-title {
-  font-size: 16px;
-  font-weight: 750;
-}
-
-.studio-subtitle {
-  margin-top: 2px;
-  color: var(--text-dim);
-  font-size: 11px;
-}
-
-.studio-search {
-  width: min(260px, 32vw);
-  margin-left: auto;
-}
-
 .studio-error {
   display: flex;
   align-items: center;
@@ -726,14 +700,8 @@
 }
 
 @media (max-width: 900px) {
-  .studio-header,
   .studio-artifact-head {
     flex-wrap: wrap;
-  }
-
-  .studio-search {
-    width: 100%;
-    margin-left: 0;
   }
 
   .studio-body {

@@ -1,4 +1,4 @@
-# 🌙 ARIS Studio — Auto Research in Sleep
+# 🌙 SomniQ Studio — Auto Research in Sleep
 
 ```
     ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
@@ -14,12 +14,12 @@
          Studio 桌面端 · 让 AI 边睡边帮你做研究
 ```
 
-![ARIS Studio 截图](docs/screenshot.png)
+![SomniQ Studio 截图](docs/screenshot.png)
 
-> **ARIS 的桌面应用** —— Executor 执行 · Reviewer 审查 · 迭代精进。
+> **SomniQ 的桌面应用** —— Executor 执行 · Reviewer 审查 · 迭代精进。
 
-[![Version](https://img.shields.io/badge/version-0.4.8-blue?style=flat-square)](https://github.com/zhuyingqin/Aris/releases)
-[![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D6?style=flat-square&logo=windows)](https://github.com/zhuyingqin/Aris)
+[![Version](https://img.shields.io/badge/version-0.4.8-blue?style=flat-square)](https://github.com/zhuyingqin/SomniQ/releases)
+[![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D6?style=flat-square&logo=windows)](https://github.com/zhuyingqin/SomniQ)
 [![Built with Tauri](https://img.shields.io/badge/built%20with-Tauri%202-FFC131?style=flat-square&logo=tauri)](https://tauri.app)
 [![UI](https://img.shields.io/badge/UI-React%20%2B%20Vite-61DAFB?style=flat-square&logo=react)](https://react.dev)
 [![License](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
@@ -28,6 +28,27 @@
 
 
 ## 📰 最新动态
+
+> **v0.4.11** (2026-07) —— Runtime / tools / executor 表面重构（`crates/runtime` +
+> `crates/tools` + `crates/executor` + `crates/chat` + `crates/commands` +
+> `crates/compat-harness` + `crates/notebook` 约 60 个 Rust 文件）：hooks、process registry、
+> cache、hot-memory、change-ledger、oauth、remote、usage、permissions、session_index 全面打磨。
+> 测试重组：~14 个新的 `src/<area>/tests/` 子目录，把散落在源文件旁的内联测试集中到每个 crate
+> 的单一 `tests/` 命名空间（knowledge / lab / literature / studio / typeset / chat / aris-cli /
+> api 等）。Tauri 后端（`commands.rs`、`config.rs`、`engine.rs`、`env/cache.rs`、`files.rs`、
+> `knowledge.rs`、`lab.rs`、`lib.rs`、`literature.rs`、`mail/*.rs`、`projects.rs`、
+> `scheduled.rs`、`sessions.rs`、`state.rs`、`studio.rs`、`usage_log.rs`、`chat_events.rs`、
+> 新增 `change_ledger.rs`）把 runtime 表面接入 desktop 命令。前端（`App.tsx`、`api/tauri.ts`、
+> chat / lab / literature / studio / typeset、`styles.css`、`types.ts`）适配 runtime 重构。
+
+> **v0.4.10** (2026-07) —— Chat：image preview 组件、run/command helpers、扩充测试覆盖。Lab：
+> 文件操作 + lab 预览润色。Typeset：CodeMirror-6 decoration-based 可视化编辑器。Runtime / tools
+> / executor 表面新增。aris-cli + Tauri 后端微调。清理：删除过时的 `idea-stage/v0.4.10..v0.4.13`
+> 计划文档。
+
+
+<details>
+<summary>📜 早期版本（v0.4.9 → v0.1.0，点击展开）</summary>
 
 > **v0.4.9** (2026-07) —— Typeset 模块：Tectonic 驱动的 LaTeX 编译（`src-tauri/src/typeset.rs`）+
 > CodeMirror-6 可视化编辑器（`desktop/src/typeset/`，mathlive 数学输入，slides-main 测试样本）。
@@ -54,9 +75,6 @@
 > detail），newapi 托管登录 + Settings-as-projection，Lab 升级（MATLAB REPL、kernel 选择器），Chat
 > stop+continue 中断架构 + `AskUserQuestion` 工具，runtime / cache / tools（knowledge、literature、
 > notebook、studio）更新。
-
-<details>
-<summary>📜 早期版本（v0.4.5 → v0.1.0，点击展开）</summary>
 
 > **v0.4.5** (2026-06) —— CI 修复：把 `TAURI_SIGNING_PRIVATE_KEY` 传给 macOS 桌面任务，否则 bundle 步骤
 > 会因为 updater-artifacts 检查报错。
@@ -120,30 +138,30 @@
 
 ---
 
-## ✨ ARIS Studio 是什么？
+## ✨ SomniQ Studio 是什么？
 
-**ARIS Studio**（*Auto Research in Sleep*）是一个本地桌面工作台，用和 ARIS-Code 相同的对抗式循环跑完整研究流程
+**SomniQ Studio**（*Auto Research in Sleep*）是一个本地桌面工作台，用和 SomniQ-Code 相同的对抗式循环跑完整研究流程
 （从找 idea 到论文投稿）：
 
 - 🤖 **Executor** —— 主力 LLM：写代码、调研文献、起草论文、规划实验
 - 🔍 **Reviewer** —— 独立 LLM，通过 `LlmReview` 工具批判 executor 的输出
 - 🔄 **迭代** —— 写 → 批 → 改，直到质量收敛
 
-旧的 ARIS CLI 不再是入口；CLI / runtime 相关 crate 现在作为桌面端复用的底层库。
+旧的 SomniQ CLI 不再是入口；CLI / runtime 相关 crate 现在作为桌面端复用的底层库。
 
 ---
 
 ## 🚀 安装
 
-ARIS Studio 以 **Windows** 桌面应用形式发布（Tauri 2 + React + Vite），打包为 NSIS 安装包。
+SomniQ Studio 以 **Windows** 桌面应用形式发布（Tauri 2 + React + Vite），打包为 NSIS 安装包。
 
 **依赖：** Windows 10/11 + WebView2 Runtime · Node.js 18+ · Rust stable（MSVC）· Visual Studio C++ Build Tools
 
 ### 从源码运行
 
 ```powershell
-git clone https://github.com/zhuyingqin/Aris.git
-cd Aris\desktop
+git clone https://github.com/zhuyingqin/SomniQ.git
+cd SomniQ\desktop
 npm install
 npm run tauri dev
 ```
@@ -170,7 +188,7 @@ npm run tauri build
 
 ### MCP 与 Playwright
 
-ARIS 桌面端从当前项目的 `.mcp.json` 读取 MCP 服务器，并在 **Extensions → Plugins** 与
+SomniQ 桌面端从当前项目的 `.mcp.json` 读取 MCP 服务器，并在 **Extensions → Plugins** 与
 **Settings → Permissions & MCP** 中提供配置入口。Windows 安装包会内置
 `aris-playwright-mcp` launcher、vendored `@playwright/mcp` 和 Node runtime，因此用户添加
 Playwright 预设时不需要自己安装 Node.js / npm。默认预设使用 Microsoft Edge
@@ -200,9 +218,9 @@ Playwright 预设时不需要自己安装 Node.js / npm。默认预设使用 Mic
 - **💬 桌面 Chat** —— 流式工具调用、有序输出、markdown、会话历史、`@` 文件提及，以及 reasoning/"thinking" 内容；会话按项目持久化。
 - **🔄 对抗式 Review** —— `LlmReview` 走 Settings 中的 reviewer，executor 与 reviewer 可以是不同 provider 的不同模型。
 - **📚 内置 Skills** —— 在 Skills 页浏览，或在 Chat 中通过 slash skill 调用。
-- **🧩 Workflow Studio** —— 在可视化画布上设计智能体团队工作流，底层基于 ARIS DSL。
+- **🧩 Workflow Studio** —— 在可视化画布上设计智能体团队工作流，底层基于 SomniQ DSL。
 - **📊 运行监控** —— 启动 / 暂停 / 恢复 / 取消运行，实时查看 phase、agent、event、task、mailbox。
-- **📎 PDF 附件** —— ARIS 通过 `read_file` 读取文本型 PDF，可直接审本地论文（文本提取，非 OCR）。
+- **📎 PDF 附件** —— SomniQ 通过 `read_file` 读取文本型 PDF，可直接审本地论文（文本提取，非 OCR）。
 - **🗂️ 多项目** —— 在顶部切换项目，各自独立的 sessions、runs、agents、workflows。
 - **🔒 本地优先** —— 配置与运行数据都留在你的机器上。
 
@@ -287,7 +305,7 @@ Desktop 还会维护 `verified_executors`，用于在 Chat 顶部模型下拉里
 
 ## 🧱 架构
 
-ARIS Studio 复用 ARIS kernel，而不是在前端重写 agent 逻辑：UI 调用本地 Tauri 后端，后端再调用共享 Rust crate。
+SomniQ Studio 复用 SomniQ kernel，而不是在前端重写 agent 逻辑：UI 调用本地 Tauri 后端，后端再调用共享 Rust crate。
 
 ```text
 React + Vite 前端
@@ -341,14 +359,14 @@ cargo test -p runtime reads_pdf      # PDF 读取测试（仓库根目录）
 
 ## 🙏 致谢
 
-ARIS Studio 是 **[ARIS-Code](https://github.com/wanshuiyin/Auto-claude-code-research-in-sleep)** 的桌面 shell，
+SomniQ Studio 是 **[SomniQ-Code](https://github.com/wanshuiyin/Auto-claude-code-research-in-sleep)** 的桌面 shell，
 构建在 **[claw-code](https://github.com/ultraworkers/claw-code)**（Claude Code 的 Rust 复刻）之上。感谢两个团队。
 
 ---
 
 ## 📄 License
 
-MIT License © 2026 ARIS Contributors
+MIT License © 2026 SomniQ Contributors
 
 ---
 

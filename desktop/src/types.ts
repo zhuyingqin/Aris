@@ -29,6 +29,7 @@ export interface ChatCommandResult {
   replaceTurns: boolean;
   openSettings: boolean;
   refreshStatus: boolean;
+  refreshProjectBrief?: boolean;
   /** Backend session-history token estimate in the same unit as the
    * auto-compaction budget. Null/absent leaves the ring's own transcript
    * estimate in place. */
@@ -596,10 +597,17 @@ export interface ChatTurn {
   id: string;
   role: "user" | "assistant";
   blocks: ChatBlock[];
+  omittedTurnIndex?: number;
+  omittedBytes?: number;
   streaming?: boolean;
   error?: string;
   stopped?: boolean;
   attachments?: ChatAttachment[];
+}
+
+export interface ChatReasoningEffortView {
+  supported: boolean;
+  effort: string;
 }
 
 export interface ChatEventLogEntry {

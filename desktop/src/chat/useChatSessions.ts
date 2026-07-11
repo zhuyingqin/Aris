@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  chatEventsReplay,
   chatUiSessionLoad,
   chatUiSessionSave,
   chatUiSessionsList,
@@ -244,13 +245,34 @@ export function useChatSessions(projectId?: string | null) {
     setHomeSession(makeHomeSession(activeProjectId));
   }, [activeProjectId, allSessions, currentId, homeSession.projectId, projectKnown]);
 
+  const loadSessionFromEventLog = useCallback(async (session: ChatSession): Promise<ChatSession | null> => {
+    try {
+      const replay = await chatEventsReplay(session.id);
+      if (replay.eventCount === 0 && replay.turns.length === 0) return null;
+      if (replay.turns.length === 0 && (session.turnCount ?? 0) > 0) return null;
+      return {
+        ...session,
+        turns: replay.turns,
+        turnsLoaded: true,
+        turnsPartial: false,
+        turnCount: replay.turns.length,
+        partialBaseTurnIds: undefined,
+        title: session.title === "New chat" ? titleFromTurns(replay.turns) : session.title,
+      };
+    } catch {
+      return null;
+    }
+  }, []);
+
   useEffect(() => {
     if (!isTauri() || currentId === HOME_SESSION_ID) return;
     const session = sessionsRef.current.find((item) => item.id === currentId);
     if (!session || session.turnsLoaded !== false || loadingSessionIds.current.has(currentId)) return;
     loadingSessionIds.current.add(currentId);
-    chatUiSessionLoad<ChatSession>(currentId)
+    loadSessionFromEventLog(session)
+      .then((eventSession) => eventSession ?? chatUiSessionLoad<ChatSession>(currentId))
       .then((stored) => {
+        if (!stored) throw new Error("chat session not found");
         const loaded = { ...migrateSession(stored, session.projectId), turnsLoaded: true };
         setAllSessions((previous) => previous.map((item) =>
           item.id === currentId ? mergeLoadedSession(item, loaded) : item));
@@ -259,7 +281,7 @@ export function useChatSessions(projectId?: string | null) {
       .finally(() => {
         loadingSessionIds.current.delete(currentId);
       });
-  }, [currentId, setError]);
+  }, [currentId, loadSessionFromEventLog, setError]);
 
   const currentSession = useMemo(
     () => {
@@ -364,6 +386,20 @@ export function useChatSessions(projectId?: string | null) {
     });
   }, [activeProjectId, homeSession, markSessionDirty, updateSession]);
 
+  const hydrateOmittedTurn = useCallback((id: string, turnIndex: number, turn: ChatTurn) => {
+    if (id === HOME_SESSION_ID) return;
+    setAllSessions((previous) => previous.map((session) => {
+      if (session.id !== id) return session;
+      let replaced = false;
+      const turns = session.turns.map((item) => {
+        if (item.omittedTurnIndex !== turnIndex) return item;
+        replaced = true;
+        return turn;
+      });
+      return replaced ? { ...session, turns, turnsLoaded: true } : session;
+    }));
+  }, []);
+
   const newSession = useCallback(() => {
     if (currentId === HOME_SESSION_ID) {
       if (!isBlankSession(homeSession)) setHomeSession(makeHomeSession(activeProjectId));
@@ -415,6 +451,7 @@ export function useChatSessions(projectId?: string | null) {
     createSessionInProject,
     updateSession,
     patchTurns,
+    hydrateOmittedTurn,
     newSession,
     setDraft,
     renameSession,

@@ -55,25 +55,26 @@ interface OnboardingStep {
 
 const ONBOARDING_STEPS: OnboardingStep[] = [
   {
-    kicker: "导航栏",
-    title: "左侧导航：每个模块去哪",
-    body: "这里是功能入口，不同模块负责不同工作。先看清楚左侧，后面遇到任务就知道该去哪里。",
+    kicker: "功能入口",
+    title: "左上角菜单：在各个模块间切换",
+    body: "点击 SomniQ Chat 就能打开功能菜单，切换到其它工作模块。当前所在模块会高亮显示。",
     points: [
-      "Chat：提出任务，让代理读代码、改文件、跑命令",
-      "Lab：运行 notebook、脚本和实验",
-      "Literature / Studio：读论文、看生成成果",
+      "对话：提出任务，让代理读代码、改文件、跑命令",
+      "代码 / LaTeX：编写程序、运行实验和排版论文",
+      "文献 / 工作室：检索论文、整理资料，查看生成的 slides 和海报",
+      "邮箱 / 扩展：收发邮件，管理已连接的工具和技能",
     ],
-    targetSelectors: ['[data-onboarding-target="sidebar"]', '[data-onboarding-target="mobile-menu"]'],
-    placement: "right",
+    targetSelectors: ['[data-onboarding-target="product-switcher"]'],
+    placement: "bottom",
   },
   {
     kicker: "主工作区",
     title: "Chat 区：当前正在做事的地方",
     body: "中间这块会显示对话、工具调用、执行结果和错误提示。你主要在这里输入需求、看过程、确认结果。",
     points: [
+      "左侧栏按「置顶」「项目」分组显示历史对话，点文件夹图标可展开或折叠",
       "把目标、报错或文件路径直接发给 Chat",
-      "代理执行命令时，过程和结果会显示在这里",
-      "任务做完后，也会在这里给出修改摘要",
+      "代理执行命令时，过程、结果和修改摘要都会显示在这里",
     ],
     targetSelectors: ['[data-onboarding-target="workspace"]'],
     placement: "inside",
@@ -100,7 +101,7 @@ const ONBOARDING_STEPS: OnboardingStep[] = [
       "配置完成后再回到 Chat 开始任务",
     ],
     targetSelectors: ['[data-onboarding-target="user-settings"]', '[data-onboarding-target="user-menu"]'],
-    placement: "right",
+    placement: "bottom",
   },
 ];
 
@@ -191,7 +192,7 @@ function cardStyle(rect: TargetRect | null, placement: OnboardingPlacement): CSS
   const margin = 16;
   const gap = 16;
   const cardWidth = Math.min(390, Math.max(280, window.innerWidth - margin * 2));
-  const estimatedCardHeight = 302;
+  const estimatedCardHeight = 326;
   let left = rect.right + gap;
   let top = rect.top + rect.height / 2 - estimatedCardHeight / 2;
 

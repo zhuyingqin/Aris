@@ -33,7 +33,6 @@ export type Tab =
   | "mail"
   | "extensions"
   | "settings"
-  | "sessions"
   | "scheduled";
 
 export type Theme = "dark" | "light";
@@ -214,10 +213,6 @@ interface AppState {
   pendingStudioArtifactId: string | null;
   setPendingStudioArtifactId: (value: string | null) => void;
 
-  /** One-shot: open this session's transcript, consumed by Sessions after switching tabs. */
-  pendingSessionViewId: string | null;
-  setPendingSessionViewId: (value: string | null) => void;
-
   stateDir: string;
   error: string | null;
   projects: DesktopProject[];
@@ -309,9 +304,6 @@ export const useStore = create<AppState>((set, get) => ({
 
   pendingStudioArtifactId: null,
   setPendingStudioArtifactId: (value) => set({ pendingStudioArtifactId: value }),
-
-  pendingSessionViewId: null,
-  setPendingSessionViewId: (value) => set({ pendingSessionViewId: value }),
 
   stateDir: "",
   error: null,

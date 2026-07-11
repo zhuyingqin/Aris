@@ -88,16 +88,51 @@ export function firstVisibleTurnIndexFromVirtualItems(
   return visible?.index ?? items[items.length - 1].index;
 }
 
+export interface ChatStarter {
+  id: "literature" | "research" | "review" | "writing";
+  label: string;
+  hint: string;
+  prompt: string;
+}
+
+function StarterIcon({ id }: { id: ChatStarter["id"] }) {
+  const common = {
+    width: 18,
+    height: 18,
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: 1.7,
+    strokeLinecap: "round" as const,
+    strokeLinejoin: "round" as const,
+    "aria-hidden": true,
+  };
+  if (id === "literature") {
+    return <svg {...common}><circle cx="10.5" cy="10.5" r="6" /><path d="m15 15 5 5" /></svg>;
+  }
+  if (id === "research") {
+    return <svg {...common}><path d="M4 6.5h16M4 12h16M4 17.5h10" /><path d="M18 15.5v5M15.5 18h5" /></svg>;
+  }
+  if (id === "review") {
+    return <svg {...common}><circle cx="12" cy="12" r="8" /><path d="m8.5 12 2.3 2.3 4.8-5" /></svg>;
+  }
+  return <svg {...common}><path d="m14.5 5.5 4 4M5 19l2.6-.6L18.8 7.2a1.4 1.4 0 0 0-2-2L5.6 16.4 5 19Z" /><path d="M13 7 17 11" /></svg>;
+}
+
 interface Props {
   sessionId: string;
   turns: ChatTurn[];
   loading?: boolean;
   composerHeight: number;
-  starters: string[];
+  starters: ChatStarter[];
+  welcomeTitle: string;
+  welcomeDescription: string;
   onStarter: (prompt: string) => void;
   onEdit: (turn: ChatTurn) => void;
   onRetry: (turn: ChatTurn) => void;
   onContinue: () => void;
+  onLoadOmittedTurn?: (turnIndex: number) => void;
+  isOmittedTurnLoading?: (turnIndex: number) => boolean;
   onPermissionRespond: (promptId: string, allow: boolean) => void;
   onQuestionRespond: (toolUseId: string, answer: string) => void;
 }
@@ -157,22 +192,20 @@ function QuestionTimeline({
           ))}
         </span>
       </button>
-      {open && (
-        <div className="chat-question-popover" role="list" aria-label="本轮对话提问">
-          {markers.map((marker) => (
-            <button
-              key={marker.id}
-              type="button"
-              className={marker.number === active ? "active" : ""}
-              role="listitem"
-              onClick={() => onJump(marker.turnIndex)}
-            >
-              <span className="chat-question-item-number">{marker.number}</span>
-              <span className="chat-question-item-text">{marker.preview}</span>
-            </button>
-          ))}
-        </div>
-      )}
+      <div className="chat-question-popover" role="list" aria-label="本轮对话提问">
+        {markers.map((marker) => (
+          <button
+            key={marker.id}
+            type="button"
+            className={marker.number === active ? "active" : ""}
+            role="listitem"
+            onClick={() => onJump(marker.turnIndex)}
+          >
+            <span className="chat-question-item-number">{marker.number}</span>
+            <span className="chat-question-item-text">{marker.preview}</span>
+          </button>
+        ))}
+      </div>
     </div>
   );
 }
@@ -194,10 +227,14 @@ export default function ChatThread({
   loading = false,
   composerHeight,
   starters,
+  welcomeTitle,
+  welcomeDescription,
   onStarter,
   onEdit,
   onRetry,
   onContinue,
+  onLoadOmittedTurn,
+  isOmittedTurnLoading = () => false,
   onPermissionRespond,
   onQuestionRespond,
 }: Props) {
@@ -345,13 +382,22 @@ export default function ChatThread({
                 <span className="chat-welcome-glow" aria-hidden="true" />
                 <img src={arisIcon} alt="" decoding="async" />
               </div>
-              <h1>What are we working on?</h1>
-              <p>Start from the current project context, or attach files and ask anything.</p>
+              <h1>{welcomeTitle}</h1>
+              <p>{welcomeDescription}</p>
               {starters.length > 0 && (
                 <div className="chat-starters">
-                  {starters.map((prompt) => (
-                    <button key={prompt} type="button" onClick={() => onStarter(prompt)}>
-                      <span className="chat-starter-label">{prompt}</span>
+                  {starters.map((starter) => (
+                    <button
+                      key={starter.id}
+                      className={`chat-starter chat-starter-${starter.id}`}
+                      type="button"
+                      onClick={() => onStarter(starter.prompt)}
+                    >
+                      <span className="chat-starter-icon" aria-hidden="true"><StarterIcon id={starter.id} /></span>
+                      <span className="chat-starter-content">
+                        <span className="chat-starter-label">{starter.label}</span>
+                        <span className="chat-starter-hint">{starter.hint}</span>
+                      </span>
                       <svg className="chat-starter-arrow" width="14" height="14" viewBox="0 0 16 16"
                         fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"
                         strokeLinejoin="round" aria-hidden="true">
@@ -386,6 +432,8 @@ export default function ChatThread({
                       onEdit={onEdit}
                       onRetry={onRetry}
                       onContinue={onContinue}
+                      onLoadOmittedTurn={onLoadOmittedTurn}
+                      omittedTurnLoading={turn.omittedTurnIndex != null && isOmittedTurnLoading(turn.omittedTurnIndex)}
                       onPermissionRespond={onPermissionRespond}
                       onQuestionRespond={onQuestionRespond}
                     />

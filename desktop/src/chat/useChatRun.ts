@@ -14,19 +14,27 @@ import {
   chatPermissionRespond,
   chatPermissionSet,
   chatQuestionRespond,
+  chatReasoningEffortGet,
+  chatReasoningEffortSet,
+  chatRewindToUserMessage,
   chatSetContext,
   chatStatus,
   chatSuggestTitle,
   isTauri,
+  projectGoalInfer,
+  projectGoalProgress,
   type ChatSendRequest,
 } from "../api/tauri";
 import { useStore } from "../store";
-import type { ChatAttachment, ChatModelOption, ChatStatus, ChatTurn, PermissionModeView } from "../types";
+import type {
+  ChatAttachment, ChatModelOption, ChatReasoningEffortView, ChatStatus, ChatTurn, PermissionModeView,
+} from "../types";
 import { CHAT_COPY } from "./i18n";
 import { cleanChatTitle, patchLastAssistantTurn, textFromTurn, titleFromTurns } from "./model";
 import type { ChatSession } from "./types";
 import { useChatStream } from "./useChatStream";
 import { onChatModelsUpdated } from "../modelEvents";
+import { notifyProjectBriefUpdated } from "./ProjectBriefCard";
 import {
   assistantTextTurn,
   assistantTurn,
@@ -34,6 +42,7 @@ import {
   continueStoppedPrompt,
   contextForRetry,
   deferHeavyUiWork,
+  EMPTY_ASSISTANT_RESPONSE,
   estimateTokens,
   formatCompactTokens,
   needsBackendContextReset,
@@ -67,12 +76,15 @@ export function useChatRun({
   const language = useStore((state) => state.language);
   const copy = CHAT_COPY[language];
   const setError = useStore((state) => state.setError);
+  const currentProject = useStore((state) => state.currentProject);
 
   const [status, setStatus] = useState<ChatStatus | null>(null);
   const [permission, setPermission] = useState<PermissionModeView | null>(null);
   const [permissionBusy, setPermissionBusy] = useState(false);
   const [modelOptions, setModelOptions] = useState<ChatModelOption[]>([]);
   const [modelBusy, setModelBusy] = useState(false);
+  const [reasoning, setReasoning] = useState<ChatReasoningEffortView>({ supported: false, effort: "high" });
+  const [reasoningBusy, setReasoningBusy] = useState(false);
   // After `/compact` the backend session shrinks but the visible transcript is
   // kept intact, so the transcript-derived token estimate (and thus the
   // ContextRing) would never move. Pin the ring to the real post-compaction
@@ -87,9 +99,11 @@ export function useChatRun({
   });
 
   const titleRequests = useRef(new Set<string>());
+  const goalRequests = useRef(new Set<string>());
   const sendLocks = useRef(new Set<string>());
   const syncedTurnIds = useRef(new Map<string, Set<string>>());
-  const dirtyBackendContext = useRef(new Set<string>());
+  const backendContextNeedsReset = useRef(new Set<string>());
+  const unsavedBackendTurns = useRef(new Map<string, ChatTurn[]>());
   const contextOverridesRef = useRef(contextOverrides);
   contextOverridesRef.current = contextOverrides;
 
@@ -101,10 +115,6 @@ export function useChatRun({
     const known = syncedTurnIds.current.get(sessionId) ?? new Set<string>();
     for (const turn of turnsToMark) known.add(turn.id);
     syncedTurnIds.current.set(sessionId, known);
-  }, []);
-
-  const markBackendContextDirty = useCallback((sessionId: string) => {
-    dirtyBackendContext.current.add(sessionId);
   }, []);
 
   const patchAssistant = useCallback((
@@ -142,10 +152,55 @@ export function useChatRun({
       .catch(() => undefined);
   }, [updateSession]);
 
+  const syncProjectGoal = useCallback((sessionId: string, nextTurns: ChatTurn[]) => {
+    if (!isTauri() || !currentProject?.id) return;
+    const userTurns = nextTurns.filter((turn) => turn.role === "user");
+    const assistantTurns = nextTurns.filter((turn) => turn.role === "assistant");
+    const latestAssistant = assistantTurns[assistantTurns.length - 1];
+    const assistantText = latestAssistant ? textFromTurn(latestAssistant).trim() : "";
+    if (!assistantText) return;
+
+    if (userTurns.length === 1 && assistantTurns.length === 1 && !goalRequests.current.has(sessionId)) {
+      const userText = textFromTurn(userTurns[0]).trim();
+      if (!userText) return;
+      goalRequests.current.add(sessionId);
+      void projectGoalInfer(currentProject.id, sessionId, userText, assistantText)
+        .then(notifyProjectBriefUpdated)
+        .catch(() => {
+          goalRequests.current.delete(sessionId);
+        });
+      return;
+    }
+
+    const recentStatus = assistantText
+      .split(/\r?\n/)
+      .map((line) => line.replace(/^#+\s*/, "").trim())
+      .find(Boolean)
+      ?.slice(0, 260);
+    if (!recentStatus) return;
+    void projectGoalProgress(currentProject.id, recentStatus)
+      .then(notifyProjectBriefUpdated)
+      .catch(() => undefined);
+  }, [currentProject?.id]);
+
   const onComplete = useCallback((sessionId: string, reply: string) => {
     patchAssistant(
       sessionId,
       (turn) => {
+        const hasAssistantContent = turn.blocks.some((block) => (
+          (block.kind === "text" && block.text.trim())
+          || (block.kind === "thinking" && block.thinking.trim())
+        ));
+        // A successful invoke with neither final text nor streamed thinking is
+        // an abnormal/empty termination, not a successful empty answer.
+        if (!reply.trim() && !hasAssistantContent) {
+          return {
+            ...turn,
+            streaming: false,
+            error: EMPTY_ASSISTANT_RESPONSE,
+            stopped: false,
+          };
+        }
         return {
           ...turn,
           blocks: completedAssistantBlocks(turn, reply),
@@ -157,25 +212,49 @@ export function useChatRun({
       (nextTurns) => {
         markBackendContextSynced(sessionId, nextTurns);
         suggestTitle(sessionId, nextTurns);
+        syncProjectGoal(sessionId, nextTurns);
       },
     );
-  }, [markBackendContextSynced, patchAssistant, suggestTitle]);
+  }, [markBackendContextSynced, patchAssistant, suggestTitle, syncProjectGoal]);
 
-  const onError = useCallback((sessionId: string, error: string, stopped: boolean) => {
+  const onError = useCallback((
+    sessionId: string,
+    error: string,
+    stopped: boolean,
+    sessionPreserved?: boolean,
+  ) => {
+    // A build/panic/pre-worker failure has no authoritative backend copy of
+    // the UI's just-added user turn. Reconcile it before the next send so it
+    // cannot disappear from model context.
+    const needsBackendRepair = sessionPreserved === false;
+    if (needsBackendRepair) backendContextNeedsReset.current.add(sessionId);
     const visibleError = visibleTurnError(error, stopped);
     patchAssistant(
       sessionId,
-      (turn) => ({
-        ...turn,
-        streaming: false,
-        error: visibleError,
-        stopped,
-      }),
-      stopped && !visibleError
-        ? () => markBackendContextDirty(sessionId)
+      (turn) => {
+        // A late rejected invoke can arrive after the backend's authoritative
+        // chat-error event. Do not let the subsequent expected cancellation
+        // overwrite that real error with an empty stopped state.
+        const nextError = visibleError ?? (stopped ? turn.error : undefined);
+        return {
+          ...turn,
+          streaming: false,
+          error: nextError,
+          stopped: stopped && !nextError,
+        };
+      },
+      needsBackendRepair
+        ? (turns) => {
+          const assistantIndex = turns.length - 1;
+          const user = turns[assistantIndex - 1];
+          const assistant = turns[assistantIndex];
+          if (user?.role === "user" && assistant?.role === "assistant") {
+            unsavedBackendTurns.current.set(sessionId, [user, assistant]);
+          }
+        }
         : undefined,
     );
-  }, [markBackendContextDirty, patchAssistant]);
+  }, [patchAssistant]);
 
   // Pin the ContextRing to an authoritative backend token count — reported
   // after every turn (real usage) and after compaction — anchored at the
@@ -278,6 +357,16 @@ export function useChatRun({
     chatModelOptions().then((opts) => setModelOptions(opts.options)).catch(() => setModelOptions([]));
   }, []);
 
+  const refreshReasoning = useCallback((model?: string | null) => {
+    if (!isTauri() || !model) {
+      setReasoning({ supported: false, effort: "high" });
+      return;
+    }
+    chatReasoningEffortGet(model).then(setReasoning).catch(() => {
+      setReasoning({ supported: false, effort: "high" });
+    });
+  }, []);
+
   useEffect(() => {
     refreshStatus(currentSession?.model ?? null);
     if (!isTauri()) {
@@ -290,7 +379,8 @@ export function useChatRun({
     }
     chatPermissionGet(currentId).then(setPermission).catch(() => setPermission(null));
     refreshModelOptions();
-  }, [copy.permissionLabels, copy.previewPermissionDescription, currentId, currentSession?.model, refreshModelOptions, refreshStatus]);
+    refreshReasoning(currentSession?.model);
+  }, [copy.permissionLabels, copy.previewPermissionDescription, currentId, currentSession?.model, refreshModelOptions, refreshReasoning, refreshStatus]);
 
   useEffect(() => onChatModelsUpdated(() => {
     refreshModelOptions();
@@ -329,6 +419,7 @@ export function useChatRun({
     try {
       const nextStatus = await chatModelSet(model, false);
       setStatus(nextStatus);
+      refreshReasoning(nextStatus.model ?? model);
       updateSession(currentSession.id, (session) => ({
         ...session,
         model: nextStatus.model ?? model,
@@ -339,7 +430,20 @@ export function useChatRun({
     } finally {
       setModelBusy(false);
     }
-  }, [activeModel, currentSession, setError, updateSession]);
+  }, [activeModel, currentSession, refreshReasoning, setError, updateSession]);
+
+  const changeReasoningEffort = useCallback(async (effort: string) => {
+    if (!reasoning.supported || effort === reasoning.effort || !isTauri()) return;
+    setReasoningBusy(true);
+    try {
+      const next = await chatReasoningEffortSet(effort);
+      setReasoning({ ...next, supported: reasoning.supported });
+    } catch (error) {
+      setError(String(error));
+    } finally {
+      setReasoningBusy(false);
+    }
+  }, [reasoning.effort, reasoning.supported, setError]);
 
   const changePermission = useCallback(async (mode: string) => {
     if (!isTauri()) {
@@ -382,12 +486,17 @@ export function useChatRun({
     attached: ChatAttachment[],
     resetContext = false,
     promptOverride?: string | ChatSendRequest,
+    rewindFromUser?: ChatTurn,
   ) => {
     const prompt = typeof promptOverride === "string"
       ? { text: promptOverride }
       : promptOverride ?? (await outgoingMessage(text, attached));
     const selectedModel = session.model || status?.model || undefined;
-    const request = selectedModel ? { ...prompt, model: selectedModel } : prompt;
+    const request: ChatSendRequest = {
+      ...prompt,
+      projectId: session.projectId,
+      ...(selectedModel ? { model: selectedModel } : {}),
+    };
     if (!isTauri()) {
       patchTurns(session.id, () => [
         ...prefix,
@@ -398,13 +507,33 @@ export function useChatRun({
       setEditingTurnId(null);
       return;
     }
-    const shouldResetContext = dirtyBackendContext.current.has(session.id)
+    const shouldResetContext = backendContextNeedsReset.current.has(session.id)
       || needsBackendContextReset(session.turns, prefix, resetContext);
     if (shouldResetContext) {
-      const tokens = await chatSetContext(session.id, await contextForRetry(prefix), "replace");
+      // Retry/edit normally truncate history before an earlier user turn. Ask
+      // the backend to rewind its authoritative session first; this retains
+      // compaction summaries and untruncated tool content. Old or ambiguous
+      // sessions safely fall back to the existing UI reconstruction.
+      const recoveryTurns = unsavedBackendTurns.current.get(session.id);
+      let tokens = recoveryTurns
+        ? await chatSetContext(session.id, await contextForRetry(recoveryTurns), "append").catch(() => null)
+        : null;
+      const rewindMessage = rewindFromUser
+        ? await outgoingMessage(textFromTurn(rewindFromUser), rewindFromUser.attachments ?? [])
+        : undefined;
+      if (rewindMessage) {
+        const rewindTokens = await chatRewindToUserMessage(session.id, rewindMessage).catch(() => null);
+        // Rewind must succeed for an edit/retry; a repaired append alone would
+        // leave the rejected user turn at the end of the session.
+        tokens = rewindTokens;
+      }
+      if (tokens == null) {
+        tokens = await chatSetContext(session.id, await contextForRetry(prefix), "replace");
+      }
       setContextOverrides((prev) => new Map(prev).set(session.id, { tokens, anchor: prefix.length }));
       markBackendContextSynced(session.id, prefix);
-      dirtyBackendContext.current.delete(session.id);
+      backendContextNeedsReset.current.delete(session.id);
+      unsavedBackendTurns.current.delete(session.id);
     } else {
       markBackendContextSynced(session.id, prefix);
     }
@@ -429,6 +558,8 @@ export function useChatRun({
         textFromTurn(previousUser),
         previousUser.attachments ?? [],
         true,
+        undefined,
+        previousUser,
       );
     } finally {
       sendLocks.current.delete(session.id);
@@ -445,7 +576,7 @@ export function useChatRun({
         session.turns,
         "Continue from where you stopped.",
         [],
-        true,
+        false,
         continueStoppedPrompt(),
       );
     } finally {
@@ -471,10 +602,13 @@ export function useChatRun({
     respondPermission,
     respondQuestion,
     modelBusy,
+    reasoning,
+    reasoningBusy,
     activeModel,
     modelSelectOptions,
     canSwitchModel,
     changeModel,
+    changeReasoningEffort,
     refreshStatus,
     refreshModelOptions,
     // context accounting
