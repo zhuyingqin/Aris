@@ -289,8 +289,8 @@ fn resume_supported_command_list_matches_expected_surface() {
     assert_eq!(
         names,
         vec![
-            "help", "status", "compact", "clear", "cost", "config", "memory", "init", "diff",
-            "version", "export",
+            "help", "status", "compact", "clear", "cost", "config", "memory", "goal", "init",
+            "diff", "version", "export", "export-debug-zip",
         ]
     );
 }
