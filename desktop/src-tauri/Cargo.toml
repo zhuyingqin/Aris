@@ -46,3 +46,5 @@ aris-commands = { package = "commands", path = "../../crates/commands" }
 tokio = { version = "1", features = ["rt-multi-thread"] }
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
+# Integrated terminal: cross-platform PTY (ConPTY on Windows) for the Code page.
+portable-pty = "0.8"

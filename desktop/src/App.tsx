@@ -1162,6 +1162,7 @@ export default function App() {
           <div className="dir" title={stateDir || copy.runStateDir}>
             {currentProject?.path ?? stateDir}
           </div>
+          <div id="app-chat-actions-portal" style={{ display: "contents" }} />
           <div className="app-account" ref={userMenuRef}>
             {userMenuOpen && (
               <div className="sidebar-user-menu" role="menu" aria-label={copy.userMenu}>

@@ -11,7 +11,9 @@ use std::time::Duration;
 use serde::Serialize;
 
 use crate::backend::KernelHandle;
-use crate::kernel::{CellOutput, ExecuteOutcome, KernelSession, OutputCallback};
+use crate::kernel::{
+    CellOutput, CompleteOutcome, ExecuteOutcome, InspectOutcome, KernelSession, OutputCallback,
+};
 use crate::matlab::{self, MatlabSession};
 use crate::NotebookError;
 
@@ -120,6 +122,29 @@ impl KernelManager {
         let session = sessions().lock().unwrap().get(id).cloned();
         let session = session.ok_or_else(|| NotebookError::NoSession(id.to_string()))?;
         session.execute_streaming(code, timeout, Box::new(on_output) as OutputCallback)
+    }
+
+    /// Tab-completion against the kernel for `id` at `cursor_pos` (a UTF-8 byte
+    /// offset into `code`). Errors if no kernel is running.
+    pub fn complete(
+        id: &str,
+        code: &str,
+        cursor_pos: usize,
+    ) -> Result<CompleteOutcome, NotebookError> {
+        let session = sessions().lock().unwrap().get(id).cloned();
+        let session = session.ok_or_else(|| NotebookError::NoSession(id.to_string()))?;
+        session.complete(code, cursor_pos)
+    }
+
+    /// Object introspection (Shift+Tab docs) against the kernel for `id`.
+    pub fn inspect(
+        id: &str,
+        code: &str,
+        cursor_pos: usize,
+    ) -> Result<InspectOutcome, NotebookError> {
+        let session = sessions().lock().unwrap().get(id).cloned();
+        let session = session.ok_or_else(|| NotebookError::NoSession(id.to_string()))?;
+        session.inspect(code, cursor_pos)
     }
 
     /// Interrupt the kernel for `id`, raising `KeyboardInterrupt` in the running

@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
 
 import MarkdownContent from "../chat/MarkdownContent";
 import type { CellOutput } from "./labTypes";
@@ -151,6 +151,10 @@ export function OutputView({ output }: { output: CellOutput }) {
   const raw = outputRecord(output);
   const kind = outputKind(output);
 
+  // A `clear` signal is consumed upstream (it empties the cell); if one ever
+  // reaches here, render nothing rather than a stray box.
+  if (kind === "clear") return null;
+
   if (kind === "stream") {
     const name = raw.name === "stderr" ? "stderr" : "stdout";
     return <AnsiText className={`lab-out lab-out-${name}`} text={outputText(raw.text)} />;
@@ -163,4 +167,40 @@ export function OutputView({ output }: { output: CellOutput }) {
   }
 
   return <RichData data={outputData(output)} />;
+}
+
+/** Height at which a cell's combined output is capped and a toggle appears. */
+const OUTPUT_CAP_PX = 420;
+
+/**
+ * Renders a cell's outputs, capping very tall output with a fade + "Show full
+ * output" toggle so one huge dump (a big array print, a long traceback) can't
+ * blow out the notebook scroll. Re-measures on every streamed output change.
+ */
+export function OutputGroup({ outputs }: { outputs: CellOutput[] }) {
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const [overflowing, setOverflowing] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+
+  useLayoutEffect(() => {
+    const el = bodyRef.current;
+    if (!el) return;
+    setOverflowing(el.scrollHeight > OUTPUT_CAP_PX + 8);
+  }, [outputs]);
+
+  const capped = overflowing && !expanded;
+  return (
+    <div className="lab-out-group">
+      <div ref={bodyRef} className={capped ? "lab-out-group-body capped" : "lab-out-group-body"}>
+        {outputs.map((output, index) => (
+          <OutputView key={index} output={output} />
+        ))}
+      </div>
+      {overflowing && (
+        <button type="button" className="lab-out-toggle" onClick={() => setExpanded((value) => !value)}>
+          {expanded ? "Collapse output" : "Show full output"}
+        </button>
+      )}
+    </div>
+  );
 }

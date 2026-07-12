@@ -145,6 +145,7 @@ beforeEach(() => {
     });
   }
   pdfMocks.render.mockReset().mockReturnValue({ promise: Promise.resolve(), cancel: vi.fn() });
+  pdfMocks.document.numPages = 1;
   pdfMocks.getTextContent.mockReset().mockResolvedValue({
     items: [
       { str: "Body text", transform: [10, 0, 0, 10, 24, 64], width: 48, height: 10 },
@@ -344,6 +345,139 @@ describe("Typeset start page", () => {
     await waitFor(() =>
       expect(typesetCodeView()?.state.doc.toString()).toContain("\\section{Edited title}"),
     );
+  });
+
+  it("compiles the latest Visual edit without requiring a mode switch", async () => {
+    mockProjectFiles();
+    const source = "\\documentclass{article}\\n\\begin{document}\\nOriginal text\\n\\end{document}";
+    const edited = "Visual edit";
+    const expected = source.replace("Original text", edited);
+    mocks.fileReadText.mockResolvedValueOnce({ path: "paper.tex", content: source, bytes: source.length });
+
+    const { container } = render(<Typeset />);
+
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+    const view = await waitFor(() => {
+      const item = (window as unknown as {
+        __typesetView?: {
+          state: { doc: { toString: () => string } };
+          dispatch: (transaction: { changes: { from: number; to: number; insert: string } }) => void;
+        };
+      }).__typesetView;
+      expect(item).toBeTruthy();
+      return item!;
+    });
+    const from = view.state.doc.toString().indexOf("Original text");
+    view.dispatch({ changes: { from, to: from + "Original text".length, insert: edited } });
+
+    await recompileOpenSource();
+
+    await waitFor(() => expect(mocks.fileWriteText).toHaveBeenCalledWith("paper.tex", expected));
+    await waitFor(() => expect(mocks.latexCompile).toHaveBeenCalledWith("paper.tex", "paper.pdf"));
+  });
+
+  it("preserves the active selection when switching between Visual and Code", async () => {
+    mockProjectFiles();
+    const source = "\\documentclass{article}\n\\begin{document}\nBody text\n\\end{document}";
+    mocks.fileReadText.mockResolvedValueOnce({ path: "paper.tex", content: source, bytes: source.length });
+
+    const { container } = render(<Typeset />);
+
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+    const visualView = await waitFor(() => {
+      const view = (window as unknown as {
+        __typesetView?: { dispatch: (transaction: { selection: { anchor: number; head: number } }) => void };
+      }).__typesetView;
+      expect(view).toBeTruthy();
+      return view!;
+    });
+    const start = source.indexOf("Body text");
+    visualView.dispatch({ selection: { anchor: start, head: start + "Body text".length } });
+
+    fireEvent.click(screen.getByRole("tab", { name: "Code" }));
+
+    await waitFor(() => {
+      const selection = typesetCodeView()?.state.selection.main;
+      expect(selection?.from).toBe(start);
+      expect(selection?.to).toBe(start + "Body text".length);
+    });
+  });
+
+  it("shows Beamer slide navigation and keeps slide jumps in Visual mode", async () => {
+    mockProjectFiles();
+    const source = [
+      "\\documentclass{beamer}",
+      "\\begin{document}",
+      "\\begin{frame}{Motivation}",
+      "First slide.",
+      "\\end{frame}",
+      "\\begin{frame}{Method}",
+      "Second slide.",
+      "\\end{frame}",
+      "\\end{document}",
+    ].join("\n");
+    pdfMocks.document.numPages = 2;
+    mocks.fileReadText.mockResolvedValueOnce({ path: "paper.tex", content: source, bytes: source.length });
+
+    const { container } = render(<Typeset />);
+
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+    const navigation = await screen.findByRole("navigation", { name: "Slide navigation" });
+    expect(navigation.textContent).toContain("Slide 1 / 2");
+    expect(navigation.textContent).toContain("Motivation");
+    const compiledVisual = await waitFor(() => {
+      const item = container.querySelector<HTMLElement>(".typeset-compiled-visual");
+      expect(item).toBeTruthy();
+      return item!;
+    });
+    expect(within(compiledVisual).getByText(/Compiled slide 1 \/ 2/)).toBeTruthy();
+    expect(screen.getByText("Compiled slide preview")).toBeTruthy();
+
+    fireEvent.click(within(navigation).getByRole("button", { name: "Next slide" }));
+
+    await waitFor(() => expect(navigation.textContent).toContain("Slide 2 / 2"));
+    expect(navigation.textContent).toContain("Method");
+    await waitFor(() => expect(within(compiledVisual).getByText(/Compiled slide 2 \/ 2/)).toBeTruthy());
+    expect(screen.getByRole("tab", { name: "Visual" }).getAttribute("aria-selected")).toBe("true");
+    expect(mocks.fileWriteText).not.toHaveBeenCalled();
+    expect(mocks.latexCompile).not.toHaveBeenCalled();
+  });
+
+  it("opens exact Beamer text in Code without mutating source from Visual", async () => {
+    mockProjectFiles();
+    const source = [
+      "\\documentclass{beamer}",
+      "\\begin{document}",
+      "\\begin{frame}{Motivation}",
+      "Body text",
+      "\\end{frame}",
+      "\\end{document}",
+    ].join("\n");
+    mocks.fileReadText.mockResolvedValueOnce({ path: "paper.tex", content: source, bytes: source.length });
+
+    const { container } = render(<Typeset />);
+
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+    const compiledVisual = await waitFor(() => {
+      const item = container.querySelector<HTMLElement>(".typeset-compiled-visual");
+      expect(item).toBeTruthy();
+      return item!;
+    });
+    const textButton = await within(compiledVisual).findByRole("button", { name: "Jump to source text: Body text" });
+    fireEvent.click(textButton);
+
+    await waitFor(() => expect(screen.getByRole("tab", { name: "Code" }).getAttribute("aria-selected")).toBe("true"));
+    await waitFor(() => {
+      const view = typesetCodeView();
+      const selection = view?.state.selection.main;
+      expect(view?.state.doc.sliceString(selection?.from ?? 0, selection?.to ?? 0)).toBe("Body text");
+    });
+    expect(mocks.fileWriteText).not.toHaveBeenCalled();
+    expect(mocks.latexCompile).not.toHaveBeenCalled();
   });
 
   it("renders rich LaTeX source in the current visual editor", async () => {

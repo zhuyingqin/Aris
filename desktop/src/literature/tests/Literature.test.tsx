@@ -756,6 +756,18 @@ describe("Literature library", () => {
     const downloaded = fixtureLibrary();
     downloaded.papers[0].pdf = { status: "downloaded", path: "papers/1111.00001.pdf" };
     mocks.literatureLoad.mockResolvedValue(downloaded);
+    // Sparse page text (below the text-evidence floor) routes this page to
+    // the vision path, keeping this test's original all-visual intent.
+    mocks.literaturePdfText.mockResolvedValue({
+      text: "[[PAGE 1]]\nfig",
+      pages: [{ page: 1, text: "fig", source: "embedded" }],
+      totalCharacters: 3,
+      extractedCharacters: 3,
+      truncated: false,
+      ocrUsed: false,
+      missingPages: [],
+      warnings: [],
+    });
     mocks.literaturePdfImages.mockResolvedValue({
       pages: [{
         page: 1,
@@ -807,6 +819,22 @@ describe("Literature library", () => {
     const downloaded = fixtureLibrary();
     downloaded.papers[0].pdf = { status: "downloaded", path: "papers/1111.00001.pdf" };
     mocks.literatureLoad.mockResolvedValue(downloaded);
+    // All 5 pages are sparse (below the text-evidence floor), so every page
+    // still routes to the vision path — this test's original intent.
+    mocks.literaturePdfText.mockResolvedValue({
+      text: Array.from({ length: 5 }, (_, index) => `[[PAGE ${index + 1}]]\nfig`).join("\n\n"),
+      pages: Array.from({ length: 5 }, (_, index) => ({
+        page: index + 1,
+        text: "fig",
+        source: "embedded" as const,
+      })),
+      totalCharacters: 15,
+      extractedCharacters: 15,
+      truncated: false,
+      ocrUsed: false,
+      missingPages: [],
+      warnings: [],
+    });
     const pages = Array.from({ length: 5 }, (_, index) => ({
       page: index + 1,
       mimeType: "image/jpeg" as const,
@@ -857,6 +885,18 @@ describe("Literature library", () => {
     const downloaded = fixtureLibrary();
     downloaded.papers[0].pdf = { status: "downloaded", path: "papers/1111.00001.pdf" };
     mocks.literatureLoad.mockResolvedValue(downloaded);
+    // Sparse page text (below the text-evidence floor) routes this page to
+    // the vision path, keeping this test's original all-visual intent.
+    mocks.literaturePdfText.mockResolvedValue({
+      text: "[[PAGE 1]]\nfig",
+      pages: [{ page: 1, text: "fig", source: "embedded" }],
+      totalCharacters: 3,
+      extractedCharacters: 3,
+      truncated: false,
+      ocrUsed: false,
+      missingPages: [],
+      warnings: [],
+    });
     mocks.literaturePdfImages.mockResolvedValue({
       pages: [{
         page: 1,
@@ -924,6 +964,139 @@ describe("Literature library", () => {
     expect(
       reviewed.pdfAnnotations.find((item) => item.kind === "answer-support")?.note,
     ).toContain("A human-revised answer.");
+  });
+
+  it("reads evidence from page text without calling the vision model when pages have readable text", async () => {
+    const downloaded = fixtureLibrary();
+    downloaded.papers[0].pdf = { status: "downloaded", path: "papers/1111.00001.pdf" };
+    mocks.literatureLoad.mockResolvedValue(downloaded);
+    const bodyText = "A".repeat(500);
+    mocks.literaturePdfText.mockResolvedValue({
+      text: `[[PAGE 1]]\n${bodyText}`,
+      pages: [{ page: 1, text: bodyText, source: "embedded" }],
+      totalCharacters: bodyText.length,
+      extractedCharacters: bodyText.length,
+      truncated: false,
+      ocrUsed: false,
+      missingPages: [],
+      warnings: [],
+    });
+    mocks.literatureLlm.mockImplementation((_system: string, prompt: string) => {
+      if (prompt.includes("[[PAGE 1]]")) {
+        return Promise.resolve(JSON.stringify([
+          { page: 1, quote: bodyText.slice(0, 20), note: "Found in body text.", role: "result" },
+        ]));
+      }
+      const evidenceId = prompt.match(/"id":"([^"]+)"/)?.[1];
+      return Promise.resolve(JSON.stringify([{
+        question: "What was found?",
+        answer: "The body text covers it.",
+        supports: [{ evidenceId, role: "result" }],
+      }]));
+    });
+
+    render(<Literature />);
+    await screen.findAllByText("Persisted Paper on Grounded Reading");
+    await act(async () => {
+      await useLiteratureStore.getState().generateAnswerChains(downloaded.papers[0].id);
+    });
+
+    const paper = useLiteratureStore.getState().library.papers[0];
+    expect(paper.evidence).toEqual([expect.objectContaining({ page: 1, source: "text" })]);
+    expect(paper.answerChains[0].basis).toBe("text");
+    expect(mocks.literatureLlmVision).not.toHaveBeenCalled();
+    expect(mocks.literaturePdfImages).not.toHaveBeenCalled();
+  });
+
+  it("merges text and vision evidence when a paper has both dense text pages and sparse figure pages", async () => {
+    const downloaded = fixtureLibrary();
+    downloaded.papers[0].pdf = { status: "downloaded", path: "papers/1111.00001.pdf" };
+    mocks.literatureLoad.mockResolvedValue(downloaded);
+    const bodyText = "B".repeat(500);
+    mocks.literaturePdfText.mockResolvedValue({
+      text: `[[PAGE 1]]\n${bodyText}\n\n[[PAGE 2]]\nfig`,
+      pages: [
+        { page: 1, text: bodyText, source: "embedded" },
+        { page: 2, text: "fig", source: "embedded" },
+      ],
+      totalCharacters: bodyText.length + 3,
+      extractedCharacters: bodyText.length + 3,
+      truncated: false,
+      ocrUsed: false,
+      missingPages: [],
+      warnings: [],
+    });
+    mocks.literaturePdfImages.mockResolvedValue({
+      pages: [{
+        page: 2,
+        mimeType: "image/jpeg",
+        data: "ZmFrZQ==",
+        byteLength: 4,
+        fingerprint: "sha256:page-2",
+      }],
+      totalPages: 2,
+      totalBytes: 4,
+    });
+    mocks.literatureLlmVision.mockResolvedValue(
+      JSON.stringify([{ page: 2, quote: "Chart evidence.", note: "Seen in the figure.", role: "result" }]),
+    );
+    mocks.literatureLlm.mockImplementation((_system: string, prompt: string) => {
+      if (prompt.includes("[[PAGE 1]]")) {
+        return Promise.resolve(JSON.stringify([
+          { page: 1, quote: bodyText.slice(0, 20), note: "Body text claim.", role: "premise" },
+        ]));
+      }
+      const evidenceIds = [...prompt.matchAll(/"id":"([^"]+)"/g)].map((match) => match[1]);
+      return Promise.resolve(JSON.stringify([{
+        question: "What does the paper show?",
+        answer: "Text and figure evidence agree.",
+        supports: evidenceIds.map((evidenceId) => ({ evidenceId, role: "result" })),
+      }]));
+    });
+
+    render(<Literature />);
+    await screen.findAllByText("Persisted Paper on Grounded Reading");
+    await act(async () => {
+      await useLiteratureStore.getState().generateAnswerChains(downloaded.papers[0].id);
+    });
+
+    expect(mocks.literaturePdfImages).toHaveBeenCalledWith("papers/1111.00001.pdf", [2]);
+    const paper = useLiteratureStore.getState().library.papers[0];
+    expect(paper.evidence.map((item) => item.source).sort()).toEqual(["text", "vision"]);
+    expect(paper.answerChains[0].basis).toBe("vision");
+  });
+
+  it("falls back to reading every page visually when full-text extraction fails", async () => {
+    const downloaded = fixtureLibrary();
+    downloaded.papers[0].pdf = { status: "downloaded", path: "papers/1111.00001.pdf" };
+    mocks.literatureLoad.mockResolvedValue(downloaded);
+    mocks.literaturePdfText.mockRejectedValue(new Error("PDF 没有可读取文本。"));
+    mocks.literaturePdfImages.mockResolvedValue({
+      pages: [{
+        page: 1,
+        mimeType: "image/jpeg",
+        data: "ZmFrZQ==",
+        byteLength: 4,
+        fingerprint: "sha256:page-1",
+      }],
+      totalPages: 1,
+      totalBytes: 4,
+    });
+    mocks.literatureLlmVision.mockResolvedValue(
+      JSON.stringify([{ page: 1, quote: "Scanned page evidence.", note: "Read visually.", role: "result" }]),
+    );
+    mocks.literatureLlm.mockResolvedValue("[]");
+
+    render(<Literature />);
+    await screen.findAllByText("Persisted Paper on Grounded Reading");
+    await act(async () => {
+      await useLiteratureStore.getState().generateAnswerChains(downloaded.papers[0].id);
+    });
+
+    expect(mocks.literaturePdfImages).toHaveBeenCalledWith("papers/1111.00001.pdf", undefined);
+    expect(useLiteratureStore.getState().library.papers[0].evidence).toEqual([
+      expect.objectContaining({ page: 1, source: "vision" }),
+    ]);
   });
 
   it("deletes evidence and removes its linked answer-chain support", async () => {

@@ -3,7 +3,7 @@ import {
   isTauri,
   projectBriefGet,
   type ProjectBriefView,
-  type ProjectGoalStatus,
+  type ProjectIntentStatus,
 } from "../api/tauri";
 import type { Language } from "../store";
 
@@ -14,7 +14,6 @@ export function notifyProjectBriefUpdated() {
 }
 
 interface ProjectBriefPreference {
-  collapsed: boolean;
   hidden: boolean;
 }
 
@@ -25,11 +24,11 @@ function preferenceKey(projectId: string) {
 function loadPreference(projectId: string): ProjectBriefPreference {
   try {
     const raw = localStorage.getItem(preferenceKey(projectId));
-    if (!raw) return { collapsed: false, hidden: false };
+    if (!raw) return { hidden: false };
     const parsed = JSON.parse(raw) as Partial<ProjectBriefPreference>;
-    return { collapsed: Boolean(parsed.collapsed), hidden: Boolean(parsed.hidden) };
+    return { hidden: Boolean(parsed.hidden) };
   } catch {
-    return { collapsed: false, hidden: false };
+    return { hidden: false };
   }
 }
 
@@ -74,10 +73,8 @@ export function useProjectBrief(projectId?: string | null) {
 
   return {
     brief,
-    collapsed: preference.collapsed,
     hidden: preference.hidden,
     refresh,
-    setCollapsed: (collapsed: boolean) => updatePreference({ collapsed }),
     setHidden: (hidden: boolean) => updatePreference({ hidden }),
   };
 }
@@ -90,7 +87,7 @@ const COPY = {
     criteria: "成功标准",
     status: "最近状态",
     noGoal: "发送第一条实质性请求后，SomniQ 会从你的问题中提炼当前目标。",
-    hide: "隐藏项目摘要",
+    hide: "收回项目摘要",
     collapse: "折叠项目摘要",
     expand: "展开项目摘要",
     active: "进行中",
@@ -104,7 +101,7 @@ const COPY = {
     criteria: "Success criteria",
     status: "Recent status",
     noGoal: "After the first substantive request, SomniQ will summarize the current goal from your question.",
-    hide: "Hide project summary",
+    hide: "Retract project summary",
     collapse: "Collapse project summary",
     expand: "Expand project summary",
     active: "Active",
@@ -113,11 +110,9 @@ const COPY = {
   },
 } satisfies Record<Language, Record<string, string>>;
 
-function statusLabel(status: ProjectGoalStatus | undefined, language: Language) {
-  const copy = COPY[language];
-  if (status === "paused") return copy.paused;
-  if (status === "complete") return copy.complete;
-  return copy.active;
+function intentStatusLabel(status: ProjectIntentStatus | undefined, language: Language) {
+  if (language === "cn") return status === "established" ? "已形成" : "识别中";
+  return status === "established" ? "Established" : "Emerging";
 }
 
 function RowIcon({ kind }: { kind: "mission" | "goal" | "criteria" | "status" }) {
@@ -141,64 +136,65 @@ function RowIcon({ kind }: { kind: "mission" | "goal" | "criteria" | "status" })
 export default function ProjectBriefCard({
   brief,
   language,
-  collapsed,
-  onCollapsedChange,
   onHide,
 }: {
   brief: ProjectBriefView;
   language: Language;
-  collapsed: boolean;
-  onCollapsedChange: (collapsed: boolean) => void;
   onHide: () => void;
 }) {
   const copy = COPY[language];
-  const goal = brief.goal ?? null;
+  const labels = language === "cn"
+    ? {
+      goal: "长期目标",
+      milestone: "当前里程碑",
+      status: "最近进展",
+      noGoal: "SomniQ 正在从持续对话中识别本项目的长期目标。",
+    }
+    : {
+      goal: "Long-term goal",
+      milestone: "Current milestone",
+      status: "Recent progress",
+      noGoal: "SomniQ is identifying this project's long-term goal from your ongoing conversations.",
+    };
+  const intent = brief.intent ?? null;
+  const milestone = brief.goal ?? null;
   return (
-    <section className={`project-brief-card${collapsed ? " collapsed" : ""}`} aria-label={copy.title}>
+    <section className="project-brief-card" aria-label={copy.title}>
       <div className="project-brief-head">
-        <button
-          type="button"
-          className="project-brief-toggle"
-          onClick={() => onCollapsedChange(!collapsed)}
-          aria-expanded={!collapsed}
-          title={collapsed ? copy.expand : copy.collapse}
-        >
+        <div className="project-brief-heading">
+          <RowIcon kind="goal" />
           <span className="project-brief-title">{copy.title}</span>
-          {collapsed && <span className="project-brief-preview">{goal?.objective ?? brief.mission}</span>}
-          <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
-            <path d={collapsed ? "m4 6 4 4 4-4" : "m4 10 4-4 4 4"} />
+        </div>
+        {intent && <span className={`project-brief-status ${intent.status}`}>{intentStatusLabel(intent.status, language)}</span>}
+        <button type="button" className="project-brief-hide" onClick={onHide} title={copy.hide} aria-label={copy.hide}>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <rect x="3.5" y="4" width="17" height="16" rx="2.5" />
+            <path d="M15.5 4v16M11.5 9l-3 3 3 3" />
           </svg>
         </button>
-        {goal && <span className={`project-brief-status ${goal.status}`}>{statusLabel(goal.status, language)}</span>}
-        <button type="button" className="project-brief-hide" onClick={onHide} title={copy.hide} aria-label={copy.hide}>×</button>
       </div>
-      {!collapsed && (
-        <div className="project-brief-body">
-          <div className="project-brief-row">
-            <RowIcon kind="mission" />
-            <div><span>{copy.mission}</span><p>{brief.mission}</p></div>
-          </div>
-          <div className="project-brief-row">
-            <RowIcon kind="goal" />
-            <div><span>{copy.goal}</span><p>{goal?.objective ?? copy.noGoal}</p></div>
-          </div>
-          {goal && (
-            <>
-              <div className="project-brief-row">
-                <RowIcon kind="criteria" />
-                <div>
-                  <span>{copy.criteria}</span>
-                  <ul>{goal.successCriteria.map((criterion) => <li key={criterion}>{criterion}</li>)}</ul>
-                </div>
-              </div>
-              <div className="project-brief-row">
-                <RowIcon kind="status" />
-                <div><span>{copy.status}</span><p>{goal.recentStatus}</p></div>
-              </div>
-            </>
-          )}
+      <div className="project-brief-body">
+        <div className="project-brief-row">
+          <RowIcon kind="mission" />
+          <div><span>{copy.mission}</span><p>{brief.mission}</p></div>
         </div>
-      )}
+        <div className="project-brief-row">
+          <RowIcon kind="goal" />
+          <div><span>{labels.goal}</span><p>{intent?.objective ?? labels.noGoal}</p></div>
+        </div>
+        {milestone && (
+          <>
+            <div className="project-brief-row">
+              <RowIcon kind="criteria" />
+              <div><span>{labels.milestone}</span><p>{milestone.objective}</p></div>
+            </div>
+            <div className="project-brief-row">
+              <RowIcon kind="status" />
+              <div><span>{labels.status}</span><p>{milestone.recentStatus}</p></div>
+            </div>
+          </>
+        )}
+      </div>
     </section>
   );
 }

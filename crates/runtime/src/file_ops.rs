@@ -6,6 +6,7 @@ use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::time::Instant;
 
+use encoding_rs::{GB18030, GBK};
 use flate2::read::{DeflateDecoder, ZlibDecoder};
 use glob::Pattern;
 use regex::RegexBuilder;
@@ -199,9 +200,34 @@ pub fn read_file(
     let content = if is_pdf_path(&absolute_path) {
         extract_pdf_text(&absolute_path)?
     } else {
-        fs::read_to_string(&absolute_path)?
+        decode_text_bytes(&fs::read(&absolute_path)?)?
     };
     Ok(read_text_payload(absolute_path, &content, offset, limit))
+}
+
+fn decode_text_bytes(bytes: &[u8]) -> io::Result<String> {
+    if bytes.contains(&0) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "file contains NUL bytes and is not a supported text file; open it in its native app",
+        ));
+    }
+
+    if let Ok(content) = std::str::from_utf8(bytes) {
+        return Ok(content.to_owned());
+    }
+
+    for encoding in [GB18030, GBK] {
+        let (content, _, had_errors) = encoding.decode(bytes);
+        if !had_errors {
+            return Ok(content.into_owned());
+        }
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "file is not valid UTF-8, GB18030, or GBK text; open it in its native app",
+    ))
 }
 
 fn read_text_payload(

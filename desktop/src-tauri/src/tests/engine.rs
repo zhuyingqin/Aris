@@ -15,20 +15,13 @@ fn debug_export_paths_are_markdown_safe_and_linkable() {
 }
 
 #[test]
-fn extracts_structured_goal_json_and_has_safe_fallbacks() {
-    let raw = "```json\n{\"objective\":\"Ship continuity\",\"successCriteria\":[\"tests pass\"],\"recentStatus\":\"implemented\"}\n```";
-    assert_eq!(
-        extract_json_object(raw),
-        Some("{\"objective\":\"Ship continuity\",\"successCriteria\":[\"tests pass\"],\"recentStatus\":\"implemented\"}")
-    );
-    assert_eq!(
-        fallback_goal_objective("  keep   the goal  "),
-        "keep the goal"
-    );
-    assert_eq!(
-        fallback_goal_status("\nFirst useful status\nMore"),
-        "First useful status"
-    );
+fn extracts_structured_project_intent_json() {
+    let raw = "```json\n{\"hasLongTermIntent\":true,\"objective\":\"Ship durable continuity\",\"confidence\":91}\n```";
+    let json = extract_json_object(raw).expect("json object");
+    let generated: GeneratedProjectIntent = serde_json::from_str(json).expect("intent json");
+    assert!(generated.has_long_term_intent);
+    assert_eq!(generated.objective, "Ship durable continuity");
+    assert_eq!(generated.confidence, 91);
 }
 
 #[test]
@@ -578,6 +571,12 @@ fn context_action_picks_warn_then_compact_by_usage() {
     assert_eq!(context_action(899, 1_000), ContextAction::Warn); // just under trigger
     assert_eq!(context_action(900, 1_000), ContextAction::Compact); // 90%
     assert_eq!(context_action(2_000, 1_000), ContextAction::Compact); // over window
+}
+
+#[test]
+fn gpt5_context_window_uses_proxy_budget() {
+    assert_eq!(context_window_for_model("gpt-5.6-luna"), 300_000);
+    assert_eq!(context_window_for_model("gpt-4.1"), 300_000);
 }
 
 #[test]

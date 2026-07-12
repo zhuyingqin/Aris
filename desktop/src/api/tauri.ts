@@ -525,6 +525,16 @@ export const labExecuteCell = <T>(
     timeoutSecs: opts.timeoutSecs ?? null,
     kernel: opts.kernel ?? null,
   });
+export const labComplete = <T>(notebookPath: string, code: string, cursorPos: number) =>
+  isLabPreviewMode()
+    ? preview<T>({ matches: [], cursorStart: cursorPos, cursorEnd: cursorPos } as T)
+    :
+  invoke<T>("lab_complete", { notebookPath, code, cursorPos });
+export const labInspect = <T>(notebookPath: string, code: string, cursorPos: number) =>
+  isLabPreviewMode()
+    ? preview<T>({ found: false, data: {} } as T)
+    :
+  invoke<T>("lab_inspect", { notebookPath, code, cursorPos });
 export const labShutdownKernel = (notebookPath: string) =>
   isLabPreviewMode() ? Promise.resolve() :
   invoke<void>("lab_shutdown_kernel", { notebookPath });
@@ -567,6 +577,26 @@ export const onLabCellOutput = <T>(handler: (event: T) => void) =>
 export const onLabFileOutput = <T>(handler: (event: T) => void) =>
   isLabPreviewMode() ? Promise.resolve(noopUnlisten) :
   listen<T>("lab-file-output", (e) => handler(e.payload));
+
+// ── Integrated terminal (Code page) ─────────────────────────────────────────
+export const terminalOpen = (id: string, cwd: string | null, cols: number, rows: number) =>
+  isLabPreviewMode() ? Promise.resolve() :
+  invoke<void>("terminal_open", { id, cwd, cols, rows });
+export const terminalWrite = (id: string, data: string) =>
+  isLabPreviewMode() ? Promise.resolve() :
+  invoke<void>("terminal_write", { id, data });
+export const terminalResize = (id: string, cols: number, rows: number) =>
+  isLabPreviewMode() ? Promise.resolve() :
+  invoke<void>("terminal_resize", { id, cols, rows });
+export const terminalClose = (id: string) =>
+  isLabPreviewMode() ? Promise.resolve() :
+  invoke<void>("terminal_close", { id });
+export const onTerminalOutput = (handler: (event: { id: string; data: string }) => void) =>
+  isLabPreviewMode() ? Promise.resolve(noopUnlisten) :
+  listen<{ id: string; data: string }>("terminal-output", (e) => handler(e.payload));
+export const onTerminalExit = (handler: (event: { id: string }) => void) =>
+  isLabPreviewMode() ? Promise.resolve(noopUnlisten) :
+  listen<{ id: string }>("terminal-exit", (e) => handler(e.payload));
 export const labRunAll = <T>(
   notebookPath: string,
   opts: {
@@ -788,19 +818,35 @@ export interface ProjectGoalView {
   updatedAt: string;
 }
 
+export type ProjectIntentStatus = "emerging" | "established";
+
+export interface ProjectIntentView {
+  objective: string;
+  confidence: number;
+  status: ProjectIntentStatus;
+  evidenceCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ProjectIntentObservation {
+  id: string;
+  text: string;
+}
+
 export interface ProjectBriefView {
   mission: string;
+  intent?: ProjectIntentView | null;
   goal?: ProjectGoalView | null;
 }
 
 export const projectBriefGet = (projectId: string) =>
   invoke<ProjectBriefView>("project_brief_get", { projectId });
-export const projectGoalInfer = (
+export const projectIntentObserve = (
   projectId: string,
   sessionId: string,
-  user: string,
-  assistant: string,
-) => invoke<ProjectBriefView>("project_goal_infer", { projectId, sessionId, user, assistant });
+  observations: ProjectIntentObservation[],
+) => invoke<ProjectBriefView>("project_intent_observe", { projectId, sessionId, observations });
 export const projectGoalProgress = (projectId: string, recentStatus: string) =>
   invoke<ProjectBriefView>("project_goal_progress", { projectId, recentStatus });
 

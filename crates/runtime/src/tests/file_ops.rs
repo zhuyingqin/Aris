@@ -3,6 +3,7 @@ use std::io::Write;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use encoding_rs::{GB18030, GBK};
 use flate2::{write::ZlibEncoder, Compression};
 
 use super::{
@@ -88,6 +89,47 @@ fn reads_and_writes_files() {
     let read_output =
         read_file(path.to_string_lossy().as_ref(), Some(1), Some(1)).expect("read should succeed");
     assert_eq!(read_output.file.content, "two");
+}
+
+#[test]
+fn reads_gbk_text_files() {
+    let _lock = crate::test_env_lock();
+    let _env = EnvGuard::unset("ARIS_WORKSPACE_ROOT");
+    let path = temp_path("gbk.txt");
+    let expected = "中文 research notes";
+    let (bytes, _, had_errors) = GBK.encode(expected);
+    assert!(!had_errors);
+    std::fs::write(&path, bytes).expect("write GBK text");
+
+    let output = read_file(path.to_string_lossy().as_ref(), None, None).expect("read GBK text");
+    assert_eq!(output.file.content, expected);
+}
+
+#[test]
+fn reads_gb18030_text_files() {
+    let _lock = crate::test_env_lock();
+    let _env = EnvGuard::unset("ARIS_WORKSPACE_ROOT");
+    let path = temp_path("gb18030.txt");
+    let expected = "𠀀 research notes";
+    let (bytes, _, had_errors) = GB18030.encode(expected);
+    assert!(!had_errors);
+    std::fs::write(&path, bytes).expect("write GB18030 text");
+
+    let output = read_file(path.to_string_lossy().as_ref(), None, None).expect("read GB18030 text");
+    assert_eq!(output.file.content, expected);
+}
+
+#[test]
+fn rejects_binary_files_with_an_actionable_error() {
+    let _lock = crate::test_env_lock();
+    let _env = EnvGuard::unset("ARIS_WORKSPACE_ROOT");
+    let path = temp_path("binary.txt");
+    std::fs::write(&path, b"\0\x01\x02").expect("write binary content");
+
+    let error = read_file(path.to_string_lossy().as_ref(), None, None)
+        .expect_err("binary content should not be decoded as text");
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert!(error.to_string().contains("NUL bytes"));
 }
 
 #[test]

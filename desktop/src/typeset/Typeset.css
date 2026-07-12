@@ -45,6 +45,11 @@
   --visual-page-bg: #11171d;
   --visual-text: #edf2f5;
   --visual-muted: #9ca8b1;
+  --visual-muted-2: #c2ccd4;
+  --visual-code-text: #8bdba1;
+  --visual-link: #79b8ff;
+  --visual-accent-bright: #65d47a;
+  --visual-slide-bg: #171f28;
   --visual-border: rgb(213 224 235 / 14%);
   --visual-border-strong: rgb(213 224 235 / 24%);
   --visual-widget-bg: rgb(255 255 255 / 4%);
@@ -297,6 +302,14 @@
   min-height: 0;
   flex-direction: column;
   background: var(--file-tree-bg);
+}
+
+/* File tree above Outline: size the tree to its own rows instead of always
+   stretching to fill the sidebar, so a short tree doesn't strand Outline at
+   the very bottom behind a wall of empty space. It can still shrink (and its
+   inner `.typeset-tree` scrolls) when there are enough files to need the room. */
+.file-tree-outline-panel-group .typeset-sidebar {
+  flex: 0 1 auto;
 }
 
 .typeset-main-grid.project-hidden .typeset-editor-pane {
@@ -908,6 +921,55 @@
   padding: 0 8px;
 }
 
+.typeset-visual-toolbar.safe-visual .toolbar-editor > :not(.typeset-safe-visual-toolbar) {
+  display: none;
+}
+
+.typeset-safe-visual-toolbar {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  color: var(--ol-muted-2);
+}
+
+.typeset-safe-visual-toolbar > svg {
+  width: 16px;
+  height: 16px;
+  color: var(--visual-link);
+}
+
+.typeset-safe-visual-toolbar strong {
+  color: var(--ol-text);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.typeset-safe-visual-toolbar span {
+  overflow: hidden;
+  color: var(--ol-muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.typeset-safe-visual-toolbar button {
+  height: 26px;
+  margin-left: auto;
+  padding: 0 10px;
+  border: 1px solid color-mix(in srgb, var(--visual-link) 42%, var(--ol-border));
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--visual-link) 12%, transparent);
+  color: var(--visual-link);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.typeset-safe-visual-toolbar button:hover {
+  background: color-mix(in srgb, var(--visual-link) 20%, transparent);
+}
+
 .typeset-visual-toolbar button {
   display: inline-flex;
   align-items: center;
@@ -1136,9 +1198,111 @@
 
 /* Push the Code/Visual switch to the far right, as in Overleaf's editor header. */
 .typeset-visual-filebar .typeset-visual-mode-switch {
-  margin-left: auto;
+  margin-left: 0;
   margin-right: 8px;
   align-self: center;
+}
+
+.typeset-slide-nav {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 2px;
+  padding: 4px 8px;
+  border-right: 1px solid var(--ol-border);
+}
+
+.typeset-slide-nav > button {
+  min-width: 26px;
+  height: 26px;
+  padding: 0 6px;
+  border-radius: 5px;
+  color: var(--ol-muted-2);
+}
+
+.typeset-slide-nav > button:hover:not(:disabled) {
+  background: var(--ol-panel-hover);
+  color: var(--ol-text);
+}
+
+.typeset-slide-nav > button:disabled {
+  cursor: default;
+  opacity: 0.35;
+}
+
+.typeset-slide-nav > button svg {
+  width: 14px;
+  height: 14px;
+}
+
+.typeset-slide-nav .typeset-slide-nav-label {
+  display: grid;
+  min-width: 132px;
+  max-width: min(28cqw, 280px);
+  height: 28px;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  text-align: left;
+}
+
+.typeset-slide-nav-label span {
+  color: var(--visual-accent-bright);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.typeset-slide-nav-label strong {
+  overflow: hidden;
+  color: var(--ol-text);
+  font-size: 11px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.typeset-editor-context {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  padding: 0 8px;
+}
+
+.typeset-sync-chip,
+.typeset-stale-chip {
+  display: inline-flex;
+  height: 20px;
+  align-items: center;
+  padding: 0 7px;
+  border: 1px solid var(--ol-border-strong);
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.typeset-sync-chip {
+  border-color: color-mix(in srgb, var(--visual-link) 36%, var(--ol-border));
+  background: color-mix(in srgb, var(--visual-link) 10%, transparent);
+  color: var(--visual-link);
+}
+
+.typeset-stale-chip {
+  border-color: color-mix(in srgb, #e6ad55 38%, var(--ol-border));
+  background: color-mix(in srgb, #e6ad55 9%, transparent);
+  color: #e8bd78;
+}
+
+.typeset-interaction-hint {
+  overflow: hidden;
+  color: var(--ol-muted);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .typeset-current-section {
@@ -1175,7 +1339,7 @@
   min-height: 0;
   overflow: auto;
   padding: 0 0 48px;
-  background: #f4f4f4;
+  background: var(--visual-canvas-bg);
 }
 
 .typeset-visual-page {
@@ -1720,6 +1884,66 @@
 
 .typeset-visual-pane {
   background: var(--ol-editor-bg);
+}
+
+.typeset-compiled-visual {
+  position: relative;
+  grid-template-rows: auto minmax(0, 1fr);
+  background: var(--visual-canvas-bg);
+}
+
+.typeset-compiled-visual-status {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--visual-border);
+  background: var(--ol-panel);
+  color: var(--ol-muted);
+  font-size: 11px;
+}
+
+.typeset-compiled-visual-status span {
+  color: var(--visual-link);
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.typeset-compiled-visual-status strong {
+  overflow: hidden;
+  color: var(--ol-muted-2);
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.typeset-compiled-visual-scroll {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  align-items: flex-start;
+  justify-content: center;
+  overflow: auto;
+  padding: 20px;
+  background:
+    radial-gradient(circle at 50% 0, rgb(121 184 255 / 5%), transparent 38%),
+    var(--visual-canvas-bg);
+}
+
+.typeset-compiled-visual-scroll .typeset-pdf-page {
+  flex: 0 0 auto;
+  margin: 0;
+  border: 1px solid var(--visual-border-strong);
+  border-radius: 5px;
+  box-shadow: 0 18px 46px rgb(0 0 0 / 28%);
+}
+
+.typeset-compiled-visual-scroll .typeset-pdf-text-run:hover,
+.typeset-compiled-visual-scroll .typeset-pdf-text-run:focus-visible {
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--visual-link) 20%, transparent);
+  outline: 1px solid color-mix(in srgb, var(--visual-link) 55%, transparent);
 }
 
 .typeset-visual-toolbar {
@@ -3745,6 +3969,11 @@
   --visual-page-bg: #ffffff;
   --visual-text: #111716;
   --visual-muted: #68736d;
+  --visual-muted-2: #3f4c45;
+  --visual-code-text: #246d3b;
+  --visual-link: #1f66b1;
+  --visual-accent-bright: #247c34;
+  --visual-slide-bg: #f8faf9;
   --visual-border: #dce3e8;
   --visual-border-strong: #cbd5dc;
   --visual-widget-bg: #f7f9fa;
@@ -3790,4 +4019,44 @@
 :root[data-theme="light"] .typeset-visual-pane,
 :root[data-theme="light"] .typeset-visual-scroll {
   background: #fff;
+}
+
+/* The live CodeMirror visual surface uses the same layered canvas as Code
+   mode. These rules intentionally come after the legacy paper/deck styles. */
+.typeset-visual-page.typeset-visual-cm,
+.typeset-visual-page.typeset-visual-cm.latex-paper,
+.typeset-visual-page.typeset-visual-cm.beamer-deck {
+  width: 100%;
+  min-height: 100%;
+  margin: 0;
+  box-sizing: border-box;
+  padding: 24px clamp(22px, 5vw, 64px) 86px;
+  border: 0;
+  border-radius: 0;
+  background: var(--visual-page-bg);
+  box-shadow: none;
+  color: var(--visual-text);
+}
+
+.typeset-visual-page.typeset-visual-cm.beamer-deck {
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  font-size: 15px;
+  line-height: 1.45;
+}
+
+.typeset-visual-page.typeset-visual-cm.latex-paper {
+  font-family: "KaTeX_Main", "Latin Modern Roman", "CMU Serif", "Times New Roman", Times, serif;
+  font-size: 17.5px;
+  line-height: 1.33;
+}
+
+@container (max-width: 760px) {
+  .typeset-interaction-hint {
+    display: none;
+  }
+
+  .typeset-slide-nav .typeset-slide-nav-label {
+    min-width: 92px;
+    max-width: 150px;
+  }
 }

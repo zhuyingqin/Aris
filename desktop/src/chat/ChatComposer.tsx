@@ -196,6 +196,14 @@ const PERMISSION_OPTIONS = [
   { value: "danger-full-access" },
 ];
 
+const REASONING_OPTIONS = [
+  { value: "minimal", label: "Minimal" },
+  { value: "low", label: "Low" },
+  { value: "medium", label: "Medium" },
+  { value: "high", label: "High" },
+  { value: "xhigh", label: "Extra high" },
+];
+
 function ContextRing({ used, max }: { used: number; max: number }) {
   const rawPct = max > 0 ? used / max : 0;
   const pct = Math.min(1, Math.max(0, rawPct));
@@ -310,8 +318,10 @@ export default function ChatComposer({
   const [dragging, setDragging] = useState(false);
   const [permMenuOpen, setPermMenuOpen] = useState(false);
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
+  const [reasoningMenuOpen, setReasoningMenuOpen] = useState(false);
   const permMenuRef = useRef<HTMLDivElement>(null);
   const modelMenuRef = useRef<HTMLDivElement>(null);
+  const reasoningMenuRef = useRef<HTMLDivElement>(null);
   const fileSearchVersion = useRef(0);
   const recentSkills = loadRecent(RECENT_SKILLS_KEY);
   const recentFiles = loadRecent(RECENT_FILES_KEY);
@@ -404,7 +414,7 @@ export default function ChatComposer({
   }, [onHeightChange]);
 
   useEffect(() => {
-    if (!permMenuOpen && !modelMenuOpen) return;
+    if (!permMenuOpen && !modelMenuOpen && !reasoningMenuOpen) return;
     const handler = (e: MouseEvent) => {
       if (permMenuOpen && permMenuRef.current && !permMenuRef.current.contains(e.target as Node)) {
         setPermMenuOpen(false);
@@ -412,10 +422,13 @@ export default function ChatComposer({
       if (modelMenuOpen && modelMenuRef.current && !modelMenuRef.current.contains(e.target as Node)) {
         setModelMenuOpen(false);
       }
+      if (reasoningMenuOpen && reasoningMenuRef.current && !reasoningMenuRef.current.contains(e.target as Node)) {
+        setReasoningMenuOpen(false);
+      }
     };
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
-  }, [permMenuOpen, modelMenuOpen]);
+  }, [permMenuOpen, modelMenuOpen, reasoningMenuOpen]);
 
   useEffect(() => {
     const version = ++fileSearchVersion.current;
@@ -772,21 +785,36 @@ export default function ChatComposer({
               </div>
             )}
             {reasoningSupported && (
-              <label className="chat-reasoning-select" title="Reasoning effort">
-                <span>Reasoning</span>
-                <select
-                  aria-label="Reasoning effort"
-                  value={reasoningEffort}
+              <div className="chat-pill-wrap" ref={reasoningMenuRef}>
+                <button
+                  type="button"
+                  className="chat-pill chat-reasoning-pill"
+                  onClick={() => setReasoningMenuOpen((v) => !v)}
                   disabled={busy || reasoningBusy}
-                  onChange={(event) => onReasoningEffortChange?.(event.target.value)}
+                  title="Reasoning effort"
+                  aria-label="Reasoning effort"
                 >
-                  <option value="minimal">Minimal</option>
-                  <option value="low">Low</option>
-                  <option value="medium">Medium</option>
-                  <option value="high">High</option>
-                  <option value="xhigh">Extra high</option>
-                </select>
-              </label>
+                  {REASONING_OPTIONS.find((opt) => opt.value === reasoningEffort)?.label ?? reasoningEffort}
+                  <span className="chat-pill-chevron">▾</span>
+                </button>
+                {reasoningMenuOpen && (
+                  <div className="chat-pill-menu chat-pill-menu-right" role="menu">
+                    {REASONING_OPTIONS.map((opt) => (
+                      <button
+                        key={opt.value}
+                        className={`chat-pill-menu-item${reasoningEffort === opt.value ? " active" : ""}`}
+                        role="menuitem"
+                        onClick={() => {
+                          onReasoningEffortChange?.(opt.value);
+                          setReasoningMenuOpen(false);
+                        }}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
             )}
             {busy ? (
               <button className="chat-send-btn chat-stop-btn" onClick={onStop} aria-label={copy.stopResponse}>■</button>

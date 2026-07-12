@@ -73,7 +73,7 @@ fn context_budget_scales_with_model_window() {
         context_compaction_threshold_for_model("gemini-2.5-pro"),
         850_000
     );
-    assert_eq!(context_compaction_threshold_for_model("gpt-5"), 340_000);
+    assert_eq!(context_compaction_threshold_for_model("gpt-5"), 300_000);
     assert_eq!(
         context_compaction_threshold_for_model("deepseek-v4-pro"),
         850_000

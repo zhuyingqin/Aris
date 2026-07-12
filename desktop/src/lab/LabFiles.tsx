@@ -72,18 +72,15 @@ function iconForFile(path: string): string {
   return "-";
 }
 
-type FileIconName = "attach" | "delete" | "file" | "folder" | "open" | "refresh" | "rename";
+type FileIconName = "file" | "folder" | "open" | "refresh";
 
 function FileActionIcon({ name }: { name: FileIconName }) {
   return (
     <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.45" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      {name === "attach" && <path d="M8 3.2v9.6M3.2 8h9.6" />}
-      {name === "delete" && <path d="M3 4h10M6.5 4V2.8h3V4M5 4l.6 9h4.8L11 4" />}
       {name === "file" && <path d="M4 2.5h5.2L12 5.3v8.2H4zM9.2 2.5v2.8H12" />}
       {name === "folder" && <path d="M2.5 4.2h4l1 1h6v7.3h-11z" />}
       {name === "open" && <path d="M5.5 3h7.5v7.5M12.8 3.2 7.5 8.5M3 5.5v7.5h7.5" />}
       {name === "refresh" && <path d="M12.5 5.6A4.8 4.8 0 1 0 13 8M12.5 2.8v2.8H9.7" />}
-      {name === "rename" && <path d="m3 11.8 2.3-.5 6.3-6.3-1.8-1.8-6.3 6.3zM8.6 4.4l1.8 1.8M3 13h10" />}
     </svg>
   );
 }
@@ -110,12 +107,17 @@ function folderAttachment(entry: FileTreeEntry, children: FileTreeEntry[]): Chat
   };
 }
 
+export interface LabOpenOptions {
+  /** false = open as a replaceable preview tab (single click); true = pin permanently (double click). */
+  pin?: boolean;
+}
+
 interface Props {
   projectPath: string | null;
   notebooks: string[];
   activePath: string | null;
-  onOpenNotebook: (path: string) => void;
-  onOpenFile: (path: string) => void;
+  onOpenNotebook: (path: string, options?: LabOpenOptions) => void;
+  onOpenFile: (path: string, options?: LabOpenOptions) => void;
   onAttachToAssistant: (attachment: ChatAttachment) => void;
   onFileChanged?: (change: LabFileChange) => void;
 }
@@ -139,8 +141,29 @@ export default function LabFiles({
   const [loading, setLoading] = useState<Set<string>>(() => new Set());
   const [operationBusy, setOperationBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [rowMenu, setRowMenu] = useState<{ x: number; y: number; entry: FileTreeEntry } | null>(null);
   const notebookSet = useMemo(() => new Set(notebooks), [notebooks]);
   const previewMode = isLabPreviewMode();
+
+  // Dismiss the row context menu on any outside interaction (mirrors the
+  // editor-tab context menu in Lab.tsx).
+  useEffect(() => {
+    if (!rowMenu) return;
+    const dismiss = () => setRowMenu(null);
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setRowMenu(null);
+    };
+    window.addEventListener("mousedown", dismiss);
+    window.addEventListener("resize", dismiss);
+    window.addEventListener("blur", dismiss);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("mousedown", dismiss);
+      window.removeEventListener("resize", dismiss);
+      window.removeEventListener("blur", dismiss);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [rowMenu]);
 
   const loadDir = useCallback(async (path: string) => {
     if (!isTauri() && !previewMode) return;
@@ -180,12 +203,12 @@ export default function LabFiles({
     });
   };
 
-  const openFile = (path: string) => {
+  const openFile = (path: string, pin: boolean) => {
     if (extension(path) === ".ipynb" || notebookSet.has(path)) {
-      onOpenNotebook(path);
+      onOpenNotebook(path, { pin });
       return;
     }
-    onOpenFile(path);
+    onOpenFile(path, { pin });
   };
 
   const refreshAfterChange = async (paths: string[]) => {
@@ -205,7 +228,7 @@ export default function LabFiles({
       setExpanded((items) => new Set(items).add(parent));
       await refreshAfterChange([parent]);
       onFileChanged?.({ type: "create", path: file.path, isDir: false });
-      openFile(file.path);
+      openFile(file.path, true);
     } catch (createError) {
       setError(String(createError));
     } finally {
@@ -291,13 +314,20 @@ export default function LabFiles({
         <div
           className={`lab-explorer-row${entry.isDir ? " folder" : " file"}${isActive ? " active" : ""}`}
           style={{ paddingLeft: `${depth * 14 + 8}px` }}
+          onContextMenu={(event) => {
+            event.preventDefault();
+            setRowMenu({ x: event.clientX, y: event.clientY, entry });
+          }}
         >
           <button
             className="lab-explorer-main"
-            title={entry.path}
+            title={entry.isDir ? entry.path : `${entry.path}\nClick to preview, double-click to keep open. Right-click for more actions.`}
             onClick={() => {
               if (entry.isDir) toggleDir(entry.path);
-              else openFile(entry.path);
+              else openFile(entry.path, false);
+            }}
+            onDoubleClick={() => {
+              if (!entry.isDir) openFile(entry.path, true);
             }}
           >
             <span className="lab-explorer-caret">{entry.isDir ? (isExpanded ? "v" : ">") : ""}</span>
@@ -306,49 +336,6 @@ export default function LabFiles({
             </span>
             <span className="lab-explorer-name">{entry.name}</span>
           </button>
-          <div className="lab-explorer-row-actions">
-          {entry.isDir ? (
-            <button
-              className="lab-explorer-action"
-              title="Attach folder listing to assistant"
-              disabled={operationBusy}
-              onClick={() => onAttachToAssistant(folderAttachment(entry, nested))}
-            >
-              <FileActionIcon name="attach" />
-            </button>
-          ) : (
-            <button
-              className="lab-explorer-action"
-              title="Attach to assistant"
-              disabled={operationBusy}
-              onClick={() => onAttachToAssistant(attachmentFromPath(entry.path))}
-            >
-              <FileActionIcon name="attach" />
-            </button>
-          )}
-            <button
-              className="lab-explorer-action"
-              title="Rename or move"
-              disabled={operationBusy}
-              onClick={(event) => {
-                event.stopPropagation();
-                void renameEntry(entry);
-              }}
-            >
-              <FileActionIcon name="rename" />
-            </button>
-            <button
-              className="lab-explorer-action danger"
-              title="Delete"
-              disabled={operationBusy}
-              onClick={(event) => {
-                event.stopPropagation();
-                void deleteEntry(entry);
-              }}
-            >
-              <FileActionIcon name="delete" />
-            </button>
-          </div>
         </div>
         {entry.isDir && isExpanded && (
           <div>
@@ -422,6 +409,53 @@ export default function LabFiles({
           )}
         </div>
       </div>
+
+      {rowMenu && (
+        <div
+          className="lab-tab-menu"
+          style={{ left: rowMenu.x, top: rowMenu.y }}
+          role="menu"
+          onMouseDown={(event) => event.stopPropagation()}
+        >
+          <button
+            type="button"
+            role="menuitem"
+            disabled={operationBusy}
+            onClick={() => {
+              const entry = rowMenu.entry;
+              onAttachToAssistant(
+                entry.isDir ? folderAttachment(entry, children[entry.path] ?? []) : attachmentFromPath(entry.path),
+              );
+              setRowMenu(null);
+            }}
+          >
+            Attach to assistant
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            disabled={operationBusy}
+            onClick={() => {
+              void renameEntry(rowMenu.entry);
+              setRowMenu(null);
+            }}
+          >
+            Rename / Move
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            className="danger"
+            disabled={operationBusy}
+            onClick={() => {
+              void deleteEntry(rowMenu.entry);
+              setRowMenu(null);
+            }}
+          >
+            Delete
+          </button>
+        </div>
+      )}
     </div>
   );
 }

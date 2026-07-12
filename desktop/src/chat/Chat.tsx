@@ -283,9 +283,11 @@ export default function Chat() {
     loadingOmittedTurns.has(`${currentId}:${turnIndex}`)
   ), [currentId, loadingOmittedTurns]);
 
+  const projectBriefVisible = tab === "chat" && !projectBrief.hidden && projectBrief.brief !== null;
+
   return (
     <div
-      className="chat-root"
+      className={`chat-root${projectBriefVisible ? " chat-project-brief-open" : ""}`}
       style={{ "--chat-sidebar-w": `${sessionCtl.chatSidebarWidth}px` } as CSSProperties}
     >
       {sessionCtl.sidebarOpen && (
@@ -390,32 +392,9 @@ export default function Chat() {
 
         {tab === "chat" && document.getElementById("app-chat-actions-portal") && createPortal(
           <div className="chat-head-actions" data-tauri-drag-region style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-            {projectBrief.hidden && projectBrief.brief && (
-              <button
-                type="button"
-                className="chat-project-brief-show"
-                onClick={() => projectBrief.setHidden(false)}
-                title={language === "cn" ? "显示项目摘要" : "Show project summary"}
-                aria-label={language === "cn" ? "显示项目摘要" : "Show project summary"}
-              >
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                  <path d="M5 4h14v16H5z" /><path d="M8 8h8M8 12h8M8 16h5" />
-                </svg>
-              </button>
-            )}
             {status?.memoryFiles != null && status.memoryFiles > 0 && (
               <MemoryBadge count={status.memoryFiles} />
             )}
-            <div className="chat-head-model-badge" style={{
-              background: "var(--bg-2)",
-              color: "var(--text-dim)",
-              padding: "2px 6px",
-              borderRadius: "4px",
-              fontSize: "12px",
-              fontWeight: 500
-            }}>
-              {status?.ready ? status.provider : (status?.message ?? copy.checking)}
-            </div>
             <button
               className="chat-export-btn"
               onClick={() => void commands.exportCurrentChat()}
@@ -453,6 +432,25 @@ export default function Chat() {
               )}
             </button>
             {!status?.ready && <button onClick={() => setTab("settings")}>{copy.settings}</button>}
+            {projectBrief.brief && (
+              <button
+                type="button"
+                className={`chat-project-brief-toggle${projectBrief.hidden ? "" : " active"}`}
+                onClick={() => projectBrief.setHidden(!projectBrief.hidden)}
+                title={projectBrief.hidden
+                  ? (language === "cn" ? "显示项目摘要" : "Show project summary")
+                  : (language === "cn" ? "收起项目摘要" : "Collapse project summary")}
+                aria-label={projectBrief.hidden
+                  ? (language === "cn" ? "显示项目摘要" : "Show project summary")
+                  : (language === "cn" ? "收起项目摘要" : "Collapse project summary")}
+                aria-pressed={!projectBrief.hidden}
+                aria-controls="project-brief-popover"
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M5 4h14v16H5z" /><path d="M8 8h8M8 12h8M8 16h5" />
+                </svg>
+              </button>
+            )}
           </div>,
           document.getElementById("app-chat-actions-portal")!
         )}
@@ -460,15 +458,6 @@ export default function Chat() {
           <ScheduledTasks />
         ) : (
           <>
-        {!projectBrief.hidden && projectBrief.brief && (
-          <ProjectBriefCard
-            brief={projectBrief.brief}
-            language={language}
-            collapsed={projectBrief.collapsed}
-            onCollapsedChange={projectBrief.setCollapsed}
-            onHide={() => projectBrief.setHidden(true)}
-          />
-        )}
         <ChatThread
           key={currentId}
           sessionId={currentId}
@@ -549,6 +538,19 @@ export default function Chat() {
           </>
         )}
       </main>
+      {projectBriefVisible && projectBrief.brief && (
+        <aside
+          id="project-brief-popover"
+          className="chat-project-brief-sidebar"
+          aria-label={language === "cn" ? "项目摘要" : "Project summary"}
+        >
+          <ProjectBriefCard
+            brief={projectBrief.brief}
+            language={language}
+            onHide={() => projectBrief.setHidden(true)}
+          />
+        </aside>
+      )}
       {sessionCtl.deleted && (
         <div className="chat-undo">
           {copy.deleted(sessionCtl.deleted.title)}

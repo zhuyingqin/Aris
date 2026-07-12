@@ -20,8 +20,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use jupyter_protocol::{
-    ConnectionInfo, ExecuteRequest, ExecutionState, InterruptRequest, JupyterMessage,
-    JupyterMessageContent, KernelInfoRequest, ReplyStatus, Stdio as JupyterStdio,
+    CompleteRequest, ConnectionInfo, ExecuteRequest, ExecutionState, InspectRequest,
+    InterruptRequest, JupyterMessage, JupyterMessageContent, KernelInfoRequest, ReplyStatus,
+    Stdio as JupyterStdio,
 };
 use jupyter_zmq_client::{
     ClientControlConnection, ClientIoPubConnection, ClientShellConnection, KernelspecDir,
@@ -249,6 +250,12 @@ pub enum CellOutput {
         evalue: String,
         traceback: Vec<String>,
     },
+    /// Streaming-only signal mirroring Jupyter `clear_output`: tells the UI to
+    /// drop the cell's already-shown outputs. Never pushed into a cell's stored
+    /// `outputs`, so it is never written to the `.ipynb`.
+    Clear {
+        wait: bool,
+    },
 }
 
 impl CellOutput {
@@ -280,6 +287,9 @@ impl CellOutput {
                 "evalue": evalue,
                 "traceback": traceback
             }),
+            // Unreachable for persistence: `Clear` is only handed to the
+            // streaming callback, never stored in a cell's `outputs`.
+            CellOutput::Clear { .. } => Value::Null,
         }
     }
 }
@@ -301,6 +311,25 @@ pub struct ExecuteOutcome {
     pub outputs: Vec<CellOutput>,
 }
 
+/// Tab-completion result from a kernel `complete_request`: the candidate matches
+/// plus the source range (`cursor_start..cursor_end`) they should replace.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompleteOutcome {
+    pub matches: Vec<String>,
+    pub cursor_start: i64,
+    pub cursor_end: i64,
+}
+
+/// Object-introspection result from a kernel `inspect_request` (Shift+Tab): a
+/// mime bundle (`text/plain` docstring, etc.) and whether anything was found.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InspectOutcome {
+    pub found: bool,
+    pub data: Value,
+}
+
 pub type OutputCallback = Box<dyn Fn(CellOutput) + Send + 'static>;
 
 enum Command {
@@ -309,6 +338,16 @@ enum Command {
         timeout: Duration,
         on_output: Option<OutputCallback>,
         reply: std::sync::mpsc::Sender<Result<ExecuteOutcome, NotebookError>>,
+    },
+    Complete {
+        code: String,
+        cursor_pos: usize,
+        reply: std::sync::mpsc::Sender<Result<CompleteOutcome, NotebookError>>,
+    },
+    Inspect {
+        code: String,
+        cursor_pos: usize,
+        reply: std::sync::mpsc::Sender<Result<InspectOutcome, NotebookError>>,
     },
     Shutdown {
         reply: std::sync::mpsc::Sender<()>,
@@ -415,6 +454,37 @@ impl KernelSession {
             .map_err(|_| NotebookError::Kernel("kernel dropped the reply channel".into()))?
     }
 
+    /// Kernel tab-completion (`complete_request`). Blocks on the actor mailbox,
+    /// so a completion queued behind a long-running cell waits its turn.
+    pub fn complete(&self, code: &str, cursor_pos: usize) -> Result<CompleteOutcome, NotebookError> {
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        self.cmd_tx
+            .send(Command::Complete {
+                code: code.to_string(),
+                cursor_pos,
+                reply: reply_tx,
+            })
+            .map_err(|_| NotebookError::Kernel("kernel session has stopped".into()))?;
+        reply_rx
+            .recv()
+            .map_err(|_| NotebookError::Kernel("kernel dropped the reply channel".into()))?
+    }
+
+    /// Kernel object introspection (`inspect_request`, e.g. Shift+Tab docs).
+    pub fn inspect(&self, code: &str, cursor_pos: usize) -> Result<InspectOutcome, NotebookError> {
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        self.cmd_tx
+            .send(Command::Inspect {
+                code: code.to_string(),
+                cursor_pos,
+                reply: reply_tx,
+            })
+            .map_err(|_| NotebookError::Kernel("kernel session has stopped".into()))?;
+        reply_rx
+            .recv()
+            .map_err(|_| NotebookError::Kernel("kernel dropped the reply channel".into()))?
+    }
+
     /// Raise `KeyboardInterrupt` in the kernel, stopping the current execute.
     /// Non-blocking and safe to call while an execute is in flight — the running
     /// `execute` returns with `status = Error` once the kernel reports back idle.
@@ -502,6 +572,22 @@ async fn kernel_main(
                 reply,
             } => {
                 let result = execute_one(&mut shell, &mut iopub, code, timeout, on_output).await;
+                let _ = reply.send(result);
+            }
+            Command::Complete {
+                code,
+                cursor_pos,
+                reply,
+            } => {
+                let result = complete_one(&mut shell, code, cursor_pos).await;
+                let _ = reply.send(result);
+            }
+            Command::Inspect {
+                code,
+                cursor_pos,
+                reply,
+            } => {
+                let result = inspect_one(&mut shell, code, cursor_pos).await;
                 let _ = reply.send(result);
             }
             Command::Shutdown { reply } => {
@@ -871,6 +957,10 @@ async fn execute_one(
     let mut outputs: Vec<CellOutput> = Vec::new();
     let mut execution_count: Option<i64> = None;
     let mut had_error = false;
+    // Set by `clear_output(wait=True)`: the visible outputs are cleared right
+    // before the next output lands (see `push_output`), matching how tqdm and
+    // friends redraw a progress bar in place instead of stacking copies.
+    let mut pending_clear = false;
 
     let collect = async {
         loop {
@@ -891,6 +981,7 @@ async fn execute_one(
                         text: s.text,
                     },
                     on_output.as_deref(),
+                    &mut pending_clear,
                 ),
                 JupyterMessageContent::ExecuteResult(r) => {
                     execution_count = to_i64(&r.execution_count);
@@ -901,6 +992,7 @@ async fn execute_one(
                             data: to_value(&r.data),
                         },
                         on_output.as_deref(),
+                        &mut pending_clear,
                     );
                 }
                 JupyterMessageContent::DisplayData(d) => {
@@ -910,6 +1002,7 @@ async fn execute_one(
                             data: to_value(&d.data),
                         },
                         on_output.as_deref(),
+                        &mut pending_clear,
                     );
                 }
                 JupyterMessageContent::ErrorOutput(er) => {
@@ -922,7 +1015,21 @@ async fn execute_one(
                             traceback: er.traceback,
                         },
                         on_output.as_deref(),
+                        &mut pending_clear,
                     );
+                }
+                JupyterMessageContent::ClearOutput(clear) => {
+                    // `wait=false` clears immediately; `wait=true` defers until
+                    // the next output arrives (applied in `push_output`).
+                    if clear.wait {
+                        pending_clear = true;
+                    } else {
+                        pending_clear = false;
+                        outputs.clear();
+                        if let Some(on_output) = on_output.as_deref() {
+                            on_output(CellOutput::Clear { wait: false });
+                        }
+                    }
                 }
                 JupyterMessageContent::ExecuteInput(i) => {
                     execution_count = to_i64(&i.execution_count);
@@ -962,11 +1069,98 @@ async fn execute_one(
     })
 }
 
+/// How long to wait for a `complete`/`inspect` shell reply before giving up.
+/// These are interactive (they gate typing latency), so the budget is short.
+const INTROSPECT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Run one `complete_request`: send on Shell, read replies until ours arrives.
+async fn complete_one(
+    shell: &mut ClientShellConnection,
+    code: String,
+    cursor_pos: usize,
+) -> Result<CompleteOutcome, NotebookError> {
+    let request: JupyterMessage = CompleteRequest { code, cursor_pos }.into();
+    let request_id = request.header.msg_id.clone();
+    shell
+        .send(request)
+        .await
+        .map_err(|e| NotebookError::Kernel(format!("send complete: {e}")))?;
+    let read = async {
+        loop {
+            let msg = shell
+                .read()
+                .await
+                .map_err(|e| NotebookError::Kernel(format!("read complete: {e}")))?;
+            if msg.parent_header.as_ref().map(|h| h.msg_id.as_str()) != Some(request_id.as_str()) {
+                continue;
+            }
+            if let JupyterMessageContent::CompleteReply(reply) = msg.content {
+                return Ok(CompleteOutcome {
+                    matches: reply.matches,
+                    cursor_start: reply.cursor_start as i64,
+                    cursor_end: reply.cursor_end as i64,
+                });
+            }
+        }
+    };
+    tokio::time::timeout(INTROSPECT_TIMEOUT, read)
+        .await
+        .map_err(|_| NotebookError::Kernel("complete request timed out".into()))?
+}
+
+/// Run one `inspect_request` (Shift+Tab docs): send on Shell, await our reply.
+async fn inspect_one(
+    shell: &mut ClientShellConnection,
+    code: String,
+    cursor_pos: usize,
+) -> Result<InspectOutcome, NotebookError> {
+    let request: JupyterMessage = InspectRequest {
+        code,
+        cursor_pos,
+        detail_level: Some(0),
+    }
+    .into();
+    let request_id = request.header.msg_id.clone();
+    shell
+        .send(request)
+        .await
+        .map_err(|e| NotebookError::Kernel(format!("send inspect: {e}")))?;
+    let read = async {
+        loop {
+            let msg = shell
+                .read()
+                .await
+                .map_err(|e| NotebookError::Kernel(format!("read inspect: {e}")))?;
+            if msg.parent_header.as_ref().map(|h| h.msg_id.as_str()) != Some(request_id.as_str()) {
+                continue;
+            }
+            if let JupyterMessageContent::InspectReply(reply) = msg.content {
+                return Ok(InspectOutcome {
+                    found: reply.found,
+                    data: to_value(&reply.data),
+                });
+            }
+        }
+    };
+    tokio::time::timeout(INTROSPECT_TIMEOUT, read)
+        .await
+        .map_err(|_| NotebookError::Kernel("inspect request timed out".into()))?
+}
+
 fn push_output(
     outputs: &mut Vec<CellOutput>,
     output: CellOutput,
     on_output: Option<&(dyn Fn(CellOutput) + Send + 'static)>,
+    pending_clear: &mut bool,
 ) {
+    // Apply a deferred `clear_output(wait=True)` right before the next output so
+    // the cell clears in the same frame it repaints (no empty flicker).
+    if std::mem::take(pending_clear) {
+        outputs.clear();
+        if let Some(on_output) = on_output {
+            on_output(CellOutput::Clear { wait: false });
+        }
+    }
     if let Some(on_output) = on_output {
         on_output(output.clone());
     }

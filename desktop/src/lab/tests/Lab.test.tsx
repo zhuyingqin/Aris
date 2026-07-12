@@ -2,7 +2,7 @@
 
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { NotebookView, RunsLibrary } from "../labTypes";
+import type { LabCellOutputEvent, NotebookView, RunsLibrary } from "../labTypes";
 
 const mocks = vi.hoisted(() => ({
   labCreateNotebook: vi.fn(),
@@ -604,8 +604,10 @@ describe("Lab", () => {
     );
 
     const { container } = render(<Lab />);
-    fireEvent.click(await screen.findByText("a.py"));
-    fireEvent.click(await screen.findByText("b.py"));
+    // Double-click pins each tab; a single click would only preview it (see
+    // the preview-tab tests below), which this test isn't exercising.
+    fireEvent.doubleClick(await screen.findByText("a.py"));
+    fireEvent.doubleClick(await screen.findByText("b.py"));
     await waitFor(() => expect(container.querySelectorAll(".lab-editor-tab").length).toBe(2));
 
     const tabs = container.querySelectorAll(".lab-editor-tab");
@@ -616,5 +618,154 @@ describe("Lab", () => {
 
     await waitFor(() => expect(container.querySelectorAll(".lab-editor-tab").length).toBe(1));
     expect(container.querySelector(".lab-editor-tab-label")?.textContent).toBe("b.py");
+  });
+
+  it("opens a right-click context menu on an explorer row instead of always-visible hover icons", async () => {
+    mocks.fileListDir.mockResolvedValue([
+      { name: "a.py", path: "src/a.py", isDir: false },
+    ]);
+
+    const { container } = render(<Lab />);
+    const explorer = () => within(container.querySelector(".lab-explorer-tree") as HTMLElement);
+    const row = (await explorer().findByText("a.py")).closest(".lab-explorer-row") as HTMLElement;
+
+    // No per-row action buttons render up front (they only exist via the
+    // context menu now).
+    expect(row.querySelector(".lab-explorer-row-actions")).toBeNull();
+
+    fireEvent.contextMenu(row);
+    const menu = await screen.findByRole("menu");
+    expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent)).toEqual([
+      "Attach to assistant",
+      "Rename / Move",
+      "Delete",
+    ]);
+
+    fireEvent.click(within(menu).getByRole("menuitem", { name: "Attach to assistant" }));
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(await screen.findByLabelText("Remove a.py")).toBeTruthy();
+  });
+
+  it("single-clicking a file opens a replaceable preview tab instead of pinning it", async () => {
+    mocks.fileListDir.mockResolvedValue([
+      { name: "a.py", path: "src/a.py", isDir: false },
+      { name: "b.py", path: "src/b.py", isDir: false },
+    ]);
+    mocks.fileReadText.mockImplementation((p: string) =>
+      Promise.resolve({ path: p, content: "x = 1", bytes: 5 }),
+    );
+
+    const { container } = render(<Lab />);
+    // Scoped to the explorer tree: once a.py is open, its basename also shows
+    // up in the file-editor title, which would make an unscoped findByText
+    // ambiguous.
+    const explorer = () => within(container.querySelector(".lab-explorer-tree") as HTMLElement);
+    fireEvent.click(await explorer().findByText("a.py"));
+
+    await waitFor(() => expect(container.querySelectorAll(".lab-editor-tab").length).toBe(1));
+    expect(container.querySelector(".lab-editor-tab.preview .lab-editor-tab-label")?.textContent).toBe("a.py");
+
+    // Single-clicking a second file replaces the preview tab rather than
+    // adding a new one.
+    fireEvent.click(await explorer().findByText("b.py"));
+
+    await waitFor(() => expect(container.querySelector(".lab-file-editor-title")?.textContent).toContain("src/b.py"));
+    expect(container.querySelectorAll(".lab-editor-tab").length).toBe(1);
+    expect(container.querySelector(".lab-editor-tab.preview .lab-editor-tab-label")?.textContent).toBe("b.py");
+  });
+
+  it("double-clicking a file promotes its preview tab to a permanent one", async () => {
+    mocks.fileListDir.mockResolvedValue([
+      { name: "a.py", path: "src/a.py", isDir: false },
+      { name: "b.py", path: "src/b.py", isDir: false },
+    ]);
+    mocks.fileReadText.mockImplementation((p: string) =>
+      Promise.resolve({ path: p, content: "x = 1", bytes: 5 }),
+    );
+
+    const { container } = render(<Lab />);
+    const explorer = () => within(container.querySelector(".lab-explorer-tree") as HTMLElement);
+    fireEvent.click(await explorer().findByText("a.py"));
+    await waitFor(() => expect(container.querySelector(".lab-editor-tab.preview")).toBeTruthy());
+
+    fireEvent.doubleClick(await explorer().findByText("a.py"));
+    await waitFor(() => expect(container.querySelector(".lab-editor-tab.preview")).toBeNull());
+
+    // The pinned a.py tab now survives opening a second file via single click.
+    fireEvent.click(await explorer().findByText("b.py"));
+    await waitFor(() => expect(container.querySelectorAll(".lab-editor-tab").length).toBe(2));
+    const labels = Array.from(container.querySelectorAll(".lab-editor-tab-label")).map((el) => el.textContent);
+    expect(labels).toEqual(["a.py", "b.py"]);
+  });
+
+  it("marks the notebook tab dirty on an edit and clears it on Ctrl+S", async () => {
+    const { container } = render(<Lab />);
+    await openNotebookFromPanel(container);
+    await waitFor(() => expect(window.__somniqEditors?.get("0")).toBeTruthy());
+
+    const editor = window.__somniqEditors!.get("0")!;
+    act(() => {
+      editor.dispatch({ changes: { from: editor.state.doc.length, insert: "\nx = 1" } });
+    });
+
+    const notebookTab = () => container.querySelector(".lab-editor-tab");
+    await waitFor(() => expect(notebookTab()?.classList.contains("dirty")).toBe(true));
+
+    mocks.labEditCell.mockClear();
+    fireEvent.keyDown(container.querySelector('[data-cell="0"]')!, { key: "s", ctrlKey: true });
+
+    await waitFor(() =>
+      expect(mocks.labEditCell).toHaveBeenCalledWith(
+        "notebooks/demo.ipynb",
+        "replace",
+        expect.objectContaining({ cellIndex: 0 }),
+      ),
+    );
+    await waitFor(() => expect(notebookTab()?.classList.contains("dirty")).toBe(false));
+  });
+
+  it("marks a file tab dirty while it has unsaved edits", async () => {
+    mocks.fileListDir.mockResolvedValue([{ name: "a.py", path: "src/a.py", isDir: false }]);
+    mocks.fileReadText.mockImplementation((p: string) =>
+      Promise.resolve({ path: p, content: "x = 1", bytes: 5 }),
+    );
+
+    const { container } = render(<Lab />);
+    const explorer = () => within(container.querySelector(".lab-explorer-tree") as HTMLElement);
+    fireEvent.click(await explorer().findByText("a.py"));
+    await waitFor(() => expect(window.__somniqEditors?.get("file")).toBeTruthy());
+
+    const fileTab = () => container.querySelector(".lab-editor-tab");
+    expect(fileTab()?.classList.contains("dirty")).toBe(false);
+
+    const editor = window.__somniqEditors!.get("file")!;
+    act(() => {
+      editor.dispatch({ changes: { from: editor.state.doc.length, insert: "\ny = 2" } });
+    });
+    await waitFor(() => expect(fileTab()?.classList.contains("dirty")).toBe(true));
+  });
+
+  it("empties a cell's streamed outputs on a clear_output signal", async () => {
+    let onCellOutput: ((event: LabCellOutputEvent) => void) | null = null;
+    mocks.onLabCellOutput.mockReset().mockImplementation((handler: (event: LabCellOutputEvent) => void) => {
+      onCellOutput = handler;
+      return Promise.resolve(() => undefined);
+    });
+
+    const { container } = render(<Lab />);
+    await openNotebookFromPanel(container);
+    await waitFor(() => expect(container.querySelector(".lab-outputs")).toBeTruthy());
+    await waitFor(() => expect(onCellOutput).toBeTruthy());
+
+    const emit = (output: LabCellOutputEvent["output"]) =>
+      act(() => onCellOutput!({ notebookPath: "notebooks/demo.ipynb", cellIndex: 0, output }));
+
+    emit({ type: "stream", name: "stdout", text: "progress 1\n" });
+    await waitFor(() => expect(container.querySelector(".lab-outputs")?.textContent).toContain("progress 1"));
+
+    // A clear signal drops the shown outputs entirely (the block unmounts once
+    // the cell has no outputs), rather than appending another line.
+    emit({ type: "clear" });
+    await waitFor(() => expect(container.querySelector(".lab-outputs")).toBeNull());
   });
 });

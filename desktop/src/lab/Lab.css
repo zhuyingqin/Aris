@@ -440,6 +440,13 @@
   font-size: 10.5px;
 }
 
+/* Preview tab (single-click from Files): italic label marks it as
+   replaceable — the next single-clicked file swaps it out instead of
+   accumulating a new tab. Double-clicking promotes it to a pinned tab. */
+.lab-editor-tab.preview .lab-editor-tab-label {
+  font-style: italic;
+}
+
 .lab-editor-tab-close {
   width: 18px;
   height: 18px;
@@ -466,7 +473,36 @@
   height: 12px;
 }
 
-/* Right-click menu on an editor tab (Close / Close others / Close all). */
+/* Unsaved (dirty) affordance, VS Code-style: a dot fills the close slot when a
+   tab has unsaved edits and swaps to the close (×) icon on hover, so the tab is
+   still closable. The dot carries its own colour so it stays visible even on
+   inactive tabs (whose close icon is otherwise transparent). */
+.lab-editor-tab-dirty {
+  display: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text);
+}
+
+.lab-editor-tab.dirty .lab-editor-tab-dirty {
+  display: block;
+}
+
+.lab-editor-tab.dirty .lab-editor-tab-close svg {
+  display: none;
+}
+
+.lab-editor-tab.dirty:hover .lab-editor-tab-dirty {
+  display: none;
+}
+
+.lab-editor-tab.dirty:hover .lab-editor-tab-close svg {
+  display: block;
+}
+
+/* Shared small right-click context menu: editor tabs (Close / Close others /
+   Close all) and Explorer rows (Attach / Rename / Delete). */
 .lab-tab-menu {
   position: fixed;
   z-index: 50;
@@ -496,6 +532,11 @@
   color: #fff;
 }
 
+.lab-tab-menu button.danger:hover:not(:disabled) {
+  background: var(--red);
+  color: #fff;
+}
+
 .lab-tab-menu button:disabled {
   opacity: 0.4;
   cursor: default;
@@ -506,6 +547,94 @@
   min-height: 0;
   display: flex;
   overflow: hidden;
+}
+
+/* Integrated terminal: a bottom dock inside the editor column. Kept mounted
+   (hidden via display:none) so the shell survives hide/show. */
+.lab-terminal-dock {
+  position: relative;
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-top: 1px solid var(--border);
+  background: #0f1012;
+}
+
+.lab-terminal-dock.hidden {
+  display: none;
+}
+
+.lab-terminal-resize-handle {
+  position: absolute;
+  top: -3px;
+  left: 0;
+  right: 0;
+  height: 6px;
+  cursor: row-resize;
+  z-index: 3;
+}
+
+.lab-terminal-resize-handle:hover,
+.lab-terminal-dock.resizing .lab-terminal-resize-handle {
+  background: color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+.lab-terminal-header {
+  flex: 0 0 auto;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 8px 0 10px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-dim);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.lab-terminal-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.lab-terminal-hide {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.lab-terminal-hide:hover {
+  background: var(--bg-3);
+  color: var(--text);
+}
+
+.lab-terminal {
+  flex: 1;
+  min-height: 0;
+  padding: 4px 4px 6px 8px;
+  overflow: hidden;
+}
+
+.lab-terminal .xterm {
+  height: 100%;
+}
+
+.lab-terminal-loading {
+  flex: 1;
+  display: grid;
+  place-items: center;
+  color: var(--text-dim);
+  font-size: 12px;
 }
 
 .lab-assistant-side {
@@ -1356,6 +1485,94 @@
   gap: 7px;
 }
 
+/* Tall-output taming: a cell's outputs are grouped, and if the group runs taller
+   than the cap it is clipped with a fade and a "Show full output" toggle so one
+   huge dump can't blow out the notebook scroll. Cap height matches OUTPUT_CAP_PX
+   in outputs.tsx. */
+.lab-out-group {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+
+.lab-out-group-body {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  min-width: 0;
+}
+
+.lab-out-group-body.capped {
+  max-height: 420px;
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(to bottom, #000 85%, transparent 100%);
+  mask-image: linear-gradient(to bottom, #000 85%, transparent 100%);
+}
+
+.lab-out-toggle {
+  align-self: flex-start;
+  border: 1px solid var(--border);
+  background: var(--bg-3);
+  color: var(--text-dim);
+  font-size: 11px;
+  padding: 2px 10px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.lab-out-toggle:hover {
+  color: var(--text);
+  border-color: var(--text-dim);
+}
+
+/* Kernel intel (Code page): dark-themed autocomplete popup + Shift+Tab inspect
+   tooltip so kernel completion/docs match the editor instead of CM's light
+   default. */
+.cm-tooltip.cm-tooltip-autocomplete {
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.4);
+}
+
+.cm-tooltip.cm-tooltip-autocomplete > ul {
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 12px;
+  max-height: 260px;
+}
+
+.cm-tooltip.cm-tooltip-autocomplete > ul > li {
+  padding: 2px 9px;
+  color: var(--text);
+}
+
+.cm-tooltip.cm-tooltip-autocomplete > ul > li[aria-selected] {
+  background: var(--accent);
+  color: #fff;
+}
+
+.cm-kernel-inspect {
+  max-width: 520px;
+  max-height: 320px;
+  overflow: auto;
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.4);
+}
+
+.cm-kernel-inspect pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text);
+}
+
 .lab-out {
   margin: 0;
   white-space: pre-wrap;
@@ -2106,10 +2323,6 @@
   color: var(--text);
 }
 
-.lab-explorer-action.danger:hover:not(:disabled) {
-  color: var(--red);
-}
-
 .lab-explorer-title button:disabled,
 .lab-explorer-action:disabled {
   cursor: not-allowed;
@@ -2257,15 +2470,6 @@
   white-space: nowrap;
 }
 
-.lab-explorer-row-actions {
-  display: flex;
-  align-items: center;
-  gap: 1px;
-  opacity: 0;
-}
-
-.lab-explorer-row:hover .lab-explorer-row-actions,
-.lab-explorer-row:focus-within .lab-explorer-row-actions,
 .lab-explorer-root-row .lab-explorer-action {
   opacity: 1;
 }
@@ -2791,7 +2995,7 @@
   justify-content: center;
   gap: 8px;
   padding: 10px 8px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--lab-divider);
   border-radius: 8px;
   background: color-mix(in srgb, var(--bg-2) 76%, transparent);
   color: var(--text-dim);
@@ -2899,7 +3103,7 @@
   min-height: 35px;
   height: 35px;
   padding: 0 8px 0 20px;
-  border-bottom: 1px solid #2b2b2b;
+  border-bottom: 1px solid var(--lab-divider);
   background: #181818;
 }
 
@@ -2984,7 +3188,7 @@
   max-height: 360px;
   overflow: auto;
   padding: 6px;
-  border: 1px solid #343434;
+  border: 1px solid var(--lab-divider);
   border-radius: 6px;
   background: #1f1f1f;
   box-shadow: 0 12px 28px rgb(0 0 0 / 34%);
@@ -3043,7 +3247,7 @@
   min-height: 28px;
   align-items: center;
   padding: 0 12px 0 20px;
-  border-bottom: 1px solid #252525;
+  border-bottom: 1px solid var(--lab-divider);
   background: #181818;
   color: #a8a8a8;
   font-size: 11px;
@@ -3098,15 +3302,15 @@
 
 .lab-assistant-empty button {
   padding: 7px 9px;
-  border-color: #313131;
-  border-radius: 3px;
-  background: transparent;
+  border-color: transparent;
+  border-radius: 5px;
+  background: color-mix(in srgb, #fff 4%, transparent);
   color: #dcdcdc;
 }
 
 .lab-assistant-empty button:hover {
-  border-color: #3f3f46;
-  background: #2a2a2a;
+  border-color: color-mix(in srgb, var(--accent-2) 38%, transparent);
+  background: color-mix(in srgb, var(--accent-2) 12%, transparent);
 }
 
 .lab-assistant-turns .chat-turn {
@@ -3138,7 +3342,7 @@
   gap: 0;
   margin: 0 12px 12px;
   padding: 0;
-  border: 1px solid #313131;
+  border: 1px solid var(--lab-divider);
   border-radius: 6px;
   background: #1f1f1f;
 }
@@ -3167,7 +3371,7 @@
 }
 
 .lab-assistant-attachments span {
-  border-color: #313131;
+  border-color: var(--lab-divider);
   border-radius: 4px;
   background: #252526;
 }
@@ -3178,7 +3382,7 @@
   align-items: center;
   min-height: 34px;
   padding: 4px 7px;
-  border-top: 1px solid #313131;
+  border-top: 1px solid var(--lab-divider);
   gap: 6px;
 }
 
@@ -3258,4 +3462,48 @@
     width: 100px;
     max-width: 100px;
   }
+}
+
+/* Remaining structural chrome (Notebook/Runtime side panels, the file-editor
+   bars, and row dividers) still drew at full --border strength. Route it
+   through the same --lab-divider used above so the whole workbench reads at
+   one consistent, lighter weight instead of full-strength boxes everywhere. */
+.lab-panel {
+  border-color: var(--lab-divider);
+  background: color-mix(in srgb, var(--lab-panel-raised) 85%, transparent);
+}
+
+.lab-file-editor-bar,
+.lab-file-runtime-strip,
+.lab-file-panel-head {
+  border-color: var(--lab-divider);
+}
+
+.lab-file-runtime {
+  border-top-color: var(--lab-divider);
+}
+
+.lab-file-output-panel {
+  border-right-color: var(--lab-divider);
+}
+
+.lab-var-row,
+.lab-run-row,
+.lab-file-var-row {
+  border-top-color: var(--lab-divider);
+}
+
+.lab-runtime-summary,
+.lab-sweep-src,
+.lab-select,
+.lab-new,
+.lab-btn,
+.lab-kernel,
+.lab-run-status {
+  border-color: var(--lab-divider);
+}
+
+.lab-out-html th,
+.lab-out-html td {
+  border-color: var(--lab-divider);
 }

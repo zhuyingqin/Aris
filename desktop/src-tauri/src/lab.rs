@@ -12,7 +12,7 @@ use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use notebook::{CellOutput, ExecStatus, KernelManager, NotebookDoc};
+use notebook::{CellOutput, CompleteOutcome, ExecStatus, InspectOutcome, KernelManager, NotebookDoc};
 use serde_json::{json, Map, Value};
 use tauri::{AppHandle, Emitter, State};
 
@@ -372,6 +372,51 @@ pub async fn lab_execute_cell(
             kernel.as_deref(),
             Some(on_output),
         )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Kernel tab-completion for a notebook cell. Returns empty (not an error) when
+/// no kernel is running, so the editor quietly falls back to no suggestions
+/// instead of spinning up a kernel on every keystroke.
+#[tauri::command]
+pub async fn lab_complete(
+    projects_state: State<'_, ProjectState>,
+    notebook_path: String,
+    code: String,
+    cursor_pos: usize,
+) -> Result<Value, String> {
+    let path = resolve(&projects_state, &notebook_path)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let id = session_id(&path);
+        if !KernelManager::is_running(&id) {
+            return serde_json::to_value(CompleteOutcome::default()).map_err(|e| e.to_string());
+        }
+        let outcome = KernelManager::complete(&id, &code, cursor_pos).map_err(|e| e.to_string())?;
+        serde_json::to_value(outcome).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Kernel object introspection (Shift+Tab docs) for a notebook cell. Empty when
+/// no kernel is running.
+#[tauri::command]
+pub async fn lab_inspect(
+    projects_state: State<'_, ProjectState>,
+    notebook_path: String,
+    code: String,
+    cursor_pos: usize,
+) -> Result<Value, String> {
+    let path = resolve(&projects_state, &notebook_path)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let id = session_id(&path);
+        if !KernelManager::is_running(&id) {
+            return serde_json::to_value(InspectOutcome::default()).map_err(|e| e.to_string());
+        }
+        let outcome = KernelManager::inspect(&id, &code, cursor_pos).map_err(|e| e.to_string())?;
+        serde_json::to_value(outcome).map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| e.to_string())?

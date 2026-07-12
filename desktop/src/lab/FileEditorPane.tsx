@@ -20,7 +20,7 @@ import {
   normalizePath,
   runtimeChoiceForLanguage,
 } from "./labEditorCore";
-import { OutputView } from "./outputs";
+import { OutputGroup } from "./outputs";
 import type {
   CellOutput,
   FileExecutionResult,
@@ -86,6 +86,8 @@ interface Props {
   kernelspecs: KernelSpecInfo[];
   selectedKernel: string | null;
   onSelectKernel: (name: string) => void;
+  /** Report unsaved-edit state up to Lab so the editor tab can show a dirty dot. */
+  onDirtyChange?: (path: string, dirty: boolean) => void;
 }
 
 export default function FileEditorPane({
@@ -93,6 +95,7 @@ export default function FileEditorPane({
   kernelspecs,
   selectedKernel,
   onSelectKernel,
+  onDirtyChange,
 }: Props) {
   const [loaded, setLoaded] = useState<FileText | null>(null);
   const [draft, setDraft] = useState("");
@@ -128,6 +131,14 @@ export default function FileEditorPane({
     () => runtimeChoiceForLanguage(kernelspecs, selectedKernel, language),
     [kernelspecs, language, selectedKernel],
   );
+
+  // Surface unsaved state to Lab's tab strip; report clean on unmount / path
+  // switch (only the active file editor is mounted, so its draft is discarded
+  // when it unmounts and the tab should no longer read as dirty).
+  useEffect(() => {
+    onDirtyChange?.(path, dirty);
+    return () => onDirtyChange?.(path, false);
+  }, [path, dirty, onDirtyChange]);
 
   useEffect(() => {
     draftRef.current = draft;
@@ -210,6 +221,10 @@ export default function FileEditorPane({
     const currentPath = normalizePath(path);
     void onLabFileOutput<LabFileOutputEvent>((event) => {
       if (normalizePath(event.filePath) !== currentPath) return;
+      if ((event.output as { type?: string })?.type === "clear") {
+        setOutputs([]);
+        return;
+      }
       setOutputs((items) => [...items, event.output]);
     })
       .then((fn) => {
@@ -313,6 +328,8 @@ export default function FileEditorPane({
   isPythonRef.current = isPython;
   const runSelectionRef = useRef<() => void>(() => undefined);
   runSelectionRef.current = () => void runPython("selection");
+  const saveRef = useRef<() => void>(() => undefined);
+  saveRef.current = () => void save();
   const extraKeymapRef = useRef<KeyBinding[]>([
     {
       key: "Shift-Enter",
@@ -322,6 +339,7 @@ export default function FileEditorPane({
         return true;
       },
     },
+    { key: "Mod-s", run: () => { saveRef.current(); return true; } },
   ]);
 
   return (
@@ -453,7 +471,7 @@ export default function FileEditorPane({
               {outputs.length === 0 ? (
                 <div className="lab-muted">Run this Python file or a selection to see kernel output here.</div>
               ) : (
-                outputs.map((output, index) => <OutputView key={index} output={output} />)
+                <OutputGroup outputs={outputs} />
               )}
             </div>
           </section>
