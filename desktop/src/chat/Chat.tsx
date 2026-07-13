@@ -262,7 +262,7 @@ export default function Chat() {
   const starters = CHAT_STARTERS[language];
   const welcomeCopy = language === "cn"
     ? {
-      title: "让科研问题持续向前",
+      title: <>梦里<span className="chat-welcome-highlight">求索</span>，醒时有<span className="chat-welcome-highlight">获</span></>,
       description: "SomniQ 在后台持续推理、检索、分析与生成，把问题推进成答案。",
     }
     : {

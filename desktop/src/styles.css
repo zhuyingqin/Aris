@@ -9712,6 +9712,11 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   color: var(--text);
 }
 
+.chat-welcome-highlight {
+  color: var(--accent-2);
+  -webkit-text-fill-color: var(--accent-2);
+}
+
 :root[data-theme="light"] .chat-welcome h1 {
   background: linear-gradient(100deg, #2a3340 0%, #3a4756 55%, #51677d 100%);
   -webkit-background-clip: text;

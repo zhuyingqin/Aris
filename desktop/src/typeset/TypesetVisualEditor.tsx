@@ -506,6 +506,20 @@ const visualTheme = EditorView.theme({
     marginRight: "0.18em",
     color: "var(--visual-text)",
     fontWeight: "600",
+    whiteSpace: "pre",
+  },
+  ".cm-vis-theorem-label": {
+    display: "inline-flex",
+    marginRight: "0.55em",
+    padding: "0.08em 0.45em",
+    borderRadius: "3px",
+    backgroundColor: "var(--visual-widget-bg)",
+    color: "var(--visual-accent-bright)",
+    fontFamily: '"Segoe UI", system-ui, -apple-system, sans-serif',
+    fontSize: "0.78em",
+    fontWeight: "700",
+    letterSpacing: "0.02em",
+    verticalAlign: "0.08em",
   },
 
   // Figure placeholder card. No outer margin (see block-widget note above) — the

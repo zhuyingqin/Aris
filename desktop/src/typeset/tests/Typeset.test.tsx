@@ -898,6 +898,161 @@ describe("Typeset start page", () => {
     expect(container.querySelector(".typeset-visual-block")).toBeNull();
   });
 
+  it("renders enumitem labels in the visual editor without exposing list setup", async () => {
+    mockProjectFiles();
+    const source = [
+      "\\documentclass{article}",
+      "\\usepackage{enumitem}",
+      "\\begin{document}",
+      "\\begin{enumerate}[label=步骤 \\arabic*,leftmargin=*]",
+      "\\item First research step",
+      "\\item Second research step",
+      "\\end{enumerate}",
+      "\\end{document}",
+    ].join("\n");
+    mocks.fileReadText.mockResolvedValueOnce({ path: "paper.tex", content: source, bytes: source.length });
+
+    const { container } = render(<Typeset />);
+
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+    fireEvent.click(screen.getByRole("tab", { name: "Visual" }));
+
+    const visualContent = await waitFor(() => {
+      const item = container.querySelector<HTMLElement>(".typeset-visual-cm .cm-content");
+      expect(item).toBeTruthy();
+      expect(item?.querySelectorAll(".cm-vis-item-marker")).toHaveLength(2);
+      return item!;
+    });
+    expect(Array.from(visualContent.querySelectorAll(".cm-vis-item-marker"), (item) => item.textContent))
+      .toEqual(["步骤 1", "步骤 2"]);
+    expect(visualContent.textContent).not.toContain("\\begin{enumerate}");
+    expect(visualContent.textContent).not.toContain("leftmargin");
+  });
+
+  it("keeps rich formatting active across consecutive paper paragraphs and lists", async () => {
+    mockProjectFiles();
+    const source = [
+      "\\documentclass{article}",
+      "\\usepackage{enumitem}",
+      "\\begin{document}",
+      "\\[",
+      "\\text{人驾驶产生 }x(t) \\Rightarrow \\hat K_h \\Rightarrow \\hat Q,\\hat S,\\hat\\gamma \\Rightarrow \\text{机器用恢复出的代价生成控制}",
+      "\\]",
+      "\\noindent\\textbf{模拟}: 设专家权重 $Q=\\mathrm{diag}(0.1,0.1,1,1)$,$S=0$,$\\gamma=0.5$,由 ARE 算出真 $K_h$(式 (49))。两种工况:",
+      "\\begin{itemize}[leftmargin=*]",
+      "  \\item \\textbf{Case 1} $w=1800\\sin t$: $t_f=20\\text{s}$ 时 $\\hat K_h(t_f)$ 与 $K_h$ 接近(式 (50)),优化得 $\\hat Q^*,\\\\hat S^*,\\hat\\gamma^*$(式 (51))与真值吻合;",
+      "  \\item \\textbf{Case 2} $w\\equiv 0$: 状态收敛到 0,$\\hat K_h$ 精确收敛到 $K_h$。",
+      "\\end{itemize}",
+      "",
+      "\\noindent\\textbf{实机}: Thrustmaster 方向盘 + PreScan,工况 $w=340e^{-0.2t}$,$\\hat K_h(t_f)$ 见式 (53),与模拟 Case 1 的 (50) 接近。",
+      "",
+      "\\subsection{论文 Section V 的核心结论}",
+      "\\begin{itemize}[leftmargin=*]",
+      "  \\item 把 HiTL 系统建模为零和 LQ 微分博弈,人是带未知代价函数的理性玩家;",
+      "  \\item 通过 ICL 自适应律在线估计人的反馈矩阵 $K_h$,无需持续激励条件;",
+      "  \\item 论文的创新在于: 同时去除了 \\textbf{PE 条件} 和 \\textbf{需要测量 $u$} 这两个传统在线 IRL 算法的限制。",
+      "\\end{itemize}",
+      "\\end{document}",
+    ].join("\n");
+    mocks.fileReadText.mockResolvedValueOnce({ path: "paper.tex", content: source, bytes: source.length });
+
+    const { container } = render(<Typeset />);
+
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+    fireEvent.click(screen.getByRole("tab", { name: "Visual" }));
+
+    const visualContent = await waitFor(() => {
+      const item = container.querySelector<HTMLElement>(".typeset-visual-cm .cm-content");
+      expect(item?.querySelectorAll(".cm-vis-item-marker")).toHaveLength(5);
+      return item!;
+    });
+    expect(visualContent.textContent).toContain("模拟");
+    expect(visualContent.textContent).toContain("论文 Section V 的核心结论");
+    expect(visualContent.textContent).not.toContain("\\noindent");
+    expect(visualContent.textContent).not.toContain("\\textbf");
+    expect(visualContent.textContent).not.toContain("\\begin{itemize}");
+    expect(visualContent.textContent).not.toContain("\\subsection");
+  });
+
+  it("does not let an unclosed inline formula expose the following paper content", async () => {
+    mockProjectFiles();
+    const source = [
+      "\\documentclass{article}",
+      "\\begin{document}",
+      "$unfinished formula copied from notes",
+      "\\noindent\\textbf{模拟}: 后续段落仍应保持 Visual 显示。",
+      "\\begin{itemize}[leftmargin=*]",
+      "  \\item \\textbf{Case 1}: $K_h$ 正常收敛。",
+      "  \\item \\textbf{Case 2}: 状态收敛。",
+      "\\end{itemize}",
+      "\\subsection{后续结论}",
+      "\\end{document}",
+    ].join("\n");
+    mocks.fileReadText.mockResolvedValueOnce({ path: "paper.tex", content: source, bytes: source.length });
+
+    const { container } = render(<Typeset />);
+
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+    fireEvent.click(screen.getByRole("tab", { name: "Visual" }));
+
+    const visualContent = await waitFor(() => {
+      const item = container.querySelector<HTMLElement>(".typeset-visual-cm .cm-content");
+      expect(item?.querySelectorAll(".cm-vis-item-marker")).toHaveLength(2);
+      return item!;
+    });
+    expect(visualContent.textContent).toContain("模拟");
+    expect(visualContent.textContent).toContain("后续结论");
+    expect(visualContent.textContent).not.toContain("\\noindent");
+    expect(visualContent.textContent).not.toContain("\\textbf");
+    expect(visualContent.textContent).not.toContain("\\begin{itemize}");
+    expect(visualContent.textContent).not.toContain("\\subsection");
+  });
+
+  it("keeps list and theorem declarations visual when their marker has the caret", async () => {
+    mockProjectFiles();
+    const source = [
+      "\\documentclass{article}",
+      "\\begin{document}",
+      "\\begin{theorem}[Theorem 2]",
+      "设 $\\lVert\\phi\\rVert \\leq \\phi_0$。",
+      "\\end{theorem}",
+      "\\begin{enumerate}[label=步骤 \\arabic*,leftmargin=*]",
+      "  \\item 第一项。",
+      "  \\item 第二项。",
+      "\\end{enumerate}",
+      "\\end{document}",
+    ].join("\n");
+    mocks.fileReadText.mockResolvedValueOnce({ path: "paper.tex", content: source, bytes: source.length });
+
+    const { container } = render(<Typeset />);
+
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+    fireEvent.click(screen.getByRole("tab", { name: "Visual" }));
+    const view = await waitFor(() => {
+      const item = window.__typesetView;
+      expect(item).toBeTruthy();
+      return item!;
+    });
+
+    view.dispatch({ selection: { anchor: source.indexOf("\\begin{theorem}") } });
+    await waitFor(() => {
+      expect(container.querySelector<HTMLElement>(".cm-vis-theorem-label")?.textContent).toBe("Theorem 2");
+      expect(container.querySelector<HTMLElement>(".typeset-visual-cm .cm-content")?.textContent).not.toContain("\\begin{theorem}");
+    });
+
+    view.dispatch({ selection: { anchor: source.indexOf("\\begin{enumerate}") } });
+    await waitFor(() => {
+      const visualContent = container.querySelector<HTMLElement>(".typeset-visual-cm .cm-content");
+      expect(visualContent?.textContent).not.toContain("\\begin{enumerate}");
+      expect(Array.from(visualContent?.querySelectorAll(".cm-vis-item-marker") ?? [], (item) => item.textContent))
+        .toEqual(["步骤 1", "步骤 2"]);
+    });
+  });
+
   it("clicking the rendered title jumps to Code mode with the \\title{} source selected", async () => {
     mockProjectFiles();
     const source = [
