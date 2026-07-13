@@ -359,6 +359,13 @@ fn prepare_command(
         if launcher.posix {
             prepared.env("HOME", crate::somniq_sandbox_home_dir(cwd));
             prepared.env("TMPDIR", crate::somniq_sandbox_tmp_dir(cwd));
+            // MSYS2 invoked directly inherits the Windows PATH verbatim. Unlike
+            // Git Bash's launcher, it does not add /usr/bin or /bin, so common
+            // POSIX utilities such as `tail`, `head`, and `find` appear to be
+            // missing even though the selected shell provides them. Prepend the
+            // standard POSIX locations while retaining the host PATH for tools
+            // such as git, node, and Python.
+            prepared.env("PATH", windows_posix_path());
         }
         return prepared;
     }
@@ -404,19 +411,68 @@ fn detect_windows_posix_shell() -> Option<String> {
     static DETECTED: OnceLock<Option<String>> = OnceLock::new();
     DETECTED
         .get_or_init(|| {
-            let candidates = [
-                String::from("bash"),
-                String::from("sh"),
-                String::from(r"C:\Program Files\Git\bin\bash.exe"),
-                String::from(r"C:\Program Files\Git\usr\bin\bash.exe"),
-                String::from(r"C:\msys64\usr\bin\bash.exe"),
-                String::from(r"C:\cygwin64\bin\bash.exe"),
-            ];
-            candidates
+            windows_posix_shell_candidates()
                 .into_iter()
                 .find(|candidate| usable_posix_shell(candidate))
         })
         .clone()
+}
+
+fn windows_posix_path() -> std::ffi::OsString {
+    let mut path = std::ffi::OsString::from("/usr/local/bin:/usr/bin:/bin");
+    if let Some(inherited) = env::var_os("PATH").filter(|value| !value.is_empty()) {
+        path.push(":");
+        path.push(inherited);
+    }
+    path
+}
+
+fn windows_posix_shell_candidates() -> Vec<String> {
+    let paths = env::var_os("PATH")
+        .map(|paths| env::split_paths(&paths).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let mut candidates = vec![String::from("bash"), String::from("sh")];
+
+    // Git for Windows is frequently installed outside C:\\Program Files. Its
+    // `cmd` directory is normally on PATH, so find the sibling Git Bash before
+    // falling back to a generic MSYS2 installation.
+    candidates.extend(git_bash_candidates_from_paths(paths));
+
+    for variable in ["ProgramW6432", "ProgramFiles", "ProgramFiles(x86)"] {
+        if let Some(program_files) = env::var_os(variable) {
+            candidates.push(
+                std::path::PathBuf::from(program_files)
+                    .join("Git")
+                    .join("bin")
+                    .join("bash.exe")
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        }
+    }
+
+    candidates.extend([
+        String::from(r"C:\Program Files\Git\bin\bash.exe"),
+        String::from(r"C:\Program Files\Git\usr\bin\bash.exe"),
+        String::from(r"C:\msys64\usr\bin\bash.exe"),
+        String::from(r"C:\cygwin64\bin\bash.exe"),
+    ]);
+    candidates
+}
+
+fn git_bash_candidates_from_paths(paths: Vec<std::path::PathBuf>) -> Vec<String> {
+    paths
+        .into_iter()
+        .filter_map(|directory| {
+            let leaf = directory.file_name()?.to_string_lossy();
+            leaf.eq_ignore_ascii_case("cmd").then(|| {
+                directory
+                    .parent()
+                    .map(|root| root.join("bin").join("bash.exe"))
+            })?
+        })
+        .map(|candidate| candidate.to_string_lossy().into_owned())
+        .collect()
 }
 
 fn usable_posix_shell(candidate: &str) -> bool {

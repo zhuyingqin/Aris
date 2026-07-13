@@ -332,19 +332,33 @@ class SectionLabelWidget extends WidgetType {
 
 /** Small theorem/lemma label in place of a LaTeX theorem environment marker. */
 class TheoremLabelWidget extends WidgetType {
-  constructor(private readonly label: string) {
+  constructor(
+    private readonly label: string,
+    private readonly sourceRange: Range,
+    private readonly onJump: OpenCodeRange,
+  ) {
     super();
   }
   eq(other: TheoremLabelWidget) {
-    return other.label === this.label;
+    return other.label === this.label
+      && other.sourceRange.from === this.sourceRange.from
+      && other.sourceRange.to === this.sourceRange.to;
   }
   toDOM() {
     const el = document.createElement("span");
     el.className = `cm-vis-theorem-label ${BLOCK_TARGET_CLASS}`;
     el.textContent = this.label;
+    if (this.onJump) {
+      el.classList.add("cm-vis-theorem-editable");
+      el.title = "Click to edit theorem source in Code mode";
+      el.addEventListener("mousedown", (event) => event.preventDefault());
+      el.addEventListener("click", () => this.onJump?.(this.sourceRange.from, this.sourceRange.to));
+    }
     return el;
   }
-  ignoreEvent = blockIgnoreEvent;
+  ignoreEvent() {
+    return true;
+  }
 }
 
 /** Auto section-number badge rendered before a heading's text. */
@@ -1302,10 +1316,17 @@ function buildDecorations(state: EditorState): VisualDecorations {
     if (!THEOREM_ENVIRONMENTS.has(environment)) continue;
     const fallback = environment.charAt(0).toUpperCase() + environment.slice(1);
     const label = stripMarkup(theoremBegin[3]?.trim() || fallback) || fallback;
+    const beginTo = theoremBegin.index + theoremBegin[0].length;
+    const endMarker = `\\end{${environment}}`;
+    const endFrom = text.indexOf(endMarker, beginTo);
+    const sourceRange = {
+      from: theoremBegin.index,
+      to: endFrom >= 0 ? endFrom + endMarker.length : beginTo,
+    };
     hide(
       theoremBegin.index,
-      theoremBegin.index + theoremBegin[0].length,
-      Decoration.replace({ widget: new TheoremLabelWidget(label) }),
+      beginTo,
+      Decoration.replace({ widget: new TheoremLabelWidget(label, sourceRange, state.facet(onOpenCodeRange)) }),
     );
   }
   const theoremEndRe = /\\end\{([a-zA-Z*]+)\}/g;

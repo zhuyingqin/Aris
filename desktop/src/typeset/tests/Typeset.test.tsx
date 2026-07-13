@@ -1053,6 +1053,39 @@ describe("Typeset start page", () => {
     });
   });
 
+  it("opens the complete theorem source in Code mode when its Visual label is clicked", async () => {
+    mockProjectFiles();
+    const source = [
+      "\\documentclass{article}",
+      "\\begin{document}",
+      "\\begin{theorem}[Theorem 2]",
+      "设 $x > 0$。",
+      "\\end{theorem}",
+      "\\end{document}",
+    ].join("\n");
+    mocks.fileReadText.mockResolvedValueOnce({ path: "paper.tex", content: source, bytes: source.length });
+
+    const { container } = render(<Typeset />);
+
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+    fireEvent.click(screen.getByRole("tab", { name: "Visual" }));
+    const label = await waitFor(() => {
+      const item = container.querySelector<HTMLElement>(".cm-vis-theorem-label");
+      expect(item).toBeTruthy();
+      return item!;
+    });
+
+    fireEvent.click(label);
+
+    await waitFor(() => {
+      expect(screen.getByRole("tab", { name: "Code" }).getAttribute("aria-selected")).toBe("true");
+      const selection = typesetCodeView()?.state.selection.main;
+      expect(selection?.from).toBe(source.indexOf("\\begin{theorem}"));
+      expect(selection?.to).toBe(source.indexOf("\\end{theorem}") + "\\end{theorem}".length);
+    });
+  });
+
   it("clicking the rendered title jumps to Code mode with the \\title{} source selected", async () => {
     mockProjectFiles();
     const source = [

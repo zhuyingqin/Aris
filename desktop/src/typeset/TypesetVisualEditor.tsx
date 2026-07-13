@@ -521,6 +521,10 @@ const visualTheme = EditorView.theme({
     letterSpacing: "0.02em",
     verticalAlign: "0.08em",
   },
+  ".cm-vis-theorem-editable": { cursor: "pointer" },
+  ".cm-vis-theorem-editable:hover": {
+    boxShadow: "inset 0 -0.12em 0 rgba(47, 139, 58, 0.45)",
+  },
 
   // Figure placeholder card. No outer margin (see block-widget note above) — the
   // 8px of outer breathing room folds into the card's own padding instead.
