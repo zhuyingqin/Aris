@@ -57,6 +57,7 @@ pub struct ProjectGoalDraft {
 #[serde(rename_all = "camelCase")]
 pub struct ProjectBrief {
     pub mission: String,
+    pub intent: Option<crate::ProjectIntent>,
     pub goal: Option<ProjectGoal>,
 }
 
@@ -86,6 +87,7 @@ pub fn project_brief(workspace: &Path) -> Result<ProjectBrief, String> {
                 .unwrap_or("Current project");
             format!("{name}: define the durable project mission in AGENTS.md.")
         }),
+        intent: crate::load_project_intent(workspace)?,
         goal: load_project_goal(workspace)?,
     })
 }
@@ -223,26 +225,19 @@ fn save_project_goal(workspace: &Path, goal: &ProjectGoal) -> Result<(), String>
 
 #[must_use]
 pub fn render_project_goal_prompt(workspace: &Path) -> String {
-    let Ok(Some(goal)) = load_project_goal(workspace) else {
-        return "# Project goal\nNo project-level goal is currently recorded. When the user's first substantive request defines a concrete outcome, summarize it into a goal with observable success criteria.".to_string();
-    };
-    let mut lines = vec![
-        "# Project goal".to_string(),
-        format!("Status: {}", goal.status.as_str()),
-        format!("Objective: {}", goal.objective),
-    ];
-    if !goal.success_criteria.is_empty() {
-        lines.push("Success criteria:".to_string());
-        lines.extend(
-            goal.success_criteria
-                .iter()
-                .map(|criterion| format!("- {criterion}")),
-        );
+    let intent = crate::load_project_intent(workspace).ok().flatten();
+    let goal = load_project_goal(workspace).ok().flatten();
+    let mut lines = vec!["# Project continuity".to_string()];
+    if let Some(intent) = intent {
+        lines.push(format!("Long-term project intent: {}", intent.objective));
+        lines.push(format!("Intent confidence: {}%", intent.confidence));
+        lines.push("Keep this stable across conversations. Do not replace it merely because the latest request is a short-term task.".to_string());
+    } else {
+        lines.push("Long-term project intent: still being inferred from repeated substantive user requests. Do not treat a single short-term task as the project objective.".to_string());
     }
-    lines.push(format!("Recent status: {}", goal.recent_status));
-    lines.push(format!("Updated at: {}", goal.updated_at));
-    if goal.status == ProjectGoalStatus::Active {
-        lines.push("Treat this as durable project context across conversations. The user's latest explicit request may refine or replace it.".to_string());
+    if let Some(goal) = goal {
+        lines.push(format!("Current milestone: {}", goal.objective));
+        lines.push(format!("Milestone status: {}", goal.recent_status));
     }
     lines.join("\n")
 }

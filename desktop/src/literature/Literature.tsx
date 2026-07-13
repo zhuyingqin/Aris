@@ -1775,7 +1775,7 @@ function WorkspaceEvidence({
           disabled={generatingChains}
         >
           {generatingChains
-            ? "正在逐页视觉读取并构建链条…"
+            ? "正在读取 PDF 并构建证据链…"
             : paper.pdf.status === "downloaded"
               ? paper.answerChains.length > 0 ? "重新生成证据链" : "生成证据链"
               : "获取 PDF"}
@@ -1864,7 +1864,7 @@ function WorkspaceEvidence({
         <div className="lit-workspace-empty-content">
           <p>
             {paper.pdf.status === "downloaded"
-              ? "暂无提取的证据。可让视觉模型逐页读取 PDF 截图并提取带页码证据。"
+              ? "暂无提取的证据。可让模型逐页读取 PDF 正文，仅对图表等页面回退到截图读取，并提取带页码证据。"
               : "暂无提取的证据。请先获取 PDF，避免仅凭摘要生成证据。"}
           </p>
           <button
@@ -1874,7 +1874,7 @@ function WorkspaceEvidence({
             disabled={generatingChains}
           >
             {generatingChains
-              ? "逐页视觉读取并构建证据链中…"
+              ? "正在读取 PDF 并构建证据链…"
               : paper.pdf.status === "downloaded"
                 ? "生成证据链"
                 : "获取 PDF"}

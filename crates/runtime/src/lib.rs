@@ -25,6 +25,7 @@ mod permissions;
 mod process;
 mod process_registry;
 mod project_goal;
+mod project_intent;
 mod prompt;
 mod remote;
 pub mod sandbox;
@@ -138,6 +139,12 @@ pub use project_goal::{
     render_project_goal_prompt, render_project_goal_report, replace_project_goal,
     resume_project_goal, start_project_goal, update_project_goal_progress, ProjectBrief,
     ProjectGoal, ProjectGoalDraft, ProjectGoalStatus,
+};
+pub use project_intent::{
+    apply_project_intent_review, load_project_intent, load_project_intent_state,
+    project_intent_needs_review, project_intent_path, record_project_intent_observations,
+    ProjectIntent, ProjectIntentDraft, ProjectIntentEvidence, ProjectIntentObservation,
+    ProjectIntentState, ProjectIntentStatus,
 };
 pub use prompt::{
     instruction_files_fingerprint, load_system_prompt, prepend_bullets, team_orchestration_section,

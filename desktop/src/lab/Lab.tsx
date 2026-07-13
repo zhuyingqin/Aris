@@ -1,8 +1,9 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type MutableRefObject, type PointerEvent as ReactPointerEvent } from "react";
+import { lazy, memo, Suspense, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type MutableRefObject, type PointerEvent as ReactPointerEvent } from "react";
 import type { KeyBinding } from "@codemirror/view";
 
 import MarkdownContent from "../chat/MarkdownContent";
-import { isTauri, onLabCellOutput } from "../api/tauri";
+import { isTauri, labComplete, labInspect, onLabCellOutput } from "../api/tauri";
+import { stripAnsi, type CompleteFn, type InspectFn, type KernelCompletion } from "../editor/kernelIntel";
 import { isLabPreviewMode } from "../api/labPreview";
 import { useStore } from "../store";
 import type { ChatAttachment } from "../types";
@@ -10,8 +11,8 @@ import { useLabStore } from "./labStore";
 import CodeEditor, { type CodeDiffLine, type EditorLanguage } from "./CodeEditor";
 import FileEditorPane from "./FileEditorPane";
 import LabAssistant from "./LabAssistant";
-import LabFiles, { type LabFileChange } from "./LabFiles";
-import { OutputView } from "./outputs";
+import LabFiles, { type LabFileChange, type LabOpenOptions } from "./LabFiles";
+import { OutputGroup } from "./outputs";
 import type {
   LabCellOutputEvent,
   NotebookCell,
@@ -22,10 +23,13 @@ import type {
 import { diffTextLines } from "./textDiff";
 import "./Lab.css";
 
+// xterm.js is heavy; only pull it in the first time the terminal is opened.
+const TerminalPane = lazy(() => import("./Terminal"));
+
 type Mode = "command" | "edit";
 type CellPhase = "idle" | "queued" | "running";
-/** The four Escape/modifier+Enter situations `CellView`'s editor keymap reports upward. */
-type EditorKeyAction = "exit" | "run-advance" | "run-stay" | "run-insert";
+/** The Escape/modifier+Enter/save situations `CellView`'s editor keymap reports upward. */
+type EditorKeyAction = "exit" | "run-advance" | "run-stay" | "run-insert" | "save";
 type LabSideTab = "files" | "notebook" | "runtime";
 type LabEditorKind = "notebook" | "file";
 
@@ -41,6 +45,8 @@ type CellActions = {
   onDuplicate: (index: number) => void;
   onDelete: (index: number) => void;
   onChangeType: (index: number, type: "code" | "markdown") => void;
+  complete: CompleteFn;
+  inspect: InspectFn;
 };
 
 interface LabEditorTab {
@@ -61,6 +67,10 @@ const LAB_SIDE_WIDTH_MAX = 420;
 const LAB_ASSISTANT_WIDTH_DEFAULT = 380;
 const LAB_ASSISTANT_WIDTH_MIN = 300;
 const LAB_ASSISTANT_WIDTH_MAX = 680;
+const LAB_TERMINAL_HEIGHT_KEY = "somniq-lab-terminal-h";
+const LAB_TERMINAL_HEIGHT_DEFAULT = 260;
+const LAB_TERMINAL_HEIGHT_MIN = 120;
+const LAB_TERMINAL_HEIGHT_MAX = 560;
 
 function clampPanelWidth(value: number, min: number, max: number): number {
   return Math.round(Math.max(min, Math.min(max, value)));
@@ -266,6 +276,12 @@ const IconNotebook = () => <Icon d="M4 2.5h8v11H4zM6 5h4M6 7.5h4M6 10h2.5" />;
 const IconRuntime = () => <Icon d="M3 4.5h10M3 8h10M3 11.5h10M5 3v3M11 6.5v3M7 10v3" />;
 const IconAssistant = () => <Icon d="M2.5 4.5h11v6.5h-4L8 12.5 6.5 11h-4zM5 7.5h.01M8 7.5h.01M11 7.5h.01" />;
 const IconClose = () => <Icon d="M4.5 4.5l7 7M11.5 4.5l-7 7" />;
+const IconTerminal = () => (
+  <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <rect x="2" y="3" width="12" height="10" rx="1.2" />
+    <path d="M4.5 6.5 6.5 8l-2 1.5M8.5 9.8h3" />
+  </svg>
+);
 
 function normalizeSweepSpec(raw: unknown, activePath: string | null): SweepSpec {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
@@ -369,6 +385,7 @@ const CellView = memo(function CellView(props: CellViewProps) {
     { key: "Shift-Enter", run: () => { editorKeyRef.current("run-advance"); return true; } },
     { key: "Ctrl-Enter", run: () => { editorKeyRef.current("run-stay"); return true; } },
     { key: "Alt-Enter", run: () => { editorKeyRef.current("run-insert"); return true; } },
+    { key: "Mod-s", run: () => { editorKeyRef.current("save"); return true; } },
   ]);
   const running = phase === "running";
   const queued = phase === "queued";
@@ -472,14 +489,14 @@ const CellView = memo(function CellView(props: CellViewProps) {
             onFocus={() => props.actions.current.onSelect(index, "edit")}
             onBlur={() => code && props.actions.current.onBlurCode(index)}
             extraKeymap={extraKeymapRef.current}
+            completeRequest={code ? (source, pos) => props.actions.current.complete(source, pos) : undefined}
+            inspectRequest={code ? (source, pos) => props.actions.current.inspect(source, pos) : undefined}
           />
         )}
 
         {code && cell.outputs && cell.outputs.length > 0 && (
           <div className="lab-outputs">
-            {cell.outputs.map((output, i) => (
-              <OutputView key={i} output={output} />
-            ))}
+            <OutputGroup outputs={cell.outputs} />
           </div>
         )}
       </div>
@@ -613,8 +630,28 @@ export default function Lab() {
     ),
   );
   const [resizingPanel, setResizingPanel] = useState<"side" | "assistant" | null>(null);
+  // Bottom-docked integrated terminal. `started` mounts it once (keeping the
+  // shell alive across hide/show); `show` toggles visibility; `refit` nudges
+  // xterm to re-measure when revealed.
+  const [terminalStarted, setTerminalStarted] = useState(false);
+  const [showTerminal, setShowTerminal] = useState(false);
+  const [terminalHeight, setTerminalHeight] = useState(() =>
+    storedPanelWidth(LAB_TERMINAL_HEIGHT_KEY, LAB_TERMINAL_HEIGHT_KEY, LAB_TERMINAL_HEIGHT_MIN, LAB_TERMINAL_HEIGHT_MAX, LAB_TERMINAL_HEIGHT_DEFAULT),
+  );
+  const [terminalRefit, setTerminalRefit] = useState(0);
+  const [resizingTerminal, setResizingTerminal] = useState(false);
+  const terminalResizeRef = useRef<{ startY: number; startHeight: number } | null>(null);
   const [activeFilePath, setActiveFilePath] = useState<string | null>(null);
   const [openTabs, setOpenTabs] = useState<LabEditorTab[]>([]);
+  // The single replaceable "preview" tab (VS Code-style): opened by a single
+  // click in Files, shown in the tab strip in italics, and swapped out (never
+  // accumulated) the next time a file is single-clicked. Double-clicking a
+  // file (or its tab) promotes it into `openTabs` as a permanent tab.
+  const [previewTab, setPreviewTab] = useState<LabEditorTab | null>(null);
+  // Paths of file tabs with unsaved edits, reported up by the mounted
+  // `FileEditorPane` so the tab strip can show a VS Code-style dirty dot. Only
+  // the active file editor is mounted, so at most one entry is live at a time.
+  const [dirtyFiles, setDirtyFiles] = useState<Set<string>>(() => new Set());
   const [tabMenu, setTabMenu] = useState<{ x: number; y: number; tabId: string } | null>(null);
   const [assistantAttachments, setAssistantAttachments] = useState<ChatAttachment[]>([]);
   const [newName, setNewName] = useState("");
@@ -624,6 +661,12 @@ export default function Lab() {
   const lastD = useRef<{ index: number; time: number } | null>(null);
   const sideResizeRef = useRef<{ startX: number; startWidth: number } | null>(null);
   const assistantResizeRef = useRef<{ startX: number; startWidth: number } | null>(null);
+  // Mirrors of state read from stable (empty-deps) callbacks below, so they
+  // always see the latest pinned tabs / pending preview without needing to be
+  // recreated (and re-triggering the effects that depend on their identity).
+  const openTabsRef = useRef(openTabs);
+  openTabsRef.current = openTabs;
+  const pendingPreviewPathRef = useRef<string | null>(null);
   // Whether execution-follow auto-scroll is armed. A manual wheel/touch scroll
   // disarms it until the next run command re-arms it.
   const followRef = useRef(true);
@@ -631,6 +674,16 @@ export default function Lab() {
   const cells: NotebookCell[] = view?.notebook?.cells ?? [];
   const cellCount = cells.length;
   const elapsedMs = useElapsed(runStartedAt);
+
+  // Unsaved cell edits (drafts diverging from the persisted source) drive the
+  // notebook tab's dirty dot and what Ctrl+S / `saveNotebook` flushes to disk.
+  const notebookDirty = useMemo(
+    () => Object.entries(drafts).some(([key, value]) => {
+      const cell = cells[Number(key)];
+      return cell ? value !== cellSource(cell) : value.length > 0;
+    }),
+    [drafts, cells],
+  );
 
   // AI/external-edit review: diff the live notebook against the snapshot taken
   // when the change was detected, so changed cells light up and deletions list.
@@ -654,6 +707,30 @@ export default function Lab() {
     setOpenTabs((tabs) => {
       if (tabs.some((tab) => tab.id === id)) return tabs;
       return [...tabs, { id, kind, path }];
+    });
+    // Pinning a path that was only previewed retires the preview slot so it
+    // doesn't show up twice (once pinned, once as a stale preview).
+    setPreviewTab((tab) => (tab && tab.id === id ? null : tab));
+  }, []);
+
+  // Single-click equivalent of ensureEditorTab: shows the file in the tab
+  // strip without pinning it, replacing whatever the previous preview was.
+  // No-ops if the path is already pinned.
+  const previewEditorTab = useCallback((kind: LabEditorKind, path: string) => {
+    const id = editorTabId(kind, path);
+    if (openTabsRef.current.some((tab) => tab.id === id)) return;
+    setPreviewTab({ id, kind, path });
+  }, []);
+
+  // The mounted file editor reports its unsaved state here (see FileEditorPane's
+  // onDirtyChange). Kept as a set so a future multi-pane layout still works.
+  const handleFileDirtyChange = useCallback((filePath: string, dirty: boolean) => {
+    setDirtyFiles((prev) => {
+      if (dirty === prev.has(filePath)) return prev;
+      const next = new Set(prev);
+      if (dirty) next.add(filePath);
+      else next.delete(filePath);
+      return next;
     });
   }, []);
 
@@ -720,7 +797,15 @@ export default function Lab() {
   }, [activePath]);
 
   useEffect(() => {
-    if (activePath) ensureEditorTab("notebook", activePath);
+    if (!activePath) return;
+    // A preview-mode open (single click) already staged this exact path as
+    // the pending preview just before `activePath` changed; consume that
+    // intent once instead of force-pinning it.
+    if (pendingPreviewPathRef.current === activePath) {
+      pendingPreviewPathRef.current = null;
+      return;
+    }
+    ensureEditorTab("notebook", activePath);
   }, [activePath, ensureEditorTab]);
 
   // Focus follows selection + mode: the textarea in edit mode, the cell shell in
@@ -785,7 +870,10 @@ export default function Lab() {
   const activeEditorPath = activeFilePath ?? activePath;
   const activeEditorKind: LabEditorKind | null = activeFilePath ? "file" : activePath ? "notebook" : null;
   const activeEditorTabId = activeEditorKind && activeEditorPath ? editorTabId(activeEditorKind, activeEditorPath) : null;
-  const activeOpenTab = activeEditorTabId ? openTabs.find((tab) => tab.id === activeEditorTabId) ?? null : null;
+  // Pinned tabs plus the (at most one) preview tab, deduped in favour of the
+  // pinned entry — the tab strip and all tab lookups render off this list.
+  const allTabs = previewTab && !openTabs.some((tab) => tab.id === previewTab.id) ? [...openTabs, previewTab] : openTabs;
+  const activeOpenTab = activeEditorTabId ? allTabs.find((tab) => tab.id === activeEditorTabId) ?? null : null;
   const activeItemPath = activeOpenTab?.path ?? null;
   const activeItemKind = activeOpenTab?.kind ?? null;
   const showingNotebook = activeItemKind === "notebook";
@@ -837,6 +925,20 @@ export default function Lab() {
         await persistCell(index, source);
       }
     }
+  };
+
+  // Explicit save (Ctrl/Cmd+S): flush every drafted cell — code and markdown —
+  // to disk via `saveCell` (which reloads the view so the rendered source
+  // matches disk), then drop the drafts that were persisted.
+  const saveNotebook = async () => {
+    const pending = Object.entries(drafts).filter(([key, source]) => {
+      const cell = cells[Number(key)];
+      return cell ? source !== cellSource(cell) : false;
+    });
+    for (const [key, source] of pending) {
+      await saveCell(Number(key), source);
+    }
+    if (pending.length > 0) setDrafts({});
   };
 
   const onBlurCode = (index: number) => {
@@ -919,12 +1021,21 @@ export default function Lab() {
       select(index, "command");
       return;
     }
+    if (action === "save") {
+      void saveNotebook();
+      return;
+    }
     void runWithShortcut(index, action === "run-advance" ? "advance" : action === "run-insert" ? "insert" : "stay");
   };
 
   const handleCommandKey = (event: React.KeyboardEvent, index: number) => {
     if (event.target !== event.currentTarget) return; // ignore bubbling from the editor
     const k = event.key;
+    if ((event.ctrlKey || event.metaKey) && (k === "s" || k === "S")) {
+      event.preventDefault();
+      void saveNotebook();
+      return;
+    }
     if (k === "Enter" && (event.shiftKey || event.ctrlKey || event.altKey)) {
       event.preventDefault();
       void runWithShortcut(index, event.shiftKey ? "advance" : event.altKey ? "insert" : "stay");
@@ -1018,6 +1129,22 @@ export default function Lab() {
   };
 
   const closeEditorTab = (tabId: string) => {
+    if (previewTab?.id === tabId && !openTabs.some((tab) => tab.id === tabId)) {
+      const closingKind = previewTab.kind;
+      setPreviewTab(null);
+      if (activeEditorTabId === tabId) {
+        const fallback = openTabs[openTabs.length - 1] ?? null;
+        window.setTimeout(() => {
+          if (fallback) {
+            void activateEditorTab(fallback);
+          } else {
+            setActiveFilePath(null);
+            if (closingKind === "notebook") setSelected(null);
+          }
+        }, 0);
+      }
+      return;
+    }
     setOpenTabs((tabs) => {
       const index = tabs.findIndex((tab) => tab.id === tabId);
       if (index < 0) return tabs;
@@ -1039,9 +1166,11 @@ export default function Lab() {
   };
 
   const closeOtherEditorTabs = (keepId: string) => {
-    const keep = openTabs.find((tab) => tab.id === keepId);
+    const keep = allTabs.find((tab) => tab.id === keepId);
     if (!keep) return;
-    setOpenTabs([keep]);
+    const keepIsPreview = previewTab?.id === keepId && !openTabs.some((tab) => tab.id === keepId);
+    setOpenTabs(keepIsPreview ? [] : [keep]);
+    if (!keepIsPreview) setPreviewTab(null);
     if (activeEditorTabId !== keepId) {
       window.setTimeout(() => void activateEditorTab(keep), 0);
     }
@@ -1049,6 +1178,7 @@ export default function Lab() {
 
   const closeAllEditorTabs = () => {
     setOpenTabs([]);
+    setPreviewTab(null);
     setActiveFilePath(null);
     setSelected(null);
   };
@@ -1079,6 +1209,7 @@ export default function Lab() {
       }
 
       setOpenTabs((tabs) => tabs.map((tab) => (pathContains(sourcePath, tab.path) ? renamedTab(tab, sourcePath, targetPath) : tab)));
+      setPreviewTab((tab) => (tab && pathContains(sourcePath, tab.path) ? renamedTab(tab, sourcePath, targetPath) : tab));
       setAssistantAttachments((items) =>
         items.map((item) => {
           if (!item.path || !pathContains(sourcePath, item.path)) return item;
@@ -1107,12 +1238,21 @@ export default function Lab() {
     const removedIds = new Set(openTabs.filter((tab) => pathContains(sourcePath, tab.path)).map((tab) => tab.id));
     const nextTabs = openTabs.filter((tab) => !removedIds.has(tab.id));
     const firstRemovedIndex = openTabs.findIndex((tab) => removedIds.has(tab.id));
-    const fallback = firstRemovedIndex >= 0 ? nextTabs[Math.min(firstRemovedIndex, nextTabs.length - 1)] ?? null : null;
+    const previewRemoved = Boolean(previewTab && pathContains(sourcePath, previewTab.path));
+    const fallback =
+      firstRemovedIndex >= 0
+        ? nextTabs[Math.min(firstRemovedIndex, nextTabs.length - 1)] ?? null
+        : previewRemoved
+          ? nextTabs[nextTabs.length - 1] ?? null
+          : null;
     const activeFileRemoved = Boolean(activeFilePath && pathContains(sourcePath, activeFilePath));
     const activeNotebookRemoved = Boolean(activePath && pathContains(sourcePath, activePath));
-    const activeEditorRemoved = Boolean(activeEditorTabId && removedIds.has(activeEditorTabId));
+    const activeEditorRemoved = Boolean(
+      activeEditorTabId && (removedIds.has(activeEditorTabId) || (previewRemoved && previewTab?.id === activeEditorTabId)),
+    );
 
     setOpenTabs(nextTabs);
+    if (previewRemoved) setPreviewTab(null);
     setAssistantAttachments((items) => items.filter((item) => !item.path || !pathContains(sourcePath, item.path)));
 
     if (activeFileRemoved) setActiveFilePath(null);
@@ -1202,13 +1342,48 @@ export default function Lab() {
     localStorage.removeItem(LAB_ASSISTANT_WIDTH_LEGACY_KEY);
   };
 
-  const handleOpenNotebook = async (path: string) => {
-    ensureEditorTab("notebook", path);
+  const terminalDragHeight = (drag: { startY: number; startHeight: number }, clientY: number) =>
+    clampPanelWidth(drag.startHeight + (drag.startY - clientY), LAB_TERMINAL_HEIGHT_MIN, LAB_TERMINAL_HEIGHT_MAX);
+  const handleTerminalResizeStart = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if ((event.button ?? 0) !== 0) return;
+    terminalResizeRef.current = { startY: event.clientY, startHeight: terminalHeight };
+    setResizingTerminal(true);
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+  };
+  const handleTerminalResizeMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = terminalResizeRef.current;
+    if (!drag) return;
+    event.preventDefault();
+    setTerminalHeight(terminalDragHeight(drag, event.clientY));
+  };
+  const handleTerminalResizeEnd = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = terminalResizeRef.current;
+    if (!drag) return;
+    const height = terminalDragHeight(drag, event.clientY);
+    terminalResizeRef.current = null;
+    setResizingTerminal(false);
+    setTerminalHeight(height);
+    localStorage.setItem(LAB_TERMINAL_HEIGHT_KEY, String(height));
+  };
+  const toggleTerminal = () => {
+    setShowTerminal((visible) => (terminalStarted ? !visible : true));
+    setTerminalStarted(true);
+    setTerminalRefit((count) => count + 1);
+  };
+
+  const handleOpenNotebook = async (path: string, options?: LabOpenOptions) => {
+    if (options?.pin === false) {
+      previewEditorTab("notebook", path);
+      pendingPreviewPathRef.current = path;
+    } else {
+      ensureEditorTab("notebook", path);
+    }
     setActiveFilePath(null);
     await open(path);
   };
-  const handleOpenFile = (path: string) => {
-    ensureEditorTab("file", path);
+  const handleOpenFile = (path: string, options?: LabOpenOptions) => {
+    if (options?.pin === false) previewEditorTab("file", path);
+    else ensureEditorTab("file", path);
     setActiveFilePath(path);
     setSelected(null);
     setMode("command");
@@ -1234,6 +1409,8 @@ export default function Lab() {
     onDuplicate: () => undefined,
     onDelete: () => undefined,
     onChangeType: () => undefined,
+    complete: async () => null,
+    inspect: async () => null,
   });
   cellActionsRef.current = {
     onChange: (index, value) => setDrafts((draft) => ({ ...draft, [index]: value })),
@@ -1247,6 +1424,26 @@ export default function Lab() {
     onDuplicate: (index) => void doDuplicate(index),
     onDelete: (index) => void doDelete(index),
     onChangeType: (index, type) => void doChangeType(index, type),
+    // Kernel intel for code cells: complete/inspect against the active notebook's
+    // kernel. Both return null (no popup) when no kernel is running or on error.
+    complete: async (code, pos) => {
+      if (!activePath) return null;
+      try {
+        return await labComplete<KernelCompletion>(activePath, code, pos);
+      } catch {
+        return null;
+      }
+    },
+    inspect: async (code, pos) => {
+      if (!activePath) return null;
+      try {
+        const result = await labInspect<{ found: boolean; data: Record<string, unknown> }>(activePath, code, pos);
+        const plain = result.found ? result.data?.["text/plain"] : null;
+        return typeof plain === "string" ? stripAnsi(plain) : null;
+      } catch {
+        return null;
+      }
+    },
   };
 
   return (
@@ -1292,6 +1489,14 @@ export default function Lab() {
           </button>
           <div className="lab-activity-spacer" />
           <button
+            className={cx("lab-activity", terminalStarted && showTerminal && "active")}
+            title={terminalStarted && showTerminal ? "Hide Terminal" : "Show Terminal"}
+            onClick={toggleTerminal}
+          >
+            <IconTerminal />
+            <span>Terminal</span>
+          </button>
+          <button
             className={cx("lab-activity", assistantOpen && "active")}
             title={assistantOpen ? "Hide Assistant" : "Show Assistant"}
             onClick={() => setAssistantOpen((open) => !open)}
@@ -1315,7 +1520,7 @@ export default function Lab() {
                 projectPath={currentProjectPath}
                 notebooks={notebooks}
                 activePath={activeItemPath}
-                onOpenNotebook={(path) => void handleOpenNotebook(path)}
+                onOpenNotebook={(path, options) => void handleOpenNotebook(path, options)}
                 onOpenFile={handleOpenFile}
                 onAttachToAssistant={attachToAssistant}
                 onFileChanged={handleFileChanged}
@@ -1614,17 +1819,25 @@ export default function Lab() {
 
         <main className="lab-main">
           <div className="lab-editor-tabs" role="tablist" aria-label="Open editors">
-            {openTabs.length === 0 ? (
+            {allTabs.length === 0 ? (
               <div className="lab-editor-tab-empty">No editors open</div>
             ) : (
-              openTabs.map((tab) => (
+              allTabs.map((tab) => {
+                const isPreview = previewTab?.id === tab.id;
+                const isDirty = tab.kind === "notebook"
+                  ? tab.path === activePath && notebookDirty
+                  : dirtyFiles.has(tab.path);
+                return (
                 <button
                   key={tab.id}
-                  className={cx("lab-editor-tab", activeEditorTabId === tab.id && "active")}
+                  className={cx("lab-editor-tab", activeEditorTabId === tab.id && "active", isPreview && "preview", isDirty && "dirty")}
                   role="tab"
                   aria-selected={activeEditorTabId === tab.id}
-                  title={tab.path}
+                  title={isPreview ? `${tab.path} (preview — double-click to keep open)` : `${tab.path}${isDirty ? " (unsaved)" : ""}`}
                   onClick={() => void activateEditorTab(tab)}
+                  onDoubleClick={() => {
+                    if (isPreview) ensureEditorTab(tab.kind, tab.path);
+                  }}
                   onContextMenu={(event) => {
                     event.preventDefault();
                     setTabMenu({ x: event.clientX, y: event.clientY, tabId: tab.id });
@@ -1637,7 +1850,7 @@ export default function Lab() {
                     role="button"
                     tabIndex={0}
                     className="lab-editor-tab-close"
-                    title="Close editor"
+                    title={isDirty ? "Unsaved changes — click to close" : "Close editor"}
                     onClick={(event) => {
                       event.stopPropagation();
                       closeEditorTab(tab.id);
@@ -1650,10 +1863,12 @@ export default function Lab() {
                       }
                     }}
                   >
+                    <span className="lab-editor-tab-dirty" aria-hidden="true" />
                     <IconClose />
                   </span>
                 </button>
-              ))
+                );
+              })
             )}
           </div>
 
@@ -1677,7 +1892,7 @@ export default function Lab() {
               <button
                 type="button"
                 role="menuitem"
-                disabled={openTabs.length <= 1}
+                disabled={allTabs.length <= 1}
                 onClick={() => {
                   closeOtherEditorTabs(tabMenu.tabId);
                   setTabMenu(null);
@@ -1688,7 +1903,7 @@ export default function Lab() {
               <button
                 type="button"
                 role="menuitem"
-                disabled={openTabs.length === 0}
+                disabled={allTabs.length === 0}
                 onClick={() => {
                   closeAllEditorTabs();
                   setTabMenu(null);
@@ -1706,6 +1921,7 @@ export default function Lab() {
             kernelspecs={kernelspecs}
             selectedKernel={selectedKernel}
             onSelectKernel={selectKernel}
+            onDirtyChange={handleFileDirtyChange}
           />
         ) : !activePath ? (
           <div className="lab-cells">
@@ -1821,6 +2037,36 @@ export default function Lab() {
           </div>
         )}
           </div>
+          {terminalStarted && (
+            <div
+              className={cx("lab-terminal-dock", !showTerminal && "hidden", resizingTerminal && "resizing")}
+              style={{ height: `${terminalHeight}px` }}
+            >
+              <div
+                className="lab-terminal-resize-handle"
+                role="separator"
+                aria-orientation="horizontal"
+                aria-label="Resize terminal"
+                title="Resize terminal"
+                onPointerDown={handleTerminalResizeStart}
+                onPointerMove={handleTerminalResizeMove}
+                onPointerUp={handleTerminalResizeEnd}
+                onPointerCancel={handleTerminalResizeEnd}
+              />
+              <div className="lab-terminal-header">
+                <span className="lab-terminal-title">
+                  <IconTerminal />
+                  Terminal
+                </span>
+                <button type="button" className="lab-terminal-hide" title="Hide terminal" onClick={() => setShowTerminal(false)}>
+                  <IconClose />
+                </button>
+              </div>
+              <Suspense fallback={<div className="lab-terminal-loading">Starting terminal…</div>}>
+                <TerminalPane key={currentProjectId ?? "no-project"} cwd={currentProjectPath} refitSignal={terminalRefit} />
+              </Suspense>
+            </div>
+          )}
         </main>
 
         {assistantOpen && (

@@ -134,6 +134,9 @@ const abstractLine = Decoration.line({ class: "cm-vis-abstract-line" });
 const activeMathLine = Decoration.line({ class: "cm-vis-active-math-line" });
 const activeMathLineFirst = Decoration.line({ class: "cm-vis-active-math-line-first" });
 const activeMathLineLast = Decoration.line({ class: "cm-vis-active-math-line-last" });
+const frameLine = Decoration.line({ class: "cm-vis-frame-line" });
+const frameFirstLine = Decoration.line({ class: "cm-vis-frame-first" });
+const frameLastLine = Decoration.line({ class: "cm-vis-frame-last" });
 // Display math source spans one mark per visual line (CodeMirror splits a
 // multi-line mark decoration at line boundaries), so it must not carry its own
 // fill/radius — that renders as a stack of disconnected rounded rectangles.
@@ -251,6 +254,32 @@ class SectionNumberWidget extends WidgetType {
     el.className = "cm-vis-secnum";
     el.textContent = this.label;
     return el;
+  }
+  ignoreEvent = blockIgnoreEvent;
+}
+
+/** Compact slide index rendered before a Beamer frame title. */
+class FrameKickerWidget extends WidgetType {
+  constructor(private readonly number: number, private readonly fallbackTitle = "") {
+    super();
+  }
+  eq(other: FrameKickerWidget) {
+    return other.number === this.number && other.fallbackTitle === this.fallbackTitle;
+  }
+  toDOM() {
+    const wrapper = document.createElement("span");
+    wrapper.className = `cm-vis-frame-header ${BLOCK_TARGET_CLASS}`;
+    const kicker = document.createElement("span");
+    kicker.className = "cm-vis-frame-kicker";
+    kicker.textContent = `Slide ${this.number}`;
+    wrapper.append(kicker);
+    if (this.fallbackTitle) {
+      const title = document.createElement("strong");
+      title.className = "cm-vis-frame-title";
+      title.textContent = this.fallbackTitle;
+      wrapper.append(title);
+    }
+    return wrapper;
   }
   ignoreEvent = blockIgnoreEvent;
 }
@@ -622,6 +651,42 @@ class TableWidget extends WidgetType {
   ignoreEvent = blockIgnoreEvent;
 }
 
+/**
+ * Placeholder for a `figure`/`table` float whose content is a drawing (TikZ/PGF)
+ * rather than an image or table — there is no in-editor renderer for arbitrary
+ * TikZ, so (like Overleaf's rich text mode) it collapses to one labelled card
+ * instead of flowing dozens of raw `\node`/`\draw` lines inline. The source is
+ * unchanged; double-click/caret still opens it in Code view to edit the drawing.
+ */
+class DiagramWidget extends WidgetType {
+  constructor(
+    private readonly label: string,
+    private readonly caption: string,
+  ) {
+    super();
+  }
+  eq(other: DiagramWidget) {
+    return other.label === this.label && other.caption === this.caption;
+  }
+  toDOM() {
+    const el = document.createElement("div");
+    el.className = `cm-vis-figure cm-vis-diagram ${BLOCK_TARGET_CLASS}`;
+    const icon = document.createElement("div");
+    icon.className = "cm-vis-figure-icon";
+    icon.textContent = "\u{1F4D0}"; // 📐
+    const name = document.createElement("div");
+    name.className = "cm-vis-figure-name";
+    name.textContent = this.label;
+    const hint = document.createElement("div");
+    hint.className = "cm-vis-diagram-hint";
+    hint.textContent = "Edit in Code view to change the drawing";
+    el.append(icon, name, hint);
+    if (this.caption) el.append(buildCaptionEl(this.caption));
+    return el;
+  }
+  ignoreEvent = blockIgnoreEvent;
+}
+
 type TabularMatch = { from: number; to: number; body: string; source: string };
 
 function findTabularMatches(text: string, from: number, to: number): TabularMatch[] {
@@ -864,6 +929,73 @@ function buildDecorations(state: EditorState): VisualDecorations {
   }
   const withinFloatEnv = (pos: number) => floatEnvRanges.some((r) => pos >= r.from && pos < r.to);
 
+  // --- Beamer frames: keep source editing continuous, but make each frame read
+  // as a slide card with an editable title and explicit slide number. ---
+  const frameEnvRe = /(\\begin\{frame\}(?:\[[^\]]*\])?\s*(?:\{([^{}\n]*)\})?)([\s\S]*?)(\\end\{frame\})/g;
+  frameEnvRe.lastIndex = bodyStart;
+  let fm: RegExpExecArray | null;
+  let frameNumber = 0;
+  while ((fm = frameEnvRe.exec(text)) && fm.index < scanEnd) {
+    frameNumber += 1;
+    const frameFrom = fm.index;
+    const beginTo = frameFrom + fm[1].length;
+    const frameTo = frameFrom + fm[0].length;
+    const endFrom = frameTo - fm[4].length;
+
+    let linePos = frameFrom;
+    let first = true;
+    while (linePos <= frameTo && linePos <= state.doc.length) {
+      const line = state.doc.lineAt(linePos);
+      const last = line.to >= frameTo || line.to >= state.doc.length;
+      marks.push({ from: line.from, to: line.from, value: frameLine });
+      if (first) marks.push({ from: line.from, to: line.from, value: frameFirstLine });
+      if (last) marks.push({ from: line.from, to: line.from, value: frameLastLine });
+      if (last) break;
+      first = false;
+      linePos = line.to + 1;
+    }
+
+    const inlineTitle = fm[2]?.trim() ?? "";
+    const beginTitleOpen = inlineTitle ? fm[1].lastIndexOf("{") : -1;
+    if (inlineTitle && beginTitleOpen >= 0) {
+      const titleFrom = frameFrom + beginTitleOpen + 1;
+      const titleTo = beginTo - 1;
+      if (!selectionTouches(state, frameFrom, beginTo)) {
+        hide(
+          frameFrom,
+          titleFrom,
+          Decoration.replace({ widget: new FrameKickerWidget(frameNumber) }),
+        );
+        hide(titleTo, beginTo);
+      }
+      marks.push({ from: titleFrom, to: titleTo, value: Decoration.mark({ class: "cm-vis-frame-title" }) });
+    } else {
+      const frameTitleRe = /\\frametitle\s*\{/.exec(fm[3]);
+      let fallbackTitle = /\\titlepage\b/.test(fm[3]) ? "Title slide" : "Untitled slide";
+      if (frameTitleRe) {
+        const commandFrom = beginTo + frameTitleRe.index;
+        const openBrace = commandFrom + frameTitleRe[0].length - 1;
+        const close = matchBrace(text, openBrace);
+        if (close > 0 && close <= endFrom) {
+          fallbackTitle = "";
+          if (!selectionTouches(state, commandFrom, close)) {
+            hide(commandFrom, openBrace + 1);
+            hide(close - 1, close);
+          }
+          marks.push({ from: openBrace + 1, to: close - 1, value: Decoration.mark({ class: "cm-vis-frame-title" }) });
+        }
+      }
+      if (!selectionTouches(state, frameFrom, beginTo)) {
+        hide(
+          frameFrom,
+          beginTo,
+          Decoration.replace({ widget: new FrameKickerWidget(frameNumber, fallbackTitle) }),
+        );
+      }
+    }
+    if (!selectionTouches(state, endFrom, frameTo)) hide(endFrom, frameTo);
+  }
+
   // --- Math: display environments, \[…\], and inline $…$ (KaTeX widgets) ---
   const mathRanges: Range[] = [];
   const withinMath = (pos: number) => mathRanges.some((m) => pos >= m.from && pos < m.to);
@@ -959,10 +1091,26 @@ function buildDecorations(state: EditorState): VisualDecorations {
         );
         continue;
       }
+      // No `\includegraphics` — but a TikZ/PGF drawing has no in-editor renderer
+      // either, so collapse it to one card instead of flowing dozens of raw
+      // `\node`/`\draw` lines inline (see DiagramWidget doc comment).
+      const drawingMatch = /\\begin\{(tikzpicture|pgfpicture)\}/.exec(inner);
+      if (drawingMatch) {
+        hide(
+          envFrom,
+          envTo,
+          Decoration.replace({
+            widget: new DiagramWidget(drawingMatch[1] === "pgfpicture" ? "PGF diagram" : "TikZ diagram", caption),
+            block: true,
+          }),
+        );
+        continue;
+      }
     }
-    // Unrecognized inner content (no image / no parseable table) — fall through
-    // to the generic env-marker/declaration passes below, so at least the
-    // wrapper commands hide and the raw content still flows and stays readable.
+    // Unrecognized inner content (no image / no parseable table / no drawing) —
+    // fall through to the generic env-marker/declaration passes below, so at
+    // least the wrapper commands hide and the raw content still flows and stays
+    // readable.
   }
 
   // --- Tables: bare `tabular` with no enclosing `table` float ---
@@ -1184,7 +1332,7 @@ function buildDecorations(state: EditorState): VisualDecorations {
   }
 
   // \tableofcontents → a chip; \end{document} and structural no-ops → hidden.
-  const standaloneRe = /\\(tableofcontents|newpage|clearpage|bigskip|medskip|smallskip|noindent|centering|maketitle)\b|\\(?:vspace|hspace)\*?\s*\{[^}]*\}|\\(?:thispagestyle|pagestyle)\s*\{[^}]*\}|\\end\{document\}/g;
+  const standaloneRe = /\\(tableofcontents|titlepage|newpage|clearpage|bigskip|medskip|smallskip|noindent|centering|maketitle)\b|\\(?:vspace|hspace)\*?\s*\{[^}]*\}|\\(?:thispagestyle|pagestyle)\s*\{[^}]*\}|\\end\{document\}/g;
   standaloneRe.lastIndex = bodyStart;
   let sm: RegExpExecArray | null;
   while ((sm = standaloneRe.exec(text))) {
@@ -1294,6 +1442,18 @@ function buildDecorations(state: EditorState): VisualDecorations {
     hide(de.index, de.index + de[0].length);
   }
 
+  // Beamer layout commands affect the compiled arrangement but carry no
+  // readable content in Visual mode. Keep them in the source of truth and
+  // reveal them on caret, while folding the idle visual representation.
+  const beamerLayoutRe = /\\column\s*\{[^}\n]*\}|\\(?:pause|vfill|hfill)\b/g;
+  beamerLayoutRe.lastIndex = bodyStart;
+  let bl: RegExpExecArray | null;
+  while ((bl = beamerLayoutRe.exec(text)) && bl.index < scanEnd) {
+    if (withinMath(bl.index) || withinOpenFloat(bl.index)) continue;
+    if (selectionTouches(state, bl.index, bl.index + bl[0].length)) continue;
+    hide(bl.index, bl.index + bl[0].length);
+  }
+
   // --- Forced line breaks `\\` / `\\[len]` → an actual break ---
   const breakRe = /\\\\(\s*\[[^\]]*\])?/g;
   breakRe.lastIndex = bodyStart;
@@ -1324,6 +1484,7 @@ function buildDecorations(state: EditorState): VisualDecorations {
   let em: RegExpExecArray | null;
   while ((em = envMarkerRe.exec(text))) {
     if (em[2] === "document") continue; // preamble fold / \end{document} handle these
+    if (em[2] === "frame") continue; // Beamer frame chrome is handled above
     if (withinMath(em.index)) continue; // selected math envs must reveal complete source
     if (withinOpenFloat(em.index)) continue; // open float is fully raw
     if (withinOpenList(em.index)) continue; // open list is fully raw while editing

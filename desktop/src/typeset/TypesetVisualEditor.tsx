@@ -137,12 +137,15 @@ export function TypesetVisualEditor({
   const onChangeRef = useRef(onChange);
   const onVisibleLineChangeRef = useRef(onVisibleLineChange);
   const onViewReadyRef = useRef(onViewReady);
+  const isBeamer = /\\documentclass(?:\[[^\]]*])?\{beamer\}/.test(draft);
   onChangeRef.current = onChange;
   onVisibleLineChangeRef.current = onVisibleLineChange;
   onViewReadyRef.current = onViewReady;
 
   const reportVisibleLine = () => {
     const view = viewRef.current;
+    const editorBody = hostRef.current?.closest<HTMLElement>(".typeset-editor-body");
+    if (editorBody?.getAttribute("aria-hidden") === "true") return;
     const scroll = hostRef.current?.closest<HTMLElement>(".typeset-visual-scroll");
     if (!view || !scroll) return;
     const scrollRect = scroll.getBoundingClientRect();
@@ -276,21 +279,24 @@ export function TypesetVisualEditor({
   return (
     <section className="typeset-visual-pane ide-redesign-editor-content" aria-label="Visual editor">
       <div className="typeset-visual-scroll">
-        <div className="typeset-visual-page latex-paper typeset-visual-cm" ref={hostRef} />
+        <div
+          className={`typeset-visual-page typeset-visual-cm ${isBeamer ? "beamer-deck" : "latex-paper"}`}
+          data-document-kind={isBeamer ? "slides" : "paper"}
+          ref={hostRef}
+        />
       </div>
     </section>
   );
 }
 
 /**
- * Editor chrome that makes CodeMirror read as the printed "page" rather than a
- * code buffer: TeX-like body font, source line numbers, and transparent
- * background so the white page shows through.
+ * Editor chrome that makes CodeMirror read as a visual document while sharing
+ * the same dark surfaces and semantic colors as Code mode.
  */
 const visualTheme = EditorView.theme({
   "&": {
     height: "100%",
-    color: "#000",
+    color: "var(--visual-text)",
     backgroundColor: "transparent",
     fontFamily: '"KaTeX_Main", "Latin Modern Roman", "CMU Serif", "Times New Roman", Times, serif',
     fontSize: "17.5px",
@@ -310,7 +316,7 @@ const visualTheme = EditorView.theme({
     minWidth: "42px",
     borderRight: "0",
     backgroundColor: "transparent",
-    color: "#9aa0a6",
+    color: "var(--visual-muted)",
     fontFamily: 'ui-monospace, "Cascadia Code", "SFMono-Regular", Consolas, monospace',
     fontSize: "12px",
     lineHeight: "inherit",
@@ -322,7 +328,7 @@ const visualTheme = EditorView.theme({
   },
   ".cm-content": {
     padding: "0",
-    caretColor: "#000",
+    caretColor: "var(--visual-accent-bright)",
     letterSpacing: "0",
     fontKerning: "normal",
   },
@@ -330,7 +336,7 @@ const visualTheme = EditorView.theme({
     padding: "0",
   },
   ".cm-cursor, .cm-dropCursor": {
-    borderLeftColor: "#000",
+    borderLeftColor: "var(--visual-accent-bright)",
   },
   "&.cm-editor .cm-selectionBackground, .cm-selectionBackground": {
     backgroundColor: "rgba(47, 139, 58, 0.18)",
@@ -351,6 +357,47 @@ const visualTheme = EditorView.theme({
   ".cm-vis-sub": { verticalAlign: "sub", fontSize: "0.75em" },
   ".cm-vis-sup": { verticalAlign: "super", fontSize: "0.75em" },
   ".cm-vis-comment": { color: "#9aa0a6", fontStyle: "italic" },
+
+  // Beamer frames remain one continuous source document, but the line
+  // decorations give every slide a stable visual boundary. Entering the frame
+  // reveals its source in place, so editing never leaves the visual surface.
+  ".cm-line.cm-vis-frame-line": {
+    paddingLeft: "18px",
+    paddingRight: "18px",
+    backgroundColor: "var(--visual-slide-bg)",
+    boxShadow: "inset 1px 0 var(--visual-border-strong), inset -1px 0 var(--visual-border-strong)",
+  },
+  ".cm-line.cm-vis-frame-first": {
+    paddingTop: "24px",
+    borderTopLeftRadius: "9px",
+    borderTopRightRadius: "9px",
+    boxShadow: "inset 0 1px var(--visual-border-strong), inset 1px 0 var(--visual-border-strong), inset -1px 0 var(--visual-border-strong)",
+  },
+  ".cm-line.cm-vis-frame-last": {
+    paddingBottom: "15px",
+    borderBottomLeftRadius: "9px",
+    borderBottomRightRadius: "9px",
+    boxShadow: "inset 0 -1px var(--visual-border-strong), inset 1px 0 var(--visual-border-strong), inset -1px 0 var(--visual-border-strong)",
+  },
+  ".cm-vis-frame-title": {
+    color: "var(--visual-accent-bright)",
+    fontFamily: '"Segoe UI", system-ui, -apple-system, sans-serif',
+    fontSize: "1.18em",
+    fontWeight: "700",
+    lineHeight: "1.35",
+  },
+  ".cm-vis-frame-kicker": {
+    display: "inline-flex",
+    marginRight: "8px",
+    padding: "2px 6px",
+    border: "1px solid var(--visual-border-strong)",
+    borderRadius: "999px",
+    color: "var(--visual-muted)",
+    font: '600 10px/1.35 "Segoe UI", system-ui, sans-serif',
+    letterSpacing: "0.04em",
+    textTransform: "uppercase",
+    verticalAlign: "0.2em",
+  },
 
   // Alignment environments applied per line.
   ".cm-vis-center": { textAlign: "center" },
@@ -401,7 +448,7 @@ const visualTheme = EditorView.theme({
   ".cm-vis-active-math-source": {
     fontFamily: 'ui-monospace, "Cascadia Code", "SFMono-Regular", Consolas, monospace',
     fontSize: "0.88em",
-    color: "rgba(26, 74, 40, 0.86)",
+    color: "var(--visual-code-text)",
   },
   // Inline math ($…$) is always a single short run — no multi-line seam risk —
   // so it gets its own soft pill background for extra legibility inside prose.
@@ -429,8 +476,8 @@ const visualTheme = EditorView.theme({
     padding: "0 3px",
     borderRadius: "2px",
     background: "transparent",
-    boxShadow: "inset 0 -0.13em 0 rgba(26, 86, 196, 0.2)",
-    color: "#1a56c4",
+    boxShadow: "inset 0 -0.13em 0 color-mix(in srgb, var(--visual-link) 26%, transparent)",
+    color: "var(--visual-link)",
     fontFamily: "inherit",
     fontSize: "0.95em",
     fontWeight: "600",
@@ -440,9 +487,9 @@ const visualTheme = EditorView.theme({
     background: "rgba(26, 86, 196, 0.08)",
     boxShadow: "inset 0 -0.16em 0 rgba(26, 86, 196, 0.28)",
   },
-  ".cm-vis-chip-ref": { background: "#e6f4ea", color: "#1e7e34" },
-  ".cm-vis-chip-label": { background: "#f1f3f4", color: "#80868b", fontSize: "0.76em" },
-  ".cm-vis-chip-toc": { background: "#f6f7f9", color: "#3c4043", borderLeft: "3px solid #1a73e8" },
+  ".cm-vis-chip-ref": { background: "var(--visual-widget-bg)", color: "var(--visual-accent-bright)" },
+  ".cm-vis-chip-label": { background: "var(--visual-widget-bg)", color: "var(--visual-muted)", fontSize: "0.76em" },
+  ".cm-vis-chip-toc": { background: "var(--visual-widget-bg)", color: "var(--visual-text)", borderLeft: "3px solid var(--visual-link)" },
 
   // Lists: hang the marker in the left margin of the indented line.
   ".cm-vis-list-line": { paddingLeft: "1.45em", textIndent: "-1.05em" },
@@ -450,7 +497,7 @@ const visualTheme = EditorView.theme({
     display: "inline-block",
     minWidth: "0.85em",
     marginRight: "0.18em",
-    color: "#000",
+    color: "var(--visual-text)",
     fontWeight: "600",
   },
 
@@ -464,9 +511,9 @@ const visualTheme = EditorView.theme({
     gap: "6px",
     minHeight: "120px",
     padding: "28px 20px",
-    border: "1px dashed #c4c7ccff",
+    border: "1px dashed var(--visual-border-strong)",
     borderRadius: "6px",
-    background: "#fafbfc",
+    background: "var(--visual-widget-bg)",
   },
   ".cm-vis-figure img, .cm-vis-figure canvas": {
     maxWidth: "100%",
@@ -477,7 +524,13 @@ const visualTheme = EditorView.theme({
   ".cm-vis-figure-name": {
     fontFamily: '"Segoe UI", system-ui, -apple-system, sans-serif',
     fontSize: "13px",
-    color: "#5f6368",
+    color: "var(--visual-muted)",
+  },
+  // TikZ/PGF drawing placeholder (DiagramWidget) — same card as `.cm-vis-figure`,
+  // plus a small hint line pointing the user at Code mode for the actual edit.
+  ".cm-vis-diagram-hint": {
+    fontSize: "11.5px",
+    color: "var(--visual-muted-2)",
   },
 
   // Rendered table. The table itself keeps `margin: 0 auto` for horizontal
@@ -494,13 +547,13 @@ const visualTheme = EditorView.theme({
     textAlign: "left",
   },
   ".cm-vis-table thead, .cm-vis-table tr:first-child th": { fontWeight: "700" },
-  ".cm-vis-table th": { borderBottom: "1.5px solid #000", fontWeight: "700" },
-  ".cm-vis-table tr:last-child td": { borderBottom: "1px solid #000" },
-  ".cm-vis-table tr:first-child td, .cm-vis-table tr:first-child th": { borderTop: "1.5px solid #000" },
+  ".cm-vis-table th": { borderBottom: "1.5px solid var(--visual-border-strong)", fontWeight: "700" },
+  ".cm-vis-table tr:last-child td": { borderBottom: "1px solid var(--visual-border-strong)" },
+  ".cm-vis-table tr:first-child td, .cm-vis-table tr:first-child th": { borderTop: "1.5px solid var(--visual-border-strong)" },
 
   // Caption line.
   ".cm-vis-caption-line": { textAlign: "center" },
-  ".cm-vis-caption": { fontSize: "0.88em", color: "#3c4043" },
+  ".cm-vis-caption": { fontSize: "0.88em", color: "var(--visual-muted-2)" },
 
   // \maketitle title block.
   ".cm-vis-title": { textAlign: "center", padding: "8px 0 30px" },
@@ -509,7 +562,7 @@ const visualTheme = EditorView.theme({
   // (one line per name/affiliation block) — `pre-line` renders those breaks
   // instead of collapsing them into one run-on line.
   ".cm-vis-title-author": { fontSize: "15px", marginTop: "10px", lineHeight: "1.5", whiteSpace: "pre-line" },
-  ".cm-vis-title-date": { fontSize: "13.5px", color: "#5f6368", marginTop: "6px" },
+  ".cm-vis-title-date": { fontSize: "13.5px", color: "var(--visual-muted)", marginTop: "6px" },
   // `\title{}`/`\author{}`/`\date{}` live in the always-folded preamble, so a
   // click here jumps to Code mode with that source selected (see TitleWidget)
   // rather than revealing inline like math/abstract do. Underline-on-hover
@@ -527,7 +580,7 @@ const visualTheme = EditorView.theme({
     fontStyle: "italic",
     paddingLeft: "22px",
     paddingRight: "22px",
-    color: "#3c3f42",
+    color: "var(--visual-muted-2)",
   },
 
   // Section headings: same serif family as body, bold, with TeX-like spacing. This is a LINE
@@ -537,7 +590,7 @@ const visualTheme = EditorView.theme({
   ".cm-vis-heading-line": {
     fontFamily: "inherit",
     fontWeight: "700",
-    color: "#000",
+    color: "var(--visual-text)",
     lineHeight: "1.18",
   },
   ".cm-vis-heading-1": { fontSize: "24.5px", paddingTop: "22px" },
@@ -551,7 +604,7 @@ const visualTheme = EditorView.theme({
   ".cm-vis-secnum": {
     marginRight: "0.5em",
     fontVariantNumeric: "tabular-nums",
-    color: "#000",
+    color: "var(--visual-text)",
   },
 
   // Folded preamble chip. It's the very first block in the document — a margin
@@ -567,13 +620,13 @@ const visualTheme = EditorView.theme({
     paddingBottom: "31px",
     paddingLeft: "16px",
     paddingRight: "16px",
-    borderLeft: "3px solid #1a73e8",
+    borderLeft: "3px solid var(--visual-link)",
     borderRadius: "0 8px 8px 0",
-    background: "#f6f7f9",
-    color: "#3c4043",
+    background: "var(--visual-widget-bg)",
+    color: "var(--visual-muted-2)",
     font: '14px/1.3 "Helvetica Neue", Arial, sans-serif',
     cursor: "default",
     userSelect: "none",
   },
-  ".cm-vis-preamble strong": { color: "#80868b", fontSize: "12px", fontWeight: "600" },
-});
+  ".cm-vis-preamble strong": { color: "var(--visual-muted)", fontSize: "12px", fontWeight: "600" },
+}, { dark: true });

@@ -233,7 +233,7 @@ fn latex_forward_search_blocking(
     let target = format!(
         "{line}:{}:{}",
         column.unwrap_or(0),
-        tex_input_name(&source_path).to_string_lossy()
+        tex_input_target(&source_path, pdf_dir)
     );
 
     let mut command = runtime::hidden_command("synctex");
@@ -737,6 +737,29 @@ fn tex_input_name(input_path: &Path) -> &std::ffi::OsStr {
         .unwrap_or_else(|| input_path.as_os_str())
 }
 
+/// The name SyncTeX recorded for `source_path`, for use as `synctex view -i`'s
+/// `input` argument. TeX resolves `\input`/`\include`/`\subfile` relative to
+/// its working directory (the compile root's directory, which is `pdf_dir` —
+/// see `latex_compile_blocking`'s `source_dir`/output-path pairing), so a
+/// bare file name only matches when the edited file *is* the compile root.
+/// For anything pulled in from a subdirectory, SyncTeX needs that relative
+/// path (with `/` separators, matching what TeX itself records) or its
+/// suffix match fails with "No tag for <name>" and forward search silently
+/// returns zero results.
+fn tex_input_target(source_path: &Path, pdf_dir: &Path) -> String {
+    if let Ok(relative) = source_path.strip_prefix(pdf_dir) {
+        let joined = relative
+            .components()
+            .map(|component| component.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/");
+        if !joined.is_empty() {
+            return joined;
+        }
+    }
+    tex_input_name(source_path).to_string_lossy().into_owned()
+}
+
 #[cfg(target_os = "windows")]
 fn tex_tool_path(path: &Path) -> PathBuf {
     let value = path.to_string_lossy();
@@ -755,4 +778,41 @@ fn tex_tool_path(path: &Path) -> PathBuf {
 #[cfg(not(target_os = "windows"))]
 fn tex_tool_path(path: &Path) -> PathBuf {
     path.to_path_buf()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tex_input_target_uses_bare_name_for_the_compile_root() {
+        let pdf_dir = Path::new("/project");
+        let source_path = Path::new("/project/main.tex");
+        assert_eq!(tex_input_target(source_path, pdf_dir), "main.tex");
+    }
+
+    #[test]
+    fn tex_input_target_uses_relative_path_for_included_subfiles() {
+        // Reproduces the reported bug: double-click forward search failed
+        // with "SyncTeX Warning: No tag for intro.tex" whenever the edited
+        // file was \input from a subdirectory, because only the bare file
+        // name (matching the compile root case below) was ever sent.
+        let pdf_dir = Path::new("/project");
+        let source_path = Path::new("/project/chapters/intro.tex");
+        assert_eq!(tex_input_target(source_path, pdf_dir), "chapters/intro.tex");
+    }
+
+    #[test]
+    fn tex_input_target_normalizes_windows_separators_to_forward_slashes() {
+        let pdf_dir = Path::new(r"C:\project");
+        let source_path = Path::new(r"C:\project\chapters\intro.tex");
+        assert_eq!(tex_input_target(source_path, pdf_dir), "chapters/intro.tex");
+    }
+
+    #[test]
+    fn tex_input_target_falls_back_to_bare_name_outside_pdf_dir() {
+        let pdf_dir = Path::new("/project/build");
+        let source_path = Path::new("/elsewhere/main.tex");
+        assert_eq!(tex_input_target(source_path, pdf_dir), "main.tex");
+    }
 }

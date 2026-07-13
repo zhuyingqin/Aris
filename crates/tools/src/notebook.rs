@@ -245,6 +245,8 @@ fn render_text(outputs: &[CellOutput]) -> String {
                     out.push('\n');
                 }
             }
+            // Streaming-only signal, never stored in a cell's outputs.
+            CellOutput::Clear { .. } => {}
         }
     }
     out

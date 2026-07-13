@@ -19,7 +19,9 @@ mod run;
 
 pub use backend::KernelHandle;
 pub use doc::{CellSummary, NotebookDoc};
-pub use kernel::{CellOutput, ExecStatus, ExecuteOutcome, KernelSession};
+pub use kernel::{
+    CellOutput, CompleteOutcome, ExecStatus, ExecuteOutcome, InspectOutcome, KernelSession,
+};
 pub use manager::{KernelInfo, KernelManager, KernelspecInfo};
 pub use matlab::{find_matlab, MatlabSession, VAR_INSPECT_CODE as MATLAB_VAR_INSPECT_CODE};
 pub use run::{run_all, CellRun, RunOptions, RunReport};

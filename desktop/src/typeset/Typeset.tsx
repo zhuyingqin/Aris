@@ -3,7 +3,7 @@ import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
 import { memo } from "react";
 import katex from "katex";
 import type { PDFDocumentProxy, PDFPageProxy, RenderTask } from "pdfjs-dist";
-import type { EditorView, KeyBinding } from "@codemirror/view";
+import { EditorView, type KeyBinding } from "@codemirror/view";
 import { redo, redoDepth, undo, undoDepth } from "@codemirror/commands";
 import "katex/dist/katex.min.css";
 
@@ -64,6 +64,7 @@ type TypesetResizePanel = "project" | "pdf";
 type TypesetResizeAxis = "x" | "y";
 type OutlineItem = { line: number; level: number; title: string };
 type NumberedOutlineItem = OutlineItem & { number: string };
+type BeamerSlide = { line: number; endLine: number; title: string };
 
 const PROJECT_PANEL_DEFAULT_W = 204;
 const PROJECT_PANEL_MIN_W = 136;
@@ -2098,6 +2099,120 @@ interface PdfPreviewProps {
   forwardSearchNotice?: string | null;
 }
 
+interface CompiledVisualProps {
+  path: string | null;
+  refreshKey: number;
+  page: number;
+  dirty: boolean;
+  onSourceTextClick: (text: string, context: string) => void;
+}
+
+/**
+ * Safe Visual surface for Beamer: the compiled PDF page is the canvas.
+ * Arbitrary TikZ/custom macros cannot be reproduced faithfully by a rich-text
+ * source decorator, so this view never rewrites LaTeX. Text clicks only locate
+ * the corresponding source range in Code mode.
+ */
+function TypesetCompiledVisual({
+  path,
+  refreshKey,
+  page,
+  dirty,
+  onSourceTextClick,
+}: CompiledVisualProps) {
+  const [pdf, setPdf] = useState<PDFDocumentProxy | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [zoom, setZoom] = useState(1);
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    let disposed = false;
+    let loadedPdf: PDFDocumentProxy | null = null;
+    setPdf(null);
+    setError(null);
+    if (!path) return () => undefined;
+    setLoading(true);
+    void Promise.all([fileReadBytes(path), import("pdfjs-dist")])
+      .then(([bytes, pdfjs]) => {
+        pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerSrc;
+        return pdfjs.getDocument({ data: new Uint8Array(bytes) }).promise;
+      })
+      .then((document) => {
+        loadedPdf = document;
+        if (disposed) {
+          void document.destroy();
+          return;
+        }
+        setPdf(document);
+      })
+      .catch((loadError) => {
+        if (!disposed) setError(String(loadError));
+      })
+      .finally(() => {
+        if (!disposed) setLoading(false);
+      });
+    return () => {
+      disposed = true;
+      if (loadedPdf) void loadedPdf.destroy();
+    };
+  }, [path, refreshKey]);
+
+  useEffect(() => {
+    if (!pdf) return;
+    let disposed = false;
+    let resizeObserver: ResizeObserver | null = null;
+    const fitToWidth = async () => {
+      const scroll = scrollRef.current;
+      if (!scroll) return;
+      try {
+        const pdfPage = await pdf.getPage(clampNumber(page, 1, pdf.numPages));
+        if (disposed) return;
+        const viewport = pdfPage.getViewport({ scale: 1 });
+        const availableWidth = Math.max(240, scroll.clientWidth - 44);
+        const availableHeight = Math.max(180, scroll.clientHeight - 64);
+        setZoom(clampNumber(Math.min(availableWidth / viewport.width, availableHeight / viewport.height), 0.35, 2.2));
+      } catch {
+        if (!disposed) setZoom(1);
+      }
+    };
+    void fitToWidth();
+    if (typeof ResizeObserver !== "undefined" && scrollRef.current) {
+      resizeObserver = new ResizeObserver(() => void fitToWidth());
+      resizeObserver.observe(scrollRef.current);
+    }
+    return () => {
+      disposed = true;
+      resizeObserver?.disconnect();
+    };
+  }, [page, pdf]);
+
+  const safePage = pdf ? clampNumber(page, 1, pdf.numPages) : 1;
+
+  return (
+    <section className="typeset-compiled-visual typeset-visual-pane" aria-label="Compiled slide visual editor">
+      <div className="typeset-compiled-visual-status" role="status">
+        <span>Compiled slide {safePage}{pdf ? ` / ${pdf.numPages}` : ""}</span>
+        <strong>{dirty ? "Source changed — preview is intentionally unchanged" : "Preview matches the last successful compile"}</strong>
+      </div>
+      <div className="typeset-compiled-visual-scroll" ref={scrollRef}>
+        {!path && <div className="typeset-empty">Compile the slide deck to open the safe Visual preview.</div>}
+        {path && loading && <div className="typeset-empty">Loading compiled slide...</div>}
+        {path && error && <PdfFallbackPage error={error} outputPath={path} sourcePath={null} />}
+        {pdf && !error && (
+          <PdfPage
+            key={`${path}:${refreshKey}:${safePage}`}
+            pdf={pdf}
+            page={safePage}
+            zoom={zoom}
+            onSourceTextClick={onSourceTextClick}
+          />
+        )}
+      </div>
+    </section>
+  );
+}
+
 function PdfFallbackPage({ error, outputPath, sourcePath }: { error: string; outputPath: string | null; sourcePath: string | null }) {
   return (
     <div className="typeset-pdf-unavailable" role="status" aria-label="Compiled PDF unavailable">
@@ -2224,7 +2339,11 @@ function TypesetPdfPreview({
         const scroll = scrollRef.current;
         if (!pageEl || !scroll) return;
         const targetTop = pageEl.offsetTop + forwardTarget.location.pointY * zoom - scroll.clientHeight / 2;
-        scroll.scrollTo({ top: Math.max(0, targetTop), behavior: "smooth" });
+        if (typeof scroll.scrollTo === "function") {
+          scroll.scrollTo({ top: Math.max(0, targetTop), behavior: "smooth" });
+        } else {
+          scroll.scrollTop = Math.max(0, targetTop);
+        }
       });
     });
     return () => {
@@ -2611,6 +2730,8 @@ const VISUAL_SECTION_LEVELS: Array<{ key: string; label: string }> = [
 
 function TypesetEditorToolbar({
   activeOutlineItem,
+  activeSlide,
+  slides,
   draft,
   mode,
   canRedo,
@@ -2620,14 +2741,19 @@ function TypesetEditorToolbar({
   visualViewRef,
   onChange,
   onModeChange,
+  onNavigateToLine,
+  onEditSlideSource,
   onRedo,
   onSave,
   onSearch,
   onUndo,
   path,
+  linkedPdfLine,
   saving,
 }: {
   activeOutlineItem: NumberedOutlineItem | null;
+  activeSlide: BeamerSlide | null;
+  slides: BeamerSlide[];
   draft: string;
   mode: EditorMode;
   canRedo: boolean;
@@ -2637,11 +2763,14 @@ function TypesetEditorToolbar({
   visualViewRef: { current: EditorView | null };
   onChange: (value: string) => void;
   onModeChange: (mode: EditorMode) => void;
+  onNavigateToLine: (line: number) => void;
+  onEditSlideSource: (line: number) => void;
   onRedo: () => void;
   onSave: () => void;
   onSearch: (start: number, end: number) => void;
   onUndo: () => void;
   path: string | null;
+  linkedPdfLine: number | null;
   saving: boolean;
 }) {
   const [searchOpen, setSearchOpen] = useState(false);
@@ -2649,6 +2778,8 @@ function TypesetEditorToolbar({
   const [searchIndex, setSearchIndex] = useState(0);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const searchMatches = useMemo(() => textSearchMatches(draft, searchQuery), [draft, searchQuery]);
+  const activeSlideIndex = activeSlide ? slides.indexOf(activeSlide) : -1;
+  const safeCompiledVisual = slides.length > 0 && mode === "visual";
   // Every command below reads/writes at the *live* selection of whichever
   // editor is active — see `activeEditorAdapter` for why Code mode (a plain
   // textarea) and Visual mode (CodeMirror) need different `replace` backends.
@@ -2703,8 +2834,21 @@ function TypesetEditorToolbar({
   }, [searchOpen]);
 
   return (
-    <div className="typeset-visual-toolbar ol-cm-toolbar-wrapper" aria-label="Editor tools">
+    <div className={`typeset-visual-toolbar ol-cm-toolbar-wrapper${safeCompiledVisual ? " safe-visual" : ""}`} aria-label="Editor tools">
       <div className="typeset-visual-toolbar-row ol-cm-toolbar toolbar-editor" role="toolbar" aria-label="Editor toolbar">
+        {safeCompiledVisual && (
+          <div className="typeset-safe-visual-toolbar">
+            <ToolIcon name="visual" />
+            <strong>Compiled slide preview</strong>
+            <span>Click visible text to edit its exact LaTeX source.</span>
+            <button
+              type="button"
+              onClick={() => onEditSlideSource((activeSlide ?? slides[0]).line)}
+            >
+              Edit slide source
+            </button>
+          </div>
+        )}
         <div className="ol-cm-toolbar-button-group" aria-label="Undo Redo actions">
           <button type="button" className="ol-cm-toolbar-button" title="Undo" aria-label="Undo" disabled={!canUndo} onClick={onUndo}><ToolIcon name="undo" /></button>
           <button type="button" className="ol-cm-toolbar-button" title="Redo" aria-label="Redo" disabled={!canRedo} onClick={onRedo}><ToolIcon name="redo" /></button>
@@ -2804,9 +2948,52 @@ function TypesetEditorToolbar({
           <FileIcon path={path || "untitled.tex"} />
           <strong>{path ? basename(path) : "Untitled"}</strong>
         </div>
-        <div className="typeset-current-section" aria-live="polite" title={activeOutlineItem?.title ?? "No section selected"}>
-          <ToolIcon name="list" />
-          <span>{activeOutlineItem ? `Section ${activeOutlineItem.number} ${activeOutlineItem.title}` : "No section"}</span>
+        {slides.length > 0 ? (
+          <nav className="typeset-slide-nav" aria-label="Slide navigation">
+            <button
+              type="button"
+              aria-label="Previous slide"
+              title="Previous slide"
+              disabled={activeSlideIndex <= 0}
+              onClick={() => onNavigateToLine(slides[activeSlideIndex - 1]?.line ?? slides[0].line)}
+            >
+              <ToolIcon name="previous" />
+            </button>
+            <button
+              type="button"
+              className="typeset-slide-nav-label"
+              title={activeSlide?.title ?? "Open first slide"}
+              onClick={() => onNavigateToLine((activeSlide ?? slides[0]).line)}
+            >
+              <span>{activeSlideIndex >= 0 ? `Slide ${activeSlideIndex + 1} / ${slides.length}` : `${slides.length} slides`}</span>
+              <strong>{activeSlide?.title ?? slides[0].title}</strong>
+            </button>
+            <button
+              type="button"
+              aria-label="Next slide"
+              title="Next slide"
+              disabled={activeSlideIndex < 0 || activeSlideIndex >= slides.length - 1}
+              onClick={() => onNavigateToLine(slides[activeSlideIndex + 1]?.line ?? slides[slides.length - 1].line)}
+            >
+              <ToolIcon name="next" />
+            </button>
+          </nav>
+        ) : (
+          <div className="typeset-current-section" aria-live="polite" title={activeOutlineItem?.title ?? "No section selected"}>
+            <ToolIcon name="list" />
+            <span>{activeOutlineItem ? `Section ${activeOutlineItem.number} ${activeOutlineItem.title}` : "No section"}</span>
+          </div>
+        )}
+        <div className="typeset-editor-context" aria-live="polite">
+          {linkedPdfLine != null && <span className="typeset-sync-chip">PDF → line {linkedPdfLine}</span>}
+          {dirty && <span className="typeset-stale-chip">PDF needs recompile</span>}
+          <span className="typeset-interaction-hint">
+            {safeCompiledVisual
+              ? "Visual is read-only until you explicitly edit source"
+              : mode === "visual"
+                ? "Click to edit · double-click to locate in PDF"
+                : "Double-click source to locate in PDF"}
+          </span>
         </div>
         <div className="typeset-visual-mode-switch editor-switch" role="tablist" aria-label="Editor mode">
           <button type="button" role="tab" aria-selected={mode === "code"} className={mode === "code" ? "active" : ""} onClick={() => onModeChange("code")}>Code</button>
@@ -3667,6 +3854,29 @@ function activeOutlineItemForLine(outline: NumberedOutlineItem[], line: number):
   return active;
 }
 
+function beamerSlidesFor(source: string): BeamerSlide[] {
+  const slides: BeamerSlide[] = [];
+  const frameRe = /\\begin\{frame\}(?:\[[^\]]*\])?(?:\{([^{}\n]*)\})?([\s\S]*?)\\end\{frame\}/g;
+  let match: RegExpExecArray | null;
+  while ((match = frameRe.exec(source))) {
+    const frameTitle = /\\frametitle\s*\{([^{}\n]*)\}/.exec(match[2] ?? "")?.[1];
+    const fallbackTitle = /\\titlepage\b/.test(match[2] ?? "") ? "Title slide" : `Slide ${slides.length + 1}`;
+    slides.push({
+      line: lineNumberForOffset(source, match.index),
+      endLine: lineNumberForOffset(source, match.index + match[0].length),
+      title: stripInlineMarkup(match[1] || frameTitle || fallbackTitle),
+    });
+  }
+  return slides;
+}
+
+function activeBeamerSlideForLine(slides: BeamerSlide[], line: number): BeamerSlide | null {
+  return slides.find((slide) => line >= slide.line && line <= slide.endLine)
+    ?? [...slides].reverse().find((slide) => slide.line <= line)
+    ?? slides[0]
+    ?? null;
+}
+
 function lineOffsetFor(source: string, line: number): number {
   const lines = source.split("\n");
   return lines.slice(0, Math.max(0, line - 1)).reduce((sum, item) => sum + item.length + 1, 0);
@@ -3713,6 +3923,10 @@ export default function Typeset() {
   const [outlinePanelHeight, setOutlinePanelHeight] = useState(OUTLINE_PANEL_DEFAULT_H);
   const [outlineCollapsed, setOutlineCollapsed] = useState(false);
   const [currentSourceLine, setCurrentSourceLine] = useState(1);
+  // CodeMirror reports edits synchronously, while React may defer committing the
+  // matching state update. Keep the authoritative latest source in a ref so a
+  // Recompile click immediately after an edit cannot save the previous draft.
+  const draftRef = useRef("");
   // Mirror the panel widths into refs so the drag callbacks can read the current
   // size without listing the widths as dependencies. Keeping the callbacks stable
   // stops the window/document listener effect from tearing down (and aborting the
@@ -3742,10 +3956,16 @@ export default function Typeset() {
   const dirty = Boolean(loaded && draft !== loaded.content);
   const outline = useMemo(() => outlineFor(draft), [draft]);
   const numberedOutline = useMemo(() => numberedOutlineFor(outline), [outline]);
+  const beamerSlides = useMemo(() => beamerSlidesFor(draft), [draft]);
   const activeOutlineItem = useMemo(
     () => activeOutlineItemForLine(numberedOutline, currentSourceLine),
     [currentSourceLine, numberedOutline],
   );
+  const activeBeamerSlide = useMemo(
+    () => activeBeamerSlideForLine(beamerSlides, currentSourceLine),
+    [beamerSlides, currentSourceLine],
+  );
+  const activeBeamerPage = Math.max(1, activeBeamerSlide ? beamerSlides.indexOf(activeBeamerSlide) + 1 : 1);
   const activeWorkDir = useMemo(() => workDirForSource(sourcePath), [sourcePath]);
   const browserPreviewMode = !isTauri();
   const diagnosticsCount = useMemo(() => {
@@ -3759,10 +3979,12 @@ export default function Typeset() {
   const canRedoDraft = Boolean(activeEditorView && redoDepth(activeEditorView.state) > 0);
 
   const resetDraft = useCallback((nextDraft: string) => {
+    draftRef.current = nextDraft;
     setDraft(nextDraft);
   }, []);
 
   const changeDraft = useCallback((nextDraft: string) => {
+    draftRef.current = nextDraft;
     const codeView = editorRef.current?.view;
     const visualView = visualViewRef.current;
     // Both surfaces stay mounted and mirror intentional edits into their own
@@ -3788,6 +4010,29 @@ export default function Typeset() {
     const view = editorMode === "code" ? editorRef.current?.view : visualViewRef.current;
     if (view) redo(view);
   }, [editorMode]);
+
+  const changeEditorMode = useCallback((nextMode: EditorMode) => {
+    if (nextMode === editorMode) return;
+    const sourceView = editorMode === "code" ? editorRef.current?.view : visualViewRef.current;
+    const selection = sourceView?.state.selection.main;
+    const line = selection && sourceView
+      ? sourceView.state.doc.lineAt(selection.head).number
+      : currentSourceLine;
+    setCurrentSourceLine(line);
+    setEditorMode(nextMode);
+    const targetView = nextMode === "code" ? editorRef.current?.view : visualViewRef.current;
+    if (!targetView) return;
+    const fallback = lineOffsetFor(draft, line);
+    const anchor = clampNumber(selection?.anchor ?? fallback, 0, targetView.state.doc.length);
+    const head = clampNumber(selection?.head ?? fallback, 0, targetView.state.doc.length);
+    targetView.focus();
+    targetView.dispatch({ selection: { anchor, head } });
+    if (nextMode === "code") {
+      scrollCodeEditorToLine(targetView, line);
+    } else {
+      targetView.dispatch({ effects: EditorView.scrollIntoView(head, { y: "center" }) });
+    }
+  }, [currentSourceLine, draft, editorMode]);
 
   const openSource = useCallback(async (path: string) => {
     setLoading(true);
@@ -3894,13 +4139,14 @@ export default function Typeset() {
 
   const save = useCallback(async (): Promise<FileText | null> => {
     if (!sourcePath || !loaded) return null;
-    if (!dirty) return loaded;
+    const latestDraft = draftRef.current;
+    if (latestDraft === loaded.content) return loaded;
     setSaving(true);
     setError(null);
     try {
-      const file = await fileWriteText(sourcePath, draft);
+      const file = await fileWriteText(sourcePath, latestDraft);
       setLoaded(file);
-      setDraft(file.content);
+      resetDraft(file.content);
       setSourcePath(file.path);
       return file;
     } catch (saveError) {
@@ -3909,7 +4155,7 @@ export default function Typeset() {
     } finally {
       setSaving(false);
     }
-  }, [dirty, draft, loaded, sourcePath]);
+  }, [loaded, resetDraft, sourcePath]);
 
   const compile = async () => {
     if (!sourcePath || saving || compileStatus === "running") return;
@@ -3988,6 +4234,22 @@ export default function Typeset() {
     }, 0);
   }, [draft]);
 
+  const navigateToLine = useCallback((line: number) => {
+    const offset = lineOffsetFor(draft, line);
+    setCurrentSourceLine(line);
+    window.setTimeout(() => {
+      const view = editorMode === "code" ? editorRef.current?.view : visualViewRef.current;
+      if (!view) return;
+      const safeOffset = clampNumber(offset, 0, view.state.doc.length);
+      view.focus();
+      view.dispatch({
+        selection: { anchor: safeOffset, head: safeOffset },
+        effects: EditorView.scrollIntoView(safeOffset, { y: "center" }),
+      });
+      if (editorMode === "code") scrollCodeEditorToLine(view, line);
+    }, 0);
+  }, [draft, editorMode]);
+
   const openCodeRange = useCallback((start: number, end: number) => {
     const safeStart = clampNumber(start, 0, draft.length);
     const safeEnd = clampNumber(end, safeStart, draft.length);
@@ -4004,7 +4266,7 @@ export default function Typeset() {
     }, 0);
   }, [draft]);
 
-  const openSourceForPdfText = useCallback((text: string, context = text) => {
+  const openSourceForPdfText = useCallback((text: string, context = text, forceCode = false) => {
     const match = findLatexOffsetForPdfText(draft, text, context);
     if (!match) return;
     const cursor = {
@@ -4015,12 +4277,16 @@ export default function Typeset() {
     };
     setVisualPdfCursor(cursor);
     setCurrentSourceLine(cursor.line);
-    if (editorMode === "visual") {
+    if (editorMode === "visual" && !forceCode) {
       setEditorMode("visual");
       return;
     }
     openCodeRange(match.start, match.end);
   }, [draft, editorMode, openCodeRange]);
+
+  const openCodeForCompiledText = useCallback((text: string, context: string) => {
+    openSourceForPdfText(text, context, true);
+  }, [openSourceForPdfText]);
 
   // Forward search: double-click in Code or Visual jumps the PDF preview to
   // the exact compiled position, via the real SyncTeX data latexmk/xelatex
@@ -4029,16 +4295,12 @@ export default function Typeset() {
   // binary, or a line with no typeset material (blank lines, comments) are
   // all real, visible-to-the-user reasons the jump didn't happen.
   const jumpToPdfForLine = useCallback((line: number, column: number) => {
-    // eslint-disable-next-line no-console -- temporary forward-search diagnostic, see conversation
-    console.debug("[typeset] jumpToPdfForLine", { line, column, sourcePath, previewPath });
     if (!sourcePath || !previewPath) {
       setForwardSearchNotice("Compile the PDF before jumping to it.");
       return;
     }
     void latexForwardSearch(sourcePath, previewPath, line, column)
       .then((result) => {
-        // eslint-disable-next-line no-console -- temporary forward-search diagnostic, see conversation
-        console.debug("[typeset] latexForwardSearch result", result);
         const location = result.locations[0];
         if (location) {
           setPdfForwardTarget({ location, nonce: Date.now() });
@@ -4048,8 +4310,6 @@ export default function Typeset() {
         }
       })
       .catch((forwardError) => {
-        // eslint-disable-next-line no-console -- temporary forward-search diagnostic, see conversation
-        console.error("[typeset] latexForwardSearch error", forwardError);
         setForwardSearchNotice(String(forwardError));
       });
   }, [sourcePath, previewPath]);
@@ -4422,6 +4682,8 @@ export default function Typeset() {
               {loaded && (
                 <TypesetEditorToolbar
                   activeOutlineItem={activeOutlineItem}
+                  activeSlide={activeBeamerSlide}
+                  slides={beamerSlides}
                   path={sourcePath}
                   draft={draft}
                   mode={editorMode}
@@ -4430,11 +4692,14 @@ export default function Typeset() {
                   editorRef={editorRef}
                   visualViewRef={visualViewRef}
                   onChange={changeDraft}
-                  onModeChange={setEditorMode}
+                  onModeChange={changeEditorMode}
+                  onNavigateToLine={navigateToLine}
+                  onEditSlideSource={openCodeAtLine}
                   onRedo={redoDraft}
                   onSave={() => void save()}
                   onSearch={openCodeRange}
                   onUndo={undoDraft}
+                  linkedPdfLine={visualPdfCursor?.line ?? null}
                   saving={saving}
                   dirty={dirty}
                 />
@@ -4469,17 +4734,27 @@ export default function Typeset() {
                     hidden={editorMode !== "visual"}
                     aria-hidden={editorMode !== "visual"}
                   >
-                    <TypesetVisualEditor
-                      path={sourcePath}
-                      draft={draft}
-                      pdfCursor={visualPdfCursor}
-                      onChange={changeDraft}
-                      onVisibleLineChange={setCurrentSourceLine}
-                      onOpenCodeAtLine={openCodeAtLine}
-                      onOpenCodeRange={openCodeRange}
-                      onForwardSearch={jumpToPdfForLine}
-                      onViewReady={onVisualViewReady}
-                    />
+                    {beamerSlides.length > 0 ? (
+                      <TypesetCompiledVisual
+                        path={previewPath}
+                        refreshKey={refreshKey}
+                        page={activeBeamerPage}
+                        dirty={dirty}
+                        onSourceTextClick={openCodeForCompiledText}
+                      />
+                    ) : (
+                      <TypesetVisualEditor
+                        path={sourcePath}
+                        draft={draft}
+                        pdfCursor={visualPdfCursor}
+                        onChange={changeDraft}
+                        onVisibleLineChange={setCurrentSourceLine}
+                        onOpenCodeAtLine={openCodeAtLine}
+                        onOpenCodeRange={openCodeRange}
+                        onForwardSearch={jumpToPdfForLine}
+                        onViewReady={onVisualViewReady}
+                      />
+                    )}
                   </div>
                 </>
               ) : (

@@ -17,7 +17,7 @@ const apiMocks = vi.hoisted(() => ({
   chatRunCommand: vi.fn(),
   chatSuggestTitle: vi.fn(() => Promise.resolve("Concise title")),
   projectBriefGet: vi.fn(() => Promise.resolve({ mission: "Test project mission", goal: null })),
-  projectGoalInfer: vi.fn(() => Promise.resolve({ mission: "Test project mission", goal: null })),
+  projectIntentObserve: vi.fn(() => Promise.resolve({ mission: "Test project mission", intent: null, goal: null })),
   projectGoalProgress: vi.fn(() => Promise.resolve({ mission: "Test project mission", goal: null })),
   chatRewindToUserMessage: vi.fn(() => Promise.resolve<number | null>(null)),
   chatSetContext: vi.fn((_sessionId: string, _messages: unknown[], _mode?: string) => Promise.resolve(0)),
@@ -174,6 +174,22 @@ describe("Chat export action", () => {
   afterEach(() => {
     cleanup();
     document.getElementById("app-chat-actions-portal")?.remove();
+  });
+
+  it("reserves a right-side lane for the summary and keeps its toggle last", async () => {
+    render(<Chat />);
+
+    await waitFor(() => {
+      expect(document.querySelector(".chat-project-brief-sidebar .project-brief-card")).toBeTruthy();
+    });
+    expect(document.querySelector(".chat-root")?.classList.contains("chat-project-brief-open")).toBe(true);
+    expect(document.getElementById("project-brief-popover")).toBeTruthy();
+    expect(document.querySelector(".chat > .project-brief-card")).toBeNull();
+    expect(document.querySelector(".chat-head-actions")?.lastElementChild?.classList.contains("chat-project-brief-toggle")).toBe(true);
+
+    await userEvent.click(screen.getByRole("button", { name: "Collapse project summary" }));
+    await waitFor(() => expect(document.getElementById("project-brief-popover")).toBeNull());
+    expect(document.querySelector(".chat-root")?.classList.contains("chat-project-brief-open")).toBe(false);
   });
 
   it("runs /export for the current chat and appends the exported path", async () => {

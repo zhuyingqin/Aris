@@ -3,6 +3,7 @@ import { Prec } from "@codemirror/state";
 import { EditorView, keymap, placeholder as placeholderExtension, type KeyBinding } from "@codemirror/view";
 import { SharedEditor } from "../editor/SharedEditor";
 import { diffDecorations, dispatchDiffLines, type CodeDiffLine } from "../editor/editorDecorations";
+import { kernelCompletion, kernelInspect, type CompleteFn, type InspectFn } from "../editor/kernelIntel";
 import type { EditorLanguage, EditorUpdate, SharedEditorHandle } from "../editor/editorTypes";
 
 export type { EditorLanguage } from "../editor/editorTypes";
@@ -31,6 +32,11 @@ interface CodeEditorProps {
   onReady?: (handle: SharedEditorHandle | null) => void;
   /** Double-click forward-search: reports the 1-based line/column under the click (e.g. to jump a LaTeX PDF preview to that position). */
   onDoubleClickPos?: (line: number, column: number) => void;
+  /** Kernel-backed autocomplete source (notebook cells). When set, replaces the
+   *  language pack's keyword-only completion with `complete_request` results. */
+  completeRequest?: CompleteFn;
+  /** Kernel object introspection for Shift+Tab docs (notebook cells). */
+  inspectRequest?: InspectFn;
 }
 
 export default function CodeEditor({
@@ -47,6 +53,8 @@ export default function CodeEditor({
   extraKeymap,
   diffLines,
   onDoubleClickPos,
+  completeRequest,
+  inspectRequest,
 }: CodeEditorProps) {
   const handleRef = useRef<SharedEditorHandle | null>(null);
   const onChangeRef = useRef(onChange);
@@ -55,6 +63,12 @@ export default function CodeEditor({
   // prop change is still picked up without recreating the editor extensions.
   const onDoubleClickPosRef = useRef(onDoubleClickPos);
   onDoubleClickPosRef.current = onDoubleClickPos;
+  // Same ref indirection for the kernel-intel callbacks: extensions capture the
+  // refs once at mount but always call whatever the latest render supplied.
+  const completeRequestRef = useRef(completeRequest);
+  completeRequestRef.current = completeRequest;
+  const inspectRequestRef = useRef(inspectRequest);
+  inspectRequestRef.current = inspectRequest;
 
   // Extensions are a creation-time input to SharedEditor (see its docs) — this
   // only needs to compute the *initial* set once per mount.
@@ -85,6 +99,11 @@ export default function CodeEditor({
     if (wrap) list.push(EditorView.lineWrapping);
     if (placeholder) list.push(placeholderExtension(placeholder));
     if (extraKeymap?.length) list.push(Prec.high(keymap.of(extraKeymap)));
+    // Kernel-backed intel for notebook cells: a `complete_request` source and a
+    // Shift+Tab `inspect_request` popover. Gated on the mount-time props so
+    // surfaces without a kernel (file editor, Typeset) keep language completion.
+    if (completeRequest) list.push(kernelCompletion(completeRequestRef));
+    if (inspectRequest) list.push(Prec.high(kernelInspect(inspectRequestRef)));
     return list;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);

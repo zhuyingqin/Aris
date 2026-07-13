@@ -2149,6 +2149,9 @@ fn context_window_for_model(model: &str) -> u64 {
     if model.starts_with("gemini-") {
         return 1_000_000;
     }
+    if model.starts_with("gpt-5") || model.starts_with("gpt-4.1") {
+        return 300_000;
+    }
     if model.starts_with("deepseek-v4") {
         return 1_000_000;
     }
@@ -3033,36 +3036,28 @@ pub fn project_brief_get(project_id: String) -> Result<runtime::ProjectBrief, St
 }
 
 #[tauri::command]
-pub async fn project_goal_infer(
+pub async fn project_intent_observe(
     project_id: String,
     session_id: String,
-    user: String,
-    assistant: String,
+    observations: Vec<runtime::ProjectIntentObservation>,
 ) -> Result<runtime::ProjectBrief, String> {
     validate_session_id(&session_id)?;
     let workspace = active_project_workspace(&project_id)?;
-    if let Some(existing) = runtime::load_project_goal(&workspace)? {
-        if existing.status != runtime::ProjectGoalStatus::Complete {
-            if existing.status == runtime::ProjectGoalStatus::Active {
-                runtime::update_project_goal_progress(
-                    &workspace,
-                    &fallback_goal_status(&assistant),
-                )?;
-            }
-            return runtime::project_brief(&workspace);
-        }
+    let state = runtime::record_project_intent_observations(&workspace, &session_id, observations)?;
+    if !runtime::project_intent_needs_review(&state) {
+        return runtime::project_brief(&workspace);
     }
-    let fallback_user = user.clone();
-    let fallback_assistant = assistant.clone();
-    let draft = tauri::async_runtime::spawn_blocking(move || infer_project_goal(&user, &assistant))
-        .await
-        .map_err(|error| error.to_string())?
-        .unwrap_or_else(|_| runtime::ProjectGoalDraft {
-            objective: fallback_goal_objective(&fallback_user),
-            success_criteria: Vec::new(),
-            recent_status: fallback_goal_status(&fallback_assistant),
-        });
-    runtime::start_project_goal(&workspace, draft, Some(session_id))?;
+
+    let evidence = state.evidence.clone();
+    let existing = state.intent.clone();
+    let draft = tauri::async_runtime::spawn_blocking(move || {
+        infer_project_intent(&evidence, existing.as_ref())
+    })
+    .await
+    .ok()
+    .and_then(Result::ok)
+    .flatten();
+    runtime::apply_project_intent_review(&workspace, draft)?;
     runtime::project_brief(&workspace)
 }
 
@@ -3094,23 +3089,33 @@ fn active_project_workspace(project_id: &str) -> Result<PathBuf, String> {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct GeneratedProjectGoal {
+struct GeneratedProjectIntent {
+    #[serde(default)]
+    has_long_term_intent: bool,
+    #[serde(default)]
     objective: String,
     #[serde(default)]
-    success_criteria: Vec<String>,
-    #[serde(default)]
-    recent_status: String,
+    confidence: u8,
 }
 
-fn infer_project_goal(user: &str, assistant: &str) -> Result<runtime::ProjectGoalDraft, String> {
-    crate::config::apply_reviewer_environment(true);
+fn infer_project_intent(
+    evidence: &[runtime::ProjectIntentEvidence],
+    existing: Option<&runtime::ProjectIntent>,
+) -> Result<Option<runtime::ProjectIntentDraft>, String> {
     let (model, _provider, executor_config) = resolve_executor()?;
     runtime::clear_interrupt();
-    let system = "Summarize the user's substantive project outcome into durable project-goal state. Return one JSON object only with camelCase fields: objective (one concise outcome, not a topic), successCriteria (2-4 observable checks), and recentStatus (one short sentence describing what the assistant just accomplished or proposed). Use the user's language. Base the objective primarily on the user request. Do not include markdown, reasoning, labels, secrets, temporary paths, or implementation trivia.";
+    let system = "Curate durable project intent. Infer only a long-term project outcome that remains true across multiple user requests. Reject individual implementation tasks, UI tweaks, one-off debugging, temporary experiments, and assistant suggestions. Prefer a stable end-state or enduring capability. Use only the user's messages as evidence. Return one JSON object only with camelCase fields: hasLongTermIntent (boolean), objective (one concise durable outcome, empty when insufficient evidence), and confidence (0-100). Use the user's language. Do not include markdown, reasoning, labels, secrets, paths, or implementation trivia. An established intent must never be replaced automatically.";
+    let existing_intent = existing
+        .map(|intent| format!("Existing intent: {}", intent.objective))
+        .unwrap_or_else(|| "Existing intent: none".to_string());
+    let evidence_text = evidence
+        .iter()
+        .enumerate()
+        .map(|(index, item)| format!("{}. {}", index + 1, truncate_for_prompt(&item.text, 600)))
+        .collect::<Vec<_>>()
+        .join("\n");
     let prompt = format!(
-        "User request:\n{}\n\nAssistant response:\n{}\n\nJSON:",
-        truncate_for_prompt(user, 4_000),
-        truncate_for_prompt(assistant, 2_400)
+        "{existing_intent}\n\nSubstantive user messages, oldest to newest:\n{evidence_text}\n\nJSON:"
     );
     let observer: Box<dyn aris_executor::StreamObserver> = Box::new(SilentStreamObserver);
     let mut conversation = aris_chat::build_conversation_runtime(
@@ -3132,39 +3137,22 @@ fn infer_project_goal(user: &str, assistant: &str) -> Result<runtime::ProjectGoa
         .map_err(|error| error.to_string())?;
     let raw = strip_reasoning_markup(&aris_chat::final_assistant_text(&summary));
     let json =
-        extract_json_object(&raw).ok_or_else(|| "goal summary did not contain JSON".to_string())?;
-    let generated: GeneratedProjectGoal = serde_json::from_str(json)
-        .map_err(|error| format!("invalid goal summary JSON: {error}"))?;
-    Ok(runtime::ProjectGoalDraft {
+        extract_json_object(&raw).ok_or_else(|| "project intent did not contain JSON".to_string())?;
+    let generated: GeneratedProjectIntent = serde_json::from_str(json)
+        .map_err(|error| format!("invalid project intent JSON: {error}"))?;
+    if !generated.has_long_term_intent || generated.objective.trim().is_empty() || generated.confidence < 60 {
+        return Ok(None);
+    }
+    Ok(Some(runtime::ProjectIntentDraft {
         objective: generated.objective,
-        success_criteria: generated.success_criteria,
-        recent_status: generated.recent_status,
-    })
+        confidence: generated.confidence,
+    }))
 }
 
 fn extract_json_object(raw: &str) -> Option<&str> {
     let start = raw.find('{')?;
     let end = raw.rfind('}')?;
     (end >= start).then_some(&raw[start..=end])
-}
-
-fn fallback_goal_objective(user: &str) -> String {
-    let cleaned = user.split_whitespace().collect::<Vec<_>>().join(" ");
-    let objective = cleaned.chars().take(320).collect::<String>();
-    if objective.is_empty() {
-        "Advance the current project request to a verifiable outcome.".to_string()
-    } else {
-        objective
-    }
-}
-
-fn fallback_goal_status(assistant: &str) -> String {
-    let cleaned = assistant
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .unwrap_or("Goal captured; continue with the next verifiable step.");
-    cleaned.chars().take(260).collect()
 }
 
 fn suggest_chat_title(user: &str, assistant: &str) -> Result<String, String> {

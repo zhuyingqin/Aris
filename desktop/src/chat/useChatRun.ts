@@ -21,8 +21,8 @@ import {
   chatStatus,
   chatSuggestTitle,
   isTauri,
-  projectGoalInfer,
   projectGoalProgress,
+  projectIntentObserve,
   type ChatSendRequest,
 } from "../api/tauri";
 import { useStore } from "../store";
@@ -99,7 +99,7 @@ export function useChatRun({
   });
 
   const titleRequests = useRef(new Set<string>());
-  const goalRequests = useRef(new Set<string>());
+  const intentRequests = useRef(new Set<string>());
   const sendLocks = useRef(new Set<string>());
   const syncedTurnIds = useRef(new Map<string, Set<string>>());
   const backendContextNeedsReset = useRef(new Set<string>());
@@ -152,7 +152,7 @@ export function useChatRun({
       .catch(() => undefined);
   }, [updateSession]);
 
-  const syncProjectGoal = useCallback((sessionId: string, nextTurns: ChatTurn[]) => {
+  const syncProjectContinuity = useCallback((sessionId: string, nextTurns: ChatTurn[]) => {
     if (!isTauri() || !currentProject?.id) return;
     const userTurns = nextTurns.filter((turn) => turn.role === "user");
     const assistantTurns = nextTurns.filter((turn) => turn.role === "assistant");
@@ -160,16 +160,20 @@ export function useChatRun({
     const assistantText = latestAssistant ? textFromTurn(latestAssistant).trim() : "";
     if (!assistantText) return;
 
-    if (userTurns.length === 1 && assistantTurns.length === 1 && !goalRequests.current.has(sessionId)) {
-      const userText = textFromTurn(userTurns[0]).trim();
-      if (!userText) return;
-      goalRequests.current.add(sessionId);
-      void projectGoalInfer(currentProject.id, sessionId, userText, assistantText)
+    const observations = userTurns
+      .map((turn) => ({ id: turn.id, text: textFromTurn(turn).trim() }))
+      .filter((observation) => observation.text.length > 0);
+    const newestObservation = observations[observations.length - 1];
+    if (newestObservation) {
+      const requestKey = `${sessionId}:${newestObservation.id}`;
+      if (!intentRequests.current.has(requestKey)) {
+        intentRequests.current.add(requestKey);
+        void projectIntentObserve(currentProject.id, sessionId, observations)
         .then(notifyProjectBriefUpdated)
         .catch(() => {
-          goalRequests.current.delete(sessionId);
+          intentRequests.current.delete(requestKey);
         });
-      return;
+      }
     }
 
     const recentStatus = assistantText
@@ -212,10 +216,10 @@ export function useChatRun({
       (nextTurns) => {
         markBackendContextSynced(sessionId, nextTurns);
         suggestTitle(sessionId, nextTurns);
-        syncProjectGoal(sessionId, nextTurns);
+        syncProjectContinuity(sessionId, nextTurns);
       },
     );
-  }, [markBackendContextSynced, patchAssistant, suggestTitle, syncProjectGoal]);
+  }, [markBackendContextSynced, patchAssistant, suggestTitle, syncProjectContinuity]);
 
   const onError = useCallback((
     sessionId: string,

@@ -135,15 +135,27 @@ const renderPageJpeg = async (page: PDFPageProxy): Promise<Uint8Array> => {
   return new Uint8Array(await blob.arrayBuffer());
 };
 
-export const extractPdfPageImages = async (relativePath: string): Promise<PdfImageExtraction> => {
+/**
+ * Renders `pageNumbers` (or every page, when omitted) to JPEG. Callers that
+ * only need a subset — e.g. the figure/table/scanned pages a text pass
+ * couldn't read — pass an explicit list so pages that don't need a vision
+ * model never get rendered or uploaded.
+ */
+export const extractPdfPageImages = async (
+  relativePath: string,
+  pageNumbers?: number[],
+): Promise<PdfImageExtraction> => {
   const [bytes, pdfjs] = await Promise.all([literaturePdfBytes(relativePath), import("pdfjs-dist")]);
   pdfjs.GlobalWorkerOptions.workerSrc = workerSrc;
   const document = await pdfjs.getDocument({ data: new Uint8Array(bytes) }).promise;
   const totalPages = document.numPages;
+  const targetPages = pageNumbers && pageNumbers.length > 0
+    ? pageNumbers.filter((pageNumber) => pageNumber >= 1 && pageNumber <= totalPages)
+    : Array.from({ length: totalPages }, (_, index) => index + 1);
   const pages: PdfPageImage[] = [];
 
   try {
-    for (let pageNumber = 1; pageNumber <= totalPages; pageNumber += 1) {
+    for (const pageNumber of targetPages) {
       const page = await document.getPage(pageNumber);
       const image = await renderPageJpeg(page);
       pages.push({
@@ -158,8 +170,8 @@ export const extractPdfPageImages = async (relativePath: string): Promise<PdfIma
     await document.destroy();
   }
 
-  if (pages.length !== totalPages || pages.length === 0) {
-    throw new Error("Could not render every PDF page for visual evidence reading.");
+  if (pages.length !== targetPages.length || pages.length === 0) {
+    throw new Error("Could not render every requested PDF page for visual evidence reading.");
   }
   return {
     pages,

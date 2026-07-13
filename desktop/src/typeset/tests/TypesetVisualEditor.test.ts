@@ -76,6 +76,48 @@ describe("latexListEnterInsertion", () => {
 });
 
 describe("visualDecorations", () => {
+  it("renders Beamer frames as numbered visual slide cards with editable titles", () => {
+    const source = [
+      "\\documentclass{beamer}",
+      "\\begin{document}",
+      "\\begin{frame}{Motivation}",
+      "Body text.",
+      "\\end{frame}",
+      "\\end{document}",
+    ].join("\n");
+    const frameFrom = source.indexOf("\\begin{frame}");
+    const titleFrom = source.indexOf("Motivation");
+    const ranges = visualDecorationRanges(source);
+    const frameHeader = ranges.find((range) => range.from === frameFrom && range.widget);
+
+    expect(frameHeader?.widget?.toDOM().textContent).toContain("Slide 1");
+    expect(ranges.some((range) => range.from === frameFrom && range.className === "cm-vis-frame-line")).toBe(true);
+    expect(ranges.some((range) => range.from === frameFrom && range.className === "cm-vis-frame-first")).toBe(true);
+    expect(ranges.some((range) => range.from === titleFrom && range.className === "cm-vis-frame-title")).toBe(true);
+  });
+
+  it("labels title slides and folds Beamer-only layout commands", () => {
+    const source = [
+      "\\documentclass{beamer}",
+      "\\begin{document}",
+      "\\begin{frame}",
+      "\\titlepage",
+      "\\column{0.5\\textwidth}",
+      "Body text.",
+      "\\end{frame}",
+      "\\end{document}",
+    ].join("\n");
+    const frameFrom = source.indexOf("\\begin{frame}");
+    const titlePageFrom = source.indexOf("\\titlepage");
+    const columnFrom = source.indexOf("\\column");
+    const ranges = visualDecorationRanges(source);
+    const frameHeader = ranges.find((range) => range.from === frameFrom && range.widget);
+
+    expect(frameHeader?.widget?.toDOM().textContent).toContain("Title slide");
+    expect(ranges.some((range) => range.from === titlePageFrom && range.to === titlePageFrom + "\\titlepage".length)).toBe(true);
+    expect(ranges.some((range) => range.from === columnFrom && range.to === columnFrom + "\\column{0.5\\textwidth}".length)).toBe(true);
+  });
+
   it("reveals the complete display math environment while editing inside it", () => {
     const source = [
       "\\begin{document}",
@@ -182,5 +224,56 @@ describe("visualDecorations", () => {
     // `\begin{abstract}`, an inconsistent half-reveal.
     expect(ranges.some((range) => range.from === beginFrom && range.to === beginTo)).toBe(false);
     expect(ranges.some((range) => range.from === endFrom && range.to === endTo)).toBe(false);
+  });
+
+  it("collapses a TikZ figure (no \\includegraphics) into one diagram card instead of flowing raw \\node/\\draw lines", () => {
+    const source = [
+      "\\begin{document}",
+      "\\begin{figure}[H]",
+      "\\centering",
+      "\\begin{tikzpicture}",
+      "\\node (a) {A};",
+      "\\node[right=of a] (b) {B};",
+      "\\draw[-Latex] (a) -- (b);",
+      "\\end{tikzpicture}",
+      "\\caption{A to B.}",
+      "\\end{figure}",
+      "Body text.",
+      "\\end{document}",
+    ].join("\n");
+    const envFrom = source.indexOf("\\begin{figure}");
+    const envTo = source.indexOf("\\end{figure}") + "\\end{figure}".length;
+    const ranges = visualDecorationRanges(source);
+
+    const diagram = ranges.find((range) => range.from === envFrom && range.to === envTo && range.widget);
+    expect(diagram?.widget).toBeTruthy();
+    const dom = diagram!.widget!.toDOM();
+    expect(dom.className).toContain("cm-vis-block-target");
+    expect(dom.textContent).toContain("TikZ diagram");
+    expect(dom.textContent).toContain("A to B.");
+
+    // The raw TikZ commands must not appear as their own unwidgeted decoration
+    // range — the whole float is one widget, not begin/end hidden with the body
+    // still flowing as plain text.
+    const nodeFrom = source.indexOf("\\node (a)");
+    expect(ranges.some((range) => range.from === nodeFrom && !range.widget)).toBe(false);
+  });
+
+  it("reveals the raw TikZ source while the caret is inside the figure", () => {
+    const source = [
+      "\\begin{document}",
+      "\\begin{figure}[H]",
+      "\\begin{tikzpicture}",
+      "\\node (a) {A};",
+      "\\end{tikzpicture}",
+      "\\end{figure}",
+      "\\end{document}",
+    ].join("\n");
+    const anchor = source.indexOf("\\node (a)");
+    const envFrom = source.indexOf("\\begin{figure}");
+    const envTo = source.indexOf("\\end{figure}") + "\\end{figure}".length;
+    const ranges = visualDecorationRanges(source, anchor);
+
+    expect(ranges.some((range) => range.from === envFrom && range.to === envTo && range.widget)).toBe(false);
   });
 });

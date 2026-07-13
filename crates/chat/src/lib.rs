@@ -181,8 +181,11 @@ pub fn context_compaction_threshold_for_model(model: &str) -> usize {
         // ~1M window → compact near the top, reserving ~150k for prompt+output.
         850_000
     } else if m.contains("gpt-5") || m.contains("gpt-4.1") {
-        // ~400k window.
-        340_000
+        // GPT-5.5/5.6-compatible proxies may advertise a much larger raw
+        // window, but the configured agentic route is roughly 300k. Keep the
+        // budget at that practical ceiling so compaction leaves room for the
+        // system prompt, tool schemas, and output.
+        300_000
     } else if m.contains("kimi") || m.contains("moonshot") || m.contains("qwen") {
         // ~256k window.
         200_000

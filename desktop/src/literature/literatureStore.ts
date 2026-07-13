@@ -23,6 +23,7 @@ import {
   type BriefSection,
   type CriterionKind,
   type CriteriaSuggestion,
+  type EvidenceSource,
   type LiteratureLibrary,
   type LiteraturePaper,
   type LiteratureReviewTask,
@@ -44,6 +45,7 @@ import {
   extractPdfPageImages,
   extractPdfTextByPage,
   type PdfExtraction,
+  type PdfPageExtraction,
   type PdfPageImage,
 } from "./pdfExtraction";
 
@@ -730,8 +732,11 @@ const llmBrief = async (
 const VISUAL_EVIDENCE_SYSTEM =
   "You are a rigorous visual paper reader. Read every supplied PDF page image directly, including figures, tables, formulas, captions, and body text. Extract only evidence visibly supported by those images. Write every evidence explanation in Chinese while preserving quotes as faithful visible transcriptions in their source language. Return a JSON array and nothing else.";
 
+const TEXT_EVIDENCE_SYSTEM =
+  "You are a rigorous paper reader. Read the supplied extracted PDF page text directly. Extract only evidence explicitly present in that text. Write every evidence explanation in Chinese while preserving quotes as faithful verbatim excerpts in their source language. Return a JSON array and nothing else.";
+
 const ANSWER_CHAIN_SYSTEM =
-  "You build question-to-final-answer chains only from visual evidence previously read directly from PDF page images. Write every question and final answer in Chinese. Return a JSON array and nothing else.";
+  "You build question-to-final-answer chains only from evidence previously read directly from the PDF (extracted page text and/or rendered page images). Write every question and final answer in Chinese. Return a JSON array and nothing else.";
 
 const EVIDENCE_ROLE_LABELS: Record<string, string> = {
   premise: "前提",
@@ -764,7 +769,13 @@ Your previous reply could not be parsed. Return ONLY the raw JSON array with no 
   }
 };
 
-type VisualEvidence = LiteraturePaper["evidence"][number] & { source: "vision"; imageFingerprint: string };
+/** One evidence item read either from extracted page text (cheap) or a
+ * rendered page image (vision model, reserved for pages a text pass can't
+ * cover — figures, tables, dense math, or scanned/OCR pages). */
+type PageEvidence = LiteraturePaper["evidence"][number] & {
+  source: EvidenceSource;
+  imageFingerprint?: string;
+};
 
 const imageBatches = (pages: PdfPageImage[], size = 4) => {
   const batches: PdfPageImage[][] = [];
@@ -774,6 +785,61 @@ const imageBatches = (pages: PdfPageImage[], size = 4) => {
   return batches;
 };
 
+// Text is far cheaper than page images, so batches are sized by a character
+// budget instead of a fixed page count: a run of sparse pages fills one
+// call, a run of dense pages splits into more.
+const TEXT_EVIDENCE_BATCH_CHARS = 12_000;
+
+const textPageBatches = (pages: PdfPageExtraction[], maxChars = TEXT_EVIDENCE_BATCH_CHARS) => {
+  const batches: PdfPageExtraction[][] = [];
+  let current: PdfPageExtraction[] = [];
+  let currentChars = 0;
+  for (const page of pages) {
+    if (current.length > 0 && currentChars + page.text.length > maxChars) {
+      batches.push(current);
+      current = [];
+      currentChars = 0;
+    }
+    current.push(page);
+    currentChars += page.text.length;
+  }
+  if (current.length > 0) batches.push(current);
+  return batches;
+};
+
+// A page is worth reading as text only when extraction actually found a real
+// paragraph on it. Below the absolute floor, or well below the paper's own
+// median page (a run of dense pages makes a sparse one stand out as
+// caption-only), the page likely carries its content visually — a figure,
+// table, or formula block — so it goes to the vision model instead, along
+// with anything OCR/embedded extraction failed on outright.
+const TEXT_EVIDENCE_MIN_CHARS = 200;
+const TEXT_EVIDENCE_RELATIVE_RATIO = 0.35;
+
+const classifyEvidencePages = (
+  pages: PdfPageExtraction[],
+): { textPages: PdfPageExtraction[]; visualPageNumbers: number[] } => {
+  const embeddedLengths = pages
+    .filter((page) => page.source === "embedded")
+    .map((page) => page.text.length)
+    .sort((a, b) => a - b);
+  const median = embeddedLengths.length > 0
+    ? embeddedLengths[Math.floor(embeddedLengths.length / 2)]
+    : 0;
+  const relativeFloor = median * TEXT_EVIDENCE_RELATIVE_RATIO;
+  const textPages: PdfPageExtraction[] = [];
+  const visualPageNumbers: number[] = [];
+  for (const page of pages) {
+    const isTextPage =
+      page.source === "embedded"
+      && page.text.length >= TEXT_EVIDENCE_MIN_CHARS
+      && page.text.length >= relativeFloor;
+    if (isTextPage) textPages.push(page);
+    else visualPageNumbers.push(page.page);
+  }
+  return { textPages, visualPageNumbers };
+};
+
 const spreadLimit = <T,>(values: T[], limit: number) => {
   if (values.length <= limit) return values;
   return Array.from({ length: limit }, (_, index) =>
@@ -781,12 +847,69 @@ const spreadLimit = <T,>(values: T[], limit: number) => {
   );
 };
 
+// Applied once on the combined text+vision evidence list, not per-source —
+// otherwise two 24-item caps could double the evidence handed to the answer
+// chain synthesis step below.
+const dedupeAndLimit = (evidence: PageEvidence[], limit: number): PageEvidence[] => {
+  const deduped = evidence.filter(
+    (item, index, all) =>
+      all.findIndex(
+        (candidate) =>
+          candidate.page === item.page
+          && normalizeAnchorText(candidate.quote) === normalizeAnchorText(item.quote),
+      ) === index,
+  );
+  return spreadLimit(deduped, limit);
+};
+
+const llmTextEvidence = async (
+  paper: LiteraturePaper,
+  question: string,
+  pages: PdfPageExtraction[],
+): Promise<PageEvidence[]> => {
+  const evidence: PageEvidence[] = [];
+  for (const batch of textPageBatches(pages)) {
+    const allowed = new Map(batch.map((page) => [page.page, normalizeAnchorText(page.text)]));
+    const parsed = await literatureLlmJson(
+      TEXT_EVIDENCE_SYSTEM,
+      `Paper: ${paper.title}
+Research question: ${question || "(identify the paper's most important claims and findings)"}
+
+${batch.map((page) => `[[PAGE ${page.page}]]\n${page.text}`).join("\n\n")}
+
+Read the page text above. Return up to 6 high-value evidence items from these pages:
+[{"page": 1, "quote": "short faithful verbatim excerpt copied from that page", "note": "why this evidence matters", "role": "premise|method|result|limitation"}]
+The page must be one of the pages shown above, and the quote must be copied verbatim from that page's text. Do not infer content that is not present in the text.
+Write every note in Chinese. Preserve each quote as a faithful verbatim excerpt in the source language. Keep role as one of premise|method|result|limitation.`,
+    ) as unknown;
+    if (!Array.isArray(parsed)) throw new Error("expected a JSON array of text evidence");
+    for (const item of parsed as Array<Record<string, unknown>>) {
+      const page = Number(item.page);
+      const quote = String(item.quote ?? "").trim();
+      const note = String(item.note ?? "").trim();
+      const role = String(item.role ?? "evidence").trim() || "evidence";
+      const pageText = allowed.get(page);
+      const normalizedQuote = normalizeAnchorText(quote);
+      if (!Number.isInteger(page) || !pageText || normalizedQuote.length < 8 || !note) continue;
+      if (!pageText.includes(normalizedQuote)) continue;
+      evidence.push({
+        id: makeId("evidence"),
+        page,
+        quote: quote.slice(0, 360),
+        note: `${evidenceRoleLabel(role)}：${note}`,
+        source: "text",
+      });
+    }
+  }
+  return evidence;
+};
+
 const llmVisualEvidence = async (
   paper: LiteraturePaper,
   question: string,
   pages: PdfPageImage[],
-): Promise<VisualEvidence[]> => {
-  const evidence: VisualEvidence[] = [];
+): Promise<PageEvidence[]> => {
+  const evidence: PageEvidence[] = [];
   for (const batch of imageBatches(pages)) {
     const allowed = new Map(batch.map((page) => [page.page, page]));
     const parsed = await literatureVisionLlmJson(
@@ -819,22 +942,13 @@ Write every note in Chinese. Preserve each quote as a faithful transcription in 
       });
     }
   }
-  const deduped = evidence.filter(
-    (item, index, all) =>
-      all.findIndex(
-        (candidate) =>
-          candidate.page === item.page
-          && normalizeAnchorText(candidate.quote) === normalizeAnchorText(item.quote),
-      ) === index,
-  );
-  if (deduped.length === 0) throw new Error("model returned no visual evidence");
-  return spreadLimit(deduped, 24);
+  return evidence;
 };
 
-const llmAnswerChainsFromVisualEvidence = async (
+const llmAnswerChainsFromEvidence = async (
   paper: LiteraturePaper,
   focus: ProjectFocus | undefined,
-  evidence: VisualEvidence[],
+  evidence: PageEvidence[],
 ): Promise<{ chains: ReadingAnswerChain[]; annotations: PdfAnnotation[] }> => {
   const evidencePayload = evidence.map((item) => ({
     id: item.id,
@@ -848,10 +962,10 @@ const llmAnswerChainsFromVisualEvidence = async (
     `Paper: ${paper.title}
 Research focus: ${focus?.question?.trim() || "(generate the most important paper-reading questions)"}
 
-Visual evidence read from all PDF page-image batches:
+Evidence read from the PDF (text extraction and/or page images):
 ${JSON.stringify(evidencePayload)}
 
-Generate 3-4 critical questions and final answers. Use only the supplied visual evidence.
+Generate 3-4 critical questions and final answers. Use only the supplied evidence.
 Return ONLY:
 [{"question": "...", "answer": "...", "supports": [{"evidenceId": "evidence-id", "role": "premise|method|result|limitation"}]}]
 Each answer requires at least one support and may use at most 3 supports.
@@ -867,23 +981,25 @@ All question and answer values must be written in Chinese. Keep support role as 
     const answer = String(row.answer ?? "").trim();
     if (!question || !answer || !Array.isArray(row.supports)) continue;
     const chainId = makeId("chain");
+    let sawVisionSupport = false;
     const supports = row.supports
       .map((support) => support as Record<string, unknown>)
       .map((support) => {
         const evidenceId = String(support.evidenceId ?? "").trim();
         const role = String(support.role ?? "support").trim() || "support";
-        const visual = evidenceById.get(evidenceId);
-        if (!visual) return null;
+        const source = evidenceById.get(evidenceId);
+        if (!source) return null;
+        if (source.source === "vision") sawVisionSupport = true;
         const annotation: PdfAnnotation = {
           id: makeId("annotation"),
-          page: visual.page,
-          quote: visual.quote,
+          page: source.page,
+          quote: source.quote,
           note: `${evidenceRoleLabel(role)}：${answer}`,
           kind: "answer-support",
-          source: "vision",
-          imageFingerprint: visual.imageFingerprint,
+          source: source.source,
+          imageFingerprint: source.imageFingerprint,
           sourceId: chainId,
-          evidenceId: visual.id,
+          evidenceId: source.id,
           createdAt: isoNow(),
         };
         annotations.push(annotation);
@@ -896,7 +1012,7 @@ All question and answer values must be written in Chinese. Keep support role as 
       question,
       answer,
       supports,
-      basis: "vision",
+      basis: sawVisionSupport ? "vision" : "text",
       reviewStatus: "unreviewed",
       createdAt: isoNow(),
     });
@@ -1868,29 +1984,48 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
       }
       set({ generatingAnswerChains: paperId, error: null });
       try {
-        log("info", `正在逐页读取 PDF 图片并构建统一证据链：${paper.title}`, {
-          open: true,
-        });
-        const extraction = await extractPdfPageImages(paper.pdf.path);
-        const evidence = await llmVisualEvidence(
-          paper,
-          get().library.projectFocus?.question ?? "",
-          extraction.pages,
-        );
-        const evidenceMarks = evidenceAnnotations(evidence);
+        log("info", `正在读取 PDF 并规划文本/视觉证据来源：${paper.title}`, { open: true });
+        const question = get().library.projectFocus?.question ?? "";
+
+        // Text extraction is cheap and covers most pages of a typical paper;
+        // only pages it can't (figures/tables/dense math/scanned pages) fall
+        // back to rendering + a vision model. If text extraction fails
+        // outright (e.g. a scanned PDF with no usable OCR), fall back to
+        // reading every page visually — the pre-split behavior.
+        let textPages: PdfPageExtraction[] = [];
+        let visualPageNumbers: number[] | undefined;
+        try {
+          const textExtraction = await extractPdfTextByPage(paper.pdf.path);
+          const classified = classifyEvidencePages(textExtraction.pages);
+          textPages = classified.textPages;
+          visualPageNumbers = classified.visualPageNumbers;
+        } catch {
+          visualPageNumbers = undefined;
+        }
+
+        const evidence: PageEvidence[] = [];
+        if (textPages.length > 0) {
+          log("info", `文本证据：${textPages.length} 页`);
+          evidence.push(...await llmTextEvidence(paper, question, textPages));
+        }
+        if (visualPageNumbers === undefined || visualPageNumbers.length > 0) {
+          const imageExtraction = await extractPdfPageImages(paper.pdf.path, visualPageNumbers);
+          log("info", `视觉证据：${imageExtraction.pages.length} 页`);
+          evidence.push(...await llmVisualEvidence(paper, question, imageExtraction.pages));
+        }
+        const deduped = dedupeAndLimit(evidence, 24);
+        if (deduped.length === 0) throw new Error("model returned no evidence");
+
+        const evidenceMarks = evidenceAnnotations(deduped);
         patchPapers([paperId], (entry) => ({
           ...entry,
-          evidence,
+          evidence: deduped,
           pdfAnnotations: [
             ...entry.pdfAnnotations.filter((annotation) => annotation.kind !== "evidence"),
             ...evidenceMarks,
           ],
         }));
-        const result = await llmAnswerChainsFromVisualEvidence(
-          paper,
-          get().library.projectFocus,
-          evidence,
-        );
+        const result = await llmAnswerChainsFromEvidence(paper, get().library.projectFocus, deduped);
         patchPapers([paperId], (entry) => ({
           ...entry,
           answerChains: result.chains,
@@ -1899,9 +2034,12 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
             ...result.annotations,
           ],
         }));
+        const visualPageCount = visualPageNumbers === undefined
+          ? deduped.filter((item) => item.source === "vision").length
+          : visualPageNumbers.length;
         log(
           "ok",
-          `已读取全部 ${extraction.totalPages} 页，生成 ${evidence.length} 条视觉证据和 ${result.chains.length} 条问答证据链`,
+          `已读取 ${textPages.length} 文本页 + ${visualPageCount} 视觉页，生成 ${deduped.length} 条证据和 ${result.chains.length} 条问答证据链`,
         );
       } catch (error) {
         const message = `问题-答案-证据链生成失败：${String(error)}`;

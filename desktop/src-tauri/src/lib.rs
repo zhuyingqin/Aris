@@ -17,6 +17,7 @@ mod scheduled;
 mod sessions;
 mod state;
 mod studio;
+mod terminal;
 mod typeset;
 mod usage_log;
 mod watcher;
@@ -267,6 +268,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(engine::ChatState::default())
         .manage(projects::ProjectState::default())
+        .manage(terminal::TerminalState::default())
         .setup(|app| {
             if let Some(resource_dir) = resource_dir(app) {
                 augment_resource_path_for_mcp(&resource_dir);
@@ -385,6 +387,12 @@ pub fn run() {
             lab::lab_set_kernelspec,
             lab::lab_start_kernel,
             lab::lab_execute_cell,
+            lab::lab_complete,
+            lab::lab_inspect,
+            terminal::terminal_open,
+            terminal::terminal_write,
+            terminal::terminal_resize,
+            terminal::terminal_close,
             lab::lab_shutdown_kernel,
             lab::lab_interrupt_kernel,
             lab::lab_start_file_kernel,
@@ -419,7 +427,7 @@ pub fn run() {
             engine::studio_agent_send_rich,
             engine::chat_suggest_title,
             engine::project_brief_get,
-            engine::project_goal_infer,
+            engine::project_intent_observe,
             engine::project_goal_progress,
             engine::chat_reset,
             engine::chat_rewind_to_user_message,

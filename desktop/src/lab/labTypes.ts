@@ -6,7 +6,11 @@ export type KernelCellOutput =
   | { type: "stream"; name: string; text: string }
   | { type: "execute_result"; execution_count: number | null; data: Record<string, unknown> }
   | { type: "display_data"; data: Record<string, unknown> }
-  | { type: "error"; ename: string; evalue: string; traceback: string[] };
+  | { type: "error"; ename: string; evalue: string; traceback: string[] }
+  // Streaming-only signal mirroring Jupyter `clear_output`: tells the UI to drop
+  // a cell's already-shown outputs (e.g. tqdm redrawing a progress bar) instead
+  // of appending. Never persisted to the `.ipynb`.
+  | { type: "clear"; wait?: boolean };
 
 export type NotebookCellOutput =
   | { output_type: "stream"; name?: string; text?: string | string[] }

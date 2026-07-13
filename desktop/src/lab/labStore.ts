@@ -646,6 +646,12 @@ export const useLabStore = create<LabState>((set, get) => ({
     const { activePath, view } = get();
     if (!view || activePath !== event.notebookPath || event.cellIndex === null) return;
     const index = event.cellIndex;
+    // A `clear_output` signal drops the cell's shown outputs rather than adding
+    // one — this is what stops a redrawing tqdm bar from flooding the cell.
+    if ((event.output as { type?: string })?.type === "clear") {
+      set({ view: replaceCellOutputs(view, index, []) });
+      return;
+    }
     const current = view.notebook.cells[index]?.outputs ?? [];
     set({ view: replaceCellOutputs(view, index, [...current, event.output]) });
   },
