@@ -29,6 +29,43 @@
 
 ## 📰 What's New
 
+> **v0.4.16** (2026-07) — `reports` kernel module (report-rendering pipeline consumed by the CLI /
+> runtime). New desktop components: `ChatNavigationTabs` + `SideTaskPanel` (in-chat side-task /
+> status panel + explicit nav tab strip). New editor helper `latexVscodeHighlighting`
+> (VSCode-style LaTeX syntax tokens for the typeset visual editor). `.github/workflows/release.yml`
+> refinement + updater-manifest generator refresh. Runtime / Tools / Chat / Tauri backend
+> surface updates. Chat / Lab / Typeset / API UI refinements. Notebook / knowledge / literature
+> / studio tool surface.
+
+> **v0.4.15** (2026-07) — Integrated cross-platform PTY terminal (ConPTY on Windows) for the Lab
+> Code page: `desktop/src-tauri/src/terminal.rs` + `portable-pty` dep on the Rust side paired with
+> `desktop/src/lab/Terminal.tsx` + `@xterm/xterm` + `@xterm/addon-fit` on the frontend. New
+> `project_intent` kernel module (intent persistence + inference pipeline) alongside
+> `project_goal`. New `editor/kernelIntel.ts` (editor intelligence helpers — completion /
+> diagnostics / hover). Notebook kernel refinements. New deps: +@xterm/xterm, +@xterm/addon-fit,
+> +katex, +mermaid, +pdfjs-dist.
+
+<details>
+<summary>📜 Earlier releases (v0.4.14 → v0.1.0)</summary>
+
+> **v0.4.14** (2026-07) — New `project_goal` kernel module (mission/goal persistence + inference
+> pipeline). New `editor` desktop module: `SharedEditor` + `editorCommands` / `editorDecorations` /
+> `editorLanguages` / `editorState` / `editorTypes` / `editorView` — extracted from the typeset
+> visual editor. New `ProjectBriefCard` chat component (surfaces project mission/goal inline).
+> `AGENTS.md` contributor guide + `THIRD_PARTY_NOTICES.md` for bundled deps. CodeMirror language
+> plugins + `@tauri-apps/plugin-{process,updater}` deps.
+
+> **v0.4.13** (2026-07) — `desktop/src/sessions/Sessions.tsx` removed; `store.ts` reflects the new
+> session model. Chat surface polish (`Chat.tsx`, `ChatSidebar.tsx`, `ChatThread.tsx`, `i18n.ts`).
+> Lab / Studio / Onboarding / Scheduled-tasks UI refinements. `styles.css` font-stack upgrade
+> (`Inter` → fallback chain) + `font-synthesis: none` + `text-rendering: optimizeLegibility`.
+
+> **v0.4.12** (2026-07) — Chat surface polish (`Chat.tsx`, `ChatMessage.tsx`, `ChatSidebar.tsx`,
+> `WorkflowFlow.tsx`, `i18n.ts`, `model.ts`) + matching test alignment. Onboarding tutorial
+> step + accent-token + reduced-motion tweaks. Tauri backend (`engine.rs`, `newapi.rs`) —
+> reqwest gains `gzip` / `brotli` / `deflate` decoder features. aris-cli + tools runtime
+> surface follow-up.
+
 > **v0.4.11** (2026-07) — Runtime / tools / executor surface refactor (~60 Rust files in
 > `crates/runtime` + `crates/tools` + `crates/executor` + `crates/chat` + `crates/commands` +
 > `crates/compat-harness` + `crates/notebook`): hooks, process registry, cache, hot-memory,
@@ -46,9 +83,6 @@
 > coverage. Lab: file operations + lab preview polish. Typeset: CodeMirror-6 decoration-based
 > visual editor. Runtime / tools / executor surface additions. aris-cli + Tauri backend tweaks.
 > Cleanup: dropped stale `idea-stage/v0.4.10..v0.4.13` planning docs.
-
-<details>
-<summary>📜 Earlier releases (v0.4.9 → v0.1.0)</summary>
 
 > **v0.4.9** (2026-07) — Typeset module: Tectonic-backed LaTeX compile (`src-tauri/src/typeset.rs`) +
 > CodeMirror-6 visual editor (`desktop/src/typeset/`, mathlive math input, slides-main fixture).

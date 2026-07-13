@@ -29,6 +29,40 @@
 
 ## 📰 最新动态
 
+> **v0.4.16** (2026-07) —— 新 `reports` kernel 模块（CLI / runtime 用的报告渲染流水线）。新增
+> `ChatNavigationTabs` + `SideTaskPanel` 桌面组件（chat 内侧任务/状态面板 + 显式导航 tab 条）。
+> 新增 `latexVscodeHighlighting` 编辑器助手（VSCode 风格 LaTeX 语法 token，给 typeset 可视化编辑
+> 器用）。`.github/workflows/release.yml` 流水线调整 + updater-manifest 生成器刷新。
+> Runtime / Tools / Chat / Tauri 后端表面更新。Chat / Lab / Typeset / API UI 打磨。
+> Notebook / knowledge / literature / studio 工具表面。
+
+> **v0.4.15** (2026-07) —— Lab Code 页集成跨平台 PTY 终端（Windows 上用 ConPTY）：
+> Rust 端 `desktop/src-tauri/src/terminal.rs` + `portable-pty` 依赖，前端
+> `desktop/src/lab/Terminal.tsx` + `@xterm/xterm` + `@xterm/addon-fit`。新增 `project_intent`
+> kernel 模块（与 `project_goal` 并列的意图持久化 + 推理流水线）。新增 `editor/kernelIntel.ts`
+> （编辑器智能助手 —— completion / diagnostics / hover）。Notebook kernel 打磨。新增依赖：
+> +@xterm/xterm、+@xterm/addon-fit、+katex、+mermaid、+pdfjs-dist。
+
+<details>
+<summary>📜 早期版本（v0.4.14 → v0.1.0，点击展开）</summary>
+
+> **v0.4.14** (2026-07) —— 新 `project_goal` kernel 模块（mission/goal 持久化 + 推理流水线）。
+> 新 `editor` 桌面模块：`SharedEditor` + `editorCommands` / `editorDecorations` /
+> `editorLanguages` / `editorState` / `editorTypes` / `editorView` —— 从 typeset 可视化编辑器
+> 抽出。新 `ProjectBriefCard` chat 组件（在 chat 面板显示项目 mission/goal）。`AGENTS.md`
+> contributor guide + `THIRD_PARTY_NOTICES.md`。CodeMirror 语言包 + `@tauri-apps/plugin-{process,updater}`
+> 依赖。
+
+> **v0.4.13** (2026-07) —— 删除 `desktop/src/sessions/Sessions.tsx`；`store.ts` 反映新的 session
+> 模型。Chat 表面打磨（`Chat.tsx`、`ChatSidebar.tsx`、`ChatThread.tsx`、`i18n.ts`）。Lab / Studio
+> / Onboarding / Scheduled-tasks UI 润色。`styles.css` 字体栈升级（`Inter` 主字体 + 回退链）
+> + `font-synthesis: none` + `text-rendering: optimizeLegibility`。
+
+> **v0.4.12** (2026-07) —— Chat 表面打磨（`Chat.tsx`、`ChatMessage.tsx`、`ChatSidebar.tsx`、
+> `WorkflowFlow.tsx`、`i18n.ts`、`model.ts`）+ 对应测试对齐。Onboarding tutorial 步骤 +
+> accent-token + reduced-motion 润色。Tauri 后端（`engine.rs`、`newapi.rs`）—— reqwest 加
+> `gzip` / `brotli` / `deflate` decoder features。aris-cli + tools runtime 表面后续打磨。
+
 > **v0.4.11** (2026-07) —— Runtime / tools / executor 表面重构（`crates/runtime` +
 > `crates/tools` + `crates/executor` + `crates/chat` + `crates/commands` +
 > `crates/compat-harness` + `crates/notebook` 约 60 个 Rust 文件）：hooks、process registry、
@@ -46,9 +80,7 @@
 > / executor 表面新增。aris-cli + Tauri 后端微调。清理：删除过时的 `idea-stage/v0.4.10..v0.4.13`
 > 计划文档。
 
-
-<details>
-<summary>📜 早期版本（v0.4.9 → v0.1.0，点击展开）</summary>
+> **v0.4.9** (2026-07) —— Typeset 模块：Tectonic 驱动的 LaTeX 编译
 
 > **v0.4.9** (2026-07) —— Typeset 模块：Tectonic 驱动的 LaTeX 编译（`src-tauri/src/typeset.rs`）+
 > CodeMirror-6 可视化编辑器（`desktop/src/typeset/`，mathlive 数学输入，slides-main 测试样本）。
