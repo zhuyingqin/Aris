@@ -597,7 +597,7 @@ pub fn load_system_prompt(
     }
 
     // Inject available skills into the system prompt
-    if let Some(skills_section) = render_available_skills() {
+    if let Some(skills_section) = render_available_skills(&cwd) {
         builder = builder.append_section(skills_section);
     }
 
@@ -651,11 +651,11 @@ struct SkillListing {
     scope: &'static str,
 }
 
-fn render_available_skills() -> Option<String> {
+fn render_available_skills(cwd: &Path) -> Option<String> {
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut entries = Vec::new();
 
-    for (scope, root) in aris_skill_search_roots() {
+    for (scope, root) in aris_skill_search_roots(cwd) {
         collect_skill_root(scope, &root, &mut seen, &mut entries);
     }
 
@@ -675,7 +675,7 @@ fn render_available_skills() -> Option<String> {
     }
 
     if crate::legacy_claude_skills_enabled() {
-        for root in legacy_claude_skill_roots() {
+        for root in legacy_claude_skill_roots(cwd) {
             collect_skill_root("Legacy", &root, &mut seen, &mut entries);
         }
     }
@@ -751,22 +751,18 @@ fn collect_skill_root(
     }
 }
 
-fn aris_skill_search_roots() -> Vec<(&'static str, PathBuf)> {
-    let mut roots = Vec::new();
-    if let Ok(cwd) = std::env::current_dir() {
-        roots.push(("Project", crate::aris_project_skills_dir(&cwd)));
-    }
-    roots.push(("User", crate::aris_user_skills_dir()));
-    roots
+fn aris_skill_search_roots(cwd: &Path) -> Vec<(&'static str, PathBuf)> {
+    vec![
+        ("Project", crate::aris_project_skills_dir(cwd)),
+        ("User", crate::aris_user_skills_dir()),
+    ]
 }
 
-fn legacy_claude_skill_roots() -> Vec<PathBuf> {
-    let mut roots = Vec::new();
-    if let Ok(cwd) = std::env::current_dir() {
-        roots.push(crate::claude_project_skills_dir(&cwd));
-    }
-    roots.push(crate::claude_user_skills_dir());
-    roots
+fn legacy_claude_skill_roots(cwd: &Path) -> Vec<PathBuf> {
+    vec![
+        crate::claude_project_skills_dir(cwd),
+        crate::claude_user_skills_dir(),
+    ]
 }
 
 fn skill_scope_rank(scope: &str) -> usize {

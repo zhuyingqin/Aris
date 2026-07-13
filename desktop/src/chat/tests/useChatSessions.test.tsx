@@ -249,7 +249,7 @@ describe("useChatSessions Tauri persistence", () => {
     );
   });
 
-  it("loads Tauri session turns from the event log before falling back to saved turn projections", async () => {
+  it("loads the saved Tauri turn projection before consulting event-log recovery", async () => {
     apiMocks.chatUiSessionsList.mockResolvedValue([{
       ...startedSession("event-chat", "event"),
       turns: [],
@@ -262,6 +262,10 @@ describe("useChatSessions Tauri persistence", () => {
       lastSeq: 2,
       turns: [{ id: "event-turn", role: "user", blocks: [{ kind: "text", text: "event sourced" }] }],
     });
+    apiMocks.chatUiSessionLoad.mockResolvedValue({
+      ...startedSession("event-chat", "event"),
+      turns: [{ id: "saved-turn", role: "user", blocks: [{ kind: "text", text: "saved projection" }] }],
+    });
 
     const { result } = renderHook(() => useChatSessions("default"));
 
@@ -269,10 +273,38 @@ describe("useChatSessions Tauri persistence", () => {
     act(() => result.current.setCurrentId("event-chat"));
 
     await waitFor(() => expect(result.current.currentSession?.turns[0]).toMatchObject({
+      id: "saved-turn",
+      blocks: [{ kind: "text", text: "saved projection" }],
+    }));
+    expect(apiMocks.chatUiSessionLoad).toHaveBeenCalledWith("event-chat");
+    expect(apiMocks.chatEventsReplay).not.toHaveBeenCalled();
+  });
+
+  it("falls back to event-log recovery when the saved Tauri projection is unavailable", async () => {
+    apiMocks.chatUiSessionsList.mockResolvedValue([{
+      ...startedSession("event-recovery-chat", "event recovery"),
+      turns: [],
+      turnsLoaded: false,
+      turnCount: 1,
+    }]);
+    apiMocks.chatUiSessionLoad.mockResolvedValue(null);
+    apiMocks.chatEventsReplay.mockResolvedValue({
+      sessionId: "event-recovery-chat",
+      eventCount: 2,
+      lastSeq: 2,
+      turns: [{ id: "event-turn", role: "user", blocks: [{ kind: "text", text: "event sourced" }] }],
+    });
+
+    const { result } = renderHook(() => useChatSessions("default"));
+
+    await waitFor(() => expect(result.current.allSessions.map((session) => session.id)).toEqual(["event-recovery-chat"]));
+    act(() => result.current.setCurrentId("event-recovery-chat"));
+
+    await waitFor(() => expect(result.current.currentSession?.turns[0]).toMatchObject({
       id: "event-turn",
       blocks: [{ kind: "text", text: "event sourced" }],
     }));
-    expect(apiMocks.chatEventsReplay).toHaveBeenCalledWith("event-chat");
-    expect(apiMocks.chatUiSessionLoad).not.toHaveBeenCalled();
+    expect(apiMocks.chatUiSessionLoad).toHaveBeenCalledWith("event-recovery-chat");
+    expect(apiMocks.chatEventsReplay).toHaveBeenCalledWith("event-recovery-chat");
   });
 });

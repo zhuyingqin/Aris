@@ -27,6 +27,7 @@ mod process_registry;
 mod project_goal;
 mod project_intent;
 mod prompt;
+mod reports;
 mod remote;
 pub mod sandbox;
 mod session;
@@ -70,10 +71,10 @@ pub use event_sink::{
     RuntimeEvent,
 };
 pub use file_ops::{
-    append_file, append_file_with_context, edit_file, edit_file_with_context, glob_search,
-    grep_search, read_file, write_file, write_file_with_context, AppendFileOutput, EditFileOutput,
-    FileChange, GlobSearchOutput, GrepSearchInput, GrepSearchOutput, ReadFileOutput,
-    StructuredPatchHunk, TextFilePayload, WriteFileOutput,
+    append_file, append_file_with_context, decode_process_text, edit_file, edit_file_with_context,
+    glob_search, grep_search, read_file, write_file, write_file_with_context, AppendFileOutput,
+    EditFileOutput, FileChange, GlobSearchOutput, GrepSearchInput, GrepSearchOutput,
+    ReadFileOutput, StructuredPatchHunk, TextFilePayload, WriteFileOutput,
 };
 pub use hooks::{HookEvent, HookRunResult, HookRunner};
 pub use hot_memory::{
@@ -111,7 +112,7 @@ pub use oauth::{
     PkceChallengeMethod, PkceCodePair,
 };
 pub use paths::{
-    migrate_legacy_project_runtime_dirs, project_agent_store_dir_from_env,
+    command_exists, migrate_legacy_project_runtime_dirs, project_agent_store_dir_from_env,
     project_run_state_dir_from_env, project_runtime_dir_for, project_runtime_dir_from_env,
     project_sessions_dir_from_env, project_workflows_dir_from_env, somniq_config_dir_from_env,
     user_workflows_dir_from_env, workspace_root_from_env, AGENTS_DIR_NAME,
@@ -150,6 +151,10 @@ pub use prompt::{
     instruction_files_fingerprint, load_system_prompt, prepend_bullets, team_orchestration_section,
     ContextFile, ProjectContext, PromptBuildError, SystemPromptBuilder,
     SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
+};
+pub use reports::{
+    format_compact_report, format_cost_report, format_status_report, render_config_report,
+    render_memory_report, StatusContext, StatusUsage,
 };
 pub use remote::{
     inherited_upstream_proxy_env, no_proxy_list, read_token, upstream_proxy_ws_url,

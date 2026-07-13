@@ -471,6 +471,49 @@ export function previewDeletePath(path: string): Promise<void> {
   return Promise.resolve();
 }
 
+export function previewDuplicatePath(path: string): PreviewFileTreeEntry {
+  const source = normalizePreviewPath(path);
+  const isDir = previewDirExists(source) && !previewFileExists(source);
+  if (!source || (!previewFileExists(source) && !isDir)) {
+    throw new Error(`Path not found: ${path}`);
+  }
+  const slash = source.lastIndexOf("/");
+  const parent = slash >= 0 ? source.slice(0, slash) : "";
+  const name = slash >= 0 ? source.slice(slash + 1) : source;
+  const extension = isDir || !name.includes(".") ? "" : name.slice(name.lastIndexOf("."));
+  const stem = extension ? name.slice(0, -extension.length) : name;
+  let target = "";
+  for (let index = 1; index <= 10_000; index += 1) {
+    const suffix = index === 1 ? " copy" : ` copy ${index}`;
+    target = [parent, `${stem}${suffix}${extension}`].filter(Boolean).join("/");
+    if (!previewFileExists(target) && !previewDirExists(target)) break;
+  }
+  if (!target || previewFileExists(target) || previewDirExists(target)) {
+    throw new Error("Could not find an available name for the duplicated entry.");
+  }
+  ensurePreviewParentDirs(target);
+  if (!isDir) {
+    if (files.has(source)) files.set(target, files.get(source) ?? "");
+    else binaryFiles.set(target, binaryFiles.get(source) ?? "");
+    return { name: previewBasename(target), path: target, isDir: false };
+  }
+
+  const prefix = `${source}/`;
+  for (const [filePath, content] of files) {
+    if (filePath.startsWith(prefix)) files.set(`${target}/${filePath.slice(prefix.length)}`, content);
+  }
+  for (const [filePath, content] of binaryFiles) {
+    if (filePath.startsWith(prefix)) binaryFiles.set(`${target}/${filePath.slice(prefix.length)}`, content);
+  }
+  for (const directory of Array.from(explicitDirs)) {
+    if (directory === source || directory.startsWith(prefix)) {
+      explicitDirs.add(directory === source ? target : `${target}/${directory.slice(prefix.length)}`);
+    }
+  }
+  explicitDirs.add(target);
+  return { name: previewBasename(target), path: target, isDir: true };
+}
+
 function outputFor(code: string, path: string): CellOutput[] {
   const trimmed = code.trim();
   if (!trimmed) return [{ output_type: "stream", name: "stdout", text: "Nothing to run.\n" }];

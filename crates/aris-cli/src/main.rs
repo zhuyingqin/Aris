@@ -39,12 +39,12 @@ use render::{MarkdownStreamState, Spinner, TerminalRenderer};
 #[cfg(test)]
 use runtime::AssistantEvent;
 use runtime::{
-    clear_oauth_credentials, generate_pkce_pair, generate_state, load_system_prompt,
-    parse_oauth_callback_request_target, save_oauth_credentials, CompactionConfig,
-    CompactionResult, ConfigLoader, ConfigSource, ContentBlock, ConversationMessage,
+    clear_oauth_credentials, format_compact_report, format_cost_report, format_status_report,
+    generate_pkce_pair, generate_state, load_system_prompt, parse_oauth_callback_request_target,
+    save_oauth_credentials, CompactionConfig, ConfigLoader, ContentBlock, ConversationMessage,
     ConversationRuntime, MessageRole, OAuthAuthorizationRequest, OAuthConfig,
-    OAuthTokenExchangeRequest, PermissionMode, ProjectContext, RuntimeError, Session, TokenUsage,
-    ToolError, ToolExecutor, UsageTracker,
+    OAuthTokenExchangeRequest, PermissionMode, ProjectContext, RuntimeError, Session,
+    StatusContext, StatusUsage, TokenUsage, ToolError, ToolExecutor, UsageTracker,
 };
 use serde_json::json;
 use tools::{execute_tool, execute_tool_with_context, mvp_tool_specs, ToolRunContext};
@@ -885,26 +885,6 @@ struct ResumeCommandOutcome {
     message: Option<String>,
 }
 
-#[derive(Debug, Clone)]
-struct StatusContext {
-    cwd: PathBuf,
-    session_path: Option<PathBuf>,
-    loaded_config_files: usize,
-    discovered_config_files: usize,
-    memory_file_count: usize,
-    project_root: Option<PathBuf>,
-    git_branch: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct StatusUsage {
-    message_count: usize,
-    turns: u32,
-    latest: TokenUsage,
-    cumulative: TokenUsage,
-    estimated_tokens: usize,
-}
-
 fn format_model_report(model: &str, message_count: usize, turns: u32) -> String {
     format!(
         "Model
@@ -981,22 +961,6 @@ fn format_permissions_switch_report(previous: &str, next: &str) -> String {
     )
 }
 
-fn format_cost_report(usage: TokenUsage) -> String {
-    format!(
-        "Cost
-  Input tokens     {}
-  Output tokens    {}
-  Cache create     {}
-  Cache read       {}
-  Total tokens     {}",
-        usage.input_tokens,
-        usage.output_tokens,
-        usage.cache_creation_input_tokens,
-        usage.cache_read_input_tokens,
-        usage.total_tokens(),
-    )
-}
-
 fn format_resume_report(session_path: &str, message_count: usize, turns: u32) -> String {
     format!(
         "Session resumed
@@ -1004,28 +968,6 @@ fn format_resume_report(session_path: &str, message_count: usize, turns: u32) ->
   Messages         {message_count}
   Turns            {turns}"
     )
-}
-
-fn format_compact_report(result: &CompactionResult) -> String {
-    let removed = result.removed_message_count;
-    let resulting_messages = result.compacted_session.messages.len();
-    let skipped = removed == 0;
-    if skipped {
-        format!(
-            "Compact\n  Result           skipped\n  Reason           no safe prefix or session below threshold\n  Messages kept    {resulting_messages}\n  Tokens before    {}\n  Tokens after     {}",
-            result.tokens_before, result.tokens_after
-        )
-    } else {
-        let saved = result.tokens_before.saturating_sub(result.tokens_after);
-        format!(
-            "Compact\n  Result           compacted\n  Summary source   {}\n  Token estimate   {}\n  Messages removed {removed}\n  Messages kept    {resulting_messages}\n  Tail preserved   {}\n  Tokens before    {}\n  Tokens after     {}\n  Tokens saved     {saved}",
-            result.summary_source.as_str(),
-            result.token_estimate_source.as_str(),
-            result.preserved_message_count,
-            result.tokens_before,
-            result.tokens_after
-        )
-    }
 }
 
 fn format_auto_compaction_notice(removed: usize) -> String {
@@ -1129,6 +1071,7 @@ fn run_resume_command(
                     },
                     default_permission_mode().as_str(),
                     &status_context(Some(session_path))?,
+                    "live-repl",
                 )),
             })
         }
@@ -1910,6 +1853,7 @@ impl LiveCli {
                 },
                 self.permission_mode.as_str(),
                 &status_context(Some(&self.session.path)).expect("status context should load"),
+                "live-repl",
             )
         );
     }
@@ -3075,7 +3019,7 @@ impl LiveCli {
         let (title, body) = parse_titled_body(&draft)
             .ok_or_else(|| "failed to parse generated PR title/body".to_string())?;
 
-        if command_exists("gh") {
+        if runtime::command_exists("gh") {
             let body_path = write_temp_text_file("aris-pr-body.md", &body)?;
             let output = Command::new("gh")
                 .args(["pr", "create", "--title", &title, "--body-file"])
@@ -3106,7 +3050,7 @@ impl LiveCli {
         let (title, body) = parse_titled_body(&draft)
             .ok_or_else(|| "failed to parse generated issue title/body".to_string())?;
 
-        if command_exists("gh") {
+        if runtime::command_exists("gh") {
             let body_path = write_temp_text_file("aris-issue-body.md", &body)?;
             let output = Command::new("gh")
                 .args(["issue", "create", "--title", &title, "--body-file"])
@@ -3298,185 +3242,18 @@ fn status_context(
     })
 }
 
-fn format_status_report(
-    model: &str,
-    usage: StatusUsage,
-    permission_mode: &str,
-    context: &StatusContext,
-) -> String {
-    [
-        format!(
-            "Status
-  Model            {model}
-  Permission mode  {permission_mode}
-  Messages         {}
-  Turns            {}
-  Estimated tokens {}",
-            usage.message_count, usage.turns, usage.estimated_tokens,
-        ),
-        format!(
-            "Usage
-  Latest total     {}
-  Cumulative input {}
-  Cumulative output {}
-  Cumulative total {}",
-            usage.latest.total_tokens(),
-            usage.cumulative.input_tokens,
-            usage.cumulative.output_tokens,
-            usage.cumulative.total_tokens(),
-        ),
-        format!(
-            "Workspace
-  Cwd              {}
-  Project root     {}
-  Git branch       {}
-  Session          {}
-  Config files     loaded {}/{}
-  Memory files     {}",
-            context.cwd.display(),
-            context
-                .project_root
-                .as_ref()
-                .map_or_else(|| "unknown".to_string(), |path| path.display().to_string()),
-            context.git_branch.as_deref().unwrap_or("unknown"),
-            context.session_path.as_ref().map_or_else(
-                || "live-repl".to_string(),
-                |path| path.display().to_string()
-            ),
-            context.loaded_config_files,
-            context.discovered_config_files,
-            context.memory_file_count,
-        ),
-    ]
-    .join(
-        "
-
-",
-    )
-}
-
 fn render_config_report(section: Option<&str>) -> Result<String, Box<dyn std::error::Error>> {
     let cwd = env::current_dir()?;
-    let loader = ConfigLoader::default_for(&cwd);
-    let discovered = loader.discover();
-    let runtime_config = loader.load()?;
-
-    let mut lines = vec![
-        format!(
-            "Config
-  Working directory {}
-  Loaded files      {}
-  Merged keys       {}",
-            cwd.display(),
-            runtime_config.loaded_entries().len(),
-            runtime_config.merged().len()
-        ),
-        "Discovered files".to_string(),
-    ];
-    for entry in discovered {
-        let source = match entry.source {
-            ConfigSource::User => "user",
-            ConfigSource::Project => "project",
-            ConfigSource::Local => "local",
-        };
-        let status = if runtime_config
-            .loaded_entries()
-            .iter()
-            .any(|loaded_entry| loaded_entry.path == entry.path)
-        {
-            "loaded"
-        } else {
-            "missing"
-        };
-        lines.push(format!(
-            "  {source:<7} {status:<7} {}",
-            entry.path.display()
-        ));
-    }
-
-    if let Some(section) = section {
-        lines.push(format!("Merged section: {section}"));
-        let value = match section {
-            "env" => runtime_config.get("env"),
-            "hooks" => runtime_config.get("hooks"),
-            "model" => runtime_config.get("model"),
-            other => {
-                lines.push(format!(
-                    "  Unsupported config section '{other}'. Use env, hooks, or model."
-                ));
-                return Ok(lines.join(
-                    "
-",
-                ));
-            }
-        };
-        lines.push(format!(
-            "  {}",
-            match value {
-                Some(value) => value.render(),
-                None => "<unset>".to_string(),
-            }
-        ));
-        return Ok(lines.join(
-            "
-",
-        ));
-    }
-
-    lines.push("Merged JSON".to_string());
-    lines.push(format!("  {}", runtime_config.as_json().render()));
-    Ok(lines.join(
-        "
-",
-    ))
+    runtime::render_config_report(&cwd, section)
+        .map_err(std::io::Error::other)
+        .map_err(Into::into)
 }
 
 fn render_memory_report() -> Result<String, Box<dyn std::error::Error>> {
     let cwd = env::current_dir()?;
-    let hot = runtime::load_hot_memory(&cwd)?;
-    let knowledge = runtime::load_knowledge_memory_catalog();
-    let mut lines = vec![
-        "Memory".to_string(),
-        format!("  Working directory {}", cwd.display()),
-        format!("  Project scope     {}", hot.project_scope),
-        format!(
-            "  Hot memory        memory={}/{} chars, user={}/{} chars",
-            hot.memory_chars, hot.memory_limit, hot.user_chars, hot.user_limit
-        ),
-        format!("  Pending writes    {}", hot.pending_count),
-        format!(
-            "  Write approval    {}",
-            runtime::memory_write_approval_enabled()
-        ),
-        format!("  Knowledge files   {}", knowledge.len()),
-        "Hot entries".to_string(),
-    ];
-    for entry in hot.user.iter().chain(hot.memory.iter()) {
-        lines.push(format!(
-            "  [{}] {} scope={} source={} expires={}",
-            entry.id,
-            entry.content,
-            entry.scope,
-            entry.source,
-            entry.expires_at.as_deref().unwrap_or("never")
-        ));
-    }
-    if hot.user.is_empty() && hot.memory.is_empty() {
-        lines.push("  No active hot-memory entries.".to_string());
-    }
-    lines.push("Knowledge catalog".to_string());
-    for entry in knowledge {
-        lines.push(format!(
-            "  {} - {} ({})",
-            entry.name,
-            entry.description,
-            entry.path.display()
-        ));
-    }
-    Ok(lines.join(
-        "
-",
-    ))
+    runtime::render_memory_report(&cwd)
+        .map_err(std::io::Error::other)
+        .map_err(Into::into)
 }
 
 fn handle_goal_command(
@@ -3972,14 +3749,6 @@ fn git_status_ok(args: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
         return Err(format!("git {} failed: {stderr}", args.join(" ")).into());
     }
     Ok(())
-}
-
-fn command_exists(name: &str) -> bool {
-    Command::new("which")
-        .arg(name)
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
 }
 
 fn write_temp_text_file(

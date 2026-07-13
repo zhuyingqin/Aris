@@ -16,6 +16,15 @@ const HOME_SESSION_ID = "chat-home";
 const SESSION_PERSIST_DELAY_MS = 250;
 const MAX_LEGACY_TAURI_LOCAL_SESSIONS_CHARS = 2_000_000;
 
+// Persistence ownership is deliberately split by concern:
+// - runtime Session is the model's compactable execution context;
+// - chat-ui-sessions is the canonical UI projection (drafts, pins, full and
+//   lazily loaded turns); and
+// - the event log is immutable audit/recovery data.
+//
+// In particular, event replay must not silently replace a saved UI projection:
+// it cannot represent all UI-only fields or omitted-turn placeholders.
+
 function isStartedSession(session: ChatSession) {
   return session.turnsLoaded === false || session.turns.length > 0;
 }
@@ -245,7 +254,7 @@ export function useChatSessions(projectId?: string | null) {
     setHomeSession(makeHomeSession(activeProjectId));
   }, [activeProjectId, allSessions, currentId, homeSession.projectId, projectKnown]);
 
-  const loadSessionFromEventLog = useCallback(async (session: ChatSession): Promise<ChatSession | null> => {
+  const recoverSessionFromEventLog = useCallback(async (session: ChatSession): Promise<ChatSession | null> => {
     try {
       const replay = await chatEventsReplay(session.id);
       if (replay.eventCount === 0 && replay.turns.length === 0) return null;
@@ -269,8 +278,9 @@ export function useChatSessions(projectId?: string | null) {
     const session = sessionsRef.current.find((item) => item.id === currentId);
     if (!session || session.turnsLoaded !== false || loadingSessionIds.current.has(currentId)) return;
     loadingSessionIds.current.add(currentId);
-    loadSessionFromEventLog(session)
-      .then((eventSession) => eventSession ?? chatUiSessionLoad<ChatSession>(currentId))
+    chatUiSessionLoad<ChatSession>(currentId)
+      .catch(() => null)
+      .then((stored) => stored ?? recoverSessionFromEventLog(session))
       .then((stored) => {
         if (!stored) throw new Error("chat session not found");
         const loaded = { ...migrateSession(stored, session.projectId), turnsLoaded: true };
@@ -281,7 +291,7 @@ export function useChatSessions(projectId?: string | null) {
       .finally(() => {
         loadingSessionIds.current.delete(currentId);
       });
-  }, [currentId, loadSessionFromEventLog, setError]);
+  }, [currentId, recoverSessionFromEventLog, setError]);
 
   const currentSession = useMemo(
     () => {

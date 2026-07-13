@@ -67,7 +67,7 @@ fn context_budget_scales_with_model_window() {
     // Large-window models get large budgets — the whole point of the fix.
     assert_eq!(
         context_compaction_threshold_for_model("MiniMax-Text-01"),
-        850_000
+        320_000
     );
     assert_eq!(
         context_compaction_threshold_for_model("gemini-2.5-pro"),

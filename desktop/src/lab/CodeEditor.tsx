@@ -4,6 +4,7 @@ import { EditorView, keymap, placeholder as placeholderExtension, type KeyBindin
 import { SharedEditor } from "../editor/SharedEditor";
 import { diffDecorations, dispatchDiffLines, type CodeDiffLine } from "../editor/editorDecorations";
 import { kernelCompletion, kernelInspect, type CompleteFn, type InspectFn } from "../editor/kernelIntel";
+import { latexVscodeHighlighting } from "../editor/latexVscodeHighlighting";
 import type { EditorLanguage, EditorUpdate, SharedEditorHandle } from "../editor/editorTypes";
 
 export type { EditorLanguage } from "../editor/editorTypes";
@@ -37,6 +38,8 @@ interface CodeEditorProps {
   completeRequest?: CompleteFn;
   /** Kernel object introspection for Shift+Tab docs (notebook cells). */
   inspectRequest?: InspectFn;
+  /** Applies the VS Code Dark+ LaTeX palette without changing other code surfaces. */
+  latexVscodeTheme?: boolean;
 }
 
 export default function CodeEditor({
@@ -55,6 +58,7 @@ export default function CodeEditor({
   onDoubleClickPos,
   completeRequest,
   inspectRequest,
+  latexVscodeTheme = false,
 }: CodeEditorProps) {
   const handleRef = useRef<SharedEditorHandle | null>(null);
   const onChangeRef = useRef(onChange);
@@ -96,6 +100,7 @@ export default function CodeEditor({
       }),
       diffDecorations(diffLines),
     ];
+    if (latexVscodeTheme) list.push(latexVscodeHighlighting);
     if (wrap) list.push(EditorView.lineWrapping);
     if (placeholder) list.push(placeholderExtension(placeholder));
     if (extraKeymap?.length) list.push(Prec.high(keymap.of(extraKeymap)));
@@ -123,7 +128,7 @@ export default function CodeEditor({
 
   return (
     <SharedEditor
-      className="lab-editor"
+      className={`lab-editor${latexVscodeTheme ? " typeset-latex-vscode" : ""}`}
       doc={value}
       language={language}
       surface="code"

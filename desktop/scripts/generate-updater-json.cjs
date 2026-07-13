@@ -35,6 +35,7 @@ const bundleDir = path.resolve(
   ),
 );
 const outputPath = path.resolve(bundleDir, argValue("--out", "latest.json"));
+const platform = argValue("--platform", "windows");
 const version = argValue("--version", packageJson.version);
 const repository = process.env.GITHUB_REPOSITORY || "zhuyingqin/Aris";
 const tag = process.env.GITHUB_REF_NAME || `v${version}`;
@@ -46,40 +47,61 @@ if (!fs.existsSync(bundleDir)) {
 }
 
 const files = fs.readdirSync(bundleDir);
-const installerName =
-  files.find((name) => name === `SomniQ Studio_${version}_x64-setup.exe`) ||
-  files.find((name) => name === `ARIS Studio_${version}_x64-setup.exe`) ||
-  files.find((name) => name.endsWith("_x64-setup.exe"));
+const updaterBundleName =
+  platform === "windows"
+    ? files.find((name) => name === `SomniQ Studio_${version}_x64-setup.exe`) ||
+      files.find((name) => name === `ARIS Studio_${version}_x64-setup.exe`) ||
+      files.find((name) => name.endsWith("_x64-setup.exe"))
+    : platform === "macos"
+      ? files.find((name) => name.endsWith(".app.tar.gz"))
+      : null;
 
-if (!installerName) {
-  throw new Error(`Could not find SomniQ Studio NSIS installer in ${bundleDir}`);
+if (!updaterBundleName) {
+  throw new Error(`Could not find a ${platform} updater bundle in ${bundleDir}`);
 }
 
-const signaturePath = path.join(bundleDir, `${installerName}.sig`);
+const signaturePath = path.join(bundleDir, `${updaterBundleName}.sig`);
 if (!fs.existsSync(signaturePath)) {
   throw new Error(`Missing updater signature: ${signaturePath}`);
 }
 
 const signature = fs.readFileSync(signaturePath, "utf8").trim();
-const installerAssetName =
+const updaterAssetName =
   argValue("--asset-name", process.env.ARIS_UPDATE_ASSET_NAME) ||
-  githubReleaseAssetName(installerName);
-const installerUrl = `${releaseBaseUrl.replace(/\/+$/, "")}/${encodeReleaseAssetName(installerAssetName)}`;
+  githubReleaseAssetName(updaterBundleName);
+const updaterUrl = `${releaseBaseUrl.replace(/\/+$/, "")}/${encodeReleaseAssetName(updaterAssetName)}`;
 const notes = process.env.RELEASE_NOTES || `SomniQ Studio ${version}`;
 
-const windowsEntry = {
+const updaterEntry = {
   signature,
-  url: installerUrl,
+  url: updaterUrl,
 };
+
+const platforms =
+  platform === "windows"
+    ? {
+        "windows-x86_64": updaterEntry,
+        "windows-x86_64-msvc": updaterEntry,
+      }
+    : platform === "macos"
+      ? {
+          // The universal bundle works on both CPU architectures. The `-app`
+          // variants are requested by macOS app bundles before the standard
+          // Tauri updater target is tried.
+          "darwin-aarch64-app": updaterEntry,
+          "darwin-aarch64": updaterEntry,
+          "darwin-x86_64-app": updaterEntry,
+          "darwin-x86_64": updaterEntry,
+        }
+      : (() => {
+          throw new Error(`Unsupported updater platform: ${platform}`);
+        })();
 
 const manifest = {
   version,
   notes,
   pub_date: new Date().toISOString(),
-  platforms: {
-    "windows-x86_64": windowsEntry,
-    "windows-x86_64-msvc": windowsEntry,
-  },
+  platforms,
 };
 
 fs.writeFileSync(outputPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");

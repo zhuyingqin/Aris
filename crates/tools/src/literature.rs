@@ -21,6 +21,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use crate::{collapse_whitespace, read_json_file};
+
 const PAPERS_DIR: &str = "papers";
 const LIBRARY_FILE: &str = "library.json";
 const HTTP_TIMEOUT: Duration = Duration::from_secs(25);
@@ -95,13 +97,13 @@ pub fn run_literature_search(input: LiteratureSearchInput) -> Result<String, Str
 pub fn run_literature_library_upsert(
     input: LiteratureLibraryUpsertInput,
 ) -> Result<String, String> {
-    let base = workspace_base()?;
+    let base = runtime::workspace_root_from_env();
     let stats = library_upsert_at(&base, &input.papers, input.search.as_ref())?;
     serde_json::to_string_pretty(&stats).map_err(|e| e.to_string())
 }
 
 pub fn run_literature_pdf_download(input: LiteraturePdfDownloadInput) -> Result<String, String> {
-    let base = workspace_base()?;
+    let base = runtime::workspace_root_from_env();
     let result = download_pdf_at(
         &base,
         &input.url,
@@ -119,10 +121,6 @@ pub fn run_literature_browser_download_task(
     serde_json::to_string_pretty(&task).map_err(|e| e.to_string())
 }
 
-fn workspace_base() -> Result<PathBuf, String> {
-    std::env::current_dir().map_err(|e| e.to_string())
-}
-
 // ── Library persistence ─────────────────────────────────────────────────────
 
 pub fn library_path_at(base: &Path) -> PathBuf {
@@ -138,25 +136,18 @@ pub fn library_load_at(base: &Path) -> Result<Value, String> {
     let backup = path.with_extension("json.bak");
     if !path.exists() {
         return if backup.exists() {
-            read_library_json(&backup)
+            read_json_file(&backup)
         } else {
             Ok(empty_library())
         };
     }
-    match read_library_json(&path) {
+    match read_json_file(&path) {
         Ok(library) => Ok(library),
-        Err(primary_error) if backup.exists() => {
-            read_library_json(&backup).map_err(|backup_error| {
-                format!("{primary_error}; backup recovery failed: {backup_error}")
-            })
-        }
+        Err(primary_error) if backup.exists() => read_json_file(&backup).map_err(|backup_error| {
+            format!("{primary_error}; backup recovery failed: {backup_error}")
+        }),
         Err(error) => Err(error),
     }
-}
-
-fn read_library_json(path: &Path) -> Result<Value, String> {
-    let raw = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-    serde_json::from_str(&raw).map_err(|e| format!("{} is not valid JSON: {e}", path.display()))
 }
 
 pub fn library_save_at(base: &Path, library: &Value) -> Result<(), String> {
@@ -243,7 +234,7 @@ pub fn library_upsert_at(
             "id": search_id,
             "query": search.query,
             "sources": search.sources,
-            "ranAt": now_iso(),
+            "ranAt": runtime::now_iso8601(),
             "resultCount": records.len(),
             "newCount": added,
         });
@@ -310,7 +301,7 @@ fn paper_from_record(record: &Value, search_id: Option<&str>) -> Value {
         "unread": true,
         "source": record_str(record, "source"),
         "citedBy": record["citedBy"].as_u64(),
-        "addedAt": now_iso(),
+        "addedAt": runtime::now_iso8601(),
         "pdf": { "status": "none", "url": record["pdfUrl"].as_str() },
         "evidence": [],
     })
@@ -1605,10 +1596,6 @@ pub fn sanitize_file_name(name: &str) -> Result<String, String> {
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
-fn collapse_whitespace(value: &str) -> String {
-    value.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
 fn strip_version(id: &str) -> String {
     let id = id.trim();
     if let Some(pos) = id.rfind('v') {
@@ -1652,21 +1639,6 @@ fn epoch_millis() -> u128 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis())
         .unwrap_or_default()
-}
-
-fn now_iso() -> String {
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or_default();
-    let of_day = secs % 86_400;
-    format!(
-        "{}T{:02}:{:02}:{:02}.000Z",
-        runtime::today_iso(),
-        of_day / 3600,
-        (of_day % 3600) / 60,
-        of_day % 60
-    )
 }
 
 #[cfg(test)]

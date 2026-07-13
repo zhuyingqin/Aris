@@ -120,6 +120,22 @@ fn reads_gb18030_text_files() {
 }
 
 #[test]
+fn decode_process_text_falls_back_to_gbk_for_cp936_subprocess_output() {
+    let expected = "中文 REPL 输出";
+    let (bytes, _, had_errors) = GBK.encode(expected);
+    assert!(!had_errors);
+    assert_eq!(super::decode_process_text(&bytes), expected);
+}
+
+#[test]
+fn decode_process_text_never_errors_on_arbitrary_bytes() {
+    let garbage = [0xff_u8, 0xfe, 0x00, 0x01, 0x80, 0x81];
+    // Must not panic; a lossy decode is an acceptable last resort for bytes
+    // that are neither UTF-8 nor a recognized Windows codepage.
+    let _ = super::decode_process_text(&garbage);
+}
+
+#[test]
 fn rejects_binary_files_with_an_actionable_error() {
     let _lock = crate::test_env_lock();
     let _env = EnvGuard::unset("ARIS_WORKSPACE_ROOT");

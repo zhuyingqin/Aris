@@ -11,7 +11,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_json::{json, Value};
 
-use crate::layout;
+use crate::{layout, read_json_file};
 
 const USER_STATE_FIELDS: &[&str] = &["title", "pinned", "notes", "pageReviews"];
 
@@ -61,15 +61,15 @@ pub fn library_load_at(base: &Path) -> Result<Value, String> {
     let backup = path.with_extension("json.bak");
     let mut library = if !path.exists() {
         if backup.exists() {
-            read_library_json(&backup)?
+            read_json_file(&backup)?
         } else {
             empty_library()
         }
     } else {
-        match read_library_json(&path) {
+        match read_json_file(&path) {
             Ok(library) => library,
             Err(primary_error) if backup.exists() => {
-                read_library_json(&backup).map_err(|backup_error| {
+                read_json_file(&backup).map_err(|backup_error| {
                     format!("{primary_error}; backup recovery failed: {backup_error}")
                 })?
             }
@@ -153,12 +153,6 @@ fn percent_encode_path_segment(value: &str) -> String {
             _ => format!("%{byte:02X}"),
         })
         .collect()
-}
-
-fn read_library_json(path: &Path) -> Result<Value, String> {
-    let raw = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
-    serde_json::from_str(&raw)
-        .map_err(|error| format!("{} is not valid JSON: {error}", path.display()))
 }
 
 fn merge_artifacts(library: &mut Value, records: &[Value]) -> Result<(usize, usize), String> {
@@ -295,7 +289,7 @@ fn normalize_artifact(record: &Value) -> Value {
         .or_insert_with(|| Value::Array(Vec::new()));
     artifact
         .entry("generatedAt".to_string())
-        .or_insert_with(|| Value::String(now_iso()));
+        .or_insert_with(|| Value::String(runtime::now_iso8601()));
     Value::Object(artifact)
 }
 
@@ -379,7 +373,7 @@ fn discover_artifact_in_dir(
         "kind": kind,
         "title": title,
         "status": if pdf.is_some() || html.is_some() { "ready" } else { "draft" },
-        "generatedAt": now_iso(),
+        "generatedAt": runtime::now_iso8601(),
     });
     for (field, path) in [
         ("texPath", tex),
@@ -440,7 +434,7 @@ fn discover_web_artifacts_at(base: &Path) -> Vec<Value> {
                 "kind": "web",
                 "title": title_from_id_part(&id_part),
                 "status": "ready",
-                "generatedAt": now_iso(),
+                "generatedAt": runtime::now_iso8601(),
                 "htmlPath": relative_display(base, &path),
             }));
         }
@@ -456,7 +450,7 @@ fn artifact_from_single_file(base: &Path, kind: &str, path: &Path, id_part: &str
         "kind": kind,
         "title": title_from_id_part(id_part),
         "status": if ready { "ready" } else { "draft" },
-        "generatedAt": now_iso(),
+        "generatedAt": runtime::now_iso8601(),
     });
     artifact[field] = Value::String(relative_display(base, path));
     Some(artifact)
@@ -573,21 +567,6 @@ fn first_with_extension(directory: &Path, extension: &str) -> Option<PathBuf> {
                 .is_some_and(|value| value.eq_ignore_ascii_case(extension))
         })
         .min()
-}
-
-fn now_iso() -> String {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or_default();
-    let of_day = secs % 86_400;
-    format!(
-        "{}T{:02}:{:02}:{:02}.000Z",
-        runtime::today_iso(),
-        of_day / 3600,
-        (of_day % 3600) / 60,
-        of_day % 60
-    )
 }
 
 fn relative_display(base: &Path, path: &Path) -> String {

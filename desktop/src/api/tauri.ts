@@ -6,6 +6,7 @@ import {
   previewExecuteFile,
   previewCreateDir,
   previewDeletePath,
+  previewDuplicatePath,
   previewFileTree,
   previewRenamePath,
   previewReadBytes,
@@ -681,6 +682,11 @@ export const fileRename = (path: string, newPath: string) =>
     :
   invoke<FileTreeEntry>("file_rename", { path, newPath });
 
+export const fileDuplicate = (path: string) =>
+  isFilePreviewMode()
+    ? preview<FileTreeEntry>(previewDuplicatePath(path))
+    : invoke<FileTreeEntry>("file_duplicate", { path });
+
 export const fileDelete = (path: string) =>
   isFilePreviewMode() ? previewDeletePath(path) :
   invoke<void>("file_delete", { path });
@@ -699,6 +705,9 @@ export const fileRead = (path: string, limit?: number) =>
 export const fileOpen = (path: string) =>
   isFilePreviewMode() ? Promise.resolve() :
   invoke<void>("file_open", { path });
+export const fileReveal = (path: string) =>
+  isFilePreviewMode() ? Promise.resolve() :
+  invoke<void>("file_reveal", { path });
 export const projectChatStarters = () => invoke<string[]>("project_chat_starters");
 
 export interface LatexCompileResult {
@@ -715,14 +724,32 @@ export interface LatexCompileResult {
   returnCodeInterpretation?: string | null;
 }
 
-export const latexCompile = (inputPath: string, outputPath?: string | null) =>
+export interface LatexCompileProgressEvent {
+  runId: string;
+  stdout: string;
+  stderr: string;
+  elapsedMs: number;
+}
+
+export const onLatexCompileProgress = (handler: (event: LatexCompileProgressEvent) => void) =>
+  isFilePreviewMode() ? Promise.resolve(noopUnlisten) :
+  listen<LatexCompileProgressEvent>("latex-compile-progress", (e) => handler(e.payload));
+
+export const latexCompile = (
+  inputPath: string,
+  outputPath?: string | null,
+  cleanCache = false,
+  runId?: string | null,
+) =>
   isFilePreviewMode()
     ? preview<LatexCompileResult>({
         success: true,
         inputPath,
         outputPath: outputPath ?? inputPath.replace(/\.tex$/i, ".pdf"),
         engine: "xelatex",
-        stdout: "Browser preview is showing the bundled compiled PDF.",
+        stdout: cleanCache
+          ? "LaTeX cache cleared before recompiling. Browser preview is showing the bundled compiled PDF."
+          : "Browser preview is showing the bundled compiled PDF.",
         stderr: "",
         exitCode: 0,
         interrupted: false,
@@ -733,6 +760,8 @@ export const latexCompile = (inputPath: string, outputPath?: string | null) =>
     : invoke<LatexCompileResult>("latex_compile", {
         inputPath,
         outputPath: outputPath ?? null,
+        cleanCache,
+        runId: runId ?? null,
       });
 
 /** A SyncTeX match: `pointX/pointY` is the exact synchronized point (for
@@ -861,6 +890,8 @@ export interface ChatSendRequest {
   images?: ChatImageInput[];
   model?: string | null;
   projectId?: string | null;
+  /** Keep runtime/session traces outside project storage and discard them after each turn. */
+  ephemeral?: boolean;
 }
 
 export interface ChatContextToolCall {

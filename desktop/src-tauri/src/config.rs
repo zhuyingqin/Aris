@@ -207,8 +207,9 @@ pub(crate) fn current_executor_object() -> Result<Map<String, Value>, String> {
 pub(crate) fn persist_newapi_executor_credentials(
     base_url: &str,
     api_key: &str,
+    token_id: Option<i64>,
 ) -> Result<(), String> {
-    persist_values(&[
+    let mut values: Vec<(&str, Value)> = vec![
         (
             "newapi_executor_base_url",
             Value::String(normalize_openai_base_url(base_url)),
@@ -217,7 +218,30 @@ pub(crate) fn persist_newapi_executor_credentials(
             "newapi_executor_api_key",
             Value::String(api_key.to_string()),
         ),
-    ])
+    ];
+    if let Some(token_id) = token_id {
+        values.push(("newapi_token_id", Value::Number(token_id.into())));
+    }
+    persist_values(&values)
+}
+
+/// Return a previously-revealed downstream key if it was fetched for the same
+/// gateway base URL and token id. new-api masks keys in its token-list
+/// response, so callers must `POST /api/token/{id}/key` to reveal the raw
+/// value — an endpoint the gateway rate-limits. Reusing the cached key lets
+/// periodic account refreshes (see `App.tsx` polling) skip that call entirely
+/// once a token has been revealed once, instead of hitting it every cycle.
+pub(crate) fn cached_newapi_token_key(base_url: &str, token_id: i64) -> Option<String> {
+    let obj = load_object();
+    let cached_base = get_non_empty(&obj, "newapi_executor_base_url")?;
+    let cached_id = obj.get("newapi_token_id").and_then(Value::as_i64)?;
+    if cached_id != token_id {
+        return None;
+    }
+    if url_match_key(&cached_base) != url_match_key(&normalize_openai_base_url(base_url)) {
+        return None;
+    }
+    get_non_empty(&obj, "newapi_executor_api_key")
 }
 
 fn mask(key: &str) -> String {
@@ -406,6 +430,7 @@ pub(crate) fn clear_newapi_session() -> Result<(), String> {
         "newapi_access_token",
         "newapi_executor_base_url",
         "newapi_executor_api_key",
+        "newapi_token_id",
         "managed_models",
     ] {
         obj.remove(key);

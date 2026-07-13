@@ -167,6 +167,12 @@ async fn parse_json(response: reqwest::Response, label: &str) -> Result<Value, S
         .map_err(|error| format!("{label}响应读取失败: {error}"))?;
 
     parse_json_bytes(&bytes).map_err(|error| {
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            return format!("{label}请求过于频繁，请稍后重试 (HTTP 429)");
+        }
+        if !status.is_success() && bytes.is_empty() {
+            return format!("{label}请求失败: HTTP {status}，请稍后重试");
+        }
         let preview = response_preview(&bytes);
         format!(
             "{label}响应解析失败: HTTP {status}, Content-Type {content_type}: {error}; 响应内容: {preview}"
@@ -649,7 +655,7 @@ async fn get_or_create_token(
     client: &reqwest::Client,
     base: &str,
     session: &NewApiSession,
-) -> Result<String, String> {
+) -> Result<(String, Option<i64>), String> {
     let token = match find_token(client, base, session).await? {
         Some(token) => token,
         None => match create_token(client, base, session).await? {
@@ -660,10 +666,18 @@ async fn get_or_create_token(
         },
     };
     if let Some(key) = token.key {
-        return Ok(key);
+        return Ok((key, token.id));
     }
     let token_id = token.id.ok_or_else(|| "令牌未返回可用 ID".to_string())?;
-    fetch_token_key(client, base, session, token_id).await
+    // The list response only ever returns a masked key, so a fresh reveal call
+    // is otherwise required on *every* refresh. Reuse a previously-revealed
+    // key for the same token id to avoid tripping the gateway's rate limit on
+    // that endpoint (see `config::cached_newapi_token_key`).
+    if let Some(cached) = config::cached_newapi_token_key(base, token_id) {
+        return Ok((cached, Some(token_id)));
+    }
+    let key = fetch_token_key(client, base, session, token_id).await?;
+    Ok((key, Some(token_id)))
 }
 
 fn stored_session() -> Result<(String, NewApiSession), String> {
@@ -700,9 +714,9 @@ async fn refresh_downstream_token(
     session: &NewApiSession,
     model: &str,
 ) -> Result<String, String> {
-    let token = get_or_create_token(client, base, session).await?;
+    let (token, token_id) = get_or_create_token(client, base, session).await?;
     let executor_base_url = format!("{base}/v1");
-    config::persist_newapi_executor_credentials(&executor_base_url, &token)?;
+    config::persist_newapi_executor_credentials(&executor_base_url, &token, token_id)?;
     let model = model.trim();
     if !model.is_empty() {
         let _ = config::record_verified_executor("openai", model, Some(&executor_base_url), &token);

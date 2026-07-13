@@ -204,7 +204,7 @@ pub fn resolve_sandbox_status(config: &SandboxConfig, cwd: &Path) -> SandboxStat
 #[must_use]
 pub fn resolve_sandbox_status_for_request(request: &SandboxRequest, cwd: &Path) -> SandboxStatus {
     let container = detect_container_environment();
-    let namespace_supported = cfg!(target_os = "linux") && command_exists("unshare");
+    let namespace_supported = cfg!(target_os = "linux") && crate::command_exists("unshare");
     let network_supported = namespace_supported;
     let filesystem_active =
         request.enabled && request.filesystem_mode != FilesystemIsolationMode::Off;
@@ -318,11 +318,6 @@ fn normalize_mounts(mounts: &[String], cwd: &Path) -> Vec<String> {
         })
         .map(|path| path.display().to_string())
         .collect()
-}
-
-fn command_exists(command: &str) -> bool {
-    env::var_os("PATH")
-        .is_some_and(|paths| env::split_paths(&paths).any(|path| path.join(command).exists()))
 }
 
 #[cfg(test)]

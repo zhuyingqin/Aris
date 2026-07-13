@@ -312,6 +312,29 @@ describe("ChatMessage rendering", () => {
     expect(screen.getByText("Model returned an empty response.")).toBeTruthy();
   });
 
+  it("does not hide blocks in a single long turn", () => {
+    render(
+      <ChatMessage
+        turn={{
+          id: "user-long-turn",
+          role: "user",
+          blocks: Array.from({ length: 61 }, (_, index) => ({
+            kind: "text" as const,
+            text: `step ${index}`,
+          })),
+        }}
+        canRetry={false}
+        onEdit={() => undefined}
+        onRetry={() => undefined}
+        onContinue={() => undefined}
+      />,
+    );
+
+    expect(screen.getByText("step 0")).toBeTruthy();
+    expect(screen.getByText("step 60")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Show .* earlier steps/ })).toBeNull();
+  });
+
   it("offers to load omitted saved turns from the notice", async () => {
     const user = userEvent.setup();
     const onLoadOmittedTurn = vi.fn();
