@@ -2276,10 +2276,36 @@ fn valid_public_stun_uri(value: &str) -> bool {
         Some((host, port)) => (host, Some(port)),
         None => (endpoint, None),
     };
-    if host.parse::<std::net::IpAddr>().is_ok() || !valid_public_dns_name(host) {
+    let valid_host = match host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(address)) => valid_public_ipv4_address(address),
+        Ok(std::net::IpAddr::V6(_)) => false,
+        Err(_) => valid_public_dns_name(host),
+    };
+    if !valid_host {
         return false;
     }
     port.is_none_or(|port| !port.is_empty() && port.parse::<u16>().is_ok_and(|port| port != 0))
+}
+
+fn valid_public_ipv4_address(address: std::net::Ipv4Addr) -> bool {
+    let [first, second, third, _] = address.octets();
+    if first == 0
+        || first == 10
+        || first == 127
+        || first >= 224
+        || (first == 100 && (64..=127).contains(&second))
+        || (first == 169 && second == 254)
+        || (first == 172 && (16..=31).contains(&second))
+        || (first == 192 && second == 0 && third == 0)
+        || (first == 192 && second == 0 && third == 2)
+        || (first == 192 && second == 168)
+        || (first == 198 && (second == 18 || second == 19))
+        || (first == 198 && second == 51 && third == 100)
+        || (first == 203 && second == 0 && third == 113)
+    {
+        return false;
+    }
+    true
 }
 
 fn valid_public_dns_name(host: &str) -> bool {
@@ -4500,6 +4526,7 @@ mod tests {
         let mobile = TestDevice::new(DeviceKind::Mobile, "Research phone");
         let pairing_invitation = invitation(&desktop);
         let ice_servers = vec![
+            "stun:106.53.28.124:3478".to_owned(),
             "stun:stun.example.com:3478".to_owned(),
             "stuns:stun.example.org:5349".to_owned(),
         ];
@@ -4527,7 +4554,9 @@ mod tests {
 
         for invalid in [
             "turn:turn.example.com:3478",
+            "stun:10.0.0.1:3478",
             "stun:127.0.0.1:3478",
+            "stun:192.0.2.1:3478",
             "stun:localhost:3478",
             "stun:stun.example.com:0",
             "stun:stun.example.com?transport=udp",
