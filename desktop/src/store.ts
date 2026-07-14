@@ -1,13 +1,19 @@
 import { create } from "zustand";
 import type { DesktopProject } from "./types";
 import {
+  configSet,
   isTauri,
+  newapiBootstrap,
+  newapiLogin,
+  newapiLogout,
+  newapiRegister,
   onProjectChanged,
   projectAdd,
   projectsGet,
   projectsReorder,
   projectSetCurrent,
   stateDir as fetchStateDir,
+  type NewApiLoginResult,
 } from "./api/tauri";
 import { isLabPreviewMode, isTypesetPreviewMode } from "./api/labPreview";
 
@@ -87,7 +93,105 @@ function applyLanguage(language: Language) {
   }
 }
 
+// Desktop account login is intentionally separate from remote-device pairing.
+// The former selects the user's NewAPI executor; the latter uses a QR-issued
+// device credential and must never consume this account token.
+const AUTH_FLAG_KEY = "somniq-auth-v1";
+const AUTH_LEGACY_FLAG_KEY = "aris-auth-v1";
+const AUTH_SERVER_KEY = "somniq-auth-server-v1";
+const AUTH_LEGACY_SERVER_KEY = "aris-auth-server-v1";
+const ACCOUNT_CACHE_KEY = "somniq-account-v1";
+const ACCOUNT_LEGACY_CACHE_KEY = "aris-account-v1";
+export const DEFAULT_AUTH_SERVER = "http://106.53.28.124:18080";
+const DEFAULT_MODEL = "MiniMax-M3";
+
+export function isManagedAuthInvalidError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  const lower = message.toLowerCase();
+  return (
+    lower.includes("login expired") ||
+    lower.includes("sign in again") ||
+    lower.includes("invalid access token") ||
+    lower.includes("invalid token") ||
+    lower.includes("401 unauthorized") ||
+    (lower.includes("unauthorized") && lower.includes("token"))
+  );
+}
+
+function readStoredServer(): string {
+  try {
+    return localStorage.getItem(AUTH_SERVER_KEY)
+      ?? localStorage.getItem(AUTH_LEGACY_SERVER_KEY)
+      ?? DEFAULT_AUTH_SERVER;
+  } catch {
+    return DEFAULT_AUTH_SERVER;
+  }
+}
+
+function initialAuthed(): boolean {
+  if (!isTauri()) return true;
+  try {
+    return (localStorage.getItem(AUTH_FLAG_KEY) ?? localStorage.getItem(AUTH_LEGACY_FLAG_KEY)) === "1";
+  } catch {
+    return false;
+  }
+}
+
+async function persistManagedAuthResult(result: NewApiLoginResult) {
+  await configSet({
+    executorProvider: "openai",
+    executorModel: result.model,
+    executorBaseUrl: result.baseUrl,
+    executorApiKey: result.token,
+  });
+}
+
+function markAuthed(server: string) {
+  try {
+    localStorage.setItem(AUTH_FLAG_KEY, "1");
+    localStorage.setItem(AUTH_SERVER_KEY, server);
+    localStorage.removeItem(AUTH_LEGACY_FLAG_KEY);
+    localStorage.removeItem(AUTH_LEGACY_SERVER_KEY);
+  } catch {
+    // Storage disabled: the in-memory session remains authenticated.
+  }
+}
+
+function rememberAuthServer(server: string) {
+  try {
+    localStorage.setItem(AUTH_SERVER_KEY, server);
+    localStorage.removeItem(AUTH_LEGACY_SERVER_KEY);
+  } catch {
+    // Ignore unavailable browser storage.
+  }
+}
+
+function clearStoredAuth() {
+  try {
+    localStorage.removeItem(AUTH_FLAG_KEY);
+    localStorage.removeItem(AUTH_LEGACY_FLAG_KEY);
+    localStorage.removeItem(ACCOUNT_CACHE_KEY);
+    localStorage.removeItem(ACCOUNT_LEGACY_CACHE_KEY);
+  } catch {
+    // Ignore unavailable browser storage.
+  }
+}
+
 interface AppState {
+  /** True once the desktop user has signed in, or in browser preview. */
+  authed: boolean;
+  /** Last-used NewAPI endpoint shown by the desktop login form. */
+  authServer: string;
+  login: (server: string, username: string, password: string) => Promise<void>;
+  validateAuth: () => Promise<boolean>;
+  register: (
+    server: string,
+    username: string,
+    password: string,
+    options?: { email?: string; verificationCode?: string; affCode?: string; turnstile?: string },
+  ) => Promise<void>;
+  logout: () => void;
+
   tab: Tab;
   setTab: (tab: Tab) => void;
 
@@ -130,6 +234,52 @@ applyTheme(initialTheme);
 applyLanguage(initialLanguage);
 
 export const useStore = create<AppState>((set, get) => ({
+  authed: initialAuthed(),
+  authServer: readStoredServer(),
+  login: async (server, username, password) => {
+    const trimmedServer = (server.trim() || DEFAULT_AUTH_SERVER).replace(/\/+$/, "");
+    if (!trimmedServer) throw new Error("请输入服务器地址");
+    const result = await newapiLogin(trimmedServer, DEFAULT_MODEL, username, password);
+    await persistManagedAuthResult(result);
+    markAuthed(trimmedServer);
+    set({ authed: true, authServer: trimmedServer });
+  },
+  validateAuth: async () => {
+    if (!isTauri() || !get().authed) return true;
+    try {
+      await newapiBootstrap();
+      return true;
+    } catch (error) {
+      if (isManagedAuthInvalidError(error)) {
+        get().logout();
+        return false;
+      }
+      return true;
+    }
+  },
+  register: async (server, username, password, options = {}) => {
+    const trimmedServer = (server.trim() || DEFAULT_AUTH_SERVER).replace(/\/+$/, "");
+    if (!trimmedServer) throw new Error("请输入服务器地址");
+    await newapiRegister({
+      baseUrl: trimmedServer,
+      username,
+      password,
+      email: options.email,
+      verificationCode: options.verificationCode,
+      affCode: options.affCode,
+      turnstile: options.turnstile,
+    });
+    rememberAuthServer(trimmedServer);
+    set({ authServer: trimmedServer });
+  },
+  logout: () => {
+    clearStoredAuth();
+    if (isTauri()) {
+      void newapiLogout().catch(() => undefined);
+    }
+    set({ authed: false });
+  },
+
   tab: isTypesetPreviewMode() ? "typeset" : isLabPreviewMode() ? "lab" : "chat",
   setTab: (tab) => set({ tab }),
 

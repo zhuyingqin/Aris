@@ -61,6 +61,7 @@ export interface ConfigView {
   scopusKeyMasked?: string | null;
   language?: string | null;
   memoryWriteApproval: boolean;
+  managedModels?: string[];
   verifiedExecutors?: { provider: string; model: string; baseUrl: string }[];
 }
 

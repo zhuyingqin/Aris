@@ -41,6 +41,7 @@ type AppShellCopy = {
   maximizeWindow: string;
   closeWindow: string;
   settings: string;
+  logout: string;
   currentProject: string;
   noProject: string;
   projects: string;
@@ -81,6 +82,7 @@ const APP_COPY: Record<Language, AppShellCopy> = {
     maximizeWindow: "最大化窗口",
     closeWindow: "关闭窗口",
     settings: "设置",
+    logout: "退出登录",
     currentProject: "当前项目",
     noProject: "无项目",
     projects: "项目",
@@ -119,6 +121,7 @@ const APP_COPY: Record<Language, AppShellCopy> = {
     maximizeWindow: "Maximize window",
     closeWindow: "Close window",
     settings: "Settings",
+    logout: "Sign out",
     currentProject: "Current project",
     noProject: "No project",
     projects: "Projects",
@@ -255,6 +258,15 @@ const GearIcon = () => (
   </svg>
 );
 
+const LogoutIcon = () => (
+  <svg width="16" height="16" viewBox="0 0 16 16" fill="none"
+    stroke="currentColor" strokeWidth="1.45" strokeLinecap="round" strokeLinejoin="round"
+    aria-hidden="true">
+    <path d="M6.5 3H3.8a1 1 0 00-1 1v8a1 1 0 001 1h2.7" />
+    <path d="M9.5 5.2L12.3 8l-2.8 2.8M12.1 8H6.2" />
+  </svg>
+);
+
 const PRIMARY_NAV_ITEMS: NavItem[] = [
   {
     id: "chat", label: "Chat",
@@ -340,6 +352,7 @@ export default function App() {
   const language = useStore((s) => s.language);
   const tab = useStore((s) => s.tab);
   const setTab = useStore((s) => s.setTab);
+  const logout = useStore((s) => s.logout);
   const deferredTab = useDeferredValue(tab);
   const [, startTabTransition] = useTransition();
   const stateDir = useStore((s) => s.stateDir);
@@ -937,6 +950,15 @@ export default function App() {
             aria-label={copy.settings}
           >
             <GearIcon />
+          </button>
+          <button
+            className="app-local-settings-button app-local-logout-button"
+            type="button"
+            onClick={logout}
+            title={copy.logout}
+            aria-label={copy.logout}
+          >
+            <LogoutIcon />
           </button>
         </div>
       </header>

@@ -157,6 +157,105 @@ export const configTest = (patch: ConfigPatch) =>
 export const providerTest = (input: { baseUrl: string; model?: string; apiKey?: string }) =>
   invoke<ConfigTestDetail>("provider_test", { input });
 
+// Managed desktop login (NewAPI) is distinct from the passwordless remote
+// pairing gateway. These calls are used only by the desktop login shell.
+export interface NewApiLoginResult {
+  /** OpenAI-compatible base URL for the executor (`<base>/v1`). */
+  baseUrl: string;
+  model: string;
+  /** Usable downstream key (`sk-...`) for the executor. */
+  token: string;
+}
+
+export interface NewApiAuthStatus {
+  registerEnabled: boolean;
+  passwordRegisterEnabled: boolean;
+  passwordLoginEnabled: boolean;
+  emailVerification: boolean;
+  turnstileCheck: boolean;
+  turnstileSiteKey: string;
+  userAgreementEnabled: boolean;
+  privacyPolicyEnabled: boolean;
+}
+
+export interface NewApiUsageLogEntry {
+  id: string;
+  createdAt: number;
+  model: string;
+  tokenName: string;
+  channel: string;
+  requestId: string;
+  upstreamRequestId: string;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  quota: number;
+  status: string;
+  typeLabel: string;
+}
+
+export interface NewApiUsageLogPage {
+  items: NewApiUsageLogEntry[];
+  total: number;
+  page: number;
+  pageSize: number;
+}
+
+export interface NewApiGroupOption {
+  name: string;
+  desc: string;
+  ratio: string;
+}
+
+export interface NewApiAccount {
+  username: string;
+  displayName: string;
+  role?: number;
+  isAdmin?: boolean;
+  subscriptionName?: string;
+  subscriptionDesc?: string;
+  subscriptionQuota?: number;
+  subscriptionUsedQuota?: number;
+  group: string;
+  groupDesc: string;
+  groupRatio: string;
+  quota: number;
+  usedQuota: number;
+  models: string[];
+  model: string;
+}
+
+export const newapiAuthStatus = (baseUrl: string) =>
+  invoke<NewApiAuthStatus>("newapi_auth_status", { baseUrl });
+export const newapiLogout = () => invoke<void>("newapi_logout");
+export const newapiLogin = (
+  baseUrl: string,
+  model: string,
+  username: string,
+  password: string,
+) => invoke<NewApiLoginResult>("newapi_login", { baseUrl, model, username, password });
+export const newapiRegister = (input: {
+  baseUrl: string;
+  username: string;
+  password: string;
+  email?: string;
+  verificationCode?: string;
+  affCode?: string;
+  turnstile?: string;
+}) => invoke<void>("newapi_register", { input });
+export const newapiSendVerification = (input: {
+  baseUrl: string;
+  email: string;
+  turnstile?: string;
+}) => invoke<void>("newapi_send_verification", { input });
+export const newapiModels = () => invoke<string[]>("newapi_models");
+export const newapiBootstrap = () => invoke<NewApiAccount>("newapi_bootstrap");
+export const newapiGroups = () => invoke<NewApiGroupOption[]>("newapi_groups");
+export const newapiUpdateGroup = (group: string) =>
+  invoke<NewApiAccount>("newapi_update_group", { group });
+export const newapiUsageLogs = (page: number, pageSize: number) =>
+  invoke<NewApiUsageLogPage>("newapi_usage_logs", { page, pageSize });
+
 export const appUpdateCheck = async (): Promise<AppUpdateInfo> => {
   if (!isTauri()) return { available: false };
   const { check } = await import("@tauri-apps/plugin-updater");

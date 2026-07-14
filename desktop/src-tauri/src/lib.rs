@@ -10,6 +10,7 @@ mod lab;
 mod literature;
 mod mail;
 mod mcp;
+mod newapi;
 mod process;
 mod projects;
 mod remote;
@@ -334,6 +335,16 @@ pub fn run() {
             config::config_set,
             config::config_test,
             config::provider_test,
+            newapi::newapi_auth_status,
+            newapi::newapi_logout,
+            newapi::newapi_login,
+            newapi::newapi_register,
+            newapi::newapi_send_verification,
+            newapi::newapi_models,
+            newapi::newapi_bootstrap,
+            newapi::newapi_groups,
+            newapi::newapi_update_group,
+            newapi::newapi_usage_logs,
             connectors::connector_plugins_list,
             connectors::connector_connect,
             scheduled::scheduled_tasks_list,

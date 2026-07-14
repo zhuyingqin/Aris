@@ -2924,6 +2924,16 @@ pub fn chat_model_options() -> ChatModelOptions {
 
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut options: Vec<ChatModelOption> = Vec::new();
+    for model in crate::config::managed_model_summaries() {
+        if model.trim().is_empty() || !seen.insert(model.clone()) {
+            continue;
+        }
+        options.push(ChatModelOption {
+            value: model.clone(),
+            label: model,
+            description: Some("Managed account".to_string()),
+        });
+    }
     for (entry_provider, model, base_url) in crate::config::verified_executor_summaries() {
         if model.trim().is_empty() || !seen.insert(model.clone()) {
             continue;
@@ -2987,6 +2997,9 @@ pub fn chat_model_set(model: String, persist: Option<bool>) -> Result<ChatStatus
     if persist == Some(false) {
         let (model, provider, _) = resolve_executor_for_model(Some(trimmed))?;
         return Ok(chat_status_for(model, provider));
+    }
+    if crate::config::switch_to_managed_executor(trimmed)? {
+        return Ok(chat_status());
     }
     let switched = crate::config::switch_to_verified_executor(trimmed)?;
     if switched {
@@ -4960,7 +4973,25 @@ fn model_selection_items(
     items
 }
 
+fn model_selection_items_owned(
+    current: &str,
+    choices: &[(String, String, String)],
+) -> Vec<ChatCommandSelectionItem> {
+    let refs = choices
+        .iter()
+        .map(|(value, label, description)| (value.as_str(), label.as_str(), description.as_str()))
+        .collect::<Vec<_>>();
+    model_selection_items(current, &refs)
+}
+
 fn executor_model_selection(provider: &str, current: &str) -> ChatCommandSelection {
+    let managed_choices = crate::config::managed_model_summaries()
+        .into_iter()
+        .map(|model| {
+            let label = model.clone();
+            (model, label, "Managed account".to_string())
+        })
+        .collect::<Vec<_>>();
     let anthropic_choices = [
         (
             "claude-opus-4-7",
@@ -5027,6 +5058,13 @@ fn executor_model_selection(provider: &str, current: &str) -> ChatCommandSelecti
     } else {
         &openai_compat_choices[..]
     };
+    let mut items = model_selection_items(current, choices);
+    if !managed_choices.is_empty() {
+        let mut managed_items = model_selection_items_owned(current, &managed_choices);
+        managed_items.retain(|item| !items.iter().any(|existing| existing.value == item.value));
+        managed_items.extend(items);
+        items = managed_items;
+    }
     ChatCommandSelection {
         command: "model".to_string(),
         title: "Select executor model".to_string(),
@@ -5034,7 +5072,7 @@ fn executor_model_selection(provider: &str, current: &str) -> ChatCommandSelecti
             "Provider: {provider}. You can still type /model <model-id>."
         )),
         current: Some(current.to_string()),
-        items: model_selection_items(current, choices),
+        items,
     }
 }
 
