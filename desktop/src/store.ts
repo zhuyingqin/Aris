@@ -1,13 +1,8 @@
 import { create } from "zustand";
 import type { DesktopProject } from "./types";
 import {
-  configSet,
   isTauri,
-  newapiBootstrap,
-  newapiLogin,
-  newapiLogout,
-  newapiRegister,
-  type NewApiLoginResult,
+  onProjectChanged,
   projectAdd,
   projectsGet,
   projectsReorder,
@@ -92,106 +87,7 @@ function applyLanguage(language: Language) {
   }
 }
 
-// ── Managed login (new-api gateway) ───────────────────────────────────────────
-// A signed-in flag gates the UI; the actual authorization is the downstream
-// token written into the executor config. Browser preview has no backend, so it
-// is never gated.
-
-const AUTH_FLAG_KEY = "somniq-auth-v1";
-const AUTH_LEGACY_FLAG_KEY = "aris-auth-v1";
-const AUTH_SERVER_KEY = "somniq-auth-server-v1";
-const AUTH_LEGACY_SERVER_KEY = "aris-auth-server-v1";
-const ACCOUNT_CACHE_KEY = "somniq-account-v1";
-const ACCOUNT_LEGACY_CACHE_KEY = "aris-account-v1";
-export const DEFAULT_AUTH_SERVER = "http://106.53.28.124:18080";
-const DEFAULT_MODEL = "MiniMax-M3";
-
-export function isManagedAuthInvalidError(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error);
-  const lower = message.toLowerCase();
-  return (
-    lower.includes("login expired") ||
-    lower.includes("sign in again") ||
-    lower.includes("invalid access token") ||
-    lower.includes("invalid token") ||
-    lower.includes("401 unauthorized") ||
-    (lower.includes("unauthorized") && lower.includes("token"))
-  );
-}
-
-function readStoredServer(): string {
-  try {
-    return localStorage.getItem(AUTH_SERVER_KEY) ?? localStorage.getItem(AUTH_LEGACY_SERVER_KEY) ?? DEFAULT_AUTH_SERVER;
-  } catch {
-    return DEFAULT_AUTH_SERVER;
-  }
-}
-
-function initialAuthed(): boolean {
-  if (!isTauri()) return true; // no gateway in plain-browser preview
-  try {
-    return (localStorage.getItem(AUTH_FLAG_KEY) ?? localStorage.getItem(AUTH_LEGACY_FLAG_KEY)) === "1";
-  } catch {
-    return false;
-  }
-}
-
-async function persistManagedAuthResult(result: NewApiLoginResult) {
-  await configSet({
-    executorProvider: "openai",
-    executorModel: result.model,
-    executorBaseUrl: result.baseUrl,
-    executorApiKey: result.token,
-  });
-}
-
-function markAuthed(server: string) {
-  try {
-    localStorage.setItem(AUTH_FLAG_KEY, "1");
-    localStorage.setItem(AUTH_SERVER_KEY, server);
-    localStorage.removeItem(AUTH_LEGACY_FLAG_KEY);
-    localStorage.removeItem(AUTH_LEGACY_SERVER_KEY);
-  } catch {
-    // Storage disabled — session still authed for this run.
-  }
-}
-
-function rememberAuthServer(server: string) {
-  try {
-    localStorage.setItem(AUTH_SERVER_KEY, server);
-    localStorage.removeItem(AUTH_LEGACY_SERVER_KEY);
-  } catch {
-    // ignore
-  }
-}
-
-function clearStoredAuth() {
-  try {
-    localStorage.removeItem(AUTH_FLAG_KEY);
-    localStorage.removeItem(AUTH_LEGACY_FLAG_KEY);
-    localStorage.removeItem(ACCOUNT_CACHE_KEY);
-    localStorage.removeItem(ACCOUNT_LEGACY_CACHE_KEY);
-  } catch {
-    // ignore
-  }
-}
-
 interface AppState {
-  /** True once the user has signed in to the managed gateway (or in preview). */
-  authed: boolean;
-  /** Last-used gateway server URL, prefilled in the login form. */
-  authServer: string;
-  /** Sign in, then persist the returned executor config. Throws on failure. */
-  login: (server: string, username: string, password: string) => Promise<void>;
-  validateAuth: () => Promise<boolean>;
-  register: (
-    server: string,
-    username: string,
-    password: string,
-    options?: { email?: string; verificationCode?: string; affCode?: string; turnstile?: string },
-  ) => Promise<void>;
-  logout: () => void;
-
   tab: Tab;
   setTab: (tab: Tab) => void;
 
@@ -234,52 +130,6 @@ applyTheme(initialTheme);
 applyLanguage(initialLanguage);
 
 export const useStore = create<AppState>((set, get) => ({
-  authed: initialAuthed(),
-  authServer: readStoredServer(),
-  login: async (server, username, password) => {
-    const trimmedServer = (server.trim() || DEFAULT_AUTH_SERVER).replace(/\/+$/, "");
-    if (!trimmedServer) throw new Error("请输入服务器地址");
-    const result = await newapiLogin(trimmedServer, DEFAULT_MODEL, username, password);
-    await persistManagedAuthResult(result);
-    markAuthed(trimmedServer);
-    set({ authed: true, authServer: trimmedServer });
-  },
-  validateAuth: async () => {
-    if (!isTauri() || !get().authed) return true;
-    try {
-      await newapiBootstrap();
-      return true;
-    } catch (error) {
-      if (isManagedAuthInvalidError(error)) {
-        get().logout();
-        return false;
-      }
-      return true;
-    }
-  },
-  register: async (server, username, password, options = {}) => {
-    const trimmedServer = (server.trim() || DEFAULT_AUTH_SERVER).replace(/\/+$/, "");
-    if (!trimmedServer) throw new Error("请输入服务器地址");
-    await newapiRegister({
-      baseUrl: trimmedServer,
-      username,
-      password,
-      email: options.email,
-      verificationCode: options.verificationCode,
-      affCode: options.affCode,
-      turnstile: options.turnstile,
-    });
-    rememberAuthServer(trimmedServer);
-    set({ authServer: trimmedServer });
-  },
-  logout: () => {
-    clearStoredAuth();
-    if (isTauri()) {
-      void newapiLogout().catch(() => undefined);
-    }
-    set({ authed: false });
-  },
-
   tab: isTypesetPreviewMode() ? "typeset" : isLabPreviewMode() ? "lab" : "chat",
   setTab: (tab) => set({ tab }),
 
@@ -399,6 +249,25 @@ export const useStore = create<AppState>((set, get) => ({
       .then((view) => set({ projects: view.projects, currentProject: view.currentProject }))
       .catch((error) => set({ error: String(error) }));
 
-    return () => {};
+    let disposed = false;
+    let unlistenProjectChanged: (() => void) | undefined;
+    void onProjectChanged(() => {
+      void projectsGet()
+        .then((view) => {
+          if (!disposed) {
+            set({ projects: view.projects, currentProject: view.currentProject });
+          }
+        })
+        .catch((error) => {
+          if (!disposed) set({ error: String(error) });
+        });
+    }).then((unlisten) => {
+      if (disposed) unlisten();
+      else unlistenProjectChanged = unlisten;
+    }).catch(() => undefined);
+    return () => {
+      disposed = true;
+      unlistenProjectChanged?.();
+    };
   },
 }));

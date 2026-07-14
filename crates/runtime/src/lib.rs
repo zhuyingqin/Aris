@@ -27,8 +27,8 @@ mod process_registry;
 mod project_goal;
 mod project_intent;
 mod prompt;
-mod reports;
 mod remote;
+mod reports;
 pub mod sandbox;
 mod session;
 mod session_index;
@@ -152,14 +152,14 @@ pub use prompt::{
     ContextFile, ProjectContext, PromptBuildError, SystemPromptBuilder,
     SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
 };
-pub use reports::{
-    format_compact_report, format_cost_report, format_status_report, render_config_report,
-    render_memory_report, StatusContext, StatusUsage,
-};
 pub use remote::{
     inherited_upstream_proxy_env, no_proxy_list, read_token, upstream_proxy_ws_url,
     RemoteSessionContext, UpstreamProxyBootstrap, UpstreamProxyState, DEFAULT_REMOTE_BASE_URL,
     DEFAULT_SESSION_TOKEN_PATH, DEFAULT_SYSTEM_CA_BUNDLE, NO_PROXY_HOSTS, UPSTREAM_PROXY_ENV_KEYS,
+};
+pub use reports::{
+    format_compact_report, format_cost_report, format_status_report, render_config_report,
+    render_memory_report, StatusContext, StatusUsage,
 };
 pub use session::{
     ContentBlock, ConversationMessage, MessageRole, Session, SessionCompactionRecord, SessionError,

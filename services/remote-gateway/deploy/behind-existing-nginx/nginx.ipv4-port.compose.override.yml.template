@@ -1,0 +1,7 @@
+# Add this as a third Compose overlay only for the IP-address-certificate
+# variant. It preserves the existing 80/443 mappings and publishes the
+# dedicated Nginx TLS listener; no SomniQ internal service gets a host port.
+services:
+  nginx:
+    ports:
+      - "8443:8443"

@@ -68,6 +68,20 @@ import type {
   McpTestResult,
   PermissionModeView,
   ProjectView,
+  RemoteAuditEntry,
+  RemoteConnectPhoneResult,
+  RemoteControlEnableInput,
+  RemoteControlStatus,
+  RemoteDevice,
+  RemotePairingApprovalInput,
+  RemotePairingInvitation,
+  RemotePendingPairing,
+  RemoteP2pAnswerInput,
+  RemoteP2pDataInput,
+  RemoteP2pFailureInput,
+  RemoteP2pIceCandidateInput,
+  RemoteP2pPendingSnapshot,
+  RemoteP2pSessionInput,
   ScheduledTask,
   ScheduledTaskInput,
   SessionSummary,
@@ -89,6 +103,48 @@ export const projectSetCurrent = (id: string) =>
 export const projectsReorder = (projectIds: string[]) =>
   invoke<ProjectView>("projects_reorder", { projectIds });
 
+// Remote control (P0/P1). These commands configure the desktop-side agent;
+// the network transport itself never becomes a frontend-invokable API.
+export const remoteControlStatus = () => invoke<RemoteControlStatus>("remote_control_status");
+export const remoteControlEnable = (input: RemoteControlEnableInput) =>
+  invoke<RemoteControlStatus>("remote_control_enable", { input });
+export const remoteControlConnectPhone = () =>
+  invoke<RemoteConnectPhoneResult>("remote_control_connect_phone");
+export const remoteControlDisable = () => invoke<RemoteControlStatus>("remote_control_disable");
+export const remoteControlDevices = () => invoke<RemoteDevice[]>("remote_control_devices");
+export const remoteControlStartPairing = () =>
+  invoke<RemotePairingInvitation>("remote_control_start_pairing");
+export const remoteControlPendingPairing = (pairingId: string) =>
+  invoke<RemotePendingPairing | null>("remote_control_pending_pairing", { pairingId });
+export const remoteControlApprovePairing = (input: RemotePairingApprovalInput) =>
+  invoke<RemoteDevice>("remote_control_approve_pairing", { input });
+export const remoteControlDiscardPairing = (pairingId: string) =>
+  invoke<void>("remote_control_discard_pairing", { pairingId });
+export const remoteControlRevokeDevice = (deviceId: string) =>
+  invoke<void>("remote_control_revoke_device", { deviceId });
+export const remoteControlAudit = (limit?: number) =>
+  invoke<RemoteAuditEntry[]>("remote_control_audit", { limit });
+
+// P2 WebRTC bridge. These are intentionally narrow renderer-to-Rust calls:
+// the renderer handles browser RTC APIs, while Rust retains transport keys,
+// pairing authorization, replay windows, and the gateway bearer credential.
+export const remoteControlP2pPending = () =>
+  invoke<RemoteP2pPendingSnapshot>("remote_control_p2p_pending");
+export const remoteControlP2pAnswer = (input: RemoteP2pAnswerInput) =>
+  invoke<void>("remote_control_p2p_answer", { input });
+export const remoteControlP2pIceCandidate = (input: RemoteP2pIceCandidateInput) =>
+  invoke<void>("remote_control_p2p_ice_candidate", { input });
+export const remoteControlP2pIceComplete = (input: RemoteP2pSessionInput) =>
+  invoke<void>("remote_control_p2p_ice_complete", { input });
+export const remoteControlP2pOpened = (input: RemoteP2pSessionInput) =>
+  invoke<void>("remote_control_p2p_opened", { input });
+export const remoteControlP2pFailed = (input: RemoteP2pFailureInput) =>
+  invoke<void>("remote_control_p2p_failed", { input });
+export const remoteControlP2pFrame = (input: RemoteP2pDataInput) =>
+  invoke<string>("remote_control_p2p_frame", { input });
+export const remoteControlP2pClosed = (input: RemoteP2pSessionInput) =>
+  invoke<void>("remote_control_p2p_closed", { input });
+
 // ── Settings / Skills / Sessions (P1) ─────────────────────────────────────────
 
 export const configGet = () => invoke<ConfigView>("config_get");
@@ -101,121 +157,6 @@ export const configTest = (patch: ConfigPatch) =>
 export const providerTest = (input: { baseUrl: string; model?: string; apiKey?: string }) =>
   invoke<ConfigTestDetail>("provider_test", { input });
 
-// ── Managed login (new-api gateway) ───────────────────────────────────────────
-
-export interface NewApiLoginResult {
-  /** OpenAI-compatible base URL for the executor (`<base>/v1`). */
-  baseUrl: string;
-  model: string;
-  /** Usable downstream key (`sk-…`) for the executor. */
-  token: string;
-}
-
-export interface NewApiAuthStatus {
-  registerEnabled: boolean;
-  passwordRegisterEnabled: boolean;
-  passwordLoginEnabled: boolean;
-  emailVerification: boolean;
-  turnstileCheck: boolean;
-  turnstileSiteKey: string;
-  userAgreementEnabled: boolean;
-  privacyPolicyEnabled: boolean;
-}
-
-export const newapiAuthStatus = (baseUrl: string) =>
-  invoke<NewApiAuthStatus>("newapi_auth_status", { baseUrl });
-export const newapiLogout = () => invoke<void>("newapi_logout");
-
-/** Sign in to a new-api gateway; returns an executor config for the user. */
-export const newapiLogin = (
-  baseUrl: string,
-  model: string,
-  username: string,
-  password: string,
-) =>
-  invoke<NewApiLoginResult>("newapi_login", { baseUrl, model, username, password });
-export const newapiRegister = (input: {
-  baseUrl: string;
-  username: string;
-  password: string;
-  email?: string;
-  verificationCode?: string;
-  affCode?: string;
-  turnstile?: string;
-}) => invoke<void>("newapi_register", { input });
-export const newapiSendVerification = (input: {
-  baseUrl: string;
-  email: string;
-  turnstile?: string;
-}) => invoke<void>("newapi_send_verification", { input });
-export const newapiModels = () => invoke<string[]>("newapi_models");
-
-export interface NewApiUsageLogEntry {
-  id: string;
-  createdAt: number;
-  model: string;
-  tokenName: string;
-  channel: string;
-  requestId: string;
-  upstreamRequestId: string;
-  promptTokens: number;
-  completionTokens: number;
-  totalTokens: number;
-  quota: number;
-  status: string;
-  typeLabel: string;
-}
-
-export interface NewApiUsageLogPage {
-  items: NewApiUsageLogEntry[];
-  total: number;
-  page: number;
-  pageSize: number;
-}
-
-export interface NewApiGroupOption {
-  name: string;
-  desc: string;
-  ratio: string;
-}
-
-export interface NewApiAccount {
-  username: string;
-  displayName: string;
-  /** new-api numeric role, when exposed by the gateway. */
-  role?: number;
-  /** True when the account can manage administrator-only settings. */
-  isAdmin?: boolean;
-  /** Human-facing subscription/plan name if the gateway exposes one. */
-  subscriptionName?: string;
-  /** Human-facing subscription/plan description if the gateway exposes one. */
-  subscriptionDesc?: string;
-  /** Remaining active subscription quota, in new-api credit units. */
-  subscriptionQuota?: number;
-  /** Active subscription quota consumed so far, in new-api credit units. */
-  subscriptionUsedQuota?: number;
-  /** new-api user group. */
-  group: string;
-  /** Human description of the current group. */
-  groupDesc: string;
-  /** Price multiplier of the current group ("1.5", "自动"). */
-  groupRatio: string;
-  /** Remaining quota balance, in new-api credit units. */
-  quota: number;
-  /** Quota consumed so far, in new-api credit units. */
-  usedQuota: number;
-  models: string[];
-  /** Currently selected executor model. */
-  model: string;
-}
-
-/** One-shot account/entitlements projection for the signed-in user. */
-export const newapiBootstrap = () => invoke<NewApiAccount>("newapi_bootstrap");
-export const newapiGroups = () => invoke<NewApiGroupOption[]>("newapi_groups");
-export const newapiUpdateGroup = (group: string) =>
-  invoke<NewApiAccount>("newapi_update_group", { group });
-export const newapiUsageLogs = (page: number, pageSize: number) =>
-  invoke<NewApiUsageLogPage>("newapi_usage_logs", { page, pageSize });
 export const appUpdateCheck = async (): Promise<AppUpdateInfo> => {
   if (!isTauri()) return { available: false };
   const { check } = await import("@tauri-apps/plugin-updater");
@@ -346,6 +287,18 @@ export const mailSend = (accountId: string, draft: MailDraft) =>
   invoke<void>("mail_send", { accountId, draft });
 export const onMailNewMessage = (handler: (event: MailNewMessageEvent) => void) =>
   listen<MailNewMessageEvent>("mail-new-message", (e) => handler(e.payload));
+
+export interface RemoteChatSessionUpdatedEvent {
+  sessionId: string;
+}
+
+export const onRemoteChatSessionUpdated = (
+  handler: (event: RemoteChatSessionUpdatedEvent) => void,
+) => listen<RemoteChatSessionUpdatedEvent>("remote-chat-session-updated", (e) => handler(e.payload));
+
+/** Emitted after a project is switched locally or by a paired phone. */
+export const onProjectChanged = (handler: () => void) =>
+  listen("project-changed", () => handler());
 
 export const skillsList = () => invoke<SkillMeta[]>("skills_list");
 export const skillView = (name: string) =>

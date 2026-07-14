@@ -1,49 +1,27 @@
-import React, { useEffect, useState } from "react";
+import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
-import Login from "./auth/Login";
+import { isTauri } from "./api/tauri";
 import ErrorBoundary from "./ErrorBoundary";
-import { useStore } from "./store";
+import { RemoteP2pBridge } from "./remote/RemoteP2pBridge";
 import "./styles.css";
 
-/** Gate the app shell behind the managed-gateway login. */
+/**
+ * The desktop workspace is local-first. Remote pairing is authorized by the
+ * QR ceremony and the paired-device credential, so opening the desktop must
+ * not depend on a separate gateway or account login.
+ */
 function Root() {
-  const authed = useStore((s) => s.authed);
-  const validateAuth = useStore((s) => s.validateAuth);
-  const [checkingAuth, setCheckingAuth] = useState(false);
-
-  useEffect(() => {
-    let cancelled = false;
-    if (!authed) {
-      setCheckingAuth(false);
-      return () => {
-        cancelled = true;
-      };
-    }
-    setCheckingAuth(true);
-    validateAuth().finally(() => {
-      if (!cancelled) setCheckingAuth(false);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [authed, validateAuth]);
-
-  if (authed && checkingAuth) {
-    return (
-      <div className="auth-checking" role="status">
-        Verifying sign-in...
-      </div>
-    );
-  }
-
-  return authed ? <App /> : <Login />;
+  return <App />;
 }
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <ErrorBoundary>
-      <Root />
+      <>
+        {isTauri() && <RemoteP2pBridge />}
+        <Root />
+      </>
     </ErrorBoundary>
   </React.StrictMode>,
 );

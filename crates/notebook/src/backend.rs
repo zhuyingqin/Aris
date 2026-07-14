@@ -7,7 +7,9 @@
 
 use std::time::Duration;
 
-use crate::kernel::{CompleteOutcome, ExecuteOutcome, InspectOutcome, KernelSession, OutputCallback};
+use crate::kernel::{
+    CompleteOutcome, ExecuteOutcome, InspectOutcome, KernelSession, OutputCallback,
+};
 use crate::matlab::MatlabSession;
 use crate::NotebookError;
 
@@ -69,7 +71,11 @@ impl KernelHandle {
 
     /// Tab-completion. Only the Jupyter backend supports it; MATLAB returns
     /// nothing rather than erroring, so the editor just shows no suggestions.
-    pub fn complete(&self, code: &str, cursor_pos: usize) -> Result<CompleteOutcome, NotebookError> {
+    pub fn complete(
+        &self,
+        code: &str,
+        cursor_pos: usize,
+    ) -> Result<CompleteOutcome, NotebookError> {
         match self {
             KernelHandle::Jupyter(k) => k.complete(code, cursor_pos),
             KernelHandle::Matlab(_) => Ok(CompleteOutcome::default()),

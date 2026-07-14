@@ -9712,6 +9712,31 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   color: var(--text);
 }
 
+.app-head-actions .app-local-settings-button {
+  display: inline-flex;
+  width: 30px;
+  height: 30px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-2);
+  color: var(--text-dim);
+}
+
+.app-head-actions .app-local-settings-button:hover,
+.app-head-actions .app-local-settings-button:focus-visible {
+  border-color: color-mix(in srgb, var(--accent) 56%, var(--border));
+  background: var(--bg-3);
+  color: var(--text);
+}
+
+.app-head-actions .app-local-settings-button svg {
+  width: 16px;
+  height: 16px;
+}
+
 .chat-welcome-highlight {
   color: var(--accent-2);
   -webkit-text-fill-color: var(--accent-2);
@@ -10559,6 +10584,458 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
 
 .sp-settings-page .sp-btn-primary {
   box-shadow: none;
+}
+
+/* Remote Agent settings: local-first configuration and device revocation only.
+   Pairing approval is deliberately handled by the desktop pairing flow, not
+   by a manual form in this surface. */
+.sp-settings-page .sp-remote-section {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.sp-settings-page .sp-remote-section .sp-section-head {
+  margin-bottom: 0;
+}
+
+.sp-remote-status-card {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  min-width: 0;
+  padding: 12px 13px;
+  border: 1px solid var(--settings-border);
+  border-radius: 8px;
+  background: var(--settings-surface-2);
+}
+
+.sp-remote-status-card.is-enabled {
+  border-color: color-mix(in srgb, var(--green) 42%, var(--settings-border));
+}
+
+.sp-remote-status-dot {
+  width: 9px;
+  height: 9px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: var(--settings-muted);
+}
+
+.sp-remote-status-card.is-enabled .sp-remote-status-dot {
+  background: var(--green);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--green) 13%, transparent);
+}
+
+.sp-remote-status-copy {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.sp-remote-status-copy strong,
+.sp-remote-identity strong {
+  color: var(--settings-text);
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.sp-remote-status-copy span,
+.sp-remote-identity span {
+  color: var(--settings-muted);
+  font-size: 12px;
+  line-height: 1.42;
+}
+
+.sp-remote-identity {
+  display: flex;
+  flex: 0 1 220px;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 120px;
+  padding-left: 12px;
+  border-left: 1px solid var(--settings-border);
+}
+
+.sp-remote-gateway-form {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+}
+
+.sp-remote-field {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+  color: var(--settings-text);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.sp-remote-field input,
+.sp-remote-field textarea {
+  width: 100%;
+  height: 34px;
+  min-width: 0;
+  padding: 0 10px;
+  border: 1px solid var(--settings-border);
+  border-radius: 7px;
+  background: var(--settings-surface-2);
+  color: var(--settings-text);
+  font: inherit;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.sp-remote-field textarea {
+  height: auto;
+  min-height: 52px;
+  padding: 8px 10px;
+  resize: vertical;
+}
+
+.sp-remote-field input:focus,
+.sp-remote-field textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+.sp-remote-field small {
+  color: var(--settings-muted);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.45;
+}
+
+.sp-remote-message {
+  padding: 9px 11px;
+  border: 1px solid color-mix(in srgb, var(--amber) 42%, var(--settings-border));
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--amber) 7%, var(--settings-surface-2));
+  color: var(--settings-text);
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.sp-remote-pairing-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 13px;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--settings-border));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent) 7%, var(--settings-surface-2));
+}
+
+.sp-remote-notice-icon {
+  display: grid;
+  width: 19px;
+  height: 19px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--accent) 50%, var(--settings-border));
+  border-radius: 50%;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.sp-remote-pairing-notice strong {
+  color: var(--settings-text);
+  font-size: 12px;
+}
+
+.sp-remote-pairing-notice p {
+  margin: 3px 0 0;
+  color: var(--settings-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.sp-remote-pairing-flow {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 13px;
+  border: 1px solid var(--settings-border);
+  border-radius: 8px;
+  background: var(--settings-surface-2);
+}
+
+.sp-remote-pairing-card {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 14px;
+  align-items: center;
+}
+
+.sp-remote-qr-wrap {
+  display: grid;
+  width: 320px;
+  aspect-ratio: 1;
+  place-items: center;
+  box-sizing: border-box;
+  padding: 12px;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.sp-remote-qr {
+  display: block;
+  width: 100%;
+  height: 100%;
+  image-rendering: pixelated;
+}
+
+.sp-remote-pairing-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  min-width: 0;
+}
+
+.sp-remote-pairing-actions p {
+  margin: 0;
+  color: var(--settings-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.sp-remote-pairing-actions > div,
+.sp-remote-pairing-actions-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.sp-remote-pairing-approval {
+  grid-column: 1 / -1;
+  padding-top: 12px;
+  border-top: 1px solid var(--settings-border);
+}
+
+.sp-remote-pairing-approval > div:first-child {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.sp-remote-pairing-approval > div:first-child strong {
+  color: var(--settings-text);
+  font-size: 13px;
+}
+
+.sp-remote-pairing-approval > div:first-child span {
+  color: var(--settings-muted);
+  font-size: 12px;
+}
+
+.sp-remote-scope-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  margin: 12px 0;
+  padding: 0;
+  border: 0;
+}
+
+.sp-remote-scope-picker legend {
+  margin-bottom: 7px;
+  color: var(--settings-muted);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.sp-remote-scope-picker label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--settings-text);
+  font-size: 12px;
+}
+
+.sp-remote-scope-picker input {
+  accent-color: var(--accent);
+}
+
+.sp-remote-devices {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.sp-remote-devices-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.sp-remote-empty {
+  padding: 16px;
+  border: 1px dashed var(--settings-border-strong);
+  border-radius: 8px;
+  color: var(--settings-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.sp-remote-device-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sp-remote-device {
+  padding: 12px;
+  border: 1px solid var(--settings-border);
+  border-radius: 8px;
+  background: var(--settings-surface-2);
+}
+
+.sp-remote-device.is-revoked {
+  opacity: 0.72;
+}
+
+.sp-remote-device-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.sp-remote-device-head > div:first-child {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.sp-remote-device-head strong {
+  overflow: hidden;
+  color: var(--settings-text);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sp-remote-device-state {
+  flex: 0 0 auto;
+  padding: 2px 7px;
+  border: 1px solid color-mix(in srgb, var(--green) 35%, var(--settings-border));
+  border-radius: 999px;
+  color: var(--green);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.sp-remote-device-state.is-revoked {
+  border-color: color-mix(in srgb, var(--settings-muted) 50%, var(--settings-border));
+  color: var(--settings-muted);
+}
+
+.sp-remote-revoke-button {
+  height: 29px;
+}
+
+.sp-remote-device-details {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px 16px;
+  margin: 11px 0 0;
+}
+
+.sp-remote-device-details div {
+  min-width: 0;
+}
+
+.sp-remote-device-details dt {
+  color: var(--settings-muted);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.sp-remote-device-details dd {
+  margin: 2px 0 0;
+  color: var(--settings-text);
+  font-size: 11px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.sp-remote-device-details .sp-remote-fingerprint {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.sp-remote-revoke-confirm {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 12px;
+  padding-top: 11px;
+  border-top: 1px solid color-mix(in srgb, var(--red) 28%, var(--settings-border));
+  color: var(--settings-text);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.sp-remote-revoke-confirm > div {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 7px;
+}
+
+@media (max-width: 760px) {
+  .sp-settings-tabs {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .sp-remote-status-card,
+  .sp-remote-gateway-form,
+  .sp-remote-pairing-card,
+  .sp-remote-revoke-confirm {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .sp-remote-pairing-card {
+    display: flex;
+  }
+
+  .sp-remote-qr-wrap {
+    align-self: center;
+    width: min(320px, 100%);
+  }
+
+  .sp-remote-identity {
+    padding-top: 9px;
+    padding-left: 0;
+    border-top: 1px solid var(--settings-border);
+    border-left: 0;
+  }
+
+  .sp-remote-gateway-form .sp-btn {
+    width: 100%;
+  }
+
+  .sp-remote-device-details {
+    grid-template-columns: 1fr;
+  }
+
+  .sp-remote-revoke-confirm > div {
+    width: 100%;
+  }
+
+  .sp-remote-revoke-confirm .sp-btn {
+    flex: 1 1 0;
+  }
 }
 
 .app-head-actions {

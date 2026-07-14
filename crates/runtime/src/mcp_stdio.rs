@@ -464,6 +464,32 @@ impl McpServerManager {
         &mut self,
         server_name: &str,
     ) -> Result<Vec<ManagedMcpTool>, McpServerManagerError> {
+        // A child can close its stdio pipes just before Windows updates its
+        // process status. In that narrow interval `try_wait()` reports it as
+        // alive, so the first tools/list read observes EOF. Discovery is
+        // idempotent, unlike a tool call, so rebuild the process and retry it
+        // once for an explicit transport-close error.
+        let result = match self.discover_server_tools_once(server_name).await {
+            Ok(tools) => Ok(tools),
+            Err(error) if is_retryable_discovery_transport_error(&error) => {
+                self.invalidate_server_process(server_name)?;
+                self.discover_server_tools_once(server_name).await
+            }
+            Err(error) => Err(error),
+        };
+        if result.is_err() {
+            // `tools/list` can be paginated, so a failed discovery may have
+            // installed routes from an earlier page. Never retain that partial
+            // view after the terminal error.
+            self.clear_routes_for_server(server_name);
+        }
+        result
+    }
+
+    async fn discover_server_tools_once(
+        &mut self,
+        server_name: &str,
+    ) -> Result<Vec<ManagedMcpTool>, McpServerManagerError> {
         self.clear_routes_for_server(server_name);
         self.ensure_server_ready(server_name).await?;
 
@@ -530,6 +556,19 @@ impl McpServerManager {
         }
 
         Ok(discovered_tools)
+    }
+
+    fn invalidate_server_process(
+        &mut self,
+        server_name: &str,
+    ) -> Result<(), McpServerManagerError> {
+        let server = self.server_mut(server_name)?;
+        // `McpStdioProcess::request` has already terminated and reaped the
+        // child on I/O failure. Dropping this stale wrapper lets the retry
+        // spawn fresh stdin/stdout pipes even if `try_wait()` lagged behind.
+        server.process = None;
+        server.initialized = false;
+        Ok(())
     }
 
     fn server_mut(
@@ -648,6 +687,16 @@ impl McpServerManager {
 
         Ok(())
     }
+}
+
+fn is_retryable_discovery_transport_error(error: &McpServerManagerError) -> bool {
+    let McpServerManagerError::Io(error) = error else {
+        return false;
+    };
+    matches!(
+        error.kind(),
+        io::ErrorKind::UnexpectedEof | io::ErrorKind::BrokenPipe
+    )
 }
 
 #[derive(Debug)]

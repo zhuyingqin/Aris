@@ -70,7 +70,9 @@ pub fn load_project_intent_state(workspace: &Path) -> Result<ProjectIntentState,
     let path = project_intent_path(workspace);
     let raw = match std::fs::read_to_string(&path) {
         Ok(raw) => raw,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(ProjectIntentState::default()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(ProjectIntentState::default())
+        }
         Err(error) => return Err(error.to_string()),
     };
     serde_json::from_str(&raw)
@@ -128,7 +130,10 @@ pub fn record_project_intent_observations(
 pub fn project_intent_needs_review(state: &ProjectIntentState) -> bool {
     state.evidence.len() >= 2
         && state.evidence.len() > state.reviewed_evidence_count
-        && !matches!(state.intent.as_ref().map(|intent| intent.status), Some(ProjectIntentStatus::Established))
+        && !matches!(
+            state.intent.as_ref().map(|intent| intent.status),
+            Some(ProjectIntentStatus::Established)
+        )
 }
 
 pub fn apply_project_intent_review(
@@ -138,7 +143,10 @@ pub fn apply_project_intent_review(
     let mut state = load_project_intent_state(workspace)?;
     state.reviewed_evidence_count = state.evidence.len();
 
-    if !matches!(state.intent.as_ref().map(|intent| intent.status), Some(ProjectIntentStatus::Established)) {
+    if !matches!(
+        state.intent.as_ref().map(|intent| intent.status),
+        Some(ProjectIntentStatus::Established)
+    ) {
         if let Some(draft) = draft {
             let objective = clean_text(&draft.objective, MAX_OBJECTIVE_CHARS);
             if !objective.is_empty() {

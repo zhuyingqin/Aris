@@ -1,6 +1,76 @@
 use super::*;
 
 #[test]
+fn internal_no_tools_executor_denies_unexpected_tool_calls() {
+    let mut executor = NoToolsExecutor;
+    let error = executor
+        .execute("bash", r#"{"command":"echo should-not-run"}"#)
+        .expect_err("internal no-tools executor must reject every tool");
+
+    assert!(error
+        .to_string()
+        .contains("not available during this no-tools request"));
+}
+
+#[test]
+fn paired_remote_runtime_uses_desktop_tools_without_renderer_streams() {
+    let remote = ChatTurnRuntime::RemoteApproved;
+    let (blocked_tools, full_tool_registry) = remote.tool_profile();
+
+    assert!(full_tool_registry);
+    assert_eq!(blocked_tools, REMOTE_APPROVED_EXTRA_BLOCKED_TOOLS);
+    assert!(blocked_tools.contains(&ASK_USER_QUESTION_TOOL));
+    assert_eq!(remote.event_delivery(), ChatEventDelivery::RecordOnly);
+    assert!(!remote.emits_desktop_chat_events());
+    assert_eq!(remote.surface(), "Paired mobile");
+    assert!(ChatTurnRuntime::Desktop {
+        extra_blocked_tools: &[],
+        full_tool_registry: true,
+    }
+    .emits_desktop_chat_events());
+}
+
+#[test]
+fn remote_chat_target_requires_a_project_and_valid_session_id() {
+    assert_eq!(
+        validate_remote_chat_target("", "desktop-chat"),
+        Err("remote chat requires a project id".to_string())
+    );
+    assert!(validate_remote_chat_target("default", "../outside-session")
+        .expect_err("remote target must reject traversal in session id")
+        .contains("invalid chat session id"));
+}
+
+#[test]
+fn paired_remote_chat_reads_the_selected_project_runtime_session() {
+    let session_id = format!("remote-project-session-{}", std::process::id());
+    let root = std::env::temp_dir().join(format!(
+        "somniq-remote-project-session-{}",
+        remote_protocol::DeviceId::new()
+    ));
+    let project_id = "project-0123456789abcdef";
+    let sessions_dir = crate::state::project_runtime_dir(project_id).join("sessions");
+    std::fs::create_dir_all(&sessions_dir).expect("create project session directory");
+    let path = sessions_dir.join(format!("{session_id}.json"));
+    let mut session = Session::new();
+    session
+        .messages
+        .push(ConversationMessage::user_text("project scoped"));
+    session.save_to_path(&path).expect("write project session");
+
+    std::fs::create_dir_all(&root).expect("create project workspace");
+    let loaded = with_bound_project_environment(&root, project_id, || {
+        get_project_scoped_chat_session(project_id, &session_id)
+    })
+    .expect("bind default project environment")
+    .expect("paired chat reads the project-scoped session");
+    assert_eq!(loaded.messages.len(), 1);
+
+    let _ = std::fs::remove_file(path);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn debug_export_paths_are_markdown_safe_and_linkable() {
     let path = Path::new(r"C:\Users\wt\.config\SomniQ\desktop-runtime");
 

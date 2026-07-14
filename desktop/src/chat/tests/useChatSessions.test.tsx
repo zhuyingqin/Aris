@@ -13,6 +13,7 @@ const apiMocks = vi.hoisted(() => ({
   chatUiSessionDelete: vi.fn(() => Promise.resolve()),
   chatUiSessionsLoad: vi.fn(),
   chatUiSessionsSave: vi.fn(() => Promise.resolve()),
+  onRemoteChatSessionUpdated: vi.fn(() => Promise.resolve(() => undefined)),
 }));
 
 vi.mock("../../api/tauri", () => apiMocks);
@@ -40,6 +41,7 @@ beforeEach(() => {
   apiMocks.chatUiSessionDelete.mockResolvedValue(undefined);
   apiMocks.chatUiSessionsLoad.mockResolvedValue([]);
   apiMocks.chatUiSessionsSave.mockResolvedValue(undefined);
+  apiMocks.onRemoteChatSessionUpdated.mockResolvedValue(() => undefined);
 });
 
 afterEach(() => cleanup());
@@ -204,6 +206,7 @@ describe("useChatSessions Tauri persistence", () => {
     apiMocks.chatUiSessionDelete.mockResolvedValue(undefined);
     apiMocks.chatUiSessionsLoad.mockResolvedValue([]);
     apiMocks.chatUiSessionsSave.mockResolvedValue(undefined);
+    apiMocks.onRemoteChatSessionUpdated.mockResolvedValue(() => undefined);
   });
 
   it("hydrates Tauri summaries without parsing localStorage or loading turns", async () => {
@@ -227,6 +230,52 @@ describe("useChatSessions Tauri persistence", () => {
     expect(result.current.currentId).toBe("chat-home");
     expect(localStorage.getItem(SESSIONS_KEY)).toBeNull();
     expect(apiMocks.chatUiSessionLoad).not.toHaveBeenCalled();
+  });
+
+  it("reloads a persisted remote turn instead of retaining its stale session summary", async () => {
+    let remoteUpdateHandler: ((event: { sessionId: string }) => void) | undefined;
+    (apiMocks.onRemoteChatSessionUpdated as unknown as {
+      mockImplementation: (implementation: (handler: (event: { sessionId: string }) => void) => Promise<() => void>) => void;
+    }).mockImplementation((handler) => {
+      remoteUpdateHandler = handler;
+      return Promise.resolve(() => undefined);
+    });
+    const summary = {
+      ...startedSession("remote-chat", "stale summary"),
+      turns: [],
+      turnsLoaded: false,
+      turnCount: 1,
+      updatedAt: 100,
+    };
+    const saved = {
+      ...startedSession("remote-chat", "Remote turn"),
+      turns: [
+        { id: "remote-user", role: "user", blocks: [{ kind: "text", text: "from phone" }] },
+        { id: "remote-assistant", role: "assistant", blocks: [{ kind: "text", text: "from desktop" }] },
+      ],
+      turnsLoaded: true,
+      turnCount: 2,
+      updatedAt: 200,
+    };
+    apiMocks.chatUiSessionsList.mockResolvedValue([summary]);
+    apiMocks.chatUiSessionLoad.mockResolvedValue(saved);
+
+    const { result } = renderHook(() => useChatSessions("default"));
+
+    await waitFor(() => expect(apiMocks.onRemoteChatSessionUpdated).toHaveBeenCalled());
+    await waitFor(() => expect(result.current.allSessions).toHaveLength(1));
+    act(() => remoteUpdateHandler?.({ sessionId: "remote-chat" }));
+
+    await waitFor(() => expect(result.current.allSessions[0]).toMatchObject({
+      id: "remote-chat",
+      turnsLoaded: true,
+      turnCount: 2,
+      turns: [
+        { id: "remote-user", blocks: [{ kind: "text", text: "from phone" }] },
+        { id: "remote-assistant", blocks: [{ kind: "text", text: "from desktop" }] },
+      ],
+    }));
+    expect(apiMocks.chatUiSessionLoad).toHaveBeenCalledWith("remote-chat");
   });
 
   it("saves Tauri sessions through the backend store without writing localStorage snapshots", async () => {

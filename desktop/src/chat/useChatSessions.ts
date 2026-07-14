@@ -6,6 +6,7 @@ import {
   chatUiSessionsList,
   chatUiSessionsSave,
   isTauri,
+  onRemoteChatSessionUpdated,
 } from "../api/tauri";
 import { useStore } from "../store";
 import type { ChatTurn } from "../types";
@@ -94,6 +95,18 @@ function mergeLoadedSession(current: ChatSession, loaded: ChatSession): ChatSess
   };
 }
 
+function mergeRemoteLoadedSession(current: ChatSession | undefined, loaded: ChatSession): ChatSession {
+  if (!current) return loaded;
+  // A lazy list entry is intentionally summary-only. Its timestamp cannot be
+  // allowed to discard the freshly persisted, full remote turn projection.
+  if (current.turnsLoaded === false) return mergeLoadedSession(current, loaded);
+  if (loaded.updatedAt < current.updatedAt) return current;
+  const loadedTurnCount = loaded.turnCount ?? loaded.turns.length;
+  const currentTurnCount = current.turnCount ?? current.turns.length;
+  if (loaded.updatedAt === current.updatedAt && loadedTurnCount < currentTurnCount) return current;
+  return loaded;
+}
+
 function persistLocalSessions(sessions: ChatSession[]) {
   try {
     localStorage.setItem(SESSIONS_KEY, JSON.stringify(persistentSessions(sessions)));
@@ -149,6 +162,7 @@ export function useChatSessions(projectId?: string | null) {
   const persistTimer = useRef<number | null>(null);
   const dirtySessionIds = useRef(new Set<string>());
   const loadingSessionIds = useRef(new Set<string>());
+  const remoteSessionUpdateVersions = useRef(new Map<string, number>());
   const visibleAllSessions = useMemo(() => persistentSessions(allSessions), [allSessions]);
   const visibleSessions = useMemo(
     () => visibleAllSessions.filter((session) => session.projectId === activeProjectId),
@@ -181,6 +195,51 @@ export function useChatSessions(projectId?: string | null) {
         hydrated.current = true;
       });
   }, [setError]);
+
+  useEffect(() => {
+    if (!isTauri()) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+
+    const refreshRemoteSession = ({ sessionId }: { sessionId: string }) => {
+      const id = typeof sessionId === "string" ? sessionId.trim() : "";
+      if (!id) return;
+      const version = (remoteSessionUpdateVersions.current.get(id) ?? 0) + 1;
+      remoteSessionUpdateVersions.current.set(id, version);
+      const known = sessionsRef.current.find((session) => session.id === id);
+      void chatUiSessionLoad<ChatSession>(id)
+        .then((stored) => {
+          if (!stored || disposed || remoteSessionUpdateVersions.current.get(id) !== version) return;
+          const loaded = { ...migrateSession(stored, known?.projectId), turnsLoaded: true };
+          if (loaded.id !== id) return;
+          setAllSessions((previous) => {
+            const current = previous.find((session) => session.id === id);
+            const merged = mergeRemoteLoadedSession(current, loaded);
+            if (current === merged) return previous;
+            return current
+              ? previous.map((session) => session.id === id ? merged : session)
+              : [...previous, merged];
+          });
+        })
+        // The session may have been deleted locally between the desktop save
+        // and this notification; ignore that benign race.
+        .catch(() => undefined);
+    };
+
+    void onRemoteChatSessionUpdated(refreshRemoteSession)
+      .then((nextUnlisten) => {
+        if (disposed) {
+          nextUnlisten();
+        } else {
+          unlisten = nextUnlisten;
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
 
   const flushPendingSessions = useCallback(() => {
     const pending = pendingPersistSessions.current;
@@ -285,7 +344,7 @@ export function useChatSessions(projectId?: string | null) {
         if (!stored) throw new Error("chat session not found");
         const loaded = { ...migrateSession(stored, session.projectId), turnsLoaded: true };
         setAllSessions((previous) => previous.map((item) =>
-          item.id === currentId ? mergeLoadedSession(item, loaded) : item));
+          item.id === currentId ? mergeRemoteLoadedSession(item, loaded) : item));
       })
       .catch((error) => setError(`Failed to load chat session: ${String(error)}`))
       .finally(() => {

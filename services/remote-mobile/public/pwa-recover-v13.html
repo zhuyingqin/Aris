@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#0e1116" />
+    <meta http-equiv="Cache-Control" content="no-store, max-age=0, must-revalidate" />
+    <title>Updating SomniQ Remote</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        background: #0e1116;
+        color: #d7dee7;
+        font-family: "Inter", "SF Pro Text", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, sans-serif;
+      }
+
+      body {
+        display: grid;
+        min-width: 320px;
+        min-height: 100dvh;
+        margin: 0;
+        place-items: center;
+      }
+
+      main {
+        width: min(100% - 48px, 360px);
+      }
+
+      h1 {
+        margin: 0 0 8px;
+        font-size: 18px;
+      }
+
+      p {
+        margin: 0;
+        color: #8a97a6;
+        font-size: 14px;
+        line-height: 1.55;
+      }
+
+      button {
+        display: none;
+        min-height: 38px;
+        margin-top: 18px;
+        padding: 8px 12px;
+        border: 1px solid #3b4756;
+        border-radius: 8px;
+        background: #1a222c;
+        color: #d7dee7;
+        font: inherit;
+      }
+
+      button[data-visible="true"] {
+        display: inline-flex;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>正在更新 SomniQ Remote</h1>
+      <p id="status" role="status">正在刷新本机应用资源，请稍候。</p>
+      <button id="retry" type="button">重试</button>
+    </main>
+    <script>
+      const status = document.querySelector("#status");
+      const retry = document.querySelector("#retry");
+      const appScope = new URL("./", window.location.href).href;
+      const appWorker = new URL("sw.js", appScope).href;
+
+      async function recover() {
+        retry.dataset.visible = "false";
+        status.textContent = "正在刷新本机应用资源，请稍候。";
+
+        const unregister = "serviceWorker" in navigator
+          ? navigator.serviceWorker.getRegistrations().then((registrations) => Promise.all(
+            registrations
+              .filter((registration) => registration.scope === appScope || workerMatches(registration))
+              .map((registration) => registration.unregister()),
+          ))
+          : Promise.resolve();
+        const clearCaches = "caches" in window
+          ? caches.keys().then((names) => Promise.all(
+            names
+              .filter((name) => name.startsWith("somniq-remote-"))
+              .map((name) => caches.delete(name)),
+          ))
+          : Promise.resolve();
+
+        try {
+          await Promise.all([unregister, clearCaches]);
+          status.textContent = "更新完成，正在打开 SomniQ Remote。";
+          window.location.replace(new URL("./?recovered=v13", window.location.href));
+        } catch {
+          status.textContent = "更新未完成，请重试。";
+          retry.dataset.visible = "true";
+        }
+      }
+
+      function workerMatches(registration) {
+        return [registration.active, registration.waiting, registration.installing]
+          .some((worker) => worker && worker.scriptURL === appWorker);
+      }
+
+      retry.addEventListener("click", () => void recover());
+      void recover();
+    </script>
+  </body>
+</html>

@@ -1,7 +1,6 @@
 use super::{
-    apply_bundled_internal_config, apply_reviewer_environment_from, clear_newapi_session,
-    deepseek_executor_key, normalize_managed_model_slots, read_verified, upsert_verified,
-    write_verified, ConfigPatch, VerifiedExecutor,
+    apply_bundled_internal_config, apply_reviewer_environment_from, deepseek_executor_key,
+    executor_object_for_model, read_verified, upsert_verified, write_verified, VerifiedExecutor,
 };
 use serde_json::{Map, Value};
 use std::sync::Mutex;
@@ -93,101 +92,38 @@ fn read_verified_skips_entries_without_a_model() {
 }
 
 #[test]
-fn managed_executor_update_does_not_require_admin_api_access() {
-    let obj = serde_json::json!({
-        "newapi_base_url": "http://gateway.example",
-        "newapi_executor_base_url": "http://gateway.example/v1",
-        "newapi_executor_api_key": "gateway-token",
-        "managed_models": ["MiniMax-M3"]
-    })
-    .as_object()
-    .expect("object")
-    .clone();
-    let patch = ConfigPatch {
-        executor_provider: Some("openai".to_string()),
-        executor_model: Some("MiniMax-M3".to_string()),
-        executor_base_url: Some("http://gateway.example/v1".to_string()),
-        executor_api_key: Some("gateway-token".to_string()),
-        ..Default::default()
-    };
+fn legacy_managed_models_do_not_block_local_model_selection() {
+    let _guard = ENV_LOCK.lock().expect("env lock");
+    let previous_home = std::env::var("HOME").ok();
+    let previous_userprofile = std::env::var("USERPROFILE").ok();
+    let home = temp_dir("stale-managed-models");
+    std::env::set_var("HOME", &home);
+    std::env::set_var("USERPROFILE", &home);
 
-    assert!(!patch.changes_admin_api_settings(&obj));
-}
+    let config_path = crate::state::config_path();
+    std::fs::create_dir_all(config_path.parent().expect("config parent"))
+        .expect("create config parent");
+    std::fs::write(
+        &config_path,
+        serde_json::json!({
+            "managed_models": ["MiniMax-M3"],
+            "executor_provider": "openai",
+            "executor_model": "MiniMax-M3",
+            "executor_base_url": "https://api.example.test/v1",
+            "executor_api_key": "local-key"
+        })
+        .to_string(),
+    )
+    .expect("write config");
 
-#[test]
-fn manual_executor_api_update_requires_admin_api_access() {
-    let obj = serde_json::json!({
-        "newapi_base_url": "http://gateway.example",
-        "newapi_executor_base_url": "http://gateway.example/v1",
-        "newapi_executor_api_key": "gateway-token",
-        "managed_models": ["MiniMax-M3"]
-    })
-    .as_object()
-    .expect("object")
-    .clone();
-    let patch = ConfigPatch {
-        executor_provider: Some("openai".to_string()),
-        executor_model: Some("gpt-5.5".to_string()),
-        executor_base_url: Some("https://api.openai.com/v1".to_string()),
-        executor_api_key: Some("manual-token".to_string()),
-        ..Default::default()
-    };
+    let selected = executor_object_for_model("MiniMax-M3")
+        .expect("stale managed config is harmless")
+        .expect("current local model remains selectable");
+    assert_eq!(selected["executor_base_url"], "https://api.example.test/v1");
+    assert_eq!(selected["executor_api_key"], "local-key");
 
-    assert!(patch.changes_admin_api_settings(&obj));
-}
-
-#[test]
-fn managed_reviewer_update_does_not_require_admin_api_access() {
-    let obj = serde_json::json!({
-        "newapi_base_url": "http://gateway.example",
-        "newapi_executor_base_url": "http://gateway.example/v1",
-        "newapi_executor_api_key": "gateway-token",
-        "managed_models": ["MiniMax-M3", "gpt-5.5"]
-    })
-    .as_object()
-    .expect("object")
-    .clone();
-    let patch = ConfigPatch {
-        reviewer_model: Some("gpt-5.5".to_string()),
-        ..Default::default()
-    };
-
-    assert!(!patch.changes_admin_api_settings(&obj));
-}
-
-#[test]
-fn managed_reviewer_disable_does_not_require_admin_api_access() {
-    let obj = serde_json::json!({
-        "newapi_base_url": "http://gateway.example",
-        "newapi_executor_base_url": "http://gateway.example/v1",
-        "newapi_executor_api_key": "gateway-token",
-        "managed_models": ["MiniMax-M3"]
-    })
-    .as_object()
-    .expect("object")
-    .clone();
-    let patch = ConfigPatch {
-        reviewer_provider: Some(String::new()),
-        reviewer_model: Some(String::new()),
-        reviewer_base_url: Some(String::new()),
-        ..Default::default()
-    };
-
-    assert!(!patch.changes_admin_api_settings(&obj));
-}
-
-#[test]
-fn reviewer_api_update_requires_admin_api_access() {
-    let obj = Map::new();
-    let patch = ConfigPatch {
-        reviewer_provider: Some("openai".to_string()),
-        reviewer_model: Some("gpt-5.5".to_string()),
-        reviewer_base_url: Some("https://api.openai.com/v1".to_string()),
-        reviewer_api_key: Some("reviewer-token".to_string()),
-        ..Default::default()
-    };
-
-    assert!(patch.changes_admin_api_settings(&obj));
+    let _ = std::fs::remove_dir_all(&home);
+    restore_home(previous_home, previous_userprofile);
 }
 
 #[test]
@@ -274,123 +210,6 @@ fn bundled_internal_config_can_overwrite_existing() {
 
     let _ = std::fs::remove_dir_all(&home);
     let _ = std::fs::remove_dir_all(&resources);
-    restore_home(previous_home, previous_userprofile);
-}
-
-#[test]
-fn managed_slots_backfill_gateway_key_from_matching_executor() {
-    let mut obj = serde_json::json!({
-        "newapi_base_url": "http://gateway.example",
-        "managed_models": ["MiniMax-M3"],
-        "executor_provider": "openai",
-        "executor_model": "MiniMax-M3",
-        "executor_base_url": "http://gateway.example/v1",
-        "executor_api_key": "gateway-token"
-    })
-    .as_object()
-    .expect("object")
-    .clone();
-
-    assert!(normalize_managed_model_slots(&mut obj).expect("normalize"));
-    assert_eq!(obj["newapi_executor_base_url"], "http://gateway.example/v1");
-    assert_eq!(obj["newapi_executor_api_key"], "gateway-token");
-    assert_eq!(obj["executor_provider"], "openai");
-    assert_eq!(obj["executor_base_url"], "http://gateway.example/v1");
-    assert_eq!(obj["executor_api_key"], "gateway-token");
-}
-
-#[test]
-fn managed_reviewer_replaces_stale_key_with_gateway_key() {
-    let mut obj = serde_json::json!({
-        "newapi_base_url": "http://gateway.example",
-        "managed_models": ["deepseek-v4-pro"],
-        "executor_provider": "openai",
-        "executor_model": "MiniMax-M3",
-        "executor_base_url": "http://gateway.example/v1",
-        "executor_api_key": "gateway-token",
-        "reviewer_provider": "deepseek",
-        "reviewer_model": "deepseek-v4-pro",
-        "reviewer_base_url": "https://api.deepseek.com/anthropic",
-        "reviewer_api_key": "stale-deepseek-token"
-    })
-    .as_object()
-    .expect("object")
-    .clone();
-
-    assert!(normalize_managed_model_slots(&mut obj).expect("normalize"));
-    assert_eq!(obj["newapi_executor_api_key"], "gateway-token");
-    assert_eq!(obj["reviewer_provider"], "custom");
-    assert_eq!(obj["reviewer_model"], "deepseek-v4-pro");
-    assert_eq!(obj["reviewer_base_url"], "http://gateway.example/v1");
-    assert_eq!(obj["reviewer_api_key"], "gateway-token");
-}
-
-#[test]
-fn clear_newapi_session_removes_only_managed_credentials() {
-    let _guard = ENV_LOCK.lock().expect("env lock");
-    let previous_home = std::env::var("HOME").ok();
-    let previous_userprofile = std::env::var("USERPROFILE").ok();
-    let home = temp_dir("clear-newapi");
-    std::env::set_var("HOME", &home);
-    std::env::set_var("USERPROFILE", &home);
-
-    let config_path = crate::state::config_path();
-    std::fs::create_dir_all(config_path.parent().expect("config parent"))
-        .expect("create config parent");
-    std::fs::write(
-        &config_path,
-        serde_json::json!({
-            "newapi_base_url": "http://gateway.example",
-            "newapi_user_id": 7,
-            "newapi_username": "user",
-            "newapi_access_token": "access-token",
-            "newapi_executor_base_url": "http://gateway.example/v1",
-            "newapi_executor_api_key": "gateway-token",
-            "managed_models": ["MiniMax-M3"],
-            "executor_provider": "openai",
-            "executor_model": "MiniMax-M3",
-            "executor_base_url": "http://gateway.example/v1",
-            "executor_api_key": "gateway-token",
-            "reviewer_provider": "custom",
-            "reviewer_model": "deepseek-v4-pro",
-            "reviewer_base_url": "http://gateway.example/v1",
-            "reviewer_api_key": "gateway-token",
-            "summarizer_provider": "openai",
-            "summarizer_model": "MiniMax-M2.7",
-            "summarizer_base_url": "https://api.minimaxi.com/v1",
-            "summarizer_api_key": "summarizer-token",
-            "verified_executors": [
-                {
-                    "provider": "openai",
-                    "model": "MiniMax-M3",
-                    "base_url": "http://gateway.example/v1",
-                    "api_key": "gateway-token"
-                },
-                {
-                    "provider": "openai",
-                    "model": "gpt-5.5",
-                    "base_url": "https://api.openai.com/v1",
-                    "api_key": "openai-token"
-                }
-            ]
-        })
-        .to_string(),
-    )
-    .expect("write config");
-
-    clear_newapi_session().expect("clear newapi");
-    let saved = crate::config::load_object();
-    assert!(saved.get("newapi_access_token").is_none());
-    assert!(saved.get("newapi_executor_api_key").is_none());
-    assert!(saved.get("executor_api_key").is_none());
-    assert!(saved.get("reviewer_api_key").is_none());
-    assert_eq!(saved["summarizer_api_key"], "summarizer-token");
-
-    let verified = read_verified(&saved);
-    assert_eq!(verified.len(), 1);
-    assert_eq!(verified[0].api_key, "openai-token");
-
-    let _ = std::fs::remove_dir_all(&home);
     restore_home(previous_home, previous_userprofile);
 }
 

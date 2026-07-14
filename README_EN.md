@@ -29,6 +29,12 @@
 
 ## 📰 What's New
 
+> **v0.4.17** (2026-07) — Desktop-approved mobile remote control: pair a phone by QR code,
+> then securely browse desktop projects and conversations, continue a selected chat, and switch
+> its model from the phone. The connection prefers encrypted WebRTC P2P and automatically falls
+> back to an end-to-end encrypted WSS/TCP relay. The installable phone PWA now uses the official
+> SomniQ icon.
+
 > **v0.4.16** (2026-07) — `reports` kernel module (report-rendering pipeline consumed by CLI /
 > runtime). New desktop components: `ChatNavigationTabs` + `SideTaskPanel` (in-chat side-task /
 > status panel + explicit nav tab strip). New editor helper `latexVscodeHighlighting`

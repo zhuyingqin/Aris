@@ -29,6 +29,10 @@
 
 ## 📰 最新动态
 
+> **v0.4.17** (2026-07) —— 新增桌面端批准的手机远程控制：手机扫码配对后可安全查看桌面项目与对话、
+> 继续指定对话，并从手机切换该对话模型。连接优先使用端到端加密的 WebRTC P2P，无法直连时自动回退到
+> 端到端加密的 WSS/TCP 中继；可安装的手机 PWA 已使用正式 SomniQ 图标。
+
 > **v0.4.16** (2026-07) —— 新 `reports` kernel 模块（CLI / runtime 用的报告渲染流水线）。新增
 > `ChatNavigationTabs` + `SideTaskPanel` 桌面组件（chat 内侧任务/状态面板 + 显式导航 tab 条）。
 > 新增 `latexVscodeHighlighting` 编辑器助手（VSCode 风格 LaTeX 语法 token，给 typeset 可视化编辑

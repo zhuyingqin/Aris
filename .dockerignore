@@ -1,0 +1,35 @@
+# Keep the remote-gateway image build context small. The gateway Dockerfile
+# deliberately uses the repository root as its build context because the
+# shared remote-protocol crate lives outside services/remote-gateway.
+.git
+.github
+.aris
+.claude
+.clawd-agents
+.codex
+.somniq
+
+**/target
+**/node_modules
+**/.vite-cache
+dist
+desktop/dist
+
+# Local data, caches, and generated research artifacts are never needed by
+# the gateway image and must not be sent to a Docker daemon.
+data
+papers
+figures
+tmp
+logs
+*.env
+*.key
+*.pem
+*.p12
+*.pfx
+*.log
+*.aux
+*.fdb_latexmk
+*.fls
+*.synctex.gz
+*.toc

@@ -1,0 +1,46 @@
+# Replace every <...> placeholder before enabling this vhost. It is for a
+# fixed public IPv4 with a publicly trusted IP-address certificate. The PWA is
+# served at the vhost root on an IP-only HTTPS port.
+#
+# This vhost is a dedicated TLS listener so browsers that omit TLS SNI for an
+# IP literal still receive the IP certificate without disturbing the existing
+# application's :443 default server.
+
+server {
+    listen 8443 ssl default_server;
+    http2 on;
+    server_name <public-ip>;
+
+    ssl_certificate     <path-to-fullchain.pem>;
+    ssl_certificate_key <path-to-privkey.pem>;
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    access_log off;
+    client_max_body_size 256k;
+    server_tokens off;
+    add_header Content-Security-Policy "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self'; style-src 'self'; style-src-attr 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https: wss:; manifest-src 'self'; worker-src 'self'; upgrade-insecure-requests" always;
+
+    # Limit only the public, first-use registration write path. Existing
+    # desktops use the same route with a bearer, and the burst leaves normal
+    # user retries unaffected.
+    location = /v1/pairings {
+        limit_req zone=somniq_pairing_registration burst=8 nodelay;
+        proxy_pass http://somniq_remote_edge;
+        include <path-to-proxy-headers.conf>;
+        proxy_buffering off;
+        proxy_read_timeout 1h;
+        proxy_send_timeout 1h;
+    }
+
+    # The mobile PWA, browser WebSocket-ticket exchange, signaling, and relay
+    # all use this same trusted HTTPS origin. There is no password-login route
+    # in the capability-based pairing flow.
+    location / {
+        proxy_pass http://somniq_remote_edge;
+        include <path-to-proxy-headers.conf>;
+        proxy_buffering off;
+        proxy_read_timeout 1h;
+        proxy_send_timeout 1h;
+    }
+
+}

@@ -1,6 +1,9 @@
 use super::{
-    chat_ui_preview_turns, find_turns_array_bounds, partition_chat_ui_index, tail_turns_from_array,
+    append_remote_chat_text_turns, chat_ui_preview_turns, find_turns_array_bounds,
+    merge_missing_remote_chat_ui_turns, partition_chat_ui_index, preserve_remote_chat_updated_at,
+    remote_chat_sessions_from_index, remote_chat_transcript_for_project, tail_turns_from_array,
     turn_from_array_index, CHAT_UI_SESSION_PREVIEW_MAX_TURNS,
+    MAX_REMOTE_CHAT_TRANSCRIPT_TEXT_BYTES,
 };
 use serde_json::{json, Value};
 use std::collections::HashSet;
@@ -11,6 +14,256 @@ fn text_turn(index: usize, text: impl Into<String>) -> Value {
         "role": if index % 2 == 0 { "user" } else { "assistant" },
         "blocks": [{ "kind": "text", "text": text.into() }],
     })
+}
+
+fn chat_session(
+    id: &str,
+    project_id: &str,
+    title: &str,
+    updated_at: i64,
+    turns: Vec<Value>,
+) -> Value {
+    json!({
+        "id": id,
+        "projectId": project_id,
+        "title": title,
+        "updatedAt": updated_at,
+        "turns": turns,
+    })
+}
+
+#[test]
+fn remote_chat_list_filters_current_project_orders_by_update_and_bounds_results() {
+    let index = vec![
+        chat_session("older", "project-a", "Older", 10, vec![text_turn(0, "old")]),
+        chat_session(
+            "other",
+            "project-b",
+            "Other",
+            99,
+            vec![text_turn(0, "other")],
+        ),
+        chat_session("newer", "project-a", "Newer", 20, vec![text_turn(0, "new")]),
+    ];
+
+    let list = remote_chat_sessions_from_index(&index, "project-a", 1);
+
+    assert!(list.has_more);
+    assert_eq!(list.sessions.len(), 1);
+    assert_eq!(list.sessions[0].id, "newer");
+    assert_eq!(list.sessions[0].title, "Newer");
+    assert_eq!(list.sessions[0].updated_at_unix_ms, 20);
+}
+
+#[test]
+fn remote_chat_transcript_exposes_only_user_and_assistant_text_blocks() {
+    let session = chat_session(
+        "chat-safe",
+        "default",
+        "Safe transcript",
+        42,
+        vec![
+            json!({
+                "id": "user-1",
+                "role": "user",
+                "blocks": [
+                    { "kind": "text", "text": "Please summarize this." },
+                    { "kind": "notice", "message": "attachment omitted" }
+                ]
+            }),
+            json!({
+                "id": "assistant-1",
+                "role": "assistant",
+                "blocks": [
+                    { "kind": "thinking", "thinking": "private reasoning" },
+                    { "kind": "tool", "name": "read_file", "input": "secret input", "output": "secret output" },
+                    { "kind": "permission", "input": "private permission" },
+                    { "kind": "text", "text": "Here is the summary." }
+                ]
+            }),
+        ],
+    );
+
+    let transcript = remote_chat_transcript_for_project(&session, "default", 100)
+        .expect("session in project should be readable");
+
+    assert!(!transcript.has_more);
+    assert_eq!(transcript.id, "chat-safe");
+    assert_eq!(transcript.title, "Safe transcript");
+    assert_eq!(
+        transcript.messages,
+        vec![
+            super::RemoteChatTranscriptMessage {
+                role: "user".to_string(),
+                text: "Please summarize this.".to_string(),
+            },
+            super::RemoteChatTranscriptMessage {
+                role: "assistant".to_string(),
+                text: "Here is the summary.".to_string(),
+            },
+        ]
+    );
+}
+
+#[test]
+fn remote_chat_transcript_returns_newest_messages_and_marks_more_history() {
+    let session = chat_session(
+        "chat-tail",
+        "default",
+        "Tail",
+        9,
+        vec![
+            text_turn(0, "first"),
+            text_turn(1, "second"),
+            text_turn(2, "third"),
+        ],
+    );
+
+    let transcript = remote_chat_transcript_for_project(&session, "default", 2)
+        .expect("session in project should be readable");
+
+    assert!(transcript.has_more);
+    assert_eq!(
+        transcript
+            .messages
+            .iter()
+            .map(|message| message.text.as_str())
+            .collect::<Vec<_>>(),
+        vec!["second", "third"]
+    );
+    assert!(remote_chat_transcript_for_project(&session, "project-other", 2).is_none());
+}
+
+#[test]
+fn remote_chat_transcript_bounds_text_on_a_utf8_boundary() {
+    let session = chat_session(
+        "chat-large-text",
+        "default",
+        "Large text",
+        1,
+        vec![text_turn(
+            0,
+            "测".repeat(MAX_REMOTE_CHAT_TRANSCRIPT_TEXT_BYTES),
+        )],
+    );
+
+    let transcript = remote_chat_transcript_for_project(&session, "default", 1)
+        .expect("session in project should be readable");
+    let text = &transcript.messages[0].text;
+
+    assert!(transcript.has_more);
+    assert!(text.len() <= MAX_REMOTE_CHAT_TRANSCRIPT_TEXT_BYTES);
+    assert!(text.chars().all(|character| character == '测'));
+}
+
+#[test]
+fn remote_chat_append_persists_two_text_turns_and_is_idempotent() {
+    let mut session = chat_session(
+        "chat-append",
+        "default",
+        "Append",
+        1,
+        vec![text_turn(0, "existing")],
+    );
+
+    assert!(append_remote_chat_text_turns(
+        &mut session,
+        "message-1",
+        "remote question",
+        "remote answer",
+        99,
+    )
+    .expect("append should work"));
+    assert_eq!(session["updatedAt"], json!(99));
+    assert_eq!(session["turns"].as_array().expect("turns").len(), 3);
+    assert_eq!(session["turns"][1]["id"], json!("remote-message-1-user"));
+    assert_eq!(session["turns"][1]["role"], json!("user"));
+    assert_eq!(session["turns"][1]["blocks"][0]["kind"], json!("text"));
+    assert_eq!(
+        session["turns"][1]["blocks"][0]["text"],
+        json!("remote question")
+    );
+    assert_eq!(
+        session["turns"][2]["id"],
+        json!("remote-message-1-assistant")
+    );
+    assert_eq!(session["turns"][2]["role"], json!("assistant"));
+    assert_eq!(
+        session["turns"][2]["blocks"][0]["text"],
+        json!("remote answer")
+    );
+
+    assert!(!append_remote_chat_text_turns(
+        &mut session,
+        "message-1",
+        "remote question",
+        "remote answer",
+        100,
+    )
+    .expect("retry should be idempotent"));
+    assert_eq!(session["updatedAt"], json!(99));
+    assert_eq!(session["turns"].as_array().expect("turns").len(), 3);
+}
+
+#[test]
+fn stale_full_ui_snapshot_retains_missing_remote_turns_in_stored_order() {
+    let stored = chat_session(
+        "chat-race",
+        "default",
+        "Race safe",
+        99,
+        vec![
+            text_turn(0, "desktop before"),
+            json!({
+                "id": "remote-request-user",
+                "role": "user",
+                "blocks": [{ "kind": "text", "text": "phone question" }],
+            }),
+            json!({
+                "id": "remote-request-assistant",
+                "role": "assistant",
+                "blocks": [{ "kind": "text", "text": "phone answer" }],
+            }),
+            json!({
+                "id": "local-missing",
+                "role": "assistant",
+                "blocks": [{ "kind": "text", "text": "do not resurrect ordinary stale data" }],
+            }),
+            text_turn(2, "desktop after"),
+        ],
+    );
+    // This is a full snapshot captured before the paired request appended its
+    // durable remote turns. Its later desktop turn is still an ordering anchor.
+    let mut stale_incoming = chat_session(
+        "chat-race",
+        "default",
+        "Race safe",
+        5,
+        vec![
+            text_turn(0, "desktop before"),
+            text_turn(2, "desktop after"),
+        ],
+    );
+
+    let merged = merge_missing_remote_chat_ui_turns(&mut stale_incoming, &stored);
+    preserve_remote_chat_updated_at(&mut stale_incoming, &stored, merged);
+
+    assert!(merged);
+    assert_eq!(stale_incoming["updatedAt"], json!(99));
+    assert_eq!(
+        stale_incoming["turns"]
+            .as_array()
+            .expect("turns")
+            .iter()
+            .filter_map(|turn| turn["id"].as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "turn-0",
+            "remote-request-user",
+            "remote-request-assistant",
+            "turn-2",
+        ]
+    );
 }
 
 #[test]

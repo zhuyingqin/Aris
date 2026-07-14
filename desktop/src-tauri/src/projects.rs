@@ -7,7 +7,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 
 use crate::state;
 
@@ -275,6 +275,57 @@ pub fn current_project_path(projects: &ProjectState) -> Result<PathBuf, String> 
     current_project(&registry).map(|project| PathBuf::from(project.path))
 }
 
+/// Stable identifier of the currently active project.
+///
+/// Desktop remote control is intentionally limited to this project.  Keeping
+/// the lookup here avoids exposing the full registry internals to another
+/// module and lets the remote layer reject a stale request after a project
+/// switch.
+pub(crate) fn active_project_id(projects: &ProjectState) -> Result<String, String> {
+    let registry = projects
+        .registry
+        .lock()
+        .map_err(|_| "project state poisoned".to_string())?;
+    current_project(&registry).map(|project| project.id)
+}
+
+/// Return the desktop-owned project registry without exposing it to a remote
+/// client directly. The remote boundary converts this to a path-free summary.
+pub(crate) fn registered_projects(
+    projects: &ProjectState,
+) -> Result<(Vec<DesktopProject>, String), String> {
+    let registry = projects
+        .registry
+        .lock()
+        .map_err(|_| "project state poisoned".to_string())?;
+    Ok((
+        registry.projects.clone(),
+        registry.current_project_id.clone(),
+    ))
+}
+
+/// Switch an already registered project for the constrained remote boundary.
+/// Paths are never accepted from the phone, and the normal active-workflow
+/// guard remains in effect.
+pub(crate) fn switch_registered_project(
+    projects: &ProjectState,
+    id: &str,
+) -> Result<DesktopProject, String> {
+    ensure_switch_allowed()?;
+    let mut registry = projects
+        .registry
+        .lock()
+        .map_err(|_| "project state poisoned".to_string())?;
+    activate(&mut registry, id)?;
+    current_project(&registry)
+}
+
+fn notify_project_changed(app: &AppHandle) {
+    if let Err(error) = app.emit("project-changed", ()) {
+        eprintln!("SomniQ desktop: could not notify project change: {error}");
+    }
+}
+
 pub fn init(projects: &ProjectState) -> Result<(), String> {
     let mut registry = projects
         .registry
@@ -331,6 +382,7 @@ pub fn project_add(projects: State<ProjectState>, path: String) -> Result<Projec
 
 #[tauri::command]
 pub fn project_set_current(
+    app: AppHandle,
     projects: State<ProjectState>,
     id: String,
 ) -> Result<ProjectView, String> {
@@ -340,7 +392,9 @@ pub fn project_set_current(
         .lock()
         .map_err(|_| "project state poisoned".to_string())?;
     activate(&mut registry, &id)?;
-    view(&registry)
+    let result = view(&registry)?;
+    notify_project_changed(&app);
+    Ok(result)
 }
 
 #[tauri::command]
