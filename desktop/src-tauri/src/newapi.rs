@@ -376,6 +376,43 @@ fn has_stored_session() -> bool {
     has_base && has_user
 }
 
+pub(crate) async fn stored_user_is_admin() -> Result<bool, String> {
+    let (base, session) = stored_session().map_err(|_| SESSION_EXPIRED_MESSAGE.to_string())?;
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(20))
+        .build()
+        .map_err(|error| format!("HTTP client creation failed: {error}"))?;
+    let data = clear_session_if_invalid(user_self(&client, &base, &session).await)?;
+    let string_field = |key: &str| {
+        data.get(key)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_string()
+    };
+    let group = string_field("group");
+    let groups = user_groups(&client, &base, &session).await;
+    let group_desc = groups
+        .get(group.as_str())
+        .and_then(|entry| entry.get("desc"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let role = data
+        .get("role")
+        .or_else(|| data.get("user_role"))
+        .or_else(|| data.get("userRole"))
+        .and_then(value_as_i64)
+        .unwrap_or(0);
+    let role_text = ["role", "role_name", "roleName", "status"]
+        .into_iter()
+        .filter_map(|key| data.get(key).and_then(value_as_string))
+        .find(|value| has_admin_marker(value));
+    Ok(user_is_admin_marker(role, role_text, &group, &group_desc))
+}
+
 /// Sign in and return the authenticated user/session values needed by new-api.
 async fn login(
     client: &reqwest::Client,

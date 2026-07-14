@@ -9,10 +9,18 @@ import {
   configTest,
   isTauri,
   localEnvironmentChecks,
+  newapiBootstrap,
+  newapiGroups,
+  newapiModels,
+  newapiUpdateGroup,
+  newapiUsageLogs,
   systemPromptView,
   userPromptView,
+  type NewApiAccount,
+  type NewApiGroupOption,
+  type NewApiUsageLogPage,
 } from "../api/tauri";
-import { useStore, type Language } from "../store";
+import { isManagedAuthInvalidError, useStore, type Language } from "../store";
 import { notifyChatModelsUpdated } from "../modelEvents";
 import type {
   AppUpdateInfo,
@@ -25,6 +33,7 @@ import type {
   SystemPromptView,
   UserPromptView,
 } from "../types";
+import MailSettings, { MailSettingsDetail } from "./MailSettings";
 import RemoteControlPanel from "./RemoteControlPanel";
 
 interface PresetOption {
@@ -45,16 +54,22 @@ interface ProviderMeta {
 type SaveState = "idle" | "saving" | "saved" | "error";
 type TestState = "idle" | "testing" | "passed" | "failed";
 type UpdateState = "idle" | "checking" | "available" | "current" | "downloading" | "ready" | "error";
-type SettingsTab = "general" | "models" | "remote" | "about";
+type SettingsTab = "general" | "auth" | "models" | "usage" | "remote" | "about";
 
+const MANAGED_NEW_API_MODE = true;
+const MANAGED_MODEL_SERVER_LABEL = "通用模型服务器";
+const MANAGED_MODEL_SERVER_BASE_URL = "http://106.53.28.124:18080";
+const ACCOUNT_CACHE_KEY = "somniq-account-v1";
+const LEGACY_ACCOUNT_CACHE_KEY = "aris-account-v1";
 const SETTINGS_TAB_REQUEST_KEY = "somniq-settings-tab-request";
 const SETTINGS_TAB_REQUEST_EVENT = "somniq-settings-tab-request";
+const USAGE_LOG_PAGE_SIZE = 12;
 const PREVIEW_CONFIG_VIEW: ConfigView = {
   appVersion: "0.4.5",
   configPath: "browser preview - Tauri config is not loaded",
   executorProvider: "openai",
   executorModel: "MiniMax-M3",
-  executorBaseUrl: "",
+  executorBaseUrl: `${MANAGED_MODEL_SERVER_BASE_URL}/v1`,
   summarizerProvider: "",
   summarizerModel: "",
   summarizerBaseUrl: "",
@@ -63,14 +78,90 @@ const PREVIEW_CONFIG_VIEW: ConfigView = {
   executorKeyMasked: "sk-...preview",
   reviewerProvider: "openai",
   reviewerModel: "MiniMax-M3",
-  reviewerBaseUrl: "",
+  reviewerBaseUrl: `${MANAGED_MODEL_SERVER_BASE_URL}/v1`,
   hasReviewerKey: true,
   reviewerKeyMasked: "sk-...preview",
   hasScopusKey: false,
   language: "cn",
   memoryWriteApproval: true,
+  managedModels: ["MiniMax-M3", "MiniMax-M2.7", "gpt-5.5", "GLM-5", "deepseek-v4-pro"],
   verifiedExecutors: [],
 };
+const PREVIEW_ACCOUNT: NewApiAccount = {
+  username: "preview-user",
+  displayName: "Preview User",
+  role: 10,
+  isAdmin: true,
+  subscriptionName: "Team Plan",
+  subscriptionDesc: "Browser preview data",
+  subscriptionQuota: 1_850_000,
+  subscriptionUsedQuota: 650_000,
+  group: "default",
+  groupDesc: "Standard group",
+  groupRatio: "1",
+  quota: 1_250_000,
+  usedQuota: 750_000,
+  models: ["MiniMax-M3", "MiniMax-M2.7", "gpt-5.5", "GLM-5", "deepseek-v4-pro"],
+  model: "MiniMax-M3",
+};
+const PREVIEW_GROUP_OPTIONS: NewApiGroupOption[] = [
+  { name: "default", desc: "Standard group", ratio: "1" },
+  { name: "research", desc: "Research routing", ratio: "0.8" },
+  { name: "premium", desc: "Premium routing", ratio: "1.5" },
+];
+const PREVIEW_USAGE_LOGS: NewApiUsageLogPage = {
+  page: 1,
+  pageSize: USAGE_LOG_PAGE_SIZE,
+  total: 3,
+  items: [
+    {
+      id: "preview-1",
+      createdAt: Math.floor(Date.now() / 1000) - 240,
+      model: "MiniMax-M3",
+      tokenName: "somniq-desktop",
+      channel: "MiniMax",
+      requestId: "req_preview_001928374",
+      upstreamRequestId: "",
+      promptTokens: 4180,
+      completionTokens: 920,
+      totalTokens: 5100,
+      quota: 6200,
+      status: "success",
+      typeLabel: "Consume",
+    },
+    {
+      id: "preview-2",
+      createdAt: Math.floor(Date.now() / 1000) - 3600,
+      model: "gpt-5.5",
+      tokenName: "somniq-desktop",
+      channel: "OpenAI-compatible",
+      requestId: "req_preview_001928375",
+      upstreamRequestId: "",
+      promptTokens: 2310,
+      completionTokens: 780,
+      totalTokens: 3090,
+      quota: 4100,
+      status: "success",
+      typeLabel: "Consume",
+    },
+    {
+      id: "preview-3",
+      createdAt: Math.floor(Date.now() / 1000) - 7200,
+      model: "deepseek-v4-pro",
+      tokenName: "somniq-desktop",
+      channel: "DeepSeek",
+      requestId: "req_preview_001928376",
+      upstreamRequestId: "",
+      promptTokens: 1490,
+      completionTokens: 530,
+      totalTokens: 2020,
+      quota: 2400,
+      status: "success",
+      typeLabel: "Consume",
+    },
+  ],
+};
+let usageLogPageCache: Record<number, NewApiUsageLogPage> = {};
 const PREVIEW_SYSTEM_PROMPT: SystemPromptView = {
   model: PREVIEW_CONFIG_VIEW.executorModel ?? "preview-model",
   fullToolRegistry: true,
@@ -97,7 +188,9 @@ const ENVIRONMENT_CHECK_PLACEHOLDERS = [
 
 const SETTINGS_TABS: Array<{ id: SettingsTab; label: string }> = [
   { id: "general", label: "通用" },
+  { id: "auth", label: "认证" },
   { id: "models", label: "模型" },
+  { id: "usage", label: "使用统计" },
   { id: "remote", label: "远程控制" },
   { id: "about", label: "关于" },
 ];
@@ -145,15 +238,77 @@ const SETTINGS_COPY: Record<Language, {
   userPromptBlocks: (count: number) => string;
   userPromptImages: (count: number) => string;
   userPromptLoading: string;
+  creditUnit: string;
+  usageTitle: string;
+  usageSub: string;
+  usageRefresh: string;
+  usageRefreshing: string;
+  accountUsedQuota: string;
+  accountBalance: string;
+  accountTotalQuota: string;
+  accountUsageRatio: string;
+  usedQuota: string;
+  remainingQuota: string;
+  subscriptionUsed: string;
+  subscriptionBalance: string;
+  subscriptionUsageRatio: string;
+  callDetails: string;
+  usageRange: (start: number, end: number, total: number) => string;
+  usageNoRecords: string;
+  usageLoading: string;
+  usageHeaders: {
+    time: string;
+    model: string;
+    token: string;
+    tokens: string;
+    quota: string;
+    request: string;
+  };
+  usagePageSummary: (pageSize: number, page: number, pageCount: number) => string;
+  usagePrev: string;
+  usageNext: string;
+  usageEmpty: string;
+  usageRefreshFailed: (error: string) => string;
+  usageNotSignedIn: string;
   currentModelFallback: string;
+  authAccountTitle: string;
+  authAccountSub: string;
+  authRefresh: string;
+  authRefreshing: string;
+  authLogout: string;
+  authSignedIn: string;
+  authSignedOut: string;
+  authSignedOutSub: string;
+  authBalanceMeta: (quota: string, used: string) => string;
+  authSubscriptionLabel: string;
+  authSubscriptionEmpty: string;
+  authSubscriptionSource: string;
+  authSubscriptionBalance: string;
+  authAccountBalance: string;
+  authAccountBalanceHint: string;
+  authUsedQuota: string;
+  authUsedQuotaMeta: (percent: number, ratio: string) => string;
+  authGroupTag: (group: string) => string;
+  authGroupMeta: (group: string, ratio?: string, desc?: string) => string;
+  authRefreshFailed: (error: string) => string;
   modelServiceTitle: string;
   modelServiceSub: string;
+  modelSync: string;
+  modelSyncing: string;
   executorModel: string;
   reviewerModel: string;
   reviewerModelOff: string;
+  modelSyncAfterLogin: string;
   currentExecutor: (model: string) => string;
   currentReviewer: (model: string) => string;
   reviewerOff: string;
+  modelSyncingStatus: string;
+  modelSynced: (count: number) => string;
+  modelSyncAfterLoginStatus: string;
+  integratedAuthTitle: string;
+  integratedAuthSub: string;
+  mailBack: string;
+  mailTitle: string;
   aboutUpdateTitle: string;
   aboutUpdateSub: string;
   aboutCheck: string;
@@ -195,7 +350,7 @@ const SETTINGS_COPY: Record<Language, {
   saveConnectionSavedInfo: string;
 }> = {
   cn: {
-    tabs: { general: "通用", models: "模型", remote: "远程控制", about: "关于" },
+    tabs: { general: "通用", auth: "认证", models: "模型", usage: "使用统计", remote: "远程控制", about: "关于" },
     settingsCategories: "设置分类",
     loading: "加载中...",
     statusModelService: "模型服务",
@@ -237,15 +392,70 @@ const SETTINGS_COPY: Record<Language, {
     userPromptBlocks: (count) => `${count} 个文本块`,
     userPromptImages: (count) => `${count} 张图片`,
     userPromptLoading: "正在加载用户提示词...",
+    creditUnit: "额度",
+    usageTitle: "使用统计",
+    usageSub: "显示当前登录账号在服务器侧的额度和使用量，不再读取本地项目 usage log。",
+    usageRefresh: "刷新",
+    usageRefreshing: "刷新中...",
+    accountUsedQuota: "当前账号已用额度",
+    accountBalance: "账户余额",
+    accountTotalQuota: "账户总额度",
+    accountUsageRatio: "账户消耗比例",
+    usedQuota: "已用额度",
+    remainingQuota: "剩余额度",
+    subscriptionUsed: "订阅已用",
+    subscriptionBalance: "订阅余额",
+    subscriptionUsageRatio: "订阅消耗比例",
+    callDetails: "调用明细",
+    usageRange: (start, end, total) => `第 ${start}-${end} 条 / 共 ${total} 条`,
+    usageNoRecords: "暂无记录",
+    usageLoading: "加载中...",
+    usageHeaders: { time: "时间", model: "模型", token: "令牌", tokens: "令牌数", quota: "额度", request: "请求" },
+    usagePageSummary: (pageSize, page, pageCount) => `每页 ${pageSize} 条，当前第 ${page} / ${pageCount} 页`,
+    usagePrev: "上一页",
+    usageNext: "下一页",
+    usageEmpty: "暂无调用记录。",
+    usageRefreshFailed: (error) => `账号额度刷新失败，当前显示上次缓存 · ${error}`,
+    usageNotSignedIn: "未登录或账号信息未加载。登录后点击刷新获取当前用户使用量。",
     currentModelFallback: "未选择",
+    authAccountTitle: "账号服务",
+    authAccountSub: "账号、订阅、分组与额度由服务器下发，本地只保留最近一次投影。",
+    authRefresh: "刷新",
+    authRefreshing: "刷新中...",
+    authLogout: "退出登录",
+    authSignedIn: "已登录",
+    authSignedOut: "未登录",
+    authSignedOutSub: "登录后显示账号信息",
+    authBalanceMeta: (quota, used) => `余额 ${quota} · 已用 ${used}`,
+    authSubscriptionLabel: "订阅套餐",
+    authSubscriptionEmpty: "无有效订阅",
+    authSubscriptionSource: "来自 /api/subscription/self",
+    authSubscriptionBalance: "订阅余额",
+    authAccountBalance: "账户余额",
+    authAccountBalanceHint: "可继续用于模型调用",
+    authUsedQuota: "已用额度",
+    authUsedQuotaMeta: (percent, ratio) => `${percent}% 已消耗 · 倍率 ${ratio || "-"}`,
+    authGroupTag: (group) => `分组 ${group}`,
+    authGroupMeta: (group, ratio, desc) => `分组 ${group || "-"}${ratio ? ` · 倍率 ${ratio}` : ""}${desc ? ` · ${desc}` : ""}`,
+    authRefreshFailed: (error) => `刷新失败，当前显示上次缓存 · ${error}`,
     modelServiceTitle: "模型服务",
-    modelServiceSub: "模型和密钥仅保存在这台电脑；手机只会读取已验证的模型选项。",
+    modelServiceSub: "从账号已有模型中分别选择对话执行模型和审核模型；对话中也可以临时切换任意已同步模型。",
+    modelSync: "同步模型",
+    modelSyncing: "同步中...",
     executorModel: "执行模型",
     reviewerModel: "审核模型",
     reviewerModelOff: "关闭审核模型",
+    modelSyncAfterLogin: "登录后同步模型",
     currentExecutor: (model) => `当前执行：${model}`,
     currentReviewer: (model) => ` · 审核：${model}`,
     reviewerOff: " · 审核：关闭",
+    modelSyncingStatus: "正在同步模型",
+    modelSynced: (count) => `已同步 ${count} 个模型`,
+    modelSyncAfterLoginStatus: "登录后将自动同步模型",
+    integratedAuthTitle: "集成认证",
+    integratedAuthSub: "邮箱连接，将 SomniQ 接入 Gmail / Outlook / IMAP。",
+    mailBack: "返回",
+    mailTitle: "邮箱",
     aboutUpdateTitle: "应用更新",
     aboutUpdateSub: "通过 GitHub Release 检查、下载并安装 SomniQ Studio 更新。",
     aboutCheck: "检查更新",
@@ -287,7 +497,7 @@ const SETTINGS_COPY: Record<Language, {
     saveConnectionSavedInfo: "已保存。下次对话时生效。",
   },
   en: {
-    tabs: { general: "General", models: "Models", remote: "Remote", about: "About" },
+    tabs: { general: "General", auth: "Auth", models: "Models", usage: "Usage", remote: "Remote", about: "About" },
     settingsCategories: "Settings categories",
     loading: "Loading...",
     statusModelService: "Model service",
@@ -329,15 +539,70 @@ const SETTINGS_COPY: Record<Language, {
     userPromptBlocks: (count) => `${count} blocks`,
     userPromptImages: (count) => `${count} images`,
     userPromptLoading: "Loading user prompt...",
+    creditUnit: "credits",
+    usageTitle: "Usage",
+    usageSub: "Server-side quota and usage for the signed-in account.",
+    usageRefresh: "Refresh",
+    usageRefreshing: "Refreshing...",
+    accountUsedQuota: "Account used",
+    accountBalance: "Balance",
+    accountTotalQuota: "Total quota",
+    accountUsageRatio: "Account usage",
+    usedQuota: "Used quota",
+    remainingQuota: "Remaining quota",
+    subscriptionUsed: "Subscription used",
+    subscriptionBalance: "Subscription balance",
+    subscriptionUsageRatio: "Subscription usage",
+    callDetails: "Call Details",
+    usageRange: (start, end, total) => `${start}-${end} of ${total}`,
+    usageNoRecords: "No records",
+    usageLoading: "Loading...",
+    usageHeaders: { time: "Time", model: "Model", token: "Token", tokens: "Tokens", quota: "Quota", request: "Request" },
+    usagePageSummary: (pageSize, page, pageCount) => `${pageSize} per page, page ${page} of ${pageCount}`,
+    usagePrev: "Previous",
+    usageNext: "Next",
+    usageEmpty: "No usage records yet.",
+    usageRefreshFailed: (error) => `Failed to refresh account quota. Showing cached data. ${error}`,
+    usageNotSignedIn: "Not signed in, or account information is not loaded. Sign in, then refresh usage.",
     currentModelFallback: "Not selected",
+    authAccountTitle: "Account Service",
+    authAccountSub: "Account, subscription, group, and quota are provided by the server. This device keeps only the latest snapshot.",
+    authRefresh: "Refresh",
+    authRefreshing: "Refreshing...",
+    authLogout: "Sign out",
+    authSignedIn: "Signed in",
+    authSignedOut: "Not signed in",
+    authSignedOutSub: "Sign in to show account information",
+    authBalanceMeta: (quota, used) => `Balance ${quota} · Used ${used}`,
+    authSubscriptionLabel: "Subscription",
+    authSubscriptionEmpty: "No active subscription",
+    authSubscriptionSource: "From /api/subscription/self",
+    authSubscriptionBalance: "Subscription balance",
+    authAccountBalance: "Account balance",
+    authAccountBalanceHint: "Available for model calls",
+    authUsedQuota: "Used quota",
+    authUsedQuotaMeta: (percent, ratio) => `${percent}% used · ratio ${ratio || "-"}`,
+    authGroupTag: (group) => `Group ${group}`,
+    authGroupMeta: (group, ratio, desc) => `Group ${group || "-"}${ratio ? ` · ratio ${ratio}` : ""}${desc ? ` · ${desc}` : ""}`,
+    authRefreshFailed: (error) => `Refresh failed. Showing cached data. ${error}`,
     modelServiceTitle: "Model Service",
-    modelServiceSub: "Models and keys stay on this computer; the phone sees only verified model choices.",
+    modelServiceSub: "Choose the chat execution model and review model from synced account models. Chat can also switch to any synced model temporarily.",
+    modelSync: "Sync models",
+    modelSyncing: "Syncing...",
     executorModel: "Execution model",
     reviewerModel: "Review model",
     reviewerModelOff: "Disable review model",
+    modelSyncAfterLogin: "Sync models after sign-in",
     currentExecutor: (model) => `Current executor: ${model}`,
     currentReviewer: (model) => ` · reviewer: ${model}`,
     reviewerOff: " · reviewer: off",
+    modelSyncingStatus: "Syncing models",
+    modelSynced: (count) => `${count} models synced`,
+    modelSyncAfterLoginStatus: "Models will sync automatically after sign-in",
+    integratedAuthTitle: "Integrated Auth",
+    integratedAuthSub: "Connect mail accounts and link SomniQ with Gmail, Outlook, or IMAP.",
+    mailBack: "Back",
+    mailTitle: "Mail",
     aboutUpdateTitle: "App Updates",
     aboutUpdateSub: "Check, download, and install SomniQ Studio updates from GitHub Releases.",
     aboutCheck: "Check for updates",
@@ -418,6 +683,7 @@ const REVIEWER_MODELS: PresetOption[] = [
 ];
 
 const OPENAI_COMPAT_URLS: PresetOption[] = [
+  { label: MANAGED_MODEL_SERVER_LABEL, value: `${MANAGED_MODEL_SERVER_BASE_URL}/v1` },
   { label: "OpenAI", value: "https://api.openai.com/v1" },
   { label: "MiniMax", value: "https://api.minimaxi.com/v1" },
   { label: "Gemini", value: "https://generativelanguage.googleapis.com/v1beta/openai" },
@@ -547,8 +813,31 @@ const REVIEWER_PROVIDERS: Record<string, ProviderMeta> = {
   },
 };
 
+function readCachedAccount(): NewApiAccount | null {
+  try {
+    const raw = localStorage.getItem(ACCOUNT_CACHE_KEY) ?? localStorage.getItem(LEGACY_ACCOUNT_CACHE_KEY);
+    return raw ? (JSON.parse(raw) as NewApiAccount) : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeCachedAccount(account: NewApiAccount | null) {
+  try {
+    if (account) {
+      localStorage.setItem(ACCOUNT_CACHE_KEY, JSON.stringify(account));
+      localStorage.removeItem(LEGACY_ACCOUNT_CACHE_KEY);
+    } else {
+      localStorage.removeItem(ACCOUNT_CACHE_KEY);
+      localStorage.removeItem(LEGACY_ACCOUNT_CACHE_KEY);
+    }
+  } catch {
+    // Local storage can be disabled; the in-memory state is still useful.
+  }
+}
+
 function isSettingsTab(value: unknown): value is SettingsTab {
-  return value === "general" || value === "models" || value === "remote" || value === "about";
+  return value === "general" || value === "auth" || value === "models" || value === "usage" || value === "remote" || value === "about";
 }
 
 function readRequestedSettingsTab(): SettingsTab | null {
@@ -562,6 +851,53 @@ function readRequestedSettingsTab(): SettingsTab | null {
     // Session storage can be disabled in embedded browser contexts.
   }
   return null;
+}
+
+function uniqueModelList(...groups: Array<Array<string | null | undefined> | null | undefined>): string[] {
+  const seen = new Set<string>();
+  const items: string[] = [];
+  for (const group of groups) {
+    for (const value of group ?? []) {
+      const model = value?.trim();
+      if (!model || seen.has(model)) continue;
+      seen.add(model);
+      items.push(model);
+    }
+  }
+  return items;
+}
+
+function formatQuota(credits: number): string {
+  return `$${(credits / 500000).toFixed(2)}`;
+}
+
+function quotaPercent(account: NewApiAccount): number {
+  const total = account.quota + account.usedQuota;
+  if (!Number.isFinite(total) || total <= 0) return 0;
+  return Math.min(100, Math.round((account.usedQuota / total) * 100));
+}
+
+function subscriptionQuotaPercent(account: NewApiAccount): number {
+  const used = account.subscriptionUsedQuota ?? 0;
+  const remaining = account.subscriptionQuota ?? 0;
+  const total = used + remaining;
+  if (!Number.isFinite(total) || total <= 0) return 0;
+  return Math.min(100, Math.round((used / total) * 100));
+}
+
+function isAdminAccount(account: NewApiAccount | null): boolean {
+  if (!account) return false;
+  if (account.isAdmin === true) return true;
+  if (typeof account.role === "number" && account.role >= 10) return true;
+  const markers = [account.group, account.groupDesc, account.subscriptionName, account.subscriptionDesc];
+  return markers.some((value) => {
+    const text = value?.trim();
+    if (!text) return false;
+    const lower = text.toLowerCase();
+    return ["admin", "administrator", "root", "superuser", "super-admin", "owner"].includes(lower)
+      || text.includes("管理员")
+      || text.includes("管理員");
+  });
 }
 
 function formatUpdateBytes(value: number): string {
@@ -594,7 +930,6 @@ function formatUsageDate(value: number): string {
   });
 }
 
-/*
 function shortUsageId(value: string): string {
   const text = value.trim();
   if (!text) return "-";
@@ -605,8 +940,6 @@ function shortUsageId(value: string): string {
 function usageLogMeta(status: string, typeLabel: string): string {
   return [typeLabel, status].map((value) => value.trim()).filter(Boolean).join(" · ");
 }
-
-*/
 
 function environmentMark(id: string): string {
   if (id === "python") return "Py";
@@ -646,12 +979,27 @@ function detectProtocol(url: string): string {
   return "openai";
 }
 
+function isManagedModelServerUrl(value: string | null | undefined): boolean {
+  const normalized = (value ?? "")
+    .trim()
+    .replace(/\/+$/, "")
+    .replace(/^https?:\/\//i, "")
+    .toLowerCase();
+  return normalized === "106.53.28.124:18080"
+    || normalized === "106.53.28.124:18080/v1";
+}
+
 function displayServerValue(value: string): string {
-  return value;
+  return isManagedModelServerUrl(value) ? MANAGED_MODEL_SERVER_LABEL : value;
+}
+
+function hideManagedServerAddress(value: string): string {
+  return value.replace(/(?:https?:\/\/)?106\.53\.28\.124:18080(?:\/v1)?/gi, MANAGED_MODEL_SERVER_LABEL);
 }
 
 function suggestModels(url: string): string[] {
   const lower = url.toLowerCase();
+  if (isManagedModelServerUrl(lower)) return ["MiniMax-M3", "MiniMax-M2.7", "gpt-5.5"];
   if (lower.includes("minimaxi.com")) return ["MiniMax-M3", "MiniMax-M2.7"];
   if (lower.includes("deepseek.com")) return ["deepseek-v4-pro"];
   if (lower.includes("openai.com")) return ["gpt-5.5", "gpt-5.4", "gpt-4o"];
@@ -666,6 +1014,7 @@ function suggestModels(url: string): string[] {
 
 function formatServerLabel(server: string, provider?: string): string {
   const source = server.trim() || provider?.trim() || "unknown";
+  if (isManagedModelServerUrl(source)) return MANAGED_MODEL_SERVER_LABEL;
   if (source === "OpenAI-compatible" || source === "Anthropic-compatible" || source === "unknown") return source;
   try {
     const url = new URL(source);
@@ -838,7 +1187,7 @@ function TestDetail({ detail }: { detail: ConfigTestResult["executor"] }) {
         <span className="st-test-label">{detail.label}</span>
         {detail.model && <span className="st-test-meta">{detail.model}</span>}
       </div>
-      <div className="st-test-message">{detail.message}</div>
+      <div className="st-test-message">{hideManagedServerAddress(detail.message)}</div>
       {detail.baseUrl && <div className="st-test-url">{formatServerLabel(detail.baseUrl)}</div>}
     </div>
   );
@@ -850,6 +1199,7 @@ export default function Settings() {
   const setTheme = useStore((state) => state.setTheme);
   const language = useStore((state) => state.language);
   const setLanguage = useStore((state) => state.setLanguage);
+  const logout = useStore((state) => state.logout);
   const [configView, setConfigView] = useState<ConfigView | null>(() => isTauri() ? null : PREVIEW_CONFIG_VIEW);
   const [advForm, setAdvForm] = useState<ConfigPatch>({});
   const [execKey, setExecKey] = useState("");
@@ -868,6 +1218,26 @@ export default function Settings() {
   const [environmentLoading, setEnvironmentLoading] = useState(false);
   const [environmentError, setEnvironmentError] = useState("");
   const [environmentCheckedAt, setEnvironmentCheckedAt] = useState<number | null>(null);
+  const [usageLoading, setUsageLoading] = useState(false);
+  const [usageLogPage, setUsageLogPage] = useState(1);
+  const [usageLogPages, setUsageLogPages] = useState<Record<number, NewApiUsageLogPage>>(() =>
+    isTauri() ? usageLogPageCache : { [PREVIEW_USAGE_LOGS.page]: PREVIEW_USAGE_LOGS },
+  );
+  const [usageLogs, setUsageLogs] = useState<NewApiUsageLogPage | null>(() =>
+    isTauri() ? usageLogPageCache[1] ?? null : PREVIEW_USAGE_LOGS,
+  );
+  const [usageLogError, setUsageLogError] = useState("");
+  const [managedModels, setManagedModels] = useState<string[]>(() => isTauri() ? [] : PREVIEW_CONFIG_VIEW.managedModels ?? []);
+  const [managedModelsLoading, setManagedModelsLoading] = useState(false);
+  const [managedModelsError, setManagedModelsError] = useState("");
+  const [account, setAccount] = useState<NewApiAccount | null>(() => isTauri() ? readCachedAccount() : PREVIEW_ACCOUNT);
+  const [accountLoading, setAccountLoading] = useState(false);
+  const [accountError, setAccountError] = useState("");
+  const [groupOptions, setGroupOptions] = useState<NewApiGroupOption[]>(() => isTauri() ? [] : PREVIEW_GROUP_OPTIONS);
+  const [groupDraft, setGroupDraft] = useState(() => isTauri() ? readCachedAccount()?.group ?? "" : PREVIEW_ACCOUNT.group);
+  const [groupLoading, setGroupLoading] = useState(false);
+  const [groupSaving, setGroupSaving] = useState(false);
+  const [groupError, setGroupError] = useState("");
   const [systemPrompt, setSystemPrompt] = useState<SystemPromptView | null>(() => isTauri() ? null : PREVIEW_SYSTEM_PROMPT);
   const [systemPromptOpen, setSystemPromptOpen] = useState(false);
   const [systemPromptLoading, setSystemPromptLoading] = useState(false);
@@ -877,7 +1247,10 @@ export default function Settings() {
   const [userPromptLoading, setUserPromptLoading] = useState(false);
   const [userPromptError, setUserPromptError] = useState("");
   const [activeSettingsTab, setActiveSettingsTab] = useState<SettingsTab>(() => readRequestedSettingsTab() ?? "general");
+  const [mailDetailOpen, setMailDetailOpen] = useState(false);
   const savedTimer = useRef<number | null>(null);
+  const usageLogPagesRef = useRef(usageLogPages);
+  const usageRefreshPendingRef = useRef(false);
   const copy = SETTINGS_COPY[language];
 
   const loadConfig = (view: ConfigView) => {
@@ -911,6 +1284,74 @@ export default function Settings() {
   useEffect(() => () => {
     if (savedTimer.current !== null) window.clearTimeout(savedTimer.current);
   }, []);
+
+  useEffect(() => {
+    usageLogPagesRef.current = usageLogPages;
+  }, [usageLogPages]);
+
+  const cacheUsageLogPage = (pageData: NewApiUsageLogPage, reset = false) => {
+    setUsageLogPages((current) => {
+      const next = reset ? {} : { ...current };
+      next[pageData.page] = pageData;
+      usageLogPagesRef.current = next;
+      usageLogPageCache = next;
+      return next;
+    });
+    setUsageLogs(pageData);
+  };
+
+  const loadUsageSummary = async (page = usageLogPage, options: { force?: boolean; refreshAccount?: boolean } = {}) => {
+    const cachedLogs = usageLogPagesRef.current[page];
+    if (!options.force && cachedLogs) {
+      setUsageLogs(cachedLogs);
+      setUsageLogError("");
+      return;
+    }
+    if (!isTauri()) {
+      cacheUsageLogPage({ ...PREVIEW_USAGE_LOGS, page });
+      return;
+    }
+    setUsageLoading(true);
+    setUsageLogError("");
+    try {
+      if (options.refreshAccount || !account) {
+        await loadAccount();
+      }
+      const nextLogs = await newapiUsageLogs(page, USAGE_LOG_PAGE_SIZE);
+      cacheUsageLogPage(nextLogs, options.force);
+    } catch (error) {
+      const message = String(error);
+      setUsageLogError(message);
+      if (cachedLogs) {
+        setUsageLogs(cachedLogs);
+      }
+      setError(message);
+    } finally {
+      setUsageLoading(false);
+    }
+  };
+
+  const refreshUsage = () => {
+    const firstPage = 1;
+    setUsageLogPages({});
+    usageLogPagesRef.current = {};
+    usageLogPageCache = {};
+    setUsageLogs(null);
+    usageRefreshPendingRef.current = true;
+    if (usageLogPage === firstPage) {
+      void loadUsageSummary(firstPage, { force: true, refreshAccount: true });
+      usageRefreshPendingRef.current = false;
+    } else {
+      setUsageLogPage(firstPage);
+    }
+  };
+
+  const goToUsageLogPage = (page: number) => {
+    const nextPage = Math.max(1, page);
+    setUsageLogs(usageLogPagesRef.current[nextPage] ?? null);
+    setUsageLogError("");
+    setUsageLogPage(nextPage);
+  };
 
   const loadEnvironmentChecks = async () => {
     if (!isTauri()) return;
@@ -962,6 +1403,111 @@ export default function Settings() {
     }
   };
 
+  const loadManagedModels = async () => {
+    if (!MANAGED_NEW_API_MODE) return;
+    if (!isTauri()) {
+      setManagedModels(PREVIEW_CONFIG_VIEW.managedModels ?? []);
+      setConfigView(PREVIEW_CONFIG_VIEW);
+      notifyChatModelsUpdated();
+      return;
+    }
+    setManagedModelsLoading(true);
+    setManagedModelsError("");
+    try {
+      const models = await newapiModels();
+      setManagedModels(models);
+      setConfigView((current) => current ? { ...current, managedModels: models } : current);
+      notifyChatModelsUpdated();
+    } catch (error) {
+      setManagedModels([]);
+      setManagedModelsError(String(error));
+    } finally {
+      setManagedModelsLoading(false);
+    }
+  };
+
+  const loadGroupOptions = async () => {
+    if (!MANAGED_NEW_API_MODE) return;
+    if (!isTauri()) {
+      setGroupOptions(PREVIEW_GROUP_OPTIONS);
+      return;
+    }
+    setGroupLoading(true);
+    setGroupError("");
+    try {
+      setGroupOptions(await newapiGroups());
+    } catch (error) {
+      setGroupError(String(error));
+    } finally {
+      setGroupLoading(false);
+    }
+  };
+
+  const loadAccount = async () => {
+    if (!MANAGED_NEW_API_MODE) return;
+    if (!isTauri()) {
+      setAccount(PREVIEW_ACCOUNT);
+      setGroupDraft(PREVIEW_ACCOUNT.group);
+      return;
+    }
+    setAccountLoading(true);
+    setAccountError("");
+    try {
+      const next = await newapiBootstrap();
+      setAccount(next);
+      setGroupDraft(next.group);
+      if (next.models.length > 0) {
+        setManagedModels(next.models);
+        setConfigView((current) => current ? { ...current, managedModels: next.models } : current);
+        notifyChatModelsUpdated();
+      }
+      writeCachedAccount(next);
+    } catch (error) {
+      const message = String(error);
+      setAccountError(message);
+      if (isManagedAuthInvalidError(error)) {
+        writeCachedAccount(null);
+        logout();
+      }
+    } finally {
+      setAccountLoading(false);
+    }
+  };
+
+  const saveAccountGroup = async () => {
+    const nextGroup = groupDraft.trim();
+    if (!nextGroup || !account || nextGroup === account.group) return;
+    setGroupSaving(true);
+    setGroupError("");
+    try {
+      const next = isTauri()
+        ? await newapiUpdateGroup(nextGroup)
+        : { ...PREVIEW_ACCOUNT, group: nextGroup };
+      setAccount(next);
+      setGroupDraft(next.group);
+      if (next.models.length > 0) {
+        setManagedModels(next.models);
+        setConfigView((current) => current ? { ...current, managedModels: next.models } : current);
+        notifyChatModelsUpdated();
+      }
+      writeCachedAccount(next);
+    } catch (error) {
+      const message = String(error);
+      setGroupError(message);
+      setError(message);
+    } finally {
+      setGroupSaving(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!isTauri()) return;
+    void loadManagedModels();
+    void loadGroupOptions();
+    void loadAccount();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   useEffect(() => {
     const openRequestedTab = (tab: SettingsTab) => {
       setActiveSettingsTab(tab);
@@ -1008,6 +1554,14 @@ export default function Settings() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeSettingsTab, userPromptOpen]);
+
+  useEffect(() => {
+    if (!isTauri() || activeSettingsTab !== "usage") return;
+    const refreshAccount = usageRefreshPendingRef.current;
+    usageRefreshPendingRef.current = false;
+    void loadUsageSummary(usageLogPage, refreshAccount ? { force: true, refreshAccount: true } : {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeSettingsTab, usageLogPage]);
 
   const buildPatch = (options: { includeExecutor?: boolean; includeReviewer?: boolean } = {}) => {
     const patch: ConfigPatch = { ...advForm };
@@ -1088,6 +1642,43 @@ export default function Settings() {
     }
   };
 
+  const applyManagedModel = async (model: string) => {
+    if (!model || model === configView?.executorModel) return;
+    if (!isTauri()) {
+      setConfigView((current) => current ? { ...current, executorModel: model } : current);
+      setAdvForm((current) => ({ ...current, executorModel: model }));
+      setAccount((current) => (current ? { ...current, model } : current));
+      notifyChatModelsUpdated();
+      return;
+    }
+    try {
+      const next = await configSet({ executorModel: model });
+      loadConfig(next);
+      setAccount((current) => (current ? { ...current, model } : current));
+      notifyChatModelsUpdated();
+    } catch (error) {
+      setError(String(error));
+    }
+  };
+
+  const applyManagedReviewerModel = async (model: string) => {
+    if (model === (configView?.reviewerModel ?? "")) return;
+    if (!isTauri()) {
+      setConfigView((current) => current ? { ...current, reviewerModel: model } : current);
+      setAdvForm((current) => ({ ...current, reviewerModel: model }));
+      return;
+    }
+    try {
+      const patch: ConfigPatch = model
+        ? { reviewerModel: model }
+        : { reviewerProvider: "", reviewerModel: "", reviewerBaseUrl: "" };
+      const next = await configSet(patch);
+      loadConfig(next);
+    } catch (error) {
+      setError(String(error));
+    }
+  };
+
   const checkForUpdates = async () => {
     setUpdateState("checking");
     setUpdateProgress(null);
@@ -1146,12 +1737,28 @@ export default function Settings() {
     }
   };
 
+  if (mailDetailOpen) {
+    return (
+      <div className="st-page sp-detail-page">
+        <div className="sp-detail-head">
+          <button className="sp-back-btn" onClick={() => setMailDetailOpen(false)} type="button">{copy.mailBack}</button>
+          <div className="sp-detail-title">{copy.mailTitle}</div>
+          <div className="sp-detail-badges">
+            <span className="sp-role-badge sp-role-mail">IMAP/SMTP</span>
+          </div>
+        </div>
+        <MailSettingsDetail />
+      </div>
+    );
+  }
+
   if (!configView) return <div className="board"><div className="empty">{copy.loading}</div></div>;
 
   const advExecProvider = advForm.executorProvider ?? "anthropic";
   const advExecMeta = EXECUTOR_PROVIDERS[advExecProvider] ?? EXECUTOR_PROVIDERS.custom;
-  const canConfigureExecutor = true;
-  const canConfigureReviewerApi = true;
+  const canConfigureExecutor = isAdminAccount(account);
+  const canConfigureReviewerApi = canConfigureExecutor;
+  const canSelectManagedReviewer = MANAGED_NEW_API_MODE;
   const advReviewerProvider = advForm.reviewerProvider ?? "";
   const advReviewerMeta = REVIEWER_PROVIDERS[advReviewerProvider] ?? REVIEWER_PROVIDERS.custom;
   const summaryProviderOptions = (() => {
@@ -1246,6 +1853,49 @@ export default function Settings() {
       : `${formatUpdateBytes(updateProgress.downloadedBytes)} downloaded`
     : "";
   const environmentReadyCount = environmentChecks.filter((item) => item.available).length;
+  const accountUsedQuota = account?.usedQuota ?? 0;
+  const accountRemainingQuota = account?.quota ?? 0;
+  const accountTotalQuota = accountUsedQuota + accountRemainingQuota;
+  const accountUsagePercent = account ? quotaPercent(account) : 0;
+  const subscriptionUsedQuota = account?.subscriptionUsedQuota ?? 0;
+  const subscriptionRemainingQuota = account?.subscriptionQuota ?? 0;
+  const subscriptionUsagePercent = account ? subscriptionQuotaPercent(account) : 0;
+  const groupCopy = language === "cn"
+    ? {
+      label: "后台分组",
+      hint: "切换后会更新 New API 后台里当前账号的分组，并重新同步额度与模型。",
+      save: "保存分组",
+      saving: "保存中...",
+      loading: "正在加载分组...",
+      empty: "暂无可选分组",
+    }
+    : {
+      label: "Backend group",
+      hint: "Saving updates this account's group in New API, then refreshes quota and models.",
+      save: "Save group",
+      saving: "Saving...",
+      loading: "Loading groups...",
+      empty: "No groups available",
+    };
+  const groupOptionsWithCurrent = account?.group && !groupOptions.some((option) => option.name === account.group)
+    ? [{ name: account.group, desc: account.groupDesc, ratio: account.groupRatio }, ...groupOptions]
+    : groupOptions;
+  const usageLogTotal = usageLogs?.total ?? 0;
+  const usageLogItems = usageLogs?.items ?? [];
+  const usageLogPageCount = Math.max(1, Math.ceil(usageLogTotal / USAGE_LOG_PAGE_SIZE));
+  const usageLogStart = usageLogTotal > 0 ? (usageLogPage - 1) * USAGE_LOG_PAGE_SIZE + 1 : 0;
+  const usageLogEnd = usageLogTotal > 0 ? Math.min(usageLogStart + usageLogItems.length - 1, usageLogTotal) : 0;
+  const canGoPrevUsageLogPage = usageLogPage > 1 && !usageLoading;
+  const canGoNextUsageLogPage = usageLogPage < usageLogPageCount && !usageLoading;
+  const currentManagedModel = configView.executorModel?.trim() || copy.currentModelFallback;
+  const availableManagedModels = uniqueModelList(
+    managedModels,
+    configView.managedModels,
+    [configView.executorModel, configView.reviewerModel],
+    account?.models,
+  );
+  const managedModelPreview = availableManagedModels.slice(0, 12);
+  const currentReviewerModel = configView.reviewerModel?.trim() || "";
   const currentConfiguredModel = configView.executorModel?.trim() || copy.currentModelFallback;
   const currentServerLabel = configuredServerLabel(configView);
 
@@ -1452,6 +2102,120 @@ export default function Settings() {
         </>
       )}
 
+      {activeSettingsTab === "auth" && (
+        <>
+          <div className="sp-update-section">
+            <div className="sp-section-head">
+              <div className="sp-section-head-text">
+                <div className="sp-section-title">{copy.authAccountTitle}</div>
+                <div className="sp-section-sub">{copy.authAccountSub}</div>
+              </div>
+              <div className="sp-update-actions">
+                <button className="sp-btn sp-btn-secondary" onClick={() => void loadAccount()} disabled={accountLoading} type="button">
+                  {accountLoading ? copy.authRefreshing : copy.authRefresh}
+                </button>
+                <button className="sp-btn sp-btn-secondary" onClick={logout} type="button">{copy.authLogout}</button>
+              </div>
+            </div>
+            <div className={`sp-update-panel ${accountError && !account ? "sp-update-panel-error" : "sp-update-panel-current"}`}>
+              <div className="sp-update-main">
+                <span className={`sp-update-dot ${accountError && !account ? "sp-update-dot-error" : "sp-update-dot-current"}`} />
+                <div className="sp-update-copy">
+                  <div className="sp-update-title">
+                    {account ? (account.displayName || account.username || copy.authSignedIn) : copy.authSignedOut}
+                    {account?.subscriptionName ? <span className="sp-status-tag sp-status-tag-version" style={{ marginLeft: 8 }}>{account.subscriptionName}</span> : null}
+                    {account?.group ? <span className="sp-status-tag sp-status-tag-version sp-account-group-tag" style={{ marginLeft: 8 }}>{copy.authGroupTag(account.group)}</span> : null}
+                  </div>
+                  <div className="sp-update-meta">
+                    {account
+                      ? copy.authBalanceMeta(formatQuota(account.quota), formatQuota(account.usedQuota))
+                      : (accountError || copy.authSignedOutSub)}
+                  </div>
+                  {account && (
+                    <div className="sp-account-summary" aria-label={copy.authAccountTitle}>
+                      <div className="sp-account-metric">
+                        <span>{copy.authSubscriptionLabel}</span>
+                        <strong>{account.subscriptionName || copy.authSubscriptionEmpty}</strong>
+                        <small>{account.subscriptionDesc || copy.authSubscriptionSource}</small>
+                      </div>
+                      <div className="sp-account-metric subscription">
+                        <span>{copy.authSubscriptionBalance}</span>
+                        <strong>{formatQuota(account.subscriptionQuota ?? 0)}</strong>
+                        <small>{copy.authUsedQuotaMeta(subscriptionQuotaPercent(account), account.groupRatio || "-")}</small>
+                      </div>
+                      <div className="sp-account-metric balance">
+                        <span>{copy.authAccountBalance}</span>
+                        <strong>{formatQuota(account.quota)}</strong>
+                        <small>{copy.authAccountBalanceHint}</small>
+                      </div>
+                      <div className="sp-account-metric">
+                        <span>{copy.authUsedQuota}</span>
+                        <strong>{formatQuota(account.usedQuota)}</strong>
+                        <small>{copy.authUsedQuotaMeta(quotaPercent(account), account.groupRatio || "-")}</small>
+                      </div>
+                    </div>
+                  )}
+                  {account && (account.groupRatio || account.groupDesc) && (
+                    <div className="sp-update-message">
+                      {copy.authGroupMeta(account.group, account.groupRatio, account.groupDesc)}
+                    </div>
+                  )}
+                  {account && (
+                    <div className="sp-account-group-control">
+                      <label className="sp-account-group-field">
+                        <span>{groupCopy.label}</span>
+                        <select
+                          className="sp-settings-select"
+                          value={groupDraft}
+                          onChange={(event) => setGroupDraft(event.currentTarget.value)}
+                          disabled={groupLoading || groupSaving || groupOptionsWithCurrent.length === 0}
+                        >
+                          {groupOptionsWithCurrent.map((option) => (
+                            <option value={option.name} key={option.name}>
+                              {option.name}{option.ratio ? ` · ${option.ratio}` : ""}{option.desc ? ` · ${option.desc}` : ""}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <button
+                        className="sp-btn sp-btn-secondary"
+                        type="button"
+                        onClick={() => void saveAccountGroup()}
+                        disabled={groupSaving || groupLoading || !groupDraft.trim() || groupDraft === account.group}
+                      >
+                        {groupSaving ? groupCopy.saving : groupCopy.save}
+                      </button>
+                      <div className="sp-account-group-hint">
+                        {groupLoading ? groupCopy.loading : groupOptionsWithCurrent.length === 0 ? groupCopy.empty : groupCopy.hint}
+                      </div>
+                      {groupError && <div className="sp-update-message sp-update-message-error">{groupError}</div>}
+                    </div>
+                  )}
+                  {account && account.quota + account.usedQuota > 0 && (
+                    <div className="sp-quota-bar">
+                      <div style={{ width: `${quotaPercent(account)}%` }} />
+                    </div>
+                  )}
+                  {account && accountError && <div className="sp-update-message">{copy.authRefreshFailed(accountError)}</div>}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="sp-providers-section">
+            <div className="sp-section-head">
+              <div className="sp-section-head-text">
+                <div className="sp-section-title">{copy.integratedAuthTitle}</div>
+                <div className="sp-section-sub">{copy.integratedAuthSub}</div>
+              </div>
+            </div>
+            <div className="sp-card-list">
+              <MailSettings onOpen={() => setMailDetailOpen(true)} />
+            </div>
+          </div>
+        </>
+      )}
+
       {activeSettingsTab === "models" && (
         <>
           <div className="sp-update-section">
@@ -1460,15 +2224,45 @@ export default function Settings() {
                 <div className="sp-section-title">{copy.modelServiceTitle}</div>
                 <div className="sp-section-sub">{copy.modelServiceSub}</div>
               </div>
+              <div className="sp-update-actions">
+                <button className="sp-btn sp-btn-secondary" onClick={() => void loadManagedModels()} disabled={managedModelsLoading} type="button">
+                  {managedModelsLoading ? copy.modelSyncing : copy.modelSync}
+                </button>
+              </div>
             </div>
             <div className="sp-model-pair">
               <label className="sp-model-select-row">
                 <span>{copy.executorModel}</span>
-                <span className="sp-model-select-empty">{advForm.executorModel || copy.currentModelFallback}</span>
+                {availableManagedModels.length > 0 ? (
+                  <select
+                    value={configView.executorModel ?? ""}
+                    onChange={(event) => void applyManagedModel(event.target.value)}
+                    className="sp-settings-select"
+                  >
+                    {availableManagedModels.map((model) => (
+                      <option key={model} value={model}>{model}</option>
+                    ))}
+                  </select>
+                ) : (
+                  <span className="sp-model-select-empty">{copy.modelSyncAfterLogin}</span>
+                )}
               </label>
               <label className="sp-model-select-row">
                 <span>{copy.reviewerModel}</span>
-                <span className="sp-model-select-empty">{advForm.reviewerModel || copy.reviewerModelOff}</span>
+                {canSelectManagedReviewer && availableManagedModels.length > 0 ? (
+                  <select
+                    value={currentReviewerModel}
+                    onChange={(event) => void applyManagedReviewerModel(event.target.value)}
+                    className="sp-settings-select"
+                  >
+                    <option value="">{copy.reviewerModelOff}</option>
+                    {availableManagedModels.map((model) => (
+                      <option key={model} value={model}>{model}</option>
+                    ))}
+                  </select>
+                ) : (
+                  <span className="sp-model-select-empty">{copy.modelSyncAfterLogin}</span>
+                )}
               </label>
             </div>
             <div className="sp-update-panel sp-update-panel-current">
@@ -1476,11 +2270,24 @@ export default function Settings() {
                 <span className="sp-update-dot sp-update-dot-current" />
                 <div className="sp-update-copy">
                   <div className="sp-update-title">
-                    {copy.currentExecutor(currentConfiguredModel)}
+                    {copy.currentExecutor(currentManagedModel)}
+                    {currentReviewerModel ? copy.currentReviewer(currentReviewerModel) : copy.reviewerOff}
                   </div>
                   <div className="sp-update-meta">
-                    {language === "cn" ? "在下方配置本机模型服务；配对手机只会看到已保存的模型。" : "Configure the local model service below; paired phones only see saved models."}
+                    {managedModelsLoading
+                      ? copy.modelSyncingStatus
+                      : managedModelsError
+                        ? managedModelsError
+                        : availableManagedModels.length > 0
+                          ? copy.modelSynced(availableManagedModels.length)
+                          : copy.modelSyncAfterLoginStatus}
                   </div>
+                  {managedModelPreview.length > 0 && (
+                    <div className="sp-update-message">
+                      {managedModelPreview.join(" · ")}
+                      {availableManagedModels.length > managedModelPreview.length ? ` · +${availableManagedModels.length - managedModelPreview.length}` : ""}
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
@@ -1593,7 +2400,6 @@ export default function Settings() {
         <RemoteControlPanel language={language} onError={setError} />
       )}
 
-      {/*
       {activeSettingsTab === "usage" && (
         <div className="sp-usage-section">
           <div className="sp-usage-page-head">
@@ -1736,7 +2542,6 @@ export default function Settings() {
           )}
         </div>
       )}
-      */}
 
       {activeSettingsTab === "about" && (
         <div className="sp-update-section">

@@ -2,8 +2,8 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { appRelaunch, appUpdateCheck, appUpdateDownloadAndInstall, isTauri } from "./api/tauri";
-import { useStore, type Language, type Tab } from "./store";
+import { appRelaunch, appUpdateCheck, appUpdateDownloadAndInstall, isTauri, newapiBootstrap, onChatDone, type NewApiAccount } from "./api/tauri";
+import { isManagedAuthInvalidError, useStore, type Language, type Tab } from "./store";
 import type { AppUpdateInfo, AppUpdateProgress } from "./types";
 import ErrorBoundary from "./ErrorBoundary";
 import Chat from "./chat/Chat";
@@ -32,6 +32,10 @@ type AppShellCopy = {
   viewErrorTitle: string;
   viewErrorBody: string;
   tryAgain: string;
+  userFallback: string;
+  accountInfo: string;
+  account: string;
+  balance: (value: string) => string;
   back: string;
   forward: string;
   appMenuLabel: string;
@@ -40,8 +44,11 @@ type AppShellCopy = {
   minimizeWindow: string;
   maximizeWindow: string;
   closeWindow: string;
+  userMenu: string;
   settings: string;
+  remainingUsage: string;
   logout: string;
+  user: string;
   currentProject: string;
   noProject: string;
   projects: string;
@@ -73,6 +80,10 @@ const APP_COPY: Record<Language, AppShellCopy> = {
     viewErrorTitle: "当前视图出现界面错误。",
     viewErrorBody: "当前页面无法渲染。",
     tryAgain: "重试",
+    userFallback: "用户",
+    accountInfo: "账户信息",
+    account: "账户",
+    balance: (value) => `余额 ${value}`,
     back: "后退",
     forward: "前进",
     appMenuLabel: "应用菜单",
@@ -81,8 +92,11 @@ const APP_COPY: Record<Language, AppShellCopy> = {
     minimizeWindow: "最小化窗口",
     maximizeWindow: "最大化窗口",
     closeWindow: "关闭窗口",
+    userMenu: "用户菜单",
     settings: "设置",
+    remainingUsage: "剩余用量",
     logout: "退出登录",
+    user: "用户",
     currentProject: "当前项目",
     noProject: "无项目",
     projects: "项目",
@@ -112,6 +126,10 @@ const APP_COPY: Record<Language, AppShellCopy> = {
     viewErrorTitle: "This view hit a UI error.",
     viewErrorBody: "The current screen could not render.",
     tryAgain: "Try again",
+    userFallback: "User",
+    accountInfo: "Account info",
+    account: "Account",
+    balance: (value) => `Balance ${value}`,
     back: "Back",
     forward: "Forward",
     appMenuLabel: "Application menu",
@@ -120,8 +138,11 @@ const APP_COPY: Record<Language, AppShellCopy> = {
     minimizeWindow: "Minimize window",
     maximizeWindow: "Maximize window",
     closeWindow: "Close window",
+    userMenu: "User menu",
     settings: "Settings",
+    remainingUsage: "Remaining usage",
     logout: "Sign out",
+    user: "User",
     currentProject: "Current project",
     noProject: "No project",
     projects: "Projects",
@@ -183,10 +204,14 @@ interface NavItem {
 type UpdateIndicatorState = "idle" | "available" | "downloading" | "ready";
 
 const UPDATE_CHECK_INTERVAL_MS = 30 * 60 * 1000;
+const ACCOUNT_REFRESH_INTERVAL_MS = 60 * 1000;
+const ACCOUNT_REFRESH_MIN_INTERVAL_MS = 15 * 1000;
+const ACCOUNT_CACHE_KEY = "somniq-account-v1";
+const ACCOUNT_LEGACY_CACHE_KEY = "aris-account-v1";
 const SETTINGS_TAB_REQUEST_KEY = "somniq-settings-tab-request";
 const SETTINGS_TAB_REQUEST_EVENT = "somniq-settings-tab-request";
 
-type RequestedSettingsTab = "general" | "models" | "remote" | "about";
+type RequestedSettingsTab = "general" | "auth" | "usage" | "models" | "remote" | "about";
 
 const IC = (p: { d: string; extra?: string }) => (
   <svg width="16" height="16" viewBox="0 0 16 16" fill="none"
@@ -249,12 +274,32 @@ const PlusIcon = () => (
   </svg>
 );
 
+const UserCircleIcon = () => (
+  <svg width="16" height="16" viewBox="0 0 16 16" fill="none"
+    stroke="currentColor" strokeWidth="1.45" strokeLinecap="round" strokeLinejoin="round"
+    aria-hidden="true">
+    <circle cx="8" cy="8" r="6" />
+    <circle cx="8" cy="6.3" r="1.8" />
+    <path d="M4.8 12c.8-1.7 5.6-1.7 6.4 0" />
+  </svg>
+);
+
 const GearIcon = () => (
   <svg width="16" height="16" viewBox="0 0 16 16" fill="none"
     stroke="currentColor" strokeWidth="1.45" strokeLinecap="round" strokeLinejoin="round"
     aria-hidden="true">
     <circle cx="8" cy="8" r="2.3" />
     <path d="M8 1.8v1.5M8 12.7v1.5M14.2 8h-1.5M3.3 8H1.8M12.4 3.6l-1.1 1.1M4.7 11.3l-1.1 1.1M12.4 12.4l-1.1-1.1M4.7 4.7l-1.1-1.1" />
+  </svg>
+);
+
+const UsageIcon = () => (
+  <svg width="16" height="16" viewBox="0 0 16 16" fill="none"
+    stroke="currentColor" strokeWidth="1.45" strokeLinecap="round" strokeLinejoin="round"
+    aria-hidden="true">
+    <path d="M3.3 11.8a5.8 5.8 0 119.4 0" />
+    <path d="M8 8.4l2.6-2.6" />
+    <path d="M5 12.8h6" />
   </svg>
 );
 
@@ -331,6 +376,69 @@ function sameProjectOrder(left: string[], right: string[]) {
   return left.length === right.length && left.every((id, index) => id === right[index]);
 }
 
+function readCachedAccount(): NewApiAccount | null {
+  try {
+    const raw = localStorage.getItem(ACCOUNT_CACHE_KEY) ?? localStorage.getItem(ACCOUNT_LEGACY_CACHE_KEY);
+    return raw ? (JSON.parse(raw) as NewApiAccount) : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeCachedAccount(account: NewApiAccount | null) {
+  try {
+    if (account) {
+      localStorage.setItem(ACCOUNT_CACHE_KEY, JSON.stringify(account));
+      localStorage.removeItem(ACCOUNT_LEGACY_CACHE_KEY);
+    } else {
+      localStorage.removeItem(ACCOUNT_CACHE_KEY);
+      localStorage.removeItem(ACCOUNT_LEGACY_CACHE_KEY);
+    }
+  } catch {
+    // Storage may be unavailable in restricted browser contexts.
+  }
+}
+
+function accountName(account: NewApiAccount | null, fallback: string) {
+  const displayName = account?.displayName?.trim();
+  if (displayName) return displayName;
+  const username = account?.username?.trim();
+  if (!username) return fallback;
+  const at = username.indexOf("@");
+  return at > 0 ? username.slice(0, at) : username;
+}
+
+function accountEmail(account: NewApiAccount | null, fallback: string) {
+  return account?.username?.trim() || account?.displayName?.trim() || fallback;
+}
+
+function accountPlan(account: NewApiAccount | null, copy: AppShellCopy) {
+  const subscription = account?.subscriptionName?.trim();
+  if (subscription) return subscription;
+  if (account && Number.isFinite(account.quota)) return copy.balance(formatAccountQuota(account.quota));
+  return copy.account;
+}
+
+function formatAccountQuota(credits: number): string {
+  return `$${(credits / 500000).toFixed(2)}`;
+}
+
+function formatOptionalAccountQuota(credits?: number | null): string {
+  return typeof credits === "number" && Number.isFinite(credits)
+    ? formatAccountQuota(credits)
+    : "-";
+}
+
+function accountInitials(name: string, email: string, userFallback: string) {
+  const source = (name && name !== userFallback ? name : email).trim();
+  const local = source.includes("@") ? source.slice(0, source.indexOf("@")) : source;
+  const parts = local.split(/[\s._-]+/).filter(Boolean);
+  const chars = parts.length > 1
+    ? [parts[0][0], parts[1][0]]
+    : Array.from(parts[0] ?? local).slice(0, 2);
+  return chars.join("").toUpperCase() || "U";
+}
+
 function requestSettingsTab(tab: RequestedSettingsTab) {
   try {
     sessionStorage.setItem(SETTINGS_TAB_REQUEST_KEY, tab);
@@ -367,6 +475,9 @@ export default function App() {
   const reorderProjects = useStore((s) => s.reorderProjects);
   const [productMenuOpen, setProductMenuOpen] = useState(false);
   const [projectMenuOpen, setProjectMenuOpen] = useState(false);
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
+  const [usageDetailsOpen, setUsageDetailsOpen] = useState(false);
+  const [account, setAccount] = useState<NewApiAccount | null>(() => readCachedAccount());
   const [draggedProjectId, setDraggedProjectId] = useState<string | null>(null);
   const [projectOrderPreview, setProjectOrderPreview] = useState<string[] | null>(null);
   const [updateState, setUpdateState] = useState<UpdateIndicatorState>("idle");
@@ -384,6 +495,8 @@ export default function App() {
   const suppressProjectClickRef = useRef(false);
   const updateCheckInFlightRef = useRef(false);
   const updateStateRef = useRef<UpdateIndicatorState>("idle");
+  const accountRefreshInFlightRef = useRef(false);
+  const lastAccountRefreshAtRef = useRef(0);
   const projectDragRef = useRef<{
     id: string;
     pointerId: number;
@@ -391,12 +504,15 @@ export default function App() {
     startY: number;
     moved: boolean;
   } | null>(null);
+  const userMenuRef = useRef<HTMLDivElement | null>(null);
 
   const selectTab = useCallback((nextTab: Tab) => {
     preloadTabModule(nextTab);
     startTabTransition(() => setTab(nextTab));
     setProductMenuOpen(false);
     setProjectMenuOpen(false);
+    setUserMenuOpen(false);
+    setUsageDetailsOpen(false);
   }, [setTab, startTabTransition]);
 
   const chooseProject = async () => {
@@ -511,7 +627,65 @@ export default function App() {
     selectTab("settings");
   }, [selectTab]);
 
+  const handleLogout = useCallback(() => {
+    setUserMenuOpen(false);
+    setUsageDetailsOpen(false);
+    setAccount(null);
+    writeCachedAccount(null);
+    logout();
+  }, [logout]);
+
+  const refreshAccount = useCallback(async (options: { force?: boolean } = {}) => {
+    if (!isTauri()) return;
+    const now = Date.now();
+    if (accountRefreshInFlightRef.current) return;
+    if (!options.force && now - lastAccountRefreshAtRef.current < ACCOUNT_REFRESH_MIN_INTERVAL_MS) return;
+    accountRefreshInFlightRef.current = true;
+    lastAccountRefreshAtRef.current = now;
+    try {
+      const next = await newapiBootstrap();
+      setAccount(next);
+      writeCachedAccount(next);
+    } catch (err) {
+      if (isManagedAuthInvalidError(err)) {
+        setAccount(null);
+        writeCachedAccount(null);
+        logout();
+      }
+    } finally {
+      accountRefreshInFlightRef.current = false;
+    }
+  }, [logout]);
+
   useEffect(() => init(), [init]);
+  useEffect(() => {
+    if (!isTauri()) return;
+    void refreshAccount({ force: true });
+    const timer = window.setInterval(() => {
+      void refreshAccount();
+    }, ACCOUNT_REFRESH_INTERVAL_MS);
+    const refreshOnFocus = () => {
+      void refreshAccount();
+    };
+    window.addEventListener("focus", refreshOnFocus);
+    let disposed = false;
+    let unlistenChatDone: (() => void) | null = null;
+    void onChatDone(() => {
+      void refreshAccount({ force: true });
+    }).then((unlisten) => {
+      if (disposed) unlisten();
+      else unlistenChatDone = unlisten;
+    }).catch(() => {});
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+      window.removeEventListener("focus", refreshOnFocus);
+      unlistenChatDone?.();
+    };
+  }, [refreshAccount]);
+  useEffect(() => {
+    if (userMenuOpen) void refreshAccount();
+  }, [refreshAccount, userMenuOpen]);
   useEffect(() => {
     if (tab === "lab") setLabMounted(true);
   }, [tab]);
@@ -641,6 +815,31 @@ export default function App() {
       document.removeEventListener("pointerdown", closeOnPointerDown);
     };
   }, [projectMenuOpen]);
+  useEffect(() => {
+    if (!userMenuOpen) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setUserMenuOpen(false);
+        setUsageDetailsOpen(false);
+      }
+    };
+    const closeOnPointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (
+        target instanceof Node &&
+        !userMenuRef.current?.contains(target)
+      ) {
+        setUserMenuOpen(false);
+        setUsageDetailsOpen(false);
+      }
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    document.addEventListener("pointerdown", closeOnPointerDown);
+    return () => {
+      window.removeEventListener("keydown", closeOnEscape);
+      document.removeEventListener("pointerdown", closeOnPointerDown);
+    };
+  }, [userMenuOpen]);
   const projectById = new Map(projects.map((project) => [project.id, project]));
   const orderedProjects = (projectOrderPreview ?? projects.map((project) => project.id))
     .map((id) => projectById.get(id))
@@ -712,6 +911,24 @@ export default function App() {
       <span className="app-update-badge" aria-hidden="true" />
     </button>
   ) : null;
+  const userName = accountName(account, copy.userFallback);
+  const userEmail = accountEmail(account, copy.accountInfo);
+  const userPlan = accountPlan(account, copy);
+  const userInitials = accountInitials(userName, userEmail, copy.userFallback);
+  const usageMenuLabels = language === "cn"
+    ? { balance: "余额", used: "已用", plan: "套餐", subscriptionBalance: "套餐余额" }
+    : { balance: "Balance", used: "Used", plan: "Plan", subscriptionBalance: "Plan balance" };
+  const usageDetailsLabel = language === "cn" ? "\u4f7f\u7528\u7edf\u8ba1" : "Usage statistics";
+  const showSubscriptionQuota = typeof account?.subscriptionQuota === "number"
+    && Number.isFinite(account.subscriptionQuota)
+    && account.subscriptionQuota !== account.quota;
+  const usagePrimary = [usageMenuLabels.balance, formatOptionalAccountQuota(account?.quota)] as const;
+  const usageMetrics = [
+    [usageMenuLabels.used, formatOptionalAccountQuota(account?.usedQuota)] as const,
+    ...(showSubscriptionQuota
+      ? [[usageMenuLabels.subscriptionBalance, formatOptionalAccountQuota(account?.subscriptionQuota)] as const]
+      : []),
+  ];
   const handleProductMenuKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
     const items = Array.from(productMenuRef.current?.querySelectorAll<HTMLButtonElement>("button") ?? []);
     if (items.length === 0) return;
@@ -789,6 +1006,8 @@ export default function App() {
               }}
               onClick={() => {
                 setProjectMenuOpen(false);
+                setUserMenuOpen(false);
+                setUsageDetailsOpen(false);
                 setProductMenuOpen((open) => !open);
               }}
             >
@@ -865,6 +1084,8 @@ export default function App() {
               disabled={projectBusy || projects.length === 0}
               onClick={() => {
                 setProductMenuOpen(false);
+                setUserMenuOpen(false);
+                setUsageDetailsOpen(false);
                 setProjectMenuOpen((open) => !open);
               }}
               title={currentProject?.path}
@@ -942,24 +1163,87 @@ export default function App() {
             {currentProject?.path ?? stateDir}
           </div>
           <div id="app-chat-actions-portal" style={{ display: "contents" }} />
-          <button
-            className="app-local-settings-button"
-            type="button"
-            onClick={() => openSettingsTab("general")}
-            title={copy.settings}
-            aria-label={copy.settings}
-          >
-            <GearIcon />
-          </button>
-          <button
-            className="app-local-settings-button app-local-logout-button"
-            type="button"
-            onClick={logout}
-            title={copy.logout}
-            aria-label={copy.logout}
-          >
-            <LogoutIcon />
-          </button>
+          <div className="app-account" ref={userMenuRef}>
+            {userMenuOpen && (
+              <div className="sidebar-user-menu" role="menu" aria-label={copy.userMenu}>
+                <div className="sidebar-user-menu-row muted" role="presentation">
+                  <span className="sidebar-user-menu-icon"><UserCircleIcon /></span>
+                  <span className="sidebar-user-menu-email">{userEmail}</span>
+                </div>
+                <button
+                  className="sidebar-user-menu-row"
+                  type="button"
+                  role="menuitem"
+                  data-onboarding-target="user-settings"
+                  onClick={() => openSettingsTab("general")}
+                >
+                  <span className="sidebar-user-menu-icon"><GearIcon /></span>
+                  <span>{copy.settings}</span>
+                  <span className="sidebar-user-shortcut">Ctrl+,</span>
+                </button>
+                <div className="sidebar-user-menu-divider" role="separator" />
+                <button
+                  className={`sidebar-user-menu-row${usageDetailsOpen ? " active" : ""}`}
+                  type="button"
+                  role="menuitem"
+                  aria-expanded={usageDetailsOpen}
+                  aria-controls="sidebar-user-usage-details"
+                  onClick={() => setUsageDetailsOpen((open) => !open)}
+                >
+                  <span className="sidebar-user-menu-icon"><UsageIcon /></span>
+                  <span>{copy.remainingUsage}</span>
+                  <span className="sidebar-user-chevron"><Chevron dir={usageDetailsOpen ? "down" : "right"} size={13} /></span>
+                </button>
+                {usageDetailsOpen && (
+                  <div className="sidebar-user-usage-panel" id="sidebar-user-usage-details" role="group" aria-label={copy.remainingUsage}>
+                    <div className="sidebar-user-usage-primary">
+                      <span>{usagePrimary[0]}</span>
+                      <strong>{usagePrimary[1]}</strong>
+                    </div>
+                    <div className="sidebar-user-usage-grid">
+                      {usageMetrics.map(([label, value]) => (
+                        <div className="sidebar-user-usage-tile" key={label}>
+                          <span>{label}</span>
+                          <strong>{value}</strong>
+                        </div>
+                      ))}
+                    </div>
+                    <button className="sidebar-user-usage-link" type="button" onClick={() => openSettingsTab("usage")}>
+                      {usageDetailsLabel}
+                    </button>
+                  </div>
+                )}
+                <button className="sidebar-user-menu-row" type="button" role="menuitem" onClick={handleLogout}>
+                  <span className="sidebar-user-menu-icon"><LogoutIcon /></span>
+                  <span>{copy.logout}</span>
+                </button>
+              </div>
+            )}
+            <button
+              className="app-account-button"
+              type="button"
+              aria-haspopup="menu"
+              aria-expanded={userMenuOpen}
+              aria-label={copy.user}
+              title={`${userName} · ${userPlan}`}
+              data-onboarding-target="user-menu"
+              onClick={() => {
+                setProductMenuOpen(false);
+                setProjectMenuOpen(false);
+                setUsageDetailsOpen(false);
+                setUserMenuOpen((open) => !open);
+              }}
+            >
+              <span className="sidebar-user-avatar">{userInitials}</span>
+              <span className="app-account-summary" aria-hidden="true">
+                <span className="app-account-name">{userName}</span>
+                <span className="app-account-plan">{userPlan}</span>
+              </span>
+              <span className="app-account-chevron" aria-hidden="true">
+                <Chevron dir={userMenuOpen ? "down" : "right"} size={13} />
+              </span>
+            </button>
+          </div>
         </div>
       </header>
 

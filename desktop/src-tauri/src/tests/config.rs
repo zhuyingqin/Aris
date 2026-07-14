@@ -1,7 +1,7 @@
 use super::{
     apply_bundled_internal_config, apply_reviewer_environment_from, clear_newapi_session,
     deepseek_executor_key, normalize_managed_model_slots, read_verified, upsert_verified,
-    write_verified, VerifiedExecutor,
+    write_verified, ConfigPatch, VerifiedExecutor,
 };
 use serde_json::{Map, Value};
 use std::sync::Mutex;
@@ -90,6 +90,104 @@ fn read_verified_skips_entries_without_a_model() {
     let parsed = read_verified(&obj);
     assert_eq!(parsed.len(), 1);
     assert_eq!(parsed[0].model, "gpt-5.5");
+}
+
+#[test]
+fn managed_executor_update_does_not_require_admin_api_access() {
+    let obj = serde_json::json!({
+        "newapi_base_url": "http://gateway.example",
+        "newapi_executor_base_url": "http://gateway.example/v1",
+        "newapi_executor_api_key": "gateway-token",
+        "managed_models": ["MiniMax-M3"]
+    })
+    .as_object()
+    .expect("object")
+    .clone();
+    let patch = ConfigPatch {
+        executor_provider: Some("openai".to_string()),
+        executor_model: Some("MiniMax-M3".to_string()),
+        executor_base_url: Some("http://gateway.example/v1".to_string()),
+        executor_api_key: Some("gateway-token".to_string()),
+        ..Default::default()
+    };
+
+    assert!(!patch.changes_admin_api_settings(&obj));
+}
+
+#[test]
+fn manual_executor_api_update_requires_admin_api_access() {
+    let obj = serde_json::json!({
+        "newapi_base_url": "http://gateway.example",
+        "newapi_executor_base_url": "http://gateway.example/v1",
+        "newapi_executor_api_key": "gateway-token",
+        "managed_models": ["MiniMax-M3"]
+    })
+    .as_object()
+    .expect("object")
+    .clone();
+    let patch = ConfigPatch {
+        executor_provider: Some("openai".to_string()),
+        executor_model: Some("gpt-5.5".to_string()),
+        executor_base_url: Some("https://api.openai.com/v1".to_string()),
+        executor_api_key: Some("manual-token".to_string()),
+        ..Default::default()
+    };
+
+    assert!(patch.changes_admin_api_settings(&obj));
+}
+
+#[test]
+fn managed_reviewer_update_does_not_require_admin_api_access() {
+    let obj = serde_json::json!({
+        "newapi_base_url": "http://gateway.example",
+        "newapi_executor_base_url": "http://gateway.example/v1",
+        "newapi_executor_api_key": "gateway-token",
+        "managed_models": ["MiniMax-M3", "gpt-5.5"]
+    })
+    .as_object()
+    .expect("object")
+    .clone();
+    let patch = ConfigPatch {
+        reviewer_model: Some("gpt-5.5".to_string()),
+        ..Default::default()
+    };
+
+    assert!(!patch.changes_admin_api_settings(&obj));
+}
+
+#[test]
+fn managed_reviewer_disable_does_not_require_admin_api_access() {
+    let obj = serde_json::json!({
+        "newapi_base_url": "http://gateway.example",
+        "newapi_executor_base_url": "http://gateway.example/v1",
+        "newapi_executor_api_key": "gateway-token",
+        "managed_models": ["MiniMax-M3"]
+    })
+    .as_object()
+    .expect("object")
+    .clone();
+    let patch = ConfigPatch {
+        reviewer_provider: Some(String::new()),
+        reviewer_model: Some(String::new()),
+        reviewer_base_url: Some(String::new()),
+        ..Default::default()
+    };
+
+    assert!(!patch.changes_admin_api_settings(&obj));
+}
+
+#[test]
+fn reviewer_api_update_requires_admin_api_access() {
+    let obj = Map::new();
+    let patch = ConfigPatch {
+        reviewer_provider: Some("openai".to_string()),
+        reviewer_model: Some("gpt-5.5".to_string()),
+        reviewer_base_url: Some("https://api.openai.com/v1".to_string()),
+        reviewer_api_key: Some("reviewer-token".to_string()),
+        ..Default::default()
+    };
+
+    assert!(patch.changes_admin_api_settings(&obj));
 }
 
 #[test]
