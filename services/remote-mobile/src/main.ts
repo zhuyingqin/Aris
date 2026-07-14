@@ -330,6 +330,7 @@ let projectSwitching = false;
 let chatSending = false;
 let chatSessionsLoading = false;
 let chatTranscriptLoading = false;
+let conversationViewportSyncFrame: number | null = null;
 let chatSessions: RemoteChatSession[] = [];
 let selectedChatSessionId: string | null = null;
 let chatModelState: RemoteChatModelState = { model: null, options: [] };
@@ -411,6 +412,13 @@ chatInput.addEventListener("input", () => {
   resizeChatComposer();
   updateChatComposer();
 });
+chatInput.addEventListener("focus", () => {
+  // Safari can update its visual viewport a frame or two after a textarea
+  // receives focus. Keep the grid and composer within that visible viewport.
+  setWorkspaceDrawerOpen(false);
+  scheduleConversationViewportSync();
+});
+chatInput.addEventListener("blur", scheduleConversationViewportSync);
 refreshChatSessionsButton.addEventListener("click", () => void refreshChatSessions());
 refreshWorkspaceButton.addEventListener("click", () => void requestWorkspaceOverview());
 openWorkspaceButton.addEventListener("click", () => setWorkspaceDrawerOpen(true));
@@ -446,10 +454,10 @@ document.addEventListener("click", (event) => {
   }
   setChatModelMenuOpen(false);
 });
-window.addEventListener("resize", syncConversationViewport);
-window.visualViewport?.addEventListener("resize", syncConversationViewport);
-window.visualViewport?.addEventListener("scroll", syncConversationViewport);
-syncConversationViewport();
+window.addEventListener("resize", scheduleConversationViewportSync);
+window.visualViewport?.addEventListener("resize", scheduleConversationViewportSync);
+window.visualViewport?.addEventListener("scroll", scheduleConversationViewportSync);
+scheduleConversationViewportSync();
 
 if ("serviceWorker" in navigator && window.isSecureContext) {
   window.addEventListener("load", () => {
@@ -1726,17 +1734,21 @@ function isUnsupportedRemoteCommand(
   return reason.length === 0 || reason.includes(command);
 }
 
-function canSendChat(): boolean {
+function canWriteChat(): boolean {
   return canAccessRemoteChat() &&
-    selectedChatSessionId !== null &&
-    !chatTranscriptLoading;
+    selectedChatSessionId !== null;
+}
+
+function canSendChat(): boolean {
+  return canWriteChat() && !chatTranscriptLoading;
 }
 
 function updateChatComposer(): void {
   const granted = hasChatScope();
   const connected = phase === "connected" && transport !== null;
+  const canWrite = canWriteChat();
   const canSend = canSendChat();
-  chatInput.disabled = !canSend || chatSending;
+  chatInput.disabled = !canWrite || chatSending;
   sendChatButton.disabled = !canSend || chatSending || chatInput.value.trim().length === 0;
   refreshChatSessionsButton.disabled = !granted || !connected || chatSessionsLoading;
   refreshWorkspaceButton.disabled = !connected || projectSwitching;
@@ -1755,9 +1767,9 @@ function updateChatComposer(): void {
           : !selectedChatSessionId
             ? "请先选择一个桌面对话。"
             : "";
-  chatHint.hidden = canSend && !chatSending;
+  chatHint.hidden = canWrite && !chatSending && !chatTranscriptLoading;
   chatHint.textContent = hint;
-  chatInput.placeholder = canSend
+  chatInput.placeholder = canWrite
     ? "给 SomniQ 发送消息"
     : !selectedChatSessionId
       ? "请从左上角选择一个对话"
@@ -1935,6 +1947,18 @@ function syncConversationViewport(): void {
   if (height > 0) {
     document.documentElement.style.setProperty("--remote-viewport-height", `${height}px`);
   }
+}
+
+function scheduleConversationViewportSync(): void {
+  syncConversationViewport();
+  if (conversationViewportSyncFrame !== null) {
+    return;
+  }
+  conversationViewportSyncFrame = window.requestAnimationFrame(() => {
+    conversationViewportSyncFrame = null;
+    syncConversationViewport();
+    window.requestAnimationFrame(syncConversationViewport);
+  });
 }
 
 function setStatus(message: string): void {
