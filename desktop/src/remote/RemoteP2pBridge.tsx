@@ -149,6 +149,10 @@ export function RemoteP2pBridge() {
       session.channel = channel;
       channel.binaryType = "arraybuffer";
       channel.onopen = () => {
+        if (session.timeout !== undefined) {
+          window.clearTimeout(session.timeout);
+          session.timeout = undefined;
+        }
         void remoteControlP2pOpened(session).catch(() => {
           void finish(session, "data_channel_failed", true);
         });

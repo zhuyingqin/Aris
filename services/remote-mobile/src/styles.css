@@ -1,6 +1,7 @@
 :root {
   color-scheme: dark;
   --remote-viewport-height: 100dvh;
+  --remote-viewport-offset-top: 0px;
   --bg: #0e1116;
   --bg-1: #151a21;
   --bg-2: #1c232c;
@@ -37,7 +38,8 @@ body {
 }
 
 body.remote-conversation-active {
-  height: var(--remote-viewport-height);
+  height: 100%;
+  min-height: 100%;
   overflow: hidden;
 }
 
@@ -676,10 +678,17 @@ select:focus {
 /* Connected phones use the same project -> conversation hierarchy as the
  * desktop chat surface, but collapse it into a touch-first workspace drawer. */
 .remote-app.conversation-mode {
+  position: fixed;
+  z-index: 0;
+  top: var(--remote-viewport-offset-top);
+  right: 0;
+  left: 0;
   width: 100%;
   max-width: none;
   height: var(--remote-viewport-height);
-  min-height: var(--remote-viewport-height);
+  min-height: 0;
+  margin: 0;
+  overflow: hidden;
 }
 
 .conversation-page {
@@ -687,7 +696,7 @@ select:focus {
   display: grid;
   width: 100%;
   max-width: 100%;
-  height: var(--remote-viewport-height);
+  height: 100%;
   min-height: 0;
   padding: 0;
   grid-template-columns: minmax(0, 1fr);

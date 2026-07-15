@@ -1953,25 +1953,25 @@ function resizeChatComposer(): void {
 }
 
 function syncConversationViewport(): void {
-  // On iOS the layout viewport may remain taller than the visible area while
-  // the keyboard is open. Bind the connected chat grid to the visual viewport
-  // so its middle message pane shrinks and scrolls instead of falling behind
-  // the composer.
-  const height = Math.round(window.visualViewport?.height ?? window.innerHeight);
+  // Safari pans the visual viewport when a textarea receives focus. Keep the
+  // fixed connected surface aligned to both its height and its offset instead
+  // of resizing the document beneath the keyboard.
+  const viewport = window.visualViewport;
+  const height = Math.round(viewport?.height ?? window.innerHeight);
+  const offsetTop = Math.max(0, Math.round(viewport?.offsetTop ?? 0));
   if (height > 0) {
     document.documentElement.style.setProperty("--remote-viewport-height", `${height}px`);
   }
+  document.documentElement.style.setProperty("--remote-viewport-offset-top", `${offsetTop}px`);
 }
 
 function scheduleConversationViewportSync(): void {
-  syncConversationViewport();
   if (conversationViewportSyncFrame !== null) {
     return;
   }
   conversationViewportSyncFrame = window.requestAnimationFrame(() => {
     conversationViewportSyncFrame = null;
     syncConversationViewport();
-    window.requestAnimationFrame(syncConversationViewport);
   });
 }
 
