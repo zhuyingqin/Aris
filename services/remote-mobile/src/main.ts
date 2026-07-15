@@ -49,7 +49,11 @@ import {
   type RemoteChatModelState,
 } from "./chatModelNavigation";
 import { renderRemoteMarkdown } from "./remoteMarkdown";
-import { pairingBrowserContext, pairingBrowserContextLabel } from "./pairingContext";
+import {
+  isStandalonePairingContainer,
+  pairingBrowserContext,
+  pairingBrowserContextLabel,
+} from "./pairingContext";
 import {
   workspaceOverviewFromResponse,
   type RemoteWorkspaceCapability,
@@ -96,9 +100,10 @@ app.innerHTML = `
         <button id="stop-camera" class="text-button" type="button" hidden>关闭相机</button>
       </div>
       <p class="scan-or">或</p>
-      <button id="choose-qr-image" class="secondary-button file-button" type="button">从相册选择二维码</button>
-      <input id="qr-image" type="file" accept="image/*" hidden />
-      <p class="hint">二维码仅用于一次性配对，不会显示或保存其内容。</p>
+       <button id="choose-qr-image" class="secondary-button file-button" type="button">从相册选择二维码</button>
+       <input id="qr-image" type="file" accept="image/*" hidden />
+       <button id="discard-mismatched-pairing" class="text-button" type="button" hidden>清除这个应用的旧配对</button>
+       <p class="hint">二维码仅用于一次性配对，不会显示或保存其内容。</p>
     </section>
 
     <section id="pairing-panel" class="card" hidden aria-labelledby="pairing-title">
@@ -347,6 +352,7 @@ let chatModelSwitching = false;
 let chatModelMenuOpen = false;
 let pairingStorageProtection: PairingStorageProtection = "unknown";
 let pairingStorageRequest: Promise<PairingStorageProtection> | null = null;
+let hasMismatchedStoredPairing = false;
 const pendingControlRequests = new Map<string, PendingControlRequest>();
 const pairingContext = pairingBrowserContext(navigator.userAgent, isEmbeddedWindow());
 
@@ -367,6 +373,7 @@ const cameraPreview = byId<HTMLElement>("camera-preview");
 const startCameraButton = byId<HTMLButtonElement>("start-camera");
 const stopCameraButton = byId<HTMLButtonElement>("stop-camera");
 const chooseQrImageButton = byId<HTMLButtonElement>("choose-qr-image");
+const discardMismatchedPairingButton = byId<HTMLButtonElement>("discard-mismatched-pairing");
 const claimButton = byId<HTMLButtonElement>("claim-pairing");
 const connectButton = byId<HTMLButtonElement>("connect");
 const forgetPairingButton = byId<HTMLButtonElement>("forget-pairing");
@@ -411,6 +418,7 @@ chooseQrImageButton.addEventListener("click", () => {
   qrImage.click();
 });
 qrImage.addEventListener("change", () => void scanQrImage());
+discardMismatchedPairingButton.addEventListener("click", () => void discardMismatchedPairing());
 claimButton.addEventListener("click", () => void claimPairing());
 connectButton.addEventListener("click", () => void connect());
 forgetPairingButton.addEventListener("click", () => void revokeAndForget());
@@ -730,6 +738,7 @@ function scheduleCompletionPoll(): void {
 }
 
 async function restorePairedSession(): Promise<PairedSessionRestoreResult> {
+  hasMismatchedStoredPairing = false;
   try {
     const session = await sessionStore.load();
     if (!session) {
@@ -737,9 +746,10 @@ async function restorePairedSession(): Promise<PairedSessionRestoreResult> {
     }
     const loadedIdentity = await ensureIdentity();
     if (loadedIdentity.descriptor.device_id !== session.mobile.device_id) {
+      hasMismatchedStoredPairing = true;
       return {
         restored: false,
-        failureMessage: "此浏览器的安全身份与已保存配对不一致。请在原来的浏览器或 SomniQ Remote 主屏应用中打开；配对记录已保留，便于诊断。",
+        failureMessage: pairingIdentityMismatchMessage(),
       };
     }
     identity = loadedIdentity;
@@ -747,6 +757,26 @@ async function restorePairedSession(): Promise<PairedSessionRestoreResult> {
     return { restored: true, failureMessage: null };
   } catch (error) {
     return { restored: false, failureMessage: errorMessage(error) };
+  }
+}
+
+async function discardMismatchedPairing(): Promise<void> {
+  if (!hasMismatchedStoredPairing) {
+    return;
+  }
+  setBusy(discardMismatchedPairingButton, true);
+  try {
+    await sessionStore.clear();
+    pairedSession = null;
+    claimed = null;
+    scannedPairingPayload = null;
+    hasMismatchedStoredPairing = false;
+    setPhase("scan");
+    setStatus("已清除此主屏应用中不匹配的旧会话。请在此应用内打开相机扫码并完成一次配对；以后始终从这个主屏图标进入。");
+  } catch (error) {
+    setStatus(errorMessage(error));
+  } finally {
+    setBusy(discardMismatchedPairingButton, false);
   }
 }
 
@@ -1951,6 +1981,7 @@ function setPhase(next: FlowPhase): void {
   remoteApp.classList.toggle("conversation-mode", next === "connected");
   document.body.classList.toggle("remote-conversation-active", next === "connected");
   scanPanel.hidden = next !== "scan";
+  discardMismatchedPairingButton.hidden = next !== "scan" || !hasMismatchedStoredPairing;
   pairingPanel.hidden = next !== "confirm";
   waitingPanel.hidden = next !== "waiting";
   pairedPanel.hidden = next !== "paired";
@@ -2025,6 +2056,19 @@ function isEmbeddedWindow(): boolean {
   } catch {
     return true;
   }
+}
+
+function pairingIdentityMismatchMessage(): string {
+  if (isStandaloneMobileApp()) {
+    return "SomniQ Remote 主屏应用与 Safari 使用独立的安全存储。此主屏应用中保留了旧会话，但当前安全身份来自另一个容器。请清除这个应用的旧配对后，在此主屏应用内重新扫码一次；以后始终从这个主屏图标进入。";
+  }
+  return "此浏览器的安全身份与已保存配对不一致。请在原来的浏览器或 SomniQ Remote 主屏应用中打开；配对记录已保留，便于诊断。";
+}
+
+function isStandaloneMobileApp(): boolean {
+  const displayModeStandalone = window.matchMedia?.("(display-mode: standalone)").matches === true;
+  const appleStandalone = (navigator as Navigator & { standalone?: boolean }).standalone === true;
+  return isStandalonePairingContainer(displayModeStandalone, appleStandalone);
 }
 
 function pairingCompletedStatus(): string {

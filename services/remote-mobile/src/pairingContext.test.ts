@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { pairingBrowserContext, pairingBrowserContextLabel } from "./pairingContext";
+import {
+  isStandalonePairingContainer,
+  pairingBrowserContext,
+  pairingBrowserContextLabel,
+} from "./pairingContext";
 
 describe("pairing browser context", () => {
   it("blocks known in-app browsers for a first pairing", () => {
@@ -16,5 +20,11 @@ describe("pairing browser context", () => {
   it("allows a normal browser and provides the user-facing context label", () => {
     expect(pairingBrowserContext("Mozilla/5.0 Chrome/126.0 Mobile Safari/537.36", false)).toBeNull();
     expect(pairingBrowserContextLabel("wechat")).toBe("微信内置浏览器");
+  });
+
+  it("recognizes the iOS home-screen container", () => {
+    expect(isStandalonePairingContainer(true, false)).toBe(true);
+    expect(isStandalonePairingContainer(false, true)).toBe(true);
+    expect(isStandalonePairingContainer(false, false)).toBe(false);
   });
 });

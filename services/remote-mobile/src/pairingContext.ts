@@ -37,3 +37,10 @@ export function pairingBrowserContext(
 export function pairingBrowserContextLabel(context: PairingBrowserContext): string {
   return CONTEXT_LABELS[context];
 }
+
+export function isStandalonePairingContainer(
+  displayModeStandalone: boolean,
+  appleStandalone: boolean,
+): boolean {
+  return displayModeStandalone || appleStandalone;
+}
