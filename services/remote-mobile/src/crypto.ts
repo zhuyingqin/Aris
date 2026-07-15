@@ -57,9 +57,15 @@ export class IndexedDbIdentityStore implements MobileIdentityStore {
   async load(): Promise<StoredWebCryptoIdentity | null> {
     const database = await openIdentityDatabase();
     try {
-      return await requestResult<StoredWebCryptoIdentity | undefined>(
-        database.transaction(IDENTITY_STORE_NAME, "readonly").objectStore(IDENTITY_STORE_NAME).get(IDENTITY_RECORD_KEY),
-      ) ?? null;
+      const transaction = database.transaction(IDENTITY_STORE_NAME, "readonly");
+      const completion = transactionComplete(transaction);
+      const [record] = await Promise.all([
+        requestResult<StoredWebCryptoIdentity | undefined>(
+          transaction.objectStore(IDENTITY_STORE_NAME).get(IDENTITY_RECORD_KEY),
+        ),
+        completion,
+      ]);
+      return record ?? null;
     } finally {
       database.close();
     }
@@ -68,12 +74,10 @@ export class IndexedDbIdentityStore implements MobileIdentityStore {
   async save(record: StoredWebCryptoIdentity): Promise<void> {
     const database = await openIdentityDatabase();
     try {
-      await transactionDone(
-        database
-          .transaction(IDENTITY_STORE_NAME, "readwrite")
-          .objectStore(IDENTITY_STORE_NAME)
-          .put(record, IDENTITY_RECORD_KEY),
-      );
+      const transaction = database.transaction(IDENTITY_STORE_NAME, "readwrite");
+      const completion = transactionComplete(transaction);
+      transaction.objectStore(IDENTITY_STORE_NAME).put(record, IDENTITY_RECORD_KEY);
+      await completion;
     } finally {
       database.close();
     }
@@ -82,9 +86,10 @@ export class IndexedDbIdentityStore implements MobileIdentityStore {
   async clear(): Promise<void> {
     const database = await openIdentityDatabase();
     try {
-      await transactionDone(
-        database.transaction(IDENTITY_STORE_NAME, "readwrite").objectStore(IDENTITY_STORE_NAME).delete(IDENTITY_RECORD_KEY),
-      );
+      const transaction = database.transaction(IDENTITY_STORE_NAME, "readwrite");
+      const completion = transactionComplete(transaction);
+      transaction.objectStore(IDENTITY_STORE_NAME).delete(IDENTITY_RECORD_KEY);
+      await completion;
     } finally {
       database.close();
     }
@@ -286,10 +291,11 @@ function requestResult<T>(request: IDBRequest<T>): Promise<T> {
   });
 }
 
-function transactionDone<T>(request: IDBRequest<T>): Promise<void> {
+function transactionComplete(transaction: IDBTransaction): Promise<void> {
   return new Promise((resolve, reject) => {
-    request.onsuccess = () => resolve();
-    request.onerror = () => reject(new RemoteProtocolError("The protected mobile identity store update failed."));
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(new RemoteProtocolError("The protected mobile identity store transaction failed."));
+    transaction.onabort = () => reject(new RemoteProtocolError("The protected mobile identity store transaction was aborted."));
   });
 }
 

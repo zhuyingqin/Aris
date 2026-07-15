@@ -305,6 +305,11 @@ interface RemoteTranscriptMessage {
   text: string;
 }
 
+interface PairedSessionRestoreResult {
+  restored: boolean;
+  failureMessage: string | null;
+}
+
 const api = new GatewayApi();
 const identityStore = new IndexedDbIdentityStore();
 const sessionStore = new BrowserPairedSessionStore();
@@ -486,8 +491,8 @@ async function initialize(): Promise<void> {
   // The paired-device credential is encrypted in browser storage and is
   // sufficient for the data plane. A new device is authorized only by the
   // signed QR ceremony and an explicit approval on the desktop.
-  const restored = await restorePairedSession();
-  if (restored && pairedSession) {
+  const restoration = await restorePairedSession();
+  if (restoration.restored && pairedSession) {
     updateDesktopLabels(pairedSession.invitation.desktop.display_name);
     setPhase("paired");
     setStatus(hasChatScope()
@@ -501,7 +506,11 @@ async function initialize(): Promise<void> {
     showPairingConfirmation();
   } else {
     setPhase("scan");
-    setStatus(initialPairingError ?? "请在电脑 SomniQ 中显示二维码后，用手机系统相机扫描。");
+    setStatus(
+      initialPairingError ??
+      restoration.failureMessage ??
+      "请在电脑 SomniQ 中显示二维码后，用手机系统相机扫描。",
+    );
   }
 }
 
@@ -596,6 +605,9 @@ async function claimPairing(): Promise<void> {
   if (!scannedPairingPayload) {
     return;
   }
+  // Start this while the user gesture is still active. Mobile browsers are
+  // more likely to grant durable storage when the request comes from a tap.
+  void requestPersistentPairingStorage();
   setBusy(claimButton, true);
   try {
     const mobileIdentity = await ensureIdentity();
@@ -655,6 +667,7 @@ async function completePairingWhenApproved(): Promise<void> {
       ice_servers: [...pending.claim.ice_servers],
     };
     await sessionStore.save(session);
+    await requestPersistentPairingStorage();
     pairedSession = session;
     claimed = null;
     stopCompletionPolling();
@@ -683,24 +696,25 @@ function scheduleCompletionPoll(): void {
   }
 }
 
-async function restorePairedSession(): Promise<boolean> {
+async function restorePairedSession(): Promise<PairedSessionRestoreResult> {
   try {
     const session = await sessionStore.load();
     if (!session) {
-      return false;
+      return { restored: false, failureMessage: null };
     }
     const loadedIdentity = await ensureIdentity();
     if (loadedIdentity.descriptor.device_id !== session.mobile.device_id) {
       await sessionStore.clear();
-      setStatus("此手机身份已变化，旧配对已移除。请重新扫描电脑二维码。");
-      return false;
+      return {
+        restored: false,
+        failureMessage: "此手机身份已变化，旧配对已移除。请在同一浏览器或 SomniQ Remote 主屏应用中重新扫码。",
+      };
     }
     identity = loadedIdentity;
     pairedSession = await refreshStoredPairingScopes(session);
-    return true;
+    return { restored: true, failureMessage: null };
   } catch (error) {
-    setStatus(errorMessage(error));
-    return false;
+    return { restored: false, failureMessage: errorMessage(error) };
   }
 }
 
@@ -1959,6 +1973,19 @@ function scheduleConversationViewportSync(): void {
     syncConversationViewport();
     window.requestAnimationFrame(syncConversationViewport);
   });
+}
+
+async function requestPersistentPairingStorage(): Promise<void> {
+  const storage = navigator.storage;
+  if (typeof storage?.persist !== "function") {
+    return;
+  }
+  try {
+    await storage.persist();
+  } catch {
+    // Storage persistence is an optimization. IndexedDB remains the normal
+    // credential store when a browser does not expose or declines this API.
+  }
 }
 
 function setStatus(message: string): void {

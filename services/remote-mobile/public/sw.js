@@ -1,5 +1,5 @@
 const CACHE_PREFIX = "somniq-remote-shell-";
-const CACHE_NAME = "somniq-remote-shell-v18";
+const CACHE_NAME = "somniq-remote-shell-v19";
 const APP_SCOPE = new URL(self.registration.scope);
 const APP_SHELL_ASSETS = [
   "",
