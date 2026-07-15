@@ -31,8 +31,13 @@ export class BrowserPairedSessionStore {
         requestResult<StoredEncryptedSession | undefined>(store.get(SESSION_RECORD)),
         transactionComplete(transaction),
       ]);
-      if (!key || !encrypted) {
+      if (!key && !encrypted) {
         return null;
+      }
+      if (!key || !encrypted) {
+        throw new RemoteProtocolError(
+          "The saved mobile pairing is incomplete. Reset this app's local pairing and pair once more.",
+        );
       }
       if (encrypted.version !== 1 || !(encrypted.nonce instanceof ArrayBuffer) || !(encrypted.ciphertext instanceof ArrayBuffer)) {
         throw new RemoteProtocolError("The saved mobile pairing is invalid. Revoke it from the desktop and pair again.");

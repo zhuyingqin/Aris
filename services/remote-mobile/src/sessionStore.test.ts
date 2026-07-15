@@ -52,7 +52,47 @@ describe("BrowserPairedSessionStore", () => {
 
     await expect(store.load()).resolves.toEqual({ ...legacySession, ice_servers: [] });
   });
+
+  it("rejects a partially committed pairing instead of treating it as a new app", async () => {
+    const store = new BrowserPairedSessionStore();
+    await expect(store.load()).resolves.toBeNull();
+    const key = await crypto.subtle.generateKey(
+      { name: "AES-GCM", length: 256 },
+      false,
+      ["encrypt", "decrypt"],
+    );
+    if ("privateKey" in key) {
+      throw new Error("AES-GCM returned an invalid key");
+    }
+    await putSessionRecord("credential-key", key);
+
+    await expect(new BrowserPairedSessionStore().load()).rejects.toThrow("incomplete");
+  });
 });
+
+function putSessionRecord(key: IDBValidKey, value: unknown): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(DATABASE_NAME, 1);
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      const database = request.result;
+      const transaction = database.transaction("secure-session", "readwrite");
+      transaction.objectStore("secure-session").put(value, key);
+      transaction.oncomplete = () => {
+        database.close();
+        resolve();
+      };
+      transaction.onerror = () => {
+        database.close();
+        reject(transaction.error);
+      };
+      transaction.onabort = () => {
+        database.close();
+        reject(transaction.error);
+      };
+    };
+  });
+}
 
 function deleteDatabase(): Promise<void> {
   return new Promise((resolve, reject) => {

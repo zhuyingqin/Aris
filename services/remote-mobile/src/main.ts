@@ -102,7 +102,7 @@ app.innerHTML = `
       <p class="scan-or">或</p>
        <button id="choose-qr-image" class="secondary-button file-button" type="button">从相册选择二维码</button>
        <input id="qr-image" type="file" accept="image/*" hidden />
-       <button id="discard-mismatched-pairing" class="text-button" type="button" hidden>清除这个应用的旧配对</button>
+       <button id="discard-mismatched-pairing" class="text-button" type="button" hidden>重置此应用并重新配对</button>
        <p class="hint">二维码仅用于一次性配对，不会显示或保存其内容。</p>
     </section>
 
@@ -326,6 +326,7 @@ const cameraScanner = new BrowserQrCameraScanner();
 let identity: WebCryptoMobileIdentity | null = null;
 let claimed: ClaimedPairing | null = null;
 let pairedSession: PairedMobileSession | null = null;
+let mismatchedStoredSession: PairedMobileSession | null = null;
 let transport: P2pFirstTransport | null = null;
 let completionPollTimer: ReturnType<typeof setTimeout> | null = null;
 let completingPairing = false;
@@ -447,11 +448,6 @@ workspaceBackdrop.addEventListener("click", () => setWorkspaceDrawerOpen(false))
 openModelMenuButton.addEventListener("click", () => setChatModelMenuOpen(!chatModelMenuOpen));
 revokePairingButton.addEventListener("click", () => void revokeAndForget());
 
-if (pairingContext) {
-  startCameraButton.disabled = true;
-  chooseQrImageButton.disabled = true;
-}
-
 window.addEventListener("beforeunload", () => {
   stopCompletionPolling();
   stopCameraScan();
@@ -520,6 +516,13 @@ async function initialize(): Promise<void> {
       ? "已恢复安全配对，正在连接电脑…"
       : "此手机使用的是旧权限集。请在桌面端撤销后重新扫码配对，以启用项目、模型和对话控制。");
     await connect();
+    return;
+  }
+
+  if (hasMismatchedStoredPairing) {
+    scannedPairingPayload = null;
+    setPhase("scan");
+    setStatus(restoration.failureMessage ?? pairingIdentityMismatchMessage());
     return;
   }
 
@@ -739,23 +742,36 @@ function scheduleCompletionPoll(): void {
 
 async function restorePairedSession(): Promise<PairedSessionRestoreResult> {
   hasMismatchedStoredPairing = false;
+  mismatchedStoredSession = null;
   try {
     const session = await sessionStore.load();
     if (!session) {
+      const orphanedIdentity = await WebCryptoMobileIdentity.load(identityStore);
+      if (orphanedIdentity) {
+        hasMismatchedStoredPairing = true;
+        return {
+          restored: false,
+          failureMessage: "此应用保留了设备身份，但配对会话已经缺失。请重置此应用并重新配对，避免服务器拒绝重复的设备身份。",
+        };
+      }
       return { restored: false, failureMessage: null };
     }
-    const loadedIdentity = await ensureIdentity();
-    if (loadedIdentity.descriptor.device_id !== session.mobile.device_id) {
-      hasMismatchedStoredPairing = true;
+    mismatchedStoredSession = session;
+    hasMismatchedStoredPairing = true;
+    const loadedIdentity = await WebCryptoMobileIdentity.load(identityStore);
+    if (!loadedIdentity || !sameMobileIdentity(loadedIdentity.descriptor, session.mobile)) {
       return {
         restored: false,
         failureMessage: pairingIdentityMismatchMessage(),
       };
     }
+    hasMismatchedStoredPairing = false;
     identity = loadedIdentity;
     pairedSession = await refreshStoredPairingScopes(session);
+    mismatchedStoredSession = null;
     return { restored: true, failureMessage: null };
   } catch (error) {
+    hasMismatchedStoredPairing = true;
     return { restored: false, failureMessage: errorMessage(error) };
   }
 }
@@ -766,18 +782,43 @@ async function discardMismatchedPairing(): Promise<void> {
   }
   setBusy(discardMismatchedPairingButton, true);
   try {
-    await sessionStore.clear();
+    if (mismatchedStoredSession) {
+      try {
+        await api.revokeThisDevice(
+          mismatchedStoredSession.invitation.gateway_url,
+          mismatchedStoredSession.credential,
+        );
+      } catch (error) {
+        if (!(error instanceof GatewayApiError && (error.status === 401 || error.status === 403))) {
+          throw error;
+        }
+      }
+    }
+    await Promise.all([sessionStore.clear(), identityStore.clear()]);
+    identity = null;
     pairedSession = null;
+    mismatchedStoredSession = null;
     claimed = null;
     scannedPairingPayload = null;
     hasMismatchedStoredPairing = false;
     setPhase("scan");
-    setStatus("已清除此主屏应用中不匹配的旧会话。请在此应用内打开相机扫码并完成一次配对；以后始终从这个主屏图标进入。");
+    setStatus("已重置此主屏应用的旧身份和会话。请在此应用内打开相机扫码并完成最后一次配对；以后退出再打开会自动恢复。");
   } catch (error) {
     setStatus(errorMessage(error));
   } finally {
     setBusy(discardMismatchedPairingButton, false);
   }
+}
+
+function sameMobileIdentity(
+  left: PairedMobileSession["mobile"],
+  right: PairedMobileSession["mobile"],
+): boolean {
+  return left.device_id === right.device_id &&
+    left.kind === "mobile" &&
+    right.kind === "mobile" &&
+    left.signing_public_key === right.signing_public_key &&
+    left.key_agreement_public_key === right.key_agreement_public_key;
 }
 
 /**
@@ -1981,6 +2022,9 @@ function setPhase(next: FlowPhase): void {
   remoteApp.classList.toggle("conversation-mode", next === "connected");
   document.body.classList.toggle("remote-conversation-active", next === "connected");
   scanPanel.hidden = next !== "scan";
+  const pairingEntryBlocked = pairingContext !== null || hasMismatchedStoredPairing;
+  startCameraButton.disabled = pairingEntryBlocked;
+  chooseQrImageButton.disabled = pairingEntryBlocked;
   discardMismatchedPairingButton.hidden = next !== "scan" || !hasMismatchedStoredPairing;
   pairingPanel.hidden = next !== "confirm";
   waitingPanel.hidden = next !== "waiting";
@@ -2060,9 +2104,9 @@ function isEmbeddedWindow(): boolean {
 
 function pairingIdentityMismatchMessage(): string {
   if (isStandaloneMobileApp()) {
-    return "SomniQ Remote 主屏应用与 Safari 使用独立的安全存储。此主屏应用中保留了旧会话，但当前安全身份来自另一个容器。请清除这个应用的旧配对后，在此主屏应用内重新扫码一次；以后始终从这个主屏图标进入。";
+    return "Apple 主屏应用无法恢复旧版本保存的安全私钥，但旧会话仍然存在。请点“重置此应用并重新配对”，然后在这个主屏应用内完成最后一次扫码；新格式会在退出后继续保留身份。";
   }
-  return "此浏览器的安全身份与已保存配对不一致。请在原来的浏览器或 SomniQ Remote 主屏应用中打开；配对记录已保留，便于诊断。";
+  return "此浏览器无法恢复旧版本保存的安全身份。请重置此应用并重新配对一次；新格式会在退出后继续保留身份。";
 }
 
 function isStandaloneMobileApp(): boolean {
