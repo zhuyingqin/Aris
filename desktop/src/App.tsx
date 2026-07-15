@@ -211,7 +211,7 @@ const ACCOUNT_LEGACY_CACHE_KEY = "aris-account-v1";
 const SETTINGS_TAB_REQUEST_KEY = "somniq-settings-tab-request";
 const SETTINGS_TAB_REQUEST_EVENT = "somniq-settings-tab-request";
 
-type RequestedSettingsTab = "general" | "auth" | "usage" | "models" | "remote" | "about";
+type RequestedSettingsTab = "general" | "auth" | "usage" | "remote" | "about";
 
 const IC = (p: { d: string; extra?: string }) => (
   <svg width="16" height="16" viewBox="0 0 16 16" fill="none"

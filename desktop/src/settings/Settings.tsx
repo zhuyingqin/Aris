@@ -54,7 +54,7 @@ interface ProviderMeta {
 type SaveState = "idle" | "saving" | "saved" | "error";
 type TestState = "idle" | "testing" | "passed" | "failed";
 type UpdateState = "idle" | "checking" | "available" | "current" | "downloading" | "ready" | "error";
-type SettingsTab = "general" | "auth" | "models" | "usage" | "remote" | "about";
+type SettingsTab = "general" | "auth" | "usage" | "remote" | "about";
 
 const MANAGED_NEW_API_MODE = true;
 const MANAGED_MODEL_SERVER_LABEL = "通用模型服务器";
@@ -189,7 +189,6 @@ const ENVIRONMENT_CHECK_PLACEHOLDERS = [
 const SETTINGS_TABS: Array<{ id: SettingsTab; label: string }> = [
   { id: "general", label: "通用" },
   { id: "auth", label: "认证" },
-  { id: "models", label: "模型" },
   { id: "usage", label: "使用统计" },
   { id: "remote", label: "远程控制" },
   { id: "about", label: "关于" },
@@ -350,7 +349,7 @@ const SETTINGS_COPY: Record<Language, {
   saveConnectionSavedInfo: string;
 }> = {
   cn: {
-    tabs: { general: "通用", auth: "认证", models: "模型", usage: "使用统计", remote: "远程控制", about: "关于" },
+    tabs: { general: "通用", auth: "认证", usage: "使用统计", remote: "远程控制", about: "关于" },
     settingsCategories: "设置分类",
     loading: "加载中...",
     statusModelService: "模型服务",
@@ -497,7 +496,7 @@ const SETTINGS_COPY: Record<Language, {
     saveConnectionSavedInfo: "已保存。下次对话时生效。",
   },
   en: {
-    tabs: { general: "General", auth: "Auth", models: "Models", usage: "Usage", remote: "Remote", about: "About" },
+    tabs: { general: "General", auth: "Auth", usage: "Usage", remote: "Remote", about: "About" },
     settingsCategories: "Settings categories",
     loading: "Loading...",
     statusModelService: "Model service",
@@ -837,12 +836,16 @@ function writeCachedAccount(account: NewApiAccount | null) {
 }
 
 function isSettingsTab(value: unknown): value is SettingsTab {
-  return value === "general" || value === "auth" || value === "models" || value === "usage" || value === "remote" || value === "about";
+  return value === "general" || value === "auth" || value === "usage" || value === "remote" || value === "about";
 }
 
 function readRequestedSettingsTab(): SettingsTab | null {
   try {
     const value = sessionStorage.getItem(SETTINGS_TAB_REQUEST_KEY);
+    if (value === "models") {
+      sessionStorage.removeItem(SETTINGS_TAB_REQUEST_KEY);
+      return "auth";
+    }
     if (isSettingsTab(value)) {
       sessionStorage.removeItem(SETTINGS_TAB_REQUEST_KEY);
       return value;
@@ -2216,7 +2219,7 @@ export default function Settings() {
         </>
       )}
 
-      {activeSettingsTab === "models" && (
+      {activeSettingsTab === "auth" && (
         <>
           <div className="sp-update-section">
             <div className="sp-section-head">
@@ -2295,7 +2298,7 @@ export default function Settings() {
         </>
       )}
 
-      {activeSettingsTab === "models" && (
+      {activeSettingsTab === "auth" && (
         <div className="sp-advanced-wrap sp-advanced-wrap-tab">
           <div className="sp-advanced-body">
             {canConfigureExecutor && (
