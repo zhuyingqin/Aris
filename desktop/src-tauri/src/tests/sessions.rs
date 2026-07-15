@@ -206,6 +206,45 @@ fn remote_chat_append_persists_two_text_turns_and_is_idempotent() {
 }
 
 #[test]
+fn remote_chat_completion_replaces_a_saved_partial_assistant_turn() {
+    let mut session = chat_session(
+        "chat-live",
+        "default",
+        "Live",
+        1,
+        vec![
+            json!({
+                "id": "remote-message-live-user",
+                "role": "user",
+                "blocks": [{ "kind": "text", "text": "remote question" }],
+            }),
+            json!({
+                "id": "remote-message-live-assistant",
+                "role": "assistant",
+                "blocks": [{ "kind": "text", "text": "partial" }],
+                "streaming": true,
+            }),
+        ],
+    );
+
+    assert!(append_remote_chat_text_turns(
+        &mut session,
+        "message-live",
+        "remote question",
+        "complete answer",
+        99,
+    )
+    .expect("completion should replace the live snapshot"));
+    assert_eq!(session["turns"].as_array().expect("turns").len(), 2);
+    assert_eq!(
+        session["turns"][1]["blocks"][0]["text"],
+        json!("complete answer")
+    );
+    assert_eq!(session["turns"][1]["streaming"], json!(false));
+    assert_eq!(session["updatedAt"], json!(99));
+}
+
+#[test]
 fn stale_full_ui_snapshot_retains_missing_remote_turns_in_stored_order() {
     let stored = chat_session(
         "chat-race",

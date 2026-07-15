@@ -37,7 +37,7 @@ use remote_protocol::{
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, Listener, Manager, State};
 use tokio::{
     sync::{mpsc, watch, Mutex as AsyncMutex},
     time::{interval, timeout, Instant, MissedTickBehavior},
@@ -296,6 +296,8 @@ pub(crate) struct RemoteRequestContext {
     pub transport: String,
 }
 
+pub(crate) type ControlResponseSink = Arc<dyn Fn(ControlResponse) + Send + Sync + 'static>;
+
 /// One authenticated, end-to-end encrypted wire session. The P2P WebRTC
 /// adapter and the TCP/WSS relay adapter both hand their binary frames to this
 /// type, so their authorization and anti-replay behavior cannot diverge.
@@ -333,14 +335,28 @@ impl RemoteWireSession {
         })
     }
 
-    /// Opens, validates, dispatches, and encrypts a control response. The
-    /// caller merely writes the returned binary frame to its chosen transport.
+    fn seal_response(&self, response: &ControlResponse) -> Result<SecureEnvelope, String> {
+        let sequence = self.outgoing_sequence.fetch_add(1, Ordering::SeqCst);
+        SecureEnvelope::seal(
+            &self.session_key,
+            self.outgoing_route.clone(),
+            sequence,
+            protocol_now_millis(),
+            response,
+        )
+        .map_err(|error| format!("failed to encrypt remote response: {error}"))
+    }
+
+    /// Opens, validates, and dispatches one request. The transport seals the
+    /// returned terminal response and any streamed progress with this same
+    /// wire session so sequence and replay rules stay shared.
     pub(crate) async fn handle_envelope(
         &self,
         app: AppHandle,
         state: &RemoteAgentState,
         envelope: &SecureEnvelope,
-    ) -> Result<SecureEnvelope, String> {
+        stream_sink: Option<ControlResponseSink>,
+    ) -> Result<ControlResponse, String> {
         let request = self
             .incoming
             .lock()
@@ -351,16 +367,7 @@ impl RemoteWireSession {
             device_id: self.device_id.clone(),
             transport: self.transport.clone(),
         };
-        let response = execute_control_request(app, state, context, request).await;
-        let sequence = self.outgoing_sequence.fetch_add(1, Ordering::SeqCst);
-        SecureEnvelope::seal(
-            &self.session_key,
-            self.outgoing_route.clone(),
-            sequence,
-            protocol_now_millis(),
-            &response,
-        )
-        .map_err(|error| format!("failed to encrypt remote response: {error}"))
+        Ok(execute_control_request(app, state, context, request, stream_sink).await)
     }
 }
 
@@ -1581,7 +1588,7 @@ struct ReservedRelaySession {
     active_key: String,
     device_id: String,
     session_id: SessionId,
-    wire: RemoteWireSession,
+    wire: Arc<RemoteWireSession>,
 }
 
 /// The gateway sends `ready` to each relay endpoint before it announces the
@@ -2163,8 +2170,12 @@ fn reserve_relay_session(
             .derive_session_key(&mobile.key_agreement_public_key, &context)
             .map_err(|error| format!("cannot derive remote transport key: {error}"))?;
         let incoming = SessionRoute::new(session_id, mobile_id, desktop_id);
-        let wire =
-            RemoteWireSession::new(device_id.clone(), TransportKind::TcpRelay, key, incoming)?;
+        let wire = Arc::new(RemoteWireSession::new(
+            device_id.clone(),
+            TransportKind::TcpRelay,
+            key,
+            incoming,
+        )?);
         Ok(ReservedRelaySession {
             active_key: active_key.clone(),
             device_id: device_id.clone(),
@@ -2242,6 +2253,19 @@ async fn run_relay_session(
     let _ = session_id;
 }
 
+fn encode_remote_control_response(
+    wire: &RemoteWireSession,
+    response: &ControlResponse,
+) -> Result<Vec<u8>, String> {
+    let envelope = wire.seal_response(response)?;
+    let payload = serde_json::to_vec(&envelope)
+        .map_err(|_| "cannot encode encrypted remote response".to_string())?;
+    if payload.len() > MAX_RELAY_FRAME_BYTES {
+        return Err("encrypted remote response exceeds relay frame limit".to_string());
+    }
+    Ok(payload)
+}
+
 async fn run_relay_connection(
     app: &AppHandle,
     session: &ReservedRelaySession,
@@ -2263,6 +2287,8 @@ async fn run_relay_connection(
         .send(Message::text(open))
         .await
         .map_err(|_| "cannot open remote relay session".to_string())?;
+    let (mut socket_sink, mut socket_stream) = socket.split();
+    let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel::<Result<Vec<u8>, String>>();
     let mut readiness = RelayConnectionReadiness::default();
     let peer_connect_timeout = tokio::time::sleep(REMOTE_RELAY_PEER_CONNECT_TIMEOUT);
     tokio::pin!(peer_connect_timeout);
@@ -2273,11 +2299,18 @@ async fn run_relay_connection(
             }
             changed = shutdown.changed() => {
                 if changed.is_err() || *shutdown.borrow() {
-                    let _ = socket.close(None).await;
+                    let _ = socket_sink.close().await;
                     return Ok(());
                 }
             }
-            incoming = socket.next() => {
+            Some(outbound) = outbound_rx.recv() => {
+                let payload = outbound?;
+                socket_sink
+                    .send(Message::binary(payload))
+                    .await
+                    .map_err(|_| "cannot send encrypted remote response".to_string())?;
+            }
+            incoming = socket_stream.next() => {
                 let Some(Ok(message)) = incoming else {
                     return Ok(());
                 };
@@ -2312,23 +2345,40 @@ async fn run_relay_connection(
                         }
                         let envelope = serde_json::from_slice::<SecureEnvelope>(&payload)
                             .map_err(|_| "remote relay sent an invalid encrypted frame".to_string())?;
-                        let state = app.state::<RemoteAgentState>();
-                        let response = session
-                            .wire
-                            .handle_envelope(app.clone(), state.inner(), &envelope)
-                            .await?;
-                        let response = serde_json::to_vec(&response)
-                            .map_err(|_| "cannot encode encrypted remote response".to_string())?;
-                        if response.len() > MAX_RELAY_FRAME_BYTES {
-                            return Err("encrypted remote response exceeds relay frame limit".to_string());
-                        }
-                        socket
-                            .send(Message::binary(response))
-                            .await
-                            .map_err(|_| "cannot send encrypted remote response".to_string())?;
+                        let wire = session.wire.clone();
+                        let task_app = app.clone();
+                        let task_outbound = outbound_tx.clone();
+                        let dispatch_lock = Arc::new(Mutex::new(()));
+                        let stream_wire = wire.clone();
+                        let stream_outbound = task_outbound.clone();
+                        let stream_dispatch_lock = dispatch_lock.clone();
+                        let stream_sink: ControlResponseSink = Arc::new(move |response| {
+                            let result = stream_dispatch_lock
+                                .lock()
+                                .map_err(|_| "remote response dispatch state poisoned".to_string())
+                                .and_then(|_guard| encode_remote_control_response(&stream_wire, &response));
+                            let _ = stream_outbound.send(result);
+                        });
+                        tauri::async_runtime::spawn(async move {
+                            let state = task_app.state::<RemoteAgentState>();
+                            match wire
+                                .handle_envelope(
+                                    task_app.clone(),
+                                    state.inner(),
+                                    &envelope,
+                                    Some(stream_sink.clone()),
+                                )
+                                .await
+                            {
+                                Ok(response) => stream_sink(response),
+                                Err(error) => {
+                                    let _ = task_outbound.send(Err(error));
+                                }
+                            }
+                        });
                     }
                     Message::Ping(payload) => {
-                        socket.send(Message::Pong(payload)).await
+                        socket_sink.send(Message::Pong(payload)).await
                             .map_err(|_| "cannot answer remote relay ping".to_string())?;
                     }
                     Message::Close(_) => return Ok(()),
@@ -3058,15 +3108,37 @@ pub async fn remote_control_p2p_frame(
         .map_err(|_| "encrypted P2P frame is invalid".to_string())?;
     session.established.store(true, Ordering::SeqCst);
     discard_pending_p2p_negotiation(&state, &input.session_id);
+    let dispatch_lock = Arc::new(Mutex::new(()));
+    let stream_dispatch_lock = dispatch_lock.clone();
+    let stream_wire = session.wire.clone();
+    let stream_app = app.clone();
+    let stream_device_id = input.device_id.clone();
+    let stream_session_id = input.session_id.clone();
+    let stream_sink: ControlResponseSink = Arc::new(move |response| {
+        let result = stream_dispatch_lock
+            .lock()
+            .map_err(|_| "remote response dispatch state poisoned".to_string())
+            .and_then(|_guard| encode_remote_control_response(&stream_wire, &response));
+        let Ok(payload) = result else {
+            return;
+        };
+        let _ = stream_app.emit(
+            "remote-p2p-frame",
+            RemoteP2pDataInput {
+                device_id: stream_device_id.clone(),
+                session_id: stream_session_id.clone(),
+                data_base64: STANDARD.encode(payload),
+            },
+        );
+    });
     let response = session
         .wire
-        .handle_envelope(app, state.inner(), &envelope)
+        .handle_envelope(app, state.inner(), &envelope, Some(stream_sink))
         .await?;
-    let response = serde_json::to_vec(&response)
-        .map_err(|_| "cannot encode encrypted P2P response".to_string())?;
-    if response.len() > MAX_RELAY_FRAME_BYTES {
-        return Err("encrypted P2P response exceeds the maximum size".to_string());
-    }
+    let response = dispatch_lock
+        .lock()
+        .map_err(|_| "remote response dispatch state poisoned".to_string())
+        .and_then(|_guard| encode_remote_control_response(&session.wire, &response))?;
     Ok(STANDARD.encode(response))
 }
 
@@ -3451,16 +3523,43 @@ fn remote_chat_transcript_result(
     })
 }
 
+fn remote_chat_delta_text(payload: &str, session_id: &str) -> Option<String> {
+    let value = serde_json::from_str::<Value>(payload).ok()?;
+    let object = value.as_object()?;
+    if object.get("sessionId")?.as_str()? != session_id {
+        return None;
+    }
+    let delta = object.get("text")?.as_str()?;
+    (!delta.is_empty()).then(|| delta.to_string())
+}
+
+fn bounded_remote_chat_delta(delta: String, delivered_bytes: &mut usize) -> Option<String> {
+    let remaining = MAX_REMOTE_CHAT_RESPONSE_BYTES.saturating_sub(*delivered_bytes);
+    if remaining == 0 {
+        return None;
+    }
+    let mut end = delta.len().min(remaining);
+    while end > 0 && !delta.is_char_boundary(end) {
+        end -= 1;
+    }
+    if end == 0 {
+        return None;
+    }
+    *delivered_bytes += end;
+    Some(delta[..end].to_string())
+}
+
 async fn execute_remote_chat_message(
     app: &AppHandle,
     state: &RemoteAgentState,
     device_id: &str,
-    request_id: String,
+    request_id: RequestId,
     transport: String,
     project_id: String,
     session_id: String,
     message: String,
     idempotency_key: String,
+    stream_sink: Option<ControlResponseSink>,
 ) -> Result<ControlResult, ControlError> {
     ensure_remote_chat_project(app, &project_id)?;
     crate::engine::remote_chat_session_validate(&project_id, &session_id)
@@ -3491,7 +3590,7 @@ async fn execute_remote_chat_message(
     let started_audit = RemoteAuditEntry {
         timestamp: now_epoch_millis(),
         device_id: device_id.to_string(),
-        request_id,
+        request_id: request_id.to_string(),
         action: "send_chat_message".to_string(),
         transport,
         project_id: Some(project_id.clone()),
@@ -3502,6 +3601,67 @@ async fn execute_remote_chat_message(
         eprintln!("SomniQ remote audit write failed: {error}");
     }
 
+    let _ = app.emit(
+        "remote-chat-session-updated",
+        serde_json::json!({
+            "sessionId": &session_id,
+            "messageId": &message_id,
+            "phase": "started",
+            "message": &message,
+        }),
+    );
+    if let Some(sink) = stream_sink.as_ref() {
+        sink(ControlResponse::success(
+            request_id,
+            protocol_now_millis(),
+            ControlResult::ChatMessageAccepted {
+                project_id: project_id.clone(),
+                message_id: message_id.clone(),
+            },
+        ));
+    }
+
+    let delta_app = app.clone();
+    let delta_sink = stream_sink.clone();
+    let delta_project_id = project_id.clone();
+    let delta_session_id = session_id.clone();
+    let delta_message_id = message_id.clone();
+    let delivered_delta_bytes = Arc::new(Mutex::new(0_usize));
+    let delta_delivered_bytes = delivered_delta_bytes.clone();
+    let delta_listener = app.listen_any("remote-chat-delta", move |event| {
+        let Some(delta) = remote_chat_delta_text(event.payload(), &delta_session_id) else {
+            return;
+        };
+        let Some(delta) = delta_delivered_bytes
+            .lock()
+            .ok()
+            .and_then(|mut delivered| bounded_remote_chat_delta(delta, &mut *delivered))
+        else {
+            return;
+        };
+        if let Some(sink) = delta_sink.as_ref() {
+            sink(ControlResponse::success(
+                request_id,
+                protocol_now_millis(),
+                ControlResult::ChatMessageDelta {
+                    project_id: delta_project_id.clone(),
+                    session_id: delta_session_id.clone(),
+                    message_id: delta_message_id.clone(),
+                    delta: delta.clone(),
+                },
+            ));
+        }
+        let _ = delta_app.emit(
+            "remote-chat-session-updated",
+            serde_json::json!({
+                "sessionId": &delta_session_id,
+                "messageId": &delta_message_id,
+                "phase": "delta",
+                "delta": delta,
+            }),
+        );
+    });
+
     let chat_state = app.state::<crate::engine::ChatState>();
     let response = crate::engine::remote_chat_send_paired(
         app.clone(),
@@ -3511,6 +3671,7 @@ async fn execute_remote_chat_message(
         message.clone(),
     )
     .await;
+    app.unlisten(delta_listener);
     match response {
         Ok(full_text) => {
             // The mobile response is independently bounded for the encrypted
@@ -3520,29 +3681,37 @@ async fn execute_remote_chat_message(
             // session and its durable event log; the remote transcript is
             // deliberately text-only.
             let text = truncate_remote_chat_response(full_text);
-            match crate::sessions::remote_chat_append_text_turn(
+            let persisted = match crate::sessions::remote_chat_append_text_turn(
                 &project_id,
                 &session_id,
                 &message_id,
                 &message,
                 &text,
             ) {
-                Ok(()) => {
-                    if let Err(error) = app.emit(
-                        "remote-chat-session-updated",
-                        serde_json::json!({ "sessionId": &session_id }),
-                    ) {
-                        eprintln!(
-                            "SomniQ remote: could not notify the desktop chat UI after a remote turn: {error}"
-                        );
-                    }
-                }
+                Ok(()) => true,
                 // Never turn an already-completed model request into an error:
                 // doing so would invite a user retry with a new idempotency
                 // key and duplicate the turn in the model's durable context.
-                Err(error) => eprintln!(
-                    "SomniQ remote: could not persist the completed remote chat UI projection: {error}"
-                ),
+                Err(error) => {
+                    eprintln!(
+                        "SomniQ remote: could not persist the completed remote chat UI projection: {error}"
+                    );
+                    false
+                }
+            };
+            if let Err(error) = app.emit(
+                "remote-chat-session-updated",
+                serde_json::json!({
+                    "sessionId": &session_id,
+                    "messageId": &message_id,
+                    "phase": "completed",
+                    "text": &text,
+                    "persisted": persisted,
+                }),
+            ) {
+                eprintln!(
+                    "SomniQ remote: could not notify the desktop chat UI after a remote turn: {error}"
+                );
             }
             complete_remote_chat_idempotency(
                 state,
@@ -3559,7 +3728,16 @@ async fn execute_remote_chat_message(
                 text,
             })
         }
-        Err(_) => {
+        Err(error) => {
+            let _ = app.emit(
+                "remote-chat-session-updated",
+                serde_json::json!({
+                    "sessionId": &session_id,
+                    "messageId": &message_id,
+                    "phase": "error",
+                    "error": &error,
+                }),
+            );
             release_remote_chat_idempotency(
                 state,
                 device_id,
@@ -3579,15 +3757,16 @@ async fn execute_remote_chat_message(
 /// [`remote_protocol::SecureEnvelope`] and accepting its sequence in a
 /// [`remote_protocol::ReplayWindow`] before invoking this function.
 ///
-/// Remote chat returns a bounded final response for a desktop-owned selected
-/// conversation. It runs with that session's local tool and permission policy;
-/// its text-only projection is persisted atomically and announced to the
-/// desktop UI with a dedicated session-refresh event.
+/// Remote chat can emit bounded accepted/delta progress for opted-in clients,
+/// followed by one authoritative final response. It runs with the selected
+/// session's local tool and permission policy; its text-only projection is
+/// mirrored live on the desktop and persisted atomically at completion.
 pub(crate) async fn execute_control_request(
     app: AppHandle,
     state: &RemoteAgentState,
     context: RemoteRequestContext,
     request: ControlRequest,
+    stream_sink: Option<ControlResponseSink>,
 ) -> ControlResponse {
     let action = match &request.command {
         ControlCommand::GetWorkspaceOverview => "workspace_overview",
@@ -3733,17 +3912,19 @@ pub(crate) async fn execute_control_request(
                 session_id,
                 message,
                 idempotency_key,
+                stream,
             } => {
                 execute_remote_chat_message(
                     &app,
                     state,
                     &context.device_id,
-                    request.request_id.to_string(),
+                    request.request_id,
                     context.transport.clone(),
                     project_id,
                     session_id,
                     message,
                     idempotency_key,
+                    if stream { stream_sink.clone() } else { None },
                 )
                 .await
             }

@@ -420,14 +420,14 @@ struct KernelToolExecutor {
 
 type ToolProgressSink = Arc<dyn Fn(&str, &str, tools::ToolProgress) + Send + Sync>;
 
-/// Remote chat writes its execution trace to the durable session log and
-/// refreshes the desktop projection when it finishes. Sending its streaming
-/// events through the normal renderer channel would otherwise patch the last
-/// locally-started assistant turn before the remote user turn exists there.
+/// Remote chat writes its execution trace to the durable session log and uses
+/// a dedicated event name for live text. This keeps locally-started stream
+/// handlers isolated while the remote bridge associates each delta with its
+/// durable mobile message id.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ChatEventDelivery {
     Desktop,
-    RecordOnly,
+    Remote,
 }
 
 fn publish_chat_event(
@@ -442,8 +442,11 @@ fn publish_chat_event(
         ChatEventDelivery::Desktop => {
             crate::chat_events::emit_chat_event(app, event_name, session_id, kind, payload);
         }
-        ChatEventDelivery::RecordOnly => {
-            crate::chat_events::record_event(session_id, kind, payload)
+        ChatEventDelivery::Remote => {
+            crate::chat_events::record_event(session_id, kind, payload.clone());
+            if event_name == "chat-delta" {
+                let _ = app.emit("remote-chat-delta", payload);
+            }
         }
     }
 }
@@ -3892,10 +3895,9 @@ impl ChatTurnRuntime {
     }
 
     fn event_delivery(self) -> ChatEventDelivery {
-        if self.emits_desktop_chat_events() {
-            ChatEventDelivery::Desktop
-        } else {
-            ChatEventDelivery::RecordOnly
+        match self {
+            Self::Desktop { .. } => ChatEventDelivery::Desktop,
+            Self::RemoteApproved => ChatEventDelivery::Remote,
         }
     }
 

@@ -16,7 +16,14 @@ export type ControlCommand =
   | { type: "get_chat_transcript"; project_id: string; session_id: string; limit: number }
   | { type: "get_chat_model_options"; project_id: string; session_id: string }
   | { type: "set_chat_session_model"; project_id: string; session_id: string; model: string }
-  | { type: "send_chat_message"; project_id: string; session_id: string; message: string; idempotency_key: string }
+  | {
+      type: "send_chat_message";
+      project_id: string;
+      session_id: string;
+      message: string;
+      idempotency_key: string;
+      stream: true;
+    }
   | { type: "get_review_conclusion"; project_id: string; review_id: string | null };
 
 export interface ControlResponse {
@@ -79,6 +86,7 @@ export function newChatMessageRequest(
       session_id: sessionId,
       message,
       idempotency_key: idempotencyKey,
+      stream: true,
     },
   };
 }
@@ -173,6 +181,52 @@ export function parseControlResponse(frame: Uint8Array): ControlResponse {
     throw new Error("The desktop returned an invalid encrypted control response.");
   }
   return value as unknown as ControlResponse;
+}
+
+export type ChatMessageProgress =
+  | { kind: "accepted"; projectId: string; messageId: string }
+  | {
+      kind: "delta";
+      projectId: string;
+      sessionId: string;
+      messageId: string;
+      delta: string;
+    };
+
+/** Returns only non-terminal chat responses. Callers must keep the correlated
+ * request pending until `chat_message_completed` (or an error) arrives. */
+export function chatMessageProgress(response: ControlResponse): ChatMessageProgress | null {
+  if (response.outcome.status !== "success" || !isRecord(response.outcome.result)) {
+    return null;
+  }
+  const result = response.outcome.result;
+  if (
+    result.type === "chat_message_accepted"
+    && typeof result.project_id === "string"
+    && typeof result.message_id === "string"
+  ) {
+    return {
+      kind: "accepted",
+      projectId: result.project_id,
+      messageId: result.message_id,
+    };
+  }
+  if (
+    result.type === "chat_message_delta"
+    && typeof result.project_id === "string"
+    && typeof result.session_id === "string"
+    && typeof result.message_id === "string"
+    && typeof result.delta === "string"
+  ) {
+    return {
+      kind: "delta",
+      projectId: result.project_id,
+      sessionId: result.session_id,
+      messageId: result.message_id,
+      delta: result.delta,
+    };
+  }
+  return null;
 }
 
 export function encodeControlRequest(request: ControlRequest): Uint8Array {

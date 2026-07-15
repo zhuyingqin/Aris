@@ -438,6 +438,25 @@ fn remote_chat_response_is_bounded_on_utf8_boundaries() {
 }
 
 #[test]
+fn remote_chat_delta_accepts_only_the_target_session() {
+    let payload = serde_json::json!({
+        "sessionId": "chat-live",
+        "text": "partial reply",
+    })
+    .to_string();
+
+    assert_eq!(
+        remote_chat_delta_text(&payload, "chat-live"),
+        Some("partial reply".to_string())
+    );
+    assert_eq!(remote_chat_delta_text(&payload, "another-chat"), None);
+    assert_eq!(
+        remote_chat_delta_text(r#"{"sessionId":"chat-live","text":""}"#, "chat-live"),
+        None
+    );
+}
+
+#[test]
 fn fresh_approval_can_replace_a_revoked_phone_but_not_an_active_one() {
     let phone = DeviceId::new().to_string();
     let mut store = RemoteStore {

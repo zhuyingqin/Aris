@@ -150,6 +150,10 @@ pub enum ControlCommand {
         session_id: String,
         message: String,
         idempotency_key: String,
+        /// Opt-in for correlated `accepted` and `delta` responses before the
+        /// terminal completion. Missing means false for older mobile clients.
+        #[serde(default)]
+        stream: bool,
     },
     StopRun {
         run_id: String,
@@ -242,6 +246,7 @@ impl ControlCommand {
                 session_id,
                 message,
                 idempotency_key,
+                stream: _,
             } => {
                 validate_identifier("project_id", project_id)?;
                 validate_identifier("session_id", session_id)?;
@@ -430,11 +435,19 @@ pub enum ControlResult {
         project_id: String,
         message_id: String,
     },
+    /// One ordered text fragment produced by an in-flight remote chat turn.
+    /// The response keeps the originating request id, while `message_id`
+    /// identifies the durable user/assistant turn pair across retries.
+    ChatMessageDelta {
+        project_id: String,
+        session_id: String,
+        message_id: String,
+        delta: String,
+    },
     /// A bounded remote chat turn completed by the selected desktop session.
     ///
-    /// `ChatMessageAccepted` remains available for asynchronous clients, but
-    /// the initial P2 mobile surface uses this synchronous result so a paired
-    /// phone can render the assistant's answer without a second event stream.
+    /// This remains the authoritative terminal value for both legacy
+    /// synchronous clients and clients that opted into accepted/delta frames.
     ChatMessageCompleted {
         project_id: String,
         session_id: String,
@@ -615,6 +628,7 @@ mod tests {
                 session_id: "chat-1".to_string(),
                 message: "Please summarize the reviewer conclusion.".to_string(),
                 idempotency_key: "mobile-message-1".to_string(),
+                stream: true,
             },
             100,
         );
@@ -637,6 +651,7 @@ mod tests {
             session_id: "chat-1".to_string(),
             message: "   ".to_string(),
             idempotency_key: "mobile-message-1".to_string(),
+            stream: true,
         };
         assert!(matches!(
             command.validate(),
@@ -711,5 +726,40 @@ mod tests {
                 "set_chat_session_model",
             ])
         );
+    }
+
+    #[test]
+    fn chat_delta_serializes_as_a_correlated_stream_result() {
+        let value = serde_json::to_value(ControlResult::ChatMessageDelta {
+            project_id: "project-1".to_string(),
+            session_id: "chat-1".to_string(),
+            message_id: "message-1".to_string(),
+            delta: "partial".to_string(),
+        })
+        .expect("chat delta should serialize");
+
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "type": "chat_message_delta",
+                "project_id": "project-1",
+                "session_id": "chat-1",
+                "message_id": "message-1",
+                "delta": "partial",
+            })
+        );
+
+        let legacy_command: ControlCommand = serde_json::from_value(serde_json::json!({
+            "type": "send_chat_message",
+            "project_id": "project-1",
+            "session_id": "chat-1",
+            "message": "legacy request",
+            "idempotency_key": "legacy-message-1",
+        }))
+        .expect("a pre-stream mobile request should remain valid");
+        assert!(matches!(
+            legacy_command,
+            ControlCommand::SendChatMessage { stream: false, .. }
+        ));
     }
 }

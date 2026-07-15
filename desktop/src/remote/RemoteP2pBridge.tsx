@@ -11,6 +11,7 @@ import {
   remoteControlP2pPending,
 } from "../api/tauri";
 import type {
+  RemoteP2pDataInput,
   RemoteP2pFailureReason,
   RemoteP2pIceCandidate,
   RemoteP2pOffer,
@@ -140,6 +141,29 @@ export function RemoteP2pBridge() {
       }
     };
 
+    const sendEncryptedFrame = async (session: ActiveP2pSession, dataBase64: string) => {
+      try {
+        const responseBytes = base64ToBytes(dataBase64);
+        const channel = session.channel;
+        if (
+          responseBytes.byteLength > MAX_ENCRYPTED_FRAME_BYTES
+          || !channel
+          || channel.readyState !== "open"
+        ) {
+          await finish(session, "data_channel_failed", true);
+          return;
+        }
+        // Copy into a concrete ArrayBuffer. TypeScript's newer typed-array
+        // definitions allow SharedArrayBuffer views, whereas RTCDataChannel
+        // intentionally accepts only an ArrayBuffer-backed payload.
+        const outbound = new Uint8Array(responseBytes.byteLength);
+        outbound.set(responseBytes);
+        channel.send(outbound.buffer);
+      } catch {
+        await finish(session, "data_channel_failed", true);
+      }
+    };
+
     const attachChannel = (session: ActiveP2pSession, channel: RTCDataChannel) => {
       if (channel.label !== CONTROL_CHANNEL_LABEL || session.channel) {
         channel.close();
@@ -169,17 +193,7 @@ export function RemoteP2pBridge() {
               ...session,
               dataBase64: bytesToBase64(frame),
             });
-            const responseBytes = base64ToBytes(response);
-            if (responseBytes.byteLength > MAX_ENCRYPTED_FRAME_BYTES || channel.readyState !== "open") {
-              await finish(session, "data_channel_failed", true);
-              return;
-            }
-            // Copy into a concrete ArrayBuffer. TypeScript's newer typed-array
-            // definitions allow SharedArrayBuffer views, whereas RTCDataChannel
-            // intentionally accepts only an ArrayBuffer-backed payload.
-            const outbound = new Uint8Array(responseBytes.byteLength);
-            outbound.set(responseBytes);
-            channel.send(outbound.buffer);
+            await sendEncryptedFrame(session, response);
           } catch {
             // The Rust boundary rejects invalid envelopes, replayed sequence
             // numbers, and unauthorized commands. Do not leak its diagnostics
@@ -317,6 +331,12 @@ export function RemoteP2pBridge() {
       listen<RemoteP2pSessionInput>("remote-p2p-failed", (event) => {
         const session = sessions.current.get(sessionKey(event.payload));
         if (session) closeLocal(session);
+      }),
+      listen<RemoteP2pDataInput>("remote-p2p-frame", (event) => {
+        const session = sessions.current.get(sessionKey(event.payload));
+        if (session && !disposed) {
+          void sendEncryptedFrame(session, event.payload.dataBase64);
+        }
       }),
     ];
 

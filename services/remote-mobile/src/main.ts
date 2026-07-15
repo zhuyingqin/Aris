@@ -17,6 +17,7 @@ import {
 import { mobileBasePathUrl, normalizeMobileBasePath } from "./basePath";
 import { BrowserTicketedSocketFactory } from "./browserSocket";
 import {
+  chatMessageProgress,
   encodeControlRequest,
   MOBILE_P1_REQUESTABLE_SCOPES,
   newChatModelOptionsRequest,
@@ -49,6 +50,7 @@ import {
   type RemoteChatModelState,
 } from "./chatModelNavigation";
 import { renderRemoteMarkdown } from "./remoteMarkdown";
+import { isSoftwareKeyboardOpen } from "./mobileViewport";
 import {
   isStandalonePairingContainer,
   pairingBrowserContext,
@@ -293,6 +295,7 @@ const CONTROL_RESPONSE_TIMEOUT_MS = 10 * 60_000;
 interface PendingControlRequest {
   resolve: (response: ControlResponse) => void;
   reject: (error: Error) => void;
+  onProgress?: (response: ControlResponse) => void;
   timeout: ReturnType<typeof setTimeout>;
 }
 
@@ -345,6 +348,7 @@ let chatSending = false;
 let chatSessionsLoading = false;
 let chatTranscriptLoading = false;
 let conversationViewportSyncFrame: number | null = null;
+let conversationViewportBaselineHeight = 0;
 let chatSessions: RemoteChatSession[] = [];
 let selectedChatSessionId: string | null = null;
 let chatModelState: RemoteChatModelState = { model: null, options: [] };
@@ -1061,6 +1065,7 @@ async function sendChatMessage(): Promise<void> {
   updateChatComposer();
   appendChatMessage("user", message);
   const reply = appendChatMessage("assistant", "正在等待电脑回复…", true);
+  let streamRenderFrame: number | null = null;
   chatInput.value = "";
   resizeChatComposer();
 
@@ -1070,16 +1075,44 @@ async function sendChatMessage(): Promise<void> {
     if (!projectId || !sessionId) {
       throw new Error("请先选择电脑中的一个对话。");
     }
-    const response = await sendControlRequest(newChatMessageRequest(projectId, sessionId, message));
+    let streamedText = "";
+    const response = await sendControlRequest(
+      newChatMessageRequest(projectId, sessionId, message),
+      (progressResponse) => {
+        const progress = chatMessageProgress(progressResponse);
+        if (
+          progress?.kind !== "delta"
+          || progress.projectId !== projectId
+          || progress.sessionId !== sessionId
+        ) {
+          return;
+        }
+        streamedText += progress.delta;
+        if (streamRenderFrame === null) {
+          streamRenderFrame = window.requestAnimationFrame(() => {
+            streamRenderFrame = null;
+            setChatMessageContent(reply, "assistant", streamedText || "正在等待电脑回复…");
+          });
+        }
+      },
+    );
     const completion = chatMessageCompletion(response);
     if (!completion || completion.projectId !== projectId || completion.sessionId !== sessionId) {
       throw controlResponseError(response, "电脑没有返回对话回复。");
+    }
+    if (streamRenderFrame !== null) {
+      window.cancelAnimationFrame(streamRenderFrame);
+      streamRenderFrame = null;
     }
     setChatMessageContent(reply, "assistant", completion.text);
     reply.classList.remove("pending");
     setStatus("已收到电脑上的 SomniQ 回复。");
     void refreshChatSessions();
   } catch (error) {
+    if (streamRenderFrame !== null) {
+      window.cancelAnimationFrame(streamRenderFrame);
+      streamRenderFrame = null;
+    }
     setChatMessageContent(reply, "assistant", `发送失败：${errorMessage(error)}`);
     reply.classList.remove("pending");
     reply.classList.add("error");
@@ -1209,7 +1242,10 @@ async function selectChatSession(sessionId: string): Promise<void> {
   }
 }
 
-async function sendControlRequest(request: ControlRequest): Promise<ControlResponse> {
+async function sendControlRequest(
+  request: ControlRequest,
+  onProgress?: (response: ControlResponse) => void,
+): Promise<ControlResponse> {
   const activeTransport = transport;
   if (!activeTransport) {
     throw new Error("请先安全连接电脑。");
@@ -1220,7 +1256,7 @@ async function sendControlRequest(request: ControlRequest): Promise<ControlRespo
       pendingControlRequests.delete(request.request_id);
       reject(new Error("等待电脑响应超时，请重试。"));
     }, CONTROL_RESPONSE_TIMEOUT_MS);
-    pendingControlRequests.set(request.request_id, { resolve, reject, timeout });
+    pendingControlRequests.set(request.request_id, { resolve, reject, onProgress, timeout });
   });
 
   try {
@@ -1270,6 +1306,10 @@ function showControlResponse(frame: Uint8Array): void {
     const response = parseControlResponse(frame);
     const pending = pendingControlRequests.get(response.request_id);
     if (pending) {
+      if (chatMessageProgress(response)) {
+        pending.onProgress?.(response);
+        return;
+      }
       pendingControlRequests.delete(response.request_id);
       clearTimeout(pending.timeout);
       pending.resolve(response);
@@ -2021,6 +2061,12 @@ function setPhase(next: FlowPhase): void {
   phase = next;
   remoteApp.classList.toggle("conversation-mode", next === "connected");
   document.body.classList.toggle("remote-conversation-active", next === "connected");
+  if (next === "connected") {
+    scheduleConversationViewportSync();
+  } else {
+    document.body.classList.remove("remote-keyboard-open");
+    conversationViewportBaselineHeight = 0;
+  }
   scanPanel.hidden = next !== "scan";
   const pairingEntryBlocked = pairingContext !== null || hasMismatchedStoredPairing;
   startCameraButton.disabled = pairingEntryBlocked;
@@ -2066,6 +2112,22 @@ function syncConversationViewport(): void {
   const viewport = window.visualViewport;
   const height = Math.round(viewport?.height ?? window.innerHeight);
   const offsetTop = Math.max(0, Math.round(viewport?.offsetTop ?? 0));
+  const visibleBottom = height + offsetTop;
+  const inputFocused = document.activeElement === chatInput;
+  if (!inputFocused || conversationViewportBaselineHeight <= 0) {
+    conversationViewportBaselineHeight = Math.max(
+      visibleBottom,
+      Math.round(window.innerHeight),
+    );
+  }
+  document.body.classList.toggle(
+    "remote-keyboard-open",
+    phase === "connected" && isSoftwareKeyboardOpen({
+      inputFocused,
+      baselineHeight: conversationViewportBaselineHeight,
+      visibleBottom,
+    }),
+  );
   if (height > 0) {
     document.documentElement.style.setProperty("--remote-viewport-height", `${height}px`);
   }
