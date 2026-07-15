@@ -49,6 +49,7 @@ import {
   type RemoteChatModelState,
 } from "./chatModelNavigation";
 import { renderRemoteMarkdown } from "./remoteMarkdown";
+import { pairingBrowserContext, pairingBrowserContextLabel } from "./pairingContext";
 import {
   workspaceOverviewFromResponse,
   type RemoteWorkspaceCapability,
@@ -310,6 +311,8 @@ interface PairedSessionRestoreResult {
   failureMessage: string | null;
 }
 
+type PairingStorageProtection = "unknown" | "persistent" | "best_effort" | "unavailable";
+
 const api = new GatewayApi();
 const identityStore = new IndexedDbIdentityStore();
 const sessionStore = new BrowserPairedSessionStore();
@@ -342,7 +345,10 @@ let chatModelState: RemoteChatModelState = { model: null, options: [] };
 let chatModelLoading = false;
 let chatModelSwitching = false;
 let chatModelMenuOpen = false;
+let pairingStorageProtection: PairingStorageProtection = "unknown";
+let pairingStorageRequest: Promise<PairingStorageProtection> | null = null;
 const pendingControlRequests = new Map<string, PendingControlRequest>();
+const pairingContext = pairingBrowserContext(navigator.userAgent, isEmbeddedWindow());
 
 try {
   scannedPairingPayload = consumePairingPayloadFromLocation();
@@ -432,6 +438,12 @@ closeWorkspaceButton.addEventListener("click", () => setWorkspaceDrawerOpen(fals
 workspaceBackdrop.addEventListener("click", () => setWorkspaceDrawerOpen(false));
 openModelMenuButton.addEventListener("click", () => setChatModelMenuOpen(!chatModelMenuOpen));
 revokePairingButton.addEventListener("click", () => void revokeAndForget());
+
+if (pairingContext) {
+  startCameraButton.disabled = true;
+  chooseQrImageButton.disabled = true;
+}
+
 window.addEventListener("beforeunload", () => {
   stopCompletionPolling();
   stopCameraScan();
@@ -493,12 +505,17 @@ async function initialize(): Promise<void> {
   // signed QR ceremony and an explicit approval on the desktop.
   const restoration = await restorePairedSession();
   if (restoration.restored && pairedSession) {
+    pairingStorageProtection = await inspectPairingStorageProtection();
     updateDesktopLabels(pairedSession.invitation.desktop.display_name);
     setPhase("paired");
     setStatus(hasChatScope()
       ? "已恢复安全配对，正在连接电脑…"
       : "此手机使用的是旧权限集。请在桌面端撤销后重新扫码配对，以启用项目、模型和对话控制。");
     await connect();
+    return;
+  }
+
+  if (blockPairingInEphemeralContext()) {
     return;
   }
 
@@ -515,6 +532,9 @@ async function initialize(): Promise<void> {
 }
 
 async function scanQrImage(): Promise<void> {
+  if (blockPairingInEphemeralContext()) {
+    return;
+  }
   const image = qrImage.files?.item(0);
   if (!image) {
     return;
@@ -533,6 +553,9 @@ async function scanQrImage(): Promise<void> {
 }
 
 async function startCameraScan(): Promise<void> {
+  if (blockPairingInEphemeralContext()) {
+    return;
+  }
   if (phase !== "scan") {
     return;
   }
@@ -584,6 +607,9 @@ function setCameraPreviewVisible(visible: boolean): void {
 }
 
 function showPairingConfirmation(): void {
+  if (blockPairingInEphemeralContext()) {
+    return;
+  }
   if (!scannedPairingPayload) {
     setPhase("scan");
     return;
@@ -602,12 +628,12 @@ function showPairingConfirmation(): void {
 }
 
 async function claimPairing(): Promise<void> {
-  if (!scannedPairingPayload) {
+  if (blockPairingInEphemeralContext() || !scannedPairingPayload) {
     return;
   }
   // Start this while the user gesture is still active. Mobile browsers are
   // more likely to grant durable storage when the request comes from a tap.
-  void requestPersistentPairingStorage();
+  pairingStorageRequest = requestPersistentPairingStorage();
   setBusy(claimButton, true);
   try {
     const mobileIdentity = await ensureIdentity();
@@ -629,6 +655,9 @@ async function claimPairing(): Promise<void> {
     claimed = null;
     setStatus(errorMessage(error));
   } finally {
+    if (!claimed) {
+      pairingStorageRequest = null;
+    }
     setBusy(claimButton, false);
   }
 }
@@ -667,13 +696,14 @@ async function completePairingWhenApproved(): Promise<void> {
       ice_servers: [...pending.claim.ice_servers],
     };
     await sessionStore.save(session);
-    await requestPersistentPairingStorage();
+    pairingStorageProtection = await (pairingStorageRequest ?? requestPersistentPairingStorage());
+    pairingStorageRequest = null;
     pairedSession = session;
     claimed = null;
     stopCompletionPolling();
     updateDesktopLabels(session.invitation.desktop.display_name);
     setPhase("paired");
-    setStatus("电脑已批准，正在建立端到端加密连接。");
+    setStatus(pairingCompletedStatus());
     await connect();
   } catch (error) {
     if (error instanceof GatewayApiError && error.isAwaitingDesktopApproval) {
@@ -685,6 +715,9 @@ async function completePairingWhenApproved(): Promise<void> {
     setPhase("scan");
     setStatus(`配对未完成：${errorMessage(error)}`);
   } finally {
+    if (!claimed) {
+      pairingStorageRequest = null;
+    }
     completingPairing = false;
   }
 }
@@ -704,10 +737,9 @@ async function restorePairedSession(): Promise<PairedSessionRestoreResult> {
     }
     const loadedIdentity = await ensureIdentity();
     if (loadedIdentity.descriptor.device_id !== session.mobile.device_id) {
-      await sessionStore.clear();
       return {
         restored: false,
-        failureMessage: "此手机身份已变化，旧配对已移除。请在同一浏览器或 SomniQ Remote 主屏应用中重新扫码。",
+        failureMessage: "此浏览器的安全身份与已保存配对不一致。请在原来的浏览器或 SomniQ Remote 主屏应用中打开；配对记录已保留，便于诊断。",
       };
     }
     identity = loadedIdentity;
@@ -1975,16 +2007,60 @@ function scheduleConversationViewportSync(): void {
   });
 }
 
-async function requestPersistentPairingStorage(): Promise<void> {
+function blockPairingInEphemeralContext(): boolean {
+  if (!pairingContext) {
+    return false;
+  }
+  scannedPairingPayload = null;
+  setPhase("scan");
+  setStatus(
+    `当前打开的是${pairingBrowserContextLabel(pairingContext)}。该环境会与系统浏览器隔离配对数据，不能用于首次配对。请使用右上角“在浏览器打开”，在 Safari 或 Chrome 中打开 SomniQ Remote 后再扫码。`,
+  );
+  return true;
+}
+
+function isEmbeddedWindow(): boolean {
+  try {
+    return window.top !== window;
+  } catch {
+    return true;
+  }
+}
+
+function pairingCompletedStatus(): string {
+  const base = "电脑已批准，正在建立端到端加密连接。";
+  if (pairingStorageProtection === "best_effort") {
+    return `${base} 当前浏览器未授予持久存储保护，请从同一浏览器或 SomniQ Remote 主屏图标再次打开，且不要清除其网站数据。`;
+  }
+  if (pairingStorageProtection === "unavailable") {
+    return `${base} 当前浏览器无法确认持久存储，请从同一系统浏览器或 SomniQ Remote 主屏图标再次打开。`;
+  }
+  return base;
+}
+
+async function inspectPairingStorageProtection(): Promise<PairingStorageProtection> {
   const storage = navigator.storage;
-  if (typeof storage?.persist !== "function") {
-    return;
+  if (typeof storage?.persisted !== "function") {
+    return typeof storage?.persist === "function" ? "best_effort" : "unavailable";
   }
   try {
-    await storage.persist();
+    return await storage.persisted() ? "persistent" : "best_effort";
+  } catch {
+    return "unavailable";
+  }
+}
+
+async function requestPersistentPairingStorage(): Promise<PairingStorageProtection> {
+  const storage = navigator.storage;
+  if (typeof storage?.persist !== "function") {
+    return "unavailable";
+  }
+  try {
+    return await storage.persist() ? "persistent" : "best_effort";
   } catch {
     // Storage persistence is an optimization. IndexedDB remains the normal
     // credential store when a browser does not expose or declines this API.
+    return "best_effort";
   }
 }
 
