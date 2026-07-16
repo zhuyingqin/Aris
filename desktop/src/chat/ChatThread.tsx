@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import type { ChatTurn } from "../types";
 import ErrorBoundary from "../ErrorBoundary";
@@ -125,7 +125,7 @@ interface Props {
   loading?: boolean;
   composerHeight: number;
   starters: ChatStarter[];
-  welcomeTitle: string;
+  welcomeTitle: ReactNode;
   welcomeDescription: string;
   onStarter: (prompt: string) => void;
   onEdit: (turn: ChatTurn) => void;

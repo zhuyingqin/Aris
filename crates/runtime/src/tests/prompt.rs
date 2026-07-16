@@ -177,12 +177,10 @@ fn load_system_prompt_reads_agents_and_runtime_config() {
     .expect("write settings");
 
     let _guard = env_lock();
-    let previous = std::env::current_dir().expect("cwd");
     let original_home = std::env::var("HOME").ok();
     let original_claude_home = std::env::var("CLAUDE_CONFIG_HOME").ok();
     std::env::set_var("HOME", &root);
     std::env::set_var("CLAUDE_CONFIG_HOME", root.join("missing-home"));
-    std::env::set_current_dir(&root).expect("change cwd");
     let prompt = super::load_system_prompt(&root, "2026-03-31", "linux", "6.8", None)
         .expect("system prompt should load")
         .join(
@@ -190,7 +188,6 @@ fn load_system_prompt_reads_agents_and_runtime_config() {
 
 ",
         );
-    std::env::set_current_dir(previous).expect("restore cwd");
     if let Some(value) = original_home {
         std::env::set_var("HOME", value);
     } else {
@@ -403,11 +400,7 @@ argument-hint: <topic>
     )
     .expect("write project skill");
 
-    let _guard = env_lock();
-    let previous = std::env::current_dir().expect("cwd");
-    std::env::set_current_dir(&root).expect("change cwd");
-    let rendered = render_available_skills().expect("skills should render");
-    std::env::set_current_dir(previous).expect("restore cwd");
+    let rendered = render_available_skills(&root).expect("skills should render");
 
     assert!(rendered.contains("## Project"));
     assert!(rendered.contains("- `/project-skill <topic>` - Project skill desc"));

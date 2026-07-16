@@ -28,6 +28,76 @@ pub fn workspace_root_from_env() -> PathBuf {
         .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
 }
 
+/// Return whether a command can be resolved from the current process `PATH`.
+///
+/// Windows resolution honours `PATHEXT` (so `gh` finds `gh.exe`); Unix also
+/// requires an executable bit. Keeping this in runtime avoids every surface
+/// inventing a different `which`/`where`/PATH scan.
+#[must_use]
+pub fn command_exists(command: &str) -> bool {
+    if command.trim().is_empty() {
+        return false;
+    }
+    let command_path = Path::new(command);
+    if command_path.components().count() > 1 || command_path.is_absolute() {
+        return executable_file(command_path);
+    }
+    env::var_os("PATH")
+        .is_some_and(|paths| command_exists_in_paths(command, env::split_paths(&paths)))
+}
+
+fn command_exists_in_paths(command: &str, paths: impl IntoIterator<Item = PathBuf>) -> bool {
+    let has_extension = Path::new(command).extension().is_some();
+    for directory in paths {
+        let candidate = directory.join(command);
+        if executable_file(&candidate) {
+            return true;
+        }
+        #[cfg(windows)]
+        if !has_extension
+            && pathexts()
+                .into_iter()
+                .any(|extension| executable_file(&candidate.with_extension(extension)))
+        {
+            return true;
+        }
+        #[cfg(not(windows))]
+        let _ = has_extension;
+    }
+    false
+}
+
+#[cfg(windows)]
+fn pathexts() -> Vec<String> {
+    env::var_os("PATHEXT")
+        .map(|value| {
+            value
+                .to_string_lossy()
+                .split(';')
+                .map(str::trim)
+                .filter(|extension| !extension.is_empty())
+                .map(|extension| extension.trim_start_matches('.').to_string())
+                .collect()
+        })
+        .filter(|extensions: &Vec<String>| !extensions.is_empty())
+        .unwrap_or_else(|| vec!["COM".into(), "EXE".into(), "BAT".into(), "CMD".into()])
+}
+
+fn executable_file(path: &Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        return fs::metadata(path)
+            .map(|metadata| metadata.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false);
+    }
+    #[cfg(not(unix))]
+    true
+}
+
 #[must_use]
 pub fn somniq_config_dir_from_env() -> PathBuf {
     env::var_os("ARIS_CONFIG_ROOT")

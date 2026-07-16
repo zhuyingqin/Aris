@@ -29,26 +29,103 @@
 
 ## 📰 What's New
 
-> **v0.4.11** (2026-07) — Runtime / tools / executor surface refactor (~60 Rust files in
-> `crates/runtime` + `crates/tools` + `crates/executor` + `crates/chat` + `crates/commands` +
-> `crates/compat-harness` + `crates/notebook`): hooks, process registry, cache, hot-memory,
-> change-ledger, oauth, remote, usage, permissions, and session_index refinements. Test
-> reorganisation: ~14 new `src/<area>/tests/` sub-directories move inline tests into a single
-> `tests/` namespace per crate (knowledge / lab / literature / studio / typeset / chat / aris-cli
-> / api / etc.). Tauri backend (`commands.rs`, `config.rs`, `engine.rs`, `env/cache.rs`,
-> `files.rs`, `knowledge.rs`, `lab.rs`, `lib.rs`, `literature.rs`, `mail/*.rs`, `projects.rs`,
-> `scheduled.rs`, `sessions.rs`, `state.rs`, `studio.rs`, `usage_log.rs`, `chat_events.rs`,
-> new `change_ledger.rs`) wires the runtime surface into desktop commands. Frontend (`App.tsx`,
-> `api/tauri.ts`, chat / lab / literature / studio / typeset, `styles.css`, `types.ts`) adapts to
-> the runtime refactor.
+> **v0.4.16** (2026-07) — `reports` kernel module (report-rendering pipeline consumed by CLI /
+> runtime). New desktop components: `ChatNavigationTabs` + `SideTaskPanel` (in-chat side-task /
+> status panel + explicit nav tab strip). New editor helper `latexVscodeHighlighting`
+> (VSCode-style LaTeX syntax tokens for the typeset visual editor). `.github/workflows/release.yml`
+> refinement + updater-manifest generator refresh. Runtime / Tools / Chat / Tauri backend
+> surface updates. Chat / Lab / Typeset / API UI refinements. Notebook / knowledge / literature
+> / studio tool surface.
+
+> **v0.4.15** (2026-07) — Integrated cross-platform PTY terminal (ConPTY on Windows) for the Lab
+> Code page: `desktop/src-tauri/src/terminal.rs` + `portable-pty` dep paired with
+> `desktop/src/lab/Terminal.tsx` + `@xterm/xterm` + `@xterm/addon-fit`. New `project_intent`
+> kernel module (intent persistence + inference pipeline) alongside `project_goal`. New
+> `editor/kernelIntel.ts` (editor intelligence helpers — completion / diagnostics / hover).
+> Notebook kernel refinements. New deps: +@xterm/xterm, +@xterm/addon-fit, +katex, +mermaid,
+> +pdfjs-dist.
+
+<details>
+<summary>📜 Earlier releases (v0.4.14 → v0.1.0)</summary>
+
+> **v0.4.14** (2026-07) — New `project_goal` kernel module (mission/goal persistence + inference
+> pipeline). New `editor` desktop module: `SharedEditor` + `editorCommands` / `editorDecorations` /
+> `editorLanguages` / `editorState` / `editorTypes` / `editorView` — extracted from the typeset
+> visual editor. New `ProjectBriefCard` chat component. `AGENTS.md` contributor guide +
+> `THIRD_PARTY_NOTICES.md`. CodeMirror language plugins +
+> `@tauri-apps/plugin-{process,updater}` deps.
+
+> **v0.4.13** (2026-07) — `desktop/src/sessions/Sessions.tsx` removed; `store.ts` reflects the new
+> session model. Chat surface polish. Lab / Studio / Onboarding / Scheduled-tasks UI refinements.
+> `styles.css` font-stack upgrade (`Inter` → fallback chain) +
+> `font-synthesis: none` + `text-rendering: optimizeLegibility`.
+
+> **v0.4.12** (2026-07) — Chat surface polish (`Chat.tsx`, `ChatMessage.tsx`, `ChatSidebar.tsx`,
+> `WorkflowFlow.tsx`, `i18n.ts`, `model.ts`) + matching test alignment. Onboarding tutorial
+> step + accent-token + reduced-motion tweaks. Tauri backend (`engine.rs`, `newapi.rs`) —
+> reqwest gains `gzip` / `brotli` / `deflate` decoder features. aris-cli + tools runtime
+> surface follow-up.
+
+> **v0.4.11** (2026-07) — Runtime / tools / executor surface refactor (~60 Rust files):
+> hooks, process registry, cache, hot-memory, change-ledger, oauth, remote, usage,
+> permissions, and session_index refinements. Test reorganisation: ~14 new
+> `src/<area>/tests/` sub-directories.
+
+> **v0.4.10** (2026-07) — Chat image preview component + run/command helpers. Lab file ops +
+> preview polish. Typeset CodeMirror-6 decoration-based visual editor. aris-cli + Tauri backend
+> tweaks.
+
+> **v0.4.9** (2026-07) — Typeset module: Tectonic-backed LaTeX compile + CodeMirror-6 visual
+> editor. Lab: `labEditorCore` extraction + lab preview iframe. Newapi managed-login wired
+> (Settings = projection of server state). MCP `claude` server registered.
+
+> **v0.4.8** (2026-07) — Env-probe extraction (`src-tauri/src/env/`). System prompt
+> externalized (`crates/runtime/assets/prompts/system.md`). Prompt pipeline rework.
+> Chat-stream hook extraction (`useChatStream`). Newapi managed-login integration.
+
+> **v0.4.7** (2026-07) — Lab MATLAB auto-discovery. Chat i18n (`chat/i18n.ts`). System-prompt +
+> user-prompt inspectors. Onboarding tutorial polish. `styles.css` overhaul.
+
+> **v0.4.6** (2026-07) — Mail integration (Gmail / Graph / IMAP + OAuth2 + `atomic_file.rs`).
+> Scheduled tasks module rewrite. Settings rewrite (provider cards, role pickers). Newapi
+> managed login + Settings-as-projection. Lab MATLAB REPL. Chat stop+continue +
+> `AskUserQuestion`.
+
+> **v0.4.5** (2026-06) — CI fix: pass `TAURI_SIGNING_PRIVATE_KEY` to the macOS desktop job.
+
+> **v0.4.4** (2026-06) — Deps fix: refresh `package-lock.json` so `npm ci` succeeds in CI.
+
+> **v0.4.3** (2026-06) — Runtime LLM-based context compaction + ContextRing improvements.
+> Desktop: ErrorBoundary, LiteratureViewTabs, onboarding tutorial. Notebook MATLAB kernel.
+
+> **v0.4.2** (2026-06) — First-time onboarding tutorial.
+
+> **v0.4.1** (2026-06) — Release prep: packaging + dependency alignment.
+
+> **v0.4.0** (2026-06) — Release prep: v0.4.x baseline.
+
+> **v0.3.6** (2026-06) — Patch release prep.
+
+> **v0.3.5** (2026-06) — Release fix: publish correct updater asset URLs.
+
+> **v0.3.4** (2026-06) — Desktop fix: prefer bundled Tectonic fallback when system LaTeX is
+> unavailable.
+
+> **v0.3.2** (2026-06) — Scheduled task registry, literature store, Chat test suite.
+
+> **v0.3.1** (2026-06) — Chat permission inline blocks + model-switch sync.
+
+> **v0.3.0** (2026-06) — Memory subsystem, literature PDF reader + KaTeX, `useChatStream`
+> refactor.
+
+> **v0.2.3** (2026-06) — MCP (Model Context Protocol) integration: stdio MCP client.
+
+> **v0.2.2** (2026-06) — OpenAlex + Scopus search engines wired into the literature kernel.
 
 > **v0.2.0** (2026-06) — Multi-project workspaces (each keeps its own sessions, runs, agents, and
 > workflows), PDF-readable attachments for auto-review, reasoning/"thinking" content in Chat, a
 > slash-command center with in-chat `/model` switching, and hardening (Settings-routed `LlmReview`,
 > Anthropic-compatible endpoints, no Windows console flashes).
-
-<details>
-<summary>📜 Earlier releases (v0.1.1 → v0.1.0)</summary>
 
 > **v0.1.1** (2026-05) — Chat UI overhaul: history, markdown rendering, `@`-file mentions, ordered streamed tool output.
 

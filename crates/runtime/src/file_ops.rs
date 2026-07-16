@@ -230,6 +230,25 @@ fn decode_text_bytes(bytes: &[u8]) -> io::Result<String> {
     ))
 }
 
+/// Decodes subprocess stdout/stderr as text, falling back through GB18030/GBK
+/// before a lossy UTF-8 decode. CLI tools on zh-CN Windows (TeX Live, Python,
+/// etc.) commonly write console output in the active local codepage (CP936)
+/// rather than UTF-8; a plain `from_utf8_lossy` turns that into replacement
+/// characters instead of readable text. Unlike `decode_text_bytes`, this never
+/// errors — process output must always yield *something* back to the caller.
+pub fn decode_process_text(bytes: &[u8]) -> String {
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        return text.to_string();
+    }
+    for encoding in [GB18030, GBK] {
+        let (text, _, had_errors) = encoding.decode(bytes);
+        if !had_errors {
+            return text.into_owned();
+        }
+    }
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
 fn read_text_payload(
     absolute_path: PathBuf,
     content: &str,

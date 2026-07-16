@@ -148,6 +148,18 @@ const activeMathSourceInline = Decoration.mark({
   class: "cm-vis-active-math-source cm-vis-active-math-source-inline",
 });
 
+/** Theorem-like environment names that receive readable Visual chrome. */
+const THEOREM_ENVIRONMENTS = new Set([
+  "theorem",
+  "lemma",
+  "proposition",
+  "corollary",
+  "definition",
+  "remark",
+  "example",
+  "proof",
+]);
+
 /** Memoized alignment line decorations (center / flushleft / flushright). */
 const alignLineCache: Record<string, Decoration> = {};
 const alignLine = (cls: string): Decoration =>
@@ -200,6 +212,83 @@ function stripMarkup(input: string): string {
     .trim();
 }
 
+/** Convert a positive integer into the alphabetic counter used by enumitem. */
+function alphabeticCounter(value: number, uppercase = false): string {
+  let remaining = Math.max(1, Math.floor(value));
+  let result = "";
+  while (remaining > 0) {
+    remaining -= 1;
+    result = String.fromCharCode((remaining % 26) + (uppercase ? 65 : 97)) + result;
+    remaining = Math.floor(remaining / 26);
+  }
+  return result;
+}
+
+/** Convert a positive integer into the Roman counter used by enumitem. */
+function romanCounter(value: number, uppercase = false): string {
+  const numerals: Array<[number, string]> = [
+    [1000, "M"], [900, "CM"], [500, "D"], [400, "CD"],
+    [100, "C"], [90, "XC"], [50, "L"], [40, "XL"],
+    [10, "X"], [9, "IX"], [5, "V"], [4, "IV"], [1, "I"],
+  ];
+  let remaining = Math.max(1, Math.floor(value));
+  let result = "";
+  for (const [amount, glyph] of numerals) {
+    while (remaining >= amount) {
+      result += glyph;
+      remaining -= amount;
+    }
+  }
+  return uppercase ? result : result.toLowerCase();
+}
+
+/**
+ * Read an enumitem key without splitting commas inside a braced label, such as
+ * `label=\\textbf{Step, \\arabic*}`. The visual editor intentionally only
+ * needs the label key; layout keys (leftmargin, itemsep, ...) remain source
+ * formatting and are folded separately.
+ */
+function enumitemOption(options: string | undefined, name: string): string | null {
+  if (!options) return null;
+  const source = options.trim().replace(/^\[/, "").replace(/\]$/, "");
+  let depth = 0;
+  let start = 0;
+  const entries: string[] = [];
+  for (let index = 0; index <= source.length; index += 1) {
+    const char = source[index];
+    if (char === "\\") {
+      index += 1;
+      continue;
+    }
+    if (char === "{") depth += 1;
+    else if (char === "}") depth = Math.max(0, depth - 1);
+    if (index === source.length || (char === "," && depth === 0)) {
+      entries.push(source.slice(start, index));
+      start = index + 1;
+    }
+  }
+  for (const entry of entries) {
+    const equals = entry.indexOf("=");
+    if (equals < 0 || entry.slice(0, equals).trim() !== name) continue;
+    return entry.slice(equals + 1).trim() || null;
+  }
+  return null;
+}
+
+/** Render the common enumitem counter macros in a custom `label=...` value. */
+function enumitemLabel(options: string | undefined, value: number): string | null {
+  const template = enumitemOption(options, "label");
+  if (!template) return null;
+  const rendered = template
+    .replace(/\\arabic\s*\*/g, String(value))
+    .replace(/\\alph\s*\*/g, alphabeticCounter(value))
+    .replace(/\\Alph\s*\*/g, alphabeticCounter(value, true))
+    .replace(/\\roman\s*\*/g, romanCounter(value))
+    .replace(/\\Roman\s*\*/g, romanCounter(value, true))
+    .replace(/~/g, " ");
+  return stripMarkup(rendered) || null;
+}
+
 /** Small chip shown in place of the folded preamble; click to jump to source. */
 class PreambleWidget extends WidgetType {
   constructor(private readonly lineCount: number) {
@@ -239,6 +328,37 @@ class SectionLabelWidget extends WidgetType {
     return el;
   }
   ignoreEvent = blockIgnoreEvent;
+}
+
+/** Small theorem/lemma label in place of a LaTeX theorem environment marker. */
+class TheoremLabelWidget extends WidgetType {
+  constructor(
+    private readonly label: string,
+    private readonly sourceRange: Range,
+    private readonly onJump: OpenCodeRange,
+  ) {
+    super();
+  }
+  eq(other: TheoremLabelWidget) {
+    return other.label === this.label
+      && other.sourceRange.from === this.sourceRange.from
+      && other.sourceRange.to === this.sourceRange.to;
+  }
+  toDOM() {
+    const el = document.createElement("span");
+    el.className = `cm-vis-theorem-label ${BLOCK_TARGET_CLASS}`;
+    el.textContent = this.label;
+    if (this.onJump) {
+      el.classList.add("cm-vis-theorem-editable");
+      el.title = "Click to edit theorem source in Code mode";
+      el.addEventListener("mousedown", (event) => event.preventDefault());
+      el.addEventListener("click", () => this.onJump?.(this.sourceRange.from, this.sourceRange.to));
+    }
+    return el;
+  }
+  ignoreEvent() {
+    return true;
+  }
 }
 
 /** Auto section-number badge rendered before a heading's text. */
@@ -1032,7 +1152,11 @@ function buildDecorations(state: EditorState): VisualDecorations {
   }
 
   // Inline `$…$` — single dollars only, skipping `$$` and escaped `\$`.
-  const inlineMathRe = /(?<!\\)\$(?!\$)((?:\\.|[^$\\])+?)\$/g;
+  // Keep a match on one source line: when a paper draft has one missing `$`,
+  // allowing the matcher to cross a newline turns an entire later section into
+  // math and suppresses its lists/headings/inline formatting. A malformed
+  // formula should remain local raw source, not break the rest of Visual mode.
+  const inlineMathRe = /(?<!\\)\$(?!\$)((?:\\.|[^$\\\n])+?)\$/g;
   let mm: RegExpExecArray | null;
   inlineMathRe.lastIndex = bodyStart;
   while ((mm = inlineMathRe.exec(text)) && mm.index < scanEnd) {
@@ -1180,6 +1304,39 @@ function buildDecorations(state: EditorState): VisualDecorations {
 
   const withinHeading = (pos: number) => headingBraces.some((h) => pos >= h.from && pos < h.to);
 
+  // --- Theorem-like environments: readable label + hidden wrapper source ---
+  // Environment declarations are structural chrome rather than prose. Keep them
+  // visual even when the caret lands on the declaration; entering the theorem
+  // body still exposes ordinary source commands for direct editing.
+  const theoremBeginRe = /\\begin\{([a-zA-Z*]+)\}(\s*\[([^\]]*)\])?/g;
+  theoremBeginRe.lastIndex = bodyStart;
+  let theoremBegin: RegExpExecArray | null;
+  while ((theoremBegin = theoremBeginRe.exec(text)) && theoremBegin.index < scanEnd) {
+    const environment = theoremBegin[1];
+    if (!THEOREM_ENVIRONMENTS.has(environment)) continue;
+    const fallback = environment.charAt(0).toUpperCase() + environment.slice(1);
+    const label = stripMarkup(theoremBegin[3]?.trim() || fallback) || fallback;
+    const beginTo = theoremBegin.index + theoremBegin[0].length;
+    const endMarker = `\\end{${environment}}`;
+    const endFrom = text.indexOf(endMarker, beginTo);
+    const sourceRange = {
+      from: theoremBegin.index,
+      to: endFrom >= 0 ? endFrom + endMarker.length : beginTo,
+    };
+    hide(
+      theoremBegin.index,
+      beginTo,
+      Decoration.replace({ widget: new TheoremLabelWidget(label, sourceRange, state.facet(onOpenCodeRange)) }),
+    );
+  }
+  const theoremEndRe = /\\end\{([a-zA-Z*]+)\}/g;
+  theoremEndRe.lastIndex = bodyStart;
+  let theoremEnd: RegExpExecArray | null;
+  while ((theoremEnd = theoremEndRe.exec(text)) && theoremEnd.index < scanEnd) {
+    if (!THEOREM_ENVIRONMENTS.has(theoremEnd[1])) continue;
+    hide(theoremEnd.index, theoremEnd.index + theoremEnd[0].length);
+  }
+
   // --- Inline text commands: \textbf{..} \emph{..} etc. ---
   const inlineRe = /\\(textbf|textit|emph|underline|texttt|textsc|textsubscript|textsuperscript)\s*\{/g;
   inlineRe.lastIndex = bodyStart;
@@ -1258,7 +1415,13 @@ function buildDecorations(state: EditorState): VisualDecorations {
     const bodyFrom = lm.index + `\\begin{${lm[1]}}`.length + (lm[2]?.length ?? 0);
     const bodyTo = lm.index + lm[0].length - `\\end{${lm[1]}}`.length;
     const listTo = lm.index + lm[0].length;
-    const listIsEditing = selectionTouches(state, lm.index, listTo);
+    // Keep the begin/end declaration visual when the caret is on it. The list
+    // body alone is the editable region; treating the declaration as part of
+    // that region made a click on `\\begin{itemize}` leak raw syntax while the
+    // individual item widgets remained rendered.
+    const listIsEditing = state.selection.ranges.some((range) =>
+      range.from < bodyTo && range.to > bodyFrom,
+    );
     if (listIsEditing) {
       openListRanges.push({ from: lm.index, to: listTo });
     }
@@ -1292,7 +1455,7 @@ function buildDecorations(state: EditorState): VisualDecorations {
       marks.push({ from: item.lineFrom, to: item.lineFrom, value: listItemLine });
       if (!listIsEditing && !selectionTouches(state, item.from, itemRangeEnd)) {
         const customMarker = item.match[1]?.trim();
-        const marker = customMarker || (ordered ? `${n}.` : "•");
+        const marker = customMarker || (ordered ? enumitemLabel(lm[2], n) || `${n}.` : "•");
         hide(item.from, item.to, Decoration.replace({ widget: new ItemMarkerWidget(marker) }));
       }
     }

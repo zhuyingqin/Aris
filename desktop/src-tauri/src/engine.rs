@@ -26,9 +26,10 @@ use serde_json::{json, Map, Value};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use runtime::{
-    CompactionConfig, CompactionResult, ConfigLoader, ConfigSource, ContentBlock,
-    ConversationMessage, MessageRole, PermissionMode, PermissionPromptDecision, PermissionPrompter,
-    PermissionRequest, ProjectContext, ResolvedPermissionMode, RuntimeError, Session, TokenUsage,
+    format_compact_report, format_cost_report, format_status_report, CompactionConfig,
+    ConfigLoader, ContentBlock, ConversationMessage, MessageRole, PermissionMode,
+    PermissionPromptDecision, PermissionPrompter, PermissionRequest, ProjectContext,
+    ResolvedPermissionMode, RuntimeError, Session, StatusContext, StatusUsage, TokenUsage,
     ToolError, ToolExecutor, UsageTracker,
 };
 
@@ -50,6 +51,22 @@ static SESSION_STORAGE_DIRS: OnceLock<Mutex<HashMap<String, PathBuf>>> = OnceLoc
 
 struct SessionStorageDirGuard {
     session_id: String,
+}
+
+/// Ephemeral side-task turns may use the normal runtime persistence path while
+/// they execute, but that path lives under the OS temp directory and is
+/// removed before the command returns. The in-memory ChatState entry preserves
+/// continuity for later turns until the side panel is closed.
+struct EphemeralSessionStorageCleanup(PathBuf);
+
+impl Drop for EphemeralSessionStorageCleanup {
+    fn drop(&mut self) {
+        if let Err(error) = fs::remove_dir_all(&self.0) {
+            if error.kind() != io::ErrorKind::NotFound {
+                eprintln!("SomniQ desktop: failed to clean ephemeral side task: {error}");
+            }
+        }
+    }
 }
 
 impl Drop for SessionStorageDirGuard {
@@ -409,7 +426,61 @@ struct DesktopToolExecutor<T> {
     project_id: String,
     cancelled: Arc<AtomicBool>,
     questions: QuestionPromptRegistry,
+    latex_repair_guard: LatexRepairGuard,
     inner: T,
+}
+
+#[derive(Default)]
+struct LatexRepairGuard {
+    input_path: Option<String>,
+    consecutive_failures: u8,
+}
+
+impl LatexRepairGuard {
+    fn blocks(&self, tool_name: &str, input: &str) -> Option<String> {
+        if tool_name != "LaTeXCompile"
+            || self.consecutive_failures < MAX_CONSECUTIVE_LATEX_REPAIR_FAILURES
+        {
+            return None;
+        }
+        let input_path = latex_compile_input_path(input)?;
+        if self.input_path.as_deref() != Some(input_path.as_str()) {
+            return None;
+        }
+        Some(format!(
+            "LaTeX repair guard paused this turn after {MAX_CONSECUTIVE_LATEX_REPAIR_FAILURES} consecutive failed builds of `{input_path}`. Preserve the current diff and primary diagnostic, then ask the user for direction or start a new turn; do not continue speculative fixes."
+        ))
+    }
+
+    fn record(&mut self, tool_name: &str, input: &str, failed: bool) -> Option<String> {
+        if tool_name != "LaTeXCompile" {
+            return None;
+        }
+        let input_path = latex_compile_input_path(input)?;
+        if self.input_path.as_deref() != Some(input_path.as_str()) {
+            self.input_path = Some(input_path.clone());
+            self.consecutive_failures = 0;
+        }
+        if !failed {
+            self.consecutive_failures = 0;
+            return None;
+        }
+        self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+        (self.consecutive_failures == MAX_CONSECUTIVE_LATEX_REPAIR_FAILURES).then(|| {
+            format!(
+                "LaTeX repair guard: this is failed build {MAX_CONSECUTIVE_LATEX_REPAIR_FAILURES} for `{input_path}` in the current turn. The next compile of this source is blocked. Preserve the current diff and primary diagnostic; do not make speculative bulk rewrites."
+            )
+        })
+    }
+}
+
+fn latex_compile_input_path(input: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(input)
+        .ok()?
+        .get("inputPath")?
+        .as_str()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -546,6 +617,9 @@ where
         if self.is_cancelled() {
             return Err(ToolError::interrupted_by_user());
         }
+        if let Some(message) = self.latex_repair_guard.blocks(tool_name, input) {
+            return Err(ToolError::new(message));
+        }
         let heartbeat_done = Arc::new(AtomicBool::new(false));
         let heartbeat = should_emit_generic_tool_progress(tool_name).then(|| {
             start_tool_heartbeat(
@@ -595,6 +669,11 @@ where
                 if is_error {
                     context_output = attach_recovery_hint(tool_name, &context_output);
                 }
+                let repair_guard_message =
+                    self.latex_repair_guard.record(tool_name, input, is_error);
+                if let Some(message) = repair_guard_message.as_deref() {
+                    context_output = attach_latex_repair_guard(context_output, message);
+                }
                 let ui_output = tool_output_for_ui(&context_output, artifact.as_ref());
                 let payload = json!({ "sessionId": self.session_id, "id": tool_use_id, "name": tool_name, "output": ui_output, "isError": is_error });
                 crate::chat_events::emit_chat_event(
@@ -606,6 +685,9 @@ where
                 );
                 if self.is_cancelled() {
                     return Err(ToolError::interrupted_by_user());
+                }
+                if repair_guard_message.is_some() {
+                    return Err(ToolError::new(context_output));
                 }
                 if is_error {
                     Err(ToolError::new(context_output))
@@ -989,6 +1071,9 @@ const MAX_UI_TOOL_INPUT_FIELD_CHARS: usize = 4_000;
 const MAX_TOOL_EVENT_CHARS: usize = 4_000;
 const TOOL_OUTPUT_ARTIFACT_THRESHOLD_CHARS: usize = 64_000;
 const SHELL_STREAM_CONTEXT_CHARS: usize = 12_000;
+const LATEX_STREAM_CONTEXT_CHARS: usize = 4_000;
+const MAX_LATEX_CONTEXT_OUTPUT_CHARS: usize = 12_000;
+const MAX_CONSECUTIVE_LATEX_REPAIR_FAILURES: u8 = 4;
 
 fn tool_input_for_ui(tool_name: &str, input: &str) -> String {
     if input.chars().count() <= MAX_UI_TOOL_INPUT_CHARS {
@@ -1134,19 +1219,22 @@ trait OutputCompactor: Sync {
 
 struct SkillOutputCompactor;
 struct LiteratureSearchOutputCompactor;
+struct LatexCompileOutputCompactor;
 struct ShellOutputCompactor;
 struct DefaultOutputCompactor;
 
 static SKILL_OUTPUT_COMPACTOR: SkillOutputCompactor = SkillOutputCompactor;
 static LITERATURE_SEARCH_OUTPUT_COMPACTOR: LiteratureSearchOutputCompactor =
     LiteratureSearchOutputCompactor;
+static LATEX_COMPILE_OUTPUT_COMPACTOR: LatexCompileOutputCompactor = LatexCompileOutputCompactor;
 static SHELL_OUTPUT_COMPACTOR: ShellOutputCompactor = ShellOutputCompactor;
 static DEFAULT_OUTPUT_COMPACTOR: DefaultOutputCompactor = DefaultOutputCompactor;
 
-fn output_compactors() -> [&'static dyn OutputCompactor; 4] {
+fn output_compactors() -> [&'static dyn OutputCompactor; 5] {
     [
         &SKILL_OUTPUT_COMPACTOR,
         &LITERATURE_SEARCH_OUTPUT_COMPACTOR,
+        &LATEX_COMPILE_OUTPUT_COMPACTOR,
         &SHELL_OUTPUT_COMPACTOR,
         &DEFAULT_OUTPUT_COMPACTOR,
     ]
@@ -1183,6 +1271,46 @@ impl OutputCompactor for LiteratureSearchOutputCompactor {
             artifact,
             max_chars,
             "tool output",
+        )
+    }
+}
+
+impl OutputCompactor for LatexCompileOutputCompactor {
+    fn can_handle(&self, tool_name: &str) -> bool {
+        tool_name == "LaTeXCompile"
+    }
+
+    fn compact(
+        &self,
+        output: String,
+        artifact: Option<&ToolOutputArtifact>,
+        _max_chars: usize,
+    ) -> String {
+        let Some(mut value) = serde_json::from_str::<serde_json::Value>(&output).ok() else {
+            return compact_text_output_for_limit(
+                output,
+                artifact,
+                MAX_LATEX_CONTEXT_OUTPUT_CHARS,
+                "LaTeX compiler output",
+            );
+        };
+        insert_output_artifact_fields(&mut value, artifact);
+        let truncated =
+            compact_shell_stream_fields(&mut value, LATEX_STREAM_CONTEXT_CHARS, artifact);
+        if truncated {
+            if let Some(object) = value.as_object_mut() {
+                object.insert(
+                    "truncatedForContext".to_string(),
+                    serde_json::Value::Bool(true),
+                );
+            }
+        }
+        let rendered = serde_json::to_string_pretty(&value).unwrap_or(output);
+        compact_text_output_for_limit(
+            rendered,
+            artifact,
+            MAX_LATEX_CONTEXT_OUTPUT_CHARS,
+            "LaTeX compiler output",
         )
     }
 }
@@ -1240,6 +1368,19 @@ fn attach_recovery_hint(tool_name: &str, output: &str) -> String {
     format!("{output}\n\nRecovery hint: {hint}")
 }
 
+fn attach_latex_repair_guard(output: String, message: &str) -> String {
+    if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&output) {
+        if let Some(object) = value.as_object_mut() {
+            object.insert(
+                "repairGuard".to_string(),
+                serde_json::Value::String(message.to_string()),
+            );
+            return serde_json::to_string_pretty(&value).unwrap_or(output);
+        }
+    }
+    format!("{output}\n\n{message}")
+}
+
 fn format_tool_error_with_recovery(tool_name: &str, error: &str) -> String {
     let hint = tool_recovery_hint(tool_name, error)
         .unwrap_or_else(|| "Use the error message to adjust the next step; if the operation is optional, explain the fallback and continue.".to_string());
@@ -1249,6 +1390,9 @@ fn format_tool_error_with_recovery(tool_name: &str, error: &str) -> String {
 fn tool_recovery_hint(tool_name: &str, output: &str) -> Option<String> {
     let lower = output.to_ascii_lowercase();
     if tool_name == "LaTeXCompile" {
+        if let Some(hint) = latex_primary_diagnostic_hint(output) {
+            return Some(hint);
+        }
         if lower.contains("not found") || lower.contains("failed to start") {
             return Some("LaTeX is unavailable. Install TeX Live or ensure latexmk/xelatex/pdflatex/lualatex are on PATH.".to_string());
         }
@@ -1288,6 +1432,30 @@ fn tool_recovery_hint(tool_name: &str, output: &str) -> Option<String> {
     None
 }
 
+fn latex_primary_diagnostic_hint(output: &str) -> Option<String> {
+    let value = serde_json::from_str::<serde_json::Value>(output).ok()?;
+    let diagnostic = value.get("diagnostics")?.as_array()?.first()?.as_object()?;
+    let message = diagnostic.get("message")?.as_str()?.trim();
+    if message.is_empty() {
+        return None;
+    }
+    let file = diagnostic
+        .get("filePath")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let line = diagnostic.get("line").and_then(serde_json::Value::as_u64);
+    let location = match (file, line) {
+        (Some(file), Some(line)) => format!(" at {file}:{line}"),
+        (Some(file), None) => format!(" in {file}"),
+        (None, Some(line)) => format!(" near source line {line}"),
+        (None, None) => String::new(),
+    };
+    Some(format!(
+        "Fix only the primary LaTeX diagnostic{location}: {message}. Make the smallest source edit, then rerun LaTeXCompile; do not compile through REPL or batch speculative rewrites."
+    ))
+}
+
 fn shell_output_indicates_error(output: &str) -> bool {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(output) else {
         return false;
@@ -1314,7 +1482,8 @@ fn persist_tool_output_if_large(
     tool_name: &str,
     output: &str,
 ) -> Option<ToolOutputArtifact> {
-    if output.chars().count() <= TOOL_OUTPUT_ARTIFACT_THRESHOLD_CHARS {
+    let persist_latex_failure = tool_name == "LaTeXCompile" && shell_output_indicates_error(output);
+    if output.chars().count() <= TOOL_OUTPUT_ARTIFACT_THRESHOLD_CHARS && !persist_latex_failure {
         return None;
     }
     let dir = runtime::somniq_project_tmp_dir(crate::state::workspace_dir()).join("tool-output");
@@ -1925,6 +2094,8 @@ pub struct ChatSendRequest {
     images: Vec<ChatImageInput>,
     model: Option<String>,
     project_id: Option<String>,
+    #[serde(default)]
+    ephemeral: bool,
 }
 
 fn split_data_url(value: &str) -> Option<(&str, &str)> {
@@ -2790,6 +2961,7 @@ pub fn chat_run_command(
                 },
                 permission_mode.as_str(),
                 &status_context(Some(&chat_session_path(&session_id)?))?,
+                "desktop-chat",
             )))
         }
         SlashCommand::Compact { instruction } => {
@@ -2967,7 +3139,7 @@ pub async fn chat_send(
     message: String,
 ) -> Result<String, String> {
     let user_message = ConversationMessage::user_text(message);
-    run_chat_turn(app, &state, session_id, user_message, None, None).await
+    run_chat_turn(app, &state, session_id, user_message, None, None, false).await
 }
 
 #[tauri::command]
@@ -2979,6 +3151,7 @@ pub async fn chat_send_rich(
 ) -> Result<String, String> {
     let model_override = request.model.clone();
     let project_id = request.project_id.clone();
+    let ephemeral = request.ephemeral;
     let user_message = user_message_from_request(request)?;
     run_chat_turn(
         app,
@@ -2987,6 +3160,7 @@ pub async fn chat_send_rich(
         user_message,
         model_override,
         project_id,
+        ephemeral,
     )
     .await
 }
@@ -3136,11 +3310,14 @@ fn infer_project_intent(
         .run_turn_message(ConversationMessage::user_text(prompt), None)
         .map_err(|error| error.to_string())?;
     let raw = strip_reasoning_markup(&aris_chat::final_assistant_text(&summary));
-    let json =
-        extract_json_object(&raw).ok_or_else(|| "project intent did not contain JSON".to_string())?;
+    let json = extract_json_object(&raw)
+        .ok_or_else(|| "project intent did not contain JSON".to_string())?;
     let generated: GeneratedProjectIntent = serde_json::from_str(json)
         .map_err(|error| format!("invalid project intent JSON: {error}"))?;
-    if !generated.has_long_term_intent || generated.objective.trim().is_empty() || generated.confidence < 60 {
+    if !generated.has_long_term_intent
+        || generated.objective.trim().is_empty()
+        || generated.confidence < 60
+    {
         return Ok(None);
     }
     Ok(Some(runtime::ProjectIntentDraft {
@@ -3321,6 +3498,7 @@ async fn run_chat_turn(
     user_message: ConversationMessage,
     model_override: Option<String>,
     project_id: Option<String>,
+    ephemeral: bool,
 ) -> Result<String, String> {
     run_chat_turn_with_context(
         app,
@@ -3329,6 +3507,7 @@ async fn run_chat_turn(
         user_message,
         model_override,
         project_id,
+        ephemeral,
         DESKTOP_CHAT_EXTRA_BLOCKED_TOOLS,
         true,
     )
@@ -3349,6 +3528,7 @@ pub async fn run_background_prompt(
         ConversationMessage::user_text(prompt),
         model_override,
         None,
+        false,
     )
     .await
 }
@@ -3367,6 +3547,7 @@ async fn run_literature_chat_turn(
         user_message,
         None,
         project_id,
+        false,
         LITERATURE_AGENT_EXTRA_BLOCKED_TOOLS,
         false,
     )
@@ -3406,6 +3587,7 @@ async fn run_chat_turn_with_context(
     user_message: ConversationMessage,
     model_override: Option<String>,
     project_id: Option<String>,
+    ephemeral: bool,
     extra_blocked_tools: &'static [&'static str],
     full_tool_registry: bool,
 ) -> Result<String, String> {
@@ -3415,12 +3597,28 @@ async fn run_chat_turn_with_context(
         return Err(error);
     }
     runtime::clear_interrupt();
-    let sessions_dir = match chat_sessions_dir_for_project(project_id.as_deref()) {
-        Ok(sessions_dir) => sessions_dir,
-        Err(error) => {
-            emit_chat_error(&app, &session_id, &error, false);
-            return Err(error);
+    let ephemeral_dir = ephemeral.then(|| {
+        std::env::temp_dir()
+            .join("somniq-side-tasks")
+            .join(&session_id)
+    });
+    let _ephemeral_cleanup = ephemeral_dir.clone().map(EphemeralSessionStorageCleanup);
+    let sessions_dir = match ephemeral_dir {
+        Some(path) => {
+            if let Err(error) = fs::create_dir_all(&path) {
+                let error = error.to_string();
+                emit_chat_error(&app, &session_id, &error, false);
+                return Err(error);
+            }
+            path
         }
+        None => match chat_sessions_dir_for_project(project_id.as_deref()) {
+            Ok(sessions_dir) => sessions_dir,
+            Err(error) => {
+                emit_chat_error(&app, &session_id, &error, false);
+                return Err(error);
+            }
+        },
     };
     let _session_storage_guard = match bind_session_storage_dir(&session_id, sessions_dir.clone()) {
         Ok(guard) => guard,
@@ -3460,7 +3658,9 @@ async fn run_chat_turn_with_context(
     } else {
         "Restricted agent"
     };
-    record_user_prompt(&session_id, surface, &user_message);
+    if !ephemeral {
+        record_user_prompt(&session_id, surface, &user_message);
+    }
     crate::chat_events::record_user_message(&session_id, surface, &user_message);
     let _busy = ChatBusyGuard {
         running_turns: &state.running_turns,
@@ -3608,6 +3808,7 @@ async fn run_chat_turn_with_context(
             project_id: worker_project_id,
             cancelled: worker_cancelled.clone(),
             questions: question_prompts,
+            latex_repair_guard: LatexRepairGuard::default(),
             inner: mcp_bundle.executor,
         };
         let mut permission_prompter = DesktopPermissionPrompter {
@@ -3738,14 +3939,16 @@ async fn run_chat_turn_with_context(
         return Err(error);
     }
     crate::chat_events::record_session_snapshot(&session_id, "turn_done", &updated);
-    if let Err(error) = crate::usage_log::append_turn_usage(
-        &session_id,
-        &usage_model,
-        &usage_provider,
-        &usage_server,
-        &turn_usages,
-    ) {
-        eprintln!("SomniQ desktop: failed to write usage log: {error}");
+    if !ephemeral {
+        if let Err(error) = crate::usage_log::append_turn_usage(
+            &session_id,
+            &usage_model,
+            &usage_provider,
+            &usage_server,
+            &turn_usages,
+        ) {
+            eprintln!("SomniQ desktop: failed to write usage log: {error}");
+        }
     }
     crate::chat_events::record_event(
         &session_id,
@@ -3846,6 +4049,7 @@ fn chat_context_messages_to_session(messages: Vec<ChatContextMessage>) -> Result
                     images: message.images,
                     model: None,
                     project_id: None,
+                    ephemeral: false,
                 })?),
             "assistant" => {
                 let mut blocks = Vec::new();
@@ -3952,6 +4156,7 @@ pub async fn chat_rewind_to_user_message(
         images: message.images,
         model: None,
         project_id: None,
+        ephemeral: false,
     })?;
     let mut current = get_cached_or_disk_session(&state, &session_id)?;
     if !rewind_session_before_unique_user(&mut current, &target) {
@@ -4091,26 +4296,6 @@ pub(crate) fn cancel_all_running_turns(state: &ChatState) {
 }
 
 // ---- Desktop slash command helpers ---------------------------------------
-
-#[derive(Debug, Clone)]
-struct StatusContext {
-    cwd: PathBuf,
-    session_path: Option<PathBuf>,
-    loaded_config_files: usize,
-    discovered_config_files: usize,
-    memory_file_count: usize,
-    project_root: Option<PathBuf>,
-    git_branch: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct StatusUsage {
-    message_count: usize,
-    turns: u32,
-    latest: TokenUsage,
-    cumulative: TokenUsage,
-    estimated_tokens: usize,
-}
 
 fn chat_status_model_label() -> String {
     resolve_executor()
@@ -5608,181 +5793,14 @@ fn find_git_root() -> Result<PathBuf, String> {
     Ok(PathBuf::from(path.trim()))
 }
 
-fn format_status_report(
-    model: &str,
-    usage: StatusUsage,
-    permission_mode: &str,
-    context: &StatusContext,
-) -> String {
-    [
-        format!(
-            "Status\n  Model            {model}\n  Permission mode  {permission_mode}\n  Messages         {}\n  Turns            {}\n  Estimated tokens {}",
-            usage.message_count, usage.turns, usage.estimated_tokens
-        ),
-        format!(
-            "Usage\n  Latest total     {}\n  Cumulative input {}\n  Cumulative output {}\n  Cumulative total {}",
-            usage.latest.total_tokens(),
-            usage.cumulative.input_tokens,
-            usage.cumulative.output_tokens,
-            usage.cumulative.total_tokens()
-        ),
-        format!(
-            "Workspace\n  Cwd              {}\n  Project root     {}\n  Git branch       {}\n  Session          {}\n  Config files     loaded {}/{}\n  Memory files     {}",
-            context.cwd.display(),
-            context
-                .project_root
-                .as_ref()
-                .map_or_else(|| "unknown".to_string(), |path| path.display().to_string()),
-            context.git_branch.as_deref().unwrap_or("unknown"),
-            context.session_path.as_ref().map_or_else(
-                || "desktop-chat".to_string(),
-                |path| path.display().to_string()
-            ),
-            context.loaded_config_files,
-            context.discovered_config_files,
-            context.memory_file_count
-        ),
-    ]
-    .join("\n\n")
-}
-
-fn format_cost_report(usage: TokenUsage) -> String {
-    format!(
-        "Cost\n  Input tokens     {}\n  Output tokens    {}\n  Cache create     {}\n  Cache read       {}\n  Total tokens     {}",
-        usage.input_tokens,
-        usage.output_tokens,
-        usage.cache_creation_input_tokens,
-        usage.cache_read_input_tokens,
-        usage.total_tokens()
-    )
-}
-
-fn format_compact_report(result: &CompactionResult) -> String {
-    let removed = result.removed_message_count;
-    let resulting_messages = result.compacted_session.messages.len();
-    let skipped = removed == 0;
-    if skipped {
-        format!(
-            "Compact\n  Result           skipped\n  Reason           no safe prefix or session below threshold\n  Messages kept    {resulting_messages}\n  Tokens before    {}\n  Tokens after     {}",
-            result.tokens_before, result.tokens_after
-        )
-    } else {
-        let saved = result.tokens_before.saturating_sub(result.tokens_after);
-        format!(
-            "Compact\n  Result           compacted\n  Summary source   {}\n  Token estimate   {}\n  Messages removed {removed}\n  Messages kept    {resulting_messages}\n  Tail preserved   {}\n  Tokens before    {}\n  Tokens after     {}\n  Tokens saved     {saved}",
-            result.summary_source.as_str(),
-            result.token_estimate_source.as_str(),
-            result.preserved_message_count,
-            result.tokens_before,
-            result.tokens_after
-        )
-    }
-}
-
 fn render_config_report(section: Option<&str>) -> Result<String, String> {
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
-    let loader = ConfigLoader::default_for(&cwd);
-    let discovered = loader.discover();
-    let runtime_config = loader.load().map_err(|e| e.to_string())?;
-
-    let mut lines = vec![
-        format!(
-            "Config\n  Working directory {}\n  Loaded files      {}\n  Merged keys       {}",
-            cwd.display(),
-            runtime_config.loaded_entries().len(),
-            runtime_config.merged().len()
-        ),
-        "Discovered files".to_string(),
-    ];
-    for entry in discovered {
-        let source = match entry.source {
-            ConfigSource::User => "user",
-            ConfigSource::Project => "project",
-            ConfigSource::Local => "local",
-        };
-        let status = if runtime_config
-            .loaded_entries()
-            .iter()
-            .any(|loaded_entry| loaded_entry.path == entry.path)
-        {
-            "loaded"
-        } else {
-            "missing"
-        };
-        lines.push(format!(
-            "  {source:<7} {status:<7} {}",
-            entry.path.display()
-        ));
-    }
-
-    if let Some(section) = section {
-        lines.push(format!("Merged section: {section}"));
-        let value = match section {
-            "env" => runtime_config.get("env"),
-            "hooks" => runtime_config.get("hooks"),
-            "model" => runtime_config.get("model"),
-            other => {
-                lines.push(format!(
-                    "  Unsupported config section '{other}'. Use env, hooks, or model."
-                ));
-                return Ok(lines.join("\n"));
-            }
-        };
-        lines.push(format!(
-            "  {}",
-            value.map_or_else(|| "<unset>".to_string(), |value| value.render())
-        ));
-        return Ok(lines.join("\n"));
-    }
-
-    lines.push("Merged JSON".to_string());
-    lines.push(format!("  {}", runtime_config.as_json().render()));
-    Ok(lines.join("\n"))
+    runtime::render_config_report(&cwd, section)
 }
 
 fn render_memory_report() -> Result<String, String> {
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
-    let hot = runtime::load_hot_memory(&cwd)?;
-    let knowledge = runtime::load_knowledge_memory_catalog();
-    let mut lines = vec![
-        "Memory".to_string(),
-        format!("  Working directory {}", cwd.display()),
-        format!("  Project scope     {}", hot.project_scope),
-        format!(
-            "  Hot memory        memory={}/{} chars, user={}/{} chars",
-            hot.memory_chars, hot.memory_limit, hot.user_chars, hot.user_limit
-        ),
-        format!("  Pending writes    {}", hot.pending_count),
-        format!(
-            "  Write approval    {}",
-            runtime::memory_write_approval_enabled()
-        ),
-        format!("  Knowledge files   {}", knowledge.len()),
-        "Hot entries".to_string(),
-    ];
-    for entry in hot.user.iter().chain(hot.memory.iter()) {
-        lines.push(format!(
-            "  [{}] {} scope={} source={} expires={}",
-            entry.id,
-            entry.content,
-            entry.scope,
-            entry.source,
-            entry.expires_at.as_deref().unwrap_or("never")
-        ));
-    }
-    if hot.user.is_empty() && hot.memory.is_empty() {
-        lines.push("  No active hot-memory entries.".to_string());
-    }
-    lines.push("Knowledge catalog".to_string());
-    for entry in knowledge {
-        lines.push(format!(
-            "  {} - {} ({})",
-            entry.name,
-            entry.description,
-            entry.path.display()
-        ));
-    }
-    Ok(lines.join("\n"))
+    runtime::render_memory_report(&cwd)
 }
 
 fn handle_memory_command(action: Option<&str>, target: Option<&str>) -> Result<String, String> {

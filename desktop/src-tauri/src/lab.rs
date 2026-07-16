@@ -12,7 +12,9 @@ use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use notebook::{CellOutput, CompleteOutcome, ExecStatus, InspectOutcome, KernelManager, NotebookDoc};
+use notebook::{
+    CellOutput, CompleteOutcome, ExecStatus, InspectOutcome, KernelManager, NotebookDoc,
+};
 use serde_json::{json, Map, Value};
 use tauri::{AppHandle, Emitter, State};
 

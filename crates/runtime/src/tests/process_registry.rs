@@ -1,12 +1,12 @@
 use super::{
     managed_processes_snapshot, run_managed_command, run_managed_command_with_cancel,
-    spawn_managed_background, terminate_all_managed_processes,
+    spawn_managed_background, terminate_managed_process_tree,
 };
 use std::{
     process::Command,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Mutex, OnceLock,
+        Arc,
     },
     thread,
     time::Duration,
@@ -14,23 +14,23 @@ use std::{
 
 #[test]
 fn managed_command_unregisters_after_success() {
-    let _guard = test_lock();
+    const LABEL: &str = "test managed command";
     let mut command = shell_command("echo managed");
-    let output = run_managed_command(
-        &mut command,
-        "test managed command",
-        Some(Duration::from_secs(5)),
-        true,
-    )
-    .expect("managed command should run");
+    let output = run_managed_command(&mut command, LABEL, Some(Duration::from_secs(5)), true)
+        .expect("managed command should run");
 
     assert!(output.status.success());
-    assert!(managed_processes_snapshot().is_empty());
+    assert!(
+        managed_processes_snapshot()
+            .iter()
+            .all(|process| process.label != LABEL),
+        "the completed command should have been removed from the registry"
+    );
 }
 
 #[test]
 fn managed_command_stops_when_cancel_check_fires() {
-    let _guard = test_lock();
+    const LABEL: &str = "test cancellable command";
     let cancel = Arc::new(AtomicBool::new(false));
     let cancel_worker = cancel.clone();
     thread::spawn(move || {
@@ -41,7 +41,7 @@ fn managed_command_stops_when_cancel_check_fires() {
     let mut command = long_running_shell_command();
     let output = run_managed_command_with_cancel(
         &mut command,
-        "test cancellable command",
+        LABEL,
         Some(Duration::from_secs(10)),
         true,
         || cancel.load(Ordering::SeqCst),
@@ -50,12 +50,16 @@ fn managed_command_stops_when_cancel_check_fires() {
 
     assert!(output.interrupted);
     assert!(!output.timed_out);
-    assert!(managed_processes_snapshot().is_empty());
+    assert!(
+        managed_processes_snapshot()
+            .iter()
+            .all(|process| process.label != LABEL),
+        "the cancelled command should have been removed from the registry"
+    );
 }
 
 #[test]
 fn managed_background_is_registered_and_shutdown() {
-    let _guard = test_lock();
     let mut command = long_running_shell_command();
     command
         .stdin(std::process::Stdio::null())
@@ -67,7 +71,7 @@ fn managed_background_is_registered_and_shutdown() {
     assert!(managed_processes_snapshot()
         .iter()
         .any(|process| process.pid == pid));
-    terminate_all_managed_processes();
+    terminate_managed_process_tree(pid);
     thread::sleep(Duration::from_millis(200));
     assert!(!managed_processes_snapshot()
         .iter()
@@ -96,11 +100,4 @@ fn long_running_shell_command() -> Command {
 #[cfg(not(windows))]
 fn long_running_shell_command() -> Command {
     shell_command("sleep 30")
-}
-
-fn test_lock() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }

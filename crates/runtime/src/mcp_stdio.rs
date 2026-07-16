@@ -1141,6 +1141,17 @@ fn encode_frame(payload: &[u8]) -> Vec<u8> {
 /// on one for safety on the other. Per-server lets each pick the
 /// right ceiling without affecting the others.
 fn mcp_request_timeout(override_secs: Option<u64>) -> std::time::Duration {
+    let env_value = std::env::var("MCP_REQUEST_TIMEOUT_SECS").ok();
+    mcp_request_timeout_from_env_value(override_secs, env_value.as_deref())
+}
+
+/// Resolve the timeout from an optional per-server override and a supplied
+/// environment value. Keeping the precedence and parsing logic pure makes it
+/// possible to test without mutating the process environment.
+fn mcp_request_timeout_from_env_value(
+    override_secs: Option<u64>,
+    env_value: Option<&str>,
+) -> std::time::Duration {
     const DEFAULT_SECS: u64 = 300;
     const MIN_SECS: u64 = 1;
     const MAX_SECS: u64 = 1800;
@@ -1148,9 +1159,8 @@ fn mcp_request_timeout(override_secs: Option<u64>) -> std::time::Duration {
     if let Some(secs) = override_secs {
         return std::time::Duration::from_secs(secs.clamp(MIN_SECS, MAX_SECS));
     }
-    let secs = std::env::var("MCP_REQUEST_TIMEOUT_SECS")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
+    let secs = env_value
+        .and_then(|value| value.parse::<u64>().ok())
         .map(|n| n.clamp(MIN_SECS, MAX_SECS))
         .unwrap_or(DEFAULT_SECS);
     std::time::Duration::from_secs(secs)

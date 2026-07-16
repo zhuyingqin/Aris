@@ -176,7 +176,7 @@ describe("Chat export action", () => {
     document.getElementById("app-chat-actions-portal")?.remove();
   });
 
-  it("reserves a right-side lane for the summary and keeps its toggle last", async () => {
+  it("reserves a right-side lane for the summary and exposes the side-panel toggle", async () => {
     render(<Chat />);
 
     await waitFor(() => {
@@ -185,11 +185,44 @@ describe("Chat export action", () => {
     expect(document.querySelector(".chat-root")?.classList.contains("chat-project-brief-open")).toBe(true);
     expect(document.getElementById("project-brief-popover")).toBeTruthy();
     expect(document.querySelector(".chat > .project-brief-card")).toBeNull();
-    expect(document.querySelector(".chat-head-actions")?.lastElementChild?.classList.contains("chat-project-brief-toggle")).toBe(true);
+    expect(document.querySelector(".chat-head-actions .chat-project-brief-toggle")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Show or hide side task panel" })).toBeTruthy();
+    expect(screen.queryByRole("navigation", { name: "Side task navigation" })).toBeNull();
 
     await userEvent.click(screen.getByRole("button", { name: "Collapse project summary" }));
     await waitFor(() => expect(document.getElementById("project-brief-popover")).toBeNull());
     expect(document.querySelector(".chat-root")?.classList.contains("chat-project-brief-open")).toBe(false);
+  });
+
+  it("keeps the main task visible beside a hideable, extensible side-task panel", async () => {
+    render(<Chat />);
+
+    await waitFor(() => expect(document.getElementById("project-brief-popover")).toBeTruthy());
+    await userEvent.click(screen.getByRole("button", { name: "Show or hide side task panel" }));
+
+    await waitFor(() => expect(document.querySelector(".side-task-panel")).toBeTruthy());
+    expect(document.getElementById("project-brief-popover")).toBeNull();
+    expect(document.querySelector(".chat-root")?.classList.contains("side-task-open")).toBe(true);
+    expect(document.querySelector(".chat-root")?.classList.contains("chat-project-brief-open")).toBe(false);
+    expect(document.querySelector('.chat > [data-testid="chat-thread"]')).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "Side task 1" }).getAttribute("aria-selected")).toBe("true");
+
+    await userEvent.click(screen.getByRole("button", { name: "Add side task tab" }));
+    expect(screen.getAllByRole("tab")).toHaveLength(2);
+    expect(screen.getByRole("tab", { name: "Side task 2" }).getAttribute("aria-selected")).toBe("true");
+
+    await userEvent.click(screen.getByRole("button", { name: "Hide side task panel" }));
+    expect(document.querySelector(".chat-root")?.classList.contains("side-task-open")).toBe(false);
+    expect(document.getElementById("side-task-panel")?.hidden).toBe(true);
+    expect(document.querySelectorAll(".side-task-panel")).toHaveLength(2);
+
+    await userEvent.click(screen.getByRole("button", { name: "Show or hide side task panel" }));
+    expect(document.querySelector(".chat-root")?.classList.contains("side-task-open")).toBe(true);
+    expect(screen.getByRole("tab", { name: "Side task 2" }).getAttribute("aria-selected")).toBe("true");
+
+    await userEvent.click(screen.getByRole("button", { name: "Close side task tab: Side task 2" }));
+    expect(screen.queryByRole("tab", { name: "Side task 2" })).toBeNull();
+    expect(screen.getByRole("tab", { name: "Side task 1" }).getAttribute("aria-selected")).toBe("true");
   });
 
   it("runs /export for the current chat and appends the exported path", async () => {

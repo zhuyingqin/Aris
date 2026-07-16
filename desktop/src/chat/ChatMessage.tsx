@@ -16,13 +16,6 @@ const FILE_WRITE_TOOLS = new Set([
   "PowerShell",
   "REPL",
 ]);
-// A single agent turn can hold hundreds of interleaved reasoning + tool blocks.
-// The thread virtualizes per turn, so a mega-turn is one row that would mount
-// every block at once (200+ components) and freeze the UI. We render only the
-// most recent units and hide earlier ones behind a toggle; the final answer is
-// at the tail, so the tail is what the user needs on open.
-const MAX_TURN_RENDER_UNITS = 60;
-const TURN_RENDER_TAIL = 40;
 const MAX_TOOL_IMAGE_PREVIEWS = 6;
 const MAX_TOOL_IMAGE_SCAN_CHARS = 8_000;
 // Match any non-whitespace run ending in an image extension. The previous
@@ -1114,7 +1107,6 @@ function ChatMessage({
 }: Props) {
   const language = useStore((state) => state.language);
   const copy = CHAT_COPY[language];
-  const [showEarlierBlocks, setShowEarlierBlocks] = useState(false);
   const text = textFromTurn(turn);
   const hasContent = hasRenderableContent(turn);
   const blockNodes = renderBlocks(
@@ -1124,11 +1116,6 @@ function ChatMessage({
     onLoadOmittedTurn,
     omittedTurnLoading,
   );
-  // Hide the earlier steps of an oversized turn so it doesn't mount hundreds of
-  // components at once. Keep the tail (where the final answer lives) visible.
-  const overCap = blockNodes.length > MAX_TURN_RENDER_UNITS && !showEarlierBlocks;
-  const hiddenCount = overCap ? blockNodes.length - TURN_RENDER_TAIL : 0;
-  const visibleBlockNodes = overCap ? blockNodes.slice(-TURN_RENDER_TAIL) : blockNodes;
   return (
     <article className={`chat-turn chat-${turn.role}${turn.error ? " chat-turn-error" : ""}`}>
       {turn.role === "user" && turn.attachments && turn.attachments.length > 0 && (
@@ -1136,16 +1123,7 @@ function ChatMessage({
           {turn.attachments.map((attachment) => renderAttachment(attachment, copy.image, copy.file))}
         </div>
       )}
-      {overCap && (
-        <button
-          type="button"
-          className="chat-turn-earlier-toggle"
-          onClick={() => setShowEarlierBlocks(true)}
-        >
-          {language === "cn" ? `显示更早的 ${hiddenCount} 个步骤` : `Show ${hiddenCount} earlier steps`}
-        </button>
-      )}
-      {visibleBlockNodes}
+      {blockNodes}
       {!turn.streaming && !turn.error && !turn.stopped && !hasContent && turn.role === "assistant" && (
         <div className="chat-empty-response">{copy.emptyResponse}</div>
       )}

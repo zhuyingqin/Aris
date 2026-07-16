@@ -9712,6 +9712,11 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   color: var(--text);
 }
 
+.chat-welcome-highlight {
+  color: var(--accent-2);
+  -webkit-text-fill-color: var(--accent-2);
+}
+
 :root[data-theme="light"] .chat-welcome h1 {
   background: linear-gradient(100deg, #2a3340 0%, #3a4756 55%, #51677d 100%);
   -webkit-background-clip: text;
@@ -11228,6 +11233,256 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   left: calc((100% - var(--project-brief-lane-w)) / 2);
 }
 
+/* Codex-style side tasks: the main task remains visible while the right pane
+   owns its own extensible tab strip. Hiding the pane keeps sessions mounted. */
+.chat-root.side-task-open {
+  grid-template-columns: var(--chat-sidebar-w, 218px) minmax(360px, 1fr) minmax(360px, 1fr);
+}
+
+.side-task-slot {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+  border-left: 1px solid var(--border);
+  background: var(--bg);
+}
+
+.side-task-slot[hidden] {
+  display: none;
+}
+
+.side-task-workspaces {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+  overflow: hidden;
+}
+
+.chat-navigation {
+  display: flex;
+  min-width: 0;
+  width: 100%;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--bg-1) 94%, transparent);
+}
+
+.chat-navigation-list {
+  display: flex;
+  min-width: 0;
+  flex: 0 1 auto;
+  align-items: center;
+  gap: 3px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.chat-navigation-list::-webkit-scrollbar {
+  display: none;
+}
+
+.chat-navigation-item {
+  display: flex;
+  min-width: 84px;
+  max-width: 220px;
+  height: 30px;
+  flex: 0 1 190px;
+  align-items: center;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  color: var(--text-dim);
+}
+
+.chat-navigation-item:hover {
+  background: color-mix(in srgb, var(--bg-2) 62%, transparent);
+  color: var(--text);
+}
+
+.chat-navigation-item.active {
+  border-color: color-mix(in srgb, var(--border) 72%, transparent);
+  background: var(--bg-2);
+  color: var(--text);
+}
+
+.chat-navigation-tab,
+.chat-navigation-close,
+.chat-navigation-add,
+.chat-navigation-action,
+.chat-navigation-hide {
+  border: 0;
+  background: transparent;
+  color: inherit;
+}
+
+.chat-navigation-tab {
+  display: flex;
+  min-width: 0;
+  height: 100%;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 7px;
+  padding: 0 9px;
+  text-align: left;
+}
+
+.chat-navigation-icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+
+.chat-navigation-label {
+  overflow: hidden;
+  font-size: 12px;
+  font-weight: 560;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-navigation-close {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 auto;
+  margin-right: 3px;
+  padding: 0;
+  place-items: center;
+  border-radius: 6px;
+  font-size: 15px;
+  opacity: 0;
+}
+
+.chat-navigation-item:hover .chat-navigation-close,
+.chat-navigation-item.active .chat-navigation-close,
+.chat-navigation-close:focus-visible {
+  opacity: 0.72;
+}
+
+.chat-navigation-close:hover,
+.chat-navigation-add:hover,
+.chat-navigation-action:hover,
+.chat-navigation-hide:hover {
+  background: color-mix(in srgb, var(--text) 9%, transparent);
+  color: var(--text);
+}
+
+.chat-navigation-add {
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+  padding: 0;
+  border-radius: 7px;
+  color: var(--text-dim);
+  font-size: 19px;
+}
+
+.chat-navigation-action {
+  min-height: 28px;
+  flex: 0 0 auto;
+  padding: 4px 9px;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border));
+  border-radius: 7px;
+  color: var(--accent);
+  font-size: 11px;
+}
+
+.chat-navigation-hide {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding: 0;
+  place-items: center;
+  border-radius: 7px;
+  color: var(--text-dim);
+}
+
+.chat-workspace-view {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  flex: 1;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.chat-workspace-view[hidden] {
+  display: none;
+}
+
+.side-task-panel,
+.side-task-chat {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  flex-direction: column;
+}
+
+.side-task-chat {
+  flex: 1;
+}
+
+.side-task-panel .chat-scroll {
+  padding-inline: clamp(14px, 3vw, 42px);
+}
+
+.side-task-panel .chat-input-wrap {
+  right: 0;
+  padding-inline: clamp(12px, 2vw, 24px);
+}
+
+.side-task-panel .chat-welcome {
+  padding: 24px;
+}
+
+.side-task-panel .chat-welcome-mark {
+  display: none;
+}
+
+.side-task-panel .chat-welcome h1 {
+  font-size: 18px;
+}
+
+.side-task-panel .chat-welcome p {
+  max-width: 390px;
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+.side-task-panel .chat-turn {
+  max-width: 760px;
+  margin-inline: auto;
+}
+
+@media (max-width: 1024px) {
+  .chat-root.side-task-open {
+    grid-template-columns: minmax(320px, 1fr) minmax(320px, 1fr);
+  }
+}
+
+@media (max-width: 720px) {
+  .chat-root.side-task-open {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .side-task-slot {
+    position: absolute;
+    z-index: 60;
+    inset: 0;
+    border-left: 0;
+  }
+}
+
 .project-brief-card {
   width: 100%;
   margin: 0;
@@ -11384,7 +11639,8 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   margin-top: 3px;
 }
 
-.chat-project-brief-toggle {
+.chat-project-brief-toggle,
+.chat-side-task-toggle {
   padding: 4px !important;
 }
 
@@ -11393,12 +11649,14 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   margin-left: auto;
 }
 
-.chat-project-brief-toggle.active {
+.chat-project-brief-toggle.active,
+.chat-side-task-toggle.active {
   color: var(--accent);
   background: color-mix(in srgb, var(--accent) 14%, transparent);
 }
 
-.chat-project-brief-toggle.active:hover {
+.chat-project-brief-toggle.active:hover,
+.chat-side-task-toggle.active:hover {
   background: color-mix(in srgb, var(--accent) 20%, transparent);
   color: var(--accent);
 }

@@ -80,3 +80,30 @@ fn legacy_project_runtime_dirs_migrate_to_runtime_root() {
     assert!(!root.path().join(".claude").join("sessions").exists());
     assert!(!root.path().join(".clawd-agents").exists());
 }
+
+#[test]
+fn command_lookup_uses_platform_executable_rules() {
+    let root = tempfile::tempdir().expect("tempdir");
+    #[cfg(windows)]
+    let executable = root.path().join("somniq-test-command.EXE");
+    #[cfg(not(windows))]
+    let executable = root.path().join("somniq-test-command");
+    fs::write(&executable, "test").expect("write executable");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(&executable).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&executable, permissions).expect("set executable permissions");
+    }
+
+    assert!(command_exists_in_paths(
+        "somniq-test-command",
+        vec![root.path().to_path_buf()],
+    ));
+    assert!(!command_exists_in_paths(
+        "somniq-missing-command",
+        vec![root.path().to_path_buf()],
+    ));
+}

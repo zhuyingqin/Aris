@@ -18,8 +18,8 @@ use crate::mcp::mcp_tool_name;
 use crate::mcp_client::McpClientBootstrap;
 
 use super::{
-    mcp_request_timeout, spawn_mcp_stdio_process, wait_for_interrupt_flag, JsonRpcId,
-    JsonRpcRequest, JsonRpcResponse, McpInitializeClientInfo, McpInitializeParams,
+    mcp_request_timeout_from_env_value, spawn_mcp_stdio_process, wait_for_interrupt_flag,
+    JsonRpcId, JsonRpcRequest, JsonRpcResponse, McpInitializeClientInfo, McpInitializeParams,
     McpInitializeResult, McpInitializeServerInfo, McpListToolsResult, McpReadResourceParams,
     McpReadResourceResult, McpServerManager, McpServerManagerError, McpStdioProcess, McpTool,
     McpToolCallParams,
@@ -1159,15 +1159,10 @@ fn times_out_when_server_does_not_respond() {
         .expect("runtime");
     runtime.block_on(async {
         let script_path = write_no_response_script();
-        let transport = script_transport(&script_path);
+        let mut transport = script_transport(&script_path);
+        transport.request_timeout_secs = Some(1);
         let mut process = McpStdioProcess::spawn(&transport).expect("spawn hanging server");
 
-        // Set the env override *just before* the call and restore
-        // the previous value after. Tests are otherwise local IPC
-        // at sub-100ms latency, so a transient 1s ceiling can't
-        // cause false failures elsewhere.
-        let prior = std::env::var("MCP_REQUEST_TIMEOUT_SECS").ok();
-        std::env::set_var("MCP_REQUEST_TIMEOUT_SECS", "1");
         let started = std::time::Instant::now();
         let err = process
             .initialize(
@@ -1184,11 +1179,6 @@ fn times_out_when_server_does_not_respond() {
             .await
             .expect_err("hanging server should trigger timeout");
         let elapsed = started.elapsed();
-        match prior {
-            Some(value) => std::env::set_var("MCP_REQUEST_TIMEOUT_SECS", value),
-            None => std::env::remove_var("MCP_REQUEST_TIMEOUT_SECS"),
-        }
-
         assert_eq!(err.kind(), ErrorKind::TimedOut);
         assert!(
             elapsed < std::time::Duration::from_secs(5),
@@ -1305,88 +1295,52 @@ fn manager_reports_unknown_qualified_tool_name() {
 // v0.4.13 P1.D — per-server MCP timeout precedence.
 // ============================================================
 
-/// Mutex serialising tests that mutate `MCP_REQUEST_TIMEOUT_SECS`.
-/// `mcp_request_timeout` reads the env at every call, so two
-/// concurrent tests poking the env would race even with
-/// `--test-threads=1` if the runtime crate ever switched to
-/// multi-threaded test execution.
-fn env_lock() -> &'static std::sync::Mutex<()> {
-    use std::sync::OnceLock;
-    static LOCK: OnceLock<std::sync::Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| std::sync::Mutex::new(()))
-}
-
-/// Run `body` while `MCP_REQUEST_TIMEOUT_SECS` is set (or
-/// removed). Always restores the prior env value on exit.
-fn with_env_timeout<F: FnOnce()>(value: Option<&str>, body: F) {
-    let guard = env_lock().lock().expect("env lock");
-    let prior = std::env::var("MCP_REQUEST_TIMEOUT_SECS").ok();
-    match value {
-        Some(v) => std::env::set_var("MCP_REQUEST_TIMEOUT_SECS", v),
-        None => std::env::remove_var("MCP_REQUEST_TIMEOUT_SECS"),
-    }
-    body();
-    match prior {
-        Some(value) => std::env::set_var("MCP_REQUEST_TIMEOUT_SECS", value),
-        None => std::env::remove_var("MCP_REQUEST_TIMEOUT_SECS"),
-    }
-    drop(guard);
-}
-
 #[test]
 fn per_server_timeout_overrides_global_env() {
     // Per-server `Some(42)` must beat `MCP_REQUEST_TIMEOUT_SECS=120`.
-    with_env_timeout(Some("120"), || {
-        let timeout = mcp_request_timeout(Some(42));
-        assert_eq!(timeout, std::time::Duration::from_secs(42));
-    });
+    let timeout = mcp_request_timeout_from_env_value(Some(42), Some("120"));
+    assert_eq!(timeout, std::time::Duration::from_secs(42));
 }
 
 #[test]
 fn global_env_overrides_default_when_no_per_server() {
     // No per-server override: env value wins over the 300s default.
-    with_env_timeout(Some("77"), || {
-        let timeout = mcp_request_timeout(None);
-        assert_eq!(timeout, std::time::Duration::from_secs(77));
-    });
+    let timeout = mcp_request_timeout_from_env_value(None, Some("77"));
+    assert_eq!(timeout, std::time::Duration::from_secs(77));
 }
 
 #[test]
 fn default_300s_when_no_override() {
     // Neither per-server nor env: fall back to the 300s default.
-    with_env_timeout(None, || {
-        let timeout = mcp_request_timeout(None);
-        assert_eq!(timeout, std::time::Duration::from_secs(300));
-    });
+    let timeout = mcp_request_timeout_from_env_value(None, None);
+    assert_eq!(timeout, std::time::Duration::from_secs(300));
 }
 
 #[test]
 fn per_server_timeout_clamped_to_1_to_1800s() {
     // Per-server override below 1s clamps up to 1s, above 1800s
     // clamps down to 1800s. The env doesn't matter for an
-    // override path, so set it to something orthogonal to verify.
-    with_env_timeout(Some("60"), || {
-        assert_eq!(
-            mcp_request_timeout(Some(0)),
-            std::time::Duration::from_secs(1),
-            "zero override should clamp up to 1s"
-        );
-        assert_eq!(
-            mcp_request_timeout(Some(10_000)),
-            std::time::Duration::from_secs(1800),
-            "huge override should clamp down to 1800s"
-        );
-        assert_eq!(
-            mcp_request_timeout(Some(1800)),
-            std::time::Duration::from_secs(1800),
-            "exactly 1800s should pass through"
-        );
-        assert_eq!(
-            mcp_request_timeout(Some(1)),
-            std::time::Duration::from_secs(1),
-            "exactly 1s should pass through"
-        );
-    });
+    // override path, so an env value should not affect it.
+    assert_eq!(
+        mcp_request_timeout_from_env_value(Some(0), Some("60")),
+        std::time::Duration::from_secs(1),
+        "zero override should clamp up to 1s"
+    );
+    assert_eq!(
+        mcp_request_timeout_from_env_value(Some(10_000), Some("60")),
+        std::time::Duration::from_secs(1800),
+        "huge override should clamp down to 1800s"
+    );
+    assert_eq!(
+        mcp_request_timeout_from_env_value(Some(1800), Some("60")),
+        std::time::Duration::from_secs(1800),
+        "exactly 1800s should pass through"
+    );
+    assert_eq!(
+        mcp_request_timeout_from_env_value(Some(1), Some("60")),
+        std::time::Duration::from_secs(1),
+        "exactly 1s should pass through"
+    );
 }
 
 // ============================================================
@@ -1583,18 +1537,10 @@ fn notification_after_timeout_still_times_out() {
         .enable_all()
         .build()
         .expect("runtime");
-    // Hold the env-mutation lock around both `set_var` and the
-    // `block_on(...)` to prevent racing with other env-toggling
-    // tests under multi-threaded test execution. We inline the
-    // mutex here rather than using `with_env_timeout` because the
-    // call we're guarding is async.
-    let guard = env_lock().lock().expect("env lock");
-    let prior = std::env::var("MCP_REQUEST_TIMEOUT_SECS").ok();
-    std::env::set_var("MCP_REQUEST_TIMEOUT_SECS", "1");
-
     runtime.block_on(async {
         let script_path = write_only_notifications_script();
-        let transport = script_transport(&script_path);
+        let mut transport = script_transport(&script_path);
+        transport.request_timeout_secs = Some(1);
         let mut process =
             McpStdioProcess::spawn(&transport).expect("spawn streaming-notifs server");
 
@@ -1624,10 +1570,4 @@ fn notification_after_timeout_still_times_out() {
         let _ = process.wait().await;
         cleanup_script(&script_path);
     });
-
-    match prior {
-        Some(value) => std::env::set_var("MCP_REQUEST_TIMEOUT_SECS", value),
-        None => std::env::remove_var("MCP_REQUEST_TIMEOUT_SECS"),
-    }
-    drop(guard);
 }

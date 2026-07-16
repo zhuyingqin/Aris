@@ -24,6 +24,35 @@ fn executes_simple_command() {
 }
 
 #[test]
+fn executes_standard_posix_utilities() {
+    let output = execute_bash(BashCommandInput {
+        command: String::from("printf 'alpha\\nbeta\\n' | tail -n 1"),
+        timeout: Some(1_000),
+        description: None,
+        run_in_background: Some(false),
+        dangerously_disable_sandbox: Some(false),
+        namespace_restrictions: Some(false),
+        isolate_network: Some(false),
+        filesystem_mode: Some(FilesystemIsolationMode::WorkspaceOnly),
+        allowed_mounts: None,
+    })
+    .expect("bash command should execute standard POSIX utilities");
+
+    assert_eq!(output.stdout, "beta\n");
+    assert_eq!(output.return_code_interpretation, None);
+}
+
+#[cfg(windows)]
+#[test]
+fn finds_git_bash_next_to_git_cmd_path_entry() {
+    let candidates = super::git_bash_candidates_from_paths(vec![std::path::PathBuf::from(
+        r"E:\Program Files\Git\cmd",
+    )]);
+
+    assert_eq!(candidates, vec![r"E:\Program Files\Git\bin\bash.exe"]);
+}
+
+#[test]
 fn default_timeout_prevents_foreground_hangs() {
     let _guard = crate::test_env_lock();
     set_test_foreground_shell_timeout_ms(10);

@@ -432,6 +432,68 @@ pub fn file_open(path: String) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
+/// Reveals a workspace entry in the platform file manager. This is distinct
+/// from `file_open`: a source file should be selected in Explorer, not opened
+/// in the app associated with its extension.
+#[tauri::command]
+pub fn file_reveal(path: String) -> Result<(), String> {
+    let (_root, target) = resolve_workspace_existing_path(&path)?;
+
+    #[cfg(target_os = "windows")]
+    {
+        let target_text = target.to_string_lossy();
+        let explorer_target = if let Some(rest) = target_text.strip_prefix(r"\\?\UNC\") {
+            PathBuf::from(format!(r"\\{rest}"))
+        } else {
+            target_text
+                .strip_prefix(r"\\?\")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| target.clone())
+        };
+        let mut command = crate::process::hidden_command("explorer.exe");
+        if target.is_file() {
+            command.arg(format!("/select,{}", explorer_target.display()));
+        } else {
+            command.arg(explorer_target);
+        }
+        return command
+            .spawn()
+            .map(|_| ())
+            .map_err(|error| error.to_string());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let mut command = crate::process::hidden_command("open");
+        if target.is_file() {
+            command.arg("-R");
+        }
+        return command
+            .arg(target)
+            .spawn()
+            .map(|_| ())
+            .map_err(|error| error.to_string());
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let directory = if target.is_dir() {
+            target
+        } else {
+            target
+                .parent()
+                .ok_or_else(|| "file has no parent directory".to_string())?
+                .to_path_buf()
+        };
+        let mut command = crate::process::hidden_command("xdg-open");
+        return command
+            .arg(directory)
+            .spawn()
+            .map(|_| ())
+            .map_err(|error| error.to_string());
+    }
+}
+
 #[tauri::command]
 pub fn file_list_dir(path: Option<String>) -> Result<Vec<FileTreeEntry>, String> {
     let root = workspace_root()?;
@@ -563,6 +625,70 @@ pub fn file_rename(path: String, new_path: String) -> Result<FileTreeEntry, Stri
     }
     std::fs::rename(&source, &target).map_err(|error| error.to_string())?;
     file_tree_entry_from_path(&target, &root)
+}
+
+#[tauri::command]
+pub fn file_duplicate(path: String) -> Result<FileTreeEntry, String> {
+    let (root, source) = resolve_workspace_existing_path(&path)?;
+    let target = duplicate_target_path(&source)?;
+    if source.is_dir() {
+        copy_directory(&source, &target)?;
+    } else {
+        std::fs::copy(&source, &target).map_err(|error| error.to_string())?;
+    }
+    file_tree_entry_from_path(&target, &root)
+}
+
+fn duplicate_target_path(source: &Path) -> Result<PathBuf, String> {
+    let parent = source
+        .parent()
+        .ok_or_else(|| "path has no parent directory".to_string())?;
+    let file_name = source
+        .file_name()
+        .ok_or_else(|| "path has no file name".to_string())?;
+    let (stem, extension) = if source.is_dir() {
+        (file_name.to_string_lossy().into_owned(), String::new())
+    } else {
+        let stem = source
+            .file_stem()
+            .unwrap_or(file_name)
+            .to_string_lossy()
+            .into_owned();
+        let extension = source
+            .extension()
+            .map(|value| format!(".{}", value.to_string_lossy()))
+            .unwrap_or_default();
+        (stem, extension)
+    };
+
+    for index in 1..=10_000 {
+        let suffix = if index == 1 {
+            " copy".to_string()
+        } else {
+            format!(" copy {index}")
+        };
+        let candidate = parent.join(format!("{stem}{suffix}{extension}"));
+        if !candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+    Err("could not find an available name for the duplicated entry".to_string())
+}
+
+fn copy_directory(source: &Path, target: &Path) -> Result<(), String> {
+    std::fs::create_dir(target).map_err(|error| error.to_string())?;
+    for entry in std::fs::read_dir(source).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let source_path = entry.path();
+        let target_path = target.join(entry.file_name());
+        let file_type = entry.file_type().map_err(|error| error.to_string())?;
+        if file_type.is_dir() {
+            copy_directory(&source_path, &target_path)?;
+        } else if file_type.is_file() {
+            std::fs::copy(&source_path, &target_path).map_err(|error| error.to_string())?;
+        }
+    }
+    Ok(())
 }
 
 #[tauri::command]

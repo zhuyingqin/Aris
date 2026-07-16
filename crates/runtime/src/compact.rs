@@ -88,10 +88,11 @@ impl CompactionConfig {
     #[must_use]
     pub fn manual(instruction: Option<String>) -> Self {
         Self {
-            // Preserve the latest complete user/assistant exchange. Keeping
-            // only one message can compact a one-turn session into a summary
-            // followed by an orphaned assistant message.
-            preserve_recent_messages: 2,
+            // Match automatic compaction: preserve a recent working window
+            // rather than relying entirely on a generated summary. The manual
+            // action should differ only in when it is triggered and any custom
+            // instruction supplied by the user, not in continuity guarantees.
+            preserve_recent_messages: 4,
             max_estimated_tokens: 0,
             source: CompactionSource::Manual,
             instruction,
@@ -194,12 +195,10 @@ pub fn plan_compaction(session: &Session, config: &CompactionConfig) -> Option<C
         return None;
     }
 
-    let split_index = match config.source {
-        CompactionSource::Manual => largest_safe_split(&session.messages)?,
-        CompactionSource::Auto | CompactionSource::Overflow => {
-            recent_window_safe_split(&session.messages, config.preserve_recent_messages)?
-        }
-    };
+    // Manual and automatic compaction share the same continuity boundary. A
+    // manual compaction may be requested at any size, but it must not discard
+    // more recent context than automatic compaction would.
+    let split_index = recent_window_safe_split(&session.messages, config.preserve_recent_messages)?;
 
     let removed = session.messages[..split_index].to_vec();
     if removed.is_empty() {
@@ -229,12 +228,6 @@ fn recent_window_safe_split(
             ((target_split + 1)..messages.len())
                 .find(|split_index| can_split_after(messages, split_index - 1))
         })
-}
-
-fn largest_safe_split(messages: &[ConversationMessage]) -> Option<usize> {
-    (1..messages.len())
-        .rev()
-        .find(|split_index| can_split_after(messages, split_index - 1))
 }
 
 fn can_split_after(messages: &[ConversationMessage], index: usize) -> bool {

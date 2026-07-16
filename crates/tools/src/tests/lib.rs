@@ -11,12 +11,13 @@ use std::time::Duration;
 use super::team_state;
 use super::{
     agent_permission_policy, allowed_tools_for_subagent, discover_skills, execute_agent_with_spawn,
-    execute_tool, execute_tool_with_cancel, execute_tool_with_context, final_assistant_text,
-    mvp_tool_specs, persist_agent_terminal_state, resolve_anthropic_compat_reviewer_model,
+    execute_tool, execute_tool_with_cancel, execute_tool_with_context, extract_latex_diagnostics,
+    final_assistant_text, mvp_tool_specs, persist_agent_terminal_state, preferred_latex_engine,
+    render_latex_template, repl_invokes_latex_compiler, resolve_anthropic_compat_reviewer_model,
     resolve_existing_workspace_path, resolve_output_workspace_path, resolve_reviewer_model,
-    route_openai_compat_model, run_llm_review, skill_markdown, workspace_path_candidate,
-    AgentInput, AgentJob, LlmReviewInput, SubagentToolExecutor, ToolRunContext,
-    MAX_WRITE_FILE_CONTENT_CHARS,
+    route_openai_compat_model, run_llm_review, skill_markdown, tex_tool_path,
+    workspace_path_candidate, AgentInput, AgentJob, LatexEnginePreference, LlmReviewInput,
+    SubagentToolExecutor, ToolRunContext, MAX_WRITE_FILE_CONTENT_CHARS,
 };
 use runtime::{
     ApiRequest, AssistantEvent, ContentBlock, ConversationMessage, ConversationRuntime,
@@ -98,6 +99,71 @@ fn exposes_mvp_tools() {
     assert!(names.contains(&"REPL"));
     assert!(names.contains(&"PowerShell"));
     assert!(names.contains(&"LaTeXCompile"));
+    assert!(names.contains(&"LaTeXRender"));
+}
+
+#[test]
+fn latex_compile_prefers_unicode_engine_for_ctex_source() {
+    let path = temp_path("ctex-report.tex");
+    fs::write(
+        &path,
+        "\\documentclass{ctexart}\n\\begin{document}测试\\end{document}",
+    )
+    .expect("write source");
+
+    assert_eq!(
+        preferred_latex_engine(&path),
+        LatexEnginePreference::XeLatex
+    );
+    let _ = fs::remove_file(path);
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn latex_compile_strips_windows_extended_path_prefix_for_tex_tools() {
+    let tool_path = tex_tool_path(&PathBuf::from(r"\\?\C:\Users\wt\workspace\papers"));
+    assert_eq!(tool_path, PathBuf::from(r"C:\Users\wt\workspace\papers"));
+}
+
+#[test]
+fn latex_diagnostics_identify_primary_table_error_and_source_line() {
+    let diagnostics = extract_latex_diagnostics(
+        "! Extra alignment tab has been changed to \\cr.\nl.70  2026 & evidence & conclusion & unexpected \\\\ ",
+        "",
+        false,
+        Some("exit_code:1"),
+    );
+
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].code, "table_alignment");
+    assert_eq!(diagnostics[0].line, Some(70));
+}
+
+#[test]
+fn repl_rejects_tex_compiler_workarounds() {
+    assert!(repl_invokes_latex_compiler(
+        "subprocess.run(['lualatex', '-halt-on-error', 'report.tex'])"
+    ));
+    assert!(!repl_invokes_latex_compiler(
+        "print('analyse a UTF-8 text file')"
+    ));
+    assert!(!repl_invokes_latex_compiler(
+        "print('lualatex appeared in an existing compiler log')"
+    ));
+}
+
+#[test]
+fn latex_renderer_escapes_data_and_keeps_table_shape_in_template() {
+    let data = json!({
+        "title": "A&B_2026",
+        "rows": [{ "label": "Revenue%", "value": "10#" }]
+    });
+    let template = "\\section*{ {{title}} }\n\\begin{tabular}{ll}\n{{#each rows}}{{this.label}} & {{this.value}} \\\\n{{/each}}\\end{tabular}\n";
+    let rendered = render_latex_template(template, &data, None, None).expect("render");
+
+    assert!(rendered.contains("A\\&B\\_2026"));
+    assert!(rendered.contains("Revenue\\% & 10\\#"));
+    assert!(rendered.contains("\\begin{tabular}{ll}"));
 }
 
 #[test]

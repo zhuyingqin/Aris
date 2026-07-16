@@ -21,7 +21,6 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -100,21 +99,17 @@ pub struct KnowledgeSearchInput {
 /// LLM-callable upsert. Forces `draft` (never confirms) — see module docs.
 #[allow(clippy::needless_pass_by_value)] // by-value to match the execute_tool dispatch
 pub fn run_knowledge_upsert(input: KnowledgeUpsertInput) -> Result<String, String> {
-    let base = workspace_base()?;
+    let base = runtime::workspace_root_from_env();
     let stats = knowledge_upsert_at(&base, &input.points, false)?;
     serde_json::to_string_pretty(&stats).map_err(|e| e.to_string())
 }
 
 #[allow(clippy::needless_pass_by_value)] // by-value to match the execute_tool dispatch
 pub fn run_knowledge_search(input: KnowledgeSearchInput) -> Result<String, String> {
-    let base = workspace_base()?;
+    let base = runtime::workspace_root_from_env();
     let limit = input.limit.unwrap_or(8).clamp(1, 50);
     let result = knowledge_search_at(&base, &input.query, limit)?;
     serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
-}
-
-fn workspace_base() -> Result<PathBuf, String> {
-    std::env::current_dir().map_err(|e| e.to_string())
 }
 
 // ── Database ────────────────────────────────────────────────────────────────
@@ -241,7 +236,7 @@ pub fn knowledge_upsert_at(
     let mut added = 0;
     let mut updated = 0;
     let mut ids = Vec::new();
-    let now = now_iso();
+    let now = runtime::now_iso8601();
     for point in points {
         if point.statement.trim().is_empty() {
             continue;
@@ -351,7 +346,7 @@ pub fn knowledge_confirm_at(base: &Path, kp_id: &str) -> Result<(), String> {
              SET status='confirmed',
                  confirmed_at=COALESCE(confirmed_at, ?2)
              WHERE id=?1",
-            params![kp_id, now_iso()],
+            params![kp_id, runtime::now_iso8601()],
         )
         .map_err(|e| e.to_string())?;
     if changed == 0 {
@@ -877,21 +872,6 @@ fn stable_hash(value: &str) -> String {
     let mut hasher = DefaultHasher::new();
     value.hash(&mut hasher);
     format!("{:016x}", hasher.finish())
-}
-
-fn now_iso() -> String {
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or_default();
-    let of_day = secs % 86_400;
-    format!(
-        "{}T{:02}:{:02}:{:02}.000Z",
-        runtime::today_iso(),
-        of_day / 3600,
-        (of_day % 3600) / 60,
-        of_day % 60
-    )
 }
 
 #[cfg(test)]

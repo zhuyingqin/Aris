@@ -614,7 +614,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "LaTeXCompile",
-            description: "Compile a LaTeX `.tex` root document inside the current workspace to PDF using the local TeX Live toolchain. This follows the Overleaf-style root-file compile model: resolve the root file safely inside the workspace, run latexmk when available, fall back to xelatex/pdflatex/lualatex, and return structured stdout/stderr diagnostics plus the output PDF path.",
+            description: "Compile a LaTeX `.tex` root document inside the current workspace to PDF using the local TeX Live toolchain. It resolves the root file safely, selects a Unicode-capable engine for CJK/fontspec sources, handles Windows TeX paths, retries stale latexmk caches, and returns structured diagnostics plus the output PDF path. Prefer this over shelling out to pdflatex/latexmk from bash/PowerShell/REPL. On failure, make one minimal edit for diagnostics[0], then re-run this same tool; do not batch speculative source rewrites.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -638,6 +638,30 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                     }
                 },
                 "required": ["inputPath"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::WorkspaceWrite,
+        },
+        ToolSpec {
+            name: "LaTeXRender",
+            description: "Render a data-driven LaTeX source from a stable .tex template and a JSON data file before compiling it with LaTeXCompile. Use {{field}} for safely TeX-escaped values and {{#each rows}}...{{/each}} for arrays; keep LaTeX structure in the template and prose/table values in JSON. This prevents data characters such as &, %, _, and # from changing TeX structure. The template is never overwritten.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "templatePath": {
+                        "type": "string",
+                        "description": "Workspace-relative or in-workspace absolute .tex template path."
+                    },
+                    "dataPath": {
+                        "type": "string",
+                        "description": "Workspace-relative or in-workspace absolute JSON data path."
+                    },
+                    "outputPath": {
+                        "type": "string",
+                        "description": "Workspace-relative or in-workspace absolute generated .tex path. Must differ from templatePath."
+                    }
+                },
+                "required": ["templatePath", "dataPath", "outputPath"],
                 "additionalProperties": false
             }),
             required_permission: PermissionMode::WorkspaceWrite,
@@ -1139,7 +1163,11 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "REPL",
-            description: "Execute code in a REPL-like subprocess.",
+            description: concat!(
+                "Execute code in a REPL-like subprocess for computation, data wrangling, and text/byte-level analysis (counting characters, inspecting encodings, transforming structured data). ",
+                "Do not use this as a workaround for running external build tools, compilers, or CLI programs — use bash/PowerShell for that, and use LaTeXCompile specifically to compile a LaTeX `.tex` file to PDF instead of shelling out to pdflatex/latexmk here. ",
+                "stdout/stderr are decoded as UTF-8 with a GB18030/GBK fallback for Windows console output; still prefer ASCII-safe prints when the exact byte layout matters."
+            ),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -1262,6 +1290,8 @@ pub fn execute_tool_with_cancel_and_progress_with_context(
             .and_then(studio::run_studio_library_upsert),
         "LaTeXCompile" => from_value::<LatexCompileInput>(input)
             .and_then(|input| run_latex_compile(input, should_cancel, &mut on_progress)),
+        "LaTeXRender" => from_value::<LatexRenderInput>(input)
+            .and_then(|input| run_latex_render(input, &context)),
         "NotebookExecute" => from_value::<notebook::NotebookExecuteInput>(input)
             .and_then(notebook::run_notebook_execute),
         "NotebookKernel" => from_value::<notebook::NotebookKernelInput>(input)
@@ -1615,6 +1645,12 @@ fn run_latex_compile(
     on_progress: &mut dyn FnMut(ToolProgress),
 ) -> Result<String, String> {
     to_pretty_json(execute_latex_compile(input, should_cancel, on_progress)?)
+}
+
+fn run_latex_render(input: LatexRenderInput, context: &ToolRunContext) -> Result<String, String> {
+    run_json_with_workspace_audit("LaTeXRender", context, || {
+        serde_json::to_value(execute_latex_render(input)).map_err(|error| error.to_string())
+    })
 }
 
 fn run_repl(
@@ -2126,6 +2162,14 @@ struct LatexCompileInput {
     timeout_ms: Option<u64>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LatexRenderInput {
+    template_path: String,
+    data_path: String,
+    output_path: String,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct LatexCompileOutput {
@@ -2140,6 +2184,27 @@ struct LatexCompileOutput {
     timed_out: bool,
     duration_ms: u128,
     return_code_interpretation: Option<String>,
+    diagnostics: Vec<LatexDiagnostic>,
+    repair_guidance: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LatexDiagnostic {
+    severity: String,
+    code: String,
+    message: String,
+    file_path: Option<String>,
+    line: Option<u32>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LatexRenderOutput {
+    template_path: String,
+    data_path: String,
+    output_path: String,
+    rendered_chars: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2584,8 +2649,13 @@ fn decode_html_entities(input: &str) -> String {
         .replace("&nbsp;", " ")
 }
 
-fn collapse_whitespace(input: &str) -> String {
+pub(crate) fn collapse_whitespace(input: &str) -> String {
     input.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+pub(crate) fn read_json_file(path: &Path) -> Result<Value, String> {
+    let raw = fs::read_to_string(path).map_err(|error| error.to_string())?;
+    serde_json::from_str(&raw).map_err(|error| format!("{} is not valid JSON: {error}", path.display()))
 }
 
 fn preview_text(input: &str, max_chars: usize) -> String {
@@ -4360,6 +4430,11 @@ fn execute_repl(input: ReplInput, should_cancel: &dyn Fn() -> bool) -> Result<Re
     if input.code.trim().is_empty() {
         return Err(String::from("code must not be empty"));
     }
+    if repl_invokes_latex_compiler(&input.code) {
+        return Err(String::from(
+            "REPL must not invoke pdflatex/xelatex/lualatex/latexmk. Use LaTeXCompile so Windows paths, engine selection, cache recovery, diagnostics, and repair guardrails stay consistent.",
+        ));
+    }
     let runtime = resolve_repl_runtime(&input.language)?;
     let started = Instant::now();
     let mut command = runtime::hidden_command(runtime.program);
@@ -4379,15 +4454,47 @@ fn execute_repl(input: ReplInput, should_cancel: &dyn Fn() -> bool) -> Result<Re
 
     Ok(ReplOutput {
         language: input.language,
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stdout: runtime::decode_process_text(&output.stdout),
         stderr: repl_stderr(&output),
         exit_code: output.status.code().unwrap_or(1),
         duration_ms: started.elapsed().as_millis(),
     })
 }
 
+fn repl_invokes_latex_compiler(code: &str) -> bool {
+    let lower = code.to_ascii_lowercase();
+    let names_tex_compiler = ["latexmk", "pdflatex", "xelatex", "lualatex"]
+        .iter()
+        .any(|compiler| lower.contains(compiler));
+    if !names_tex_compiler {
+        return false;
+    }
+    [
+        "subprocess.",
+        "os.system",
+        "os.popen",
+        "command::new",
+        "processbuilder",
+        "shell=true",
+        "shell = true",
+        "system(",
+        "popen(",
+        "spawn(",
+        "run(",
+    ]
+    .iter()
+    .any(|signal| lower.contains(signal))
+        || lower.lines().any(|line| {
+            let line = line.trim_start();
+            line.starts_with('!')
+                && ["latexmk", "pdflatex", "xelatex", "lualatex"]
+                    .iter()
+                    .any(|compiler| line.contains(compiler))
+        })
+}
+
 fn repl_stderr(output: &runtime::ManagedCommandOutput) -> String {
-    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let stderr = runtime::decode_process_text(&output.stderr);
     if output.timed_out {
         append_process_status_message(stderr, "REPL exceeded timeout")
     } else if output.interrupted {
@@ -4427,7 +4534,7 @@ fn detect_first_command(commands: &[&'static str]) -> Option<&'static str> {
     commands
         .iter()
         .copied()
-        .find(|command| command_exists(command))
+        .find(|command| runtime::command_exists(command))
 }
 
 #[derive(Clone, Copy)]
@@ -4687,6 +4794,243 @@ fn execute_powershell_with_cancel(
     )
 }
 
+fn execute_latex_render(input: LatexRenderInput) -> Result<LatexRenderOutput, String> {
+    let workspace = canonical_workspace_root()?;
+    let template_path = resolve_existing_workspace_path(&input.template_path, &workspace)?;
+    let data_path = resolve_existing_workspace_path(&input.data_path, &workspace)?;
+    let output_path = resolve_output_workspace_path(&input.output_path, &workspace)?;
+    if !latex_path_has_extension(&template_path, "tex") {
+        return Err("LaTeXRender templatePath must point to a .tex file".to_string());
+    }
+    if !latex_path_has_extension(&data_path, "json") {
+        return Err("LaTeXRender dataPath must point to a .json file".to_string());
+    }
+    if !latex_path_has_extension(&output_path, "tex") {
+        return Err("LaTeXRender outputPath must end with .tex".to_string());
+    }
+    if template_path == output_path {
+        return Err(
+            "LaTeXRender outputPath must differ from templatePath so the template stays stable"
+                .to_string(),
+        );
+    }
+
+    let template = std::fs::read_to_string(&template_path).map_err(|error| {
+        format!(
+            "could not read LaTeX template {}: {error}",
+            template_path.display()
+        )
+    })?;
+    let data_text = std::fs::read_to_string(&data_path)
+        .map_err(|error| format!("could not read LaTeX data {}: {error}", data_path.display()))?;
+    let data: Value = serde_json::from_str(&data_text)
+        .map_err(|error| format!("LaTeXRender dataPath must contain valid JSON: {error}"))?;
+    if !data.is_object() {
+        return Err("LaTeXRender dataPath must contain a JSON object at its root".to_string());
+    }
+    let rendered = render_latex_template(&template, &data, None, None)?;
+    std::fs::write(&output_path, rendered.as_bytes()).map_err(|error| {
+        format!(
+            "could not write rendered LaTeX {}: {error}",
+            output_path.display()
+        )
+    })?;
+
+    Ok(LatexRenderOutput {
+        template_path: workspace_relative_display(&template_path, &workspace),
+        data_path: workspace_relative_display(&data_path, &workspace),
+        output_path: workspace_relative_display(&output_path, &workspace),
+        rendered_chars: rendered.chars().count(),
+    })
+}
+
+fn render_latex_template(
+    template: &str,
+    root: &Value,
+    current: Option<&Value>,
+    index: Option<usize>,
+) -> Result<String, String> {
+    let mut output = String::new();
+    let mut cursor = 0;
+    while let Some(relative_start) = template[cursor..].find("{{#each ") {
+        let start = cursor + relative_start;
+        output.push_str(&render_latex_values(
+            &template[cursor..start],
+            root,
+            current,
+            index,
+        )?);
+        let marker_end = template[start..]
+            .find("}}")
+            .map(|offset| start + offset)
+            .ok_or_else(|| "LaTeXRender found an unterminated {{#each ...}} marker".to_string())?;
+        let path = template[start + "{{#each ".len()..marker_end].trim();
+        if path.is_empty() {
+            return Err("LaTeXRender {{#each ...}} requires a JSON array path".to_string());
+        }
+        let body_start = marker_end + 2;
+        let (body_end, after_block) = find_latex_each_end(template, body_start)?;
+        let values = resolve_latex_template_value(root, current, index, path)?;
+        let rows = values
+            .as_array()
+            .ok_or_else(|| format!("LaTeXRender {{#each {path}}} expected a JSON array"))?;
+        for (row_index, row) in rows.iter().enumerate() {
+            output.push_str(&render_latex_template(
+                &template[body_start..body_end],
+                root,
+                Some(row),
+                Some(row_index),
+            )?);
+        }
+        cursor = after_block;
+    }
+    output.push_str(&render_latex_values(
+        &template[cursor..],
+        root,
+        current,
+        index,
+    )?);
+    Ok(output)
+}
+
+fn find_latex_each_end(template: &str, body_start: usize) -> Result<(usize, usize), String> {
+    let mut cursor = body_start;
+    let mut depth = 1_u32;
+    while cursor < template.len() {
+        let next_open = template[cursor..]
+            .find("{{#each ")
+            .map(|offset| cursor + offset);
+        let next_close = template[cursor..]
+            .find("{{/each}}")
+            .map(|offset| cursor + offset);
+        match (next_open, next_close) {
+            (_, None) => {
+                return Err("LaTeXRender found {{#each ...}} without {{/each}}".to_string())
+            }
+            (Some(open), Some(close)) if open < close => {
+                let marker_end = template[open..]
+                    .find("}}")
+                    .map(|offset| open + offset)
+                    .ok_or_else(|| {
+                        "LaTeXRender found an unterminated nested {{#each ...}} marker".to_string()
+                    })?;
+                depth += 1;
+                cursor = marker_end + 2;
+            }
+            (_, Some(close)) => {
+                depth -= 1;
+                if depth == 0 {
+                    return Ok((close, close + "{{/each}}".len()));
+                }
+                cursor = close + "{{/each}}".len();
+            }
+        }
+    }
+    Err("LaTeXRender found {{#each ...}} without {{/each}}".to_string())
+}
+
+fn render_latex_values(
+    fragment: &str,
+    root: &Value,
+    current: Option<&Value>,
+    index: Option<usize>,
+) -> Result<String, String> {
+    let mut output = String::new();
+    let mut cursor = 0;
+    while let Some(relative_start) = fragment[cursor..].find("{{") {
+        let start = cursor + relative_start;
+        output.push_str(&fragment[cursor..start]);
+        let marker_end = fragment[start + 2..]
+            .find("}}")
+            .map(|offset| start + 2 + offset)
+            .ok_or_else(|| "LaTeXRender found an unterminated {{field}} marker".to_string())?;
+        let path = fragment[start + 2..marker_end].trim();
+        if path.starts_with('#') || path.starts_with('/') {
+            return Err(format!(
+                "LaTeXRender unexpected template marker {{{{{path}}}}}"
+            ));
+        }
+        if path == "@index" {
+            let index = index.ok_or_else(|| {
+                "LaTeXRender {{@index}} is only valid inside {{#each ...}}".to_string()
+            })?;
+            output.push_str(&index.to_string());
+            cursor = marker_end + 2;
+            continue;
+        }
+        let value = resolve_latex_template_value(root, current, index, path)?;
+        output.push_str(&latex_escape_template_value(value)?);
+        cursor = marker_end + 2;
+    }
+    output.push_str(&fragment[cursor..]);
+    Ok(output)
+}
+
+fn resolve_latex_template_value<'a>(
+    root: &'a Value,
+    current: Option<&'a Value>,
+    index: Option<usize>,
+    path: &str,
+) -> Result<&'a Value, String> {
+    let (base, fields) = if path == "this" {
+        (
+            current.ok_or_else(|| {
+                "LaTeXRender {{this}} is only valid inside {{#each ...}}".to_string()
+            })?,
+            "",
+        )
+    } else if let Some(fields) = path.strip_prefix("this.") {
+        (
+            current.ok_or_else(|| {
+                "LaTeXRender {{this.*}} is only valid inside {{#each ...}}".to_string()
+            })?,
+            fields,
+        )
+    } else {
+        (root, path)
+    };
+    let mut value = base;
+    for field in fields.split('.').filter(|field| !field.is_empty()) {
+        value = value
+            .as_object()
+            .and_then(|object| object.get(field))
+            .ok_or_else(|| format!("LaTeXRender could not resolve JSON field `{path}`"))?;
+    }
+    let _ = index;
+    Ok(value)
+}
+
+fn latex_escape_template_value(value: &Value) -> Result<String, String> {
+    let text = match value {
+        Value::Null => String::new(),
+        Value::String(value) => value.clone(),
+        Value::Number(value) => value.to_string(),
+        Value::Bool(value) => value.to_string(),
+        Value::Array(_) | Value::Object(_) => {
+            return Err(
+                "LaTeXRender markers must resolve to a scalar; use {{#each ...}} for arrays"
+                    .to_string(),
+            )
+        }
+    };
+    Ok(text
+        .chars()
+        .map(|character| match character {
+            '\\' => r"\textbackslash{}".to_string(),
+            '{' => r"\{".to_string(),
+            '}' => r"\}".to_string(),
+            '$' => r"\$".to_string(),
+            '&' => r"\&".to_string(),
+            '#' => r"\#".to_string(),
+            '%' => r"\%".to_string(),
+            '_' => r"\_".to_string(),
+            '~' => r"\textasciitilde{}".to_string(),
+            '^' => r"\textasciicircum{}".to_string(),
+            other => other.to_string(),
+        })
+        .collect())
+}
+
 fn execute_latex_compile(
     input: LatexCompileInput,
     should_cancel: &dyn Fn() -> bool,
@@ -4745,8 +5089,8 @@ fn execute_latex_compile(
         std::fs::copy(&expected_pdf, &output_path).map_err(|error| error.to_string())?;
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-    let mut stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let stdout = runtime::decode_process_text(&output.stdout);
+    let mut stderr = runtime::decode_process_text(&output.stderr);
     let mut return_code_interpretation = None;
     if output.timed_out {
         stderr = append_process_status_message(
@@ -4767,6 +5111,19 @@ fn execute_latex_compile(
         stderr = append_process_status_message(stderr, "LaTeXCompile produced no output PDF");
         return_code_interpretation = Some("missing_output".to_string());
     }
+    let diagnostics = extract_latex_diagnostics(
+        &stdout,
+        &stderr,
+        success,
+        return_code_interpretation.as_deref(),
+    );
+    let repair_guidance = (!success).then(|| {
+        if diagnostics.is_empty() {
+            "Inspect the TeX toolchain diagnostic, make no speculative source rewrite, and rerun LaTeXCompile once the concrete failure is understood.".to_string()
+        } else {
+            "Fix only diagnostics[0] with the smallest source change, preserve the current diff, then rerun LaTeXCompile. Do not invoke a TeX compiler from REPL.".to_string()
+        }
+    });
 
     Ok(LatexCompileOutput {
         success,
@@ -4780,6 +5137,8 @@ fn execute_latex_compile(
         timed_out: output.timed_out,
         duration_ms: started.elapsed().as_millis(),
         return_code_interpretation,
+        diagnostics,
+        repair_guidance,
     })
 }
 
@@ -4794,13 +5153,28 @@ fn run_latex_compile_process(
     should_cancel: &dyn Fn() -> bool,
     on_progress: &mut dyn FnMut(ToolProgress),
 ) -> Result<(String, runtime::ManagedCommandOutput), String> {
+    let preferred_engine = preferred_latex_engine(input_path);
     if let Some(compiler) = compiler.map(str::trim).filter(|value| !value.is_empty()) {
         if !matches!(compiler, "latexmk" | "xelatex" | "pdflatex" | "lualatex") {
             return Err(format!(
                 "unsupported LaTeX compiler `{compiler}`; expected latexmk, xelatex, pdflatex, or lualatex"
             ));
         }
-        let output = run_named_latex_compiler(
+        if compiler == "latexmk" {
+            let (engine, output) = run_latexmk_with_retries(
+                preferred_engine,
+                input_path,
+                source_dir,
+                output_dir,
+                timeout_ms,
+                workspace,
+                should_cancel,
+                on_progress,
+            )
+            .map_err(|error| format!("LaTeX command `latexmk` failed to start: {error}"))?;
+            return Ok((engine, output));
+        }
+        let output = run_latex_engine(
             compiler,
             input_path,
             source_dir,
@@ -4814,9 +5188,24 @@ fn run_latex_compile_process(
         return Ok((compiler.to_string(), output));
     }
 
-    let mut not_found = Vec::new();
-    for compiler in ["latexmk", "xelatex", "pdflatex", "lualatex"] {
-        match run_named_latex_compiler(
+    match run_latexmk_with_retries(
+        preferred_engine,
+        input_path,
+        source_dir,
+        output_dir,
+        timeout_ms,
+        workspace,
+        should_cancel,
+        on_progress,
+    ) {
+        Ok((engine, output)) => return Ok((engine, output)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("LaTeX command `latexmk` failed to start: {error}")),
+    }
+
+    let mut not_found = vec!["latexmk".to_string()];
+    for compiler in preferred_engine.fallback_engines() {
+        match run_latex_engine(
             compiler,
             input_path,
             source_dir,
@@ -4826,9 +5215,9 @@ fn run_latex_compile_process(
             should_cancel,
             on_progress,
         ) {
-            Ok(output) => return Ok((compiler.to_string(), output)),
+            Ok(output) => return Ok(((*compiler).to_string(), output)),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                not_found.push(compiler.to_string());
+                not_found.push((*compiler).to_string());
             }
             Err(error) => {
                 return Err(format!(
@@ -4845,8 +5234,8 @@ fn run_latex_compile_process(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run_named_latex_compiler(
-    compiler: &str,
+fn run_latexmk_with_retries(
+    preferred_engine: LatexEnginePreference,
     input_path: &Path,
     source_dir: &Path,
     output_dir: &Path,
@@ -4854,20 +5243,10 @@ fn run_named_latex_compiler(
     workspace: &Path,
     should_cancel: &dyn Fn() -> bool,
     on_progress: &mut dyn FnMut(ToolProgress),
-) -> std::io::Result<runtime::ManagedCommandOutput> {
-    if compiler == "latexmk" {
-        return run_latexmk(
-            input_path,
-            source_dir,
-            output_dir,
-            timeout_ms,
-            workspace,
-            should_cancel,
-            on_progress,
-        );
-    }
-    run_latex_engine(
-        compiler,
+) -> std::io::Result<(String, runtime::ManagedCommandOutput)> {
+    let mut engine = preferred_engine;
+    let mut output = run_latexmk(
+        engine,
         input_path,
         source_dir,
         output_dir,
@@ -4875,11 +5254,44 @@ fn run_named_latex_compiler(
         workspace,
         should_cancel,
         on_progress,
-    )
+    )?;
+    if engine == LatexEnginePreference::PdfLatex && latex_output_needs_unicode_engine(&output) {
+        engine = LatexEnginePreference::XeLatex;
+        output = run_latexmk(
+            engine,
+            input_path,
+            source_dir,
+            output_dir,
+            timeout_ms,
+            workspace,
+            should_cancel,
+            on_progress,
+        )?;
+    }
+    if latexmk_output_reports_stale_failure(&output) {
+        let removed = remove_known_latex_cache_files(input_path, output_dir)
+            .map_err(std::io::Error::other)?;
+        let mut retry = run_latexmk(
+            engine,
+            input_path,
+            source_dir,
+            output_dir,
+            timeout_ms,
+            workspace,
+            should_cancel,
+            on_progress,
+        )?;
+        let note =
+            format!("LaTeXCompile removed {removed} stale auxiliary file(s) and retried latexmk.");
+        retry.stdout = join_process_bytes(note.into_bytes(), retry.stdout);
+        output = retry;
+    }
+    Ok((engine.latexmk_label().to_string(), output))
 }
 
 #[allow(clippy::too_many_arguments)]
 fn run_latexmk(
+    engine: LatexEnginePreference,
     input_path: &Path,
     source_dir: &Path,
     output_dir: &Path,
@@ -4889,13 +5301,15 @@ fn run_latexmk(
     on_progress: &mut dyn FnMut(ToolProgress),
 ) -> std::io::Result<runtime::ManagedCommandOutput> {
     let mut process = runtime::hidden_command("latexmk");
+    let source_dir = tex_tool_path(source_dir);
+    let output_dir = tex_tool_path(output_dir);
     process
-        .arg("-pdf")
+        .arg(engine.latexmk_arg())
         .arg("-interaction=nonstopmode")
         .arg("-halt-on-error")
         .arg("-file-line-error")
         .arg(format!("-outdir={}", output_dir.display()))
-        .arg(input_path)
+        .arg(tex_input_name(input_path))
         .current_dir(source_dir)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -4965,12 +5379,14 @@ fn run_single_latex_engine(
     on_progress: &mut dyn FnMut(ToolProgress),
 ) -> std::io::Result<runtime::ManagedCommandOutput> {
     let mut process = runtime::hidden_command(engine);
+    let source_dir = tex_tool_path(source_dir);
+    let output_dir = tex_tool_path(output_dir);
     process
         .arg("-interaction=nonstopmode")
         .arg("-halt-on-error")
         .arg("-file-line-error")
         .arg(format!("-output-directory={}", output_dir.display()))
-        .arg(input_path)
+        .arg(tex_input_name(input_path))
         .current_dir(source_dir)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -5018,6 +5434,395 @@ fn join_process_bytes(mut first: Vec<u8>, second: Vec<u8>) -> Vec<u8> {
         first.extend(second);
     }
     first
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LatexEnginePreference {
+    PdfLatex,
+    XeLatex,
+    LuaLatex,
+}
+
+impl LatexEnginePreference {
+    fn latexmk_arg(self) -> &'static str {
+        match self {
+            Self::PdfLatex => "-pdf",
+            Self::XeLatex => "-xelatex",
+            Self::LuaLatex => "-lualatex",
+        }
+    }
+
+    fn latexmk_label(self) -> &'static str {
+        match self {
+            Self::PdfLatex => "latexmk -pdf",
+            Self::XeLatex => "latexmk -xelatex",
+            Self::LuaLatex => "latexmk -lualatex",
+        }
+    }
+
+    fn fallback_engines(self) -> &'static [&'static str] {
+        match self {
+            Self::PdfLatex => &["pdflatex", "xelatex", "lualatex"],
+            Self::XeLatex => &["xelatex", "lualatex", "pdflatex"],
+            Self::LuaLatex => &["lualatex", "xelatex", "pdflatex"],
+        }
+    }
+}
+
+fn preferred_latex_engine(input_path: &Path) -> LatexEnginePreference {
+    let Ok(source) = std::fs::read_to_string(input_path) else {
+        return LatexEnginePreference::PdfLatex;
+    };
+    if let Some(engine) = latex_magic_comment_engine(&source) {
+        return engine;
+    }
+    if latex_source_uses_luatex(&source) {
+        return LatexEnginePreference::LuaLatex;
+    }
+    if latex_source_uses_unicode_engine(&source) {
+        return LatexEnginePreference::XeLatex;
+    }
+    LatexEnginePreference::PdfLatex
+}
+
+fn latex_magic_comment_engine(source: &str) -> Option<LatexEnginePreference> {
+    source.lines().take(40).find_map(|line| {
+        let lower = line.to_ascii_lowercase();
+        if !(lower.contains("tex") && lower.contains("program")) {
+            return None;
+        }
+        if lower.contains("lualatex") || lower.contains("luatex") {
+            Some(LatexEnginePreference::LuaLatex)
+        } else if lower.contains("xelatex") || lower.contains("xetex") {
+            Some(LatexEnginePreference::XeLatex)
+        } else if lower.contains("pdflatex") || lower.contains("pdftex") {
+            Some(LatexEnginePreference::PdfLatex)
+        } else {
+            None
+        }
+    })
+}
+
+fn latex_source_uses_luatex(source: &str) -> bool {
+    latex_source_uses_any_package(source, &["luacode", "luatexja", "luaotfload"])
+        || latex_source_contains_any_command(source, &["directlua"])
+}
+
+fn latex_source_uses_unicode_engine(source: &str) -> bool {
+    latex_source_uses_any_package(
+        source,
+        &[
+            "fontspec",
+            "xeCJK",
+            "ctex",
+            "unicode-math",
+            "polyglossia",
+            "mathspec",
+            "xltxtra",
+            "xunicode",
+        ],
+    ) || latex_source_uses_any_documentclass(
+        source,
+        &["ctexart", "ctexbook", "ctexrep", "ctexbeamer"],
+    ) || latex_source_contains_any_command(
+        source,
+        &[
+            "setmainfont",
+            "setsansfont",
+            "setmonofont",
+            "setCJKmainfont",
+            "setCJKsansfont",
+            "setCJKmonofont",
+            "CJKfontspec",
+        ],
+    )
+}
+
+fn latex_source_uses_any_package(source: &str, packages: &[&str]) -> bool {
+    source.lines().map(latex_line_without_comment).any(|line| {
+        ["usepackage", "RequirePackage"].iter().any(|command| {
+            latex_command_arguments(line, command)
+                .into_iter()
+                .any(|argument| {
+                    argument.split(',').any(|package| {
+                        packages
+                            .iter()
+                            .any(|name| package.trim().eq_ignore_ascii_case(name))
+                    })
+                })
+        })
+    })
+}
+
+fn latex_source_uses_any_documentclass(source: &str, classes: &[&str]) -> bool {
+    source.lines().map(latex_line_without_comment).any(|line| {
+        latex_command_arguments(line, "documentclass")
+            .into_iter()
+            .any(|argument| {
+                classes
+                    .iter()
+                    .any(|name| argument.trim().eq_ignore_ascii_case(name))
+            })
+    })
+}
+
+fn latex_source_contains_any_command(source: &str, commands: &[&str]) -> bool {
+    source.lines().map(latex_line_without_comment).any(|line| {
+        let lower = line.to_ascii_lowercase();
+        commands
+            .iter()
+            .any(|command| lower.contains(&format!("\\{}", command.to_ascii_lowercase())))
+    })
+}
+
+fn latex_line_without_comment(line: &str) -> &str {
+    let mut escaped = false;
+    for (index, character) in line.char_indices() {
+        if character == '%' && !escaped {
+            return &line[..index];
+        }
+        escaped = character == '\\' && !escaped;
+        if character != '\\' {
+            escaped = false;
+        }
+    }
+    line
+}
+
+fn latex_command_arguments<'a>(line: &'a str, command: &str) -> Vec<&'a str> {
+    let needle = format!("\\{command}");
+    line.match_indices(&needle)
+        .filter_map(|(offset, _)| {
+            let tail = &line[offset + needle.len()..];
+            let start = tail.find('{')?;
+            let content = &tail[start + 1..];
+            let end = content.find('}')?;
+            Some(&content[..end])
+        })
+        .collect()
+}
+
+fn latex_path_has_extension(path: &Path, extension: &str) -> bool {
+    path.extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value.eq_ignore_ascii_case(extension))
+}
+
+fn latex_output_needs_unicode_engine(output: &runtime::ManagedCommandOutput) -> bool {
+    let combined = format!(
+        "{}\n{}",
+        runtime::decode_process_text(&output.stdout),
+        runtime::decode_process_text(&output.stderr)
+    )
+    .to_ascii_lowercase();
+    combined.contains("fontspec") && combined.contains("requires either xetex or luatex")
+}
+
+fn latexmk_output_reports_stale_failure(output: &runtime::ManagedCommandOutput) -> bool {
+    let combined = format!(
+        "{}\n{}",
+        runtime::decode_process_text(&output.stdout),
+        runtime::decode_process_text(&output.stderr)
+    )
+    .to_ascii_lowercase();
+    combined.contains("gave an error in previous invocation of latexmk")
+}
+
+fn known_latex_cache_paths(input_path: &Path, output_dir: &Path) -> Vec<PathBuf> {
+    let stem = input_path
+        .file_stem()
+        .unwrap_or_else(|| input_path.as_os_str())
+        .to_string_lossy();
+    [
+        "aux",
+        "bbl",
+        "bcf",
+        "blg",
+        "fdb_latexmk",
+        "fls",
+        "lof",
+        "log",
+        "lot",
+        "nav",
+        "out",
+        "run.xml",
+        "snm",
+        "synctex.gz",
+        "toc",
+        "vrb",
+        "xdv",
+    ]
+    .into_iter()
+    .map(|suffix| output_dir.join(format!("{stem}.{suffix}")))
+    .collect()
+}
+
+fn remove_known_latex_cache_files(input_path: &Path, output_dir: &Path) -> Result<usize, String> {
+    let mut removed = 0;
+    for path in known_latex_cache_paths(input_path, output_dir) {
+        if path.is_file() {
+            std::fs::remove_file(&path).map_err(|error| {
+                format!("failed to remove LaTeX cache {}: {error}", path.display())
+            })?;
+            removed += 1;
+        }
+    }
+    Ok(removed)
+}
+
+fn tex_input_name(input_path: &Path) -> &std::ffi::OsStr {
+    input_path
+        .file_name()
+        .unwrap_or_else(|| input_path.as_os_str())
+}
+
+#[cfg(target_os = "windows")]
+fn tex_tool_path(path: &Path) -> PathBuf {
+    let value = path.to_string_lossy();
+    if let Some(rest) = value.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{rest}"));
+    }
+    if value.starts_with(r"\\?\Volume{") {
+        return path.to_path_buf();
+    }
+    value
+        .strip_prefix(r"\\?\")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| path.to_path_buf())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn tex_tool_path(path: &Path) -> PathBuf {
+    path.to_path_buf()
+}
+
+fn extract_latex_diagnostics(
+    stdout: &str,
+    stderr: &str,
+    success: bool,
+    return_code_interpretation: Option<&str>,
+) -> Vec<LatexDiagnostic> {
+    let combined = format!("{stdout}\n{stderr}");
+    let lines = combined.lines().collect::<Vec<_>>();
+    let mut diagnostics = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        let line = line.trim();
+        if let Some((file_path, source_line, message)) = parse_latex_file_line_diagnostic(line) {
+            push_latex_diagnostic(
+                &mut diagnostics,
+                LatexDiagnostic {
+                    severity: "error".to_string(),
+                    code: "file_line_error".to_string(),
+                    message,
+                    file_path: Some(file_path),
+                    line: Some(source_line),
+                },
+            );
+            continue;
+        }
+        let Some(message) = line
+            .strip_prefix('!')
+            .map(str::trim)
+            .filter(|message| !message.is_empty())
+        else {
+            continue;
+        };
+        let source_line = lines[index + 1..]
+            .iter()
+            .take(4)
+            .find_map(|next| parse_latex_log_line_number(next.trim()));
+        push_latex_diagnostic(
+            &mut diagnostics,
+            LatexDiagnostic {
+                severity: "error".to_string(),
+                code: latex_diagnostic_code(message).to_string(),
+                message: message.to_string(),
+                file_path: None,
+                line: source_line,
+            },
+        );
+    }
+    if diagnostics.is_empty() && !success {
+        let message = return_code_interpretation
+            .map(|status| {
+                format!(
+                    "LaTeX compilation failed ({status}) without a parseable source diagnostic."
+                )
+            })
+            .unwrap_or_else(|| {
+                "LaTeX compilation failed without a parseable source diagnostic.".to_string()
+            });
+        diagnostics.push(LatexDiagnostic {
+            severity: "error".to_string(),
+            code: "compile_failed".to_string(),
+            message,
+            file_path: None,
+            line: None,
+        });
+    }
+    diagnostics
+}
+
+fn parse_latex_file_line_diagnostic(line: &str) -> Option<(String, u32, String)> {
+    for (index, character) in line.char_indices() {
+        if character != ':' {
+            continue;
+        }
+        let rest = &line[index + 1..];
+        let digits = rest
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect::<String>();
+        if digits.is_empty() || !rest[digits.len()..].starts_with(':') {
+            continue;
+        }
+        let file_path = line[..index].trim();
+        if !file_path.to_ascii_lowercase().contains(".tex") {
+            continue;
+        }
+        let message = rest[digits.len() + 1..].trim();
+        if message.is_empty() {
+            continue;
+        }
+        return Some((
+            file_path.to_string(),
+            digits.parse().ok()?,
+            message.to_string(),
+        ));
+    }
+    None
+}
+
+fn parse_latex_log_line_number(line: &str) -> Option<u32> {
+    let number = line
+        .strip_prefix("l.")?
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>();
+    number.parse().ok()
+}
+
+fn latex_diagnostic_code(message: &str) -> &'static str {
+    let lower = message.to_ascii_lowercase();
+    if lower.contains("extra alignment") || lower.contains("misplaced alignment") {
+        "table_alignment"
+    } else if lower.contains("missing $") || lower.contains("math mode") {
+        "math_mode"
+    } else if lower.contains("undefined control sequence") {
+        "undefined_control_sequence"
+    } else if lower.contains("file `") && lower.contains("not found") {
+        "missing_file"
+    } else if lower.contains("emergency stop") {
+        "emergency_stop"
+    } else {
+        "latex_error"
+    }
+}
+
+fn push_latex_diagnostic(diagnostics: &mut Vec<LatexDiagnostic>, diagnostic: LatexDiagnostic) {
+    if diagnostics.len() < 8 && !diagnostics.contains(&diagnostic) {
+        diagnostics.push(diagnostic);
+    }
 }
 
 fn canonical_workspace_root() -> Result<PathBuf, String> {
@@ -5152,38 +5957,15 @@ fn workspace_relative_display(path: &Path, workspace: &Path) -> String {
 }
 
 fn detect_powershell_shell() -> std::io::Result<&'static str> {
-    if command_exists("pwsh") {
+    if runtime::command_exists("pwsh") {
         Ok("pwsh")
-    } else if command_exists("powershell") {
+    } else if runtime::command_exists("powershell") {
         Ok("powershell")
     } else {
         Err(std::io::Error::new(
             std::io::ErrorKind::NotFound,
             "PowerShell executable not found (expected `pwsh` or `powershell` in PATH)",
         ))
-    }
-}
-
-fn command_exists(command: &str) -> bool {
-    #[cfg(windows)]
-    {
-        return runtime::hidden_command("where.exe")
-            .arg(command)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map(|status| status.success())
-            .unwrap_or(false);
-    }
-
-    #[cfg(not(windows))]
-    {
-        runtime::hidden_command("sh")
-            .arg("-lc")
-            .arg(format!("command -v {command} >/dev/null 2>&1"))
-            .status()
-            .map(|status| status.success())
-            .unwrap_or(false)
     }
 }
 

@@ -9,7 +9,7 @@ import ChatSidebar from "./ChatSidebar";
 import ChatThread, { type ChatStarter } from "./ChatThread";
 import FilePathMenu from "./FilePathMenu";
 import { CHAT_COPY } from "./i18n";
-import { latestFileChangesFromTurns, latestTodosFromTurns, migrateTurn, textFromTurn } from "./model";
+import { latestFileChangesFromTurns, latestTodosFromTurns, makeId, migrateTurn, textFromTurn } from "./model";
 import { fileChangeSummaryFromTurns } from "./ChatMessage";
 import WorkflowFlow from "./WorkflowFlow";
 import ScheduledTasks from "../scheduled/ScheduledTasks";
@@ -19,6 +19,8 @@ import { useChatRun } from "./useChatRun";
 import { useChatCommands } from "./useChatCommands";
 import { useChatSessionController } from "./useChatSessionController";
 import ProjectBriefCard, { useProjectBrief } from "./ProjectBriefCard";
+import ChatNavigationTabs, { type ChatNavigationTab } from "./ChatNavigationTabs";
+import SideTaskPanel, { type SideTaskMetadata } from "./SideTaskPanel";
 
 // Pure helpers live in `chatRunHelpers`; re-exported here for existing tests
 // that import them from `./Chat`.
@@ -84,6 +86,13 @@ const CHAT_STARTERS: Record<Language, ChatStarter[]> = {
     },
   ],
 };
+
+interface SideTaskTab {
+  id: string;
+  projectId: string;
+  title: string;
+  handoff: string | null;
+}
 
 function MemoryBadge({ count }: { count: number }) {
   if (count === 0) return null;
@@ -167,6 +176,56 @@ export default function Chat() {
   });
   const sessionCtl = useChatSessionController({ removeSession, restoreSession });
   const projectBrief = useProjectBrief(currentProject?.id);
+  const [sideTaskTabs, setSideTaskTabs] = useState<SideTaskTab[]>([]);
+  const [activeSideTaskId, setActiveSideTaskId] = useState<string | null>(null);
+  const [sideTaskPaneOpen, setSideTaskPaneOpen] = useState(false);
+  const sideTaskSequenceRef = useRef(0);
+  const previousProjectIdRef = useRef(currentProject?.id);
+
+  const addSideTask = useCallback(() => {
+    if (!currentProject) return;
+    sideTaskSequenceRef.current += 1;
+    const sideTaskNumber = sideTaskSequenceRef.current;
+    const sideTask: SideTaskTab = {
+      id: makeId("side-task-tab"),
+      projectId: currentProject.id,
+      title: language === "cn" ? `侧边任务 ${sideTaskNumber}` : `Side task ${sideTaskNumber}`,
+      handoff: null,
+    };
+    setSideTaskTabs((current) => [...current, sideTask]);
+    setActiveSideTaskId(sideTask.id);
+    setSideTaskPaneOpen(true);
+  }, [currentProject, language]);
+
+  const closeSideTask = useCallback((taskId: string) => {
+    setSideTaskTabs((current) => {
+      const closingIndex = current.findIndex((task) => task.id === taskId);
+      const next = current.filter((task) => task.id !== taskId);
+      if (activeSideTaskId === taskId) {
+        const replacement = next[Math.min(Math.max(closingIndex, 0), next.length - 1)];
+        setActiveSideTaskId(replacement?.id ?? null);
+        if (!replacement) setSideTaskPaneOpen(false);
+      }
+      return next;
+    });
+  }, [activeSideTaskId]);
+
+  const updateSideTaskMetadata = useCallback((taskId: string, metadata: SideTaskMetadata) => {
+    setSideTaskTabs((current) => {
+      const target = current.find((task) => task.id === taskId);
+      if (!target || (target.title === metadata.title && target.handoff === metadata.handoff)) return current;
+      return current.map((task) => task.id === taskId ? { ...task, ...metadata } : task);
+    });
+  }, []);
+
+  useEffect(() => {
+    if (previousProjectIdRef.current === currentProject?.id) return;
+    previousProjectIdRef.current = currentProject?.id;
+    sideTaskSequenceRef.current = 0;
+    setSideTaskTabs([]);
+    setActiveSideTaskId(null);
+    setSideTaskPaneOpen(false);
+  }, [currentProject?.id]);
 
   useEffect(() => {
     if (!sessionCtl.sidebarOpen) return;
@@ -182,10 +241,28 @@ export default function Chat() {
     return () => document.body.classList.remove("somniq-chat-sidebar-open");
   }, [sessionCtl.sidebarOpen]);
 
+  useEffect(() => {
+    const toggleSideTask = (event: KeyboardEvent) => {
+      if (!event.ctrlKey || !event.altKey || event.key.toLowerCase() !== "b") return;
+      event.preventDefault();
+      if (sideTaskPaneOpen) {
+        setSideTaskPaneOpen(false);
+        return;
+      }
+      const latestSideTask = sideTaskTabs[sideTaskTabs.length - 1];
+      if (latestSideTask) {
+        setActiveSideTaskId((current) => current ?? latestSideTask.id);
+        setSideTaskPaneOpen(true);
+      } else addSideTask();
+    };
+    window.addEventListener("keydown", toggleSideTask);
+    return () => window.removeEventListener("keydown", toggleSideTask);
+  }, [addSideTask, sideTaskPaneOpen, sideTaskTabs]);
+
   const starters = CHAT_STARTERS[language];
   const welcomeCopy = language === "cn"
     ? {
-      title: "让科研问题持续向前",
+      title: <>梦里<span className="chat-welcome-highlight">求索</span>，醒时<span className="chat-welcome-highlight">有获</span></>,
       description: "SomniQ 在后台持续推理、检索、分析与生成，把问题推进成答案。",
     }
     : {
@@ -208,6 +285,43 @@ export default function Chat() {
     () => fileChangeSummaryFromTurns(turns),
     [turns],
   );
+
+  const navigationCopy = language === "cn"
+    ? {
+      label: "侧边任务导航",
+      add: "新增侧边任务标签",
+      close: "关闭侧边任务标签",
+      hide: "隐藏侧边任务栏",
+      toggle: "显示或隐藏侧边任务栏",
+      handoff: "发送到主任务",
+    }
+    : {
+      label: "Side task navigation",
+      add: "Add side task tab",
+      close: "Close side task tab",
+      hide: "Hide side task panel",
+      toggle: "Show or hide side task panel",
+      handoff: "Send to main task",
+    };
+  const navigationTabs = useMemo<ChatNavigationTab[]>(() => (
+    sideTaskTabs.map((sideTask) => ({
+      id: sideTask.id,
+      label: sideTask.title,
+      closable: true,
+      closeLabel: `${navigationCopy.close}: ${sideTask.title}`,
+    }))
+  ), [navigationCopy.close, sideTaskTabs]);
+  const activeSideTask = sideTaskTabs.find((sideTask) => sideTask.id === activeSideTaskId);
+
+  const sendHandoffToMain = useCallback((content: string) => {
+    const session = currentSessionRef.current;
+    if (!session) return;
+    const nextDraft = session.draft.trim()
+      ? `${session.draft.trim()}\n\n${content}`
+      : content;
+    setDraft(session.id, nextDraft);
+    focusComposer();
+  }, [focusComposer, setDraft]);
 
   const send = async () => {
     if (!currentSession || run.sendLocks.current.has(currentSession.id) || currentChatBusy || (!composer.input.trim() && composer.attachments.length === 0)) return;
@@ -283,11 +397,14 @@ export default function Chat() {
     loadingOmittedTurns.has(`${currentId}:${turnIndex}`)
   ), [currentId, loadingOmittedTurns]);
 
-  const projectBriefVisible = tab === "chat" && !projectBrief.hidden && projectBrief.brief !== null;
+  const projectBriefVisible = tab === "chat"
+    && !sideTaskPaneOpen
+    && !projectBrief.hidden
+    && projectBrief.brief !== null;
 
   return (
     <div
-      className={`chat-root${projectBriefVisible ? " chat-project-brief-open" : ""}`}
+      className={`chat-root${projectBriefVisible ? " chat-project-brief-open" : ""}${sideTaskPaneOpen && tab === "chat" ? " side-task-open" : ""}`}
       style={{ "--chat-sidebar-w": `${sessionCtl.chatSidebarWidth}px` } as CSSProperties}
     >
       {sessionCtl.sidebarOpen && (
@@ -432,7 +549,7 @@ export default function Chat() {
               )}
             </button>
             {!status?.ready && <button onClick={() => setTab("settings")}>{copy.settings}</button>}
-            {projectBrief.brief && (
+            {projectBrief.brief && !sideTaskPaneOpen && (
               <button
                 type="button"
                 className={`chat-project-brief-toggle${projectBrief.hidden ? "" : " active"}`}
@@ -451,6 +568,24 @@ export default function Chat() {
                 </svg>
               </button>
             )}
+            <button
+              type="button"
+              className={`chat-side-task-toggle${sideTaskPaneOpen ? " active" : ""}`}
+              onClick={() => {
+                if (sideTaskPaneOpen) setSideTaskPaneOpen(false);
+                else if (sideTaskTabs.length > 0) setSideTaskPaneOpen(true);
+                else addSideTask();
+              }}
+              title={`${navigationCopy.toggle} (Ctrl+Alt+B)`}
+              aria-label={navigationCopy.toggle}
+              aria-pressed={sideTaskPaneOpen}
+              aria-controls="side-task-panel"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <rect x="3.5" y="4" width="17" height="16" rx="2.5" />
+                <path d="M14.5 4v16" />
+              </svg>
+            </button>
           </div>,
           document.getElementById("app-chat-actions-portal")!
         )}
@@ -538,6 +673,50 @@ export default function Chat() {
           </>
         )}
       </main>
+      {sideTaskTabs.length > 0 && (
+        <aside
+          id="side-task-panel"
+          className="side-task-slot"
+          aria-label={navigationCopy.label}
+          hidden={!sideTaskPaneOpen || tab !== "chat"}
+        >
+          <ChatNavigationTabs
+            tabs={navigationTabs}
+            activeTabId={activeSideTaskId ?? sideTaskTabs[0]?.id ?? ""}
+            label={navigationCopy.label}
+            addLabel={navigationCopy.add}
+            hideLabel={navigationCopy.hide}
+            action={activeSideTask?.handoff
+              ? { label: navigationCopy.handoff, onClick: () => sendHandoffToMain(activeSideTask.handoff!) }
+              : undefined}
+            onSelect={setActiveSideTaskId}
+            onClose={closeSideTask}
+            onAdd={addSideTask}
+            onHide={() => setSideTaskPaneOpen(false)}
+          />
+          <div className="side-task-workspaces">
+            {sideTaskTabs.map((sideTask) => (
+              <section
+                key={sideTask.id}
+                id={`chat-workspace-${sideTask.id}`}
+                className="chat-workspace-view"
+                role="tabpanel"
+                aria-label={sideTask.title}
+                hidden={activeSideTaskId !== sideTask.id}
+              >
+                <SideTaskPanel
+                  taskId={sideTask.id}
+                  initialTitle={sideTask.title}
+                  projectId={sideTask.projectId}
+                  model={activeModel}
+                  ready={Boolean(status?.ready)}
+                  onMetadataChange={updateSideTaskMetadata}
+                />
+              </section>
+            ))}
+          </div>
+        </aside>
+      )}
       {projectBriefVisible && projectBrief.brief && (
         <aside
           id="project-brief-popover"

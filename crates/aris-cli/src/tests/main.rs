@@ -1,17 +1,17 @@
 use super::{
-    deploy_meta_opt_hooks_to, filter_tool_specs, format_compact_report, format_cost_report,
-    format_model_report, format_model_switch_report, format_permissions_report,
-    format_permissions_switch_report, format_resume_report, format_status_report,
+    deploy_meta_opt_hooks_to, filter_tool_specs, format_model_report, format_model_switch_report,
+    format_permissions_report, format_permissions_switch_report, format_resume_report,
     format_tool_call_start, format_tool_result, normalize_allowed_tools, normalize_permission_mode,
     parse_args, parse_git_status_metadata, print_help_to, push_output_block, render_config_report,
     render_memory_report, render_repl_help, resolve_model_alias, response_to_events,
     resume_supported_slash_commands, status_context, CliAction, CliOutputFormat, SlashCommand,
-    StatusUsage, DEFAULT_MODEL,
+    DEFAULT_MODEL,
 };
 use api::{MessageResponse, OutputContentBlock, Usage};
 use runtime::{
-    AssistantEvent, CompactionResult, CompactionSummarySource, ContentBlock, ConversationMessage,
-    MessageRole, PermissionMode, Session,
+    format_compact_report, format_cost_report, format_status_report, AssistantEvent,
+    CompactionResult, CompactionSummarySource, ContentBlock, ConversationMessage, MessageRole,
+    PermissionMode, Session, StatusContext, StatusUsage,
 };
 use serde_json::json;
 use std::path::PathBuf;
@@ -289,8 +289,19 @@ fn resume_supported_command_list_matches_expected_surface() {
     assert_eq!(
         names,
         vec![
-            "help", "status", "compact", "clear", "cost", "config", "memory", "goal", "init",
-            "diff", "version", "export", "export-debug-zip",
+            "help",
+            "status",
+            "compact",
+            "clear",
+            "cost",
+            "config",
+            "memory",
+            "goal",
+            "init",
+            "diff",
+            "version",
+            "export",
+            "export-debug-zip",
         ]
     );
 }
@@ -422,7 +433,7 @@ fn status_line_reports_model_and_token_totals() {
             estimated_tokens: 128,
         },
         "workspace-write",
-        &super::StatusContext {
+        &StatusContext {
             cwd: PathBuf::from("/tmp/project"),
             session_path: Some(PathBuf::from("session.json")),
             loaded_config_files: 2,
@@ -431,6 +442,7 @@ fn status_line_reports_model_and_token_totals() {
             project_root: Some(PathBuf::from("/tmp")),
             git_branch: Some("main".to_string()),
         },
+        "live-repl",
     );
     assert!(status.contains("Status"));
     assert!(status.contains("Model            claude-sonnet"));

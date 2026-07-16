@@ -177,6 +177,11 @@ pub fn max_tokens_for_model(model: &str) -> u32 {
 #[must_use]
 pub fn context_compaction_threshold_for_model(model: &str) -> usize {
     let m = model.to_ascii_lowercase();
+    if m.contains("minimax") {
+        // Keep long research sessions intact while compacting before repeated
+        // tool diagnostics turn a repair loop into multi-minute model calls.
+        return 320_000;
+    }
     if m.contains("minimax") || m.contains("gemini") || m.contains("deepseek-v4") {
         // ~1M window → compact near the top, reserving ~150k for prompt+output.
         850_000

@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import { Compartment, Prec } from "@codemirror/state";
 import { EditorView, keymap } from "@codemirror/view";
 import { createSharedEditorView } from "../editor/editorView";
+import { latexVscodeHighlighting } from "../editor/latexVscodeHighlighting";
 import type { SharedEditorHandle } from "../editor/editorTypes";
 import {
   onForwardSearch as onForwardSearchFacet,
@@ -12,6 +13,13 @@ import {
   visualSourcePath,
 } from "./visualDecorations";
 import type { VisualPdfCursor } from "./visualModel";
+
+declare global {
+  interface Window {
+    /** DEV-only, test-only handle for the live Typeset visual editor. */
+    __typesetView?: EditorView;
+  }
+}
 
 type LatexListEnterInsertion = {
   insert: string;
@@ -169,16 +177,15 @@ export function TypesetVisualEditor({
   // bracket/search/keymap base extensions — see desktop/src/editor/editorState.ts);
   // the doc is reconciled from `draft` in a separate effect so external edits
   // (Code mode, undo/redo, compile) flow in without tearing down the view or
-  // losing the caret. `language: "text"` is deliberate: `visualDecorations`
-  // already fully owns rich-text rendering here, so no lezer grammar is loaded
-  // for this surface (avoids the shared syntaxHighlighting tinting raw markup
-  // underneath the decoration layer, which would change today's visual output).
+  // losing the caret. Visual decorations continue to own rendered content, but
+  // the underlying source now uses the same LaTeX parser and VS Code palette as
+  // Code mode whenever markup is exposed for editing.
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
     const handle = createSharedEditorView(host, {
       doc: draft,
-      language: "text",
+      language: "latex",
       surface: "typeset",
       extensions: [
         EditorView.lineWrapping,
@@ -186,6 +193,7 @@ export function TypesetVisualEditor({
         onOpenCodeRangeCompartmentRef.current.of(onOpenCodeRangeFacet.of(onOpenCodeRange)),
         onForwardSearchCompartmentRef.current.of(onForwardSearchFacet.of(onForwardSearch ?? null)),
         Prec.high(keymap.of([{ key: "Enter", run: insertLatexListItemOnEnter }])),
+        latexVscodeHighlighting,
         visualDecorations,
         visualBlockClick,
         visualForwardSearchClick,
@@ -356,7 +364,7 @@ const visualTheme = EditorView.theme({
   ".cm-vis-smallcaps": { fontVariant: "small-caps" },
   ".cm-vis-sub": { verticalAlign: "sub", fontSize: "0.75em" },
   ".cm-vis-sup": { verticalAlign: "super", fontSize: "0.75em" },
-  ".cm-vis-comment": { color: "#9aa0a6", fontStyle: "italic" },
+  ".cm-vis-comment": { color: "#6a9955", fontStyle: "italic" },
 
   // Beamer frames remain one continuous source document, but the line
   // decorations give every slide a stable visual boundary. Entering the frame
@@ -448,7 +456,6 @@ const visualTheme = EditorView.theme({
   ".cm-vis-active-math-source": {
     fontFamily: 'ui-monospace, "Cascadia Code", "SFMono-Regular", Consolas, monospace',
     fontSize: "0.88em",
-    color: "var(--visual-code-text)",
   },
   // Inline math ($…$) is always a single short run — no multi-line seam risk —
   // so it gets its own soft pill background for extra legibility inside prose.
@@ -499,6 +506,24 @@ const visualTheme = EditorView.theme({
     marginRight: "0.18em",
     color: "var(--visual-text)",
     fontWeight: "600",
+    whiteSpace: "pre",
+  },
+  ".cm-vis-theorem-label": {
+    display: "inline-flex",
+    marginRight: "0.55em",
+    padding: "0.08em 0.45em",
+    borderRadius: "3px",
+    backgroundColor: "var(--visual-widget-bg)",
+    color: "var(--visual-accent-bright)",
+    fontFamily: '"Segoe UI", system-ui, -apple-system, sans-serif',
+    fontSize: "0.78em",
+    fontWeight: "700",
+    letterSpacing: "0.02em",
+    verticalAlign: "0.08em",
+  },
+  ".cm-vis-theorem-editable": { cursor: "pointer" },
+  ".cm-vis-theorem-editable:hover": {
+    boxShadow: "inset 0 -0.12em 0 rgba(47, 139, 58, 0.45)",
   },
 
   // Figure placeholder card. No outer margin (see block-widget note above) — the

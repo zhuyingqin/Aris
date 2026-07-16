@@ -25,12 +25,7 @@ const CHAT_UI_PREVIEWS_DIR: &str = "chat-ui-session-previews";
 /// Lightweight summary index that drives the sidebar list without reading turns.
 const CHAT_UI_INDEX_FILE: &str = "chat-ui-index.json";
 const CHAT_UI_SESSION_PREVIEW_MAX_TURNS: usize = 12;
-const CHAT_UI_SESSION_PREVIEW_MAX_BYTES: usize = 180_000;
-const CHAT_UI_TEXT_BLOCK_MAX_CHARS: usize = 8_000;
-const CHAT_UI_THINKING_BLOCK_MAX_CHARS: usize = 6_000;
-const CHAT_UI_TOOL_INPUT_MAX_CHARS: usize = 4_000;
-const CHAT_UI_TOOL_OUTPUT_MAX_CHARS: usize = 8_000;
-const CHAT_UI_RAW_TURN_PARSE_MAX_BYTES: usize = 256_000;
+const CHAT_UI_PREVIEW_VERSION: u64 = 3;
 
 fn legacy_chat_ui_sessions_path() -> PathBuf {
     state::desktop_runtime_dir().join(CHAT_UI_SESSIONS_FILE)
@@ -81,6 +76,7 @@ fn remove_client_chat_ui_fields(session: &mut Value) {
         object.remove("turnCount");
         object.remove("turnsPartial");
         object.remove("partialBaseTurnIds");
+        object.remove("previewVersion");
     }
 }
 
@@ -189,9 +185,14 @@ fn read_chat_ui_session_file(id: &str) -> Result<Option<Value>, String> {
 
 fn read_chat_ui_preview_file(id: &str) -> Result<Option<Value>, String> {
     match fs::read_to_string(chat_ui_preview_file_path(id)) {
-        Ok(raw) => serde_json::from_str::<Value>(&raw)
-            .map(Some)
-            .map_err(|e| e.to_string()),
+        Ok(raw) => {
+            let preview = serde_json::from_str::<Value>(&raw).map_err(|e| e.to_string())?;
+            // Regenerate pre-v3 previews: they may have hidden a large turn
+            // even when the conversation itself had only a few turns.
+            Ok((preview.get("previewVersion").and_then(Value::as_u64)
+                == Some(CHAT_UI_PREVIEW_VERSION))
+            .then_some(preview))
+        }
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error.to_string()),
     }
@@ -269,123 +270,25 @@ fn chat_ui_turn_id(turn: &Value) -> Option<&str> {
     turn.get("id").and_then(Value::as_str)
 }
 
-fn truncate_for_chat_ui_preview(text: &str, max_chars: usize) -> (String, bool) {
-    let mut iter = text.char_indices();
-    let Some((cutoff, _)) = iter.nth(max_chars) else {
-        return (text.to_string(), false);
-    };
-    let mut output = text[..cutoff].to_string();
-    output.push_str("\n\n[Preview truncated. The full content remains saved on disk.]");
-    (output, true)
-}
-
-fn truncate_chat_ui_turn_for_preview(turn: &Value) -> (Value, bool) {
-    let mut next = turn.clone();
-    let mut truncated = false;
-    let Some(blocks) = next.get_mut("blocks").and_then(Value::as_array_mut) else {
-        return (next, false);
-    };
-    for block in blocks {
-        let Some(object) = block.as_object_mut() else {
-            continue;
-        };
-        match object.get("kind").and_then(Value::as_str) {
-            Some("text") => {
-                if let Some(text) = object.get("text").and_then(Value::as_str) {
-                    let (value, was_truncated) =
-                        truncate_for_chat_ui_preview(text, CHAT_UI_TEXT_BLOCK_MAX_CHARS);
-                    if was_truncated {
-                        object.insert("text".to_string(), Value::String(value));
-                        truncated = true;
-                    }
-                }
-            }
-            Some("thinking") => {
-                if let Some(text) = object.get("thinking").and_then(Value::as_str) {
-                    let (value, was_truncated) =
-                        truncate_for_chat_ui_preview(text, CHAT_UI_THINKING_BLOCK_MAX_CHARS);
-                    if was_truncated {
-                        object.insert("thinking".to_string(), Value::String(value));
-                        truncated = true;
-                    }
-                }
-            }
-            Some("tool") => {
-                if let Some(text) = object.get("input").and_then(Value::as_str) {
-                    let (value, was_truncated) =
-                        truncate_for_chat_ui_preview(text, CHAT_UI_TOOL_INPUT_MAX_CHARS);
-                    if was_truncated {
-                        object.insert("input".to_string(), Value::String(value));
-                        truncated = true;
-                    }
-                }
-                if let Some(text) = object.get("output").and_then(Value::as_str) {
-                    let (value, was_truncated) =
-                        truncate_for_chat_ui_preview(text, CHAT_UI_TOOL_OUTPUT_MAX_CHARS);
-                    if was_truncated {
-                        object.insert("output".to_string(), Value::String(value));
-                        truncated = true;
-                    }
-                }
-            }
-            Some("notice") => {
-                if let Some(text) = object.get("message").and_then(Value::as_str) {
-                    let (value, was_truncated) =
-                        truncate_for_chat_ui_preview(text, CHAT_UI_TEXT_BLOCK_MAX_CHARS);
-                    if was_truncated {
-                        object.insert("message".to_string(), Value::String(value));
-                        truncated = true;
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    (next, truncated)
-}
-
-fn chat_ui_preview_turns(id: &str, turns: &[Value]) -> (Vec<Value>, bool, Vec<String>) {
-    let mut selected = Vec::new();
-    let mut selected_bytes = 2;
-    let mut partial = turns.len() > CHAT_UI_SESSION_PREVIEW_MAX_TURNS;
-    for (turn_index, turn) in turns
+fn chat_ui_preview_turns(turns: &[Value]) -> (Vec<Value>, bool, Vec<String>) {
+    let mut selected = turns
         .iter()
-        .enumerate()
         .rev()
         .take(CHAT_UI_SESSION_PREVIEW_MAX_TURNS)
-    {
-        let raw_turn_bytes = serde_json::to_vec(turn)
-            .map(|data| data.len())
-            .unwrap_or(usize::MAX / 2);
-        let (preview_turn, was_truncated) = if raw_turn_bytes > CHAT_UI_RAW_TURN_PARSE_MAX_BYTES {
-            (large_turn_placeholder(id, turn_index, raw_turn_bytes), true)
-        } else {
-            truncate_chat_ui_turn_for_preview(turn)
-        };
-        partial |= was_truncated;
-        let turn_bytes = serde_json::to_vec(&preview_turn)
-            .map(|data| data.len())
-            .unwrap_or(usize::MAX / 2);
-        if !selected.is_empty() && selected_bytes + turn_bytes > CHAT_UI_SESSION_PREVIEW_MAX_BYTES {
-            partial = true;
-            break;
-        }
-        selected_bytes = selected_bytes.saturating_add(turn_bytes);
-        selected.push(preview_turn);
-    }
+        .cloned()
+        .collect::<Vec<_>>();
     selected.reverse();
     let base_ids = selected
         .iter()
         .filter_map(chat_ui_turn_id)
         .map(str::to_string)
         .collect();
-    partial |= selected.len() < turns.len();
+    let partial = selected.len() < turns.len();
     (selected, partial, base_ids)
 }
 
 fn chat_ui_preview_session(mut session: Value, turns: &[Value], turn_count: usize) -> Value {
-    let id = chat_ui_session_id(&session).unwrap_or("chat").to_string();
-    let (preview_turns, turns_partial, partial_base_turn_ids) = chat_ui_preview_turns(&id, turns);
+    let (preview_turns, turns_partial, partial_base_turn_ids) = chat_ui_preview_turns(turns);
     if let Value::Object(object) = &mut session {
         object.insert("turns".to_string(), Value::Array(preview_turns));
         object.insert("turnsLoaded".to_string(), Value::Bool(true));
@@ -395,6 +298,7 @@ fn chat_ui_preview_session(mut session: Value, turns: &[Value], turn_count: usiz
             "partialBaseTurnIds".to_string(),
             json!(partial_base_turn_ids),
         );
+        object.insert("previewVersion".to_string(), json!(CHAT_UI_PREVIEW_VERSION));
     }
     session
 }
@@ -562,12 +466,8 @@ fn tail_turns_from_array(
                     if let Some(start) = turn_start.take() {
                         let end = index + 1;
                         let bytes = end.saturating_sub(start);
-                        let value = if bytes > CHAT_UI_RAW_TURN_PARSE_MAX_BYTES {
-                            large_turn_placeholder(id, turn_count, bytes)
-                        } else {
-                            serde_json::from_str::<Value>(&raw[start..end])
-                                .unwrap_or_else(|_| large_turn_placeholder(id, turn_count, bytes))
-                        };
+                        let value = serde_json::from_str::<Value>(&raw[start..end])
+                            .unwrap_or_else(|_| large_turn_placeholder(id, turn_count, bytes));
                         turn_count += 1;
                         tail.push_back(value);
                         while tail.len() > CHAT_UI_SESSION_PREVIEW_MAX_TURNS {

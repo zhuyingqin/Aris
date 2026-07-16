@@ -53,6 +53,46 @@ fn manual_compaction_keeps_a_single_completed_turn_intact() {
 }
 
 #[test]
+fn manual_compaction_preserves_the_same_recent_window_as_auto_compaction() {
+    let session = Session {
+        version: 1,
+        messages: vec![
+            ConversationMessage::user_text("first request"),
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "first reply".to_string(),
+            }]),
+            ConversationMessage::user_text("second request"),
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "second reply".to_string(),
+            }]),
+            ConversationMessage::user_text("current request"),
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "current reply".to_string(),
+            }]),
+        ],
+        compactions: Vec::new(),
+    };
+
+    let manual = plan_compaction(&session, &CompactionConfig::manual(None)).expect("manual plan");
+    let automatic = plan_compaction(
+        &session,
+        &CompactionConfig {
+            max_estimated_tokens: 0,
+            ..CompactionConfig::default()
+        },
+    )
+    .expect("automatic plan");
+
+    assert_eq!(manual.split_index, automatic.split_index);
+    assert_eq!(manual.preserved, automatic.preserved);
+    assert_eq!(manual.preserved.len(), 4);
+    assert!(matches!(
+        &manual.preserved[0].blocks[0],
+        ContentBlock::Text { text } if text == "second request"
+    ));
+}
+
+#[test]
 fn fallback_summary_carries_latest_todowrite_state_and_forward_plan() {
     let session = Session {
         version: 1,

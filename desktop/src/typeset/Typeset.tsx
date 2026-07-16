@@ -1,6 +1,7 @@
-﻿import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+﻿import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
 import { memo } from "react";
+import { createPortal } from "react-dom";
 import katex from "katex";
 import type { PDFDocumentProxy, PDFPageProxy, RenderTask } from "pdfjs-dist";
 import { EditorView, type KeyBinding } from "@codemirror/view";
@@ -10,15 +11,20 @@ import "katex/dist/katex.min.css";
 
 import {
   fileCreateText,
+  fileDelete,
+  fileDuplicate,
   fileListDir,
   fileOpen,
   fileReadBytes,
   fileReadText,
+  fileRename,
+  fileReveal,
   fileSearch,
   fileWriteText,
   isTauri,
   latexCompile,
   latexForwardSearch,
+  onLatexCompileProgress,
   type FileText,
   type FileTreeEntry,
   type LatexCompileResult,
@@ -56,6 +62,7 @@ Edit the source and compile to refresh the PDF preview.
 
 type CompileStatus = "idle" | "running" | "success" | "error";
 type CompileResult = LatexCompileResult;
+type CompileLiveLog = { stdout: string; stderr: string; elapsedMs: number };
 type EditorMode = "code" | "visual";
 // `nonce` forces PdfPage's highlight-flash animation to restart even when the
 // user double-clicks the exact same source position twice in a row.
@@ -122,6 +129,22 @@ type PdfTextRun = {
   width: number;
   height: number;
   fontSize: number;
+  color: string;
+  backgroundColor: string;
+};
+
+type PdfTextObjectGeometry = {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+  fontSize: number;
+  color: string;
+};
+
+type PdfTextObjectChange = PdfTextObjectGeometry & {
+  text: string;
+  context: string;
 };
 
 type TextSearchMatch = {
@@ -1801,7 +1824,125 @@ interface ExplorerProps {
   activePreviewPath: string | null;
   refreshKey: number;
   onOpenPath: (path: string) => void;
+  onFileMutation: (mutation: TypesetFileMutation) => void;
 }
+
+const VISUAL_OBJECT_BEGIN = "% SOMNIQ-VISUAL-OBJECT";
+const VISUAL_OBJECT_END = "% SOMNIQ-VISUAL-OBJECT-END";
+
+function visualObjectId(text: string, offset: number): string {
+  let hash = 2166136261;
+  const value = `${offset}:${normalizePdfText(text)}`;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `text-${(hash >>> 0).toString(36)}`;
+}
+
+function visualObjectBlockAt(source: string, match: TextSearchMatch): TextSearchMatch | null {
+  const start = source.lastIndexOf(VISUAL_OBJECT_BEGIN, match.start);
+  if (start < 0) return null;
+  const previousEnd = source.lastIndexOf(VISUAL_OBJECT_END, match.start);
+  if (previousEnd > start) return null;
+  const endMarker = source.indexOf(VISUAL_OBJECT_END, match.end);
+  if (endMarker < 0) return null;
+  const endLine = source.indexOf("\n", endMarker);
+  return { start, end: endLine < 0 ? source.length : endLine + 1 };
+}
+
+function visualObjectLatex(id: string, content: string, geometry: PdfTextObjectGeometry): string {
+  const left = Math.max(0, geometry.left).toFixed(2);
+  const top = Math.max(0, geometry.top).toFixed(2);
+  const fontSize = clampNumber(geometry.fontSize, 5, 72).toFixed(2);
+  const leading = (clampNumber(geometry.fontSize, 5, 72) * 1.18).toFixed(2);
+  const rgb = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(geometry.color);
+  const colorName = `somniq${id.replace(/[^a-z0-9]/gi, "")}`;
+  const colorLine = rgb
+    ? `\\definecolor{${colorName}}{RGB}{${parseInt(rgb[1], 16)},${parseInt(rgb[2], 16)},${parseInt(rgb[3], 16)}}`
+    : `\\definecolor{${colorName}}{RGB}{31,41,55}`;
+  return [
+    `${VISUAL_OBJECT_BEGIN} id=${id} x=${left}pt y=${top}pt`,
+    colorLine,
+    "\\begin{tikzpicture}[remember picture,overlay]",
+    `  \\node[anchor=north west,inner sep=0pt,outer sep=0pt,text=${colorName},font={\\fontsize{${fontSize}pt}{${leading}pt}\\selectfont}]`,
+    `    at ([xshift=${left}pt,yshift=-${top}pt]current page.north west) {${content}};`,
+    "\\end{tikzpicture}",
+    `${VISUAL_OBJECT_END} id=${id}`,
+    "",
+  ].join("\n");
+}
+
+function ensureTikzPackage(source: string): string {
+  if (/\\usepackage(?:\[[^\]]*\])?\{[^}]*\btikz\b[^}]*\}/.test(source)) return source;
+  const documentClass = source.match(/\\documentclass(?:\[[^\]]*\])?\{[^}]+\}[^\n]*(?:\n|$)/);
+  if (documentClass?.index != null) {
+    const offset = documentClass.index + documentClass[0].length;
+    return `${source.slice(0, offset)}\\usepackage{tikz}\n${source.slice(offset)}`;
+  }
+  const beginDocument = source.indexOf("\\begin{document}");
+  if (beginDocument >= 0) return `${source.slice(0, beginDocument)}\\usepackage{tikz}\n${source.slice(beginDocument)}`;
+  return `\\usepackage{tikz}\n${source}`;
+}
+
+function editPdfTextInLatex(source: string, pdfText: string, context: string, nextText: string): string | null {
+  const match = findLatexOffsetForPdfText(source, pdfText, context);
+  if (!match) return null;
+  return `${source.slice(0, match.start)}${nextText}${source.slice(match.end)}`;
+}
+
+function escapeDirectLatexText(text: string): string {
+  return text
+    .replace(/\\/g, "\\textbackslash{}")
+    .replace(/([#$%&_{}])/g, "\\$1")
+    .replace(/\^/g, "\\textasciicircum{}")
+    .replace(/~/g, "\\textasciitilde{}");
+}
+
+function positionPdfTextInFrame(
+  frameSource: string,
+  pdfText: string,
+  context: string,
+  geometry: PdfTextObjectGeometry,
+): string | null {
+  const match = findLatexOffsetForPdfText(frameSource, pdfText, context);
+  if (!match) return null;
+  const existingBlock = visualObjectBlockAt(frameSource, match);
+  const content = frameSource.slice(match.start, match.end);
+  const idMatch = existingBlock
+    ? frameSource.slice(existingBlock.start, existingBlock.end).match(/SOMNIQ-VISUAL-OBJECT\s+id=([^\s]+)/)
+    : null;
+  const id = idMatch?.[1] ?? visualObjectId(pdfText, match.start);
+  const block = visualObjectLatex(id, content, geometry);
+  if (existingBlock) {
+    return `${frameSource.slice(0, existingBlock.start)}${block}${frameSource.slice(existingBlock.end)}`;
+  }
+
+  const placeholderWidth = Math.max(1, geometry.width).toFixed(2);
+  const placeholderHeight = Math.max(1, geometry.height).toFixed(2);
+  const placeholder = `\\rule{${placeholderWidth}pt}{0pt}\\rule{0pt}{${placeholderHeight}pt}`;
+  const withoutOriginal = `${frameSource.slice(0, match.start)}${placeholder}${frameSource.slice(match.end)}`;
+  const frameEnd = withoutOriginal.lastIndexOf("\\end{frame}");
+  if (frameEnd < 0) return null;
+  return `${withoutOriginal.slice(0, frameEnd)}${block}${withoutOriginal.slice(frameEnd)}`;
+}
+
+function insertVisualTextInFrame(
+  frameSource: string,
+  content: string,
+  geometry: PdfTextObjectGeometry,
+): string | null {
+  const frameEnd = frameSource.lastIndexOf("\\end{frame}");
+  if (frameEnd < 0) return null;
+  const objectCount = (frameSource.match(/% SOMNIQ-VISUAL-OBJECT id=/g) ?? []).length;
+  const id = visualObjectId(`${content}:${objectCount}`, frameEnd);
+  const block = visualObjectLatex(id, content, geometry);
+  return `${frameSource.slice(0, frameEnd)}${block}${frameSource.slice(frameEnd)}`;
+}
+
+type TypesetFileMutation =
+  | { type: "delete"; path: string; isDir: boolean }
+  | { type: "rename"; path: string; newPath: string; isDir: boolean };
 
 function TypesetExplorer({
   projectPath,
@@ -1810,11 +1951,18 @@ function TypesetExplorer({
   activePreviewPath,
   refreshKey,
   onOpenPath,
+  onFileMutation,
 }: ExplorerProps) {
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set(["", "papers"]));
   const [children, setChildren] = useState<Record<string, FileTreeEntry[]>>({});
   const [loading, setLoading] = useState<Set<string>>(() => new Set());
   const [error, setError] = useState<string | null>(null);
+  const [operationBusy, setOperationBusy] = useState(false);
+  const [rowMenu, setRowMenu] = useState<{ x: number; y: number; entry: FileTreeEntry } | null>(null);
+  const [renameTarget, setRenameTarget] = useState<FileTreeEntry | null>(null);
+  const [renameValue, setRenameValue] = useState("");
+  const [deleteTarget, setDeleteTarget] = useState<FileTreeEntry | null>(null);
+  const renameInputRef = useRef<HTMLInputElement | null>(null);
   const rootName = basename(rootPath) || basename(projectPath) || "Project";
 
   const loadDir = useCallback(async (path: string) => {
@@ -1843,6 +1991,30 @@ function TypesetExplorer({
     if (parentDir) void loadDir(parentDir);
   }, [loadDir, projectPath, refreshKey, activeSourcePath, rootPath]);
 
+  useEffect(() => {
+    if (!rowMenu) return;
+    const dismiss = () => setRowMenu(null);
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setRowMenu(null);
+    };
+    window.addEventListener("pointerdown", dismiss);
+    window.addEventListener("resize", dismiss);
+    window.addEventListener("blur", dismiss);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("pointerdown", dismiss);
+      window.removeEventListener("resize", dismiss);
+      window.removeEventListener("blur", dismiss);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [rowMenu]);
+
+  useEffect(() => {
+    if (!renameTarget) return;
+    const frame = window.requestAnimationFrame(() => renameInputRef.current?.select());
+    return () => window.cancelAnimationFrame(frame);
+  }, [renameTarget]);
+
   const toggleDir = (path: string) => {
     setExpanded((items) => {
       const next = new Set(items);
@@ -1853,6 +2025,109 @@ function TypesetExplorer({
       }
       return next;
     });
+  };
+
+  const refreshAfterChange = useCallback(async (paths: string[]) => {
+    await Promise.all(Array.from(new Set(paths)).map((path) => loadDir(path)));
+  }, [loadDir]);
+
+  const openRenameDialog = (entry: FileTreeEntry) => {
+    setRenameValue(entry.name);
+    setRenameTarget(entry);
+    setRowMenu(null);
+  };
+
+  const renameEntry = async () => {
+    if (!renameTarget) return;
+    const nextName = renameValue.trim();
+    if (!nextName || /[\\/]/.test(nextName)) {
+      setError("Enter a file or folder name without path separators.");
+      return;
+    }
+    if (nextName === renameTarget.name) {
+      setRenameTarget(null);
+      return;
+    }
+    const oldPath = renameTarget.path;
+    const parent = dirname(oldPath);
+    const newPath = parent ? `${parent}/${nextName}` : nextName;
+    setOperationBusy(true);
+    setError(null);
+    try {
+      const renamed = await fileRename(oldPath, newPath);
+      setExpanded((items) => {
+        const next = new Set<string>();
+        const prefix = `${oldPath}/`;
+        for (const path of items) {
+          if (path === oldPath) next.add(renamed.path);
+          else if (renameTarget.isDir && path.startsWith(prefix)) next.add(`${renamed.path}/${path.slice(prefix.length)}`);
+          else next.add(path);
+        }
+        return next;
+      });
+      await refreshAfterChange([dirname(oldPath), dirname(renamed.path)]);
+      onFileMutation({ type: "rename", path: oldPath, newPath: renamed.path, isDir: renameTarget.isDir });
+      setRenameTarget(null);
+    } catch (renameError) {
+      setError(String(renameError));
+    } finally {
+      setOperationBusy(false);
+    }
+  };
+
+  const deleteEntry = async () => {
+    if (!deleteTarget) return;
+    setOperationBusy(true);
+    setError(null);
+    try {
+      await fileDelete(deleteTarget.path);
+      setExpanded((items) => {
+        const next = new Set<string>();
+        const prefix = `${deleteTarget.path}/`;
+        for (const path of items) {
+          if (path !== deleteTarget.path && !path.startsWith(prefix)) next.add(path);
+        }
+        return next;
+      });
+      await refreshAfterChange([dirname(deleteTarget.path)]);
+      onFileMutation({ type: "delete", path: deleteTarget.path, isDir: deleteTarget.isDir });
+      setDeleteTarget(null);
+    } catch (deleteError) {
+      setError(String(deleteError));
+    } finally {
+      setOperationBusy(false);
+    }
+  };
+
+  const duplicateEntry = async (entry: FileTreeEntry) => {
+    setOperationBusy(true);
+    setError(null);
+    try {
+      const duplicated = await fileDuplicate(entry.path);
+      const parent = dirname(entry.path);
+      setExpanded((items) => {
+        const next = new Set(items);
+        next.add(parent);
+        if (duplicated.isDir) next.add(duplicated.path);
+        return next;
+      });
+      await refreshAfterChange([parent]);
+    } catch (duplicateError) {
+      setError(String(duplicateError));
+    } finally {
+      setOperationBusy(false);
+      setRowMenu(null);
+    }
+  };
+
+  const copyPath = async (path: string) => {
+    try {
+      await navigator.clipboard?.writeText(path);
+    } catch (copyError) {
+      setError(`Could not copy path: ${String(copyError)}`);
+    } finally {
+      setRowMenu(null);
+    }
   };
 
   const renderEntry = (entry: FileTreeEntry, depth: number) => {
@@ -1868,11 +2143,15 @@ function TypesetExplorer({
           type="button"
           className={`typeset-tree-row entity-name${entry.isDir ? " folder" : " file"}${sourceActive ? " active selected" : ""}${previewActive ? " preview-active" : ""}`}
           style={{ paddingLeft: `${depth * 14 + 10}px` }}
-          title={entry.path}
-          disabled={!openable}
+          title={openable ? entry.path : `${entry.path}\nRight-click for file actions.`}
           onClick={() => {
+            if (!openable) return;
             if (entry.isDir) toggleDir(entry.path);
             else onOpenPath(entry.path);
+          }}
+          onContextMenu={(event) => {
+            event.preventDefault();
+            setRowMenu({ x: event.clientX, y: event.clientY, entry });
           }}
         >
           <span className="typeset-tree-caret">{entry.isDir ? (isExpanded ? "v" : ">") : ""}</span>
@@ -1923,6 +2202,92 @@ function TypesetExplorer({
           </div>
         )}
       </div>
+      {rowMenu && typeof document !== "undefined" && createPortal(
+        <div
+          className="typeset-tree-menu"
+          style={{ left: rowMenu.x, top: rowMenu.y }}
+          role="menu"
+          aria-label="File actions"
+          onPointerDown={(event) => event.stopPropagation()}
+        >
+          <button type="button" role="menuitem" disabled={operationBusy} onClick={() => void copyPath(rowMenu.entry.path)}>
+            Copy path
+          </button>
+          <button type="button" role="menuitem" disabled={operationBusy} onClick={() => void duplicateEntry(rowMenu.entry)}>
+            Duplicate
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            disabled={operationBusy}
+            onClick={() => {
+              void fileReveal(rowMenu.entry.path).catch((revealError) => setError(String(revealError)));
+              setRowMenu(null);
+            }}
+          >
+            Show in folder
+          </button>
+          <button type="button" role="menuitem" disabled={operationBusy} onClick={() => openRenameDialog(rowMenu.entry)}>
+            Rename
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            className="danger"
+            disabled={operationBusy}
+            onClick={() => {
+              setDeleteTarget(rowMenu.entry);
+              setRowMenu(null);
+            }}
+          >
+            Delete
+          </button>
+        </div>,
+        document.body,
+      )}
+      {renameTarget && typeof document !== "undefined" && createPortal(
+        <div className="typeset-file-dialog-backdrop" role="presentation">
+          <form
+            className="typeset-file-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="typeset-rename-title"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void renameEntry();
+            }}
+          >
+            <h3 id="typeset-rename-title">Rename {renameTarget.isDir ? "folder" : "file"}</h3>
+            <label>
+              Name
+              <input
+                ref={renameInputRef}
+                value={renameValue}
+                disabled={operationBusy}
+                onChange={(event) => setRenameValue(event.target.value)}
+              />
+            </label>
+            <div className="typeset-file-dialog-actions">
+              <button type="button" disabled={operationBusy} onClick={() => setRenameTarget(null)}>Cancel</button>
+              <button type="submit" className="primary" disabled={operationBusy || !renameValue.trim()}>Rename</button>
+            </div>
+          </form>
+        </div>,
+        document.body,
+      )}
+      {deleteTarget && typeof document !== "undefined" && createPortal(
+        <div className="typeset-file-dialog-backdrop" role="presentation">
+          <div className="typeset-file-dialog" role="alertdialog" aria-modal="true" aria-labelledby="typeset-delete-title">
+            <h3 id="typeset-delete-title">Delete {deleteTarget.isDir ? "folder" : "file"}?</h3>
+            <p><strong>{deleteTarget.name}</strong> will be permanently deleted.</p>
+            <div className="typeset-file-dialog-actions">
+              <button type="button" disabled={operationBusy} onClick={() => setDeleteTarget(null)}>Cancel</button>
+              <button type="button" className="danger" disabled={operationBusy} onClick={() => void deleteEntry()}>Delete</button>
+            </div>
+          </div>
+        </div>,
+        document.body,
+      )}
     </aside>
   );
 }
@@ -1940,6 +2305,10 @@ interface PdfPageProps {
   page: number;
   zoom: number;
   onSourceTextClick: (text: string, context: string) => void;
+  editable?: boolean;
+  onTextObjectEdit?: (change: PdfTextObjectChange, nextText: string) => void;
+  onTextObjectMove?: (change: PdfTextObjectChange) => void;
+  onPageSize?: (width: number, height: number) => void;
   pageRef?: (page: number, el: HTMLDivElement | null) => void;
   highlight?: PdfPageHighlight | null;
 }
@@ -1974,22 +2343,101 @@ function textRunsFromPdfContent(textContent: unknown, viewport: { transform: num
       width,
       height,
       fontSize,
+      color: "#1f2937",
+      backgroundColor: "#ffffff",
     }];
   });
 }
 
-const PdfPage = memo(function PdfPage({ pdf, page, zoom, onSourceTextClick, pageRef, highlight }: PdfPageProps) {
+function samplePdfTextColors(
+  canvas: HTMLCanvasElement,
+  run: PdfTextRun,
+  outputScale: number,
+): Pick<PdfTextRun, "color" | "backgroundColor"> {
+  const context = canvas.getContext("2d");
+  if (!context) return { color: run.color, backgroundColor: run.backgroundColor };
+  const x = clampNumber(Math.floor(run.left * outputScale), 0, Math.max(0, canvas.width - 1));
+  const y = clampNumber(Math.floor(run.top * outputScale), 0, Math.max(0, canvas.height - 1));
+  const width = clampNumber(Math.ceil(run.width * outputScale), 1, Math.max(1, canvas.width - x));
+  const height = clampNumber(Math.ceil(run.height * outputScale), 1, Math.max(1, canvas.height - y));
+  try {
+    const pixels = context.getImageData(x, y, width, height).data;
+    const bins = new Map<string, { count: number; red: number; green: number; blue: number }>();
+    for (let index = 0; index < pixels.length; index += 4) {
+      if (pixels[index + 3] < 100) continue;
+      const red = pixels[index];
+      const green = pixels[index + 1];
+      const blue = pixels[index + 2];
+      const key = `${red >> 4}:${green >> 4}:${blue >> 4}`;
+      const bin = bins.get(key) ?? { count: 0, red: 0, green: 0, blue: 0 };
+      bin.count += 1;
+      bin.red += red;
+      bin.green += green;
+      bin.blue += blue;
+      bins.set(key, bin);
+    }
+    const ranked = Array.from(bins.values()).sort((left, right) => right.count - left.count);
+    const background = ranked[0];
+    if (!background) return { color: run.color, backgroundColor: run.backgroundColor };
+    const backgroundRgb = [background.red / background.count, background.green / background.count, background.blue / background.count];
+    const foreground = ranked.slice(1).reduce<{ bin: typeof background; score: number } | null>((best, bin) => {
+      const rgb = [bin.red / bin.count, bin.green / bin.count, bin.blue / bin.count];
+      const distance = Math.hypot(rgb[0] - backgroundRgb[0], rgb[1] - backgroundRgb[1], rgb[2] - backgroundRgb[2]);
+      const score = distance * Math.sqrt(bin.count);
+      return distance > 28 && (!best || score > best.score) ? { bin, score } : best;
+    }, null)?.bin;
+    const toHex = (value: number) => Math.round(value).toString(16).padStart(2, "0");
+    const backgroundColor = `#${toHex(backgroundRgb[0])}${toHex(backgroundRgb[1])}${toHex(backgroundRgb[2])}`;
+    if (!foreground) return { color: run.color, backgroundColor };
+    return {
+      color: `#${toHex(foreground.red / foreground.count)}${toHex(foreground.green / foreground.count)}${toHex(foreground.blue / foreground.count)}`,
+      backgroundColor,
+    };
+  } catch {
+    return { color: run.color, backgroundColor: run.backgroundColor };
+  }
+}
+
+const PdfPage = memo(function PdfPage({
+  pdf,
+  page,
+  zoom,
+  onSourceTextClick,
+  editable = false,
+  onTextObjectEdit,
+  onTextObjectMove,
+  onPageSize,
+  pageRef,
+  highlight,
+}: PdfPageProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const renderTask = useRef<RenderTask | null>(null);
   const [pageSize, setPageSize] = useState<{ width: number; height: number } | null>(null);
   const [textRuns, setTextRuns] = useState<PdfTextRun[]>([]);
+  const [objectDrafts, setObjectDrafts] = useState<Record<string, PdfTextObjectGeometry & { text: string }>>({});
+  const [selectedObjectId, setSelectedObjectId] = useState<string | null>(null);
+  const [editingObjectId, setEditingObjectId] = useState<string | null>(null);
+  const [editingText, setEditingText] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const dragRef = useRef<{
+    id: string;
+    startClientX: number;
+    startClientY: number;
+    geometry: PdfTextObjectGeometry;
+    text: string;
+    context: string;
+    moved: boolean;
+  } | null>(null);
+  const suppressClickRef = useRef(false);
 
   useEffect(() => {
     let disposed = false;
     setError(null);
     setTextRuns([]);
     setPageSize(null);
+    setObjectDrafts({});
+    setSelectedObjectId(null);
+    setEditingObjectId(null);
     renderTask.current?.cancel();
     renderTask.current = null;
     void pdf
@@ -1998,9 +2446,7 @@ const PdfPage = memo(function PdfPage({ pdf, page, zoom, onSourceTextClick, page
         if (disposed || !canvasRef.current) return;
         const viewport = pdfPage.getViewport({ scale: zoom });
         setPageSize({ width: viewport.width, height: viewport.height });
-        void pdfPage.getTextContent().then((textContent) => {
-          if (!disposed) setTextRuns(textRunsFromPdfContent(textContent, viewport, zoom));
-        });
+        onPageSize?.(viewport.width / zoom, viewport.height / zoom);
         const canvas = canvasRef.current;
         const context = canvas.getContext("2d");
         if (!context) throw new Error("Canvas rendering is unavailable.");
@@ -2015,7 +2461,11 @@ const PdfPage = memo(function PdfPage({ pdf, page, zoom, onSourceTextClick, page
         const transform = outputScale !== 1 ? [outputScale, 0, 0, outputScale, 0, 0] : undefined;
         const task = pdfPage.render({ canvas, canvasContext: context, viewport, transform });
         renderTask.current = task;
-        return task.promise;
+        return Promise.all([task.promise, pdfPage.getTextContent()]).then(([, textContent]) => {
+          if (disposed) return;
+          const runs = textRunsFromPdfContent(textContent, viewport, zoom);
+          setTextRuns(runs.map((run) => ({ ...run, ...samplePdfTextColors(canvas, run, outputScale) })));
+        });
       })
       .catch((renderError) => {
         if (!disposed && renderError?.name !== "RenderingCancelledException") {
@@ -2029,6 +2479,56 @@ const PdfPage = memo(function PdfPage({ pdf, page, zoom, onSourceTextClick, page
     };
   }, [page, pdf, zoom]);
 
+  useEffect(() => {
+    if (!editable) return undefined;
+    const geometryAt = (event: PointerEvent | MouseEvent, drag: NonNullable<typeof dragRef.current>) => {
+      if (!pageSize) return null;
+      const deltaX = (event.clientX - drag.startClientX) / zoom;
+      const deltaY = (event.clientY - drag.startClientY) / zoom;
+      const naturalPageWidth = pageSize.width / zoom;
+      const naturalPageHeight = pageSize.height / zoom;
+      return {
+        ...drag.geometry,
+        left: clampNumber(drag.geometry.left + deltaX, 0, Math.max(0, naturalPageWidth - drag.geometry.width)),
+        top: clampNumber(drag.geometry.top + deltaY, 0, Math.max(0, naturalPageHeight - drag.geometry.height)),
+        text: drag.text,
+      };
+    };
+    const moveObject = (event: PointerEvent | MouseEvent) => {
+      const drag = dragRef.current;
+      if (!drag) return;
+      const deltaX = (event.clientX - drag.startClientX) / zoom;
+      const deltaY = (event.clientY - drag.startClientY) / zoom;
+      if (Math.hypot(deltaX, deltaY) > 1.5) drag.moved = true;
+      if (!drag.moved) return;
+      const nextDraft = geometryAt(event, drag);
+      if (nextDraft) setObjectDrafts((items) => ({ ...items, [drag.id]: nextDraft }));
+    };
+    const finishObjectMove = (event: PointerEvent | MouseEvent) => {
+      const drag = dragRef.current;
+      if (!drag) return;
+      dragRef.current = null;
+      suppressClickRef.current = drag.moved;
+      if (!drag.moved) return;
+      const nextDraft = geometryAt(event, drag);
+      if (!nextDraft) return;
+      setObjectDrafts((items) => ({ ...items, [drag.id]: nextDraft }));
+      onTextObjectMove?.({ ...nextDraft, context: drag.context });
+    };
+    window.addEventListener("pointermove", moveObject);
+    window.addEventListener("pointerup", finishObjectMove);
+    window.addEventListener("pointercancel", finishObjectMove);
+    window.addEventListener("mousemove", moveObject);
+    window.addEventListener("mouseup", finishObjectMove);
+    return () => {
+      window.removeEventListener("pointermove", moveObject);
+      window.removeEventListener("pointerup", finishObjectMove);
+      window.removeEventListener("pointercancel", finishObjectMove);
+      window.removeEventListener("mousemove", moveObject);
+      window.removeEventListener("mouseup", finishObjectMove);
+    };
+  }, [editable, onTextObjectMove, pageSize, zoom]);
+
   return (
     <div className="typeset-pdf-page" ref={(el) => pageRef?.(page, el)}>
       <canvas ref={canvasRef} aria-label={`PDF page ${page}`} />
@@ -2038,29 +2538,159 @@ const PdfPage = memo(function PdfPage({ pdf, page, zoom, onSourceTextClick, page
           style={{ width: `${pageSize.width}px`, height: `${pageSize.height}px` }}
           aria-label={`PDF text layer page ${page}`}
         >
-          {textRuns.map((run, index) => (
-            <button
-              key={run.id}
-              type="button"
-              className="typeset-pdf-text-run"
-              style={{
-                left: `${run.left}px`,
-                top: `${run.top}px`,
-                width: `${run.width}px`,
-                height: `${run.height}px`,
-                fontSize: `${run.fontSize}px`,
-              }}
-              title="Jump to source"
-              aria-label={`Jump to source text: ${run.text}`}
-              onClick={(event) => {
-                event.stopPropagation();
-                const context = textRuns.slice(Math.max(0, index - 2), index + 3).map((item) => item.text).join(" ");
-                onSourceTextClick(run.text, context);
-              }}
-            >
-              {run.text}
-            </button>
-          ))}
+          {textRuns.map((run, index) => {
+            const context = textRuns.slice(Math.max(0, index - 2), index + 3).map((item) => item.text).join(" ");
+            const draft = objectDrafts[run.id];
+            const displayed = draft
+              ? {
+                  text: draft.text,
+                  left: draft.left * zoom,
+                  top: draft.top * zoom,
+                  width: draft.width * zoom,
+                  height: draft.height * zoom,
+                  fontSize: draft.fontSize * zoom,
+                  color: draft.color,
+                }
+              : run;
+            const selected = editable && selectedObjectId === run.id;
+            const editing = editable && editingObjectId === run.id;
+            const style = {
+              left: `${displayed.left}px`,
+              top: `${displayed.top}px`,
+              width: `${displayed.width}px`,
+              height: `${Math.max(displayed.height, displayed.fontSize * 1.15)}px`,
+              fontSize: `${displayed.fontSize}px`,
+              color: draft || editing ? displayed.color : undefined,
+              ...(draft ? { "--typeset-object-background": run.backgroundColor } : {}),
+            } as CSSProperties;
+            const geometry = (): PdfTextObjectGeometry => ({
+              left: displayed.left / zoom,
+              top: displayed.top / zoom,
+              width: displayed.width / zoom,
+              height: displayed.height / zoom,
+              fontSize: displayed.fontSize / zoom,
+              color: displayed.color,
+            });
+            const commitEdit = () => {
+              const nextText = editingText.trim();
+              setEditingObjectId(null);
+              if (!nextText || nextText === displayed.text) return;
+              const nextDraft = { ...geometry(), text: nextText };
+              setObjectDrafts((items) => ({ ...items, [run.id]: nextDraft }));
+              onTextObjectEdit?.({ ...geometry(), text: displayed.text, context }, nextText);
+            };
+            if (editing) {
+              return (
+                <input
+                  key={run.id}
+                  className="typeset-slide-object-editor"
+                  style={style}
+                  value={editingText}
+                  aria-label={`Edit slide text: ${displayed.text}`}
+                  autoFocus
+                  onChange={(event) => setEditingText(event.currentTarget.value)}
+                  onClick={(event) => event.stopPropagation()}
+                  onBlur={commitEdit}
+                  onKeyDown={(event) => {
+                    event.stopPropagation();
+                    if (event.key === "Enter") {
+                      event.preventDefault();
+                      commitEdit();
+                    } else if (event.key === "Escape") {
+                      event.preventDefault();
+                      setEditingObjectId(null);
+                    }
+                  }}
+                />
+              );
+            }
+            return (
+              <Fragment key={run.id}>
+                {draft && (
+                  <span
+                    className="typeset-slide-object-origin-mask"
+                    aria-hidden="true"
+                    style={{
+                      left: `${Math.max(0, run.left - 1.5)}px`,
+                      top: `${Math.max(0, run.top - 1.5)}px`,
+                      width: `${run.width + 3}px`,
+                      height: `${Math.max(run.height, run.fontSize * 1.15) + 3}px`,
+                      backgroundColor: run.backgroundColor,
+                    }}
+                  />
+                )}
+                <button
+                type="button"
+                className={`typeset-pdf-text-run${editable ? " direct-object" : ""}${selected ? " selected" : ""}${draft ? " moved" : ""}`}
+                style={style}
+                title={editable ? "Drag to move · double-click to edit" : "Jump to source"}
+                aria-label={editable ? `Slide text object: ${displayed.text}` : `Jump to source text: ${displayed.text}`}
+                aria-pressed={editable ? selected : undefined}
+                onPointerDown={(event) => {
+                  if (!editable || event.button !== 0 || dragRef.current) return;
+                  event.stopPropagation();
+                  setSelectedObjectId(run.id);
+                  event.currentTarget.setPointerCapture?.(event.pointerId);
+                  dragRef.current = {
+                    id: run.id,
+                    startClientX: event.clientX,
+                    startClientY: event.clientY,
+                    geometry: geometry(),
+                    text: displayed.text,
+                    context,
+                    moved: false,
+                  };
+                }}
+                onMouseDown={(event) => {
+                  if (!editable || event.button !== 0 || dragRef.current) return;
+                  event.stopPropagation();
+                  setSelectedObjectId(run.id);
+                  dragRef.current = {
+                    id: run.id,
+                    startClientX: event.clientX,
+                    startClientY: event.clientY,
+                    geometry: geometry(),
+                    text: displayed.text,
+                    context,
+                    moved: false,
+                  };
+                }}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  if (editable) {
+                    if (suppressClickRef.current) {
+                      suppressClickRef.current = false;
+                      return;
+                    }
+                    setSelectedObjectId(run.id);
+                    return;
+                  }
+                  onSourceTextClick(run.text, context);
+                }}
+                onDoubleClick={(event) => {
+                  if (!editable) return;
+                  event.stopPropagation();
+                  setSelectedObjectId(run.id);
+                  setEditingText(displayed.text);
+                  setEditingObjectId(run.id);
+                }}
+                onKeyDown={(event) => {
+                  if (!editable) return;
+                  if (event.key === "Enter" || event.key === "F2") {
+                    event.preventDefault();
+                    setEditingText(displayed.text);
+                    setEditingObjectId(run.id);
+                  } else if ((event.key === "Delete" || event.key === "Backspace") && selected) {
+                    event.preventDefault();
+                    onTextObjectEdit?.({ ...geometry(), text: displayed.text, context }, "");
+                  }
+                }}
+                >
+                  {displayed.text}
+                </button>
+              </Fragment>
+            );
+          })}
         </div>
       )}
       {highlight && (
@@ -2092,6 +2722,7 @@ interface PdfPreviewProps {
   logOpen: boolean;
   diagnosticsCount: number;
   onCompile: () => void;
+  onClearCacheCompile: () => void;
   onToggleLog: () => void;
   onSourceTextClick: (text: string, context: string) => void;
   onHide?: () => void;
@@ -2103,28 +2734,66 @@ interface CompiledVisualProps {
   path: string | null;
   refreshKey: number;
   page: number;
+  slide: BeamerSlide | null;
+  slides: BeamerSlide[];
+  source: string;
   dirty: boolean;
+  compiling: boolean;
+  onChangeSource: (source: string) => void;
+  onSave: () => void;
+  onNavigateToLine: (line: number) => void;
+  onOpenCodeAtLine: (line: number) => void;
+  onOpenCodeRange: (start: number, end: number) => void;
   onSourceTextClick: (text: string, context: string) => void;
+  focused: boolean;
+  onToggleFocus: () => void;
 }
 
 /**
  * Safe Visual surface for Beamer: the compiled PDF page is the canvas.
  * Arbitrary TikZ/custom macros cannot be reproduced faithfully by a rich-text
- * source decorator, so this view never rewrites LaTeX. Text clicks only locate
- * the corresponding source range in Code mode.
+ * source decorator, so the compiled output remains the visual truth. Text
+ * clicks reveal the exact frame source without pretending to reproduce custom
+ * macros in a lossy rich-text model.
  */
 function TypesetCompiledVisual({
   path,
   refreshKey,
   page,
+  slide,
+  slides,
+  source,
   dirty,
+  compiling,
+  onChangeSource,
+  onSave,
+  onNavigateToLine,
+  onOpenCodeAtLine,
+  onOpenCodeRange,
   onSourceTextClick,
+  focused,
+  onToggleFocus,
 }: CompiledVisualProps) {
   const [pdf, setPdf] = useState<PDFDocumentProxy | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [zoom, setZoom] = useState(1);
+  const [fitMode, setFitMode] = useState(true);
+  const [deckOpen, setDeckOpen] = useState(true);
+  const [pageNaturalSize, setPageNaturalSize] = useState({ width: 364, height: 273 });
+  const [sourceOpen, setSourceOpen] = useState(false);
+  const [selectedSourceRange, setSelectedSourceRange] = useState<{ start: number; end: number } | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const sourceEditorRef = useRef<HTMLTextAreaElement | null>(null);
+
+  const frameRange = useMemo(() => {
+    if (!slide) return { start: 0, end: source.length };
+    const start = lineOffsetFor(source, slide.line);
+    const end = Math.max(start, Math.min(source.length, lineOffsetFor(source, slide.endLine + 1)));
+    return { start, end };
+  }, [slide, source]);
+  const frameSource = source.slice(frameRange.start, frameRange.end);
+  const frameLineCount = Math.max(1, frameSource.replace(/\n$/, "").split("\n").length);
 
   useEffect(() => {
     let disposed = false;
@@ -2158,55 +2827,312 @@ function TypesetCompiledVisual({
     };
   }, [path, refreshKey]);
 
-  useEffect(() => {
+  const fitSlide = useCallback(async () => {
     if (!pdf) return;
+    const scroll = scrollRef.current;
+    if (!scroll) return;
+    try {
+      const pdfPage = await pdf.getPage(clampNumber(page, 1, pdf.numPages));
+      const viewport = pdfPage.getViewport({ scale: 1 });
+      const availableWidth = Math.max(280, scroll.clientWidth - 72);
+      const availableHeight = Math.max(200, scroll.clientHeight - 72);
+      setZoom(clampNumber(Math.min(availableWidth / viewport.width, availableHeight / viewport.height), 0.35, 2.4));
+    } catch {
+      setZoom(1);
+    }
+  }, [page, pdf]);
+
+  useEffect(() => {
+    if (!pdf || !fitMode) return;
     let disposed = false;
     let resizeObserver: ResizeObserver | null = null;
-    const fitToWidth = async () => {
-      const scroll = scrollRef.current;
-      if (!scroll) return;
-      try {
-        const pdfPage = await pdf.getPage(clampNumber(page, 1, pdf.numPages));
-        if (disposed) return;
-        const viewport = pdfPage.getViewport({ scale: 1 });
-        const availableWidth = Math.max(240, scroll.clientWidth - 44);
-        const availableHeight = Math.max(180, scroll.clientHeight - 64);
-        setZoom(clampNumber(Math.min(availableWidth / viewport.width, availableHeight / viewport.height), 0.35, 2.2));
-      } catch {
-        if (!disposed) setZoom(1);
-      }
+    const refit = () => {
+      if (!disposed) void fitSlide();
     };
-    void fitToWidth();
+    refit();
     if (typeof ResizeObserver !== "undefined" && scrollRef.current) {
-      resizeObserver = new ResizeObserver(() => void fitToWidth());
+      resizeObserver = new ResizeObserver(refit);
       resizeObserver.observe(scrollRef.current);
     }
     return () => {
       disposed = true;
       resizeObserver?.disconnect();
     };
-  }, [page, pdf]);
+  }, [fitMode, fitSlide, pdf]);
+
+  useEffect(() => {
+    if (!sourceOpen || !selectedSourceRange) return;
+    const frame = window.requestAnimationFrame(() => {
+      const editor = sourceEditorRef.current;
+      if (!editor) return;
+      const start = clampNumber(selectedSourceRange.start - frameRange.start, 0, editor.value.length);
+      const end = clampNumber(selectedSourceRange.end - frameRange.start, start, editor.value.length);
+      editor.focus();
+      editor.setSelectionRange(start, end);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [frameRange.start, selectedSourceRange, sourceOpen]);
 
   const safePage = pdf ? clampNumber(page, 1, pdf.numPages) : 1;
+  const activeSlideIndex = slide ? slides.indexOf(slide) : Math.max(0, safePage - 1);
+
+  const navigateSlide = (direction: -1 | 1) => {
+    const nextIndex = clampNumber(activeSlideIndex + direction, 0, Math.max(0, slides.length - 1));
+    const nextSlide = slides[nextIndex];
+    if (nextSlide && nextIndex !== activeSlideIndex) onNavigateToLine(nextSlide.line);
+  };
+
+  const openSourceForText = (text: string, context: string) => {
+    const localMatch = findLatexOffsetForPdfText(frameSource, text, context);
+    const match = localMatch
+      ? { start: localMatch.start + frameRange.start, end: localMatch.end + frameRange.start }
+      : findLatexOffsetForPdfText(source, text, context);
+    if (match) setSelectedSourceRange(match);
+    setSourceOpen(true);
+    onSourceTextClick(text, context);
+  };
+
+  const changeFrameSource = (nextFrameSource: string) => {
+    setSelectedSourceRange(null);
+    onChangeSource(`${source.slice(0, frameRange.start)}${nextFrameSource}${source.slice(frameRange.end)}`);
+  };
+
+  const editTextObject = (change: PdfTextObjectChange, nextText: string) => {
+    const escaped = escapeDirectLatexText(nextText);
+    // Scope to the current frame first (mirrors moveTextObject/openSourceForText)
+    // so editing or deleting a slide's text object can't match and mutate the
+    // same wording on a different slide earlier in the document.
+    const nextFrameSource = editPdfTextInLatex(frameSource, change.text, change.context, escaped);
+    if (nextFrameSource != null) {
+      onChangeSource(`${source.slice(0, frameRange.start)}${nextFrameSource}${source.slice(frameRange.end)}`);
+      return;
+    }
+    const nextSource = editPdfTextInLatex(source, change.text, change.context, escaped);
+    if (nextSource == null) {
+      openSourceForText(change.text, change.context);
+      return;
+    }
+    onChangeSource(nextSource);
+  };
+
+  const moveTextObject = (change: PdfTextObjectChange) => {
+    const nextFrameSource = positionPdfTextInFrame(frameSource, change.text, change.context, change);
+    if (nextFrameSource == null) {
+      openSourceForText(change.text, change.context);
+      return;
+    }
+    const positioned = `${source.slice(0, frameRange.start)}${nextFrameSource}${source.slice(frameRange.end)}`;
+    onChangeSource(ensureTikzPackage(positioned));
+  };
+
+  const addTextObject = () => {
+    const nextFrameSource = insertVisualTextInFrame(frameSource, "New text", {
+      left: pageNaturalSize.width * 0.4,
+      top: pageNaturalSize.height * 0.46,
+      width: 96,
+      height: 20,
+      fontSize: 18,
+      color: "#1f2937",
+    });
+    if (nextFrameSource == null) return;
+    const nextSource = `${source.slice(0, frameRange.start)}${nextFrameSource}${source.slice(frameRange.end)}`;
+    onChangeSource(ensureTikzPackage(nextSource));
+  };
+
+  const changeZoom = (delta: number) => {
+    setFitMode(false);
+    setZoom((value) => clampNumber(value + delta, 0.35, 2.4));
+  };
 
   return (
     <section className="typeset-compiled-visual typeset-visual-pane" aria-label="Compiled slide visual editor">
-      <div className="typeset-compiled-visual-status" role="status">
-        <span>Compiled slide {safePage}{pdf ? ` / ${pdf.numPages}` : ""}</span>
-        <strong>{dirty ? "Source changed — preview is intentionally unchanged" : "Preview matches the last successful compile"}</strong>
+      <div className="typeset-slide-canvas-toolbar">
+        <div className="typeset-slide-canvas-identity">
+          <span>Slide {safePage}{pdf ? ` / ${pdf.numPages}` : ""}</span>
+          <strong>{slide?.title || "Compiled slide"}</strong>
+          <span className="typeset-slide-direct-mode">Direct edit</span>
+          <em className={dirty ? "stale" : "current"} role="status">
+            {dirty ? "Draft · save to update preview" : "Compiled preview"}
+          </em>
+        </div>
+        <div className="typeset-slide-canvas-actions" aria-label="Slide canvas controls">
+          <button type="button" title="Zoom out" aria-label="Zoom out slide" onClick={() => changeZoom(-0.1)}>
+            <ToolIcon name="minus" />
+          </button>
+          <button
+            type="button"
+            className={fitMode ? "active fit" : "fit"}
+            title="Fit slide to canvas"
+            aria-label="Fit slide to canvas"
+            aria-pressed={fitMode}
+            onClick={() => {
+              setFitMode(true);
+              void fitSlide();
+            }}
+          >
+            Fit <span>{Math.round(zoom * 100)}%</span>
+          </button>
+          <button type="button" title="Zoom in" aria-label="Zoom in slide" onClick={() => changeZoom(0.1)}>
+            <ToolIcon name="plus" />
+          </button>
+          <span className="typeset-slide-canvas-divider" />
+          <button
+            type="button"
+            className="add-text"
+            title="Add a draggable text object"
+            aria-label="Add text object"
+            disabled={compiling}
+            onClick={addTextObject}
+          >
+            <ToolIcon name="plus" />
+            Add text
+          </button>
+          {focused && (
+            <button
+              type="button"
+              className={deckOpen ? "active deck" : "deck"}
+              title={deckOpen ? "Hide slide list" : "Show slide list"}
+              aria-label={deckOpen ? "Hide slide list" : "Show slide list"}
+              aria-pressed={deckOpen}
+              onClick={() => setDeckOpen((open) => !open)}
+            >
+              <ToolIcon name="list" />
+              Slides
+            </button>
+          )}
+          <button
+            type="button"
+            className={focused ? "active focus" : "focus"}
+            title={focused ? "Restore project and PDF panels" : "Hide surrounding panels and focus the slide"}
+            aria-label={focused ? "Exit slide focus" : "Focus slide canvas"}
+            aria-pressed={focused}
+            onClick={onToggleFocus}
+          >
+            <ToolIcon name="visual" />
+            {focused ? "Exit focus" : "Focus"}
+          </button>
+          <button
+            type="button"
+            className={sourceOpen ? "active source" : "source"}
+            aria-label={sourceOpen ? "Close slide source" : "Edit slide source"}
+            aria-pressed={sourceOpen}
+            onClick={() => setSourceOpen((open) => !open)}
+          >
+            <ToolIcon name="code" />
+            {sourceOpen ? "Close source" : "Edit source"}
+          </button>
+        </div>
       </div>
-      <div className="typeset-compiled-visual-scroll" ref={scrollRef}>
-        {!path && <div className="typeset-empty">Compile the slide deck to open the safe Visual preview.</div>}
-        {path && loading && <div className="typeset-empty">Loading compiled slide...</div>}
-        {path && error && <PdfFallbackPage error={error} outputPath={path} sourcePath={null} />}
-        {pdf && !error && (
-          <PdfPage
-            key={`${path}:${refreshKey}:${safePage}`}
-            pdf={pdf}
-            page={safePage}
-            zoom={zoom}
-            onSourceTextClick={onSourceTextClick}
-          />
+      <div className={`typeset-slide-workspace${focused && deckOpen ? " deck-open" : ""}${sourceOpen ? " source-open" : ""}`}>
+        {focused && deckOpen && (
+          <nav className="typeset-slide-deck" aria-label="Slide deck outline">
+            <header>
+              <div>
+                <span>Presentation</span>
+                <strong>{slides.length} slides</strong>
+              </div>
+              <span className={dirty ? "stale" : "current"}>{dirty ? "Draft" : "Synced"}</span>
+            </header>
+            <div className="typeset-slide-deck-list">
+              {slides.map((item, index) => {
+                const active = index === activeSlideIndex;
+                return (
+                  <button
+                    type="button"
+                    key={`${item.line}:${item.title}`}
+                    className={active ? "active" : ""}
+                    aria-current={active ? "page" : undefined}
+                    aria-label={`Open slide ${index + 1}: ${item.title}`}
+                    onClick={() => onNavigateToLine(item.line)}
+                  >
+                    <span>{String(index + 1).padStart(2, "0")}</span>
+                    <strong>{item.title || `Slide ${index + 1}`}</strong>
+                    {active && <i aria-hidden="true" />}
+                  </button>
+                );
+              })}
+            </div>
+          </nav>
+        )}
+        <div className="typeset-compiled-visual-scroll" ref={scrollRef}>
+          {!path && <div className="typeset-empty">Compile the slide deck to open the Visual canvas.</div>}
+          {path && loading && <div className="typeset-empty">Loading compiled slide...</div>}
+          {path && error && <PdfFallbackPage error={error} outputPath={path} sourcePath={null} />}
+          {pdf && !error && (
+            <div
+              className="typeset-slide-stage"
+              role="group"
+              tabIndex={0}
+              aria-label={`Slide ${safePage} canvas. Use left and right arrow keys to change slides.`}
+              onKeyDown={(event) => {
+                if (event.target !== event.currentTarget) return;
+                if (event.key === "ArrowLeft") {
+                  event.preventDefault();
+                  navigateSlide(-1);
+                } else if (event.key === "ArrowRight") {
+                  event.preventDefault();
+                  navigateSlide(1);
+                }
+              }}
+            >
+              <PdfPage
+                key={`${path}:${refreshKey}:${safePage}`}
+                pdf={pdf}
+                page={safePage}
+                zoom={zoom}
+                onSourceTextClick={openSourceForText}
+                editable
+                onTextObjectEdit={editTextObject}
+                onTextObjectMove={moveTextObject}
+                onPageSize={(width, height) => setPageNaturalSize({ width, height })}
+              />
+              <span className="typeset-slide-click-hint">Select · drag to move · double-click to edit · F2 to rename</span>
+            </div>
+          )}
+        </div>
+        {sourceOpen && (
+          <aside className="typeset-slide-source-drawer" aria-label="Current slide source editor">
+            <header>
+              <div>
+                <span>Current frame</span>
+                <strong>{slide?.title || `Slide ${safePage}`}</strong>
+              </div>
+              <button
+                type="button"
+                title="Open full Code editor"
+                onClick={() => selectedSourceRange
+                  ? onOpenCodeRange(selectedSourceRange.start, selectedSourceRange.end)
+                  : onOpenCodeAtLine(slide?.line ?? 1)}
+              >
+                Full editor
+              </button>
+            </header>
+            <textarea
+              ref={sourceEditorRef}
+              value={frameSource}
+              aria-label="LaTeX source for current slide"
+                aria-keyshortcuts="Control+S Meta+S Escape"
+              spellCheck={false}
+              onChange={(event) => changeFrameSource(event.currentTarget.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Escape") {
+                  event.preventDefault();
+                  setSourceOpen(false);
+                  return;
+                }
+              }}
+            />
+            <footer>
+              <span>
+                Lines {slide?.line ?? 1}–{slide?.endLine ?? 1} · {frameLineCount} lines · {frameSource.length} chars
+                <kbd>Ctrl S</kbd>
+              </span>
+              <button type="button" disabled={!dirty || compiling} onClick={onSave}>
+                <ToolIcon name="save" />
+                {compiling ? "Compiling…" : dirty ? "Save & update preview" : "Preview is current"}
+              </button>
+            </footer>
+          </aside>
         )}
       </div>
     </section>
@@ -2236,6 +3162,7 @@ function TypesetPdfPreview({
   logOpen,
   diagnosticsCount,
   onCompile,
+  onClearCacheCompile,
   onToggleLog,
   onSourceTextClick,
   onHide,
@@ -2247,13 +3174,39 @@ function TypesetPdfPreview({
   const [zoom, setZoom] = useState(1);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [compileMenuOpen, setCompileMenuOpen] = useState(false);
+  const [compileMenuPosition, setCompileMenuPosition] = useState({ top: 0, right: 8 });
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const compileMenuRef = useRef<HTMLDivElement | null>(null);
+  const compileMenuPopoverRef = useRef<HTMLDivElement | null>(null);
   const userZoomedRef = useRef(false);
   const pageElementsRef = useRef(new Map<number, HTMLDivElement>());
   const registerPageRef = useCallback((page: number, el: HTMLDivElement | null) => {
     if (el) pageElementsRef.current.set(page, el);
     else pageElementsRef.current.delete(page);
   }, []);
+
+  useEffect(() => {
+    if (!compileMenuOpen) return;
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      const target = event.target as Node;
+      if (
+        !compileMenuRef.current?.contains(target)
+        && !compileMenuPopoverRef.current?.contains(target)
+      ) {
+        setCompileMenuOpen(false);
+      }
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setCompileMenuOpen(false);
+    };
+    document.addEventListener("pointerdown", closeOnOutsidePointer);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutsidePointer);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [compileMenuOpen]);
 
   useEffect(() => {
     let disposed = false;
@@ -2363,7 +3316,10 @@ function TypesetPdfPreview({
       <div className="typeset-preview-toolbar toolbar toolbar-pdf toolbar-pdf-hybrid">
         <div className="typeset-pdf-left toolbar-pdf-left">
           <span className="typeset-pdf-panel-label">Compiled PDF</span>
-          <div className={`typeset-compile-button-group compile-button-group${dirty ? " has-changes" : ""}`}>
+          <div
+            ref={compileMenuRef}
+            className={`typeset-compile-button-group compile-button-group${dirty ? " has-changes" : ""}`}
+          >
             <button
               type="button"
               className={`typeset-recompile-btn compile-button ${status}${dirty ? " btn-striped-animated" : ""}`}
@@ -2378,10 +3334,49 @@ function TypesetPdfPreview({
               className="typeset-compile-options compile-dropdown-toggle"
               title="Compile options"
               aria-label="Compile options"
-              disabled
+              aria-haspopup="menu"
+              aria-expanded={compileMenuOpen}
+              disabled={disabled}
+              onClick={(event) => {
+                if (compileMenuOpen) {
+                  setCompileMenuOpen(false);
+                  return;
+                }
+                const rect = event.currentTarget.getBoundingClientRect();
+                setCompileMenuPosition({
+                  top: rect.bottom + 7,
+                  right: Math.max(8, window.innerWidth - rect.right),
+                });
+                setCompileMenuOpen(true);
+              }}
             >
-              <span aria-hidden="true">v</span>
+              <ToolIcon name="chevron" className="typeset-compile-chevron" />
             </button>
+            {compileMenuOpen && typeof document !== "undefined" && createPortal(
+              <div
+                ref={compileMenuPopoverRef}
+                className="typeset-compile-menu"
+                role="menu"
+                aria-label="Compile options menu"
+                style={compileMenuPosition}
+              >
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    setCompileMenuOpen(false);
+                    onClearCacheCompile();
+                  }}
+                >
+                  <ToolIcon name="clear" />
+                  <span>
+                    <strong>Clear cache &amp; recompile</strong>
+                    <small>Remove LaTeX auxiliary files, then rebuild the PDF.</small>
+                  </span>
+                </button>
+              </div>,
+              document.body,
+            )}
           </div>
           <button
             type="button"
@@ -2457,19 +3452,23 @@ function CompileLog({
   result,
   status,
   error,
+  liveLog,
   onClose,
 }: {
   result: CompileResult | null;
   status: CompileStatus;
   error: string | null;
+  liveLog: CompileLiveLog | null;
   onClose?: () => void;
 }) {
-  const text = [error, result?.stderr, result?.stdout].filter(Boolean).join("\n\n").trim();
+  const text = status === "running"
+    ? [error, liveLog?.stderr, liveLog?.stdout].filter(Boolean).join("\n\n").trim()
+    : [error, result?.stderr, result?.stdout].filter(Boolean).join("\n\n").trim();
   return (
     <section className={`typeset-log new-logs-pane ${status === "error" ? "error" : ""}`} aria-label="Compile log">
       <div className="typeset-log-head">
         <strong>Compile log</strong>
-        <span>{compileStatusText(status, result)}</span>
+        <span>{status === "running" && liveLog ? `Compiling ${Math.ceil(liveLog.elapsedMs / 1000)}s` : compileStatusText(status, result)}</span>
         {onClose && (
           <button type="button" className="typeset-icon-btn" title="Close log" aria-label="Close log" onClick={onClose}>
             <ToolIcon name="clear" />
@@ -2477,7 +3476,7 @@ function CompileLog({
         )}
       </div>
       <div className="logs-pane-content">
-        <pre>{text || "No diagnostics."}</pre>
+        <pre>{text || (status === "running" ? "Waiting for TeX Live output..." : "No diagnostics.")}</pre>
       </div>
     </section>
   );
@@ -2737,6 +3736,7 @@ function TypesetEditorToolbar({
   canRedo,
   canUndo,
   dirty,
+  compiling,
   editorRef,
   visualViewRef,
   onChange,
@@ -2759,6 +3759,7 @@ function TypesetEditorToolbar({
   canRedo: boolean;
   canUndo: boolean;
   dirty: boolean;
+  compiling: boolean;
   editorRef: { current: SharedEditorHandle | null };
   visualViewRef: { current: EditorView | null };
   onChange: (value: string) => void;
@@ -2855,9 +3856,9 @@ function TypesetEditorToolbar({
           <button
             type="button"
             className="ol-cm-toolbar-button"
-            title={dirty ? "Save" : "No unsaved changes"}
+            title={dirty ? (mode === "visual" ? "Save and update preview" : "Save") : "No unsaved changes"}
             aria-label="Save"
-            disabled={saving || !dirty}
+            disabled={saving || compiling || !dirty}
             onClick={onSave}
           >
             <ToolIcon name="save" />
@@ -2989,7 +3990,7 @@ function TypesetEditorToolbar({
           {dirty && <span className="typeset-stale-chip">PDF needs recompile</span>}
           <span className="typeset-interaction-hint">
             {safeCompiledVisual
-              ? "Visual is read-only until you explicitly edit source"
+              ? "Select objects · drag to move · double-click to edit"
               : mode === "visual"
                 ? "Click to edit · double-click to locate in PDF"
                 : "Double-click source to locate in PDF"}
@@ -3906,6 +4907,7 @@ export default function Typeset() {
   const [saving, setSaving] = useState(false);
   const [compileStatus, setCompileStatus] = useState<CompileStatus>("idle");
   const [compileResult, setCompileResult] = useState<CompileResult | null>(null);
+  const [compileLiveLog, setCompileLiveLog] = useState<CompileLiveLog | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const [treeRefreshKey, setTreeRefreshKey] = useState(0);
@@ -3918,6 +4920,7 @@ export default function Typeset() {
   const [forwardSearchNotice, setForwardSearchNotice] = useState<string | null>(null);
   const [projectPanelVisible, setProjectPanelVisible] = useState(true);
   const [pdfPanelVisible, setPdfPanelVisible] = useState(true);
+  const [slideFocusMode, setSlideFocusMode] = useState(true);
   const [projectPanelWidth, setProjectPanelWidth] = useState(PROJECT_PANEL_DEFAULT_W);
   const [pdfPanelWidth, setPdfPanelWidth] = useState(PDF_PANEL_DEFAULT_W);
   const [outlinePanelHeight, setOutlinePanelHeight] = useState(OUTLINE_PANEL_DEFAULT_H);
@@ -3952,6 +4955,7 @@ export default function Typeset() {
   // user manually recompiles.
   const autoCompiledPathRef = useRef<string | null>(null);
   const compileRef = useRef<() => void>(() => {});
+  const compileSequenceRef = useRef(0);
 
   const dirty = Boolean(loaded && draft !== loaded.content);
   const outline = useMemo(() => outlineFor(draft), [draft]);
@@ -3966,6 +4970,9 @@ export default function Typeset() {
     [beamerSlides, currentSourceLine],
   );
   const activeBeamerPage = Math.max(1, activeBeamerSlide ? beamerSlides.indexOf(activeBeamerSlide) + 1 : 1);
+  const slideFocusActive = editorMode === "visual" && beamerSlides.length > 0 && slideFocusMode;
+  const effectiveProjectPanelVisible = projectPanelVisible && !slideFocusActive;
+  const effectivePdfPanelVisible = pdfPanelVisible && !slideFocusActive;
   const activeWorkDir = useMemo(() => workDirForSource(sourcePath), [sourcePath]);
   const browserPreviewMode = !isTauri();
   const diagnosticsCount = useMemo(() => {
@@ -4047,6 +5054,7 @@ export default function Typeset() {
       setCurrentSourceLine(1);
       setCompileStatus("idle");
       setCompileResult(null);
+      setCompileLiveLog(null);
     } catch (openError) {
       setError(String(openError));
     } finally {
@@ -4065,6 +5073,38 @@ export default function Typeset() {
     }
   }, [openSource]);
 
+  const handleFileMutation = useCallback((mutation: TypesetFileMutation) => {
+    const pathMatches = (path: string | null, target: string) => Boolean(path && (path === target || path.startsWith(`${target}/`)));
+    if (mutation.type === "delete") {
+      if (pathMatches(sourcePath, mutation.path) || pathMatches(previewPath, mutation.path)) {
+        setSourcePath(null);
+        setPreviewPath(null);
+        setLoaded(null);
+        resetDraft("");
+        setCompileStatus("idle");
+        setCompileResult(null);
+        setCompileLiveLog(null);
+        setLogOpen(false);
+      }
+      setTreeRefreshKey((key) => key + 1);
+      return;
+    }
+
+    const renamedPath = (path: string | null) => {
+      if (!path) return null;
+      if (path === mutation.path) return mutation.newPath;
+      if (mutation.isDir && path.startsWith(`${mutation.path}/`)) {
+        return `${mutation.newPath}/${path.slice(mutation.path.length + 1)}`;
+      }
+      return path;
+    };
+    const nextSourcePath = renamedPath(sourcePath);
+    setSourcePath(nextSourcePath);
+    setPreviewPath(renamedPath(previewPath));
+    setLoaded((file) => file && nextSourcePath ? { ...file, path: nextSourcePath } : file);
+    setTreeRefreshKey((key) => key + 1);
+  }, [previewPath, resetDraft, sourcePath]);
+
   const createSource = useCallback(async (path: string) => {
     setError(null);
     try {
@@ -4079,6 +5119,7 @@ export default function Typeset() {
       setCurrentSourceLine(1);
       setCompileStatus("idle");
       setCompileResult(null);
+      setCompileLiveLog(null);
     } catch (createError) {
       setError(String(createError));
     }
@@ -4093,6 +5134,7 @@ export default function Typeset() {
     setPreviewPath(null);
     setCompileStatus("idle");
     setCompileResult(null);
+    setCompileLiveLog(null);
     setLogOpen(false);
     setVisualPdfCursor(null);
     setCurrentSourceLine(1);
@@ -4157,25 +5199,37 @@ export default function Typeset() {
     }
   }, [loaded, resetDraft, sourcePath]);
 
-  const compile = async () => {
+  const compile = async (cleanCache = false) => {
     if (!sourcePath || saving || compileStatus === "running") return;
     const openPath = sourcePath;
+    const runId = `typeset-${Date.now()}-${++compileSequenceRef.current}`;
     setCompileStatus("running");
     setCompileResult(null);
+    setCompileLiveLog({ stdout: "", stderr: "", elapsedMs: 0 });
     setError(null);
+    setLogOpen(true);
     await nextAnimationFrame();
     const saved = await save();
     if (!saved) {
       setCompileStatus("idle");
+      setCompileLiveLog(null);
       return;
     }
     const compilePath = saved.path || openPath;
+    let unlisten: (() => void) | null = null;
     try {
+      unlisten = await onLatexCompileProgress((progress) => {
+        if (progress.runId === runId) {
+          setCompileLiveLog({ stdout: progress.stdout, stderr: progress.stderr, elapsedMs: progress.elapsedMs });
+        }
+      });
       const outputPath = outputPathFor(compilePath);
-      const result = await latexCompile(compilePath, outputPath);
+      const result = cleanCache
+        ? await latexCompile(compilePath, outputPath, true, runId)
+        : await latexCompile(compilePath, outputPath, false, runId);
       setCompileResult(result);
       setCompileStatus(result.success ? "success" : "error");
-      setLogOpen(!result.success);
+      setLogOpen(true);
       setPreviewPath(result.outputPath || outputPath);
       setRefreshKey((key) => key + 1);
       setTreeRefreshKey((key) => key + 1);
@@ -4183,11 +5237,22 @@ export default function Typeset() {
       setCompileStatus("error");
       setError(String(compileError));
       setLogOpen(true);
+    } finally {
+      unlisten?.();
     }
   };
   compileRef.current = () => {
     void compile();
   };
+
+  const saveCurrentEditor = useCallback(() => {
+    if (!loaded || draftRef.current === loaded.content) return;
+    if (editorMode === "visual") {
+      compileRef.current();
+      return;
+    }
+    void save();
+  }, [editorMode, loaded, save]);
 
   // Auto-compile removed: shows last compiled PDF. Click Recompile when ready.
   useEffect(() => {
@@ -4200,8 +5265,8 @@ export default function Typeset() {
   // CodeEditor captures `extraKeymap` once at mount, so route through refs kept
   // fresh every render rather than closing over these (non-memoized, in `compile`'s
   // case) callbacks directly.
-  const saveRef = useRef(save);
-  saveRef.current = save;
+  const saveRef = useRef(saveCurrentEditor);
+  saveRef.current = saveCurrentEditor;
   const codeEditorKeymapRef = useRef<KeyBinding[]>([
     { key: "Mod-s", run: () => { void saveRef.current(); return true; } },
     // `compileRef` (defined above, near `compile`) is already a stable wrapper.
@@ -4214,11 +5279,11 @@ export default function Typeset() {
       if (!shortcut || event.key.toLowerCase() !== "s") return;
       if (!sourcePath || !loaded) return;
       event.preventDefault();
-      void save();
+      saveCurrentEditor();
     };
     window.addEventListener("keydown", handleSaveShortcut, { capture: true });
     return () => window.removeEventListener("keydown", handleSaveShortcut, { capture: true });
-  }, [loaded, save, sourcePath]);
+  }, [loaded, saveCurrentEditor, sourcePath]);
 
   const openCodeAtLine = useCallback((line: number) => {
     const offset = lineOffsetFor(draft, line);
@@ -4283,10 +5348,6 @@ export default function Typeset() {
     }
     openCodeRange(match.start, match.end);
   }, [draft, editorMode, openCodeRange]);
-
-  const openCodeForCompiledText = useCallback((text: string, context: string) => {
-    openSourceForPdfText(text, context, true);
-  }, [openSourceForPdfText]);
 
   // Forward search: double-click in Code or Visual jumps the PDF preview to
   // the exact compiled position, via the real SyncTeX data latexmk/xelatex
@@ -4563,8 +5624,9 @@ export default function Typeset() {
   const gridClassName = [
     "typeset-main-grid ide-redesign-body",
     !sourcePath && !loaded ? "start-mode" : "",
-    !projectPanelVisible ? "project-hidden" : "",
-    !pdfPanelVisible ? "pdf-hidden" : "",
+    !effectiveProjectPanelVisible ? "project-hidden" : "",
+    !effectivePdfPanelVisible ? "pdf-hidden" : "",
+    slideFocusActive ? "slide-focus-mode" : "",
   ].filter(Boolean).join(" ");
   const gridStyle = {
     "--typeset-left-user-w": `${projectPanelWidth}px`,
@@ -4589,21 +5651,35 @@ export default function Typeset() {
               <div className="ide-rail-tabs-wrapper">
                 <button
                   type="button"
-                  className={`ide-rail-tab-link${projectPanelVisible ? " open-rail active" : ""}`}
-                  title={projectPanelVisible ? "Hide Project files" : "Show Project files"}
-                  aria-label={projectPanelVisible ? "Hide Project files" : "Show Project files"}
-                  aria-pressed={projectPanelVisible}
-                  onClick={() => setProjectPanelVisible((visible) => !visible)}
+                  className={`ide-rail-tab-link${effectiveProjectPanelVisible ? " open-rail active" : ""}`}
+                  title={effectiveProjectPanelVisible ? "Hide Project files" : "Show Project files"}
+                  aria-label={effectiveProjectPanelVisible ? "Hide Project files" : "Show Project files"}
+                  aria-pressed={effectiveProjectPanelVisible}
+                  onClick={() => {
+                    if (slideFocusActive) {
+                      setSlideFocusMode(false);
+                      setProjectPanelVisible(true);
+                    } else {
+                      setProjectPanelVisible((visible) => !visible);
+                    }
+                  }}
                 >
                   <ToolIcon name="files" className="ide-rail-tab-link-icon" />
                 </button>
                 <button
                   type="button"
-                  className={`ide-rail-tab-link${pdfPanelVisible ? " open-rail active" : ""}`}
-                  title={pdfPanelVisible ? "Hide PDF panel" : "Show PDF panel"}
-                  aria-label={pdfPanelVisible ? "Hide PDF panel" : "Show PDF panel"}
-                  aria-pressed={pdfPanelVisible}
-                  onClick={() => setPdfPanelVisible((visible) => !visible)}
+                  className={`ide-rail-tab-link${effectivePdfPanelVisible ? " open-rail active" : ""}`}
+                  title={effectivePdfPanelVisible ? "Hide PDF panel" : "Show PDF panel"}
+                  aria-label={effectivePdfPanelVisible ? "Hide PDF panel" : "Show PDF panel"}
+                  aria-pressed={effectivePdfPanelVisible}
+                  onClick={() => {
+                    if (slideFocusActive) {
+                      setSlideFocusMode(false);
+                      setPdfPanelVisible(true);
+                    } else {
+                      setPdfPanelVisible((visible) => !visible);
+                    }
+                  }}
                 >
                   <ToolIcon name="visual" className="ide-rail-tab-link-icon" />
                 </button>
@@ -4638,7 +5714,7 @@ export default function Typeset() {
           />
         ) : (
           <>
-            {projectPanelVisible && (
+            {effectiveProjectPanelVisible && (
               <>
                 <div className="typeset-left-panel file-tree-outline-panel-group">
                   <TypesetExplorer
@@ -4648,6 +5724,7 @@ export default function Typeset() {
                     activePreviewPath={previewPath}
                     refreshKey={treeRefreshKey}
                     onOpenPath={openPath}
+                    onFileMutation={handleFileMutation}
                   />
                   <TypesetOutlinePanel
                     activeLine={activeOutlineItem?.line ?? null}
@@ -4696,11 +5773,12 @@ export default function Typeset() {
                   onNavigateToLine={navigateToLine}
                   onEditSlideSource={openCodeAtLine}
                   onRedo={redoDraft}
-                  onSave={() => void save()}
+                  onSave={saveCurrentEditor}
                   onSearch={openCodeRange}
                   onUndo={undoDraft}
                   linkedPdfLine={visualPdfCursor?.line ?? null}
                   saving={saving}
+                  compiling={compileStatus === "running"}
                   dirty={dirty}
                 />
               )}
@@ -4727,6 +5805,7 @@ export default function Typeset() {
                       wrap={false}
                       dataEditor="typeset-code"
                       placeholder="\\section{Title}"
+                      latexVscodeTheme
                     />
                   </div>
                   <div
@@ -4739,8 +5818,19 @@ export default function Typeset() {
                         path={previewPath}
                         refreshKey={refreshKey}
                         page={activeBeamerPage}
+                        slide={activeBeamerSlide}
+                        slides={beamerSlides}
+                        source={draft}
                         dirty={dirty}
-                        onSourceTextClick={openCodeForCompiledText}
+                        compiling={compileStatus === "running"}
+                        onChangeSource={changeDraft}
+                        onSave={saveCurrentEditor}
+                        onNavigateToLine={navigateToLine}
+                        onOpenCodeAtLine={openCodeAtLine}
+                        onOpenCodeRange={openCodeRange}
+                        onSourceTextClick={openSourceForPdfText}
+                        focused={slideFocusActive}
+                        onToggleFocus={() => setSlideFocusMode((focused) => !focused)}
                       />
                     ) : (
                       <TypesetVisualEditor
@@ -4761,7 +5851,7 @@ export default function Typeset() {
                 <div className="typeset-empty">Create or open a .tex file.</div>
               )}
             </section>
-            {pdfPanelVisible && (
+            {effectivePdfPanelVisible && (
               <>
                 <div
                   className="typeset-resize-handle pdf"
@@ -4791,13 +5881,14 @@ export default function Typeset() {
                     logOpen={logOpen}
                     diagnosticsCount={diagnosticsCount}
                     onCompile={() => void compile()}
+                    onClearCacheCompile={() => void compile(true)}
                     onToggleLog={() => setLogOpen((open) => !open)}
                     onSourceTextClick={openSourceForPdfText}
                     onHide={() => setPdfPanelVisible(false)}
                     forwardTarget={pdfForwardTarget}
                     forwardSearchNotice={forwardSearchNotice}
                   />
-                  {logOpen && <CompileLog result={compileResult} status={compileStatus} error={error} onClose={() => setLogOpen(false)} />}
+                  {logOpen && <CompileLog result={compileResult} status={compileStatus} error={error} liveLog={compileLiveLog} onClose={() => setLogOpen(false)} />}
                 </div>
               </>
             )}

@@ -35,6 +35,7 @@ fn rich_chat_request_maps_data_url_to_image_block() {
         }],
         model: None,
         project_id: None,
+        ephemeral: false,
     })
     .expect("rich request should parse");
 
@@ -60,6 +61,7 @@ fn rich_chat_request_rejects_non_image_media_type() {
         }],
         model: None,
         project_id: None,
+        ephemeral: false,
     })
     .expect_err("non-image upload should be rejected");
 
@@ -347,6 +349,68 @@ fn huge_shell_output_preserves_json_and_full_output_path() {
     assert_eq!(parsed["rawOutputPath"], artifact.path);
     assert_eq!(parsed["persistedOutputSize"], artifact.bytes);
     assert_eq!(parsed["truncatedForContext"], true);
+}
+
+#[test]
+fn latex_compile_context_keeps_primary_diagnostic_and_bounds_raw_logs() {
+    let raw = serde_json::to_string_pretty(&json!({
+        "success": false,
+        "inputPath": "papers/report.tex",
+        "outputPath": "papers/report.pdf",
+        "engine": "latexmk -xelatex",
+        "stdout": "x".repeat(12_000),
+        "stderr": "! Extra alignment tab has been changed to \\cr.\nl.70 table row",
+        "returnCodeInterpretation": "exit_code:1",
+        "diagnostics": [{
+            "severity": "error",
+            "code": "table_alignment",
+            "message": "Extra alignment tab has been changed to \\cr.",
+            "filePath": "papers/report.tex",
+            "line": 70
+        }]
+    }))
+    .expect("json");
+    let artifact = ToolOutputArtifact {
+        path: "C:\\tmp\\latex-output.txt".to_string(),
+        bytes: raw.len() as u64,
+    };
+
+    let compacted = compact_tool_output_for_context("LaTeXCompile", raw, Some(&artifact));
+    let parsed: serde_json::Value = serde_json::from_str(&compacted).expect("json output");
+
+    assert!(compacted.chars().count() <= MAX_LATEX_CONTEXT_OUTPUT_CHARS);
+    assert_eq!(parsed["diagnostics"][0]["line"], 70);
+    assert!(parsed["stdout"]
+        .as_str()
+        .unwrap()
+        .contains("SomniQ truncated stdout"));
+    assert_eq!(parsed["persistedOutputPath"], artifact.path);
+    let hint = tool_recovery_hint("LaTeXCompile", &compacted).expect("targeted hint");
+    assert!(hint.contains("papers/report.tex:70"));
+    assert!(hint.contains("do not compile through REPL"));
+}
+
+#[test]
+fn latex_repair_guard_stops_repeated_failures_for_the_same_source_only() {
+    let input = r#"{"inputPath":"papers/report.tex"}"#;
+    let mut guard = LatexRepairGuard::default();
+
+    for attempt in 0..MAX_CONSECUTIVE_LATEX_REPAIR_FAILURES {
+        assert!(guard.blocks("LaTeXCompile", input).is_none());
+        let notice = guard.record("LaTeXCompile", input, true);
+        assert_eq!(
+            notice.is_some(),
+            attempt + 1 == MAX_CONSECUTIVE_LATEX_REPAIR_FAILURES
+        );
+    }
+    assert!(guard.blocks("LaTeXCompile", input).is_some());
+    assert!(guard
+        .blocks("LaTeXCompile", r#"{"inputPath":"papers/other.tex"}"#)
+        .is_none());
+
+    let success = guard.record("LaTeXCompile", r#"{"inputPath":"papers/other.tex"}"#, false);
+    assert!(success.is_none());
+    assert!(guard.blocks("LaTeXCompile", input).is_none());
 }
 
 #[test]

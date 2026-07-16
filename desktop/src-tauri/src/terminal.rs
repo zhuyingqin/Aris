@@ -97,8 +97,10 @@ pub fn terminal_open(
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
                         let data = base64::engine::general_purpose::STANDARD.encode(&buf[..n]);
-                        let _ = emit_app
-                            .emit(TERMINAL_OUTPUT_EVENT, json!({ "id": emit_id, "data": data }));
+                        let _ = emit_app.emit(
+                            TERMINAL_OUTPUT_EVENT,
+                            json!({ "id": emit_id, "data": data }),
+                        );
                     }
                 }
             }
