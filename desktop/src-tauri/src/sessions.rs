@@ -1088,20 +1088,26 @@ fn append_remote_chat_text_turns(
     let has_user_turn = turns
         .iter()
         .any(|turn| chat_ui_turn_id(turn) == Some(user_turn_id.as_str()));
-    let has_assistant_turn = turns
+    let assistant_turn_index = turns
         .iter()
-        .any(|turn| chat_ui_turn_id(turn) == Some(assistant_turn_id.as_str()));
+        .position(|turn| chat_ui_turn_id(turn) == Some(assistant_turn_id.as_str()));
     let mut changed = false;
     if !has_user_turn {
         turns.push(remote_chat_turn_value(user_turn_id, "user", user_text));
         changed = true;
     }
-    if !has_assistant_turn {
-        turns.push(remote_chat_turn_value(
-            assistant_turn_id,
-            "assistant",
-            assistant_text,
-        ));
+    let completed_assistant =
+        remote_chat_turn_value(assistant_turn_id, "assistant", assistant_text);
+    if let Some(index) = assistant_turn_index {
+        // A live desktop renderer may have saved an in-flight projection.
+        // The backend's completed text is authoritative and must replace that
+        // partial snapshot before the completion refresh is announced.
+        if turns[index] != completed_assistant {
+            turns[index] = completed_assistant;
+            changed = true;
+        }
+    } else {
+        turns.push(completed_assistant);
         changed = true;
     }
     if changed {

@@ -13,14 +13,14 @@ fn internal_no_tools_executor_denies_unexpected_tool_calls() {
 }
 
 #[test]
-fn paired_remote_runtime_uses_desktop_tools_without_renderer_streams() {
+fn paired_remote_runtime_uses_dedicated_remote_streams() {
     let remote = ChatTurnRuntime::RemoteApproved;
     let (blocked_tools, full_tool_registry) = remote.tool_profile();
 
     assert!(full_tool_registry);
     assert_eq!(blocked_tools, REMOTE_APPROVED_EXTRA_BLOCKED_TOOLS);
     assert!(blocked_tools.contains(&ASK_USER_QUESTION_TOOL));
-    assert_eq!(remote.event_delivery(), ChatEventDelivery::RecordOnly);
+    assert_eq!(remote.event_delivery(), ChatEventDelivery::Remote);
     assert!(!remote.emits_desktop_chat_events());
     assert_eq!(remote.surface(), "Paired mobile");
     assert!(ChatTurnRuntime::Desktop {

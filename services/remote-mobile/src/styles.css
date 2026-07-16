@@ -2,6 +2,7 @@
   color-scheme: dark;
   --remote-viewport-height: 100dvh;
   --remote-viewport-offset-top: 0px;
+  --remote-composer-safe-bottom: env(safe-area-inset-bottom);
   --bg: #0e1116;
   --bg-1: #151a21;
   --bg-2: #1c232c;
@@ -41,6 +42,10 @@ body.remote-conversation-active {
   height: 100%;
   min-height: 100%;
   overflow: hidden;
+}
+
+body.remote-keyboard-open {
+  --remote-composer-safe-bottom: 0px;
 }
 
 button,
@@ -1578,7 +1583,7 @@ select:focus {
   min-width: 0;
   min-height: 0;
   margin: 0;
-  padding: 8px clamp(12px, 4vw, 40px) calc(env(safe-area-inset-bottom) + 8px);
+  padding: 8px clamp(12px, 4vw, 40px) calc(var(--remote-composer-safe-bottom) + 8px);
   border-top: 1px solid #202934;
   background: #0f141a;
 }
@@ -1698,6 +1703,12 @@ select:focus {
 }
 
 @media (hover: none) and (pointer: coarse) {
+  /* iOS zooms the whole visual viewport when a focused form control is below
+   * 16px. That zoom clips the composer and its send button horizontally. */
+  .chat-composer textarea {
+    font-size: 16px;
+  }
+
   .workspace-drawer {
     width: 100%;
   }

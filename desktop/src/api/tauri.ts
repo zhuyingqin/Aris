@@ -389,6 +389,13 @@ export const onMailNewMessage = (handler: (event: MailNewMessageEvent) => void) 
 
 export interface RemoteChatSessionUpdatedEvent {
   sessionId: string;
+  messageId?: string;
+  phase?: "started" | "delta" | "completed" | "error";
+  message?: string;
+  delta?: string;
+  text?: string;
+  error?: string;
+  persisted?: boolean;
 }
 
 export const onRemoteChatSessionUpdated = (

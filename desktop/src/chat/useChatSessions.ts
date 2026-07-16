@@ -7,6 +7,7 @@ import {
   chatUiSessionsSave,
   isTauri,
   onRemoteChatSessionUpdated,
+  type RemoteChatSessionUpdatedEvent,
 } from "../api/tauri";
 import { useStore } from "../store";
 import type { ChatTurn } from "../types";
@@ -107,6 +108,52 @@ function mergeRemoteLoadedSession(current: ChatSession | undefined, loaded: Chat
   return loaded;
 }
 
+interface RemoteTurnBuffer {
+  messageId: string;
+  userText: string;
+  text: string;
+  completed: boolean;
+  error?: string;
+}
+
+function applyRemoteTurnBuffer(session: ChatSession, buffer: RemoteTurnBuffer): ChatSession {
+  const userId = `remote-${buffer.messageId}-user`;
+  const assistantId = `remote-${buffer.messageId}-assistant`;
+  const turns = session.turns.slice();
+  let added = 0;
+  if (!turns.some((turn) => turn.id === userId)) {
+    turns.push({
+      id: userId,
+      role: "user",
+      blocks: [{ kind: "text", text: buffer.userText }],
+    });
+    added += 1;
+  }
+  const assistant = {
+    id: assistantId,
+    role: "assistant" as const,
+    blocks: buffer.text ? [{ kind: "text" as const, text: buffer.text }] : [],
+    streaming: !buffer.completed && !buffer.error,
+    error: buffer.error,
+    stopped: false,
+  };
+  const assistantIndex = turns.findIndex((turn) => turn.id === assistantId);
+  if (assistantIndex >= 0) turns[assistantIndex] = assistant;
+  else {
+    turns.push(assistant);
+    added += 1;
+  }
+  const priorTurnCount = session.turnCount ?? session.turns.length;
+  return {
+    ...session,
+    turns,
+    turnsLoaded: true,
+    turnCount: session.turnsPartial ? priorTurnCount + added : turns.length,
+    title: session.title === "New chat" ? titleFromTurns(turns) : session.title,
+    updatedAt: Date.now(),
+  };
+}
+
 function persistLocalSessions(sessions: ChatSession[]) {
   try {
     localStorage.setItem(SESSIONS_KEY, JSON.stringify(persistentSessions(sessions)));
@@ -163,6 +210,7 @@ export function useChatSessions(projectId?: string | null) {
   const dirtySessionIds = useRef(new Set<string>());
   const loadingSessionIds = useRef(new Set<string>());
   const remoteSessionUpdateVersions = useRef(new Map<string, number>());
+  const remoteTurnBuffers = useRef(new Map<string, RemoteTurnBuffer>());
   const visibleAllSessions = useMemo(() => persistentSessions(allSessions), [allSessions]);
   const visibleSessions = useMemo(
     () => visibleAllSessions.filter((session) => session.projectId === activeProjectId),
@@ -200,8 +248,9 @@ export function useChatSessions(projectId?: string | null) {
     if (!isTauri()) return;
     let disposed = false;
     let unlisten: (() => void) | undefined;
+    const remoteRenderFrames = new Map<string, number>();
 
-    const refreshRemoteSession = ({ sessionId }: { sessionId: string }) => {
+    const loadPersistedRemoteSession = (sessionId: string) => {
       const id = typeof sessionId === "string" ? sessionId.trim() : "";
       if (!id) return;
       const version = (remoteSessionUpdateVersions.current.get(id) ?? 0) + 1;
@@ -226,6 +275,88 @@ export function useChatSessions(projectId?: string | null) {
         .catch(() => undefined);
     };
 
+    const updateBufferedSession = (id: string, buffer: RemoteTurnBuffer) => {
+      setAllSessions((previous) => previous.map((session) => (
+        session.id === id && session.turnsLoaded !== false
+          ? applyRemoteTurnBuffer(session, buffer)
+          : session
+      )));
+    };
+
+    const cancelBufferedSessionUpdate = (id: string) => {
+      const frame = remoteRenderFrames.get(id);
+      if (frame !== undefined) window.cancelAnimationFrame(frame);
+      remoteRenderFrames.delete(id);
+    };
+
+    const scheduleBufferedSessionUpdate = (id: string) => {
+      if (remoteRenderFrames.has(id)) return;
+      remoteRenderFrames.set(id, window.requestAnimationFrame(() => {
+        remoteRenderFrames.delete(id);
+        const current = remoteTurnBuffers.current.get(id);
+        if (current) updateBufferedSession(id, { ...current });
+      }));
+    };
+
+    const refreshRemoteSession = (event: RemoteChatSessionUpdatedEvent) => {
+      const id = typeof event.sessionId === "string" ? event.sessionId.trim() : "";
+      if (!id) return;
+      const messageId = typeof event.messageId === "string" ? event.messageId.trim() : "";
+      if (event.phase === "started" && messageId && typeof event.message === "string") {
+        const buffer: RemoteTurnBuffer = {
+          messageId,
+          userText: event.message,
+          text: "",
+          completed: false,
+        };
+        remoteTurnBuffers.current.set(id, buffer);
+        updateBufferedSession(id, buffer);
+        // A remote phone can target a session that is only a lazy sidebar
+        // summary on this desktop. Load its full projection once, then apply
+        // every delta accumulated while the read was in flight.
+        void chatUiSessionLoad<ChatSession>(id)
+          .then((stored) => {
+            const currentBuffer = remoteTurnBuffers.current.get(id);
+            if (!stored || disposed || currentBuffer?.messageId !== messageId) return;
+            const knownProjectId = sessionsRef.current.find((session) => session.id === id)?.projectId;
+            const loaded = { ...migrateSession(stored, knownProjectId ?? "default"), turnsLoaded: true };
+            setAllSessions((previous) => previous.map((session) => {
+              if (session.id !== id) return session;
+              const base = session.turnsLoaded === false ? loaded : session;
+              return applyRemoteTurnBuffer(base, currentBuffer);
+            }));
+          })
+          .catch(() => undefined);
+        return;
+      }
+      const buffer = remoteTurnBuffers.current.get(id);
+      if (event.phase === "delta" && buffer && buffer.messageId === messageId && typeof event.delta === "string") {
+        buffer.text += event.delta;
+        scheduleBufferedSessionUpdate(id);
+        return;
+      }
+      if (event.phase === "completed" && buffer && buffer.messageId === messageId) {
+        cancelBufferedSessionUpdate(id);
+        if (typeof event.text === "string") buffer.text = event.text;
+        buffer.completed = true;
+        updateBufferedSession(id, { ...buffer });
+        remoteTurnBuffers.current.delete(id);
+        if (event.persisted !== false) loadPersistedRemoteSession(id);
+        return;
+      }
+      if (event.phase === "error" && buffer && buffer.messageId === messageId) {
+        cancelBufferedSessionUpdate(id);
+        buffer.completed = true;
+        buffer.error = event.error || "Remote chat failed.";
+        updateBufferedSession(id, { ...buffer });
+        remoteTurnBuffers.current.delete(id);
+        return;
+      }
+      // Backward compatibility with completed-turn notifications emitted by
+      // older desktop backends.
+      loadPersistedRemoteSession(id);
+    };
+
     void onRemoteChatSessionUpdated(refreshRemoteSession)
       .then((nextUnlisten) => {
         if (disposed) {
@@ -237,6 +368,8 @@ export function useChatSessions(projectId?: string | null) {
       .catch(() => undefined);
     return () => {
       disposed = true;
+      for (const frame of remoteRenderFrames.values()) window.cancelAnimationFrame(frame);
+      remoteRenderFrames.clear();
       unlisten?.();
     };
   }, []);

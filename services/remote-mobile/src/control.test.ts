@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  chatMessageProgress,
   MOBILE_P1_REQUESTABLE_SCOPES,
   newChatModelOptionsRequest,
   newChatTranscriptRequest,
@@ -32,6 +33,7 @@ describe("mobile control requests", () => {
         session_id: "session-alpha",
         message: "Summarize the current evidence.",
         idempotency_key: "chat-turn-1",
+        stream: true,
       },
     });
     expect(request.request_id).toMatch(/^[0-9a-f-]{36}$/);
@@ -91,6 +93,50 @@ describe("mobile control requests", () => {
     expect(response.outcome).toMatchObject({
       status: "success",
       result: { type: "chat_message_completed", message_id: "message-42" },
+    });
+  });
+
+  it("classifies accepted and delta chat responses as non-terminal progress", () => {
+    const accepted = parseControlResponse(new TextEncoder().encode(JSON.stringify({
+      protocol_version: 1,
+      request_id: "request-live",
+      responded_at_unix_ms: 1_234,
+      outcome: {
+        status: "success",
+        result: {
+          type: "chat_message_accepted",
+          project_id: "project-alpha",
+          message_id: "message-live",
+        },
+      },
+    })));
+    const delta = parseControlResponse(new TextEncoder().encode(JSON.stringify({
+      protocol_version: 1,
+      request_id: "request-live",
+      responded_at_unix_ms: 1_235,
+      outcome: {
+        status: "success",
+        result: {
+          type: "chat_message_delta",
+          project_id: "project-alpha",
+          session_id: "session-alpha",
+          message_id: "message-live",
+          delta: "partial answer",
+        },
+      },
+    })));
+
+    expect(chatMessageProgress(accepted)).toEqual({
+      kind: "accepted",
+      projectId: "project-alpha",
+      messageId: "message-live",
+    });
+    expect(chatMessageProgress(delta)).toEqual({
+      kind: "delta",
+      projectId: "project-alpha",
+      sessionId: "session-alpha",
+      messageId: "message-live",
+      delta: "partial answer",
     });
   });
 });

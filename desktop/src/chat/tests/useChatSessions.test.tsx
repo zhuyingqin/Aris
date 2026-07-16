@@ -278,6 +278,83 @@ describe("useChatSessions Tauri persistence", () => {
     expect(apiMocks.chatUiSessionLoad).toHaveBeenCalledWith("remote-chat");
   });
 
+  it("renders remote chat deltas live without persisting a partial projection", async () => {
+    let remoteUpdateHandler: ((event: {
+      sessionId: string;
+      messageId?: string;
+      phase?: "started" | "delta" | "completed" | "error";
+      message?: string;
+      delta?: string;
+      text?: string;
+      persisted?: boolean;
+    }) => void) | undefined;
+    (apiMocks.onRemoteChatSessionUpdated as unknown as {
+      mockImplementation: (implementation: (handler: (event: {
+        sessionId: string;
+        messageId?: string;
+        phase?: "started" | "delta" | "completed" | "error";
+        message?: string;
+        delta?: string;
+        text?: string;
+        persisted?: boolean;
+      }) => void) => Promise<() => void>) => void;
+    }).mockImplementation((handler) => {
+      remoteUpdateHandler = handler;
+      return Promise.resolve(() => undefined);
+    });
+    const stored = startedSession("remote-live", "existing");
+    apiMocks.chatUiSessionsList.mockResolvedValue([stored]);
+    apiMocks.chatUiSessionLoad.mockResolvedValue(stored);
+
+    const { result } = renderHook(() => useChatSessions("default"));
+
+    await waitFor(() => expect(remoteUpdateHandler).toBeDefined());
+    await waitFor(() => expect(result.current.allSessions).toHaveLength(1));
+    act(() => remoteUpdateHandler?.({
+      sessionId: "remote-live",
+      messageId: "message-live",
+      phase: "started",
+      message: "from phone",
+    }));
+    act(() => remoteUpdateHandler?.({
+      sessionId: "remote-live",
+      messageId: "message-live",
+      phase: "delta",
+      delta: "live ",
+    }));
+    act(() => remoteUpdateHandler?.({
+      sessionId: "remote-live",
+      messageId: "message-live",
+      phase: "delta",
+      delta: "reply",
+    }));
+
+    await waitFor(() => expect(result.current.allSessions[0]?.turns.slice(-2)).toMatchObject([
+      { id: "remote-message-live-user", role: "user", blocks: [{ kind: "text", text: "from phone" }] },
+      {
+        id: "remote-message-live-assistant",
+        role: "assistant",
+        blocks: [{ kind: "text", text: "live reply" }],
+        streaming: true,
+      },
+    ]));
+
+    act(() => remoteUpdateHandler?.({
+      sessionId: "remote-live",
+      messageId: "message-live",
+      phase: "completed",
+      text: "live reply",
+      persisted: false,
+    }));
+    const turns = result.current.allSessions[0]?.turns ?? [];
+    expect(turns[turns.length - 1]).toMatchObject({
+      id: "remote-message-live-assistant",
+      streaming: false,
+      blocks: [{ kind: "text", text: "live reply" }],
+    });
+    expect(apiMocks.chatUiSessionSave).not.toHaveBeenCalled();
+  });
+
   it("saves Tauri sessions through the backend store without writing localStorage snapshots", async () => {
     const { result } = renderHook(() => useChatSessions("default"));
     await waitFor(() => expect(apiMocks.chatUiSessionsList).toHaveBeenCalled());
