@@ -158,6 +158,33 @@ pub(crate) fn remote_chat_sessions_list(
     crate::sessions::remote_chat_sessions_list(project_id, limit)
 }
 
+/// Creates matching runtime and Chat UI records for a new paired-device chat.
+/// The desktop owns the opaque identifier so the phone cannot select a path or
+/// overwrite an existing conversation.
+pub(crate) fn remote_chat_session_create(
+    project_id: &str,
+) -> Result<crate::sessions::RemoteChatSessionSummary, String> {
+    validate_remote_chat_project(project_id)?;
+    let session_id = format!("chat-{}", remote_protocol::RequestId::new());
+    validate_session_id(&session_id)?;
+    let sessions_dir = chat_sessions_dir_for_project(Some(project_id))?;
+    let runtime_path = sessions_dir.join(format!("{session_id}.json"));
+    if runtime_path.exists() {
+        return Err("remote chat session already exists".to_string());
+    }
+
+    Session::new()
+        .save_to_path(&runtime_path)
+        .map_err(|error| error.to_string())?;
+    match crate::sessions::remote_chat_session_create(project_id, &session_id) {
+        Ok(summary) => Ok(summary),
+        Err(error) => {
+            let _ = fs::remove_file(runtime_path);
+            Err(error)
+        }
+    }
+}
+
 /// Verify that an opaque remote session id is an existing, visible Chat UI
 /// session in the current project.
 pub(crate) fn remote_chat_session_validate(
@@ -168,7 +195,7 @@ pub(crate) fn remote_chat_session_validate(
     crate::sessions::remote_chat_session_validate(project_id, session_id)
 }
 
-/// Read a selected Chat UI session as a bounded, text-only transcript.
+/// Read a selected Chat UI session as a bounded visible transcript.
 pub(crate) fn remote_chat_session_transcript(
     project_id: &str,
     session_id: &str,
@@ -176,6 +203,18 @@ pub(crate) fn remote_chat_session_transcript(
 ) -> Result<crate::sessions::RemoteChatTranscript, String> {
     validate_remote_chat_project(project_id)?;
     crate::sessions::remote_chat_session_transcript(project_id, session_id, limit)
+}
+
+/// Read the durable event log for one verified project-scoped Chat without
+/// disturbing the live event-directory binding held by an executing turn.
+pub(crate) fn remote_chat_session_events(
+    project_id: &str,
+    session_id: &str,
+) -> Result<Vec<crate::chat_events::ChatEventLogEntry>, String> {
+    validate_remote_chat_project(project_id)?;
+    crate::sessions::remote_chat_session_validate(project_id, session_id)?;
+    let sessions_dir = chat_sessions_dir_for_project(Some(project_id))?;
+    crate::chat_events::read_events_for_session_in_dir(session_id, &sessions_dir)
 }
 
 /// A model choice returned to the remote-control boundary. The values are
@@ -384,11 +423,6 @@ const TEAM_WORKFLOW_BLOCKED_TOOLS: &[&str] = &[
 
 const DESKTOP_CHAT_EXTRA_BLOCKED_TOOLS: &[&str] = &[];
 
-// A phone cannot answer the desktop-only interactive question card. Remote
-// turns must instead complete the requested work or return a concrete textual
-// question to the paired phone.
-const REMOTE_APPROVED_EXTRA_BLOCKED_TOOLS: &[&str] = &[ASK_USER_QUESTION_TOOL];
-
 // Literature agent sessions allow bash so /research-lit can run Python fetchers
 // (arxiv_fetch.py, openalex_fetch.py, etc.). Multi-agent and worktree tools
 // remain blocked — only the shell execution lane is opened.
@@ -420,14 +454,42 @@ struct KernelToolExecutor {
 
 type ToolProgressSink = Arc<dyn Fn(&str, &str, tools::ToolProgress) + Send + Sync>;
 
-/// Remote chat writes its execution trace to the durable session log and uses
-/// a dedicated event name for live text. This keeps locally-started stream
-/// handlers isolated while the remote bridge associates each delta with its
-/// durable mobile message id.
+/// A paired phone continues the desktop Chat turn and receives a separate,
+/// filtered mirror associated with its durable mobile message id.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ChatEventDelivery {
     Desktop,
-    Remote,
+    /// Run the ordinary desktop renderer and, in parallel, emit the filtered
+    /// mobile projection. A paired phone is an input surface for the same Chat
+    /// turn; it must not cause a second, reduced renderer/runtime path.
+    DesktopAndRemote,
+}
+
+/// Legacy paired phones receive only an execution stage. Current clients opt
+/// into the same bounded, UI-sanitized thinking and tool events separately.
+fn remote_chat_activity(event_name: &str) -> Option<&'static str> {
+    match event_name {
+        "chat-thinking-delta" => Some("thinking"),
+        "chat-tool" | "chat-tool-progress" | "chat-tool-result" => Some("tool"),
+        _ => None,
+    }
+}
+
+/// Publish a content-free lifecycle phase for a paired turn. These stages are
+/// deliberately separate from thinking/tool render blocks so the phone never
+/// labels session loading or compaction as model reasoning.
+fn emit_remote_chat_activity(
+    delivery: ChatEventDelivery,
+    app: &AppHandle,
+    session_id: &str,
+    activity: &'static str,
+) {
+    if matches!(delivery, ChatEventDelivery::DesktopAndRemote) {
+        let _ = app.emit(
+            "remote-chat-activity",
+            json!({ "sessionId": session_id, "activity": activity }),
+        );
+    }
 }
 
 fn publish_chat_event(
@@ -442,12 +504,40 @@ fn publish_chat_event(
         ChatEventDelivery::Desktop => {
             crate::chat_events::emit_chat_event(app, event_name, session_id, kind, payload);
         }
-        ChatEventDelivery::Remote => {
-            crate::chat_events::record_event(session_id, kind, payload.clone());
-            if event_name == "chat-delta" {
-                let _ = app.emit("remote-chat-delta", payload);
-            }
+        ChatEventDelivery::DesktopAndRemote => {
+            crate::chat_events::emit_chat_event(app, event_name, session_id, kind, payload.clone());
+            emit_remote_chat_mirror(app, event_name, session_id, payload);
         }
+    }
+}
+
+/// Emit the mobile-facing projection of a desktop event. Tool inputs/outputs
+/// have already passed the same UI compaction used by Desktop. The remote
+/// boundary sends these events only to an explicitly paired, scoped client;
+/// permission decisions and wire/debug events are never mirrored.
+fn emit_remote_chat_mirror(app: &AppHandle, event_name: &str, session_id: &str, payload: Value) {
+    let render_kind = match event_name {
+        "chat-delta" => Some("text_delta"),
+        "chat-thinking-delta" => Some("thinking_delta"),
+        "chat-tool" => Some("tool_call"),
+        "chat-tool-progress" => Some("tool_progress"),
+        "chat-tool-result" => Some("tool_result"),
+        _ => None,
+    };
+    if let Some(kind) = render_kind {
+        let _ = app.emit(
+            "remote-chat-render-event",
+            json!({ "sessionId": session_id, "kind": kind, "payload": payload.clone() }),
+        );
+    }
+    if event_name == "chat-delta" {
+        let _ = app.emit("remote-chat-delta", payload);
+    }
+    if let Some(activity) = remote_chat_activity(event_name) {
+        let _ = app.emit(
+            "remote-chat-activity",
+            json!({ "sessionId": session_id, "activity": activity }),
+        );
     }
 }
 
@@ -986,38 +1076,6 @@ struct DesktopPermissionPrompter {
     session_id: String,
     prompts: PermissionPromptRegistry,
     cancelled: Arc<AtomicBool>,
-}
-
-/// A paired phone may use the selected session's already-granted capabilities,
-/// but it cannot satisfy a desktop-only permission card. Deny an escalation
-/// deterministically instead of emitting a renderer event that would attach to
-/// an unrelated local assistant turn or leave the remote request waiting.
-struct RemotePermissionPrompter {
-    session_id: String,
-}
-
-impl PermissionPrompter for RemotePermissionPrompter {
-    fn decide(&mut self, request: &PermissionRequest) -> PermissionPromptDecision {
-        let reason = format!(
-            "tool `{}` needs {} permission, which requires a local desktop approval and is not available to a paired-phone turn",
-            request.tool_name,
-            request.required_mode.as_str(),
-        );
-        crate::chat_events::record_event(
-            &self.session_id,
-            "approval_resolved",
-            json!({
-                "sessionId": &self.session_id,
-                "toolName": &request.tool_name,
-                "currentMode": request.current_mode.as_str(),
-                "requiredMode": request.required_mode.as_str(),
-                "decision": "deny",
-                "remote": true,
-                "reason": &reason,
-            }),
-        );
-        PermissionPromptDecision::Deny { reason }
-    }
 }
 
 impl DesktopPermissionPrompter {
@@ -2404,8 +2462,10 @@ fn get_project_scoped_chat_session(project_id: &str, session_id: &str) -> Result
 /// session ids are visible UI identifiers and may recur between projects, so
 /// they must not be routed through the process-wide cache or default session
 /// directory used by a local renderer turn.
-fn persist_chat_turn_session(
-    state: &ChatState,
+/// Persist the runtime projection without touching `ChatState`. Heavy session
+/// serialization, atomic writes, and FTS indexing can therefore run on a
+/// blocking worker instead of the async Tauri command thread.
+fn persist_chat_turn_session_to_disk(
     session_id: &str,
     project_id: Option<&str>,
     session: &Session,
@@ -2416,7 +2476,7 @@ fn persist_chat_turn_session(
             .save_to_path(sessions_dir.join(format!("{session_id}.json")))
             .map_err(|error| error.to_string())
     } else {
-        store_chat_session(state, session_id.to_string(), session.clone())
+        save_chat_session(session_id, session)
     }
 }
 
@@ -2637,19 +2697,20 @@ fn emit_context_warning(
 /// Before running a turn, keep the session within the model-derived budget:
 /// warn at >=70% usage, auto-compact at >=90% (falling back to a warning when
 /// there is too little history to compact). Returns the session to run the turn
-/// against — compacted in place when triggered, and persisted so the next turn
-/// and the UI both see the reduced history.
+/// against. A compacted session is persisted by the normal success/error turn
+/// boundary; doing an extra full write and FTS rebuild here would delay the
+/// model request without improving durability.
 fn maybe_auto_compact(
     app: &AppHandle,
-    state: &ChatState,
     session_id: &str,
     model: &str,
     executor_config: aris_chat::ChatExecutorConfig,
     summarizer_model: Option<String>,
     summarizer_config: Option<aris_chat::SummarizerConfig>,
     session: Session,
-    project_id: Option<&str>,
     emit_to_desktop: bool,
+    event_delivery: ChatEventDelivery,
+    cancelled: &AtomicBool,
 ) -> Result<Session, String> {
     let window = context_window_for_model(model);
     let budget = compaction_budget_for_model(model);
@@ -2661,6 +2722,11 @@ fn maybe_auto_compact(
             Ok(session)
         }
         ContextAction::Compact => {
+            if cancelled.load(Ordering::SeqCst) {
+                return Err("interrupted by user".to_string());
+            }
+            emit_remote_chat_activity(event_delivery, app, session_id, "compacting");
+            let started = Instant::now();
             let result = compact_session_with_runtime(
                 session.clone(),
                 executor_config,
@@ -2669,15 +2735,28 @@ fn maybe_auto_compact(
                 summarizer_config,
                 CompactionConfig::default(),
             )?;
+            if cancelled.load(Ordering::SeqCst) {
+                return Err("interrupted by user".to_string());
+            }
             if result.removed_message_count == 0 {
                 // Too little history to compact — warn instead of claiming a no-op.
                 emit_context_warning(app, session_id, used, window, budget, emit_to_desktop);
                 return Ok(session);
             }
             let compacted = result.compacted_session;
-            persist_chat_turn_session(state, session_id, project_id, &compacted)?;
             crate::chat_events::record_session_snapshot(session_id, "auto_compact", &compacted);
             let after = runtime::estimate_session_tokens(&compacted) as u64;
+            crate::chat_events::record_event(
+                session_id,
+                "preflight_stage",
+                json!({
+                    "sessionId": session_id,
+                    "stage": "compaction",
+                    "elapsedMs": started.elapsed().as_millis(),
+                    "tokensBefore": used,
+                    "tokensAfter": after,
+                }),
+            );
             let payload = json!({
                 "sessionId": session_id,
                 "removedMessageCount": result.removed_message_count,
@@ -3416,15 +3495,15 @@ pub(crate) async fn remote_chat_send(
 ///
 /// The session id is supplied by the desktop remote-control boundary, not the
 /// phone. The paired-device boundary has already verified its explicit chat
-/// scope; tool calls still use the selected desktop session's local permission
-/// mode. A tool that would require an interactive desktop-only approval is
-/// denied for the remote turn rather than being allowed or left waiting.
+/// scope. It continues the selected desktop Chat with the same local tool and
+/// permission policy; the paired phone is only another input/display surface.
 pub(crate) async fn remote_chat_send_paired(
     app: AppHandle,
     state: &ChatState,
     session_id: String,
     project_id: String,
     message: String,
+    cancelled: Arc<AtomicBool>,
 ) -> Result<String, String> {
     // A phone may continue only a session surfaced by the current project's
     // Chat UI store. This prevents an opaque id from being used to create or
@@ -3445,6 +3524,7 @@ pub(crate) async fn remote_chat_send_paired(
         Some(project_id),
         false,
         ChatTurnRuntime::RemoteApproved,
+        Some(cancelled),
     )
     .await
 }
@@ -3819,6 +3899,7 @@ async fn run_chat_turn(
             extra_blocked_tools: DESKTOP_CHAT_EXTRA_BLOCKED_TOOLS,
             full_tool_registry: true,
         },
+        None,
     )
     .await
 }
@@ -3861,6 +3942,7 @@ async fn run_literature_chat_turn(
             extra_blocked_tools: LITERATURE_AGENT_EXTRA_BLOCKED_TOOLS,
             full_tool_registry: false,
         },
+        None,
     )
     .await
 }
@@ -3873,15 +3955,14 @@ enum ChatTurnRuntime {
         full_tool_registry: bool,
     },
     /// An authenticated paired device may continue the selected desktop chat.
-    /// It uses the same tool and permission policy as that chat, but streams
-    /// execution into the durable event log until its final UI projection is
-    /// atomically refreshed.
+    /// It preserves the project-scoped persistence and cancellation boundary,
+    /// while fanning ordinary desktop events out to the safe mobile mirror.
     RemoteApproved,
 }
 
 impl ChatTurnRuntime {
     fn emits_desktop_chat_events(self) -> bool {
-        matches!(self, Self::Desktop { .. })
+        true
     }
 
     fn tool_profile(self) -> (&'static [&'static str], bool) {
@@ -3890,14 +3971,17 @@ impl ChatTurnRuntime {
                 extra_blocked_tools,
                 full_tool_registry,
             } => (extra_blocked_tools, full_tool_registry),
-            Self::RemoteApproved => (REMOTE_APPROVED_EXTRA_BLOCKED_TOOLS, true),
+            // Remote pairing authorizes only which desktop session may be
+            // continued. Once that boundary is verified, Chat itself keeps the
+            // same tool registry as a local desktop turn.
+            Self::RemoteApproved => (DESKTOP_CHAT_EXTRA_BLOCKED_TOOLS, true),
         }
     }
 
     fn event_delivery(self) -> ChatEventDelivery {
         match self {
             Self::Desktop { .. } => ChatEventDelivery::Desktop,
-            Self::RemoteApproved => ChatEventDelivery::Remote,
+            Self::RemoteApproved => ChatEventDelivery::DesktopAndRemote,
         }
     }
 
@@ -3964,6 +4048,7 @@ async fn run_chat_turn_with_context(
     project_id: Option<String>,
     ephemeral: bool,
     turn_runtime: ChatTurnRuntime,
+    cancellation: Option<Arc<AtomicBool>>,
 ) -> Result<String, String> {
     let emit_desktop_chat_events = turn_runtime.emits_desktop_chat_events();
     validate_session_id(&session_id)?;
@@ -4010,7 +4095,7 @@ async fn run_chat_turn_with_context(
                 return Err(error);
             }
         };
-    let cancelled = Arc::new(AtomicBool::new(false));
+    let cancelled = cancellation.unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
     {
         let mut running = state
             .running_turns
@@ -4031,10 +4116,19 @@ async fn run_chat_turn_with_context(
         record_user_prompt(&session_id, surface, &user_message);
     }
     crate::chat_events::record_user_message(&session_id, surface, &user_message);
+    // The durable event is authoritative; this content-free notification only
+    // wakes paired long polls so they can read the scoped, filtered projection.
+    let _ = app.emit(
+        "chat-user-message-recorded",
+        json!({ "sessionId": &session_id }),
+    );
     let _busy = ChatBusyGuard {
         running_turns: &state.running_turns,
         session_id: session_id.clone(),
     };
+    if cancelled.load(Ordering::SeqCst) {
+        return Err("interrupted by user".to_string());
+    }
     crate::config::apply_reviewer_environment(true);
     let (model, provider, executor_config) =
         match resolve_executor_for_model(model_override.as_deref()) {
@@ -4047,20 +4141,12 @@ async fn run_chat_turn_with_context(
     let usage_model = model.clone();
     let usage_provider = provider.clone();
     let usage_server = executor_server_label(&executor_config);
-    let session = match if matches!(turn_runtime, ChatTurnRuntime::RemoteApproved) {
-        match project_id.as_deref() {
-            Some(project_id) => get_project_scoped_chat_session(project_id, &session_id),
-            None => Err("paired remote chat requires a project id".to_string()),
-        }
-    } else {
-        get_cached_or_disk_session(&state, &session_id)
-    } {
-        Ok(session) => session,
-        Err(error) => {
-            emit_chat_error(&app, &session_id, &error, false, emit_desktop_chat_events);
-            return Err(error);
-        }
-    };
+    let remote_controlled = matches!(turn_runtime, ChatTurnRuntime::RemoteApproved);
+    let event_delivery = turn_runtime.event_delivery();
+    emit_remote_chat_activity(event_delivery, &app, &session_id, "preparing");
+    // A paired request is the same Chat turn initiated from another display;
+    // retain the configured compaction/summarizer behavior instead of forcing
+    // a slower, different remote-only fallback.
     let config_obj = crate::config::load_object();
     let summarizer_model = config_object_string(&config_obj, "summarizer_model");
     let summarizer_config = match resolve_summarizer_config(&config_obj) {
@@ -4070,27 +4156,97 @@ async fn run_chat_turn_with_context(
             None
         }
     };
-    let remote_project_id = matches!(turn_runtime, ChatTurnRuntime::RemoteApproved)
-        .then_some(project_id.as_deref())
-        .flatten();
-    let session = match maybe_auto_compact(
-        &app,
-        state,
-        &session_id,
-        &model,
-        executor_config.clone(),
-        summarizer_model.clone(),
-        summarizer_config.clone(),
-        session,
-        remote_project_id,
-        emit_desktop_chat_events,
-    ) {
-        Ok(session) => session,
+    let remote_project_id_owned = remote_controlled.then(|| project_id.clone()).flatten();
+    if remote_controlled && remote_project_id_owned.is_none() {
+        let error = "paired remote chat requires a project id".to_string();
+        emit_chat_error(&app, &session_id, &error, false, emit_desktop_chat_events);
+        return Err(error);
+    }
+    // A cached local session is cloned under a short lock. Any disk load,
+    // token estimation, compaction, serialization, and indexing then runs on
+    // the blocking pool rather than on the Tauri async command thread.
+    let cached_local_session = if remote_controlled {
+        None
+    } else {
+        match state.sessions.lock() {
+            Ok(sessions) => sessions.get(&session_id).cloned(),
+            Err(_) => {
+                let error = "chat state poisoned".to_string();
+                emit_chat_error(&app, &session_id, &error, false, emit_desktop_chat_events);
+                return Err(error);
+            }
+        }
+    };
+    let preflight_app = app.clone();
+    let preflight_session_id = session_id.clone();
+    let preflight_model = model.clone();
+    let preflight_executor_config = executor_config.clone();
+    let preflight_summarizer_model = summarizer_model.clone();
+    let preflight_summarizer_config = summarizer_config.clone();
+    let preflight_project_id = remote_project_id_owned.clone();
+    let preflight_cancelled = cancelled.clone();
+    let preflight = tauri::async_runtime::spawn_blocking(move || {
+        let total_started = Instant::now();
+        let load_started = Instant::now();
+        let session = if let Some(session) = cached_local_session {
+            session
+        } else if let Some(project_id) = preflight_project_id.as_deref() {
+            get_project_scoped_chat_session(project_id, &preflight_session_id)?
+        } else {
+            load_chat_session(&preflight_session_id)?
+        };
+        crate::chat_events::record_event(
+            &preflight_session_id,
+            "preflight_stage",
+            json!({
+                "sessionId": &preflight_session_id,
+                "stage": "session_load",
+                "elapsedMs": load_started.elapsed().as_millis(),
+            }),
+        );
+        if preflight_cancelled.load(Ordering::SeqCst) {
+            return Err("interrupted by user".to_string());
+        }
+        let result = maybe_auto_compact(
+            &preflight_app,
+            &preflight_session_id,
+            &preflight_model,
+            preflight_executor_config,
+            preflight_summarizer_model,
+            preflight_summarizer_config,
+            session,
+            emit_desktop_chat_events,
+            event_delivery,
+            &preflight_cancelled,
+        );
+        crate::chat_events::record_event(
+            &preflight_session_id,
+            "preflight_stage",
+            json!({
+                "sessionId": &preflight_session_id,
+                "stage": "total",
+                "elapsedMs": total_started.elapsed().as_millis(),
+                "completed": result.is_ok(),
+            }),
+        );
+        result
+    })
+    .await;
+    let session = match preflight {
+        Ok(Ok(result)) => result,
+        Ok(Err(error)) => {
+            emit_chat_error(&app, &session_id, &error, false, emit_desktop_chat_events);
+            return Err(error);
+        }
         Err(error) => {
+            let error = error.to_string();
             emit_chat_error(&app, &session_id, &error, false, emit_desktop_chat_events);
             return Err(error);
         }
     };
+    if cancelled.load(Ordering::SeqCst) {
+        return Err("interrupted by user".to_string());
+    }
     // A paired device continues the selected desktop session rather than
     // getting an independent permission profile. The session's local policy
     // remains the authority for every tool call.
@@ -4107,8 +4263,6 @@ async fn run_chat_turn_with_context(
             }
         };
     let (extra_blocked_tools, full_tool_registry) = turn_runtime.tool_profile();
-    let event_delivery = turn_runtime.event_delivery();
-    let remote_approved = matches!(turn_runtime, ChatTurnRuntime::RemoteApproved);
 
     // Configured compaction-summary model (Settings → "Summary model"); empty
     // means "Auto" and the chat crate picks a sensible default.
@@ -4237,20 +4391,14 @@ async fn run_chat_turn_with_context(
             message: error.to_string(),
             session: Some(build_failure_session),
         })?;
-        let summary_result = if remote_approved {
-            let mut permission_prompter = RemotePermissionPrompter {
-                session_id: worker_session_id.clone(),
-            };
-            runtime.run_turn_message(user_message, Some(&mut permission_prompter))
-        } else {
-            let mut permission_prompter = DesktopPermissionPrompter {
-                app: worker_app,
-                session_id: worker_session_id,
-                prompts: permission_prompts,
-                cancelled: worker_cancelled,
-            };
-            runtime.run_turn_message(user_message, Some(&mut permission_prompter))
+        emit_remote_chat_activity(event_delivery, &worker_app, &worker_session_id, "thinking");
+        let mut permission_prompter = DesktopPermissionPrompter {
+            app: worker_app,
+            session_id: worker_session_id,
+            prompts: permission_prompts,
+            cancelled: worker_cancelled,
         };
+        let summary_result = runtime.run_turn_message(user_message, Some(&mut permission_prompter));
         let summary = match summary_result {
             Ok(summary) => summary,
             Err(error) => {
@@ -4300,25 +4448,43 @@ async fn run_chat_turn_with_context(
             let mut session_preserved = false;
             if let Some(mut failed_session) = failure.session {
                 runtime::strip_trailing_internal_continuation_messages(&mut failed_session);
-                match persist_chat_turn_session(
-                    state,
-                    &session_id,
-                    remote_project_id,
-                    &failed_session,
-                ) {
-                    Ok(()) => {
+                let failure_session_id = session_id.clone();
+                let failure_project_id = remote_project_id_owned.clone();
+                let persisted = tauri::async_runtime::spawn_blocking(move || {
+                    persist_chat_turn_session_to_disk(
+                        &failure_session_id,
+                        failure_project_id.as_deref(),
+                        &failed_session,
+                    )?;
+                    Ok::<Session, String>(failed_session)
+                })
+                .await;
+                match persisted {
+                    Ok(Ok(failed_session)) => {
                         session_preserved = true;
                         crate::chat_events::record_session_snapshot(
                             &session_id,
                             "turn_error",
                             &failed_session,
                         );
+                        if remote_project_id_owned.is_none() {
+                            if let Err(error) =
+                                cache_chat_session(state, session_id.clone(), failed_session)
+                            {
+                                eprintln!(
+                                    "SomniQ desktop: failed to cache preserved session: {error}"
+                                );
+                            }
+                        }
                     }
-                    Err(store_error) => {
+                    Ok(Err(store_error)) => {
                         eprintln!(
                             "SomniQ desktop: failed to preserve session after turn error: {store_error}"
                         );
                     }
+                    Err(join_error) => eprintln!(
+                        "SomniQ desktop: session preservation worker failed: {join_error}"
+                    ),
                 }
             }
             emit_chat_error(
@@ -4332,6 +4498,12 @@ async fn run_chat_turn_with_context(
         }
     };
 
+    if cancelled.load(Ordering::SeqCst) {
+        let error = "interrupted by user".to_string();
+        emit_chat_error(&app, &session_id, &error, false, emit_desktop_chat_events);
+        return Err(error);
+    }
+
     // Session-history token estimate after this turn. This is the same budget
     // unit used by auto-compaction, so it is the value that should drive the
     // frontend ContextRing. Provider usage is emitted separately below because
@@ -4342,11 +4514,36 @@ async fn run_chat_turn_with_context(
     let auto_compaction_token_estimate_source =
         auto_compaction.map(|event| event.token_estimate_source.as_str());
     let provider_usage = latest_provider_usage(&turn_usages);
-    if let Err(error) = persist_chat_turn_session(state, &session_id, remote_project_id, &updated) {
-        emit_chat_error(&app, &session_id, &error, false, emit_desktop_chat_events);
-        return Err(error);
-    }
+    let persist_session_id = session_id.clone();
+    let persist_project_id = remote_project_id_owned.clone();
+    let updated = match tauri::async_runtime::spawn_blocking(move || {
+        persist_chat_turn_session_to_disk(
+            &persist_session_id,
+            persist_project_id.as_deref(),
+            &updated,
+        )?;
+        Ok::<Session, String>(updated)
+    })
+    .await
+    {
+        Ok(Ok(updated)) => updated,
+        Ok(Err(error)) => {
+            emit_chat_error(&app, &session_id, &error, false, emit_desktop_chat_events);
+            return Err(error);
+        }
+        Err(error) => {
+            let error = error.to_string();
+            emit_chat_error(&app, &session_id, &error, false, emit_desktop_chat_events);
+            return Err(error);
+        }
+    };
     crate::chat_events::record_session_snapshot(&session_id, "turn_done", &updated);
+    if remote_project_id_owned.is_none() {
+        if let Err(error) = cache_chat_session(state, session_id.clone(), updated) {
+            emit_chat_error(&app, &session_id, &error, false, emit_desktop_chat_events);
+            return Err(error);
+        }
+    }
     if !ephemeral {
         if let Err(error) = crate::usage_log::append_turn_usage(
             &session_id,

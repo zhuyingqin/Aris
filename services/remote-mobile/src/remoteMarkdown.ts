@@ -2,6 +2,8 @@ export type RemoteMarkdownBlock =
   | { kind: "heading"; level: number; text: string }
   | { kind: "unordered_list"; items: string[] }
   | { kind: "ordered_list"; items: string[] }
+  | { kind: "task_list"; ordered: boolean; items: Array<{ text: string; checked: boolean }> }
+  | { kind: "table"; headers: string[]; rows: string[][] }
   | { kind: "quote"; text: string }
   | { kind: "code"; language: string; text: string }
   | { kind: "divider" }
@@ -60,6 +62,27 @@ export function parseRemoteMarkdown(text: string): RemoteMarkdownBlock[] {
       continue;
     }
 
+    const table = parseRemoteMarkdownTable(lines, index);
+    if (table) {
+      const rows: string[][] = [];
+      index += 2;
+      while (index < lines.length) {
+        const row = parseRemoteMarkdownTableRow(lines[index]);
+        if (!row) break;
+        rows.push(normalizeRemoteMarkdownTableRow(row, table.headers.length));
+        index += 1;
+      }
+      blocks.push({ kind: "table", headers: table.headers, rows });
+      continue;
+    }
+
+    const taskList = parseRemoteMarkdownTaskList(lines, index);
+    if (taskList) {
+      blocks.push(taskList.block);
+      index = taskList.nextIndex;
+      continue;
+    }
+
     if (/^[-*+]\s+/.test(line)) {
       const items: string[] = [];
       while (index < lines.length) {
@@ -85,7 +108,7 @@ export function parseRemoteMarkdown(text: string): RemoteMarkdownBlock[] {
     }
 
     const paragraph: string[] = [];
-    while (index < lines.length && lines[index].trim().length > 0 && !beginsRemoteMarkdownBlock(lines[index])) {
+    while (index < lines.length && lines[index].trim().length > 0 && !beginsRemoteMarkdownBlock(lines, index)) {
       paragraph.push(lines[index]);
       index += 1;
     }
@@ -131,6 +154,59 @@ export function renderRemoteMarkdown(text: string): DocumentFragment {
         fragment.append(list);
         break;
       }
+      case "task_list": {
+        const list = document.createElement(block.ordered ? "ol" : "ul");
+        list.className = "remote-markdown-task-list";
+        for (const item of block.items) {
+          const entry = document.createElement("li");
+          const checkbox = document.createElement("input");
+          checkbox.type = "checkbox";
+          checkbox.checked = item.checked;
+          checkbox.disabled = true;
+          checkbox.tabIndex = -1;
+          checkbox.setAttribute("aria-label", item.checked ? "Completed task" : "Open task");
+          const content = document.createElement("span");
+          appendInlineMarkdown(content, item.text);
+          entry.append(checkbox, content);
+          list.append(entry);
+        }
+        fragment.append(list);
+        break;
+      }
+      case "table": {
+        const scroll = document.createElement("div");
+        scroll.className = "remote-markdown-table-scroll";
+        const table = document.createElement("table");
+        table.className = "remote-markdown-table";
+        const head = document.createElement("thead");
+        const headerRow = document.createElement("tr");
+        for (const header of block.headers) {
+          const cell = document.createElement("th");
+          cell.scope = "col";
+          appendInlineMarkdown(cell, header);
+          headerRow.append(cell);
+        }
+        head.append(headerRow);
+        table.append(head);
+
+        if (block.rows.length > 0) {
+          const body = document.createElement("tbody");
+          for (const row of block.rows) {
+            const tableRow = document.createElement("tr");
+            for (const value of row) {
+              const cell = document.createElement("td");
+              appendInlineMarkdown(cell, value);
+              tableRow.append(cell);
+            }
+            body.append(tableRow);
+          }
+          table.append(body);
+        }
+
+        scroll.append(table);
+        fragment.append(scroll);
+        break;
+      }
       case "quote": {
         const quote = document.createElement("blockquote");
         appendInlineMarkdown(quote, block.text);
@@ -160,12 +236,14 @@ export function renderRemoteMarkdown(text: string): DocumentFragment {
   return fragment;
 }
 
-function beginsRemoteMarkdownBlock(line: string): boolean {
-  return /^```|^(#{1,3})\s+|^(?:\*{3,}|-{3,}|_{3,})\s*$|^>\s?|^[-*+]\s+|^\d+[.)]\s+/.test(line);
+function beginsRemoteMarkdownBlock(lines: string[], index: number): boolean {
+  const line = lines[index];
+  return /^```|^(#{1,3})\s+|^(?:\*{3,}|-{3,}|_{3,})\s*$|^>\s?|^[-*+]\s+|^\d+[.)]\s+/.test(line)
+    || parseRemoteMarkdownTable(lines, index) !== null;
 }
 
 function appendInlineMarkdown(target: HTMLElement, text: string): void {
-  const token = /`([^`]+)`|\*\*([^*]+)\*\*|\[([^\]]+)\]\(([^)\s]+)\)/g;
+  const token = /`([^`\n]+)`|!\[([^\]\n]*)\]\(([^()\s]+)\)|\[([^\]\n]+)\]\(([^()\s]+)\)|\*\*([^*\n]+)\*\*|~~([^~\n]+)~~|\*([^*\n]+)\*|_([^_\n]+)_/g;
   let cursor = 0;
   for (const match of text.matchAll(token)) {
     const offset = match.index ?? 0;
@@ -175,20 +253,46 @@ function appendInlineMarkdown(target: HTMLElement, text: string): void {
       code.textContent = match[1];
       target.append(code);
     } else if (match[2] !== undefined) {
-      const strong = document.createElement("strong");
-      strong.textContent = match[2];
-      target.append(strong);
-    } else {
-      const href = safeRemoteHref(match[4]);
+      const src = safeRemoteUrl(match[3]);
+      if (src) {
+        const image = document.createElement("img");
+        image.src = src;
+        image.alt = match[2];
+        image.loading = "lazy";
+        image.decoding = "async";
+        image.referrerPolicy = "no-referrer";
+        target.append(image);
+      } else {
+        appendPlainText(target, match[0]);
+      }
+    } else if (match[4] !== undefined) {
+      const href = safeRemoteUrl(match[5]);
       if (href) {
         const link = document.createElement("a");
         link.href = href;
         link.target = "_blank";
-        link.rel = "noreferrer";
-        link.textContent = match[3];
+        link.rel = "noopener noreferrer";
+        link.textContent = match[4];
         target.append(link);
       } else {
-        appendPlainText(target, match[3]);
+        appendPlainText(target, match[0]);
+      }
+    } else if (match[6] !== undefined) {
+      const strong = document.createElement("strong");
+      strong.textContent = match[6];
+      target.append(strong);
+    } else if (match[7] !== undefined) {
+      const deleted = document.createElement("del");
+      deleted.textContent = match[7];
+      target.append(deleted);
+    } else if (match[8] !== undefined || match[9] !== undefined) {
+      const value = match[8] ?? match[9] ?? "";
+      if (isInlineWordBoundary(text, offset, match[0].length)) {
+        const emphasis = document.createElement("em");
+        emphasis.textContent = value;
+        target.append(emphasis);
+      } else {
+        appendPlainText(target, match[0]);
       }
     }
     cursor = offset + match[0].length;
@@ -204,10 +308,99 @@ function appendPlainText(target: HTMLElement, text: string): void {
   });
 }
 
-function safeRemoteHref(value: string): string | null {
+function parseRemoteMarkdownTaskList(
+  lines: string[],
+  index: number,
+): { block: Extract<RemoteMarkdownBlock, { kind: "task_list" }>; nextIndex: number } | null {
+  const first = parseRemoteMarkdownTaskListItem(lines[index]);
+  if (!first) return null;
+
+  const items = [first.item];
+  let nextIndex = index + 1;
+  while (nextIndex < lines.length) {
+    const next = parseRemoteMarkdownTaskListItem(lines[nextIndex]);
+    if (!next || next.ordered !== first.ordered) break;
+    items.push(next.item);
+    nextIndex += 1;
+  }
+
+  return {
+    block: { kind: "task_list", ordered: first.ordered, items },
+    nextIndex,
+  };
+}
+
+function parseRemoteMarkdownTaskListItem(
+  line: string,
+): { ordered: boolean; item: { text: string; checked: boolean } } | null {
+  const unordered = /^[-*+]\s+\[([ xX])\]\s*(.*)$/.exec(line);
+  if (unordered) {
+    return { ordered: false, item: { checked: unordered[1].toLowerCase() === "x", text: unordered[2] } };
+  }
+
+  const ordered = /^\d+[.)]\s+\[([ xX])\]\s*(.*)$/.exec(line);
+  if (!ordered) return null;
+  return { ordered: true, item: { checked: ordered[1].toLowerCase() === "x", text: ordered[2] } };
+}
+
+function parseRemoteMarkdownTable(
+  lines: string[],
+  index: number,
+): { headers: string[] } | null {
+  if (index + 1 >= lines.length) return null;
+  const headers = parseRemoteMarkdownTableRow(lines[index]);
+  const separator = parseRemoteMarkdownTableRow(lines[index + 1]);
+  if (!headers || !separator || headers.length === 0 || headers.length !== separator.length) return null;
+  if (!separator.every((cell) => /^:?-{3,}:?$/.test(cell.trim()))) return null;
+  return { headers };
+}
+
+function parseRemoteMarkdownTableRow(line: string): string[] | null {
+  const trimmed = line.trim();
+  if (!trimmed.includes("|")) return null;
+
+  const row = trimmed.replace(/^\|/, "").replace(/\|$/, "");
+  const cells: string[] = [];
+  let cell = "";
+  let escaped = false;
+  for (const character of row) {
+    if (escaped) {
+      cell += character;
+      escaped = false;
+    } else if (character === "\\") {
+      escaped = true;
+    } else if (character === "|") {
+      cells.push(cell.trim());
+      cell = "";
+    } else {
+      cell += character;
+    }
+  }
+  if (escaped) cell += "\\";
+  cells.push(cell.trim());
+  return cells;
+}
+
+function normalizeRemoteMarkdownTableRow(cells: string[], columnCount: number): string[] {
+  return Array.from({ length: columnCount }, (_, index) => cells[index] ?? "");
+}
+
+function isInlineWordBoundary(text: string, offset: number, length: number): boolean {
+  const before = offset > 0 ? text[offset - 1] : "";
+  const after = text[offset + length] ?? "";
+  return !isInlineWordCharacter(before) && !isInlineWordCharacter(after);
+}
+
+function isInlineWordCharacter(value: string): boolean {
+  return /[\p{L}\p{N}_]/u.test(value);
+}
+
+export function safeRemoteUrl(value: string): string | null {
   try {
     const url = new URL(value);
-    return url.protocol === "https:" || url.protocol === "http:" ? url.href : null;
+    return (url.protocol === "https:" || url.protocol === "http:") && url.hostname.length > 0
+      ? url.href
+      : null;
   } catch {
     return null;
   }

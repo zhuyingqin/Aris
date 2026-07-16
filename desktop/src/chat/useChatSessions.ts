@@ -96,6 +96,14 @@ function mergeLoadedSession(current: ChatSession, loaded: ChatSession): ChatSess
   };
 }
 
+function isSessionStreaming(session: ChatSession) {
+  for (let index = session.turns.length - 1; index >= 0; index -= 1) {
+    const turn = session.turns[index];
+    if (turn.role === "assistant") return turn.streaming === true;
+  }
+  return false;
+}
+
 function mergeRemoteLoadedSession(current: ChatSession | undefined, loaded: ChatSession): ChatSession {
   if (!current) return loaded;
   // A lazy list entry is intentionally summary-only. Its timestamp cannot be
@@ -113,6 +121,11 @@ interface RemoteTurnBuffer {
   userText: string;
   text: string;
   completed: boolean;
+  /** Preserve the desktop renderer's canonical rich blocks while the phone
+   * receives its separately bounded rich mirror. */
+  desktopMirrored: boolean;
+  activity?: "preparing" | "compacting" | "thinking" | "tool";
+  stopped?: boolean;
   error?: string;
 }
 
@@ -129,15 +142,35 @@ function applyRemoteTurnBuffer(session: ChatSession, buffer: RemoteTurnBuffer): 
     });
     added += 1;
   }
+  const assistantIndex = turns.findIndex((turn) => turn.id === assistantId);
+  const existingAssistant = assistantIndex >= 0 ? turns[assistantIndex] : undefined;
+  const preserveDesktopBlocks = buffer.desktopMirrored
+    && existingAssistant?.role === "assistant"
+    && existingAssistant.blocks.length > 0;
   const assistant = {
+    ...(existingAssistant?.role === "assistant" ? existingAssistant : {}),
     id: assistantId,
     role: "assistant" as const,
-    blocks: buffer.text ? [{ kind: "text" as const, text: buffer.text }] : [],
+    blocks: preserveDesktopBlocks
+      ? existingAssistant?.blocks ?? []
+      : buffer.text
+      ? [{ kind: "text" as const, text: buffer.text }]
+      : buffer.activity
+        ? [{
+            kind: "notice" as const,
+            message: buffer.activity === "tool"
+              ? "SomniQ is running a tool…"
+              : buffer.activity === "compacting"
+                ? "SomniQ is compacting this conversation…"
+                : buffer.activity === "preparing"
+                  ? "SomniQ is preparing this turn…"
+                  : "SomniQ is thinking…",
+          }]
+        : [],
     streaming: !buffer.completed && !buffer.error,
     error: buffer.error,
-    stopped: false,
+    stopped: Boolean(buffer.stopped),
   };
-  const assistantIndex = turns.findIndex((turn) => turn.id === assistantId);
   if (assistantIndex >= 0) turns[assistantIndex] = assistant;
   else {
     turns.push(assistant);
@@ -301,6 +334,10 @@ export function useChatSessions(projectId?: string | null) {
     const refreshRemoteSession = (event: RemoteChatSessionUpdatedEvent) => {
       const id = typeof event.sessionId === "string" ? event.sessionId.trim() : "";
       if (!id) return;
+      if (event.phase === "created") {
+        loadPersistedRemoteSession(id);
+        return;
+      }
       const messageId = typeof event.messageId === "string" ? event.messageId.trim() : "";
       if (event.phase === "started" && messageId && typeof event.message === "string") {
         const buffer: RemoteTurnBuffer = {
@@ -308,31 +345,41 @@ export function useChatSessions(projectId?: string | null) {
           userText: event.message,
           text: "",
           completed: false,
+          desktopMirrored: event.desktopMirrored === true,
+          activity: "preparing",
         };
         remoteTurnBuffers.current.set(id, buffer);
         updateBufferedSession(id, buffer);
-        // A remote phone can target a session that is only a lazy sidebar
-        // summary on this desktop. Load its full projection once, then apply
-        // every delta accumulated while the read was in flight.
-        void chatUiSessionLoad<ChatSession>(id)
-          .then((stored) => {
-            const currentBuffer = remoteTurnBuffers.current.get(id);
-            if (!stored || disposed || currentBuffer?.messageId !== messageId) return;
-            const knownProjectId = sessionsRef.current.find((session) => session.id === id)?.projectId;
-            const loaded = { ...migrateSession(stored, knownProjectId ?? "default"), turnsLoaded: true };
-            setAllSessions((previous) => previous.map((session) => {
-              if (session.id !== id) return session;
-              const base = session.turnsLoaded === false ? loaded : session;
-              return applyRemoteTurnBuffer(base, currentBuffer);
-            }));
-          })
-          .catch(() => undefined);
+        // Keep lazy, unselected sessions summary-only. The selected-session
+        // loader below coalesces the single disk read and applies this buffer
+        // after it finishes, so a phone message cannot force a megabyte-scale
+        // React render in an unrelated desktop conversation.
         return;
       }
       const buffer = remoteTurnBuffers.current.get(id);
       if (event.phase === "delta" && buffer && buffer.messageId === messageId && typeof event.delta === "string") {
         buffer.text += event.delta;
-        scheduleBufferedSessionUpdate(id);
+        buffer.activity = undefined;
+        // The same turn is already updating the desktop Chat through its
+        // ordinary `chat-delta` stream. Keep this text only as a recovery
+        // fallback; do not replace thinking/tool/rich blocks with the mobile
+        // text projection.
+        if (!buffer.desktopMirrored) scheduleBufferedSessionUpdate(id);
+        return;
+      }
+      if (
+        event.phase === "activity"
+        && buffer
+        && buffer.messageId === messageId
+        && (
+          event.activity === "preparing"
+          || event.activity === "compacting"
+          || event.activity === "thinking"
+          || event.activity === "tool"
+        )
+      ) {
+        buffer.activity = event.activity;
+        if (!buffer.desktopMirrored) scheduleBufferedSessionUpdate(id);
         return;
       }
       if (event.phase === "completed" && buffer && buffer.messageId === messageId) {
@@ -341,13 +388,25 @@ export function useChatSessions(projectId?: string | null) {
         buffer.completed = true;
         updateBufferedSession(id, { ...buffer });
         remoteTurnBuffers.current.delete(id);
-        if (event.persisted !== false) loadPersistedRemoteSession(id);
+        // In mirror mode the normal desktop renderer has just produced the
+        // canonical rich turn. Loading the backend's durable fallback
+        // here would overwrite it before the normal session save lands.
+        if (event.persisted !== false && !buffer.desktopMirrored) loadPersistedRemoteSession(id);
         return;
       }
       if (event.phase === "error" && buffer && buffer.messageId === messageId) {
         cancelBufferedSessionUpdate(id);
         buffer.completed = true;
         buffer.error = event.error || "Remote chat failed.";
+        updateBufferedSession(id, { ...buffer });
+        remoteTurnBuffers.current.delete(id);
+        return;
+      }
+      if (event.phase === "cancelled" && buffer && buffer.messageId === messageId) {
+        cancelBufferedSessionUpdate(id);
+        buffer.completed = true;
+        buffer.stopped = true;
+        buffer.activity = undefined;
         updateBufferedSession(id, { ...buffer });
         remoteTurnBuffers.current.delete(id);
         return;
@@ -391,13 +450,20 @@ export function useChatSessions(projectId?: string | null) {
     const dirtyIds = new Set(dirtySessionIds.current);
     if (dirtyIds.size === 0) return;
     for (const id of dirtyIds) dirtySessionIds.current.delete(id);
-    const sessionsToSave = persistentSessions(pending)
+    const dirtySessions = persistentSessions(pending)
       .filter((session) => dirtyIds.has(session.id));
+    const sessionsToSave = dirtySessions.filter((session) => (
+      !isSessionStreaming(session) && !remoteTurnBuffers.current.has(session.id)
+    ));
+    const savingIds = new Set(sessionsToSave.map((session) => session.id));
+    for (const session of dirtySessions) {
+      if (!savingIds.has(session.id)) dirtySessionIds.current.add(session.id);
+    }
     if (sessionsToSave.length === 0) return;
     void Promise.all(sessionsToSave.map((session) => chatUiSessionSave(session)))
       .then(clearLocalSessionSnapshots)
       .catch((error) => {
-        for (const id of dirtyIds) dirtySessionIds.current.add(id);
+        for (const id of savingIds) dirtySessionIds.current.add(id);
         setError(`Failed to save chat sessions: ${String(error)}`);
       });
   }, [setError]);
@@ -476,8 +542,12 @@ export function useChatSessions(projectId?: string | null) {
       .then((stored) => {
         if (!stored) throw new Error("chat session not found");
         const loaded = { ...migrateSession(stored, session.projectId), turnsLoaded: true };
-        setAllSessions((previous) => previous.map((item) =>
-          item.id === currentId ? mergeRemoteLoadedSession(item, loaded) : item));
+        setAllSessions((previous) => previous.map((item) => {
+          if (item.id !== currentId) return item;
+          const merged = mergeRemoteLoadedSession(item, loaded);
+          const remoteBuffer = remoteTurnBuffers.current.get(currentId);
+          return remoteBuffer ? applyRemoteTurnBuffer(merged, { ...remoteBuffer }) : merged;
+        }));
       })
       .catch((error) => setError(`Failed to load chat session: ${String(error)}`))
       .finally(() => {
@@ -571,6 +641,11 @@ export function useChatSessions(projectId?: string | null) {
       setHomeSession(makeHomeSession(activeProjectId));
       return;
     }
+    // Stream listeners are process-wide and also receive paired-phone events
+    // for unselected sessions. Do not materialize a summary-only session with
+    // an empty transcript merely because a delta arrived; the selected-session
+    // loader will merge the remote buffer when the user actually opens it.
+    if (sessionsRef.current.find((session) => session.id === id)?.turnsLoaded === false) return;
     updateSession(id, (session) => {
       const turns = fn(session.turns);
       const previousTurnCount = session.turnCount ?? session.turns.length;

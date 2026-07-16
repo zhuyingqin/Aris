@@ -1,10 +1,12 @@
 use super::{
     append_remote_chat_text_turns, chat_ui_preview_turns, find_turns_array_bounds,
     merge_missing_remote_chat_ui_turns, partition_chat_ui_index, preserve_remote_chat_updated_at,
+    remote_chat_new_session_value, remote_chat_session_summary_for_project,
     remote_chat_sessions_from_index, remote_chat_transcript_for_project, tail_turns_from_array,
     turn_from_array_index, CHAT_UI_SESSION_PREVIEW_MAX_TURNS,
     MAX_REMOTE_CHAT_TRANSCRIPT_TEXT_BYTES,
 };
+use remote_protocol::ChatTranscriptBlock;
 use serde_json::{json, Value};
 use std::collections::HashSet;
 
@@ -33,6 +35,22 @@ fn chat_session(
 }
 
 #[test]
+fn remote_chat_new_session_has_matching_empty_ui_state_and_summary() {
+    let session = remote_chat_new_session_value("project-a", "chat-created", 42);
+    assert_eq!(session["turns"], json!([]));
+    assert_eq!(session["turnsLoaded"], true);
+    assert_eq!(session["turnCount"], 0);
+    assert_eq!(session["createdAt"], 42);
+
+    let summary = remote_chat_session_summary_for_project(&session, "project-a")
+        .expect("new session should have a project-scoped summary");
+    assert_eq!(summary.id, "chat-created");
+    assert_eq!(summary.title, "New chat");
+    assert_eq!(summary.updated_at_unix_ms, 42);
+    assert_eq!(summary.model, None);
+}
+
+#[test]
 fn remote_chat_list_filters_current_project_orders_by_update_and_bounds_results() {
     let index = vec![
         chat_session("older", "project-a", "Older", 10, vec![text_turn(0, "old")]),
@@ -56,7 +74,7 @@ fn remote_chat_list_filters_current_project_orders_by_update_and_bounds_results(
 }
 
 #[test]
-fn remote_chat_transcript_exposes_only_user_and_assistant_text_blocks() {
+fn remote_chat_transcript_matches_visible_text_thinking_and_tool_blocks() {
     let session = chat_session(
         "chat-safe",
         "default",
@@ -75,8 +93,8 @@ fn remote_chat_transcript_exposes_only_user_and_assistant_text_blocks() {
                 "id": "assistant-1",
                 "role": "assistant",
                 "blocks": [
-                    { "kind": "thinking", "thinking": "private reasoning" },
-                    { "kind": "tool", "name": "read_file", "input": "secret input", "output": "secret output" },
+                    { "kind": "thinking", "thinking": "visible reasoning" },
+                    { "kind": "tool", "id": "tool-1", "name": "read_file", "input": "visible input", "output": "visible output", "isError": false },
                     { "kind": "permission", "input": "private permission" },
                     { "kind": "text", "text": "Here is the summary." }
                 ]
@@ -96,10 +114,31 @@ fn remote_chat_transcript_exposes_only_user_and_assistant_text_blocks() {
             super::RemoteChatTranscriptMessage {
                 role: "user".to_string(),
                 text: "Please summarize this.".to_string(),
+                blocks: vec![ChatTranscriptBlock::Text {
+                    text: "Please summarize this.".to_string(),
+                }],
+                truncated: false,
             },
             super::RemoteChatTranscriptMessage {
                 role: "assistant".to_string(),
                 text: "Here is the summary.".to_string(),
+                blocks: vec![
+                    ChatTranscriptBlock::Thinking {
+                        thinking: "visible reasoning".to_string(),
+                    },
+                    ChatTranscriptBlock::Tool {
+                        tool_use_id: Some("tool-1".to_string()),
+                        name: "read_file".to_string(),
+                        input: "visible input".to_string(),
+                        output: Some("visible output".to_string()),
+                        is_error: Some(false),
+                        progress: None,
+                    },
+                    ChatTranscriptBlock::Text {
+                        text: "Here is the summary.".to_string(),
+                    },
+                ],
+                truncated: false,
             },
         ]
     );
@@ -245,6 +284,48 @@ fn remote_chat_completion_replaces_a_saved_partial_assistant_turn() {
 }
 
 #[test]
+fn remote_chat_completion_preserves_saved_thinking_and_tool_blocks() {
+    let mut session = chat_session(
+        "chat-rich",
+        "default",
+        "Rich",
+        1,
+        vec![
+            json!({
+                "id": "remote-message-rich-user",
+                "role": "user",
+                "blocks": [{ "kind": "text", "text": "check it" }],
+            }),
+            json!({
+                "id": "remote-message-rich-assistant",
+                "role": "assistant",
+                "blocks": [
+                    { "kind": "thinking", "thinking": "checking" },
+                    { "kind": "tool", "id": "tool-1", "name": "shell_command", "input": "ping", "output": "ok", "isError": false },
+                    { "kind": "text", "text": "route " }
+                ],
+                "streaming": true,
+            }),
+        ],
+    );
+
+    assert!(append_remote_chat_text_turns(
+        &mut session,
+        "message-rich",
+        "check it",
+        "route is direct",
+        99,
+    )
+    .expect("completion should preserve the rich snapshot"));
+    let blocks = session["turns"][1]["blocks"].as_array().expect("blocks");
+    assert_eq!(blocks[0]["kind"], json!("thinking"));
+    assert_eq!(blocks[1]["kind"], json!("tool"));
+    assert_eq!(blocks[1]["output"], json!("ok"));
+    assert_eq!(blocks[2]["text"], json!("route is direct"));
+    assert_eq!(session["turns"][1]["streaming"], json!(false));
+}
+
+#[test]
 fn stale_full_ui_snapshot_retains_missing_remote_turns_in_stored_order() {
     let stored = chat_session(
         "chat-race",
@@ -310,7 +391,7 @@ fn chat_ui_preview_limits_only_tail_turns() {
     let turns = (0..40)
         .map(|index| text_turn(index, "x".repeat(30_000)))
         .collect::<Vec<_>>();
-    let (preview, partial, base_ids) = chat_ui_preview_turns(&turns);
+    let (preview, partial, base_ids) = chat_ui_preview_turns("chat-tail", &turns);
 
     assert!(partial);
     assert!(preview.len() <= CHAT_UI_SESSION_PREVIEW_MAX_TURNS);
@@ -343,19 +424,21 @@ fn fast_tail_loader_keeps_a_single_huge_turn_in_full() {
 }
 
 #[test]
-fn regular_preview_keeps_a_single_huge_turn_in_full() {
+fn regular_preview_omits_a_single_huge_turn_from_quick_load() {
     let huge = format!(
         "early setup that should be hidden{}FINAL ANSWER",
         "x".repeat(300_000)
     );
     let turns = vec![text_turn(0, "small"), text_turn(1, huge.clone())];
-    let (preview, partial, base_ids) = chat_ui_preview_turns(&turns);
+    let (preview, partial, base_ids) = chat_ui_preview_turns("chat-large", &turns);
 
-    assert!(!partial);
+    assert!(partial);
     assert_eq!(preview.len(), 2);
-    assert_eq!(preview[1]["id"], json!("turn-1"));
-    assert!(preview[1].get("omittedTurnIndex").is_none());
-    assert_eq!(preview[1]["blocks"][0]["text"], json!(huge));
+    assert_eq!(preview[1]["omittedTurnIndex"], json!(1));
+    assert_eq!(
+        preview[1]["omittedBytes"],
+        json!(serde_json::to_vec(&turns[1]).unwrap().len())
+    );
     assert_eq!(base_ids[1], "turn-1");
 }
 

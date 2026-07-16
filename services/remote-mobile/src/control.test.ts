@@ -2,13 +2,20 @@ import { describe, expect, it } from "vitest";
 
 import {
   chatMessageProgress,
+  chatMessageStopRequested,
+  chatMessageTerminal,
+  chatSessionEventsFromResponse,
+  chatSessionCreatedFromResponse,
   MOBILE_P1_REQUESTABLE_SCOPES,
   newChatModelOptionsRequest,
+  newChatEventsRequest,
+  newCreateChatSessionRequest,
   newChatTranscriptRequest,
   newChatMessageRequest,
   newListChatSessionsRequest,
   newSetActiveProjectRequest,
   newSetChatSessionModelRequest,
+  newStopChatMessageRequest,
   parseControlResponse,
 } from "./control";
 
@@ -34,9 +41,24 @@ describe("mobile control requests", () => {
         message: "Summarize the current evidence.",
         idempotency_key: "chat-turn-1",
         stream: true,
+        rich_stream: false,
       },
     });
     expect(request.request_id).toMatch(/^[0-9a-f-]{36}$/);
+  });
+
+  it("opts into ordered desktop-visible chat events only when negotiated", () => {
+    expect(newChatMessageRequest(
+      "project-alpha",
+      "session-alpha",
+      "Check the route.",
+      "chat-turn-rich",
+      1_234,
+      true,
+    ).command).toMatchObject({
+      type: "send_chat_message",
+      rich_stream: true,
+    });
   });
 
   it("uses bounded session list and transcript commands", () => {
@@ -51,6 +73,50 @@ describe("mobile control requests", () => {
       session_id: "session-alpha",
       limit: 100,
     });
+  });
+
+  it("builds a cursor-based desktop chat event long poll", () => {
+    expect(newChatEventsRequest("project-alpha", "session-alpha", 42, 200, 20_000, 1_234).command).toEqual({
+      type: "get_chat_events",
+      project_id: "project-alpha",
+      session_id: "session-alpha",
+      after_seq: 42,
+      limit: 200,
+      wait_ms: 20_000,
+    });
+  });
+
+  it("creates a desktop-owned chat and validates its returned summary", () => {
+    expect(newCreateChatSessionRequest("project-alpha", 1_234).command).toEqual({
+      type: "create_chat_session",
+      project_id: "project-alpha",
+    });
+    const response: import("./control").ControlResponse = {
+      protocol_version: 1,
+      request_id: "request-create",
+      responded_at_unix_ms: 1_235,
+      outcome: {
+        status: "success",
+        result: {
+          type: "chat_session_created",
+          project_id: "project-alpha",
+          session: {
+            session_id: "chat-new",
+            title: "New chat",
+            updated_at_unix_ms: 1_235,
+            model: null,
+          },
+        },
+      },
+    };
+    expect(chatSessionCreatedFromResponse(response, "project-alpha")).toEqual({
+      projectId: "project-alpha",
+      sessionId: "chat-new",
+      title: "New chat",
+      updatedAtUnixMs: 1_235,
+      model: null,
+    });
+    expect(chatSessionCreatedFromResponse(response, "project-beta")).toBeNull();
   });
 
   it("uses the existing paired-chat capability for project and model selection", () => {
@@ -69,6 +135,15 @@ describe("mobile control requests", () => {
       project_id: "project-beta",
       session_id: "session-beta",
       model: "gpt-5.6",
+    });
+  });
+
+  it("builds a stop request scoped to the accepted desktop message", () => {
+    expect(newStopChatMessageRequest("project-alpha", "session-alpha", "message-42", 1_234).command).toEqual({
+      type: "stop_chat_message",
+      project_id: "project-alpha",
+      session_id: "session-alpha",
+      message_id: "message-42",
     });
   });
 
@@ -96,7 +171,7 @@ describe("mobile control requests", () => {
     });
   });
 
-  it("classifies accepted and delta chat responses as non-terminal progress", () => {
+  it("classifies accepted, safe activity, and delta responses as non-terminal progress", () => {
     const accepted = parseControlResponse(new TextEncoder().encode(JSON.stringify({
       protocol_version: 1,
       request_id: "request-live",
@@ -125,6 +200,21 @@ describe("mobile control requests", () => {
         },
       },
     })));
+    const activity = parseControlResponse(new TextEncoder().encode(JSON.stringify({
+      protocol_version: 1,
+      request_id: "request-live",
+      responded_at_unix_ms: 1_235,
+      outcome: {
+        status: "success",
+        result: {
+          type: "chat_message_activity",
+          project_id: "project-alpha",
+          session_id: "session-alpha",
+          message_id: "message-live",
+          activity: "tool",
+        },
+      },
+    })));
 
     expect(chatMessageProgress(accepted)).toEqual({
       kind: "accepted",
@@ -138,5 +228,176 @@ describe("mobile control requests", () => {
       messageId: "message-live",
       delta: "partial answer",
     });
+    expect(chatMessageProgress(activity)).toEqual({
+      kind: "activity",
+      projectId: "project-alpha",
+      sessionId: "session-alpha",
+      messageId: "message-live",
+      activity: "tool",
+    });
   });
+
+  it("parses ordered thinking and UI-sanitized tool events", () => {
+    const response = parseControlResponse(new TextEncoder().encode(JSON.stringify({
+      protocol_version: 1,
+      request_id: "request-rich",
+      responded_at_unix_ms: 1_240,
+      outcome: {
+        status: "success",
+        result: {
+          type: "chat_message_event",
+          project_id: "project-alpha",
+          session_id: "session-alpha",
+          message_id: "message-rich",
+          event: {
+            kind: "tool_progress",
+            tool_use_id: "tool-1",
+            name: "shell_command",
+            progress: {
+              elapsed_ms: 250,
+              timeout_ms: 30_000,
+              pid: 42,
+              stdout_tail: "checking",
+              stderr_tail: null,
+              near_timeout: false,
+              message: "running",
+            },
+          },
+        },
+      },
+    })));
+
+    expect(chatMessageProgress(response)).toEqual({
+      kind: "event",
+      projectId: "project-alpha",
+      sessionId: "session-alpha",
+      messageId: "message-rich",
+      event: {
+        kind: "tool_progress",
+        toolUseId: "tool-1",
+        name: "shell_command",
+        progress: {
+          elapsedMs: 250,
+          timeoutMs: 30_000,
+          pid: 42,
+          stdoutTail: "checking",
+          stderrTail: null,
+          nearTimeout: false,
+          message: "running",
+        },
+      },
+    });
+  });
+
+  it("parses desktop-originated user and assistant event batches", () => {
+    const response = parseControlResponse(new TextEncoder().encode(JSON.stringify({
+      protocol_version: 1,
+      request_id: "request-sync",
+      responded_at_unix_ms: 1_240,
+      outcome: {
+        status: "success",
+        result: {
+          type: "chat_events",
+          project_id: "project-alpha",
+          session_id: "session-alpha",
+          next_seq: 45,
+          events: [
+            { kind: "user_message", seq: 43, text: "desktop question" },
+            { kind: "assistant", seq: 44, event: { kind: "thinking_delta", delta: "checking" } },
+            { kind: "done", seq: 45, text: "desktop answer" },
+          ],
+        },
+      },
+    })));
+    expect(chatSessionEventsFromResponse(response)).toEqual({
+      projectId: "project-alpha",
+      sessionId: "session-alpha",
+      nextSeq: 45,
+      events: [
+        { kind: "user_message", seq: 43, text: "desktop question" },
+        { kind: "assistant", seq: 44, event: { kind: "thinking_delta", delta: "checking" } },
+        { kind: "done", seq: 45, text: "desktop answer" },
+      ],
+    });
+  });
+
+  it("accepts only safe chat activity values and parses terminal stop outcomes", () => {
+    const malformedActivity = parseControlResponse(new TextEncoder().encode(JSON.stringify({
+      protocol_version: 1,
+      request_id: "request-live",
+      responded_at_unix_ms: 1_236,
+      outcome: {
+        status: "success",
+        result: {
+          type: "chat_message_activity",
+          project_id: "project-alpha",
+          session_id: "session-alpha",
+          message_id: "message-live",
+          activity: "raw_reasoning",
+        },
+      },
+    })));
+    expect(chatMessageProgress(malformedActivity)).toBeNull();
+
+    const cancelled = parseControlResponse(new TextEncoder().encode(JSON.stringify({
+      protocol_version: 1,
+      request_id: "request-live",
+      responded_at_unix_ms: 1_237,
+      outcome: {
+        status: "success",
+        result: {
+          type: "chat_message_cancelled",
+          project_id: "project-alpha",
+          session_id: "session-alpha",
+          message_id: "message-live",
+        },
+      },
+    })));
+    expect(chatMessageTerminal(cancelled)).toEqual({
+      kind: "cancelled",
+      projectId: "project-alpha",
+      sessionId: "session-alpha",
+      messageId: "message-live",
+    });
+
+    const stopAccepted = parseControlResponse(new TextEncoder().encode(JSON.stringify({
+      protocol_version: 1,
+      request_id: "request-stop",
+      responded_at_unix_ms: 1_238,
+      outcome: {
+        status: "success",
+        result: {
+          type: "chat_message_stop_requested",
+          project_id: "project-alpha",
+          session_id: "session-alpha",
+          message_id: "message-live",
+        },
+      },
+    })));
+    expect(chatMessageStopRequested(stopAccepted, "project-alpha", "session-alpha", "message-live")).toBe(true);
+    expect(chatMessageStopRequested(stopAccepted, "project-alpha", "session-alpha", "other-message")).toBe(false);
+  });
+
+  it.each(["preparing", "compacting"] as const)(
+    "parses the %s pre-execution activity without calling it thinking",
+    (activity) => {
+      const response = parseControlResponse(new TextEncoder().encode(JSON.stringify({
+        protocol_version: 1,
+        request_id: "request-preflight",
+        responded_at_unix_ms: 1_238,
+        outcome: {
+          status: "success",
+          result: {
+            type: "chat_message_activity",
+            project_id: "project-alpha",
+            session_id: "session-alpha",
+            message_id: "message-live",
+            activity,
+          },
+        },
+      })));
+
+      expect(chatMessageProgress(response)).toMatchObject({ kind: "activity", activity });
+    },
+  );
 });

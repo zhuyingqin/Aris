@@ -278,6 +278,56 @@ describe("useChatSessions Tauri persistence", () => {
     expect(apiMocks.chatUiSessionLoad).toHaveBeenCalledWith("remote-chat");
   });
 
+  it("keeps an unselected remote session lazy and applies its live buffer after selection", async () => {
+    let remoteUpdateHandler: ((event: {
+      sessionId: string;
+      messageId?: string;
+      phase?: "started";
+      message?: string;
+      desktopMirrored?: boolean;
+    }) => void) | undefined;
+    (apiMocks.onRemoteChatSessionUpdated as unknown as {
+      mockImplementation: (implementation: (handler: NonNullable<typeof remoteUpdateHandler>) => Promise<() => void>) => void;
+    }).mockImplementation((handler) => {
+      remoteUpdateHandler = handler;
+      return Promise.resolve(() => undefined);
+    });
+    const summary = {
+      ...startedSession("remote-lazy", "lazy"),
+      turns: [],
+      turnsLoaded: false,
+      turnCount: 1,
+    };
+    const stored = startedSession("remote-lazy", "existing");
+    apiMocks.chatUiSessionsList.mockResolvedValue([summary]);
+    apiMocks.chatUiSessionLoad.mockResolvedValue(stored);
+
+    const { result } = renderHook(() => useChatSessions("default"));
+    await waitFor(() => expect(remoteUpdateHandler).toBeDefined());
+    await waitFor(() => expect(result.current.allSessions).toHaveLength(1));
+
+    act(() => remoteUpdateHandler?.({
+      sessionId: "remote-lazy",
+      messageId: "message-lazy",
+      phase: "started",
+      message: "from phone",
+      desktopMirrored: true,
+    }));
+    expect(apiMocks.chatUiSessionLoad).not.toHaveBeenCalled();
+    expect(result.current.allSessions[0]?.turnsLoaded).toBe(false);
+    const lazyPatch = vi.fn((turns: ChatTurn[]) => turns);
+    act(() => result.current.patchTurns("remote-lazy", lazyPatch));
+    expect(lazyPatch).not.toHaveBeenCalled();
+    expect(result.current.allSessions[0]?.turnsLoaded).toBe(false);
+
+    act(() => result.current.setCurrentId("remote-lazy"));
+    await waitFor(() => expect(result.current.currentSession?.turns.slice(-2)).toMatchObject([
+      { id: "remote-message-lazy-user", blocks: [{ kind: "text", text: "from phone" }] },
+      { id: "remote-message-lazy-assistant", streaming: true },
+    ]));
+    expect(apiMocks.chatUiSessionLoad).toHaveBeenCalledTimes(1);
+  });
+
   it("renders remote chat deltas live without persisting a partial projection", async () => {
     let remoteUpdateHandler: ((event: {
       sessionId: string;
@@ -353,6 +403,88 @@ describe("useChatSessions Tauri persistence", () => {
       blocks: [{ kind: "text", text: "live reply" }],
     });
     expect(apiMocks.chatUiSessionSave).not.toHaveBeenCalled();
+  });
+
+  it("keeps the desktop rich stream when a paired phone receives its text mirror", async () => {
+    let remoteUpdateHandler: ((event: {
+      sessionId: string;
+      messageId?: string;
+      phase?: "started" | "delta" | "completed";
+      message?: string;
+      delta?: string;
+      text?: string;
+      persisted?: boolean;
+      desktopMirrored?: boolean;
+    }) => void) | undefined;
+    (apiMocks.onRemoteChatSessionUpdated as unknown as {
+      mockImplementation: (implementation: (handler: (event: {
+        sessionId: string;
+        messageId?: string;
+        phase?: "started" | "delta" | "completed";
+        message?: string;
+        delta?: string;
+        text?: string;
+        persisted?: boolean;
+        desktopMirrored?: boolean;
+      }) => void) => Promise<() => void>) => void;
+    }).mockImplementation((handler) => {
+      remoteUpdateHandler = handler;
+      return Promise.resolve(() => undefined);
+    });
+    const stored = startedSession("remote-mirror", "existing");
+    apiMocks.chatUiSessionsList.mockResolvedValue([stored]);
+    apiMocks.chatUiSessionLoad.mockResolvedValue(stored);
+
+    const { result } = renderHook(() => useChatSessions("default"));
+    await waitFor(() => expect(remoteUpdateHandler).toBeDefined());
+    await waitFor(() => expect(result.current.allSessions).toHaveLength(1));
+    act(() => remoteUpdateHandler?.({
+      sessionId: "remote-mirror",
+      messageId: "message-mirror",
+      phase: "started",
+      message: "from phone",
+      desktopMirrored: true,
+    }));
+    act(() => {
+      result.current.patchTurns("remote-mirror", (turns) => turns.map((turn) => (
+        turn.id === "remote-message-mirror-assistant"
+          ? {
+              ...turn,
+              blocks: [
+                { kind: "thinking", thinking: "desktop reasoning" },
+                { kind: "tool", id: "tool-1", name: "read_file", input: "{}" },
+                { kind: "text", text: "desktop answer" },
+              ],
+            }
+          : turn
+      )));
+    });
+    act(() => remoteUpdateHandler?.({
+      sessionId: "remote-mirror",
+      messageId: "message-mirror",
+      phase: "delta",
+      delta: "mobile text mirror",
+      desktopMirrored: true,
+    }));
+    act(() => remoteUpdateHandler?.({
+      sessionId: "remote-mirror",
+      messageId: "message-mirror",
+      phase: "completed",
+      text: "mobile text mirror",
+      persisted: true,
+      desktopMirrored: true,
+    }));
+
+    const turns = result.current.allSessions[0]?.turns ?? [];
+    expect(turns[turns.length - 1]).toMatchObject({
+      id: "remote-message-mirror-assistant",
+      streaming: false,
+      blocks: [
+        { kind: "thinking", thinking: "desktop reasoning" },
+        { kind: "tool", id: "tool-1", name: "read_file" },
+        { kind: "text", text: "desktop answer" },
+      ],
+    });
   });
 
   it("saves Tauri sessions through the backend store without writing localStorage snapshots", async () => {

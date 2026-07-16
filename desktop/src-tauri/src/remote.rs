@@ -26,9 +26,10 @@ use futures_util::{SinkExt, StreamExt};
 use keyring::{Entry as KeyringEntry, Error as KeyringError};
 use qrcode::{render::svg, QrCode};
 use remote_protocol::{
-    ChatModelOption, ChatSessionSummary, ChatTranscriptMessage, ChatTranscriptRole, ControlCommand,
-    ControlError, ControlRequest, ControlResponse, ControlResult, DeviceDescriptor, DeviceId,
-    DeviceKind, DeviceScope, DeviceScopes, DeviceSignature, DeviceSigningKey, KeyAgreementSecret,
+    ChatMessageActivity, ChatMessageEvent, ChatModelOption, ChatSessionEvent, ChatSessionSummary,
+    ChatToolProgress, ChatTranscriptMessage, ChatTranscriptRole, ControlCommand, ControlError,
+    ControlRequest, ControlResponse, ControlResult, DeviceDescriptor, DeviceId, DeviceKind,
+    DeviceScope, DeviceScopes, DeviceSignature, DeviceSigningKey, KeyAgreementSecret,
     P2pFailureReason, PairingApproval, PairingId, PairingInvitation, PairingRequest,
     ProjectSummary, ProtocolVersion, RemoteCapability, ReplayWindow, RequestId, SecureEnvelope,
     SessionId, SessionKey, SessionKeyContext, SessionRoute, TransportKind, TransportSignal,
@@ -75,7 +76,26 @@ const MAX_PENDING_GATEWAY_SIGNALS: usize = 32;
 const MAX_P2P_BASE64_FRAME_BYTES: usize = MAX_RELAY_FRAME_BYTES * 2;
 /// Keep a completed answer comfortably below the encrypted relay frame cap.
 /// JSON escaping plus the SecureEnvelope overhead can grow the wire payload.
-const MAX_REMOTE_CHAT_RESPONSE_BYTES: usize = 48 * 1024;
+/// This is deliberately much larger than a UI preview: ordinary long-form
+/// answers must not disappear merely because they originated on a phone.
+const MAX_REMOTE_CHAT_RESPONSE_BYTES: usize = 128 * 1024;
+/// Each live encrypted control response remains small enough for both the
+/// relay and a WebRTC data channel. A turn can contain many ordered fragments.
+const MAX_REMOTE_CHAT_DELTA_BYTES: usize = 24 * 1024;
+/// Protect the paired-control channel from an unexpectedly unbounded provider
+/// stream while allowing substantially more content than the terminal replay
+/// frame. The desktop still retains the complete local Chat session.
+const MAX_REMOTE_CHAT_STREAM_BYTES: usize = 1024 * 1024;
+/// Thinking and visible tool cards have their own budget so a verbose tool
+/// cannot consume the final-answer text stream budget.
+const MAX_REMOTE_CHAT_RICH_STREAM_BYTES: usize = 1024 * 1024;
+/// One durable desktop event must always fit in a bounded sync batch. This
+/// prevents a single unusually large provider delta from pinning the cursor.
+const MAX_REMOTE_CHAT_EVENT_CONTENT_BYTES: usize = 64 * 1024;
+/// Secure envelopes encode ciphertext as JSON/base64. Keep plaintext event
+/// batches well below the 256 KiB relay and WebRTC frame ceiling.
+const MAX_REMOTE_CHAT_EVENT_BATCH_BYTES: usize = 160 * 1024;
+const MAX_REMOTE_CHAT_EVENT_ERROR_BYTES: usize = 8 * 1024;
 const MAX_REMOTE_CHAT_IDEMPOTENCY_ENTRIES: usize = 128;
 const REMOTE_CHAT_IDEMPOTENCY_TTL_MILLIS: u64 = 10 * 60 * 1_000;
 const PAIRING_TTL_MILLIS: u64 = 5 * 60 * 1_000;
@@ -102,8 +122,12 @@ const MANAGED_REMOTE_STUN_SERVER: &str = "stun:106.53.28.124:3478";
 const DEFAULT_REMOTE_DESKTOP_NAME: &str = "SomniQ Desktop";
 const REMOTE_WORKSPACE_CAPABILITIES: &[RemoteCapability] = &[
     RemoteCapability::SetActiveProject,
+    RemoteCapability::CreateChatSession,
     RemoteCapability::GetChatModelOptions,
     RemoteCapability::SetChatSessionModel,
+    RemoteCapability::StopChatMessage,
+    RemoteCapability::RichChatProgress,
+    RemoteCapability::ChatEventSync,
 ];
 
 /// Shared, protocol-versioned capabilities a paired device may receive. The
@@ -257,16 +281,32 @@ pub struct RemotePairingApprovalInput {
 struct RemoteChatIdempotencyEntry {
     device_id: String,
     project_id: String,
+    session_id: String,
     idempotency_key: String,
     request_digest: String,
     message_id: String,
     created_at: u64,
     completed_text: Option<String>,
+    cancelled: Arc<AtomicBool>,
 }
 
 enum RemoteChatReservation {
-    New { message_id: String },
-    Completed { message_id: String, text: String },
+    New {
+        message_id: String,
+        cancelled: Arc<AtomicBool>,
+    },
+    Completed {
+        message_id: String,
+        text: String,
+    },
+}
+
+/// The terminal decision for a remote message is made while the idempotency
+/// entry is locked, so an accepted Stop cannot race a later completion frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RemoteChatTerminalDecision {
+    Completed,
+    Cancelled,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3093,7 +3133,7 @@ pub async fn remote_control_p2p_frame(
     app: AppHandle,
     state: State<'_, RemoteAgentState>,
     input: RemoteP2pDataInput,
-) -> Result<String, String> {
+) -> Result<(), String> {
     if input.data_base64.len() > MAX_P2P_BASE64_FRAME_BYTES {
         return Err("encrypted P2P frame exceeds the maximum size".to_string());
     }
@@ -3131,15 +3171,58 @@ pub async fn remote_control_p2p_frame(
             },
         );
     });
-    let response = session
-        .wire
-        .handle_envelope(app, state.inner(), &envelope, Some(stream_sink))
-        .await?;
-    let response = dispatch_lock
-        .lock()
-        .map_err(|_| "remote response dispatch state poisoned".to_string())
-        .and_then(|_guard| encode_remote_control_response(&session.wire, &response))?;
-    Ok(STANDARD.encode(response))
+    // The renderer owns only the browser WebRTC object. Once a bounded frame
+    // has crossed into Rust, release the Tauri invoke immediately and let the
+    // background task own request execution. Progress and the terminal frame
+    // use the same ordered event path back to the data channel.
+    let worker_app = app.clone();
+    let worker_wire = session.wire.clone();
+    let terminal_app = app;
+    let terminal_wire = session.wire.clone();
+    let terminal_device_id = input.device_id;
+    let terminal_session_id = input.session_id;
+    tauri::async_runtime::spawn(async move {
+        let state = worker_app.state::<RemoteAgentState>();
+        let response = worker_wire
+            .handle_envelope(
+                worker_app.clone(),
+                state.inner(),
+                &envelope,
+                Some(stream_sink),
+            )
+            .await;
+        let response = match response {
+            Ok(response) => response,
+            Err(error) => {
+                eprintln!("SomniQ desktop: rejected an encrypted P2P control frame: {error}");
+                remove_p2p_session(state.inner(), &terminal_device_id, &terminal_session_id);
+                let _ = worker_app.emit(
+                    "remote-p2p-failed",
+                    RemoteP2pSessionInput {
+                        device_id: terminal_device_id,
+                        session_id: terminal_session_id,
+                    },
+                );
+                return;
+            }
+        };
+        let encoded = dispatch_lock
+            .lock()
+            .map_err(|_| "remote response dispatch state poisoned".to_string())
+            .and_then(|_guard| encode_remote_control_response(&terminal_wire, &response));
+        let Ok(encoded) = encoded else {
+            return;
+        };
+        let _ = terminal_app.emit(
+            "remote-p2p-frame",
+            RemoteP2pDataInput {
+                device_id: terminal_device_id,
+                session_id: terminal_session_id,
+                data_base64: STANDARD.encode(encoded),
+            },
+        );
+    });
+    Ok(())
 }
 
 /// Removes local P2P session state when a browser WebRTC data channel closes.
@@ -3359,6 +3442,7 @@ fn reserve_remote_chat_idempotency(
     state: &RemoteAgentState,
     device_id: &str,
     project_id: &str,
+    session_id: &str,
     idempotency_key: &str,
     request_digest: &str,
 ) -> Result<RemoteChatReservation, ControlError> {
@@ -3398,16 +3482,22 @@ fn reserve_remote_chat_idempotency(
         entries.remove(oldest);
     }
     let message_id = RequestId::new().to_string();
+    let cancelled = Arc::new(AtomicBool::new(false));
     entries.push(RemoteChatIdempotencyEntry {
         device_id: device_id.to_string(),
         project_id: project_id.to_string(),
+        session_id: session_id.to_string(),
         idempotency_key: idempotency_key.to_string(),
         request_digest: request_digest.to_string(),
         message_id: message_id.clone(),
         created_at: now,
         completed_text: None,
+        cancelled: cancelled.clone(),
     });
-    Ok(RemoteChatReservation::New { message_id })
+    Ok(RemoteChatReservation::New {
+        message_id,
+        cancelled,
+    })
 }
 
 fn complete_remote_chat_idempotency(
@@ -3417,7 +3507,7 @@ fn complete_remote_chat_idempotency(
     idempotency_key: &str,
     request_digest: &str,
     text: String,
-) -> Result<(), ControlError> {
+) -> Result<RemoteChatTerminalDecision, ControlError> {
     let mut entries = state
         .chat_idempotency
         .lock()
@@ -3431,8 +3521,11 @@ fn complete_remote_chat_idempotency(
                 && entry.request_digest == request_digest
         })
         .ok_or(ControlError::Internal)?;
+    if entry.cancelled.load(Ordering::SeqCst) {
+        return Ok(RemoteChatTerminalDecision::Cancelled);
+    }
     entry.completed_text = Some(text);
-    Ok(())
+    Ok(RemoteChatTerminalDecision::Completed)
 }
 
 fn release_remote_chat_idempotency(
@@ -3451,6 +3544,39 @@ fn release_remote_chat_idempotency(
                 && entry.completed_text.is_none())
         });
     }
+}
+
+/// Mark only the paired device's own in-flight chat message as cancelled.
+/// The message id is generated by the desktop and never maps to an arbitrary
+/// local process or another phone's request.
+fn request_remote_chat_cancellation(
+    state: &RemoteAgentState,
+    device_id: &str,
+    project_id: &str,
+    session_id: &str,
+    message_id: &str,
+) -> Result<bool, ControlError> {
+    let now = now_epoch_millis();
+    let mut entries = state
+        .chat_idempotency
+        .lock()
+        .map_err(|_| ControlError::Internal)?;
+    entries
+        .retain(|entry| now.saturating_sub(entry.created_at) <= REMOTE_CHAT_IDEMPOTENCY_TTL_MILLIS);
+    let entry = entries
+        .iter_mut()
+        .find(|entry| {
+            entry.device_id == device_id
+                && entry.project_id == project_id
+                && entry.session_id == session_id
+                && entry.message_id == message_id
+        })
+        .ok_or(ControlError::NotFound)?;
+    let active = entry.completed_text.is_none();
+    if active {
+        entry.cancelled.store(true, Ordering::SeqCst);
+    }
+    Ok(active)
 }
 
 fn ensure_remote_chat_project(app: &AppHandle, project_id: &str) -> Result<(), ControlError> {
@@ -3492,6 +3618,63 @@ fn remote_chat_sessions_result(
     })
 }
 
+fn remote_chat_session_created_result(
+    app: &AppHandle,
+    project_id: String,
+) -> Result<ControlResult, ControlError> {
+    ensure_remote_chat_project(app, &project_id)?;
+    let created = crate::engine::remote_chat_session_create(&project_id).map_err(|_| {
+        ControlError::TemporarilyUnavailable {
+            retry_after_ms: Some(1_000),
+        }
+    })?;
+    let session = ChatSessionSummary {
+        session_id: created.id,
+        title: created.title,
+        updated_at_unix_ms: created.updated_at_unix_ms,
+        model: created.model,
+    };
+    if let Err(error) = app.emit(
+        "remote-chat-session-updated",
+        serde_json::json!({
+            "sessionId": &session.session_id,
+            "phase": "created",
+        }),
+    ) {
+        eprintln!("SomniQ remote: could not notify the desktop about a new chat: {error}");
+    }
+    Ok(ControlResult::ChatSessionCreated {
+        project_id,
+        session,
+    })
+}
+
+/// Stop the active paired-device turn identified by the desktop-issued message
+/// id. The encrypted control command is deliberately narrower than the legacy
+/// `StopRun`: a phone cannot use it to interrupt an arbitrary local process.
+fn remote_chat_stop_result(
+    app: &AppHandle,
+    state: &RemoteAgentState,
+    device_id: &str,
+    project_id: String,
+    session_id: String,
+    message_id: String,
+) -> Result<ControlResult, ControlError> {
+    ensure_remote_chat_project(app, &project_id)?;
+    let active =
+        request_remote_chat_cancellation(state, device_id, &project_id, &session_id, &message_id)?;
+    if active {
+        let chat_state = app.state::<crate::engine::ChatState>();
+        crate::engine::cancel_chat_turn(chat_state.inner(), &session_id)
+            .map_err(|_| ControlError::Internal)?;
+    }
+    Ok(ControlResult::ChatMessageStopRequested {
+        project_id,
+        session_id,
+        message_id,
+    })
+}
+
 fn remote_chat_transcript_result(
     app: &AppHandle,
     project_id: String,
@@ -3511,6 +3694,7 @@ fn remote_chat_transcript_result(
         messages.push(ChatTranscriptMessage {
             role,
             text: message.text,
+            blocks: message.blocks,
         });
     }
     Ok(ControlResult::ChatTranscript {
@@ -3533,20 +3717,464 @@ fn remote_chat_delta_text(payload: &str, session_id: &str) -> Option<String> {
     (!delta.is_empty()).then(|| delta.to_string())
 }
 
-fn bounded_remote_chat_delta(delta: String, delivered_bytes: &mut usize) -> Option<String> {
-    let remaining = MAX_REMOTE_CHAT_RESPONSE_BYTES.saturating_sub(*delivered_bytes);
-    if remaining == 0 {
+fn remote_chat_event_session(payload: &str) -> Option<String> {
+    serde_json::from_str::<Value>(payload)
+        .ok()?
+        .get("sessionId")?
+        .as_str()
+        .map(str::to_string)
+}
+
+fn remote_chat_user_text(payload: &Value) -> Option<String> {
+    let blocks = payload.get("message")?.get("blocks")?.as_array()?;
+    let text = blocks
+        .iter()
+        .filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
+        .filter_map(|block| block.get("text").and_then(Value::as_str))
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if !text.is_empty() {
+        return Some(text);
+    }
+    blocks
+        .iter()
+        .any(|block| block.get("type").and_then(Value::as_str) == Some("image"))
+        .then(|| "（桌面发送了图片）".to_string())
+}
+
+fn truncate_remote_chat_event_text(text: &str, maximum: usize) -> String {
+    if text.len() <= maximum {
+        return text.to_string();
+    }
+    let mut end = maximum;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].to_string()
+}
+
+fn bounded_remote_chat_session_message_event(event: ChatMessageEvent) -> ChatMessageEvent {
+    match event {
+        ChatMessageEvent::TextDelta { delta } => ChatMessageEvent::TextDelta {
+            delta: truncate_remote_chat_event_text(&delta, MAX_REMOTE_CHAT_EVENT_CONTENT_BYTES),
+        },
+        ChatMessageEvent::ThinkingDelta { delta } => ChatMessageEvent::ThinkingDelta {
+            delta: truncate_remote_chat_event_text(&delta, MAX_REMOTE_CHAT_EVENT_CONTENT_BYTES),
+        },
+        ChatMessageEvent::ToolCall {
+            tool_use_id,
+            name,
+            input,
+        } => ChatMessageEvent::ToolCall {
+            tool_use_id: tool_use_id.map(|value| {
+                truncate_remote_chat_event_text(&value, MAX_REMOTE_CHAT_EVENT_ERROR_BYTES)
+            }),
+            name: truncate_remote_chat_event_text(&name, MAX_REMOTE_CHAT_EVENT_ERROR_BYTES),
+            input: truncate_remote_chat_event_text(&input, MAX_REMOTE_CHAT_EVENT_CONTENT_BYTES),
+        },
+        ChatMessageEvent::ToolProgress {
+            tool_use_id,
+            name,
+            progress,
+        } => ChatMessageEvent::ToolProgress {
+            tool_use_id: tool_use_id.map(|value| {
+                truncate_remote_chat_event_text(&value, MAX_REMOTE_CHAT_EVENT_ERROR_BYTES)
+            }),
+            name: truncate_remote_chat_event_text(&name, MAX_REMOTE_CHAT_EVENT_ERROR_BYTES),
+            progress: ChatToolProgress {
+                elapsed_ms: progress.elapsed_ms,
+                timeout_ms: progress.timeout_ms,
+                pid: progress.pid,
+                stdout_tail: progress.stdout_tail.map(|value| {
+                    truncate_remote_chat_event_text(&value, MAX_REMOTE_CHAT_EVENT_ERROR_BYTES)
+                }),
+                stderr_tail: progress.stderr_tail.map(|value| {
+                    truncate_remote_chat_event_text(&value, MAX_REMOTE_CHAT_EVENT_ERROR_BYTES)
+                }),
+                near_timeout: progress.near_timeout,
+                message: truncate_remote_chat_event_text(
+                    &progress.message,
+                    MAX_REMOTE_CHAT_EVENT_ERROR_BYTES,
+                ),
+            },
+        },
+        ChatMessageEvent::ToolResult {
+            tool_use_id,
+            name,
+            output,
+            is_error,
+        } => ChatMessageEvent::ToolResult {
+            tool_use_id: tool_use_id.map(|value| {
+                truncate_remote_chat_event_text(&value, MAX_REMOTE_CHAT_EVENT_ERROR_BYTES)
+            }),
+            name: truncate_remote_chat_event_text(&name, MAX_REMOTE_CHAT_EVENT_ERROR_BYTES),
+            output: truncate_remote_chat_event_text(&output, MAX_REMOTE_CHAT_EVENT_CONTENT_BYTES),
+            is_error,
+        },
+    }
+}
+
+fn remote_chat_session_event(
+    entry: &crate::chat_events::ChatEventLogEntry,
+    session_id: &str,
+) -> Option<ChatSessionEvent> {
+    match entry.kind.as_str() {
+        "user_message" => Some(ChatSessionEvent::UserMessage {
+            seq: entry.seq,
+            text: truncate_remote_chat_event_text(
+                &remote_chat_user_text(&entry.payload)?,
+                MAX_REMOTE_CHAT_EVENT_CONTENT_BYTES,
+            ),
+        }),
+        "assistant_delta"
+        | "assistant_thinking_delta"
+        | "tool_call"
+        | "tool_progress"
+        | "tool_result" => {
+            let kind = match entry.kind.as_str() {
+                "assistant_delta" => "text_delta",
+                "assistant_thinking_delta" => "thinking_delta",
+                "tool_call" => "tool_call",
+                "tool_progress" => "tool_progress",
+                "tool_result" => "tool_result",
+                _ => unreachable!(),
+            };
+            let payload = serde_json::json!({
+                "sessionId": session_id,
+                "kind": kind,
+                "payload": &entry.payload,
+            })
+            .to_string();
+            Some(ChatSessionEvent::Assistant {
+                seq: entry.seq,
+                event: bounded_remote_chat_session_message_event(remote_chat_render_event(
+                    &payload, session_id,
+                )?),
+            })
+        }
+        "done" => Some(ChatSessionEvent::Done {
+            seq: entry.seq,
+            text: truncate_remote_chat_event_text(
+                entry
+                    .payload
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+                MAX_REMOTE_CHAT_EVENT_CONTENT_BYTES,
+            ),
+        }),
+        "error" => Some(ChatSessionEvent::Error {
+            seq: entry.seq,
+            message: truncate_remote_chat_event_text(
+                entry
+                    .payload
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Desktop Chat failed."),
+                MAX_REMOTE_CHAT_EVENT_ERROR_BYTES,
+            ),
+        }),
+        "reset" => Some(ChatSessionEvent::Reset { seq: entry.seq }),
+        _ => None,
+    }
+}
+
+fn remote_chat_event_batch(
+    entries: &[crate::chat_events::ChatEventLogEntry],
+    session_id: &str,
+    after_seq: Option<u64>,
+    limit: u16,
+) -> (Vec<ChatSessionEvent>, u64) {
+    let last_seq = entries.last().map(|entry| entry.seq).unwrap_or_default();
+    let (start_index, mut next_seq) = if let Some(after_seq) = after_seq {
+        (
+            entries.partition_point(|entry| entry.seq <= after_seq),
+            after_seq,
+        )
+    } else {
+        let latest_turn_start = entries
+            .iter()
+            .rposition(|entry| entry.kind == "user_message");
+        match latest_turn_start {
+            Some(index)
+                if !entries[index + 1..]
+                    .iter()
+                    .any(|entry| entry.kind == "reset") =>
+            {
+                // Reconcile the latest turn even when it has already reached
+                // a terminal event. Otherwise a very fast desktop response
+                // can finish between transcript loading and subscription.
+                (
+                    index,
+                    entries[..index]
+                        .last()
+                        .map(|entry| entry.seq)
+                        .unwrap_or_default(),
+                )
+            }
+            _ => return (Vec::new(), last_seq),
+        }
+    };
+
+    let mut events = Vec::new();
+    let mut event_bytes = 0usize;
+    for entry in entries[start_index..].iter().take(usize::from(limit)) {
+        if let Some(event) = remote_chat_session_event(entry, session_id) {
+            let serialized_bytes =
+                serde_json::to_vec(&event).map_or(usize::MAX, |value| value.len());
+            if serialized_bytes > MAX_REMOTE_CHAT_EVENT_BATCH_BYTES.saturating_sub(event_bytes) {
+                break;
+            }
+            event_bytes = event_bytes.saturating_add(serialized_bytes);
+            events.push(event);
+        }
+        // Invisible entries (for example permission prompts) still advance
+        // the durable cursor without exposing their content to the phone.
+        next_seq = entry.seq;
+    }
+    (events, next_seq)
+}
+
+fn remote_chat_events_snapshot(
+    project_id: &str,
+    session_id: &str,
+    after_seq: Option<u64>,
+    limit: u16,
+) -> Result<ControlResult, ControlError> {
+    let entries = crate::engine::remote_chat_session_events(project_id, session_id)
+        .map_err(|_| ControlError::NotFound)?;
+    let (events, next_seq) = remote_chat_event_batch(&entries, session_id, after_seq, limit);
+    Ok(ControlResult::ChatEvents {
+        project_id: project_id.to_string(),
+        session_id: session_id.to_string(),
+        events,
+        next_seq,
+    })
+}
+
+async fn remote_chat_events_result(
+    app: &AppHandle,
+    project_id: String,
+    session_id: String,
+    after_seq: Option<u64>,
+    limit: u16,
+    wait_ms: u32,
+) -> Result<ControlResult, ControlError> {
+    ensure_remote_chat_project(app, &project_id)?;
+    crate::engine::remote_chat_session_validate(&project_id, &session_id)
+        .map_err(|_| ControlError::NotFound)?;
+
+    let (wake_tx, mut wake_rx) = mpsc::channel::<()>(1);
+    let mut listeners = Vec::new();
+    if after_seq.is_some() && wait_ms > 0 {
+        for event_name in [
+            "chat-user-message-recorded",
+            "chat-delta",
+            "chat-thinking-delta",
+            "chat-tool",
+            "chat-tool-progress",
+            "chat-tool-result",
+            "chat-done",
+            "chat-error",
+        ] {
+            let wake_tx = wake_tx.clone();
+            let target_session_id = session_id.clone();
+            listeners.push(app.listen_any(event_name, move |event| {
+                if remote_chat_event_session(event.payload()).as_deref()
+                    == Some(target_session_id.as_str())
+                {
+                    let _ = wake_tx.try_send(());
+                }
+            }));
+        }
+    }
+
+    let initial = remote_chat_events_snapshot(&project_id, &session_id, after_seq, limit);
+    let should_wait = matches!(
+        (&initial, after_seq),
+        (
+            Ok(ControlResult::ChatEvents {
+                events,
+                next_seq,
+                ..
+            }),
+            Some(after_seq)
+        ) if events.is_empty() && *next_seq == after_seq && wait_ms > 0
+    );
+    let result = if should_wait {
+        let _ = timeout(Duration::from_millis(u64::from(wait_ms)), wake_rx.recv()).await;
+        // Coalesce token-sized provider events into one encrypted response.
+        tokio::time::sleep(Duration::from_millis(35)).await;
+        remote_chat_events_snapshot(&project_id, &session_id, after_seq, limit)
+    } else {
+        initial
+    };
+    for listener in listeners {
+        app.unlisten(listener);
+    }
+    result
+}
+
+fn remote_chat_activity(payload: &str, session_id: &str) -> Option<ChatMessageActivity> {
+    let value = serde_json::from_str::<Value>(payload).ok()?;
+    let object = value.as_object()?;
+    if object.get("sessionId")?.as_str()? != session_id {
         return None;
     }
-    let mut end = delta.len().min(remaining);
+    match object.get("activity")?.as_str()? {
+        "preparing" => Some(ChatMessageActivity::Preparing),
+        "compacting" => Some(ChatMessageActivity::Compacting),
+        "thinking" => Some(ChatMessageActivity::Thinking),
+        "tool" => Some(ChatMessageActivity::Tool),
+        _ => None,
+    }
+}
+
+fn remote_chat_render_event(payload: &str, session_id: &str) -> Option<ChatMessageEvent> {
+    let value = serde_json::from_str::<Value>(payload).ok()?;
+    let object = value.as_object()?;
+    if object.get("sessionId")?.as_str()? != session_id {
+        return None;
+    }
+    let kind = object.get("kind")?.as_str()?;
+    let event = object.get("payload")?.as_object()?;
+    if event.get("sessionId")?.as_str()? != session_id {
+        return None;
+    }
+    let tool_use_id = || {
+        event
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_string)
+    };
+    match kind {
+        "text_delta" => Some(ChatMessageEvent::TextDelta {
+            delta: event.get("text")?.as_str()?.to_string(),
+        }),
+        "thinking_delta" => Some(ChatMessageEvent::ThinkingDelta {
+            delta: event.get("thinking")?.as_str()?.to_string(),
+        }),
+        "tool_call" => Some(ChatMessageEvent::ToolCall {
+            tool_use_id: tool_use_id(),
+            name: event.get("name")?.as_str()?.to_string(),
+            input: event.get("input")?.as_str()?.to_string(),
+        }),
+        "tool_progress" => Some(ChatMessageEvent::ToolProgress {
+            tool_use_id: tool_use_id(),
+            name: event.get("name")?.as_str()?.to_string(),
+            progress: ChatToolProgress {
+                elapsed_ms: event.get("elapsedMs")?.as_u64()?,
+                timeout_ms: event.get("timeoutMs").and_then(Value::as_u64),
+                pid: event
+                    .get("pid")
+                    .and_then(Value::as_u64)
+                    .and_then(|value| u32::try_from(value).ok()),
+                stdout_tail: event
+                    .get("stdoutTail")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                stderr_tail: event
+                    .get("stderrTail")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                near_timeout: event
+                    .get("nearTimeout")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                message: event
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+            },
+        }),
+        "tool_result" => Some(ChatMessageEvent::ToolResult {
+            tool_use_id: tool_use_id(),
+            name: event.get("name")?.as_str()?.to_string(),
+            output: event.get("output")?.as_str()?.to_string(),
+            is_error: event.get("isError")?.as_bool()?,
+        }),
+        _ => None,
+    }
+}
+
+fn remote_chat_was_cancelled(cancelled: &AtomicBool, error: &str) -> bool {
+    cancelled.load(Ordering::SeqCst) || error.trim().eq_ignore_ascii_case("interrupted by user")
+}
+
+fn bounded_remote_chat_delta(delta: String, delivered_bytes: &mut usize) -> Vec<String> {
+    bounded_remote_chat_stream_text(delta, delivered_bytes, MAX_REMOTE_CHAT_STREAM_BYTES)
+}
+
+fn bounded_remote_chat_stream_text(
+    delta: String,
+    delivered_bytes: &mut usize,
+    maximum_bytes: usize,
+) -> Vec<String> {
+    let remaining = maximum_bytes.saturating_sub(*delivered_bytes);
+    if remaining == 0 || delta.is_empty() {
+        return Vec::new();
+    }
+    let limit = delta.len().min(remaining);
+    let mut end = limit;
     while end > 0 && !delta.is_char_boundary(end) {
         end -= 1;
     }
     if end == 0 {
-        return None;
+        return Vec::new();
     }
-    *delivered_bytes += end;
-    Some(delta[..end].to_string())
+
+    let visible = &delta[..end];
+    let mut fragments = Vec::with_capacity((visible.len() / MAX_REMOTE_CHAT_DELTA_BYTES) + 1);
+    let mut start = 0;
+    while start < visible.len() {
+        let mut fragment_end = (start + MAX_REMOTE_CHAT_DELTA_BYTES).min(visible.len());
+        while fragment_end > start && !visible.is_char_boundary(fragment_end) {
+            fragment_end -= 1;
+        }
+        if fragment_end == start {
+            break;
+        }
+        fragments.push(visible[start..fragment_end].to_string());
+        start = fragment_end;
+    }
+    *delivered_bytes += start;
+    fragments
+}
+
+fn bounded_remote_chat_render_events(
+    event: ChatMessageEvent,
+    delivered_text_bytes: &mut usize,
+    delivered_rich_bytes: &mut usize,
+) -> Vec<ChatMessageEvent> {
+    match event {
+        ChatMessageEvent::TextDelta { delta } => {
+            bounded_remote_chat_delta(delta, delivered_text_bytes)
+                .into_iter()
+                .map(|delta| ChatMessageEvent::TextDelta { delta })
+                .collect()
+        }
+        ChatMessageEvent::ThinkingDelta { delta } => bounded_remote_chat_stream_text(
+            delta,
+            delivered_rich_bytes,
+            MAX_REMOTE_CHAT_RICH_STREAM_BYTES,
+        )
+        .into_iter()
+        .map(|delta| ChatMessageEvent::ThinkingDelta { delta })
+        .collect(),
+        event => {
+            let event_bytes = serde_json::to_vec(&event).map_or(usize::MAX, |value| value.len());
+            let remaining = MAX_REMOTE_CHAT_RICH_STREAM_BYTES.saturating_sub(*delivered_rich_bytes);
+            if event_bytes > remaining {
+                Vec::new()
+            } else {
+                *delivered_rich_bytes = (*delivered_rich_bytes).saturating_add(event_bytes);
+                vec![event]
+            }
+        }
+    }
 }
 
 async fn execute_remote_chat_message(
@@ -3559,16 +4187,18 @@ async fn execute_remote_chat_message(
     session_id: String,
     message: String,
     idempotency_key: String,
+    rich_stream: bool,
     stream_sink: Option<ControlResponseSink>,
 ) -> Result<ControlResult, ControlError> {
     ensure_remote_chat_project(app, &project_id)?;
     crate::engine::remote_chat_session_validate(&project_id, &session_id)
         .map_err(|_| ControlError::NotFound)?;
     let request_digest = remote_chat_request_digest(&session_id, &message);
-    let message_id = match reserve_remote_chat_idempotency(
+    let (message_id, cancelled) = match reserve_remote_chat_idempotency(
         state,
         device_id,
         &project_id,
+        &session_id,
         &idempotency_key,
         &request_digest,
     )? {
@@ -3580,7 +4210,10 @@ async fn execute_remote_chat_message(
                 text,
             });
         }
-        RemoteChatReservation::New { message_id } => message_id,
+        RemoteChatReservation::New {
+            message_id,
+            cancelled,
+        } => (message_id, cancelled),
     };
 
     // Long tool-enabled turns may outlive the synchronous mobile response
@@ -3608,6 +4241,7 @@ async fn execute_remote_chat_message(
             "messageId": &message_id,
             "phase": "started",
             "message": &message,
+            "desktopMirrored": true,
         }),
     );
     if let Some(sink) = stream_sink.as_ref() {
@@ -3622,45 +4256,164 @@ async fn execute_remote_chat_message(
     }
 
     let delta_app = app.clone();
-    let delta_sink = stream_sink.clone();
+    let delta_sink = if rich_stream {
+        None
+    } else {
+        stream_sink.clone()
+    };
     let delta_project_id = project_id.clone();
     let delta_session_id = session_id.clone();
     let delta_message_id = message_id.clone();
     let delivered_delta_bytes = Arc::new(Mutex::new(0_usize));
     let delta_delivered_bytes = delivered_delta_bytes.clone();
+    let last_activity = Arc::new(Mutex::new(None::<ChatMessageActivity>));
+    let delta_last_activity = last_activity.clone();
     let delta_listener = app.listen_any("remote-chat-delta", move |event| {
         let Some(delta) = remote_chat_delta_text(event.payload(), &delta_session_id) else {
             return;
         };
-        let Some(delta) = delta_delivered_bytes
-            .lock()
-            .ok()
-            .and_then(|mut delivered| bounded_remote_chat_delta(delta, &mut *delivered))
-        else {
+        let deltas = if delta_sink.is_some() {
+            delta_delivered_bytes
+                .lock()
+                .ok()
+                .map(|mut delivered| bounded_remote_chat_delta(delta, &mut *delivered))
+                .unwrap_or_default()
+        } else {
+            vec![delta]
+        };
+        if deltas.is_empty() {
+            return;
+        }
+        if let Ok(mut activity) = delta_last_activity.lock() {
+            *activity = None;
+        }
+        for delta in deltas {
+            if let Some(sink) = delta_sink.as_ref() {
+                sink(ControlResponse::success(
+                    request_id,
+                    protocol_now_millis(),
+                    ControlResult::ChatMessageDelta {
+                        project_id: delta_project_id.clone(),
+                        session_id: delta_session_id.clone(),
+                        message_id: delta_message_id.clone(),
+                        delta: delta.clone(),
+                    },
+                ));
+            }
+            let _ = delta_app.emit(
+                "remote-chat-session-updated",
+                serde_json::json!({
+                    "sessionId": &delta_session_id,
+                    "messageId": &delta_message_id,
+                    "phase": "delta",
+                    "delta": delta,
+                    "desktopMirrored": true,
+                }),
+            );
+        }
+    });
+
+    let activity_app = app.clone();
+    // Activity frames carry the pre-execution stages (preparing/compacting)
+    // that do not have a corresponding rich render event. Rich clients still
+    // receive the ordered thinking/tool blocks separately.
+    let activity_sink = stream_sink.clone();
+    let activity_project_id = project_id.clone();
+    let activity_session_id = session_id.clone();
+    let activity_message_id = message_id.clone();
+    let activity_last = last_activity.clone();
+    let activity_listener = app.listen_any("remote-chat-activity", move |event| {
+        let Some(activity) = remote_chat_activity(event.payload(), &activity_session_id) else {
             return;
         };
-        if let Some(sink) = delta_sink.as_ref() {
+        let should_deliver = activity_last
+            .lock()
+            .map(|mut last| {
+                if *last == Some(activity) {
+                    false
+                } else {
+                    *last = Some(activity);
+                    true
+                }
+            })
+            .unwrap_or(false);
+        if !should_deliver {
+            return;
+        }
+        if let Some(sink) = activity_sink.as_ref() {
             sink(ControlResponse::success(
                 request_id,
                 protocol_now_millis(),
-                ControlResult::ChatMessageDelta {
-                    project_id: delta_project_id.clone(),
-                    session_id: delta_session_id.clone(),
-                    message_id: delta_message_id.clone(),
-                    delta: delta.clone(),
+                ControlResult::ChatMessageActivity {
+                    project_id: activity_project_id.clone(),
+                    session_id: activity_session_id.clone(),
+                    message_id: activity_message_id.clone(),
+                    activity,
                 },
             ));
         }
-        let _ = delta_app.emit(
+        let activity = match activity {
+            ChatMessageActivity::Preparing => "preparing",
+            ChatMessageActivity::Compacting => "compacting",
+            ChatMessageActivity::Thinking => "thinking",
+            ChatMessageActivity::Tool => "tool",
+        };
+        let _ = activity_app.emit(
             "remote-chat-session-updated",
             serde_json::json!({
-                "sessionId": &delta_session_id,
-                "messageId": &delta_message_id,
-                "phase": "delta",
-                "delta": delta,
+                "sessionId": &activity_session_id,
+                "messageId": &activity_message_id,
+                "phase": "activity",
+                "activity": activity,
+                "desktopMirrored": true,
             }),
         );
     });
+
+    let rich_listener = if rich_stream {
+        let rich_sink = stream_sink.clone();
+        let rich_project_id = project_id.clone();
+        let rich_session_id = session_id.clone();
+        let rich_message_id = message_id.clone();
+        let rich_delivered_text_bytes = delivered_delta_bytes.clone();
+        let delivered_rich_bytes = Arc::new(Mutex::new(0_usize));
+        Some(app.listen_any("remote-chat-render-event", move |event| {
+            let Some(render_event) = remote_chat_render_event(event.payload(), &rich_session_id)
+            else {
+                return;
+            };
+            let render_events = match (
+                rich_delivered_text_bytes.lock(),
+                delivered_rich_bytes.lock(),
+            ) {
+                (Ok(mut delivered_text), Ok(mut delivered_rich)) => {
+                    bounded_remote_chat_render_events(
+                        render_event,
+                        &mut delivered_text,
+                        &mut delivered_rich,
+                    )
+                }
+                _ => Vec::new(),
+            };
+            let Some(sink) = rich_sink.as_ref() else {
+                return;
+            };
+            for event in render_events {
+                sink(ControlResponse::success(
+                    request_id,
+                    protocol_now_millis(),
+                    ControlResult::ChatMessageEvent {
+                        project_id: rich_project_id.clone(),
+                        session_id: rich_session_id.clone(),
+                        message_id: rich_message_id.clone(),
+                        event,
+                    },
+                ));
+            }
+        }))
+    } else {
+        None
+    };
 
     let chat_state = app.state::<crate::engine::ChatState>();
     let response = crate::engine::remote_chat_send_paired(
@@ -3669,18 +4422,83 @@ async fn execute_remote_chat_message(
         session_id.clone(),
         project_id.clone(),
         message.clone(),
+        cancelled.clone(),
     )
     .await;
     app.unlisten(delta_listener);
+    app.unlisten(activity_listener);
+    if let Some(listener) = rich_listener {
+        app.unlisten(listener);
+    }
     match response {
         Ok(full_text) => {
+            // A stop can race a provider's final frame. Prefer the requested
+            // cancellation over persisting/sending a late completion.
+            if cancelled.load(Ordering::SeqCst) {
+                let _ = app.emit(
+                    "remote-chat-session-updated",
+                    serde_json::json!({
+                        "sessionId": &session_id,
+                        "messageId": &message_id,
+                        "phase": "cancelled",
+                        "desktopMirrored": true,
+                    }),
+                );
+                release_remote_chat_idempotency(
+                    state,
+                    device_id,
+                    &project_id,
+                    &idempotency_key,
+                    &request_digest,
+                );
+                return Ok(ControlResult::ChatMessageCancelled {
+                    project_id,
+                    session_id,
+                    message_id,
+                });
+            }
             // The mobile response is independently bounded for the encrypted
             // relay frame. Persist that same visible projection in the Chat
             // UI store so a later phone refresh and the desktop sidebar agree
-            // on what was delivered. Tool execution remains in the runtime
-            // session and its durable event log; the remote transcript is
-            // deliberately text-only.
+            // on what was delivered. Existing visible thinking/tool blocks
+            // saved by the ordinary desktop renderer are preserved.
             let text = truncate_remote_chat_response(full_text);
+            match complete_remote_chat_idempotency(
+                state,
+                device_id,
+                &project_id,
+                &idempotency_key,
+                &request_digest,
+                text.clone(),
+            )? {
+                // Completion and Stop contend on the same idempotency lock.
+                // If Stop reached that lock first, never persist or emit a
+                // late completion after the phone was told it was stopping.
+                RemoteChatTerminalDecision::Cancelled => {
+                    let _ = app.emit(
+                        "remote-chat-session-updated",
+                        serde_json::json!({
+                            "sessionId": &session_id,
+                            "messageId": &message_id,
+                            "phase": "cancelled",
+                            "desktopMirrored": true,
+                        }),
+                    );
+                    release_remote_chat_idempotency(
+                        state,
+                        device_id,
+                        &project_id,
+                        &idempotency_key,
+                        &request_digest,
+                    );
+                    return Ok(ControlResult::ChatMessageCancelled {
+                        project_id,
+                        session_id,
+                        message_id,
+                    });
+                }
+                RemoteChatTerminalDecision::Completed => {}
+            }
             let persisted = match crate::sessions::remote_chat_append_text_turn(
                 &project_id,
                 &session_id,
@@ -3707,20 +4525,13 @@ async fn execute_remote_chat_message(
                     "phase": "completed",
                     "text": &text,
                     "persisted": persisted,
+                    "desktopMirrored": true,
                 }),
             ) {
                 eprintln!(
                     "SomniQ remote: could not notify the desktop chat UI after a remote turn: {error}"
                 );
             }
-            complete_remote_chat_idempotency(
-                state,
-                device_id,
-                &project_id,
-                &idempotency_key,
-                &request_digest,
-                text.clone(),
-            )?;
             Ok(ControlResult::ChatMessageCompleted {
                 project_id,
                 session_id,
@@ -3729,6 +4540,29 @@ async fn execute_remote_chat_message(
             })
         }
         Err(error) => {
+            if remote_chat_was_cancelled(&cancelled, &error) {
+                let _ = app.emit(
+                    "remote-chat-session-updated",
+                    serde_json::json!({
+                        "sessionId": &session_id,
+                        "messageId": &message_id,
+                        "phase": "cancelled",
+                        "desktopMirrored": true,
+                    }),
+                );
+                release_remote_chat_idempotency(
+                    state,
+                    device_id,
+                    &project_id,
+                    &idempotency_key,
+                    &request_digest,
+                );
+                return Ok(ControlResult::ChatMessageCancelled {
+                    project_id,
+                    session_id,
+                    message_id,
+                });
+            }
             let _ = app.emit(
                 "remote-chat-session-updated",
                 serde_json::json!({
@@ -3736,6 +4570,7 @@ async fn execute_remote_chat_message(
                     "messageId": &message_id,
                     "phase": "error",
                     "error": &error,
+                    "desktopMirrored": true,
                 }),
             );
             release_remote_chat_idempotency(
@@ -3759,8 +4594,8 @@ async fn execute_remote_chat_message(
 ///
 /// Remote chat can emit bounded accepted/delta progress for opted-in clients,
 /// followed by one authoritative final response. It runs with the selected
-/// session's local tool and permission policy; its text-only projection is
-/// mirrored live on the desktop and persisted atomically at completion.
+/// session's local tool and permission policy; its bounded visible projection
+/// is mirrored live and persisted at completion.
 pub(crate) async fn execute_control_request(
     app: AppHandle,
     state: &RemoteAgentState,
@@ -3774,10 +4609,13 @@ pub(crate) async fn execute_control_request(
         ControlCommand::GetProjectSummary { .. } => "project_summary",
         ControlCommand::GetTaskTimeline { .. } => "task_timeline",
         ControlCommand::ListChatSessions { .. } => "list_chat_sessions",
+        ControlCommand::CreateChatSession { .. } => "create_chat_session",
         ControlCommand::GetChatTranscript { .. } => "get_chat_transcript",
+        ControlCommand::GetChatEvents { .. } => "get_chat_events",
         ControlCommand::GetChatModelOptions { .. } => "get_chat_model_options",
         ControlCommand::SetChatSessionModel { .. } => "set_chat_session_model",
         ControlCommand::SendChatMessage { .. } => "send_chat_message",
+        ControlCommand::StopChatMessage { .. } => "stop_chat_message",
         ControlCommand::StopRun { .. } => "stop_run",
         ControlCommand::GetReviewConclusion { .. } => "review_conclusion",
     };
@@ -3872,11 +4710,24 @@ pub(crate) async fn execute_control_request(
             ControlCommand::ListChatSessions { project_id, limit } => {
                 remote_chat_sessions_result(&app, project_id, limit)
             }
+            ControlCommand::CreateChatSession { project_id } => {
+                remote_chat_session_created_result(&app, project_id)
+            }
             ControlCommand::GetChatTranscript {
                 project_id,
                 session_id,
                 limit,
             } => remote_chat_transcript_result(&app, project_id, session_id, limit),
+            ControlCommand::GetChatEvents {
+                project_id,
+                session_id,
+                after_seq,
+                limit,
+                wait_ms,
+            } => {
+                remote_chat_events_result(&app, project_id, session_id, after_seq, limit, wait_ms)
+                    .await
+            }
             ControlCommand::GetChatModelOptions {
                 project_id,
                 session_id,
@@ -3913,6 +4764,7 @@ pub(crate) async fn execute_control_request(
                 message,
                 idempotency_key,
                 stream,
+                rich_stream,
             } => {
                 execute_remote_chat_message(
                     &app,
@@ -3924,10 +4776,23 @@ pub(crate) async fn execute_control_request(
                     session_id,
                     message,
                     idempotency_key,
+                    rich_stream,
                     if stream { stream_sink.clone() } else { None },
                 )
                 .await
             }
+            ControlCommand::StopChatMessage {
+                project_id,
+                session_id,
+                message_id,
+            } => remote_chat_stop_result(
+                &app,
+                state,
+                &context.device_id,
+                project_id,
+                session_id,
+                message_id,
+            ),
             // Run identifiers are intentionally not mapped to arbitrary local
             // process IDs in P1. Workflow-run control is added only after it
             // has an opaque, device-owned run mapping like chat sessions.

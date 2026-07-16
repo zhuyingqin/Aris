@@ -150,6 +150,10 @@
   color: #9dc8ff;
 }
 
+.typeset-pdf-status.stale {
+  color: #ffd88a;
+}
+
 .typeset-btn,
 .typeset-recompile-btn {
   display: inline-flex;
@@ -3935,6 +3939,32 @@
   gap: 3px;
 }
 
+.typeset-compile-menu-section {
+  padding: 6px 9px 3px;
+  color: #bac4cc;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.typeset-compile-menu button[role="menuitemradio"] {
+  align-items: center;
+}
+
+.typeset-compile-menu button[role="menuitemradio"] > b {
+  margin-left: auto;
+  color: #8fd7ae;
+  font-size: 16px;
+  line-height: 1;
+}
+
+.typeset-compile-menu-divider {
+  height: 1px;
+  margin: 5px 4px;
+  background: rgb(213 224 235 / 18%);
+}
+
 .typeset-compile-menu strong {
   font-size: 12px;
   font-weight: 600;
@@ -4087,6 +4117,10 @@
 :root[data-theme="light"] .typeset-tree-menu button,
 :root[data-theme="light"] .typeset-file-dialog h3 {
   color: #26313a;
+}
+
+:root[data-theme="light"] .typeset-compile-menu-section {
+  color: #637080;
 }
 
 :root[data-theme="light"] .typeset-compile-menu button:hover,
@@ -4429,6 +4463,80 @@
 
 .typeset-log.error pre {
   color: #ffd0cc;
+}
+
+.typeset-diagnostics {
+  display: grid;
+  gap: 5px;
+  margin-bottom: 8px;
+}
+
+.typeset-diagnostic {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 8px;
+  width: 100%;
+  align-items: center;
+  padding: 7px 9px;
+  border: 1px solid rgb(255 170 164 / 42%);
+  border-radius: 4px;
+  background: rgb(92 45 43 / 28%);
+  color: #ffd0cc;
+  cursor: pointer;
+  font: 11px/1.35 var(--font-ui, sans-serif);
+  text-align: left;
+}
+
+.typeset-diagnostic:hover:not(:disabled),
+.typeset-diagnostic:focus-visible {
+  border-color: #ffaaa4;
+  outline: none;
+}
+
+.typeset-diagnostic:disabled {
+  cursor: default;
+  opacity: 0.78;
+}
+
+.typeset-diagnostic > span {
+  color: #ffaaa4;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.typeset-diagnostic.warning {
+  border-color: rgb(255 216 138 / 42%);
+  background: rgb(92 76 38 / 24%);
+  color: #ffe4a9;
+}
+
+.typeset-diagnostic.warning > span {
+  color: #ffd88a;
+}
+
+.typeset-diagnostic > strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.typeset-diagnostic > small,
+.typeset-build-provenance {
+  color: var(--ol-muted);
+  font-size: 10px;
+}
+
+.typeset-build-provenance {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 2px 8px;
+}
+
+.typeset-build-provenance code {
+  font: inherit;
 }
 
 .typeset-outline {

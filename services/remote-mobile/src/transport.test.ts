@@ -59,7 +59,18 @@ class FakePeerConnection {
   onconnectionstatechange: (() => void) | null = null;
   dataChannel: RTCDataChannel | null = null;
 
-  constructor(private readonly beforeCreateOffer?: () => void) {}
+  constructor(
+    private readonly beforeCreateOffer?: () => void,
+    private readonly selectedPath: {
+      localCandidateType: RTCIceCandidateType;
+      remoteCandidateType: RTCIceCandidateType;
+      protocol: string;
+    } = {
+      localCandidateType: "host",
+      remoteCandidateType: "srflx",
+      protocol: "udp",
+    },
+  ) {}
 
   createDataChannel(): RTCDataChannel {
     const dataChannel = {
@@ -84,6 +95,35 @@ class FakePeerConnection {
   async setLocalDescription(): Promise<void> {}
   async setRemoteDescription(): Promise<void> {}
   async addIceCandidate(): Promise<void> {}
+  async getStats(): Promise<RTCStatsReport> {
+    const entries = [
+      { id: "transport-1", type: "transport", timestamp: 1, selectedCandidatePairId: "pair-1" },
+      {
+        id: "pair-1",
+        type: "candidate-pair",
+        timestamp: 1,
+        state: "succeeded",
+        nominated: true,
+        localCandidateId: "local-1",
+        remoteCandidateId: "remote-1",
+      },
+      {
+        id: "local-1",
+        type: "local-candidate",
+        timestamp: 1,
+        candidateType: this.selectedPath.localCandidateType,
+        protocol: this.selectedPath.protocol,
+      },
+      {
+        id: "remote-1",
+        type: "remote-candidate",
+        timestamp: 1,
+        candidateType: this.selectedPath.remoteCandidateType,
+        protocol: this.selectedPath.protocol,
+      },
+    ] as unknown as RTCStats[];
+    return new Map(entries.map((entry) => [entry.id, entry])) as unknown as RTCStatsReport;
+  }
   close(): void {}
 
   emitLocalIce(candidate: RTCIceCandidate | null): void {
@@ -126,7 +166,14 @@ describe("P2pFirstTransport", () => {
     const connected = transport.connect();
     await waitForCondition(() => peer.dataChannel !== null);
     peer.dataChannel!.onopen?.(new Event("open"));
-    await expect(connected).resolves.toMatchObject({ transport: "p2p" });
+    await expect(connected).resolves.toMatchObject({
+      transport: "p2p",
+      directPath: {
+        localCandidateType: "host",
+        remoteCandidateType: "srflx",
+        protocol: "udp",
+      },
+    });
 
     peer.dataChannel!.onclose?.(new Event("close"));
     await waitForCondition(() => states.some((state) => state.kind === "connected" && state.transport === "tcp_relay"));
@@ -139,6 +186,50 @@ describe("P2pFirstTransport", () => {
     expect(relayOffers).toHaveLength(1);
     expect(relayOffers[0]?.session_id).not.toBe(offer?.session_id);
     expect(errors).toHaveLength(0);
+    transport.close();
+  });
+
+  it("never labels a WebRTC relay candidate pair as P2P", async () => {
+    const signal = new FakeSocket();
+    const relay = new FakeSocket((text, socket) => {
+      const frame = JSON.parse(text) as { type?: unknown; session_id?: unknown };
+      if (frame.type === "open" && typeof frame.session_id === "string") {
+        queueMicrotask(() => socket.handlers?.onText(JSON.stringify({
+          type: "ready",
+          session_id: frame.session_id,
+        })));
+        queueMicrotask(() => socket.handlers?.onText(JSON.stringify({
+          type: "peer_connected",
+          device_id: SESSION.invitation.desktop.device_id,
+          session_id: frame.session_id,
+        })));
+      }
+    });
+    const peer = new FakePeerConnection(undefined, {
+      localCandidateType: "relay",
+      remoteCandidateType: "srflx",
+      protocol: "udp",
+    });
+    const states: Array<{ kind: string; transport?: string }> = [];
+    const transport = new P2pFirstTransport({
+      session: SESSION,
+      socketFactory: {
+        openSignal: async () => signal,
+        openRelay: async () => relay,
+      },
+      createFrameCodec: async () => ({ seal: async (value) => value, open: async (value) => value }),
+      createPeerConnection: () => peer as unknown as RTCPeerConnection,
+      onStateChange: (state) => states.push(state),
+    });
+
+    const connected = transport.connect();
+    await waitForCondition(() => peer.dataChannel !== null);
+    peer.dataChannel!.onopen?.(new Event("open"));
+
+    await expect(connected).resolves.toMatchObject({ transport: "tcp_relay" });
+    expect(states).toContainEqual(expect.objectContaining({ kind: "verifying_p2p" }));
+    expect(states).not.toContainEqual(expect.objectContaining({ kind: "connected", transport: "p2p" }));
+    expect(states).toContainEqual(expect.objectContaining({ kind: "connected", transport: "tcp_relay" }));
     transport.close();
   });
 
@@ -388,6 +479,7 @@ describe("P2pFirstTransport", () => {
     expect(states.map((state) => state.kind)).toEqual([
       "connecting_signal",
       "negotiating_p2p",
+      "verifying_p2p",
       "connected",
       "falling_back",
       "connected",

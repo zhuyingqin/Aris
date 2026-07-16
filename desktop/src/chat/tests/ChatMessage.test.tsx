@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChatTurn } from "../../types";
@@ -386,6 +386,30 @@ describe("ChatMessage rendering", () => {
     expect(container.querySelector(".md-think")).toBeTruthy();
     expect(container.querySelector("h2")?.textContent).toBe("直接验证");
     expect(container.querySelector(".md-code-block")?.textContent).toContain("样本 | X | 是否能看到");
+  });
+
+  it("reveals the newest thinking phase when answer text arrives in the same stream batch", async () => {
+    const turn = (streaming: boolean): ChatTurn => ({
+      id: "assistant-coalesced-thinking",
+      role: "assistant",
+      streaming,
+      blocks: [
+        { kind: "thinking", thinking: "首条思考应立即可见。" },
+        { kind: "text", text: "正文已经紧跟到达。" },
+      ],
+    });
+    const props = {
+      canRetry: false,
+      onEdit: () => undefined,
+      onRetry: () => undefined,
+      onContinue: () => undefined,
+    };
+    const { container, rerender } = render(<ChatMessage turn={turn(true)} {...props} />);
+
+    expect(container.querySelector(".md-think-body")?.textContent).toContain("首条思考应立即可见");
+
+    rerender(<ChatMessage turn={turn(false)} {...props} />);
+    await waitFor(() => expect(container.querySelector(".md-think-body")).toBeNull());
   });
 });
 

@@ -42,7 +42,11 @@ describe("workspace navigation", () => {
           projects: [],
           capabilities: [
             "set_active_project",
+            "create_chat_session",
             "get_chat_model_options",
+            "stop_chat_message",
+            "rich_chat_progress",
+            "chat_event_sync",
             "set_active_project",
             "future_desktop_capability",
           ],
@@ -52,7 +56,11 @@ describe("workspace navigation", () => {
 
     expect(workspaceOverviewFromResponse(response)?.capabilities).toEqual([
       "set_active_project",
+      "create_chat_session",
       "get_chat_model_options",
+      "stop_chat_message",
+      "rich_chat_progress",
+      "chat_event_sync",
     ]);
     expect(workspaceOverviewFromResponse(response)?.capabilitiesAdvertised).toBe(true);
   });

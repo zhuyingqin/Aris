@@ -11,6 +11,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use remote_protocol::{ChatToolProgress, ChatTranscriptBlock};
 use runtime::{ContentBlock, MessageRole, Session};
 
 use crate::state;
@@ -25,20 +26,26 @@ const CHAT_UI_PREVIEWS_DIR: &str = "chat-ui-session-previews";
 /// Lightweight summary index that drives the sidebar list without reading turns.
 const CHAT_UI_INDEX_FILE: &str = "chat-ui-index.json";
 const CHAT_UI_SESSION_PREVIEW_MAX_TURNS: usize = 12;
-const CHAT_UI_PREVIEW_VERSION: u64 = 3;
+// Keep enough room for session metadata while preventing rich thinking/tool
+// turns from turning the quick preview into a second full-session file.
+const CHAT_UI_SESSION_PREVIEW_MAX_TURN_BYTES: usize = 192 * 1024;
+const CHAT_UI_PREVIEW_VERSION: u64 = 4;
 
-// Remote chat is intentionally a bounded, text-only projection of the
-// desktop's UI session store. These limits keep one encrypted control response
-// comfortably below the relay frame limit even when a saved conversation has
-// unusually long model output.
+// Remote chat is a bounded projection of the visible desktop UI session. These
+// limits keep text, thinking, and UI-sanitized tool cards comfortably below the
+// encrypted relay frame even when a saved conversation is unusually large.
 const MAX_REMOTE_CHAT_SESSION_LIST: usize = 200;
 const MAX_REMOTE_CHAT_SESSION_TITLE_BYTES: usize = 512;
 const MAX_REMOTE_CHAT_TRANSCRIPT_MESSAGES: usize = 100;
-const MAX_REMOTE_CHAT_TRANSCRIPT_TEXT_BYTES: usize = 48 * 1024;
-// The relay response body is capped at 48 KiB, but its friendly truncation
-// marker is appended after that prefix. Accept a little extra in the durable
-// UI projection so completing a long remote turn cannot fail on that marker.
-const MAX_REMOTE_CHAT_UI_ASSISTANT_TEXT_BYTES: usize = 64 * 1024;
+// Keep a recovered phone transcript comfortably below the encrypted relay
+// frame cap while preserving normal long-form Chat responses.
+const MAX_REMOTE_CHAT_TRANSCRIPT_TEXT_BYTES: usize = 128 * 1024;
+const MAX_REMOTE_CHAT_TRANSCRIPT_SERIALIZED_BYTES: usize =
+    MAX_REMOTE_CHAT_TRANSCRIPT_TEXT_BYTES - (16 * 1024);
+const MAX_REMOTE_CHAT_TRANSCRIPT_BLOCK_BYTES: usize = 32 * 1024;
+// The terminal remote response uses the same 128 KiB safe frame budget.
+// Accept it atomically in the durable completion fallback projection.
+const MAX_REMOTE_CHAT_UI_ASSISTANT_TEXT_BYTES: usize = 128 * 1024;
 const MAX_REMOTE_CHAT_SESSION_ID_BYTES: usize = 256;
 const MAX_REMOTE_CHAT_USER_TEXT_BYTES: usize = 16 * 1024;
 const MAX_REMOTE_CHAT_MESSAGE_ID_BYTES: usize = 256;
@@ -203,8 +210,8 @@ fn read_chat_ui_preview_file(id: &str) -> Result<Option<Value>, String> {
     match fs::read_to_string(chat_ui_preview_file_path(id)) {
         Ok(raw) => {
             let preview = serde_json::from_str::<Value>(&raw).map_err(|e| e.to_string())?;
-            // Regenerate pre-v3 previews: they may have hidden a large turn
-            // even when the conversation itself had only a few turns.
+            // Regenerate older previews: v4 adds a serialized byte budget so
+            // rich thinking/tool turns cannot make quick-load files unbounded.
             Ok((preview.get("previewVersion").and_then(Value::as_u64)
                 == Some(CHAT_UI_PREVIEW_VERSION))
             .then_some(preview))
@@ -286,25 +293,47 @@ fn chat_ui_turn_id(turn: &Value) -> Option<&str> {
     turn.get("id").and_then(Value::as_str)
 }
 
-fn chat_ui_preview_turns(turns: &[Value]) -> (Vec<Value>, bool, Vec<String>) {
-    let mut selected = turns
-        .iter()
-        .rev()
-        .take(CHAT_UI_SESSION_PREVIEW_MAX_TURNS)
-        .cloned()
-        .collect::<Vec<_>>();
-    selected.reverse();
+fn chat_ui_preview_turns(id: &str, turns: &[Value]) -> (Vec<Value>, bool, Vec<String>) {
+    let start = turns
+        .len()
+        .saturating_sub(CHAT_UI_SESSION_PREVIEW_MAX_TURNS);
+    let selected = &turns[start..];
     let base_ids = selected
         .iter()
         .filter_map(chat_ui_turn_id)
         .map(str::to_string)
-        .collect();
-    let partial = selected.len() < turns.len();
-    (selected, partial, base_ids)
+        .collect::<Vec<_>>();
+    let mut remaining = CHAT_UI_SESSION_PREVIEW_MAX_TURN_BYTES;
+    let mut omitted = false;
+    // Spend the byte budget newest-first so the latest normal-sized exchange
+    // remains immediately visible. Oversized turns stay available through the
+    // existing on-demand `chat_ui_turn_load` placeholder path.
+    let mut preview = selected
+        .iter()
+        .enumerate()
+        .rev()
+        .map(|(offset, turn)| {
+            let bytes = serde_json::to_vec(turn)
+                .map(|value| value.len())
+                .unwrap_or(remaining + 1);
+            if bytes <= remaining {
+                remaining -= bytes;
+                turn.clone()
+            } else {
+                omitted = true;
+                large_turn_placeholder(id, start + offset, bytes)
+            }
+        })
+        .collect::<Vec<_>>();
+    preview.reverse();
+    (preview, start > 0 || omitted, base_ids)
 }
 
 fn chat_ui_preview_session(mut session: Value, turns: &[Value], turn_count: usize) -> Value {
-    let (preview_turns, turns_partial, partial_base_turn_ids) = chat_ui_preview_turns(turns);
+    let id = chat_ui_session_id(&session)
+        .unwrap_or("chat-preview")
+        .to_string();
+    let (preview_turns, turns_partial, partial_base_turn_ids) = chat_ui_preview_turns(&id, turns);
     if let Value::Object(object) = &mut session {
         object.insert("turns".to_string(), Value::Array(preview_turns));
         object.insert("turnsLoaded".to_string(), Value::Bool(true));
@@ -757,14 +786,17 @@ pub(crate) struct RemoteChatSessionList {
     pub has_more: bool,
 }
 
-/// One text-only user or assistant message reconstructed from the desktop Chat
-/// UI projection. Tool input/output, reasoning, permission prompts, notices,
-/// and attachments are deliberately excluded from this remote view.
+/// One visible user or assistant message reconstructed from the desktop Chat
+/// UI projection. Permission prompts, notices, and attachments remain local;
+/// thinking and the already-sanitized tool cards match the desktop rendering.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct RemoteChatTranscriptMessage {
     pub role: String,
     pub text: String,
+    pub blocks: Vec<ChatTranscriptBlock>,
+    #[serde(skip)]
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -859,7 +891,70 @@ fn remote_chat_session_summary_for_project(
     })
 }
 
-fn remote_chat_text_from_turn(turn: &Value) -> Option<RemoteChatTranscriptMessage> {
+fn remote_chat_new_session_value(project_id: &str, session_id: &str, now: i64) -> Value {
+    json!({
+        "id": session_id,
+        "projectId": project_id,
+        "title": "New chat",
+        "model": null,
+        "turns": [],
+        "turnsLoaded": true,
+        "turnsPartial": false,
+        "turnCount": 0,
+        "draft": "",
+        "draftAttachments": [],
+        "pinned": false,
+        "createdAt": now,
+        "updatedAt": now,
+    })
+}
+
+fn truncate_remote_chat_block(value: &str, maximum: usize, truncated: &mut bool) -> String {
+    if value.len() > maximum {
+        *truncated = true;
+    }
+    truncate_utf8_bytes(value, maximum)
+}
+
+fn remote_chat_tool_progress(value: &Value, truncated: &mut bool) -> Option<ChatToolProgress> {
+    let object = value.as_object()?;
+    let elapsed_ms = object.get("elapsedMs")?.as_u64()?;
+    let timeout_ms = object.get("timeoutMs").and_then(Value::as_u64);
+    let pid = object
+        .get("pid")
+        .and_then(Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok());
+    Some(ChatToolProgress {
+        elapsed_ms,
+        timeout_ms,
+        pid,
+        stdout_tail: object
+            .get("stdoutTail")
+            .and_then(Value::as_str)
+            .map(|value| {
+                truncate_remote_chat_block(value, MAX_REMOTE_CHAT_TRANSCRIPT_BLOCK_BYTES, truncated)
+            }),
+        stderr_tail: object
+            .get("stderrTail")
+            .and_then(Value::as_str)
+            .map(|value| {
+                truncate_remote_chat_block(value, MAX_REMOTE_CHAT_TRANSCRIPT_BLOCK_BYTES, truncated)
+            }),
+        near_timeout: object
+            .get("nearTimeout")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        message: object
+            .get("message")
+            .and_then(Value::as_str)
+            .map(|value| {
+                truncate_remote_chat_block(value, MAX_REMOTE_CHAT_TRANSCRIPT_BLOCK_BYTES, truncated)
+            })
+            .unwrap_or_default(),
+    })
+}
+
+fn remote_chat_message_from_turn(turn: &Value) -> Option<RemoteChatTranscriptMessage> {
     let role = match turn.get("role").and_then(Value::as_str) {
         Some("user") => "user",
         Some("assistant") => "assistant",
@@ -867,12 +962,82 @@ fn remote_chat_text_from_turn(turn: &Value) -> Option<RemoteChatTranscriptMessag
     };
     let blocks = turn.get("blocks").and_then(Value::as_array);
     let has_blocks = blocks.is_some_and(|blocks| !blocks.is_empty());
-    let mut texts = blocks
-        .into_iter()
-        .flatten()
-        .filter(|block| block.get("kind").and_then(Value::as_str) == Some("text"))
-        .filter_map(|block| block.get("text").and_then(Value::as_str))
-        .filter(|text| !text.trim().is_empty())
+    let mut visible_blocks = Vec::new();
+    let mut truncated = false;
+    for block in blocks.into_iter().flatten() {
+        match block.get("kind").and_then(Value::as_str) {
+            Some("text") => {
+                let Some(text) = block.get("text").and_then(Value::as_str) else {
+                    continue;
+                };
+                if !text.trim().is_empty() {
+                    visible_blocks.push(ChatTranscriptBlock::Text {
+                        text: truncate_remote_chat_block(
+                            text,
+                            MAX_REMOTE_CHAT_TRANSCRIPT_BLOCK_BYTES,
+                            &mut truncated,
+                        ),
+                    });
+                }
+            }
+            Some("thinking") if role == "assistant" => {
+                let Some(thinking) = block.get("thinking").and_then(Value::as_str) else {
+                    continue;
+                };
+                if !thinking.trim().is_empty() {
+                    visible_blocks.push(ChatTranscriptBlock::Thinking {
+                        thinking: truncate_remote_chat_block(
+                            thinking,
+                            MAX_REMOTE_CHAT_TRANSCRIPT_BLOCK_BYTES,
+                            &mut truncated,
+                        ),
+                    });
+                }
+            }
+            Some("tool") if role == "assistant" => {
+                let Some(name) = block.get("name").and_then(Value::as_str) else {
+                    continue;
+                };
+                visible_blocks.push(ChatTranscriptBlock::Tool {
+                    tool_use_id: block
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .map(|value| truncate_remote_chat_block(value, 512, &mut truncated)),
+                    name: truncate_remote_chat_block(name, 512, &mut truncated),
+                    input: block
+                        .get("input")
+                        .and_then(Value::as_str)
+                        .map(|value| {
+                            truncate_remote_chat_block(
+                                value,
+                                MAX_REMOTE_CHAT_TRANSCRIPT_BLOCK_BYTES,
+                                &mut truncated,
+                            )
+                        })
+                        .unwrap_or_default(),
+                    output: block.get("output").and_then(Value::as_str).map(|value| {
+                        truncate_remote_chat_block(
+                            value,
+                            MAX_REMOTE_CHAT_TRANSCRIPT_BLOCK_BYTES,
+                            &mut truncated,
+                        )
+                    }),
+                    is_error: block.get("isError").and_then(Value::as_bool),
+                    progress: block
+                        .get("progress")
+                        .and_then(|value| remote_chat_tool_progress(value, &mut truncated)),
+                });
+            }
+            _ => {}
+        }
+    }
+
+    let mut texts = visible_blocks
+        .iter()
+        .filter_map(|block| match block {
+            ChatTranscriptBlock::Text { text } => Some(text.clone()),
+            _ => None,
+        })
         .collect::<Vec<_>>();
 
     // Pre-block UI records used a top-level `text` field. Keep that historical
@@ -883,12 +1048,21 @@ fn remote_chat_text_from_turn(turn: &Value) -> Option<RemoteChatTranscriptMessag
             .and_then(Value::as_str)
             .filter(|text| !text.trim().is_empty())
         {
-            texts.push(text);
+            texts.push(text.to_string());
+            visible_blocks.push(ChatTranscriptBlock::Text {
+                text: truncate_remote_chat_block(
+                    text,
+                    MAX_REMOTE_CHAT_TRANSCRIPT_BLOCK_BYTES,
+                    &mut truncated,
+                ),
+            });
         }
     }
-    (!texts.is_empty()).then(|| RemoteChatTranscriptMessage {
+    (!visible_blocks.is_empty()).then(|| RemoteChatTranscriptMessage {
         role: role.to_string(),
         text: texts.join("\n"),
+        blocks: visible_blocks,
+        truncated,
     })
 }
 
@@ -903,34 +1077,46 @@ fn remote_chat_transcript_for_project(
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .filter_map(remote_chat_text_from_turn)
+        .filter_map(remote_chat_message_from_turn)
         .collect::<Vec<_>>();
     let start = messages.len().saturating_sub(limit);
-    let mut has_more = start > 0;
+    let mut has_more = start > 0 || messages.iter().any(|message| message.truncated);
     let mut included_reversed = Vec::new();
     let mut included_bytes = 0usize;
 
     // Retain the newest meaningful messages first, then restore chronological
     // order. That makes a bounded response useful for continuing a chat.
     for message in messages[start..].iter().rev() {
-        let available = MAX_REMOTE_CHAT_TRANSCRIPT_TEXT_BYTES.saturating_sub(included_bytes);
+        let available = MAX_REMOTE_CHAT_TRANSCRIPT_SERIALIZED_BYTES.saturating_sub(included_bytes);
         if available == 0 {
             has_more = true;
             continue;
         }
-        let text = truncate_utf8_bytes(&message.text, available);
-        if text.len() < message.text.len() {
+        let mut included = message.clone();
+        let mut encoded_len = serde_json::to_vec(&included).map_or(usize::MAX, |value| value.len());
+        if encoded_len > available {
+            // Preserve a bounded text fallback for unusually large historical
+            // turns instead of letting one rich card exceed the relay frame.
+            let text_budget = available.saturating_sub(256) / 2;
+            let text = truncate_utf8_bytes(&message.text, text_budget);
+            included = RemoteChatTranscriptMessage {
+                role: message.role.clone(),
+                blocks: (!text.is_empty())
+                    .then(|| ChatTranscriptBlock::Text { text: text.clone() })
+                    .into_iter()
+                    .collect(),
+                text,
+                truncated: true,
+            };
+            encoded_len = serde_json::to_vec(&included).map_or(usize::MAX, |value| value.len());
             has_more = true;
         }
-        if text.is_empty() {
+        if included.blocks.is_empty() || encoded_len > available {
             has_more = true;
             continue;
         }
-        included_bytes = included_bytes.saturating_add(text.len());
-        included_reversed.push(RemoteChatTranscriptMessage {
-            role: message.role.clone(),
-            text,
-        });
+        included_bytes = included_bytes.saturating_add(encoded_len);
+        included_reversed.push(included);
     }
     included_reversed.reverse();
 
@@ -991,6 +1177,28 @@ pub(crate) fn remote_chat_sessions_list(
     ))
 }
 
+/// Creates the Chat UI projection for a new paired-device conversation. Empty
+/// chats are deliberately omitted from the normal recent-chat index, so the
+/// caller returns the summary from this value directly to the phone.
+pub(crate) fn remote_chat_session_create(
+    project_id: &str,
+    session_id: &str,
+) -> Result<RemoteChatSessionSummary, String> {
+    validate_remote_chat_project_id(project_id)?;
+    validate_remote_chat_session_id(session_id)?;
+    ensure_chat_ui_migrated()?;
+    fs::create_dir_all(chat_ui_sessions_dir()).map_err(|error| error.to_string())?;
+    if chat_ui_session_file_path(session_id).exists() {
+        return Err("remote chat session already exists".to_string());
+    }
+
+    let session = remote_chat_new_session_value(project_id, session_id, remote_chat_now_millis());
+    let summary = remote_chat_session_summary_for_project(&session, project_id)
+        .ok_or_else(|| "failed to create remote chat session summary".to_string())?;
+    write_chat_ui_session_file(session_id, session)?;
+    Ok(summary)
+}
+
 /// Verifies that an opaque remote session id is an existing Chat UI session in
 /// the requested project. It does not reveal whether a missing id belongs to a
 /// different project.
@@ -1031,10 +1239,9 @@ pub(crate) fn remote_chat_set_session_model(
     write_chat_ui_session_file(session_id, session)
 }
 
-/// Reads the selected Chat UI session as a bounded, text-only transcript.
-/// The remote projection deliberately excludes every non-text block so a
-/// phone cannot read tool inputs, tool results, chain-of-thought, permissions,
-/// attachments, or UI-only notices.
+/// Reads the selected Chat UI session as a bounded visible transcript. It
+/// includes the same thinking and already-sanitized tool cards shown by the
+/// desktop, while permissions, attachments, and UI-only notices stay local.
 pub(crate) fn remote_chat_session_transcript(
     project_id: &str,
     session_id: &str,
@@ -1062,6 +1269,56 @@ fn remote_chat_turn_value(id: String, role: &str, text: &str) -> Value {
         "blocks": [{ "kind": "text", "text": text }],
         "streaming": false,
     })
+}
+
+/// Complete an existing rich assistant projection without flattening its
+/// thinking/tool order. Returns `None` when the existing turn is text-only (or
+/// malformed), in which case the caller should use the authoritative fallback.
+fn complete_remote_chat_rich_turn(turn: &mut Value, assistant_text: &str) -> Option<bool> {
+    let object = turn.as_object_mut()?;
+    if object.get("role").and_then(Value::as_str) != Some("assistant") {
+        return None;
+    }
+    let blocks = object.get_mut("blocks")?.as_array_mut()?;
+    let has_non_text = blocks
+        .iter()
+        .any(|block| block.get("kind").and_then(Value::as_str) != Some("text"));
+    if !has_non_text {
+        return None;
+    }
+
+    let existing_text = blocks
+        .iter()
+        .filter(|block| block.get("kind").and_then(Value::as_str) == Some("text"))
+        .filter_map(|block| block.get("text").and_then(Value::as_str))
+        .collect::<String>();
+    let mut changed = false;
+    if existing_text != assistant_text {
+        if assistant_text.starts_with(&existing_text) {
+            let remainder = &assistant_text[existing_text.len()..];
+            if !remainder.is_empty() {
+                if let Some(text) = blocks
+                    .iter_mut()
+                    .rev()
+                    .find(|block| block.get("kind").and_then(Value::as_str) == Some("text"))
+                {
+                    let current = text.get("text").and_then(Value::as_str).unwrap_or_default();
+                    text["text"] = Value::String(format!("{current}{remainder}"));
+                } else {
+                    blocks.push(json!({ "kind": "text", "text": assistant_text }));
+                }
+            }
+        } else {
+            blocks.retain(|block| block.get("kind").and_then(Value::as_str) != Some("text"));
+            blocks.push(json!({ "kind": "text", "text": assistant_text }));
+        }
+        changed = true;
+    }
+    if object.get("streaming").and_then(Value::as_bool) != Some(false) {
+        object.insert("streaming".to_string(), Value::Bool(false));
+        changed = true;
+    }
+    Some(changed)
 }
 
 /// Appends the two durable UI turns for a completed remote request. Returns
@@ -1099,12 +1356,16 @@ fn append_remote_chat_text_turns(
     let completed_assistant =
         remote_chat_turn_value(assistant_turn_id, "assistant", assistant_text);
     if let Some(index) = assistant_turn_index {
-        // A live desktop renderer may have saved an in-flight projection.
-        // The backend's completed text is authoritative and must replace that
-        // partial snapshot before the completion refresh is announced.
-        if turns[index] != completed_assistant {
-            turns[index] = completed_assistant;
-            changed = true;
+        // The ordinary desktop renderer may have already saved thinking and
+        // tool cards. Preserve those canonical visible blocks and use the
+        // backend completion only to fill a missing final text suffix.
+        match complete_remote_chat_rich_turn(&mut turns[index], assistant_text) {
+            Some(rich_changed) => changed |= rich_changed,
+            None if turns[index] != completed_assistant => {
+                turns[index] = completed_assistant;
+                changed = true;
+            }
+            None => {}
         }
     } else {
         turns.push(completed_assistant);
@@ -1118,8 +1379,8 @@ fn append_remote_chat_text_turns(
 
 /// Persist a completed remote turn into the full Chat UI session file, then
 /// atomically refresh its preview and sidebar index. This is the authoritative
-/// text projection for remote turns; execution details remain in the durable
-/// chat event log so a phone never receives tool inputs, outputs, or prompts.
+/// terminal text fallback for remote turns. If the ordinary desktop renderer
+/// has already saved rich visible blocks, they are retained and completed.
 pub(crate) fn remote_chat_append_text_turn(
     project_id: &str,
     session_id: &str,
@@ -1291,8 +1552,7 @@ pub fn chat_ui_sessions_list() -> Result<Value, String> {
     Ok(Value::Array(read_chat_ui_index()?))
 }
 
-#[tauri::command]
-pub fn chat_ui_session_load(id: String) -> Result<Value, String> {
+fn chat_ui_session_load_blocking(id: String) -> Result<Value, String> {
     validate_chat_ui_session_id(&id)?;
     ensure_chat_ui_migrated()?;
     if let Some(preview) = read_chat_ui_preview_file(&id)? {
@@ -1315,7 +1575,13 @@ pub fn chat_ui_session_load(id: String) -> Result<Value, String> {
 }
 
 #[tauri::command]
-pub fn chat_ui_turn_load(id: String, turn_index: usize) -> Result<Value, String> {
+pub async fn chat_ui_session_load(id: String) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || chat_ui_session_load_blocking(id))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+fn chat_ui_turn_load_blocking(id: String, turn_index: usize) -> Result<Value, String> {
     validate_chat_ui_session_id(&id)?;
     ensure_chat_ui_migrated()?;
     let raw = match fs::read_to_string(chat_ui_session_file_path(&id)) {
@@ -1333,7 +1599,13 @@ pub fn chat_ui_turn_load(id: String, turn_index: usize) -> Result<Value, String>
 }
 
 #[tauri::command]
-pub fn chat_ui_session_save(session: Value) -> Result<(), String> {
+pub async fn chat_ui_turn_load(id: String, turn_index: usize) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || chat_ui_turn_load_blocking(id, turn_index))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+fn chat_ui_session_save_blocking(session: Value) -> Result<(), String> {
     let id = chat_ui_session_id(&session)
         .ok_or_else(|| "chat UI session must include an id".to_string())?
         .to_string();
@@ -1376,6 +1648,13 @@ pub fn chat_ui_session_save(session: Value) -> Result<(), String> {
     }
 
     write_chat_ui_session_file(&id, next)
+}
+
+#[tauri::command]
+pub async fn chat_ui_session_save(session: Value) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || chat_ui_session_save_blocking(session))
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]

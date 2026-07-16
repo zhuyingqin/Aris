@@ -436,14 +436,17 @@ function MarkdownLink({
 export const ThinkBlock = memo(function ThinkBlock({
   content,
   streaming = false,
+  revealWhileTurnStreaming = false,
 }: {
   content: string;
   streaming?: boolean;
+  revealWhileTurnStreaming?: boolean;
 }) {
-  const [open, setOpen] = useState(streaming);
+  const autoOpen = streaming || revealWhileTurnStreaming;
+  const [open, setOpen] = useState(autoOpen);
   const [elapsedSec, setElapsedSec] = useState(0);
   const startRef = useRef<number | null>(null);
-  const wasStreaming = useRef(streaming);
+  const wasAutoOpen = useRef(autoOpen);
   const bodyRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -462,13 +465,14 @@ export const ThinkBlock = memo(function ThinkBlock({
     return () => window.clearInterval(id);
   }, [streaming]);
 
-  // Collapse once thinking finishes (streaming true → false), but leave the
-  // user free to re-open it afterwards.
+  // A provider can finish thinking and begin answer text inside one batched
+  // React update. Keep the newest thinking phase revealed for the rest of the
+  // active turn, then collapse it when the whole turn finishes.
   useEffect(() => {
-    if (!wasStreaming.current && streaming) setOpen(true);
-    else if (wasStreaming.current && !streaming) setOpen(false);
-    wasStreaming.current = streaming;
-  }, [streaming]);
+    if (!wasAutoOpen.current && autoOpen) setOpen(true);
+    else if (wasAutoOpen.current && !autoOpen) setOpen(false);
+    wasAutoOpen.current = autoOpen;
+  }, [autoOpen]);
 
   // Keep the bounded body pinned to the newest thinking text while it streams.
   useEffect(() => {

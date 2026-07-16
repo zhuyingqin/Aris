@@ -18,10 +18,11 @@ mod transport;
 mod wire;
 
 pub use control::{
-    ChatModelOption, ChatSessionSummary, ChatTranscriptMessage, ChatTranscriptRole, ControlCommand,
-    ControlError, ControlRequest, ControlResponse, ControlResponseOutcome, ControlResult,
-    ControlValidationError, DeviceScope, DeviceScopes, ProjectSummary, RemoteCapability,
-    ReviewDisposition, ReviewSummary, TimelineEvent,
+    ChatMessageActivity, ChatMessageEvent, ChatModelOption, ChatSessionEvent, ChatSessionSummary,
+    ChatToolProgress, ChatTranscriptBlock, ChatTranscriptMessage, ChatTranscriptRole,
+    ControlCommand, ControlError, ControlRequest, ControlResponse, ControlResponseOutcome,
+    ControlResult, ControlValidationError, DeviceScope, DeviceScopes, ProjectSummary,
+    RemoteCapability, ReviewDisposition, ReviewSummary, TimelineEvent,
 };
 pub use crypto::{
     CryptoError, DevicePublicKey, DeviceSignature, DeviceSigningKey, KeyAgreementPublicKey,

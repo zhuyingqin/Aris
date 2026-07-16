@@ -21,6 +21,7 @@ const mocks = vi.hoisted(() => ({
   fileSearch: vi.fn(),
   fileWriteText: vi.fn(),
   latexCompile: vi.fn(),
+  latexCompileCancel: vi.fn(),
   latexForwardSearch: vi.fn(),
   onLatexCompileProgress: vi.fn(),
   projectAdd: vi.fn(),
@@ -75,6 +76,7 @@ vi.mock("../../api/tauri", () => ({
   fileWriteText: mocks.fileWriteText,
   isTauri: () => true,
   latexCompile: mocks.latexCompile,
+  latexCompileCancel: mocks.latexCompileCancel,
   latexForwardSearch: mocks.latexForwardSearch,
   onLatexCompileProgress: mocks.onLatexCompileProgress,
   projectAdd: mocks.projectAdd,
@@ -118,6 +120,7 @@ beforeEach(() => {
   window.localStorage.removeItem("somniq-typeset-preview");
   window.localStorage.removeItem("somniq-lab-preview");
   window.localStorage.removeItem("aris-lab-preview");
+  window.localStorage.removeItem("somniq-typeset-compile-error-handling:project-a");
   if (!window.PointerEvent) {
     Object.defineProperty(window, "PointerEvent", {
       configurable: true,
@@ -181,6 +184,7 @@ beforeEach(() => {
     isDir: false,
   }));
   mocks.fileReveal.mockReset().mockResolvedValue(undefined);
+  mocks.latexCompileCancel.mockReset().mockResolvedValue(undefined);
   mocks.fileWriteText.mockReset().mockImplementation((path: string, content: string) => Promise.resolve({ path, content, bytes: content.length }));
   mocks.latexCompile.mockReset().mockResolvedValue({ success: true, outputPath: "paper.pdf" });
   mocks.onLatexCompileProgress.mockReset().mockResolvedValue(() => undefined);
@@ -324,6 +328,7 @@ describe("Typeset start page", () => {
       "sections/local.pdf",
       false,
       expect.any(String),
+      false,
     ));
     expect(container.querySelector(".typeset-visual-filebar strong")?.textContent).toBe("local.tex");
     await waitFor(() => expect(container.querySelector(".typeset-preview-file")?.textContent).toBe("main.pdf"));
@@ -342,7 +347,7 @@ describe("Typeset start page", () => {
     fireEvent.click(await screen.findByRole("menuitem", { name: /Clear cache & recompile/ }));
 
     await waitFor(() =>
-      expect(mocks.latexCompile).toHaveBeenCalledWith("paper.tex", "paper.pdf", true, expect.any(String)),
+      expect(mocks.latexCompile).toHaveBeenCalledWith("paper.tex", "paper.pdf", true, expect.any(String), false),
     );
   });
 
@@ -503,6 +508,7 @@ describe("Typeset start page", () => {
       "paper.pdf",
       false,
       expect.any(String),
+      false,
     ));
   });
 
@@ -822,6 +828,100 @@ describe("Typeset start page", () => {
     expect(written).toContain("current page.north west) {New text}");
     expect(written.indexOf("New text")).toBeLessThan(written.indexOf("\\end{frame}"));
     await waitFor(() => expect(mocks.latexCompile).toHaveBeenCalledTimes(1));
+  });
+
+  it("uses the Overleaf-style continue-on-error setting for the next compile", async () => {
+    mockProjectFiles();
+    const source = "\\documentclass{article}\n\\begin{document}\nBody text\n\\end{document}";
+    mocks.fileReadText.mockResolvedValueOnce({ path: "paper.tex", content: source, bytes: source.length });
+    const { container } = render(<Typeset />);
+
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+    fireEvent.click(screen.getByRole("button", { name: "Compile options" }));
+    fireEvent.click(await screen.findByRole("menuitemradio", { name: /Try to compile despite errors/ }));
+    expect(window.localStorage.getItem("somniq-typeset-compile-error-handling:project-a")).toBe("continue");
+
+    await recompileOpenSource();
+    await waitFor(() => expect(mocks.latexCompile).toHaveBeenCalledWith(
+      "paper.tex",
+      "paper.pdf",
+      false,
+      expect.any(String),
+      true,
+    ));
+  });
+
+  it("labels a recovered PDF as compiled with errors", async () => {
+    mockProjectFiles();
+    const source = "\\documentclass{article}\n\\begin{document}\nBody text\n\\end{document}";
+    mocks.fileReadText.mockResolvedValueOnce({ path: "paper.tex", content: source, bytes: source.length });
+    mocks.latexCompile.mockResolvedValueOnce({
+      success: false,
+      partialOutput: true,
+      outputPath: "paper.pdf",
+      engine: "latexmk -pdf",
+      stdout: "",
+      stderr: "! Missing } inserted.",
+      interrupted: false,
+      timedOut: false,
+      durationMs: 12,
+    });
+    const { container } = render(<Typeset />);
+
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+    await recompileOpenSource();
+
+    expect((await screen.findAllByText("Compiled with errors")).length).toBeGreaterThan(0);
+  });
+
+  it("marks a failed build as stale instead of presenting its old PDF as new", async () => {
+    mockProjectFiles();
+    const source = "\\documentclass{article}\n\\begin{document}\nBody text\n\\end{document}";
+    mocks.fileReadText.mockResolvedValueOnce({ path: "paper.tex", content: source, bytes: source.length });
+    mocks.latexCompile.mockResolvedValueOnce({
+      success: false,
+      partialOutput: false,
+      pdfState: "stale",
+      outputPath: "paper.pdf",
+      engine: "latexmk -pdf",
+      stdout: "",
+      stderr: "! Missing } inserted.",
+      interrupted: false,
+      timedOut: false,
+      durationMs: 12,
+      rootSourceHash: "abcdef0123456789",
+      pdfHash: "previous-pdf",
+      compiledAtUnixMs: 1,
+      diagnostics: [],
+    });
+    const { container } = render(<Typeset />);
+
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+    await recompileOpenSource();
+
+    expect(await screen.findByText("Showing last verified PDF")).toBeTruthy();
+    expect(screen.getByText("PDF: stale")).toBeTruthy();
+  });
+
+  it("cancels an active desktop compilation", async () => {
+    mockProjectFiles();
+    const source = "\\documentclass{article}\n\\begin{document}\nBody text\n\\end{document}";
+    mocks.fileReadText.mockResolvedValueOnce({ path: "paper.tex", content: source, bytes: source.length });
+    let finish: ((result: unknown) => void) | undefined;
+    mocks.latexCompile.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    const { container } = render(<Typeset />);
+
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+    fireEvent.click(screen.getByRole("button", { name: "Recompile" }));
+    const stop = await screen.findByRole("button", { name: "Stop compilation" });
+    fireEvent.click(stop);
+    await waitFor(() => expect(mocks.latexCompileCancel).toHaveBeenCalledWith(expect.stringMatching(/^typeset-/)));
+
+    finish?.({ success: false, partialOutput: false, pdfState: "missing", outputPath: "paper.pdf", engine: "latexmk", stdout: "", stderr: "interrupted", interrupted: true, timedOut: false, durationMs: 1, rootSourceHash: "x", diagnostics: [] });
   });
 
   it("keeps frame source edits local until Ctrl+S saves and recompiles", async () => {

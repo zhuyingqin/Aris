@@ -141,7 +141,7 @@ export const remoteControlP2pOpened = (input: RemoteP2pSessionInput) =>
 export const remoteControlP2pFailed = (input: RemoteP2pFailureInput) =>
   invoke<void>("remote_control_p2p_failed", { input });
 export const remoteControlP2pFrame = (input: RemoteP2pDataInput) =>
-  invoke<string>("remote_control_p2p_frame", { input });
+  invoke<void>("remote_control_p2p_frame", { input });
 export const remoteControlP2pClosed = (input: RemoteP2pSessionInput) =>
   invoke<void>("remote_control_p2p_closed", { input });
 
@@ -390,12 +390,15 @@ export const onMailNewMessage = (handler: (event: MailNewMessageEvent) => void) 
 export interface RemoteChatSessionUpdatedEvent {
   sessionId: string;
   messageId?: string;
-  phase?: "started" | "delta" | "completed" | "error";
+  phase?: "created" | "started" | "activity" | "delta" | "completed" | "cancelled" | "error";
   message?: string;
+  activity?: "preparing" | "compacting" | "thinking" | "tool";
   delta?: string;
   text?: string;
   error?: string;
   persisted?: boolean;
+  /** The backend also emitted ordinary `chat-*` events for this turn. */
+  desktopMirrored?: boolean;
 }
 
 export const onRemoteChatSessionUpdated = (
@@ -781,6 +784,20 @@ export interface LatexCompileResult {
   timedOut: boolean;
   durationMs: number;
   returnCodeInterpretation?: string | null;
+  partialOutput: boolean;
+  pdfState: "fresh" | "partial" | "stale" | "missing";
+  rootSourceHash: string;
+  pdfHash?: string | null;
+  compiledAtUnixMs: number;
+  diagnostics: LatexDiagnostic[];
+}
+
+export interface LatexDiagnostic {
+  severity: "error" | "warning" | string;
+  code: string;
+  message: string;
+  filePath?: string | null;
+  line?: number | null;
 }
 
 export interface LatexCompileProgressEvent {
@@ -794,11 +811,15 @@ export const onLatexCompileProgress = (handler: (event: LatexCompileProgressEven
   isFilePreviewMode() ? Promise.resolve(noopUnlisten) :
   listen<LatexCompileProgressEvent>("latex-compile-progress", (e) => handler(e.payload));
 
+export const latexCompileCancel = (runId: string) =>
+  isFilePreviewMode() ? Promise.resolve() : invoke<void>("latex_compile_cancel", { runId });
+
 export const latexCompile = (
   inputPath: string,
   outputPath?: string | null,
   cleanCache = false,
   runId?: string | null,
+  continueOnError = false,
 ) =>
   isFilePreviewMode()
     ? preview<LatexCompileResult>({
@@ -815,12 +836,19 @@ export const latexCompile = (
         timedOut: false,
         durationMs: 0,
         returnCodeInterpretation: null,
+        partialOutput: false,
+        pdfState: "fresh",
+        rootSourceHash: "browser-preview",
+        pdfHash: "browser-preview",
+        compiledAtUnixMs: Date.now(),
+        diagnostics: [],
       })
     : invoke<LatexCompileResult>("latex_compile", {
         inputPath,
         outputPath: outputPath ?? null,
         cleanCache,
         runId: runId ?? null,
+        continueOnError,
       });
 
 /** A SyncTeX match: `pointX/pointY` is the exact synchronized point (for

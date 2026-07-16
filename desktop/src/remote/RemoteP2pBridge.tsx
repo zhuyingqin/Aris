@@ -189,15 +189,14 @@ export function RemoteP2pBridge() {
             return;
           }
           try {
-            const response = await remoteControlP2pFrame({
+            await remoteControlP2pFrame({
               ...session,
               dataBase64: bytesToBase64(frame),
             });
-            await sendEncryptedFrame(session, response);
           } catch {
-            // The Rust boundary rejects invalid envelopes, replayed sequence
-            // numbers, and unauthorized commands. Do not leak its diagnostics
-            // over the browser transport.
+            // Synchronous frame-shape/bounds failures close the channel here.
+            // Auth/replay failures discovered by the background Rust worker
+            // arrive through `remote-p2p-failed` below.
             await finish(session, "data_channel_failed", true);
           }
         })();

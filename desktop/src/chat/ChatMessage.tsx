@@ -969,7 +969,13 @@ function renderSingleBlock(
   return <ToolCall key={block.id ?? index} block={block} />;
 }
 
-function renderAssistantTextRun(blocks: ChatBlock[], start: number, end: number, turn: ChatTurn) {
+function renderAssistantTextRun(
+  blocks: ChatBlock[],
+  start: number,
+  end: number,
+  turn: ChatTurn,
+  latestThinkingIndex: number,
+) {
   const text = blocks
     .filter((block): block is Extract<ChatBlock, { kind: "text" }> => block.kind === "text")
     .map((block) => block.text)
@@ -987,6 +993,9 @@ function renderAssistantTextRun(blocks: ChatBlock[], start: number, end: number,
         <ThinkBlock
           content={thinking}
           streaming={Boolean(turn.streaming && isTailRun && last?.kind === "thinking")}
+          revealWhileTurnStreaming={Boolean(
+            turn.streaming && latestThinkingIndex >= start && latestThinkingIndex < end
+          )}
         />
       )}
       {text.trim() && (
@@ -1012,6 +1021,13 @@ function renderBlocks(
 ) {
   const blocks = turn.blocks;
   const out: ReactNode[] = [];
+  let latestThinkingIndex = -1;
+  for (let index = blocks.length - 1; index >= 0; index -= 1) {
+    if (blocks[index].kind === "thinking") {
+      latestThinkingIndex = index;
+      break;
+    }
+  }
   let i = 0;
   while (i < blocks.length) {
     const block = blocks[i];
@@ -1020,7 +1036,7 @@ function renderBlocks(
       while (j < blocks.length && (blocks[j].kind === "text" || blocks[j].kind === "thinking")) {
         j += 1;
       }
-      out.push(renderAssistantTextRun(blocks.slice(i, j), i, j, turn));
+      out.push(renderAssistantTextRun(blocks.slice(i, j), i, j, turn, latestThinkingIndex));
       i = j;
       continue;
     }

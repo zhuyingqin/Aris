@@ -1,9 +1,11 @@
-use encoding_rs::{GB18030, GBK};
 use serde::Serialize;
 use std::{
+    collections::HashMap,
     path::{Path, PathBuf},
-    process::ExitStatus,
-    time::{Duration, Instant},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex, OnceLock,
+    },
 };
 use tauri::{AppHandle, Emitter};
 
@@ -23,47 +25,19 @@ pub struct LatexCompileResult {
     timed_out: bool,
     duration_ms: u128,
     return_code_interpretation: Option<String>,
+    partial_output: bool,
+    pdf_state: tools::LatexPdfState,
+    root_source_hash: String,
+    pdf_hash: Option<String>,
+    compiled_at_unix_ms: u128,
+    diagnostics: Vec<tools::LatexDiagnostic>,
 }
 
-struct LatexRunOutput {
-    stdout: String,
-    stderr: String,
-    status: ExitStatus,
-    interrupted: bool,
-    timed_out: bool,
-}
+static LATEX_COMPILATION_CANCELLATIONS: OnceLock<Mutex<HashMap<String, Arc<AtomicBool>>>> =
+    OnceLock::new();
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum LatexEnginePreference {
-    PdfLatex,
-    XeLatex,
-    LuaLatex,
-}
-
-impl LatexEnginePreference {
-    fn latexmk_arg(self) -> &'static str {
-        match self {
-            Self::PdfLatex => "-pdf",
-            Self::XeLatex => "-xelatex",
-            Self::LuaLatex => "-lualatex",
-        }
-    }
-
-    fn latexmk_label(self) -> &'static str {
-        match self {
-            Self::PdfLatex => "latexmk -pdf",
-            Self::XeLatex => "latexmk -xelatex",
-            Self::LuaLatex => "latexmk -lualatex",
-        }
-    }
-
-    fn fallback_engines(self) -> &'static [&'static str] {
-        match self {
-            Self::PdfLatex => &["pdflatex", "xelatex", "lualatex"],
-            Self::XeLatex => &["xelatex", "lualatex", "pdflatex"],
-            Self::LuaLatex => &["lualatex", "xelatex", "pdflatex"],
-        }
-    }
+fn latex_compilation_cancellations() -> &'static Mutex<HashMap<String, Arc<AtomicBool>>> {
+    LATEX_COMPILATION_CANCELLATIONS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 #[tauri::command]
@@ -73,24 +47,54 @@ pub async fn latex_compile(
     output_path: Option<String>,
     clean_cache: Option<bool>,
     run_id: Option<String>,
+    continue_on_error: Option<bool>,
 ) -> Result<LatexCompileResult, String> {
-    tauri::async_runtime::spawn_blocking(move || {
+    let cancellation = Arc::new(AtomicBool::new(false));
+    if let Some(run_id) = run_id.as_ref() {
+        latex_compilation_cancellations()
+            .lock()
+            .map_err(|_| "LaTeX compilation cancellation registry is unavailable".to_string())?
+            .insert(run_id.clone(), Arc::clone(&cancellation));
+    }
+    let cleanup_run_id = run_id.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
         latex_compile_blocking(
             input_path,
             output_path,
             clean_cache.unwrap_or(false),
+            continue_on_error.unwrap_or(false),
             LatexProgressReporter::new(app, run_id),
+            cancellation,
         )
     })
     .await
-    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())
+    .and_then(|result| result);
+    if let Some(run_id) = cleanup_run_id {
+        if let Ok(mut cancellations) = latex_compilation_cancellations().lock() {
+            cancellations.remove(&run_id);
+        }
+    }
+    result
+}
+
+#[tauri::command]
+pub fn latex_compile_cancel(run_id: String) -> Result<(), String> {
+    if let Ok(cancellations) = latex_compilation_cancellations().lock() {
+        if let Some(cancellation) = cancellations.get(&run_id) {
+            cancellation.store(true, Ordering::SeqCst);
+        }
+    }
+    Ok(())
 }
 
 fn latex_compile_blocking(
     input_path: String,
     output_path: Option<String>,
     clean_cache: bool,
+    continue_on_error: bool,
     progress: LatexProgressReporter,
+    cancellation: Arc<AtomicBool>,
 ) -> Result<LatexCompileResult, String> {
     let workspace = crate::state::workspace_dir()
         .canonicalize()
@@ -121,84 +125,39 @@ fn latex_compile_blocking(
         "pdf",
         "latex_compile outputPath must end with .pdf",
     )?;
-    let output_dir = output_path
-        .parent()
-        .ok_or_else(|| "outputPath must include a file name".to_string())?
-        .to_path_buf();
-    std::fs::create_dir_all(&output_dir).map_err(|error| error.to_string())?;
-    let source_dir = compile_input_path
-        .parent()
-        .ok_or_else(|| "inputPath must include a file name".to_string())?;
-
-    let started = Instant::now();
-    let timeout_ms = runtime::resolve_foreground_shell_timeout_ms(None);
-    let cache_cleanup_note = clean_cache
-        .then(|| {
-            clean_latex_cache(
-                &compile_input_path,
-                source_dir,
-                &output_dir,
-                timeout_ms,
-                &progress,
-            )
-        })
-        .transpose()?;
-    let (engine, output) = run_texlive_compile(
-        &compile_input_path,
-        source_dir,
-        &output_dir,
-        timeout_ms,
-        &progress,
+    let mut report_progress = |update| progress.emit(update);
+    let output = tools::compile_latex_document(
+        tools::LatexCompileRequest {
+            input_path: compile_input_path.clone(),
+            output_path: output_path.clone(),
+            compiler: None,
+            timeout_ms: None,
+            clean_cache,
+            continue_on_error,
+        },
+        &workspace,
+        &|| cancellation.load(Ordering::SeqCst),
+        &mut report_progress,
     )?;
-    let expected_pdf = output_dir
-        .join(
-            compile_input_path
-                .file_stem()
-                .ok_or_else(|| "inputPath must include a file name".to_string())?,
-        )
-        .with_extension("pdf");
-    if expected_pdf.is_file() && expected_pdf != output_path {
-        std::fs::copy(&expected_pdf, &output_path).map_err(|error| error.to_string())?;
-    }
-
-    let stdout = match cache_cleanup_note {
-        Some(note) => join_process_text(note, output.stdout),
-        None => output.stdout,
-    };
-    let mut stderr = output.stderr;
-    let mut return_code_interpretation = None;
-    if output.timed_out {
-        stderr = append_status_message(
-            stderr,
-            &format!("latex_compile exceeded timeout of {timeout_ms} ms"),
-        );
-        return_code_interpretation = Some("timeout".to_string());
-    } else if output.interrupted {
-        stderr = append_status_message(stderr, "latex_compile interrupted");
-        return_code_interpretation = Some("interrupted".to_string());
-    } else if let Some(code) = output.status.code().filter(|code| *code != 0) {
-        return_code_interpretation = Some(format!("exit_code:{code}"));
-    }
-
-    let mut success = output.status.success() && output_path.is_file();
-    if output.status.success() && !output_path.is_file() {
-        success = false;
-        stderr = append_status_message(stderr, "TeX Live did not produce the requested PDF");
-        return_code_interpretation = Some("missing_output".to_string());
-    }
 
     Ok(LatexCompileResult {
-        success,
+        success: output.success,
         input_path: crate::files::display_workspace_path(&compile_input_path, &workspace),
         output_path: crate::files::display_workspace_path(&output_path, &workspace),
-        engine,
-        stdout,
-        stderr,
-        exit_code: output.status.code(),
+        engine: output.engine,
+        stdout: output.stdout,
+        stderr: output.stderr,
+        exit_code: output.exit_code,
         interrupted: output.interrupted,
         timed_out: output.timed_out,
-        duration_ms: started.elapsed().as_millis(),
-        return_code_interpretation,
+        duration_ms: output.duration_ms,
+        return_code_interpretation: output.return_code_interpretation,
+        partial_output: output.pdf_state == tools::LatexPdfState::Partial,
+        pdf_state: output.pdf_state,
+        root_source_hash: output.root_source_hash,
+        pdf_hash: output.pdf_hash,
+        compiled_at_unix_ms: output.compiled_at_unix_ms,
+        diagnostics: output.diagnostics,
     })
 }
 
@@ -213,7 +172,7 @@ impl LatexProgressReporter {
         Self { app, run_id }
     }
 
-    fn emit(&self, progress: runtime::ManagedCommandProgress) {
+    fn emit(&self, progress: tools::ToolProgress) {
         let Some(run_id) = self.run_id.as_deref() else {
             return;
         };
@@ -227,91 +186,6 @@ impl LatexProgressReporter {
             }),
         );
     }
-}
-
-fn clean_latex_cache(
-    input_path: &Path,
-    source_dir: &Path,
-    output_dir: &Path,
-    timeout_ms: u64,
-    progress: &LatexProgressReporter,
-) -> Result<String, String> {
-    let mut command = runtime::hidden_command("latexmk");
-    let source_dir = tex_tool_path(source_dir);
-    let output_dir = tex_tool_path(output_dir);
-    command.arg("-c");
-    if tex_command_needs_output_directory(&source_dir, &output_dir) {
-        command.arg(format!("-outdir={}", output_dir.display()));
-    }
-    command
-        .arg(tex_input_name(input_path))
-        .current_dir(source_dir);
-
-    match run_latex_process(command, timeout_ms, progress) {
-        Ok(output) if output.status.success() && !output.interrupted && !output.timed_out => {
-            let removed = remove_known_latex_cache_files(input_path, output_dir.as_path())?;
-            Ok(format!(
-                "LaTeX cache cleared ({removed} remaining auxiliary file(s) removed) before recompiling."
-            ))
-        }
-        Ok(output) => {
-            let detail = join_process_text(output.stderr, output.stdout);
-            Err(if detail.trim().is_empty() {
-                "latexmk failed while clearing the LaTeX cache".to_string()
-            } else {
-                format!("latexmk failed while clearing the LaTeX cache:\n{detail}")
-            })
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let removed = remove_known_latex_cache_files(input_path, output_dir.as_path())?;
-            Ok(format!(
-                "latexmk was unavailable; cleared {removed} known LaTeX cache file(s) before recompiling."
-            ))
-        }
-        Err(error) => Err(format!("Failed to start LaTeX cache cleanup: {error}")),
-    }
-}
-
-fn known_latex_cache_paths(input_path: &Path, output_dir: &Path) -> Vec<PathBuf> {
-    let stem = input_path
-        .file_stem()
-        .unwrap_or_else(|| input_path.as_os_str())
-        .to_string_lossy();
-    [
-        "aux",
-        "bbl",
-        "bcf",
-        "blg",
-        "fdb_latexmk",
-        "fls",
-        "lof",
-        "log",
-        "lot",
-        "nav",
-        "out",
-        "run.xml",
-        "snm",
-        "synctex.gz",
-        "toc",
-        "vrb",
-        "xdv",
-    ]
-    .into_iter()
-    .map(|suffix| output_dir.join(format!("{stem}.{suffix}")))
-    .collect()
-}
-
-fn remove_known_latex_cache_files(input_path: &Path, output_dir: &Path) -> Result<usize, String> {
-    let mut removed = 0;
-    for path in known_latex_cache_paths(input_path, output_dir) {
-        if !path.is_file() {
-            continue;
-        }
-        std::fs::remove_file(&path)
-            .map_err(|error| format!("Failed to remove {}: {error}", path.display()))?;
-        removed += 1;
-    }
-    Ok(removed)
 }
 
 /// A single SyncTeX match: `pointX`/`pointY` is the exact synchronized point
@@ -495,279 +369,6 @@ fn parse_synctex_view_output(stdout: &str) -> Vec<SyncTexLocation> {
     locations
 }
 
-fn run_texlive_compile(
-    input_path: &Path,
-    source_dir: &Path,
-    output_dir: &Path,
-    timeout_ms: u64,
-    progress: &LatexProgressReporter,
-) -> Result<(String, LatexRunOutput), String> {
-    let mut not_found = Vec::new();
-    let preferred_engine = preferred_latex_engine(input_path);
-
-    match run_latexmk(
-        preferred_engine,
-        input_path,
-        source_dir,
-        output_dir,
-        timeout_ms,
-        progress,
-    ) {
-        Ok(output) => {
-            if preferred_engine == LatexEnginePreference::PdfLatex
-                && latex_output_needs_unicode_engine(&output)
-            {
-                let retry_engine = LatexEnginePreference::XeLatex;
-                if let Ok(output) = run_latexmk(
-                    retry_engine,
-                    input_path,
-                    source_dir,
-                    output_dir,
-                    timeout_ms,
-                    progress,
-                ) {
-                    return Ok((retry_engine.latexmk_label().to_string(), output));
-                }
-            }
-            if latexmk_output_reports_stale_failure(&output.stdout, &output.stderr) {
-                let cleanup_note =
-                    clean_latex_cache(input_path, source_dir, output_dir, timeout_ms, progress)?;
-                let retry = run_latexmk(
-                    preferred_engine,
-                    input_path,
-                    source_dir,
-                    output_dir,
-                    timeout_ms,
-                    progress,
-                )
-                .map_err(|error| format!("TeX Live retry failed to start: {error}"))?;
-                return Ok((
-                    preferred_engine.latexmk_label().to_string(),
-                    stale_cache_retry_output(output, cleanup_note, retry),
-                ));
-            }
-            return Ok((preferred_engine.latexmk_label().to_string(), output));
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            not_found.push("latexmk".to_string());
-        }
-        Err(error) => {
-            return Err(format!(
-                "TeX Live command `latexmk` failed to start: {error}"
-            ));
-        }
-    }
-
-    for engine in preferred_engine.fallback_engines() {
-        let run = run_latex_engine(
-            engine, input_path, source_dir, output_dir, timeout_ms, progress,
-        );
-        match run {
-            Ok(output) => return Ok((engine.to_string(), output)),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                not_found.push(engine.to_string());
-            }
-            Err(error) => {
-                return Err(format!(
-                    "TeX Live command `{engine}` failed to start: {error}"
-                ));
-            }
-        }
-    }
-    Err(format!(
-        "TeX Live command not found. Tried: {}. Install TeX Live and ensure latexmk/xelatex/pdflatex/lualatex are on PATH.",
-        not_found.join(", ")
-    ))
-}
-
-fn resolve_compile_root(input_path: &Path) -> Result<PathBuf, String> {
-    if tex_file_is_standalone(input_path) {
-        return Ok(input_path.to_path_buf());
-    }
-    let Some(parent) = input_path.parent() else {
-        return Ok(input_path.to_path_buf());
-    };
-    let Some(file_name) = input_path.file_name().and_then(|value| value.to_str()) else {
-        return Ok(input_path.to_path_buf());
-    };
-    let Some(stem) = input_path.file_stem().and_then(|value| value.to_str()) else {
-        return Ok(input_path.to_path_buf());
-    };
-    let mut candidates = Vec::new();
-    for entry in std::fs::read_dir(parent).map_err(|error| error.to_string())? {
-        let entry = entry.map_err(|error| error.to_string())?;
-        let path = entry.path();
-        if path == input_path || !has_extension(&path, "tex") {
-            continue;
-        }
-        let Ok(source) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        if tex_source_is_standalone(&source) && tex_source_inputs_file(&source, stem, file_name) {
-            candidates.push(path);
-        }
-    }
-    candidates.sort_by(|left, right| {
-        let score = |path: &Path| {
-            let name = path
-                .file_name()
-                .and_then(|value| value.to_str())
-                .unwrap_or_default()
-                .to_lowercase();
-            match name.as_str() {
-                "main.tex" => 0,
-                "report.tex" => 1,
-                _ => 2,
-            }
-        };
-        score(left).cmp(&score(right)).then_with(|| left.cmp(right))
-    });
-    Ok(candidates
-        .into_iter()
-        .next()
-        .unwrap_or_else(|| input_path.to_path_buf()))
-}
-
-fn run_latexmk(
-    engine: LatexEnginePreference,
-    input_path: &Path,
-    source_dir: &Path,
-    output_dir: &Path,
-    timeout_ms: u64,
-    progress: &LatexProgressReporter,
-) -> std::io::Result<LatexRunOutput> {
-    let mut command = runtime::hidden_command("latexmk");
-    let source_dir = tex_tool_path(source_dir);
-    let output_dir = tex_tool_path(output_dir);
-    command
-        .arg(engine.latexmk_arg())
-        .arg("-interaction=nonstopmode")
-        .arg("-halt-on-error")
-        .arg("-file-line-error")
-        .arg("-synctex=1");
-    if tex_command_needs_output_directory(&source_dir, &output_dir) {
-        command.arg(format!("-outdir={}", output_dir.display()));
-    }
-    command
-        .arg(tex_input_name(input_path))
-        .current_dir(source_dir);
-    run_latex_process(command, timeout_ms, progress)
-}
-
-fn run_latex_engine(
-    engine: &str,
-    input_path: &Path,
-    source_dir: &Path,
-    output_dir: &Path,
-    timeout_ms: u64,
-    progress: &LatexProgressReporter,
-) -> std::io::Result<LatexRunOutput> {
-    let first = run_single_latex_engine(
-        engine, input_path, source_dir, output_dir, timeout_ms, progress,
-    )?;
-    if !first.status.success() || first.interrupted || first.timed_out {
-        return Ok(first);
-    }
-    let second = run_single_latex_engine(
-        engine, input_path, source_dir, output_dir, timeout_ms, progress,
-    )?;
-    Ok(LatexRunOutput {
-        stdout: join_process_text(first.stdout, second.stdout),
-        stderr: join_process_text(first.stderr, second.stderr),
-        status: second.status,
-        interrupted: second.interrupted,
-        timed_out: second.timed_out,
-    })
-}
-
-fn run_single_latex_engine(
-    engine: &str,
-    input_path: &Path,
-    source_dir: &Path,
-    output_dir: &Path,
-    timeout_ms: u64,
-    progress: &LatexProgressReporter,
-) -> std::io::Result<LatexRunOutput> {
-    let mut command = runtime::hidden_command(engine);
-    let source_dir = tex_tool_path(source_dir);
-    let output_dir = tex_tool_path(output_dir);
-    command
-        .arg("-interaction=nonstopmode")
-        .arg("-halt-on-error")
-        .arg("-file-line-error")
-        .arg("-synctex=1");
-    if tex_command_needs_output_directory(&source_dir, &output_dir) {
-        command.arg(format!("-output-directory={}", output_dir.display()));
-    }
-    command
-        .arg(tex_input_name(input_path))
-        .current_dir(source_dir);
-    run_latex_process(command, timeout_ms, progress)
-}
-
-fn run_latex_process(
-    mut command: std::process::Command,
-    timeout_ms: u64,
-    progress: &LatexProgressReporter,
-) -> std::io::Result<LatexRunOutput> {
-    let output = runtime::run_managed_command_with_cancel_and_progress(
-        &mut command,
-        "TeX Live compile",
-        Some(Duration::from_millis(timeout_ms)),
-        true,
-        || false,
-        |update| progress.emit(update),
-    )?;
-    Ok(LatexRunOutput {
-        stdout: decode_tex_output(&output.stdout),
-        stderr: decode_tex_output(&output.stderr),
-        status: output.status,
-        interrupted: output.interrupted,
-        timed_out: output.timed_out,
-    })
-}
-
-fn tex_command_needs_output_directory(source_dir: &Path, output_dir: &Path) -> bool {
-    source_dir != output_dir
-}
-
-fn latexmk_output_reports_stale_failure(stdout: &str, stderr: &str) -> bool {
-    let output = format!("{stdout}\n{stderr}").to_ascii_lowercase();
-    output.contains("gave an error in previous invocation of latexmk")
-}
-
-fn stale_cache_retry_output(
-    _previous: LatexRunOutput,
-    cleanup_note: String,
-    retry: LatexRunOutput,
-) -> LatexRunOutput {
-    LatexRunOutput {
-        stdout: join_process_text(
-            format!(
-                "{cleanup_note}\nLaTeXmk found a stale failed-build marker and retried from a clean cache."
-            ),
-            retry.stdout,
-        ),
-        stderr: retry.stderr,
-        status: retry.status,
-        interrupted: retry.interrupted,
-        timed_out: retry.timed_out,
-    }
-}
-
-fn decode_tex_output(bytes: &[u8]) -> String {
-    if let Ok(text) = std::str::from_utf8(bytes) {
-        return text.to_string();
-    }
-    for encoding in [GB18030, GBK] {
-        let (text, _, had_errors) = encoding.decode(bytes);
-        if !had_errors {
-            return text.into_owned();
-        }
-    }
-    String::from_utf8_lossy(bytes).into_owned()
-}
-
 fn ensure_extension(path: &Path, extension: &str, message: &str) -> Result<(), String> {
     has_extension(path, extension)
         .then_some(())
@@ -842,135 +443,58 @@ fn tex_argument_matches(argument: &str, stem: &str, file_name: &str) -> bool {
         || normalized.ends_with(&format!("/{file_stem}"))
 }
 
-fn preferred_latex_engine(input_path: &Path) -> LatexEnginePreference {
-    let Ok(source) = std::fs::read_to_string(input_path) else {
-        return LatexEnginePreference::PdfLatex;
-    };
-    if let Some(engine) = latex_magic_comment_engine(&source) {
-        return engine;
-    }
-    if latex_source_uses_luatex(&source) {
-        return LatexEnginePreference::LuaLatex;
-    }
-    if latex_source_uses_unicode_engine(&source) {
-        return LatexEnginePreference::XeLatex;
-    }
-    LatexEnginePreference::PdfLatex
-}
-
-fn latex_magic_comment_engine(source: &str) -> Option<LatexEnginePreference> {
-    source.lines().take(40).find_map(|line| {
-        let lower = line.to_ascii_lowercase();
-        let is_tex_directive = lower.contains("tex") && lower.contains("program");
-        if !is_tex_directive {
-            return None;
-        }
-        if lower.contains("lualatex") || lower.contains("luatex") {
-            Some(LatexEnginePreference::LuaLatex)
-        } else if lower.contains("xelatex") || lower.contains("xetex") {
-            Some(LatexEnginePreference::XeLatex)
-        } else if lower.contains("pdflatex") || lower.contains("pdftex") {
-            Some(LatexEnginePreference::PdfLatex)
-        } else {
-            None
-        }
-    })
-}
-
-fn latex_source_uses_luatex(source: &str) -> bool {
-    latex_source_uses_any_package(source, &["luacode", "luatexja", "luaotfload"])
-        || latex_source_contains_any_command(source, &["directlua"])
-}
-
-fn latex_source_uses_unicode_engine(source: &str) -> bool {
-    latex_source_uses_any_package(
-        source,
-        &[
-            "fontspec",
-            "xeCJK",
-            "ctex",
-            "unicode-math",
-            "polyglossia",
-            "mathspec",
-            "xltxtra",
-            "xunicode",
-        ],
-    ) || latex_source_uses_any_documentclass(
-        source,
-        &["ctexart", "ctexbook", "ctexrep", "ctexbeamer"],
-    ) || latex_source_contains_any_command(
-        source,
-        &[
-            "setmainfont",
-            "setsansfont",
-            "setmonofont",
-            "setCJKmainfont",
-            "setCJKsansfont",
-            "setCJKmonofont",
-            "CJKfontspec",
-        ],
-    )
-}
-
-fn latex_source_uses_any_package(source: &str, package_names: &[&str]) -> bool {
-    source.lines().map(latex_line_without_comment).any(|line| {
-        ["usepackage", "RequirePackage"].iter().any(|command| {
-            latex_command_arguments(line, command).any(|argument| {
-                argument.split(',').any(|package| {
-                    package_names
-                        .iter()
-                        .any(|name| package.trim().eq_ignore_ascii_case(name))
-                })
-            })
-        })
-    })
-}
-
-fn latex_source_uses_any_documentclass(source: &str, class_names: &[&str]) -> bool {
-    source.lines().map(latex_line_without_comment).any(|line| {
-        latex_command_arguments(line, "documentclass").any(|argument| {
-            class_names
-                .iter()
-                .any(|name| argument.trim().eq_ignore_ascii_case(name))
-        })
-    })
-}
-
-fn latex_source_contains_any_command(source: &str, commands: &[&str]) -> bool {
-    source.lines().map(latex_line_without_comment).any(|line| {
-        let lower = line.to_ascii_lowercase();
-        commands
-            .iter()
-            .any(|command| lower.contains(&format!("\\{}", command.to_ascii_lowercase())))
-    })
-}
-
-fn latex_output_needs_unicode_engine(output: &LatexRunOutput) -> bool {
-    let combined = format!("{}\n{}", output.stdout, output.stderr).to_ascii_lowercase();
-    combined.contains("fontspec") && combined.contains("requires either xetex or luatex")
-}
-
-fn append_status_message(stderr: String, message: &str) -> String {
-    if stderr.trim().is_empty() {
-        message.to_string()
-    } else {
-        format!("{}\n{message}", stderr.trim_end())
-    }
-}
-
-fn join_process_text(first: String, second: String) -> String {
-    match (first.trim().is_empty(), second.trim().is_empty()) {
-        (true, true) => String::new(),
-        (true, false) => second,
-        (false, true) => first,
-        (false, false) => format!("{}\n{}", first.trim_end(), second),
-    }
-}
-
 fn tex_input_name(input_path: &Path) -> &std::ffi::OsStr {
     input_path
         .file_name()
         .unwrap_or_else(|| input_path.as_os_str())
+}
+
+fn resolve_compile_root(input_path: &Path) -> Result<PathBuf, String> {
+    if tex_file_is_standalone(input_path) {
+        return Ok(input_path.to_path_buf());
+    }
+    let Some(parent) = input_path.parent() else {
+        return Ok(input_path.to_path_buf());
+    };
+    let Some(file_name) = input_path.file_name().and_then(|value| value.to_str()) else {
+        return Ok(input_path.to_path_buf());
+    };
+    let Some(stem) = input_path.file_stem().and_then(|value| value.to_str()) else {
+        return Ok(input_path.to_path_buf());
+    };
+    let mut candidates = Vec::new();
+    for entry in std::fs::read_dir(parent).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let path = entry.path();
+        if path == input_path || !has_extension(&path, "tex") {
+            continue;
+        }
+        let Ok(source) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        if tex_source_is_standalone(&source) && tex_source_inputs_file(&source, stem, file_name) {
+            candidates.push(path);
+        }
+    }
+    candidates.sort_by(|left, right| {
+        let score = |path: &Path| {
+            let name = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default()
+                .to_lowercase();
+            match name.as_str() {
+                "main.tex" => 0,
+                "report.tex" => 1,
+                _ => 2,
+            }
+        };
+        score(left).cmp(&score(right)).then_with(|| left.cmp(right))
+    });
+    Ok(candidates
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| input_path.to_path_buf()))
 }
 
 /// The name SyncTeX recorded for `source_path`, for use as `synctex view -i`'s
@@ -1053,43 +577,20 @@ mod tests {
     }
 
     #[test]
-    fn known_cache_paths_include_auxiliary_files_but_preserve_the_pdf() {
-        let paths = known_latex_cache_paths(Path::new("/project/root.tex"), Path::new("/project"));
-        assert!(paths.contains(&PathBuf::from("/project/root.aux")));
-        assert!(paths.contains(&PathBuf::from("/project/root.fdb_latexmk")));
-        assert!(paths.contains(&PathBuf::from("/project/root.synctex.gz")));
-        assert!(!paths.contains(&PathBuf::from("/project/root.pdf")));
-    }
+    fn cancel_marks_the_registered_compile_run() {
+        let run_id = "typeset-test-cancel".to_string();
+        let cancellation = Arc::new(AtomicBool::new(false));
+        latex_compilation_cancellations()
+            .lock()
+            .unwrap()
+            .insert(run_id.clone(), Arc::clone(&cancellation));
 
-    #[test]
-    fn decodes_tex_live_cp936_output_without_corrupting_chinese_paths() {
-        let expected = "Latexmk: F:\\F-CESN会议";
-        let (bytes, _, had_errors) = GBK.encode(expected);
-        assert!(!had_errors);
-        assert_eq!(decode_tex_output(&bytes), expected);
-    }
+        latex_compile_cancel(run_id.clone()).unwrap();
 
-    #[test]
-    fn detects_latexmk_stale_failed_build_marker() {
-        assert!(latexmk_output_reports_stale_failure(
-            "Collected error summary: pdflatex: gave an error in previous invocation of latexmk.",
-            ""
-        ));
-        assert!(!latexmk_output_reports_stale_failure(
-            "! Undefined control sequence.",
-            ""
-        ));
-    }
-
-    #[test]
-    fn omits_output_directory_flag_when_latex_writes_beside_its_source() {
-        assert!(!tex_command_needs_output_directory(
-            Path::new(r"F:\F-CESN会议"),
-            Path::new(r"F:\F-CESN会议"),
-        ));
-        assert!(tex_command_needs_output_directory(
-            Path::new(r"F:\F-CESN会议"),
-            Path::new(r"F:\F-CESN会议\build"),
-        ));
+        assert!(cancellation.load(Ordering::SeqCst));
+        latex_compilation_cancellations()
+            .lock()
+            .unwrap()
+            .remove(&run_id);
     }
 }

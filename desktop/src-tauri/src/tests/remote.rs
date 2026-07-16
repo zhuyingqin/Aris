@@ -152,8 +152,12 @@ fn current_desktop_advertises_optional_workspace_commands() {
         REMOTE_WORKSPACE_CAPABILITIES,
         &[
             remote_protocol::RemoteCapability::SetActiveProject,
+            remote_protocol::RemoteCapability::CreateChatSession,
             remote_protocol::RemoteCapability::GetChatModelOptions,
             remote_protocol::RemoteCapability::SetChatSessionModel,
+            remote_protocol::RemoteCapability::StopChatMessage,
+            remote_protocol::RemoteCapability::RichChatProgress,
+            remote_protocol::RemoteCapability::ChatEventSync,
         ]
     );
 }
@@ -388,28 +392,51 @@ fn stale_gateway_credential_recovery_accepts_only_the_known_restart_outcome() {
 #[test]
 fn remote_chat_idempotency_replays_only_the_same_completed_request() {
     let (state, root) = temp_state("remote-chat-idempotency");
-    let first =
-        reserve_remote_chat_idempotency(&state, "phone-a", "project-a", "retry-key", "digest-a")
-            .expect("first request reserves a turn");
-    let message_id = match first {
-        RemoteChatReservation::New { message_id } => message_id,
-        RemoteChatReservation::Completed { .. } => panic!("first request must be new"),
-    };
-    assert!(matches!(
-        reserve_remote_chat_idempotency(&state, "phone-a", "project-a", "retry-key", "digest-a"),
-        Err(ControlError::TemporarilyUnavailable { .. })
-    ));
-    complete_remote_chat_idempotency(
+    let first = reserve_remote_chat_idempotency(
         &state,
         "phone-a",
         "project-a",
+        "chat-a",
         "retry-key",
         "digest-a",
-        "assistant reply".to_string(),
     )
-    .expect("completed result is cached in memory");
-    match reserve_remote_chat_idempotency(&state, "phone-a", "project-a", "retry-key", "digest-a")
-        .expect("same retry reads the completed result")
+    .expect("first request reserves a turn");
+    let message_id = match first {
+        RemoteChatReservation::New { message_id, .. } => message_id,
+        RemoteChatReservation::Completed { .. } => panic!("first request must be new"),
+    };
+    assert!(matches!(
+        reserve_remote_chat_idempotency(
+            &state,
+            "phone-a",
+            "project-a",
+            "chat-a",
+            "retry-key",
+            "digest-a",
+        ),
+        Err(ControlError::TemporarilyUnavailable { .. })
+    ));
+    assert_eq!(
+        complete_remote_chat_idempotency(
+            &state,
+            "phone-a",
+            "project-a",
+            "retry-key",
+            "digest-a",
+            "assistant reply".to_string(),
+        )
+        .expect("completed result is cached in memory"),
+        RemoteChatTerminalDecision::Completed,
+    );
+    match reserve_remote_chat_idempotency(
+        &state,
+        "phone-a",
+        "project-a",
+        "chat-a",
+        "retry-key",
+        "digest-a",
+    )
+    .expect("same retry reads the completed result")
     {
         RemoteChatReservation::Completed {
             message_id: replayed_id,
@@ -421,9 +448,69 @@ fn remote_chat_idempotency_replays_only_the_same_completed_request() {
         RemoteChatReservation::New { .. } => panic!("completed retry must not run again"),
     }
     assert!(matches!(
-        reserve_remote_chat_idempotency(&state, "phone-a", "project-a", "retry-key", "digest-b"),
+        reserve_remote_chat_idempotency(
+            &state,
+            "phone-a",
+            "project-a",
+            "chat-a",
+            "retry-key",
+            "digest-b",
+        ),
         Err(ControlError::Conflict)
     ));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn remote_chat_cancellation_is_bound_to_its_device_project_and_session() {
+    let (state, root) = temp_state("remote-chat-cancellation");
+    let reservation = reserve_remote_chat_idempotency(
+        &state,
+        "phone-a",
+        "project-a",
+        "chat-a",
+        "retry-key",
+        "digest-a",
+    )
+    .expect("first request reserves a turn");
+    let (message_id, cancelled) = match reservation {
+        RemoteChatReservation::New {
+            message_id,
+            cancelled,
+        } => (message_id, cancelled),
+        RemoteChatReservation::Completed { .. } => panic!("first request must be new"),
+    };
+
+    assert!(matches!(
+        request_remote_chat_cancellation(&state, "phone-b", "project-a", "chat-a", &message_id,),
+        Err(ControlError::NotFound)
+    ));
+    assert!(matches!(
+        request_remote_chat_cancellation(&state, "phone-a", "project-a", "chat-b", &message_id,),
+        Err(ControlError::NotFound)
+    ));
+    assert!(!cancelled.load(Ordering::SeqCst));
+    assert!(request_remote_chat_cancellation(
+        &state,
+        "phone-a",
+        "project-a",
+        "chat-a",
+        &message_id,
+    )
+    .expect("owner can cancel active turn"));
+    assert!(cancelled.load(Ordering::SeqCst));
+    assert_eq!(
+        complete_remote_chat_idempotency(
+            &state,
+            "phone-a",
+            "project-a",
+            "retry-key",
+            "digest-a",
+            "late completion".to_string(),
+        )
+        .expect("terminal arbitration succeeds"),
+        RemoteChatTerminalDecision::Cancelled,
+    );
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -435,6 +522,29 @@ fn remote_chat_response_is_bounded_on_utf8_boundaries() {
     assert!(truncated.is_char_boundary(truncated.len()));
     assert!(truncated.len() <= MAX_REMOTE_CHAT_RESPONSE_BYTES);
     assert!(truncated.len() < MAX_RELAY_FRAME_BYTES);
+}
+
+#[test]
+fn remote_chat_delta_streams_long_answers_in_ordered_safe_fragments() {
+    let input = "abc".repeat(MAX_REMOTE_CHAT_DELTA_BYTES);
+    let mut delivered = 0;
+    let fragments = bounded_remote_chat_delta(input.clone(), &mut delivered);
+
+    assert!(fragments.len() > 1);
+    assert_eq!(fragments.concat(), input);
+    assert_eq!(delivered, input.len());
+    assert!(fragments
+        .iter()
+        .all(|fragment| fragment.len() <= MAX_REMOTE_CHAT_DELTA_BYTES));
+}
+
+#[test]
+fn remote_chat_delta_has_a_generous_total_stream_guard() {
+    let mut delivered = MAX_REMOTE_CHAT_STREAM_BYTES.saturating_sub(2);
+    let fragments = bounded_remote_chat_delta("abcd".to_string(), &mut delivered);
+
+    assert_eq!(fragments.concat(), "ab");
+    assert_eq!(delivered, MAX_REMOTE_CHAT_STREAM_BYTES);
 }
 
 #[test]
@@ -454,6 +564,207 @@ fn remote_chat_delta_accepts_only_the_target_session() {
         remote_chat_delta_text(r#"{"sessionId":"chat-live","text":""}"#, "chat-live"),
         None
     );
+}
+
+#[test]
+fn remote_chat_render_event_keeps_sanitized_tool_progress_for_the_target_session() {
+    let payload = serde_json::json!({
+        "sessionId": "chat-live",
+        "kind": "tool_progress",
+        "payload": {
+            "sessionId": "chat-live",
+            "id": "tool-1",
+            "name": "shell_command",
+            "elapsedMs": 250,
+            "timeoutMs": 30_000,
+            "pid": 42,
+            "stdoutTail": "checking",
+            "stderrTail": null,
+            "nearTimeout": false,
+            "message": "running"
+        }
+    })
+    .to_string();
+
+    assert!(matches!(
+        remote_chat_render_event(&payload, "chat-live"),
+        Some(ChatMessageEvent::ToolProgress {
+            tool_use_id: Some(tool_use_id),
+            name,
+            progress: ChatToolProgress {
+                elapsed_ms: 250,
+                pid: Some(42),
+                ..
+            },
+        }) if tool_use_id == "tool-1" && name == "shell_command"
+    ));
+    assert_eq!(remote_chat_render_event(&payload, "another-chat"), None);
+}
+
+#[test]
+fn desktop_chat_event_snapshot_reconciles_the_latest_visible_turn() {
+    let entry = |seq: u64, kind: &str, payload: Value| crate::chat_events::ChatEventLogEntry {
+        version: 1,
+        seq,
+        ts: seq,
+        session_id: "chat-live".to_string(),
+        kind: kind.to_string(),
+        payload,
+    };
+    let mut entries = vec![
+        entry(1, "done", serde_json::json!({ "sessionId": "chat-live" })),
+        entry(
+            2,
+            "user_message",
+            serde_json::json!({
+                "message": { "blocks": [{ "type": "text", "text": "desktop question" }] }
+            }),
+        ),
+        entry(
+            3,
+            "assistant_thinking_delta",
+            serde_json::json!({ "sessionId": "chat-live", "thinking": "checking" }),
+        ),
+        // Permission controls remain desktop-only but still advance the cursor.
+        entry(
+            4,
+            "approval_request",
+            serde_json::json!({ "sessionId": "chat-live", "input": "private" }),
+        ),
+    ];
+
+    let (events, next_seq) = remote_chat_event_batch(&entries, "chat-live", None, 200);
+    assert_eq!(next_seq, 4);
+    assert_eq!(
+        events,
+        vec![
+            ChatSessionEvent::UserMessage {
+                seq: 2,
+                text: "desktop question".to_string(),
+            },
+            ChatSessionEvent::Assistant {
+                seq: 3,
+                event: ChatMessageEvent::ThinkingDelta {
+                    delta: "checking".to_string(),
+                },
+            },
+        ]
+    );
+
+    entries.push(entry(
+        5,
+        "done",
+        serde_json::json!({ "sessionId": "chat-live", "text": "desktop answer" }),
+    ));
+    let (idle_events, idle_cursor) = remote_chat_event_batch(&entries, "chat-live", None, 200);
+    assert_eq!(
+        idle_events,
+        vec![
+            ChatSessionEvent::UserMessage {
+                seq: 2,
+                text: "desktop question".to_string(),
+            },
+            ChatSessionEvent::Assistant {
+                seq: 3,
+                event: ChatMessageEvent::ThinkingDelta {
+                    delta: "checking".to_string(),
+                },
+            },
+            ChatSessionEvent::Done {
+                seq: 5,
+                text: "desktop answer".to_string(),
+            },
+        ]
+    );
+    assert_eq!(idle_cursor, 5);
+
+    entries.push(entry(
+        6,
+        "reset",
+        serde_json::json!({ "sessionId": "chat-live" }),
+    ));
+    let (reset_events, reset_cursor) = remote_chat_event_batch(&entries, "chat-live", None, 200);
+    assert!(reset_events.is_empty());
+    assert_eq!(reset_cursor, 6);
+}
+
+#[test]
+fn desktop_chat_event_batches_stop_before_the_encrypted_frame_budget() {
+    let entry = |seq: u64, kind: &str, payload: Value| crate::chat_events::ChatEventLogEntry {
+        version: 1,
+        seq,
+        ts: seq,
+        session_id: "chat-live".to_string(),
+        kind: kind.to_string(),
+        payload,
+    };
+    let mut entries = vec![entry(
+        1,
+        "user_message",
+        serde_json::json!({
+            "message": { "blocks": [{ "type": "text", "text": "desktop question" }] }
+        }),
+    )];
+    for seq in 2..=5 {
+        entries.push(entry(
+            seq,
+            "assistant_delta",
+            serde_json::json!({
+                "sessionId": "chat-live",
+                "text": "x".repeat(60 * 1024),
+            }),
+        ));
+    }
+
+    let (events, next_seq) = remote_chat_event_batch(&entries, "chat-live", None, 200);
+    let serialized_bytes = events
+        .iter()
+        .map(|event| serde_json::to_vec(event).expect("event serializes").len())
+        .sum::<usize>();
+
+    assert_eq!(events.len(), 3);
+    assert_eq!(next_seq, 3);
+    assert!(serialized_bytes <= MAX_REMOTE_CHAT_EVENT_BATCH_BYTES);
+
+    let (remaining, remaining_cursor) =
+        remote_chat_event_batch(&entries, "chat-live", Some(next_seq), 200);
+    assert_eq!(remaining.len(), 2);
+    assert_eq!(remaining_cursor, 5);
+}
+
+#[test]
+fn remote_chat_rich_events_use_separate_bounded_text_and_detail_budgets() {
+    let mut text_bytes = MAX_REMOTE_CHAT_STREAM_BYTES - 2;
+    let mut rich_bytes = MAX_REMOTE_CHAT_RICH_STREAM_BYTES - 2;
+    let text = bounded_remote_chat_render_events(
+        ChatMessageEvent::TextDelta {
+            delta: "abcd".to_string(),
+        },
+        &mut text_bytes,
+        &mut rich_bytes,
+    );
+    assert_eq!(
+        text,
+        vec![ChatMessageEvent::TextDelta {
+            delta: "ab".to_string()
+        }]
+    );
+    assert_eq!(rich_bytes, MAX_REMOTE_CHAT_RICH_STREAM_BYTES - 2);
+
+    let thinking = bounded_remote_chat_render_events(
+        ChatMessageEvent::ThinkingDelta {
+            delta: "abcd".to_string(),
+        },
+        &mut text_bytes,
+        &mut rich_bytes,
+    );
+    assert_eq!(
+        thinking,
+        vec![ChatMessageEvent::ThinkingDelta {
+            delta: "ab".to_string()
+        }]
+    );
+    assert_eq!(rich_bytes, MAX_REMOTE_CHAT_RICH_STREAM_BYTES);
 }
 
 #[test]
