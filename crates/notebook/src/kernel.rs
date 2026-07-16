@@ -456,7 +456,11 @@ impl KernelSession {
 
     /// Kernel tab-completion (`complete_request`). Blocks on the actor mailbox,
     /// so a completion queued behind a long-running cell waits its turn.
-    pub fn complete(&self, code: &str, cursor_pos: usize) -> Result<CompleteOutcome, NotebookError> {
+    pub fn complete(
+        &self,
+        code: &str,
+        cursor_pos: usize,
+    ) -> Result<CompleteOutcome, NotebookError> {
         let (reply_tx, reply_rx) = std::sync::mpsc::channel();
         self.cmd_tx
             .send(Command::Complete {

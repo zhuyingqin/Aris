@@ -5,9 +5,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 #[test]
 fn executes_simple_command() {
+    let _guard = crate::test_env_lock();
     let output = execute_bash(BashCommandInput {
         command: String::from("printf 'hello'"),
-        timeout: Some(1_000),
+        // Git Bash startup on Windows can consume most of a one-second test
+        // budget before the shell reaches the command. This verifies shell
+        // availability rather than launcher latency.
+        timeout: Some(5_000),
         description: None,
         run_in_background: Some(false),
         dangerously_disable_sandbox: Some(false),
@@ -25,9 +29,13 @@ fn executes_simple_command() {
 
 #[test]
 fn executes_standard_posix_utilities() {
+    let _guard = crate::test_env_lock();
     let output = execute_bash(BashCommandInput {
         command: String::from("printf 'alpha\\nbeta\\n' | tail -n 1"),
-        timeout: Some(1_000),
+        // Git Bash startup on Windows can consume most of a one-second test
+        // budget before the shell reaches the pipeline. This verifies POSIX
+        // utility availability rather than shell launch latency.
+        timeout: Some(5_000),
         description: None,
         run_in_background: Some(false),
         dangerously_disable_sandbox: Some(false),
@@ -80,9 +88,10 @@ fn default_timeout_prevents_foreground_hangs() {
 
 #[test]
 fn disables_sandbox_when_requested() {
+    let _guard = crate::test_env_lock();
     let output = execute_bash(BashCommandInput {
         command: String::from("printf 'hello'"),
-        timeout: Some(1_000),
+        timeout: Some(5_000),
         description: None,
         run_in_background: Some(false),
         dangerously_disable_sandbox: Some(true),

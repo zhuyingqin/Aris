@@ -34,6 +34,7 @@ import type {
   UserPromptView,
 } from "../types";
 import MailSettings, { MailSettingsDetail } from "./MailSettings";
+import RemoteControlPanel from "./RemoteControlPanel";
 
 interface PresetOption {
   label: string;
@@ -53,7 +54,7 @@ interface ProviderMeta {
 type SaveState = "idle" | "saving" | "saved" | "error";
 type TestState = "idle" | "testing" | "passed" | "failed";
 type UpdateState = "idle" | "checking" | "available" | "current" | "downloading" | "ready" | "error";
-type SettingsTab = "general" | "auth" | "usage" | "about";
+type SettingsTab = "general" | "auth" | "usage" | "remote" | "about";
 
 const MANAGED_NEW_API_MODE = true;
 const MANAGED_MODEL_SERVER_LABEL = "通用模型服务器";
@@ -189,6 +190,7 @@ const SETTINGS_TABS: Array<{ id: SettingsTab; label: string }> = [
   { id: "general", label: "通用" },
   { id: "auth", label: "认证" },
   { id: "usage", label: "使用统计" },
+  { id: "remote", label: "远程控制" },
   { id: "about", label: "关于" },
 ];
 
@@ -347,7 +349,7 @@ const SETTINGS_COPY: Record<Language, {
   saveConnectionSavedInfo: string;
 }> = {
   cn: {
-    tabs: { general: "通用", auth: "认证", usage: "使用统计", about: "关于" },
+    tabs: { general: "通用", auth: "认证", usage: "使用统计", remote: "远程控制", about: "关于" },
     settingsCategories: "设置分类",
     loading: "加载中...",
     statusModelService: "模型服务",
@@ -494,7 +496,7 @@ const SETTINGS_COPY: Record<Language, {
     saveConnectionSavedInfo: "已保存。下次对话时生效。",
   },
   en: {
-    tabs: { general: "General", auth: "Auth", usage: "Usage", about: "About" },
+    tabs: { general: "General", auth: "Auth", usage: "Usage", remote: "Remote", about: "About" },
     settingsCategories: "Settings categories",
     loading: "Loading...",
     statusModelService: "Model service",
@@ -834,12 +836,16 @@ function writeCachedAccount(account: NewApiAccount | null) {
 }
 
 function isSettingsTab(value: unknown): value is SettingsTab {
-  return value === "general" || value === "auth" || value === "usage" || value === "about";
+  return value === "general" || value === "auth" || value === "usage" || value === "remote" || value === "about";
 }
 
 function readRequestedSettingsTab(): SettingsTab | null {
   try {
     const value = sessionStorage.getItem(SETTINGS_TAB_REQUEST_KEY);
+    if (value === "models") {
+      sessionStorage.removeItem(SETTINGS_TAB_REQUEST_KEY);
+      return "auth";
+    }
     if (isSettingsTab(value)) {
       sessionStorage.removeItem(SETTINGS_TAB_REQUEST_KEY);
       return value;
@@ -1455,6 +1461,7 @@ export default function Settings() {
       setGroupDraft(next.group);
       if (next.models.length > 0) {
         setManagedModels(next.models);
+        setConfigView((current) => current ? { ...current, managedModels: next.models } : current);
         notifyChatModelsUpdated();
       }
       writeCachedAccount(next);
@@ -1483,6 +1490,7 @@ export default function Settings() {
       setGroupDraft(next.group);
       if (next.models.length > 0) {
         setManagedModels(next.models);
+        setConfigView((current) => current ? { ...current, managedModels: next.models } : current);
         notifyChatModelsUpdated();
       }
       writeCachedAccount(next);
@@ -1657,7 +1665,6 @@ export default function Settings() {
   };
 
   const applyManagedReviewerModel = async (model: string) => {
-    if (!canSelectManagedReviewer) return;
     if (model === (configView?.reviewerModel ?? "")) return;
     if (!isTauri()) {
       setConfigView((current) => current ? { ...current, reviewerModel: model } : current);
@@ -1892,6 +1899,7 @@ export default function Settings() {
   );
   const managedModelPreview = availableManagedModels.slice(0, 12);
   const currentReviewerModel = configView.reviewerModel?.trim() || "";
+  const currentConfiguredModel = configView.executorModel?.trim() || copy.currentModelFallback;
   const currentServerLabel = configuredServerLabel(configView);
 
   return (
@@ -1916,7 +1924,7 @@ export default function Settings() {
           <div className="sp-status-bar">
             <div className="sp-status-slot">
               <span className="sp-status-tag sp-status-tag-exec">{copy.statusModelService}</span>
-              <span className="sp-status-model">{currentManagedModel}</span>
+              <span className="sp-status-model">{currentConfiguredModel}</span>
               {configView.hasExecutorKey && <span className="sp-status-key">●</span>}
               <span className="sp-status-url">{currentServerLabel}</span>
             </div>
@@ -1987,7 +1995,6 @@ export default function Settings() {
               </div>
             </div>
           </div>
-
           <div className="sp-update-section">
             <div className="sp-section-head">
               <div className="sp-section-head-text">
@@ -2110,7 +2117,7 @@ export default function Settings() {
                 <button className="sp-btn sp-btn-secondary" onClick={() => void loadAccount()} disabled={accountLoading} type="button">
                   {accountLoading ? copy.authRefreshing : copy.authRefresh}
                 </button>
-                <button className="sp-btn sp-btn-secondary" onClick={() => logout()} type="button">{copy.authLogout}</button>
+                <button className="sp-btn sp-btn-secondary" onClick={logout} type="button">{copy.authLogout}</button>
               </div>
             </div>
             <div className={`sp-update-panel ${accountError && !account ? "sp-update-panel-error" : "sp-update-panel-current"}`}>
@@ -2128,27 +2135,27 @@ export default function Settings() {
                       : (accountError || copy.authSignedOutSub)}
                   </div>
                   {account && (
-                      <div className="sp-account-summary" aria-label={copy.authAccountTitle}>
-                        <div className="sp-account-metric">
-                          <span>{copy.authSubscriptionLabel}</span>
-                          <strong>{account.subscriptionName || copy.authSubscriptionEmpty}</strong>
-                          <small>{account.subscriptionDesc || copy.authSubscriptionSource}</small>
-                        </div>
-                        <div className="sp-account-metric subscription">
-                          <span>{copy.authSubscriptionBalance}</span>
-                          <strong>{formatQuota(account.subscriptionQuota ?? 0)}</strong>
-                          <small>{copy.authUsedQuotaMeta(subscriptionQuotaPercent(account), account.groupRatio || "-")}</small>
-                        </div>
-                        <div className="sp-account-metric balance">
-                          <span>{copy.authAccountBalance}</span>
-                          <strong>{formatQuota(account.quota)}</strong>
-                          <small>{copy.authAccountBalanceHint}</small>
-                        </div>
-                        <div className="sp-account-metric">
-                          <span>{copy.authUsedQuota}</span>
-                          <strong>{formatQuota(account.usedQuota)}</strong>
-                          <small>{copy.authUsedQuotaMeta(quotaPercent(account), account.groupRatio || "-")}</small>
-                        </div>
+                    <div className="sp-account-summary" aria-label={copy.authAccountTitle}>
+                      <div className="sp-account-metric">
+                        <span>{copy.authSubscriptionLabel}</span>
+                        <strong>{account.subscriptionName || copy.authSubscriptionEmpty}</strong>
+                        <small>{account.subscriptionDesc || copy.authSubscriptionSource}</small>
+                      </div>
+                      <div className="sp-account-metric subscription">
+                        <span>{copy.authSubscriptionBalance}</span>
+                        <strong>{formatQuota(account.subscriptionQuota ?? 0)}</strong>
+                        <small>{copy.authUsedQuotaMeta(subscriptionQuotaPercent(account), account.groupRatio || "-")}</small>
+                      </div>
+                      <div className="sp-account-metric balance">
+                        <span>{copy.authAccountBalance}</span>
+                        <strong>{formatQuota(account.quota)}</strong>
+                        <small>{copy.authAccountBalanceHint}</small>
+                      </div>
+                      <div className="sp-account-metric">
+                        <span>{copy.authUsedQuota}</span>
+                        <strong>{formatQuota(account.usedQuota)}</strong>
+                        <small>{copy.authUsedQuotaMeta(quotaPercent(account), account.groupRatio || "-")}</small>
+                      </div>
                     </div>
                   )}
                   {account && (account.groupRatio || account.groupDesc) && (
@@ -2198,6 +2205,22 @@ export default function Settings() {
             </div>
           </div>
 
+          <div className="sp-providers-section">
+            <div className="sp-section-head">
+              <div className="sp-section-head-text">
+                <div className="sp-section-title">{copy.integratedAuthTitle}</div>
+                <div className="sp-section-sub">{copy.integratedAuthSub}</div>
+              </div>
+            </div>
+            <div className="sp-card-list">
+              <MailSettings onOpen={() => setMailDetailOpen(true)} />
+            </div>
+          </div>
+        </>
+      )}
+
+      {activeSettingsTab === "auth" && (
+        <>
           <div className="sp-update-section">
             <div className="sp-section-head">
               <div className="sp-section-head-text">
@@ -2227,33 +2250,31 @@ export default function Settings() {
                   <span className="sp-model-select-empty">{copy.modelSyncAfterLogin}</span>
                 )}
               </label>
-              {canSelectManagedReviewer && (
-                <label className="sp-model-select-row">
-                  <span>{copy.reviewerModel}</span>
-                  {availableManagedModels.length > 0 ? (
-                    <select
-                      value={currentReviewerModel}
-                      onChange={(event) => void applyManagedReviewerModel(event.target.value)}
-                      className="sp-settings-select"
-                    >
-                      <option value="">{copy.reviewerModelOff}</option>
-                      {availableManagedModels.map((model) => (
-                        <option key={model} value={model}>{model}</option>
-                      ))}
-                    </select>
-                  ) : (
-                    <span className="sp-model-select-empty">{copy.modelSyncAfterLogin}</span>
-                  )}
-                </label>
-              )}
+              <label className="sp-model-select-row">
+                <span>{copy.reviewerModel}</span>
+                {canSelectManagedReviewer && availableManagedModels.length > 0 ? (
+                  <select
+                    value={currentReviewerModel}
+                    onChange={(event) => void applyManagedReviewerModel(event.target.value)}
+                    className="sp-settings-select"
+                  >
+                    <option value="">{copy.reviewerModelOff}</option>
+                    {availableManagedModels.map((model) => (
+                      <option key={model} value={model}>{model}</option>
+                    ))}
+                  </select>
+                ) : (
+                  <span className="sp-model-select-empty">{copy.modelSyncAfterLogin}</span>
+                )}
+              </label>
             </div>
-            <div className={`sp-update-panel ${managedModelsError ? "sp-update-panel-error" : "sp-update-panel-current"}`}>
+            <div className="sp-update-panel sp-update-panel-current">
               <div className="sp-update-main">
-                <span className={`sp-update-dot ${managedModelsError ? "sp-update-dot-error" : "sp-update-dot-current"}`} />
+                <span className="sp-update-dot sp-update-dot-current" />
                 <div className="sp-update-copy">
                   <div className="sp-update-title">
                     {copy.currentExecutor(currentManagedModel)}
-                    {canSelectManagedReviewer ? (currentReviewerModel ? copy.currentReviewer(currentReviewerModel) : copy.reviewerOff) : ""}
+                    {currentReviewerModel ? copy.currentReviewer(currentReviewerModel) : copy.reviewerOff}
                   </div>
                   <div className="sp-update-meta">
                     {managedModelsLoading
@@ -2272,18 +2293,6 @@ export default function Settings() {
                   )}
                 </div>
               </div>
-            </div>
-          </div>
-
-          <div className="sp-providers-section">
-            <div className="sp-section-head">
-              <div className="sp-section-head-text">
-                <div className="sp-section-title">{copy.integratedAuthTitle}</div>
-                <div className="sp-section-sub">{copy.integratedAuthSub}</div>
-              </div>
-            </div>
-            <div className="sp-card-list">
-              <MailSettings onOpen={() => setMailDetailOpen(true)} />
             </div>
           </div>
         </>
@@ -2388,6 +2397,10 @@ export default function Settings() {
             </div>
           </div>
         </div>
+      )}
+
+      {activeSettingsTab === "remote" && (
+        <RemoteControlPanel language={language} onError={setError} />
       )}
 
       {activeSettingsTab === "usage" && (

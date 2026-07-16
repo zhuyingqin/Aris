@@ -1,0 +1,13 @@
+[Unit]
+Description=Renew SomniQ public-IP TLS certificate
+Wants=docker.service
+After=docker.service
+ConditionPathExists=/opt/somniq-remote/certificates/renewal/<certificate-name>.conf
+
+[Service]
+Type=oneshot
+# The certificate volume is dedicated to SomniQ. Do not add the Docker socket
+# to this Certbot container; the host reloads Nginx after renewal instead.
+ExecStart=/usr/bin/docker run --rm --name somniq-ip-certbot -v /opt/somniq-remote/acme:/var/www/certbot -v /opt/somniq-remote/certificates:/etc/letsencrypt certbot/certbot:v5.7.0 renew --quiet --cert-name <certificate-name>
+ExecStartPost=/usr/bin/docker exec <nginx-container> nginx -t
+ExecStartPost=/usr/bin/docker exec <nginx-container> nginx -s reload

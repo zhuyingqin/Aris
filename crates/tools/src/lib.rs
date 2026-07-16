@@ -2655,7 +2655,8 @@ pub(crate) fn collapse_whitespace(input: &str) -> String {
 
 pub(crate) fn read_json_file(path: &Path) -> Result<Value, String> {
     let raw = fs::read_to_string(path).map_err(|error| error.to_string())?;
-    serde_json::from_str(&raw).map_err(|error| format!("{} is not valid JSON: {error}", path.display()))
+    serde_json::from_str(&raw)
+        .map_err(|error| format!("{} is not valid JSON: {error}", path.display()))
 }
 
 fn preview_text(input: &str, max_chars: usize) -> String {

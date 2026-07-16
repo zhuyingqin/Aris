@@ -64,6 +64,9 @@ fn project_intent_requires_accumulated_evidence_and_preserves_established_goal()
     )
     .expect("apply later task")
     .expect("intent remains");
-    assert_eq!(unchanged.objective, "Build a local-first, auditable research workspace.");
+    assert_eq!(
+        unchanged.objective,
+        "Build a local-first, auditable research workspace."
+    );
     assert!(project_intent_path(root.path()).is_file());
 }

@@ -13,6 +13,7 @@ mod mcp;
 mod newapi;
 mod process;
 mod projects;
+mod remote;
 mod scheduled;
 mod sessions;
 mod state;
@@ -268,6 +269,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(engine::ChatState::default())
         .manage(projects::ProjectState::default())
+        .manage(remote::RemoteAgentState::default())
         .manage(terminal::TerminalState::default())
         .setup(|app| {
             if let Some(resource_dir) = resource_dir(app) {
@@ -283,6 +285,11 @@ pub fn run() {
             config::apply_reviewer_environment(false);
             projects::init(&app.state::<projects::ProjectState>())
                 .map_err(std::io::Error::other)?;
+            remote::init(
+                app.handle().clone(),
+                app.state::<remote::RemoteAgentState>().inner(),
+            )
+            .map_err(std::io::Error::other)?;
             if let Some(window) = app.get_webview_window("main") {
                 if let Ok(icon) = Image::from_bytes(include_bytes!("../icons/icon.png")) {
                     let _ = window.set_icon(icon);
@@ -304,6 +311,25 @@ pub fn run() {
             projects::project_add,
             projects::project_set_current,
             projects::projects_reorder,
+            remote::remote_control_status,
+            remote::remote_control_enable,
+            remote::remote_control_connect_phone,
+            remote::remote_control_disable,
+            remote::remote_control_devices,
+            remote::remote_control_start_pairing,
+            remote::remote_control_pending_pairing,
+            remote::remote_control_approve_pairing,
+            remote::remote_control_discard_pairing,
+            remote::remote_control_revoke_device,
+            remote::remote_control_p2p_pending,
+            remote::remote_control_p2p_answer,
+            remote::remote_control_p2p_ice_candidate,
+            remote::remote_control_p2p_ice_complete,
+            remote::remote_control_p2p_opened,
+            remote::remote_control_p2p_failed,
+            remote::remote_control_p2p_frame,
+            remote::remote_control_p2p_closed,
+            remote::remote_control_audit,
             config::config_get,
             config::config_secret_get,
             config::config_set,

@@ -1,0 +1,20 @@
+# Stage 1 for a new hostname: include this file from Nginx's `http { ... }`
+# context before a certificate exists. It lets Certbot complete HTTP-01 while
+# retaining the normal HTTPS redirect for every other request. Replace the
+# placeholder before loading it.
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name <somniq.example.com>;
+
+    location ^~ /.well-known/acme-challenge/ {
+        root /opt/somniq-remote/acme;
+        default_type text/plain;
+        try_files $uri =404;
+    }
+
+    location / {
+        return 308 https://$host$request_uri;
+    }
+}

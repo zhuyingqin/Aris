@@ -1,0 +1,25 @@
+# Replace <public-ip> before loading this file from Nginx's `http {}` context.
+#
+# This is the first stage of a bare-IP deployment. It exposes only the ACME
+# webroot for that literal IP and leaves all other port-80 traffic redirected
+# to the dedicated IP HTTPS port. Do not enable the TLS companion file until
+# Certbot has issued the certificate under /etc/letsencrypt/live/somniq-ipv4/.
+
+server {
+    listen 80;
+    server_name <public-ip>;
+    access_log off;
+    server_tokens off;
+
+    location ^~ /.well-known/acme-challenge/ {
+        # The existing Nginx Compose overlay mounts this host directory at
+        # the same path inside the container.
+        root /opt/somniq-remote/acme;
+        default_type text/plain;
+        try_files $uri =404;
+    }
+
+    location / {
+        return 308 https://$host:8443$request_uri;
+    }
+}

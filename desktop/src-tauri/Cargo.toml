@@ -5,7 +5,7 @@
 
 [package]
 name = "aris-desktop"
-version = "0.4.16"
+version = "0.4.17"
 edition = "2021"
 license = "MIT"
 description = "ARIS Studio — desktop UI for designing and monitoring agent teams & workflows"
@@ -43,7 +43,15 @@ api = { path = "../../crates/api" }
 aris-executor = { path = "../../crates/executor" }
 aris-chat = { path = "../../crates/chat" }
 aris-commands = { package = "commands", path = "../../crates/commands" }
-tokio = { version = "1", features = ["rt-multi-thread"] }
+remote-protocol = { path = "../../crates/remote-protocol" }
+# Long-lived remote device secrets are held by the operating system credential
+# store (Windows Credential Manager, macOS Keychain, or Linux keyutils), never
+# in the readable desktop configuration file.
+keyring = { version = "3.6.3", default-features = false, features = ["windows-native", "apple-native", "linux-native"] }
+qrcode = { version = "0.14.1", default-features = false, features = ["svg"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+tokio = { version = "1", features = ["net", "rt-multi-thread", "sync", "time"] }
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 # Integrated terminal: cross-platform PTY (ConPTY on Windows) for the Code page.

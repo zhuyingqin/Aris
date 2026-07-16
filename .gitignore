@@ -11,6 +11,7 @@ target-codex-build/
 # Build artifacts
 target/
 dist/
+/node_modules/
 desktop/src-tauri/resources/mcp/
 desktop/src-tauri/resources/node/
 desktop/src-tauri/resources/internal-config.json
@@ -44,3 +45,11 @@ idea-stage/
 *.fls
 *.synctex.gz
 *.toc
+
+# Local release/deployment staging and diagnostic output
+.codex-deploy-stage/
+desktop-build.log
+desktop-lib-test*.log
+prompt-determinism-test.log
+remote-single-test*.log
+somniq-remote*.tar.gz

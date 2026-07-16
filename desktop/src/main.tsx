@@ -2,14 +2,16 @@ import React, { useEffect, useState } from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
 import Login from "./auth/Login";
+import { isTauri } from "./api/tauri";
 import ErrorBoundary from "./ErrorBoundary";
+import { RemoteP2pBridge } from "./remote/RemoteP2pBridge";
 import { useStore } from "./store";
 import "./styles.css";
 
-/** Gate the app shell behind the managed-gateway login. */
+/** Gate the desktop workspace behind its NewAPI account login. */
 function Root() {
-  const authed = useStore((s) => s.authed);
-  const validateAuth = useStore((s) => s.validateAuth);
+  const authed = useStore((state) => state.authed);
+  const validateAuth = useStore((state) => state.validateAuth);
   const [checkingAuth, setCheckingAuth] = useState(false);
 
   useEffect(() => {
@@ -30,11 +32,7 @@ function Root() {
   }, [authed, validateAuth]);
 
   if (authed && checkingAuth) {
-    return (
-      <div className="auth-checking" role="status">
-        Verifying sign-in...
-      </div>
-    );
+    return <div className="auth-checking" role="status">Verifying sign-in...</div>;
   }
 
   return authed ? <App /> : <Login />;
@@ -43,7 +41,11 @@ function Root() {
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <ErrorBoundary>
-      <Root />
+      <>
+        {/* Remote pairing uses its own device credential, not the desktop account. */}
+        {isTauri() && <RemoteP2pBridge />}
+        <Root />
+      </>
     </ErrorBoundary>
   </React.StrictMode>,
 );

@@ -7,12 +7,13 @@ import {
   newapiLogin,
   newapiLogout,
   newapiRegister,
-  type NewApiLoginResult,
+  onProjectChanged,
   projectAdd,
   projectsGet,
   projectsReorder,
   projectSetCurrent,
   stateDir as fetchStateDir,
+  type NewApiLoginResult,
 } from "./api/tauri";
 import { isLabPreviewMode, isTypesetPreviewMode } from "./api/labPreview";
 
@@ -92,11 +93,9 @@ function applyLanguage(language: Language) {
   }
 }
 
-// ── Managed login (new-api gateway) ───────────────────────────────────────────
-// A signed-in flag gates the UI; the actual authorization is the downstream
-// token written into the executor config. Browser preview has no backend, so it
-// is never gated.
-
+// Desktop account login is intentionally separate from remote-device pairing.
+// The former selects the user's NewAPI executor; the latter uses a QR-issued
+// device credential and must never consume this account token.
 const AUTH_FLAG_KEY = "somniq-auth-v1";
 const AUTH_LEGACY_FLAG_KEY = "aris-auth-v1";
 const AUTH_SERVER_KEY = "somniq-auth-server-v1";
@@ -121,14 +120,16 @@ export function isManagedAuthInvalidError(error: unknown): boolean {
 
 function readStoredServer(): string {
   try {
-    return localStorage.getItem(AUTH_SERVER_KEY) ?? localStorage.getItem(AUTH_LEGACY_SERVER_KEY) ?? DEFAULT_AUTH_SERVER;
+    return localStorage.getItem(AUTH_SERVER_KEY)
+      ?? localStorage.getItem(AUTH_LEGACY_SERVER_KEY)
+      ?? DEFAULT_AUTH_SERVER;
   } catch {
     return DEFAULT_AUTH_SERVER;
   }
 }
 
 function initialAuthed(): boolean {
-  if (!isTauri()) return true; // no gateway in plain-browser preview
+  if (!isTauri()) return true;
   try {
     return (localStorage.getItem(AUTH_FLAG_KEY) ?? localStorage.getItem(AUTH_LEGACY_FLAG_KEY)) === "1";
   } catch {
@@ -152,7 +153,7 @@ function markAuthed(server: string) {
     localStorage.removeItem(AUTH_LEGACY_FLAG_KEY);
     localStorage.removeItem(AUTH_LEGACY_SERVER_KEY);
   } catch {
-    // Storage disabled — session still authed for this run.
+    // Storage disabled: the in-memory session remains authenticated.
   }
 }
 
@@ -161,7 +162,7 @@ function rememberAuthServer(server: string) {
     localStorage.setItem(AUTH_SERVER_KEY, server);
     localStorage.removeItem(AUTH_LEGACY_SERVER_KEY);
   } catch {
-    // ignore
+    // Ignore unavailable browser storage.
   }
 }
 
@@ -172,16 +173,15 @@ function clearStoredAuth() {
     localStorage.removeItem(ACCOUNT_CACHE_KEY);
     localStorage.removeItem(ACCOUNT_LEGACY_CACHE_KEY);
   } catch {
-    // ignore
+    // Ignore unavailable browser storage.
   }
 }
 
 interface AppState {
-  /** True once the user has signed in to the managed gateway (or in preview). */
+  /** True once the desktop user has signed in, or in browser preview. */
   authed: boolean;
-  /** Last-used gateway server URL, prefilled in the login form. */
+  /** Last-used NewAPI endpoint shown by the desktop login form. */
   authServer: string;
-  /** Sign in, then persist the returned executor config. Throws on failure. */
   login: (server: string, username: string, password: string) => Promise<void>;
   validateAuth: () => Promise<boolean>;
   register: (
@@ -399,6 +399,25 @@ export const useStore = create<AppState>((set, get) => ({
       .then((view) => set({ projects: view.projects, currentProject: view.currentProject }))
       .catch((error) => set({ error: String(error) }));
 
-    return () => {};
+    let disposed = false;
+    let unlistenProjectChanged: (() => void) | undefined;
+    void onProjectChanged(() => {
+      void projectsGet()
+        .then((view) => {
+          if (!disposed) {
+            set({ projects: view.projects, currentProject: view.currentProject });
+          }
+        })
+        .catch((error) => {
+          if (!disposed) set({ error: String(error) });
+        });
+    }).then((unlisten) => {
+      if (disposed) unlisten();
+      else unlistenProjectChanged = unlisten;
+    }).catch(() => undefined);
+    return () => {
+      disposed = true;
+      unlistenProjectChanged?.();
+    };
   },
 }));

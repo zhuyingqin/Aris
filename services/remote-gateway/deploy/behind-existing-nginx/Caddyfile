@@ -1,0 +1,43 @@
+{
+	# TLS is owned by the existing Nginx edge. This inner hop is intentionally
+	# plain HTTP on an internal Docker network only.
+	auto_https off
+	admin off
+	persist_config off
+}
+
+:8080 {
+	header {
+		-Server
+		# The browser sees this response only through the outer HTTPS Nginx
+		# endpoint, so HSTS is still safe and useful here.
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+	}
+
+	# Do not add an access-log block. Browser WS tickets travel in
+	# Sec-WebSocket-Protocol and must never enter proxy logs.
+	@api path /healthz /v1/*
+	handle @api {
+		reverse_proxy gateway:8787
+	}
+
+	# Do not let an installed phone keep an earlier app shell. Only Vite's
+	# content-hashed bundles are cacheable across releases.
+	@pwa_shell path / /index.html /pair /sw.js /manifest.webmanifest /refresh.html /refresh-v12.html /pwa-recover-v13.html
+	header @pwa_shell {
+		Cache-Control "no-store, max-age=0, must-revalidate"
+		Pragma "no-cache"
+	}
+	@pwa_assets path /assets/*
+	header @pwa_assets Cache-Control "public, max-age=31536000, immutable"
+
+	# Serve the phone PWA and make /pair (and other client-side routes) reload
+	# safely. Vite is built with base="/", so it works below this vhost root.
+	handle {
+		root * /srv/mobile
+		try_files {path} /index.html
+		file_server
+	}
+}

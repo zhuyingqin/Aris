@@ -135,6 +135,138 @@ export interface ConfigTestResult {
   reviewer?: ConfigTestDetail | null;
 }
 
+// ── Remote control (P0/P1) ────────────────────────────────────────────────
+
+export type RemoteScope =
+  | "read_project_state"
+  | "read_task_timeline"
+  | "send_chat_messages"
+  | "stop_runs"
+  | "read_review_conclusions";
+
+export interface RemoteDevice {
+  id: string;
+  label: string;
+  fingerprint: string;
+  scopes: RemoteScope[];
+  pairedAt: number;
+  lastSeenAt?: number | null;
+  revokedAt?: number | null;
+}
+
+export interface RemoteControlStatus {
+  enabled: boolean;
+  gatewayUrl?: string | null;
+  deviceId?: string | null;
+  deviceName?: string | null;
+  /** Explicit public STUN endpoints used for direct P2P candidate gathering. */
+  iceServers: string[];
+  pairedDeviceCount: number;
+  activeDeviceCount: number;
+}
+
+export interface RemoteControlEnableInput {
+  gatewayUrl: string;
+  deviceName?: string;
+  /** STUN/STUNS URLs; leave empty for LAN host-candidate P2P only. */
+  iceServers?: string[];
+}
+
+export interface RemotePairingInvitation {
+  pairingId: string;
+  expiresAt: number;
+  qrCodeDataUrl: string;
+}
+
+/** One-click managed remote setup: the native layer enrolls the desktop
+ * through the QR capability ceremony, then returns a fresh local QR code. */
+export interface RemoteConnectPhoneResult {
+  status: RemoteControlStatus;
+  pairing: RemotePairingInvitation;
+}
+
+export interface RemotePendingPairing {
+  pairingId: string;
+  claimId: string;
+  deviceId: string;
+  label: string;
+  fingerprint: string;
+  requestedScopes: RemoteScope[];
+  requestedAt: number;
+}
+
+export interface RemotePairingApprovalInput {
+  pairingId: string;
+}
+
+export interface RemoteAuditEntry {
+  timestamp: number;
+  deviceId: string;
+  requestId: string;
+  action: string;
+  transport: string;
+  projectId?: string | null;
+  outcome: string;
+  errorCode?: string | null;
+}
+
+/** Gateway-to-renderer WebRTC offer. It contains negotiation metadata only;
+ * encrypted control payloads remain opaque `SecureEnvelope` binary frames. */
+export interface RemoteP2pOffer {
+  deviceId: string;
+  sessionId: string;
+  sdp: string;
+  iceServers: string[];
+}
+
+export interface RemoteP2pIceCandidate {
+  deviceId: string;
+  sessionId: string;
+  candidate: string;
+  sdpMid?: string | null;
+  sdpMLineIndex?: number | null;
+  usernameFragment?: string | null;
+}
+
+/** Recovery snapshot used when an offer arrived before the desktop WebView
+ * finished registering its Tauri event listeners. */
+export interface RemoteP2pPendingSnapshot {
+  offers: RemoteP2pOffer[];
+  candidates: RemoteP2pIceCandidate[];
+  iceCompletes: RemoteP2pSessionInput[];
+}
+
+export interface RemoteP2pSessionInput {
+  deviceId: string;
+  sessionId: string;
+}
+
+export interface RemoteP2pAnswerInput extends RemoteP2pSessionInput {
+  sdp: string;
+}
+
+export interface RemoteP2pIceCandidateInput extends RemoteP2pSessionInput {
+  candidate: string;
+  sdpMid?: string | null;
+  sdpMLineIndex?: number | null;
+  usernameFragment?: string | null;
+}
+
+export type RemoteP2pFailureReason =
+  | "ice_timeout"
+  | "ice_failed"
+  | "negotiation_failed"
+  | "data_channel_failed"
+  | "cancelled";
+
+export interface RemoteP2pFailureInput extends RemoteP2pSessionInput {
+  reason: RemoteP2pFailureReason;
+}
+
+export interface RemoteP2pDataInput extends RemoteP2pSessionInput {
+  dataBase64: string;
+}
+
 export interface LocalEnvironmentCheck {
   id: string;
   label: string;
