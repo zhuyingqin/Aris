@@ -4,18 +4,9 @@ import { chatChangeRevert, fileOpen } from "../api/tauri";
 import ChatImagePreview, { isDirectImageSource, isPreviewableImagePath } from "./ChatImagePreview";
 import MarkdownContent, { ThinkBlock } from "./MarkdownContent";
 import { CHAT_COPY } from "./i18n";
-import { textFromTurn } from "./model";
+import { isFileChangeTool, parseToolBlockJson, parseToolBlockObject, textFromTurn } from "./model";
 import { useStore } from "../store";
 
-const FILE_WRITE_TOOLS = new Set([
-  "write_file",
-  "append_file",
-  "edit_file",
-  "str_replace_based_edit_tool",
-  "bash",
-  "PowerShell",
-  "REPL",
-]);
 const MAX_TOOL_IMAGE_PREVIEWS = 6;
 const MAX_TOOL_IMAGE_SCAN_CHARS = 8_000;
 // Match any non-whitespace run ending in an image extension. The previous
@@ -33,6 +24,13 @@ interface FileChange {
   diff: string;
   changeId?: string;
 }
+
+type ChatToolBlock = Extract<ChatBlock, { kind: "tool" }>;
+
+// Diff construction can be expensive for completed writes. Stream updates use
+// new block objects for in-flight changes, so a per-block WeakMap is safe and
+// lets finished file cards be reused without retaining old conversations.
+const fileDiffsByToolBlock = new WeakMap<ChatToolBlock, FileChange[]>();
 
 export interface CountedFileChange extends FileChange {
   addedLines: number;
@@ -91,48 +89,16 @@ interface StudioLink {
 
 function studioLinksFromTool(block: Extract<ChatBlock, { kind: "tool" }>): StudioLink[] {
   if (block.name !== "StudioLibraryUpsert" || block.isError || !block.output) return [];
-  try {
-    const output = JSON.parse(block.output) as { studioLinks?: unknown };
-    if (!Array.isArray(output.studioLinks)) return [];
-    return output.studioLinks.filter((link): link is StudioLink => {
-      if (!link || typeof link !== "object") return false;
-      const value = link as Partial<StudioLink>;
-      return typeof value.id === "string"
-        && typeof value.title === "string"
-        && typeof value.href === "string";
-    });
-  } catch {
-    return [];
-  }
-}
-
-function parseInput(input: string): Record<string, unknown> {
-  try {
-    return JSON.parse(input) as Record<string, unknown>;
-  } catch {
-    return {};
-  }
-}
-
-function parseOutput(output: string | undefined): Record<string, unknown> | null {
-  if (!output) return null;
-  try {
-    const parsed = JSON.parse(output) as unknown;
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
-      ? parsed as Record<string, unknown>
-      : null;
-  } catch {
-    return null;
-  }
-}
-
-function parseJsonValue(value: string | undefined): unknown {
-  if (!value) return null;
-  try {
-    return JSON.parse(value) as unknown;
-  } catch {
-    return null;
-  }
+  const output = parseToolBlockObject(block, "output");
+  const studioLinks = output?.studioLinks;
+  if (!Array.isArray(studioLinks)) return [];
+  return studioLinks.filter((link): link is StudioLink => {
+    if (!link || typeof link !== "object") return false;
+    const value = link as Partial<StudioLink>;
+    return typeof value.id === "string"
+      && typeof value.title === "string"
+      && typeof value.href === "string";
+  });
 }
 
 function cleanImageCandidate(value: string): string {
@@ -184,8 +150,8 @@ function imagePathsFromTool(
   const paths: string[] = [];
   const seen = new Set<string>();
   if (change) addImagePath(change.path, paths, seen);
-  collectImagePathsFromValue(parseJsonValue(block.input), paths, seen);
-  collectImagePathsFromValue(parseJsonValue(block.output), paths, seen);
+  collectImagePathsFromValue(parseToolBlockJson(block, "input"), paths, seen);
+  collectImagePathsFromValue(parseToolBlockJson(block, "output"), paths, seen);
   if (block.input) collectImagePathsFromText(block.input, paths, seen);
   if (block.output) collectImagePathsFromText(block.output, paths, seen);
   if (block.progress?.stdoutTail) collectImagePathsFromText(block.progress.stdoutTail, paths, seen);
@@ -228,45 +194,98 @@ function diffsFromCodexChanges(output: Record<string, unknown> | null): FileChan
   return parsed;
 }
 
-function diffsFromTool(block: Extract<ChatBlock, { kind: "tool" }>): FileChange[] {
-  if (!FILE_WRITE_TOOLS.has(block.name) || block.isError) return [];
-  const output = parseOutput(block.output);
-  const codexChanges = diffsFromCodexChanges(output);
-  if (codexChanges.length > 0) return codexChanges;
-
-  const input = parseInput(block.input);
-  const path = String(output?.filePath ?? input.path ?? input.file_path ?? input.target_file ?? "");
-  if (!path) return [];
-  const changeId = changeIdFromOutput(output);
-  if (block.name === "write_file") {
-    const content = String(input.content ?? "");
-    return [attachChangeId({
-      path,
-      diff: [`--- /dev/null`, `+++ ${path}`, ...content.split("\n").map((line) => `+${line}`)].join("\n"),
-    }, changeId)];
-  }
-  if (block.name === "append_file") {
-    const content = String(input.content ?? "");
-    return [attachChangeId({
-      path,
-      diff: [`--- ${path}`, `+++ ${path}`, ...content.split("\n").map((line) => `+${line}`)].join("\n"),
-    }, changeId)];
-  }
-  if (block.name !== "edit_file" && block.name !== "str_replace_based_edit_tool") return [];
-  const before = String(input.old_string ?? input.old_str ?? input.old_text ?? "");
-  const after = String(input.new_string ?? input.new_str ?? input.new_text ?? "");
+function notebookDiffFromTool(
+  input: Record<string, unknown>,
+  output: Record<string, unknown> | null,
+  path: string,
+  changeId?: string,
+): FileChange[] {
+  const mode = String(output?.edit_mode ?? input.edit_mode ?? "replace");
+  const cellId = String(output?.cell_id ?? input.cell_id ?? "new cell");
+  const oldSource = typeof input.old_source === "string" ? input.old_source : "";
+  const newSource = mode === "delete"
+    ? ""
+    : String(input.new_source ?? output?.new_source ?? "");
+  const removed = oldSource
+    ? oldSource.split("\n").map((line) => `-${line}`)
+    : mode === "delete" ? [`- [cell ${cellId} deleted]`] : [];
+  const added = newSource
+    ? newSource.split("\n").map((line) => `+${line}`)
+    : mode === "delete" ? [] : [`+ [cell ${cellId} ${mode}]`];
   return [attachChangeId({
     path,
     diff: [
-      `--- ${path}`,
-      `+++ ${path}`,
-      ...before.split("\n").map((line) => `-${line}`),
-      ...after.split("\n").map((line) => `+${line}`),
+      `--- ${path} (cell ${cellId})`,
+      `+++ ${path} (cell ${cellId})`,
+      ...removed,
+      ...added,
     ].join("\n"),
   }, changeId)];
 }
 
-export function diffFromTool(block: Extract<ChatBlock, { kind: "tool" }>): FileChange | null {
+function diffsFromTool(block: ChatToolBlock): FileChange[] {
+  if (!isFileChangeTool(block.name) || block.isError) return [];
+  if (block.output !== undefined) {
+    const cached = fileDiffsByToolBlock.get(block);
+    if (cached) return cached;
+  }
+
+  const output = parseToolBlockObject(block, "output");
+  const codexChanges = diffsFromCodexChanges(output);
+  if (codexChanges.length > 0) {
+    if (block.output !== undefined) fileDiffsByToolBlock.set(block, codexChanges);
+    return codexChanges;
+  }
+
+  const input = parseToolBlockObject(block, "input") ?? {};
+  const path = String(
+    output?.filePath
+      ?? output?.notebookPath
+      ?? output?.notebook_path
+      ?? input.path
+      ?? input.file_path
+      ?? input.target_file
+      ?? input.notebook_path
+      ?? "",
+  );
+  if (!path) return [];
+  const changeId = changeIdFromOutput(output);
+  let changes: FileChange[];
+  if (block.name === "NotebookEdit") {
+    changes = notebookDiffFromTool(input, output, path, changeId);
+  } else if (block.name === "write_file") {
+    const content = String(input.content ?? "");
+    changes = [attachChangeId({
+      path,
+      diff: [`--- /dev/null`, `+++ ${path}`, ...content.split("\n").map((line) => `+${line}`)].join("\n"),
+    }, changeId)];
+  } else if (block.name === "append_file") {
+    const content = String(input.content ?? "");
+    changes = [attachChangeId({
+      path,
+      diff: [`--- ${path}`, `+++ ${path}`, ...content.split("\n").map((line) => `+${line}`)].join("\n"),
+    }, changeId)];
+  } else if (block.name === "edit_file" || block.name === "str_replace_based_edit_tool") {
+    const before = String(input.old_string ?? input.old_str ?? input.old_text ?? "");
+    const after = String(input.new_string ?? input.new_str ?? input.new_text ?? "");
+    changes = [attachChangeId({
+      path,
+      diff: [
+        `--- ${path}`,
+        `+++ ${path}`,
+        ...before.split("\n").map((line) => `-${line}`),
+        ...after.split("\n").map((line) => `+${line}`),
+      ].join("\n"),
+    }, changeId)];
+  } else {
+    changes = [];
+  }
+
+  if (block.output !== undefined) fileDiffsByToolBlock.set(block, changes);
+  return changes;
+}
+
+export function diffFromTool(block: ChatToolBlock): FileChange | null {
   return diffsFromTool(block)[0] ?? null;
 }
 

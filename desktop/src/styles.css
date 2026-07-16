@@ -5814,7 +5814,7 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
 }
 
 .sp-env-card-missing {
-  opacity: 0.82;
+  border-color: color-mix(in srgb, var(--amber) 24%, var(--border));
 }
 
 .sp-env-card-top {
@@ -10923,6 +10923,33 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   font-size: 13px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.sp-env-card-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 12px;
+  padding-top: 11px;
+  border-top: 1px solid color-mix(in srgb, var(--border) 72%, transparent);
+}
+
+.sp-env-install {
+  min-height: 30px;
+  border: 1px solid color-mix(in srgb, var(--accent) 44%, var(--border));
+  border-radius: 7px;
+  padding: 0 11px;
+  background: color-mix(in srgb, var(--accent) 10%, var(--bg-2));
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.sp-env-install:hover,
+.sp-env-install:focus-visible {
+  border-color: color-mix(in srgb, var(--accent) 72%, var(--border));
+  background: color-mix(in srgb, var(--accent) 17%, var(--bg-2));
+  color: var(--text);
 }
 
 .sp-remote-device-state {

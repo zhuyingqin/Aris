@@ -58,6 +58,28 @@ describe("ChatMessage rendering", () => {
     expect(change?.diff).toContain("+\\end{frame}");
   });
 
+  it("creates a diff card for NotebookEdit cells", () => {
+    const change = diffFromTool({
+      kind: "tool",
+      name: "NotebookEdit",
+      input: JSON.stringify({
+        notebook_path: "notebooks/experiment.ipynb",
+        cell_id: "cell-1",
+        new_source: "print('updated')",
+        edit_mode: "replace",
+      }),
+      output: JSON.stringify({
+        notebook_path: "notebooks/experiment.ipynb",
+        cell_id: "cell-1",
+        edit_mode: "replace",
+      }),
+    });
+
+    expect(change?.path).toBe("notebooks/experiment.ipynb");
+    expect(change?.diff).toContain("cell cell-1");
+    expect(change?.diff).toContain("+print('updated')");
+  });
+
   it("prefers Codex-style file changes from tool output", () => {
     const change = diffFromTool({
       kind: "tool",

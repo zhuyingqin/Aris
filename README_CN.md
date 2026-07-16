@@ -29,6 +29,28 @@
 
 ## 📰 最新动态
 
+> **v0.4.20** (2026-07) —— Chat 表面重构：新增 `ChatComposer` + `useChatComposer` +
+> `useChatRun` hooks，扩展 `ChatMessage` 模型与测试，Settings 表面更新。Typeset 可视化编辑器
+> 迭代：`Typeset.tsx` + `TypesetVisualEditor.tsx` + `Typeset.css` 重写，配合新增的
+> `TypesetLibraryCopy` i18n 模块。Tauri 后端 (`commands.rs`、`env/{mod,probe}.rs`、
+> `files.rs`、`lib.rs`) —— env-probe 与 file-IO 表面更新。新增 `environmentInstall.ts`
+> (+ test) 用于应用内 Python / Jupyter / LaTeX 工具链提示。新增设计文档
+> `docs/development-logic/edit-history-rollback.md`（基于 shadow-Git 的统一变更历史底座，
+> Typeset + Chat undo 共享）。
+
+> **v0.4.19** (2026-07) —— 移动端 PWA 打磨：新增 `chatBlocks.ts` + test（移动端聊天块渲染助手）、
+> 新增 `foregroundResume.ts` + test（配对恢复后的前台 resume 路径），
+> `control.ts` / `main.ts` / `transport.ts` / `remoteMarkdown.ts` /
+> `workspaceNavigation.ts` / `styles.css` / SW 表面更新。桌面端 typeset + chat + Tauri 后端
+> + remote-protocol 表面更新。Tools 表面更新（`crates/tools/`）。
+
+> **v0.4.18** (2026-07) —— Remote-mobile follow-up：`crates/remote-protocol/src/control.rs`
+> 表面更新，新增 `services/remote-mobile/src/mobileViewport.ts` + test，手机 PWA 打磨
+>（`control.ts` + `main.ts` + `index.html` + `styles.css` + tests）。WebRTC P2P bridge
+> 打磨（`desktop/src/remote/RemoteP2pBridge.tsx`：channel retention + storage protection）。
+> 桌面端表面更新（`engine.rs`、`remote.rs`、`sessions.rs` + tests）。Chat session 表面更新
+> （`useChatSessions.ts` + test）。Tauri 绑定表面更新。
+
 > **v0.4.17** (2026-07) —— 新增桌面端批准的手机远程控制：手机扫码配对后可安全查看桌面项目与对话、
 > 继续指定对话，并从手机切换该对话模型。连接优先使用端到端加密的 WebRTC P2P，无法直连时自动回退到
 > 端到端加密的 WSS/TCP 中继；可安装的手机 PWA 已使用正式 SomniQ 图标。

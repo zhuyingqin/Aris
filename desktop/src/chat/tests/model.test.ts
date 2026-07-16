@@ -9,6 +9,7 @@ import {
   makeId,
   makeSession,
   migrateSession,
+  parseToolBlockJson,
   patchLastAssistantTurn,
   titleFromTurns,
   transcriptFromTurn,
@@ -103,6 +104,30 @@ describe("latestTodosFromTurns", () => {
 });
 
 describe("latestFileChangesFromTurns", () => {
+  it("tracks NotebookEdit in the same file-change stream as file tools", () => {
+    const changes = latestFileChangesFromTurns([
+      userTurn("update notebook"),
+      toolTurn(
+        "NotebookEdit",
+        {
+          notebook_path: "notebooks/experiment.ipynb",
+          cell_id: "cell-1",
+          new_source: "print('updated')",
+          edit_mode: "replace",
+        },
+        {
+          notebook_path: "notebooks/experiment.ipynb",
+          cell_id: "cell-1",
+          edit_mode: "replace",
+        },
+      ),
+    ]);
+
+    expect(changes).toEqual([
+      { path: "notebooks/experiment.ipynb", status: "modified", sourceTool: "NotebookEdit" },
+    ]);
+  });
+
   it("extracts confirmed write and edit file changes from the latest request", () => {
     const turns: ChatTurn[] = [
       userTurn("old task"),
@@ -204,6 +229,20 @@ Path(r"C:\Users\wt\.config\aris\desktop-workspace\papers\longyoung\report.pdf").
 });
 
 describe("model chat helpers", () => {
+  it("caches parsed tool JSON by immutable block identity", () => {
+    const block = {
+      kind: "tool" as const,
+      name: "write_file",
+      input: JSON.stringify({ path: "report.md", content: "large output" }),
+      output: JSON.stringify({ filePath: "report.md" }),
+    };
+
+    const first = parseToolBlockJson(block, "output");
+    const second = parseToolBlockJson(block, "output");
+
+    expect(second).toBe(first);
+  });
+
   it("scores direct slash-style abbreviations above weak subsequence matches", () => {
     const literature = fuzzyScore("lit", "research-lit literature paper search");
     const weak = fuzzyScore("lit", "utility cleanup");

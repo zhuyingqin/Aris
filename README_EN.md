@@ -29,6 +29,28 @@
 
 ## 📰 What's New
 
+> **v0.4.20** (2026-07) — Chat surface refactor: new `ChatComposer` + `useChatComposer` +
+> `useChatRun` hooks, expanded `ChatMessage` model + tests, and Settings refinements.
+> Typeset visual-editor iteration: `Typeset.tsx` + `TypesetVisualEditor.tsx` + `Typeset.css`
+> rewrite with the new `TypesetLibraryCopy` i18n module. Tauri backend (`commands.rs`,
+> `env/{mod,probe}.rs`, `files.rs`, `lib.rs`) — env-probe and file-IO refinements. New
+> `environmentInstall.ts` (+ test) for in-app Python / Jupyter / LaTeX toolchain prompts.
+> New design doc: `docs/development-logic/edit-history-rollback.md` (shadow-Git single source
+> of truth for Typeset + Chat undo).
+
+> **v0.4.19** (2026-07) — Mobile PWA refinements: new `chatBlocks.ts` + test (mobile chat block
+> rendering helpers), new `foregroundResume.ts` + test (foreground resume after pairing
+> recovery), and `control.ts` / `main.ts` / `transport.ts` / `remoteMarkdown.ts` /
+> `workspaceNavigation.ts` / `styles.css` / SW refinements. Desktop typeset + chat + Tauri
+> backend + remote-protocol surface updates. Tools surface refinement (`crates/tools/`).
+
+> **v0.4.18** (2026-07) — Remote-mobile follow-up: `crates/remote-protocol/src/control.rs`
+> refinement, new `services/remote-mobile/src/mobileViewport.ts` + test, phone PWA
+> refinements (`control.ts` + `main.ts` + `index.html` + `styles.css` + tests). WebRTC P2P
+> bridge refinements (`desktop/src/remote/RemoteP2pBridge.tsx`: channel retention + storage
+> protection). Desktop-side surface updates (`engine.rs`, `remote.rs`, `sessions.rs` + tests).
+> Chat session surface update (`useChatSessions.ts` + test). Tauri bindings refinement.
+
 > **v0.4.17** (2026-07) — Desktop-approved mobile remote control: pair a phone by QR code,
 > then securely browse desktop projects and conversations, continue a selected chat, and switch
 > its model from the phone. The connection prefers encrypted WebRTC P2P and automatically falls

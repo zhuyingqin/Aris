@@ -36,7 +36,6 @@ import { useChatStream } from "./useChatStream";
 import { onChatModelsUpdated } from "../modelEvents";
 import { notifyProjectBriefUpdated } from "./ProjectBriefCard";
 import {
-  assistantTextTurn,
   assistantTurn,
   completedAssistantBlocks,
   continueStoppedPrompt,
@@ -492,60 +491,78 @@ export function useChatRun({
     promptOverride?: string | ChatSendRequest,
     rewindFromUser?: ChatTurn,
   ) => {
-    const prompt = typeof promptOverride === "string"
-      ? { text: promptOverride }
-      : promptOverride ?? (await outgoingMessage(text, attached));
-    const selectedModel = session.model || status?.model || undefined;
-    const request: ChatSendRequest = {
-      ...prompt,
-      projectId: session.projectId,
-      ...(selectedModel ? { model: selectedModel } : {}),
-    };
+    // Render the submitted turn before *any* asynchronous preparation. Reading
+    // a path attachment and rebuilding an edited/retried backend context can
+    // both take noticeable time; holding this patch until they finish makes a
+    // send look like it was ignored. The streaming assistant placeholder also
+    // makes the composer enter its busy/Stop state immediately.
+    patchTurns(session.id, () => [...prefix, userTurn(text, attached), assistantTurn()]);
+    updateSession(session.id, (item) => ({ ...item, draft: "", draftAttachments: [] }));
+    setEditingTurnId(null);
+
     if (!isTauri()) {
-      patchTurns(session.id, () => [
-        ...prefix,
-        userTurn(text, attached),
-        assistantTextTurn(copy.previewResponse),
-      ]);
-      updateSession(session.id, (item) => ({ ...item, draft: "", draftAttachments: [] }));
-      setEditingTurnId(null);
+      patchAssistant(session.id, (turn) => ({
+        ...turn,
+        blocks: [{ kind: "text", text: copy.previewResponse }],
+        streaming: false,
+      }));
       return;
     }
     const shouldResetContext = backendContextNeedsReset.current.has(session.id)
       || needsBackendContextReset(session.turns, prefix, resetContext);
-    if (shouldResetContext) {
-      // Retry/edit normally truncate history before an earlier user turn. Ask
-      // the backend to rewind its authoritative session first; this retains
-      // compaction summaries and untruncated tool content. Old or ambiguous
-      // sessions safely fall back to the existing UI reconstruction.
-      const recoveryTurns = unsavedBackendTurns.current.get(session.id);
-      let tokens = recoveryTurns
-        ? await chatSetContext(session.id, await contextForRetry(recoveryTurns), "append").catch(() => null)
-        : null;
-      const rewindMessage = rewindFromUser
-        ? await outgoingMessage(textFromTurn(rewindFromUser), rewindFromUser.attachments ?? [])
-        : undefined;
-      if (rewindMessage) {
-        const rewindTokens = await chatRewindToUserMessage(session.id, rewindMessage).catch(() => null);
-        // Rewind must succeed for an edit/retry; a repaired append alone would
-        // leave the rejected user turn at the end of the session.
-        tokens = rewindTokens;
+    try {
+      const prompt = typeof promptOverride === "string"
+        ? { text: promptOverride }
+        : promptOverride ?? (await outgoingMessage(text, attached));
+      const selectedModel = session.model || status?.model || undefined;
+      const request: ChatSendRequest = {
+        ...prompt,
+        projectId: session.projectId,
+        ...(selectedModel ? { model: selectedModel } : {}),
+      };
+      if (shouldResetContext) {
+        // Retry/edit normally truncate history before an earlier user turn. Ask
+        // the backend to rewind its authoritative session first; this retains
+        // compaction summaries and untruncated tool content. Old or ambiguous
+        // sessions safely fall back to the existing UI reconstruction.
+        const recoveryTurns = unsavedBackendTurns.current.get(session.id);
+        let tokens = recoveryTurns
+          ? await chatSetContext(session.id, await contextForRetry(recoveryTurns), "append").catch(() => null)
+          : null;
+        const rewindMessage = rewindFromUser
+          ? await outgoingMessage(textFromTurn(rewindFromUser), rewindFromUser.attachments ?? [])
+          : undefined;
+        if (rewindMessage) {
+          const rewindTokens = await chatRewindToUserMessage(session.id, rewindMessage).catch(() => null);
+          // Rewind must succeed for an edit/retry; a repaired append alone would
+          // leave the rejected user turn at the end of the session.
+          tokens = rewindTokens;
+        }
+        if (tokens == null) {
+          tokens = await chatSetContext(session.id, await contextForRetry(prefix), "replace");
+        }
+        setContextOverrides((prev) => new Map(prev).set(session.id, { tokens, anchor: prefix.length }));
+        markBackendContextSynced(session.id, prefix);
+        backendContextNeedsReset.current.delete(session.id);
+        unsavedBackendTurns.current.delete(session.id);
+      } else {
+        markBackendContextSynced(session.id, prefix);
       }
-      if (tokens == null) {
-        tokens = await chatSetContext(session.id, await contextForRetry(prefix), "replace");
-      }
-      setContextOverrides((prev) => new Map(prev).set(session.id, { tokens, anchor: prefix.length }));
-      markBackendContextSynced(session.id, prefix);
-      backendContextNeedsReset.current.delete(session.id);
-      unsavedBackendTurns.current.delete(session.id);
-    } else {
-      markBackendContextSynced(session.id, prefix);
+      await run(session.id, request);
+    } catch (error) {
+      // Context rebuilding is local preparation, not a stream error, so the
+      // stream hook cannot surface this rejection for us. The optimistic pair
+      // is already visible; finish its placeholder through the normal error
+      // path and mark the backend for repair on the next send.
+      const detail = String(error);
+      onError(
+        session.id,
+        shouldResetContext ? `Unable to reset chat context: ${detail}` : detail,
+        false,
+        false,
+      );
     }
-    patchTurns(session.id, () => [...prefix, userTurn(text, attached), assistantTurn()]);
-    updateSession(session.id, (item) => ({ ...item, draft: "", draftAttachments: [] }));
-    setEditingTurnId(null);
-    await run(session.id, request);
-  }, [copy.previewResponse, markBackendContextSynced, patchTurns, run, status?.model, updateSession, setEditingTurnId]);
+  }, [copy.previewResponse, markBackendContextSynced, onError, patchAssistant, patchTurns, run, status?.model, updateSession, setEditingTurnId]);
 
   const retry = useCallback(async (assistant: ChatTurn) => {
     const session = currentSessionRef.current;

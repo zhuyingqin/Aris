@@ -107,7 +107,31 @@ function ComposerHarness({
   );
 }
 
+function RerenderComposerHarness() {
+  const [renderCount, setRenderCount] = useState(0);
+  return (
+    <>
+      <button type="button" onClick={() => setRenderCount((count) => count + 1)}>
+        Rerender {renderCount}
+      </button>
+      <ComposerHarness />
+    </>
+  );
+}
+
 describe("ChatComposer picker keyboard operation", () => {
+  it("loads recent picker entries only once across unrelated renders", async () => {
+    localStorage.setItem("somniq-chat-recent-skills", JSON.stringify(["paper-plan"]));
+    localStorage.setItem("somniq-chat-recent-files", JSON.stringify(["src/chat/Chat.tsx"]));
+    const getItem = vi.spyOn(Storage.prototype, "getItem");
+    const user = userEvent.setup();
+    render(<RerenderComposerHarness />);
+
+    expect(getItem).toHaveBeenCalledTimes(2);
+    await user.click(screen.getByRole("button", { name: /Rerender/ }));
+    expect(getItem).toHaveBeenCalledTimes(2);
+  });
+
   it("allows a second chat to submit while another chat is running", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn();

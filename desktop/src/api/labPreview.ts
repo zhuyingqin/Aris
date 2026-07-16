@@ -370,6 +370,27 @@ export function previewSearchFiles(pattern: string, root?: string | null): strin
     .sort((left, right) => left.localeCompare(right));
 }
 
+/** Mirrors the desktop Typeset library command for browser-only previews. */
+export function previewListTypesetDocuments() {
+  const now = Date.now();
+  return [
+    {
+      path: PREVIEW_SLIDES_TEX_FILE,
+      title: "Inverse Reinforcement Learning — Theory, Practice & Frontiers",
+      kind: "beamer" as const,
+      modifiedEpochMs: now - 2 * 60 * 60 * 1000,
+      compileState: "fresh" as const,
+    },
+    {
+      path: PREVIEW_TEX_FILE,
+      title: "Error Probability Distribution Compensation for Improved Wind Speed Forecasting",
+      kind: "article" as const,
+      modifiedEpochMs: now - 26 * 60 * 60 * 1000,
+      compileState: "missing" as const,
+    },
+  ];
+}
+
 export function previewReadText(path: string): FileTextLike {
   const content = files.get(path) ?? "";
   return { path, content, bytes: new TextEncoder().encode(content).length };

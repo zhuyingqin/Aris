@@ -21,6 +21,7 @@ import {
   type NewApiUsageLogPage,
 } from "../api/tauri";
 import { isManagedAuthInvalidError, useStore, type Language } from "../store";
+import { handoffEnvironmentInstall, isInstallableEnvironment } from "../environmentInstall";
 import { notifyChatModelsUpdated } from "../modelEvents";
 import type {
   AppUpdateInfo,
@@ -327,6 +328,14 @@ const SETTINGS_COPY: Record<Language, {
   envRefresh: string;
   envDetecting: string;
   envEmpty: string;
+  envStatusReady: string;
+  envStatusWarning: string;
+  envStatusMissing: string;
+  envVersion: string;
+  envPath: string;
+  envUnknownVersion: string;
+  envNotOnPath: string;
+  envInstallInChat: string;
   advancedExecutor: string;
   advancedReviewer: string;
   advancedProviderType: string;
@@ -474,6 +483,14 @@ const SETTINGS_COPY: Record<Language, {
     envRefresh: "刷新",
     envDetecting: "检测中...",
     envEmpty: "点击刷新后显示本机可用的科研与排版运行环境。",
+    envStatusReady: "可用",
+    envStatusWarning: "需检查",
+    envStatusMissing: "未检测到",
+    envVersion: "版本",
+    envPath: "路径",
+    envUnknownVersion: "未获取",
+    envNotOnPath: "未加入 PATH",
+    envInstallInChat: "前往对话安装",
     advancedExecutor: "执行器",
     advancedReviewer: "审阅",
     advancedProviderType: "Provider 类型",
@@ -621,6 +638,14 @@ const SETTINGS_COPY: Record<Language, {
     envRefresh: "Refresh",
     envDetecting: "Checking...",
     envEmpty: "Refresh to show available local research and typesetting tools.",
+    envStatusReady: "Available",
+    envStatusWarning: "Check required",
+    envStatusMissing: "Not detected",
+    envVersion: "Version",
+    envPath: "Path",
+    envUnknownVersion: "Unavailable",
+    envNotOnPath: "Not on PATH",
+    envInstallInChat: "Install with Chat",
     advancedExecutor: "Executor",
     advancedReviewer: "Reviewer",
     advancedProviderType: "Provider Type",
@@ -952,10 +977,36 @@ function environmentMark(id: string): string {
   return id.slice(0, 3).toUpperCase();
 }
 
-function environmentStatusLabel(item: LocalEnvironmentCheck): string {
-  if (item.status === "ready") return "可用";
-  if (item.status === "warning") return "需检查";
-  return item.available ? "可用" : "未检测到";
+function environmentStatusLabel(item: LocalEnvironmentCheck, language: Language): string {
+  const copy = SETTINGS_COPY[language];
+  if (item.status === "ready") return copy.envStatusReady;
+  if (item.status === "warning") return copy.envStatusWarning;
+  return item.available ? copy.envStatusReady : copy.envStatusMissing;
+}
+
+function environmentCategoryLabel(id: string, language: Language, fallback: string): string {
+  const labels: Record<string, Record<Language, string>> = {
+    python: { cn: "运行环境", en: "Runtime" },
+    jupyter: { cn: "Notebook", en: "Notebook" },
+    matlab: { cn: "数值计算", en: "Numerical computing" },
+    latex: { cn: "论文排版", en: "Typesetting" },
+  };
+  return labels[id]?.[language] ?? fallback;
+}
+
+function environmentMessage(item: LocalEnvironmentCheck, language: Language): string {
+  if (item.available && item.status === "warning") {
+    return language === "cn" ? "已找到可执行文件，但版本检查未完成。" : "The executable was found, but its version check did not complete.";
+  }
+  if (item.available) {
+    return language === "cn" ? "已检测到可用环境。" : "The runtime is available.";
+  }
+  if (isInstallableEnvironment(item.id)) {
+    return language === "cn"
+      ? `未检测到 ${item.label}，可以转到对话完成安装与验证。`
+      : `${item.label} was not detected. Open Chat to install and verify it.`;
+  }
+  return language === "cn" ? `未检测到 ${item.label}。` : `${item.label} was not detected.`;
 }
 
 function normalizeExecutorProvider(provider: string | null | undefined, baseUrl: string | null | undefined): string {
@@ -1357,7 +1408,6 @@ export default function Settings() {
   };
 
   const loadEnvironmentChecks = async () => {
-    if (!isTauri()) return;
     setEnvironmentLoading(true);
     setEnvironmentError("");
     try {
@@ -2621,7 +2671,7 @@ export default function Settings() {
                       <span className="sp-env-mark">{environmentMark(item.id)}</span>
                       <div className="sp-env-title-block">
                         <div className="sp-env-title">{item.label}</div>
-                        <div className="sp-env-category">{item.category}</div>
+                        <div className="sp-env-category">{environmentCategoryLabel(item.id, language, item.category)}</div>
                       </div>
                       <span className="sp-env-badge sp-env-badge-loading">
                         <span className="sp-env-spinner" />
@@ -2641,15 +2691,28 @@ export default function Settings() {
                       <span className="sp-env-mark">{environmentMark(item.id)}</span>
                       <div className="sp-env-title-block">
                         <div className="sp-env-title">{item.label}</div>
-                        <div className="sp-env-category">{item.category}</div>
+                        <div className="sp-env-category">{environmentCategoryLabel(item.id, language, item.category)}</div>
                       </div>
-                      <span className={`sp-env-badge sp-env-badge-${item.status}`}>{environmentStatusLabel(item)}</span>
+                      <span className={`sp-env-badge sp-env-badge-${item.status}`}>{environmentStatusLabel(item, language)}</span>
                     </div>
                     <div className="sp-env-lines">
-                      <div><span>版本</span><strong title={item.version ?? ""}>{item.version ?? "未获取"}</strong></div>
-                      <div><span>路径</span><strong title={item.path ?? ""}>{item.path ?? "未加入 PATH"}</strong></div>
+                      <div><span>{copy.envVersion}</span><strong title={item.version ?? ""}>{item.version ?? copy.envUnknownVersion}</strong></div>
+                      <div><span>{copy.envPath}</span><strong title={item.path ?? ""}>{item.path ?? copy.envNotOnPath}</strong></div>
                     </div>
-                    <div className="sp-env-message" title={item.detail ?? item.message}>{item.message}</div>
+                    <div className="sp-env-message" title={item.detail ?? item.message}>{environmentMessage(item, language)}</div>
+                    {!item.available && isInstallableEnvironment(item.id) && (
+                      <div className="sp-env-card-actions">
+                        <button
+                          className="sp-env-install"
+                          type="button"
+                          onClick={() => {
+                            if (isInstallableEnvironment(item.id)) handoffEnvironmentInstall(item.id, language);
+                          }}
+                        >
+                          {copy.envInstallInChat}
+                        </button>
+                      </div>
+                    )}
                   </div>
                 ))
               )}

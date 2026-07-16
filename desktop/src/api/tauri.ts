@@ -8,6 +8,7 @@ import {
   previewDeletePath,
   previewDuplicatePath,
   previewFileTree,
+  previewListTypesetDocuments,
   previewRenamePath,
   previewReadBytes,
   previewKernelspecs,
@@ -25,6 +26,50 @@ import {
 /** True only inside the Tauri webview; false in a plain browser (vite preview). */
 export const isTauri = (): boolean =>
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+
+const PREVIEW_LOCAL_ENVIRONMENT_CHECKS: LocalEnvironmentCheck[] = [
+  {
+    id: "python",
+    label: "Python",
+    category: "Runtime",
+    status: "ready",
+    available: true,
+    version: "Python 3.12",
+    path: "python",
+    message: "Python is available in the browser preview sample.",
+  },
+  {
+    id: "jupyter",
+    label: "Jupyter",
+    category: "Notebook",
+    status: "missing",
+    available: false,
+    version: null,
+    path: null,
+    message: "Jupyter is not installed in this preview sample.",
+  },
+  {
+    id: "matlab",
+    label: "MATLAB",
+    category: "Numerical computing",
+    status: "warning",
+    available: false,
+    version: null,
+    path: null,
+    message: "MATLAB was not detected in this preview sample.",
+  },
+  {
+    id: "latex",
+    label: "LaTeX",
+    category: "Typesetting",
+    status: "missing",
+    available: false,
+    version: null,
+    path: null,
+    message: "A system LaTeX toolchain was not detected in this preview sample.",
+  },
+];
+
 export const openExternalUrl = (url: string) => {
   if (isTauri()) return invoke<void>("open_external_url", { url });
   window.open(url, "_blank", "noopener,noreferrer");
@@ -94,7 +139,13 @@ import type {
 
 export const stateDir = () => invoke<string>("state_dir");
 export const localEnvironmentChecks = (forceRefresh?: boolean) =>
-  invoke<LocalEnvironmentCheck[]>("local_environment_checks", { forceRefresh: forceRefresh ?? false });
+  !isTauri()
+    ? Promise.resolve(PREVIEW_LOCAL_ENVIRONMENT_CHECKS.map((item) => ({ ...item })))
+    : invoke<LocalEnvironmentCheck[]>("local_environment_checks", { forceRefresh: forceRefresh ?? false });
+export const localEnvironmentCheck = (id: string) =>
+  !isTauri()
+    ? Promise.resolve({ ...(PREVIEW_LOCAL_ENVIRONMENT_CHECKS.find((item) => item.id === id) ?? PREVIEW_LOCAL_ENVIRONMENT_CHECKS[0]) })
+    : invoke<LocalEnvironmentCheck>("local_environment_check", { id });
 export const projectsGet = () => invoke<ProjectView>("projects_get");
 export const projectAdd = (path: string) =>
   invoke<ProjectView>("project_add", { path });
@@ -708,11 +759,28 @@ export interface FileText {
   bytes: number;
 }
 
+export type TypesetDocumentKind = "article" | "beamer" | "poster" | "report";
+export type TypesetCompileState = "fresh" | "stale" | "missing";
+
+/** A compilable LaTeX root document, rather than an included chapter file. */
+export interface TypesetDocument {
+  path: string;
+  title: string;
+  kind: TypesetDocumentKind;
+  modifiedEpochMs: number;
+  compileState: TypesetCompileState;
+}
+
 export const fileListDir = (path?: string | null) =>
   isFilePreviewMode()
     ? preview<FileTreeEntry[]>(previewFileTree(path ?? null))
     :
   invoke<FileTreeEntry[]>("file_list_dir", { path: path ?? null });
+
+export const typesetListDocuments = () =>
+  isFilePreviewMode()
+    ? preview<TypesetDocument[]>(previewListTypesetDocuments() as TypesetDocument[])
+    : invoke<TypesetDocument[]>("typeset_list_documents");
 
 export const fileReadText = (path: string) =>
   isFilePreviewMode()

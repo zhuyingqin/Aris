@@ -1,4 +1,8 @@
-use std::path::{Path, PathBuf};
+use std::{
+    io::Read,
+    path::{Path, PathBuf},
+    time::UNIX_EPOCH,
+};
 
 use encoding_rs::{GB18030, GBK};
 use serde::Serialize;
@@ -6,6 +10,9 @@ use serde_json::json;
 
 const MAX_FILE_EDITOR_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_FILE_BINARY_BYTES: u64 = 40 * 1024 * 1024;
+const MAX_TYPESET_DOCUMENT_SCAN_BYTES: u64 = 512 * 1024;
+const MAX_TYPESET_DOCUMENTS: usize = 500;
+const MAX_TYPESET_TEX_FILES: usize = 5_000;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -21,6 +28,19 @@ pub struct FileText {
     path: String,
     content: String,
     bytes: u64,
+}
+
+/// A compilable LaTeX root document discovered in the current workspace.
+/// Included chapter files are deliberately excluded: they do not contain a
+/// document class and should remain part of their parent document in the UI.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TypesetDocument {
+    path: String,
+    title: String,
+    kind: String,
+    modified_epoch_ms: u64,
+    compile_state: String,
 }
 
 fn file_tree_entry_from_path(path: &Path, root: &Path) -> Result<FileTreeEntry, String> {
@@ -40,6 +60,179 @@ fn file_tree_entry_from_path(path: &Path, root: &Path) -> Result<FileTreeEntry, 
         path: display_workspace_path(path, root),
         is_dir: metadata.is_dir(),
     })
+}
+
+fn modified_epoch_ms(metadata: &std::fs::Metadata) -> u64 {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_millis().min(u64::MAX as u128) as u64)
+        .unwrap_or(0)
+}
+
+fn latex_braced_argument(source: &str, command: &str) -> Option<String> {
+    let offset = source.find(command)? + command.len();
+    let remainder = &source[offset..];
+    let start = remainder.find('{')?;
+    let mut depth = 0usize;
+    let mut escaped = false;
+
+    for (index, ch) in remainder[start..].char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if ch == '{' {
+            depth += 1;
+            continue;
+        }
+        if ch == '}' {
+            depth = depth.saturating_sub(1);
+            if depth == 0 {
+                let content_start = start + 1;
+                return Some(remainder[content_start..start + index].to_string());
+            }
+        }
+    }
+    None
+}
+
+fn plain_latex_title(value: String) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut command = false;
+    for ch in value.chars() {
+        if command {
+            if ch.is_ascii_alphabetic() || ch == '@' {
+                continue;
+            }
+            command = false;
+        }
+        match ch {
+            '\\' => command = true,
+            '{' | '}' | '$' => {}
+            '~' => out.push(' '),
+            _ => out.push(ch),
+        }
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn typeset_document_kind(source: &str) -> &'static str {
+    let document_class = latex_braced_argument(source, "\\documentclass")
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let source_lower = source.to_ascii_lowercase();
+    if document_class.contains("beamer")
+        && (source_lower.contains("beamerposter") || source_lower.contains("tikzposter"))
+    {
+        "poster"
+    } else if document_class.contains("beamer") {
+        "beamer"
+    } else if document_class.contains("report")
+        || document_class.contains("book")
+        || document_class.contains("memoir")
+    {
+        "report"
+    } else {
+        "article"
+    }
+}
+
+fn typeset_document_title(source: &str, path: &Path) -> String {
+    let title = latex_braced_argument(source, "\\title")
+        .map(plain_latex_title)
+        .filter(|title| !title.is_empty());
+    title.unwrap_or_else(|| {
+        path.file_stem()
+            .map(|name| name.to_string_lossy().replace(['_', '-'], " "))
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or_else(|| "Untitled document".to_string())
+    })
+}
+
+fn typeset_compile_state(source_path: &Path, source_modified_ms: u64) -> String {
+    let pdf_path = source_path.with_extension("pdf");
+    let Ok(pdf_metadata) = std::fs::metadata(pdf_path) else {
+        return "missing".to_string();
+    };
+    if !pdf_metadata.is_file() {
+        return "missing".to_string();
+    }
+    if modified_epoch_ms(&pdf_metadata) >= source_modified_ms {
+        "fresh".to_string()
+    } else {
+        "stale".to_string()
+    }
+}
+
+fn collect_typeset_documents(
+    directory: &Path,
+    root: &Path,
+    documents: &mut Vec<TypesetDocument>,
+    tex_file_count: &mut usize,
+) -> Result<(), String> {
+    if documents.len() >= MAX_TYPESET_DOCUMENTS || *tex_file_count >= MAX_TYPESET_TEX_FILES {
+        return Ok(());
+    }
+
+    for entry in std::fs::read_dir(directory).map_err(|error| error.to_string())? {
+        if documents.len() >= MAX_TYPESET_DOCUMENTS || *tex_file_count >= MAX_TYPESET_TEX_FILES {
+            break;
+        }
+        let entry = entry.map_err(|error| error.to_string())?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if tools::layout::is_noisy_workspace_entry(&name) {
+            continue;
+        }
+        let file_type = entry.file_type().map_err(|error| error.to_string())?;
+        if file_type.is_symlink() {
+            continue;
+        }
+        let path = entry.path();
+        if file_type.is_dir() {
+            collect_typeset_documents(&path, root, documents, tex_file_count)?;
+            continue;
+        }
+        if !file_type.is_file()
+            || !path
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("tex"))
+        {
+            continue;
+        }
+        *tex_file_count += 1;
+        let metadata = std::fs::metadata(&path).map_err(|error| error.to_string())?;
+        if metadata.len() > MAX_FILE_EDITOR_BYTES {
+            continue;
+        }
+        let handle = std::fs::File::open(&path).map_err(|error| error.to_string())?;
+        let mut bytes = Vec::new();
+        handle
+            .take(MAX_TYPESET_DOCUMENT_SCAN_BYTES)
+            .read_to_end(&mut bytes)
+            .map_err(|error| error.to_string())?;
+        let source = match decode_text_bytes(&bytes) {
+            Ok(source) => source,
+            Err(_) => continue,
+        };
+        if !source.contains("\\documentclass") {
+            continue;
+        }
+        let source_modified_ms = modified_epoch_ms(&metadata);
+        documents.push(TypesetDocument {
+            path: display_workspace_path(&path, root),
+            title: typeset_document_title(&source, &path),
+            kind: typeset_document_kind(&source).to_string(),
+            modified_epoch_ms: source_modified_ms,
+            compile_state: typeset_compile_state(&path, source_modified_ms),
+        });
+    }
+    Ok(())
 }
 
 fn mojibake_score(text: &str) -> usize {
@@ -527,6 +720,26 @@ pub fn file_list_dir(path: Option<String>) -> Result<Vec<FileTreeEntry>, String>
             .then_with(|| left.name.cmp(&right.name))
     });
     Ok(entries)
+}
+
+/// Lists only compilable LaTeX root documents in the current workspace.
+/// This deliberately differs from `file_search("**/*.tex")`: chapter and
+/// include files stay inside their parent document rather than becoming a
+/// misleading second entry in the Typeset library.
+#[tauri::command]
+pub fn typeset_list_documents() -> Result<Vec<TypesetDocument>, String> {
+    let root = workspace_root()?;
+    let mut documents = Vec::new();
+    let mut tex_file_count = 0usize;
+    collect_typeset_documents(&root, &root, &mut documents, &mut tex_file_count)?;
+    documents.sort_by(|left, right| {
+        right
+            .modified_epoch_ms
+            .cmp(&left.modified_epoch_ms)
+            .then_with(|| left.title.to_lowercase().cmp(&right.title.to_lowercase()))
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    Ok(documents)
 }
 
 #[tauri::command]

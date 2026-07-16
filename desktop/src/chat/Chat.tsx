@@ -272,14 +272,14 @@ export default function Chat() {
   const [loadingOmittedTurns, setLoadingOmittedTurns] = useState<Set<string>>(() => new Set());
 
   const turns = currentSession?.turns ?? [];
-  const { editingTurnId, focusComposer } = composer;
+  const { editingTurnId, focusComposer, setEditingTurnId } = composer;
   const { status, activeModel } = run;
   // Remote phone turns are rendered from the encrypted bridge rather than the
   // local stream hook. Treat their visible streaming state as busy too, so the
   // desktop composer exposes the same Stop control for either origin.
   const currentChatBusy = run.currentChatBusy
     || turns.some((turn) => turn.role === "assistant" && turn.streaming);
-  const { pendingCommandSelection } = commands;
+  const { pendingCommandSelection, setPendingCommandSelection } = commands;
 
   const workflowTodos = useMemo(() => latestTodosFromTurns(turns), [turns]);
   const workflowFileChanges = useMemo(
@@ -360,14 +360,29 @@ export default function Chat() {
     }
   };
 
+  // Keep the composer's submit prop stable while its latest implementation
+  // continues to read the current stream/session state.
+  const sendRef = useRef(send);
+  sendRef.current = send;
+  const submitComposer = useCallback(() => {
+    void sendRef.current();
+  }, []);
+
   const edit = useCallback((turn: ChatTurn) => {
     const session = currentSessionRef.current;
     if (!session || run.runningSessionIdsRef.current.has(session.id)) return;
     setDraft(session.id, textFromTurn(turn));
     updateSession(session.id, (item) => ({ ...item, draftAttachments: turn.attachments ?? [] }));
-    composer.setEditingTurnId(turn.id);
+    setEditingTurnId(turn.id);
     focusComposer();
-  }, [composer, focusComposer, run.runningSessionIdsRef, setDraft, updateSession]);
+  }, [focusComposer, run.runningSessionIdsRef, setDraft, setEditingTurnId, updateSession]);
+
+  const startFromPrompt = useCallback((prompt: string) => {
+    const session = currentSessionRef.current;
+    if (!session) return;
+    setDraft(session.id, prompt);
+    focusComposer();
+  }, [currentSessionRef, focusComposer, setDraft]);
 
   const openWorkflowFile = useCallback((path: string) => {
     if (!isTauri()) return;
@@ -401,6 +416,18 @@ export default function Chat() {
   const isOmittedTurnLoading = useCallback((turnIndex: number) => (
     loadingOmittedTurns.has(`${currentId}:${turnIndex}`)
   ), [currentId, loadingOmittedTurns]);
+
+  const updateComposerInput = useCallback((value: string) => {
+    if (pendingCommandSelection) setPendingCommandSelection(null);
+    const session = currentSessionRef.current;
+    if (session) setDraft(session.id, value);
+  }, [currentSessionRef, pendingCommandSelection, setDraft, setPendingCommandSelection]);
+
+  const stopComposer = useCallback(() => {
+    void run.stop(currentId);
+  }, [currentId, run.stop]);
+
+  const cancelEdit = useCallback(() => setEditingTurnId(null), [setEditingTurnId]);
 
   const projectBriefVisible = tab === "chat"
     && !sideTaskPaneOpen
@@ -607,18 +634,14 @@ export default function Chat() {
           starters={starters}
           welcomeTitle={welcomeCopy.title}
           welcomeDescription={welcomeCopy.description}
-          onStarter={(prompt) => {
-            if (!currentSession) return;
-            setDraft(currentSession.id, prompt);
-            focusComposer();
-          }}
+          onStarter={startFromPrompt}
           onEdit={edit}
           onRetry={run.retry}
           onContinue={run.continueStopped}
-          onLoadOmittedTurn={(turnIndex) => void loadOmittedTurn(turnIndex)}
+          onLoadOmittedTurn={loadOmittedTurn}
           isOmittedTurnLoading={isOmittedTurnLoading}
-          onPermissionRespond={(promptId, allow) => void run.respondPermission(promptId, allow)}
-          onQuestionRespond={(toolUseId, answer) => void run.respondQuestion(toolUseId, answer)}
+          onPermissionRespond={run.respondPermission}
+          onQuestionRespond={run.respondQuestion}
         />
         {(workflowTodos.length > 0 || workflowFileChanges.length > 0 || workflowFileChangeSummary) && !pendingCommandSelection && (
           <WorkflowFlow
@@ -652,27 +675,24 @@ export default function Chat() {
           focusRequest={composer.focusRequest}
           permission={run.permission}
           permissionBusy={run.permissionBusy}
-          onPermissionChange={(mode) => void run.changePermission(mode)}
+          onPermissionChange={run.changePermission}
           modelName={status?.ready ? activeModel : null}
           modelOptions={run.modelSelectOptions}
           modelBusy={run.modelBusy}
           canSwitchModel={run.canSwitchModel}
-          onModelChange={(model) => void run.changeModel(model)}
+          onModelChange={run.changeModel}
           reasoningSupported={run.reasoning.supported}
           reasoningEffort={run.reasoning.effort}
           reasoningBusy={run.reasoningBusy}
-          onReasoningEffortChange={(effort) => void run.changeReasoningEffort(effort)}
+          onReasoningEffortChange={run.changeReasoningEffort}
           contextUsed={run.estimatedTokens}
           contextMax={run.contextMax}
           contextStatus={run.currentContextNotice}
-          onInputChange={(value) => {
-            if (pendingCommandSelection) commands.setPendingCommandSelection(null);
-            if (currentSession) setDraft(currentSession.id, value);
-          }}
+          onInputChange={updateComposerInput}
           onAttachmentsChange={composer.setAttachments}
-          onSubmit={() => void send()}
-          onStop={() => void run.stop(currentId)}
-          onCancelEdit={() => composer.setEditingTurnId(null)}
+          onSubmit={submitComposer}
+          onStop={stopComposer}
+          onCancelEdit={cancelEdit}
           onHeightChange={composer.setComposerHeight}
         />
           </>
