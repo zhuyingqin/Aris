@@ -46,6 +46,14 @@ idea-stage/
 *.synctex.gz
 *.toc
 
+# Personal paper workspace (NOT project code — outside the paper-write skill)
+papers/
+main.tex
+*.log
+
+# Local scratch benchmarks
+_bench*.mjs
+
 # Local release/deployment staging and diagnostic output
 .codex-deploy-stage/
 desktop-build.log

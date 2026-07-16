@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 // Bundled skills are compiled into the runtime crate and re-exported
 use runtime::BUNDLED_SKILLS;
@@ -21,6 +21,7 @@ use runtime::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 const MAX_WRITE_FILE_CONTENT_CHARS: usize = 24_000;
 const TOOL_PROGRESS_NEAR_TIMEOUT_RATIO: f64 = 0.80;
@@ -2172,30 +2173,58 @@ struct LatexRenderInput {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct LatexCompileOutput {
-    success: bool,
-    input_path: String,
-    output_path: String,
-    engine: String,
-    stdout: String,
-    stderr: String,
-    exit_code: Option<i32>,
-    interrupted: bool,
-    timed_out: bool,
-    duration_ms: u128,
-    return_code_interpretation: Option<String>,
-    diagnostics: Vec<LatexDiagnostic>,
-    repair_guidance: Option<String>,
+pub struct LatexCompileOutput {
+    pub success: bool,
+    pub input_path: String,
+    pub output_path: String,
+    pub engine: String,
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: Option<i32>,
+    pub interrupted: bool,
+    pub timed_out: bool,
+    pub duration_ms: u128,
+    pub return_code_interpretation: Option<String>,
+    pub diagnostics: Vec<LatexDiagnostic>,
+    pub repair_guidance: Option<String>,
+    pub pdf_state: LatexPdfState,
+    pub root_source_hash: String,
+    pub pdf_hash: Option<String>,
+    pub compiled_at_unix_ms: u128,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct LatexDiagnostic {
-    severity: String,
-    code: String,
-    message: String,
-    file_path: Option<String>,
-    line: Option<u32>,
+pub struct LatexDiagnostic {
+    pub severity: String,
+    pub code: String,
+    pub message: String,
+    pub file_path: Option<String>,
+    pub line: Option<u32>,
+}
+
+/// Provenance state for the PDF selected after a LaTeX compile attempt.
+/// `stale` is deliberately distinct from `partial`: it means a PDF exists but
+/// was not produced or changed by this invocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LatexPdfState {
+    Fresh,
+    Partial,
+    Stale,
+    Missing,
+}
+
+/// Desktop and agent callers share this compile request. Agents keep the
+/// strict default (`continue_on_error: false`) through their tool schema.
+#[derive(Debug, Clone)]
+pub struct LatexCompileRequest {
+    pub input_path: PathBuf,
+    pub output_path: PathBuf,
+    pub compiler: Option<String>,
+    pub timeout_ms: Option<u64>,
+    pub clean_cache: bool,
+    pub continue_on_error: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -5057,28 +5086,43 @@ fn execute_latex_compile(
     {
         return Err("LaTeXCompile outputPath must end with .pdf".to_string());
     }
-    if let Some(parent) = output_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    }
+    let mut output = compile_latex_document(
+        LatexCompileRequest {
+            input_path: input_path.clone(),
+            output_path: output_path.clone(),
+            compiler: input.compiler,
+            timeout_ms: input.timeout_ms,
+            clean_cache: false,
+            continue_on_error: false,
+        },
+        &workspace,
+        should_cancel,
+        on_progress,
+    )?;
+    output.input_path = workspace_relative_display(&input_path, &workspace);
+    output.output_path = workspace_relative_display(&output_path, &workspace);
+    Ok(output)
+}
+
+/// Compile a TeX root with one shared engine-selection, cache-recovery,
+/// cancellation, diagnostic, and provenance path for the desktop and Agent.
+/// Paths must already have been validated by the caller.
+pub fn compile_latex_document(
+    request: LatexCompileRequest,
+    workspace: &Path,
+    should_cancel: &dyn Fn() -> bool,
+    on_progress: &mut dyn FnMut(ToolProgress),
+) -> Result<LatexCompileOutput, String> {
+    let input_path = request.input_path;
+    let output_path = request.output_path;
     let output_dir = output_path
         .parent()
         .ok_or_else(|| "outputPath must include a file name".to_string())?;
     let source_dir = input_path
         .parent()
         .ok_or_else(|| "inputPath must include a file name".to_string())?;
+    std::fs::create_dir_all(output_dir).map_err(|error| error.to_string())?;
 
-    let timeout_ms = runtime::resolve_foreground_shell_timeout_ms(input.timeout_ms);
-    let started = Instant::now();
-    let (engine, output) = run_latex_compile_process(
-        input.compiler.as_deref(),
-        &input_path,
-        source_dir,
-        output_dir,
-        timeout_ms,
-        &workspace,
-        should_cancel,
-        on_progress,
-    )?;
     let expected_pdf = output_dir
         .join(
             input_path
@@ -5086,11 +5130,36 @@ fn execute_latex_compile(
                 .ok_or_else(|| "inputPath must include a file name".to_string())?,
         )
         .with_extension("pdf");
+    let expected_pdf_before = latex_output_fingerprint(&expected_pdf);
+    let timeout_ms = runtime::resolve_foreground_shell_timeout_ms(request.timeout_ms);
+    let started = Instant::now();
+    let cache_note = if request.clean_cache {
+        let removed = remove_known_latex_cache_files(&input_path, output_dir)?;
+        Some(format!(
+            "LaTeX cache cleared ({removed} auxiliary file(s) removed) before recompiling."
+        ))
+    } else {
+        None
+    };
+    let (engine, output) = run_latex_compile_process(
+        request.compiler.as_deref(),
+        &input_path,
+        source_dir,
+        output_dir,
+        timeout_ms,
+        workspace,
+        request.continue_on_error,
+        should_cancel,
+        on_progress,
+    )?;
     if expected_pdf.is_file() && expected_pdf != output_path {
         std::fs::copy(&expected_pdf, &output_path).map_err(|error| error.to_string())?;
     }
 
-    let stdout = runtime::decode_process_text(&output.stdout);
+    let stdout = cache_note.map_or_else(
+        || runtime::decode_process_text(&output.stdout),
+        |note| format!("{note}\n{}", runtime::decode_process_text(&output.stdout)),
+    );
     let mut stderr = runtime::decode_process_text(&output.stderr);
     let mut return_code_interpretation = None;
     if output.timed_out {
@@ -5112,6 +5181,15 @@ fn execute_latex_compile(
         stderr = append_process_status_message(stderr, "LaTeXCompile produced no output PDF");
         return_code_interpretation = Some("missing_output".to_string());
     }
+    let pdf_state = latex_pdf_state(
+        success,
+        request.continue_on_error,
+        output.interrupted,
+        output.timed_out,
+        expected_pdf_before.as_ref(),
+        latex_output_fingerprint(&expected_pdf).as_ref(),
+        output_path.is_file(),
+    );
     let diagnostics = extract_latex_diagnostics(
         &stdout,
         &stderr,
@@ -5128,8 +5206,8 @@ fn execute_latex_compile(
 
     Ok(LatexCompileOutput {
         success,
-        input_path: workspace_relative_display(&input_path, &workspace),
-        output_path: workspace_relative_display(&output_path, &workspace),
+        input_path: input_path.display().to_string(),
+        output_path: output_path.display().to_string(),
         engine,
         stdout,
         stderr,
@@ -5140,7 +5218,55 @@ fn execute_latex_compile(
         return_code_interpretation,
         diagnostics,
         repair_guidance,
+        pdf_state,
+        root_source_hash: latex_file_hash(&input_path).unwrap_or_default(),
+        pdf_hash: latex_file_hash(&output_path),
+        compiled_at_unix_ms: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis(),
     })
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct LatexOutputFingerprint {
+    length: u64,
+    modified: Option<SystemTime>,
+}
+
+fn latex_output_fingerprint(path: &Path) -> Option<LatexOutputFingerprint> {
+    let metadata = std::fs::metadata(path).ok()?;
+    Some(LatexOutputFingerprint {
+        length: metadata.len(),
+        modified: metadata.modified().ok(),
+    })
+}
+
+fn latex_pdf_state(
+    success: bool,
+    continue_on_error: bool,
+    interrupted: bool,
+    timed_out: bool,
+    before: Option<&LatexOutputFingerprint>,
+    after: Option<&LatexOutputFingerprint>,
+    output_exists: bool,
+) -> LatexPdfState {
+    if success {
+        LatexPdfState::Fresh
+    } else if continue_on_error && !interrupted && !timed_out && before != after && output_exists {
+        LatexPdfState::Partial
+    } else if output_exists {
+        LatexPdfState::Stale
+    } else {
+        LatexPdfState::Missing
+    }
+}
+
+fn latex_file_hash(path: &Path) -> Option<String> {
+    let bytes = std::fs::read(path).ok()?;
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    Some(format!("{:x}", hasher.finalize()))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5151,6 +5277,7 @@ fn run_latex_compile_process(
     output_dir: &Path,
     timeout_ms: u64,
     workspace: &Path,
+    continue_on_error: bool,
     should_cancel: &dyn Fn() -> bool,
     on_progress: &mut dyn FnMut(ToolProgress),
 ) -> Result<(String, runtime::ManagedCommandOutput), String> {
@@ -5169,6 +5296,7 @@ fn run_latex_compile_process(
                 output_dir,
                 timeout_ms,
                 workspace,
+                continue_on_error,
                 should_cancel,
                 on_progress,
             )
@@ -5182,6 +5310,7 @@ fn run_latex_compile_process(
             output_dir,
             timeout_ms,
             workspace,
+            continue_on_error,
             should_cancel,
             on_progress,
         )
@@ -5196,6 +5325,7 @@ fn run_latex_compile_process(
         output_dir,
         timeout_ms,
         workspace,
+        continue_on_error,
         should_cancel,
         on_progress,
     ) {
@@ -5213,6 +5343,7 @@ fn run_latex_compile_process(
             output_dir,
             timeout_ms,
             workspace,
+            continue_on_error,
             should_cancel,
             on_progress,
         ) {
@@ -5242,6 +5373,7 @@ fn run_latexmk_with_retries(
     output_dir: &Path,
     timeout_ms: u64,
     workspace: &Path,
+    continue_on_error: bool,
     should_cancel: &dyn Fn() -> bool,
     on_progress: &mut dyn FnMut(ToolProgress),
 ) -> std::io::Result<(String, runtime::ManagedCommandOutput)> {
@@ -5253,6 +5385,7 @@ fn run_latexmk_with_retries(
         output_dir,
         timeout_ms,
         workspace,
+        continue_on_error,
         should_cancel,
         on_progress,
     )?;
@@ -5265,6 +5398,7 @@ fn run_latexmk_with_retries(
             output_dir,
             timeout_ms,
             workspace,
+            continue_on_error,
             should_cancel,
             on_progress,
         )?;
@@ -5279,6 +5413,7 @@ fn run_latexmk_with_retries(
             output_dir,
             timeout_ms,
             workspace,
+            continue_on_error,
             should_cancel,
             on_progress,
         )?;
@@ -5298,6 +5433,7 @@ fn run_latexmk(
     output_dir: &Path,
     timeout_ms: u64,
     workspace: &Path,
+    continue_on_error: bool,
     should_cancel: &dyn Fn() -> bool,
     on_progress: &mut dyn FnMut(ToolProgress),
 ) -> std::io::Result<runtime::ManagedCommandOutput> {
@@ -5307,9 +5443,13 @@ fn run_latexmk(
     process
         .arg(engine.latexmk_arg())
         .arg("-interaction=nonstopmode")
-        .arg("-halt-on-error")
         .arg("-file-line-error")
-        .arg(format!("-outdir={}", output_dir.display()))
+        .arg("-synctex=1")
+        .arg(format!("-outdir={}", output_dir.display()));
+    if !continue_on_error {
+        process.arg("-halt-on-error");
+    }
+    process
         .arg(tex_input_name(input_path))
         .current_dir(source_dir)
         .stdout(std::process::Stdio::piped())
@@ -5333,6 +5473,7 @@ fn run_latex_engine(
     output_dir: &Path,
     timeout_ms: u64,
     workspace: &Path,
+    continue_on_error: bool,
     should_cancel: &dyn Fn() -> bool,
     on_progress: &mut dyn FnMut(ToolProgress),
 ) -> std::io::Result<runtime::ManagedCommandOutput> {
@@ -5343,6 +5484,7 @@ fn run_latex_engine(
         output_dir,
         timeout_ms,
         workspace,
+        continue_on_error,
         should_cancel,
         on_progress,
     )?;
@@ -5356,6 +5498,7 @@ fn run_latex_engine(
         output_dir,
         timeout_ms,
         workspace,
+        continue_on_error,
         should_cancel,
         on_progress,
     )?;
@@ -5376,6 +5519,7 @@ fn run_single_latex_engine(
     output_dir: &Path,
     timeout_ms: u64,
     workspace: &Path,
+    continue_on_error: bool,
     should_cancel: &dyn Fn() -> bool,
     on_progress: &mut dyn FnMut(ToolProgress),
 ) -> std::io::Result<runtime::ManagedCommandOutput> {
@@ -5384,9 +5528,13 @@ fn run_single_latex_engine(
     let output_dir = tex_tool_path(output_dir);
     process
         .arg("-interaction=nonstopmode")
-        .arg("-halt-on-error")
         .arg("-file-line-error")
-        .arg(format!("-output-directory={}", output_dir.display()))
+        .arg("-synctex=1")
+        .arg(format!("-output-directory={}", output_dir.display()));
+    if !continue_on_error {
+        process.arg("-halt-on-error");
+    }
+    process
         .arg(tex_input_name(input_path))
         .current_dir(source_dir)
         .stdout(std::process::Stdio::piped())
@@ -5743,6 +5891,22 @@ fn extract_latex_diagnostics(
             },
         );
     }
+    for line in &lines {
+        let line = line.trim();
+        let Some(message) = latex_warning_message(line) else {
+            continue;
+        };
+        push_latex_diagnostic(
+            &mut diagnostics,
+            LatexDiagnostic {
+                severity: "warning".to_string(),
+                code: "latex_warning".to_string(),
+                message,
+                file_path: None,
+                line: latex_warning_input_line(line),
+            },
+        );
+    }
     if diagnostics.is_empty() && !success {
         let message = return_code_interpretation
             .map(|status| {
@@ -5762,6 +5926,25 @@ fn extract_latex_diagnostics(
         });
     }
     diagnostics
+}
+
+fn latex_warning_message(line: &str) -> Option<String> {
+    let lower = line.to_ascii_lowercase();
+    let warning_index = lower.find("warning:")?;
+    let message = line[warning_index + "warning:".len()..].trim();
+    (!message.is_empty()).then(|| message.to_string())
+}
+
+fn latex_warning_input_line(line: &str) -> Option<u32> {
+    let lower = line.to_ascii_lowercase();
+    let marker = "on input line ";
+    let start = lower.find(marker)? + marker.len();
+    lower[start..]
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>()
+        .parse()
+        .ok()
 }
 
 fn parse_latex_file_line_diagnostic(line: &str) -> Option<(String, u32, String)> {

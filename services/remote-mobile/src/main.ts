@@ -7,10 +7,13 @@ import {
   Folder,
   MessageSquareText,
   PanelLeft,
+  Plus,
   RefreshCw,
   SendHorizontal,
   Settings2,
   SlidersHorizontal,
+  Square,
+  SquarePen,
   Wifi,
   X,
 } from "lucide";
@@ -18,19 +21,35 @@ import { mobileBasePathUrl, normalizeMobileBasePath } from "./basePath";
 import { BrowserTicketedSocketFactory } from "./browserSocket";
 import {
   chatMessageProgress,
+  chatMessageStopRequested,
+  chatMessageTerminal,
+  chatSessionEventsFromResponse,
+  chatSessionCreatedFromResponse,
   encodeControlRequest,
   MOBILE_P1_REQUESTABLE_SCOPES,
   newChatModelOptionsRequest,
+  newCreateChatSessionRequest,
   newChatTranscriptRequest,
+  newChatEventsRequest,
   newChatMessageRequest,
   newListChatSessionsRequest,
   newSetActiveProjectRequest,
   newSetChatSessionModelRequest,
+  newStopChatMessageRequest,
   newWorkspaceOverviewRequest,
   parseControlResponse,
   type ControlRequest,
   type ControlResponse,
+  type ChatMessageActivity,
+  type ChatSessionEvent,
 } from "./control";
+import {
+  applyChatMessageEvent,
+  latestThinkingBlockIndex,
+  remoteTranscriptMessageFromWire,
+  type RemoteChatBlock,
+  type RemoteTranscriptMessage,
+} from "./chatBlocks";
 import { WebCryptoMobileIdentity, IndexedDbIdentityStore } from "./crypto";
 import { SecureEnvelopeCodec } from "./envelope";
 import { GatewayApi, GatewayApiError, type ClaimedPairing } from "./gateway";
@@ -51,6 +70,7 @@ import {
 } from "./chatModelNavigation";
 import { renderRemoteMarkdown } from "./remoteMarkdown";
 import { isSoftwareKeyboardOpen } from "./mobileViewport";
+import { ForegroundResumeCoordinator } from "./foregroundResume";
 import {
   isStandalonePairingContainer,
   pairingBrowserContext,
@@ -158,59 +178,65 @@ app.innerHTML = `
           </button>
         </header>
 
-        <div class="workspace-connection">
-          <span class="status-dot online" aria-hidden="true"></span>
-          <div>
-            <strong id="workspace-desktop-name">桌面 SomniQ</strong>
-            <span id="connection-detail">正在建立安全连接…</span>
-          </div>
-        </div>
-
-        <section class="workspace-project-section" aria-labelledby="workspace-project-heading">
-          <div class="workspace-section-heading">
-            <p id="workspace-project-heading" class="workspace-section-label">项目</p>
-            <button id="refresh-workspace" class="drawer-refresh-button" type="button" aria-label="刷新项目" title="刷新项目">
-              <i data-lucide="refresh-cw" aria-hidden="true"></i>
-            </button>
-          </div>
-          <div id="workspace-projects" class="workspace-projects"></div>
-        </section>
-
-        <section class="workspace-sessions-section" aria-labelledby="workspace-sessions-heading">
-          <div class="workspace-section-heading">
-            <p id="workspace-sessions-heading" class="workspace-section-label">对话</p>
-            <div class="workspace-session-tools">
-              <span id="workspace-session-count" class="workspace-session-count"></span>
-              <button id="refresh-chat-sessions" class="drawer-refresh-button" type="button" aria-label="刷新对话" title="刷新对话">
+        <div id="workspace-drawer-content" class="workspace-drawer-content">
+          <section id="drawer-projects-section" class="workspace-project-section" aria-labelledby="workspace-project-heading">
+            <div class="workspace-section-heading">
+              <p id="workspace-project-heading" class="workspace-section-label">工作区</p>
+              <button id="refresh-workspace" class="drawer-refresh-button" type="button" aria-label="刷新项目" title="刷新项目">
                 <i data-lucide="refresh-cw" aria-hidden="true"></i>
               </button>
             </div>
-          </div>
-          <p id="chat-session-status" class="chat-session-status" aria-live="polite"></p>
-          <div id="workspace-session-list" class="workspace-session-list"></div>
-        </section>
+            <div id="workspace-projects" class="workspace-projects"></div>
+          </section>
 
-        <details class="drawer-device-settings">
-          <summary><i data-lucide="settings-2" aria-hidden="true"></i>连接设置</summary>
-          <div class="drawer-device-actions">
-            <button id="reconnect" class="drawer-action-button" type="button"><i data-lucide="wifi" aria-hidden="true"></i>重新连接</button>
-            <button id="revoke-pairing" class="drawer-action-button danger" type="button">撤销并忘记此手机</button>
+          <section id="drawer-sessions-section" class="workspace-sessions-section" aria-labelledby="workspace-sessions-heading">
+            <div class="workspace-section-heading">
+              <p id="workspace-sessions-heading" class="workspace-section-label">最近对话</p>
+              <div class="workspace-session-tools">
+                <span id="workspace-session-count" class="workspace-session-count"></span>
+                <button id="create-chat-session" class="drawer-create-button" type="button" aria-label="新建对话" title="新建对话">
+                  <i data-lucide="plus" aria-hidden="true"></i><span>新建</span>
+                </button>
+                <button id="refresh-chat-sessions" class="drawer-refresh-button" type="button" aria-label="刷新对话" title="刷新对话">
+                  <i data-lucide="refresh-cw" aria-hidden="true"></i>
+                </button>
+              </div>
+            </div>
+            <p id="chat-session-status" class="chat-session-status" aria-live="polite"></p>
+            <div id="workspace-session-list" class="workspace-session-list"></div>
+          </section>
+        </div>
+
+        <section id="drawer-device-card" class="drawer-device-card" aria-label="桌面连接">
+          <div class="workspace-connection">
+            <span class="status-dot online" aria-hidden="true"></span>
+            <div>
+              <strong id="workspace-desktop-name">SomniQ Desktop</strong>
+              <span id="connection-detail">正在建立安全连接…</span>
+            </div>
           </div>
-        </details>
+          <details id="drawer-device-settings" class="drawer-device-settings">
+            <summary>连接详情<i data-lucide="chevron-down" aria-hidden="true"></i></summary>
+            <div class="drawer-device-actions">
+              <button id="reconnect" class="drawer-action-button" type="button"><i data-lucide="wifi" aria-hidden="true"></i>重新连接</button>
+              <button id="revoke-pairing" class="drawer-action-button danger" type="button">撤销并忘记此手机</button>
+            </div>
+          </details>
+        </section>
       </aside>
 
       <header class="chat-workspace-header">
         <button id="open-workspace" class="icon-button workspace-toggle" type="button" aria-label="打开项目与对话列表" aria-controls="workspace-drawer" aria-expanded="false" title="项目与对话">
           <i data-lucide="panel-left" aria-hidden="true"></i>
         </button>
-        <div class="chat-mobile-brand" aria-hidden="true"><span>SomniQ</span> <strong>Chat</strong></div>
         <div class="chat-header-context">
-          <button id="open-project-workspace" class="header-project-trigger" type="button" aria-label="打开当前项目和对话列表" aria-controls="workspace-drawer" title="当前项目">
-            <i data-lucide="folder" aria-hidden="true"></i>
-            <span id="current-project-label">正在读取项目</span>
-            <i data-lucide="chevron-down" aria-hidden="true"></i>
-          </button>
           <p id="current-session-label" class="current-session-label">选择一个对话</p>
+          <p id="current-project-label" class="current-project-label">正在读取项目</p>
+        </div>
+        <div class="chat-header-actions">
+          <button id="header-create-chat" class="header-action-button" type="button" aria-label="新建对话" title="新建对话">
+            <i data-lucide="square-pen" aria-hidden="true"></i>
+          </button>
         </div>
         <h2 id="connected-title" class="sr-only">选择一个对话</h2>
       </header>
@@ -227,21 +253,23 @@ app.innerHTML = `
       <form id="chat-form" class="chat-composer">
         <label class="sr-only" for="chat-message">继续此对话</label>
         <div class="chat-composer-shell">
+          <div id="chat-model-control" class="chat-model-control" hidden>
+            <button id="open-model-menu" class="chat-model-trigger" type="button" aria-label="切换模型" aria-haspopup="listbox" aria-expanded="false" title="切换模型">
+              <i data-lucide="sliders-horizontal" aria-hidden="true"></i>
+              <span id="current-model-label">模型</span>
+            </button>
+            <div id="chat-model-menu" class="chat-model-menu" role="listbox" aria-label="可用模型" hidden></div>
+          </div>
           <textarea id="chat-message" rows="1" maxlength="4096" required placeholder="选择对话后即可继续发送消息…"></textarea>
           <div class="chat-composer-footer">
             <div class="chat-composer-meta">
               <p id="chat-hint" class="chat-hint"></p>
-              <div id="chat-model-control" class="chat-model-control" hidden>
-                <button id="open-model-menu" class="chat-model-trigger" type="button" aria-label="切换模型" aria-haspopup="listbox" aria-expanded="false" title="切换模型">
-                  <i data-lucide="sliders-horizontal" aria-hidden="true"></i>
-                  <span id="current-model-label">模型</span>
-                  <i data-lucide="chevron-down" aria-hidden="true"></i>
-                </button>
-                <div id="chat-model-menu" class="chat-model-menu" role="listbox" aria-label="可用模型" hidden></div>
-              </div>
             </div>
             <button id="send-chat" class="chat-send-button" type="submit" aria-label="发送消息" title="发送消息">
               <i data-lucide="send-horizontal" aria-hidden="true"></i>
+            </button>
+            <button id="stop-chat" class="chat-stop-button" type="button" aria-label="停止生成" title="停止生成" hidden>
+              <i data-lucide="square" aria-hidden="true"></i>
             </button>
           </div>
         </div>
@@ -267,10 +295,13 @@ const REMOTE_ICONS = {
   Folder,
   MessageSquareText,
   PanelLeft,
+  Plus,
   RefreshCw,
   SendHorizontal,
   Settings2,
   SlidersHorizontal,
+  Square,
+  SquarePen,
   Wifi,
   X,
 };
@@ -291,6 +322,19 @@ const PAIRING_COMPLETION_POLL_MS = 2_000;
 // secure transport stays alive while they execute, so do not present a false
 // delivery failure merely because a normal chat turn outlives two minutes.
 const CONTROL_RESPONSE_TIMEOUT_MS = 10 * 60_000;
+// Stop is an acknowledgement-only control request. Keep its deadline short
+// so a lost acknowledgement does not trap the original long-running chat.
+const STOP_CHAT_RESPONSE_TIMEOUT_MS = 12_000;
+// iOS can suspend an otherwise open WebRTC/DataChannel while the PWA is in
+// the background. Foreground recovery uses a short probe so the stale route
+// is replaced promptly instead of leaving the conversation frozen.
+const FOREGROUND_SYNC_RESPONSE_TIMEOUT_MS = 10_000;
+const FOREGROUND_SYNC_DELAY_MS = 250;
+const FOREGROUND_CHAT_RECOVERY_RETRY_MS = 2_000;
+const FOREGROUND_CHAT_RECOVERY_MAX_ATTEMPTS = 150;
+const CHAT_EVENT_WAIT_MS = 20_000;
+const CHAT_EVENT_RESPONSE_TIMEOUT_MS = 30_000;
+const CHAT_EVENT_RETRY_MS = 250;
 
 interface PendingControlRequest {
   resolve: (response: ControlResponse) => void;
@@ -309,14 +353,60 @@ interface WorkspaceCapabilityState {
   advertised: boolean;
 }
 
-interface RemoteTranscriptMessage {
-  role: string;
-  text: string;
+interface ActiveRemoteChatRequest {
+  projectId: string;
+  sessionId: string;
+  message: string;
+  idempotencyKey: string;
+  messageId: string | null;
+  activity: ChatMessageActivity;
+  startedAt: number;
+  streamedText: string;
+  blocks: RemoteChatBlock[];
+  richStream: boolean;
+  stopRequested: boolean;
+  stopRequestInFlight: boolean;
+}
+
+interface DesktopSyncedChatTurn {
+  userSeq: number;
+  reply: HTMLElement;
+  blocks: RemoteChatBlock[];
 }
 
 interface PairedSessionRestoreResult {
   restored: boolean;
   failureMessage: string | null;
+}
+
+interface ConnectOptions {
+  workspaceTimeoutMs?: number;
+  replaceInFlight?: boolean;
+}
+
+interface WorkspaceOverviewOptions {
+  timeoutMs?: number;
+}
+
+interface ChatSessionRefreshOptions {
+  openNewest?: boolean;
+  timeoutMs?: number;
+}
+
+interface ChatTranscriptLoadOptions {
+  timeoutMs?: number;
+}
+
+interface ForegroundConversationSelection {
+  projectId: string | null;
+  sessionId: string | null;
+}
+
+interface ForegroundChatRecovery {
+  projectId: string;
+  sessionId: string;
+  message: string;
+  idempotencyKey: string;
 }
 
 type PairingStorageProtection = "unknown" | "persistent" | "best_effort" | "unavailable";
@@ -331,6 +421,8 @@ let claimed: ClaimedPairing | null = null;
 let pairedSession: PairedMobileSession | null = null;
 let mismatchedStoredSession: PairedMobileSession | null = null;
 let transport: P2pFirstTransport | null = null;
+let connectionTask: Promise<boolean> | null = null;
+let connectionGeneration = 0;
 let completionPollTimer: ReturnType<typeof setTimeout> | null = null;
 let completingPairing = false;
 let phase: FlowPhase = "loading";
@@ -345,12 +437,17 @@ let workspaceCapabilityState: WorkspaceCapabilityState = {
 let workspaceDrawerOpen = false;
 let projectSwitching = false;
 let chatSending = false;
+let activeRemoteChatRequest: ActiveRemoteChatRequest | null = null;
+let chatActivityTimer: ReturnType<typeof setInterval> | null = null;
 let chatSessionsLoading = false;
+let chatSessionCreating = false;
 let chatTranscriptLoading = false;
 let conversationViewportSyncFrame: number | null = null;
 let conversationViewportBaselineHeight = 0;
 let chatSessions: RemoteChatSession[] = [];
 let selectedChatSessionId: string | null = null;
+let chatEventSyncGeneration = 0;
+let desktopSyncedChatTurn: DesktopSyncedChatTurn | null = null;
 let chatModelState: RemoteChatModelState = { model: null, options: [] };
 let chatModelLoading = false;
 let chatModelSwitching = false;
@@ -358,8 +455,16 @@ let chatModelMenuOpen = false;
 let pairingStorageProtection: PairingStorageProtection = "unknown";
 let pairingStorageRequest: Promise<PairingStorageProtection> | null = null;
 let hasMismatchedStoredPairing = false;
+let foregroundResumeTimer: ReturnType<typeof setTimeout> | null = null;
+let foregroundResumeTask: Promise<boolean> | null = null;
+let foregroundResumeGeneration = 0;
+let foregroundTranscriptSyncPending: ForegroundConversationSelection | null = null;
+let foregroundChatRecoveryTask: Promise<void> | null = null;
+let foregroundChatRecoveryGeneration = 0;
+let pendingForegroundChatRecovery: ForegroundChatRecovery | null = null;
 const pendingControlRequests = new Map<string, PendingControlRequest>();
 const pairingContext = pairingBrowserContext(navigator.userAgent, isEmbeddedWindow());
+const foregroundResume = new ForegroundResumeCoordinator();
 
 try {
   scannedPairingPayload = consumePairingPayloadFromLocation();
@@ -386,7 +491,10 @@ const reconnectButton = byId<HTMLButtonElement>("reconnect");
 const chatForm = byId<HTMLFormElement>("chat-form");
 const chatInput = byId<HTMLTextAreaElement>("chat-message");
 const sendChatButton = byId<HTMLButtonElement>("send-chat");
+const stopChatButton = byId<HTMLButtonElement>("stop-chat");
 const chatHint = byId<HTMLElement>("chat-hint");
+const createChatSessionButton = byId<HTMLButtonElement>("create-chat-session");
+const headerCreateChatButton = byId<HTMLButtonElement>("header-create-chat");
 const refreshChatSessionsButton = byId<HTMLButtonElement>("refresh-chat-sessions");
 const refreshWorkspaceButton = byId<HTMLButtonElement>("refresh-workspace");
 const chatSessionStatus = byId<HTMLElement>("chat-session-status");
@@ -395,7 +503,6 @@ const chatEmpty = byId<HTMLElement>("chat-empty");
 const workspaceBackdrop = byId<HTMLButtonElement>("workspace-backdrop");
 const workspaceDrawer = byId<HTMLElement>("workspace-drawer");
 const openWorkspaceButton = byId<HTMLButtonElement>("open-workspace");
-const openProjectWorkspaceButton = byId<HTMLButtonElement>("open-project-workspace");
 const closeWorkspaceButton = byId<HTMLButtonElement>("close-workspace");
 const workspaceDesktopName = byId<HTMLElement>("workspace-desktop-name");
 const workspaceProjectsElement = byId<HTMLElement>("workspace-projects");
@@ -415,6 +522,7 @@ const waitingDesktop = byId<HTMLElement>("waiting-desktop");
 const pairedDesktop = byId<HTMLElement>("paired-desktop");
 const connectionDetail = byId<HTMLElement>("connection-detail");
 const status = byId<HTMLElement>("status");
+const persistentWorkspaceLayout = window.matchMedia("(min-width: 900px)");
 
 startCameraButton.addEventListener("click", () => void startCameraScan());
 stopCameraButton.addEventListener("click", stopCameraScanByUser);
@@ -432,6 +540,7 @@ chatForm.addEventListener("submit", (event) => {
   event.preventDefault();
   void sendChatMessage();
 });
+stopChatButton.addEventListener("click", () => void stopChatMessage());
 chatInput.addEventListener("input", () => {
   resizeChatComposer();
   updateChatComposer();
@@ -443,25 +552,46 @@ chatInput.addEventListener("focus", () => {
   scheduleConversationViewportSync();
 });
 chatInput.addEventListener("blur", scheduleConversationViewportSync);
+createChatSessionButton.addEventListener("click", () => void createChatSession());
+headerCreateChatButton.addEventListener("click", () => void createChatSession());
 refreshChatSessionsButton.addEventListener("click", () => void refreshChatSessions());
 refreshWorkspaceButton.addEventListener("click", () => void requestWorkspaceOverview());
 openWorkspaceButton.addEventListener("click", () => setWorkspaceDrawerOpen(true));
-openProjectWorkspaceButton.addEventListener("click", () => setWorkspaceDrawerOpen(true));
 closeWorkspaceButton.addEventListener("click", () => setWorkspaceDrawerOpen(false));
 workspaceBackdrop.addEventListener("click", () => setWorkspaceDrawerOpen(false));
+persistentWorkspaceLayout.addEventListener("change", syncWorkspaceDrawerPresentation);
 openModelMenuButton.addEventListener("click", () => setChatModelMenuOpen(!chatModelMenuOpen));
 revokePairingButton.addEventListener("click", () => void revokeAndForget());
 
 window.addEventListener("beforeunload", () => {
   stopCompletionPolling();
   stopCameraScan();
+  stopChatActivityTimer();
+  pauseForegroundResume();
   rejectPendingControlRequests(new Error("The remote page was closed."));
   transport?.close();
 });
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) {
+    pauseForegroundResume();
     stopCameraScan();
+    return;
   }
+  scheduleConversationViewportSync();
+  scheduleForegroundResume();
+});
+window.addEventListener("pagehide", () => {
+  pauseForegroundResume();
+});
+window.addEventListener("pageshow", (event) => {
+  if (event.persisted) {
+    foregroundResume.markBackgrounded();
+  }
+  scheduleConversationViewportSync();
+  scheduleForegroundResume();
+});
+window.addEventListener("focus", () => {
+  scheduleForegroundResume();
 });
 window.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && workspaceDrawerOpen) {
@@ -889,14 +1019,45 @@ function sameRemoteScopes(
   return left.length === right.length && left.every((scope) => right.includes(scope));
 }
 
-async function connect(): Promise<void> {
+function connect(options: ConnectOptions = {}): Promise<boolean> {
   if (!pairedSession) {
-    return;
+    return Promise.resolve(false);
+  }
+  if (connectionTask && !options.replaceInFlight) {
+    return connectionTask;
+  }
+
+  const generation = ++connectionGeneration;
+  const task = connectInternal(options, generation);
+  connectionTask = task;
+  void task.then(
+    () => {
+      if (connectionTask === task) {
+        connectionTask = null;
+      }
+    },
+    () => {
+      if (connectionTask === task) {
+        connectionTask = null;
+      }
+    },
+  );
+  return task;
+}
+
+function isCurrentConnection(generation: number): boolean {
+  return generation === connectionGeneration;
+}
+
+async function connectInternal(options: ConnectOptions, generation: number): Promise<boolean> {
+  if (!pairedSession || !isCurrentConnection(generation)) {
+    return false;
   }
   const session = pairedSession;
   rejectPendingControlRequests(new Error("The remote connection was replaced."));
-  transport?.close();
+  const previousTransport = transport;
   transport = null;
+  previousTransport?.close();
   activeProjectId = null;
   workspaceProjects = [];
   resetWorkspaceCapabilities();
@@ -905,10 +1066,13 @@ async function connect(): Promise<void> {
   updateChatComposer();
   setBusy(connectButton, true);
   setBusy(reconnectButton, true);
+  let candidate: P2pFirstTransport | null = null;
   try {
     const mobileIdentity = await ensureIdentity();
+    if (!isCurrentConnection(generation)) {
+      return false;
+    }
     const configuration = makeRtcConfiguration(session.ice_servers);
-    let candidate!: P2pFirstTransport;
     candidate = new P2pFirstTransport({
       session,
       socketFactory: new BrowserTicketedSocketFactory(),
@@ -927,51 +1091,66 @@ async function connect(): Promise<void> {
         });
       },
       onStateChange: (state) => {
-        if (transport === candidate) {
+        if (isCurrentConnection(generation) && transport === candidate) {
           showTransportState(state);
         }
       },
       onPlaintextFrame: (frame) => {
-        if (transport === candidate) {
+        if (isCurrentConnection(generation) && transport === candidate) {
           showControlResponse(frame);
         }
       },
       onTransportError: (error) => {
-        if (transport === candidate) {
+        if (isCurrentConnection(generation) && transport === candidate) {
           rejectPendingControlRequests(error);
           setStatus(error.message);
         }
       },
     });
+    if (!isCurrentConnection(generation)) {
+      candidate.close();
+      return false;
+    }
     transport = candidate;
     await candidate.connect();
-    if (transport !== candidate) {
-      return;
+    if (!isCurrentConnection(generation) || transport !== candidate) {
+      candidate.close();
+      return false;
     }
     setPhase("connected");
     updateChatComposer();
     if (!hasChatScope()) {
       setStatus("此手机使用的是旧权限集。请在桌面端撤销后重新扫码配对，以启用项目、模型和对话控制。");
-      return;
+      return true;
     }
-    await requestWorkspaceOverview();
+    return requestWorkspaceOverview({ timeoutMs: options.workspaceTimeoutMs });
   } catch (error) {
-    if (transport) {
-      transport.close();
+    if (!isCurrentConnection(generation)) {
+      return false;
+    }
+    if (transport === candidate) {
+      candidate?.close();
       transport = null;
     }
     rejectPendingControlRequests(error instanceof Error ? error : new Error(errorMessage(error)));
     setPhase("paired");
     setStatus(errorMessage(error));
+    return false;
   } finally {
-    setBusy(connectButton, false);
-    setBusy(reconnectButton, false);
+    if (isCurrentConnection(generation)) {
+      setBusy(connectButton, false);
+      setBusy(reconnectButton, false);
+    }
   }
 }
 
-async function requestWorkspaceOverview(): Promise<void> {
+async function requestWorkspaceOverview(options: WorkspaceOverviewOptions = {}): Promise<boolean> {
   try {
-    const response = await sendControlRequest(newWorkspaceOverviewRequest());
+    const response = await sendControlRequest(
+      newWorkspaceOverviewRequest(),
+      undefined,
+      options.timeoutMs,
+    );
     const overview = workspaceOverviewFromResponse(response);
     if (!overview || overview.projects.length === 0) {
       throw controlResponseError(response, "电脑没有返回研究项目。");
@@ -992,12 +1171,383 @@ async function requestWorkspaceOverview(): Promise<void> {
     renderChatWorkspaceHeader();
     updateChatComposer();
     setStatus("已刷新电脑上的研究工作区。");
+    let chatSessionsRefreshed = true;
     if (canAccessRemoteChat()) {
-      await refreshChatSessions({ openNewest: projectChanged });
+      chatSessionsRefreshed = await refreshChatSessions({
+        openNewest: projectChanged,
+        timeoutMs: options.timeoutMs,
+      });
     }
+    return chatSessionsRefreshed;
   } catch (error) {
     setStatus(errorMessage(error));
+    return false;
   }
+}
+
+function pauseForegroundResume(): void {
+  foregroundResume.markBackgrounded();
+  foregroundResumeGeneration += 1;
+  foregroundChatRecoveryGeneration += 1;
+  if (foregroundResumeTimer !== null) {
+    clearTimeout(foregroundResumeTimer);
+    foregroundResumeTimer = null;
+  }
+  // A suspended Promise cannot be forcibly cancelled, but its generation is
+  // now stale and it must not clear the requirement for the next foreground.
+  foregroundResumeTask = null;
+  foregroundResume.cancelQueuedResume();
+}
+
+function scheduleForegroundResume(): void {
+  if (foregroundResumeTimer !== null || foregroundResumeTask !== null) {
+    return;
+  }
+  if (!foregroundResume.requestResume({
+    documentHidden: document.hidden,
+    paired: pairedSession !== null,
+    connectable: phase === "paired" || phase === "connected",
+  })) {
+    return;
+  }
+
+  const generation = foregroundResumeGeneration;
+  foregroundResumeTimer = setTimeout(() => {
+    foregroundResumeTimer = null;
+    startForegroundResume(generation);
+  }, FOREGROUND_SYNC_DELAY_MS);
+}
+
+function startForegroundResume(generation: number): void {
+  if (!isCurrentForegroundResume(generation) || foregroundResumeTask !== null) {
+    return;
+  }
+
+  const task = synchronizeAfterForeground(generation);
+  foregroundResumeTask = task;
+  void task.then(
+    (synchronized) => finishForegroundResume(task, generation, synchronized),
+    (error) => {
+      if (isCurrentForegroundResume(generation)) {
+        setStatus(errorMessage(error));
+      }
+      finishForegroundResume(task, generation, false);
+    },
+  );
+}
+
+function isCurrentForegroundResume(generation: number): boolean {
+  return generation === foregroundResumeGeneration && !document.hidden && pairedSession !== null;
+}
+
+function finishForegroundResume(
+  task: Promise<boolean>,
+  generation: number,
+  synchronized: boolean,
+): void {
+  if (foregroundResumeTask === task) {
+    foregroundResumeTask = null;
+  }
+  if (generation !== foregroundResumeGeneration) {
+    return;
+  }
+  foregroundResume.completeResume({
+    documentHidden: document.hidden,
+    connected: phase === "connected" && transport !== null,
+    synchronized,
+  });
+}
+
+async function waitForConnectionTask(timeoutMs: number): Promise<boolean | null> {
+  const task = connectionTask;
+  if (!task) {
+    return true;
+  }
+  return new Promise((resolve) => {
+    const timeout = setTimeout(() => resolve(null), timeoutMs);
+    void task.then(
+      (connected) => {
+        clearTimeout(timeout);
+        resolve(connected);
+      },
+      () => {
+        clearTimeout(timeout);
+        resolve(false);
+      },
+    );
+  });
+}
+
+async function synchronizeAfterForeground(generation: number): Promise<boolean> {
+  if (!isCurrentForegroundResume(generation)) {
+    return false;
+  }
+
+  const selection = captureForegroundConversationSelection();
+  const activeChatWasRunning = chatSending && activeRemoteChatRequest !== null;
+  const activeChatRecovery = activeChatWasRunning && activeRemoteChatRequest && !activeRemoteChatRequest.stopRequested
+    ? foregroundChatRecoveryFrom(activeRemoteChatRequest)
+    : null;
+  const hadActiveChat = activeChatWasRunning;
+  const interruptedChat = activeChatRecovery ?? pendingForegroundChatRecovery;
+  let workspaceSynced = false;
+
+  if (hadActiveChat) {
+    // A terminal chat frame may have been lost while iOS suspended the page.
+    // Replace its route immediately so the old ten-minute request cannot keep
+    // the phone in a false "thinking" state.
+    setStatus("正在恢复上一条消息与电脑的安全连接…");
+    workspaceSynced = await connect({
+      workspaceTimeoutMs: FOREGROUND_SYNC_RESPONSE_TIMEOUT_MS,
+      replaceInFlight: true,
+    });
+  } else {
+    const pendingConnection = await waitForConnectionTask(FOREGROUND_SYNC_RESPONSE_TIMEOUT_MS);
+    if (!isCurrentForegroundResume(generation)) {
+      return false;
+    }
+
+    if (pendingConnection === null) {
+      setStatus("正在替换未恢复的安全连接…");
+      workspaceSynced = await connect({
+        workspaceTimeoutMs: FOREGROUND_SYNC_RESPONSE_TIMEOUT_MS,
+        replaceInFlight: true,
+      });
+    } else if (phase === "connected" && transport) {
+      setStatus("正在同步离开期间电脑上的更新…");
+      workspaceSynced = await requestWorkspaceOverview({
+        timeoutMs: FOREGROUND_SYNC_RESPONSE_TIMEOUT_MS,
+      });
+    } else {
+      setStatus("正在恢复与电脑的安全连接…");
+      workspaceSynced = await connect({
+        workspaceTimeoutMs: FOREGROUND_SYNC_RESPONSE_TIMEOUT_MS,
+      });
+    }
+  }
+
+  if (!isCurrentForegroundResume(generation)) {
+    return false;
+  }
+  if (!workspaceSynced && phase === "connected" && transport) {
+    setStatus("正在重新建立安全连接并同步更新…");
+    workspaceSynced = await connect({
+      workspaceTimeoutMs: FOREGROUND_SYNC_RESPONSE_TIMEOUT_MS,
+      replaceInFlight: true,
+    });
+  }
+  if (!workspaceSynced || !isCurrentForegroundResume(generation)) {
+    return false;
+  }
+  const transcriptSynced = await refreshForegroundConversationSelection(selection);
+  if (interruptedChat && isCurrentForegroundResume(generation)) {
+    startForegroundChatRecovery(interruptedChat, generation);
+  }
+  return transcriptSynced;
+}
+
+function captureForegroundConversationSelection(): ForegroundConversationSelection {
+  return {
+    projectId: activeProjectId,
+    sessionId: selectedChatSessionId,
+  };
+}
+
+async function refreshForegroundConversationSelection(
+  selection: ForegroundConversationSelection,
+): Promise<boolean> {
+  if (
+    !selection.projectId ||
+    !selection.sessionId ||
+    selection.projectId !== activeProjectId ||
+    !chatSessions.some((session) => session.sessionId === selection.sessionId)
+  ) {
+    return true;
+  }
+  if (chatSending) {
+    // Keep the in-page streaming placeholder intact. Once the old request is
+    // terminal (or a stale route is rejected by reconnection), fetch the
+    // authoritative transcript from the desktop.
+    foregroundTranscriptSyncPending = selection;
+    return false;
+  }
+  return selectChatSession(selection.sessionId, {
+    timeoutMs: FOREGROUND_SYNC_RESPONSE_TIMEOUT_MS,
+  });
+}
+
+function refreshPendingForegroundTranscript(): void {
+  const selection = foregroundTranscriptSyncPending;
+  if (!selection || chatSending || document.hidden) {
+    return;
+  }
+  if (phase !== "connected" || !transport) {
+    return;
+  }
+  foregroundTranscriptSyncPending = null;
+  void refreshForegroundConversationSelection(selection);
+}
+
+function foregroundChatRecoveryFrom(active: ActiveRemoteChatRequest): ForegroundChatRecovery {
+  return {
+    projectId: active.projectId,
+    sessionId: active.sessionId,
+    message: active.message,
+    idempotencyKey: active.idempotencyKey,
+  };
+}
+
+function startForegroundChatRecovery(
+  recovery: ForegroundChatRecovery,
+  resumeGeneration: number,
+): void {
+  pendingForegroundChatRecovery = recovery;
+  const recoveryGeneration = ++foregroundChatRecoveryGeneration;
+  const task = recoverForegroundChat(recovery, resumeGeneration, recoveryGeneration);
+  foregroundChatRecoveryTask = task;
+  void task.then(
+    () => {
+      if (foregroundChatRecoveryTask === task) {
+        foregroundChatRecoveryTask = null;
+      }
+    },
+    () => {
+      if (foregroundChatRecoveryTask === task) {
+        foregroundChatRecoveryTask = null;
+      }
+    },
+  );
+}
+
+function clearPendingForegroundChatRecovery(recovery: ForegroundChatRecovery): void {
+  if (
+    pendingForegroundChatRecovery?.projectId === recovery.projectId &&
+    pendingForegroundChatRecovery.sessionId === recovery.sessionId &&
+    pendingForegroundChatRecovery.idempotencyKey === recovery.idempotencyKey
+  ) {
+    pendingForegroundChatRecovery = null;
+  }
+}
+
+function canRecoverForegroundChat(resumeGeneration: number, recoveryGeneration: number): boolean {
+  return recoveryGeneration === foregroundChatRecoveryGeneration &&
+    isCurrentForegroundResume(resumeGeneration) &&
+    phase === "connected" &&
+    transport !== null;
+}
+
+async function recoverForegroundChat(
+  recovery: ForegroundChatRecovery,
+  resumeGeneration: number,
+  recoveryGeneration: number,
+): Promise<void> {
+  for (let attempt = 0; attempt < FOREGROUND_CHAT_RECOVERY_MAX_ATTEMPTS; attempt += 1) {
+    if (!canRecoverForegroundChat(resumeGeneration, recoveryGeneration)) {
+      return;
+    }
+    let accepted = false;
+    try {
+      const response = await sendControlRequest(
+        newChatMessageRequest(
+          recovery.projectId,
+          recovery.sessionId,
+          recovery.message,
+          recovery.idempotencyKey,
+        ),
+        (progressResponse) => {
+          if (!canRecoverForegroundChat(resumeGeneration, recoveryGeneration)) {
+            return;
+          }
+          const progress = chatMessageProgress(progressResponse);
+          if (progress?.kind === "activity") {
+            setStatus(progress.activity === "tool"
+              ? "SomniQ 仍在电脑上执行工具…"
+              : progress.activity === "compacting"
+                ? "SomniQ 正在电脑上压缩会话上下文…"
+                : progress.activity === "preparing"
+                  ? "SomniQ 正在电脑上准备上一个任务…"
+                  : "SomniQ 仍在电脑上思考…");
+          } else if (progress?.kind === "accepted") {
+            accepted = true;
+            setStatus("正在恢复发送给电脑的上一条消息…");
+          }
+        },
+        FOREGROUND_SYNC_RESPONSE_TIMEOUT_MS,
+      );
+      if (!canRecoverForegroundChat(resumeGeneration, recoveryGeneration)) {
+        return;
+      }
+      const terminal = chatMessageTerminal(response);
+      if (
+        terminal &&
+        terminal.projectId === recovery.projectId &&
+        terminal.sessionId === recovery.sessionId
+      ) {
+        clearPendingForegroundChatRecovery(recovery);
+        await refreshRecoveredChatTranscript(recovery, resumeGeneration, recoveryGeneration);
+        return;
+      }
+      if (!isRemoteChatRecoveryPending(response)) {
+        clearPendingForegroundChatRecovery(recovery);
+        return;
+      }
+    } catch {
+      if (!canRecoverForegroundChat(resumeGeneration, recoveryGeneration)) {
+        return;
+      }
+      if (!accepted) {
+        await connect({
+          workspaceTimeoutMs: FOREGROUND_SYNC_RESPONSE_TIMEOUT_MS,
+          replaceInFlight: true,
+        });
+      }
+    }
+    await waitForForegroundChatRecoveryRetry(resumeGeneration, recoveryGeneration);
+  }
+}
+
+function isRemoteChatRecoveryPending(response: ControlResponse): boolean {
+  return response.outcome.status === "error" &&
+    isRecord(response.outcome.error) &&
+    response.outcome.error.code === "temporarily_unavailable";
+}
+
+async function refreshRecoveredChatTranscript(
+  recovery: ForegroundChatRecovery,
+  resumeGeneration: number,
+  recoveryGeneration: number,
+): Promise<void> {
+  if (!canRecoverForegroundChat(resumeGeneration, recoveryGeneration)) {
+    return;
+  }
+  const sessionsRefreshed = await refreshChatSessions({
+    timeoutMs: FOREGROUND_SYNC_RESPONSE_TIMEOUT_MS,
+  });
+  if (
+    !sessionsRefreshed ||
+    !canRecoverForegroundChat(resumeGeneration, recoveryGeneration) ||
+    activeProjectId !== recovery.projectId ||
+    !chatSessions.some((session) => session.sessionId === recovery.sessionId) ||
+    (selectedChatSessionId !== null && selectedChatSessionId !== recovery.sessionId)
+  ) {
+    return;
+  }
+  await selectChatSession(recovery.sessionId, {
+    timeoutMs: FOREGROUND_SYNC_RESPONSE_TIMEOUT_MS,
+  });
+}
+
+function waitForForegroundChatRecoveryRetry(
+  resumeGeneration: number,
+  recoveryGeneration: number,
+): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, FOREGROUND_CHAT_RECOVERY_RETRY_MS);
+    if (!canRecoverForegroundChat(resumeGeneration, recoveryGeneration)) {
+      clearTimeout(timer);
+      resolve();
+    }
+  });
 }
 
 async function selectWorkspaceProject(projectId: string): Promise<void> {
@@ -1061,91 +1611,304 @@ async function sendChatMessage(): Promise<void> {
     return;
   }
 
+  const projectId = activeProjectId;
+  const sessionId = selectedChatSessionId;
+  if (!projectId || !sessionId) {
+    updateChatComposer();
+    return;
+  }
+
+  stopChatEventSync();
+  const idempotencyKey = crypto.randomUUID();
+  // A fresh user turn supersedes any background recovery probe for an older
+  // turn, so it cannot unexpectedly replace the conversation later.
+  foregroundChatRecoveryGeneration += 1;
+  pendingForegroundChatRecovery = null;
+  const richStream = workspaceCapabilityState.advertised
+    && workspaceCapabilityState.capabilities.has("rich_chat_progress");
+  const activeRequest: ActiveRemoteChatRequest = {
+    projectId,
+    sessionId,
+    message,
+    idempotencyKey,
+    messageId: null,
+    activity: "preparing",
+    startedAt: Date.now(),
+    streamedText: "",
+    blocks: [],
+    richStream,
+    stopRequested: false,
+    stopRequestInFlight: false,
+  };
+  activeRemoteChatRequest = activeRequest;
+
   chatSending = true;
   updateChatComposer();
   appendChatMessage("user", message);
-  const reply = appendChatMessage("assistant", "正在等待电脑回复…", true);
+  const reply = appendChatMessage("assistant", activeRemoteChatStatus(activeRequest), true);
   let streamRenderFrame: number | null = null;
+  startChatActivityTimer(activeRequest, reply);
   chatInput.value = "";
   resizeChatComposer();
 
   try {
-    const projectId = activeProjectId;
-    const sessionId = selectedChatSessionId;
-    if (!projectId || !sessionId) {
-      throw new Error("请先选择电脑中的一个对话。");
-    }
-    let streamedText = "";
     const response = await sendControlRequest(
-      newChatMessageRequest(projectId, sessionId, message),
+      newChatMessageRequest(projectId, sessionId, message, idempotencyKey, Date.now(), richStream),
       (progressResponse) => {
         const progress = chatMessageProgress(progressResponse);
-        if (
-          progress?.kind !== "delta"
-          || progress.projectId !== projectId
-          || progress.sessionId !== sessionId
-        ) {
+        if (!progress || activeRemoteChatRequest !== activeRequest) {
           return;
         }
-        streamedText += progress.delta;
+        if (progress.kind === "accepted") {
+          if (progress.projectId !== projectId || activeRequest.messageId) return;
+          activeRequest.messageId = progress.messageId;
+          renderPendingRemoteReply(reply, activeRequest);
+          updateChatComposer();
+          if (activeRequest.stopRequested) void dispatchChatStop(activeRequest);
+          return;
+        }
+        if (
+          progress.projectId !== projectId
+          || progress.sessionId !== sessionId
+          || progress.messageId !== activeRequest.messageId
+        ) return;
+        if (progress.kind === "activity") {
+          activeRequest.activity = progress.activity;
+          renderPendingRemoteReply(reply, activeRequest);
+          updateChatComposer();
+          return;
+        }
+        if (progress.kind === "event") {
+          activeRequest.blocks = applyChatMessageEvent(activeRequest.blocks, progress.event);
+          if (progress.event.kind === "text_delta") {
+            activeRequest.streamedText += progress.event.delta;
+          } else if (progress.event.kind === "thinking_delta") {
+            activeRequest.activity = "thinking";
+          } else {
+            activeRequest.activity = "tool";
+          }
+        } else {
+          activeRequest.streamedText += progress.delta;
+        }
         if (streamRenderFrame === null) {
           streamRenderFrame = window.requestAnimationFrame(() => {
             streamRenderFrame = null;
-            setChatMessageContent(reply, "assistant", streamedText || "正在等待电脑回复…");
+            if (activeRemoteChatRequest === activeRequest) {
+              renderPendingRemoteReply(reply, activeRequest);
+            }
           });
         }
       },
     );
-    const completion = chatMessageCompletion(response);
-    if (!completion || completion.projectId !== projectId || completion.sessionId !== sessionId) {
+    if (activeRemoteChatRequest !== activeRequest) {
+      return;
+    }
+    const terminal = chatMessageTerminal(response);
+    if (
+      !terminal
+      || terminal.projectId !== projectId
+      || terminal.sessionId !== sessionId
+      || (activeRequest.messageId !== null && terminal.messageId !== activeRequest.messageId)
+    ) {
       throw controlResponseError(response, "电脑没有返回对话回复。");
     }
+    activeRequest.messageId ??= terminal.messageId;
     if (streamRenderFrame !== null) {
       window.cancelAnimationFrame(streamRenderFrame);
       streamRenderFrame = null;
     }
-    setChatMessageContent(reply, "assistant", completion.text);
+    if (terminal.kind === "completed") {
+      // The terminal frame remains bounded for the encrypted relay, while the
+      // ordered live stream may contain a longer complete answer. Never throw
+      // away that already verified mobile stream in favour of the replay-safe
+      // terminal preview.
+      const visibleText = activeRequest.streamedText.length > terminal.text.length
+        ? activeRequest.streamedText
+        : terminal.text;
+      if (activeRequest.blocks.length > 0) {
+        completeRemoteChatBlocks(activeRequest, visibleText);
+        renderRemoteChatBlocks(reply, activeRequest.blocks, false);
+      } else {
+        setChatMessageContent(reply, "assistant", visibleText);
+      }
+      setStatus("已收到电脑上的 SomniQ 回复。");
+    } else {
+      if (activeRequest.blocks.length > 0) {
+        renderRemoteChatBlocks(reply, activeRequest.blocks, false, "已停止。");
+      } else {
+        setChatMessageContent(reply, "assistant", activeRequest.streamedText || "已停止。");
+      }
+      setStatus("已停止电脑上的当前回复。");
+    }
     reply.classList.remove("pending");
-    setStatus("已收到电脑上的 SomniQ 回复。");
     void refreshChatSessions();
   } catch (error) {
     if (streamRenderFrame !== null) {
       window.cancelAnimationFrame(streamRenderFrame);
       streamRenderFrame = null;
     }
-    setChatMessageContent(reply, "assistant", `发送失败：${errorMessage(error)}`);
-    reply.classList.remove("pending");
-    reply.classList.add("error");
-    setStatus(errorMessage(error));
+    if (activeRemoteChatRequest === activeRequest) {
+      setChatMessageContent(reply, "assistant", `发送失败：${errorMessage(error)}`);
+      reply.classList.remove("pending");
+      reply.classList.add("error");
+      setStatus(errorMessage(error));
+    }
   } finally {
+    if (activeRemoteChatRequest !== activeRequest) {
+      return;
+    }
+    clearActiveRemoteChatRequest(activeRequest);
     chatSending = false;
+    if (activeProjectId === projectId && selectedChatSessionId === sessionId) {
+      startChatEventSync(projectId, sessionId);
+    }
     updateChatComposer();
+    refreshPendingForegroundTranscript();
   }
 }
 
-async function refreshChatSessions(options: { openNewest?: boolean } = {}): Promise<void> {
-  if (!canAccessRemoteChat()) {
+async function stopChatMessage(): Promise<void> {
+  const active = activeRemoteChatRequest;
+  if (
+    !active
+    || !chatSending
+    || !canAccessRemoteChat()
+    || !supportsRemoteCapability("stop_chat_message")
+    || active.stopRequested
+  ) {
     updateChatComposer();
     return;
   }
+  active.stopRequested = true;
+  renderPendingRemoteReplyForActiveTurn(active);
+  updateChatComposer();
+  await dispatchChatStop(active);
+}
+
+async function dispatchChatStop(active: ActiveRemoteChatRequest): Promise<void> {
+  if (
+    activeRemoteChatRequest !== active
+    || !active.stopRequested
+    || !active.messageId
+    || active.stopRequestInFlight
+  ) return;
+  active.stopRequestInFlight = true;
+  updateChatComposer();
+  try {
+    const response = await sendControlRequest(
+      newStopChatMessageRequest(active.projectId, active.sessionId, active.messageId),
+      undefined,
+      STOP_CHAT_RESPONSE_TIMEOUT_MS,
+    );
+    if (!chatMessageStopRequested(response, active.projectId, active.sessionId, active.messageId)) {
+      if (isUnsupportedRemoteCommand(response, "stop_chat_message")) {
+        disableRemoteCapability("stop_chat_message");
+        throw new Error("当前电脑版本尚不支持从手机停止回复，请更新并重启 SomniQ Studio。");
+      }
+      throw controlResponseError(response, "电脑没有确认停止当前回复。");
+    }
+    if (activeRemoteChatRequest === active) {
+      setStatus("正在停止电脑上的当前回复…");
+    }
+  } catch (error) {
+    if (activeRemoteChatRequest === active) {
+      active.stopRequested = false;
+      setStatus(errorMessage(error));
+      updateChatComposer();
+    }
+  } finally {
+    if (activeRemoteChatRequest === active) {
+      active.stopRequestInFlight = false;
+      updateChatComposer();
+    }
+  }
+}
+
+function activeRemoteChatStatus(active: ActiveRemoteChatRequest): string {
+  const elapsedSeconds = Math.max(1, Math.floor((Date.now() - active.startedAt) / 1_000));
+  if (active.stopRequested) return `正在停止当前回复… · ${elapsedSeconds}s`;
+  const label = active.activity === "tool"
+    ? "正在执行工具"
+    : active.activity === "compacting"
+      ? "正在压缩会话上下文"
+      : active.activity === "preparing"
+        ? "正在准备任务"
+        : "正在思考";
+  return `SomniQ ${label}… · ${elapsedSeconds}s`;
+}
+
+function renderPendingRemoteReply(reply: HTMLElement, active: ActiveRemoteChatRequest): void {
+  if (active.blocks.length > 0) {
+    renderRemoteChatBlocks(
+      reply,
+      active.blocks,
+      true,
+      active.stopRequested ? activeRemoteChatStatus(active) : undefined,
+    );
+  } else {
+    setChatMessageContent(reply, "assistant", active.streamedText || activeRemoteChatStatus(active));
+  }
+}
+
+function renderPendingRemoteReplyForActiveTurn(active: ActiveRemoteChatRequest): void {
+  if (activeRemoteChatRequest !== active) return;
+  const pendingReplies = [...chatLog.querySelectorAll<HTMLElement>(".chat-turn.pending")];
+  const pendingReply = pendingReplies[pendingReplies.length - 1];
+  if (pendingReply) renderPendingRemoteReply(pendingReply, active);
+}
+
+function startChatActivityTimer(active: ActiveRemoteChatRequest, reply: HTMLElement): void {
+  stopChatActivityTimer();
+  chatActivityTimer = setInterval(() => {
+    if (activeRemoteChatRequest !== active || !chatSending) {
+      stopChatActivityTimer();
+      return;
+    }
+    if (!active.streamedText && active.blocks.length === 0) renderPendingRemoteReply(reply, active);
+    updateChatComposer();
+  }, 1_000);
+}
+
+function stopChatActivityTimer(): void {
+  if (chatActivityTimer !== null) {
+    clearInterval(chatActivityTimer);
+    chatActivityTimer = null;
+  }
+}
+
+function clearActiveRemoteChatRequest(expected?: ActiveRemoteChatRequest): void {
+  if (expected && activeRemoteChatRequest !== expected) return;
+  activeRemoteChatRequest = null;
+  stopChatActivityTimer();
+}
+
+async function refreshChatSessions(options: ChatSessionRefreshOptions = {}): Promise<boolean> {
+  if (!canAccessRemoteChat()) {
+    updateChatComposer();
+    return false;
+  }
   const projectId = activeProjectId;
   if (!projectId) {
-    await requestWorkspaceOverview();
-    return;
+    return requestWorkspaceOverview();
   }
 
   let sessionToOpen: string | null = null;
+  let refreshed = false;
   chatSessionsLoading = true;
   renderChatSessionNavigation();
   updateChatComposer();
   try {
-    const response = await sendControlRequest(newListChatSessionsRequest(projectId));
+    const response = await sendControlRequest(
+      newListChatSessionsRequest(projectId),
+      undefined,
+      options.timeoutMs,
+    );
     const sessionResult = chatSessionsFromResponse(response, projectId);
     if (!sessionResult) {
       throw controlResponseError(response, "电脑没有返回可用的对话列表。");
     }
     if (activeProjectId !== projectId) {
-      return;
+      return false;
     }
     chatSessions = sessionResult.sessions;
     const selectedSessionStillExists = selectedChatSessionId !== null &&
@@ -1168,6 +1931,7 @@ async function refreshChatSessions(options: { openNewest?: boolean } = {}): Prom
       ? "这台电脑上还没有可继续的对话。"
       : `已加载 ${chatSessions.length} 个桌面对话。${sessionResult.hasMore ? "仅显示最近的 200 个。" : ""}`;
     setStatus("已加载电脑中的对话列表。");
+    refreshed = true;
   } catch (error) {
     chatSessionStatus.textContent = errorMessage(error);
     setStatus(errorMessage(error));
@@ -1178,27 +1942,83 @@ async function refreshChatSessions(options: { openNewest?: boolean } = {}): Prom
   }
 
   if (sessionToOpen && activeProjectId === projectId && canAccessRemoteChat()) {
-    await selectChatSession(sessionToOpen);
+    return selectChatSession(sessionToOpen, { timeoutMs: options.timeoutMs });
+  }
+  return refreshed;
+}
+
+async function createChatSession(): Promise<void> {
+  const projectId = activeProjectId;
+  if (
+    !projectId
+    || !canAccessRemoteChat()
+    || !supportsRemoteCapability("create_chat_session")
+    || chatSessionCreating
+  ) {
+    updateChatComposer();
+    return;
+  }
+
+  chatSessionCreating = true;
+  renderChatSessionNavigation();
+  updateChatComposer();
+  chatSessionStatus.textContent = "正在电脑上新建对话…";
+  try {
+    const response = await sendControlRequest(newCreateChatSessionRequest(projectId));
+    const created = chatSessionCreatedFromResponse(response, projectId);
+    if (!created) {
+      if (isUnsupportedRemoteCommand(response, "create_chat_session")) {
+        disableRemoteCapability("create_chat_session");
+        throw new Error("当前电脑端版本尚不支持手机新建对话，请更新并重启 SomniQ Studio。");
+      }
+      throw controlResponseError(response, "电脑没有返回新建的对话。");
+    }
+    if (activeProjectId !== projectId) {
+      return;
+    }
+
+    const session: RemoteChatSession = {
+      sessionId: created.sessionId,
+      title: created.title || "新对话",
+      updatedAtUnixMs: created.updatedAtUnixMs,
+      model: created.model,
+    };
+    chatSessions = [session, ...chatSessions.filter((entry) => entry.sessionId !== session.sessionId)];
+    chatSessionStatus.textContent = "新对话已创建。";
+    setStatus("已在电脑上创建新对话。");
+    renderChatSessionNavigation();
+    await selectChatSession(session.sessionId);
+  } catch (error) {
+    chatSessionStatus.textContent = errorMessage(error);
+    setStatus(errorMessage(error));
+  } finally {
+    chatSessionCreating = false;
+    renderChatSessionNavigation();
+    updateChatComposer();
   }
 }
 
-async function selectChatSession(sessionId: string): Promise<void> {
+async function selectChatSession(
+  sessionId: string,
+  options: ChatTranscriptLoadOptions = {},
+): Promise<boolean> {
+  stopChatEventSync();
   if (!sessionId) {
     selectedChatSessionId = null;
     clearChatLog("选择一个桌面对话后显示历史。");
     renderChatSessionNavigation();
     updateChatComposer();
-    return;
+    return false;
   }
   if (!chatSessions.some((session) => session.sessionId === sessionId)) {
     selectedChatSessionId = null;
     renderChatSessionNavigation();
     updateChatComposer();
-    return;
+    return false;
   }
   const projectId = activeProjectId;
   if (!projectId || !canAccessRemoteChat()) {
-    return;
+    return false;
   }
 
   selectedChatSessionId = sessionId;
@@ -1209,13 +2029,17 @@ async function selectChatSession(sessionId: string): Promise<void> {
   renderChatSessionNavigation();
   updateChatComposer();
   try {
-    const response = await sendControlRequest(newChatTranscriptRequest(projectId, sessionId));
+    const response = await sendControlRequest(
+      newChatTranscriptRequest(projectId, sessionId),
+      undefined,
+      options.timeoutMs,
+    );
     const transcript = chatTranscriptFromResponse(response);
     if (!transcript || transcript.projectId !== projectId || transcript.sessionId !== sessionId) {
       throw controlResponseError(response, "电脑没有返回对话历史。");
     }
     if (activeProjectId !== projectId || selectedChatSessionId !== sessionId) {
-      return;
+      return false;
     }
     renderChatTranscript(transcript.messages);
     const session = chatSessions.find((entry) => entry.sessionId === sessionId);
@@ -1223,7 +2047,9 @@ async function selectChatSession(sessionId: string): Promise<void> {
       ? `正在继续「${session.title}」。${transcript.hasMore ? "已显示最近的 100 条消息。" : ""}`
       : "已加载对话历史。";
     setStatus("已加载所选桌面对话的历史。");
-    await refreshChatModelState(projectId, sessionId);
+    void refreshChatModelState(projectId, sessionId);
+    startChatEventSync(projectId, sessionId);
+    return true;
   } catch (error) {
     if (selectedChatSessionId === sessionId) {
       clearChatLog(`无法加载历史：${errorMessage(error)}`);
@@ -1233,6 +2059,7 @@ async function selectChatSession(sessionId: string): Promise<void> {
     if (activeProjectId === projectId) {
       setStatus(errorMessage(error));
     }
+    return false;
   } finally {
     if (activeProjectId === projectId) {
       chatTranscriptLoading = false;
@@ -1245,6 +2072,7 @@ async function selectChatSession(sessionId: string): Promise<void> {
 async function sendControlRequest(
   request: ControlRequest,
   onProgress?: (response: ControlResponse) => void,
+  timeoutMs = CONTROL_RESPONSE_TIMEOUT_MS,
 ): Promise<ControlResponse> {
   const activeTransport = transport;
   if (!activeTransport) {
@@ -1255,7 +2083,7 @@ async function sendControlRequest(
     const timeout = setTimeout(() => {
       pendingControlRequests.delete(request.request_id);
       reject(new Error("等待电脑响应超时，请重试。"));
-    }, CONTROL_RESPONSE_TIMEOUT_MS);
+    }, timeoutMs);
     pendingControlRequests.set(request.request_id, { resolve, reject, onProgress, timeout });
   });
 
@@ -1319,28 +2147,6 @@ function showControlResponse(frame: Uint8Array): void {
   } catch (error) {
     setStatus(errorMessage(error));
   }
-}
-
-function chatMessageCompletion(response: ControlResponse): { projectId: string; sessionId: string; messageId: string; text: string } | null {
-  if (response.outcome.status !== "success" || !isRecord(response.outcome.result)) {
-    return null;
-  }
-  const resultValue = response.outcome.result;
-  if (
-    resultValue.type !== "chat_message_completed" ||
-    typeof resultValue.project_id !== "string" ||
-    typeof resultValue.session_id !== "string" ||
-    typeof resultValue.message_id !== "string" ||
-    typeof resultValue.text !== "string"
-  ) {
-    return null;
-  }
-  return {
-    projectId: resultValue.project_id,
-    sessionId: resultValue.session_id,
-    messageId: resultValue.message_id,
-    text: resultValue.text,
-  };
 }
 
 function chatSessionsFromResponse(
@@ -1408,14 +2214,9 @@ function chatTranscriptFromResponse(response: ControlResponse): {
 
   const messages: RemoteTranscriptMessage[] = [];
   for (const entry of resultValue.messages) {
-    if (
-      !isRecord(entry) ||
-      (entry.role !== "user" && entry.role !== "assistant") ||
-      typeof entry.text !== "string"
-    ) {
-      return null;
-    }
-    messages.push({ role: entry.role, text: entry.text });
+    const message = remoteTranscriptMessageFromWire(entry);
+    if (!message) return null;
+    messages.push(message);
   }
   return {
     projectId: resultValue.project_id,
@@ -1423,6 +2224,156 @@ function chatTranscriptFromResponse(response: ControlResponse): {
     messages,
     hasMore: resultValue.has_more,
   };
+}
+
+function startChatEventSync(projectId: string, sessionId: string): void {
+  stopChatEventSync();
+  if (
+    !workspaceCapabilityState.advertised
+    || !workspaceCapabilityState.capabilities.has("chat_event_sync")
+    || phase !== "connected"
+    || !transport
+  ) return;
+  const generation = chatEventSyncGeneration;
+  void runChatEventSync(projectId, sessionId, generation);
+}
+
+function stopChatEventSync(): void {
+  chatEventSyncGeneration += 1;
+  desktopSyncedChatTurn = null;
+}
+
+function isCurrentChatEventSync(projectId: string, sessionId: string, generation: number): boolean {
+  return generation === chatEventSyncGeneration
+    && phase === "connected"
+    && transport !== null
+    && activeProjectId === projectId
+    && selectedChatSessionId === sessionId;
+}
+
+async function runChatEventSync(
+  projectId: string,
+  sessionId: string,
+  generation: number,
+): Promise<void> {
+  let afterSeq: number | null = null;
+  while (isCurrentChatEventSync(projectId, sessionId, generation)) {
+    if (chatSending) {
+      await waitForChatEventRetry();
+      continue;
+    }
+    try {
+      const response = await sendControlRequest(
+        newChatEventsRequest(projectId, sessionId, afterSeq, 200, CHAT_EVENT_WAIT_MS),
+        undefined,
+        CHAT_EVENT_RESPONSE_TIMEOUT_MS,
+      );
+      if (!isCurrentChatEventSync(projectId, sessionId, generation)) return;
+      const batch = chatSessionEventsFromResponse(response);
+      if (!batch || batch.projectId !== projectId || batch.sessionId !== sessionId) {
+        if (
+          response.outcome.status === "error"
+          && isRecord(response.outcome.error)
+          && response.outcome.error.code === "invalid_request"
+        ) {
+          disableRemoteCapability("chat_event_sync");
+          return;
+        }
+        throw new Error("电脑返回了无效的对话同步事件。");
+      }
+      const initialSnapshot = afterSeq === null;
+      afterSeq = batch.nextSeq;
+      for (const event of batch.events) {
+        if (!isCurrentChatEventSync(projectId, sessionId, generation)) return;
+        applyDesktopChatSessionEvent(event, sessionId, initialSnapshot);
+      }
+    } catch {
+      if (!isCurrentChatEventSync(projectId, sessionId, generation)) return;
+      await waitForChatEventRetry();
+    }
+  }
+}
+
+function applyDesktopChatSessionEvent(
+  event: ChatSessionEvent,
+  sessionId: string,
+  initialSnapshot: boolean,
+): void {
+  if (event.kind === "reset") {
+    void selectChatSession(sessionId);
+    return;
+  }
+  if (event.kind === "user_message") {
+    const turns = [...chatLog.querySelectorAll<HTMLElement>(".chat-turn")];
+    const last = turns[turns.length - 1];
+    const previous = turns[turns.length - 2];
+    const snapshotUser = initialSnapshot
+      && (last?.classList.contains("chat-user") && last.textContent === event.text
+        ? last
+        : last?.classList.contains("chat-assistant")
+          && previous?.classList.contains("chat-user")
+          && previous.textContent === event.text
+          ? previous
+          : null);
+    if (!snapshotUser) {
+      appendChatMessage("user", event.text);
+    }
+    const existingReply = snapshotUser === previous && last?.classList.contains("chat-assistant")
+      ? last
+      : null;
+    const reply = existingReply ?? appendChatMessage("assistant", "SomniQ 正在思考…", true);
+    reply.classList.remove("error");
+    reply.classList.add("pending");
+    desktopSyncedChatTurn = { userSeq: event.seq, reply, blocks: [] };
+    setStatus("桌面端开始了新的对话消息。");
+    updateChatComposer();
+    return;
+  }
+
+  let turn = desktopSyncedChatTurn;
+  if (!turn && event.kind === "assistant") {
+    const reply = appendChatMessage("assistant", "SomniQ 正在思考…", true);
+    turn = { userSeq: event.seq, reply, blocks: [] };
+    desktopSyncedChatTurn = turn;
+  }
+  if (event.kind === "assistant" && turn) {
+    turn.blocks = applyChatMessageEvent(turn.blocks, event.event);
+    renderRemoteChatBlocks(turn.reply, turn.blocks, true);
+    chatLog.scrollTop = chatLog.scrollHeight;
+    updateChatComposer();
+    return;
+  }
+  if (event.kind === "done") {
+    if (turn) {
+      completeRemoteBlocks(turn.blocks, event.text);
+      if (turn.blocks.length > 0) renderRemoteChatBlocks(turn.reply, turn.blocks, false);
+      else setChatMessageContent(turn.reply, "assistant", event.text || "桌面回复已完成。");
+      turn.reply.classList.remove("pending");
+    }
+    desktopSyncedChatTurn = null;
+    setStatus("已同步桌面端的最新回复。");
+    updateChatComposer();
+    void refreshChatSessions();
+    return;
+  }
+  if (event.kind === "error") {
+    if (turn) {
+      if (turn.blocks.length > 0) {
+        renderRemoteChatBlocks(turn.reply, turn.blocks, false, `桌面执行失败：${event.message}`);
+      } else {
+        setChatMessageContent(turn.reply, "assistant", `桌面执行失败：${event.message}`);
+      }
+      turn.reply.classList.remove("pending");
+      turn.reply.classList.add("error");
+    }
+    desktopSyncedChatTurn = null;
+    setStatus(`桌面执行失败：${event.message}`);
+    updateChatComposer();
+  }
+}
+
+function waitForChatEventRetry(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, CHAT_EVENT_RETRY_MS));
 }
 
 function controlResponseError(response: ControlResponse, fallback: string): Error {
@@ -1463,8 +2414,11 @@ function rejectPendingControlRequests(error: Error): void {
 }
 
 function resetRemoteChatState(): void {
+  stopChatEventSync();
+  clearActiveRemoteChatRequest();
   chatSending = false;
   chatSessionsLoading = false;
+  chatSessionCreating = false;
   chatTranscriptLoading = false;
   chatSessions = [];
   selectedChatSessionId = null;
@@ -1525,6 +2479,7 @@ function renderWorkspaceProjects(): void {
     const title = document.createElement("strong");
     title.textContent = project.title;
     const meta = document.createElement("span");
+    meta.className = "workspace-project-meta";
     meta.textContent = project.activeRunId
       ? "工作流正在运行"
       : isActive
@@ -1539,15 +2494,22 @@ function renderWorkspaceProjects(): void {
 
 function renderChatSessionNavigation(): void {
   const available = canAccessRemoteChat();
+  const canCreate = available && supportsRemoteCapability("create_chat_session");
   workspaceSessionList.replaceChildren();
   workspaceSessionCount.textContent = chatSessions.length > 0 ? String(chatSessions.length) : "";
+  createChatSessionButton.disabled = !canCreate || chatSessionsLoading || chatSessionCreating;
+  headerCreateChatButton.disabled = !canCreate || chatSessionsLoading || chatSessionCreating;
+  createChatSessionButton.title = canCreate
+    ? chatSessionCreating ? "正在新建对话" : "新建对话"
+    : "请更新并重启电脑端后使用手机新建对话";
+  headerCreateChatButton.title = createChatSessionButton.title;
 
   const emptyMessage = !available
     ? "请先连接电脑"
     : chatSessionsLoading
       ? "正在加载对话…"
       : chatSessions.length === 0
-        ? "没有可继续的对话"
+        ? canCreate ? "点击上方＋新建对话" : "没有可继续的对话"
         : "";
   if (emptyMessage) {
     const empty = document.createElement("p");
@@ -1809,7 +2771,10 @@ function renderChatTranscript(messages: readonly RemoteTranscriptMessage[]): voi
   }
   chatLog.replaceChildren();
   for (const message of messages) {
-    appendChatMessage(message.role === "user" ? "user" : "assistant", message.text);
+    const element = appendChatMessage(message.role, message.text);
+    if (message.role === "assistant" && message.blocks.length > 0) {
+      renderRemoteChatBlocks(element, message.blocks, false);
+    }
   }
 }
 
@@ -1853,6 +2818,10 @@ function disableRemoteCapability(capability: RemoteWorkspaceCapability): void {
     setChatModelMenuOpen(false);
     renderChatModelControl();
   }
+  if (capability === "create_chat_session") {
+    renderChatSessionNavigation();
+  }
+  updateChatComposer();
 }
 
 function setWorkspaceCapabilities(overview: {
@@ -1897,7 +2866,7 @@ function canWriteChat(): boolean {
 }
 
 function canSendChat(): boolean {
-  return canWriteChat() && !chatTranscriptLoading;
+  return canWriteChat() && !chatTranscriptLoading && desktopSyncedChatTurn === null;
 }
 
 function updateChatComposer(): void {
@@ -1905,12 +2874,26 @@ function updateChatComposer(): void {
   const connected = phase === "connected" && transport !== null;
   const canWrite = canWriteChat();
   const canSend = canSendChat();
-  chatInput.disabled = !canWrite || chatSending;
-  sendChatButton.disabled = !canSend || chatSending || chatInput.value.trim().length === 0;
+  const active = activeRemoteChatRequest;
+  const desktopBusy = desktopSyncedChatTurn !== null;
+  chatInput.disabled = !canWrite || chatSending || desktopBusy;
+  sendChatButton.hidden = chatSending;
+  sendChatButton.disabled = !canSend || chatSending || desktopBusy || chatInput.value.trim().length === 0;
+  stopChatButton.hidden = !chatSending;
+  stopChatButton.disabled = !chatSending
+    || !active
+    || !canAccessRemoteChat()
+    || !supportsRemoteCapability("stop_chat_message")
+    || active.stopRequested
+    || active.stopRequestInFlight;
   refreshChatSessionsButton.disabled = !granted || !connected || chatSessionsLoading;
+  createChatSessionButton.disabled = !canAccessRemoteChat()
+    || !supportsRemoteCapability("create_chat_session")
+    || chatSessionsLoading
+    || chatSessionCreating;
+  headerCreateChatButton.disabled = createChatSessionButton.disabled;
   refreshWorkspaceButton.disabled = !connected || projectSwitching;
   openWorkspaceButton.disabled = !connected;
-  openProjectWorkspaceButton.disabled = !connected;
   const hint = !granted
     ? "当前配对未获“发送消息”权限。请从电脑重新配对并批准该权限。"
     : !connected
@@ -1918,13 +2901,17 @@ function updateChatComposer(): void {
       : !activeProjectId
         ? "正在读取电脑上的研究工作区…"
       : chatSending
-        ? "正在等待电脑回复…"
+        ? active
+          ? activeRemoteChatStatus(active)
+          : "正在连接电脑上的对话…"
+        : desktopBusy
+          ? "桌面端正在回复，手机已同步显示实时进度。"
         : chatTranscriptLoading
           ? "正在加载所选对话的历史…"
           : !selectedChatSessionId
             ? "请先选择一个桌面对话。"
             : "";
-  chatHint.hidden = canWrite && !chatSending && !chatTranscriptLoading;
+  chatHint.hidden = canWrite && !chatSending && !chatTranscriptLoading && !desktopBusy;
   chatHint.textContent = hint;
   chatInput.placeholder = canWrite
     ? "给 SomniQ 发送消息"
@@ -1941,6 +2928,7 @@ function appendChatMessage(role: "user" | "assistant", text: string, pending = f
   }
   const message = document.createElement("article");
   message.className = `chat-turn chat-${role}${pending ? " pending" : ""}`;
+  message.dataset.role = role;
   setChatMessageContent(message, role, text);
   chatLog.append(message);
   chatLog.scrollTop = chatLog.scrollHeight;
@@ -1958,6 +2946,130 @@ function setChatMessageContent(message: HTMLElement, role: "user" | "assistant",
   message.replaceChildren(content);
 }
 
+function completeRemoteChatBlocks(active: ActiveRemoteChatRequest, terminalText: string): void {
+  completeRemoteBlocks(active.blocks, terminalText);
+}
+
+function completeRemoteBlocks(blocks: RemoteChatBlock[], terminalText: string): void {
+  const streamedBlocksText = blocks
+    .filter((block): block is Extract<RemoteChatBlock, { kind: "text" }> => block.kind === "text")
+    .map((block) => block.text)
+    .join("");
+  if (!terminalText || streamedBlocksText.length >= terminalText.length) return;
+  const remainder = streamedBlocksText.length === 0
+    ? terminalText
+    : terminalText.startsWith(streamedBlocksText)
+      ? terminalText.slice(streamedBlocksText.length)
+      : "";
+  if (!remainder) return;
+  const last = blocks[blocks.length - 1];
+  if (last?.kind === "text") last.text += remainder;
+  else blocks.push({ kind: "text", text: remainder });
+}
+
+function renderRemoteChatBlocks(
+  message: HTMLElement,
+  blocks: readonly RemoteChatBlock[],
+  pending: boolean,
+  trailingStatus?: string,
+): void {
+  const openKeys = new Set(
+    [...message.querySelectorAll<HTMLDetailsElement>(
+      'details[data-block-key][open]:not([data-auto-open="true"])',
+    )]
+      .map((details) => details.dataset.blockKey)
+      .filter((key): key is string => Boolean(key)),
+  );
+  const container = document.createElement("div");
+  container.className = "remote-rich-blocks";
+  const liveThinkingIndex = pending ? latestThinkingBlockIndex(blocks) : -1;
+  blocks.forEach((block, index) => {
+    if (block.kind === "text") {
+      if (!block.text) return;
+      const content = document.createElement("div");
+      content.className = "remote-rich-text remote-markdown";
+      content.append(renderRemoteMarkdown(block.text));
+      container.append(content);
+      return;
+    }
+    const key = block.kind === "tool"
+      ? `tool:${block.toolUseId ?? `${block.name}:${index}`}`
+      : `thinking:${index}`;
+    const details = document.createElement("details");
+    details.dataset.blockKey = key;
+    details.className = block.kind === "thinking" ? "remote-thinking-card" : "remote-tool-card";
+    const summary = document.createElement("summary");
+    const title = document.createElement("span");
+    title.className = "remote-rich-title";
+    if (block.kind === "thinking") {
+      title.textContent = pending && index === blocks.length - 1 ? "思考中" : "思考";
+      summary.append(title);
+      const content = document.createElement("div");
+      content.className = "remote-rich-content remote-markdown";
+      content.append(renderRemoteMarkdown(block.thinking));
+      details.append(summary, content);
+    } else {
+      title.textContent = block.name || "工具";
+      const status = document.createElement("span");
+      status.className = `remote-tool-status${block.isError ? " error" : ""}`;
+      status.textContent = block.output === null ? "运行中" : block.isError ? "失败" : "完成";
+      summary.append(title, status);
+      const content = document.createElement("div");
+      content.className = "remote-rich-content remote-tool-content";
+      if (block.progress) {
+        const progress = document.createElement("p");
+        progress.className = "remote-tool-progress";
+        const elapsed = `${Math.max(0, block.progress.elapsedMs / 1_000).toFixed(1)}s`;
+        progress.textContent = block.progress.message || `已运行 ${elapsed}`;
+        content.append(progress);
+      }
+      appendRemoteToolField(content, "输入", block.input);
+      if (block.progress?.stdoutTail) appendRemoteToolField(content, "实时输出", block.progress.stdoutTail);
+      if (block.progress?.stderrTail) appendRemoteToolField(content, "错误输出", block.progress.stderrTail, true);
+      if (block.output !== null) appendRemoteToolField(content, block.isError ? "错误" : "结果", block.output, block.isError === true);
+      details.append(summary, content);
+    }
+    const liveThinking = block.kind === "thinking" && index === liveThinkingIndex;
+    const liveTool = block.kind === "tool" && index === blocks.length - 1 && block.output === null;
+    const preserveUserOpen = openKeys.has(key);
+    const autoOpen = pending && (liveThinking || liveTool);
+    details.open = preserveUserOpen || autoOpen;
+    if (autoOpen && !preserveUserOpen) {
+      details.dataset.autoOpen = "true";
+    }
+    summary.addEventListener("click", () => {
+      delete details.dataset.autoOpen;
+    });
+    container.append(details);
+  });
+  if (trailingStatus) {
+    const status = document.createElement("p");
+    status.className = "remote-chat-status";
+    status.textContent = trailingStatus;
+    container.append(status);
+  }
+  message.replaceChildren(container);
+}
+
+function appendRemoteToolField(
+  parent: HTMLElement,
+  labelText: string,
+  value: string,
+  error = false,
+): void {
+  if (!value) return;
+  const section = document.createElement("section");
+  section.className = `remote-tool-field${error ? " error" : ""}`;
+  const label = document.createElement("p");
+  label.textContent = labelText;
+  const pre = document.createElement("pre");
+  const code = document.createElement("code");
+  code.textContent = value;
+  pre.append(code);
+  section.append(label, pre);
+  parent.append(section);
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -1970,13 +3082,16 @@ function showTransportState(state: TransportState): void {
     case "negotiating_p2p":
       setStatus("正在尝试端到端 P2P 连接…");
       break;
+    case "verifying_p2p":
+      setStatus("P2P 通道已打开，正在核验实际直连路径…");
+      break;
     case "falling_back":
       setStatus("直连不可用，正在切换至端到端加密中继…");
       break;
     case "connected":
       setPhase("connected");
       connectionDetail.textContent = state.transport === "p2p"
-        ? "已通过端到端 P2P 直连。"
+        ? "已验证端到端 P2P 直连；服务器仅用于信令/STUN，数据不经过中继。"
         : "已通过端到端加密中继连接。";
       setStatus(connectionDetail.textContent);
       break;
@@ -2076,6 +3191,7 @@ function setPhase(next: FlowPhase): void {
   waitingPanel.hidden = next !== "waiting";
   pairedPanel.hidden = next !== "paired";
   connectedPanel.hidden = next !== "connected";
+  syncWorkspaceDrawerPresentation();
   updateChatComposer();
 
   const activeStep = next === "loading" || next === "scan" || next === "confirm"
@@ -2094,9 +3210,16 @@ function setWorkspaceDrawerOpen(open: boolean): void {
   const next = open && phase === "connected";
   workspaceDrawerOpen = next;
   remoteApp.classList.toggle("workspace-drawer-open", next);
-  workspaceDrawer.setAttribute("aria-hidden", String(!next));
-  workspaceBackdrop.hidden = !next;
-  openWorkspaceButton.setAttribute("aria-expanded", String(next));
+  syncWorkspaceDrawerPresentation();
+}
+
+function syncWorkspaceDrawerPresentation(): void {
+  const persistent = phase === "connected" && persistentWorkspaceLayout.matches;
+  const visible = persistent || workspaceDrawerOpen;
+  remoteApp.classList.toggle("workspace-sidebar-persistent", persistent);
+  workspaceDrawer.setAttribute("aria-hidden", String(!visible));
+  workspaceBackdrop.hidden = persistent || !workspaceDrawerOpen;
+  openWorkspaceButton.setAttribute("aria-expanded", String(visible));
 }
 
 function resizeChatComposer(): void {

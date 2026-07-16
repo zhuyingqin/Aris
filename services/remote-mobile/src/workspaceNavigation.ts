@@ -16,8 +16,12 @@ export interface RemoteWorkspaceProject {
  */
 export type RemoteWorkspaceCapability =
   | "set_active_project"
+  | "create_chat_session"
   | "get_chat_model_options"
-  | "set_chat_session_model";
+  | "set_chat_session_model"
+  | "stop_chat_message"
+  | "rich_chat_progress"
+  | "chat_event_sync";
 
 export interface RemoteWorkspaceOverview {
   projects: RemoteWorkspaceProject[];
@@ -28,8 +32,12 @@ export interface RemoteWorkspaceOverview {
 
 const KNOWN_CAPABILITIES = new Set<RemoteWorkspaceCapability>([
   "set_active_project",
+  "create_chat_session",
   "get_chat_model_options",
   "set_chat_session_model",
+  "stop_chat_message",
+  "rich_chat_progress",
+  "chat_event_sync",
 ]);
 
 /**

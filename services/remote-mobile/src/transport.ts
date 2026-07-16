@@ -87,15 +87,36 @@ export interface P2pFirstTransportOptions {
 export type TransportState =
   | { kind: "connecting_signal" }
   | { kind: "negotiating_p2p"; sessionId: string }
-  | { kind: "connected"; transport: "p2p" | "tcp_relay"; sessionId: string; fallbackReason?: P2pFailureReason }
+  | { kind: "verifying_p2p"; sessionId: string }
+  | {
+      kind: "connected";
+      transport: "p2p" | "tcp_relay";
+      sessionId: string;
+      fallbackReason?: P2pFailureReason;
+      directPath?: VerifiedDirectP2pPath;
+    }
   | { kind: "falling_back"; reason: P2pFailureReason }
   | { kind: "closed" }
   | { kind: "failed" };
+
+export type DirectIceCandidateType = "host" | "srflx" | "prflx";
+
+/**
+ * Non-address metadata from the browser's selected ICE candidate pair. This
+ * is attached only after the data channel opened and getStats confirmed that
+ * neither endpoint is a TURN/relay candidate.
+ */
+export interface VerifiedDirectP2pPath {
+  localCandidateType: DirectIceCandidateType;
+  remoteCandidateType: DirectIceCandidateType;
+  protocol: string | null;
+}
 
 export interface ActiveTransport {
   transport: "p2p" | "tcp_relay";
   sessionId: string;
   fallbackReason?: P2pFailureReason;
+  directPath?: VerifiedDirectP2pPath;
 }
 
 /**
@@ -285,7 +306,8 @@ export class P2pFirstTransport {
         if (this.closed || this.p2pSessionId !== sessionId || this.fallingBack) {
           return;
         }
-        this.activate({ transport: "p2p", sessionId });
+        this.emitState({ kind: "verifying_p2p", sessionId });
+        void this.activateVerifiedP2p(peerConnection, sessionId);
       };
       dataChannel.onclose = () => {
         if (this.p2pSessionId === sessionId) {
@@ -465,6 +487,37 @@ export class P2pFirstTransport {
     }
   }
 
+  private async activateVerifiedP2p(
+    peerConnection: RTCPeerConnection,
+    sessionId: string,
+  ): Promise<void> {
+    try {
+      const directPath = await verifyDirectP2pPath(peerConnection);
+      if (
+        this.closed
+        || this.fallingBack
+        || this.peerConnection !== peerConnection
+        || this.p2pSessionId !== sessionId
+      ) {
+        return;
+      }
+      this.activate({ transport: "p2p", sessionId, directPath });
+    } catch (error) {
+      if (
+        this.closed
+        || this.fallingBack
+        || this.peerConnection !== peerConnection
+        || this.p2pSessionId !== sessionId
+      ) {
+        return;
+      }
+      await this.fallBackToRelay(
+        "negotiation_failed",
+        toRemoteError(error, "The selected WebRTC route could not be verified as direct P2P."),
+      );
+    }
+  }
+
   private disposeP2pAttempt(): void {
     const dataChannel = this.dataChannel;
     const peerConnection = this.peerConnection;
@@ -579,6 +632,7 @@ export class P2pFirstTransport {
       transport: active.transport,
       sessionId: active.sessionId,
       ...(active.fallbackReason ? { fallbackReason: active.fallbackReason } : {}),
+      ...(active.directPath ? { directPath: active.directPath } : {}),
     });
     this.resolveConnection?.(active);
     this.resolveConnection = null;
@@ -1121,6 +1175,83 @@ function defaultPeerConnection(configuration: RTCConfiguration | undefined): RTC
     throw new RemoteProtocolError("This mobile platform does not provide WebRTC.");
   }
   return new RTCPeerConnection(configuration);
+}
+
+const DIRECT_ICE_CANDIDATE_TYPES = new Set<DirectIceCandidateType>(["host", "srflx", "prflx"]);
+
+/**
+ * Proves that the open DataChannel selected a direct ICE candidate pair.
+ * Signaling and STUN may still use the configured server, but application data
+ * is never called P2P when either selected candidate is a TURN `relay` route
+ * or when the browser cannot identify the selected pair.
+ */
+export async function verifyDirectP2pPath(
+  peerConnection: RTCPeerConnection,
+): Promise<VerifiedDirectP2pPath> {
+  if (typeof peerConnection.getStats !== "function") {
+    throw new RemoteProtocolError("The browser cannot verify the selected WebRTC route.");
+  }
+  const report = await peerConnection.getStats();
+  const stats = new Map<string, RTCStats>();
+  report.forEach((entry) => stats.set(entry.id, entry));
+
+  const transports = [...stats.values()].filter((entry) => entry.type === "transport");
+  const selectedPairId = transports
+    .map((entry) => stringStat(entry, "selectedCandidatePairId"))
+    .find((value): value is string => value !== null);
+  const candidatePairs = [...stats.values()].filter((entry) => entry.type === "candidate-pair");
+  const selectedPair = (selectedPairId ? stats.get(selectedPairId) : undefined)
+    ?? candidatePairs.find((entry) => booleanStat(entry, "selected") === true)
+    ?? candidatePairs.find((entry) => (
+      stringStat(entry, "state") === "succeeded" && booleanStat(entry, "nominated") === true
+    ));
+  if (!selectedPair || selectedPair.type !== "candidate-pair") {
+    throw new RemoteProtocolError("The browser did not report a selected ICE candidate pair.");
+  }
+
+  const localCandidateId = stringStat(selectedPair, "localCandidateId");
+  const remoteCandidateId = stringStat(selectedPair, "remoteCandidateId");
+  const localCandidate = localCandidateId ? stats.get(localCandidateId) : undefined;
+  const remoteCandidate = remoteCandidateId ? stats.get(remoteCandidateId) : undefined;
+  const localCandidateType = directCandidateType(localCandidate);
+  const remoteCandidateType = directCandidateType(remoteCandidate);
+  if (!localCandidateType || !remoteCandidateType) {
+    throw new RemoteProtocolError("The selected WebRTC route is relayed or cannot be proven direct.");
+  }
+
+  const protocol = normalizeProtocol(
+    stringStat(localCandidate, "protocol")
+      ?? stringStat(selectedPair, "protocol")
+      ?? stringStat(remoteCandidate, "protocol"),
+  );
+  return { localCandidateType, remoteCandidateType, protocol };
+}
+
+function directCandidateType(entry: RTCStats | undefined): DirectIceCandidateType | null {
+  if (!entry || (entry.type !== "local-candidate" && entry.type !== "remote-candidate")) {
+    return null;
+  }
+  const candidateType = stringStat(entry, "candidateType");
+  return candidateType && DIRECT_ICE_CANDIDATE_TYPES.has(candidateType as DirectIceCandidateType)
+    ? candidateType as DirectIceCandidateType
+    : null;
+}
+
+function stringStat(entry: RTCStats | undefined, key: string): string | null {
+  if (!entry) return null;
+  const value = (entry as unknown as Record<string, unknown>)[key];
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function booleanStat(entry: RTCStats, key: string): boolean | null {
+  const value = (entry as unknown as Record<string, unknown>)[key];
+  return typeof value === "boolean" ? value : null;
+}
+
+function normalizeProtocol(value: string | null): string | null {
+  if (!value) return null;
+  const protocol = value.trim().toLowerCase();
+  return /^[a-z0-9+-]{1,16}$/.test(protocol) ? protocol : null;
 }
 
 function boundedTimeout(value: number, label: string): number {

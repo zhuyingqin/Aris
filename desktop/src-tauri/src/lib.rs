@@ -478,6 +478,7 @@ pub fn run() {
             files::file_reveal,
             files::project_chat_starters,
             typeset::latex_compile,
+            typeset::latex_compile_cancel,
             typeset::latex_forward_search,
         ])
         .build(tauri::generate_context!())

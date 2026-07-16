@@ -12,11 +12,12 @@ use super::team_state;
 use super::{
     agent_permission_policy, allowed_tools_for_subagent, discover_skills, execute_agent_with_spawn,
     execute_tool, execute_tool_with_cancel, execute_tool_with_context, extract_latex_diagnostics,
-    final_assistant_text, mvp_tool_specs, persist_agent_terminal_state, preferred_latex_engine,
-    render_latex_template, repl_invokes_latex_compiler, resolve_anthropic_compat_reviewer_model,
-    resolve_existing_workspace_path, resolve_output_workspace_path, resolve_reviewer_model,
-    route_openai_compat_model, run_llm_review, skill_markdown, tex_tool_path,
-    workspace_path_candidate, AgentInput, AgentJob, LatexEnginePreference, LlmReviewInput,
+    final_assistant_text, latex_pdf_state, mvp_tool_specs, persist_agent_terminal_state,
+    preferred_latex_engine, render_latex_template, repl_invokes_latex_compiler,
+    resolve_anthropic_compat_reviewer_model, resolve_existing_workspace_path,
+    resolve_output_workspace_path, resolve_reviewer_model, route_openai_compat_model,
+    run_llm_review, skill_markdown, tex_tool_path, workspace_path_candidate, AgentInput, AgentJob,
+    LatexEnginePreference, LatexOutputFingerprint, LatexPdfState, LlmReviewInput,
     SubagentToolExecutor, ToolRunContext, MAX_WRITE_FILE_CONTENT_CHARS,
 };
 use runtime::{
@@ -137,6 +138,71 @@ fn latex_diagnostics_identify_primary_table_error_and_source_line() {
     assert_eq!(diagnostics.len(), 1);
     assert_eq!(diagnostics[0].code, "table_alignment");
     assert_eq!(diagnostics[0].line, Some(70));
+}
+
+#[test]
+fn latex_diagnostics_preserve_warnings_and_their_source_line() {
+    let diagnostics = extract_latex_diagnostics(
+        "LaTeX Warning: Citation `missing' on input line 12.",
+        "",
+        true,
+        None,
+    );
+
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].severity, "warning");
+    assert_eq!(diagnostics[0].line, Some(12));
+}
+
+#[test]
+fn latex_pdf_provenance_never_treats_an_unchanged_old_pdf_as_current() {
+    let before = LatexOutputFingerprint {
+        length: 100,
+        modified: None,
+    };
+    assert_eq!(
+        latex_pdf_state(
+            false,
+            true,
+            false,
+            false,
+            Some(&before),
+            Some(&before),
+            true
+        ),
+        LatexPdfState::Stale
+    );
+    assert_eq!(
+        latex_pdf_state(false, true, false, false, Some(&before), None, false),
+        LatexPdfState::Missing
+    );
+    assert_eq!(
+        latex_pdf_state(
+            false,
+            true,
+            false,
+            false,
+            Some(&before),
+            Some(&LatexOutputFingerprint {
+                length: 101,
+                modified: None,
+            }),
+            true,
+        ),
+        LatexPdfState::Partial
+    );
+    assert_eq!(
+        latex_pdf_state(
+            true,
+            false,
+            false,
+            false,
+            Some(&before),
+            Some(&before),
+            true
+        ),
+        LatexPdfState::Fresh
+    );
 }
 
 #[test]

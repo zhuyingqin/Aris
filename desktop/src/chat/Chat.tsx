@@ -273,7 +273,12 @@ export default function Chat() {
 
   const turns = currentSession?.turns ?? [];
   const { editingTurnId, focusComposer } = composer;
-  const { status, currentChatBusy, activeModel } = run;
+  const { status, activeModel } = run;
+  // Remote phone turns are rendered from the encrypted bridge rather than the
+  // local stream hook. Treat their visible streaming state as busy too, so the
+  // desktop composer exposes the same Stop control for either origin.
+  const currentChatBusy = run.currentChatBusy
+    || turns.some((turn) => turn.role === "assistant" && turn.streaming);
   const { pendingCommandSelection } = commands;
 
   const workflowTodos = useMemo(() => latestTodosFromTurns(turns), [turns]);

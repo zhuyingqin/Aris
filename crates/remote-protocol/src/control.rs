@@ -12,6 +12,8 @@ const MAX_CHAT_SESSION_LIST_LIMIT: u16 = 200;
 /// count limit prevents one request from forcing it to inspect an arbitrary
 /// number of stored turns.
 const MAX_CHAT_TRANSCRIPT_LIMIT: u16 = 100;
+const MAX_CHAT_EVENT_LIST_LIMIT: u16 = 200;
+const MAX_CHAT_EVENT_WAIT_MILLIS: u32 = 25_000;
 const MAX_STOP_REASON_BYTES: usize = 1_024;
 const MAX_TIMELINE_LIMIT: u16 = 200;
 
@@ -122,13 +124,29 @@ pub enum ControlCommand {
         project_id: String,
         limit: u16,
     },
-    /// Read the plaintext user/assistant projection of one desktop chat.
-    /// Tool inputs, tool results, reasoning, attachments, and permissions are
-    /// intentionally absent from this remote protocol surface.
+    /// Create an empty desktop-owned chat in the active project. The desktop
+    /// chooses the opaque session id and persists both runtime and UI state.
+    CreateChatSession {
+        project_id: String,
+    },
+    /// Read the visible user/assistant projection of one desktop chat. Current
+    /// clients also receive the same bounded thinking and tool cards rendered
+    /// by Desktop; attachments and permission decisions remain desktop-only.
     GetChatTranscript {
         project_id: String,
         session_id: String,
         limit: u16,
+    },
+    /// Wait for visible changes to one selected desktop chat. `after_seq =
+    /// None` returns the latest visible turn plus its current cursor so a turn
+    /// completed while the phone loaded history cannot fall through the gap;
+    /// subsequent calls use that cursor for lossless long polling.
+    GetChatEvents {
+        project_id: String,
+        session_id: String,
+        after_seq: Option<u64>,
+        limit: u16,
+        wait_ms: u32,
     },
     /// Read the verified model choices available to one desktop-owned chat.
     /// Provider credentials and configuration are intentionally absent.
@@ -145,8 +163,7 @@ pub enum ControlCommand {
     },
     SendChatMessage {
         project_id: String,
-        /// The selected desktop-owned chat session, never a new session
-        /// created by a phone request.
+        /// The selected desktop-owned chat session.
         session_id: String,
         message: String,
         idempotency_key: String,
@@ -154,6 +171,19 @@ pub enum ControlCommand {
         /// terminal completion. Missing means false for older mobile clients.
         #[serde(default)]
         stream: bool,
+        /// Opt in to the ordered visible Desktop event stream (text, thinking,
+        /// tool call/progress/result). It is sent only when the desktop first
+        /// advertised [`RemoteCapability::RichChatProgress`].
+        #[serde(default)]
+        rich_stream: bool,
+    },
+    /// Stop one active message that this paired device started in a selected
+    /// desktop-owned conversation. The opaque message id binds cancellation to
+    /// the phone's own remote turn rather than an arbitrary local process.
+    StopChatMessage {
+        project_id: String,
+        session_id: String,
+        message_id: String,
     },
     StopRun {
         run_id: String,
@@ -176,10 +206,13 @@ impl ControlCommand {
             Self::GetTaskTimeline { .. } => DeviceScope::ReadTaskTimeline,
             Self::SetActiveProject { .. }
             | Self::ListChatSessions { .. }
+            | Self::CreateChatSession { .. }
             | Self::GetChatTranscript { .. }
+            | Self::GetChatEvents { .. }
             | Self::GetChatModelOptions { .. }
             | Self::SetChatSessionModel { .. }
-            | Self::SendChatMessage { .. } => DeviceScope::SendChatMessages,
+            | Self::SendChatMessage { .. }
+            | Self::StopChatMessage { .. } => DeviceScope::SendChatMessages,
             Self::StopRun { .. } => DeviceScope::StopRuns,
             Self::GetReviewConclusion { .. } => DeviceScope::ReadReviewConclusions,
         }
@@ -216,6 +249,7 @@ impl ControlCommand {
                 validate_identifier("project_id", project_id)?;
                 validate_chat_limit("chat session list", *limit, MAX_CHAT_SESSION_LIST_LIMIT)
             }
+            Self::CreateChatSession { project_id } => validate_identifier("project_id", project_id),
             Self::GetChatTranscript {
                 project_id,
                 session_id,
@@ -224,6 +258,23 @@ impl ControlCommand {
                 validate_identifier("project_id", project_id)?;
                 validate_identifier("session_id", session_id)?;
                 validate_chat_limit("chat transcript", *limit, MAX_CHAT_TRANSCRIPT_LIMIT)
+            }
+            Self::GetChatEvents {
+                project_id,
+                session_id,
+                after_seq: _,
+                limit,
+                wait_ms,
+            } => {
+                validate_identifier("project_id", project_id)?;
+                validate_identifier("session_id", session_id)?;
+                validate_chat_limit("chat event list", *limit, MAX_CHAT_EVENT_LIST_LIMIT)?;
+                if *wait_ms > MAX_CHAT_EVENT_WAIT_MILLIS {
+                    return Err(ControlValidationError::InvalidChatEventWait {
+                        maximum: MAX_CHAT_EVENT_WAIT_MILLIS,
+                    });
+                }
+                Ok(())
             }
             Self::GetChatModelOptions {
                 project_id,
@@ -247,11 +298,21 @@ impl ControlCommand {
                 message,
                 idempotency_key,
                 stream: _,
+                rich_stream: _,
             } => {
                 validate_identifier("project_id", project_id)?;
                 validate_identifier("session_id", session_id)?;
                 validate_bounded_text("message", message, MAX_CHAT_MESSAGE_BYTES, true)?;
                 validate_identifier("idempotency_key", idempotency_key)
+            }
+            Self::StopChatMessage {
+                project_id,
+                session_id,
+                message_id,
+            } => {
+                validate_identifier("project_id", project_id)?;
+                validate_identifier("session_id", session_id)?;
+                validate_identifier("message_id", message_id)
             }
             Self::StopRun { run_id, reason } => {
                 validate_identifier("run_id", run_id)?;
@@ -372,10 +433,105 @@ pub enum ControlResponseOutcome {
 pub enum RemoteCapability {
     /// The desktop accepts [`ControlCommand::SetActiveProject`].
     SetActiveProject,
+    /// The desktop accepts [`ControlCommand::CreateChatSession`].
+    CreateChatSession,
     /// The desktop accepts [`ControlCommand::GetChatModelOptions`].
     GetChatModelOptions,
     /// The desktop accepts [`ControlCommand::SetChatSessionModel`].
     SetChatSessionModel,
+    /// The desktop accepts [`ControlCommand::StopChatMessage`].
+    StopChatMessage,
+    /// The desktop accepts `rich_stream` and emits ordered visible Chat events.
+    RichChatProgress,
+    /// The desktop supports cursor-based long polling for desktop-originated
+    /// visible chat changes.
+    ChatEventSync,
+}
+
+/// Backward-compatible, non-content-bearing execution stage for paired-device
+/// clients that do not opt in to the visible rich event stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatMessageActivity {
+    Preparing,
+    Compacting,
+    Thinking,
+    Tool,
+}
+
+/// Bounded tool progress already prepared for the Desktop UI. Network
+/// addresses, provider credentials, permission controls, and raw wire traces
+/// are never represented here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChatToolProgress {
+    pub elapsed_ms: u64,
+    pub timeout_ms: Option<u64>,
+    pub pid: Option<u32>,
+    pub stdout_tail: Option<String>,
+    pub stderr_tail: Option<String>,
+    pub near_timeout: bool,
+    pub message: String,
+}
+
+/// One event in the exact visible order produced by the desktop Chat runtime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ChatMessageEvent {
+    TextDelta {
+        delta: String,
+    },
+    ThinkingDelta {
+        delta: String,
+    },
+    ToolCall {
+        tool_use_id: Option<String>,
+        name: String,
+        input: String,
+    },
+    ToolProgress {
+        tool_use_id: Option<String>,
+        name: String,
+        progress: ChatToolProgress,
+    },
+    ToolResult {
+        tool_use_id: Option<String>,
+        name: String,
+        output: String,
+        is_error: bool,
+    },
+}
+
+/// A durable visible block reconstructed from the Desktop Chat UI store.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ChatTranscriptBlock {
+    Text {
+        text: String,
+    },
+    Thinking {
+        thinking: String,
+    },
+    Tool {
+        tool_use_id: Option<String>,
+        name: String,
+        input: String,
+        output: Option<String>,
+        is_error: Option<bool>,
+        progress: Option<ChatToolProgress>,
+    },
+}
+
+/// A visible desktop-originated change in one selected Chat session. Sequence
+/// numbers are durable event-log cursors, not filesystem or process ids.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ChatSessionEvent {
+    UserMessage { seq: u64, text: String },
+    Assistant { seq: u64, event: ChatMessageEvent },
+    Done { seq: u64, text: String },
+    Error { seq: u64, message: String },
+    Reset { seq: u64 },
 }
 
 /// Successful payloads for the reviewed P1 command surface.
@@ -407,6 +563,13 @@ pub enum ControlResult {
         sessions: Vec<ChatSessionSummary>,
         has_more: bool,
     },
+    /// Confirmation containing the desktop-owned conversation created for the
+    /// paired phone. Empty chats may not appear in the normal recent-chat
+    /// index until their first message, so this summary is authoritative.
+    ChatSessionCreated {
+        project_id: String,
+        session: ChatSessionSummary,
+    },
     /// Plain-text transcript projection for one desktop-owned session.
     ChatTranscript {
         project_id: String,
@@ -415,6 +578,14 @@ pub enum ControlResult {
         updated_at_unix_ms: i64,
         messages: Vec<ChatTranscriptMessage>,
         has_more: bool,
+    },
+    /// One bounded batch from the selected desktop Chat's durable visible
+    /// event stream. Empty batches are normal long-poll heartbeats.
+    ChatEvents {
+        project_id: String,
+        session_id: String,
+        events: Vec<ChatSessionEvent>,
+        next_seq: u64,
     },
     /// The per-session model currently used for future mobile turns and its
     /// verified choices. A model label is presentation metadata only.
@@ -435,6 +606,20 @@ pub enum ControlResult {
         project_id: String,
         message_id: String,
     },
+    /// A non-terminal, safe execution-status update for a paired chat turn.
+    ChatMessageActivity {
+        project_id: String,
+        session_id: String,
+        message_id: String,
+        activity: ChatMessageActivity,
+    },
+    /// Ordered rich event used only by clients that requested `rich_stream`.
+    ChatMessageEvent {
+        project_id: String,
+        session_id: String,
+        message_id: String,
+        event: ChatMessageEvent,
+    },
     /// One ordered text fragment produced by an in-flight remote chat turn.
     /// The response keeps the originating request id, while `message_id`
     /// identifies the durable user/assistant turn pair across retries.
@@ -453,6 +638,20 @@ pub enum ControlResult {
         session_id: String,
         message_id: String,
         text: String,
+    },
+    /// The selected remote chat turn was interrupted before a final response.
+    ChatMessageCancelled {
+        project_id: String,
+        session_id: String,
+        message_id: String,
+    },
+    /// The desktop accepted a request to interrupt the selected remote turn.
+    /// The original `send_chat_message` request receives the authoritative
+    /// `chat_message_cancelled` terminal response once cleanup has finished.
+    ChatMessageStopRequested {
+        project_id: String,
+        session_id: String,
+        message_id: String,
     },
     RunStopAccepted {
         run_id: String,
@@ -511,13 +710,16 @@ pub struct ChatModelOption {
     pub description: Option<String>,
 }
 
-/// One displayed chat message. This intentionally carries only visible user
-/// or assistant text, not internal model reasoning or any tool data.
+/// One displayed chat message. `text` remains the backward-compatible plain
+/// projection; `blocks` carries the bounded visible Desktop rendering for
+/// clients that support rich transcript recovery.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChatTranscriptMessage {
     pub role: ChatTranscriptRole,
     pub text: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocks: Vec<ChatTranscriptBlock>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -578,6 +780,8 @@ pub enum ControlValidationError {
     InvalidTimelineLimit { maximum: u16 },
     #[error("{field} limit must be between one and {maximum}")]
     InvalidChatLimit { field: &'static str, maximum: u16 },
+    #[error("chat event wait exceeds maximum {maximum} ms")]
+    InvalidChatEventWait { maximum: u32 },
 }
 
 fn validate_identifier(field: &'static str, value: &str) -> Result<(), ControlValidationError> {
@@ -629,6 +833,7 @@ mod tests {
                 message: "Please summarize the reviewer conclusion.".to_string(),
                 idempotency_key: "mobile-message-1".to_string(),
                 stream: true,
+                rich_stream: true,
             },
             100,
         );
@@ -652,6 +857,7 @@ mod tests {
             message: "   ".to_string(),
             idempotency_key: "mobile-message-1".to_string(),
             stream: true,
+            rich_stream: true,
         };
         assert!(matches!(
             command.validate(),
@@ -713,8 +919,12 @@ mod tests {
             projects: Vec::new(),
             capabilities: vec![
                 RemoteCapability::SetActiveProject,
+                RemoteCapability::CreateChatSession,
                 RemoteCapability::GetChatModelOptions,
                 RemoteCapability::SetChatSessionModel,
+                RemoteCapability::StopChatMessage,
+                RemoteCapability::RichChatProgress,
+                RemoteCapability::ChatEventSync,
             ],
         };
         assert_eq!(
@@ -722,10 +932,100 @@ mod tests {
                 ["capabilities"],
             serde_json::json!([
                 "set_active_project",
+                "create_chat_session",
                 "get_chat_model_options",
                 "set_chat_session_model",
+                "stop_chat_message",
+                "rich_chat_progress",
+                "chat_event_sync",
             ])
         );
+    }
+
+    #[test]
+    fn create_chat_session_is_bounded_and_serializes_stably() {
+        let command = ControlCommand::CreateChatSession {
+            project_id: "project-1".to_string(),
+        };
+        assert_eq!(command.required_scope(), DeviceScope::SendChatMessages);
+        command.validate().expect("valid create command");
+        assert_eq!(
+            serde_json::to_value(command).expect("create command should serialize"),
+            serde_json::json!({
+                "type": "create_chat_session",
+                "project_id": "project-1",
+            })
+        );
+
+        let result = ControlResult::ChatSessionCreated {
+            project_id: "project-1".to_string(),
+            session: ChatSessionSummary {
+                session_id: "chat-1".to_string(),
+                title: "New chat".to_string(),
+                updated_at_unix_ms: 42,
+                model: None,
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(result).expect("create result should serialize")["type"],
+            "chat_session_created"
+        );
+    }
+
+    #[test]
+    fn chat_event_sync_is_bounded_and_serializes_visible_events() {
+        let command = ControlCommand::GetChatEvents {
+            project_id: "project-1".to_string(),
+            session_id: "chat-1".to_string(),
+            after_seq: Some(41),
+            limit: 200,
+            wait_ms: 20_000,
+        };
+        assert_eq!(command.required_scope(), DeviceScope::SendChatMessages);
+        command.validate().expect("valid chat event long poll");
+        assert_eq!(
+            serde_json::to_value(command).expect("chat event command should serialize"),
+            serde_json::json!({
+                "type": "get_chat_events",
+                "project_id": "project-1",
+                "session_id": "chat-1",
+                "after_seq": 41,
+                "limit": 200,
+                "wait_ms": 20_000,
+            })
+        );
+
+        let result = ControlResult::ChatEvents {
+            project_id: "project-1".to_string(),
+            session_id: "chat-1".to_string(),
+            events: vec![ChatSessionEvent::Assistant {
+                seq: 42,
+                event: ChatMessageEvent::ThinkingDelta {
+                    delta: "checking".to_string(),
+                },
+            }],
+            next_seq: 42,
+        };
+        assert_eq!(
+            serde_json::to_value(result).expect("chat events should serialize")["events"][0],
+            serde_json::json!({
+                "kind": "assistant",
+                "seq": 42,
+                "event": { "kind": "thinking_delta", "delta": "checking" },
+            })
+        );
+
+        let excessive_wait = ControlCommand::GetChatEvents {
+            project_id: "project-1".to_string(),
+            session_id: "chat-1".to_string(),
+            after_seq: None,
+            limit: 1,
+            wait_ms: MAX_CHAT_EVENT_WAIT_MILLIS + 1,
+        };
+        assert!(matches!(
+            excessive_wait.validate(),
+            Err(ControlValidationError::InvalidChatEventWait { .. })
+        ));
     }
 
     #[test]
@@ -759,7 +1059,63 @@ mod tests {
         .expect("a pre-stream mobile request should remain valid");
         assert!(matches!(
             legacy_command,
-            ControlCommand::SendChatMessage { stream: false, .. }
+            ControlCommand::SendChatMessage {
+                stream: false,
+                rich_stream: false,
+                ..
+            }
         ));
+    }
+
+    #[test]
+    fn stop_chat_message_is_scoped_and_serializes_with_safe_progress() {
+        let command = ControlCommand::StopChatMessage {
+            project_id: "project-1".to_string(),
+            session_id: "chat-1".to_string(),
+            message_id: "message-1".to_string(),
+        };
+        assert_eq!(command.required_scope(), DeviceScope::SendChatMessages);
+        command.validate().expect("valid stop command");
+        assert_eq!(
+            serde_json::to_value(command).expect("stop command should serialize"),
+            serde_json::json!({
+                "type": "stop_chat_message",
+                "project_id": "project-1",
+                "session_id": "chat-1",
+                "message_id": "message-1",
+            })
+        );
+
+        let activity = ControlResult::ChatMessageActivity {
+            project_id: "project-1".to_string(),
+            session_id: "chat-1".to_string(),
+            message_id: "message-1".to_string(),
+            activity: ChatMessageActivity::Thinking,
+        };
+        assert_eq!(
+            serde_json::to_value(activity).expect("activity should serialize"),
+            serde_json::json!({
+                "type": "chat_message_activity",
+                "project_id": "project-1",
+                "session_id": "chat-1",
+                "message_id": "message-1",
+                "activity": "thinking",
+            })
+        );
+
+        let cancelled = ControlResult::ChatMessageCancelled {
+            project_id: "project-1".to_string(),
+            session_id: "chat-1".to_string(),
+            message_id: "message-1".to_string(),
+        };
+        assert_eq!(
+            serde_json::to_value(cancelled).expect("cancelled should serialize"),
+            serde_json::json!({
+                "type": "chat_message_cancelled",
+                "project_id": "project-1",
+                "session_id": "chat-1",
+                "message_id": "message-1",
+            })
+        );
     }
 }

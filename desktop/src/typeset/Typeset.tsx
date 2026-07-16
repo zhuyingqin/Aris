@@ -23,11 +23,13 @@ import {
   fileWriteText,
   isTauri,
   latexCompile,
+  latexCompileCancel,
   latexForwardSearch,
   onLatexCompileProgress,
   type FileText,
   type FileTreeEntry,
   type LatexCompileResult,
+  type LatexDiagnostic,
   type SyncTexLocation,
 } from "../api/tauri";
 import { isTypesetPreviewMode } from "../api/labPreview";
@@ -60,15 +62,33 @@ Edit the source and compile to refresh the PDF preview.
 \\end{document}
 `;
 
-type CompileStatus = "idle" | "running" | "success" | "error";
+type CompileStatus = "idle" | "running" | "success" | "partial" | "error";
 type CompileResult = LatexCompileResult;
 type CompileLiveLog = { stdout: string; stderr: string; elapsedMs: number };
+type CompileErrorHandling = "stop" | "continue";
 type EditorMode = "code" | "visual";
 // `nonce` forces PdfPage's highlight-flash animation to restart even when the
 // user double-clicks the exact same source position twice in a row.
 type PdfForwardTarget = { location: SyncTexLocation; nonce: number };
 type TypesetResizePanel = "project" | "pdf";
 type TypesetResizeAxis = "x" | "y";
+
+const COMPILE_ERROR_HANDLING_STORAGE_PREFIX = "somniq-typeset-compile-error-handling:";
+
+function compileErrorHandlingStorageKey(projectId?: string): string {
+  return `${COMPILE_ERROR_HANDLING_STORAGE_PREFIX}${projectId ?? "default"}`;
+}
+
+function loadCompileErrorHandling(projectId?: string): CompileErrorHandling {
+  if (typeof window === "undefined") return "stop";
+  try {
+    return window.localStorage.getItem(compileErrorHandlingStorageKey(projectId)) === "continue"
+      ? "continue"
+      : "stop";
+  } catch {
+    return "stop";
+  }
+}
 type OutlineItem = { line: number; level: number; title: string };
 type NumberedOutlineItem = OutlineItem & { number: string };
 type BeamerSlide = { line: number; endLine: number; title: string };
@@ -409,6 +429,7 @@ function compileStatusText(status: CompileStatus, result: CompileResult | null):
     if (!result) return "Compiled";
     return `${result.engine} in ${result.durationMs} ms`;
   }
+  if (status === "partial") return "Compiled with errors";
   if (status === "error") return "Compile failed";
   return "";
 }
@@ -2721,8 +2742,12 @@ interface PdfPreviewProps {
   disabled: boolean;
   logOpen: boolean;
   diagnosticsCount: number;
+  continueOnError: boolean;
+  canCancel: boolean;
   onCompile: () => void;
+  onCancelCompile: () => void;
   onClearCacheCompile: () => void;
+  onSetContinueOnError: (value: boolean) => void;
   onToggleLog: () => void;
   onSourceTextClick: (text: string, context: string) => void;
   onHide?: () => void;
@@ -3161,8 +3186,12 @@ function TypesetPdfPreview({
   disabled,
   logOpen,
   diagnosticsCount,
+  continueOnError,
+  canCancel,
   onCompile,
+  onCancelCompile,
   onClearCacheCompile,
+  onSetContinueOnError,
   onToggleLog,
   onSourceTextClick,
   onHide,
@@ -3323,11 +3352,11 @@ function TypesetPdfPreview({
             <button
               type="button"
               className={`typeset-recompile-btn compile-button ${status}${dirty ? " btn-striped-animated" : ""}`}
-              disabled={disabled}
-              onClick={onCompile}
+              disabled={status === "running" ? !canCancel : disabled}
+              onClick={status === "running" ? onCancelCompile : onCompile}
             >
-              <ToolIcon name="compile" />
-              {status === "running" ? "Compiling" : "Recompile"}
+              <ToolIcon name={status === "running" ? "clear" : "compile"} />
+              {status === "running" ? "Stop compilation" : "Recompile"}
             </button>
             <button
               type="button"
@@ -3360,9 +3389,61 @@ function TypesetPdfPreview({
                 aria-label="Compile options menu"
                 style={compileMenuPosition}
               >
+                <div className="typeset-compile-menu-section" role="presentation">
+                  <span>Compile error handling</span>
+                </div>
+                <button
+                  type="button"
+                  role="menuitemradio"
+                  aria-checked={!continueOnError}
+                  onClick={() => {
+                    onSetContinueOnError(false);
+                    setCompileMenuOpen(false);
+                  }}
+                >
+                  <span>
+                    <strong>Stop on first error</strong>
+                    <small>Fail fast and preserve the last verified PDF.</small>
+                  </span>
+                  {!continueOnError && <b aria-hidden="true">✓</b>}
+                </button>
+                <button
+                  type="button"
+                  role="menuitemradio"
+                  aria-checked={continueOnError}
+                  onClick={() => {
+                    onSetContinueOnError(true);
+                    setCompileMenuOpen(false);
+                  }}
+                >
+                  <span>
+                    <strong>Try to compile despite errors</strong>
+                    <small>Show a newly generated PDF when TeX can recover; it remains marked as having errors.</small>
+                  </span>
+                  {continueOnError && <b aria-hidden="true">✓</b>}
+                </button>
+                <div className="typeset-compile-menu-divider" role="presentation" />
+                {status === "running" && (
+                  <button
+                    type="button"
+                    role="menuitem"
+                    disabled={!canCancel}
+                    onClick={() => {
+                      setCompileMenuOpen(false);
+                      onCancelCompile();
+                    }}
+                  >
+                    <ToolIcon name="clear" />
+                    <span>
+                      <strong>Stop compilation</strong>
+                      <small>Cancel the active TeX process and keep the last verified PDF.</small>
+                    </span>
+                  </button>
+                )}
                 <button
                   type="button"
                   role="menuitem"
+                  disabled={status === "running"}
                   onClick={() => {
                     setCompileMenuOpen(false);
                     onClearCacheCompile();
@@ -3389,6 +3470,12 @@ function TypesetPdfPreview({
             {diagnosticsCount > 0 && <span>{diagnosticsCount}</span>}
           </button>
           {statusText && <span className={`typeset-pdf-status ${status}`}>{statusText}</span>}
+          {result?.pdfState === "stale" && (
+            <span className="typeset-pdf-status stale" role="status">Showing last verified PDF</span>
+          )}
+          {result?.pdfState === "missing" && (
+            <span className="typeset-pdf-status error" role="status">No PDF was produced by this build</span>
+          )}
           {forwardSearchNotice && <span className="typeset-pdf-status error" role="status">{forwardSearchNotice}</span>}
         </div>
         <div className="typeset-preview-actions toolbar-pdf-right">
@@ -3453,17 +3540,22 @@ function CompileLog({
   status,
   error,
   liveLog,
+  onDiagnosticClick,
   onClose,
 }: {
   result: CompileResult | null;
   status: CompileStatus;
   error: string | null;
   liveLog: CompileLiveLog | null;
+  onDiagnosticClick?: (diagnostic: LatexDiagnostic) => void;
   onClose?: () => void;
 }) {
   const text = status === "running"
     ? [error, liveLog?.stderr, liveLog?.stdout].filter(Boolean).join("\n\n").trim()
     : [error, result?.stderr, result?.stdout].filter(Boolean).join("\n\n").trim();
+  const pdfState = result?.pdfState ?? (result?.success ? "fresh" : result?.partialOutput ? "partial" : "missing");
+  const sourceHash = result?.rootSourceHash ?? "";
+  const buildTime = result?.compiledAtUnixMs ? new Date(result.compiledAtUnixMs).toLocaleTimeString() : "not recorded";
   return (
     <section className={`typeset-log new-logs-pane ${status === "error" ? "error" : ""}`} aria-label="Compile log">
       <div className="typeset-log-head">
@@ -3476,6 +3568,35 @@ function CompileLog({
         )}
       </div>
       <div className="logs-pane-content">
+        {result?.diagnostics && result.diagnostics.length > 0 && (
+          <div className="typeset-diagnostics" aria-label="LaTeX diagnostics">
+            {result.diagnostics.map((diagnostic, index) => {
+              const location = diagnostic.filePath
+                ? `${diagnostic.filePath}${diagnostic.line ? `:${diagnostic.line}` : ""}`
+                : diagnostic.line ? `line ${diagnostic.line}` : "";
+              return (
+                <button
+                  key={`${diagnostic.code}-${diagnostic.filePath ?? "root"}-${diagnostic.line ?? index}`}
+                  type="button"
+                  className={`typeset-diagnostic ${diagnostic.severity}`}
+                  onClick={() => onDiagnosticClick?.(diagnostic)}
+                  disabled={!onDiagnosticClick || (!diagnostic.filePath && !diagnostic.line)}
+                >
+                  <span>{diagnostic.severity}</span>
+                  <strong>{diagnostic.message}</strong>
+                  {location && <small>{location}</small>}
+                </button>
+              );
+            })}
+          </div>
+        )}
+        {result && (
+          <div className="typeset-build-provenance" aria-label="PDF build provenance">
+            <span>PDF: {pdfState}</span>
+            <span>Built {buildTime}</span>
+            <code title={sourceHash}>source {sourceHash.slice(0, 12) || "unavailable"}</code>
+          </div>
+        )}
         <pre>{text || (status === "running" ? "Waiting for TeX Live output..." : "No diagnostics.")}</pre>
       </div>
     </section>
@@ -4907,6 +5028,8 @@ export default function Typeset() {
   const [saving, setSaving] = useState(false);
   const [compileStatus, setCompileStatus] = useState<CompileStatus>("idle");
   const [compileResult, setCompileResult] = useState<CompileResult | null>(null);
+  const [activeCompileRunId, setActiveCompileRunId] = useState<string | null>(null);
+  const [compileErrorHandling, setCompileErrorHandling] = useState<CompileErrorHandling>(() => loadCompileErrorHandling(currentProject?.id));
   const [compileLiveLog, setCompileLiveLog] = useState<CompileLiveLog | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
@@ -4957,6 +5080,19 @@ export default function Typeset() {
   const compileRef = useRef<() => void>(() => {});
   const compileSequenceRef = useRef(0);
 
+  useEffect(() => {
+    setCompileErrorHandling(loadCompileErrorHandling(currentProject?.id));
+  }, [currentProject?.id]);
+
+  const setCompileErrorHandlingPreference = useCallback((value: CompileErrorHandling) => {
+    setCompileErrorHandling(value);
+    try {
+      window.localStorage.setItem(compileErrorHandlingStorageKey(currentProject?.id), value);
+    } catch {
+      // The preference remains active for this session if local storage is unavailable.
+    }
+  }, [currentProject?.id]);
+
   const dirty = Boolean(loaded && draft !== loaded.content);
   const outline = useMemo(() => outlineFor(draft), [draft]);
   const numberedOutline = useMemo(() => numberedOutlineFor(outline), [outline]);
@@ -4976,11 +5112,12 @@ export default function Typeset() {
   const activeWorkDir = useMemo(() => workDirForSource(sourcePath), [sourcePath]);
   const browserPreviewMode = !isTauri();
   const diagnosticsCount = useMemo(() => {
+    if (compileResult?.diagnostics?.length) return compileResult.diagnostics.length;
     const text = [error, compileResult?.stderr].filter(Boolean).join("\n").trim();
     if (!text) return 0;
     const count = text.split(/\r?\n/).filter((line) => line.trim()).length;
     return Math.min(count, 9);
-  }, [compileResult?.stderr, error]);
+  }, [compileResult?.diagnostics, compileResult?.stderr, error]);
   const activeEditorView = editorMode === "code" ? editorRef.current?.view : visualViewRef.current;
   const canUndoDraft = Boolean(activeEditorView && undoDepth(activeEditorView.state) > 0);
   const canRedoDraft = Boolean(activeEditorView && redoDepth(activeEditorView.state) > 0);
@@ -5041,7 +5178,7 @@ export default function Typeset() {
     }
   }, [currentSourceLine, draft, editorMode]);
 
-  const openSource = useCallback(async (path: string) => {
+  const openSource = useCallback(async (path: string, initialLine = 1) => {
     setLoading(true);
     setError(null);
     try {
@@ -5051,7 +5188,7 @@ export default function Typeset() {
       setLoaded(file);
       resetDraft(file.content);
       setVisualPdfCursor(null);
-      setCurrentSourceLine(1);
+      setCurrentSourceLine(initialLine);
       setCompileStatus("idle");
       setCompileResult(null);
       setCompileLiveLog(null);
@@ -5204,6 +5341,7 @@ export default function Typeset() {
     const openPath = sourcePath;
     const runId = `typeset-${Date.now()}-${++compileSequenceRef.current}`;
     setCompileStatus("running");
+    setActiveCompileRunId(runId);
     setCompileResult(null);
     setCompileLiveLog({ stdout: "", stderr: "", elapsedMs: 0 });
     setError(null);
@@ -5213,6 +5351,7 @@ export default function Typeset() {
     if (!saved) {
       setCompileStatus("idle");
       setCompileLiveLog(null);
+      setActiveCompileRunId(null);
       return;
     }
     const compilePath = saved.path || openPath;
@@ -5224,14 +5363,21 @@ export default function Typeset() {
         }
       });
       const outputPath = outputPathFor(compilePath);
-      const result = cleanCache
-        ? await latexCompile(compilePath, outputPath, true, runId)
-        : await latexCompile(compilePath, outputPath, false, runId);
+      const result = await latexCompile(
+        compilePath,
+        outputPath,
+        cleanCache,
+        runId,
+        compileErrorHandling === "continue",
+      );
       setCompileResult(result);
-      setCompileStatus(result.success ? "success" : "error");
+      setCompileStatus(result.success ? "success" : result.partialOutput ? "partial" : "error");
       setLogOpen(true);
-      setPreviewPath(result.outputPath || outputPath);
-      setRefreshKey((key) => key + 1);
+      const pdfState = result.pdfState ?? (result.success ? "fresh" : result.partialOutput ? "partial" : "missing");
+      if (pdfState === "fresh" || pdfState === "partial") {
+        setPreviewPath(result.outputPath || outputPath);
+        setRefreshKey((key) => key + 1);
+      }
       setTreeRefreshKey((key) => key + 1);
     } catch (compileError) {
       setCompileStatus("error");
@@ -5239,8 +5385,16 @@ export default function Typeset() {
       setLogOpen(true);
     } finally {
       unlisten?.();
+      setActiveCompileRunId((active) => active === runId ? null : active);
     }
   };
+
+  const cancelCompile = useCallback(() => {
+    if (!activeCompileRunId) return;
+    void latexCompileCancel(activeCompileRunId).catch((cancelError) => {
+      setError(String(cancelError));
+    });
+  }, [activeCompileRunId]);
   compileRef.current = () => {
     void compile();
   };
@@ -5314,6 +5468,19 @@ export default function Typeset() {
       if (editorMode === "code") scrollCodeEditorToLine(view, line);
     }, 0);
   }, [draft, editorMode]);
+
+  const openDiagnostic = useCallback((diagnostic: LatexDiagnostic) => {
+    const line = diagnostic.line ?? 1;
+    const reportedPath = diagnostic.filePath?.trim();
+    if (!reportedPath || !sourcePath || normalizePath(reportedPath) === normalizePath(sourcePath) || basename(reportedPath) === basename(sourcePath)) {
+      navigateToLine(line);
+      return;
+    }
+    const targetPath = /^(?:[A-Za-z]:[\\/]|[\\/])/.test(reportedPath)
+      ? reportedPath
+      : `${dirname(sourcePath)}/${reportedPath}`.replace(/\\/g, "/");
+    void openSource(targetPath, line);
+  }, [navigateToLine, openSource, sourcePath]);
 
   const openCodeRange = useCallback((start: number, end: number) => {
     const safeStart = clampNumber(start, 0, draft.length);
@@ -5877,18 +6044,22 @@ export default function Typeset() {
                     status={compileStatus}
                     result={compileResult}
                     dirty={dirty}
-                    disabled={!sourcePath || saving || loading || compileStatus === "running"}
+                    disabled={!sourcePath || saving || loading}
                     logOpen={logOpen}
                     diagnosticsCount={diagnosticsCount}
+                    continueOnError={compileErrorHandling === "continue"}
+                    canCancel={Boolean(activeCompileRunId)}
                     onCompile={() => void compile()}
+                    onCancelCompile={cancelCompile}
                     onClearCacheCompile={() => void compile(true)}
+                    onSetContinueOnError={(value) => setCompileErrorHandlingPreference(value ? "continue" : "stop")}
                     onToggleLog={() => setLogOpen((open) => !open)}
                     onSourceTextClick={openSourceForPdfText}
                     onHide={() => setPdfPanelVisible(false)}
                     forwardTarget={pdfForwardTarget}
                     forwardSearchNotice={forwardSearchNotice}
                   />
-                  {logOpen && <CompileLog result={compileResult} status={compileStatus} error={error} liveLog={compileLiveLog} onClose={() => setLogOpen(false)} />}
+                  {logOpen && <CompileLog result={compileResult} status={compileStatus} error={error} liveLog={compileLiveLog} onDiagnosticClick={openDiagnostic} onClose={() => setLogOpen(false)} />}
                 </div>
               </>
             )}

@@ -535,6 +535,23 @@ pub fn record_session_snapshot(session_id: &str, reason: &str, session: &Session
 
 pub fn read_events_for_session(session_id: &str) -> Result<Vec<ChatEventLogEntry>, String> {
     let path = chat_event_log_path(session_id)?;
+    read_events_from_path(session_id, &path)
+}
+
+/// Read a project-scoped event log without changing the process-wide live
+/// binding used by an in-flight Chat turn.
+pub fn read_events_for_session_in_dir(
+    session_id: &str,
+    sessions_dir: &Path,
+) -> Result<Vec<ChatEventLogEntry>, String> {
+    validate_session_id(session_id)?;
+    read_events_from_path(
+        session_id,
+        &sessions_dir.join(format!("{session_id}.events.jsonl")),
+    )
+}
+
+fn read_events_from_path(session_id: &str, path: &Path) -> Result<Vec<ChatEventLogEntry>, String> {
     let file = match fs::File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
