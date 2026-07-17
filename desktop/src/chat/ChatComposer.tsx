@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { fileSearch, isTauri } from "../api/tauri";
 import { useStore } from "../store";
 import type { ChatAttachment, DesktopCommandSpec, PermissionModeView, SkillMeta } from "../types";
@@ -45,10 +45,11 @@ function loadRecent(key: string): string[] {
   }
 }
 
-function remember(key: string, value: string) {
-  const next = [value, ...loadRecent(key).filter((item) => item !== value)].slice(0, 6);
+function rememberRecent(key: string, value: string, recent: string[]): string[] {
+  const next = [value, ...recent.filter((item) => item !== value)].slice(0, 6);
   localStorage.setItem(key, JSON.stringify(next));
   localStorage.removeItem(legacyRecentKey(key));
+  return next;
 }
 
 function isExactDesktopCommand(input: string, command: DesktopCommandSpec | undefined): boolean {
@@ -273,7 +274,7 @@ interface Props {
   contextStatus?: ContextStatusView | null;
 }
 
-export default function ChatComposer({
+function ChatComposer({
   input,
   commands,
   skills,
@@ -319,15 +320,19 @@ export default function ChatComposer({
   const [permMenuOpen, setPermMenuOpen] = useState(false);
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const [reasoningMenuOpen, setReasoningMenuOpen] = useState(false);
+  // These values change only when a picker selection is made. Keeping them in
+  // state avoids parsing localStorage (and invalidating the picker memo) for
+  // every streamed assistant update.
+  const [recentSkills, setRecentSkills] = useState(() => loadRecent(RECENT_SKILLS_KEY));
+  const [recentFiles, setRecentFiles] = useState(() => loadRecent(RECENT_FILES_KEY));
   const permMenuRef = useRef<HTMLDivElement>(null);
   const modelMenuRef = useRef<HTMLDivElement>(null);
   const reasoningMenuRef = useRef<HTMLDivElement>(null);
   const fileSearchVersion = useRef(0);
-  const recentSkills = loadRecent(RECENT_SKILLS_KEY);
-  const recentFiles = loadRecent(RECENT_FILES_KEY);
   const permissionLabel = permission ? (copy.permissionLabels[permission.mode] ?? permission.label) : "";
 
   const slashItems = useMemo<SlashPickerItem[]>(() => {
+    if (pickerMode !== "skill") return [];
     const commandMatches = commands
       .map((command, index) => rankSlashItem(
         pickerQuery,
@@ -365,10 +370,12 @@ export default function ChatComposer({
       .map(({ item }) => item)
       .filter((item) => !recentNames.has(item.skill.name));
     return [...commandMatches, ...recent, ...rest];
-  }, [commands, pickerQuery, recentSkills, skills]);
+  }, [commands, pickerMode, pickerQuery, recentSkills, skills]);
   const fileItems = useMemo(
-    () => [...recentFiles.filter((path) => fuzzyMatch(pickerQuery, path)), ...fileResults.filter((path) => !recentFiles.includes(path))],
-    [fileResults, pickerQuery, recentFiles],
+    () => pickerMode === "file"
+      ? [...recentFiles.filter((path) => fuzzyMatch(pickerQuery, path)), ...fileResults.filter((path) => !recentFiles.includes(path))]
+      : [],
+    [fileResults, pickerMode, pickerQuery, recentFiles],
   );
   const activeItems = pickerMode === "skill" ? slashItems : fileItems;
   const isCommandInput = input.trim().startsWith("/");
@@ -483,13 +490,15 @@ export default function ChatComposer({
 
   const chooseSlashItem = (item: SlashPickerItem | undefined) => {
     if (!item) return;
-    if (item.kind === "skill") remember(RECENT_SKILLS_KEY, item.skill.name);
+    if (item.kind === "skill") {
+      setRecentSkills((current) => rememberRecent(RECENT_SKILLS_KEY, item.skill.name, current));
+    }
     replaceActiveToken(`/${item.kind === "command" ? item.command.name : item.skill.name} `);
   };
 
   const chooseFile = (path: string | undefined) => {
     if (!path) return;
-    remember(RECENT_FILES_KEY, path);
+    setRecentFiles((current) => rememberRecent(RECENT_FILES_KEY, path, current));
     onAttachmentsChange([
       ...attachments.filter((attachment) => attachment.path !== path),
       { id: makeId("attachment"), kind: "file", name: basename(path), path },
@@ -834,3 +843,5 @@ export default function ChatComposer({
     </div>
   );
 }
+
+export default memo(ChatComposer);

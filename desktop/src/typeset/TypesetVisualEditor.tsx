@@ -276,10 +276,12 @@ export function TypesetVisualEditor({
     const view = viewRef.current;
     if (!view || !pdfCursor) return;
     const safeStart = Math.max(0, Math.min(pdfCursor.start, view.state.doc.length));
-    const safeEnd = Math.max(safeStart, Math.min(pdfCursor.end, view.state.doc.length));
     view.focus();
     view.dispatch({
-      selection: { anchor: safeStart, head: safeEnd },
+      // Reverse search is navigation, not a text-selection command. A collapsed
+      // cursor keeps the active source line visible without painting a large
+      // selection when one PDF text item maps to a whole paragraph.
+      selection: { anchor: safeStart },
       effects: EditorView.scrollIntoView(safeStart, { y: "center" }),
     });
   }, [pdfCursor]);
@@ -320,8 +322,8 @@ const visualTheme = EditorView.theme({
     overflow: "visible",
   },
   ".cm-gutters": {
-    paddingRight: "14px",
-    minWidth: "42px",
+    paddingRight: "6px",
+    minWidth: "34px",
     borderRight: "0",
     backgroundColor: "transparent",
     color: "var(--visual-muted)",
@@ -330,8 +332,8 @@ const visualTheme = EditorView.theme({
     lineHeight: "inherit",
   },
   ".cm-gutterElement": {
-    padding: "0 8px 0 0",
-    minWidth: "32px",
+    padding: "0 4px 0 0",
+    minWidth: "26px",
     textAlign: "right",
   },
   ".cm-content": {
@@ -345,6 +347,9 @@ const visualTheme = EditorView.theme({
   },
   ".cm-cursor, .cm-dropCursor": {
     borderLeftColor: "var(--visual-accent-bright)",
+  },
+  ".cm-activeLine, .cm-activeLineGutter": {
+    backgroundColor: "rgba(47, 139, 58, 0.08)",
   },
   "&.cm-editor .cm-selectionBackground, .cm-selectionBackground": {
     backgroundColor: "rgba(47, 139, 58, 0.18)",
@@ -645,8 +650,8 @@ const visualTheme = EditorView.theme({
     paddingBottom: "31px",
     paddingLeft: "16px",
     paddingRight: "16px",
-    borderLeft: "3px solid var(--visual-link)",
-    borderRadius: "0 8px 8px 0",
+    borderLeft: "0",
+    borderRadius: "4px",
     background: "var(--visual-widget-bg)",
     color: "var(--visual-muted-2)",
     font: '14px/1.3 "Helvetica Neue", Arial, sans-serif',

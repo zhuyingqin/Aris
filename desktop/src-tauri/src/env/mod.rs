@@ -99,6 +99,34 @@ pub async fn get_or_probe(force_refresh: bool) -> Result<Vec<LocalEnvironmentChe
     Ok(checks)
 }
 
+/// Probe one runtime without paying the cost of the full environment scan.
+/// Typeset uses this path so opening its document library never waits on the
+/// comparatively slow MATLAB probe.
+pub async fn get_or_probe_one(id: &str) -> Result<LocalEnvironmentCheck, String> {
+    if let Some(cached) = SESSION_CACHE
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .map_err(|error| error.to_string())?
+        .as_ref()
+        .and_then(|checks| checks.iter().find(|check| check.id == id))
+        .cloned()
+    {
+        return Ok(cached);
+    }
+
+    if id == "latex" {
+        return tauri::async_runtime::spawn_blocking(probe::latex_check)
+            .await
+            .map_err(|error| error.to_string());
+    }
+
+    get_or_probe(false)
+        .await?
+        .into_iter()
+        .find(|check| check.id == id)
+        .ok_or_else(|| format!("unknown environment runtime: {id}"))
+}
+
 /// Invalidate the in-memory session cache so the next call will re-validate
 /// against the disk cache.
 pub fn invalidate_session_cache() {

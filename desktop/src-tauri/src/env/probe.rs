@@ -163,7 +163,7 @@ pub(crate) fn first_successful_probe(
     }
 }
 
-fn latex_check() -> LocalEnvironmentCheck {
+pub(crate) fn latex_check() -> LocalEnvironmentCheck {
     let candidates: Vec<(String, Vec<&'static str>)> = vec![
         ("latexmk".to_string(), vec!["--version"]),
         ("xelatex".to_string(), vec!["--version"]),

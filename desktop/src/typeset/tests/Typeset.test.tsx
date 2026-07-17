@@ -23,12 +23,14 @@ const mocks = vi.hoisted(() => ({
   latexCompile: vi.fn(),
   latexCompileCancel: vi.fn(),
   latexForwardSearch: vi.fn(),
+  localEnvironmentCheck: vi.fn(),
   onLatexCompileProgress: vi.fn(),
   projectAdd: vi.fn(),
   projectsGet: vi.fn(),
   projectsReorder: vi.fn(),
   projectSetCurrent: vi.fn(),
   stateDir: vi.fn(),
+  typesetListDocuments: vi.fn(),
 }));
 
 const pdfMocks = vi.hoisted(() => {
@@ -78,12 +80,14 @@ vi.mock("../../api/tauri", () => ({
   latexCompile: mocks.latexCompile,
   latexCompileCancel: mocks.latexCompileCancel,
   latexForwardSearch: mocks.latexForwardSearch,
+  localEnvironmentCheck: mocks.localEnvironmentCheck,
   onLatexCompileProgress: mocks.onLatexCompileProgress,
   projectAdd: mocks.projectAdd,
   projectsGet: mocks.projectsGet,
   projectsReorder: mocks.projectsReorder,
   projectSetCurrent: mocks.projectSetCurrent,
   stateDir: mocks.stateDir,
+  typesetListDocuments: mocks.typesetListDocuments,
 }));
 
 vi.mock("../../api/labPreview", async (importOriginal) => {
@@ -163,6 +167,8 @@ beforeEach(() => {
   pdfMocks.getDocument.mockReset().mockReturnValue({ promise: Promise.resolve(pdfMocks.document) });
   useStore.setState({
     tab: "typeset",
+    language: "en",
+    pendingChatInput: null,
     projects: [project],
     currentProject: project,
     projectBusy: false,
@@ -184,6 +190,10 @@ beforeEach(() => {
     isDir: false,
   }));
   mocks.fileReveal.mockReset().mockResolvedValue(undefined);
+  mocks.typesetListDocuments.mockReset().mockResolvedValue([
+    { path: "sections/local.tex", title: "local.tex", kind: "article", modifiedEpochMs: 3, compileState: "missing" },
+    { path: "paper.tex", title: "paper.tex", kind: "article", modifiedEpochMs: 2, compileState: "missing" },
+  ]);
   mocks.latexCompileCancel.mockReset().mockResolvedValue(undefined);
   mocks.fileWriteText.mockReset().mockImplementation((path: string, content: string) => Promise.resolve({ path, content, bytes: content.length }));
   mocks.latexCompile.mockReset().mockResolvedValue({ success: true, outputPath: "paper.pdf" });
@@ -192,6 +202,16 @@ beforeEach(() => {
     found: true,
     locations: [{ page: 1, pointX: 50, pointY: 60, boxLeft: 40, boxTop: 55, boxWidth: 100, boxHeight: 12 }],
     stderr: "",
+  });
+  mocks.localEnvironmentCheck.mockReset().mockResolvedValue({
+    id: "latex",
+    label: "LaTeX",
+    category: "Typesetting",
+    status: "ready",
+    available: true,
+    version: "TeX Live",
+    path: "latexmk",
+    message: "Available",
   });
 });
 
@@ -202,6 +222,11 @@ afterEach(() => {
 
 describe("Typeset start page", () => {
   function mockProjectFiles() {
+    mocks.typesetListDocuments.mockResolvedValue([
+      { path: "sections/local.tex", title: "local.tex", kind: "article", modifiedEpochMs: 300, compileState: "fresh" },
+      { path: "drafts/other.tex", title: "other.tex", kind: "report", modifiedEpochMs: 200, compileState: "stale" },
+      { path: "paper.tex", title: "paper.tex", kind: "article", modifiedEpochMs: 100, compileState: "missing" },
+    ]);
     mocks.fileSearch.mockImplementation((pattern: string) => {
       if (pattern.endsWith("*.tex")) return Promise.resolve(["sections/local.tex", "drafts/other.tex", "paper.tex"]);
       return Promise.resolve([]);
@@ -242,26 +267,76 @@ describe("Typeset start page", () => {
     fireEvent.click(button);
   }
 
-  it("shows whole-project scan results at root and current-folder contents after entering a folder", async () => {
+  it("shows root documents and filters the document library", async () => {
     mockProjectFiles();
 
-    const { container } = render(<Typeset />);
+    render(<Typeset />);
 
     expect(await screen.findByText("other.tex")).toBeTruthy();
     expect(screen.getByText("paper.tex")).toBeTruthy();
     expect(screen.getByText("local.tex")).toBeTruthy();
 
-    const folderList = container.querySelector<HTMLElement>(".typeset-folder-list");
-    expect(folderList).toBeTruthy();
-    const sectionsButton = within(folderList!).getByText("sections").closest("button");
-    expect(sectionsButton).toBeTruthy();
-    fireEvent.click(sectionsButton!);
-
-    await waitFor(() => expect(mocks.fileListDir).toHaveBeenCalledWith("sections"));
-    await waitFor(() => expect(screen.queryByText("other.tex")).toBeNull());
+    fireEvent.click(screen.getByRole("button", { name: "Reports" }));
+    expect(await screen.findByText("other.tex")).toBeTruthy();
     expect(screen.queryByText("paper.tex")).toBeNull();
-    expect(screen.getByText("local.tex")).toBeTruthy();
-    expect(within(folderList!).getByText("nested")).toBeTruthy();
+
+    fireEvent.change(screen.getByPlaceholderText("Search by title or path"), { target: { value: "local" } });
+    expect(screen.queryByText("other.tex")).toBeNull();
+    expect(screen.queryByText("local.tex")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "All documents" }));
+    expect(await screen.findByText("local.tex")).toBeTruthy();
+  });
+
+  it("follows the global Chinese language setting", async () => {
+    mockProjectFiles();
+    useStore.setState({ language: "cn" });
+
+    render(<Typeset />);
+
+    expect(await screen.findByRole("heading", { name: "全部文档" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "新建 LaTeX 文档" })).toBeTruthy();
+    expect(screen.getByPlaceholderText("按标题或路径搜索")).toBeTruthy();
+    expect(screen.getByText("已编译")).toBeTruthy();
+    expect(screen.getAllByText("需要编译").length).toBeGreaterThan(0);
+  });
+
+  it("hands a missing LaTeX toolchain to Chat for installation", async () => {
+    mockProjectFiles();
+    mocks.localEnvironmentCheck.mockResolvedValue({
+      id: "latex",
+      label: "LaTeX",
+      category: "Typesetting",
+      status: "missing",
+      available: false,
+      version: null,
+      path: null,
+      message: "Not installed",
+    });
+
+    render(<Typeset />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Install with Chat" }));
+
+    expect(useStore.getState().tab).toBe("chat");
+    expect(useStore.getState().pendingChatInput).toContain("LaTeX toolchain");
+    expect(useStore.getState().pendingChatInput).toContain("ask for my approval");
+  });
+
+  it("creates a presentation root document from the library template", async () => {
+    mockProjectFiles();
+
+    render(<Typeset />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "New LaTeX document" }));
+    fireEvent.change(screen.getByLabelText("Document title"), { target: { value: "Research talk" } });
+    fireEvent.click(screen.getByRole("radio", { name: /Presentation/i }));
+    fireEvent.click(screen.getByRole("button", { name: "Create document" }));
+
+    await waitFor(() => expect(mocks.fileCreateText).toHaveBeenCalledWith(
+      "slides/Research-talk/main.tex",
+      expect.stringContaining("\\documentclass[aspectratio=169]{beamer}"),
+    ));
   });
 
   it("returns to the source start page after opening a file", async () => {
@@ -277,8 +352,8 @@ describe("Typeset start page", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Home" }));
 
-    expect(await screen.findByText("Folders")).toBeTruthy();
-    expect(screen.getByText("Sources")).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "All documents" })).toBeTruthy();
+    expect(screen.getByPlaceholderText("Search by title or path")).toBeTruthy();
     expect(screen.queryByText("Open LaTeX source")).toBeNull();
     expect(screen.getByText("other.tex")).toBeTruthy();
     expect(screen.getByText("paper.tex")).toBeTruthy();
@@ -359,6 +434,51 @@ describe("Typeset start page", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: "Compile options" })).toBeTruthy());
 
     expect(screen.getByRole("button", { name: "Compile options" }).querySelector("svg")).toBeTruthy();
+  });
+
+  it("selects PDF zoom from the toolbar and displays current and total pages", async () => {
+    mockProjectFiles();
+    pdfMocks.document.numPages = 3;
+    const source = "\\documentclass{article}\n\\begin{document}\nBody text\n\\end{document}";
+    mocks.fileReadText.mockResolvedValueOnce({ path: "paper.tex", content: source, bytes: source.length });
+
+    const { container } = render(<Typeset />);
+
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+    await recompileOpenSource();
+
+    const pageInput = await screen.findByRole("textbox", { name: "Current PDF page" }) as HTMLInputElement;
+    expect(pageInput.value).toBe("1");
+    expect(screen.getByLabelText("3 PDF pages").textContent).toBe("/ 3");
+
+    fireEvent.click(screen.getByRole("button", { name: /PDF zoom \d+%/ }));
+    const zoomMenu = await screen.findByRole("menu", { name: "PDF zoom menu" });
+    fireEvent.click(within(zoomMenu).getByRole("menuitemradio", { name: "150%" }));
+    expect(screen.getByRole("button", { name: "PDF zoom 150%" })).toBeTruthy();
+
+    const pages = container.querySelectorAll<HTMLElement>(".typeset-pdf-page");
+    const scroll = container.querySelector<HTMLElement>(".typeset-pdf-scroll");
+    expect(pages).toHaveLength(3);
+    expect(scroll).toBeTruthy();
+    Object.defineProperty(scroll!, "clientHeight", { configurable: true, value: 120 });
+    pages.forEach((page, index) => {
+      Object.defineProperty(page, "offsetTop", { configurable: true, value: index * 160 });
+      Object.defineProperty(page, "offsetHeight", { configurable: true, value: 120 });
+    });
+    scroll!.scrollTop = 180;
+    fireEvent.scroll(scroll!);
+
+    await waitFor(() => expect(pageInput.value).toBe("2"));
+
+    const scrollTo = vi.fn();
+    Object.defineProperty(scroll!, "scrollTo", { configurable: true, value: scrollTo });
+    fireEvent.focus(pageInput);
+    fireEvent.change(pageInput, { target: { value: "3" } });
+    fireEvent.keyDown(pageInput, { key: "Enter" });
+
+    expect(pageInput.value).toBe("3");
+    expect(scrollTo).toHaveBeenCalledWith({ top: 308, behavior: "auto" });
   });
 
   it("updates the compile log from progress events before compilation completes", async () => {
@@ -1522,7 +1642,7 @@ describe("Typeset start page", () => {
       expect(container.querySelector(".typeset-editor-pane.visual-mode")).toBeTruthy();
       expect(container.querySelector(".lab-editor-input")).toBeNull();
       expect(view?.state.selection.main.from).toBe(expectedStart);
-      expect(view?.state.selection.main.to).toBe(expectedStart + "Body text".length);
+      expect(view?.state.selection.main.to).toBe(expectedStart);
     });
   });
 
@@ -1671,6 +1791,41 @@ describe("Typeset start page", () => {
     expect(within(outline).getByRole("button", { name: /Method/ }).getAttribute("aria-current")).toBe("location");
   });
 
+  it("uses Beamer frame titles when the document has no section outline", async () => {
+    mockProjectFiles();
+    const source = [
+      "\\documentclass{beamer}",
+      "\\begin{document}",
+      "\\begin{frame}",
+      "\\titlepage",
+      "\\end{frame}",
+      "\\begin{frame}{Method}",
+      "Method body.",
+      "\\end{frame}",
+      "\\end{document}",
+    ].join("\n");
+    mocks.fileReadText.mockResolvedValueOnce({ path: "paper.tex", content: source, bytes: source.length });
+
+    const { container } = render(<Typeset />);
+
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+    fireEvent.click(screen.getByRole("button", { name: "Exit slide focus" }));
+
+    const outline = screen.getByLabelText("Document outline");
+    expect(within(outline).getByRole("button", { name: /Title slide/ })).toBeTruthy();
+    const method = within(outline).getByRole("button", { name: /Method/ });
+    fireEvent.click(method);
+
+    const expectedOffset = source.indexOf("\\begin{frame}{Method}");
+    await waitFor(() => expect(screen.getByRole("tab", { name: "Code" }).getAttribute("aria-selected")).toBe("true"));
+    await waitFor(() => {
+      const { from, to } = typesetCodeView()?.state.selection.main ?? { from: -1, to: -1 };
+      expect(from).toBe(expectedOffset);
+      expect(to).toBe(expectedOffset);
+    });
+  });
+
   it("updates the active section while the LaTeX editor scrolls", async () => {
     mockProjectFiles();
     const source = [
@@ -1723,12 +1878,16 @@ describe("Typeset start page", () => {
 
     const outline = container.querySelector<HTMLElement>(".typeset-outline");
     const divider = screen.getByRole("separator", { name: "Resize Outline" });
-    expect(outline?.style.flexBasis).toBe("184px");
+    expect(outline?.style.flexBasis).toBe("33.333%");
+    expect(outline?.style.flexShrink).toBe("1");
 
     fireEvent.pointerDown(divider, { button: 0, pointerType: "mouse", clientY: 300 });
     fireEvent.pointerMove(window, { buttons: 1, pointerType: "mouse", clientY: 240 });
 
-    await waitFor(() => expect(outline?.style.flexBasis).toBe("244px"));
+    await waitFor(() => {
+      expect(outline?.style.flexBasis).toBe("244px");
+      expect(outline?.style.flexShrink).toBe("0");
+    });
 
     fireEvent.pointerUp(window, { pointerType: "mouse", clientY: 240 });
     fireEvent.click(screen.getByRole("button", { name: "Hide Outline" }));
@@ -1738,6 +1897,27 @@ describe("Typeset start page", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /Outline/ }));
     await waitFor(() => expect(container.querySelector<HTMLElement>(".typeset-outline")?.style.flexBasis).toBe("244px"));
+  });
+
+  it("keeps an empty outline at one third height and resizable", async () => {
+    mockProjectFiles();
+    const source = "\\documentclass{article}\n\\begin{document}\nBody text.\n\\end{document}";
+    mocks.fileReadText.mockResolvedValueOnce({ path: "paper.tex", content: source, bytes: source.length });
+
+    const { container } = render(<Typeset />);
+
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+
+    const outline = container.querySelector<HTMLElement>(".typeset-outline.empty");
+    const divider = screen.getByRole("separator", { name: "Resize Outline" });
+    expect(outline?.style.flexBasis).toBe("33.333%");
+
+    fireEvent.pointerDown(divider, { button: 0, pointerType: "mouse", clientY: 300 });
+    fireEvent.pointerMove(window, { buttons: 1, pointerType: "mouse", clientY: 260 });
+
+    await waitFor(() => expect(outline?.style.flexBasis).toBe("224px"));
+    fireEvent.pointerUp(window, { pointerType: "mouse", clientY: 260 });
   });
 
   it("keeps resizing panels after the mouse leaves the divider", async () => {
@@ -1751,6 +1931,7 @@ describe("Typeset start page", () => {
     const grid = container.querySelector<HTMLElement>(".typeset-main-grid");
     const divider = screen.getByRole("separator", { name: "Resize Project files" });
     expect(grid?.style.getPropertyValue("--typeset-left-user-w")).toBe("204px");
+    expect(divider.querySelector(".typeset-resize-handle-hit")).toBeTruthy();
 
     fireEvent.pointerDown(divider, { button: 0, pointerType: "mouse", clientX: 260, clientY: 0 });
     fireEvent.pointerMove(window, { buttons: 1, pointerType: "mouse", clientX: 324 });
@@ -1857,7 +2038,7 @@ describe("Typeset start page", () => {
     fireEvent.pointerUp(window, { pointerType: "mouse", clientX: 852 });
   });
 
-  it("starts resizing from the wider project edge hit zone", async () => {
+  it("does not resize from project content beside the hidden divider", async () => {
     mockProjectFiles();
 
     const { container } = render(<Typeset />);
@@ -1867,30 +2048,18 @@ describe("Typeset start page", () => {
 
     const grid = container.querySelector<HTMLElement>(".typeset-main-grid");
     const projectPanel = container.querySelector<HTMLElement>(".typeset-left-panel");
-    const divider = screen.getByRole("separator", { name: "Resize Project files" });
-    vi.spyOn(divider, "getBoundingClientRect").mockReturnValue({
-      x: 244,
-      y: 76,
-      width: 14,
-      height: 644,
-      top: 76,
-      right: 258,
-      bottom: 720,
-      left: 244,
-      toJSON: () => ({}),
-    } as DOMRect);
     expect(projectPanel).toBeTruthy();
     expect(grid?.style.getPropertyValue("--typeset-left-user-w")).toBe("204px");
 
     fireEvent.pointerDown(projectPanel!, { button: 0, pointerType: "mouse", clientX: 230, clientY: 200 });
     fireEvent.pointerMove(window, { buttons: 1, pointerType: "mouse", clientX: 286, clientY: 200 });
 
-    await waitFor(() => expect(grid?.style.getPropertyValue("--typeset-left-user-w")).toBe("260px"));
+    expect(grid?.style.getPropertyValue("--typeset-left-user-w")).toBe("204px");
 
     fireEvent.pointerUp(window, { pointerType: "mouse", clientX: 286, clientY: 200 });
   });
 
-  it("starts resizing from the wider PDF edge hit zone", async () => {
+  it("does not resize from PDF content beside the hidden divider", async () => {
     mockProjectFiles();
 
     const { container } = render(<Typeset />);
@@ -1900,25 +2069,13 @@ describe("Typeset start page", () => {
 
     const grid = container.querySelector<HTMLElement>(".typeset-main-grid");
     const preview = container.querySelector<HTMLElement>(".typeset-preview-stack");
-    const divider = screen.getByRole("separator", { name: "Resize PDF preview" });
-    vi.spyOn(divider, "getBoundingClientRect").mockReturnValue({
-      x: 930,
-      y: 76,
-      width: 14,
-      height: 644,
-      top: 76,
-      right: 944,
-      bottom: 720,
-      left: 930,
-      toJSON: () => ({}),
-    } as DOMRect);
     expect(preview).toBeTruthy();
     expect(grid?.style.getPropertyValue("--typeset-preview-user-w")).toBe("760px");
 
     fireEvent.pointerDown(preview!, { button: 0, pointerType: "mouse", clientX: 958, clientY: 200 });
     fireEvent.pointerMove(window, { buttons: 1, pointerType: "mouse", clientX: 902, clientY: 200 });
 
-    await waitFor(() => expect(grid?.style.getPropertyValue("--typeset-preview-user-w")).toBe("816px"));
+    expect(grid?.style.getPropertyValue("--typeset-preview-user-w")).toBe("760px");
 
     fireEvent.pointerUp(window, { pointerType: "mouse", clientX: 902, clientY: 200 });
   });
@@ -1934,18 +2091,6 @@ describe("Typeset start page", () => {
 
     const grid = container.querySelector<HTMLElement>(".typeset-main-grid");
     const editor = container.querySelector<HTMLElement>(".typeset-editor-body .lab-editor");
-    const divider = screen.getByRole("separator", { name: "Resize PDF preview" });
-    vi.spyOn(divider, "getBoundingClientRect").mockReturnValue({
-      x: 930,
-      y: 76,
-      width: 14,
-      height: 644,
-      top: 76,
-      right: 944,
-      bottom: 720,
-      left: 930,
-      toJSON: () => ({}),
-    } as DOMRect);
     vi.spyOn(editor!, "getBoundingClientRect").mockReturnValue({
       x: 260,
       y: 76,

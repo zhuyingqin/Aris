@@ -70,9 +70,10 @@ export function useChatComposer({
   }, [pendingChatInput, setDraft, setPendingChatInput, focusComposer, currentSessionRef]);
 
   const setAttachments = useCallback((next: ChatAttachment[]) => {
-    if (!currentSession) return;
-    updateSession(currentSession.id, (session) => ({ ...session, draftAttachments: next }));
-  }, [currentSession, updateSession]);
+    const session = currentSessionRef.current;
+    if (!session) return;
+    updateSession(session.id, (item) => ({ ...item, draftAttachments: next }));
+  }, [currentSessionRef, updateSession]);
 
   const addFilesToChat = useCallback(async (files: File[]) => {
     if (!currentSession || files.length === 0) return;

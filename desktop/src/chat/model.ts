@@ -19,6 +19,52 @@ export function makeId(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+type ChatToolBlock = Extract<ChatBlock, { kind: "tool" }>;
+type ToolJsonField = "input" | "output";
+
+interface ParsedToolBlockJson {
+  input?: unknown;
+  output?: unknown;
+}
+
+// Streaming replaces only the active tool block. Completed blocks keep their
+// identity, so cache their JSON once instead of parsing large tool output on
+// every streamed turn update. WeakMap lets old sessions be collected normally.
+const parsedToolBlockJson = new WeakMap<ChatToolBlock, ParsedToolBlockJson>();
+
+export function parseToolBlockJson(block: ChatToolBlock, field: ToolJsonField): unknown {
+  let cached = parsedToolBlockJson.get(block);
+  if (!cached) {
+    cached = {};
+    parsedToolBlockJson.set(block, cached);
+  }
+  if (Object.prototype.hasOwnProperty.call(cached, field)) return cached[field];
+
+  const source = block[field];
+  if (!source) {
+    cached[field] = undefined;
+    return undefined;
+  }
+  try {
+    const parsed = JSON.parse(source) as unknown;
+    cached[field] = parsed;
+    return parsed;
+  } catch {
+    cached[field] = undefined;
+    return undefined;
+  }
+}
+
+export function parseToolBlockObject(
+  block: ChatToolBlock,
+  field: ToolJsonField,
+): Record<string, unknown> | null {
+  const parsed = parseToolBlockJson(block, field);
+  return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+    ? parsed as Record<string, unknown>
+    : null;
+}
+
 export function makeSession(projectId = "default"): ChatSession {
   const now = Date.now();
   return {
@@ -227,6 +273,10 @@ const FILE_CHANGE_TOOL_NAMES = new Set([
   "PowerShell",
   "REPL",
 ]);
+
+export function isFileChangeTool(name: string): boolean {
+  return FILE_CHANGE_TOOL_NAMES.has(name);
+}
 const SHELL_TOOL_NAMES = new Set(["bash", "PowerShell"]);
 const REPL_TOOL_NAMES = new Set(["REPL", "node_repl", "mcp__node_repl__js"]);
 const REPL_SOURCE_EXTENSIONS = "tex|bib|json|md|txt|csv|ts|tsx|js|jsx|css|html|py|ipynb|mmd|svg";
@@ -241,13 +291,8 @@ const REPL_RELATIVE_FILE_RE = new RegExp(
 const REPL_WRITE_RE =
   /(?:\bopen\s*\([^)]*,\s*(?:mode\s*=\s*)?["'][^"']*[wax]|\.(?:write_text|write_bytes)\s*\()/i;
 
-function parseTodoList(input: string): ChatTodoItem[] | null {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(input);
-  } catch {
-    return null;
-  }
+function parseTodoList(block: ChatToolBlock): ChatTodoItem[] | null {
+  const parsed = parseToolBlockJson(block, "input");
   const raw = (parsed as { todos?: unknown })?.todos;
   if (!Array.isArray(raw)) return null;
   const todos: ChatTodoItem[] = [];
@@ -275,23 +320,11 @@ export function latestTodosFromTurns(turns: ChatTurn[]): ChatTodoItem[] {
     for (let blockIndex = blocks.length - 1; blockIndex >= 0; blockIndex -= 1) {
       const block = blocks[blockIndex];
       if (block.kind !== "tool" || block.name !== "TodoWrite") continue;
-      const todos = parseTodoList(block.input);
+      const todos = parseTodoList(block);
       if (todos && todos.length > 0) return todos;
     }
   }
   return [];
-}
-
-function parseJsonObject(input: string | undefined): Record<string, unknown> | null {
-  if (!input) return null;
-  try {
-    const parsed = JSON.parse(input) as unknown;
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
-      ? parsed as Record<string, unknown>
-      : null;
-  } catch {
-    return null;
-  }
 }
 
 function stringField(record: Record<string, unknown> | null, keys: string[]): string | null {
@@ -395,13 +428,13 @@ function changesFromWriteTool(
   block: Extract<ChatBlock, { kind: "tool" }>,
   projectRoot?: string | null,
 ): ChatFileChange[] {
-  if (!FILE_CHANGE_TOOL_NAMES.has(block.name) || block.isError || block.output === undefined) return [];
-  const input = parseJsonObject(block.input);
-  const output = parseJsonObject(block.output);
+  if (!isFileChangeTool(block.name) || block.isError || block.output === undefined) return [];
+  const input = parseToolBlockObject(block, "input");
+  const output = parseToolBlockObject(block, "output");
   const codexChanges = changesFromCodexOutput(output, block.name, projectRoot);
   if (codexChanges.length > 0) return codexChanges;
 
-  const outputPath = stringField(output, ["filePath", "path", "target_file", "notebook_path"]);
+  const outputPath = stringField(output, ["filePath", "path", "target_file", "notebook_path", "notebookPath"]);
   const path = normalizeFileChangePath(outputPath ?? toolInputPath(input) ?? "", projectRoot);
   if (!path) return [];
 
@@ -421,18 +454,18 @@ function changesFromShellTool(
   projectRoot?: string | null,
 ): ChatFileChange[] {
   if (!SHELL_TOOL_NAMES.has(block.name) || block.isError || block.output === undefined) return [];
-  const input = parseJsonObject(block.input);
+  const input = parseToolBlockObject(block, "input");
   const command = stringField(input, ["command"]) ?? "";
   if (!/\bgit\b[^\r\n;&|]*\bstatus\b/i.test(command) || !/(?:--short|\s-s\b|--porcelain)/i.test(command)) {
     return [];
   }
-  const output = parseJsonObject(block.output);
+  const output = parseToolBlockObject(block, "output");
   const stdout = stringField(output, ["stdout"]) ?? block.output;
   return parseGitStatusChanges(stdout, projectRoot);
 }
 
 function replCodeFromTool(block: Extract<ChatBlock, { kind: "tool" }>): string {
-  const input = parseJsonObject(block.input);
+  const input = parseToolBlockObject(block, "input");
   return stringField(input, ["code", "script", "source", "command"]) ?? block.input ?? "";
 }
 
@@ -487,7 +520,7 @@ function changesFromReplTool(
   const code = replCodeFromTool(block);
   if (!REPL_WRITE_RE.test(code)) return [];
 
-  const output = parseJsonObject(block.output);
+  const output = parseToolBlockObject(block, "output");
   const stdout = stringField(output, ["stdout"]);
   const stderr = stringField(output, ["stderr"]);
   const paths = collectReplFilePaths([code, stdout, stderr].filter(Boolean).join("\n"), projectRoot);

@@ -19,22 +19,34 @@ import {
   fileReadText,
   fileRename,
   fileReveal,
-  fileSearch,
   fileWriteText,
   isTauri,
   latexCompile,
   latexCompileCancel,
   latexForwardSearch,
+  localEnvironmentCheck,
   onLatexCompileProgress,
   type FileText,
   type FileTreeEntry,
   type LatexCompileResult,
   type LatexDiagnostic,
   type SyncTexLocation,
+  type TypesetDocument,
+  typesetListDocuments,
 } from "../api/tauri";
 import { isTypesetPreviewMode } from "../api/labPreview";
 import CodeEditor from "../lab/CodeEditor";
+import { handoffEnvironmentInstall } from "../environmentInstall";
 import { TypesetVisualEditor } from "./TypesetVisualEditor";
+import {
+  documentCompileLabel,
+  documentKindLabel,
+  documentRelativeTime,
+  TYPESET_LIBRARY_COPY,
+  TYPESET_LIBRARY_TEMPLATES,
+  type TypesetLibraryScope,
+  type TypesetTemplate,
+} from "./TypesetLibraryCopy";
 import type { VisualPdfCursor } from "./visualModel";
 import type { SharedEditorHandle } from "../editor/editorTypes";
 import { useStore } from "../store";
@@ -72,6 +84,7 @@ type EditorMode = "code" | "visual";
 type PdfForwardTarget = { location: SyncTexLocation; nonce: number };
 type TypesetResizePanel = "project" | "pdf";
 type TypesetResizeAxis = "x" | "y";
+type TypesetLibraryPreferences = Record<string, { favorite?: boolean; archived?: boolean }>;
 
 const COMPILE_ERROR_HANDLING_STORAGE_PREFIX = "somniq-typeset-compile-error-handling:";
 
@@ -101,9 +114,11 @@ const PDF_PANEL_MIN_W = 220;
 const PDF_PANEL_MAX_W = 1040;
 const OUTLINE_PANEL_DEFAULT_H = 184;
 const OUTLINE_PANEL_MIN_H = 72;
-const OUTLINE_PANEL_MAX_H = 420;
-const RESIZE_HOT_ZONE_PX = 32;
-const SCROLLBAR_GUTTER_PX = 18;
+const OUTLINE_PANEL_MAX_H = 720;
+const PDF_ZOOM_MIN = 0.25;
+const PDF_ZOOM_MAX = 4;
+const PDF_ZOOM_PRESETS = [0.5, 0.75, 1, 1.25, 1.5, 2, 4] as const;
+const TYPESET_LIBRARY_PREFERENCES_STORAGE_PREFIX = "somniq-typeset-library:";
 
 type VisualBlock =
   | { kind: "abstract"; line: number; endLine: number; text: string }
@@ -227,42 +242,6 @@ function resizeAxisForTarget(target: HTMLElement): TypesetResizeAxis {
 
 function coordinateForAxis(axis: TypesetResizeAxis, event: { clientX: number; clientY: number }): number {
   return axis === "y" ? event.clientY : event.clientX;
-}
-
-function resizeHitFromGridPoint(grid: HTMLElement, clientX: number, clientY: number): { panel: TypesetResizePanel; axis: TypesetResizeAxis } | null {
-  const candidates = Array.from(grid.querySelectorAll<HTMLElement>("[data-resize-panel]"));
-  let closest: { panel: TypesetResizePanel; axis: TypesetResizeAxis; distance: number } | null = null;
-  for (const candidate of candidates) {
-    const panel = candidate.dataset.resizePanel;
-    if (panel !== "project" && panel !== "pdf") continue;
-    const rect = candidate.getBoundingClientRect();
-    const axis = resizeAxisForTarget(candidate);
-    const onCrossAxis =
-      axis === "x"
-        ? clientY >= rect.top && clientY <= rect.bottom
-        : clientX >= rect.left && clientX <= rect.right;
-    if (!onCrossAxis) continue;
-    const center = axis === "x" ? rect.left + rect.width / 2 : rect.top + rect.height / 2;
-    const distance = Math.abs(coordinateForAxis(axis, { clientX, clientY }) - center);
-    if (distance > RESIZE_HOT_ZONE_PX) continue;
-    if (!closest || distance < closest.distance) {
-      closest = { panel, axis, distance };
-    }
-  }
-  return closest ? { panel: closest.panel, axis: closest.axis } : null;
-}
-
-function isEditorScrollbarGutterPointer(target: EventTarget | null, clientX: number, clientY: number): boolean {
-  if (!(target instanceof HTMLElement)) return false;
-  const scrollTarget = target.closest<HTMLElement>(".typeset-visual-scroll, .typeset-editor-body .lab-editor");
-  if (!scrollTarget) return false;
-  const rect = scrollTarget.getBoundingClientRect();
-  if (rect.width <= 0 || rect.height <= 0) return false;
-  const inside = clientX >= rect.left && clientX <= rect.right && clientY >= rect.top && clientY <= rect.bottom;
-  if (!inside) return false;
-  const verticalGutter = clientX >= rect.right - SCROLLBAR_GUTTER_PX;
-  const horizontalGutter = clientY >= rect.bottom - SCROLLBAR_GUTTER_PX;
-  return verticalGutter || horizontalGutter;
 }
 
 function normalizePath(path: string): string {
@@ -394,8 +373,83 @@ function workDirForSource(path: string | null | undefined): string {
   return path ? dirname(path) : "";
 }
 
-function defaultSourceFor(_path: string): string {
-  return DEFAULT_LATEX_DOCUMENT;
+function latexEscapeTemplateText(value: string): string {
+  return value.replace(/([#$%&_{}])/g, "\\$1");
+}
+
+function defaultSourceFor(_path: string, template: TypesetTemplate = "article", title = "SomniQ LaTeX Draft"): string {
+  const escapedTitle = latexEscapeTemplateText(title.trim() || "Untitled document");
+  if (template === "beamer") {
+    return `\\documentclass[aspectratio=169]{beamer}
+\\usetheme{metropolis}
+
+\\title{${escapedTitle}}
+\\author{}
+\\date{\\today}
+
+\\begin{document}
+
+\\begin{frame}
+  \\titlepage
+\\end{frame}
+
+\\begin{frame}{Overview}
+  \\begin{itemize}
+    \\item Start with the problem and motivation.
+    \\item Add one idea per slide.
+  \\end{itemize}
+\\end{frame}
+
+\\end{document}
+`;
+  }
+  if (template === "report") {
+    return `\\documentclass[11pt]{report}
+\\usepackage[margin=1in]{geometry}
+\\usepackage{hyperref}
+
+\\title{${escapedTitle}}
+\\author{}
+\\date{\\today}
+
+\\begin{document}
+\\maketitle
+\\tableofcontents
+
+\\chapter{Introduction}
+
+Start writing your report here.
+
+\\end{document}
+`;
+  }
+  if (template === "poster") {
+    return `\\documentclass{beamer}
+\\usepackage[size=a1,scale=1.1]{beamerposter}
+
+\\title{${escapedTitle}}
+\\author{}
+\\date{}
+
+\\begin{document}
+\\begin{frame}[t]
+  \\begin{columns}[t]
+    \\begin{column}{.48\\textwidth}
+      \\begin{block}{Motivation}
+        Summarize the research question and why it matters.
+      \\end{block}
+    \\end{column}
+    \\begin{column}{.48\\textwidth}
+      \\begin{block}{Results}
+        Add the main evidence, figures, and conclusions.
+      \\end{block}
+    \\end{column}
+  \\end{columns}
+\\end{frame}
+\\end{document}
+`;
+  }
+  return DEFAULT_LATEX_DOCUMENT.replace("SomniQ LaTeX Draft", escapedTitle);
 }
 
 function preferredSource(paths: string[]): string | null {
@@ -2981,7 +3035,13 @@ function TypesetCompiledVisual({
           </em>
         </div>
         <div className="typeset-slide-canvas-actions" aria-label="Slide canvas controls">
-          <button type="button" title="Zoom out" aria-label="Zoom out slide" onClick={() => changeZoom(-0.1)}>
+          <button
+            type="button"
+            className="zoom-step"
+            title="Zoom out"
+            aria-label="Zoom out slide"
+            onClick={() => changeZoom(-0.1)}
+          >
             <ToolIcon name="minus" />
           </button>
           <button
@@ -2997,7 +3057,13 @@ function TypesetCompiledVisual({
           >
             Fit <span>{Math.round(zoom * 100)}%</span>
           </button>
-          <button type="button" title="Zoom in" aria-label="Zoom in slide" onClick={() => changeZoom(0.1)}>
+          <button
+            type="button"
+            className="zoom-step"
+            title="Zoom in"
+            aria-label="Zoom in slide"
+            onClick={() => changeZoom(0.1)}
+          >
             <ToolIcon name="plus" />
           </button>
           <span className="typeset-slide-canvas-divider" />
@@ -3201,13 +3267,21 @@ function TypesetPdfPreview({
   const [pdf, setPdf] = useState<PDFDocumentProxy | null>(null);
   const [numPages, setNumPages] = useState(0);
   const [zoom, setZoom] = useState(1);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [pageDraft, setPageDraft] = useState("1");
+  const [zoomDraft, setZoomDraft] = useState("100");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [compileMenuOpen, setCompileMenuOpen] = useState(false);
   const [compileMenuPosition, setCompileMenuPosition] = useState({ top: 0, right: 8 });
+  const [zoomMenuOpen, setZoomMenuOpen] = useState(false);
+  const [zoomMenuPosition, setZoomMenuPosition] = useState({ top: 0, right: 8 });
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const compileMenuRef = useRef<HTMLDivElement | null>(null);
   const compileMenuPopoverRef = useRef<HTMLDivElement | null>(null);
+  const zoomMenuRef = useRef<HTMLButtonElement | null>(null);
+  const zoomMenuPopoverRef = useRef<HTMLDivElement | null>(null);
+  const pageInputFocusedRef = useRef(false);
   const userZoomedRef = useRef(false);
   const pageElementsRef = useRef(new Map<number, HTMLDivElement>());
   const registerPageRef = useCallback((page: number, el: HTMLDivElement | null) => {
@@ -3238,11 +3312,32 @@ function TypesetPdfPreview({
   }, [compileMenuOpen]);
 
   useEffect(() => {
+    if (!zoomMenuOpen) return;
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      const target = event.target as Node;
+      if (!zoomMenuRef.current?.contains(target) && !zoomMenuPopoverRef.current?.contains(target)) {
+        setZoomMenuOpen(false);
+      }
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setZoomMenuOpen(false);
+    };
+    document.addEventListener("pointerdown", closeOnOutsidePointer);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutsidePointer);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [zoomMenuOpen]);
+
+  useEffect(() => {
     let disposed = false;
     let loadedPdf: PDFDocumentProxy | null = null;
     userZoomedRef.current = false;
     setPdf(null);
     setNumPages(0);
+    setCurrentPage(1);
+    setPageDraft("1");
     setError(null);
     if (!path) return () => undefined;
     setLoading(true);
@@ -3307,6 +3402,50 @@ function TypesetPdfPreview({
     };
   }, [pdf]);
 
+  useEffect(() => {
+    const scroll = scrollRef.current;
+    if (!pdf || !scroll || numPages < 1) return;
+    let frame = 0;
+    const updateCurrentPage = () => {
+      // Track the page at the reading edge, rather than the viewport center.
+      // A short landscape PDF can show two pages at once; center tracking would
+      // report the following page immediately after jumping to the current one.
+      const viewportAnchor = scroll.scrollTop + Math.min(48, scroll.clientHeight / 4);
+      let nextPage = 1;
+      let closestDistance = Number.POSITIVE_INFINITY;
+      for (let page = 1; page <= numPages; page += 1) {
+        const pageEl = pageElementsRef.current.get(page);
+        if (!pageEl) continue;
+        const top = pageEl.offsetTop;
+        const bottom = top + pageEl.offsetHeight;
+        const distance = viewportAnchor < top
+          ? top - viewportAnchor
+          : viewportAnchor > bottom
+            ? viewportAnchor - bottom
+            : 0;
+        if (distance < closestDistance) {
+          closestDistance = distance;
+          nextPage = page;
+        }
+      }
+      setCurrentPage((page) => page === nextPage ? page : nextPage);
+    };
+    const onScroll = () => {
+      window.cancelAnimationFrame(frame);
+      frame = window.requestAnimationFrame(updateCurrentPage);
+    };
+    scroll.addEventListener("scroll", onScroll, { passive: true });
+    onScroll();
+    return () => {
+      window.cancelAnimationFrame(frame);
+      scroll.removeEventListener("scroll", onScroll);
+    };
+  }, [numPages, pdf, zoom]);
+
+  useEffect(() => {
+    if (!pageInputFocusedRef.current) setPageDraft(String(currentPage));
+  }, [currentPage]);
+
   // Forward search: scroll the compiled PDF to the page/point SyncTeX
   // resolved for the last double-click in the source editor. Runs after the
   // target page has had a chance to mount/register its ref (double rAF: one
@@ -3334,9 +3473,54 @@ function TypesetPdfPreview({
     };
   }, [forwardTarget, zoom]);
 
-  const changeZoom = (delta: number) => {
+  const setZoomLevel = (value: number, closeMenu = true) => {
     userZoomedRef.current = true;
-    setZoom((value) => clampNumber(value + delta, 0.45, 2.2));
+    setZoom(clampNumber(value, PDF_ZOOM_MIN, PDF_ZOOM_MAX));
+    if (closeMenu) setZoomMenuOpen(false);
+  };
+  const changeZoom = (delta: number) => {
+    setZoomLevel(Math.round((zoom + delta) * 100) / 100, false);
+  };
+  const fitPdf = async (mode: "height" | "width") => {
+    const scroll = scrollRef.current;
+    if (!pdf || !scroll) return;
+    try {
+      const page = await pdf.getPage(clampNumber(currentPage, 1, Math.max(1, numPages)));
+      const viewport = page.getViewport({ scale: 1 });
+      const availableWidth = Math.max(100, scroll.clientWidth - 32);
+      const availableHeight = Math.max(100, scroll.clientHeight - 32);
+      const nextZoom = mode === "width" ? availableWidth / viewport.width : availableHeight / viewport.height;
+      setZoomLevel(nextZoom);
+    } catch {
+      setZoomMenuOpen(false);
+    }
+  };
+  const applyZoomDraft = () => {
+    const percentage = Number.parseFloat(zoomDraft.replace("%", ""));
+    if (!Number.isFinite(percentage)) {
+      setZoomDraft(String(Math.round(zoom * 100)));
+      return;
+    }
+    setZoomLevel(percentage / 100);
+  };
+  const scrollToPage = (page: number, behavior: ScrollBehavior = "auto") => {
+    const nextPage = clampNumber(Math.round(page), 1, Math.max(1, numPages));
+    const pageEl = pageElementsRef.current.get(nextPage);
+    const scroll = scrollRef.current;
+    setCurrentPage(nextPage);
+    setPageDraft(String(nextPage));
+    if (!pageEl || !scroll) return;
+    const top = Math.max(0, pageEl.offsetTop - 12);
+    if (typeof scroll.scrollTo === "function") scroll.scrollTo({ top, behavior });
+    else scroll.scrollTop = top;
+  };
+  const commitPageDraft = () => {
+    const requestedPage = Number.parseInt(pageDraft, 10);
+    if (!Number.isFinite(requestedPage)) {
+      setPageDraft(String(currentPage));
+      return;
+    }
+    scrollToPage(requestedPage);
   };
   const statusText = dirty ? "Unsaved changes" : compileStatusText(status, result);
 
@@ -3356,7 +3540,9 @@ function TypesetPdfPreview({
               onClick={status === "running" ? onCancelCompile : onCompile}
             >
               <ToolIcon name={status === "running" ? "clear" : "compile"} />
-              {status === "running" ? "Stop compilation" : "Recompile"}
+              <span className="typeset-recompile-label">
+                {status === "running" ? "Stop compilation" : "Recompile"}
+              </span>
             </button>
             <button
               type="button"
@@ -3480,20 +3666,114 @@ function TypesetPdfPreview({
         </div>
         <div className="typeset-preview-actions toolbar-pdf-right">
           <span className="typeset-preview-file" title={path ?? ""}>{path ? basename(path) : "Preview"}</span>
+          <div className="typeset-pdf-page-control" aria-label="PDF page navigation">
+            <input
+              type="text"
+              inputMode="numeric"
+              value={pageDraft}
+              aria-label="Current PDF page"
+              disabled={numPages < 1}
+              onFocus={(event) => {
+                pageInputFocusedRef.current = true;
+                event.currentTarget.select();
+              }}
+              onChange={(event) => setPageDraft(event.currentTarget.value.replace(/[^0-9]/g, ""))}
+              onBlur={() => {
+                pageInputFocusedRef.current = false;
+                commitPageDraft();
+              }}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  commitPageDraft();
+                  event.currentTarget.blur();
+                } else if (event.key === "Escape") {
+                  setPageDraft(String(currentPage));
+                  event.currentTarget.blur();
+                }
+              }}
+            />
+            <span aria-label={`${numPages} PDF pages`}>/ {numPages || 0}</span>
+          </div>
           <div className="toolbar-pdf-controls pdfjs-viewer-controls-small">
-            <button type="button" className="typeset-icon-btn pdf-toolbar-btn" title="Zoom out" aria-label="Zoom out" onClick={() => changeZoom(-0.1)}>
+            <button type="button" className="typeset-icon-btn pdf-toolbar-btn pdf-zoom-step" title="Zoom out" aria-label="Zoom out" onClick={() => changeZoom(-0.1)}>
               <ToolIcon name="minus" />
             </button>
-            <span className="typeset-zoom-label pdfjs-zoom-dropdown-button">{Math.round(zoom * 100)}%</span>
-            <button type="button" className="typeset-icon-btn pdf-toolbar-btn" title="Zoom in" aria-label="Zoom in" onClick={() => changeZoom(0.1)}>
+            <button
+              ref={zoomMenuRef}
+              type="button"
+              className="typeset-zoom-label pdfjs-zoom-dropdown-button"
+              title="Choose PDF zoom"
+              aria-label={`PDF zoom ${Math.round(zoom * 100)}%`}
+              aria-haspopup="menu"
+              aria-expanded={zoomMenuOpen}
+              onClick={(event) => {
+                if (zoomMenuOpen) {
+                  setZoomMenuOpen(false);
+                  return;
+                }
+                const rect = event.currentTarget.getBoundingClientRect();
+                setZoomDraft(String(Math.round(zoom * 100)));
+                setZoomMenuPosition({
+                  top: rect.bottom + 6,
+                  right: Math.max(8, window.innerWidth - rect.right),
+                });
+                setZoomMenuOpen(true);
+              }}
+            >
+              <span>{Math.round(zoom * 100)}%</span>
+              <ToolIcon name="chevron" />
+            </button>
+            <button type="button" className="typeset-icon-btn pdf-toolbar-btn pdf-zoom-step" title="Zoom in" aria-label="Zoom in" onClick={() => changeZoom(0.1)}>
               <ToolIcon name="plus" />
             </button>
           </div>
-          <button type="button" className="typeset-icon-btn" title="Open PDF externally" aria-label="Open PDF externally" disabled={!path} onClick={() => path && void fileOpen(path)}>
+          {zoomMenuOpen && typeof document !== "undefined" && createPortal(
+            <div
+              ref={zoomMenuPopoverRef}
+              className="typeset-zoom-menu"
+              role="menu"
+              aria-label="PDF zoom menu"
+              style={zoomMenuPosition}
+            >
+              <form
+                className="typeset-zoom-menu-input"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  applyZoomDraft();
+                }}
+              >
+                <input
+                  value={zoomDraft}
+                  inputMode="decimal"
+                  aria-label="PDF zoom percentage"
+                  onChange={(event) => setZoomDraft(event.currentTarget.value.replace(/[^0-9.]/g, ""))}
+                />
+                <span>%</span>
+              </form>
+              <button type="button" role="menuitem" onClick={() => void fitPdf("width")}>Fit to width</button>
+              <button type="button" role="menuitem" onClick={() => void fitPdf("height")}>Fit to height</button>
+              <div className="typeset-zoom-menu-divider" role="presentation" />
+              {PDF_ZOOM_PRESETS.map((preset) => (
+                <button
+                  key={preset}
+                  type="button"
+                  role="menuitemradio"
+                  aria-checked={Math.round(zoom * 100) === Math.round(preset * 100)}
+                  onClick={() => setZoomLevel(preset)}
+                >
+                  <span>{Math.round(preset * 100)}%</span>
+                  {Math.round(zoom * 100) === Math.round(preset * 100) && <b aria-hidden="true">✓</b>}
+                </button>
+              ))}
+            </div>,
+            document.body,
+          )}
+          <button type="button" className="typeset-icon-btn pdf-open-external" title="Open PDF externally" aria-label="Open PDF externally" disabled={!path} onClick={() => path && void fileOpen(path)}>
             <ToolIcon name="open" />
           </button>
           {onHide && (
-            <button type="button" className="typeset-icon-btn" title="Hide PDF preview" aria-label="Hide PDF preview" onClick={onHide}>
+            <button type="button" className="typeset-icon-btn pdf-hide-preview" title="Hide PDF preview" aria-label="Hide PDF preview" onClick={onHide}>
               <ToolIcon name="next" />
             </button>
           )}
@@ -3616,24 +3896,12 @@ function TypesetOutlinePanel({
   activeLine: number | null;
   collapsed: boolean;
   outline: NumberedOutlineItem[];
-  height: number;
+  height: number | null;
   onJumpToLine: (line: number) => void;
   onResizeKeyDown: (event: React.KeyboardEvent<HTMLDivElement>) => void;
   onResizePointerDown: (event: ReactPointerEvent<HTMLDivElement>) => void;
   onToggleCollapsed: () => void;
 }) {
-  if (outline.length === 0) {
-    return (
-      <section className="typeset-outline empty" aria-label="Document outline">
-        <div className="typeset-outline-head">
-          <strong>Outline</strong>
-          <span>0</span>
-        </div>
-        <span className="typeset-outline-empty">No sections found.</span>
-      </section>
-    );
-  }
-
   if (collapsed) {
     return (
       <section className="typeset-outline-collapsed" aria-label="Document outline">
@@ -3646,24 +3914,49 @@ function TypesetOutlinePanel({
     );
   }
 
+  const flexBasis = height == null ? "33.333%" : `${height}px`;
+  const panelStyle = { flexBasis, flexShrink: height == null ? 1 : 0 };
+  const resizeHandle = (
+    <div
+      className="typeset-outline-resize"
+      role="separator"
+      aria-label="Resize Outline"
+      aria-orientation="horizontal"
+      aria-valuemin={OUTLINE_PANEL_MIN_H}
+      aria-valuemax={OUTLINE_PANEL_MAX_H}
+      aria-valuenow={height ?? undefined}
+      aria-valuetext={height == null ? "One third of the sidebar" : `${height} pixels`}
+      title="Drag to resize Outline"
+      tabIndex={0}
+      onKeyDown={onResizeKeyDown}
+      onPointerDown={onResizePointerDown}
+    >
+      <span aria-hidden="true" />
+    </div>
+  );
+
+  if (outline.length === 0) {
+    return (
+      <>
+        {resizeHandle}
+        <section className="typeset-outline empty" aria-label="Document outline" style={panelStyle}>
+          <div className="typeset-outline-head">
+            <strong>Outline</strong>
+            <span>0</span>
+            <button type="button" className="typeset-outline-toggle" title="Hide Outline" aria-label="Hide Outline" onClick={onToggleCollapsed}>
+              <ToolIcon name="clear" />
+            </button>
+          </div>
+          <span className="typeset-outline-empty">No sections found.</span>
+        </section>
+      </>
+    );
+  }
+
   return (
     <>
-      <div
-        className="typeset-outline-resize"
-        role="separator"
-        aria-label="Resize Outline"
-        aria-orientation="horizontal"
-        aria-valuemin={OUTLINE_PANEL_MIN_H}
-        aria-valuemax={OUTLINE_PANEL_MAX_H}
-        aria-valuenow={height}
-        title="Drag to resize Outline"
-        tabIndex={0}
-        onKeyDown={onResizeKeyDown}
-        onPointerDown={onResizePointerDown}
-      >
-        <span aria-hidden="true" />
-      </div>
-      <section className="typeset-outline" aria-label="Document outline" style={{ flexBasis: `${height}px` }}>
+      {resizeHandle}
+      <section className="typeset-outline" aria-label="Document outline" style={panelStyle}>
       <div className="typeset-outline-head">
         <strong>Outline</strong>
         <span>{outline.length}</span>
@@ -4791,148 +5084,380 @@ function TypesetVisualBlockEditor({
 // cleanup phase removes them; the CodeMirror TypesetVisualEditor is used instead.
 void TypesetVisualBlockEditor;
 
+function typesetLibraryPreferenceKey(projectPath: string | null): string {
+  return `${TYPESET_LIBRARY_PREFERENCES_STORAGE_PREFIX}${projectPath || "default"}`;
+}
+
+function loadTypesetLibraryPreferences(projectPath: string | null): TypesetLibraryPreferences {
+  if (typeof window === "undefined") return {};
+  try {
+    const value = window.localStorage.getItem(typesetLibraryPreferenceKey(projectPath));
+    if (!value) return {};
+    const parsed: unknown = JSON.parse(value);
+    return parsed && typeof parsed === "object" ? parsed as TypesetLibraryPreferences : {};
+  } catch {
+    return {};
+  }
+}
+
+function newTypesetDocumentPath(template: TypesetTemplate, title: string): string {
+  const definition = TYPESET_LIBRARY_TEMPLATES.find((item) => item.kind === template) ?? TYPESET_LIBRARY_TEMPLATES[0];
+  const safeName = title
+    .trim()
+    .replace(/[\\/:*?"<>|]/g, "")
+    .replace(/\s+/g, "-")
+    .replace(/^-+|-+$/g, "") || "untitled-document";
+  return `${definition.folder}/${safeName}/main.tex`;
+}
+
 function TypesetStartPage({
   projectPath,
-  sources,
-  folders,
+  documents,
+  latexAvailable,
   loading,
   error,
   onOpenSource,
   onCreateSource,
+  onRefresh,
 }: {
   projectPath: string | null;
-  sources: string[];
-  folders: FileTreeEntry[];
+  documents: TypesetDocument[];
+  latexAvailable: boolean | null;
   loading: boolean;
   error: string | null;
   onOpenSource: (path: string) => void;
-  onCreateSource: (path: string) => void;
+  onCreateSource: (path: string, template: TypesetTemplate, title: string) => void;
+  onRefresh: () => void;
 }) {
-  const [currentFolder, setCurrentFolder] = useState("");
-  const [entries, setEntries] = useState<FileTreeEntry[]>(folders);
-  const [folderLoading, setFolderLoading] = useState(false);
-  const [folderError, setFolderError] = useState<string | null>(null);
-  const selectedPrefix = currentFolder ? `${currentFolder}/` : "";
-  const latexPath = `${selectedPrefix}main.tex`;
-  const scannedSources = useMemo(
-    () =>
-      sortedSources(sources).map((path) => ({
-        name: basename(path),
-        path,
-        isDir: false,
-      })),
-    [sources],
-  );
-  const visibleSources = useMemo(
-    () =>
-      currentFolder
-        ? entries
-            .filter((entry) => !entry.isDir && extension(entry.path) === ".tex")
-            .sort((left, right) => left.name.localeCompare(right.name))
-        : scannedSources,
-    [currentFolder, entries, scannedSources],
-  );
-  const visibleFolders = useMemo(
-    () => entries.filter((entry) => entry.isDir).sort((left, right) => left.name.localeCompare(right.name)),
-    [entries],
-  );
-  const sourceCountText = loading || (folderLoading && currentFolder)
-    ? "Loading"
-    : currentFolder
-      ? `${visibleSources.length} here, ${sources.length} total`
-      : `${sources.length} total`;
+  const language = useStore((state) => state.language);
+  const copy = TYPESET_LIBRARY_COPY[language];
+  const [scope, setScope] = useState<TypesetLibraryScope>("all");
+  const [search, setSearch] = useState("");
+  const [sort, setSort] = useState<"modified" | "title">("modified");
+  const [selectedPaths, setSelectedPaths] = useState<Set<string>>(() => new Set());
+  const [preferences, setPreferences] = useState<TypesetLibraryPreferences>(() => loadTypesetLibraryPreferences(projectPath));
+  const [createOpen, setCreateOpen] = useState(false);
+  const [template, setTemplate] = useState<TypesetTemplate>("article");
+  const [newTitle, setNewTitle] = useState("");
+  const [actionError, setActionError] = useState<string | null>(null);
 
   useEffect(() => {
-    let cancelled = false;
-    setFolderLoading(true);
-    setFolderError(null);
-    void fileListDir(currentFolder || null)
-      .then((items) => {
-        if (!cancelled) setEntries(items);
-      })
-      .catch((loadError) => {
-        if (!cancelled) {
-          setEntries([]);
-          setFolderError(String(loadError));
-        }
-      })
-      .finally(() => {
-        if (!cancelled) setFolderLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [currentFolder]);
-
-  useEffect(() => {
-    if (!currentFolder) setEntries(folders);
-  }, [currentFolder, folders]);
-
-  useEffect(() => {
-    setCurrentFolder("");
+    setScope("all");
+    setSearch("");
+    setSelectedPaths(new Set());
+    setPreferences(loadTypesetLibraryPreferences(projectPath));
   }, [projectPath]);
 
+  const updatePreferences = useCallback((update: (current: TypesetLibraryPreferences) => TypesetLibraryPreferences) => {
+    setPreferences((current) => {
+      const next = update(current);
+      try {
+        window.localStorage.setItem(typesetLibraryPreferenceKey(projectPath), JSON.stringify(next));
+      } catch {
+        // Favorites and archive state remain available for this session when storage is unavailable.
+      }
+      return next;
+    });
+  }, [projectPath]);
+
+  const activeDocuments = useMemo(
+    () => documents.filter((document) => !preferences[document.path]?.archived),
+    [documents, preferences],
+  );
+  const counts = useMemo(() => ({
+    all: activeDocuments.length,
+    recent: activeDocuments.length,
+    favorites: activeDocuments.filter((document) => preferences[document.path]?.favorite).length,
+    article: activeDocuments.filter((document) => document.kind === "article").length,
+    beamer: activeDocuments.filter((document) => document.kind === "beamer").length,
+    poster: activeDocuments.filter((document) => document.kind === "poster").length,
+    report: activeDocuments.filter((document) => document.kind === "report").length,
+    ready: activeDocuments.filter((document) => document.compileState === "fresh").length,
+    "needs-compile": activeDocuments.filter((document) => document.compileState !== "fresh").length,
+    archived: documents.filter((document) => preferences[document.path]?.archived).length,
+  }), [activeDocuments, documents, preferences]);
+
+  const visibleDocuments = useMemo(() => {
+    const needle = search.trim().toLocaleLowerCase();
+    const matchesScope = (document: TypesetDocument) => {
+      const preference = preferences[document.path];
+      if (scope === "archived") return Boolean(preference?.archived);
+      if (preference?.archived) return false;
+      if (scope === "favorites") return Boolean(preference?.favorite);
+      if (scope === "article" || scope === "beamer" || scope === "poster" || scope === "report") return document.kind === scope;
+      if (scope === "ready") return document.compileState === "fresh";
+      if (scope === "needs-compile") return document.compileState !== "fresh";
+      return true;
+    };
+    return documents
+      .filter(matchesScope)
+      .filter((document) => !needle || `${document.title} ${document.path} ${document.kind}`.toLocaleLowerCase().includes(needle))
+      .sort((left, right) => sort === "title"
+        ? left.title.localeCompare(right.title) || left.path.localeCompare(right.path)
+        : right.modifiedEpochMs - left.modifiedEpochMs || left.title.localeCompare(right.title));
+  }, [documents, preferences, scope, search, sort]);
+
+  const visiblePathSet = useMemo(() => new Set(visibleDocuments.map((document) => document.path)), [visibleDocuments]);
+  const allVisibleSelected = visibleDocuments.length > 0 && visibleDocuments.every((document) => selectedPaths.has(document.path));
+  const title = copy.scopes[scope];
+
+  const toggleSelection = (path: string) => {
+    setSelectedPaths((current) => {
+      const next = new Set(current);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+  };
+
+  const toggleSelectVisible = () => {
+    setSelectedPaths((current) => {
+      const next = new Set(current);
+      if (allVisibleSelected) {
+        for (const path of visiblePathSet) next.delete(path);
+      } else {
+        for (const path of visiblePathSet) next.add(path);
+      }
+      return next;
+    });
+  };
+
+  const toggleFavorite = (path: string) => {
+    updatePreferences((current) => ({
+      ...current,
+      [path]: { ...current[path], favorite: !current[path]?.favorite },
+    }));
+  };
+
+  const toggleArchived = (path: string) => {
+    updatePreferences((current) => ({
+      ...current,
+      [path]: { ...current[path], archived: !current[path]?.archived },
+    }));
+    setSelectedPaths((current) => {
+      const next = new Set(current);
+      next.delete(path);
+      return next;
+    });
+  };
+
+  const revealDocument = (path: string) => {
+    setActionError(null);
+    void fileReveal(path).catch((revealError) => setActionError(String(revealError)));
+  };
+
+  const createDocument = () => {
+    const fallbackTitle = copy.templates[template].label;
+    const titleValue = newTitle.trim() || fallbackTitle;
+    onCreateSource(newTypesetDocumentPath(template, titleValue), template, titleValue);
+    setCreateOpen(false);
+    setNewTitle("");
+  };
+
+  const navigationGroups: Array<{ label: string; items: Array<{ scope: TypesetLibraryScope; label: string }> }> = [
+    {
+      label: copy.groups.library,
+      items: [
+        { scope: "all", label: copy.navigation.all },
+        { scope: "recent", label: copy.navigation.recent },
+        { scope: "favorites", label: copy.navigation.favorites },
+      ],
+    },
+    {
+      label: copy.groups.documentType,
+      items: [
+        { scope: "article", label: copy.navigation.article },
+        { scope: "beamer", label: copy.navigation.beamer },
+        { scope: "poster", label: copy.navigation.poster },
+        { scope: "report", label: copy.navigation.report },
+      ],
+    },
+    {
+      label: copy.groups.buildStatus,
+      items: [
+        { scope: "ready", label: copy.navigation.ready },
+        { scope: "needs-compile", label: copy.navigation["needs-compile"] },
+        { scope: "archived", label: copy.navigation.archived },
+      ],
+    },
+  ];
+
   return (
-    <section className="typeset-start" aria-label="Choose typesetting source">
+    <section className="typeset-start typeset-library" aria-label={copy.libraryLabel}>
       {error && <div className="typeset-error-bar">{error}</div>}
-      <div className="typeset-start-grid">
-        <section className="typeset-start-panel">
-          <div className="typeset-start-panel-head">
-            <strong>Folders</strong>
-            <span>{folderLoading ? "Loading" : `${visibleFolders.length}`}</span>
-          </div>
-          <div className="typeset-folder-list">
-            {currentFolder && (
-              <button type="button" onClick={() => setCurrentFolder(dirname(currentFolder))}>
-                <span className="typeset-folder-up">..</span>
-                <span>Parent folder</span>
-              </button>
-            )}
-            {visibleFolders.map((folder) => (
-              <button
-                key={folder.path}
-                type="button"
-                onClick={() => setCurrentFolder(folder.path)}
-              >
-                <FileIcon path={folder.name} dir />
-                <span>{folder.name}</span>
-              </button>
-            ))}
-            {!folderLoading && visibleFolders.length === 0 && !currentFolder && (
-              <div className="typeset-start-empty">No folders found.</div>
-            )}
-          </div>
-          <div className="typeset-start-create">
-            <button type="button" className="typeset-recompile-btn" onClick={() => onCreateSource(latexPath)}>
-              <ToolIcon name="new" />
-              New main.tex
-            </button>
-          </div>
-        </section>
-        <section className="typeset-start-panel">
-          <div className="typeset-start-panel-head">
-            <strong>Sources</strong>
-            <span>{sourceCountText}</span>
-          </div>
-          <div className="typeset-start-list">
-            {folderError && <div className="typeset-start-empty">{folderError}</div>}
-            {!folderError && visibleSources.length === 0 ? (
-              <div className="typeset-start-empty">No .tex files found.</div>
-            ) : (
-              visibleSources.map((entry) => (
-                <button key={entry.path} type="button" className="typeset-source-choice" onClick={() => onOpenSource(entry.path)}>
-                  <FileIcon path={entry.path} />
-                  <span>
-                    <strong>{entry.name}</strong>
-                    <em>{dirname(entry.path) || "Project root"}</em>
-                  </span>
-                  <b>LaTeX</b>
+      <div className="typeset-library-shell">
+        <aside className="typeset-library-sidebar" aria-label={copy.categoriesLabel}>
+          <button type="button" className="typeset-library-new" onClick={() => setCreateOpen(true)}>
+            <ToolIcon name="new" />
+            {copy.newDocument}
+          </button>
+          {navigationGroups.map((group) => (
+            <section key={group.label} className="typeset-library-nav-group" aria-label={group.label}>
+              <strong>{group.label}</strong>
+              {group.items.map((item) => (
+                <button
+                  key={item.scope}
+                  type="button"
+                  className={scope === item.scope ? "active" : ""}
+                  aria-label={item.label}
+                  aria-current={scope === item.scope ? "page" : undefined}
+                  onClick={() => setScope(item.scope)}
+                >
+                  <span>{item.label}</span>
+                  <em>{counts[item.scope]}</em>
                 </button>
-              ))
+              ))}
+            </section>
+          ))}
+          <div className="typeset-library-sidebar-foot">
+            <ToolIcon name="files" />
+            <span>{copy.rootDocumentsOnly}</span>
+          </div>
+        </aside>
+
+        <section className="typeset-library-main" aria-label={title}>
+          <header className="typeset-library-header">
+            <div>
+              <h1>{title}</h1>
+              <p>{loading ? copy.scanning : copy.documentCount(visibleDocuments.length)}</p>
+            </div>
+            <button type="button" className="typeset-library-refresh" onClick={onRefresh} disabled={loading} aria-label={copy.refreshLibrary}>
+              <ToolIcon name="refresh" />
+              {copy.refresh}
+            </button>
+          </header>
+
+          {latexAvailable === false && (
+            <div className="typeset-library-runtime-notice" role="status">
+              <span className="typeset-library-runtime-mark">TeX</span>
+              <div>
+                <strong>{copy.latexMissingTitle}</strong>
+                <span>{copy.latexMissingBody}</span>
+              </div>
+              <button type="button" onClick={() => handoffEnvironmentInstall("latex", language)}>
+                {copy.installInChat}
+              </button>
+            </div>
+          )}
+
+          <div className="typeset-library-controls">
+            <label className="typeset-library-search">
+              <ToolIcon name="search" />
+              <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder={copy.searchPlaceholder} />
+            </label>
+            <label className="typeset-library-sort">
+              <span>{copy.sort}</span>
+              <select value={sort} onChange={(event) => setSort(event.target.value as "modified" | "title")} aria-label={copy.sortDocuments}>
+                <option value="modified">{copy.sortModified}</option>
+                <option value="title">{copy.sortTitle}</option>
+              </select>
+            </label>
+          </div>
+
+          {actionError && <div className="typeset-error-bar typeset-library-action-error">{actionError}</div>}
+          <div className="typeset-library-table-wrap">
+            <table className="typeset-library-table">
+              <thead>
+                <tr>
+                  <th className="typeset-library-select-col">
+                    <input type="checkbox" aria-label={copy.selectVisible} checked={allVisibleSelected} onChange={toggleSelectVisible} />
+                  </th>
+                  <th>{copy.table.document}</th>
+                  <th>{copy.table.type}</th>
+                  <th>{copy.table.modified}</th>
+                  <th>{copy.table.status}</th>
+                  <th className="typeset-library-actions-col">{copy.table.actions}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {visibleDocuments.map((document) => {
+                  const archived = Boolean(preferences[document.path]?.archived);
+                  const favorite = Boolean(preferences[document.path]?.favorite);
+                  return (
+                    <tr key={document.path} className={archived ? "archived" : ""} onDoubleClick={() => onOpenSource(document.path)}>
+                      <td className="typeset-library-select-col">
+                        <input
+                          type="checkbox"
+                          aria-label={copy.selectDocument(document.title)}
+                          checked={selectedPaths.has(document.path)}
+                          onChange={() => toggleSelection(document.path)}
+                        />
+                      </td>
+                      <td>
+                        <button type="button" className="typeset-library-document" onClick={() => onOpenSource(document.path)}>
+                          <FileIcon path={document.path} />
+                          <span>
+                            <strong>{document.title}</strong>
+                            <em title={document.path}>{dirname(document.path) || copy.projectRoot}</em>
+                          </span>
+                        </button>
+                      </td>
+                      <td><span className={`typeset-library-kind ${document.kind}`}>{documentKindLabel(document.kind, language)}</span></td>
+                      <td><time dateTime={new Date(document.modifiedEpochMs).toISOString()}>{documentRelativeTime(document.modifiedEpochMs, language)}</time></td>
+                      <td><span className={`typeset-library-status ${document.compileState}`}>{documentCompileLabel(document.compileState, language)}</span></td>
+                      <td className="typeset-library-actions-col">
+                        <div className="typeset-library-actions" aria-label={copy.actionsFor(document.title)}>
+                          <button type="button" title={copy.open} aria-label={copy.openDocument(document.title)} onClick={() => onOpenSource(document.path)}><ToolIcon name="open" /></button>
+                          <button type="button" title={copy.reveal} aria-label={copy.revealDocument(document.title)} onClick={() => revealDocument(document.path)}><ToolIcon name="files" /></button>
+                          <button type="button" title={favorite ? copy.removeFavorite : copy.addFavorite} aria-label={copy.favoriteDocument(document.title, favorite)} onClick={() => toggleFavorite(document.path)} className={favorite ? "active" : ""}>★</button>
+                          <button type="button" title={archived ? copy.restore : copy.archive} aria-label={copy.archiveDocument(document.title, archived)} onClick={() => toggleArchived(document.path)}><ToolIcon name={archived ? "undo" : "download"} /></button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+            {!loading && visibleDocuments.length === 0 && (
+              <div className="typeset-library-empty">
+                <ToolIcon name="files" />
+                <strong>{documents.length === 0 ? copy.emptyRootTitle : copy.emptyViewTitle}</strong>
+                <span>{documents.length === 0 ? copy.emptyRootBody : copy.emptyViewBody}</span>
+              </div>
             )}
           </div>
         </section>
       </div>
+
+      {createOpen && (
+        <div className="typeset-library-create-backdrop" role="presentation" onMouseDown={() => setCreateOpen(false)}>
+          <section className="typeset-library-create-dialog" role="dialog" aria-modal="true" aria-label={copy.dialogLabel} onMouseDown={(event) => event.stopPropagation()}>
+            <header>
+              <div>
+                <span>{copy.dialogEyebrow}</span>
+                <strong>{copy.dialogTitle}</strong>
+              </div>
+              <button type="button" aria-label={copy.closeDialog} onClick={() => setCreateOpen(false)}><ToolIcon name="clear" /></button>
+            </header>
+            <label className="typeset-library-title-input">
+              <span>{copy.documentTitle}</span>
+              <input autoFocus value={newTitle} onChange={(event) => setNewTitle(event.target.value)} placeholder={copy.titlePlaceholder} />
+            </label>
+            <div className="typeset-library-template-grid" role="radiogroup" aria-label={copy.templateLabel}>
+              {TYPESET_LIBRARY_TEMPLATES.map((item) => {
+                const templateCopy = copy.templates[item.kind];
+                return (
+                  <button
+                    key={item.kind}
+                    type="button"
+                    role="radio"
+                    aria-checked={template === item.kind}
+                    className={template === item.kind ? "active" : ""}
+                    onClick={() => setTemplate(item.kind)}
+                  >
+                    <strong>{templateCopy.label}</strong>
+                    <span>{templateCopy.description}</span>
+                  </button>
+                );
+              })}
+            </div>
+            <footer>
+              <button type="button" className="typeset-btn subtle" onClick={() => setCreateOpen(false)}>{copy.cancel}</button>
+              <button type="button" className="typeset-recompile-btn" onClick={createDocument}><ToolIcon name="new" />{copy.create}</button>
+            </footer>
+          </section>
+        </div>
+      )}
     </section>
   );
 }
@@ -4944,7 +5469,7 @@ function outlineFor(source: string): OutlineItem[] {
     subsection: 3,
     subsubsection: 4,
   };
-  return source
+  const sectionOutline = source
     .split("\n")
     .map((line, index) => {
       const latexMatch = /^\\(chapter|section|subsection|subsubsection)\*?\{(.+?)\}/.exec(line.trim());
@@ -4954,6 +5479,17 @@ function outlineFor(source: string): OutlineItem[] {
       return null;
     })
     .filter((item): item is { line: number; level: number; title: string } => Boolean(item));
+  if (sectionOutline.length > 0) return sectionOutline;
+
+  // Beamer decks often omit \section entirely. In that case an empty Outline
+  // wastes a third of the project panel even though every frame has a useful
+  // navigation title, so fall back to the frame list without changing article
+  // or sectioned-deck numbering.
+  return beamerSlidesFor(source).map((slide) => ({
+    line: slide.line,
+    level: 2,
+    title: slide.title,
+  }));
 }
 
 function numberedOutlineFor(outline: OutlineItem[]): NumberedOutlineItem[] {
@@ -5034,8 +5570,8 @@ export default function Typeset() {
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const [treeRefreshKey, setTreeRefreshKey] = useState(0);
-  const [startSources, setStartSources] = useState<string[]>([]);
-  const [startFolders, setStartFolders] = useState<FileTreeEntry[]>([]);
+  const [startDocuments, setStartDocuments] = useState<TypesetDocument[]>([]);
+  const [latexAvailable, setLatexAvailable] = useState<boolean | null>(null);
   const [logOpen, setLogOpen] = useState(false);
   const [editorMode, setEditorMode] = useState<EditorMode>("visual");
   const [visualPdfCursor, setVisualPdfCursor] = useState<VisualPdfCursor | null>(null);
@@ -5046,7 +5582,7 @@ export default function Typeset() {
   const [slideFocusMode, setSlideFocusMode] = useState(true);
   const [projectPanelWidth, setProjectPanelWidth] = useState(PROJECT_PANEL_DEFAULT_W);
   const [pdfPanelWidth, setPdfPanelWidth] = useState(PDF_PANEL_DEFAULT_W);
-  const [outlinePanelHeight, setOutlinePanelHeight] = useState(OUTLINE_PANEL_DEFAULT_H);
+  const [outlinePanelHeight, setOutlinePanelHeight] = useState<number | null>(null);
   const [outlineCollapsed, setOutlineCollapsed] = useState(false);
   const [currentSourceLine, setCurrentSourceLine] = useState(1);
   // CodeMirror reports edits synchronously, while React may defer committing the
@@ -5059,7 +5595,7 @@ export default function Typeset() {
   // active drag) every time a resize updates the width state.
   const projectPanelWidthRef = useRef(projectPanelWidth);
   const pdfPanelWidthRef = useRef(pdfPanelWidth);
-  const outlinePanelHeightRef = useRef(outlinePanelHeight);
+  const outlinePanelHeightRef = useRef<number | null>(outlinePanelHeight);
   const resizeCleanupRef = useRef<(() => void) | null>(null);
   projectPanelWidthRef.current = projectPanelWidth;
   pdfPanelWidthRef.current = pdfPanelWidth;
@@ -5083,6 +5619,20 @@ export default function Typeset() {
   useEffect(() => {
     setCompileErrorHandling(loadCompileErrorHandling(currentProject?.id));
   }, [currentProject?.id]);
+
+  useEffect(() => {
+    let active = true;
+    void localEnvironmentCheck("latex")
+      .then((check) => {
+        if (active) setLatexAvailable(check.available);
+      })
+      .catch(() => {
+        if (active) setLatexAvailable(null);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   const setCompileErrorHandlingPreference = useCallback((value: CompileErrorHandling) => {
     setCompileErrorHandling(value);
@@ -5242,11 +5792,21 @@ export default function Typeset() {
     setTreeRefreshKey((key) => key + 1);
   }, [previewPath, resetDraft, sourcePath]);
 
-  const createSource = useCallback(async (path: string) => {
+  const createSource = useCallback(async (path: string, template: TypesetTemplate = "article", title = "SomniQ LaTeX Draft") => {
     setError(null);
     try {
       const normalized = normalizeNewTypesetPath(path);
-      const file = await fileCreateText(normalized, defaultSourceFor(normalized));
+      const file = await fileCreateText(normalized, defaultSourceFor(normalized, template, title));
+      setStartDocuments((documents) => [
+        {
+          path: file.path,
+          title,
+          kind: template,
+          modifiedEpochMs: Date.now(),
+          compileState: "missing",
+        },
+        ...documents.filter((document) => document.path !== file.path),
+      ]);
       setTreeRefreshKey((key) => key + 1);
       setSourcePath(file.path);
       setPreviewPath(outputPathFor(file.path));
@@ -5277,13 +5837,9 @@ export default function Typeset() {
     setCurrentSourceLine(1);
     autoCompiledPathRef.current = null;
     try {
-      const [latexMatches, rootEntries] = await Promise.all([
-        fileSearch("**/*.tex").catch(() => []),
-        fileListDir(null).catch(() => []),
-      ]);
-      const sortedMatches = sortedSources(latexMatches);
-      setStartSources(sortedMatches);
-      setStartFolders(rootEntries.filter((entry) => entry.isDir));
+      const documents = await typesetListDocuments();
+      const sortedMatches = sortedSources(documents.map((document) => document.path));
+      setStartDocuments(documents);
       setTreeRefreshKey((key) => key + 1);
       if (isTypesetPreviewMode() && !previewAutoOpenedRef.current) {
         previewAutoOpenedRef.current = true;
@@ -5299,8 +5855,7 @@ export default function Typeset() {
         }
       }
     } catch (scanError) {
-      setStartSources([]);
-      setStartFolders([]);
+      setStartDocuments([]);
       setError(String(scanError));
     } finally {
       setLoading(false);
@@ -5690,7 +6245,8 @@ export default function Typeset() {
     resizeCleanupRef.current?.();
 
     const startY = event.clientY;
-    const startHeight = outlinePanelHeightRef.current;
+    const measuredHeight = event.currentTarget.nextElementSibling?.getBoundingClientRect().height ?? 0;
+    const startHeight = outlinePanelHeightRef.current ?? (measuredHeight > 0 ? measuredHeight : OUTLINE_PANEL_DEFAULT_H);
     const root = document.documentElement;
     const body = document.body;
     const previousBodyCursor = body.style.cursor;
@@ -5754,16 +6310,6 @@ export default function Typeset() {
     document.addEventListener("keydown", onEscape, captureOptions);
   }, []);
 
-  const beginGridResizeFromPointer = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
-    if (event.pointerType === "mouse" && event.button !== 0) return;
-    if (isEditorScrollbarGutterPointer(event.target, event.clientX, event.clientY)) return;
-    const hit = resizeHitFromGridPoint(event.currentTarget, event.clientX, event.clientY);
-    if (!hit) return;
-    event.preventDefault();
-    event.stopPropagation();
-    beginPanelResize(hit.panel, hit.axis, event.clientX, event.clientY);
-  }, [beginPanelResize]);
-
   useEffect(() => () => {
     resizeCleanupRef.current?.();
   }, []);
@@ -5785,7 +6331,12 @@ export default function Typeset() {
     event.preventDefault();
     const step = event.shiftKey ? 40 : 16;
     const direction = event.key === "ArrowUp" ? 1 : -1;
-    setOutlinePanelHeight((height) => clampNumber(height + direction * step, OUTLINE_PANEL_MIN_H, OUTLINE_PANEL_MAX_H));
+    const measuredHeight = event.currentTarget.nextElementSibling?.getBoundingClientRect().height ?? 0;
+    setOutlinePanelHeight((height) => clampNumber(
+      (height ?? (measuredHeight > 0 ? measuredHeight : OUTLINE_PANEL_DEFAULT_H)) + direction * step,
+      OUTLINE_PANEL_MIN_H,
+      OUTLINE_PANEL_MAX_H,
+    ));
   }, []);
 
   const gridClassName = [
@@ -5801,16 +6352,17 @@ export default function Typeset() {
   } as CSSProperties;
 
   return (
-    <div className="typeset-workbench ide-redesign-main">
+    <div className={`typeset-workbench ide-redesign-main${browserPreviewMode ? " browser-preview" : ""}`}>
       {browserPreviewMode && (
         <div className="typeset-runtime-banner" role="status">
-          Browser preview uses bundled sample data. Desktop/Tauri reads real project files and compiles through the local backend.
+          <strong>Browser preview</strong>
+          <span>Sample data only</span>
+          <em>Desktop mode uses local files and local compilation.</em>
         </div>
       )}
       <div
         className={gridClassName}
         style={gridStyle}
-        onPointerDownCapture={beginGridResizeFromPointer}
       >
         {(sourcePath || loaded) && (
           <nav className="typeset-rail ide-rail" aria-label="Typeset sections">
@@ -5872,12 +6424,13 @@ export default function Typeset() {
         {!sourcePath && !loaded ? (
           <TypesetStartPage
             projectPath={currentProject?.path ?? null}
-            sources={startSources}
-            folders={startFolders}
+            documents={startDocuments}
+            latexAvailable={latexAvailable}
             loading={loading}
             error={error}
             onOpenSource={openPath}
             onCreateSource={createSource}
+            onRefresh={() => void scanProject()}
           />
         ) : (
           <>

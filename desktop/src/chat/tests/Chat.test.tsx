@@ -71,6 +71,7 @@ vi.mock("../ChatThread", () => ({
             block.kind === "text" ? <div key={index}>{block.text}</div> : null
           ))}
           {turn.stopped && <button onClick={onContinue}>Continue</button>}
+          {turn.role === "assistant" && turn.error && <div role="alert">{turn.error}</div>}
           {turn.role === "assistant" && turn.error && <button onClick={() => onRetry(turn)}>Retry</button>}
         </article>
       ))}
@@ -342,6 +343,77 @@ describe("Chat export action", () => {
       session.id,
       expect.objectContaining({ text: "Inspect the implementation", model: "MiniMax-M3" }),
     ));
+  });
+
+  it("renders an attached message and clears its draft before file preparation finishes", async () => {
+    const session = makeSession("default");
+    session.id = "session-slow-attachment";
+    session.title = "Slow attachment";
+    session.turns = [{
+      id: "prior-turn",
+      role: "assistant",
+      blocks: [{ kind: "text", text: "Prior response" }],
+    }];
+    session.draft = "Summarize the attached notes";
+    session.draftAttachments = [{
+      id: "attachment-notes",
+      kind: "file",
+      name: "notes.md",
+      path: "F:\\Agent\\Aris\\notes.md",
+    }];
+    localStorage.setItem(SESSIONS_KEY, JSON.stringify([session]));
+    localStorage.setItem(CURRENT_KEY, session.id);
+
+    let resolveFileRead: ((value: string) => void) | undefined;
+    apiMocks.fileRead.mockImplementationOnce(() => new Promise<string>((resolve) => {
+      resolveFileRead = resolve;
+    }));
+    apiMocks.chatRewindToUserMessage.mockResolvedValue(null);
+    apiMocks.chatSend.mockResolvedValue("Attachment summary");
+
+    render(<Chat />);
+
+    await userEvent.click(await screen.findByRole("button", { name: "Slow attachment" }));
+    await userEvent.click(screen.getByRole("button", { name: "Send message" }));
+
+    await waitFor(() => expect(screen.getByText("Summarize the attached notes")).toBeTruthy());
+    expect((screen.getByRole("textbox", { name: "Message SomniQ" }) as HTMLTextAreaElement).value).toBe("");
+    expect(apiMocks.chatSend).not.toHaveBeenCalled();
+
+    resolveFileRead?.("# Notes");
+    await waitFor(() => expect(apiMocks.chatSend).toHaveBeenCalledWith(
+      session.id,
+      expect.objectContaining({ text: expect.stringContaining("# Notes") }),
+    ));
+  });
+
+  it("keeps the optimistic retry turn and surfaces a context-reset failure", async () => {
+    const session = makeSession("default");
+    session.id = "session-reset-failure";
+    session.title = "Reset failure";
+    session.turns = [
+      { id: "turn-user", role: "user", blocks: [{ kind: "text", text: "Retry this request" }] },
+      {
+        id: "turn-assistant",
+        role: "assistant",
+        error: "provider failed",
+        blocks: [{ kind: "text", text: "Partial answer" }],
+      },
+    ];
+    localStorage.setItem(SESSIONS_KEY, JSON.stringify([session]));
+    localStorage.setItem(CURRENT_KEY, session.id);
+    apiMocks.chatRewindToUserMessage.mockResolvedValue(null);
+    apiMocks.chatSetContext.mockRejectedValueOnce(new Error("context service unavailable"));
+
+    render(<Chat />);
+
+    await userEvent.click(await screen.findByRole("button", { name: "Reset failure" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Retry" }));
+
+    await waitFor(() => expect(apiMocks.chatSetContext).toHaveBeenCalledWith(session.id, [], "replace"));
+    expect(screen.getByText("Retry this request")).toBeTruthy();
+    expect(await screen.findByText("Unable to reset chat context: Error: context service unavailable")).toBeTruthy();
+    expect(apiMocks.chatSend).not.toHaveBeenCalled();
   });
 
   it("appends only an unpreserved failed turn instead of replacing backend history", async () => {

@@ -26,6 +26,11 @@ pub async fn local_environment_checks(
     crate::env::get_or_probe(force_refresh.unwrap_or(false)).await
 }
 
+#[tauri::command]
+pub async fn local_environment_check(id: String) -> Result<LocalEnvironmentCheck, String> {
+    crate::env::get_or_probe_one(&id).await
+}
+
 fn allowed_external_url(url: &str) -> bool {
     let trimmed = url.trim();
     if trimmed.is_empty() || trimmed.chars().any(char::is_control) {
