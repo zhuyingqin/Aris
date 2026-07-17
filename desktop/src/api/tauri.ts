@@ -757,6 +757,8 @@ export interface FileText {
   path: string;
   content: string;
   bytes: number;
+  /** Content fingerprint returned by the backend for optimistic save checks. */
+  version?: string;
 }
 
 export type TypesetDocumentKind = "article" | "beamer" | "poster" | "report";
@@ -788,11 +790,11 @@ export const fileReadText = (path: string) =>
     :
   invoke<FileText>("file_read_text", { path });
 
-export const fileWriteText = (path: string, content: string) =>
+export const fileWriteText = (path: string, content: string, expectedVersion?: string | null) =>
   isFilePreviewMode()
-    ? preview<FileText>(previewWriteText(path, content))
+    ? preview<FileText>(previewWriteText(path, content, expectedVersion))
     :
-  invoke<FileText>("file_write_text", { path, content });
+  invoke<FileText>("file_write_text", { path, content, expectedVersion: expectedVersion ?? null });
 
 export const fileCreateText = (path: string, content: string) =>
   isFilePreviewMode()
@@ -821,9 +823,10 @@ export const fileDelete = (path: string) =>
   isFilePreviewMode() ? previewDeletePath(path) :
   invoke<void>("file_delete", { path });
 
-export const fileReadBytes = (path: string) =>
-  isFilePreviewMode() ? previewReadBytes(path) :
-  invoke<number[]>("file_read_bytes", { path });
+export const fileReadBytes = (path: string): Promise<ArrayBuffer> =>
+  isFilePreviewMode()
+    ? previewReadBytes(path).then((bytes) => Uint8Array.from(bytes).buffer)
+    : invoke<ArrayBuffer>("file_read_bytes", { path });
 
 export const fileSearch = (pattern: string, root?: string) =>
   isFilePreviewMode() ? preview<string[]>(previewSearchFiles(pattern, root ?? null)) :

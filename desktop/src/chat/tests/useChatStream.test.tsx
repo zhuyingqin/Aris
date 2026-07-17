@@ -335,7 +335,7 @@ describe("useChatStream concurrent sessions", () => {
     });
   });
 
-  it("prefers providerUsage.promptTokens over contextTokens for real context ring", () => {
+  it("prefers the post-turn session token estimate for the context ring", () => {
     let doneHandler:
       | ((event: {
         sessionId: string;
@@ -366,9 +366,10 @@ describe("useChatStream concurrent sessions", () => {
       });
     });
 
-    // Real API prompt_tokens should be preferred over the local estimate.
-    expect(onContextTokens).toHaveBeenCalledWith("chat-ctx", 420_000);
-    expect(onContextTokens).not.toHaveBeenCalledWith("chat-ctx", 900);
+    // The backend estimate is in the same unit as the compaction budget.
+    // Provider prompt usage may be measured before automatic compaction.
+    expect(onContextTokens).toHaveBeenCalledWith("chat-ctx", 900);
+    expect(onContextTokens).not.toHaveBeenCalledWith("chat-ctx", 420_000);
   });
 
   it("deduplicates repeated AskUserQuestion tool-call events by id", () => {

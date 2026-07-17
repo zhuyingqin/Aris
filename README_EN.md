@@ -29,6 +29,16 @@
 
 ## 📰 What's New
 
+> **v0.4.21** (2026-07) — Tools surface refinement: `crates/tools/src/lib.rs` (+ test). Typeset
+> visual-editor iteration: `Typeset.tsx` + `TypesetVisualEditor.tsx` + `Typeset.css` + new
+> `TypesetVisualEditor.test.ts` + `visualDecorations.ts`. Tauri backend (`typeset.rs` major +
+> `files.rs`). Chat surface updates (`Chat.tsx`, `ChatComposer.tsx`, `ChatImagePreview.tsx`,
+> `useChatRun.ts`, `useChatStream.ts` + tests). Lab: `FileEditorPane.tsx` refinement. New:
+> `desktop/src/windowCloseGuard.ts` (+ test) — single close lifecycle for the Tauri shell and
+> the embedded browser view. New research-loop diagram
+> (`figures/somniq-research-loop.{md,mmd,png}`) wired into the product-positioning README.
+> API + App + styles polish.
+
 > **v0.4.20** (2026-07) — Chat surface refactor: new `ChatComposer` + `useChatComposer` +
 > `useChatRun` hooks, expanded `ChatMessage` model + tests, and Settings refinements.
 > Typeset visual-editor iteration: `Typeset.tsx` + `TypesetVisualEditor.tsx` + `Typeset.css`
@@ -43,6 +53,9 @@
 > recovery), and `control.ts` / `main.ts` / `transport.ts` / `remoteMarkdown.ts` /
 > `workspaceNavigation.ts` / `styles.css` / SW refinements. Desktop typeset + chat + Tauri
 > backend + remote-protocol surface updates. Tools surface refinement (`crates/tools/`).
+
+<details>
+<summary>📜 Earlier releases (v0.4.18 → v0.1.0)</summary>
 
 > **v0.4.18** (2026-07) — Remote-mobile follow-up: `crates/remote-protocol/src/control.rs`
 > refinement, new `services/remote-mobile/src/mobileViewport.ts` + test, phone PWA
@@ -72,9 +85,6 @@
 > `editor/kernelIntel.ts` (editor intelligence helpers — completion / diagnostics / hover).
 > Notebook kernel refinements. New deps: +@xterm/xterm, +@xterm/addon-fit, +katex, +mermaid,
 > +pdfjs-dist.
-
-<details>
-<summary>📜 Earlier releases (v0.4.14 → v0.1.0)</summary>
 
 > **v0.4.14** (2026-07) — New `project_goal` kernel module (mission/goal persistence + inference
 > pipeline). New `editor` desktop module: `SharedEditor` + `editorCommands` / `editorDecorations` /

@@ -11,6 +11,7 @@ import LiteratureViewTabs, { type LiteraturePageView } from "./literature/Litera
 import Extensions from "./extensions/Extensions";
 import Settings from "./settings/Settings";
 import OnboardingTutorial from "./OnboardingTutorial";
+import { installBrowserUnsavedChangesGuard, shouldPreventDesktopClose } from "./windowCloseGuard";
 
 const loadLiterature = () => import("./literature/Literature");
 const loadStudio = () => import("./studio/Studio");
@@ -460,6 +461,7 @@ export default function App() {
   const language = useStore((s) => s.language);
   const tab = useStore((s) => s.tab);
   const setTab = useStore((s) => s.setTab);
+  const typesetDirty = useStore((s) => s.typesetDirty);
   const logout = useStore((s) => s.logout);
   const deferredTab = useDeferredValue(tab);
   const [, startTabTransition] = useTransition();
@@ -487,6 +489,7 @@ export default function App() {
   // Mount Lab once on first visit, then keep it alive (hidden) like Chat
   // instead of conditionally mounting per tab — see LabPane above for why.
   const [labMounted, setLabMounted] = useState(false);
+  const [typesetMounted, setTypesetMounted] = useState(false);
   const productSwitcherRef = useRef<HTMLDivElement | null>(null);
   const productSwitcherTriggerRef = useRef<HTMLButtonElement | null>(null);
   const productMenuRef = useRef<HTMLDivElement | null>(null);
@@ -523,6 +526,9 @@ export default function App() {
       title: "Add SomniQ project",
     });
     if (typeof selected === "string") {
+      if (typesetDirty && !window.confirm("Discard the unsaved LaTeX changes and open the added project?")) {
+        return;
+      }
       try {
         await addProject(selected);
       } catch {
@@ -533,6 +539,13 @@ export default function App() {
 
   const selectProject = (id: string) => {
     setProjectMenuOpen(false);
+    if (
+      id !== currentProject?.id
+      && typesetDirty
+      && !window.confirm("Discard the unsaved LaTeX changes and switch projects?")
+    ) {
+      return;
+    }
     void switchProject(id).catch(() => undefined);
   };
 
@@ -688,7 +701,32 @@ export default function App() {
   }, [refreshAccount, userMenuOpen]);
   useEffect(() => {
     if (tab === "lab") setLabMounted(true);
+    if (tab === "typeset") setTypesetMounted(true);
   }, [tab]);
+  useEffect(() => installBrowserUnsavedChangesGuard(
+    isTauri(),
+    () => useStore.getState().typesetDirty,
+  ), []);
+  useEffect(() => {
+    if (!isTauri()) return;
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+    void getCurrentWindow().onCloseRequested((event) => {
+      if (shouldPreventDesktopClose(
+        useStore.getState().typesetDirty,
+        () => window.confirm("Discard the unsaved LaTeX changes and close SomniQ Studio?"),
+      )) {
+        event.preventDefault();
+      }
+    }).then((nextUnlisten) => {
+      if (disposed) nextUnlisten();
+      else unlisten = nextUnlisten;
+    }).catch(() => undefined);
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
   useEffect(() => {
     let disposed = false;
     const heavyTabs = ["literature", "studio", "mail"];
@@ -1272,10 +1310,12 @@ export default function App() {
               </ErrorBoundary>
             </div>
           )}
-          {renderedTab === "typeset" && (
-            <Suspense fallback={<AppLoadingPane copy={copy} label={TAB_MODULE_LABELS.typeset} />}>
-              <Typeset />
-            </Suspense>
+          {typesetMounted && (
+            <div className="app-typeset-pane" hidden={renderedTab !== "typeset"}>
+              <Suspense fallback={<AppLoadingPane copy={copy} label={TAB_MODULE_LABELS.typeset} />}>
+                <Typeset />
+              </Suspense>
+            </div>
           )}
           {renderedTab === "literature" && (
             <Suspense fallback={<AppLoadingPane copy={copy} label={TAB_MODULE_LABELS.literature} />}>

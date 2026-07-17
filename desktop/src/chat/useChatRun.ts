@@ -329,6 +329,9 @@ export function useChatRun({
     ? (status.contextWindow ?? status.compactionBudget ?? null)
     : null;
   const currentContextNotice = contextNotice?.sessionId === currentId ? contextNotice : null;
+  const dismissContextNotice = useCallback(() => {
+    setContextNotice((notice) => notice?.sessionId === currentId ? null : notice);
+  }, [currentId]);
 
   useEffect(() => {
     if (currentContextOverride) {
@@ -638,6 +641,7 @@ export function useChatRun({
     estimatedTokens,
     contextMax,
     currentContextNotice,
+    dismissContextNotice,
     // turn execution
     beginRun,
     retry,

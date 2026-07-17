@@ -7,6 +7,7 @@ use std::{
 use encoding_rs::{GB18030, GBK};
 use serde::Serialize;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 
 const MAX_FILE_EDITOR_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_FILE_BINARY_BYTES: u64 = 40 * 1024 * 1024;
@@ -28,6 +29,11 @@ pub struct FileText {
     path: String,
     content: String,
     bytes: u64,
+    version: String,
+}
+
+fn file_content_version(bytes: &[u8]) -> String {
+    format!("sha256:{:x}", Sha256::digest(bytes))
 }
 
 /// A compilable LaTeX root document discovered in the current workspace.
@@ -759,11 +765,16 @@ pub fn file_read_text(path: String) -> Result<FileText, String> {
         path: display_workspace_path(&target, &root),
         content,
         bytes: metadata.len(),
+        version: file_content_version(&bytes),
     })
 }
 
 #[tauri::command]
-pub fn file_write_text(path: String, content: String) -> Result<FileText, String> {
+pub fn file_write_text(
+    path: String,
+    content: String,
+    expected_version: Option<String>,
+) -> Result<FileText, String> {
     if content.len() as u64 > MAX_FILE_EDITOR_BYTES {
         return Err(format!(
             "content is too large for the Lab editor ({} bytes, limit {} bytes)",
@@ -772,15 +783,27 @@ pub fn file_write_text(path: String, content: String) -> Result<FileText, String
         ));
     }
     let (root, target) = resolve_workspace_file(&path)?;
-    std::fs::write(&target, content).map_err(|error| error.to_string())?;
-    let content = std::fs::read_to_string(&target).map_err(|error| error.to_string())?;
-    let bytes = std::fs::metadata(&target)
-        .map_err(|error| error.to_string())?
-        .len();
+    let current_bytes = std::fs::read(&target).map_err(|error| error.to_string())?;
+    let current_version = file_content_version(&current_bytes);
+    if expected_version
+        .as_deref()
+        .filter(|version| !version.trim().is_empty())
+        .is_some_and(|expected| expected != current_version)
+    {
+        return Err(format!(
+            "FILE_CONFLICT: {} changed on disk after it was opened; reload it before saving",
+            display_workspace_path(&target, &root)
+        ));
+    }
+    runtime::write_file_atomically(&target, content.as_bytes())
+        .map_err(|error| error.to_string())?;
+    let bytes = std::fs::read(&target).map_err(|error| error.to_string())?;
+    let content = decode_text_bytes(&bytes)?;
     Ok(FileText {
         path: display_workspace_path(&target, &root),
         content,
-        bytes,
+        bytes: bytes.len() as u64,
+        version: file_content_version(&bytes),
     })
 }
 
@@ -800,13 +823,15 @@ pub fn file_create_text(path: String, content: String) -> Result<FileText, Strin
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
-    std::fs::write(&target, content).map_err(|error| error.to_string())?;
-    let metadata = std::fs::metadata(&target).map_err(|error| error.to_string())?;
-    let content = std::fs::read_to_string(&target).map_err(|error| error.to_string())?;
+    runtime::write_file_atomically(&target, content.as_bytes())
+        .map_err(|error| error.to_string())?;
+    let bytes = std::fs::read(&target).map_err(|error| error.to_string())?;
+    let content = decode_text_bytes(&bytes)?;
     Ok(FileText {
         path: display_workspace_path(&target, &root),
         content,
-        bytes: metadata.len(),
+        bytes: bytes.len() as u64,
+        version: file_content_version(&bytes),
     })
 }
 
@@ -916,7 +941,7 @@ pub fn file_delete(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn file_read_bytes(path: String) -> Result<Vec<u8>, String> {
+pub fn file_read_bytes(path: String) -> Result<tauri::ipc::Response, String> {
     let (_root, target) = resolve_workspace_file(&path)?;
     let metadata = std::fs::metadata(&target).map_err(|error| error.to_string())?;
     if metadata.len() > MAX_FILE_BINARY_BYTES {
@@ -926,12 +951,27 @@ pub fn file_read_bytes(path: String) -> Result<Vec<u8>, String> {
             MAX_FILE_BINARY_BYTES
         ));
     }
-    std::fs::read(&target).map_err(|error| error.to_string())
+    std::fs::read(&target)
+        .map(tauri::ipc::Response::new)
+        .map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
 mod text_decode_tests {
     use super::*;
+
+    #[test]
+    fn content_version_is_stable_and_changes_with_bytes() {
+        assert_eq!(
+            file_content_version(b"draft"),
+            file_content_version(b"draft")
+        );
+        assert_ne!(
+            file_content_version(b"draft"),
+            file_content_version(b"external edit")
+        );
+        assert!(file_content_version(b"draft").starts_with("sha256:"));
+    }
 
     #[test]
     fn repairs_common_utf8_as_gbk_mojibake() {

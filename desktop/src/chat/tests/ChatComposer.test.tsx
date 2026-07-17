@@ -70,6 +70,38 @@ describe("ChatComposer textarea and attachments", () => {
     expect(attachment.content).toContain("Vision input is not supported");
     expect(attachment.content).not.toMatch(/^data:/);
   });
+
+  it("allows the context compaction notice to be dismissed", async () => {
+    const user = userEvent.setup();
+    const onContextStatusDismiss = vi.fn();
+    render(
+      <ChatComposer
+        input=""
+        commands={[]}
+        skills={[]}
+        attachments={[]}
+        busy={false}
+        ready
+        editing={false}
+        contextStatus={{
+          kind: "compacted",
+          message: "Context was compacted automatically.",
+          detail: "Earlier messages were summarized.",
+        }}
+        onContextStatusDismiss={onContextStatusDismiss}
+        onInputChange={() => undefined}
+        onAttachmentsChange={() => undefined}
+        onSubmit={() => undefined}
+        onStop={() => undefined}
+        onCancelEdit={() => undefined}
+        onHeightChange={() => undefined}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Dismiss context notice" }));
+
+    expect(onContextStatusDismiss).toHaveBeenCalledOnce();
+  });
 });
 
 const SKILLS: SkillMeta[] = [

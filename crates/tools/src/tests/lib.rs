@@ -12,7 +12,8 @@ use super::team_state;
 use super::{
     agent_permission_policy, allowed_tools_for_subagent, discover_skills, execute_agent_with_spawn,
     execute_tool, execute_tool_with_cancel, execute_tool_with_context, extract_latex_diagnostics,
-    final_assistant_text, latex_pdf_state, mvp_tool_specs, persist_agent_terminal_state,
+    final_assistant_text, latex_input_manifest_hash, latex_input_snapshot,
+    latex_input_snapshot_changed, latex_pdf_state, mvp_tool_specs, persist_agent_terminal_state,
     preferred_latex_engine, render_latex_template, repl_invokes_latex_compiler,
     resolve_anthropic_compat_reviewer_model, resolve_existing_workspace_path,
     resolve_output_workspace_path, resolve_reviewer_model, route_openai_compat_model,
@@ -203,6 +204,37 @@ fn latex_pdf_provenance_never_treats_an_unchanged_old_pdf_as_current() {
         ),
         LatexPdfState::Fresh
     );
+}
+
+#[test]
+fn latex_input_manifest_covers_transitive_sources_bibliography_and_figures() {
+    let root = temp_path("latex-input-manifest");
+    fs::create_dir_all(root.join("chapters")).expect("chapters");
+    fs::create_dir_all(root.join("figures")).expect("figures");
+    fs::write(
+        root.join("main.tex"),
+        "\\documentclass{article}\n\\input{chapters/intro}\n\\addbibresource{references.bib}",
+    )
+    .expect("main");
+    fs::write(
+        root.join("chapters/intro.tex"),
+        "\\includegraphics{figures/chart}",
+    )
+    .expect("chapter");
+    fs::write(root.join("references.bib"), "@article{x,title={X}}").expect("bib");
+    fs::write(root.join("figures/chart.png"), b"png-bytes").expect("figure");
+    let workspace = fs::canonicalize(&root).expect("workspace");
+    let input = workspace.join("main.tex");
+
+    let snapshot = latex_input_snapshot(&input, &workspace);
+    assert_eq!(snapshot.len(), 4);
+    let hash = latex_input_manifest_hash(&snapshot, &workspace);
+    assert_eq!(hash.len(), 64);
+    assert!(!latex_input_snapshot_changed(&snapshot));
+
+    fs::write(workspace.join("chapters/intro.tex"), "changed").expect("change input");
+    assert!(latex_input_snapshot_changed(&snapshot));
+    fs::remove_dir_all(root).expect("cleanup");
 }
 
 #[test]

@@ -46,8 +46,8 @@ function mimeTypeFromPath(path: string): string {
   return "image/png";
 }
 
-function bytesToObjectUrl(bytes: number[], mimeType: string): string {
-  const blob = new Blob([new Uint8Array(bytes)], { type: mimeType });
+function bytesToObjectUrl(bytes: ArrayBuffer, mimeType: string): string {
+  const blob = new Blob([bytes], { type: mimeType });
   return URL.createObjectURL(blob);
 }
 

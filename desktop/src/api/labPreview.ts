@@ -15,6 +15,16 @@ interface FileTextLike {
   path: string;
   content: string;
   bytes: number;
+  version: string;
+}
+
+function previewTextVersion(content: string): string {
+  let hash = 0x811c9dc5;
+  for (const byte of new TextEncoder().encode(content)) {
+    hash ^= byte;
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return `preview:${(hash >>> 0).toString(16).padStart(8, "0")}`;
 }
 
 export interface PreviewFileTreeEntry {
@@ -393,7 +403,7 @@ export function previewListTypesetDocuments() {
 
 export function previewReadText(path: string): FileTextLike {
   const content = files.get(path) ?? "";
-  return { path, content, bytes: new TextEncoder().encode(content).length };
+  return { path, content, bytes: new TextEncoder().encode(content).length, version: previewTextVersion(content) };
 }
 
 export async function previewReadBytes(path: string): Promise<number[]> {
@@ -406,11 +416,20 @@ export async function previewReadBytes(path: string): Promise<number[]> {
   return Array.from(new TextEncoder().encode(files.get(path) ?? ""));
 }
 
-export function previewWriteText(path: string, content: string): FileTextLike {
+export function previewWriteText(path: string, content: string, expectedVersion?: string | null): FileTextLike {
   const normalized = normalizePreviewPath(path);
+  const current = files.get(normalized);
+  if (current !== undefined && expectedVersion && previewTextVersion(current) !== expectedVersion) {
+    throw new Error(`FILE_CONFLICT: ${normalized} changed after it was opened; reload it before saving`);
+  }
   ensurePreviewParentDirs(normalized);
   files.set(normalized, content);
-  return { path: normalized, content, bytes: new TextEncoder().encode(content).length };
+  return {
+    path: normalized,
+    content,
+    bytes: new TextEncoder().encode(content).length,
+    version: previewTextVersion(content),
+  };
 }
 
 export function previewCreateDir(path: string): PreviewFileTreeEntry {

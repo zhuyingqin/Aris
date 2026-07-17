@@ -272,6 +272,7 @@ interface Props {
   contextUsed?: number;
   contextMax?: number | null;
   contextStatus?: ContextStatusView | null;
+  onContextStatusDismiss?: () => void;
 }
 
 function ChatComposer({
@@ -304,6 +305,7 @@ function ChatComposer({
   contextUsed,
   contextMax,
   contextStatus,
+  onContextStatusDismiss,
 }: Props) {
   const language = useStore((state) => state.language);
   const copy = CHAT_COPY[language];
@@ -330,6 +332,7 @@ function ChatComposer({
   const reasoningMenuRef = useRef<HTMLDivElement>(null);
   const fileSearchVersion = useRef(0);
   const permissionLabel = permission ? (copy.permissionLabels[permission.mode] ?? permission.label) : "";
+  const dismissContextLabel = language === "cn" ? "关闭上下文提示" : "Dismiss context notice";
 
   const slashItems = useMemo<SlashPickerItem[]>(() => {
     if (pickerMode !== "skill") return [];
@@ -609,6 +612,17 @@ function ChatComposer({
             <span>{contextStatus.message}</span>
             {contextStatus.detail && <small>{contextStatus.detail}</small>}
           </div>
+          {onContextStatusDismiss && (
+            <button
+              type="button"
+              className="chat-context-status-dismiss"
+              onClick={onContextStatusDismiss}
+              aria-label={dismissContextLabel}
+              title={dismissContextLabel}
+            >
+              ×
+            </button>
+          )}
         </div>
       )}
       <div className="chat-input">

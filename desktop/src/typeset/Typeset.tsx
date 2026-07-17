@@ -1,5 +1,5 @@
 ﻿import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
+import type { CSSProperties, PointerEvent as ReactPointerEvent, WheelEvent as ReactWheelEvent } from "react";
 import { memo } from "react";
 import { createPortal } from "react-dom";
 import katex from "katex";
@@ -78,6 +78,8 @@ type CompileStatus = "idle" | "running" | "success" | "partial" | "error";
 type CompileResult = LatexCompileResult;
 type CompileLiveLog = { stdout: string; stderr: string; elapsedMs: number };
 type CompileErrorHandling = "stop" | "continue";
+type CompileLogFilter = "all" | "error" | "warning" | "info";
+type CompileLogLevel = Exclude<CompileLogFilter, "all">;
 type EditorMode = "code" | "visual";
 // `nonce` forces PdfPage's highlight-flash animation to restart even when the
 // user double-clicks the exact same source position twice in a row.
@@ -118,6 +120,9 @@ const OUTLINE_PANEL_MAX_H = 720;
 const PDF_ZOOM_MIN = 0.25;
 const PDF_ZOOM_MAX = 4;
 const PDF_ZOOM_PRESETS = [0.5, 0.75, 1, 1.25, 1.5, 2, 4] as const;
+const PDF_WHEEL_ZOOM_SETTLE_MS = 80;
+/** About 32 MiB of RGBA backing storage for one mounted PDF page. */
+const PDF_CANVAS_MAX_PIXELS = 8_000_000;
 const TYPESET_LIBRARY_PREFERENCES_STORAGE_PREFIX = "somniq-typeset-library:";
 
 type VisualBlock =
@@ -2379,6 +2384,7 @@ interface PdfPageProps {
   pdf: PDFDocumentProxy;
   page: number;
   zoom: number;
+  estimatedSize?: { width: number; height: number };
   onSourceTextClick: (text: string, context: string) => void;
   editable?: boolean;
   onTextObjectEdit?: (change: PdfTextObjectChange, nextText: string) => void;
@@ -2477,6 +2483,7 @@ const PdfPage = memo(function PdfPage({
   pdf,
   page,
   zoom,
+  estimatedSize,
   onSourceTextClick,
   editable = false,
   onTextObjectEdit,
@@ -2487,6 +2494,7 @@ const PdfPage = memo(function PdfPage({
 }: PdfPageProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const renderTask = useRef<RenderTask | null>(null);
+  const renderedDocumentRef = useRef<{ pdf: PDFDocumentProxy; page: number } | null>(null);
   const [pageSize, setPageSize] = useState<{ width: number; height: number } | null>(null);
   const [textRuns, setTextRuns] = useState<PdfTextRun[]>([]);
   const [objectDrafts, setObjectDrafts] = useState<Record<string, PdfTextObjectGeometry & { text: string }>>({});
@@ -2507,12 +2515,16 @@ const PdfPage = memo(function PdfPage({
 
   useEffect(() => {
     let disposed = false;
+    const documentChanged = renderedDocumentRef.current?.pdf !== pdf || renderedDocumentRef.current?.page !== page;
     setError(null);
-    setTextRuns([]);
-    setPageSize(null);
-    setObjectDrafts({});
-    setSelectedObjectId(null);
-    setEditingObjectId(null);
+    if (documentChanged) {
+      renderedDocumentRef.current = { pdf, page };
+      setTextRuns([]);
+      setPageSize(null);
+      setObjectDrafts({});
+      setSelectedObjectId(null);
+      setEditingObjectId(null);
+    }
     renderTask.current?.cancel();
     renderTask.current = null;
     void pdf
@@ -2528,7 +2540,10 @@ const PdfPage = memo(function PdfPage({
         // Render the backing store at the device pixel ratio so the PDF stays
         // crisp and identical across a plain browser and the Tauri WebView2
         // window (which can run at a different Windows display scale / DPR).
-        const outputScale = window.devicePixelRatio || 1;
+        const requestedOutputScale = window.devicePixelRatio || 1;
+        const pagePixels = Math.max(1, viewport.width * viewport.height);
+        const pixelBudgetScale = Math.sqrt(PDF_CANVAS_MAX_PIXELS / pagePixels);
+        const outputScale = Math.min(requestedOutputScale, Math.max(0.01, pixelBudgetScale));
         canvas.width = Math.ceil(viewport.width * outputScale);
         canvas.height = Math.ceil(viewport.height * outputScale);
         canvas.style.width = `${viewport.width}px`;
@@ -2551,6 +2566,11 @@ const PdfPage = memo(function PdfPage({
       disposed = true;
       renderTask.current?.cancel();
       renderTask.current = null;
+      const canvas = canvasRef.current;
+      if (canvas) {
+        canvas.width = 0;
+        canvas.height = 0;
+      }
     };
   }, [page, pdf, zoom]);
 
@@ -2605,7 +2625,14 @@ const PdfPage = memo(function PdfPage({
   }, [editable, onTextObjectMove, pageSize, zoom]);
 
   return (
-    <div className="typeset-pdf-page" ref={(el) => pageRef?.(page, el)}>
+    <div
+      className="typeset-pdf-page"
+      ref={(el) => pageRef?.(page, el)}
+      style={!pageSize && estimatedSize ? {
+        width: `${estimatedSize.width * zoom}px`,
+        height: `${estimatedSize.height * zoom}px`,
+      } : undefined}
+    >
       <canvas ref={canvasRef} aria-label={`PDF page ${page}`} />
       {pageSize && (
         <div
@@ -3116,7 +3143,7 @@ function TypesetCompiledVisual({
       </div>
       <div className={`typeset-slide-workspace${focused && deckOpen ? " deck-open" : ""}${sourceOpen ? " source-open" : ""}`}>
         {focused && deckOpen && (
-          <nav className="typeset-slide-deck" aria-label="Slide deck outline">
+          <nav className="typeset-slide-deck" aria-label="幻灯片大纲">
             <header>
               <div>
                 <span>Presentation</span>
@@ -3270,6 +3297,8 @@ function TypesetPdfPreview({
   const [currentPage, setCurrentPage] = useState(1);
   const [pageDraft, setPageDraft] = useState("1");
   const [zoomDraft, setZoomDraft] = useState("100");
+  const [pageSizes, setPageSizes] = useState<Record<number, { width: number; height: number }>>({});
+  const [renderRange, setRenderRange] = useState({ start: 1, end: 3 });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [compileMenuOpen, setCompileMenuOpen] = useState(false);
@@ -3283,10 +3312,44 @@ function TypesetPdfPreview({
   const zoomMenuPopoverRef = useRef<HTMLDivElement | null>(null);
   const pageInputFocusedRef = useRef(false);
   const userZoomedRef = useRef(false);
+  const zoomRef = useRef(zoom);
+  const pendingWheelZoomRef = useRef<number | null>(null);
+  const wheelZoomTimerRef = useRef<number | null>(null);
   const pageElementsRef = useRef(new Map<number, HTMLDivElement>());
   const registerPageRef = useCallback((page: number, el: HTMLDivElement | null) => {
     if (el) pageElementsRef.current.set(page, el);
     else pageElementsRef.current.delete(page);
+  }, []);
+  const recordPageSize = useCallback((page: number, width: number, height: number) => {
+    setPageSizes((sizes) => {
+      const current = sizes[page];
+      if (current && Math.abs(current.width - width) < 0.1 && Math.abs(current.height - height) < 0.1) {
+        return sizes;
+      }
+      return { ...sizes, [page]: { width, height } };
+    });
+  }, []);
+  const showPagesAround = useCallback((page: number) => {
+    const radius = zoom >= 2 ? 0 : zoom >= 1.1 ? 1 : 2;
+    setRenderRange((range) => {
+      const next = {
+        start: Math.max(1, page - radius),
+        end: Math.min(Math.max(1, numPages), page + radius),
+      };
+      return range.start === next.start && range.end === next.end ? range : next;
+    });
+  }, [numPages, zoom]);
+
+  useEffect(() => {
+    showPagesAround(currentPage);
+  }, [currentPage, showPagesAround]);
+
+  useEffect(() => {
+    zoomRef.current = zoom;
+  }, [zoom]);
+
+  useEffect(() => () => {
+    if (wheelZoomTimerRef.current !== null) window.clearTimeout(wheelZoomTimerRef.current);
   }, []);
 
   useEffect(() => {
@@ -3336,6 +3399,8 @@ function TypesetPdfPreview({
     userZoomedRef.current = false;
     setPdf(null);
     setNumPages(0);
+    setPageSizes({});
+    setRenderRange({ start: 1, end: 3 });
     setCurrentPage(1);
     setPageDraft("1");
     setError(null);
@@ -3354,6 +3419,7 @@ function TypesetPdfPreview({
         }
         setPdf(document);
         setNumPages(document.numPages);
+        setRenderRange({ start: 1, end: Math.min(3, document.numPages) });
       })
       .catch((loadError) => {
         if (!disposed) setError(String(loadError));
@@ -3366,6 +3432,33 @@ function TypesetPdfPreview({
       if (loadedPdf) void loadedPdf.destroy();
     };
   }, [path, refreshKey]);
+
+  useEffect(() => {
+    if (!pdf || numPages < 1) return;
+    let disposed = false;
+    const missingPages: number[] = [];
+    for (let page = renderRange.start; page <= renderRange.end; page += 1) {
+      if (!pageSizes[page]) missingPages.push(page);
+    }
+    if (missingPages.length === 0) return () => { disposed = true; };
+    void Promise.all(missingPages.map(async (page) => {
+      const pdfPage = await pdf.getPage(page);
+      const viewport = pdfPage.getViewport({ scale: 1 });
+      return [page, { width: viewport.width, height: viewport.height }] as const;
+    })).then((sizes) => {
+      if (disposed) return;
+      setPageSizes((current) => {
+        const next = { ...current };
+        for (const [page, size] of sizes) next[page] = size;
+        return next;
+      });
+    }).catch(() => {
+      // Mounted pages still report their own dimensions if metadata lookup fails.
+    });
+    return () => {
+      disposed = true;
+    };
+  }, [numPages, pageSizes, pdf, renderRange.end, renderRange.start]);
 
   useEffect(() => {
     if (!pdf || typeof window === "undefined") return;
@@ -3411,24 +3504,41 @@ function TypesetPdfPreview({
       // A short landscape PDF can show two pages at once; center tracking would
       // report the following page immediately after jumping to the current one.
       const viewportAnchor = scroll.scrollTop + Math.min(48, scroll.clientHeight / 4);
-      let nextPage = 1;
-      let closestDistance = Number.POSITIVE_INFINITY;
-      for (let page = 1; page <= numPages; page += 1) {
-        const pageEl = pageElementsRef.current.get(page);
-        if (!pageEl) continue;
-        const top = pageEl.offsetTop;
-        const bottom = top + pageEl.offsetHeight;
-        const distance = viewportAnchor < top
-          ? top - viewportAnchor
-          : viewportAnchor > bottom
-            ? viewportAnchor - bottom
-            : 0;
-        if (distance < closestDistance) {
-          closestDistance = distance;
-          nextPage = page;
+      const viewportHeight = scroll.clientHeight;
+      const overscan = viewportHeight * 0.75;
+      const renderTop = Math.max(0, scroll.scrollTop - overscan);
+      const renderBottom = scroll.scrollTop + viewportHeight + overscan;
+      const pageAtOffset = (offset: number) => {
+        let low = 1;
+        let high = numPages;
+        let match = 1;
+        while (low <= high) {
+          const middle = Math.floor((low + high) / 2);
+          const element = pageElementsRef.current.get(middle);
+          if (!element) break;
+          const top = element.offsetTop;
+          const bottom = top + element.offsetHeight;
+          match = middle;
+          if (offset < top) high = middle - 1;
+          else if (offset > bottom) low = middle + 1;
+          else return middle;
         }
-      }
+        return clampNumber(match, 1, numPages);
+      };
+      const nextPage = pageAtOffset(viewportAnchor);
+      const visibleStart = pageAtOffset(renderTop);
+      const visibleEnd = pageAtOffset(renderBottom);
       setCurrentPage((page) => page === nextPage ? page : nextPage);
+      if (viewportHeight > 0 && visibleEnd > 0) {
+        const radius = zoom >= 2 ? 0 : zoom >= 1.1 ? 1 : 2;
+        const nextRange = {
+          start: Math.max(visibleStart, nextPage - radius),
+          end: Math.min(visibleEnd, nextPage + radius),
+        };
+        setRenderRange((range) => (
+          range.start === nextRange.start && range.end === nextRange.end ? range : nextRange
+        ));
+      }
     };
     const onScroll = () => {
       window.cancelAnimationFrame(frame);
@@ -3452,6 +3562,7 @@ function TypesetPdfPreview({
   // for this render's DOM commit, one for the page's own render effect).
   useEffect(() => {
     if (!forwardTarget) return;
+    showPagesAround(forwardTarget.location.page);
     let frame1 = 0;
     let frame2 = 0;
     frame1 = window.requestAnimationFrame(() => {
@@ -3471,15 +3582,19 @@ function TypesetPdfPreview({
       window.cancelAnimationFrame(frame1);
       window.cancelAnimationFrame(frame2);
     };
-  }, [forwardTarget, zoom]);
+  }, [forwardTarget, showPagesAround, zoom]);
 
   const setZoomLevel = (value: number, closeMenu = true) => {
+    const nextZoom = clampNumber(value, PDF_ZOOM_MIN, PDF_ZOOM_MAX);
     userZoomedRef.current = true;
-    setZoom(clampNumber(value, PDF_ZOOM_MIN, PDF_ZOOM_MAX));
+    zoomRef.current = nextZoom;
+    pendingWheelZoomRef.current = null;
+    if (wheelZoomTimerRef.current !== null) {
+      window.clearTimeout(wheelZoomTimerRef.current);
+      wheelZoomTimerRef.current = null;
+    }
+    setZoom(nextZoom);
     if (closeMenu) setZoomMenuOpen(false);
-  };
-  const changeZoom = (delta: number) => {
-    setZoomLevel(Math.round((zoom + delta) * 100) / 100, false);
   };
   const fitPdf = async (mode: "height" | "width") => {
     const scroll = scrollRef.current;
@@ -3503,8 +3618,24 @@ function TypesetPdfPreview({
     }
     setZoomLevel(percentage / 100);
   };
-  const scrollToPage = (page: number, behavior: ScrollBehavior = "auto") => {
+  const handlePdfWheel = (event: ReactWheelEvent<HTMLDivElement>) => {
+    if (!event.ctrlKey || event.deltaY === 0) return;
+    event.preventDefault();
+    const deltaY = event.deltaMode === 1 ? event.deltaY * 16 : event.deltaY;
+    const delta = clampNumber(-deltaY * 0.001, -0.14, 0.14);
+    const currentTarget = pendingWheelZoomRef.current ?? zoomRef.current;
+    pendingWheelZoomRef.current = clampNumber(currentTarget + delta, PDF_ZOOM_MIN, PDF_ZOOM_MAX);
+    if (wheelZoomTimerRef.current !== null) window.clearTimeout(wheelZoomTimerRef.current);
+    wheelZoomTimerRef.current = window.setTimeout(() => {
+      wheelZoomTimerRef.current = null;
+      const nextZoom = pendingWheelZoomRef.current;
+      pendingWheelZoomRef.current = null;
+      if (nextZoom !== null) setZoomLevel(nextZoom, false);
+    }, PDF_WHEEL_ZOOM_SETTLE_MS);
+  };
+  const scrollToPage = useCallback((page: number, behavior: ScrollBehavior = "auto") => {
     const nextPage = clampNumber(Math.round(page), 1, Math.max(1, numPages));
+    showPagesAround(nextPage);
     const pageEl = pageElementsRef.current.get(nextPage);
     const scroll = scrollRef.current;
     setCurrentPage(nextPage);
@@ -3513,7 +3644,7 @@ function TypesetPdfPreview({
     const top = Math.max(0, pageEl.offsetTop - 12);
     if (typeof scroll.scrollTo === "function") scroll.scrollTo({ top, behavior });
     else scroll.scrollTop = top;
-  };
+  }, [numPages, showPagesAround]);
   const commitPageDraft = () => {
     const requestedPage = Number.parseInt(pageDraft, 10);
     if (!Number.isFinite(requestedPage)) {
@@ -3522,10 +3653,33 @@ function TypesetPdfPreview({
     }
     scrollToPage(requestedPage);
   };
+
+  useEffect(() => {
+    if (numPages < 2 || logOpen || compileMenuOpen || zoomMenuOpen) return;
+    const onPageNavigationKey = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || (event.key !== "ArrowLeft" && event.key !== "ArrowRight")) return;
+      const target = event.target;
+      if (
+        target instanceof HTMLElement
+        && target.closest("input, textarea, select, [contenteditable='true'], [role='textbox']")
+      ) {
+        return;
+      }
+      event.preventDefault();
+      scrollToPage(currentPage + (event.key === "ArrowRight" ? 1 : -1), "smooth");
+    };
+    window.addEventListener("keydown", onPageNavigationKey);
+    return () => window.removeEventListener("keydown", onPageNavigationKey);
+  }, [compileMenuOpen, currentPage, logOpen, numPages, scrollToPage, zoomMenuOpen]);
+
   const statusText = dirty ? "Unsaved changes" : compileStatusText(status, result);
 
   return (
-    <section className={`typeset-preview pdf${!path ? " pdf-empty" : ""}`} aria-label="PDF preview">
+    <section
+      className={`typeset-preview pdf${!path ? " pdf-empty" : ""}`}
+      aria-label="PDF preview"
+      aria-keyshortcuts="ArrowLeft ArrowRight"
+    >
       <div className="typeset-preview-toolbar toolbar toolbar-pdf toolbar-pdf-hybrid">
         <div className="typeset-pdf-left toolbar-pdf-left">
           <span className="typeset-pdf-panel-label">Compiled PDF</span>
@@ -3696,9 +3850,6 @@ function TypesetPdfPreview({
             <span aria-label={`${numPages} PDF pages`}>/ {numPages || 0}</span>
           </div>
           <div className="toolbar-pdf-controls pdfjs-viewer-controls-small">
-            <button type="button" className="typeset-icon-btn pdf-toolbar-btn pdf-zoom-step" title="Zoom out" aria-label="Zoom out" onClick={() => changeZoom(-0.1)}>
-              <ToolIcon name="minus" />
-            </button>
             <button
               ref={zoomMenuRef}
               type="button"
@@ -3723,9 +3874,6 @@ function TypesetPdfPreview({
             >
               <span>{Math.round(zoom * 100)}%</span>
               <ToolIcon name="chevron" />
-            </button>
-            <button type="button" className="typeset-icon-btn pdf-toolbar-btn pdf-zoom-step" title="Zoom in" aria-label="Zoom in" onClick={() => changeZoom(0.1)}>
-              <ToolIcon name="plus" />
             </button>
           </div>
           {zoomMenuOpen && typeof document !== "undefined" && createPortal(
@@ -3779,7 +3927,11 @@ function TypesetPdfPreview({
           )}
         </div>
       </div>
-      <div className="typeset-pdf-scroll" ref={scrollRef}>
+      <div
+        className="typeset-pdf-scroll"
+        ref={scrollRef}
+        onWheel={handlePdfWheel}
+      >
         {!path && <div className="typeset-empty">No PDF selected.</div>}
         {path && loading && <div className="typeset-empty">Loading PDF...</div>}
         {path && error ? (
@@ -3789,6 +3941,18 @@ function TypesetPdfPreview({
         )}
         {pdf && !error && Array.from({ length: numPages }, (_, index) => {
           const page = index + 1;
+          const estimatedSize = pageSizes[page] ?? pageSizes[1] ?? { width: 612, height: 792 };
+          if (page < renderRange.start || page > renderRange.end) {
+            return (
+              <div
+                key={`${path}:${refreshKey}:${page}`}
+                className="typeset-pdf-page typeset-pdf-page-placeholder"
+                ref={(element) => registerPageRef(page, element)}
+                style={{ width: `${estimatedSize.width * zoom}px`, height: `${estimatedSize.height * zoom}px` }}
+                aria-label={`PDF page ${page} placeholder`}
+              />
+            );
+          }
           const highlight = forwardTarget && forwardTarget.location.page === page
             ? {
                 left: forwardTarget.location.boxLeft * zoom,
@@ -3804,7 +3968,9 @@ function TypesetPdfPreview({
               pdf={pdf}
               page={page}
               zoom={zoom}
+              estimatedSize={estimatedSize}
               onSourceTextClick={onSourceTextClick}
+              onPageSize={(width, height) => recordPageSize(page, width, height)}
               pageRef={registerPageRef}
               highlight={highlight}
             />
@@ -3821,14 +3987,16 @@ function CompileLog({
   error,
   liveLog,
   onDiagnosticClick,
-  onClose,
+  onClearCacheCompile,
+  disabled = false,
 }: {
   result: CompileResult | null;
   status: CompileStatus;
   error: string | null;
   liveLog: CompileLiveLog | null;
   onDiagnosticClick?: (diagnostic: LatexDiagnostic) => void;
-  onClose?: () => void;
+  onClearCacheCompile?: () => void;
+  disabled?: boolean;
 }) {
   const text = status === "running"
     ? [error, liveLog?.stderr, liveLog?.stdout].filter(Boolean).join("\n\n").trim()
@@ -3836,49 +4004,180 @@ function CompileLog({
   const pdfState = result?.pdfState ?? (result?.success ? "fresh" : result?.partialOutput ? "partial" : "missing");
   const sourceHash = result?.rootSourceHash ?? "";
   const buildTime = result?.compiledAtUnixMs ? new Date(result.compiledAtUnixMs).toLocaleTimeString() : "not recorded";
+  const diagnostics = useMemo(() => (result?.diagnostics ?? []).map((diagnostic, index) => {
+    const level: CompileLogLevel = diagnostic.severity === "warning" && /(?:over|under)full\s+\\?hbox/i.test(diagnostic.message)
+      ? "info"
+      : diagnostic.severity === "error" || diagnostic.severity === "warning"
+        ? diagnostic.severity
+        : "info";
+    return {
+      diagnostic,
+      id: `${diagnostic.code}-${diagnostic.filePath ?? "root"}-${diagnostic.line ?? index}-${index}`,
+      level,
+    };
+  }), [result?.diagnostics]);
+  const [filter, setFilter] = useState<CompileLogFilter>("all");
+  const filteredDiagnostics = filter === "all"
+    ? diagnostics
+    : diagnostics.filter((entry) => entry.level === filter);
+  const diagnosticSignature = diagnostics.map((entry) => entry.id).join("|");
+  const [expandedDiagnosticId, setExpandedDiagnosticId] = useState<string | null>(null);
+
+  useEffect(() => {
+    setExpandedDiagnosticId(filteredDiagnostics[0]?.id ?? null);
+  }, [filter, diagnosticSignature]);
+
+  const counts = diagnostics.reduce<Record<CompileLogLevel, number>>(
+    (current, entry) => ({ ...current, [entry.level]: current[entry.level] + 1 }),
+    { error: 0, warning: 0, info: 0 },
+  );
+  const filters: Array<{ id: CompileLogFilter; label: string; count: number }> = [
+    { id: "all", label: "All logs", count: diagnostics.length },
+    { id: "error", label: "Errors", count: counts.error },
+    { id: "warning", label: "Warnings", count: counts.warning },
+    { id: "info", label: "Info", count: counts.info },
+  ];
+
+  const diagnosticLocation = (diagnostic: LatexDiagnostic) => diagnostic.filePath
+    ? `${diagnostic.filePath}${diagnostic.line ? `, ${diagnostic.line}` : ""}`
+    : diagnostic.line ? `line ${diagnostic.line}` : "No source location";
+  const canOpenDiagnostic = (diagnostic: LatexDiagnostic) => Boolean(
+    onDiagnosticClick && (diagnostic.filePath || diagnostic.line),
+  );
+  const diagnosticGuidance = (diagnostic: LatexDiagnostic) => {
+    if (diagnostic.code === "table_alignment") {
+      return "An alignment character (&) was used outside a table or alignment environment. Escape it as \\& when it is ordinary text.";
+    }
+    if (/citation .*undefined/i.test(diagnostic.message)) {
+      return "The citation key is not available in the active bibliography. Check the .bib entry and the bibliography declaration.";
+    }
+    return diagnostic.severity === "error"
+      ? "Open the source location, make the smallest correction, then recompile."
+      : "This does not necessarily stop the PDF build, but it is worth reviewing at the reported source location.";
+  };
+  const diagnosticExcerpt = (diagnostic: LatexDiagnostic) => {
+    const lines = text.split(/\r?\n/).filter(Boolean);
+    if (!lines.length) return "No compiler output was captured for this diagnostic.";
+    const message = diagnostic.message.toLocaleLowerCase();
+    const match = lines.findIndex((line) => line.toLocaleLowerCase().includes(message));
+    const start = match < 0 ? 0 : Math.max(0, match - 1);
+    return lines.slice(start, start + 9).join("\n");
+  };
+
   return (
     <section className={`typeset-log new-logs-pane ${status === "error" ? "error" : ""}`} aria-label="Compile log">
-      <div className="typeset-log-head">
-        <strong>Compile log</strong>
-        <span>{status === "running" && liveLog ? `Compiling ${Math.ceil(liveLog.elapsedMs / 1000)}s` : compileStatusText(status, result)}</span>
-        {onClose && (
-          <button type="button" className="typeset-icon-btn" title="Close log" aria-label="Close log" onClick={onClose}>
-            <ToolIcon name="clear" />
+      <div className="typeset-log-tabs" role="tablist" aria-label="Compile log filters">
+        {filters.map((item) => (
+          <button
+            key={item.id}
+            type="button"
+            role="tab"
+            aria-selected={filter === item.id}
+            className={filter === item.id ? "active" : ""}
+            onClick={() => setFilter(item.id)}
+          >
+            <span>{item.label}</span>
+            <b>{item.count}</b>
           </button>
-        )}
+        ))}
       </div>
       <div className="logs-pane-content">
-        {result?.diagnostics && result.diagnostics.length > 0 && (
-          <div className="typeset-diagnostics" aria-label="LaTeX diagnostics">
-            {result.diagnostics.map((diagnostic, index) => {
-              const location = diagnostic.filePath
-                ? `${diagnostic.filePath}${diagnostic.line ? `:${diagnostic.line}` : ""}`
-                : diagnostic.line ? `line ${diagnostic.line}` : "";
+        {filteredDiagnostics.length > 0 && (
+          <div className="typeset-diagnostics typeset-diagnostics-accordion" aria-label="LaTeX diagnostics">
+            {filteredDiagnostics.map(({ diagnostic, id, level }) => {
+              const expanded = expandedDiagnosticId === id;
+              const openable = canOpenDiagnostic(diagnostic);
               return (
-                <button
-                  key={`${diagnostic.code}-${diagnostic.filePath ?? "root"}-${diagnostic.line ?? index}`}
-                  type="button"
-                  className={`typeset-diagnostic ${diagnostic.severity}`}
-                  onClick={() => onDiagnosticClick?.(diagnostic)}
-                  disabled={!onDiagnosticClick || (!diagnostic.filePath && !diagnostic.line)}
-                >
-                  <span>{diagnostic.severity}</span>
-                  <strong>{diagnostic.message}</strong>
-                  {location && <small>{location}</small>}
-                </button>
+                <article key={id} className={`typeset-diagnostic-card ${level} ${expanded ? "expanded" : ""}`}>
+                  <div className="typeset-diagnostic-summary">
+                    <button
+                      type="button"
+                      className="typeset-diagnostic-expand"
+                      aria-label={`${expanded ? "Collapse" : "Expand"} diagnostic: ${diagnostic.message}`}
+                      aria-expanded={expanded}
+                      onClick={() => setExpandedDiagnosticId((current) => current === id ? null : id)}
+                    >
+                      <ToolIcon name="chevron" />
+                    </button>
+                    <div className="typeset-diagnostic-copy">
+                      <button
+                        type="button"
+                        className="typeset-diagnostic-title"
+                        disabled={!openable}
+                        onClick={() => onDiagnosticClick?.(diagnostic)}
+                      >
+                        {diagnostic.message}
+                      </button>
+                      <button
+                        type="button"
+                        className="typeset-diagnostic-location"
+                        disabled={!openable}
+                        onClick={() => onDiagnosticClick?.(diagnostic)}
+                      >
+                        {diagnosticLocation(diagnostic)}
+                      </button>
+                    </div>
+                    {openable && (
+                      <button
+                        type="button"
+                        className="typeset-diagnostic-locate"
+                        aria-label={`Open ${diagnosticLocation(diagnostic)}`}
+                        title="Open source location"
+                        onClick={() => onDiagnosticClick?.(diagnostic)}
+                      >
+                        <ToolIcon name="ref" />
+                      </button>
+                    )}
+                    {level === "error" && <span className="typeset-diagnostic-sparkle" aria-hidden="true">✦</span>}
+                  </div>
+                  {expanded && (
+                    <div className="typeset-diagnostic-details">
+                      <p>{diagnosticGuidance(diagnostic)}</p>
+                      <pre>{diagnosticExcerpt(diagnostic)}</pre>
+                    </div>
+                  )}
+                </article>
               );
             })}
           </div>
         )}
-        {result && (
+        {!filteredDiagnostics.length && (
+          <div className="typeset-log-empty" role="status">
+            {diagnostics.length ? "No logs match this filter." : status === "running" ? "Waiting for TeX Live output..." : "No diagnostics."}
+          </div>
+        )}
+        <details className="typeset-raw-logs">
+          <summary>
+            <ToolIcon name="chevron" />
+            <span>Raw logs</span>
+          </summary>
+          <pre>{text || (status === "running" ? "Waiting for TeX Live output..." : "No compiler output was captured.")}</pre>
+        </details>
+      </div>
+      <footer className="typeset-log-footer">
+        {onClearCacheCompile && (
+          <button
+            type="button"
+            className="typeset-log-clear-cache"
+            disabled={disabled || status === "running"}
+            onClick={onClearCacheCompile}
+          >
+            <ToolIcon name="clear" />
+            <span>Clear cached files</span>
+          </button>
+        )}
+        <details className="typeset-log-build-details">
+          <summary>
+            <span>Other logs and files</span>
+            <ToolIcon name="chevron" />
+          </summary>
           <div className="typeset-build-provenance" aria-label="PDF build provenance">
             <span>PDF: {pdfState}</span>
             <span>Built {buildTime}</span>
-            <code title={sourceHash}>source {sourceHash.slice(0, 12) || "unavailable"}</code>
+            <code title={sourceHash}>inputs {sourceHash.slice(0, 12) || "unavailable"}</code>
           </div>
-        )}
-        <pre>{text || (status === "running" ? "Waiting for TeX Live output..." : "No diagnostics.")}</pre>
-      </div>
+        </details>
+      </footer>
     </section>
   );
 }
@@ -3904,10 +4203,10 @@ function TypesetOutlinePanel({
 }) {
   if (collapsed) {
     return (
-      <section className="typeset-outline-collapsed" aria-label="Document outline">
+      <section className="typeset-outline-collapsed" aria-label="文档大纲">
         <button type="button" onClick={onToggleCollapsed}>
           <ToolIcon name="list" />
-          <span>Outline</span>
+          <span>大纲</span>
           <em>{outline.length}</em>
         </button>
       </section>
@@ -3920,13 +4219,13 @@ function TypesetOutlinePanel({
     <div
       className="typeset-outline-resize"
       role="separator"
-      aria-label="Resize Outline"
+      aria-label="调整大纲大小"
       aria-orientation="horizontal"
       aria-valuemin={OUTLINE_PANEL_MIN_H}
       aria-valuemax={OUTLINE_PANEL_MAX_H}
       aria-valuenow={height ?? undefined}
-      aria-valuetext={height == null ? "One third of the sidebar" : `${height} pixels`}
-      title="Drag to resize Outline"
+      aria-valuetext={height == null ? "侧边栏高度的三分之一" : `${height} 像素`}
+      title="拖动调整大纲大小"
       tabIndex={0}
       onKeyDown={onResizeKeyDown}
       onPointerDown={onResizePointerDown}
@@ -3939,15 +4238,15 @@ function TypesetOutlinePanel({
     return (
       <>
         {resizeHandle}
-        <section className="typeset-outline empty" aria-label="Document outline" style={panelStyle}>
+        <section className="typeset-outline empty" aria-label="文档大纲" style={panelStyle}>
           <div className="typeset-outline-head">
-            <strong>Outline</strong>
+            <strong>大纲</strong>
             <span>0</span>
-            <button type="button" className="typeset-outline-toggle" title="Hide Outline" aria-label="Hide Outline" onClick={onToggleCollapsed}>
+            <button type="button" className="typeset-outline-toggle" title="隐藏大纲" aria-label="隐藏大纲" onClick={onToggleCollapsed}>
               <ToolIcon name="clear" />
             </button>
           </div>
-          <span className="typeset-outline-empty">No sections found.</span>
+          <span className="typeset-outline-empty">未找到章节。</span>
         </section>
       </>
     );
@@ -3956,11 +4255,11 @@ function TypesetOutlinePanel({
   return (
     <>
       {resizeHandle}
-      <section className="typeset-outline" aria-label="Document outline" style={panelStyle}>
+      <section className="typeset-outline" aria-label="文档大纲" style={panelStyle}>
       <div className="typeset-outline-head">
-        <strong>Outline</strong>
+        <strong>大纲</strong>
         <span>{outline.length}</span>
-        <button type="button" className="typeset-outline-toggle" title="Hide Outline" aria-label="Hide Outline" onClick={onToggleCollapsed}>
+        <button type="button" className="typeset-outline-toggle" title="隐藏大纲" aria-label="隐藏大纲" onClick={onToggleCollapsed}>
           <ToolIcon name="clear" />
         </button>
       </div>
@@ -3971,7 +4270,8 @@ function TypesetOutlinePanel({
             type="button"
             className={activeLine === item.line ? "active" : ""}
             aria-current={activeLine === item.line ? "location" : undefined}
-            style={{ paddingLeft: `${8 + (item.level - 1) * 12}px` }}
+            data-level={Math.min(item.level, 4)}
+            style={{ paddingLeft: `${8 + (item.level - 1) * 14}px` }}
             onClick={() => onJumpToLine(item.line)}
           >
             <span><b>{item.number}</b>{item.title}</span>
@@ -5462,32 +5762,75 @@ function TypesetStartPage({
   );
 }
 
+// Absolute LaTeX sectioning depth (\part is shallowest). The outline stores
+// these raw ranks so nesting is unambiguous, then normalizes them for display
+// (see `normalizeOutlineLevels`) so the shallowest heading a document actually
+// uses renders flush-left regardless of class — \section is top-level in an
+// article, \chapter in a report/book.
+const OUTLINE_HEADING_LEVELS: Record<string, number> = {
+  part: 1,
+  chapter: 2,
+  section: 3,
+  subsection: 4,
+  subsubsection: 5,
+};
+
+// A sectioning command at the start of a (trimmed) line, tolerating the starred
+// form (\section*) and an optional short-title argument (\chapter[Short]{Full}).
+// The previous regex required `{` immediately after the command, so every
+// chapter/section written with a running-head `[...]` argument was silently
+// dropped from the outline — the core "Chapter isn't recognized" bug.
+const OUTLINE_HEADING_RE = /^\\(part|chapter|section|subsection|subsubsection)\*?\s*(?:\[[^\]]*\])?\s*\{/;
+
+/** Reads the brace-balanced argument beginning at `braceIndex` (a `{`), so a
+ * title with nested groups like `\section{A \textbf{B}}` isn't truncated at the
+ * first `}` the way a non-greedy `{(.+?)}` capture would be. */
+function balancedBraceArg(text: string, braceIndex: number): string | null {
+  if (text[braceIndex] !== "{") return null;
+  let depth = 0;
+  for (let index = braceIndex; index < text.length; index += 1) {
+    const char = text[index];
+    if (char === "{") depth += 1;
+    else if (char === "}") {
+      depth -= 1;
+      if (depth === 0) return text.slice(braceIndex + 1, index);
+    }
+  }
+  return null;
+}
+
+/** Shifts raw sectioning ranks so the shallowest heading present becomes level
+ * 1, preserving relative depth (a lone \subsection under \section stays one step
+ * in). Numbering is depth-relative already, so this only affects indentation. */
+function normalizeOutlineLevels(items: OutlineItem[]): OutlineItem[] {
+  if (items.length === 0) return items;
+  const minLevel = Math.min(...items.map((item) => item.level));
+  return items.map((item) => ({ ...item, level: item.level - minLevel + 1 }));
+}
+
 function outlineFor(source: string): OutlineItem[] {
-  const latexLevels: Record<string, number> = {
-    chapter: 1,
-    section: 2,
-    subsection: 3,
-    subsubsection: 4,
-  };
-  const sectionOutline = source
-    .split("\n")
-    .map((line, index) => {
-      const latexMatch = /^\\(chapter|section|subsection|subsubsection)\*?\{(.+?)\}/.exec(line.trim());
-      if (latexMatch) {
-        return { line: index + 1, level: latexLevels[latexMatch[1]] ?? 2, title: latexMatch[2] };
-      }
-      return null;
-    })
-    .filter((item): item is { line: number; level: number; title: string } => Boolean(item));
-  if (sectionOutline.length > 0) return sectionOutline;
+  const sectionOutline: OutlineItem[] = [];
+  source.split("\n").forEach((line, index) => {
+    const trimmed = line.trim();
+    const match = OUTLINE_HEADING_RE.exec(trimmed);
+    if (!match) return;
+    const title = balancedBraceArg(trimmed, match[0].length - 1)?.trim();
+    if (!title) return;
+    sectionOutline.push({
+      line: index + 1,
+      level: OUTLINE_HEADING_LEVELS[match[1]] ?? OUTLINE_HEADING_LEVELS.section,
+      title,
+    });
+  });
+  if (sectionOutline.length > 0) return normalizeOutlineLevels(sectionOutline);
 
   // Beamer decks often omit \section entirely. In that case an empty Outline
   // wastes a third of the project panel even though every frame has a useful
-  // navigation title, so fall back to the frame list without changing article
-  // or sectioned-deck numbering.
+  // navigation title, so fall back to the frame list. Frames are siblings, so
+  // they all sit flush-left at level 1.
   return beamerSlidesFor(source).map((slide) => ({
     line: slide.line,
-    level: 2,
+    level: 1,
     title: slide.title,
   }));
 }
@@ -5556,6 +5899,7 @@ function scrollCodeEditorToLine(view: EditorView, line: number): void {
 
 export default function Typeset() {
   const currentProject = useStore((state) => state.currentProject);
+  const setTypesetDirty = useStore((state) => state.setTypesetDirty);
   const [sourcePath, setSourcePath] = useState<string | null>(null);
   const [previewPath, setPreviewPath] = useState<string | null>(null);
   const [loaded, setLoaded] = useState<FileText | null>(null);
@@ -5589,6 +5933,11 @@ export default function Typeset() {
   // matching state update. Keep the authoritative latest source in a ref so a
   // Recompile click immediately after an edit cannot save the previous draft.
   const draftRef = useRef("");
+  // PDF text layers may retain their click handler for longer than a render
+  // cycle. Read the current mode from a ref so reverse search always targets
+  // the visible Code surface when the user has selected Code mode.
+  const editorModeRef = useRef<EditorMode>(editorMode);
+  editorModeRef.current = editorMode;
   // Mirror the panel widths into refs so the drag callbacks can read the current
   // size without listing the widths as dependencies. Keeping the callbacks stable
   // stops the window/document listener effect from tearing down (and aborting the
@@ -5615,6 +5964,15 @@ export default function Typeset() {
   const autoCompiledPathRef = useRef<string | null>(null);
   const compileRef = useRef<() => void>(() => {});
   const compileSequenceRef = useRef(0);
+  const documentEpochRef = useRef(0);
+  const compileEpochRef = useRef(0);
+  const sourcePathRef = useRef<string | null>(sourcePath);
+  const loadedRef = useRef<FileText | null>(loaded);
+  const activeCompileRunIdRef = useRef<string | null>(activeCompileRunId);
+  const saveInFlightRef = useRef<Promise<FileText | null> | null>(null);
+  sourcePathRef.current = sourcePath;
+  loadedRef.current = loaded;
+  activeCompileRunIdRef.current = activeCompileRunId;
 
   useEffect(() => {
     setCompileErrorHandling(loadCompileErrorHandling(currentProject?.id));
@@ -5644,6 +6002,9 @@ export default function Typeset() {
   }, [currentProject?.id]);
 
   const dirty = Boolean(loaded && draft !== loaded.content);
+  useEffect(() => {
+    setTypesetDirty(dirty);
+  }, [dirty, setTypesetDirty]);
   const outline = useMemo(() => outlineFor(draft), [draft]);
   const numberedOutline = useMemo(() => numberedOutlineFor(outline), [outline]);
   const beamerSlides = useMemo(() => beamerSlidesFor(draft), [draft]);
@@ -5675,6 +6036,28 @@ export default function Typeset() {
   const resetDraft = useCallback((nextDraft: string) => {
     draftRef.current = nextDraft;
     setDraft(nextDraft);
+  }, []);
+
+  const invalidateActiveCompile = useCallback(() => {
+    compileEpochRef.current += 1;
+    const runId = activeCompileRunIdRef.current;
+    activeCompileRunIdRef.current = null;
+    setActiveCompileRunId(null);
+    if (runId) {
+      setCompileStatus("idle");
+      setCompileLiveLog(null);
+      void latexCompileCancel(runId).catch(() => {
+        // A document transition must not be blocked by a best-effort cancel.
+      });
+    }
+  }, []);
+
+  useEffect(() => () => {
+    documentEpochRef.current += 1;
+    compileEpochRef.current += 1;
+    const runId = activeCompileRunIdRef.current;
+    activeCompileRunIdRef.current = null;
+    if (runId) void latexCompileCancel(runId).catch(() => undefined);
   }, []);
 
   const changeDraft = useCallback((nextDraft: string) => {
@@ -5728,11 +6111,29 @@ export default function Typeset() {
     }
   }, [currentSourceLine, draft, editorMode]);
 
-  const openSource = useCallback(async (path: string, initialLine = 1) => {
+  const openSource = useCallback(async (path: string, initialLine = 1): Promise<boolean> => {
+    const currentPath = sourcePathRef.current;
+    if (currentPath === path) {
+      setCurrentSourceLine(initialLine);
+      return true;
+    }
+    const currentFile = loadedRef.current;
+    if (
+      currentPath
+      && currentFile
+      && draftRef.current !== currentFile.content
+      && !window.confirm(`Discard unsaved changes in ${basename(currentPath)} and open ${basename(path)}?`)
+    ) {
+      return false;
+    }
+    const documentEpoch = ++documentEpochRef.current;
+    invalidateActiveCompile();
     setLoading(true);
+    setSaving(false);
     setError(null);
     try {
       const file = await fileReadText(path);
+      if (documentEpochRef.current !== documentEpoch) return false;
       setSourcePath(file.path);
       setPreviewPath(outputPathFor(file.path));
       setLoaded(file);
@@ -5742,12 +6143,14 @@ export default function Typeset() {
       setCompileStatus("idle");
       setCompileResult(null);
       setCompileLiveLog(null);
+      return true;
     } catch (openError) {
-      setError(String(openError));
+      if (documentEpochRef.current === documentEpoch) setError(String(openError));
+      return false;
     } finally {
-      setLoading(false);
+      if (documentEpochRef.current === documentEpoch) setLoading(false);
     }
-  }, [resetDraft]);
+  }, [invalidateActiveCompile, resetDraft]);
 
   const openPath = useCallback((path: string) => {
     if (extension(path) === ".tex") {
@@ -5764,6 +6167,8 @@ export default function Typeset() {
     const pathMatches = (path: string | null, target: string) => Boolean(path && (path === target || path.startsWith(`${target}/`)));
     if (mutation.type === "delete") {
       if (pathMatches(sourcePath, mutation.path) || pathMatches(previewPath, mutation.path)) {
+        documentEpochRef.current += 1;
+        invalidateActiveCompile();
         setSourcePath(null);
         setPreviewPath(null);
         setLoaded(null);
@@ -5786,17 +6191,24 @@ export default function Typeset() {
       return path;
     };
     const nextSourcePath = renamedPath(sourcePath);
+    if (nextSourcePath !== sourcePath) {
+      documentEpochRef.current += 1;
+      invalidateActiveCompile();
+    }
     setSourcePath(nextSourcePath);
     setPreviewPath(renamedPath(previewPath));
     setLoaded((file) => file && nextSourcePath ? { ...file, path: nextSourcePath } : file);
     setTreeRefreshKey((key) => key + 1);
-  }, [previewPath, resetDraft, sourcePath]);
+  }, [invalidateActiveCompile, previewPath, resetDraft, sourcePath]);
 
   const createSource = useCallback(async (path: string, template: TypesetTemplate = "article", title = "SomniQ LaTeX Draft") => {
+    const documentEpoch = ++documentEpochRef.current;
+    invalidateActiveCompile();
     setError(null);
     try {
       const normalized = normalizeNewTypesetPath(path);
       const file = await fileCreateText(normalized, defaultSourceFor(normalized, template, title));
+      if (documentEpochRef.current !== documentEpoch) return;
       setStartDocuments((documents) => [
         {
           path: file.path,
@@ -5818,12 +6230,15 @@ export default function Typeset() {
       setCompileResult(null);
       setCompileLiveLog(null);
     } catch (createError) {
-      setError(String(createError));
+      if (documentEpochRef.current === documentEpoch) setError(String(createError));
     }
-  }, [resetDraft]);
+  }, [invalidateActiveCompile, resetDraft]);
 
   const scanProject = useCallback(async () => {
+    const documentEpoch = ++documentEpochRef.current;
+    invalidateActiveCompile();
     setLoading(true);
+    setSaving(false);
     setError(null);
     setLoaded(null);
     resetDraft("");
@@ -5838,6 +6253,7 @@ export default function Typeset() {
     autoCompiledPathRef.current = null;
     try {
       const documents = await typesetListDocuments();
+      if (documentEpochRef.current !== documentEpoch) return;
       const sortedMatches = sortedSources(documents.map((document) => document.path));
       setStartDocuments(documents);
       setTreeRefreshKey((key) => key + 1);
@@ -5846,6 +6262,7 @@ export default function Typeset() {
         const previewSource = preferredSource(sortedMatches);
         if (previewSource) {
           const file = await fileReadText(previewSource);
+          if (documentEpochRef.current !== documentEpoch) return;
           setSourcePath(file.path);
           setPreviewPath(outputPathFor(file.path));
           setLoaded(file);
@@ -5855,12 +6272,14 @@ export default function Typeset() {
         }
       }
     } catch (scanError) {
-      setStartDocuments([]);
-      setError(String(scanError));
+      if (documentEpochRef.current === documentEpoch) {
+        setStartDocuments([]);
+        setError(String(scanError));
+      }
     } finally {
-      setLoading(false);
+      if (documentEpochRef.current === documentEpoch) setLoading(false);
     }
-  }, [resetDraft]);
+  }, [invalidateActiveCompile, resetDraft]);
 
   useEffect(() => {
     void scanProject();
@@ -5871,41 +6290,98 @@ export default function Typeset() {
     setCurrentSourceLine((line) => clampNumber(line, 1, lineCount));
   }, [draft]);
 
-  const save = useCallback(async (): Promise<FileText | null> => {
-    if (!sourcePath || !loaded) return null;
+  const performSave = useCallback(async (): Promise<FileText | null> => {
+    const savePath = sourcePathRef.current;
+    const baseFile = loadedRef.current;
+    if (!savePath || !baseFile) return null;
+    const documentEpoch = documentEpochRef.current;
     const latestDraft = draftRef.current;
-    if (latestDraft === loaded.content) return loaded;
     setSaving(true);
     setError(null);
     try {
-      const file = await fileWriteText(sourcePath, latestDraft);
+      if (latestDraft === baseFile.content) {
+        // Legacy/browser fixtures without a version cannot be validated. The
+        // desktop backend always supplies a SHA-256 version.
+        if (!baseFile.version) return baseFile;
+        const diskFile = await fileReadText(savePath);
+        if (documentEpochRef.current !== documentEpoch || sourcePathRef.current !== savePath) return diskFile;
+        if (diskFile.version === baseFile.version && diskFile.content === baseFile.content) return baseFile;
+        if (draftRef.current === baseFile.content) {
+          loadedRef.current = diskFile;
+          setLoaded(diskFile);
+          resetDraft(diskFile.content);
+          setSourcePath(diskFile.path);
+          setError(`${basename(savePath)} changed outside SomniQ Studio, so the editor was refreshed before compiling.`);
+          return diskFile;
+        }
+      }
+
+      const contentToWrite = draftRef.current;
+      const file = baseFile.version
+        ? await fileWriteText(savePath, contentToWrite, baseFile.version)
+        : await fileWriteText(savePath, contentToWrite);
+      if (documentEpochRef.current !== documentEpoch || sourcePathRef.current !== savePath) return file;
+      loadedRef.current = file;
       setLoaded(file);
-      resetDraft(file.content);
+      if (draftRef.current === contentToWrite) resetDraft(file.content);
       setSourcePath(file.path);
       return file;
     } catch (saveError) {
-      setError(String(saveError));
+      if (documentEpochRef.current === documentEpoch && sourcePathRef.current === savePath) {
+        setError(String(saveError));
+      }
       return null;
     } finally {
-      setSaving(false);
+      if (documentEpochRef.current === documentEpoch) setSaving(false);
     }
-  }, [loaded, resetDraft, sourcePath]);
+  }, [resetDraft]);
+
+  const save = useCallback(async function saveLatest(): Promise<FileText | null> {
+    const pending = saveInFlightRef.current;
+    if (pending) {
+      await pending;
+      const currentFile = loadedRef.current;
+      if (currentFile && sourcePathRef.current && draftRef.current !== currentFile.content) {
+        return saveLatest();
+      }
+      return currentFile;
+    }
+    const task = performSave();
+    saveInFlightRef.current = task;
+    try {
+      return await task;
+    } finally {
+      if (saveInFlightRef.current === task) saveInFlightRef.current = null;
+    }
+  }, [performSave]);
 
   const compile = async (cleanCache = false) => {
-    if (!sourcePath || saving || compileStatus === "running") return;
+    if (!sourcePath || saving || activeCompileRunIdRef.current) return;
     const openPath = sourcePath;
     const runId = `typeset-${Date.now()}-${++compileSequenceRef.current}`;
+    const compileEpoch = ++compileEpochRef.current;
+    activeCompileRunIdRef.current = runId;
+    const ownsCompile = () => (
+      compileEpochRef.current === compileEpoch
+      && activeCompileRunIdRef.current === runId
+      && sourcePathRef.current === openPath
+    );
     setCompileStatus("running");
     setActiveCompileRunId(runId);
     setCompileResult(null);
     setCompileLiveLog({ stdout: "", stderr: "", elapsedMs: 0 });
     setError(null);
-    setLogOpen(true);
+    // Don't jump to the log while compiling — the PDF toolbar already shows a
+    // "Compiling" status. The log only opens itself when a build actually fails
+    // (below); a user watching it can still open it manually.
     await nextAnimationFrame();
+    if (!ownsCompile()) return;
     const saved = await save();
+    if (!ownsCompile()) return;
     if (!saved) {
       setCompileStatus("idle");
       setCompileLiveLog(null);
+      activeCompileRunIdRef.current = null;
       setActiveCompileRunId(null);
       return;
     }
@@ -5913,10 +6389,11 @@ export default function Typeset() {
     let unlisten: (() => void) | null = null;
     try {
       unlisten = await onLatexCompileProgress((progress) => {
-        if (progress.runId === runId) {
+        if (progress.runId === runId && ownsCompile()) {
           setCompileLiveLog({ stdout: progress.stdout, stderr: progress.stderr, elapsedMs: progress.elapsedMs });
         }
       });
+      if (!ownsCompile()) return;
       const outputPath = outputPathFor(compilePath);
       const result = await latexCompile(
         compilePath,
@@ -5925,9 +6402,12 @@ export default function Typeset() {
         runId,
         compileErrorHandling === "continue",
       );
+      if (!ownsCompile()) return;
       setCompileResult(result);
       setCompileStatus(result.success ? "success" : result.partialOutput ? "partial" : "error");
-      setLogOpen(true);
+      // Reveal the log only when the build reported problems; a clean success
+      // returns focus to the freshly rendered PDF.
+      setLogOpen(!result.success);
       const pdfState = result.pdfState ?? (result.success ? "fresh" : result.partialOutput ? "partial" : "missing");
       if (pdfState === "fresh" || pdfState === "partial") {
         setPreviewPath(result.outputPath || outputPath);
@@ -5935,33 +6415,47 @@ export default function Typeset() {
       }
       setTreeRefreshKey((key) => key + 1);
     } catch (compileError) {
-      setCompileStatus("error");
-      setError(String(compileError));
-      setLogOpen(true);
+      if (ownsCompile()) {
+        setCompileStatus("error");
+        setError(String(compileError));
+        setLogOpen(true);
+      }
     } finally {
       unlisten?.();
-      setActiveCompileRunId((active) => active === runId ? null : active);
+      if (ownsCompile()) {
+        activeCompileRunIdRef.current = null;
+        setActiveCompileRunId(null);
+      }
     }
   };
 
   const cancelCompile = useCallback(() => {
-    if (!activeCompileRunId) return;
-    void latexCompileCancel(activeCompileRunId).catch((cancelError) => {
+    const runId = activeCompileRunIdRef.current;
+    if (!runId) return;
+    void latexCompileCancel(runId).catch((cancelError) => {
       setError(String(cancelError));
     });
-  }, [activeCompileRunId]);
+  }, []);
   compileRef.current = () => {
     void compile();
   };
 
   const saveCurrentEditor = useCallback(() => {
     if (!loaded || draftRef.current === loaded.content) return;
-    if (editorMode === "visual") {
+    if (activeCompileRunIdRef.current) {
+      setError("The current compile is still reading the project. Wait for it to finish or cancel it before saving.");
+      return;
+    }
+    // The Beamer compiled-visual editor renders the built PDF, so its Save has
+    // to recompile to refresh the slides. Every other surface (Code editor and
+    // the article WYSIWYG editor) only writes the file — compiling stays manual
+    // via Recompile / Ctrl+Enter, so Ctrl+S no longer forces a full build.
+    if (editorMode === "visual" && beamerSlides.length > 0) {
       compileRef.current();
       return;
     }
     void save();
-  }, [editorMode, loaded, save]);
+  }, [beamerSlides.length, editorMode, loaded, save]);
 
   // Auto-compile removed: shows last compiled PDF. Click Recompile when ready.
   useEffect(() => {
@@ -6027,49 +6521,70 @@ export default function Typeset() {
   const openDiagnostic = useCallback((diagnostic: LatexDiagnostic) => {
     const line = diagnostic.line ?? 1;
     const reportedPath = diagnostic.filePath?.trim();
-    if (!reportedPath || !sourcePath || normalizePath(reportedPath) === normalizePath(sourcePath) || basename(reportedPath) === basename(sourcePath)) {
+    if (!reportedPath || !sourcePath) {
+      navigateToLine(line);
+      return;
+    }
+    const compileRootPath = compileResult?.inputPath || sourcePath;
+    const normalizedReportedPath = normalizePath(reportedPath).replace(/^\.\//, "");
+    const normalizedSourcePath = normalizePath(sourcePath);
+    if (normalizedReportedPath === normalizedSourcePath) {
       navigateToLine(line);
       return;
     }
     const targetPath = /^(?:[A-Za-z]:[\\/]|[\\/])/.test(reportedPath)
       ? reportedPath
-      : `${dirname(sourcePath)}/${reportedPath}`.replace(/\\/g, "/");
+      : `${dirname(compileRootPath)}/${normalizedReportedPath}`.replace(/\\/g, "/");
+    if (normalizePath(targetPath) === normalizedSourcePath) {
+      navigateToLine(line);
+      return;
+    }
     void openSource(targetPath, line);
-  }, [navigateToLine, openSource, sourcePath]);
+  }, [compileResult?.inputPath, navigateToLine, openSource, sourcePath]);
 
   const openCodeRange = useCallback((start: number, end: number) => {
-    const safeStart = clampNumber(start, 0, draft.length);
-    const safeEnd = clampNumber(end, safeStart, draft.length);
-    const line = lineNumberForOffset(draft, safeStart);
+    const source = draftRef.current;
+    const safeStart = clampNumber(start, 0, source.length);
+    const safeEnd = clampNumber(end, safeStart, source.length);
+    const line = lineNumberForOffset(source, safeStart);
     setCurrentSourceLine(line);
     setEditorMode("code");
-    window.setTimeout(() => {
+    window.requestAnimationFrame(() => {
       const editor = editorRef.current;
-      editor?.focus();
-      editor?.dispatch({ selection: { anchor: safeStart, head: safeEnd } });
-      if (editor) scrollCodeEditorToLine(editor.view, line);
+      if (!editor) return;
+      const editorStart = clampNumber(safeStart, 0, editor.view.state.doc.length);
+      const editorEnd = clampNumber(safeEnd, editorStart, editor.view.state.doc.length);
+      editor.focus();
+      editor.dispatch({
+        selection: { anchor: editorStart, head: editorEnd },
+        effects: EditorView.scrollIntoView(editorStart, { y: "center" }),
+      });
+      window.requestAnimationFrame(() => scrollCodeEditorToLine(editor.view, line));
       setCurrentSourceLine(line);
       window.requestAnimationFrame(() => setCurrentSourceLine(line));
-    }, 0);
-  }, [draft]);
+    });
+  }, []);
 
   const openSourceForPdfText = useCallback((text: string, context = text, forceCode = false) => {
-    const match = findLatexOffsetForPdfText(draft, text, context);
+    const source = editorModeRef.current === "code"
+      ? editorRef.current?.view.state.doc.toString() || draftRef.current
+      : draftRef.current;
+    const match = findLatexOffsetForPdfText(source, text, context);
     if (!match) return;
     const cursor = {
-      line: lineNumberForOffset(draft, match.start),
+      line: lineNumberForOffset(source, match.start),
       start: match.start,
       end: match.end,
       text: normalizePdfText(text),
     };
     setVisualPdfCursor(cursor);
     setCurrentSourceLine(cursor.line);
-    if (editorMode === "visual" && !forceCode) {
+    if (editorModeRef.current === "visual" && !forceCode) {
       setEditorMode("visual");
       return;
     }
     openCodeRange(match.start, match.end);
-  }, [draft, editorMode, openCodeRange]);
+  }, [openCodeRange]);
 
   // Forward search: double-click in Code or Visual jumps the PDF preview to
   // the exact compiled position, via the real SyncTeX data latexmk/xelatex
@@ -6096,6 +6611,15 @@ export default function Typeset() {
         setForwardSearchNotice(String(forwardError));
       });
   }, [sourcePath, previewPath]);
+
+  const jumpFromOutline = useCallback((line: number) => {
+    // An outline item represents a source heading. Open the exact source line
+    // and use SyncTeX to bring the compiled PDF to the corresponding output.
+    setPdfPanelVisible(true);
+    setLogOpen(false);
+    navigateToLine(line);
+    jumpToPdfForLine(line, 1);
+  }, [jumpToPdfForLine, navigateToLine]);
 
   useEffect(() => {
     if (!pdfForwardTarget) return;
@@ -6451,7 +6975,7 @@ export default function Typeset() {
                     collapsed={outlineCollapsed}
                     outline={numberedOutline}
                     height={outlinePanelHeight}
-                    onJumpToLine={openCodeAtLine}
+                    onJumpToLine={jumpFromOutline}
                     onResizeKeyDown={handleOutlineResizeKey}
                     onResizePointerDown={beginOutlineResizeFromPointer}
                     onToggleCollapsed={() => setOutlineCollapsed((collapsed) => !collapsed)}
@@ -6522,7 +7046,7 @@ export default function Typeset() {
                       }}
                       onDoubleClickPos={jumpToPdfForLine}
                       readOnly={saving}
-                      wrap={false}
+                      wrap
                       dataEditor="typeset-code"
                       placeholder="\\section{Title}"
                       latexVscodeTheme
@@ -6612,7 +7136,17 @@ export default function Typeset() {
                     forwardTarget={pdfForwardTarget}
                     forwardSearchNotice={forwardSearchNotice}
                   />
-                  {logOpen && <CompileLog result={compileResult} status={compileStatus} error={error} liveLog={compileLiveLog} onDiagnosticClick={openDiagnostic} onClose={() => setLogOpen(false)} />}
+                  {logOpen && (
+                    <CompileLog
+                      result={compileResult}
+                      status={compileStatus}
+                      error={error}
+                      liveLog={compileLiveLog}
+                      disabled={!sourcePath || saving || loading}
+                      onClearCacheCompile={() => void compile(true)}
+                      onDiagnosticClick={openDiagnostic}
+                    />
+                  )}
                 </div>
               </>
             )}
