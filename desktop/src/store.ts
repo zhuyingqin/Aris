@@ -195,6 +195,10 @@ interface AppState {
   tab: Tab;
   setTab: (tab: Tab) => void;
 
+  /** True while the LaTeX editor contains changes not persisted to disk. */
+  typesetDirty: boolean;
+  setTypesetDirty: (dirty: boolean) => void;
+
   theme: Theme;
   setTheme: (theme: Theme) => void;
 
@@ -282,6 +286,8 @@ export const useStore = create<AppState>((set, get) => ({
 
   tab: isTypesetPreviewMode() ? "typeset" : isLabPreviewMode() ? "lab" : "chat",
   setTab: (tab) => set({ tab }),
+  typesetDirty: false,
+  setTypesetDirty: (typesetDirty) => set({ typesetDirty }),
 
   theme: initialTheme,
   setTheme: (theme) => {

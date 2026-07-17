@@ -76,6 +76,38 @@ describe("latexListEnterInsertion", () => {
 });
 
 describe("visualDecorations", () => {
+  it("renders chapters after page-break commands and numbers nested sections", () => {
+    const source = [
+      "\\documentclass{report}",
+      "\\begin{document}",
+      "\\newpage",
+      "\\chapter{State of the art in time series forecasting}",
+      "\\section{Forecasting methods}",
+      "\\subsection{Classical approaches}",
+      "\\end{document}",
+    ].join("\n");
+    const chapterFrom = source.indexOf("\\chapter");
+    const sectionFrom = source.indexOf("\\section");
+    const subsectionFrom = source.indexOf("\\subsection");
+    const pageBreakFrom = source.indexOf("\\newpage");
+    const ranges = visualDecorationRanges(source);
+    const labels = ranges
+      .filter((range) => range.widget)
+      .map((range) => ({ from: range.from, text: range.widget!.toDOM().textContent }));
+
+    expect(ranges.some((range) => range.from === chapterFrom && range.className === "cm-vis-heading-line cm-vis-heading-1")).toBe(true);
+    expect(ranges.some((range) => range.from === sectionFrom && range.className === "cm-vis-heading-line cm-vis-heading-2")).toBe(true);
+    expect(ranges.some((range) => range.from === subsectionFrom && range.className === "cm-vis-heading-line cm-vis-heading-3")).toBe(true);
+    expect(labels).toEqual(expect.arrayContaining([
+      { from: chapterFrom, text: "1" },
+      { from: sectionFrom, text: "1.1" },
+      { from: subsectionFrom, text: "1.1.1" },
+    ]));
+    const pageBreak = ranges.find((range) => range.from === pageBreakFrom && range.widget);
+    expect(pageBreak?.to).toBe(pageBreakFrom + "\\newpage".length);
+    expect(pageBreak?.widget?.toDOM().textContent).toBe("分页符");
+  });
+
   it("renders Beamer frames as numbered visual slide cards with editable titles", () => {
     const source = [
       "\\documentclass{beamer}",

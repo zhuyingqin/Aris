@@ -688,6 +688,7 @@ export default function Chat() {
           contextUsed={run.estimatedTokens}
           contextMax={run.contextMax}
           contextStatus={run.currentContextNotice}
+          onContextStatusDismiss={run.dismissContextNotice}
           onInputChange={updateComposerInput}
           onAttachmentsChange={composer.setAttachments}
           onSubmit={submitComposer}

@@ -223,12 +223,14 @@ export function useChatStream({
       onChatDone(({ sessionId, contextTokens, providerUsage }) => {
         if (!isCurrentListener()) return;
         flush(sessionId);
-        // Prefer the API-reported real prompt token count — it includes the
-        // full system prompt + tool schemas that the local heuristic cannot
-        // see, and reflects what the provider actually measured. Fall back
-        // to the backend's own session-history estimate when the API didn't
-        // return usage data (rare, but happens on stream truncation).
-        const realTokens = providerUsage?.promptTokens ?? contextTokens;
+        // `contextTokens` is the post-turn session-history estimate in the
+        // same unit as the compaction budget. In particular, after automatic
+        // compaction it reflects the newly condensed session. Provider prompt
+        // usage describes the request that just completed, which may have
+        // consumed the pre-compaction context and would make the ring stay at
+        // 100%. Only use it as a fallback for older backends without the
+        // session-history value.
+        const realTokens = contextTokens ?? providerUsage?.promptTokens;
         if (realTokens != null) handlersRef.current.onContextTokens?.(sessionId, realTokens);
       }),
       // Authoritative failure signal from the backend. The `chatSend` promise

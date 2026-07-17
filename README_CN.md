@@ -29,6 +29,15 @@
 
 ## 📰 最新动态
 
+> **v0.4.21** (2026-07) —— Tools 表面更新：`crates/tools/src/lib.rs` (+ test)。Typeset
+> 可视化编辑器迭代：`Typeset.tsx` + `TypesetVisualEditor.tsx` + `Typeset.css` + 新增
+> `TypesetVisualEditor.test.ts` + `visualDecorations.ts`。Tauri 后端 (`typeset.rs`
+> 主要改动 + `files.rs`)。Chat 表面更新 (`Chat.tsx`、`ChatComposer.tsx`、
+> `ChatImagePreview.tsx`、`useChatRun.ts`、`useChatStream.ts` + tests)。Lab:
+> `FileEditorPane.tsx` 更新。新增 `desktop/src/windowCloseGuard.ts` (+ test) ——
+> 统一 Tauri shell 与内嵌浏览器视图的关闭生命周期。新增研究闭环图
+> (`figures/somniq-research-loop.{md,mmd,png}`) 接入产品定位 README。API + App + 样式打磨。
+
 > **v0.4.20** (2026-07) —— Chat 表面重构：新增 `ChatComposer` + `useChatComposer` +
 > `useChatRun` hooks，扩展 `ChatMessage` 模型与测试，Settings 表面更新。Typeset 可视化编辑器
 > 迭代：`Typeset.tsx` + `TypesetVisualEditor.tsx` + `Typeset.css` 重写，配合新增的
@@ -43,6 +52,9 @@
 > `control.ts` / `main.ts` / `transport.ts` / `remoteMarkdown.ts` /
 > `workspaceNavigation.ts` / `styles.css` / SW 表面更新。桌面端 typeset + chat + Tauri 后端
 > + remote-protocol 表面更新。Tools 表面更新（`crates/tools/`）。
+
+<details>
+<summary>📜 早期版本（v0.4.18 → v0.1.0，点击展开）</summary>
 
 > **v0.4.18** (2026-07) —— Remote-mobile follow-up：`crates/remote-protocol/src/control.rs`
 > 表面更新，新增 `services/remote-mobile/src/mobileViewport.ts` + test，手机 PWA 打磨
@@ -68,9 +80,6 @@
 > kernel 模块（与 `project_goal` 并列的意图持久化 + 推理流水线）。新增 `editor/kernelIntel.ts`
 > （编辑器智能助手 —— completion / diagnostics / hover）。Notebook kernel 打磨。新增依赖：
 > +@xterm/xterm、+@xterm/addon-fit、+katex、+mermaid、+pdfjs-dist。
-
-<details>
-<summary>📜 早期版本（v0.4.14 → v0.1.0，点击展开）</summary>
 
 > **v0.4.14** (2026-07) —— 新 `project_goal` kernel 模块（mission/goal 持久化 + 推理流水线）。
 > 新 `editor` 桌面模块：`SharedEditor` + `editorCommands` / `editorDecorations` /

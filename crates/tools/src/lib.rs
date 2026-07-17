@@ -5121,6 +5121,11 @@ pub fn compile_latex_document(
     let source_dir = input_path
         .parent()
         .ok_or_else(|| "inputPath must include a file name".to_string())?;
+    // Capture the complete discoverable project input set before launching TeX.
+    // The manifest is both the provenance hash shown to users and the guard
+    // against accepting a PDF assembled while an external editor was writing.
+    let input_snapshot = latex_input_snapshot(&input_path, workspace);
+    let compile_input_hash = latex_input_manifest_hash(&input_snapshot, workspace);
     std::fs::create_dir_all(output_dir).map_err(|error| error.to_string())?;
 
     let expected_pdf = output_dir
@@ -5181,15 +5186,32 @@ pub fn compile_latex_document(
         stderr = append_process_status_message(stderr, "LaTeXCompile produced no output PDF");
         return_code_interpretation = Some("missing_output".to_string());
     }
-    let pdf_state = latex_pdf_state(
-        success,
-        request.continue_on_error,
-        output.interrupted,
-        output.timed_out,
-        expected_pdf_before.as_ref(),
-        latex_output_fingerprint(&expected_pdf).as_ref(),
-        output_path.is_file(),
-    );
+    let inputs_changed = latex_input_snapshot_changed(&input_snapshot);
+    if inputs_changed {
+        success = false;
+        stderr = append_process_status_message(
+            stderr,
+            "LaTeX project inputs changed during compilation; the generated PDF was not accepted. Recompile the stable project state.",
+        );
+        return_code_interpretation = Some("inputs_changed".to_string());
+    }
+    let pdf_state = if inputs_changed {
+        if output_path.is_file() {
+            LatexPdfState::Stale
+        } else {
+            LatexPdfState::Missing
+        }
+    } else {
+        latex_pdf_state(
+            success,
+            request.continue_on_error,
+            output.interrupted,
+            output.timed_out,
+            expected_pdf_before.as_ref(),
+            latex_output_fingerprint(&expected_pdf).as_ref(),
+            output_path.is_file(),
+        )
+    };
     let diagnostics = extract_latex_diagnostics(
         &stdout,
         &stderr,
@@ -5219,7 +5241,7 @@ pub fn compile_latex_document(
         diagnostics,
         repair_guidance,
         pdf_state,
-        root_source_hash: latex_file_hash(&input_path).unwrap_or_default(),
+        root_source_hash: compile_input_hash,
         pdf_hash: latex_file_hash(&output_path),
         compiled_at_unix_ms: SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -5267,6 +5289,224 @@ fn latex_file_hash(path: &Path) -> Option<String> {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     Some(format!("{:x}", hasher.finalize()))
+}
+
+fn latex_source_without_comment(line: &str) -> &str {
+    let mut escaped = false;
+    for (index, character) in line.char_indices() {
+        if character == '%' && !escaped {
+            return &line[..index];
+        }
+        escaped = character == '\\' && !escaped;
+        if character != '\\' {
+            escaped = false;
+        }
+    }
+    line
+}
+
+fn latex_source_command_arguments(line: &str, command: &str) -> Vec<String> {
+    let needle = format!("\\{command}");
+    let mut rest = line;
+    let mut arguments = Vec::new();
+    while let Some(index) = rest.find(&needle) {
+        rest = &rest[index + needle.len()..];
+        let mut trimmed = rest.trim_start();
+        while let Some(optional) = trimmed.strip_prefix('[') {
+            let Some(end) = optional.find(']') else {
+                break;
+            };
+            trimmed = optional[end + 1..].trim_start();
+        }
+        let Some(argument) = trimmed.strip_prefix('{') else {
+            continue;
+        };
+        let Some(end) = argument.find('}') else {
+            continue;
+        };
+        arguments.push(argument[..end].trim().to_string());
+        rest = &argument[end + 1..];
+    }
+    arguments
+}
+
+fn latex_source_command_pairs(line: &str, command: &str) -> Vec<(String, String)> {
+    let needle = format!("\\{command}");
+    let mut rest = line;
+    let mut pairs = Vec::new();
+    while let Some(index) = rest.find(&needle) {
+        rest = &rest[index + needle.len()..];
+        let mut trimmed = rest.trim_start();
+        while let Some(optional) = trimmed.strip_prefix('[') {
+            let Some(end) = optional.find(']') else {
+                break;
+            };
+            trimmed = optional[end + 1..].trim_start();
+        }
+        let Some(first) = trimmed.strip_prefix('{') else {
+            continue;
+        };
+        let Some(first_end) = first.find('}') else {
+            continue;
+        };
+        let after_first = first[first_end + 1..].trim_start();
+        let Some(second) = after_first.strip_prefix('{') else {
+            rest = after_first;
+            continue;
+        };
+        let Some(second_end) = second.find('}') else {
+            rest = second;
+            continue;
+        };
+        pairs.push((
+            first[..first_end].trim().to_string(),
+            second[..second_end].trim().to_string(),
+        ));
+        rest = &second[second_end + 1..];
+    }
+    pairs
+}
+
+fn latex_dependency_variants(base: &Path, value: &str, extensions: &[&str]) -> Vec<PathBuf> {
+    let value = value
+        .trim()
+        .trim_matches(['\'', '"'])
+        .trim_start_matches("file:");
+    if value.is_empty() || value.contains('\\') || value.contains('#') {
+        return Vec::new();
+    }
+    let value = value.replace('\\', "/");
+    let path = base.join(value);
+    if path.extension().is_some() || extensions.is_empty() {
+        return vec![path];
+    }
+    extensions
+        .iter()
+        .map(|extension| path.with_extension(extension))
+        .collect()
+}
+
+fn latex_discover_dependencies(source_path: &Path, compile_root_dir: &Path) -> Vec<PathBuf> {
+    let Ok(source) = std::fs::read(source_path) else {
+        return Vec::new();
+    };
+    let source = String::from_utf8_lossy(&source);
+    let source_dir = source_path.parent().unwrap_or(compile_root_dir);
+    let bases = if source_dir == compile_root_dir {
+        vec![compile_root_dir]
+    } else {
+        vec![compile_root_dir, source_dir]
+    };
+    let mut dependencies = Vec::new();
+    for line in source.lines().map(latex_source_without_comment) {
+        for command in ["input", "include", "subfile"] {
+            for argument in latex_source_command_arguments(line, command) {
+                for base in &bases {
+                    dependencies.extend(latex_dependency_variants(base, &argument, &["tex"]));
+                }
+            }
+        }
+        for command in ["import", "subimport"] {
+            for (directory, file) in latex_source_command_pairs(line, command) {
+                let joined = Path::new(&directory).join(file);
+                let joined = joined.to_string_lossy();
+                for base in [source_dir, compile_root_dir] {
+                    dependencies.extend(latex_dependency_variants(base, &joined, &["tex"]));
+                }
+            }
+        }
+        for argument in latex_source_command_arguments(line, "includegraphics") {
+            for base in &bases {
+                dependencies.extend(latex_dependency_variants(
+                    base,
+                    &argument,
+                    &["pdf", "png", "jpg", "jpeg", "eps", "svg"],
+                ));
+            }
+        }
+        for command in ["bibliography", "addbibresource"] {
+            for argument in latex_source_command_arguments(line, command) {
+                for item in argument.split(',') {
+                    for base in &bases {
+                        dependencies.extend(latex_dependency_variants(base, item, &["bib"]));
+                    }
+                }
+            }
+        }
+        for argument in latex_source_command_arguments(line, "bibliographystyle") {
+            for base in &bases {
+                dependencies.extend(latex_dependency_variants(base, &argument, &["bst"]));
+            }
+        }
+        for argument in latex_source_command_arguments(line, "documentclass") {
+            for base in &bases {
+                dependencies.extend(latex_dependency_variants(base, &argument, &["cls"]));
+            }
+        }
+        for argument in latex_source_command_arguments(line, "usepackage") {
+            for package in argument.split(',') {
+                for base in &bases {
+                    dependencies.extend(latex_dependency_variants(base, package, &["sty"]));
+                }
+            }
+        }
+    }
+    dependencies
+}
+
+fn latex_input_snapshot(input_path: &Path, workspace: &Path) -> BTreeMap<PathBuf, String> {
+    let Some(root_dir) = input_path.parent() else {
+        return BTreeMap::new();
+    };
+    let mut pending = vec![input_path.to_path_buf()];
+    let mut snapshot = BTreeMap::new();
+    while let Some(path) = pending.pop() {
+        let Ok(path) = path.canonicalize() else {
+            continue;
+        };
+        if !path.starts_with(workspace) || snapshot.contains_key(&path) {
+            continue;
+        }
+        let Some(hash) = latex_file_hash(&path) else {
+            continue;
+        };
+        snapshot.insert(path.clone(), hash);
+        let parse_dependencies = path
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_some_and(|extension| {
+                matches!(
+                    extension.to_ascii_lowercase().as_str(),
+                    "tex" | "sty" | "cls" | "bbx" | "cbx"
+                )
+            });
+        if parse_dependencies {
+            pending.extend(
+                latex_discover_dependencies(&path, root_dir)
+                    .into_iter()
+                    .filter(|dependency| dependency.is_file()),
+            );
+        }
+    }
+    snapshot
+}
+
+fn latex_input_manifest_hash(snapshot: &BTreeMap<PathBuf, String>, workspace: &Path) -> String {
+    let mut hasher = Sha256::new();
+    for (path, hash) in snapshot {
+        let relative = path.strip_prefix(workspace).unwrap_or(path);
+        hasher.update(relative.to_string_lossy().replace('\\', "/").as_bytes());
+        hasher.update([0]);
+        hasher.update(hash.as_bytes());
+        hasher.update([0]);
+    }
+    format!("{:x}", hasher.finalize())
+}
+
+fn latex_input_snapshot_changed(snapshot: &BTreeMap<PathBuf, String>) -> bool {
+    snapshot
+        .iter()
+        .any(|(path, expected_hash)| latex_file_hash(path).as_ref() != Some(expected_hash))
 }
 
 #[allow(clippy::too_many_arguments)]

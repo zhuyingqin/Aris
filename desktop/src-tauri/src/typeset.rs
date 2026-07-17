@@ -1,6 +1,6 @@
 use serde::Serialize;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -105,7 +105,7 @@ fn latex_compile_blocking(
         "tex",
         "latex_compile inputPath must point to a .tex file",
     )?;
-    let compile_input_path = resolve_compile_root(&input_path)?;
+    let compile_input_path = resolve_compile_root(&input_path, &workspace)?;
     let output_path = match output_path
         .as_deref()
         .filter(|path| !path.trim().is_empty())
@@ -382,21 +382,33 @@ fn has_extension(path: &Path, extension: &str) -> bool {
 }
 
 fn tex_file_is_standalone(path: &Path) -> bool {
-    std::fs::read_to_string(path)
-        .map(|source| tex_source_is_standalone(&source))
+    std::fs::read(path)
+        .map(|source| tex_source_is_standalone(&String::from_utf8_lossy(&source)))
         .unwrap_or(false)
 }
 
 fn tex_source_is_standalone(source: &str) -> bool {
-    source.contains("\\documentclass") || source.contains("\\begin{document}")
+    source
+        .lines()
+        .map(latex_line_without_comment)
+        .any(|line| line.contains("\\documentclass") || line.contains("\\begin{document}"))
 }
 
-fn tex_source_inputs_file(source: &str, stem: &str, file_name: &str) -> bool {
-    source.lines().map(latex_line_without_comment).any(|line| {
-        ["input", "include", "subfile"].iter().any(|command| {
-            latex_command_arguments(line, command)
-                .any(|argument| tex_argument_matches(argument, stem, file_name))
-        })
+fn tex_magic_root(source: &str) -> Option<String> {
+    source.lines().take(50).find_map(|line| {
+        let directive = line.trim_start().strip_prefix('%')?.trim_start();
+        let directive = directive.strip_prefix('!')?.trim_start();
+        let (key, value) = directive.split_once('=')?;
+        let normalized_key = key
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_ascii_lowercase();
+        if normalized_key != "tex root" {
+            return None;
+        }
+        let value = value.trim().trim_matches(['\'', '"']);
+        (!value.is_empty()).then(|| value.to_string())
     })
 }
 
@@ -433,14 +445,112 @@ fn latex_command_arguments<'a>(line: &'a str, command: &str) -> impl Iterator<It
     })
 }
 
-fn tex_argument_matches(argument: &str, stem: &str, file_name: &str) -> bool {
-    let normalized = argument.trim().replace('\\', "/");
-    let normalized = normalized.trim_end_matches(".tex");
-    let file_stem = file_name.trim_end_matches(".tex");
-    normalized == stem
-        || normalized == file_stem
-        || normalized.ends_with(&format!("/{stem}"))
-        || normalized.ends_with(&format!("/{file_stem}"))
+fn latex_command_argument_pairs<'a>(line: &'a str, command: &str) -> Vec<(&'a str, &'a str)> {
+    let needle = format!("\\{command}");
+    let mut rest = line;
+    let mut pairs = Vec::new();
+    while let Some(index) = rest.find(&needle) {
+        rest = &rest[index + needle.len()..];
+        let mut trimmed = rest.trim_start();
+        while let Some(optional_argument) = trimmed.strip_prefix('[') {
+            let Some(end) = optional_argument.find(']') else {
+                break;
+            };
+            trimmed = optional_argument[end + 1..].trim_start();
+        }
+        let Some(first_start) = trimmed.strip_prefix('{') else {
+            continue;
+        };
+        let Some(first_end) = first_start.find('}') else {
+            continue;
+        };
+        let first = first_start[..first_end].trim();
+        let after_first = first_start[first_end + 1..].trim_start();
+        let Some(second_start) = after_first.strip_prefix('{') else {
+            rest = after_first;
+            continue;
+        };
+        let Some(second_end) = second_start.find('}') else {
+            rest = second_start;
+            continue;
+        };
+        pairs.push((first, second_start[..second_end].trim()));
+        rest = &second_start[second_end + 1..];
+    }
+    pairs
+}
+
+fn tex_path_with_default_extension(base: &Path, value: &str) -> PathBuf {
+    let normalized = value.trim().replace('\\', "/");
+    let mut path = base.join(normalized);
+    if path.extension().is_none() {
+        path.set_extension("tex");
+    }
+    path
+}
+
+fn tex_source_dependencies(source_path: &Path, compile_root_dir: &Path) -> Vec<PathBuf> {
+    let Ok(source) = std::fs::read(source_path) else {
+        return Vec::new();
+    };
+    let source = String::from_utf8_lossy(&source);
+    let source_dir = source_path.parent().unwrap_or(compile_root_dir);
+    let mut dependencies = Vec::new();
+    for line in source.lines().map(latex_line_without_comment) {
+        for command in ["input", "include", "subfile"] {
+            for argument in latex_command_arguments(line, command) {
+                dependencies.push(tex_path_with_default_extension(compile_root_dir, argument));
+                if source_dir != compile_root_dir {
+                    dependencies.push(tex_path_with_default_extension(source_dir, argument));
+                }
+            }
+        }
+        for command in ["import", "subimport"] {
+            for (directory, file) in latex_command_argument_pairs(line, command) {
+                let imported = Path::new(directory).join(file);
+                let imported = imported.to_string_lossy();
+                dependencies.push(tex_path_with_default_extension(source_dir, &imported));
+                if source_dir != compile_root_dir {
+                    dependencies.push(tex_path_with_default_extension(compile_root_dir, &imported));
+                }
+            }
+        }
+    }
+    dependencies
+}
+
+fn tex_root_reaches_file(root: &Path, target: &Path, workspace: &Path) -> bool {
+    let Ok(target) = target.canonicalize() else {
+        return false;
+    };
+    let Some(root_dir) = root.parent() else {
+        return false;
+    };
+    let mut pending = vec![root.to_path_buf()];
+    let mut visited = HashSet::new();
+    while let Some(source_path) = pending.pop() {
+        let Ok(source_path) = source_path.canonicalize() else {
+            continue;
+        };
+        if source_path == target {
+            return true;
+        }
+        if !source_path.starts_with(workspace) || !visited.insert(source_path.clone()) {
+            continue;
+        }
+        for dependency in tex_source_dependencies(&source_path, root_dir) {
+            let Ok(dependency) = dependency.canonicalize() else {
+                continue;
+            };
+            if dependency == target {
+                return true;
+            }
+            if dependency.starts_with(workspace) && has_extension(&dependency, "tex") {
+                pending.push(dependency);
+            }
+        }
+    }
+    false
 }
 
 fn tex_input_name(input_path: &Path) -> &std::ffi::OsStr {
@@ -449,32 +559,79 @@ fn tex_input_name(input_path: &Path) -> &std::ffi::OsStr {
         .unwrap_or_else(|| input_path.as_os_str())
 }
 
-fn resolve_compile_root(input_path: &Path) -> Result<PathBuf, String> {
+fn resolve_compile_root(input_path: &Path, workspace: &Path) -> Result<PathBuf, String> {
+    let input_bytes = std::fs::read(input_path).map_err(|error| error.to_string())?;
+    let input_source = String::from_utf8_lossy(&input_bytes);
+    if let Some(configured_root) = tex_magic_root(&input_source) {
+        let Some(parent) = input_path.parent() else {
+            return Err(format!(
+                "cannot resolve % !TeX root for {}",
+                input_path.display()
+            ));
+        };
+        let configured_path = Path::new(&configured_root);
+        let configured_path = if configured_path.is_absolute() {
+            configured_path.to_path_buf()
+        } else {
+            parent.join(configured_path)
+        };
+        let configured_path = configured_path.canonicalize().map_err(|error| {
+            format!(
+                "% !TeX root from {} does not resolve to a file: {error}",
+                input_path.display()
+            )
+        })?;
+        if !configured_path.starts_with(workspace) {
+            return Err("% !TeX root must stay inside the current workspace".to_string());
+        }
+        ensure_extension(
+            &configured_path,
+            "tex",
+            "% !TeX root must point to a .tex file",
+        )?;
+        if !tex_file_is_standalone(&configured_path) {
+            return Err(format!(
+                "% !TeX root is not a compilable root document: {}",
+                configured_path.display()
+            ));
+        }
+        return Ok(configured_path);
+    }
     if tex_file_is_standalone(input_path) {
         return Ok(input_path.to_path_buf());
     }
     let Some(parent) = input_path.parent() else {
         return Ok(input_path.to_path_buf());
     };
-    let Some(file_name) = input_path.file_name().and_then(|value| value.to_str()) else {
-        return Ok(input_path.to_path_buf());
-    };
-    let Some(stem) = input_path.file_stem().and_then(|value| value.to_str()) else {
-        return Ok(input_path.to_path_buf());
-    };
     let mut candidates = Vec::new();
-    for entry in std::fs::read_dir(parent).map_err(|error| error.to_string())? {
-        let entry = entry.map_err(|error| error.to_string())?;
-        let path = entry.path();
-        if path == input_path || !has_extension(&path, "tex") {
-            continue;
+    let mut search_dir = parent;
+    loop {
+        for entry in std::fs::read_dir(search_dir).map_err(|error| error.to_string())? {
+            let entry = entry.map_err(|error| error.to_string())?;
+            let path = entry.path();
+            if path == input_path || !has_extension(&path, "tex") {
+                continue;
+            }
+            let Ok(source) = std::fs::read(&path) else {
+                continue;
+            };
+            let source = String::from_utf8_lossy(&source);
+            if tex_source_is_standalone(&source)
+                && tex_root_reaches_file(&path, input_path, workspace)
+            {
+                candidates.push(path);
+            }
         }
-        let Ok(source) = std::fs::read_to_string(&path) else {
-            continue;
+        if search_dir == workspace {
+            break;
+        }
+        let Some(next) = search_dir
+            .parent()
+            .filter(|next| next.starts_with(workspace))
+        else {
+            break;
         };
-        if tex_source_is_standalone(&source) && tex_source_inputs_file(&source, stem, file_name) {
-            candidates.push(path);
-        }
+        search_dir = next;
     }
     candidates.sort_by(|left, right| {
         let score = |path: &Path| {
@@ -491,10 +648,19 @@ fn resolve_compile_root(input_path: &Path) -> Result<PathBuf, String> {
         };
         score(left).cmp(&score(right)).then_with(|| left.cmp(right))
     });
-    Ok(candidates
-        .into_iter()
-        .next()
-        .unwrap_or_else(|| input_path.to_path_buf()))
+    if candidates.len() > 1 {
+        let roots = candidates
+            .iter()
+            .filter_map(|path| path.strip_prefix(workspace).ok())
+            .map(|path| path.to_string_lossy().replace('\\', "/"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(format!(
+            "multiple LaTeX roots include {} ({roots}); add `% !TeX root = ../main.tex` to select one",
+            input_path.display()
+        ));
+    }
+    Ok(candidates.pop().unwrap_or_else(|| input_path.to_path_buf()))
 }
 
 /// The name SyncTeX recorded for `source_path`, for use as `synctex view -i`'s
@@ -543,6 +709,118 @@ fn tex_tool_path(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn temporary_tex_project(label: &str) -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "somniq-typeset-{label}-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(root.join("chapters")).expect("create temporary project");
+        root
+    }
+
+    #[test]
+    fn resolve_compile_root_honors_magic_root_from_nested_chapter() {
+        let root = temporary_tex_project("magic-root");
+        let main = root.join("main.tex");
+        let chapter = root.join("chapters/intro.tex");
+        std::fs::write(
+            &main,
+            "\\documentclass{article}\n\\begin{document}\n\\input{chapters/intro}\n\\end{document}",
+        )
+        .expect("write root");
+        std::fs::write(&chapter, "% !TeX root = ../main.tex\nChapter text").expect("write chapter");
+        let workspace = root.canonicalize().expect("canonical workspace");
+        let chapter = chapter.canonicalize().expect("canonical chapter");
+        let resolved = resolve_compile_root(&chapter, &workspace).expect("resolve root");
+        assert_eq!(resolved, main.canonicalize().expect("canonical root"));
+        std::fs::remove_dir_all(root).expect("remove temporary project");
+    }
+
+    #[test]
+    fn resolve_compile_root_searches_ancestor_directories() {
+        let root = temporary_tex_project("ancestor-root");
+        let main = root.join("main.tex");
+        let chapter = root.join("chapters/intro.tex");
+        std::fs::write(
+            &main,
+            "\\documentclass{article}\n\\begin{document}\n\\input{chapters/intro}\n\\end{document}",
+        )
+        .expect("write root");
+        std::fs::write(&chapter, "Nested chapter").expect("write chapter");
+        let workspace = root.canonicalize().expect("canonical workspace");
+        let chapter = chapter.canonicalize().expect("canonical chapter");
+        let resolved = resolve_compile_root(&chapter, &workspace).expect("resolve root");
+        assert_eq!(resolved, main.canonicalize().expect("canonical root"));
+        std::fs::remove_dir_all(root).expect("remove temporary project");
+    }
+
+    #[test]
+    fn resolve_compile_root_follows_transitive_inputs() {
+        let root = temporary_tex_project("transitive-root");
+        std::fs::create_dir_all(root.join("parts")).expect("create parts");
+        let main = root.join("main.tex");
+        let chapter = root.join("chapters/intro.tex");
+        std::fs::write(
+            &main,
+            "\\documentclass{article}\n\\begin{document}\n\\input{parts/body}\n\\end{document}",
+        )
+        .expect("write root");
+        std::fs::write(root.join("parts/body.tex"), "\\input{chapters/intro}")
+            .expect("write intermediate input");
+        std::fs::write(&chapter, "Nested chapter").expect("write chapter");
+        let workspace = root.canonicalize().expect("canonical workspace");
+        let chapter = chapter.canonicalize().expect("canonical chapter");
+        let resolved = resolve_compile_root(&chapter, &workspace).expect("resolve root");
+        assert_eq!(resolved, main.canonicalize().expect("canonical root"));
+        std::fs::remove_dir_all(root).expect("remove temporary project");
+    }
+
+    #[test]
+    fn resolve_compile_root_follows_import_paths() {
+        let root = temporary_tex_project("import-root");
+        let main = root.join("main.tex");
+        let chapter = root.join("chapters/intro.tex");
+        std::fs::write(
+            &main,
+            "\\documentclass{article}\n\\begin{document}\n\\import{chapters/}{intro}\n\\end{document}",
+        )
+        .expect("write root");
+        std::fs::write(&chapter, "Imported chapter").expect("write chapter");
+        let workspace = root.canonicalize().expect("canonical workspace");
+        let chapter = chapter.canonicalize().expect("canonical chapter");
+        let resolved = resolve_compile_root(&chapter, &workspace).expect("resolve root");
+        assert_eq!(resolved, main.canonicalize().expect("canonical root"));
+        std::fs::remove_dir_all(root).expect("remove temporary project");
+    }
+
+    #[test]
+    fn resolve_compile_root_reports_ambiguous_multi_root_projects() {
+        let root = temporary_tex_project("ambiguous-root");
+        let chapter = root.join("chapters/intro.tex");
+        let root_source =
+            "\\documentclass{article}\n\\begin{document}\n\\input{chapters/intro}\n\\end{document}";
+        std::fs::write(root.join("main.tex"), root_source).expect("write first root");
+        std::fs::write(root.join("report.tex"), root_source).expect("write second root");
+        std::fs::write(&chapter, "Nested chapter").expect("write chapter");
+        let workspace = root.canonicalize().expect("canonical workspace");
+        let chapter = chapter.canonicalize().expect("canonical chapter");
+        let error = resolve_compile_root(&chapter, &workspace).expect_err("ambiguous root");
+        assert!(error.contains("multiple LaTeX roots"));
+        assert!(error.contains("% !TeX root"));
+        std::fs::remove_dir_all(root).expect("remove temporary project");
+    }
+
+    #[test]
+    fn standalone_detection_ignores_commented_document_commands() {
+        assert!(!tex_source_is_standalone(
+            "% \\documentclass{article}\n% \\begin{document}\nChapter text"
+        ));
+    }
 
     #[test]
     fn tex_input_target_uses_bare_name_for_the_compile_root() {

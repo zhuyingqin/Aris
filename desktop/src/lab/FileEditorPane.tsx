@@ -245,7 +245,9 @@ export default function FileEditorPane({
     setSaving(true);
     setError(null);
     try {
-      const file = await fileWriteText(path, draft);
+      const file = loaded.version
+        ? await fileWriteText(path, draft, loaded.version)
+        : await fileWriteText(path, draft);
       setLoaded(file);
       setDraft(file.content);
       setReviewBase(file.content);
@@ -270,7 +272,9 @@ export default function FileEditorPane({
     setSaving(true);
     setError(null);
     try {
-      const file = await fileWriteText(path, reviewBase);
+      const file = loaded.version
+        ? await fileWriteText(path, reviewBase, loaded.version)
+        : await fileWriteText(path, reviewBase);
       setLoaded(file);
       setDraft(file.content);
       setReviewBase(file.content);

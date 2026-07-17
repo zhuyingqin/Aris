@@ -48,6 +48,11 @@
   --visual-text: #edf2f5;
   --visual-muted: #9ca8b1;
   --visual-muted-2: #c2ccd4;
+  --visual-heading-1: #8fc5ff;
+  --visual-heading-2: #7fd7c1;
+  --visual-heading-3: #c6a8f5;
+  --visual-heading-4: #b7a1d1;
+  --visual-caption: #e0b978;
   --visual-code-text: #8bdba1;
   --visual-link: #79b8ff;
   --visual-accent-bright: #65d47a;
@@ -82,8 +87,10 @@
   --line-height-02: 16px;
   --mono: var(--font-mono);
   --scrollbar-size: 10px;
-  --scrollbar-thumb: color-mix(in srgb, var(--ol-muted) 42%, transparent);
-  --scrollbar-thumb-hover: color-mix(in srgb, var(--ol-muted-2) 68%, transparent);
+  --typeset-scrollbar-inset: 2px;
+  --scrollbar-thumb: color-mix(in srgb, var(--ol-muted-2) 46%, transparent);
+  --scrollbar-thumb-hover: color-mix(in srgb, var(--ol-muted-2) 72%, transparent);
+  --typeset-scrollbar-track: transparent;
   position: relative;
   display: grid;
   container-type: inline-size;
@@ -4987,6 +4994,7 @@
   gap: 3px;
   padding: 0 4px;
   border: 0;
+  border-radius: 6px;
   background: transparent;
   color: var(--ol-muted-2);
   font-size: 12px;
@@ -5161,22 +5169,6 @@
   background: color-mix(in srgb, var(--ol-bg-3) 58%, transparent);
 }
 
-.toolbar-pdf-controls .typeset-icon-btn {
-  width: 30px;
-  height: 28px;
-  border-color: transparent;
-  border-radius: 0;
-  background: transparent;
-}
-
-.toolbar-pdf-controls .typeset-icon-btn:first-child {
-  border-radius: 6px 0 0 6px;
-}
-
-.toolbar-pdf-controls .typeset-icon-btn:last-child {
-  border-radius: 0 6px 6px 0;
-}
-
 @container pdf-preview (max-width: 760px) {
   .typeset-preview-toolbar {
     gap: 4px;
@@ -5203,10 +5195,6 @@
 }
 
 @container pdf-preview (max-width: 420px) {
-  .pdf-zoom-step {
-    display: none;
-  }
-
   .typeset-preview-actions {
     min-width: 0;
   }
@@ -5395,29 +5383,30 @@
 }
 
 .typeset-log {
+  --typeset-log-canvas: #263447;
+  --typeset-log-surface: #18232f;
+  --typeset-log-surface-raised: #203044;
+  --typeset-log-border: rgb(157 187 220 / 24%);
+  --typeset-log-text: #eaf1f8;
+  --typeset-log-muted: #afc0d1;
   position: absolute;
   inset: var(--typeset-pdf-toolbar-h) 0 0 0;
   z-index: 5;
+  display: grid;
   height: auto;
+  grid-template-rows: 44px minmax(0, 1fr) 46px;
   border: 0;
   border-top: 1px solid var(--ol-border);
   border-radius: 0;
+  background: var(--typeset-log-canvas);
   box-shadow: none;
   overflow: hidden;
 }
 
-.typeset-log-head,
 .typeset-outline-head {
   height: 34px;
   padding: 0 8px;
   border-bottom: 1px solid var(--ol-border);
-}
-
-.typeset-log-head {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
-  gap: 8px;
-  background: var(--ol-bg);
 }
 
 .typeset-outline-head {
@@ -5426,111 +5415,373 @@
   background: color-mix(in srgb, var(--ol-bg-2) 34%, var(--ol-bg));
 }
 
-.typeset-log-head strong::before {
+.typeset-log-clear-cache,
+.typeset-diagnostic-expand,
+.typeset-diagnostic-title,
+.typeset-diagnostic-location,
+.typeset-diagnostic-locate {
+  border: 0;
+  font: inherit;
+}
+
+.typeset-log-clear-cache {
+  display: inline-flex;
+  height: 28px;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border-radius: 16px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.typeset-log-tabs {
+  display: flex;
+  align-items: stretch;
+  gap: 1px;
+  padding: 0 8px;
+  background: #18222e;
+  border-bottom: 1px solid var(--typeset-log-border);
+}
+
+.typeset-log-tabs button {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 7px;
+  border: 0;
+  background: transparent;
+  color: var(--typeset-log-text);
+  cursor: pointer;
+  font: 700 12px/1 var(--font-ui, sans-serif);
+}
+
+.typeset-log-tabs button::after {
+  position: absolute;
+  right: 7px;
+  bottom: 0;
+  left: 7px;
+  height: 3px;
+  background: transparent;
   content: "";
-  display: inline-block;
-  width: 7px;
-  height: 7px;
-  margin-right: 7px;
+}
+
+.typeset-log-tabs button[aria-selected="true"]::after {
+  background: #20a561;
+}
+
+.typeset-log-tabs button:hover {
+  background: rgb(255 255 255 / 4%);
+}
+
+.typeset-log-tabs button:focus-visible,
+.typeset-diagnostic-expand:focus-visible,
+.typeset-diagnostic-title:focus-visible,
+.typeset-diagnostic-location:focus-visible,
+.typeset-diagnostic-locate:focus-visible {
+  outline: 2px solid #8fc0ff;
+  outline-offset: -2px;
+}
+
+.typeset-log-tabs b {
+  display: grid;
+  min-width: 20px;
+  height: 20px;
+  place-items: center;
   border-radius: 50%;
-  background: var(--ol-green);
-  vertical-align: 1px;
+  background: #3a4e66;
+  color: #f5f9fd;
+  font-size: 11px;
 }
 
 .typeset-log .logs-pane-content {
-  height: calc(100% - 34px);
   overflow: auto;
-  padding: 8px;
-  background: var(--ol-bg-2);
-}
-
-.typeset-log pre {
-  min-height: 100%;
-  margin: 0;
-  padding: 10px;
-  border-radius: 4px;
-  background: var(--ol-bg);
-  color: #cad0cc;
-  font: 11.5px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  white-space: pre-wrap;
-}
-
-.typeset-log.error pre {
-  color: #ffd0cc;
+  padding: 5px 8px 12px;
+  background: var(--typeset-log-canvas);
 }
 
 .typeset-diagnostics {
   display: grid;
   gap: 5px;
-  margin-bottom: 8px;
+  margin: 0 0 5px;
 }
 
-.typeset-diagnostic {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  gap: 8px;
-  width: 100%;
-  align-items: center;
-  padding: 7px 9px;
-  border: 1px solid rgb(255 170 164 / 42%);
-  border-radius: 4px;
-  background: rgb(92 45 43 / 28%);
-  color: #ffd0cc;
-  cursor: pointer;
-  font: 11px/1.35 var(--font-ui, sans-serif);
-  text-align: left;
+.typeset-diagnostic-card,
+.typeset-raw-logs {
+  border: 1px solid var(--typeset-log-border);
+  border-radius: 5px;
+  background: var(--typeset-log-surface);
 }
 
-.typeset-diagnostic:hover:not(:disabled),
-.typeset-diagnostic:focus-visible {
-  border-color: #ffaaa4;
-  outline: none;
-}
-
-.typeset-diagnostic:disabled {
-  cursor: default;
-  opacity: 0.78;
-}
-
-.typeset-diagnostic > span {
-  color: #ffaaa4;
-  font-size: 10px;
-  font-weight: 700;
-  text-transform: uppercase;
-}
-
-.typeset-diagnostic.warning {
-  border-color: rgb(255 216 138 / 42%);
-  background: rgb(92 76 38 / 24%);
-  color: #ffe4a9;
-}
-
-.typeset-diagnostic.warning > span {
-  color: #ffd88a;
-}
-
-.typeset-diagnostic > strong {
+.typeset-diagnostic-summary {
+  display: flex;
   min-width: 0;
+  min-height: 70px;
+  align-items: center;
+  gap: 9px;
+  padding: 8px 10px;
+}
+
+.typeset-diagnostic-expand {
+  display: grid;
+  width: 23px;
+  height: 23px;
+  flex: 0 0 23px;
+  place-items: center;
+  border-radius: 3px;
+  background: transparent;
+  color: #f0f5fb;
+  cursor: pointer;
+}
+
+.typeset-diagnostic-expand:hover {
+  background: rgb(255 255 255 / 8%);
+}
+
+.typeset-diagnostic-expand svg {
+  width: 15px;
+  height: 15px;
+  transform: rotate(-90deg);
+  transition: transform 120ms ease;
+}
+
+.typeset-diagnostic-card.expanded .typeset-diagnostic-expand svg,
+.typeset-raw-logs[open] summary svg,
+.typeset-log-build-details[open] summary svg {
+  transform: rotate(0deg);
+}
+
+.typeset-diagnostic-copy {
+  display: grid;
+  min-width: 0;
+  gap: 5px;
+}
+
+.typeset-diagnostic-title,
+.typeset-diagnostic-location {
   overflow: hidden;
+  width: max-content;
+  max-width: 100%;
+  padding: 0;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.typeset-diagnostic > small,
-.typeset-build-provenance {
-  color: var(--ol-muted);
-  font-size: 10px;
+.typeset-diagnostic-title {
+  color: #ff938b;
+  font-size: 13px;
+  font-weight: 750;
+}
+
+.typeset-diagnostic-location {
+  color: var(--typeset-log-muted);
+  font: 11px/1.2 var(--font-mono, ui-monospace, monospace);
+}
+
+.typeset-diagnostic-title:disabled,
+.typeset-diagnostic-location:disabled {
+  cursor: default;
+}
+
+.typeset-diagnostic-card.warning .typeset-diagnostic-title {
+  color: #ffc15a;
+}
+
+.typeset-diagnostic-card.info .typeset-diagnostic-title {
+  color: #a5cbff;
+}
+
+.typeset-diagnostic-card.warning {
+  border-color: rgb(255 193 90 / 36%);
+}
+
+.typeset-diagnostic-card.error {
+  border-color: rgb(255 147 139 / 34%);
+}
+
+.typeset-diagnostic-card.info {
+  border-color: rgb(165 203 255 / 32%);
+}
+
+.typeset-diagnostic-locate {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
+  place-items: center;
+  margin-left: auto;
+  border-radius: 50%;
+  background: transparent;
+  color: #eef5ff;
+  cursor: pointer;
+}
+
+.typeset-diagnostic-locate:hover {
+  background: rgb(255 255 255 / 9%);
+}
+
+.typeset-diagnostic-locate svg {
+  width: 17px;
+  height: 17px;
+}
+
+.typeset-diagnostic-sparkle {
+  margin-left: 4px;
+  color: #68aafc;
+  font-size: 20px;
+  line-height: 1;
+}
+
+.typeset-diagnostic-details {
+  padding: 10px;
+  border-top: 1px solid var(--typeset-log-border);
+}
+
+.typeset-diagnostic-details p {
+  margin: 0 0 10px;
+  color: var(--typeset-log-text);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.typeset-diagnostic-details pre,
+.typeset-raw-logs pre {
+  max-height: 238px;
+  margin: 0;
+  overflow: auto;
+  padding: 10px;
+  border-radius: 4px;
+  border: 1px solid rgb(157 187 220 / 18%);
+  background: var(--typeset-log-surface-raised);
+  color: #eef5fc;
+  font: 11px/1.42 var(--font-mono, ui-monospace, monospace);
+  white-space: pre-wrap;
+}
+
+.typeset-log-empty {
+  padding: 20px 12px;
+  border: 1px dashed var(--typeset-log-border);
+  border-radius: 5px;
+  color: var(--typeset-log-muted);
+  text-align: center;
+}
+
+.typeset-raw-logs {
+  overflow: hidden;
+}
+
+.typeset-raw-logs summary,
+.typeset-log-build-details summary {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 8px;
+  min-height: 48px;
+  padding: 0 12px;
+  color: var(--typeset-log-text);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+  list-style: none;
+}
+
+.typeset-raw-logs summary::-webkit-details-marker,
+.typeset-log-build-details summary::-webkit-details-marker {
+  display: none;
+}
+
+.typeset-raw-logs summary svg,
+.typeset-log-build-details summary svg {
+  width: 15px;
+  height: 15px;
+  transform: rotate(-90deg);
+  transition: transform 120ms ease;
+}
+
+.typeset-raw-logs pre {
+  margin: 0 8px 8px;
+}
+
+.typeset-log-footer {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 7px 8px;
+  border-top: 1px solid var(--typeset-log-border);
+  background: #202c3b;
+}
+
+.typeset-log-clear-cache {
+  order: 2;
+  padding: 0 14px;
+  background: #d84a3e;
+  color: #fff;
+}
+
+.typeset-log-clear-cache:hover:not(:disabled) {
+  background: #eb5649;
+}
+
+.typeset-log-clear-cache svg {
+  width: 14px;
+  height: 14px;
+}
+
+.typeset-log-build-details {
+  position: static;
+  order: 3;
+  border: 1px solid rgb(225 237 249 / 72%);
+  border-radius: 16px;
+  color: #f4f7fa;
+}
+
+.typeset-log-build-details summary {
+  min-height: 26px;
+  gap: 5px;
+  padding: 0 10px;
+  white-space: nowrap;
+}
+
+.typeset-log-build-details summary svg {
+  width: 13px;
+  height: 13px;
 }
 
 .typeset-build-provenance {
-  display: flex;
+  display: none;
   flex-wrap: wrap;
   gap: 8px;
-  margin: 0 2px 8px;
+  color: #cdd8e5;
+  font-size: 11px;
+}
+
+.typeset-log-build-details[open] .typeset-build-provenance {
+  position: absolute;
+  right: 8px;
+  bottom: calc(100% + 5px);
+  display: flex;
+  max-width: calc(100% - 16px);
+  padding: 9px 10px;
+  border: 1px solid var(--typeset-log-border);
+  border-radius: 5px;
+  background: var(--typeset-log-surface);
+  box-shadow: 0 10px 20px rgb(0 0 0 / 22%);
 }
 
 .typeset-build-provenance code {
+  overflow: hidden;
+  max-width: 210px;
   font: inherit;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .typeset-outline {
@@ -5670,6 +5921,23 @@
   font-size: 12px;
   text-align: left;
   cursor: pointer;
+}
+
+/* Give the tree a readable sense of depth: the top level (\chapter or, in an
+   article, \section) reads boldest, and deeper headings step down in weight and
+   emphasis. Indentation is applied inline per item. These sit before :hover and
+   .active so those states still win for background/colour. */
+.typeset-outline-list button[data-level="1"] {
+  font-weight: 600;
+}
+
+.typeset-outline-list button[data-level="2"] {
+  font-weight: 500;
+}
+
+.typeset-outline-list button[data-level="3"],
+.typeset-outline-list button[data-level="4"] {
+  color: var(--ol-muted);
 }
 
 .typeset-outline-list button:hover {
@@ -6011,6 +6279,11 @@
   --visual-text: #111716;
   --visual-muted: #68736d;
   --visual-muted-2: #3f4c45;
+  --visual-heading-1: #1f66b1;
+  --visual-heading-2: #087c68;
+  --visual-heading-3: #7048a2;
+  --visual-heading-4: #765d91;
+  --visual-caption: #94600b;
   --visual-code-text: #246d3b;
   --visual-link: #1f66b1;
   --visual-accent-bright: #247c34;
@@ -6071,7 +6344,7 @@
   min-height: 100%;
   margin: 0;
   box-sizing: border-box;
-  padding: 24px clamp(12px, 3vw, 32px) 86px;
+  padding: 24px clamp(8px, 1.5vw, 18px) 86px clamp(2px, 0.6vw, 8px);
   border: 0;
   border-radius: 0;
   background: var(--visual-page-bg);
@@ -6100,4 +6373,40 @@
     min-width: 92px;
     max-width: 150px;
   }
+}
+
+/* Keep independently scrollable Typeset surfaces visually consistent. The
+   track stays transparent, so a reserved scrollbar gutter never reads as a
+   second divider beside the invisible panel-resize hit area. */
+.typeset-workbench,
+.typeset-workbench * {
+  scrollbar-width: thin !important;
+  scrollbar-color: var(--scrollbar-thumb) var(--typeset-scrollbar-track) !important;
+}
+
+.typeset-workbench *::-webkit-scrollbar {
+  width: var(--scrollbar-size) !important;
+  height: var(--scrollbar-size) !important;
+}
+
+.typeset-workbench *::-webkit-scrollbar-track {
+  margin: 3px !important;
+  border: 0 !important;
+  background-color: transparent !important;
+}
+
+.typeset-workbench *::-webkit-scrollbar-thumb {
+  min-height: 48px !important;
+  border: var(--typeset-scrollbar-inset) solid transparent !important;
+  border-radius: 999px !important;
+  background-color: var(--scrollbar-thumb) !important;
+  background-clip: padding-box !important;
+}
+
+.typeset-workbench *::-webkit-scrollbar-thumb:hover {
+  background-color: var(--scrollbar-thumb-hover) !important;
+}
+
+.typeset-workbench *::-webkit-scrollbar-corner {
+  background: transparent !important;
 }

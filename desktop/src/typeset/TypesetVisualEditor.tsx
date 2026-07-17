@@ -322,18 +322,18 @@ const visualTheme = EditorView.theme({
     overflow: "visible",
   },
   ".cm-gutters": {
-    paddingRight: "6px",
-    minWidth: "34px",
+    paddingRight: "1px",
+    minWidth: "24px",
     borderRight: "0",
     backgroundColor: "transparent",
     color: "var(--visual-muted)",
     fontFamily: 'ui-monospace, "Cascadia Code", "SFMono-Regular", Consolas, monospace',
-    fontSize: "12px",
+    fontSize: "11px",
     lineHeight: "inherit",
   },
   ".cm-gutterElement": {
-    padding: "0 4px 0 0",
-    minWidth: "26px",
+    padding: "0 1px 0 0",
+    minWidth: "20px",
     textAlign: "right",
   },
   ".cm-content": {
@@ -581,9 +581,15 @@ const visualTheme = EditorView.theme({
   ".cm-vis-table tr:last-child td": { borderBottom: "1px solid var(--visual-border-strong)" },
   ".cm-vis-table tr:first-child td, .cm-vis-table tr:first-child th": { borderTop: "1.5px solid var(--visual-border-strong)" },
 
-  // Caption line.
+  // Caption line: a restrained warm tone keeps figures and tables easy to find
+  // without competing with the hierarchy colors used by headings.
   ".cm-vis-caption-line": { textAlign: "center" },
-  ".cm-vis-caption": { fontSize: "0.88em", color: "var(--visual-muted-2)" },
+  ".cm-vis-caption": {
+    fontSize: "0.88em",
+    color: "var(--visual-caption)",
+    fontWeight: "600",
+    boxShadow: "inset 0 -0.1em 0 color-mix(in srgb, var(--visual-caption) 22%, transparent)",
+  },
 
   // \maketitle title block.
   ".cm-vis-title": { textAlign: "center", padding: "8px 0 30px" },
@@ -623,18 +629,42 @@ const visualTheme = EditorView.theme({
     color: "var(--visual-text)",
     lineHeight: "1.18",
   },
-  ".cm-vis-heading-1": { fontSize: "24.5px", paddingTop: "22px" },
-  ".cm-vis-heading-2": { fontSize: "20px", paddingTop: "16px" },
-  ".cm-vis-heading-3": { fontSize: "18px", paddingTop: "12px" },
-  ".cm-vis-heading-4": { fontSize: "17.5px", paddingTop: "10px" },
-  ".cm-vis-h1": { fontSize: "24.5px" },
-  ".cm-vis-h2": { fontSize: "20px" },
-  ".cm-vis-h3": { fontSize: "18px" },
-  ".cm-vis-h4": { fontSize: "17.5px" },
+  ".cm-vis-heading-1": { fontSize: "24.5px", paddingTop: "22px", color: "var(--visual-heading-1)" },
+  ".cm-vis-heading-2": { fontSize: "20px", paddingTop: "16px", color: "var(--visual-heading-2)" },
+  ".cm-vis-heading-3": { fontSize: "18px", paddingTop: "12px", color: "var(--visual-heading-3)" },
+  ".cm-vis-heading-4": { fontSize: "17.5px", paddingTop: "10px", color: "var(--visual-heading-4)" },
+  ".cm-vis-h1": { fontSize: "24.5px", color: "var(--visual-heading-1)" },
+  ".cm-vis-h2": { fontSize: "20px", color: "var(--visual-heading-2)" },
+  ".cm-vis-h3": { fontSize: "18px", color: "var(--visual-heading-3)" },
+  ".cm-vis-h4": { fontSize: "17.5px", color: "var(--visual-heading-4)" },
   ".cm-vis-secnum": {
     marginRight: "0.5em",
     fontVariantNumeric: "tabular-nums",
-    color: "var(--visual-text)",
+  },
+  ".cm-vis-secnum-1": { color: "var(--visual-heading-1)" },
+  ".cm-vis-secnum-2": { color: "var(--visual-heading-2)" },
+  ".cm-vis-secnum-3": { color: "var(--visual-heading-3)" },
+  ".cm-vis-secnum-4": { color: "var(--visual-heading-4)" },
+  ".cm-vis-page-break": {
+    display: "flex",
+    alignItems: "center",
+    gap: "10px",
+    padding: "18px 0 14px",
+    color: "var(--visual-muted)",
+    fontFamily: 'ui-monospace, "Cascadia Code", "SFMono-Regular", Consolas, monospace',
+    fontSize: "11px",
+    letterSpacing: "0.08em",
+    lineHeight: "1",
+    userSelect: "none",
+  },
+  ".cm-vis-page-break-line": {
+    height: "1px",
+    flex: "1 1 auto",
+    backgroundColor: "var(--visual-border)",
+  },
+  ".cm-vis-page-break-label": {
+    flex: "0 0 auto",
+    whiteSpace: "nowrap",
   },
 
   // Folded preamble chip. It's the very first block in the document — a margin

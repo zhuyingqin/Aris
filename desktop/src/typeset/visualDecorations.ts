@@ -363,15 +363,15 @@ class TheoremLabelWidget extends WidgetType {
 
 /** Auto section-number badge rendered before a heading's text. */
 class SectionNumberWidget extends WidgetType {
-  constructor(private readonly label: string) {
+  constructor(private readonly label: string, private readonly level: number) {
     super();
   }
   eq(other: SectionNumberWidget) {
-    return other.label === this.label;
+    return other.label === this.label && other.level === this.level;
   }
   toDOM() {
     const el = document.createElement("span");
-    el.className = "cm-vis-secnum";
+    el.className = `cm-vis-secnum cm-vis-secnum-${this.level}`;
     el.textContent = this.label;
     return el;
   }
@@ -439,6 +439,32 @@ class BreakWidget extends WidgetType {
     el.appendChild(document.createElement("br"));
     return el;
   }
+}
+
+/** A source page break shown as a compact divider in the visual editor. */
+class PageBreakWidget extends WidgetType {
+  constructor(private readonly command: "newpage" | "clearpage") {
+    super();
+  }
+  eq(other: PageBreakWidget) {
+    return other.command === this.command;
+  }
+  toDOM() {
+    const el = document.createElement("div");
+    el.className = `cm-vis-page-break ${BLOCK_TARGET_CLASS}`;
+    el.setAttribute("aria-label", `分页符（\\${this.command}）`);
+    el.title = `分页符（\\${this.command}）`;
+    const before = document.createElement("span");
+    const label = document.createElement("span");
+    const after = document.createElement("span");
+    before.className = "cm-vis-page-break-line";
+    label.className = "cm-vis-page-break-label";
+    after.className = "cm-vis-page-break-line";
+    label.textContent = "分页符";
+    el.append(before, label, after);
+    return el;
+  }
+  ignoreEvent = blockIgnoreEvent;
 }
 
 /** List bullet / number marker shown in place of `\item`. */
@@ -538,7 +564,7 @@ function eventElement(target: EventTarget | null): Element | null {
 function headingTitleRangeAtLine(state: EditorState, lineFrom: number): Range | null {
   const line = state.doc.lineAt(lineFrom);
   const lineText = line.text;
-  const hm = /\\(section|subsection|subsubsection|paragraph)\*?\s*\{/.exec(lineText);
+  const hm = /\\(chapter|section|subsection|subsubsection|paragraph)\*?\s*\{/.exec(lineText);
   if (!hm) return null;
   const openBrace = line.from + hm.index + hm[0].length - 1;
   const close = matchBrace(state.doc.toString(), openBrace);
@@ -594,14 +620,14 @@ function mimeForImage(path: string): string {
   return "application/octet-stream";
 }
 
-async function readFigureBytes(imagePath: string, sourcePath: string | null): Promise<{ bytes: number[]; resolvedPath: string }> {
+async function readFigureBytes(imagePath: string, sourcePath: string | null): Promise<{ bytes: ArrayBuffer; resolvedPath: string }> {
   const base = dirname(sourcePath);
   const candidates = Array.from(new Set([joinPath(base, imagePath), imagePath]));
   let lastError: unknown = null;
   for (const candidate of candidates) {
     try {
       const bytes = await fileReadBytes(candidate);
-      if (bytes.length > 0) return { bytes, resolvedPath: candidate };
+      if (bytes.byteLength > 0) return { bytes, resolvedPath: candidate };
     } catch (error) {
       lastError = error;
     }
@@ -1262,13 +1288,20 @@ function buildDecorations(state: EditorState): VisualDecorations {
   }
 
   // --- Section headings (numbered) ---
-  const counters = [0, 0, 0];
-  const headingRe = /\\(section|subsection|subsubsection|paragraph)\*?\s*\{/g;
+  // A report/book hierarchy adds a chapter level above sections.  Without this
+  // distinction, `\\chapter{...}` stayed raw in Visual mode and its following
+  // `\\section` headings restarted at `1` instead of continuing as `1.1`.
+  const hasChapters = /\\chapter\*?\s*\{/.test(text.slice(bodyStart, scanEnd));
+  const counters = [0, 0, 0, 0];
+  const headingRe = /\\(chapter|section|subsection|subsubsection|paragraph)\*?\s*\{/g;
   const headingBraces: Range[] = [];
   let hm: RegExpExecArray | null;
   headingRe.lastIndex = bodyStart;
   while ((hm = headingRe.exec(text)) && hm.index < scanEnd) {
-    const level = SECTION_LEVEL[hm[1]];
+    const command = hm[1];
+    const level = command === "chapter"
+      ? 1
+      : Math.min(4, SECTION_LEVEL[command] + (hasChapters ? 1 : 0));
     const openBrace = hm.index + hm[0].length - 1;
     const close = matchBrace(text, openBrace);
     if (close < 0) continue;
@@ -1278,7 +1311,11 @@ function buildDecorations(state: EditorState): VisualDecorations {
     if (!starred && level <= counters.length) {
       counters[level - 1] += 1;
       for (let deeper = level; deeper < counters.length; deeper += 1) counters[deeper] = 0;
-      label = counters.slice(0, level).join(".");
+      // A document may have a short unchaptered front matter section before
+      // its first chapter. Keep that section's label readable rather than
+      // rendering a synthetic `0.1` prefix.
+      const firstLevel = hasChapters && level > 1 && counters[0] === 0 ? 1 : level;
+      label = counters.slice(0, firstLevel).join(".");
     }
     headingBraces.push({ from: hm.index, to: close });
 
@@ -1294,7 +1331,7 @@ function buildDecorations(state: EditorState): VisualDecorations {
         marks.push({
           from: cmdStart,
           to: cmdStart,
-          value: Decoration.widget({ widget: new SectionNumberWidget(label), side: -1 }),
+          value: Decoration.widget({ widget: new SectionNumberWidget(label, level), side: -1 }),
         });
       }
       marks.push({ from: cmdEnd, to: close - 1, value: Decoration.mark({ class: SECTION_CLASS[level] }) });
@@ -1509,6 +1546,11 @@ function buildDecorations(state: EditorState): VisualDecorations {
     if (!isEndDoc && selectionTouches(state, from, to)) continue;
     if (/tableofcontents/.test(sm[0])) {
       hide(from, to, Decoration.replace({ widget: new ChipWidget("Table of contents", "toc") }));
+    } else if (sm[0] === "\\newpage" || sm[0] === "\\clearpage") {
+      hide(from, to, Decoration.replace({
+        widget: new PageBreakWidget(sm[0] === "\\newpage" ? "newpage" : "clearpage"),
+        block: true,
+      }));
     } else {
       hide(from, to); // \end{document}, \newpage, \noindent, \vspace, … → invisible
     }
