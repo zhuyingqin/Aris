@@ -12,6 +12,7 @@ import Extensions from "./extensions/Extensions";
 import Settings from "./settings/Settings";
 import OnboardingTutorial from "./OnboardingTutorial";
 import { installBrowserUnsavedChangesGuard, shouldPreventDesktopClose } from "./windowCloseGuard";
+import { requestWindowAction } from "./windowControls";
 
 const loadLiterature = () => import("./literature/Literature");
 const loadStudio = () => import("./studio/Studio");
@@ -447,14 +448,6 @@ function requestSettingsTab(tab: RequestedSettingsTab) {
     // A live event below still handles the already-mounted settings page.
   }
   window.dispatchEvent(new CustomEvent<RequestedSettingsTab>(SETTINGS_TAB_REQUEST_EVENT, { detail: tab }));
-}
-
-function windowAction(action: "minimize" | "maximize" | "close") {
-  if (!isTauri()) return;
-  const currentWindow = getCurrentWindow();
-  if (action === "minimize") void currentWindow.minimize();
-  else if (action === "maximize") void currentWindow.toggleMaximize();
-  else void currentWindow.close();
 }
 
 export default function App() {
@@ -1009,19 +1002,19 @@ export default function App() {
         <div
           className="window-titlebar-drag"
           data-tauri-drag-region
-          onDoubleClick={() => windowAction("maximize")}
+          onDoubleClick={() => requestWindowAction("maximize")}
         >
           <span data-tauri-drag-region>SomniQ Studio</span>
         </div>
         <div className="window-titlebar-controls">
           {renderUpdateIndicator()}
-          <button type="button" aria-label={copy.minimizeWindow} onClick={() => windowAction("minimize")}>
+          <button type="button" aria-label={copy.minimizeWindow} onClick={() => requestWindowAction("minimize")}>
             {WinCtl.minimize}
           </button>
-          <button type="button" aria-label={copy.maximizeWindow} onClick={() => windowAction("maximize")}>
+          <button type="button" aria-label={copy.maximizeWindow} onClick={() => requestWindowAction("maximize")}>
             {WinCtl.maximize}
           </button>
-          <button type="button" className="close" aria-label={copy.closeWindow} onClick={() => windowAction("close")}>
+          <button type="button" className="close" aria-label={copy.closeWindow} onClick={() => requestWindowAction("close")}>
             {WinCtl.close}
           </button>
         </div>

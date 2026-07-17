@@ -6,121 +6,20 @@ import {
   type NewApiAuthStatus,
 } from "../api/tauri";
 import appLogo from "../assets/app-logo.png";
+import DesktopWindowCloseControl from "../DesktopWindowCloseControl";
 import { DEFAULT_AUTH_SERVER, useStore } from "../store";
+import { DreamScene, LoginBackdrop } from "./LoginScene";
+import "./login.css";
 
 // Self-contained sign-in screen shown before the app shell when the user has
-// not authenticated to the managed gateway. Styling is inline with CSS-variable
-// fallbacks so it renders in both themes without touching the global stylesheet.
+// not authenticated to the managed gateway. Renders the SomniQ dreamscape —
+// an animated night sky where a sleeping researcher's soul rises to light up
+// the logo's knowledge-graph constellation — behind a glass sign-in card.
+// Styling lives in login.css (sq- prefixed, night-themed by design).
 
-const wrap: CSSProperties = {
-  position: "fixed",
-  inset: 0,
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "center",
-  padding: 24,
-  overflowY: "auto",
-  background: "var(--app-bg, #0e0f13)",
-  color: "var(--text, #e6e7ea)",
-};
+type FieldVar = CSSProperties & { "--i"?: number };
 
-const card: CSSProperties = {
-  width: 340,
-  maxWidth: "calc(100vw - 48px)",
-  padding: "28px 26px",
-  borderRadius: 8,
-  background: "var(--panel, #16181d)",
-  border: "1px solid var(--border, #2a2d34)",
-  boxShadow: "0 18px 50px rgba(0,0,0,0.35)",
-  display: "flex",
-  flexDirection: "column",
-  gap: 14,
-  margin: "auto",
-};
-
-const label: CSSProperties = { fontSize: 12, opacity: 0.7, marginBottom: 6 };
-
-const input: CSSProperties = {
-  width: "100%",
-  boxSizing: "border-box",
-  padding: "9px 11px",
-  borderRadius: 8,
-  border: "1px solid var(--border, #2a2d34)",
-  background: "var(--input-bg, #0e0f13)",
-  color: "inherit",
-  fontSize: 14,
-  outline: "none",
-};
-
-const button: CSSProperties = {
-  width: "100%",
-  padding: "10px 12px",
-  borderRadius: 8,
-  border: "none",
-  background: "var(--accent, #4f7cff)",
-  color: "#fff",
-  fontSize: 14,
-  fontWeight: 600,
-  cursor: "pointer",
-};
-
-const secondaryButton: CSSProperties = {
-  padding: "9px 11px",
-  borderRadius: 8,
-  border: "1px solid var(--border, #2a2d34)",
-  background: "var(--input-bg, #0e0f13)",
-  color: "inherit",
-  fontSize: 13,
-  cursor: "pointer",
-  whiteSpace: "nowrap",
-};
-
-const switcher: CSSProperties = {
-  display: "grid",
-  gap: 4,
-  padding: 4,
-  borderRadius: 8,
-  background: "var(--input-bg, #0e0f13)",
-  border: "1px solid var(--border, #2a2d34)",
-};
-
-const switchButton: CSSProperties = {
-  border: "none",
-  borderRadius: 6,
-  padding: "7px 10px",
-  background: "transparent",
-  color: "inherit",
-  cursor: "pointer",
-  fontSize: 13,
-};
-
-const alertBase: CSSProperties = {
-  fontSize: 12.5,
-  borderRadius: 8,
-  padding: "8px 10px",
-};
-
-const brand: CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "center",
-  gap: 12,
-  marginBottom: 4,
-};
-
-const brandIcon: CSSProperties = {
-  width: 48,
-  height: 48,
-  borderRadius: 12,
-  objectFit: "cover",
-  boxShadow: "0 10px 28px rgba(0,0,0,0.24)",
-};
-
-const brandName: CSSProperties = {
-  fontSize: 20,
-  fontWeight: 700,
-  lineHeight: 1.05,
-};
+const field = (i: number) => ({ "--i": i } as FieldVar);
 
 type AuthMode = "login" | "register";
 const MANAGED_MODEL_SERVER_LABEL = "通用模型服务器";
@@ -226,7 +125,6 @@ export default function Login() {
     (mode === "login" && !passwordLoginEnabled) ||
     (mode === "register" &&
       (!authStatus || !registerSupported || turnstileRequired || (legalRequired && !legalAccepted)));
-
   const sendVerificationCode = async () => {
     if (codeBusy || codeCooldown > 0) return;
     setError(null);
@@ -308,219 +206,178 @@ export default function Login() {
   };
 
   return (
-    <div style={wrap} data-tauri-drag-region>
-      <form style={card} onSubmit={onSubmit}>
-        <div style={brand}>
-          <img src={appLogo} alt="SomniQ" style={brandIcon} />
-          <div>
-            <div style={brandName}>SomniQ Studio</div>
-            <div style={{ fontSize: 13, opacity: 0.6, marginTop: 4 }}>
-              {mode === "register" ? "创建 New API 账号" : "登录以继续"}
-            </div>
+    <div className="sq-login-root">
+      <LoginBackdrop />
+      <DesktopWindowCloseControl />
+      <div className="sq-login-columns">
+        <div className="sq-login-hero" aria-hidden="true">
+          <DreamScene />
+          <div className="sq-tagline">
+            <div className="sq-tagline-main">睡梦中科研 · 灵感出鞘</div>
+            <div className="sq-tagline-sub">RESEARCH NEVER SLEEPS — IT DREAMS.</div>
           </div>
         </div>
 
-        <div
-          style={{ ...switcher, gridTemplateColumns: `repeat(${tabs.length}, minmax(0, 1fr))` }}
-          role="tablist"
-          aria-label="认证方式"
-        >
-          {tabs.map(([value, text]) => (
-            <button
-              key={value}
-              type="button"
-              role="tab"
-              aria-selected={mode === value}
-              onClick={() => {
-                setMode(value);
-                setError(null);
-                setNotice(null);
-              }}
-              style={{
-                ...switchButton,
-                background: mode === value ? "var(--panel, #16181d)" : "transparent",
-                color: mode === value ? "var(--text, #e6e7ea)" : "var(--text-dim, #8a97a6)",
-              }}
-            >
-              {text}
-            </button>
-          ))}
-        </div>
-
-        <div>
-          <div style={label}>账号</div>
-          <input
-            style={input}
-            value={username}
-            autoFocus
-            autoComplete="username"
-            onChange={(e) => setUsername(e.target.value)}
-            placeholder="用户名"
-          />
-        </div>
-
-        <div>
-          <div style={label}>密码</div>
-          <input
-            style={input}
-            type="password"
-            value={password}
-            autoComplete={mode === "register" ? "new-password" : "current-password"}
-            onChange={(e) => setPassword(e.target.value)}
-            placeholder={mode === "register" ? "8-20 位密码" : "密码"}
-          />
-        </div>
-
-        {mode === "register" && (
-          <>
+        <form className="sq-card" onSubmit={onSubmit}>
+          <div className="sq-brand sq-field" style={field(0)}>
+            <img src={appLogo} alt="SomniQ" className="sq-logo" />
             <div>
-              <div style={label}>确认密码</div>
-              <input
-                style={input}
-                type="password"
-                value={confirmPassword}
-                autoComplete="new-password"
-                onChange={(e) => setConfirmPassword(e.target.value)}
-                placeholder="再次输入密码"
-              />
-            </div>
-
-            {needsEmailVerification && (
-              <>
-                <div>
-                  <div style={label}>邮箱</div>
-                  <input
-                    style={input}
-                    type="email"
-                    value={email}
-                    autoComplete="email"
-                    onChange={(e) => setEmail(e.target.value)}
-                    placeholder="name@example.com"
-                  />
-                </div>
-
-                <div>
-                  <div style={label}>验证码</div>
-                  <div style={{ display: "flex", gap: 8 }}>
-                    <input
-                      style={input}
-                      value={verificationCode}
-                      autoComplete="one-time-code"
-                      spellCheck={false}
-                      onChange={(e) => setVerificationCode(e.target.value)}
-                      placeholder="邮箱验证码"
-                    />
-                    <button
-                      type="button"
-                      onClick={sendVerificationCode}
-                      disabled={codeBusy || codeCooldown > 0 || !email.trim() || turnstileRequired}
-                      style={{
-                        ...secondaryButton,
-                        opacity: codeBusy || codeCooldown > 0 || !email.trim() || turnstileRequired ? 0.65 : 1,
-                      }}
-                    >
-                      {codeCooldown > 0 ? `${codeCooldown}s` : codeBusy ? "发送中" : "发送"}
-                    </button>
-                  </div>
-                </div>
-              </>
-            )}
-
-            {legalRequired && (
-              <label
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 8,
-                  fontSize: 12.5,
-                  color: "var(--text-dim, #8a97a6)",
-                }}
-              >
-                <input
-                  type="checkbox"
-                  checked={legalAccepted}
-                  onChange={(e) => setLegalAccepted(e.target.checked)}
-                />
-                我已阅读并同意服务条款和隐私政策
-              </label>
-            )}
-
-            {turnstileRequired && (
-              <div
-                role="alert"
-                style={{
-                  ...alertBase,
-                  color: "var(--warning, #fbbf24)",
-                  background: "rgba(251,191,36,0.08)",
-                  border: "1px solid rgba(251,191,36,0.35)",
-                }}
-              >
-                当前服务器开启了人机验证，请在网页端注册后返回登录。
-                <button
-                  type="button"
-                  onClick={() => void openExternalUrl(`${resolvedServer}/sign-up`)}
-                  style={{
-                    marginLeft: 8,
-                    padding: 0,
-                    border: "none",
-                    background: "transparent",
-                    color: "var(--accent, #4f7cff)",
-                    cursor: "pointer",
-                  }}
-                >
-                  打开网页注册
-                </button>
+              <div className="sq-brand-name">SomniQ Studio</div>
+              <div className="sq-brand-sub">
+                {mode === "register" ? "创建 New API 账号" : "登录以继续"}
               </div>
-            )}
-          </>
-        )}
-
-        {statusError && mode === "register" && (
-          <div
-            role="alert"
-            style={{
-              ...alertBase,
-              color: "var(--warning, #fbbf24)",
-              background: "rgba(251,191,36,0.08)",
-              border: "1px solid rgba(251,191,36,0.35)",
-            }}
-          >
-            {statusError}
+            </div>
           </div>
-        )}
 
-        {notice && (
           <div
-            role="status"
-            style={{
-              ...alertBase,
-              color: "var(--success, #34d399)",
-              background: "rgba(52,211,153,0.08)",
-              border: "1px solid rgba(52,211,153,0.35)",
-            }}
+            className="sq-tabs sq-field"
+            style={{ ...field(1), gridTemplateColumns: `repeat(${tabs.length}, minmax(0, 1fr))` }}
+            role="tablist"
+            aria-label="认证方式"
           >
-            {notice}
+            {tabs.map(([value, text]) => (
+              <button
+                key={value}
+                type="button"
+                role="tab"
+                aria-selected={mode === value}
+                onClick={() => {
+                  setMode(value);
+                  setError(null);
+                  setNotice(null);
+                }}
+                className={mode === value ? "sq-tab active" : "sq-tab"}
+              >
+                {text}
+              </button>
+            ))}
           </div>
-        )}
 
-        {error && (
-          <div
-            role="alert"
-            style={{
-              ...alertBase,
-              color: "var(--danger, #f87171)",
-              background: "var(--danger-bg, rgba(248,113,113,0.08))",
-              border: "1px solid var(--danger, rgba(248,113,113,0.35))",
-            }}
-          >
-            {error}
+          <div className="sq-field" style={field(2)}>
+            <div className="sq-label">账号</div>
+            <input
+              className="sq-input"
+              value={username}
+              autoFocus
+              autoComplete="username"
+              onChange={(e) => setUsername(e.target.value)}
+              placeholder="用户名"
+            />
           </div>
-        )}
 
-        <button type="submit" style={{ ...button, opacity: submitDisabled ? 0.7 : 1 }} disabled={submitDisabled}>
-          {busy ? (mode === "register" ? "注册中..." : "登录中...") : mode === "register" ? "创建账号" : "登录"}
-        </button>
-      </form>
+          <div className="sq-field" style={field(3)}>
+            <div className="sq-label">密码</div>
+            <input
+              className="sq-input"
+              type="password"
+              value={password}
+              autoComplete={mode === "register" ? "new-password" : "current-password"}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder={mode === "register" ? "8-20 位密码" : "密码"}
+            />
+          </div>
+
+          {mode === "register" && (
+            <>
+              <div className="sq-field" style={field(0)}>
+                <div className="sq-label">确认密码</div>
+                <input
+                  className="sq-input"
+                  type="password"
+                  value={confirmPassword}
+                  autoComplete="new-password"
+                  onChange={(e) => setConfirmPassword(e.target.value)}
+                  placeholder="再次输入密码"
+                />
+              </div>
+
+              {needsEmailVerification && (
+                <>
+                  <div className="sq-field" style={field(1)}>
+                    <div className="sq-label">邮箱</div>
+                    <input
+                      className="sq-input"
+                      type="email"
+                      value={email}
+                      autoComplete="email"
+                      onChange={(e) => setEmail(e.target.value)}
+                      placeholder="name@example.com"
+                    />
+                  </div>
+
+                  <div className="sq-field" style={field(2)}>
+                    <div className="sq-label">验证码</div>
+                    <div style={{ display: "flex", gap: 8 }}>
+                      <input
+                        className="sq-input"
+                        value={verificationCode}
+                        autoComplete="one-time-code"
+                        spellCheck={false}
+                        onChange={(e) => setVerificationCode(e.target.value)}
+                        placeholder="邮箱验证码"
+                      />
+                      <button
+                        type="button"
+                        className="sq-btn-secondary"
+                        onClick={sendVerificationCode}
+                        disabled={codeBusy || codeCooldown > 0 || !email.trim() || turnstileRequired}
+                      >
+                        {codeCooldown > 0 ? `${codeCooldown}s` : codeBusy ? "发送中" : "发送"}
+                      </button>
+                    </div>
+                  </div>
+                </>
+              )}
+
+              {legalRequired && (
+                <label className="sq-legal sq-field" style={field(3)}>
+                  <input
+                    type="checkbox"
+                    checked={legalAccepted}
+                    onChange={(e) => setLegalAccepted(e.target.checked)}
+                  />
+                  我已阅读并同意服务条款和隐私政策
+                </label>
+              )}
+
+              {turnstileRequired && (
+                <div role="alert" className="sq-alert sq-alert-warn">
+                  当前服务器开启了人机验证，请在网页端注册后返回登录。
+                  <button
+                    type="button"
+                    className="sq-linkbtn"
+                    onClick={() => void openExternalUrl(`${resolvedServer}/sign-up`)}
+                  >
+                    打开网页注册
+                  </button>
+                </div>
+              )}
+            </>
+          )}
+
+          {statusError && mode === "register" && (
+            <div role="alert" className="sq-alert sq-alert-warn">
+              {statusError}
+            </div>
+          )}
+
+          {notice && (
+            <div role="status" className="sq-alert sq-alert-ok">
+              {notice}
+            </div>
+          )}
+
+          {error && (
+            <div role="alert" className="sq-alert sq-alert-err">
+              {error}
+            </div>
+          )}
+
+          <button type="submit" className="sq-btn sq-field" style={field(4)} disabled={submitDisabled}>
+            {busy ? (mode === "register" ? "注册中..." : "登录中...") : mode === "register" ? "创建账号" : "登录"}
+          </button>
+        </form>
+      </div>
     </div>
   );
 }
