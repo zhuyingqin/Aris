@@ -395,6 +395,72 @@ fn clear_newapi_session_removes_only_managed_credentials() {
 }
 
 #[test]
+fn clear_newapi_session_keeps_managed_reviewer_model() {
+    let _guard = ENV_LOCK.lock().expect("env lock");
+    let previous_home = std::env::var("HOME").ok();
+    let previous_userprofile = std::env::var("USERPROFILE").ok();
+    let home = temp_dir("clear-newapi-reviewer");
+    std::env::set_var("HOME", &home);
+    std::env::set_var("USERPROFILE", &home);
+
+    let config_path = crate::state::config_path();
+    std::fs::create_dir_all(config_path.parent().expect("config parent"))
+        .expect("create config parent");
+    std::fs::write(
+        &config_path,
+        serde_json::json!({
+            "newapi_base_url": "http://gateway.example",
+            "newapi_executor_base_url": "http://gateway.example/v1",
+            "newapi_executor_api_key": "gateway-token",
+            "managed_models": ["MiniMax-M3", "deepseek-v4-pro"],
+            "executor_provider": "openai",
+            "executor_model": "MiniMax-M3",
+            "executor_base_url": "http://gateway.example/v1",
+            "executor_api_key": "gateway-token",
+            "reviewer_provider": "custom",
+            "reviewer_model": "deepseek-v4-pro",
+            "reviewer_base_url": "http://gateway.example/v1",
+            "reviewer_api_key": "gateway-token"
+        })
+        .to_string(),
+    )
+    .expect("write config");
+
+    clear_newapi_session().expect("clear newapi");
+    let saved = crate::config::load_object();
+    // The managed credentials are gone…
+    assert!(saved.get("reviewer_api_key").is_none());
+    assert!(saved.get("reviewer_base_url").is_none());
+    assert!(saved.get("reviewer_provider").is_none());
+    // …but the model choice survives so the next login can restore it.
+    assert_eq!(saved["reviewer_model"], "deepseek-v4-pro");
+
+    // Simulate the next login re-populating managed creds + model list, then
+    // normalizing: the reviewer slot is rebuilt from the preserved model id.
+    let mut obj = saved;
+    obj.insert(
+        "managed_models".to_string(),
+        serde_json::json!(["MiniMax-M3", "deepseek-v4-pro"]),
+    );
+    obj.insert(
+        "newapi_executor_base_url".to_string(),
+        Value::String("http://gateway.example/v1".to_string()),
+    );
+    obj.insert(
+        "newapi_executor_api_key".to_string(),
+        Value::String("gateway-token".to_string()),
+    );
+    normalize_managed_model_slots(&mut obj).expect("normalize");
+    assert_eq!(obj["reviewer_provider"], "custom");
+    assert_eq!(obj["reviewer_model"], "deepseek-v4-pro");
+    assert_eq!(obj["reviewer_base_url"], "http://gateway.example/v1");
+    assert_eq!(obj["reviewer_api_key"], "gateway-token");
+
+    let _ = std::fs::remove_dir_all(&home);
+    restore_home(previous_home, previous_userprofile);
+}
+
+#[test]
 fn deepseek_executor_key_can_reuse_reviewer_key() {
     let _guard = ENV_LOCK.lock().expect("env lock");
     std::env::remove_var("DEEPSEEK_API_KEY");

@@ -330,6 +330,7 @@ export interface TokenUsageServerBucket {
 export interface TokenUsageLogEntry {
   createdAt: number;
   sessionId: string;
+  role: "executor" | "reviewer" | string;
   server: string;
   model: string;
   provider: string;
@@ -670,6 +671,16 @@ export type ChatBlock =
   | { kind: "thinking"; thinking: string }
   | { kind: "notice"; message: string }
   | {
+      kind: "review";
+      phase: "reviewing" | "result" | "revising" | "complete";
+      attempt: number;
+      revision?: number;
+      maxRevisions: number;
+      reviewerProvider?: string;
+      reviewerModel?: string;
+      verdict?: "pass" | "revise" | "needs_user" | "unavailable";
+    }
+  | {
       kind: "permission";
       id: string;
       toolName: string;
@@ -739,7 +750,10 @@ export interface ChatTurn {
 
 export interface ChatReasoningEffortView {
   supported: boolean;
+  applied: boolean;
   effort: string;
+  transport: string;
+  message?: string | null;
 }
 
 export interface ChatEventLogEntry {

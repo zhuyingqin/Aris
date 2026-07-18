@@ -503,15 +503,34 @@ const visualTheme = EditorView.theme({
   ".cm-vis-chip-label": { background: "var(--visual-widget-bg)", color: "var(--visual-muted)", fontSize: "0.76em" },
   ".cm-vis-chip-toc": { background: "var(--visual-widget-bg)", color: "var(--visual-text)", borderLeft: "3px solid var(--visual-link)" },
 
-  // Lists: hang the marker in the left margin of the indented line.
-  ".cm-vis-list-line": { paddingLeft: "1.45em", textIndent: "-1.05em" },
+  // Lists: hang the marker just inside the document column, never in the
+  // CodeMirror line-number gutter. Wrapped text aligns with the item body.
+  ".cm-vis-list-line": { paddingLeft: "2em", textIndent: "-1.15em" },
   ".cm-vis-item-marker": {
-    display: "inline-block",
-    minWidth: "0.85em",
-    marginRight: "0.18em",
+    display: "inline-flex",
+    position: "relative",
+    justifyContent: "flex-end",
+    minWidth: "0.95em",
+    marginRight: "0.32em",
     color: "var(--visual-text)",
     fontWeight: "600",
-    whiteSpace: "pre",
+    lineHeight: "1",
+    verticalAlign: "0.02em",
+    whiteSpace: "nowrap",
+  },
+  ".cm-vis-item-marker-bullet": {
+    color: "transparent",
+  },
+  ".cm-vis-item-marker-bullet::before": {
+    content: '\"\"',
+    position: "absolute",
+    top: "50%",
+    right: "0.13em",
+    width: "0.34em",
+    height: "0.34em",
+    borderRadius: "50%",
+    backgroundColor: "var(--visual-accent-bright)",
+    transform: "translateY(-48%)",
   },
   ".cm-vis-theorem-label": {
     display: "inline-flex",

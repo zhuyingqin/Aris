@@ -385,6 +385,43 @@ describe("ChatMessage rendering", () => {
     expect(onLoadOmittedTurn).toHaveBeenCalledWith(1);
   });
 
+  it("shows which Reviewer Agent is active and opens its details only when clicked", async () => {
+    const user = userEvent.setup();
+    const onOpenIndependentReview = vi.fn();
+    render(
+      <ChatMessage
+        turn={{
+          id: "assistant-under-review",
+          role: "assistant",
+          streaming: true,
+          blocks: [{
+            kind: "review",
+            phase: "reviewing",
+            attempt: 1,
+            maxRevisions: 2,
+            reviewerProvider: "openai",
+            reviewerModel: "gpt-5-reviewer",
+          }],
+        }}
+        canRetry={false}
+        onEdit={() => undefined}
+        onRetry={() => undefined}
+        onContinue={() => undefined}
+        onOpenIndependentReview={onOpenIndependentReview}
+      />,
+    );
+
+    const badge = screen.getByRole("button", {
+      name: /Open independent Reviewer details: gpt-5-reviewer is independently reviewing/,
+    });
+    expect(screen.getByText("Reviewer Agent · openai")).toBeTruthy();
+    expect(onOpenIndependentReview).not.toHaveBeenCalled();
+
+    await user.click(badge);
+
+    expect(onOpenIndependentReview).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps streamed thinking from splitting assistant Markdown text", () => {
     const { container } = render(
       <ChatMessage

@@ -7,6 +7,7 @@ import {
 } from "@codemirror/view";
 import katex from "katex";
 import { fileReadBytes } from "../api/tauri";
+import { createSvgIcon } from "../SvgIcon";
 
 /**
  * Marker class for "block" widgets (display math, figures, tables) whose source
@@ -477,7 +478,9 @@ class ItemMarkerWidget extends WidgetType {
   }
   toDOM() {
     const el = document.createElement("span");
-    el.className = "cm-vis-item-marker";
+    el.className = this.marker === "•"
+      ? "cm-vis-item-marker cm-vis-item-marker-bullet"
+      : "cm-vis-item-marker";
     el.textContent = this.marker;
     return el;
   }
@@ -702,9 +705,7 @@ class FigureWidget extends WidgetType {
   toDOM() {
     const el = document.createElement("div");
     el.className = `cm-vis-figure ${BLOCK_TARGET_CLASS}`;
-    const icon = document.createElement("div");
-    icon.className = "cm-vis-figure-icon";
-    icon.textContent = "🖼";
+    const icon = createSvgIcon("image", 28, "cm-vis-figure-icon");
     const name = document.createElement("div");
     name.className = "cm-vis-figure-name";
     name.textContent = this.path.split("/").pop() || this.path;
@@ -739,9 +740,7 @@ class GraphicsWidget extends WidgetType {
   toDOM() {
     const el = document.createElement("div");
     el.className = `cm-vis-figure ${BLOCK_TARGET_CLASS}`;
-    const icon = document.createElement("div");
-    icon.className = "cm-vis-figure-icon";
-    icon.textContent = "🖼";
+    const icon = createSvgIcon("image", 28, "cm-vis-figure-icon");
     const name = document.createElement("div");
     name.className = "cm-vis-figure-name";
     name.textContent = this.path.split("/").pop() || this.path;
@@ -817,9 +816,7 @@ class DiagramWidget extends WidgetType {
   toDOM() {
     const el = document.createElement("div");
     el.className = `cm-vis-figure cm-vis-diagram ${BLOCK_TARGET_CLASS}`;
-    const icon = document.createElement("div");
-    icon.className = "cm-vis-figure-icon";
-    icon.textContent = "\u{1F4D0}"; // 📐
+    const icon = createSvgIcon("diagram", 28, "cm-vis-figure-icon");
     const name = document.createElement("div");
     name.className = "cm-vis-figure-name";
     name.textContent = this.label;

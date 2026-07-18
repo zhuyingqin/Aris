@@ -13,6 +13,7 @@ import {
 } from "../api/tauri";
 import type { ChatSession } from "../chat/types";
 import { useStore } from "../store";
+import { SvgIcon } from "../SvgIcon";
 import type {
   ChatModelOption,
   MailAccount,
@@ -310,7 +311,7 @@ function TaskRow({
       role="button"
       tabIndex={0}
     >
-      <span className={`sched-row-play${paused ? " paused" : ""}`} aria-hidden="true">▶</span>
+      <span className={`sched-row-play${paused ? " paused" : ""}`} aria-hidden="true"><SvgIcon name="play" size={13} /></span>
       <div className="sched-row-main">
         <span className="sched-row-title">{task.title || "未命名任务"}</span>
         <span className="sched-row-sub">
@@ -340,7 +341,7 @@ function TaskRow({
           onOpenChat();
         }}
       >
-        ↗
+        <SvgIcon name="externalLink" size={14} />
       </button>
     </div>
   );
@@ -598,7 +599,7 @@ export default function ScheduledTasks() {
           </div>
 
           <label className="sched-search">
-            <span aria-hidden="true">⌕</span>
+            <span aria-hidden="true"><SvgIcon name="search" size={15} /></span>
             <input
               value={query}
               onChange={(event) => setQuery(event.target.value)}
@@ -638,10 +639,10 @@ export default function ScheduledTasks() {
             <button className="sched-back" onClick={() => setTab("chat")} type="button">返回对话</button>
             <div className="sched-editor-actions">
               <button className="sched-create" disabled={!canCreate || busy} onClick={selectNew} type="button">
-                创建计划任务⌄
+                创建计划任务 <SvgIcon name="chevronDown" size={13} />
               </button>
               <button className="sched-icon-button" onClick={() => void refresh()} type="button" aria-label="刷新定时任务">
-                ⟳
+                <SvgIcon name="refresh" size={16} />
               </button>
             </div>
           </div>

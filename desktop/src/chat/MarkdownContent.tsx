@@ -7,6 +7,8 @@ import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
 import "highlight.js/styles/github-dark.css";
 import { fileOpen } from "../api/tauri";
+import { SvgIcon } from "../SvgIcon";
+import { isExplicitLocalFileHref, normalizeLocalFileHref } from "./localFileLinks";
 import { useStore } from "../store";
 import ChatImagePreview, { isDirectImageSource, isPreviewableImagePath } from "./ChatImagePreview";
 import MermaidDiagram from "./MermaidDiagram";
@@ -356,16 +358,13 @@ function isExternalHref(href: string): boolean {
 }
 
 function decodeLocalHref(href: string): string {
-  try {
-    return decodeURIComponent(href);
-  } catch {
-    return href;
-  }
+  return normalizeLocalFileHref(href);
 }
 
 function markdownUrlTransform(url: string, key: string): string {
   if (key === "src" && /^(data:image\/|blob:)/i.test(url)) return url;
   if (key === "href" && /^(data:image\/|blob:)/i.test(url) && isPreviewableImagePath(url)) return url;
+  if (key === "href" && isExplicitLocalFileHref(url)) return url;
   return defaultUrlTransform(url);
 }
 
@@ -386,6 +385,8 @@ function MarkdownLink({
 }) {
   const setTab = useStore((state) => state.setTab);
   const setPendingStudioArtifactId = useStore((state) => state.setPendingStudioArtifactId);
+  const setError = useStore((state) => state.setError);
+  const language = useStore((state) => state.language);
   const studioArtifactId = href ? studioArtifactIdFromHref(href) : null;
   if (studioArtifactId) {
     return (
@@ -425,10 +426,12 @@ function MarkdownLink({
       title="Open local file"
       onClick={(event) => {
         event.preventDefault();
-        void fileOpen(decodeLocalHref(href)).catch((error) => console.error("Unable to open file", error));
+        void fileOpen(decodeLocalHref(href)).catch((error) => {
+          setError(`${language === "cn" ? "无法打开文件" : "Unable to open file"}: ${String(error)}`);
+        });
       }}
     >
-      {children}
+      {children}<SvgIcon name="externalLink" size={12} className="md-local-link-icon" />
     </a>
   );
 }
@@ -491,7 +494,7 @@ export const ThinkBlock = memo(function ThinkBlock({
   return (
     <div className={`md-think${streaming ? " md-think-active" : ""}`}>
       <button className="md-think-toggle" onClick={() => setOpen((value) => !value)}>
-        <span className="md-think-icon">{open ? "▾" : "▸"}</span>
+        <span className="md-think-icon"><SvgIcon name={open ? "chevronDown" : "chevronRight"} size={12} /></span>
         {streaming && <span className="md-think-spinner" aria-hidden="true" />}
         <span className="md-think-label">{label}</span>
         {!streaming && !open && content && (

@@ -1008,6 +1008,10 @@
   color: #e7ba62;
 }
 
+.typeset-library-actions button.active .svg-icon {
+  fill: currentColor;
+}
+
 .typeset-library-actions button svg {
   width: 14px;
   height: 14px;

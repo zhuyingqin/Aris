@@ -11,16 +11,22 @@ import {
   onChatThinkingDelta,
   onChatPermissionRequest,
   onChatPermissionResolved,
+  onChatReview,
   onChatTool,
   onChatToolProgress,
   onChatToolResult,
 } from "../api/tauri";
-import type { ChatSendRequest } from "../api/tauri";
+import type { ChatSendRequest, IndependentReviewEvent } from "../api/tauri";
 import type { ChatBlock, ChatTurn } from "../types";
 import { appendTextDelta, appendThinkingDelta } from "./model";
 import { isExpectedStopError } from "./chatRunHelpers";
 
 export const MAX_RUNNING_CHAT_SESSIONS = 5;
+
+interface RevisionStreamBuffer {
+  attempt: number;
+  blocks: ChatBlock[];
+}
 
 /** Compact a token count for display: 320, 1.2k, 45.0k. */
 function formatTokenCount(tokens: number): string {
@@ -44,6 +50,19 @@ function compactionNoticeMessage(
     return `${base} - ${formatTokenCount(before)} -> ${formatTokenCount(after)} tokens (-${pct}%)`;
   }
   return base;
+}
+
+function reviewBlockFromEvent(event: IndependentReviewEvent): Extract<ChatBlock, { kind: "review" }> {
+  return {
+    kind: "review",
+    phase: event.phase === "cleared" ? "complete" : event.phase,
+    attempt: event.attempt,
+    revision: event.revision,
+    maxRevisions: event.maxRevisions,
+    reviewerProvider: event.reviewerProvider ?? event.result?.reviewerProvider ?? undefined,
+    reviewerModel: event.reviewerModel ?? event.result?.reviewerModel ?? undefined,
+    verdict: event.result?.verdict,
+  };
 }
 
 interface StreamHandlers {
@@ -86,6 +105,12 @@ export function useChatStream({
   const runningSessions = useRef(new Set<string>());
   const stopRequested = useRef(new Set<string>());
   const queues = useRef(new Map<string, Array<{ kind: "text" | "thinking"; delta: string }>>());
+  // A Reviewer-requested rewrite is a second full Executor response. Streaming
+  // it into the same visible turn used to remove the accepted draft first and
+  // then replay the whole answer from an empty card. Keep that rewrite offscreen
+  // until its generation finishes, then swap the narrative once at the next
+  // review boundary. Tool activity remains visible while the revision runs.
+  const revisionStreams = useRef(new Map<string, RevisionStreamBuffer>());
   const flushTimers = useRef(new Map<string, number>());
   const listenerGeneration = useRef(0);
   const handlersRef = useRef<StreamHandlers>({
@@ -150,10 +175,20 @@ export function useChatStream({
     const unlisteners = [
       onChatDelta(({ sessionId, text }) => {
         if (!isCurrentListener()) return;
+        const revision = revisionStreams.current.get(sessionId);
+        if (revision) {
+          revision.blocks = appendTextDelta(revision.blocks, text);
+          return;
+        }
         enqueue(sessionId, { kind: "text", delta: text });
       }),
       onChatThinkingDelta(({ sessionId, thinking }) => {
         if (!isCurrentListener()) return;
+        const revision = revisionStreams.current.get(sessionId);
+        if (revision) {
+          revision.blocks = appendThinkingDelta(revision.blocks, thinking);
+          return;
+        }
         enqueue(sessionId, { kind: "thinking", delta: thinking });
       }),
       onChatTool((tool) => {
@@ -233,6 +268,40 @@ export function useChatStream({
         const realTokens = contextTokens ?? providerUsage?.promptTokens;
         if (realTokens != null) handlersRef.current.onContextTokens?.(sessionId, realTokens);
       }),
+      onChatReview((event) => {
+        if (!isCurrentListener()) return;
+        flush(event.sessionId);
+        if (event.phase === "cleared") {
+          revisionStreams.current.delete(event.sessionId);
+          handlersRef.current.patchAssistant(event.sessionId, (turn) => ({
+            ...turn,
+            blocks: turn.blocks.filter((block) => block.kind !== "review"),
+          }));
+          return;
+        }
+        const completedRevision = event.phase === "revising"
+          ? undefined
+          : revisionStreams.current.get(event.sessionId);
+        if (completedRevision) revisionStreams.current.delete(event.sessionId);
+        if (event.phase === "revising") {
+          revisionStreams.current.set(event.sessionId, { attempt: event.attempt, blocks: [] });
+        }
+        handlersRef.current.patchAssistant(event.sessionId, (turn) => {
+          const hasRevisedNarrative = completedRevision?.blocks.some((block) => (
+            (block.kind === "text" && Boolean(block.text.trim()))
+            || (block.kind === "thinking" && Boolean(block.thinking.trim()))
+          ));
+          const retained = turn.blocks.filter((block) => (
+            block.kind !== "review"
+            && (!hasRevisedNarrative || (block.kind !== "text" && block.kind !== "thinking"))
+          ));
+          if (hasRevisedNarrative && completedRevision) retained.push(...completedRevision.blocks);
+          return {
+            ...turn,
+            blocks: [...retained, reviewBlockFromEvent(event)],
+          };
+        });
+      }),
       // Authoritative failure signal from the backend. The `chatSend` promise
       // also rejects, and `onError` is idempotent (it sets the same turn
       // error), so surfacing here is safe and guarantees the failure renders
@@ -242,6 +311,7 @@ export function useChatStream({
       onChatError(({ sessionId, message, sessionPreserved }) => {
         if (!isCurrentListener()) return;
         flush(sessionId);
+        revisionStreams.current.delete(sessionId);
         // The backend's explicit error event is authoritative. Only the
         // canonical interruption message from an active user stop is expected;
         // a provider/tool failure that races with Stop must remain visible.
@@ -270,6 +340,7 @@ export function useChatStream({
       flushTimers.current.forEach((timer) => window.clearTimeout(timer));
       flushTimers.current.clear();
       queues.current.clear();
+      revisionStreams.current.clear();
     };
   }, [enqueue, flush]);
 
@@ -297,6 +368,7 @@ export function useChatStream({
       return true;
     } catch (error) {
       flush(sessionId);
+      revisionStreams.current.delete(sessionId);
       const failure = String(error);
       const expectedStop = stopRequested.current.has(sessionId) && isExpectedStopError(failure);
       handlersRef.current.onError(sessionId, failure, expectedStop);
@@ -312,6 +384,7 @@ export function useChatStream({
     if (stopRequested.current.has(sessionId)) return;
     stopRequested.current.add(sessionId);
     flush(sessionId);
+    revisionStreams.current.delete(sessionId);
     runningSessions.current.delete(sessionId);
     setRunningSessionIds(new Set(runningSessions.current));
     handlersRef.current.onError(sessionId, "", true);

@@ -2,6 +2,7 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react
 import { fileRead, isTauri, studioHtml } from "../api/tauri";
 import Presentation from "./Presentation";
 import { useStore } from "../store";
+import { SvgIcon } from "../SvgIcon";
 import { useStudioStore } from "./studioStore";
 import {
   type StudioArtifact,
@@ -365,7 +366,7 @@ export default function Studio() {
                     <span className="studio-review-count">{reviewCount}</span>
                   )}
                   {artifact.pinned && (
-                    <span className="studio-pin" title="Pinned" aria-label="Pinned">📌</span>
+                    <span className="studio-pin" title="Pinned" aria-label="Pinned"><SvgIcon name="pin" size={15} /></span>
                   )}
                 </button>
               );
@@ -519,7 +520,7 @@ export default function Studio() {
                       >
                         Add page feedback
                       </button>
-                      <span className="studio-kbd-hint">⌘ / Ctrl + ↵</span>
+                      <span className="studio-kbd-hint">Cmd / Ctrl + Enter</span>
                     </div>
 
                     <div className="studio-current-reviews">

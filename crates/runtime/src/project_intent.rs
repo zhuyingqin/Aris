@@ -75,8 +75,12 @@ pub fn load_project_intent_state(workspace: &Path) -> Result<ProjectIntentState,
         }
         Err(error) => return Err(error.to_string()),
     };
-    serde_json::from_str(&raw)
-        .map_err(|error| format!("invalid project intent at {}: {error}", path.display()))
+    let mut state: ProjectIntentState = serde_json::from_str(&raw)
+        .map_err(|error| format!("invalid project intent at {}: {error}", path.display()))?;
+    if prune_non_substantive_evidence(&mut state) {
+        save_project_intent_state(workspace, &state)?;
+    }
+    Ok(state)
 }
 
 pub fn load_project_intent(workspace: &Path) -> Result<Option<ProjectIntent>, String> {
@@ -89,13 +93,18 @@ pub fn record_project_intent_observations(
     observations: Vec<ProjectIntentObservation>,
 ) -> Result<ProjectIntentState, String> {
     let mut state = load_project_intent_state(workspace)?;
+    // Project intent is a curated continuity signal, not a second transcript.
+    // Older builds admitted greetings, test pings, and single-option replies;
+    // prune those here while the complete auditable conversation remains in
+    // session storage.
+    let pruned = prune_non_substantive_evidence(&mut state);
     let session_id = clean_text(session_id, 160);
-    let mut changed = false;
+    let mut changed = pruned;
 
     for observation in observations {
         let id = clean_text(&observation.id, 160);
         let text = clean_text(&observation.text, MAX_EVIDENCE_CHARS);
-        if id.is_empty() || text.is_empty() {
+        if id.is_empty() || !is_substantive_project_intent_text(&text) {
             continue;
         }
         if state
@@ -124,6 +133,67 @@ pub fn record_project_intent_observations(
         save_project_intent_state(workspace, &state)?;
     }
     Ok(state)
+}
+
+fn prune_non_substantive_evidence(state: &mut ProjectIntentState) -> bool {
+    let before = state.evidence.len();
+    state
+        .evidence
+        .retain(|item| is_substantive_project_intent_text(&item.text));
+    let changed = state.evidence.len() != before;
+    if changed {
+        state.reviewed_evidence_count = state.reviewed_evidence_count.min(state.evidence.len());
+    }
+    changed
+}
+
+#[must_use]
+pub fn is_substantive_project_intent_text(value: &str) -> bool {
+    let text = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if text.is_empty() {
+        return false;
+    }
+    let lower = text.to_lowercase();
+    let compact = lower
+        .chars()
+        .filter(|character| character.is_alphanumeric())
+        .collect::<String>();
+    if compact.chars().count() <= 3 {
+        return false;
+    }
+    if matches!(
+        compact.as_str(),
+        "hello"
+            | "hi"
+            | "hey"
+            | "ok"
+            | "okay"
+            | "yes"
+            | "no"
+            | "thanks"
+            | "thankyou"
+            | "你好"
+            | "您好"
+            | "谢谢"
+            | "好的"
+            | "可以"
+            | "继续"
+    ) {
+        return false;
+    }
+    let short_test_ping = compact.chars().count() <= 24
+        && [
+            "test",
+            "testing",
+            "letmeseeif",
+            "测试",
+            "试一下",
+            "我来看看",
+            "看看能不能",
+        ]
+        .iter()
+        .any(|marker| lower.contains(marker));
+    !short_test_ping
 }
 
 #[must_use]

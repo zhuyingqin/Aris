@@ -134,6 +134,24 @@
   100% { opacity: 0; translate: -46vw 16vh; }
 }
 
+/* Luminous dust motes drifting slowly upward — the Kimi-style ambient
+   layer. Negative delays (set inline) start them mid-flight. */
+.sq-dust {
+  position: absolute;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(196, 228, 255, 0.9), rgba(196, 228, 255, 0) 70%);
+  filter: blur(0.5px);
+  opacity: 0;
+  animation: sq-dust var(--dur, 18s) linear var(--delay, 0s) infinite;
+}
+
+@keyframes sq-dust {
+  0% { opacity: 0; transform: translate(0, 0); }
+  12% { opacity: 0.55; }
+  78% { opacity: 0.18; }
+  100% { opacity: 0; transform: translate(var(--dx, 0vw), -26vh); }
+}
+
 /* ------------------------------ layout ------------------------------ */
 
 .sq-login-columns {
@@ -209,6 +227,73 @@
 @keyframes sq-moon-glow {
   0%, 100% { opacity: 0.34; }
   50% { opacity: 0.6; }
+}
+
+/* Breathing pulse ring radiating out of the moon (transform-box: view-box
+   so the origin can sit on the moon's center in SVG user units). */
+.sq-pulse {
+  opacity: 0;
+  transform-box: view-box;
+  transform-origin: 250px 240px;
+  animation: sq-pulse 7s ease-out infinite;
+}
+
+@keyframes sq-pulse {
+  0% { opacity: 0; transform: scale(0.72); }
+  16% { opacity: 0.3; }
+  58%, 100% { opacity: 0; transform: scale(1.55); }
+}
+
+/* Satellite light riding the tilted orbit shell around the moon. */
+.sq-sat {
+  offset-rotate: 0deg;
+  animation: sq-sat 18s linear infinite;
+}
+
+@keyframes sq-sat {
+  from { offset-distance: 0%; }
+  to { offset-distance: 100%; }
+}
+
+/* A short bright dash traveling along the logo's wave into the pearl. */
+.sq-tail-shimmer {
+  stroke-dasharray: 26 460;
+  stroke-dashoffset: 486;
+  opacity: 0.55;
+  animation: sq-tail-shimmer 4.8s linear infinite;
+}
+
+@keyframes sq-tail-shimmer {
+  from { stroke-dashoffset: 486; }
+  to { stroke-dashoffset: 0; }
+}
+
+/* The pearl at the wave's end, gently breathing. */
+.sq-orb-glow {
+  opacity: 0.5;
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: sq-orb-glow 4.2s ease-in-out infinite;
+}
+
+@keyframes sq-orb-glow {
+  0%, 100% { opacity: 0.38; transform: scale(0.92); }
+  50% { opacity: 0.68; transform: scale(1.1); }
+}
+
+/* Dream motes rising off the sleeper. */
+.sq-mote {
+  fill: #a5d8ff;
+  opacity: 0;
+  filter: blur(0.6px);
+  animation: sq-mote var(--dur, 10s) ease-in-out var(--delay, 0s) infinite;
+}
+
+@keyframes sq-mote {
+  0% { opacity: 0; transform: translate(0, 0); }
+  18% { opacity: 0.5; }
+  70% { opacity: 0.26; }
+  100% { opacity: 0; transform: translate(var(--dx, 0px), -160px); }
 }
 
 .sq-sparkle {
@@ -307,23 +392,38 @@
   to { stroke-dashoffset: -32; }
 }
 
-.sq-beam {
+/* The pluck: as the soul's hand reaches the moon's tip, a small flash marks a
+   star coming free, then the star arcs over and lands on the graph hub. */
+.sq-pluck-flash {
   opacity: 0;
-  stroke-dasharray: 70;
-  stroke-dashoffset: 70;
-  animation: sq-beam var(--sq-cycle) linear infinite;
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: sq-pluck-flash var(--sq-cycle) ease-in-out infinite;
 }
 
-@keyframes sq-beam {
-  0%, 20% { stroke-dashoffset: 70; opacity: 0; }
-  23% { opacity: 0.95; }
-  28% { stroke-dashoffset: 0; }
-  62% { stroke-dashoffset: 0; opacity: 0.8; }
-  70%, 100% { stroke-dashoffset: 0; opacity: 0; }
+@keyframes sq-pluck-flash {
+  0%, 19% { opacity: 0; transform: scale(0.3); }
+  22% { opacity: 0.85; transform: scale(1.4); }
+  27%, 100% { opacity: 0; transform: scale(2); }
+}
+
+.sq-pluck-star {
+  opacity: 0;
+  offset-rotate: 0deg;
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: sq-pluck-star var(--sq-cycle) ease-in-out infinite;
+}
+
+@keyframes sq-pluck-star {
+  0%, 20% { offset-distance: 0%; opacity: 0; transform: scale(0.2) rotate(0deg); }
+  23% { opacity: 1; transform: scale(1.2) rotate(40deg); }
+  31% { offset-distance: 100%; opacity: 1; transform: scale(1) rotate(160deg); }
+  34%, 100% { offset-distance: 100%; opacity: 0; transform: scale(0.3) rotate(200deg); }
 }
 
 /* Bright constellation overlay draws in three waves (hub spokes → crown → outer)
-   while the soul touches the graph; the dim base graph stays always on. */
+   after the plucked star seeds the hub; the dim base graph stays always on. */
 .sq-edge-bright {
   opacity: 0;
   stroke-dasharray: 1;
@@ -335,27 +435,27 @@
 .sq-edge-c { animation: sq-edge-c var(--sq-cycle) linear infinite; }
 
 @keyframes sq-edge-a {
-  0%, 25% { stroke-dashoffset: 1; opacity: 0; }
-  27% { opacity: 0.95; }
-  34% { stroke-dashoffset: 0; }
-  64% { stroke-dashoffset: 0; opacity: 0.9; }
-  74%, 100% { stroke-dashoffset: 0; opacity: 0; }
-}
-
-@keyframes sq-edge-b {
   0%, 32% { stroke-dashoffset: 1; opacity: 0; }
   34% { opacity: 0.95; }
   41% { stroke-dashoffset: 0; }
-  64% { stroke-dashoffset: 0; opacity: 0.9; }
-  74%, 100% { stroke-dashoffset: 0; opacity: 0; }
+  66% { stroke-dashoffset: 0; opacity: 0.9; }
+  76%, 100% { stroke-dashoffset: 0; opacity: 0; }
 }
 
-@keyframes sq-edge-c {
+@keyframes sq-edge-b {
   0%, 39% { stroke-dashoffset: 1; opacity: 0; }
   41% { opacity: 0.95; }
   48% { stroke-dashoffset: 0; }
-  64% { stroke-dashoffset: 0; opacity: 0.9; }
-  74%, 100% { stroke-dashoffset: 0; opacity: 0; }
+  66% { stroke-dashoffset: 0; opacity: 0.9; }
+  76%, 100% { stroke-dashoffset: 0; opacity: 0; }
+}
+
+@keyframes sq-edge-c {
+  0%, 46% { stroke-dashoffset: 1; opacity: 0; }
+  48% { opacity: 0.95; }
+  55% { stroke-dashoffset: 0; }
+  66% { stroke-dashoffset: 0; opacity: 0.9; }
+  76%, 100% { stroke-dashoffset: 0; opacity: 0; }
 }
 
 .sq-flare {
@@ -369,27 +469,27 @@
 .sq-flare-c { animation: sq-flare-c var(--sq-cycle) ease-in-out infinite; }
 
 @keyframes sq-flare-a {
-  0%, 24% { opacity: 0; transform: scale(0.4); }
-  28% { opacity: 1; transform: scale(1.55); }
-  33% { transform: scale(1); }
-  64% { opacity: 0.9; transform: scale(1); }
-  74%, 100% { opacity: 0; transform: scale(0.5); }
+  0%, 30% { opacity: 0; transform: scale(0.4); }
+  34% { opacity: 1; transform: scale(1.55); }
+  38% { transform: scale(1); }
+  66% { opacity: 0.9; transform: scale(1); }
+  76%, 100% { opacity: 0; transform: scale(0.5); }
 }
 
 @keyframes sq-flare-b {
-  0%, 32% { opacity: 0; transform: scale(0.4); }
-  36% { opacity: 1; transform: scale(1.5); }
-  41% { transform: scale(1); }
-  64% { opacity: 0.9; transform: scale(1); }
-  74%, 100% { opacity: 0; transform: scale(0.5); }
+  0%, 39% { opacity: 0; transform: scale(0.4); }
+  43% { opacity: 1; transform: scale(1.5); }
+  47% { transform: scale(1); }
+  66% { opacity: 0.9; transform: scale(1); }
+  76%, 100% { opacity: 0; transform: scale(0.5); }
 }
 
 @keyframes sq-flare-c {
-  0%, 40% { opacity: 0; transform: scale(0.4); }
-  44% { opacity: 1; transform: scale(1.5); }
-  49% { transform: scale(1); }
-  64% { opacity: 0.9; transform: scale(1); }
-  74%, 100% { opacity: 0; transform: scale(0.5); }
+  0%, 46% { opacity: 0; transform: scale(0.4); }
+  50% { opacity: 1; transform: scale(1.5); }
+  54% { transform: scale(1); }
+  66% { opacity: 0.9; transform: scale(1); }
+  76%, 100% { opacity: 0; transform: scale(0.5); }
 }
 
 /* The insight spark travels from the graph hub back down into the sleeper. */
@@ -422,7 +522,7 @@
 
 .sq-glyph {
   fill: rgba(147, 197, 253, 0.4);
-  font-family: "Georgia", "Times New Roman", serif;
+  color: rgba(147, 197, 253, 0.55);
   animation: sq-glyph var(--dur, 11s) ease-in-out infinite;
   animation-delay: var(--delay, 0s);
   opacity: 0;

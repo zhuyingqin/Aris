@@ -2,6 +2,7 @@ import { Fragment, lazy, Suspense, useEffect, useMemo, useRef, useState, type Re
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { literatureLlm } from "../api/tauri";
 import { useStore } from "../store";
+import { SvgIcon, type SvgIconName } from "../SvgIcon";
 import type { LiteraturePageView } from "./LiteratureViewTabs";
 import { useLiteratureStore } from "./literatureStore";
 import {
@@ -56,8 +57,8 @@ interface LiteratureViewTabsProps {
 }
 
 const LITERATURE_PAGE_VIEWS = [
-  { id: "library", label: "文献库", icon: "☰" },
-  { id: "graph", label: "知识图谱", icon: "⌘" },
+  { id: "library", label: "文献库", icon: "library" },
+  { id: "graph", label: "知识图谱", icon: "graph" },
 ] as const;
 
 export function LiteratureViewTabs({
@@ -80,7 +81,7 @@ export function LiteratureViewTabs({
           className={`lit-mode-tab${pageView === item.id ? " active" : ""}`}
           onClick={() => onPageViewChange(item.id)}
         >
-          <span aria-hidden="true">{item.icon}</span>
+          <span aria-hidden="true"><SvgIcon name={item.icon} size={15} /></span>
           {item.label}
         </button>
       ))}
@@ -95,13 +96,13 @@ function tagColorClass(tag: string): string {
   return `lit-tag-${TAG_COLORS[hash % TAG_COLORS.length]}`;
 }
 
-const STAGE_ICONS: Record<PaperStage, string> = {
-  inbox: "✉",
-  screened: "⏱",
-  shortlist: "★",
-  downloaded: "↓",
-  read: "✓",
-  excluded: "⊘",
+const STAGE_ICONS: Record<PaperStage, SvgIconName> = {
+  inbox: "inbox",
+  screened: "clock",
+  shortlist: "star",
+  downloaded: "download",
+  read: "check",
+  excluded: "excluded",
 };
 
 const STAGE_LABELS: Record<PaperStage, string> = {
@@ -453,14 +454,14 @@ export default function Literature({
         </div>
         <NavItem
           label="全部论文"
-          icon="☰"
+          icon="library"
           count={papers.filter((p) => p.stage !== "excluded").length}
           active={view === "all"}
           onClick={() => setView("all")}
         />
         <NavItem
           label="已收藏"
-          icon="☆"
+          icon="star"
           count={papers.filter((p) => p.starred).length}
           active={view === "starred"}
           onClick={() => setView("starred")}
@@ -489,7 +490,7 @@ export default function Literature({
             className="lit-section-icon-btn"
             onClick={() => { setColAddingParentId(""); setColInput(""); }}
             title="新建一级分类"
-          >+</button>
+          ><SvgIcon name="plus" size={14} /></button>
         }
       >
         {colAddingParentId === "" && (
@@ -505,8 +506,8 @@ export default function Literature({
                 if (e.key === "Escape") { setColInput(""); setColAddingParentId(null); }
               }}
             />
-            <button type="button" className="lit-col-confirm-btn" onClick={() => submitColInput()} title="确认">✓</button>
-            <button type="button" className="lit-col-cancel-btn" onClick={() => { setColInput(""); setColAddingParentId(null); }} title="取消">✕</button>
+            <button type="button" className="lit-col-confirm-btn" onClick={() => submitColInput()} title="确认"><SvgIcon name="check" size={14} /></button>
+            <button type="button" className="lit-col-cancel-btn" onClick={() => { setColInput(""); setColAddingParentId(null); }} title="取消"><SvgIcon name="close" size={14} /></button>
           </div>
         )}
 
@@ -526,11 +527,11 @@ export default function Literature({
                   onClick={() => toggleColExpand(col.id)}
                   aria-label={isExpanded ? "折叠" : "展开"}
                 >
-                  {children.length > 0 ? (isExpanded ? "▾" : "▸") : ""}
+                  {children.length > 0 && <SvgIcon name={isExpanded ? "chevronDown" : "chevronRight"} size={12} />}
                 </button>
                 <NavItem
                   label={col.label}
-                  icon="▤"
+                  icon="collection"
                   count={parentCount}
                   active={view === `col:${col.id}`}
                   onClick={() => setView(`col:${col.id}`)}
@@ -544,7 +545,7 @@ export default function Literature({
                     setColInput("");
                     setExpandedCols((prev) => { const n = new Set(prev); n.add(col.id); return n; });
                   }}
-                >+</button>
+                ><SvgIcon name="plus" size={13} /></button>
                 <button
                   type="button"
                   className="lit-col-delete-btn"
@@ -558,7 +559,7 @@ export default function Literature({
                     }
                   }}
                   aria-label={`删除 ${col.label}`}
-                >×</button>
+                ><SvgIcon name="close" size={13} /></button>
               </div>
 
               {isExpanded && (
@@ -567,7 +568,7 @@ export default function Literature({
                     <div key={child.id} className="lit-col-row lit-col-child-row">
                       <NavItem
                         label={child.label}
-                        icon="◦"
+                        icon="circle"
                         count={papers.filter((p) => p.collectionIds.includes(child.id)).length}
                         active={view === `col:${child.id}`}
                         onClick={() => setView(`col:${child.id}`)}
@@ -582,7 +583,7 @@ export default function Literature({
                           }
                         }}
                         aria-label={`删除 ${child.label}`}
-                      >×</button>
+                      ><SvgIcon name="close" size={13} /></button>
                     </div>
                   ))}
                   {colAddingParentId === col.id && (
@@ -598,8 +599,8 @@ export default function Literature({
                           if (e.key === "Escape") { setColInput(""); setColAddingParentId(null); }
                         }}
                       />
-                      <button type="button" className="lit-col-confirm-btn" onClick={() => submitColInput(col.id)}>✓</button>
-                      <button type="button" className="lit-col-cancel-btn" onClick={() => { setColInput(""); setColAddingParentId(null); }}>✕</button>
+                      <button type="button" className="lit-col-confirm-btn" onClick={() => submitColInput(col.id)}><SvgIcon name="check" size={14} /></button>
+                      <button type="button" className="lit-col-cancel-btn" onClick={() => { setColInput(""); setColAddingParentId(null); }}><SvgIcon name="close" size={14} /></button>
                     </div>
                   )}
                 </>
@@ -618,7 +619,7 @@ export default function Literature({
           <NavItem
             key={search.id}
             label={search.query}
-            icon="⌕"
+            icon="search"
             count={papers.filter((paper) => paper.searchIds.includes(search.id)).length}
             active={view === `search:${search.id}`}
             onClick={() => setView(`search:${search.id}`)}
@@ -632,7 +633,7 @@ export default function Literature({
           <NavItem
             key={task.id}
             label={task.question}
-            icon="✓"
+            icon="check"
             count={task.searchIds.length}
             active={activeReviewTaskId === task.id}
             onClick={() => {
@@ -710,22 +711,23 @@ export default function Literature({
                 type="button"
                 className="lit-workspace-icon-btn"
                 title={selectedPaper.pdf.status === "downloaded" ? "打开 PDF" : "获取 PDF"}
+                aria-label={selectedPaper.pdf.status === "downloaded" ? "打开所选论文 PDF" : "获取所选论文 PDF"}
                 onClick={() => void downloadOrBrowse(selectedPaper.id)}
                 disabled={selectedPaper.pdf.status === "downloading"}
-              >◎</button>
+              ><SvgIcon name="target" size={16} /></button>
               <button
                 type="button"
                 className="lit-workspace-icon-btn"
                 title="Open in chat"
                 onClick={() => openAgentChat(`/research-lit "${selectedPaper.title}"`)}
-              >↗</button>
+              ><SvgIcon name="externalLink" size={16} /></button>
               <button
                 type="button"
                 className="lit-workspace-icon-btn"
                 title="Clear selection"
                 aria-label="清除选择"
                 onClick={() => { setSelectedId(null); setSelectionCleared(true); }}
-              >✕</button>
+              ><SvgIcon name="close" size={16} /></button>
             </div>
           </div>
 
@@ -854,7 +856,7 @@ export default function Literature({
         </>
       ) : (
         <div className="lit-workspace-empty">
-          <div className="lit-workspace-empty-icon">◫</div>
+          <div className="lit-workspace-empty-icon"><SvgIcon name="collection" size={28} /></div>
           <p>Select a paper to open it here.</p>
         </div>
       )}
@@ -921,7 +923,7 @@ export default function Literature({
               className="lit-reading-back"
               onClick={() => setWorkspaceTab("overview")}
             >
-              ‹ 返回
+              <SvgIcon name="chevronLeft" size={14} /> 返回
             </button>
             <div className="lit-reading-title-wrap">
               <div className="lit-reading-title">{selectedPaper.title}</div>
@@ -1396,7 +1398,7 @@ function PaperRow({
           onClick={(e) => { e.stopPropagation(); onToggleStar(); }}
           aria-label={paper.starred ? "Unstar" : "Star"}
         >
-          {paper.starred ? "★" : "☆"}
+          <SvgIcon name="star" size={16} />
         </button>
       </td>
     </tr>
@@ -1479,7 +1481,7 @@ function WorkspaceOverview({
             <span>摘要</span>
             {!paper.abstract && <span className="lit-section-badge">缺失</span>}
           </div>
-          <span className="lit-toggle-caret" aria-hidden="true">{abstractOpen ? "▾" : "▸"}</span>
+          <span className="lit-toggle-caret" aria-hidden="true"><SvgIcon name={abstractOpen ? "chevronDown" : "chevronRight"} size={12} /></span>
         </button>
         {abstractOpen && (
           <p className={`lit-abstract-text${paper.abstract ? "" : " missing"}`}>
@@ -2087,7 +2089,7 @@ function WorkspaceFiles({
                   aria-pressed={assigned}
                   onClick={() => onToggleCollection(collection.id)}
                 >
-                  {assigned ? "✓ " : "+ "}
+                  <SvgIcon name={assigned ? "check" : "plus"} size={12} />
                   {collection.label}
                 </button>
               );
@@ -2130,7 +2132,7 @@ function ActivityDrawer() {
         <span className={`lit-activity-last ${latest?.level ?? ""}`}>
           {latest ? latest.text : "idle — searches, downloads, and agent actions are logged here"}
         </span>
-        <span className="lit-activity-caret" aria-hidden="true">{open ? "▾" : "▸"}</span>
+        <span className="lit-activity-caret" aria-hidden="true"><SvgIcon name={open ? "chevronDown" : "chevronRight"} size={12} /></span>
       </button>
       {open && (
         <div className="lit-activity-body">
@@ -2201,7 +2203,7 @@ function InfoTab({
               {FIT_LABELS[fit]}{paper.verdict?.score !== undefined ? ` · ${paper.verdict.score}` : ""}
             </span>
           )}
-          {paper.starred && <span className="lip-star-badge">★ 已收藏</span>}
+          {paper.starred && <span className="lip-star-badge"><SvgIcon name="star" size={13} /> 已收藏</span>}
         </div>
       )}
 
@@ -2288,7 +2290,7 @@ function InfoTab({
                   aria-pressed={assigned}
                   onClick={() => onToggleCollection(col.id)}
                 >
-                  {assigned ? "✓ " : "+ "}{col.label}
+                  <SvgIcon name={assigned ? "check" : "plus"} size={12} /> {col.label}
                 </button>
               );
             })}
@@ -2328,7 +2330,7 @@ function NavItem({
   dot,
 }: {
   label: string;
-  icon: string;
+  icon: SvgIconName;
   count: number;
   active: boolean;
   onClick: () => void;
@@ -2337,7 +2339,7 @@ function NavItem({
   return (
     <button type="button" className={`lit-nav-item${active ? " active" : ""}`} onClick={onClick}>
       <span className="lit-nav-icon" aria-hidden="true">
-        {dot ? <span className={`lit-stage-dot ${dot}`} /> : icon}
+        {dot ? <span className={`lit-stage-dot ${dot}`} /> : <SvgIcon name={icon} size={14} />}
       </span>
       <span className="lit-nav-text">{label}</span>
       <span className="lit-nav-count">{count}</span>
@@ -2367,7 +2369,7 @@ function NavSection({
           aria-expanded={open}
         >
           <span className="lit-section-label">{title}</span>
-          <span className="lit-section-caret" aria-hidden="true">{open ? "▾" : "▸"}</span>
+          <span className="lit-section-caret" aria-hidden="true"><SvgIcon name={open ? "chevronDown" : "chevronRight"} size={11} /></span>
         </button>
         {extra}
       </div>

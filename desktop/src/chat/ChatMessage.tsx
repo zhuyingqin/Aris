@@ -1,8 +1,10 @@
 import { Fragment, memo, useMemo, useState, type ReactNode } from "react";
 import type { ChatBlock, ChatTurn } from "../types";
 import { chatChangeRevert, fileOpen } from "../api/tauri";
+import { SvgIcon } from "../SvgIcon";
 import ChatImagePreview, { isDirectImageSource, isPreviewableImagePath } from "./ChatImagePreview";
 import MarkdownContent, { ThinkBlock } from "./MarkdownContent";
+import IndependentReviewBadge from "./IndependentReviewBadge";
 import { CHAT_COPY } from "./i18n";
 import { isFileChangeTool, parseToolBlockJson, parseToolBlockObject, textFromTurn } from "./model";
 import { useStore } from "../store";
@@ -461,7 +463,7 @@ function ToolCall({ block }: { block: Extract<ChatBlock, { kind: "tool" }> }) {
           }
         }}
       >
-        <span className="tool-status-icon">{running ? "◌" : block.isError ? "×" : change ? "±" : "✓"}</span>
+        <span className="tool-status-icon">{running ? <SvgIcon name="spinner" size={11} /> : block.isError ? <SvgIcon name="error" size={11} /> : change ? <SvgIcon name="modified" size={11} /> : <SvgIcon name="check" size={11} />}</span>
         <span className="tool-status-label">{status}</span>
         {change ? (
           <button
@@ -478,7 +480,7 @@ function ToolCall({ block }: { block: Extract<ChatBlock, { kind: "tool" }> }) {
         ) : (
           <span className="tool-name">{block.name}</span>
         )}
-        {!running && <span className="tool-collapse-btn">{open ? "▾" : "▸"}</span>}
+        {!running && <span className="tool-collapse-btn"><SvgIcon name={open ? "chevronDown" : "chevronRight"} size={11} /></span>}
       </div>
       <ToolProgressView block={block} />
       {studioLinks.length > 0 && (
@@ -702,13 +704,13 @@ function ToolGroup({ blocks }: { blocks: Extract<ChatBlock, { kind: "tool" }>[] 
           }
         }}
       >
-        <span className="tool-status-icon">{running ? "◌" : anyError ? "×" : "✓"}</span>
+        <span className="tool-status-icon">{running ? <SvgIcon name="spinner" size={11} /> : anyError ? <SvgIcon name="error" size={11} /> : <SvgIcon name="check" size={11} />}</span>
         <span className="tool-status-label">{status}</span>
         <span className="tool-name">{blocks[0].name}</span>
         <span className="tool-group-count" title={`${current} / ${total}`}>
           {current}/{total}
         </span>
-        <span className="tool-collapse-btn">{open ? "▾" : "▸"}</span>
+        <span className="tool-collapse-btn"><SvgIcon name={open ? "chevronDown" : "chevronRight"} size={11} /></span>
       </div>
       {open && (
         <div className="chat-tool-body chat-tool-group-body">
@@ -734,10 +736,10 @@ function PermissionCall({
   return (
     <div className={`chat-tool chat-permission-card ${pending ? "tool-running" : block.status === "skipped" ? "tool-error" : "tool-done"}`}>
       <div className="chat-tool-header">
-        <span className="tool-status-icon">{pending ? "?" : block.status === "skipped" ? "!" : "✓"}</span>
+        <span className="tool-status-icon">{pending ? <SvgIcon name="pending" size={11} /> : block.status === "skipped" ? <SvgIcon name="warning" size={11} /> : <SvgIcon name="check" size={11} />}</span>
         <span className="tool-status-label">{status}</span>
         <span className="tool-name">{block.toolName}</span>
-        <span className="tool-status-label">{block.currentMode} → {block.requiredMode}</span>
+        <span className="tool-status-label">{block.currentMode} to {block.requiredMode}</span>
       </div>
       <div className="chat-permission-actions">
         <button type="button" disabled={!pending} onClick={() => onPermissionRespond(block.id, true)}>
@@ -848,7 +850,7 @@ function QuestionCall({
   const canSubmit = spec.multiSelect ? selected.size > 0 || custom.trim().length > 0 : custom.trim().length > 0;
   const answered = resolved && !block.isError;
   const statusClass = answered ? "tool-done" : interactive ? "tool-running" : "tool-error";
-  const statusIcon = answered ? "✓" : interactive ? "?" : "!";
+  const statusIcon = answered ? <SvgIcon name="check" size={11} /> : interactive ? <SvgIcon name="pending" size={11} /> : <SvgIcon name="warning" size={11} />;
   const statusLabel = answered ? "Answered" : interactive ? "Awaiting your answer" : "Unanswered";
 
   return (
@@ -928,6 +930,7 @@ function renderSingleBlock(
   onQuestionRespond: (toolUseId: string, answer: string) => void,
   onLoadOmittedTurn: ((turnIndex: number) => void) | undefined,
   omittedTurnLoading: boolean,
+  onOpenIndependentReview: () => void,
 ) {
   if (block.kind === "text") {
     if (!block.text) return null;
@@ -956,6 +959,7 @@ function renderSingleBlock(
     const omittedTurnIndex = typeof turn.omittedTurnIndex === "number" ? turn.omittedTurnIndex : null;
     return block.message ? (
       <div key={index} className="chat-context-notice">
+        <SvgIcon name="pending" size={14} className="chat-context-notice-icon" />
         <span className="chat-context-notice-message">{block.message}</span>
         {omittedTurnIndex != null && onLoadOmittedTurn && (
           <button
@@ -969,6 +973,9 @@ function renderSingleBlock(
         )}
       </div>
     ) : null;
+  }
+  if (block.kind === "review") {
+    return <IndependentReviewBadge key={index} block={block} onOpen={onOpenIndependentReview} />;
   }
   if (block.kind === "permission") {
     return <PermissionCall key={block.id} block={block} onPermissionRespond={onPermissionRespond} />;
@@ -1037,6 +1044,7 @@ function renderBlocks(
   onQuestionRespond: (toolUseId: string, answer: string) => void,
   onLoadOmittedTurn: ((turnIndex: number) => void) | undefined,
   omittedTurnLoading: boolean,
+  onOpenIndependentReview: () => void,
 ) {
   const blocks = turn.blocks;
   const out: ReactNode[] = [];
@@ -1082,6 +1090,7 @@ function renderBlocks(
       onQuestionRespond,
       onLoadOmittedTurn,
       omittedTurnLoading,
+      onOpenIndependentReview,
     ));
     i += 1;
   }
@@ -1127,6 +1136,7 @@ interface Props {
   omittedTurnLoading?: boolean;
   onPermissionRespond?: (promptId: string, allow: boolean) => void;
   onQuestionRespond?: (toolUseId: string, answer: string) => void;
+  onOpenIndependentReview?: () => void;
 }
 
 function ChatMessage({
@@ -1139,6 +1149,7 @@ function ChatMessage({
   omittedTurnLoading = false,
   onPermissionRespond = () => undefined,
   onQuestionRespond = () => undefined,
+  onOpenIndependentReview = () => undefined,
 }: Props) {
   const language = useStore((state) => state.language);
   const copy = CHAT_COPY[language];
@@ -1150,6 +1161,7 @@ function ChatMessage({
     onQuestionRespond,
     onLoadOmittedTurn,
     omittedTurnLoading,
+    onOpenIndependentReview,
   );
   return (
     <article className={`chat-turn chat-${turn.role}${turn.error ? " chat-turn-error" : ""}`}>
@@ -1168,7 +1180,7 @@ function ChatMessage({
           <span>{copy.stoppedByUser}</span>
         </div>
       )}
-      {turn.streaming && <span className="chat-inline-cursor">▌</span>}
+      {turn.streaming && <span className="chat-inline-cursor" aria-hidden="true" />}
       {turn.error && (
         <div className="chat-error-card">
           <strong>{copy.responseFailed}</strong>

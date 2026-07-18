@@ -40,7 +40,7 @@ This skill checks multiple sources **in priority order**. All are optional — i
 
 Parse `$ARGUMENTS` for a `— sources:` directive:
 - **If `— sources:` is specified**: Only search the listed sources (comma-separated). Valid values: `zotero`, `obsidian`, `local`, `web`, `semantic-scholar`, `deepxiv`, `exa`, `gemini`, `openalex`, `all` — plus the kernel engine names `arxiv`, `crossref`, `scopus` (sent by the ARIS desktop Literature view; see the no-shell lane in Step 1).
-- **If not specified**: Default to `all` — search every available source in priority order (`semantic-scholar`, `deepxiv`, `exa`, `gemini`, and `openalex` are **excluded** from `all`; they must be explicitly listed).
+- **If not specified**: Default to `all` — search every available source in priority order. In the **shell / Python-helper lane** `semantic-scholar`, `deepxiv`, `exa`, `gemini`, and `openalex` are **excluded** from `all` and must be explicitly listed. The **no-shell `LiteratureSearch` kernel lane is different**: its default core is **Scopus + OpenAlex** (+ Crossref) with **arXiv as a supplement** — see the no-shell lane in Step 1.
 - **Kernel engine names in a shell environment**: treat `arxiv` and `crossref` as part of the `web` tier and prefer the `LiteratureSearch` kernel tool for them; `scopus` and `openalex` also run through `LiteratureSearch` when listed (Scopus needs `SCOPUS_API_KEY`).
 
 Examples:
@@ -207,17 +207,29 @@ If `$ARXIV_FETCHER` is empty (D2 graceful degradation), fall back to WebSearch f
 
 **No-shell environments (ARIS desktop Chat)**: when `bash` itself is
 unavailable or blocked, skip every bash block in this step and use the
-`LiteratureSearch` kernel tool instead. The kernel engines are `arxiv`,
-`crossref`, `openalex` and `scopus` — pass the ones the user requested via
-`— sources:` (kernel engine names map 1:1; other tokens like `web`/`all`
-mean the default set), e.g.
-`{ "query": "...", "sources": ["arxiv", "crossref", "openalex"], "maxResults": 10 }`.
-Omitting `sources` runs every available engine (Scopus only joins when
-`SCOPUS_API_KEY` is configured; an explicit `scopus` request without a key
-returns a warning instead of results — report it, don't retry).
-A successful call counts as the `arxiv` D2 contribution (plus the other
-returned engines' metadata for free). Zotero/Obsidian/local-PDF tiers are
-unavailable without a shell; note the skipped tiers in the final output.
+`LiteratureSearch` kernel tool instead. Its engines are `scopus`,
+`openalex`, `crossref` and `arxiv`. **Scopus and OpenAlex are the core**
+published-venue sources; **arXiv is only a supplement** — the kernel
+deduplicates across engines so a paper found in the core keeps its
+peer-reviewed record and merely borrows arXiv's open PDF link. Results
+always come back in Scopus → OpenAlex → Crossref → arXiv priority,
+whatever order they were requested in.
+
+- **Default (no `— sources:`, or the tokens `web`/`all`)**: OMIT `sources`
+  so the kernel runs its full set — Scopus + OpenAlex + Crossref core plus
+  the arXiv supplement — and pass a comprehensive `maxResults` (about 50),
+  e.g. `{ "query": "...", "maxResults": 50 }`. Do **not** restrict the
+  default to `arxiv`/`crossref`; that is what makes results look
+  arXiv-only.
+- **Explicit `— sources:`**: pass the requested kernel engine names 1:1,
+  e.g. `{ "query": "...", "sources": ["scopus", "openalex"], "maxResults": 50 }`.
+
+Scopus only contributes when `SCOPUS_API_KEY` is configured; an explicit
+`scopus` request without a key returns a warning instead of results —
+report it, don't retry. A successful call counts as the `arxiv` D2
+contribution (plus the other engines' metadata for free).
+Zotero/Obsidian/local-PDF tiers are unavailable without a shell; note the
+skipped tiers in the final output.
 
 The arXiv API returns structured metadata (title, abstract, full author list, categories, dates) — richer than WebSearch snippets. Merge these results with WebSearch findings and de-duplicate.
 

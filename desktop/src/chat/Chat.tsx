@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
-import { chatUiTurnLoad, fileOpen, isTauri } from "../api/tauri";
+import { chatReviewClear, chatUiTurnLoad, fileOpen, isTauri } from "../api/tauri";
 import { useStore, type Language } from "../store";
+import { SvgIcon } from "../SvgIcon";
 import type { ChatTurn } from "../types";
 import ChatComposer from "./ChatComposer";
 import CommandSelection from "./CommandSelection";
@@ -21,6 +22,10 @@ import { useChatSessionController } from "./useChatSessionController";
 import ProjectBriefCard, { useProjectBrief } from "./ProjectBriefCard";
 import ChatNavigationTabs, { type ChatNavigationTab } from "./ChatNavigationTabs";
 import SideTaskPanel, { type SideTaskMetadata } from "./SideTaskPanel";
+import IndependentReviewPanel from "./IndependentReviewPanel";
+import { useIndependentReview } from "./useIndependentReview";
+
+const INDEPENDENT_REVIEW_TAB_ID = "independent-review";
 
 // Pure helpers live in `chatRunHelpers`; re-exported here for existing tests
 // that import them from `./Chat`.
@@ -98,7 +103,7 @@ function MemoryBadge({ count }: { count: number }) {
   if (count === 0) return null;
   return (
     <div className="mem-badge" title={`${count} active memory item${count !== 1 ? "s" : ""} loaded`}>
-      <span className="mem-badge-icon">◆</span>
+      <span className="mem-badge-icon"><SvgIcon name="memory" size={10} /></span>
       <span className="mem-badge-count">{count}</span>
     </div>
   );
@@ -176,6 +181,7 @@ export default function Chat() {
   });
   const sessionCtl = useChatSessionController({ removeSession, restoreSession });
   const projectBrief = useProjectBrief(currentProject?.id);
+  const independentReview = useIndependentReview(currentId);
   const [sideTaskTabs, setSideTaskTabs] = useState<SideTaskTab[]>([]);
   const [activeSideTaskId, setActiveSideTaskId] = useState<string | null>(null);
   const [sideTaskPaneOpen, setSideTaskPaneOpen] = useState(false);
@@ -203,12 +209,13 @@ export default function Chat() {
       const next = current.filter((task) => task.id !== taskId);
       if (activeSideTaskId === taskId) {
         const replacement = next[Math.min(Math.max(closingIndex, 0), next.length - 1)];
-        setActiveSideTaskId(replacement?.id ?? null);
-        if (!replacement) setSideTaskPaneOpen(false);
+        const replacementId = replacement?.id ?? (independentReview ? INDEPENDENT_REVIEW_TAB_ID : null);
+        setActiveSideTaskId(replacementId);
+        if (!replacementId) setSideTaskPaneOpen(false);
       }
       return next;
     });
-  }, [activeSideTaskId]);
+  }, [activeSideTaskId, independentReview]);
 
   const updateSideTaskMetadata = useCallback((taskId: string, metadata: SideTaskMetadata) => {
     setSideTaskTabs((current) => {
@@ -249,6 +256,11 @@ export default function Chat() {
         setSideTaskPaneOpen(false);
         return;
       }
+      if (independentReview) {
+        setActiveSideTaskId(INDEPENDENT_REVIEW_TAB_ID);
+        setSideTaskPaneOpen(true);
+        return;
+      }
       const latestSideTask = sideTaskTabs[sideTaskTabs.length - 1];
       if (latestSideTask) {
         setActiveSideTaskId((current) => current ?? latestSideTask.id);
@@ -257,7 +269,7 @@ export default function Chat() {
     };
     window.addEventListener("keydown", toggleSideTask);
     return () => window.removeEventListener("keydown", toggleSideTask);
-  }, [addSideTask, sideTaskPaneOpen, sideTaskTabs]);
+  }, [addSideTask, independentReview, sideTaskPaneOpen, sideTaskTabs]);
 
   const starters = CHAT_STARTERS[language];
   const welcomeCopy = language === "cn"
@@ -308,14 +320,19 @@ export default function Chat() {
       toggle: "Show or hide side task panel",
       handoff: "Send to main task",
     };
-  const navigationTabs = useMemo<ChatNavigationTab[]>(() => (
-    sideTaskTabs.map((sideTask) => ({
+  const navigationTabs = useMemo<ChatNavigationTab[]>(() => ([
+    ...(independentReview ? [{
+      id: INDEPENDENT_REVIEW_TAB_ID,
+      label: language === "cn" ? "独立 Reviewer" : "Independent Reviewer",
+      closable: false,
+    }] : []),
+    ...sideTaskTabs.map((sideTask) => ({
       id: sideTask.id,
       label: sideTask.title,
       closable: true,
       closeLabel: `${navigationCopy.close}: ${sideTask.title}`,
-    }))
-  ), [navigationCopy.close, sideTaskTabs]);
+    })),
+  ]), [independentReview, language, navigationCopy.close, sideTaskTabs]);
   const activeSideTask = sideTaskTabs.find((sideTask) => sideTask.id === activeSideTaskId);
 
   const sendHandoffToMain = useCallback((content: string) => {
@@ -327,6 +344,11 @@ export default function Chat() {
     setDraft(session.id, nextDraft);
     focusComposer();
   }, [focusComposer, setDraft]);
+
+  const openIndependentReview = useCallback(() => {
+    setActiveSideTaskId(INDEPENDENT_REVIEW_TAB_ID);
+    setSideTaskPaneOpen(true);
+  }, []);
 
   const send = async () => {
     if (!currentSession || run.sendLocks.current.has(currentSession.id) || currentChatBusy || (!composer.input.trim() && composer.attachments.length === 0)) return;
@@ -534,7 +556,7 @@ export default function Chat() {
               void composer.addFilesToChat(Array.from(e.dataTransfer.files));
             }}
           >
-            <span className="chat-drop-full-icon">📎</span>
+            <span className="chat-drop-full-icon"><SvgIcon name="attachment" size={32} /></span>
             <span>拖放文件以附加</span>
           </div>
         )}
@@ -605,6 +627,10 @@ export default function Chat() {
               className={`chat-side-task-toggle${sideTaskPaneOpen ? " active" : ""}`}
               onClick={() => {
                 if (sideTaskPaneOpen) setSideTaskPaneOpen(false);
+                else if (independentReview) {
+                  setActiveSideTaskId(INDEPENDENT_REVIEW_TAB_ID);
+                  setSideTaskPaneOpen(true);
+                }
                 else if (sideTaskTabs.length > 0) setSideTaskPaneOpen(true);
                 else addSideTask();
               }}
@@ -642,6 +668,7 @@ export default function Chat() {
           isOmittedTurnLoading={isOmittedTurnLoading}
           onPermissionRespond={run.respondPermission}
           onQuestionRespond={run.respondQuestion}
+          onOpenIndependentReview={openIndependentReview}
         />
         {(workflowTodos.length > 0 || workflowFileChanges.length > 0 || workflowFileChangeSummary) && !pendingCommandSelection && (
           <WorkflowFlow
@@ -682,6 +709,8 @@ export default function Chat() {
           canSwitchModel={run.canSwitchModel}
           onModelChange={run.changeModel}
           reasoningSupported={run.reasoning.supported}
+          reasoningApplied={run.reasoning.applied}
+          reasoningMessage={run.reasoning.message}
           reasoningEffort={run.reasoning.effort}
           reasoningBusy={run.reasoningBusy}
           onReasoningEffortChange={run.changeReasoningEffort}
@@ -699,7 +728,7 @@ export default function Chat() {
           </>
         )}
       </main>
-      {sideTaskTabs.length > 0 && (
+      {navigationTabs.length > 0 && (
         <aside
           id="side-task-panel"
           className="side-task-slot"
@@ -708,7 +737,7 @@ export default function Chat() {
         >
           <ChatNavigationTabs
             tabs={navigationTabs}
-            activeTabId={activeSideTaskId ?? sideTaskTabs[0]?.id ?? ""}
+            activeTabId={activeSideTaskId ?? navigationTabs[0]?.id ?? ""}
             label={navigationCopy.label}
             addLabel={navigationCopy.add}
             hideLabel={navigationCopy.hide}
@@ -721,6 +750,23 @@ export default function Chat() {
             onHide={() => setSideTaskPaneOpen(false)}
           />
           <div className="side-task-workspaces">
+            {independentReview && (
+              <section
+                id="chat-workspace-independent-review"
+                className="chat-workspace-view"
+                role="tabpanel"
+                aria-label={language === "cn" ? "独立 Reviewer" : "Independent Reviewer"}
+                hidden={activeSideTaskId !== INDEPENDENT_REVIEW_TAB_ID}
+              >
+                <IndependentReviewPanel
+                  state={independentReview}
+                  language={language}
+                  onClear={() => {
+                    if (currentId) void chatReviewClear(currentId).catch(() => undefined);
+                  }}
+                />
+              </section>
+            )}
             {sideTaskTabs.map((sideTask) => (
               <section
                 key={sideTask.id}

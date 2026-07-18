@@ -1,0 +1,50 @@
+const WINDOWS_DRIVE_HREF_RE = /^[a-z]:(?:[\\/]|%5c|%2f)/i;
+const FILE_URI_RE = /^file:\/\//i;
+const VSCODE_FILE_URI_RE = /^vscode:\/\/file\//i;
+
+function decodeHref(value: string) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+function stripEditorLocation(value: string) {
+  return value
+    .replace(/#L\d+(?:C\d+)?$/i, "")
+    .replace(/#line-\d+$/i, "")
+    .replace(/\?(?:line|lineNumber)=\d+(?:&(?:column|col)=\d+)?$/i, "");
+}
+
+/** True for local references that react-markdown's default URL sanitizer
+ * rejects because a Windows drive letter looks like a custom URI scheme. */
+export function isExplicitLocalFileHref(href: string) {
+  const value = href.trim();
+  return WINDOWS_DRIVE_HREF_RE.test(value)
+    || FILE_URI_RE.test(value)
+    || VSCODE_FILE_URI_RE.test(value)
+    || /^\\\\/.test(value);
+}
+
+/** Convert the local link formats commonly emitted by LLMs into a filesystem
+ * path understood by the desktop backend. Relative paths remain relative to
+ * the selected project workspace. */
+export function normalizeLocalFileHref(href: string) {
+  let value = decodeHref(href.trim())
+    .trim()
+    .replace(/^[`<"']+|[`>"']+$/g, "");
+
+  if (VSCODE_FILE_URI_RE.test(value)) {
+    value = value.slice("vscode://file/".length);
+  } else if (FILE_URI_RE.test(value)) {
+    let rest = value.slice("file://".length);
+    if (rest.toLowerCase().startsWith("localhost/")) rest = rest.slice("localhost".length);
+    if (/^\/[a-z]:[\\/]/i.test(rest)) rest = rest.slice(1);
+    else if (!rest.startsWith("/") && !WINDOWS_DRIVE_HREF_RE.test(rest)) rest = `//${rest}`;
+    value = rest;
+  }
+
+  if (/^\/[a-z]:[\\/]/i.test(value)) value = value.slice(1);
+  return stripEditorLocation(value.replace(/\\/g, "/"));
+}

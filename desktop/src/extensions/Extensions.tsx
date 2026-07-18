@@ -8,6 +8,7 @@ import {
   skillsList,
 } from "../api/tauri";
 import { useStore } from "../store";
+import { SvgIcon, type SvgIconName } from "../SvgIcon";
 import type {
   McpConfigView,
   McpServerSummary,
@@ -83,7 +84,7 @@ interface CatalogItem {
   id: string;
   name: string;
   description: string;
-  glyph: string;
+  icon: SvgIconName;
   build: () => McpStdioServerInput;
 }
 
@@ -96,7 +97,7 @@ const MCP_CATALOG: CatalogItem[] = [
     id: "codex",
     name: "Codex",
     description: "把 OpenAI Codex 作为外部推理 / 审稿代理（codex · codex-reply）",
-    glyph: "⌘",
+    icon: "graph",
     build: () => ({
       name: "codex",
       command: isWindows ? "cmd" : "codex",
@@ -109,7 +110,7 @@ const MCP_CATALOG: CatalogItem[] = [
     id: "claude",
     name: "Claude Code",
     description: "接入 Claude Code 的完整工具集（Read / Edit / Grep / Agent …）",
-    glyph: "✶",
+    icon: "sparkle",
     build: () => ({
       name: "claude",
       command: "claude",
@@ -122,7 +123,7 @@ const MCP_CATALOG: CatalogItem[] = [
     id: "playwright",
     name: "Playwright",
     description: "Browser automation via SomniQ bundled Playwright MCP.",
-    glyph: "P",
+    icon: "externalLink",
     build: () => ({
       name: "playwright",
       command: isWindows ? "cmd" : "aris-playwright-mcp",
@@ -372,7 +373,7 @@ export default function Extensions() {
                   </div>
                 )}
                 <button type="button" className="ext-link" onClick={startAdd}>
-                  + 添加自定义 MCP
+                  <SvgIcon name="plus" size={14} /> 添加自定义 MCP
                 </button>
               </section>
 
@@ -387,7 +388,7 @@ export default function Extensions() {
                       return (
                         <div className="ext-card" key={item.id}>
                           <span className="ext-card-icon" aria-hidden="true">
-                            {item.glyph}
+                            <SvgIcon name={item.icon} size={19} />
                           </span>
                           <div className="ext-card-copy">
                             <strong>{item.name}</strong>
@@ -513,7 +514,7 @@ export default function Extensions() {
                 <h2>{isNew ? draft?.name || "新 MCP" : selected!.name}</h2>
               </div>
               <button type="button" className="ext-drawer-close" onClick={closeEditor}>
-                ×
+                <SvgIcon name="close" size={16} />
               </button>
             </div>
 

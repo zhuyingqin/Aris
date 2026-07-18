@@ -36,11 +36,22 @@ impl ProjectGoalStatus {
 pub struct ProjectGoal {
     pub objective: String,
     pub success_criteria: Vec<String>,
+    #[serde(default)]
+    pub verified_criteria: Vec<ProjectGoalCriterionVerification>,
     pub recent_status: String,
     pub status: ProjectGoalStatus,
     pub source_session_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectGoalCriterionVerification {
+    pub criterion_index: usize,
+    pub evidence: Vec<String>,
+    pub reviewer: String,
+    pub verified_at: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -73,9 +84,17 @@ pub fn load_project_goal(workspace: &Path) -> Result<Option<ProjectGoal>, String
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error.to_string()),
     };
-    serde_json::from_str(&raw)
-        .map(Some)
-        .map_err(|error| format!("invalid project goal at {}: {error}", path.display()))
+    let goal = serde_json::from_str::<ProjectGoal>(&raw)
+        .map_err(|error| format!("invalid project goal at {}: {error}", path.display()))?;
+    // Older Desktop builds could promote a one-turn conversational answer into
+    // durable project state. Once stored, that goal was injected into every
+    // later system prompt (for example, repeatedly announcing the model's
+    // identity). Keep the file for forensic/recovery purposes, but quarantine
+    // it from project continuity and let the next real milestone replace it.
+    if is_one_off_identity_answer_goal(&goal.objective, &goal.success_criteria) {
+        return Ok(None);
+    }
+    Ok(Some(goal))
 }
 
 pub fn project_brief(workspace: &Path) -> Result<ProjectBrief, String> {
@@ -131,11 +150,17 @@ fn write_new_goal(
     let now = now_iso8601();
     let objective = clean_required(&draft.objective, MAX_OBJECTIVE_CHARS, "goal objective")?;
     let success_criteria = clean_criteria(draft.success_criteria);
+    if is_one_off_identity_answer_goal(&objective, &success_criteria) {
+        return Err(
+            "a one-off model identity answer cannot be stored as a project milestone".to_string(),
+        );
+    }
     let recent_status = clean_optional(&draft.recent_status, MAX_STATUS_CHARS)
         .unwrap_or_else(|| "Goal captured; work has not been verified complete yet.".to_string());
     let goal = ProjectGoal {
         objective,
         success_criteria,
+        verified_criteria: Vec::new(),
         recent_status,
         status: ProjectGoalStatus::Active,
         source_session_id: source_session_id
@@ -206,6 +231,66 @@ pub fn update_project_goal_progress(
     Ok(Some(goal))
 }
 
+pub fn update_project_goal_verified_progress(
+    workspace: &Path,
+    recent_status: &str,
+    criteria_indices: &[usize],
+    evidence: &[String],
+    reviewer: &str,
+) -> Result<Option<ProjectGoal>, String> {
+    let Some(mut goal) = load_project_goal(workspace)? else {
+        return Ok(None);
+    };
+    if goal.status != ProjectGoalStatus::Active {
+        return Ok(Some(goal));
+    }
+    let valid_criteria_indices = criteria_indices
+        .iter()
+        .copied()
+        .filter(|index| *index < goal.success_criteria.len())
+        .collect::<std::collections::BTreeSet<_>>();
+    if valid_criteria_indices.is_empty() {
+        return Ok(Some(goal));
+    }
+    let Some(status) = clean_optional(recent_status, MAX_STATUS_CHARS) else {
+        return Ok(Some(goal));
+    };
+    let evidence = evidence
+        .iter()
+        .filter_map(|item| clean_optional(item, MAX_CRITERION_CHARS))
+        .take(8)
+        .collect::<Vec<_>>();
+    if evidence.is_empty() {
+        return Ok(Some(goal));
+    }
+    let reviewer =
+        clean_optional(reviewer, 200).unwrap_or_else(|| "independent Reviewer".to_string());
+    let verified_at = now_iso8601();
+    for criterion_index in valid_criteria_indices {
+        let verification = ProjectGoalCriterionVerification {
+            criterion_index,
+            evidence: evidence.clone(),
+            reviewer: reviewer.clone(),
+            verified_at: verified_at.clone(),
+        };
+        if let Some(existing) = goal
+            .verified_criteria
+            .iter_mut()
+            .find(|item| item.criterion_index == criterion_index)
+        {
+            *existing = verification;
+        } else {
+            goal.verified_criteria.push(verification);
+        }
+    }
+    goal.verified_criteria
+        .sort_by_key(|verification| verification.criterion_index);
+    goal.recent_status = status;
+    goal.updated_at = verified_at;
+    save_project_goal(workspace, &goal)?;
+    Ok(Some(goal))
+}
+
 fn update_goal(
     workspace: &Path,
     mutate: impl FnOnce(&mut ProjectGoal) -> Result<(), String>,
@@ -235,11 +320,89 @@ pub fn render_project_goal_prompt(workspace: &Path) -> String {
     } else {
         lines.push("Long-term project intent: still being inferred from repeated substantive user requests. Do not treat a single short-term task as the project objective.".to_string());
     }
-    if let Some(goal) = goal {
+    if let Some(goal) = goal.filter(|goal| goal.status == ProjectGoalStatus::Active) {
         lines.push(format!("Current milestone: {}", goal.objective));
         lines.push(format!("Milestone status: {}", goal.recent_status));
+        if goal.success_criteria.is_empty() {
+            lines.push("Milestone success criteria: not recorded. Do not claim the milestone is complete without asking for or deriving checkable criteria.".to_string());
+        } else {
+            lines.push("Milestone success criteria:".to_string());
+            lines.extend(
+                goal.success_criteria
+                    .iter()
+                    .enumerate()
+                    .map(|(index, criterion)| {
+                        let verified = goal
+                            .verified_criteria
+                            .iter()
+                            .any(|item| item.criterion_index == index);
+                        format!(
+                            "- [{}] [{index}] {criterion}",
+                            if verified { "verified" } else { "pending" }
+                        )
+                    }),
+            );
+        }
+        lines.push("Progress may be updated only from concrete tool/test/artifact evidence after an independent Reviewer passes the result. Never treat an Assistant completion claim or polished prose as evidence by itself.".to_string());
+    } else {
+        lines.push("Current milestone: none active. Do not turn a greeting, model-identity question, simple factual answer, or other one-off chat request into durable project state.".to_string());
     }
     lines.join("\n")
+}
+
+fn is_one_off_identity_answer_goal(objective: &str, criteria: &[String]) -> bool {
+    let objective = objective.to_lowercase();
+    let identity_signal = [
+        "模型身份",
+        "助手模型",
+        "模型名称",
+        "model identity",
+        "assistant identity",
+        "model name",
+    ]
+    .iter()
+    .any(|marker| objective.contains(marker))
+        || criteria.iter().any(|criterion| {
+            let lower = criterion.to_lowercase();
+            ["模型身份", "模型名称", "model identity", "model name"]
+                .iter()
+                .any(|marker| lower.contains(marker))
+        });
+    if !identity_signal {
+        return false;
+    }
+
+    let answer_signal = [
+        "回答用户",
+        "回复用户",
+        "answer the user",
+        "answer user's",
+        "respond to the user",
+    ]
+    .iter()
+    .any(|marker| objective.contains(marker));
+    let conversational_criteria = criteria
+        .iter()
+        .filter(|criterion| {
+            let lower = criterion.to_lowercase();
+            [
+                "用户提出",
+                "用户询问",
+                "助手明确",
+                "回答语言",
+                "与用户一致",
+                "user asks",
+                "user asked",
+                "assistant states",
+                "response language",
+                "same language as the user",
+            ]
+            .iter()
+            .any(|marker| lower.contains(marker))
+        })
+        .count();
+
+    answer_signal || conversational_criteria >= 2
 }
 
 #[must_use]

@@ -5,9 +5,13 @@
 //! (ARIS desktop chat) — and the contract both CLI agents and the desktop
 //! Literature UI share: one `papers/library.json` per project.
 //!
-//! - `LiteratureSearch` — arXiv Atom, Crossref REST, OpenAlex works and
-//!   Scopus Search API metadata search, normalised into one record shape and
-//!   deduplicated. Scopus needs `SCOPUS_API_KEY` (desktop Settings exports it).
+//! - `LiteratureSearch` — Scopus Search API, OpenAlex works, Crossref REST and
+//!   arXiv Atom metadata search, normalised into one record shape and
+//!   deduplicated. Scopus and OpenAlex are the published-venue core; arXiv runs
+//!   last as a preprint supplement, so a paper found in the core keeps its
+//!   peer-reviewed record and only borrows arXiv's open PDF link. Scopus needs
+//!   `SCOPUS_API_KEY` (desktop Settings exports it) and auto-joins the default
+//!   set only when the key is present.
 //! - `LiteratureLibraryUpsert` — merge search records into
 //!   `papers/library.json` without touching user state (stage, stars, tags,
 //!   verdicts survive re-discovery).
@@ -27,6 +31,12 @@ const PAPERS_DIR: &str = "papers";
 const LIBRARY_FILE: &str = "library.json";
 const HTTP_TIMEOUT: Duration = Duration::from_secs(25);
 const MAX_PDF_BYTES: u64 = 80 * 1024 * 1024;
+/// Per-source result target. The published-venue core (Scopus, OpenAlex,
+/// Crossref) fetches up to this many; the arXiv supplement is capped lower so
+/// preprints don't crowd out peer-reviewed hits.
+const DEFAULT_RESULT_LIMIT: usize = 50;
+const MAX_RESULT_LIMIT: usize = 100;
+const ARXIV_SUPPLEMENT_MAX: usize = 25;
 const USER_AGENT: &str = concat!(
     "aris/",
     env!("CARGO_PKG_VERSION"),
@@ -83,7 +93,10 @@ pub struct LiteratureBrowserDownloadTaskInput {
 // ── Tool entry points (sync, pretty-JSON out) ───────────────────────────────
 
 pub fn run_literature_search(input: LiteratureSearchInput) -> Result<String, String> {
-    let limit = input.max_results.unwrap_or(20).clamp(1, 50);
+    let limit = input
+        .max_results
+        .unwrap_or(DEFAULT_RESULT_LIMIT)
+        .clamp(1, MAX_RESULT_LIMIT);
     let outcome = search_remote(&input.query, &input.sources, limit)?;
     serde_json::to_string_pretty(&json!({
         "papers": outcome.papers,
@@ -425,10 +438,57 @@ fn http_client() -> Result<reqwest::blocking::Client, String> {
         .map_err(|e| e.to_string())
 }
 
-/// Blocking remote metadata search. Empty `sources` means every available
-/// source — Scopus joins the default set only when `SCOPUS_API_KEY` is set,
-/// but an explicit `"scopus"` request always runs (and surfaces the missing
-/// key as a warning).
+/// The metadata engines `LiteratureSearch` can query, in canonical-priority
+/// order: the published-venue core (Scopus → OpenAlex → Crossref) runs before
+/// arXiv so dedupe keeps the peer-reviewed record and arXiv only supplements.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Engine {
+    Scopus,
+    OpenAlex,
+    Crossref,
+    Arxiv,
+}
+
+/// Resolve which engines to run, always in priority order regardless of the
+/// order `sources` lists them. Empty `sources` means the full default set —
+/// Scopus joins it only when its key is available; an explicit `scopus`
+/// request always runs (and surfaces the missing key as a warning downstream).
+/// arXiv always runs last as the preprint supplement.
+fn planned_engines(sources: &[String], scopus_available: bool) -> Vec<Engine> {
+    let explicit = |name: &str| {
+        sources
+            .iter()
+            .any(|source| source.eq_ignore_ascii_case(name))
+    };
+    let wants = |name: &str| sources.is_empty() || explicit(name);
+    let mut engines = Vec::new();
+    if explicit("scopus") || (sources.is_empty() && scopus_available) {
+        engines.push(Engine::Scopus);
+    }
+    if wants("openalex") {
+        engines.push(Engine::OpenAlex);
+    }
+    if wants("crossref") {
+        engines.push(Engine::Crossref);
+    }
+    if wants("arxiv") {
+        engines.push(Engine::Arxiv);
+    }
+    engines
+}
+
+/// arXiv is a supplement — cap its result count so preprints don't crowd out
+/// the published-venue core when many overlap.
+fn supplement_limit(limit: usize) -> usize {
+    limit.min(ARXIV_SUPPLEMENT_MAX)
+}
+
+/// Blocking remote metadata search, run in canonical-priority order (Scopus →
+/// OpenAlex → Crossref → arXiv) so dedupe keeps the published-venue record and
+/// arXiv only fills the gaps (e.g. an open PDF link). Empty `sources` means the
+/// full default set — Scopus joins it only when `SCOPUS_API_KEY` is set, but an
+/// explicit `"scopus"` request always runs (and surfaces the missing key as a
+/// warning).
 pub fn search_remote(
     query: &str,
     sources: &[String],
@@ -438,12 +498,6 @@ pub fn search_remote(
     if query.is_empty() {
         return Err("search query is empty".to_string());
     }
-    let explicit = |name: &str| {
-        sources
-            .iter()
-            .any(|source| source.eq_ignore_ascii_case(name))
-    };
-    let wants = |name: &str| sources.is_empty() || explicit(name);
     let client = http_client()?;
     let mut papers = Vec::new();
     let mut warnings = Vec::new();
@@ -458,17 +512,13 @@ pub fn search_remote(
         }
         Err(error) => warnings.push(format!("{label}: {error}")),
     };
-    if wants("arxiv") {
-        run("arXiv", search_arxiv(&client, query, limit));
-    }
-    if wants("crossref") {
-        run("Crossref", search_crossref(&client, query, limit));
-    }
-    if wants("openalex") {
-        run("OpenAlex", search_openalex(&client, query, limit));
-    }
-    if explicit("scopus") || (sources.is_empty() && scopus_api_key().is_ok()) {
-        run("Scopus", search_scopus(&client, query, limit));
+    for engine in planned_engines(sources, scopus_api_key().is_ok()) {
+        match engine {
+            Engine::Scopus => run("Scopus", search_scopus(&client, query, limit)),
+            Engine::OpenAlex => run("OpenAlex", search_openalex(&client, query, limit)),
+            Engine::Crossref => run("Crossref", search_crossref(&client, query, limit)),
+            Engine::Arxiv => run("arXiv", search_arxiv(&client, query, supplement_limit(limit))),
+        }
     }
     if papers.is_empty() && !warnings.is_empty() {
         return Err(warnings.join("; "));
@@ -907,43 +957,73 @@ fn search_scopus(
     limit: usize,
 ) -> Result<Vec<RemotePaper>, String> {
     let api_key = scopus_api_key()?;
-    let count = limit.min(SCOPUS_PAGE_MAX);
     let query = scopus_query(query);
-    let request = |view: Option<&str>| {
-        let mut params: Vec<(&str, String)> = vec![
-            ("query", query.clone()),
-            ("count", count.to_string()),
-            ("start", "0".to_string()),
-        ];
-        if let Some(view) = view {
-            params.push(("view", view.to_string()));
-        }
-        client
-            .get("https://api.elsevier.com/content/search/scopus")
-            .header("X-ELS-APIKey", api_key.clone())
-            .header("Accept", "application/json")
-            .query(&params)
-            .send()
-    };
     // COMPLETE view includes abstracts but needs extra entitlement — fall back
-    // to the STANDARD view (no abstracts) instead of failing the search.
-    let response = request(Some("COMPLETE")).map_err(|e| e.to_string())?;
-    let response = if matches!(response.status().as_u16(), 401 | 403) {
-        request(None).map_err(|e| e.to_string())?
-    } else {
-        response
-    };
-    let response = response
-        .error_for_status()
-        .map_err(|e| format!("{e} (check the SCOPUS_API_KEY and its entitlements)"))?;
-    let body: Value = response.json().map_err(|e| e.to_string())?;
-    let entries = body["search-results"]["entry"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
-    // An empty result set arrives as one `{ "error": "Result set was empty" }`
-    // entry — filter_map drops it because it has no title.
-    Ok(entries.iter().filter_map(scopus_entry_to_paper).collect())
+    // to the STANDARD view (no abstracts) once, then keep using it for the rest
+    // of the pages instead of failing the search.
+    let mut view: Option<&str> = Some("COMPLETE");
+    let mut papers = Vec::new();
+    let mut start = 0usize;
+    // Scopus caps each page at SCOPUS_PAGE_MAX, so page through until we reach
+    // the requested `limit` or exhaust the result set.
+    loop {
+        let count = (limit - papers.len()).min(SCOPUS_PAGE_MAX);
+        if count == 0 {
+            break;
+        }
+        let request = |view: Option<&str>| {
+            let mut params: Vec<(&str, String)> = vec![
+                ("query", query.clone()),
+                ("count", count.to_string()),
+                ("start", start.to_string()),
+            ];
+            if let Some(view) = view {
+                params.push(("view", view.to_string()));
+            }
+            client
+                .get("https://api.elsevier.com/content/search/scopus")
+                .header("X-ELS-APIKey", api_key.clone())
+                .header("Accept", "application/json")
+                .query(&params)
+                .send()
+        };
+        let response = request(view).map_err(|e| e.to_string())?;
+        let response = if matches!(response.status().as_u16(), 401 | 403) && view.is_some() {
+            view = None;
+            request(None).map_err(|e| e.to_string())?
+        } else {
+            response
+        };
+        let response = response
+            .error_for_status()
+            .map_err(|e| format!("{e} (check the SCOPUS_API_KEY and its entitlements)"))?;
+        let body: Value = response.json().map_err(|e| e.to_string())?;
+        let results = &body["search-results"];
+        let total = scopus_total_results(results);
+        let entries = results["entry"].as_array().cloned().unwrap_or_default();
+        // An empty result set arrives as one `{ "error": "Result set was empty" }`
+        // entry — filter_map drops it because it has no title.
+        let before = papers.len();
+        papers.extend(entries.iter().filter_map(scopus_entry_to_paper));
+        let added = papers.len() - before;
+        start += count;
+        // Stop at the reported total (when known), a short page (no more rows),
+        // or when a page yields nothing usable.
+        if (total > 0 && start >= total) || entries.len() < count || added == 0 {
+            break;
+        }
+    }
+    Ok(papers)
+}
+
+/// Scopus reports the full match count in `opensearch:totalResults` (a JSON
+/// string). Missing/unparseable means "unknown" — pagination then relies on
+/// short-page detection instead.
+fn scopus_total_results(results: &Value) -> usize {
+    match &results["opensearch:totalResults"] {
+        Value::String(value) => value.trim().parse().unwrap_or(0),
+        value => usize::try_from(value.as_u64().unwrap_or(0)).unwrap_or(0),
+    }
 }
 
 fn scopus_entry_to_paper(entry: &Value) -> Option<RemotePaper> {

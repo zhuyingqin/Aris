@@ -23,6 +23,7 @@ const apiMocks = vi.hoisted(() => ({
   chatSetContext: vi.fn((_sessionId: string, _messages: unknown[], _mode?: string) => Promise.resolve(0)),
   chatDelete: vi.fn(() => Promise.resolve()),
   chatEventsReplay: vi.fn(() => Promise.resolve({ sessionId: "chat", eventCount: 0, lastSeq: 0, turns: [] })),
+  chatEventsRead: vi.fn((_sessionId: string) => Promise.resolve([] as Array<{ kind: string; payload: unknown }>)),
   chatUiSessionsList: vi.fn(() => Promise.resolve([])),
   chatUiSessionLoad: vi.fn(() => Promise.resolve(null)),
   chatUiTurnLoad: vi.fn(() => Promise.resolve(null)),
@@ -36,6 +37,7 @@ const apiMocks = vi.hoisted(() => ({
   chatModelOptions: vi.fn(() => Promise.resolve({ provider: "anthropic-compat", current: "MiniMax-M3", options: [{ value: "MiniMax-M3", label: "MiniMax-M3", description: null }] })),
   chatModelSet: vi.fn((model: string) => Promise.resolve({ ready: true, model, provider: "anthropic-compat" })),
   chatCancel: vi.fn(() => Promise.resolve()),
+  chatReviewClear: vi.fn(() => Promise.resolve()),
   onChatDelta: vi.fn(() => Promise.resolve(() => undefined)),
   onChatThinkingDelta: vi.fn(() => Promise.resolve(() => undefined)),
   onChatTool: vi.fn(() => Promise.resolve(() => undefined)),
@@ -43,6 +45,7 @@ const apiMocks = vi.hoisted(() => ({
   onChatToolResult: vi.fn(() => Promise.resolve(() => undefined)),
   onChatPermissionRequest: vi.fn(() => Promise.resolve(() => undefined)),
   onChatPermissionResolved: vi.fn(() => Promise.resolve(() => undefined)),
+  onChatReview: vi.fn(() => Promise.resolve(() => undefined)),
   onChatDone: vi.fn(() => Promise.resolve(() => undefined)),
   onChatError: vi.fn<(
     handler: (event: { sessionId: string; message: string; sessionPreserved?: boolean }) => void,
@@ -59,16 +62,22 @@ vi.mock("../ChatThread", () => ({
     turns,
     onContinue,
     onRetry,
+    onOpenIndependentReview,
   }: {
     turns: ChatTurn[];
     onContinue: () => void;
     onRetry: (turn: ChatTurn) => void;
+    onOpenIndependentReview?: () => void;
   }) => (
     <div data-testid="chat-thread">
       {turns.map((turn) => (
         <article key={turn.id} data-role={turn.role}>
           {turn.blocks.map((block, index) => (
-            block.kind === "text" ? <div key={index}>{block.text}</div> : null
+            block.kind === "text"
+              ? <div key={index}>{block.text}</div>
+              : block.kind === "review"
+                ? <button key={index} aria-label="Open Reviewer status" onClick={onOpenIndependentReview}>Reviewer Agent</button>
+                : null
           ))}
           {turn.stopped && <button onClick={onContinue}>Continue</button>}
           {turn.role === "assistant" && turn.error && <div role="alert">{turn.error}</div>}
@@ -156,6 +165,7 @@ describe("Chat export action", () => {
     apiMocks.skillsList.mockResolvedValue([]);
     apiMocks.chatUiSessionsList.mockResolvedValue([]);
     apiMocks.chatEventsReplay.mockResolvedValue({ sessionId: "chat", eventCount: 0, lastSeq: 0, turns: [] });
+    apiMocks.chatEventsRead.mockResolvedValue([]);
     apiMocks.chatUiSessionLoad.mockResolvedValue(null);
     apiMocks.chatUiSessionSave.mockResolvedValue(undefined);
     apiMocks.chatUiSessionDelete.mockResolvedValue(undefined);
@@ -225,6 +235,54 @@ describe("Chat export action", () => {
     await userEvent.click(screen.getByRole("button", { name: "Close side task tab: Side task 2" }));
     expect(screen.queryByRole("tab", { name: "Side task 2" })).toBeNull();
     expect(screen.getByRole("tab", { name: "Side task 1" }).getAttribute("aria-selected")).toBe("true");
+  });
+
+  it("keeps Reviewer details closed until the in-chat Agent badge is clicked", async () => {
+    const session = makeSession("default");
+    session.id = "session-independent-review";
+    session.title = "Reviewed task";
+    session.turns = [
+      { id: "review-user", role: "user", blocks: [{ kind: "text", text: "Implement and verify this change" }] },
+      {
+        id: "review-assistant",
+        role: "assistant",
+        streaming: true,
+        blocks: [{
+          kind: "review",
+          phase: "reviewing",
+          attempt: 1,
+          maxRevisions: 2,
+          reviewerProvider: "openai",
+          reviewerModel: "gpt-5-reviewer",
+        }],
+      },
+    ];
+    localStorage.setItem(SESSIONS_KEY, JSON.stringify([session]));
+    localStorage.setItem(CURRENT_KEY, session.id);
+    apiMocks.chatEventsRead.mockResolvedValue([{
+      kind: "independent_review",
+      payload: {
+        sessionId: session.id,
+        phase: "reviewing",
+        attempt: 1,
+        maxRevisions: 2,
+        reviewerProvider: "openai",
+        reviewerModel: "gpt-5-reviewer",
+      },
+    }]);
+
+    render(<Chat />);
+
+    await userEvent.click(await screen.findByRole("button", { name: "Reviewed task" }));
+    await screen.findByRole("tab", { name: "Independent Reviewer", hidden: true });
+    expect(document.querySelector(".chat-root")?.classList.contains("side-task-open")).toBe(false);
+    expect(document.getElementById("side-task-panel")?.hidden).toBe(true);
+
+    await userEvent.click(screen.getByRole("button", { name: "Open Reviewer status" }));
+
+    await waitFor(() => expect(document.querySelector(".chat-root")?.classList.contains("side-task-open")).toBe(true));
+    expect(screen.getByRole("tab", { name: "Independent Reviewer" }).getAttribute("aria-selected")).toBe("true");
+    expect(document.getElementById("side-task-panel")?.hidden).toBe(false);
   });
 
   it("runs /export for the current chat and appends the exported path", async () => {

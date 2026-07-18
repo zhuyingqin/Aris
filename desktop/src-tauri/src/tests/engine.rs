@@ -12,6 +12,472 @@ fn internal_no_tools_executor_denies_unexpected_tool_calls() {
         .contains("not available during this no-tools request"));
 }
 
+fn review_test_summary(tool_name: Option<&str>) -> runtime::TurnSummary {
+    let assistant = tool_name.map_or_else(
+        || {
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "Direct answer".to_string(),
+            }])
+        },
+        |name| {
+            ConversationMessage::assistant(vec![ContentBlock::ToolUse {
+                id: "tool-review".to_string(),
+                name: name.to_string(),
+                input: "{}".to_string(),
+            }])
+        },
+    );
+    runtime::TurnSummary {
+        assistant_messages: vec![assistant],
+        tool_results: Vec::new(),
+        iterations: 1,
+        usage: TokenUsage::default(),
+        auto_compaction: None,
+    }
+}
+
+#[test]
+fn independent_review_policy_skips_simple_answers_and_gates_tool_work() {
+    assert!(!review_required_for_turn(
+        "What is two plus two?",
+        &review_test_summary(None)
+    ));
+    assert!(review_required_for_turn(
+        "修复这个 Rust 函数",
+        &review_test_summary(Some("edit_file"))
+    ));
+    assert!(review_required_for_turn(
+        "检查集成测试",
+        &review_test_summary(Some("bash"))
+    ));
+    assert!(review_required_for_turn(
+        "continue",
+        &review_test_summary(Some("append_file"))
+    ));
+    assert!(!review_required_for_turn(
+        "continue",
+        &review_test_summary(Some("TodoWrite"))
+    ));
+    assert!(!review_required_for_turn(
+        "Explain how to build a conceptual framework",
+        &review_test_summary(None)
+    ));
+    assert!(review_required_for_turn(
+        "Please review this answer",
+        &review_test_summary(None)
+    ));
+    assert!(!review_required_for_turn(
+        "What issues did the Reviewer raise?",
+        &review_test_summary(None)
+    ));
+    assert!(!review_required_for_turn(
+        "审查者提了什么问题？",
+        &review_test_summary(Some("edit_file"))
+    ));
+    assert!(review_required_for_turn(
+        "请重新审查这份综述",
+        &review_test_summary(None)
+    ));
+}
+
+#[test]
+fn reviewer_must_not_share_the_executor_identity() {
+    assert!(!reviewer_is_independent(
+        "openai", "gpt-5.5", "OpenAI", "GPT-5.5"
+    ));
+    assert!(reviewer_is_independent(
+        "openai",
+        "gpt-5.5",
+        "minimax",
+        "MiniMax-M3"
+    ));
+    assert!(reviewer_is_independent(
+        "openai", "gpt-5.5", "openai", "gpt-5.6"
+    ));
+}
+
+#[test]
+fn independent_review_parser_keeps_adversarial_findings_structured() {
+    let result = parse_independent_review(
+        r#"preface <thinking>discard me</thinking> {
+          "verdict":"revise",
+          "summary":"Agent path was not checked",
+          "issues":[{"severity":"high","title":"Missing path","detail":"Only desktop changed","evidence":"diff","recommendation":"inspect agent"}],
+          "evidenceChecked":["desktop diff"],
+          "missingChecks":["cargo check"],
+          "revisionInstructions":["inspect agent path"],
+          "relevantToGoal":true,
+          "progressDelta":null,
+          "criteriaSatisfied":[]
+        } trailing"#,
+    )
+    .expect("parse review");
+    assert_eq!(result.verdict, IndependentReviewVerdict::Revise);
+    assert_eq!(result.issues[0].title, "Missing path");
+    assert_eq!(result.missing_checks, vec!["cargo check"]);
+}
+
+#[test]
+fn independent_review_event_exposes_the_active_reviewer_identity() {
+    let payload = serde_json::to_value(IndependentReviewEvent {
+        session_id: "review-session",
+        phase: "reviewing",
+        attempt: 1,
+        revision: 0,
+        max_revisions: 2,
+        reviewer_provider: Some("openai".to_string()),
+        reviewer_model: Some("gpt-5-reviewer".to_string()),
+        result: None,
+    })
+    .expect("serialize review event");
+
+    assert_eq!(payload["reviewerProvider"], "openai");
+    assert_eq!(payload["reviewerModel"], "gpt-5-reviewer");
+    assert_eq!(payload["phase"], "reviewing");
+}
+
+#[test]
+fn persisted_review_memory_keeps_rounds_until_an_explicit_clear() {
+    let result = IndependentReviewResult {
+        verdict: IndependentReviewVerdict::Revise,
+        summary: "Integration coverage is missing".to_string(),
+        issues: vec![IndependentReviewIssue {
+            severity: "high".to_string(),
+            title: "Missing integration test".to_string(),
+            detail: "Only unit tests were run".to_string(),
+            ..IndependentReviewIssue::default()
+        }],
+        ..IndependentReviewResult::default()
+    };
+    let review_event = crate::chat_events::ChatEventLogEntry {
+        version: 1,
+        seq: 1,
+        ts: 1,
+        session_id: "review-memory".to_string(),
+        kind: "independent_review".to_string(),
+        payload: json!({
+            "sessionId": "review-memory",
+            "phase": "result",
+            "attempt": 4,
+            "revision": 0,
+            "maxRevisions": 2,
+            "result": result,
+        }),
+    };
+    let memory = persisted_review_memory_from_events(vec![review_event.clone()]);
+    assert_eq!(memory.last_attempt, 4);
+    assert_eq!(memory.rounds.len(), 1);
+    let prompt = render_executor_review_memory(&memory).expect("review memory prompt");
+    assert!(prompt.contains("Missing integration test"));
+    assert!(prompt.contains("do not edit files"));
+
+    let mut first_review_complete = review_event.clone();
+    first_review_complete.seq = 2;
+    first_review_complete.ts = 2;
+    first_review_complete.payload["phase"] = json!("complete");
+
+    let legacy_second_review = crate::chat_events::ChatEventLogEntry {
+        version: 1,
+        seq: 3,
+        ts: 3,
+        session_id: "review-memory".to_string(),
+        kind: "independent_review".to_string(),
+        payload: json!({
+            "sessionId": "review-memory",
+            "phase": "result",
+            "attempt": 4,
+            "maxRevisions": 2,
+            "result": {
+                "verdict": "pass",
+                "summary": "A later legacy review with a colliding attempt",
+            },
+        }),
+    };
+    let legacy_second_complete = crate::chat_events::ChatEventLogEntry {
+        version: 1,
+        seq: 4,
+        ts: 4,
+        session_id: "review-memory".to_string(),
+        kind: "independent_review".to_string(),
+        payload: json!({
+            "sessionId": "review-memory",
+            "phase": "complete",
+            "attempt": 4,
+            "maxRevisions": 2,
+            "result": {
+                "verdict": "pass",
+                "summary": "A later legacy review with a colliding attempt",
+            },
+        }),
+    };
+    let migrated = persisted_review_memory_from_events(vec![
+        review_event.clone(),
+        first_review_complete,
+        legacy_second_review,
+        legacy_second_complete,
+    ]);
+    assert_eq!(migrated.last_attempt, 5);
+    assert_eq!(migrated.rounds.len(), 2);
+
+    let clear_event = crate::chat_events::ChatEventLogEntry {
+        version: 1,
+        seq: 5,
+        ts: 5,
+        session_id: "review-memory".to_string(),
+        kind: "independent_review".to_string(),
+        payload: json!({
+            "sessionId": "review-memory",
+            "phase": "cleared",
+            "attempt": 0,
+            "revision": 0,
+            "maxRevisions": 2,
+        }),
+    };
+    let cleared = persisted_review_memory_from_events(vec![review_event, clear_event]);
+    assert_eq!(cleared.last_attempt, 0);
+    assert!(cleared.rounds.is_empty());
+    assert!(render_executor_review_memory(&cleared).is_none());
+}
+
+#[test]
+fn reviewer_feedback_is_an_internal_system_message() {
+    let message = revision_prompt(
+        &IndependentReviewResult {
+            verdict: IndependentReviewVerdict::Revise,
+            revision_instructions: vec!["Run cargo check".to_string()],
+            ..IndependentReviewResult::default()
+        },
+        1,
+    );
+    assert_eq!(message.role, MessageRole::System);
+    assert!(matches!(
+        message.blocks.first(),
+        Some(ContentBlock::Text { text })
+            if text.contains("Run cargo check")
+                && text.contains("clean, standalone, user-facing replacement answer")
+                && text.contains("Never mention the Reviewer")
+    ));
+}
+
+#[test]
+fn irrelevant_goal_only_findings_cannot_force_revision() {
+    let mut review = IndependentReviewResult {
+        verdict: IndependentReviewVerdict::Revise,
+        relevant_to_goal: false,
+        issues: vec![IndependentReviewIssue {
+            severity: "critical".to_string(),
+            title: "Project milestone incomplete".to_string(),
+            detail: "Success criterion says the user must ask about model identity".to_string(),
+            recommendation: "Add a model identity paragraph".to_string(),
+            ..IndependentReviewIssue::default()
+        }],
+        revision_instructions: vec!["Satisfy the project milestone".to_string()],
+        progress_delta: Some("unrelated progress".to_string()),
+        criteria_satisfied: vec![0],
+        ..IndependentReviewResult::default()
+    };
+
+    normalize_review_goal_gating(&mut review);
+
+    assert_eq!(review.verdict, IndependentReviewVerdict::Pass);
+    assert!(review.issues.is_empty());
+    assert!(review.revision_instructions.is_empty());
+    assert!(review.progress_delta.is_none());
+    assert!(review.criteria_satisfied.is_empty());
+}
+
+#[test]
+fn user_request_omission_is_not_mistaken_for_a_goal_behavior_gate() {
+    let mut review = IndependentReviewResult {
+        verdict: IndependentReviewVerdict::Revise,
+        relevant_to_goal: false,
+        issues: vec![IndependentReviewIssue {
+            severity: "high".to_string(),
+            title: "User request not directly addressed".to_string(),
+            detail: "The user asked to search for related questions, but the answer did not do so."
+                .to_string(),
+            recommendation: "Address the requested search directly.".to_string(),
+            ..IndependentReviewIssue::default()
+        }],
+        revision_instructions: vec!["Answer what the user requested.".to_string()],
+        ..IndependentReviewResult::default()
+    };
+
+    normalize_review_goal_gating(&mut review);
+
+    assert_eq!(review.verdict, IndependentReviewVerdict::Revise);
+    assert_eq!(review.issues.len(), 1);
+    assert_eq!(review.revision_instructions.len(), 1);
+}
+
+#[test]
+fn advisory_review_findings_do_not_force_an_automatic_revision() {
+    let mut review = IndependentReviewResult {
+        verdict: IndependentReviewVerdict::Revise,
+        relevant_to_goal: true,
+        issues: vec![
+            IndependentReviewIssue {
+                severity: "low".to_string(),
+                title: "Optional wording improvement".to_string(),
+                ..IndependentReviewIssue::default()
+            },
+            IndependentReviewIssue {
+                severity: "medium".to_string(),
+                title: "Optional additional example".to_string(),
+                ..IndependentReviewIssue::default()
+            },
+        ],
+        ..IndependentReviewResult::default()
+    };
+
+    normalize_review_goal_gating(&mut review);
+
+    assert_eq!(review.verdict, IndependentReviewVerdict::Pass);
+    assert_eq!(review.issues.len(), 2, "advisory issues remain visible");
+
+    review.verdict = IndependentReviewVerdict::Revise;
+    review.missing_checks = vec!["Run the integration test".to_string()];
+    normalize_review_goal_gating(&mut review);
+    assert_eq!(review.verdict, IndependentReviewVerdict::Revise);
+}
+
+#[test]
+fn review_prompt_preserves_prior_evidence_and_downgrades_irrelevant_goals() {
+    let root = std::env::temp_dir().join(format!(
+        "somniq-review-prompt-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&root).expect("temp workspace");
+    runtime::start_project_goal(
+        &root,
+        runtime::ProjectGoalDraft {
+            objective: "Finish onboarding".to_string(),
+            success_criteria: vec![
+                "用户提出模型身份问题".to_string(),
+                "Produce a verified artifact".to_string(),
+            ],
+            recent_status: String::new(),
+        },
+        None,
+    )
+    .expect("start project goal");
+    let prior = IndependentReviewResult {
+        verdict: IndependentReviewVerdict::Revise,
+        summary: "Run the integration test".to_string(),
+        evidence_checked: vec!["unit test passed".to_string()],
+        ..IndependentReviewResult::default()
+    };
+    let prompt = independent_review_prompt(
+        "Fix the integration",
+        "Implemented and tested",
+        "Tool evidence round 1: unit test passed\nTool evidence round 2: integration passed",
+        "File evidence round 1: src/lib.rs",
+        &[prior],
+        2,
+        &root,
+        "minimax",
+        "MiniMax-M3",
+    );
+
+    assert!(prompt.contains("If relevantToGoal=false"));
+    assert!(prompt.contains("perform an incremental re-review"));
+    assert!(prompt.contains("unit test passed"));
+    assert!(prompt.contains("integration passed"));
+    assert!(prompt.contains("Run the integration test"));
+    assert!(prompt.contains("[truncated]"));
+    assert!(prompt.contains("REFERENCE-ONLY user/external behavior"));
+    assert!(prompt.contains("This workspace is not a Git worktree"));
+    assert!(prompt.contains("Do not penalize the Executor for missing git status/diff output"));
+    assert!(!prompt.contains("Unstaged diff:"));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn review_materializes_recent_ignored_literature_evidence() {
+    let root = std::env::temp_dir().join(format!(
+        "somniq-review-evidence-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    let lit = root.join(".somniq").join("lit");
+    fs::create_dir_all(&lit).expect("create lit directory");
+    fs::write(
+        lit.join("results.json"),
+        "{\"papers\":6,\"deduplicated\":true}\napi_key=must-not-leak",
+    )
+    .expect("write evidence");
+
+    let evidence =
+        review_materialized_evidence(&review_test_summary(Some("LiteratureSearch")), &root);
+
+    assert!(evidence.contains("results.json"));
+    assert!(evidence.contains("deduplicated"));
+    assert!(evidence.contains("[redacted sensitive evidence line]"));
+    assert!(!evidence.contains("must-not-leak"));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn review_session_collapse_keeps_tools_and_only_the_clean_final_answer() {
+    let user = ConversationMessage::user_text("Fix the bug");
+    let mut session = Session::new();
+    session.messages.push(user.clone());
+    session.messages.push(ConversationMessage::assistant(vec![
+        ContentBlock::Text {
+            text: "Rejected draft".to_string(),
+        },
+        ContentBlock::ToolUse {
+            id: "tool-1".to_string(),
+            name: "edit_file".to_string(),
+            input: r#"{"path":"src/lib.rs"}"#.to_string(),
+        },
+    ]));
+    session.messages.push(ConversationMessage::tool_result(
+        "tool-1",
+        "edit_file",
+        "ok",
+        false,
+    ));
+    session
+        .messages
+        .push(revision_prompt(&IndependentReviewResult::default(), 1));
+    session
+        .messages
+        .push(ConversationMessage::assistant(vec![ContentBlock::Text {
+            text: "# Replacement answer for Reviewer".to_string(),
+        }]));
+
+    collapse_independent_review_session(&mut session, &user, "Fixed and tested.", None);
+
+    assert!(session
+        .messages
+        .iter()
+        .all(|message| message.role != MessageRole::System));
+    assert!(session.messages.iter().any(|message| {
+        message
+            .blocks
+            .iter()
+            .any(|block| matches!(block, ContentBlock::ToolUse { name, .. } if name == "edit_file"))
+    }));
+    let visible_text = session
+        .messages
+        .iter()
+        .flat_map(|message| message.blocks.iter())
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(visible_text, vec!["Fix the bug", "Fixed and tested."]);
+}
+
 #[test]
 fn paired_remote_runtime_uses_desktop_execution_with_a_safe_mobile_mirror() {
     let remote = ChatTurnRuntime::RemoteApproved;

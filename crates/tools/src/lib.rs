@@ -1,6 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 // Bundled skills are compiled into the runtime crate and re-exported
@@ -9,6 +13,7 @@ use runtime::BUNDLED_SKILLS;
 use api::{read_base_url, read_send_betas, AuthSource};
 use aris_executor::{
     AnthropicRuntimeClient as SharedAnthropicRuntimeClient, ExecutorToolSpec, NoopStreamObserver,
+    StreamObserver,
 };
 use reqwest::blocking::Client;
 use runtime::{
@@ -17,7 +22,8 @@ use runtime::{
     write_file_with_context, ApiClient, ApiRequest, AssistantEvent, BashCommandInput,
     ConversationRuntime, FileChangeGetInput, FileChangeListInput, FileChangeOperation,
     FileChangeRecord, FileChangeRevertInput, FileMutationContext, GrepSearchInput, PermissionMode,
-    PermissionPolicy, RuntimeError, Session, StructuredPatchHunk, ToolError, ToolExecutor,
+    PermissionPolicy, RuntimeError, Session, StructuredPatchHunk, TokenUsage, ToolError,
+    ToolExecutor,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -451,17 +457,17 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "LiteratureSearch",
-            description: "Search scholarly metadata on arXiv, Crossref, OpenAlex and Scopus without a shell. Returns normalised, deduplicated records (title, authors, year, venue, DOI, abstract, pdfUrl). Scopus requires SCOPUS_API_KEY (set via desktop Settings) and is skipped from the default source set when the key is missing. Used by literature skills (/arxiv, /research-lit) when bash/python is unavailable. Follow up with LiteratureLibraryUpsert to record results.",
+            description: "Search scholarly metadata across Scopus, OpenAlex, Crossref and arXiv without a shell. Scopus and OpenAlex are the published-venue core, Crossref adds more venues, and arXiv runs last as a preprint supplement — results are deduplicated so a paper found in the core keeps its peer-reviewed record and only borrows arXiv's open PDF link. Returns normalised records (title, authors, year, venue, DOI, abstract, pdfUrl) plus per-source counts. For a comprehensive review OMIT `sources` (runs the full core + supplement) and pass maxResults around 50. Scopus requires SCOPUS_API_KEY (set via desktop Settings) and auto-joins the default set only when the key is present. Used by literature skills (/arxiv, /research-lit) when bash/python is unavailable. Follow up with LiteratureLibraryUpsert to record results.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "query": { "type": "string", "minLength": 2 },
                     "sources": {
                         "type": "array",
-                        "items": { "type": "string", "enum": ["arxiv", "crossref", "openalex", "scopus"] },
-                        "description": "Sources to query. Empty or omitted means all available sources."
+                        "items": { "type": "string", "enum": ["scopus", "openalex", "crossref", "arxiv"] },
+                        "description": "Engines to query (listing order is ignored — results always follow the Scopus → OpenAlex → Crossref → arXiv priority). Empty or omitted means the full default set: Scopus + OpenAlex + Crossref core plus the arXiv supplement."
                     },
-                    "maxResults": { "type": "integer", "minimum": 1, "maximum": 50 }
+                    "maxResults": { "type": "integer", "minimum": 1, "maximum": 100, "description": "Per-source result target (default 50). Core sources fetch up to this; arXiv is capped lower as a supplement." }
                 },
                 "required": ["query"],
                 "additionalProperties": false
@@ -6620,6 +6626,53 @@ struct LlmReviewInput {
     model: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LlmReviewRun {
+    pub text: String,
+    pub usages: Vec<TokenUsage>,
+}
+
+struct ReviewerCancelObserver {
+    cancelled: Arc<AtomicBool>,
+}
+
+impl StreamObserver for ReviewerCancelObserver {
+    fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
+    }
+}
+
+fn reviewer_stream_observer(cancelled: Option<Arc<AtomicBool>>) -> Box<dyn StreamObserver> {
+    cancelled.map_or_else(
+        || Box::new(NoopStreamObserver) as Box<dyn StreamObserver>,
+        |cancelled| Box::new(ReviewerCancelObserver { cancelled }) as Box<dyn StreamObserver>,
+    )
+}
+
+/// Execute the configured Reviewer while preserving provider usage for callers
+/// that own audit and billing logs. The ordinary `LlmReview` tool still returns
+/// only the review text for backwards compatibility.
+pub fn execute_llm_review_observed(
+    prompt: String,
+    model: Option<String>,
+) -> Result<LlmReviewRun, String> {
+    run_llm_review_observed(LlmReviewInput { prompt, model }, None)
+}
+
+/// Execute a Reviewer request that can be cancelled by the owning desktop
+/// chat turn. Provider streaming loops poll the observer even when the
+/// Reviewer emits no user-visible deltas.
+pub fn execute_llm_review_observed_with_cancel(
+    prompt: String,
+    model: Option<String>,
+    cancelled: Arc<AtomicBool>,
+) -> Result<LlmReviewRun, String> {
+    if cancelled.load(Ordering::SeqCst) {
+        return Err("interrupted by user".to_string());
+    }
+    run_llm_review_observed(LlmReviewInput { prompt, model }, Some(cancelled))
+}
+
 /// Route a model name to its OpenAI-compatible reviewer endpoint and API key
 /// env var. Returns (key_env, default_base_url, provider_tag).
 /// The provider_tag lets us compare against `ARIS_REVIEWER_PROVIDER` to detect
@@ -6749,6 +6802,13 @@ fn resolve_anthropic_compat_reviewer_model<'a>(
 }
 
 fn run_llm_review(input: LlmReviewInput) -> Result<String, String> {
+    run_llm_review_observed(input, None).map(|run| run.text)
+}
+
+fn run_llm_review_observed(
+    input: LlmReviewInput,
+    cancelled: Option<Arc<AtomicBool>>,
+) -> Result<LlmReviewRun, String> {
     let env_reviewer_model = std::env::var("ARIS_REVIEWER_MODEL")
         .ok()
         .filter(|s| !s.is_empty());
@@ -6800,7 +6860,7 @@ fn run_llm_review(input: LlmReviewInput) -> Result<String, String> {
         let base = custom_base_url.ok_or_else(|| {
             "LlmReview: ARIS_REVIEWER_BASE_URL not set (needed for custom reviewer)".to_string()
         })?;
-        return call_openai_compat_reviewer(&key, &base, model, &input.prompt);
+        return call_openai_compat_reviewer(&key, &base, model, &input.prompt, cancelled);
     }
 
     // Anthropic-compatible reviewer mode (e.g., Claude via proxy, DeepSeek).
@@ -6830,7 +6890,7 @@ fn run_llm_review(input: LlmReviewInput) -> Result<String, String> {
             "https://api.anthropic.com"
         };
         let base = custom_base_url.unwrap_or_else(|| default_base.to_string());
-        return call_anthropic_compat_reviewer(&key, &base, model, &input.prompt);
+        return call_anthropic_compat_reviewer(&key, &base, model, &input.prompt, cancelled);
     }
 
     // OpenAI-compat path: resolve model with fallback, then route to its endpoint.
@@ -6857,7 +6917,7 @@ fn run_llm_review(input: LlmReviewInput) -> Result<String, String> {
         .filter(|k| !k.is_empty())
         .ok_or_else(|| format!("LlmReview: {key_env} not set (needed for model '{model}')"))?;
 
-    call_openai_compat_reviewer(&key, &base_url, model, &input.prompt)
+    call_openai_compat_reviewer(&key, &base_url, model, &input.prompt, cancelled)
 }
 
 // Reviewer settings historically stored full endpoint URLs. The shared
@@ -6887,8 +6947,7 @@ fn anthropic_executor_base_url(base_url_or_endpoint: &str) -> String {
 fn run_reviewer_turn(
     client: aris_executor::ExecutorClient,
     prompt: &str,
-) -> Result<String, String> {
-    runtime::clear_interrupt();
+) -> Result<LlmReviewRun, String> {
     let mut runtime = ConversationRuntime::new(
         Session::new(),
         client,
@@ -6903,7 +6962,12 @@ fn run_reviewer_turn(
     if text.is_empty() {
         Err("LlmReview: empty reviewer response".to_string())
     } else {
-        Ok(text)
+        let usages = summary
+            .assistant_messages
+            .iter()
+            .filter_map(|message| message.usage)
+            .collect();
+        Ok(LlmReviewRun { text, usages })
     }
 }
 
@@ -6912,7 +6976,8 @@ fn call_anthropic_compat_reviewer(
     base_url: &str,
     model: &str,
     prompt: &str,
-) -> Result<String, String> {
+    cancelled: Option<Arc<AtomicBool>>,
+) -> Result<LlmReviewRun, String> {
     let client = SharedAnthropicRuntimeClient::new(
         AuthSource::BearerToken(api_key.to_string()),
         anthropic_executor_base_url(base_url),
@@ -6921,7 +6986,7 @@ fn call_anthropic_compat_reviewer(
         false,
         Vec::new(),
         8192,
-        Box::new(NoopStreamObserver),
+        reviewer_stream_observer(cancelled),
     )
     .map(aris_executor::ExecutorClient::Anthropic)
     .map_err(|error| format!("LlmReview executor setup failed: {error}"))?;
@@ -6933,7 +6998,8 @@ fn call_openai_compat_reviewer(
     base_url: &str,
     model: &str,
     prompt: &str,
-) -> Result<String, String> {
+    cancelled: Option<Arc<AtomicBool>>,
+) -> Result<LlmReviewRun, String> {
     let client = aris_executor::OpenAIRuntimeClient::new(
         aris_executor::OpenAIExecutorConfig {
             api_key: api_key.to_string(),
@@ -6942,7 +7008,7 @@ fn call_openai_compat_reviewer(
         model.to_string(),
         false,
         Vec::new(),
-        Box::new(NoopStreamObserver),
+        reviewer_stream_observer(cancelled),
     )
     .map(aris_executor::ExecutorClient::OpenAI)
     .map_err(|error| format!("LlmReview executor setup failed: {error}"))?;

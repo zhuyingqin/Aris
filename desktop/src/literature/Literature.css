@@ -977,6 +977,10 @@
   border-color: transparent;
 }
 
+.lit-card-star.starred .svg-icon {
+  fill: currentColor;
+}
+
 .lit-card-meta {
   font-size: 11px;
   color: var(--text-dim);

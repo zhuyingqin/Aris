@@ -410,11 +410,102 @@ fn strip_location_suffix(path: &str) -> &str {
     }
 }
 
-fn resolve_open_path(path: &str) -> Result<PathBuf, String> {
-    let raw = path.trim().trim_matches(|ch| matches!(ch, '`' | '<' | '>'));
+fn is_editor_location_fragment(fragment: &str) -> bool {
+    let Some(location) = fragment
+        .strip_prefix('L')
+        .or_else(|| fragment.strip_prefix('l'))
+    else {
+        return fragment
+            .strip_prefix("line-")
+            .is_some_and(|line| !line.is_empty() && line.chars().all(|ch| ch.is_ascii_digit()));
+    };
+    let (line, column) = location
+        .split_once('C')
+        .or_else(|| location.split_once('c'))
+        .map_or((location, None), |(line, column)| (line, Some(column)));
+    !line.is_empty()
+        && line.chars().all(|ch| ch.is_ascii_digit())
+        && column.map_or(true, |column| {
+            !column.is_empty() && column.chars().all(|ch| ch.is_ascii_digit())
+        })
+}
+
+fn is_editor_location_query(query: &str) -> bool {
+    let mut saw_line = false;
+    for field in query.split('&') {
+        let Some((key, value)) = field.split_once('=') else {
+            return false;
+        };
+        if value.is_empty() || !value.chars().all(|ch| ch.is_ascii_digit()) {
+            return false;
+        }
+        match key.to_ascii_lowercase().as_str() {
+            "line" | "linenumber" => saw_line = true,
+            "column" | "col" => {}
+            _ => return false,
+        }
+    }
+    saw_line
+}
+
+fn normalize_open_reference(path: &str) -> Result<String, String> {
+    let raw = path
+        .trim()
+        .trim_matches(|ch| matches!(ch, '`' | '<' | '>' | '"' | '\''));
     if raw.is_empty() {
         return Err("file path is empty".to_string());
     }
+    let mut normalized = urlencoding::decode(raw)
+        .map_err(|error| format!("invalid encoded file path: {error}"))?
+        .into_owned();
+
+    let lower = normalized.to_ascii_lowercase();
+    if lower.starts_with("vscode://file/") {
+        normalized = normalized["vscode://file/".len()..].to_string();
+    } else if lower.starts_with("file://") {
+        let mut rest = normalized["file://".len()..].to_string();
+        if rest.to_ascii_lowercase().starts_with("localhost/") {
+            rest = rest["localhost".len()..].to_string();
+        }
+        if rest.len() >= 3
+            && rest.starts_with('/')
+            && rest.as_bytes()[1].is_ascii_alphabetic()
+            && rest.as_bytes()[2] == b':'
+        {
+            rest.remove(0);
+        } else if !rest.starts_with('/')
+            && !(rest.len() >= 2
+                && rest.as_bytes()[0].is_ascii_alphabetic()
+                && rest.as_bytes()[1] == b':')
+        {
+            rest.insert_str(0, "//");
+        }
+        normalized = rest;
+    }
+    if normalized.len() >= 3
+        && normalized.starts_with('/')
+        && normalized.as_bytes()[1].is_ascii_alphabetic()
+        && normalized.as_bytes()[2] == b':'
+    {
+        normalized.remove(0);
+    }
+
+    if let Some((candidate, fragment)) = normalized.rsplit_once('#') {
+        if is_editor_location_fragment(fragment) {
+            normalized.truncate(candidate.len());
+        }
+    }
+    if let Some((candidate, query)) = normalized.rsplit_once('?') {
+        if is_editor_location_query(query) {
+            normalized.truncate(candidate.len());
+        }
+    }
+    Ok(normalized)
+}
+
+fn resolve_open_path(path: &str) -> Result<PathBuf, String> {
+    let normalized = normalize_open_reference(path)?;
+    let raw = normalized.as_str();
 
     let resolve = |candidate: &str| {
         let path = Path::new(candidate);

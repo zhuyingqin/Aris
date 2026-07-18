@@ -21,6 +21,7 @@ import {
   type NewApiUsageLogPage,
 } from "../api/tauri";
 import { isManagedAuthInvalidError, useStore, type Language } from "../store";
+import { SvgIcon } from "../SvgIcon";
 import { handoffEnvironmentInstall, isInstallableEnvironment } from "../environmentInstall";
 import { notifyChatModelsUpdated } from "../modelEvents";
 import type {
@@ -1975,7 +1976,7 @@ export default function Settings() {
             <div className="sp-status-slot">
               <span className="sp-status-tag sp-status-tag-exec">{copy.statusModelService}</span>
               <span className="sp-status-model">{currentConfiguredModel}</span>
-              {configView.hasExecutorKey && <span className="sp-status-key">●</span>}
+              {configView.hasExecutorKey && <span className="sp-status-key"><SvgIcon name="circle" size={8} /></span>}
               <span className="sp-status-url">{currentServerLabel}</span>
             </div>
             <div className="sp-status-sep" />

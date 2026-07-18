@@ -461,6 +461,7 @@ pub fn run() {
             engine::chat_set_context,
             engine::chat_delete,
             engine::chat_cancel,
+            engine::chat_review_clear,
             engine::chat_change_revert,
             engine::chat_debug_zip_export,
             usage_log::chat_usage_summary,

@@ -1447,6 +1447,7 @@ describe("Typeset start page", () => {
     });
     expect(visualContent.textContent).toContain("USTMS Guide");
     expect(visualContent.textContent).toContain("Visual mode should show body content.");
+    await waitFor(() => expect(visualContent.querySelectorAll(".cm-vis-item-marker-bullet")).toHaveLength(1));
     expect(container.querySelector(".typeset-visual-block")).toBeNull();
   });
 

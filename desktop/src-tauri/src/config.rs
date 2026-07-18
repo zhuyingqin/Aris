@@ -417,6 +417,18 @@ fn clear_provider_slot(obj: &mut Map<String, Value>, prefix: &str) {
     obj.remove(&format!("{prefix}_api_key"));
 }
 
+/// Clear a slot's connection + credentials but keep the non-secret model id.
+/// A managed reviewer choice is stored with the gateway base URL and token, so
+/// the plain `clear_provider_slot` above would discard the user's model pick on
+/// every logout/session-expiry. Keeping `{prefix}_model` lets
+/// `normalize_managed_model_slots` rebuild the full slot from managed
+/// credentials on the next login, so the reviewer selection survives.
+fn clear_provider_credentials_keep_model(obj: &mut Map<String, Value>, prefix: &str) {
+    obj.remove(&format!("{prefix}_provider"));
+    obj.remove(&format!("{prefix}_base_url"));
+    obj.remove(&format!("{prefix}_api_key"));
+}
+
 /// Clear only credentials created by the managed New API login flow.
 pub(crate) fn clear_newapi_session() -> Result<(), String> {
     let mut obj = load_object();
@@ -452,7 +464,9 @@ pub(crate) fn clear_newapi_session() -> Result<(), String> {
         managed_base.as_deref(),
         managed_key.as_deref(),
     ) {
-        clear_provider_slot(&mut obj, "reviewer");
+        // Keep the reviewer model so the choice survives logout; the gateway
+        // key + base URL are re-derived on next login by model normalization.
+        clear_provider_credentials_keep_model(&mut obj, "reviewer");
     }
     if slot_matches_managed(
         &obj,

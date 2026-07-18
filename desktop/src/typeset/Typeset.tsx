@@ -50,6 +50,7 @@ import {
 import type { VisualPdfCursor } from "./visualModel";
 import type { SharedEditorHandle } from "../editor/editorTypes";
 import { useStore } from "../store";
+import { SvgIcon } from "../SvgIcon";
 import "./Typeset.css";
 
 const pdfWorkerSrc = new URL("pdfjs-dist/build/pdf.worker.min.mjs", import.meta.url).toString();
@@ -3745,7 +3746,7 @@ function TypesetPdfPreview({
                     <strong>Stop on first error</strong>
                     <small>Fail fast and preserve the last verified PDF.</small>
                   </span>
-                  {!continueOnError && <b aria-hidden="true">✓</b>}
+                  {!continueOnError && <b aria-hidden="true"><SvgIcon name="check" size={14} /></b>}
                 </button>
                 <button
                   type="button"
@@ -3760,7 +3761,7 @@ function TypesetPdfPreview({
                     <strong>Try to compile despite errors</strong>
                     <small>Show a newly generated PDF when TeX can recover; it remains marked as having errors.</small>
                   </span>
-                  {continueOnError && <b aria-hidden="true">✓</b>}
+                  {continueOnError && <b aria-hidden="true"><SvgIcon name="check" size={14} /></b>}
                 </button>
                 <div className="typeset-compile-menu-divider" role="presentation" />
                 {status === "running" && (
@@ -3911,7 +3912,7 @@ function TypesetPdfPreview({
                   onClick={() => setZoomLevel(preset)}
                 >
                   <span>{Math.round(preset * 100)}%</span>
-                  {Math.round(zoom * 100) === Math.round(preset * 100) && <b aria-hidden="true">✓</b>}
+                  {Math.round(zoom * 100) === Math.round(preset * 100) && <b aria-hidden="true"><SvgIcon name="check" size={14} /></b>}
                 </button>
               ))}
             </div>,
@@ -4128,7 +4129,7 @@ function CompileLog({
                         <ToolIcon name="ref" />
                       </button>
                     )}
-                    {level === "error" && <span className="typeset-diagnostic-sparkle" aria-hidden="true">✦</span>}
+                    {level === "error" && <span className="typeset-diagnostic-sparkle" aria-hidden="true"><SvgIcon name="sparkle" size={14} /></span>}
                   </div>
                   {expanded && (
                     <div className="typeset-diagnostic-details">
@@ -4700,7 +4701,7 @@ function TypesetEditorToolbar({
           </div>
         )}
         <div className="typeset-editor-context" aria-live="polite">
-          {linkedPdfLine != null && <span className="typeset-sync-chip">PDF → line {linkedPdfLine}</span>}
+          {linkedPdfLine != null && <span className="typeset-sync-chip">PDF line {linkedPdfLine}</span>}
           {dirty && <span className="typeset-stale-chip">PDF needs recompile</span>}
           <span className="typeset-interaction-hint">
             {safeCompiledVisual
@@ -5699,7 +5700,7 @@ function TypesetStartPage({
                         <div className="typeset-library-actions" aria-label={copy.actionsFor(document.title)}>
                           <button type="button" title={copy.open} aria-label={copy.openDocument(document.title)} onClick={() => onOpenSource(document.path)}><ToolIcon name="open" /></button>
                           <button type="button" title={copy.reveal} aria-label={copy.revealDocument(document.title)} onClick={() => revealDocument(document.path)}><ToolIcon name="files" /></button>
-                          <button type="button" title={favorite ? copy.removeFavorite : copy.addFavorite} aria-label={copy.favoriteDocument(document.title, favorite)} onClick={() => toggleFavorite(document.path)} className={favorite ? "active" : ""}>★</button>
+                          <button type="button" title={favorite ? copy.removeFavorite : copy.addFavorite} aria-label={copy.favoriteDocument(document.title, favorite)} onClick={() => toggleFavorite(document.path)} className={favorite ? "active" : ""}><SvgIcon name="star" size={16} /></button>
                           <button type="button" title={archived ? copy.restore : copy.archive} aria-label={copy.archiveDocument(document.title, archived)} onClick={() => toggleArchived(document.path)}><ToolIcon name={archived ? "undo" : "download"} /></button>
                         </div>
                       </td>

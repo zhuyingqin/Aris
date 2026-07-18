@@ -1,7 +1,7 @@
 use std::ffi::OsString;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::{file_read, strip_location_suffix};
+use super::{file_read, normalize_open_reference, strip_location_suffix};
 
 struct EnvGuard {
     key: &'static str,
@@ -72,5 +72,26 @@ fn local_file_links_may_include_line_and_column_locations() {
     assert_eq!(
         strip_location_suffix(r"C:\Project\src\main.rs:42"),
         r"C:\Project\src\main.rs"
+    );
+}
+
+#[test]
+fn generated_file_link_formats_normalize_before_opening() {
+    assert_eq!(
+        normalize_open_reference("file:///C:/Research/My%20Paper/main.tex#L42C7")
+            .expect("file URI"),
+        "C:/Research/My Paper/main.tex"
+    );
+    assert_eq!(
+        normalize_open_reference("vscode://file/C:/Research/main.tex:42:7").expect("VS Code URI"),
+        "C:/Research/main.tex:42:7"
+    );
+    assert_eq!(
+        normalize_open_reference("../papers/main.tex?line=42&column=7").expect("relative path"),
+        "../papers/main.tex"
+    );
+    assert_eq!(
+        normalize_open_reference("<C%3A/研究%20项目/main.tex>").expect("encoded path"),
+        "C:/研究 项目/main.tex"
     );
 }

@@ -16,26 +16,36 @@ desktop/src-tauri backend
         | shared Rust crates
         v
 crates/runtime + crates/tools + crates/executor + crates/chat + crates/commands
+        + crates/api + crates/notebook + crates/remote-protocol
 ```
 
 Main frontend areas:
 
-- `src/chat/` - desktop chat, attachments, slash commands, sessions, streamed tool output
-- `src/settings/` - model/provider configuration and connection checks
-- `src/skills/` - bundled skill browser
+- `src/chat/` - desktop chat, attachments, slash commands, streamed tool output
+- `src/lab/` - notebooks (Jupyter/MATLAB kernels), file editor, integrated terminal
+- `src/typeset/` - Overleaf-style LaTeX editing, visual editor, PDF preview, compile
+- `src/literature/` - paper library, citation graph, knowledge review
+- `src/studio/` - slides/poster review surface
+- `src/mail/` - Gmail/Outlook mail client
+- `src/extensions/` - MCP servers and connectors
+- `src/scheduled/` - scheduled/background runs
+- `src/settings/` - model/provider configuration, account, updates
 - `src/sessions/` - persisted session list
-- `src/studio/` - workflow canvas and DSL editor
-- `src/monitor/` - workflow run board, phases, events, agents, mailbox
-- `src/teams/` - team/task views
+- `src/auth/` - login scene
+- `src/remote/` - mobile remote pairing UI
 
 Main backend areas:
 
-- `src-tauri/src/config.rs` - local `~/.config/aris/config.json` settings
+- `src-tauri/src/config.rs` - local `~/.config/SomniQ/config.json` settings
 - `src-tauri/src/engine.rs` - chat execution bridge
 - `src-tauri/src/files.rs` - file reads used by attachments and preview
 - `src-tauri/src/projects.rs` - project registration and switching
 - `src-tauri/src/state.rs` - desktop workspace/runtime directory layout
-- `src-tauri/src/workflow.rs` - workflow planning, persistence, and control
+- `src-tauri/src/lab.rs`, `typeset.rs`, `literature.rs`, `knowledge.rs`, `studio.rs`, `mail/`, `scheduled.rs`, `terminal.rs` - per-surface commands
+- `src-tauri/src/newapi.rs` - managed login gateway
+- `src-tauri/src/remote.rs` - mobile remote pairing
+- `src-tauri/src/mcp.rs`, `connectors.rs` - MCP and connector management
+- `src-tauri/src/watcher.rs`, `usage_log.rs` - file watching and usage logging
 
 ## Develop
 

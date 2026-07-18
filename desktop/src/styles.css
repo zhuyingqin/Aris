@@ -255,6 +255,56 @@ textarea {
   color: #fff;
 }
 
+/* Frameless-window controls for the pre-auth screens (sign-in / auth check).
+   These mirror .window-titlebar-controls but float over the top-right of a
+   screen that has no titlebar row, so the styles are restated self-contained. */
+.sq-window-drag {
+  position: fixed;
+  inset: 0 0 auto 0;
+  height: 36px;
+  /* Must sit above the sign-in card layer (.sq-login-columns / .sq-card are
+     position:relative z-index:1) so this strip actually receives the drag —
+     otherwise the full-viewport columns container swallows every pointerdown.
+     The card is centered well below this 36px band, so it is never covered. */
+  z-index: 5;
+}
+
+.sq-window-controls {
+  position: fixed;
+  top: 0;
+  right: 0;
+  /* Above the drag strip so the buttons take clicks instead of dragging. */
+  z-index: 6;
+  display: flex;
+  align-items: center;
+}
+
+.sq-window-controls button {
+  display: inline-grid;
+  place-items: center;
+  width: 46px;
+  height: 36px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: #c9c9c9;
+  cursor: pointer;
+}
+
+.sq-window-controls .win-ctl-glyph {
+  display: block;
+}
+
+.sq-window-controls button:hover:not(:disabled) {
+  background: #2a2a2a;
+}
+
+.sq-window-controls button.close:hover:not(:disabled) {
+  background: #c42b1c;
+  color: #fff;
+}
+
 .app-head {
   grid-area: head;
   display: flex;
@@ -799,10 +849,10 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account {
   position: fixed;
   z-index: 90;
   left: 10px;
-  bottom: 8px;
+  bottom: 0;
   display: block;
   width: calc(var(--chat-sidebar-w, 218px) - 20px);
-  padding-top: 8px;
+  padding: 8px 0;
   background: var(--chat-sidebar-bg, #11161d);
   border-top: 1px solid color-mix(in srgb, var(--border) 72%, transparent);
   box-shadow: 0 -12px 16px -4px var(--chat-sidebar-bg, #11161d);
@@ -7341,8 +7391,11 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
 
 .chat-inline-cursor {
   display: inline-block;
-  color: var(--accent);
-  font-size: 14px;
+  width: 2px;
+  height: 14px;
+  margin-left: 2px;
+  vertical-align: -2px;
+  background: var(--accent);
   margin-left: 4px;
   vertical-align: middle;
   animation: blink 1s step-end infinite;
@@ -8779,9 +8832,14 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   text-decoration: underline;
 }
 
-.md-local-link::after {
-  content: " ↗";
-  font-size: 0.8em;
+.md-local-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.md-local-link-icon {
+  flex: 0 0 auto;
 }
 
 .md-studio-link {
@@ -9721,11 +9779,10 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   z-index: 0;
   border-radius: 50%;
   background: radial-gradient(circle at center,
-    rgba(101, 217, 255, 0.28),
+    rgba(101, 217, 255, 0.28) 0%,
     rgba(110, 231, 170, 0.16) 42%,
     rgba(255, 209, 102, 0.06) 64%,
-    transparent 72%);
-  filter: blur(6px);
+    transparent 78%);
   pointer-events: none;
 }
 
@@ -12178,6 +12235,38 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   margin-top: 3px;
 }
 
+.project-brief-criteria {
+  display: grid;
+  gap: 5px;
+  margin: 3px 0 0;
+  padding: 0 !important;
+  list-style: none;
+}
+
+.project-brief-criteria li {
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr);
+  gap: 0 5px;
+  color: var(--text-dim);
+}
+
+.project-brief-criteria li.verified > span:first-child {
+  color: var(--green);
+}
+
+.project-brief-criteria li.verified > span:nth-child(2) {
+  color: var(--text);
+}
+
+.project-brief-criteria small {
+  grid-column: 2;
+  overflow: hidden;
+  color: var(--text-dim);
+  font-size: 9.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .chat-project-brief-toggle,
 .chat-side-task-toggle {
   padding: 4px !important;
@@ -12360,11 +12449,9 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   font-weight: 500;
 }
 
-.chat-context-notice::before {
-  content: "⊙";
+.chat-context-notice-icon {
+  flex: 0 0 auto;
   color: var(--amber);
-  font-size: 14px;
-  line-height: 1;
 }
 
 .chat-context-notice-message {
@@ -12391,6 +12478,108 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
 .chat-context-notice-action:disabled {
   cursor: default;
   opacity: 0.62;
+}
+
+.independent-review-badge {
+  display: grid;
+  width: min(100%, 520px);
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+  padding: 10px 11px;
+  border: 1px solid color-mix(in srgb, var(--accent) 38%, var(--border));
+  border-radius: 10px;
+  background:
+    linear-gradient(105deg, color-mix(in srgb, var(--accent) 11%, var(--bg-1)), var(--bg-1) 62%);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color .15s ease, background .15s ease, transform .15s ease;
+}
+
+.independent-review-badge:hover,
+.independent-review-badge:focus-visible {
+  border-color: color-mix(in srgb, var(--accent) 72%, var(--border));
+  background:
+    linear-gradient(105deg, color-mix(in srgb, var(--accent) 16%, var(--bg-1)), var(--bg-1) 68%);
+}
+
+.independent-review-badge:active { transform: translateY(1px); }
+
+.independent-review-badge-avatar {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  border: 1px solid color-mix(in srgb, var(--accent) 52%, var(--border));
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--accent) 18%, var(--bg-2));
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 800;
+  place-items: center;
+}
+
+.independent-review-badge-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.independent-review-badge-eyebrow {
+  overflow: hidden;
+  color: var(--text-dim);
+  font-size: 9.5px;
+  font-weight: 750;
+  letter-spacing: .055em;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.independent-review-badge-copy strong {
+  overflow: hidden;
+  font-size: 12px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.independent-review-badge-state {
+  display: grid;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--green) 14%, var(--bg-2));
+  color: var(--green);
+  font-size: 11px;
+  place-items: center;
+}
+
+.independent-review-badge-state.active {
+  background: color-mix(in srgb, var(--accent) 13%, var(--bg-2));
+  color: var(--accent);
+}
+
+.independent-review-badge-spinner {
+  width: 11px;
+  height: 11px;
+  border: 1.5px solid color-mix(in srgb, currentColor 25%, transparent);
+  border-top-color: currentColor;
+  border-radius: 50%;
+  animation: spin .9s linear infinite;
+}
+
+.independent-review-badge.verdict-revise .independent-review-badge-state {
+  background: color-mix(in srgb, var(--amber) 14%, var(--bg-2));
+  color: var(--amber);
+}
+
+.independent-review-badge.verdict-needs_user .independent-review-badge-state,
+.independent-review-badge.verdict-unavailable .independent-review-badge-state {
+  background: color-mix(in srgb, var(--red) 12%, var(--bg-2));
+  color: var(--red);
 }
 
 .chat-empty-response {
@@ -13427,10 +13616,10 @@ button.chat-workflow-file-path:hover {
     position: fixed;
     z-index: 90;
     left: 10px;
-    bottom: 8px;
+    bottom: 0;
     display: block;
     width: calc(min(300px, 82vw) - 20px);
-    padding-top: 8px;
+    padding: 8px 0;
     background: var(--chat-sidebar-bg, #11161d);
     border-top: 1px solid color-mix(in srgb, var(--border) 72%, transparent);
     box-shadow: 0 -12px 16px -4px var(--chat-sidebar-bg, #11161d);
@@ -13948,4 +14137,449 @@ button.chat-workflow-file-path:hover {
 :root[data-theme="light"] .chat-starters button,
 :root[data-theme="light"] .chat-input {
   box-shadow: 0 10px 26px rgba(56, 74, 96, 0.08);
+}
+
+/* ======================================================================
+   Ambient motion pass — dreamscape polish shared across the whole shell.
+   Everything here animates transform/opacity only (GPU-cheap) and is
+   disabled together under prefers-reduced-motion at the end of the file.
+   ====================================================================== */
+
+/* Module panes crossfade when switching tabs. Panes toggled via [hidden]
+   replay the animation on unhide (display:none -> block restarts it);
+   opacity-only so position:fixed descendants keep their containing block. */
+.app-main > :not(.toast) {
+  animation: sq-pane-in 0.26s ease both;
+}
+
+@keyframes sq-pane-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* Dropdowns and popovers ease out of their trigger instead of popping. */
+.product-menu,
+.project-menu,
+.sidebar-user-menu,
+.chat-session-menu,
+.file-path-menu,
+.chat-pill-menu {
+  transform-origin: top left;
+  animation: sq-menu-in 0.16s cubic-bezier(0.2, 0.8, 0.3, 1) both;
+}
+
+@keyframes sq-menu-in {
+  from { opacity: 0; transform: translateY(-5px) scale(0.98); }
+  to { opacity: 1; transform: none; }
+}
+
+/* Items inside the module switcher ripple in, top to bottom. */
+.product-menu .product-menu-item {
+  animation: sq-fade-up 0.24s ease both;
+}
+
+.product-menu .product-menu-item:nth-of-type(1) { animation-delay: 0.015s; }
+.product-menu .product-menu-item:nth-of-type(2) { animation-delay: 0.045s; }
+.product-menu .product-menu-item:nth-of-type(3) { animation-delay: 0.075s; }
+.product-menu .product-menu-item:nth-of-type(4) { animation-delay: 0.105s; }
+.product-menu .product-menu-item:nth-of-type(5) { animation-delay: 0.135s; }
+.product-menu .product-menu-item:nth-of-type(6) { animation-delay: 0.165s; }
+.product-menu .product-menu-item:nth-of-type(7) { animation-delay: 0.195s; }
+.product-menu .product-menu-item:nth-of-type(8) { animation-delay: 0.225s; }
+
+/* Error toast slides in from the right edge. */
+.toast {
+  animation: sq-toast-in 0.3s cubic-bezier(0.2, 0.8, 0.3, 1) both;
+}
+
+@keyframes sq-toast-in {
+  from { opacity: 0; transform: translateX(16px); }
+  to { opacity: 1; transform: none; }
+}
+
+/* New chat turns rise into place (re-renders of an existing turn don't
+   restart the animation, so streaming updates stay still). */
+.chat-turn {
+  animation: sq-turn-in 0.3s ease both;
+}
+
+@keyframes sq-turn-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: none; }
+}
+
+/* --------------------- Chat home (welcome) hero --------------------- */
+
+/* Only a small composited halo keeps moving after the initial entrance. */
+.chat-welcome-glow {
+  will-change: transform, opacity;
+  transform: translate3d(0, 0, 0);
+  animation: sq-glow-breathe 6.5s ease-in-out infinite;
+}
+
+.independent-review-panel {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  flex: 1;
+  flex-direction: column;
+  background:
+    radial-gradient(circle at 100% 0, color-mix(in srgb, var(--accent) 8%, transparent), transparent 34%),
+    var(--bg);
+}
+
+.independent-review-head {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px 18px;
+  border-bottom: 1px solid var(--border);
+}
+
+.independent-review-head h2 {
+  margin: 2px 0 0;
+  color: var(--text);
+  font-size: 16px;
+}
+
+.independent-review-head-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.independent-review-clear {
+  padding: 5px 9px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  font: inherit;
+  font-size: 10.5px;
+}
+
+.independent-review-clear:hover:not(:disabled),
+.independent-review-clear:focus-visible:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent) 46%, var(--border));
+  color: var(--text);
+}
+
+.independent-review-clear:disabled {
+  cursor: not-allowed;
+  opacity: .45;
+}
+
+.independent-review-eyebrow {
+  color: var(--text-dim);
+  font-size: 10px;
+  font-weight: 750;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.independent-review-phase {
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-dim);
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+
+.independent-review-phase.phase-reviewing,
+.independent-review-phase.phase-revising {
+  border-color: color-mix(in srgb, var(--accent) 46%, var(--border));
+  color: var(--accent);
+}
+
+.independent-review-waiting {
+  display: grid;
+  flex: 1;
+  padding: 36px;
+  place-content: center;
+  justify-items: center;
+  color: var(--text-dim);
+  text-align: center;
+}
+
+.independent-review-waiting p {
+  max-width: 360px;
+  line-height: 1.65;
+}
+
+.independent-review-spinner {
+  width: 25px;
+  height: 25px;
+  border: 2px solid color-mix(in srgb, var(--accent) 24%, transparent);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin .9s linear infinite;
+}
+
+.independent-review-scroll {
+  min-height: 0;
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px;
+}
+
+.independent-review-identity {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.independent-review-identity div {
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--bg-1);
+}
+
+.independent-review-identity span,
+.independent-review-identity strong {
+  display: block;
+}
+
+.independent-review-identity span {
+  margin-bottom: 4px;
+  color: var(--text-dim);
+  font-size: 10px;
+}
+
+.independent-review-identity strong {
+  overflow: hidden;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.independent-review-verdict {
+  padding: 12px 13px;
+  margin-bottom: 12px;
+  border: 1px solid var(--border);
+  border-left-width: 3px;
+  border-radius: 10px;
+  background: var(--bg-1);
+}
+
+.independent-review-verdict > span {
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.independent-review-verdict p {
+  margin: 7px 0 0;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.independent-review-verdict small {
+  display: block;
+  margin-top: 8px;
+  color: var(--amber);
+  line-height: 1.5;
+}
+
+.independent-review-verdict.verdict-pass { border-left-color: var(--green); }
+.independent-review-verdict.verdict-revise { border-left-color: var(--amber); }
+.independent-review-verdict.verdict-needs_user,
+.independent-review-verdict.verdict-unavailable { border-left-color: var(--red); }
+
+.independent-review-round {
+  margin-top: 8px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--bg-1) 92%, transparent);
+}
+
+.independent-review-round > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  cursor: pointer;
+  color: var(--text-dim);
+  font-size: 11px;
+  list-style: none;
+}
+
+.independent-review-round > summary::-webkit-details-marker { display: none; }
+.independent-review-round > summary strong.verdict-pass { color: var(--green); }
+.independent-review-round > summary strong.verdict-revise { color: var(--amber); }
+.independent-review-round > summary strong.verdict-needs_user,
+.independent-review-round > summary strong.verdict-unavailable { color: var(--red); }
+
+.independent-review-round-body {
+  padding: 0 12px 12px;
+  border-top: 1px solid var(--border);
+}
+
+.independent-review-round-body section { margin-top: 12px; }
+.independent-review-round-body h3 {
+  margin: 0 0 7px;
+  color: var(--text-dim);
+  font-size: 10.5px;
+  text-transform: uppercase;
+}
+
+.independent-review-round-body ul,
+.independent-review-round-body ol {
+  padding-left: 18px;
+  margin: 0;
+  color: var(--text);
+  font-size: 11.5px;
+  line-height: 1.55;
+}
+
+.independent-review-issue {
+  padding: 9px 10px;
+  margin-top: 7px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-2);
+}
+
+.independent-review-issue > div {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+}
+
+.independent-review-issue > div span {
+  color: var(--amber);
+  font-size: 9px;
+  font-weight: 750;
+  text-transform: uppercase;
+}
+
+.independent-review-issue > div strong { font-size: 11.5px; }
+.independent-review-issue p,
+.independent-review-issue small {
+  display: block;
+  margin: 6px 0 0;
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.independent-review-issue .recommendation { color: var(--text); }
+
+@keyframes sq-glow-breathe {
+  0%, 100% { opacity: 0.68; transform: translate3d(0, 0, 0) scale(0.99); }
+  50% { opacity: 0.86; transform: translate3d(0, 0, 0) scale(1.035); }
+}
+
+/* A moving background clipped to text repaints every frame, so keep the
+   headline gradient still and use one transform/opacity entrance instead. */
+.chat-welcome h1 {
+  background: linear-gradient(
+    100deg,
+    #eaf3ff 0%,
+    #b9c8d8 34%,
+    #e6f3ff 47%,
+    #8fb0c9 60%,
+    #b9c8d8 78%,
+    #eaf3ff 100%
+  );
+  background-size: 100% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  animation: sq-fade-up 0.45s cubic-bezier(0.2, 0.8, 0.3, 1) both;
+}
+
+:root[data-theme="light"] .chat-welcome h1 {
+  background: linear-gradient(
+    100deg,
+    #2a3340 0%,
+    #3a4756 34%,
+    #7ca3c8 47%,
+    #51677d 60%,
+    #3a4756 78%,
+    #2a3340 100%
+  );
+  background-size: 100% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+}
+
+@keyframes sq-fade-up {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: none; }
+}
+
+.chat-welcome p {
+  animation: sq-fade-up 0.5s ease 0.08s both;
+}
+
+/* Starter cards cascade in after the headline, and their icon tiles give
+   a small nod on hover. */
+.chat-starters .chat-starter {
+  animation: sq-fade-up 0.5s ease both;
+}
+
+.chat-starters .chat-starter:nth-child(1) { animation-delay: 0.16s; }
+.chat-starters .chat-starter:nth-child(2) { animation-delay: 0.23s; }
+.chat-starters .chat-starter:nth-child(3) { animation-delay: 0.3s; }
+.chat-starters .chat-starter:nth-child(4) { animation-delay: 0.37s; }
+
+.chat-starter-icon {
+  transition: transform 0.18s cubic-bezier(0.2, 0.8, 0.3, 1);
+}
+
+.chat-starters .chat-starter:hover .chat-starter-icon {
+  transform: scale(1.1) rotate(-4deg);
+}
+
+/* ----------------------------- composer ----------------------------- */
+
+.chat-input {
+  transition: box-shadow 0.25s ease, background 0.25s ease;
+}
+
+.chat-send-btn {
+  transition: transform 0.15s ease, background 0.15s ease, opacity 0.15s ease;
+}
+
+.chat-send-btn:hover:not(:disabled) {
+  transform: scale(1.06);
+}
+
+.chat-send-btn:active:not(:disabled) {
+  transform: scale(0.94);
+}
+
+/* -------------------------- reduced motion -------------------------- */
+
+@media (prefers-reduced-motion: reduce) {
+  .app-main > :not(.toast),
+  .product-menu,
+  .project-menu,
+  .sidebar-user-menu,
+  .chat-session-menu,
+  .file-path-menu,
+  .chat-pill-menu,
+  .product-menu .product-menu-item,
+  .toast,
+  .chat-turn,
+  .chat-welcome-glow,
+  .chat-welcome h1,
+  .chat-welcome p,
+  .chat-starters .chat-starter {
+    animation: none !important;
+  }
+
+  .chat-starter-icon,
+  .chat-send-btn {
+    transition: none !important;
+  }
 }

@@ -1,6 +1,7 @@
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { fileSearch, isTauri } from "../api/tauri";
 import { useStore } from "../store";
+import { SvgIcon } from "../SvgIcon";
 import type { ChatAttachment, DesktopCommandSpec, PermissionModeView, SkillMeta } from "../types";
 import { CHAT_COPY } from "./i18n";
 import { fuzzyMatch, fuzzyScore, makeId } from "./model";
@@ -266,6 +267,8 @@ interface Props {
   canSwitchModel?: boolean;
   onModelChange?: (model: string) => void;
   reasoningSupported?: boolean;
+  reasoningApplied?: boolean;
+  reasoningMessage?: string | null;
   reasoningEffort?: string;
   reasoningBusy?: boolean;
   onReasoningEffortChange?: (effort: string) => void;
@@ -299,6 +302,8 @@ function ChatComposer({
   canSwitchModel,
   onModelChange,
   reasoningSupported = false,
+  reasoningApplied = true,
+  reasoningMessage,
   reasoningEffort = "high",
   reasoningBusy = false,
   onReasoningEffortChange,
@@ -620,7 +625,7 @@ function ChatComposer({
               aria-label={dismissContextLabel}
               title={dismissContextLabel}
             >
-              ×
+              <SvgIcon name="close" size={14} />
             </button>
           )}
         </div>
@@ -658,7 +663,7 @@ function ChatComposer({
                   onClick={() => onAttachmentsChange(attachments.filter((item) => item.id !== attachment.id))}
                   aria-label={copy.removeAttachment(attachment.name)}
                 >
-                  x
+                  <SvgIcon name="close" size={13} />
                 </button>
               </span>
             ))}
@@ -741,7 +746,7 @@ function ChatComposer({
                   title={permission.description ?? copy.permissionMode}
                 >
                   {permissionLabel}
-                  <span className="chat-pill-chevron">▾</span>
+                  <span className="chat-pill-chevron"><SvgIcon name="chevronDown" size={12} /></span>
                 </button>
                 {permMenuOpen && (
                   <div className="chat-pill-menu" role="menu">
@@ -786,7 +791,7 @@ function ChatComposer({
                   title={canSwitchModel ? (busy ? copy.switchModelNextTurn : copy.switchModel) : copy.activeModel}
                 >
                   {modelName}
-                  {canSwitchModel && <span className="chat-pill-chevron">▾</span>}
+                  {canSwitchModel && <span className="chat-pill-chevron"><SvgIcon name="chevronDown" size={12} /></span>}
                 </button>
                 {modelMenuOpen && modelOptions && modelOptions.length > 0 && (
                   <div className="chat-pill-menu chat-pill-menu-right" role="menu">
@@ -813,14 +818,16 @@ function ChatComposer({
                   type="button"
                   className="chat-pill chat-reasoning-pill"
                   onClick={() => setReasoningMenuOpen((v) => !v)}
-                  disabled={busy || reasoningBusy}
-                  title="Reasoning effort"
+                  disabled={busy || reasoningBusy || !reasoningApplied}
+                  title={reasoningMessage ?? "Reasoning effort"}
                   aria-label="Reasoning effort"
                 >
-                  {REASONING_OPTIONS.find((opt) => opt.value === reasoningEffort)?.label ?? reasoningEffort}
-                  <span className="chat-pill-chevron">▾</span>
+                  {reasoningApplied
+                    ? (REASONING_OPTIONS.find((opt) => opt.value === reasoningEffort)?.label ?? reasoningEffort)
+                    : (language === "cn" ? "服务端默认" : "Provider default")}
+                  {reasoningApplied && <span className="chat-pill-chevron"><SvgIcon name="chevronDown" size={12} /></span>}
                 </button>
-                {reasoningMenuOpen && (
+                {reasoningApplied && reasoningMenuOpen && (
                   <div className="chat-pill-menu chat-pill-menu-right" role="menu">
                     {REASONING_OPTIONS.map((opt) => (
                       <button
@@ -840,7 +847,7 @@ function ChatComposer({
               </div>
             )}
             {busy ? (
-              <button className="chat-send-btn chat-stop-btn" onClick={onStop} aria-label={copy.stopResponse}>■</button>
+              <button className="chat-send-btn chat-stop-btn" onClick={onStop} aria-label={copy.stopResponse}><SvgIcon name="stop" size={15} /></button>
             ) : (
               <button
                 className="chat-send-btn"
@@ -848,7 +855,7 @@ function ChatComposer({
                 disabled={!canSubmit}
                 aria-label={editing ? copy.resendEditedMessage : copy.sendMessage}
               >
-                ↑
+                <SvgIcon name="send" size={17} />
               </button>
             )}
           </div>
