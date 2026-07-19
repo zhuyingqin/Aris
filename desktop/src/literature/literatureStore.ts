@@ -3,14 +3,12 @@ import {
   isTauri,
   literatureDownloadPdf,
   literatureImportPdf,
-  literatureLibraryUpsert,
   literatureLlm,
   literatureReviewLlm,
   literatureLlmVision,
   literatureLoad,
   literaturePdfOpen,
   literatureSave,
-  literatureSearch,
   onChatDone,
   onChatTool,
   onChatToolResult,
@@ -27,8 +25,8 @@ import {
   type LiteratureLibrary,
   type LiteraturePaper,
   type LiteratureReviewTask,
-  type LiteratureSearchResult,
-  type LiteratureUpsertResult,
+  type LiteratureScreenChunk,
+  type LiteratureScreenRun,
   type PdfAnnotation,
   type PaperBrief,
   type PaperFit,
@@ -52,6 +50,8 @@ import {
 const MAX_ACTIVITY_ENTRIES = 200;
 
 const PERSIST_DELAY_MS = 600;
+/** Mirrors paper-batch-grading's recommended 30-50 paper batches. */
+export const SCREEN_CHUNK_SIZE = 40;
 
 let persistTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -113,7 +113,15 @@ const normalizePaper = (paper: Partial<LiteraturePaper>, index: number): Literat
 const normalizeLibrary = (raw: Partial<LiteratureLibrary>): LiteratureLibrary => ({
   version: 1,
   papers: Array.isArray(raw.papers) ? raw.papers.map(normalizePaper) : [],
-  searches: Array.isArray(raw.searches) ? raw.searches : [],
+  searches: Array.isArray(raw.searches)
+    ? raw.searches.map((search) => ({
+        ...search,
+        query: String(search.query || search.id || "Saved search"),
+        sources: Array.isArray(search.sources) ? search.sources : [],
+        resultCount: Number(search.resultCount) || 0,
+        newCount: Number(search.newCount) || 0,
+      }))
+    : [],
   collections: Array.isArray(raw.collections) ? raw.collections : [],
   reviewTasks: Array.isArray(raw.reviewTasks)
     ? raw.reviewTasks.map((task) => ({
@@ -121,6 +129,14 @@ const normalizeLibrary = (raw: Partial<LiteratureLibrary>): LiteratureLibrary =>
         criteria: Array.isArray(task.criteria) ? task.criteria : [],
         searchIds: Array.isArray(task.searchIds) ? task.searchIds : [],
         suggestions: Array.isArray(task.suggestions) ? task.suggestions : [],
+      }))
+    : [],
+  screenRuns: Array.isArray(raw.screenRuns)
+    ? raw.screenRuns.map((run) => ({
+        ...run,
+        chunks: Array.isArray(run.chunks) ? run.chunks : [],
+        reviewerCount: Number(run.reviewerCount) || 0,
+        fallbackCount: Number(run.fallbackCount) || 0,
       }))
     : [],
   projectFocus: raw.projectFocus,
@@ -253,6 +269,7 @@ const makeReason = (
 const screenPaperForTask = (
   paper: LiteraturePaper,
   task: LiteratureReviewTask,
+  checkpoint?: Pick<PaperScreening, "screenRunId" | "chunkId">,
 ): PaperScreening => {
   const text = paperSearchText(paper);
   const titleText = paper.title.toLowerCase();
@@ -322,6 +339,8 @@ const screenPaperForTask = (
     confidence,
     reasons: reasons.slice(0, 3),
     decidedAt: isoNow(),
+    method: "heuristic",
+    ...checkpoint,
   };
 };
 
@@ -604,14 +623,44 @@ Return a JSON array. One object per paper:
 {"index": <number>, "decision": "include" | "exclude" | "maybe", "score": <0-100 topical fit>, "confidence": <0-100>, "rationale": "<one sentence naming the criterion it meets or violates>", "quote": "<verbatim snippet copied from THIS paper's abstract, <=200 chars>"}`;
 };
 
-const llmScreen = async (papers: LiteraturePaper[], task: LiteratureReviewTask) => {
+interface LlmScreenBatchResult {
+  screenings: Map<string, PaperScreening>;
+  missingIndices: number[];
+}
+
+const verifiedScreenQuote = (paper: LiteraturePaper, value: unknown) => {
+  const quote = String(value ?? "").trim();
+  if (!quote) return firstUsefulQuote(paper);
+  const normalizedQuote = quote.normalize("NFKC").replace(/\s+/g, " ").trim();
+  const normalizedAbstract = paper.abstract.normalize("NFKC").replace(/\s+/g, " ").trim();
+  return normalizedQuote.length >= 8 && normalizedAbstract.includes(normalizedQuote)
+    ? quote
+    : firstUsefulQuote(paper);
+};
+
+const llmScreen = async (
+  papers: LiteraturePaper[],
+  task: LiteratureReviewTask,
+  checkpoint: Pick<PaperScreening, "screenRunId" | "chunkId">,
+): Promise<LlmScreenBatchResult> => {
   const parsed = await literatureReviewLlmJson(SCREEN_SYSTEM, buildScreenPrompt(papers, task));
   if (!Array.isArray(parsed)) throw new Error("expected a JSON array of screenings");
   const result = new Map<string, PaperScreening>();
+  const seenIndices = new Set<number>();
+  const issueIndices = new Set<number>();
   for (const row of parsed as Array<Record<string, unknown>>) {
-    const paper = papers[Number(row.index)];
-    if (!paper) continue;
-    const quote = String(row.quote ?? "").trim() || firstUsefulQuote(paper);
+    const index = Number(row.index);
+    if (!Number.isInteger(index) || index < 0 || index >= papers.length) {
+      if (Number.isFinite(index)) issueIndices.add(index);
+      continue;
+    }
+    if (seenIndices.has(index)) {
+      issueIndices.add(index);
+      continue;
+    }
+    seenIndices.add(index);
+    const paper = papers[index];
+    const quote = verifiedScreenQuote(paper, row.quote);
     result.set(paper.id, {
       taskId: task.id,
       decision: normalizeDecision(row.decision),
@@ -626,10 +675,17 @@ const llmScreen = async (papers: LiteraturePaper[], task: LiteratureReviewTask) 
         },
       ],
       decidedAt: isoNow(),
+      method: "review-llm",
+      ...checkpoint,
     });
   }
-  if (result.size === 0) throw new Error("no usable screening rows");
-  return result;
+  papers.forEach((_, index) => {
+    if (!seenIndices.has(index)) issueIndices.add(index);
+  });
+  return {
+    screenings: result,
+    missingIndices: Array.from(issueIndices).sort((left, right) => left - right),
+  };
 };
 
 const BRIEF_SYSTEM =
@@ -1219,6 +1275,7 @@ const PREVIEW_LIBRARY: LiteratureLibrary = {
       suggestions: [],
     },
   ],
+  screenRuns: [],
 };
 
 interface LiteratureState {
@@ -1251,7 +1308,7 @@ interface LiteratureState {
   updateCriterion: (taskId: string, criterionId: string, text: string) => void;
   addCriterion: (taskId: string, kind: CriterionKind) => void;
   removeCriterion: (taskId: string, criterionId: string) => void;
-  screenPapersForTask: (taskId: string, paperIds?: string[]) => void;
+  screenPapersForTask: (taskId: string, paperIds?: string[]) => Promise<void>;
   confirmScreening: (paperId: string, taskId: string) => void;
   flipScreening: (paperId: string, taskId: string) => void;
   /** Set an explicit decision (include/exclude/maybe) and confirm it. */
@@ -1314,6 +1371,22 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
     }, PERSIST_DELAY_MS);
   };
 
+  const persistNow = async (label: string) => {
+    if (!isTauri()) return;
+    if (persistTimer) {
+      clearTimeout(persistTimer);
+      persistTimer = null;
+    }
+    try {
+      await literatureSave(get().library);
+    } catch (error) {
+      const message = `failed to save ${label}: ${String(error)}`;
+      set({ error: message });
+      log("error", message, { open: true });
+      throw error;
+    }
+  };
+
   const mutate = (update: (library: LiteratureLibrary) => LiteratureLibrary) => {
     set({ library: update(get().library) });
     persist();
@@ -1346,7 +1419,7 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
 
     setActiveReviewTask: (id) => set({ activeReviewTaskId: id }),
 
-    runRemoteSearch: async (query, sources, maxResults = 20) => {
+    runRemoteSearch: async (query, _sources, _maxResults = 20) => {
       const trimmed = query.trim();
       if (!trimmed) {
         set({ error: "请输入检索问题或关键词。" });
@@ -1356,32 +1429,9 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
         set({ error: "远程文献检索需要桌面后端。" });
         return;
       }
-      set({ searching: true, error: null });
-      log("info", `正在检索：${trimmed}`, { open: true });
-      try {
-        const result = await literatureSearch<LiteratureSearchResult>(
-          trimmed,
-          sources,
-          maxResults,
-        );
-        const stats = await literatureLibraryUpsert<LiteratureUpsertResult>(
-          result.papers,
-          trimmed,
-          sources,
-        );
-        await get().load(get().loadedProjectId ?? "default", { quiet: true });
-        log(
-          "ok",
-          `检索完成：${result.papers.length} 条结果，新增 ${stats.added}，合并 ${stats.merged}`,
-        );
-        for (const warning of result.warnings) log("warn", warning);
-      } catch (error) {
-        const message = `远程检索失败：${String(error)}`;
-        set({ error: message });
-        log("error", message, { open: true });
-      } finally {
-        set({ searching: false });
-      }
+      const message = "即时检索已迁移至“可复现检索”。请先创建和预览协议，再明确确认执行。";
+      set({ searching: false, error: message });
+      log("warn", message, { open: true });
     },
 
     load: async (projectId, options) => {
@@ -1453,7 +1503,7 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
             });
           } else if (tool.name === "LiteratureLibraryUpsert") {
             const count = Array.isArray(input.papers) ? input.papers.length : "?";
-            log("info", `Agent (Chat): saving ${count} records to the library...`, {
+            log("info", `Agent (Chat): refreshing the projection for ${count} canonical records...`, {
               open: true,
             });
           } else if (tool.name === "LiteraturePdfDownload") {
@@ -1477,10 +1527,17 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
           } catch {
             return;
           }
-          if (result.name === "LiteratureLibraryUpsert") {
+          if (result.name === "LiteratureSearch") {
+            const runId = String((output.searchRun as Record<string, unknown> | undefined)?.id ?? "");
+            const count = Array.isArray(output.papers) ? output.papers.length : 0;
             log(
               "ok",
-              `Agent saved ${Number(output.added ?? 0)} new / ${Number(output.merged ?? 0)} merged to papers/library.json`,
+              `Agent recorded ${count} canonical results${runId ? ` in SearchRun ${runId}` : ""}.`,
+            );
+          } else if (result.name === "LiteratureLibraryUpsert") {
+            log(
+              "ok",
+              `Agent refreshed papers/library.json for ${Number(output.merged ?? 0)} canonical records.`,
             );
           } else if (result.name === "LiteraturePdfDownload") {
             log("ok", `Agent downloaded ${String(output.relativePath ?? "PDF")}`);
@@ -1639,39 +1696,182 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
       const candidates = get().library.papers.filter(
         (paper) => belongs(paper) && !paper.screenings?.[taskId]?.userConfirmed,
       );
-      if (candidates.length === 0) return;
-
-      set({ screening: true });
-      let llmResults: Map<string, PaperScreening> | null = null;
-      if (isTauri()) {
-        log("info", `Review LLM is screening ${candidates.length} abstracts with SomniQ research-review standards`, { open: true });
-        try {
-          llmResults = await llmScreen(candidates, task);
-        } catch (error) {
-          log("warn", `Review LLM unavailable (${String(error)}); using keyword heuristic`);
-        }
+      if (candidates.length === 0) {
+        log("info", `No unconfirmed papers match the scope for "${task.question}".`);
+        return;
       }
+
+      const candidateChunks = Array.from(
+        { length: Math.ceil(candidates.length / SCREEN_CHUNK_SIZE) },
+        (_, index) => candidates.slice(index * SCREEN_CHUNK_SIZE, (index + 1) * SCREEN_CHUNK_SIZE),
+      );
+      const screenRunId = makeId("screen-run");
+      const chunks: LiteratureScreenChunk[] = candidateChunks.map((papers, index) => ({
+        id: `${screenRunId}-chunk-${String(index + 1).padStart(3, "0")}`,
+        index: index + 1,
+        paperIds: papers.map((paper) => paper.id),
+        status: "planned",
+        expectedCount: papers.length,
+        reviewerCount: 0,
+        fallbackCount: 0,
+        missingIndices: [],
+      }));
+      const screenRun: LiteratureScreenRun = {
+        id: screenRunId,
+        taskId,
+        status: "planned",
+        chunkSize: SCREEN_CHUNK_SIZE,
+        totalPapers: candidates.length,
+        reviewerCount: 0,
+        fallbackCount: 0,
+        criteriaUpdatedAt: task.updatedAt,
+        startedAt: isoNow(),
+        chunks,
+      };
+
+      mutate((library) => ({
+        ...library,
+        screenRuns: [screenRun, ...(library.screenRuns ?? [])],
+      }));
+      set({ screening: true });
+      let reviewerTotal = 0;
+      let fallbackTotal = 0;
       try {
+        await persistNow("screening manifest");
+        log(
+          "info",
+          `ScreenRun ${screenRunId} prepared ${candidateChunks.length} chunk(s) of at most ${SCREEN_CHUNK_SIZE} papers.`,
+          { open: true },
+        );
+
+        for (let chunkIndex = 0; chunkIndex < candidateChunks.length; chunkIndex += 1) {
+          const chunkPapers = candidateChunks[chunkIndex];
+          const chunk = chunks[chunkIndex];
+          const checkpoint = { screenRunId, chunkId: chunk.id };
+          const startedAt = isoNow();
+          mutate((library) => ({
+            ...library,
+            screenRuns: (library.screenRuns ?? []).map((run) =>
+              run.id === screenRunId
+                ? {
+                    ...run,
+                    status: "running",
+                    chunks: run.chunks.map((item) =>
+                      item.id === chunk.id ? { ...item, status: "running", startedAt } : item,
+                    ),
+                  }
+                : run,
+            ),
+          }));
+          await persistNow(`screening checkpoint ${chunk.index}`);
+
+          let reviewerBatch: LlmScreenBatchResult | null = null;
+          let reviewerError: string | undefined;
+          if (isTauri()) {
+            try {
+              reviewerBatch = await llmScreen(chunkPapers, task, checkpoint);
+            } catch (error) {
+              reviewerError = String(error);
+            }
+          } else {
+            reviewerError = "Review LLM is unavailable outside the Desktop runtime";
+          }
+
+          const screeningByPaper = new Map<string, PaperScreening>();
+          for (const paper of chunkPapers) {
+            screeningByPaper.set(
+              paper.id,
+              reviewerBatch?.screenings.get(paper.id)
+                ?? screenPaperForTask(paper, task, checkpoint),
+            );
+          }
+          const reviewerCount = reviewerBatch?.screenings.size ?? 0;
+          const fallbackCount = chunkPapers.length - reviewerCount;
+          const missingIndices = reviewerBatch?.missingIndices
+            ?? chunkPapers.map((_, index) => index);
+          reviewerTotal += reviewerCount;
+          fallbackTotal += fallbackCount;
+          const chunkStatus: LiteratureScreenChunk["status"] =
+            reviewerCount === chunkPapers.length && missingIndices.length === 0
+              ? "completed"
+              : reviewerCount === 0
+                ? "fallback"
+                : "partial";
+          const completedAt = isoNow();
+
+          mutate((library) => ({
+            ...library,
+            papers: library.papers.map((paper) => {
+              const screening = screeningByPaper.get(paper.id);
+              if (!screening || paper.screenings?.[taskId]?.userConfirmed) return paper;
+              return {
+                ...paper,
+                stage: paper.stage === "inbox" ? "screened" : paper.stage,
+                verdict: screeningToVerdict(screening),
+                screenings: {
+                  ...(paper.screenings ?? {}),
+                  [taskId]: screening,
+                },
+              };
+            }),
+            screenRuns: (library.screenRuns ?? []).map((run) =>
+              run.id === screenRunId
+                ? {
+                    ...run,
+                    reviewerCount: reviewerTotal,
+                    fallbackCount: fallbackTotal,
+                    chunks: run.chunks.map((item) =>
+                      item.id === chunk.id
+                        ? {
+                            ...item,
+                            status: chunkStatus,
+                            reviewerCount,
+                            fallbackCount,
+                            missingIndices,
+                            completedAt,
+                            error: reviewerError
+                              ?? (missingIndices.length > 0
+                                ? `Reviewer reply omitted or duplicated indices: ${missingIndices.join(", ")}`
+                                : undefined),
+                          }
+                        : item,
+                    ),
+                  }
+                : run,
+            ),
+          }));
+          await persistNow(`screening checkpoint ${chunk.index} result`);
+          log(
+            chunkStatus === "completed" ? "ok" : "warn",
+            `ScreenRun ${screenRunId} chunk ${chunk.index}/${chunks.length}: ${reviewerCount}/${chunkPapers.length} Reviewer, ${fallbackCount} heuristic.`,
+          );
+        }
+
+        const finalStatus: LiteratureScreenRun["status"] =
+          fallbackTotal === 0 ? "completed" : reviewerTotal === 0 ? "fallback" : "partial";
+        const completedAt = isoNow();
         mutate((library) => ({
           ...library,
-          papers: library.papers.map((paper) => {
-            if (!belongs(paper) || paper.screenings?.[taskId]?.userConfirmed) return paper;
-            const screening = llmResults?.get(paper.id) ?? screenPaperForTask(paper, task);
-            return {
-              ...paper,
-              stage: paper.stage === "inbox" ? "screened" : paper.stage,
-              verdict: screeningToVerdict(screening),
-              screenings: {
-                ...(paper.screenings ?? {}),
-                [taskId]: screening,
-              },
-            };
-          }),
+          screenRuns: (library.screenRuns ?? []).map((run) =>
+            run.id === screenRunId ? { ...run, status: finalStatus, completedAt } : run,
+          ),
         }));
+        await persistNow("completed screening run");
         log(
-          "ok",
-          `Screened ${candidates.length} abstracts against "${task.question}" (${llmResults ? "Review LLM" : "heuristic"})`,
+          finalStatus === "completed" ? "ok" : "warn",
+          `ScreenRun ${screenRunId} finished: ${reviewerTotal}/${candidates.length} Reviewer decisions, ${fallbackTotal} explicit heuristic fallback.`,
+          { open: true },
         );
+      } catch (error) {
+        mutate((library) => ({
+          ...library,
+          screenRuns: (library.screenRuns ?? []).map((run) =>
+            run.id === screenRunId
+              ? { ...run, status: "failed", completedAt: isoNow() }
+              : run,
+          ),
+        }));
+        log("error", `ScreenRun ${screenRunId} failed: ${String(error)}`, { open: true });
       } finally {
         set({ screening: false });
       }

@@ -2932,3 +2932,57 @@ body.am-resizing {
     border-right: 0;
   }
 }
+
+/* ======================================================================
+   Motion pass — entrance & hover transitions. Timing/easing match the
+   shared sq-* pass in styles.css; disabled under prefers-reduced-motion.
+   ====================================================================== */
+
+/* Folder rows (account sidebar) and message rows fade/slide on hover. */
+.am-folder {
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.am-message-row {
+  transition: background 0.12s ease;
+}
+
+/* Message list refreshes cascade in rows when the folder/search changes.
+   Delay is capped at the first eight rows so long lists stay snappy. */
+.am-message-list > * {
+  animation: sq-fade-up 0.24s ease both;
+}
+
+.am-message-list > *:nth-child(1) { animation-delay: 0.02s; }
+.am-message-list > *:nth-child(2) { animation-delay: 0.05s; }
+.am-message-list > *:nth-child(3) { animation-delay: 0.08s; }
+.am-message-list > *:nth-child(4) { animation-delay: 0.11s; }
+.am-message-list > *:nth-child(5) { animation-delay: 0.14s; }
+.am-message-list > *:nth-child(6) { animation-delay: 0.17s; }
+.am-message-list > *:nth-child(7) { animation-delay: 0.20s; }
+.am-message-list > *:nth-child(n+8) { animation-delay: 0.23s; }
+
+/* Compose sheet slides up from the corner while its scrim fades in. */
+.am-compose-overlay {
+  animation: sq-fade-in 0.2s ease both;
+}
+
+.am-compose-card {
+  transform-origin: bottom right;
+  animation: am-compose-in 0.24s cubic-bezier(0.2, 0.8, 0.3, 1) both;
+}
+
+@keyframes am-compose-in {
+  from { opacity: 0; transform: translateY(14px) scale(0.98); }
+  to { opacity: 1; transform: none; }
+}
+
+/* Per-message action menus pop from their trigger like the shell menus. */
+.am-action-menu {
+  transform-origin: top left;
+  animation: sq-menu-in 0.16s cubic-bezier(0.2, 0.8, 0.3, 1) both;
+}
+
+.am-action-menu.right {
+  transform-origin: top right;
+}

@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use tauri::State;
+use tauri::{Emitter, State};
 
 use runtime::{
     ContentBlock, ConversationMessage, PermissionMode, RuntimeError, RuntimeFeatureConfig, Session,
@@ -107,7 +107,10 @@ impl ToolExecutor for NoTools {
 }
 
 pub(crate) fn run_oneshot(system: &str, message: ConversationMessage) -> Result<String, String> {
-    let config = crate::config::load_object();
+    // Use the managed-normalized object (not raw `load_object`) so a managed
+    // model switch resolves the current gateway credentials and probed transport
+    // rather than a stale executor slot.
+    let config = crate::config::current_executor_object()?;
     let (model, _provider, executor_config) = aris_chat::resolve_settings_executor_config(&config)?;
     if message
         .blocks
@@ -317,7 +320,14 @@ fn import_pdf_at(base: &Path, source_path: &Path, file_name: &str) -> Result<Imp
     std::fs::create_dir_all(&papers_dir).map_err(|error| error.to_string())?;
     let safe_name = tools::literature::sanitize_file_name(file_name)?;
     let destination = papers_dir.join(safe_name);
-    if source_path.canonicalize().ok() != destination.canonicalize().ok() {
+    let same_file = source_path.canonicalize().ok() == destination.canonicalize().ok();
+    if destination.exists() && !same_file {
+        return Err(format!(
+            "refusing to overwrite existing PDF: {}",
+            destination.display()
+        ));
+    }
+    if !same_file {
         std::fs::copy(source_path, &destination).map_err(|error| error.to_string())?;
     }
     let bytes = std::fs::metadata(&destination)
@@ -418,21 +428,81 @@ pub fn literature_save(projects_state: State<ProjectState>, library: Value) -> R
 
 #[tauri::command]
 pub async fn literature_search(
+    projects_state: State<'_, ProjectState>,
     query: String,
     sources: Vec<String>,
     max_results: Option<usize>,
 ) -> Result<Value, String> {
     let limit = max_results.unwrap_or(20).clamp(1, 50);
+    let base = project_base(&projects_state)?;
     tauri::async_runtime::spawn_blocking(move || {
-        let outcome = tools::literature::search_remote(&query, &sources, limit)?;
-        Ok(json!({
-            "papers": outcome.papers,
-            "warnings": outcome.warnings,
-            "sourceCounts": outcome.source_counts,
-        }))
+        tools::literature::literature_search_ad_hoc_at(
+            &base,
+            tools::literature::LiteratureSearchInput {
+                query,
+                sources,
+                max_results: Some(limit),
+            },
+        )
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// Create a project-local, reproducible search protocol. The Desktop uses the
+/// same tools-layer operation as Chat and CLI, but supplies its active project
+/// root explicitly rather than relying on a process-wide workspace variable.
+#[tauri::command]
+pub fn literature_protocol_create(
+    projects_state: State<ProjectState>,
+    protocol: runtime::SearchProtocolDraft,
+) -> Result<Value, String> {
+    tools::literature::literature_search_protocol_create_at(
+        &project_base(&projects_state)?,
+        tools::literature::LiteratureSearchProtocolCreateInput { protocol },
+    )
+}
+
+#[tauri::command]
+pub fn literature_protocol_preview(
+    projects_state: State<ProjectState>,
+    protocol_id: String,
+) -> Result<Value, String> {
+    tools::literature::literature_search_preview_at(
+        &project_base(&projects_state)?,
+        tools::literature::LiteratureSearchPreviewInput { protocol_id },
+    )
+}
+
+/// Execute only after Desktop has displayed the provider scope and the user
+/// has explicitly confirmed it. Progress events are advisory; the shared
+/// runtime checkpoints every source transition independently of this window.
+#[tauri::command]
+pub async fn literature_protocol_execute(
+    app: tauri::AppHandle,
+    projects_state: State<'_, ProjectState>,
+    protocol_id: String,
+    confirmation: String,
+    max_results: Option<usize>,
+    resume_run_id: Option<String>,
+) -> Result<Value, String> {
+    let base = project_base(&projects_state)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        tools::literature::literature_search_execute_at(
+            &base,
+            tools::literature::LiteratureSearchExecuteInput {
+                protocol_id,
+                confirmation,
+                max_results,
+                resume_run_id,
+            },
+            |progress| {
+                let _ = app.emit("literature-search-progress", progress.clone());
+            },
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]

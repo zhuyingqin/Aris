@@ -2,7 +2,7 @@
 name: research-lit
 description: Search and analyze research papers, find related work, summarize key ideas. Use when user says "find papers", "related work", "literature review", "what does this paper say", or needs to understand academic papers.
 argument-hint: [paper-topic-or-url]
-allowed-tools: Bash(*), Read, Glob, Grep, WebSearch, WebFetch, Write, Agent, LiteratureSearch, LiteratureLibraryUpsert, LiteraturePdfDownload, mcp__zotero__*, mcp__obsidian-vault__*
+allowed-tools: Bash(*), Read, Glob, Grep, WebSearch, WebFetch, Write, Agent, LiteratureSearch, LiteraturePdfDownload, mcp__zotero__*, mcp__obsidian-vault__*
 ---
 
 # Research Literature Review
@@ -509,13 +509,13 @@ ARXIV_FETCHER=".aris/tools/arxiv_fetch.py"
   `{ "url": "<pdf_url>", "fileName": "<ARXIV_ID>", "paperId": "arxiv:<ARXIV_ID>" }`
   instead of the bash block.
 
-**Record in the shared library**: when the `LiteratureLibraryUpsert` tool is
-available, record the externally discovered candidates (after ranking, before
-Step 1.5) in `papers/library.json` — the shared project library the ARIS
-desktop Literature view displays. Pass records in the `LiteratureSearch`
-output shape plus `"search": { "query": "<topic>", "sources": [..] }` for
-provenance. The upsert never overwrites user state (stage/stars/tags); if the
-tool is unavailable, skip silently.
+**Canonical library rule**: `LiteratureSearch` already persists a bounded
+ad-hoc `SearchProtocol`, `SearchRun`, provider artifacts, and canonical records
+before projecting `papers/library.json`. Do not call `LiteratureLibraryUpsert`
+after it. Web, Zotero, or shell candidates that have not passed through that
+path remain working candidates only; do not hand-map them into the JSON library.
+Before they support screening, evidence, novelty, or writing, retrieve them
+through `LiteratureSearch` or a reviewed protocol execution.
 
 ### Step 1.5: Verify Candidate Papers (anti-hallucination, mandatory)
 

@@ -490,6 +490,23 @@ export const literatureSearch = <T>(
   sources: string[],
   maxResults?: number,
 ) => invoke<T>("literature_search", { query, sources, maxResults: maxResults ?? null });
+export const literatureProtocolCreate = <T>(protocol: unknown) =>
+  invoke<T>("literature_protocol_create", { protocol });
+export const literatureProtocolPreview = <T>(protocolId: string) =>
+  invoke<T>("literature_protocol_preview", { protocolId });
+export const literatureProtocolExecute = <T>(
+  protocolId: string,
+  confirmation: string,
+  maxResults?: number,
+  resumeRunId?: string,
+) => invoke<T>("literature_protocol_execute", {
+  protocolId,
+  confirmation,
+  maxResults: maxResults ?? null,
+  resumeRunId: resumeRunId ?? null,
+});
+export const onLiteratureSearchProgress = (callback: (progress: unknown) => void) =>
+  listen<unknown>("literature-search-progress", (event) => callback(event.payload));
 export const literatureLibraryUpsert = <T>(
   papers: unknown[],
   query: string,

@@ -83,6 +83,9 @@ fn exposes_mvp_tools() {
     assert!(names.contains(&"read_file"));
     assert!(names.contains(&"WebFetch"));
     assert!(names.contains(&"WebSearch"));
+    assert!(names.contains(&"LiteratureSearchProtocolCreate"));
+    assert!(names.contains(&"LiteratureSearchPreview"));
+    assert!(names.contains(&"LiteratureSearchExecute"));
     assert!(names.contains(&"TodoWrite"));
     assert!(names.contains(&"memory"));
     assert!(names.contains(&"session_search"));
@@ -792,7 +795,8 @@ fn bundled_skill_is_discoverable_and_invokable() {
     );
 
     let markdown = skill_markdown("research-lit").expect("bundled skill markdown");
-    assert!(markdown.contains("# Research Literature Review"));
+    assert!(markdown.contains("# Literature Search"));
+    assert!(markdown.contains("legacy alias `research-lit`"));
 
     let result = execute_tool(
         "Skill",
@@ -804,12 +808,26 @@ fn bundled_skill_is_discoverable_and_invokable() {
     .expect("bundled Skill should load");
     let output: serde_json::Value = serde_json::from_str(&result).expect("valid json");
     assert_eq!(output["skill"], "research-lit");
-    assert_eq!(output["path"], "<bundled:research-lit>");
+    assert_eq!(output["path"], "<bundled:literature-search>");
     assert_eq!(output["args"], "reservoir computing");
     assert!(output["prompt"]
         .as_str()
         .expect("prompt")
-        .contains("# Research Literature Review"));
+        .contains("# Literature Search"));
+    assert!(output["prompt"]
+        .as_str()
+        .expect("prompt")
+        .contains("legacy alias `research-lit`"));
+
+    let literature_search = skill_markdown("literature-search").expect("canonical skill markdown");
+    assert!(literature_search.contains("# Literature Search"));
+    assert!(literature_search.contains("LiteratureSearchPreview"));
+    assert!(skill_markdown("literature-screen")
+        .expect("screen skill markdown")
+        .contains("# Literature Screen"));
+    assert!(skill_markdown("literature-evidence")
+        .expect("evidence skill markdown")
+        .contains("# Literature Evidence"));
 
     let _ = fs::remove_dir_all(&tmp);
 }

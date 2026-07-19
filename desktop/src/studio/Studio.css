@@ -718,3 +718,24 @@
     border-bottom: 1px solid var(--border);
   }
 }
+
+/* ======================================================================
+   Motion pass — hover & entrance transitions. Timing/easing match the
+   shared sq-* pass in styles.css; disabled under prefers-reduced-motion.
+   ====================================================================== */
+
+/* Artifact cards in the library lift slightly on hover. */
+.studio-artifact {
+  transition: transform 0.14s ease, box-shadow 0.14s ease,
+    border-color 0.14s ease, background 0.14s ease;
+}
+
+.studio-artifact:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 6px 16px color-mix(in srgb, #000 16%, transparent);
+}
+
+.studio-artifact:active {
+  transform: none;
+  box-shadow: none;
+}

@@ -4303,6 +4303,22 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   min-width: 0;
 }
 
+.sp-model-transport {
+  align-self: flex-start;
+  padding: 1px 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-dim);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.sp-model-transport.is-responses {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  color: var(--accent);
+}
+
 .sp-model-select-empty {
   display: flex;
   align-items: center;
@@ -12175,6 +12191,95 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   color: var(--text);
 }
 
+.project-brief-review-control {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0 12px 8px;
+  padding: 10px;
+  border: 1px solid color-mix(in srgb, var(--accent) 16%, var(--border));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--accent) 4%, var(--bg-1));
+}
+
+.project-brief-review-copy {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.project-brief-review-copy strong {
+  color: var(--text);
+  font-size: 11px;
+}
+
+.project-brief-review-copy small {
+  color: var(--text-dim);
+  font-size: 10px;
+  line-height: 1.35;
+}
+
+.project-brief-review-copy .project-brief-review-error {
+  color: var(--red);
+}
+
+.project-brief-review-switch {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+  min-width: 70px;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-2);
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.project-brief-review-switch.enabled {
+  border-color: color-mix(in srgb, var(--green) 42%, var(--border));
+  color: var(--green);
+}
+
+.project-brief-review-switch:disabled {
+  cursor: wait;
+  opacity: .65;
+}
+
+.project-brief-review-switch-track {
+  position: relative;
+  display: block;
+  width: 24px;
+  height: 14px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text-dim) 34%, transparent);
+  transition: background .16s ease;
+}
+
+.project-brief-review-switch-track > span {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: white;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .28);
+  transition: transform .16s ease;
+}
+
+.project-brief-review-switch.enabled .project-brief-review-switch-track {
+  background: var(--green);
+}
+
+.project-brief-review-switch.enabled .project-brief-review-switch-track > span {
+  transform: translateX(10px);
+}
+
 .project-brief-body {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
@@ -14145,6 +14250,88 @@ button.chat-workflow-file-path:hover {
    disabled together under prefers-reduced-motion at the end of the file.
    ====================================================================== */
 
+/* Shared building blocks reused by every module stylesheet. Module CSS
+   files reference these keyframes/helpers instead of re-declaring their
+   own timing curves, keeping motion consistent app-wide. */
+@keyframes sq-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes sq-fade-up {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: none; }
+}
+
+/* Nested in-module view switches (overview panes, readers, review panels)
+   get a slightly quicker, shallower rise than the top-level pane swap. */
+@keyframes sq-subpane-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+
+.sq-subpane-in {
+  animation: sq-subpane-in 0.22s ease both;
+}
+
+/* The shell marks an element as .sq-loading until its content (images,
+   previews) has decoded; swapping the class fades the element in. */
+.sq-loading {
+  opacity: 0;
+}
+
+.sq-loading,
+.sq-loaded {
+  transition: opacity 0.2s ease;
+}
+
+/* ---------- Shared overlay & dialog entrances ---------- */
+
+/* Skill/editor drawer: the panel slides in from the right while the
+   backdrop fades in behind it. */
+.ext-overlay {
+  animation: sq-fade-in 0.2s ease both;
+}
+
+.ext-drawer {
+  animation: sq-drawer-in 0.26s cubic-bezier(0.2, 0.8, 0.3, 1) both;
+}
+
+@keyframes sq-drawer-in {
+  from { opacity: 0; transform: translateX(28px); }
+  to { opacity: 1; transform: none; }
+}
+
+/* Slash-command / model picker pops upward from the composer it is
+   anchored to. */
+.command-select {
+  transform-origin: bottom center;
+  animation: sq-menu-up 0.16s cubic-bezier(0.2, 0.8, 0.3, 1) both;
+}
+
+@keyframes sq-menu-up {
+  from { opacity: 0; transform: translateY(5px) scale(0.98); }
+  to { opacity: 1; transform: none; }
+}
+
+/* Drag-and-drop highlight layers appear while a file hovers the window. */
+.chat-drop-overlay,
+.chat-drop-full {
+  animation: sq-fade-in 0.15s ease both;
+}
+
+/* ---------- Nested view entrances (modules mount these conditionally) ---------- */
+
+.independent-review-panel,
+.lit-overview,
+.lit-pdf-reader,
+.studio-web-preview,
+.studio-review-workspace,
+.kb-review,
+.kb-confirmed {
+  animation: sq-subpane-in 0.22s ease both;
+}
+
 /* Module panes crossfade when switching tabs. Panes toggled via [hidden]
    replay the animation on unhide (display:none -> block restarts it);
    opacity-only so position:fixed descendants keep their containing block. */
@@ -14512,11 +14699,6 @@ button.chat-workflow-file-path:hover {
   background-clip: text;
 }
 
-@keyframes sq-fade-up {
-  from { opacity: 0; transform: translateY(10px); }
-  to { opacity: 1; transform: none; }
-}
-
 .chat-welcome p {
   animation: sq-fade-up 0.5s ease 0.08s both;
 }
@@ -14574,12 +14756,45 @@ button.chat-workflow-file-path:hover {
   .chat-welcome-glow,
   .chat-welcome h1,
   .chat-welcome p,
-  .chat-starters .chat-starter {
+  .chat-starters .chat-starter,
+  .ext-overlay,
+  .ext-drawer,
+  .command-select,
+  .chat-drop-overlay,
+  .chat-drop-full,
+  .sq-subpane-in,
+  .independent-review-panel,
+  .lit-overview,
+  .lit-pdf-reader,
+  .studio-web-preview,
+  .studio-review-workspace,
+  .kb-review,
+  .kb-confirmed,
+  .lit-card,
+  .kb-fragment-card,
+  .kb-card,
+  .kb-confirmed-card,
+  .am-message-list > *,
+  .am-compose-overlay,
+  .am-compose-card,
+  .am-action-menu {
     animation: none !important;
   }
 
   .chat-starter-icon,
-  .chat-send-btn {
+  .chat-send-btn,
+  .sq-loading,
+  .sq-loaded,
+  .studio-artifact,
+  .kb-view-tab,
+  .kb-fragment-card,
+  .kb-card-actions button,
+  .kb-edit-actions button,
+  .kb-graph-toggle,
+  .kb-graph-zoom-btn,
+  .kb-graph-node,
+  .am-folder,
+  .am-message-row {
     transition: none !important;
   }
 }

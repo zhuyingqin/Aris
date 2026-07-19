@@ -733,6 +733,80 @@ fn desktop_chat_event_batches_stop_before_the_encrypted_frame_budget() {
 }
 
 #[test]
+fn desktop_chat_event_batches_do_not_spend_the_visible_limit_on_session_persistence() {
+    let entry = |seq: u64, kind: &str, payload: Value| crate::chat_events::ChatEventLogEntry {
+        version: 1,
+        seq,
+        ts: seq,
+        session_id: "chat-live".to_string(),
+        kind: kind.to_string(),
+        payload,
+    };
+    let entries = vec![
+        entry(
+            1,
+            "user_message",
+            serde_json::json!({
+                "message": { "blocks": [{ "type": "text", "text": "desktop question" }] }
+            }),
+        ),
+        entry(
+            2,
+            "session_reset",
+            serde_json::json!({ "reason": "initial" }),
+        ),
+        entry(3, "session_message", serde_json::json!({ "index": 0 })),
+        entry(
+            4,
+            "session_checkpoint",
+            serde_json::json!({ "messageCount": 1 }),
+        ),
+        entry(5, "usage", serde_json::json!({ "promptTokens": 1 })),
+        entry(
+            6,
+            "done",
+            serde_json::json!({ "sessionId": "chat-live", "text": "desktop answer" }),
+        ),
+    ];
+
+    let (events, next_seq) = remote_chat_event_batch(&entries, "chat-live", Some(1), 1);
+
+    assert_eq!(next_seq, 6);
+    assert_eq!(
+        events,
+        vec![ChatSessionEvent::Done {
+            seq: 6,
+            text: "desktop answer".to_string(),
+        }]
+    );
+}
+
+#[test]
+fn desktop_chat_event_preview_bounds_large_tool_results_and_reports_review_activity() {
+    let event = bounded_remote_chat_session_message_event(ChatMessageEvent::ToolResult {
+        tool_use_id: Some("fetch-1".to_string()),
+        name: "WebFetch".to_string(),
+        output: "x".repeat(MAX_REMOTE_CHAT_TOOL_OUTPUT_BYTES + 100),
+        is_error: false,
+    });
+    assert!(matches!(
+        event,
+        ChatMessageEvent::ToolResult { output, .. }
+            if output.len() <= MAX_REMOTE_CHAT_TOOL_OUTPUT_BYTES
+                && output.ends_with(REMOTE_CHAT_TOOL_OUTPUT_TRUNCATION_NOTICE)
+    ));
+
+    assert_eq!(
+        remote_chat_review_status(&serde_json::json!({
+            "phase": "reviewing",
+            "attempt": 2,
+            "maxRevisions": 2,
+        })),
+        Some("Independent review in progress (round 2/2).".to_string())
+    );
+}
+
+#[test]
 fn remote_chat_rich_events_use_separate_bounded_text_and_detail_budgets() {
     let mut text_bytes = MAX_REMOTE_CHAT_STREAM_BYTES - 2;
     let mut rich_bytes = MAX_REMOTE_CHAT_RICH_STREAM_BYTES - 2;

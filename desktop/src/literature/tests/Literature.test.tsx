@@ -9,6 +9,10 @@ const mocks = vi.hoisted(() => ({
   literatureLoad: vi.fn(),
   literatureSave: vi.fn(),
   literatureSearch: vi.fn(),
+  literatureProtocolCreate: vi.fn(),
+  literatureProtocolPreview: vi.fn(),
+  literatureProtocolExecute: vi.fn(),
+  onLiteratureSearchProgress: vi.fn(),
   literatureLibraryUpsert: vi.fn(),
   literatureDownloadPdf: vi.fn(),
   literatureImportPdf: vi.fn(),
@@ -37,6 +41,10 @@ vi.mock("../../api/tauri", () => ({
   literatureLoad: mocks.literatureLoad,
   literatureSave: mocks.literatureSave,
   literatureSearch: mocks.literatureSearch,
+  literatureProtocolCreate: mocks.literatureProtocolCreate,
+  literatureProtocolPreview: mocks.literatureProtocolPreview,
+  literatureProtocolExecute: mocks.literatureProtocolExecute,
+  onLiteratureSearchProgress: mocks.onLiteratureSearchProgress,
   literatureLibraryUpsert: mocks.literatureLibraryUpsert,
   literatureDownloadPdf: mocks.literatureDownloadPdf,
   literatureImportPdf: mocks.literatureImportPdf,
@@ -115,6 +123,7 @@ const fixtureLibrary = (): LiteratureLibrary => ({
   searches: [],
   collections: [],
   reviewTasks: [],
+  screenRuns: [],
 });
 
 beforeEach(() => {
@@ -189,6 +198,48 @@ beforeEach(() => {
     warnings: [],
     sourceCounts: [{ source: "arXiv", count: 2 }],
   });
+  mocks.literatureProtocolCreate.mockReset().mockResolvedValue({
+    protocol: { id: "protocol-reproducible-search" },
+  });
+  mocks.literatureProtocolPreview.mockReset().mockResolvedValue({
+    protocol: {
+      id: "protocol-reproducible-search",
+      question: "What evidence supports local-first review?",
+      scope: "",
+      timeWindow: "",
+    },
+    plan: [{
+      source: "crossref",
+      query: "local-first review",
+      adapterStatus: "available",
+      coverageNote: "DOI metadata coverage.",
+      quotaPolicy: "Captures exposed rate-limit headers.",
+    }],
+    defaultMaxResults: 50,
+    maximumMaxResults: 100,
+  });
+  mocks.literatureProtocolExecute.mockReset().mockResolvedValue({
+    searchRun: {
+      id: "run-reproducible-search",
+      status: "completed",
+      sourceAttempts: [{
+        source: "crossref",
+        status: "completed",
+        hitCount: 12,
+        returnedCount: 5,
+      }],
+    },
+    warnings: [],
+    recordPreview: [{
+      id: "doi:10.1000/sample",
+      title: "Sample record from the reproducible run",
+      authors: ["A. Researcher"],
+      year: 2026,
+      venue: "Journal of Examples",
+      source: "crossref",
+    }],
+  });
+  mocks.onLiteratureSearchProgress.mockReset().mockResolvedValue(() => {});
   mocks.literatureDownloadPdf.mockReset().mockResolvedValue({
     path: "C:/project/papers/1111.00001.pdf",
     relativePath: "papers/1111.00001.pdf",
@@ -243,6 +294,43 @@ async function openSelectedPaperOverview(user: { click: (element: Element) => Pr
 }
 
 describe("Literature library", () => {
+  it("requires a protocol preview and explicit confirmation before a reproducible search run", async () => {
+    const user = userEvent.setup();
+    render(<Literature />);
+
+    await user.type(screen.getByRole("textbox", { name: "研究问题" }), "What evidence supports local-first review?");
+    await user.type(screen.getByRole("textbox", { name: "完整查询式" }), "local-first review");
+    await user.type(screen.getByRole("textbox", { name: "openalex 查询式" }), "openalex-local-first");
+    await user.type(screen.getByRole("textbox", { name: "arxiv 查询式" }), "all:arxiv-local-first");
+    await user.click(screen.getByRole("button", { name: "生成并预览协议" }));
+
+    expect(await screen.findByText("crossref")).toBeTruthy();
+    expect(mocks.literatureProtocolCreate).toHaveBeenCalledWith(expect.objectContaining({
+      question: "What evidence supports local-first review?",
+      databases: ["openalex", "crossref", "semantic-scholar", "arxiv"],
+      queries: {
+        openalex: "openalex-local-first",
+        crossref: "local-first review",
+        "semantic-scholar": "local-first review",
+        arxiv: "all:arxiv-local-first",
+      },
+    }));
+    expect(mocks.literatureProtocolPreview).toHaveBeenCalledWith("protocol-reproducible-search");
+    expect((screen.getByRole("button", { name: "执行已确认检索" }) as HTMLButtonElement).disabled).toBe(true);
+
+    await user.click(screen.getByRole("checkbox", { name: /我已核对查询式/ }));
+    await user.click(screen.getByRole("button", { name: "执行已确认检索" }));
+
+    expect(mocks.literatureProtocolExecute).toHaveBeenCalledWith(
+      "protocol-reproducible-search",
+      "execute",
+      20,
+      undefined,
+    );
+    expect(await screen.findByText(/SearchRun run-reproducible-search/)).toBeTruthy();
+    expect(screen.getByText(/Sample record from the reproducible run/)).toBeTruthy();
+  });
+
   it("loads the persisted library and shows pipeline counts", async () => {
     render(<Literature />);
 
@@ -350,17 +438,17 @@ describe("Literature library", () => {
       });
       chatToolResultHandler?.({
         name: "LiteratureLibraryUpsert",
-        output: JSON.stringify({ added: 3, merged: 0 }),
+        output: JSON.stringify({ added: 0, merged: 3 }),
         isError: false,
       });
     });
 
     const log = screen.getByRole("log", { name: "Literature activity log" });
     expect(
-      within(log).getByText(/Agent \(Chat\): saving 3 records to the library/),
+      within(log).getByText(/Agent \(Chat\): refreshing the projection for 3 canonical records/),
     ).toBeTruthy();
     expect(
-      within(log).getByText(/Agent saved 3 new \/ 0 merged to papers\/library.json/),
+      within(log).getByText(/Agent refreshed papers\/library.json for 3 canonical records/),
     ).toBeTruthy();
   });
 
@@ -433,6 +521,98 @@ describe("Literature library", () => {
     expect(mocks.literatureReviewLlm).toHaveBeenCalledOnce();
     expect(mocks.literatureLlm).not.toHaveBeenCalled();
     expect(useLiteratureStore.getState().library.papers[0].verdict?.score).toBe(91);
+    expect(useLiteratureStore.getState().library.papers[0].screenings?.["task-review"]?.method)
+      .toBe("review-llm");
+    expect(useLiteratureStore.getState().library.screenRuns[0]).toMatchObject({
+      taskId: "task-review",
+      status: "completed",
+      chunkSize: 40,
+      totalPapers: 1,
+      reviewerCount: 1,
+      fallbackCount: 0,
+    });
+    expect(mocks.literatureSave.mock.calls.length).toBeGreaterThanOrEqual(4);
+  });
+
+  it("screens large libraries in stable 40-paper chunks", async () => {
+    const library = fixtureLibrary();
+    library.papers = Array.from({ length: 41 }, (_, index) => ({
+      ...structuredClone(fixturePaper),
+      id: `arxiv:chunk-${index}`,
+      title: `Chunk paper ${index}`,
+      abstract: `Grounded literature screening evidence for paper ${index}.`,
+    }));
+    library.reviewTasks = [{
+      id: "task-chunks",
+      question: "Which papers discuss grounded literature screening?",
+      criteria: [],
+      searchIds: [],
+      createdAt: "2026-06-01T00:00:00.000Z",
+      updatedAt: "2026-06-01T00:00:00.000Z",
+      suggestions: [],
+    }];
+    useLiteratureStore.setState({ library, loaded: true });
+    const reply = (count: number) => JSON.stringify(Array.from({ length: count }, (_, index) => ({
+      index,
+      decision: "include",
+      score: 80,
+      confidence: 85,
+      rationale: "Matches the review question.",
+      quote: `Grounded literature screening evidence for paper ${index}.`,
+    })));
+    mocks.literatureReviewLlm
+      .mockResolvedValueOnce(reply(40))
+      .mockResolvedValueOnce(reply(1));
+
+    await act(async () => {
+      await useLiteratureStore.getState().screenPapersForTask("task-chunks");
+    });
+
+    const run = useLiteratureStore.getState().library.screenRuns[0];
+    expect(mocks.literatureReviewLlm).toHaveBeenCalledTimes(2);
+    expect(run.chunks.map((chunk) => chunk.expectedCount)).toEqual([40, 1]);
+    expect(run.chunks.map((chunk) => chunk.status)).toEqual(["completed", "completed"]);
+    expect(run).toMatchObject({ status: "completed", reviewerCount: 41, fallbackCount: 0 });
+  });
+
+  it("records omitted Reviewer rows and labels heuristic fallback", async () => {
+    const library = fixtureLibrary();
+    library.papers.push({
+      ...structuredClone(fixturePaper),
+      id: "arxiv:missing-row",
+      title: "Paper omitted by the Reviewer",
+    });
+    library.reviewTasks = [{
+      id: "task-partial",
+      question: "Which papers ground claims?",
+      criteria: [],
+      searchIds: [],
+      createdAt: "2026-06-01T00:00:00.000Z",
+      updatedAt: "2026-06-01T00:00:00.000Z",
+      suggestions: [],
+    }];
+    useLiteratureStore.setState({ library, loaded: true });
+    mocks.literatureReviewLlm.mockResolvedValue(JSON.stringify([{
+      index: 0,
+      decision: "include",
+      score: 82,
+      confidence: 80,
+      rationale: "Matches.",
+      quote: "A previously saved record loaded from papers/library.json.",
+    }]));
+
+    await act(async () => {
+      await useLiteratureStore.getState().screenPapersForTask("task-partial");
+    });
+
+    const state = useLiteratureStore.getState().library;
+    expect(state.screenRuns[0]).toMatchObject({
+      status: "partial",
+      reviewerCount: 1,
+      fallbackCount: 1,
+    });
+    expect(state.screenRuns[0].chunks[0].missingIndices).toEqual([1]);
+    expect(state.papers[1].screenings?.["task-partial"]?.method).toBe("heuristic");
   });
 
   it("creates and edits a colored PDF annotation", () => {
@@ -482,13 +662,44 @@ describe("Literature library", () => {
     expect(mocks.literatureDownloadPdf).not.toHaveBeenCalled();
   });
 
-  it("hides the old remote search and new-review strip", async () => {
+  it("opens the first review task and binds it to an explicit saved search", async () => {
+    const user = userEvent.setup();
+    const library = fixtureLibrary();
+    library.searches = [{
+      id: "search-run:run-first",
+      query: "local-first review",
+      sources: ["openalex"],
+      ranAt: "2026-06-01T00:00:00.000Z",
+      resultCount: 1,
+      newCount: 0,
+    }];
+    library.papers[0].searchIds = ["search-run:run-first"];
+    mocks.literatureLoad.mockResolvedValue(library);
+
     render(<Literature />);
     await screen.findAllByText("Persisted Paper on Grounded Reading");
 
     expect(screen.queryByLabelText("远程文献检索")).toBeNull();
     expect(screen.queryByRole("button", { name: "检索并保存" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "新建审查" })).toBeNull();
+    await user.click(screen.getByRole("button", { name: "新建审查任务" }));
+    await user.type(screen.getByRole("textbox", { name: "审查问题" }), "Which papers are in this run?");
+    await user.selectOptions(screen.getByRole("combobox", { name: "审查范围" }), "search-run:run-first");
+    await user.click(screen.getByRole("button", { name: "创建任务" }));
+
+    expect(useLiteratureStore.getState().library.reviewTasks[0].searchIds).toEqual([
+      "search-run:run-first",
+    ]);
+    expect(screen.getByRole("textbox", { name: "当前审查问题" })).toBeTruthy();
+    expect(mocks.literatureSearch).not.toHaveBeenCalled();
+    expect(mocks.literatureLibraryUpsert).not.toHaveBeenCalled();
+  });
+
+  it("does not let the retired instant-search store path bypass SearchRun", async () => {
+    await act(async () => {
+      await useLiteratureStore.getState().runRemoteSearch("local-first review", ["crossref"]);
+    });
+
+    expect(useLiteratureStore.getState().error).toMatch(/可复现检索/);
     expect(mocks.literatureSearch).not.toHaveBeenCalled();
     expect(mocks.literatureLibraryUpsert).not.toHaveBeenCalled();
   });

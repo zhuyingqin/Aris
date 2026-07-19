@@ -1,7 +1,7 @@
 use super::{
-    apply_bundled_internal_config, apply_reviewer_environment_from, clear_newapi_session,
-    deepseek_executor_key, normalize_managed_model_slots, read_verified, upsert_verified,
-    write_verified, ConfigPatch, VerifiedExecutor,
+    apply_bundled_internal_config, apply_patch, apply_reviewer_environment_from, build_view,
+    clear_newapi_session, deepseek_executor_key, normalize_managed_model_slots, read_verified,
+    review_enabled_from, upsert_verified, write_verified, ConfigPatch, VerifiedExecutor,
 };
 use serde_json::{Map, Value};
 use std::sync::Mutex;
@@ -35,6 +35,7 @@ fn entry(provider: &str, model: &str, base_url: &str, key: &str) -> VerifiedExec
         model: model.to_string(),
         base_url: base_url.to_string(),
         api_key: key.to_string(),
+        transport: String::new(),
     }
 }
 
@@ -174,6 +175,35 @@ fn managed_reviewer_disable_does_not_require_admin_api_access() {
     };
 
     assert!(!patch.changes_admin_api_settings(&obj));
+}
+
+#[test]
+fn automatic_review_defaults_on_and_can_be_disabled_without_clearing_reviewer() {
+    let mut obj = serde_json::json!({
+        "reviewer_provider": "openai",
+        "reviewer_model": "gpt-5.5",
+        "reviewer_api_key": "reviewer-token"
+    })
+    .as_object()
+    .expect("object")
+    .clone();
+
+    assert!(review_enabled_from(&obj));
+    assert!(build_view(&obj).review_enabled);
+
+    apply_patch(
+        &mut obj,
+        ConfigPatch {
+            review_enabled: Some(false),
+            ..Default::default()
+        },
+    );
+
+    assert!(!review_enabled_from(&obj));
+    assert!(!build_view(&obj).review_enabled);
+    assert_eq!(obj["reviewer_provider"], "openai");
+    assert_eq!(obj["reviewer_model"], "gpt-5.5");
+    assert_eq!(obj["reviewer_api_key"], "reviewer-token");
 }
 
 #[test]

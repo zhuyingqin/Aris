@@ -69,6 +69,7 @@ export default function ChatImagePreview({
   const normalizedSrc = useMemo(() => decodeHref(src.trim()), [src]);
   const [objectUrl, setObjectUrl] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
+  const [imgLoaded, setImgLoaded] = useState(false);
   const directSrc = isDirectImageSource(normalizedSrc) ? normalizedSrc : null;
   const displaySrc = directSrc ?? objectUrl;
   const canOpen = Boolean(openPath);
@@ -76,6 +77,7 @@ export default function ChatImagePreview({
   useEffect(() => {
     setFailed(false);
     setObjectUrl(null);
+    setImgLoaded(false);
     if (directSrc) return;
 
     let disposed = false;
@@ -121,11 +123,12 @@ export default function ChatImagePreview({
 
   const image = (
     <img
-      className="chat-image-preview-img"
+      className={`chat-image-preview-img ${imgLoaded ? "sq-loaded" : "sq-loading"}`}
       src={displaySrc}
       alt={alt ?? title ?? ""}
       loading="lazy"
       decoding="async"
+      onLoad={() => setImgLoaded(true)}
       onError={() => setFailed(true)}
     />
   );

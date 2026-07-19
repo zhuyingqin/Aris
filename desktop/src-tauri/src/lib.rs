@@ -258,6 +258,18 @@ fn apply_windows_taskbar_icon(window: &tauri::WebviewWindow) {
 #[cfg(not(windows))]
 fn apply_windows_taskbar_icon(_window: &tauri::WebviewWindow) {}
 
+/// Register the executor's transport-verdict callback so a runtime endpoint
+/// fallback (responses→chat or chat→responses) is persisted into the
+/// verified-executor registry. This turns "learned once per process, re-probed
+/// every launch" into a durable fact: the Settings badge and the next launch
+/// reflect the endpoint actually used, killing the first-request-per-launch
+/// fallback flip on gateways that only serve one endpoint for a model.
+fn install_transport_verdict_hook() {
+    aris_executor::set_transport_verdict_hook(Box::new(|base_url, model, verdict| {
+        config::record_runtime_transport_verdict(base_url, model, verdict);
+    }));
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     configure_webview2_user_data_dir();
@@ -283,6 +295,7 @@ pub fn run() {
             // Export config-held keys (e.g. SCOPUS_API_KEY) before any
             // literature search runs; force=false keeps real env vars intact.
             config::apply_reviewer_environment(false);
+            install_transport_verdict_hook();
             projects::init(&app.state::<projects::ProjectState>())
                 .map_err(std::io::Error::other)?;
             remote::init(
@@ -385,6 +398,9 @@ pub fn run() {
             literature::literature_load,
             literature::literature_save,
             literature::literature_search,
+            literature::literature_protocol_create,
+            literature::literature_protocol_preview,
+            literature::literature_protocol_execute,
             literature::literature_library_upsert,
             literature::literature_download_pdf,
             literature::literature_llm,

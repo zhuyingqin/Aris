@@ -262,7 +262,8 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             name: "edit_file",
             description: concat!(
                 "Replace text directly in a workspace file. Use edit_file for small and medium edits to existing/current artifacts instead of write_file, append_file, new version files, shell redirection, sed/awk in-place edits, or generated helper scripts. ",
-                "Read the target file first and take old_string from the current file contents, not stale memory; old_string should be unique unless replace_all is intentional for every match. ",
+                "Read the target file first and take old_string from the current file contents, not stale memory; old_string should be unique — if it matches multiple locations the call fails unless replace_all is set. ",
+                "CRLF/LF line-ending differences are matched automatically and the file's existing endings are preserved on write. ",
                 "When multiple edits target the same file, apply one edit, read the file again, then make the next edit so old_string does not go stale. ",
                 "It returns Codex-style structured file changes."
             ),
@@ -457,33 +458,87 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "LiteratureSearch",
-            description: "Search scholarly metadata across Scopus, OpenAlex, Crossref and arXiv without a shell. Scopus and OpenAlex are the published-venue core, Crossref adds more venues, and arXiv runs last as a preprint supplement — results are deduplicated so a paper found in the core keeps its peer-reviewed record and only borrows arXiv's open PDF link. Returns normalised records (title, authors, year, venue, DOI, abstract, pdfUrl) plus per-source counts. For a comprehensive review OMIT `sources` (runs the full core + supplement) and pass maxResults around 50. Scopus requires SCOPUS_API_KEY (set via desktop Settings) and auto-joins the default set only when the key is present. Used by literature skills (/arxiv, /research-lit) when bash/python is unavailable. Follow up with LiteratureLibraryUpsert to record results.",
+            description: "Run an explicit bounded casual metadata search across Scopus, OpenAlex, Semantic Scholar, Crossref and arXiv. It automatically creates a project-local ad-hoc SearchProtocol and durable SearchRun, then persists canonical records, request/response artifacts, quotas and failures before projecting the library view. Use the explicit ProtocolCreate → Preview → Execute workflow when the user needs to review or refine the protocol before any network request. Results are deduplicated through canonical identity. Scopus requires SCOPUS_API_KEY; Semantic Scholar can use SEMANTIC_SCHOLAR_API_KEY. Do not call LiteratureLibraryUpsert after this tool: the records are already stored and projected.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "query": { "type": "string", "minLength": 2 },
                     "sources": {
                         "type": "array",
-                        "items": { "type": "string", "enum": ["scopus", "openalex", "crossref", "arxiv"] },
-                        "description": "Engines to query (listing order is ignored — results always follow the Scopus → OpenAlex → Crossref → arXiv priority). Empty or omitted means the full default set: Scopus + OpenAlex + Crossref core plus the arXiv supplement."
+                        "items": { "type": "string", "enum": ["scopus", "openalex", "semantic-scholar", "crossref", "arxiv"] },
+                        "description": "Engines to query (listing order is ignored; results follow Scopus → OpenAlex → Semantic Scholar → Crossref → arXiv priority). Empty or omitted means the full bounded set."
                     },
                     "maxResults": { "type": "integer", "minimum": 1, "maximum": 100, "description": "Per-source result target (default 50). Core sources fetch up to this; arXiv is capped lower as a supplement." }
                 },
                 "required": ["query"],
                 "additionalProperties": false
             }),
+            required_permission: PermissionMode::WorkspaceWrite,
+        },
+        ToolSpec {
+            name: "LiteratureSearchProtocolCreate",
+            description: "Create a versioned, project-local literature SearchProtocol. The protocol records the research question, scope, source-specific queries, time window, eligibility criteria and known papers. This only saves a plan; call LiteratureSearchPreview and obtain explicit user confirmation before executing a network search.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "protocol": {
+                        "type": "object",
+                        "properties": {
+                            "question": { "type": "string", "minLength": 2 },
+                            "scope": { "type": "string" },
+                            "timeWindow": { "type": "string" },
+                            "databases": { "type": "array", "items": { "type": "string" } },
+                            "queries": { "type": "object", "additionalProperties": { "type": "string" } },
+                            "inclusionCriteria": { "type": "array", "items": { "type": "string" } },
+                            "exclusionCriteria": { "type": "array", "items": { "type": "string" } },
+                            "knownKeyPapers": { "type": "array", "items": { "type": "string" } }
+                        },
+                        "required": ["question"],
+                        "additionalProperties": false
+                    }
+                },
+                "required": ["protocol"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::WorkspaceWrite,
+        },
+        ToolSpec {
+            name: "LiteratureSearchPreview",
+            description: "Preview a saved SearchProtocol before execution. Returns each effective source, complete query and adapter availability; it never performs a network request or a full export.",
+            input_schema: json!({
+                "type": "object",
+                "properties": { "protocolId": { "type": "string", "minLength": 1 } },
+                "required": ["protocolId"],
+                "additionalProperties": false
+            }),
             required_permission: PermissionMode::ReadOnly,
         },
         ToolSpec {
+            name: "LiteratureSearchExecute",
+            description: "Execute a previously previewed SearchProtocol and persist a checkpointed SearchRun, canonical records, sanitised request details, raw provider-response artifacts, quotas and source failures. Use only after the user has reviewed the preview and explicitly agreed to the bounded scope. The `confirmation` field must be exactly `execute`. A `resumeRunId` can continue only the same interrupted protocol revision.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "protocolId": { "type": "string", "minLength": 1 },
+                    "confirmation": { "type": "string", "enum": ["execute"] },
+                    "maxResults": { "type": "integer", "minimum": 1, "maximum": 100 },
+                    "resumeRunId": { "type": "string", "minLength": 1 }
+                },
+                "required": ["protocolId", "confirmation"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::WorkspaceWrite,
+        },
+        ToolSpec {
             name: "LiteratureLibraryUpsert",
-            description: "Record literature search results in the project's shared library (papers/library.json — the same library the desktop Literature view and the /arxiv skill use). New papers land in the inbox stage; re-discovered papers only get metadata gaps filled, never losing user stage/stars/tags/notes. Pass the `papers` array exactly as returned by LiteratureSearch.",
+            description: "Compatibility-only refresh of the `papers/library.json` projection. Every supplied paper must already exist in the canonical literature store under its canonical id; this tool rejects untracked records and never creates a search or imports raw results. LiteratureSearch already persists and projects its results, so normally this tool is unnecessary.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "papers": {
                         "type": "array",
                         "items": { "type": "object" },
-                        "description": "Records in the LiteratureSearch output shape."
+                        "description": "Existing canonical records, identified by the exact `id` returned by LiteratureSearch or a saved protocol execution."
                     },
                     "search": {
                         "type": "object",
@@ -493,7 +548,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                         },
                         "required": ["query"],
                         "additionalProperties": false,
-                        "description": "Optional provenance: records this run as a saved search."
+                        "description": "Deprecated compatibility field; ignored because saved-search provenance belongs to SearchRun."
                     }
                 },
                 "required": ["papers"],
@@ -1281,6 +1336,14 @@ pub fn execute_tool_with_cancel_and_progress_with_context(
         "WebSearch" => from_value::<WebSearchInput>(input).and_then(run_web_search),
         "LiteratureSearch" => from_value::<literature::LiteratureSearchInput>(input)
             .and_then(literature::run_literature_search),
+        "LiteratureSearchProtocolCreate" => {
+            from_value::<literature::LiteratureSearchProtocolCreateInput>(input)
+                .and_then(literature::run_literature_search_protocol_create)
+        }
+        "LiteratureSearchPreview" => from_value::<literature::LiteratureSearchPreviewInput>(input)
+            .and_then(literature::run_literature_search_preview),
+        "LiteratureSearchExecute" => from_value::<literature::LiteratureSearchExecuteInput>(input)
+            .and_then(literature::run_literature_search_execute),
         "LiteratureLibraryUpsert" => from_value::<literature::LiteratureLibraryUpsertInput>(input)
             .and_then(literature::run_literature_library_upsert),
         "LiteraturePdfDownload" => from_value::<literature::LiteraturePdfDownloadInput>(input)
@@ -2898,12 +2961,20 @@ fn execute_skill(input: SkillInput) -> Result<SkillOutput, String> {
         .trim()
         .trim_start_matches('/')
         .trim_start_matches('$');
+    let resolution = runtime::registered_literature_skill(requested)
+        .filter(|resolution| resolution.lifecycle == runtime::SkillLifecycle::Active);
+    let resolved = resolution
+        .as_ref()
+        .map_or(requested, |resolution| resolution.canonical_name);
 
     // Try filesystem search roots first (user overrides take priority)
     if let Ok(skill_path) = resolve_skill_path(requested) {
-        let raw_prompt = std::fs::read_to_string(&skill_path).map_err(|e| e.to_string())?;
+        let raw_prompt = with_activated_skill_profile(
+            std::fs::read_to_string(&skill_path).map_err(|e| e.to_string())?,
+            resolution.as_ref(),
+        );
         let description = parse_skill_description(&raw_prompt);
-        let helper_report = build_helper_report(requested);
+        let helper_report = build_helper_report(resolved);
         // Active filesystem skill dir = parent of SKILL.md. Used by the
         // resolver chain's Layer 1 (`<active_skill_dir>/tools/<helper>`).
         let active_skill_dir = skill_path
@@ -2929,11 +3000,12 @@ fn execute_skill(input: SkillInput) -> Result<SkillOutput, String> {
     // already materialised every BUNDLED_RESOURCES entry into the cache. We just
     // surface a per-skill slice of the report so the model knows where helpers live.
     for (name, content) in BUNDLED_SKILLS {
-        if name.eq_ignore_ascii_case(requested) {
-            let description = parse_skill_description(content);
+        if name.eq_ignore_ascii_case(resolved) {
+            let content = with_activated_skill_profile((*content).to_string(), resolution.as_ref());
+            let description = parse_skill_description(&content);
             let helper_report = build_helper_report(name);
             // Bundled skills have no on-disk skill dir; Layer 1 doesn't apply.
-            let prompt = inject_resolver_preamble(content, helper_report.as_ref(), None);
+            let prompt = inject_resolver_preamble(&content, helper_report.as_ref(), None);
             return Ok(SkillOutput {
                 skill: input.skill,
                 path: format!("<bundled:{name}>"),
@@ -3148,6 +3220,10 @@ fn resolve_skill_path(skill: &str) -> Result<std::path::PathBuf, String> {
     if requested.is_empty() {
         return Err(String::from("skill must not be empty"));
     }
+    // The literature registry only redirects activated aliases. Staged entries
+    // remain discoverable for migration reporting without changing a user's
+    // existing legacy workflow prematurely.
+    let requested = runtime::activated_canonical_skill_name(requested).unwrap_or(requested);
     // Reject path traversal attempts
     if requested.contains("..") || requested.contains('/') || requested.contains('\\') {
         return Err(format!("invalid skill name: {requested}"));
@@ -3250,17 +3326,45 @@ pub fn discover_skills() -> Vec<SkillMeta> {
 /// copy. Used by external UIs (e.g. the desktop app) to preview a skill without
 /// executing it. Returns `None` if no skill of that name exists.
 pub fn skill_markdown(name: &str) -> Option<String> {
+    let resolution = runtime::registered_literature_skill(name)
+        .filter(|resolution| resolution.lifecycle == runtime::SkillLifecycle::Active);
+    let resolved_name = resolution
+        .as_ref()
+        .map_or(name, |resolution| resolution.canonical_name);
     if let Ok(path) = resolve_skill_path(name) {
         if let Ok(content) = std::fs::read_to_string(&path) {
-            return Some(content);
+            return Some(with_activated_skill_profile(content, resolution.as_ref()));
         }
     }
     for (bundled_name, content) in BUNDLED_SKILLS {
-        if bundled_name.eq_ignore_ascii_case(name) {
-            return Some((*content).to_string());
+        if bundled_name.eq_ignore_ascii_case(resolved_name) {
+            return Some(with_activated_skill_profile(
+                (*content).to_string(),
+                resolution.as_ref(),
+            ));
         }
     }
     None
+}
+
+fn with_activated_skill_profile(
+    mut content: String,
+    resolution: Option<&runtime::RegisteredSkillResolution>,
+) -> String {
+    let Some(resolution) = resolution.filter(|resolution| {
+        !resolution
+            .requested_name
+            .eq_ignore_ascii_case(resolution.canonical_name)
+    }) else {
+        return content;
+    };
+    content.push_str(&format!(
+        "\n\n## Activated compatibility profile\n\nThis invocation used the legacy alias `{}`. Run the canonical `{}` workflow with profile `{}` and preserve the alias-specific behavior described by that profile.\n",
+        resolution.requested_name,
+        resolution.canonical_name,
+        resolution.profile.unwrap_or("default"),
+    ));
+    content
 }
 
 /// Parse YAML frontmatter from a SKILL.md file.

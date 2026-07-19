@@ -2,7 +2,7 @@
 name: arxiv
 description: Search, download, and summarize academic papers from arXiv. Use when user says "search arxiv", "download paper", "fetch arxiv", "arxiv search", "get paper pdf", or wants to find and save papers from arXiv to the local paper library.
 argument-hint: [query-or-arxiv-id]
-allowed-tools: Bash(*), Read, Write, LiteratureSearch, LiteratureLibraryUpsert, LiteraturePdfDownload
+allowed-tools: Bash(*), Read, Write, LiteratureSearch, LiteraturePdfDownload
 ---
 
 # arXiv Paper Search & Download
@@ -37,7 +37,9 @@ Pick ONE lane before Step 2 and keep it for the whole run:
   - Step 4 download → `LiteraturePdfDownload` with `{ "url": "<pdf_url>", "fileName": "<ARXIV_ID>", "paperId": "arxiv:<ARXIV_ID>" }`
   - Step 6 wiki ingest → skip (needs `python3`); mention the skip in the final output.
 
-Both lanes record results in the shared library (Step 4.5).
+The tool lane records its search in the canonical literature store. The shell
+lane may download files, but must not write untracked fetcher output directly
+to `papers/library.json`.
 
 ## Workflow
 
@@ -174,27 +176,14 @@ After each download:
 - Add a 1-second delay between consecutive downloads to avoid rate limiting
 - Report: `Downloaded: papers/2301.07041.pdf (842 KB)`
 
-### Step 4.5: Record in the Shared Library
+### Step 4.5: Canonical Search Record
 
-When the `LiteratureLibraryUpsert` tool is available, record every paper
-returned by this invocation (downloaded or not) so it appears in the shared
-project library — `papers/library.json`, the same file the ARIS desktop
-Literature view displays:
-
-- Pass the `papers` array exactly as returned by `LiteratureSearch`. In the
-  shell lane, map the fetcher's JSON into the same record shape:
-  `{ "id": "arxiv:<ID>", "title", "authors": [..], "year", "venue": "arXiv",
-  "doi", "arxivId": "<ID>", "abstract", "url": "<abs_url>",
-  "pdfUrl": "<pdf_url>", "source": "arXiv" }`.
-- Include `"search": { "query": "<user query>", "sources": ["arxiv"] }` so
-  the run shows up as a saved search in the library.
-- Tool-lane downloads already update the library when `paperId` is passed;
-  in the shell lane this upsert is the only recording step, so run it after
-  downloads and the existing papers keep their stage/stars/tags (the tool
-  never overwrites user state).
-
-If the tool is unavailable (plain Claude Code without the ARIS kernel),
-skip silently.
+`LiteratureSearch` already creates an ad-hoc `SearchProtocol` and `SearchRun`,
+persists its canonical records, and projects `papers/library.json`. Do not call
+`LiteratureLibraryUpsert` afterward. Shell/API candidates are useful working
+notes but are not canonical records; do not map them into JSON by hand. For a
+project-library entry, re-run the bounded query through `LiteratureSearch` (or
+the reviewed protocol workflow) so the provider artifacts and provenance exist.
 
 ### Step 5: Summarize
 
@@ -257,7 +246,7 @@ Summarize what was done:
 
 - `Found N papers for "query"`
 - `Downloaded: papers/2301.07041.pdf (842 KB)` (for each download)
-- `Recorded N papers in papers/library.json` (when the upsert tool ran)
+- `Canonical SearchRun recorded N papers` (when LiteratureSearch ran)
 - `Wiki-ingested N papers` (if `research-wiki/` was present)
 - Any warnings (rate limit hit, file too small, already exists)
 

@@ -2,8 +2,8 @@
 //!
 //! Supports providers that implement the OpenAI `/v1/chat/completions` API
 //! (Gemini, DeepSeek, GLM, MiniMax, Moonshot, Qwen, Yi, etc.) and routes
-//! tool-using reasoning models on OpenAI's official endpoint through
-//! `/v1/responses` so `reasoning.effort` is actually applied.
+//! OpenAI GPT-5/o-series tool flows through `/v1/responses`, including on
+//! compatible gateways such as NewAPI.
 
 use runtime::{
     ApiClient, ApiRequest, AssistantEvent, ContentBlock, ConversationMessage, MessageRole,
@@ -19,18 +19,43 @@ use crate::{
 
 const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 
-/// Per-turn reasoning_content size cap (chars; rough proxy for tokens ~4:1).
-/// Captures up to ~8K tokens of thinking per assistant turn before truncating.
-/// Long reasoning traces still go to the model in real-time; only the cache
-/// entry for replay is capped, preventing the request body from ballooning
-/// over many turns.
+/// Signature scheme for replayed Responses reasoning items. Two encodings
+/// coexist so existing session files stay byte-stable (the v0.4.24 prompt-cache
+/// contract):
+/// - **v2** (current): `{PREFIX}v2:{"model":"<id>","items":[...]}`. The model
+///   that produced the encrypted items is embedded so a later turn on a
+///   *different* model drops them on decode instead of replaying reasoning the
+///   new model cannot decrypt (the Responses API answers 400).
+/// - **v1** (legacy): `{PREFIX}[...]`, a bare item array with no model tag.
+///   Still replayed as-is — rewriting these blocks would change already-sent
+///   historical bytes and invalidate the provider's prefix cache. The runtime
+///   reasoning-item self-heal ([`is_reasoning_item_rejected`]) covers any v1
+///   cross-model rejection.
+const OPENAI_RESPONSES_REASONING_SIGNATURE_PREFIX: &str = "openai-responses-reasoning:";
+const OPENAI_RESPONSES_REASONING_V2_TAG: &str = "v2:";
+
+/// Marker signature for a `reasoning_content`-family (Kimi/Moonshot, MiMo,
+/// DeepSeek-R1) reasoning block. Unlike the Responses encrypted signature, the
+/// text *is* the payload — this prefix only tags a persisted Thinking block as
+/// "replay me as `reasoning_content` on the chat transport". An empty signature
+/// marks a display-only thinking block that is never replayed on any transport.
+const OPENAI_REASONING_CONTENT_SIGNATURE: &str = "openai-reasoning-content:";
+
+/// Per-turn reasoning size cap (chars; rough proxy for tokens ~4:1). Captures
+/// up to ~8K tokens of thinking per assistant turn before truncating, so a
+/// single runaway reasoning trace cannot bloat the persisted session block. Long
+/// reasoning still streams to the UI in real time; only what is *persisted* for
+/// replay/display is capped.
 const MAX_REASONING_CHARS_PER_TURN: usize = 32_000;
 
-/// Total reasoning_cache size cap (sum of all turns' cached reasoning,
-/// bytes — implementation uses `String::len`). When exceeded, oldest
-/// turns are evicted. ~32K tokens for ASCII; multi-byte chars trim
-/// faster (acceptable conservative bound for non-ASCII reasoning).
-const MAX_REASONING_CACHE_TOTAL_CHARS: usize = 128_000;
+/// Total `reasoning_content` replay budget across all assistant turns in one
+/// request (chars). Enforced at request-build time in [`convert_messages_openai`]:
+/// oldest turns get `reasoning_content` first and the newest are dropped once the
+/// budget is spent. This keeps already-sent historical bytes stable (preserving
+/// the provider's automatic prefix cache) while bounding how much reasoning a
+/// long session replays every turn. ~32K tokens for ASCII; multi-byte trims
+/// faster (a conservative bound for non-ASCII reasoning).
+const MAX_REASONING_CONTENT_REPLAY_CHARS: usize = 128_000;
 
 /// Whether this model accepts an OpenAI-style `reasoning_effort` request field.
 /// Heuristic-only: matches OpenAI reasoning families (o1/o3/o4, gpt-5.5+) and
@@ -50,11 +75,318 @@ fn supports_reasoning_effort(model: &str) -> bool {
         || m.contains("thinking")
 }
 
+/// Which OpenAI-compatible transport to use for a request.
+///
+/// v0.4.24: the endpoint is no longer implied by the base URL. Gateways
+/// differ per *model* — on one self-hosted new-api deployment `gpt-5.6-*`
+/// proxies `/v1/responses` natively while `MiniMax-M3` answers
+/// `convert_request_failed` and Kimi/MiMo 404 — so the choice is a
+/// per-(server, model) capability, configurable and probed, not a guess.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OpenAiTransport {
+    /// Infer from the model: GPT-5/o-series tool flows prefer
+    /// `/v1/responses` on official and compatible endpoints; a rejected
+    /// Responses request is learned and falls back to Chat Completions.
+    #[default]
+    Auto,
+    ChatCompletions,
+    Responses,
+}
+
+impl OpenAiTransport {
+    /// Parse a Settings/config value. Unknown or empty values fall back to
+    /// [`OpenAiTransport::Auto`] so a hand-edited config can never wedge a
+    /// provider into an endpoint it does not serve.
+    #[must_use]
+    pub fn from_config_value(raw: &str) -> Self {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "responses" => Self::Responses,
+            "chat" | "chat_completions" | "chat-completions" => Self::ChatCompletions,
+            _ => Self::Auto,
+        }
+    }
+
+    #[must_use]
+    pub fn as_config_value(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::ChatCompletions => "chat_completions",
+            Self::Responses => "responses",
+        }
+    }
+}
+
+/// The `Auto` heuristic: GPT-5/o-series tool flows prefer the native Responses
+/// protocol on official OpenAI and compatible gateways. Other reasoning model
+/// families retain their provider-specific Chat Completions protocol.
 #[must_use]
-fn uses_openai_responses_api(base_url: &str, model: &str, enable_tools: bool) -> bool {
-    let base = base_url.trim().trim_end_matches('/').to_ascii_lowercase();
-    let official_openai = base == "https://api.openai.com" || base == "https://api.openai.com/v1";
-    official_openai && enable_tools && supports_reasoning_effort(model)
+fn uses_openai_responses_api(_base_url: &str, model: &str, enable_tools: bool) -> bool {
+    let m = model.to_ascii_lowercase();
+    let openai_responses_model =
+        word_match(&m, "o1") || word_match(&m, "o3") || word_match(&m, "o4") || m.contains("gpt-5");
+    enable_tools && openai_responses_model
+}
+
+/// Why [`resolve_transport`] chose the endpoint it did. Surfaced in the
+/// `llm.request` wire trace so "why did this turn use chat/completions?" is a
+/// log lookup instead of a guess — the single most confusing part of the
+/// per-(server, model) transport story.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TransportReason {
+    /// A prior `/v1/responses` request on this pair was rejected; learned.
+    LearnedResponsesUnsupported,
+    /// A prior chat request on this pair was told to use `/v1/responses`; learned.
+    LearnedRequiresResponses,
+    /// Explicit Settings/config preference for `/v1/responses`.
+    ConfiguredResponses,
+    /// Explicit Settings/config preference for `/v1/chat/completions`.
+    ConfiguredChat,
+    /// No learned fact or preference — the model+tools `Auto` heuristic decided.
+    AutoHeuristic,
+}
+
+impl TransportReason {
+    #[must_use]
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::LearnedResponsesUnsupported => "learned_responses_unsupported",
+            Self::LearnedRequiresResponses => "learned_requires_responses",
+            Self::ConfiguredResponses => "configured_responses",
+            Self::ConfiguredChat => "configured_chat",
+            Self::AutoHeuristic => "auto_heuristic",
+        }
+    }
+}
+
+/// Resolve the transport for one request, honouring (in order): a
+/// process-learned "this server/model does not serve /v1/responses" fact, the
+/// symmetric "this pair requires /v1/responses" fact, the configured
+/// preference, and finally the `Auto` heuristic. Returns the decision plus the
+/// reason for it (for the wire trace).
+#[must_use]
+fn resolve_transport(
+    configured: OpenAiTransport,
+    base_url: &str,
+    model: &str,
+    enable_tools: bool,
+) -> (bool, TransportReason) {
+    if responses_known_unsupported(base_url, model) {
+        return (false, TransportReason::LearnedResponsesUnsupported);
+    }
+    if chat_known_requires_responses(base_url, model) {
+        return (true, TransportReason::LearnedRequiresResponses);
+    }
+    match configured {
+        OpenAiTransport::Responses => (true, TransportReason::ConfiguredResponses),
+        OpenAiTransport::ChatCompletions => (false, TransportReason::ConfiguredChat),
+        OpenAiTransport::Auto => (
+            uses_openai_responses_api(base_url, model, enable_tools),
+            TransportReason::AutoHeuristic,
+        ),
+    }
+}
+
+fn transport_registry_key(base_url: &str, model: &str) -> String {
+    format!(
+        "{}|{}",
+        base_url.trim().trim_end_matches('/').to_ascii_lowercase(),
+        model.to_ascii_lowercase()
+    )
+}
+
+/// Callback invoked when the runtime *learns* a `(base_url, model)` transport
+/// verdict — a `/v1/responses` request fell back to chat/completions, or a chat
+/// request was told to use responses. The desktop app registers this to persist
+/// the verdict into its verified-executor registry so the Settings badge and the
+/// next launch reflect the endpoint actually used, instead of re-probing on the
+/// first request of every process. `verdict` is `"responses"` or
+/// `"chat_completions"`. CLI leaves it unset (process registry alone suffices).
+type TransportVerdictHook = Box<dyn Fn(&str, &str, &str) + Send + Sync>;
+
+fn transport_verdict_hook() -> &'static std::sync::OnceLock<TransportVerdictHook> {
+    static HOOK: std::sync::OnceLock<TransportVerdictHook> = std::sync::OnceLock::new();
+    &HOOK
+}
+
+/// Register the transport-verdict persistence callback. First registration
+/// wins; later calls are ignored (idempotent across runtime re-inits).
+pub fn set_transport_verdict_hook(hook: TransportVerdictHook) {
+    let _ = transport_verdict_hook().set(hook);
+}
+
+fn record_transport_verdict(base_url: &str, model: &str, verdict: &str) {
+    if let Some(hook) = transport_verdict_hook().get() {
+        hook(base_url, model, verdict);
+    }
+}
+
+/// Process-wide set of `(server, model)` pairs observed to reject
+/// `/v1/responses`. Populated by the runtime fallback so a gateway that
+/// cannot convert the request is asked exactly once per process instead of
+/// once per turn. Deliberately *not* persisted here (the desktop hook handles
+/// durable persistence): a gateway upgrade restores the preferred transport on
+/// next launch via Settings re-probe rather than a stale process fact.
+fn responses_unsupported_registry() -> &'static std::sync::Mutex<std::collections::HashSet<String>>
+{
+    static REGISTRY: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    REGISTRY.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+fn responses_known_unsupported(base_url: &str, model: &str) -> bool {
+    responses_unsupported_registry()
+        .lock()
+        .is_ok_and(|registry| registry.contains(&transport_registry_key(base_url, model)))
+}
+
+fn mark_responses_unsupported(base_url: &str, model: &str) {
+    if let Ok(mut registry) = responses_unsupported_registry().lock() {
+        registry.insert(transport_registry_key(base_url, model));
+    }
+    record_transport_verdict(base_url, model, "chat_completions");
+}
+
+/// Symmetric to [`responses_unsupported_registry`]: `(server, model)` pairs a
+/// chat/completions request was told to serve via `/v1/responses` instead
+/// (official OpenAI's gate on gpt-5.5+/o-series tool flows, forwarded by a
+/// gateway). Learned once per process so the reverse fallback fires at most one
+/// wasted round-trip, then every later turn starts on responses directly.
+fn chat_requires_responses_registry() -> &'static std::sync::Mutex<std::collections::HashSet<String>>
+{
+    static REGISTRY: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    REGISTRY.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+fn chat_known_requires_responses(base_url: &str, model: &str) -> bool {
+    chat_requires_responses_registry()
+        .lock()
+        .is_ok_and(|registry| registry.contains(&transport_registry_key(base_url, model)))
+}
+
+fn mark_chat_requires_responses(base_url: &str, model: &str) {
+    if let Ok(mut registry) = chat_requires_responses_registry().lock() {
+        registry.insert(transport_registry_key(base_url, model));
+    }
+    record_transport_verdict(base_url, model, "responses");
+}
+
+/// Whether a failed `/v1/chat/completions` POST means "this model must use
+/// `/v1/responses` instead" — the official OpenAI gate on gpt-5.5+/o-series tool
+/// flows, which a gateway may forward verbatim. Symmetric to
+/// [`responses_transport_unsupported`]: lets a chat request the backend insists
+/// is responses-only retry there rather than hard-failing every turn.
+///
+/// Narrow: only a 400 that explicitly points at `/v1/responses`, or pairs
+/// `reasoning_effort`/`function`+`tools` with a "not supported" verdict, so a
+/// generic 400 is never mistaken for a transport problem.
+#[must_use]
+pub fn chat_requires_responses_transport(status: u16, body: &str) -> bool {
+    if status != 400 {
+        return false;
+    }
+    let lower = body.to_ascii_lowercase();
+    if lower.contains("/v1/responses") || lower.contains("use responses") {
+        return true;
+    }
+    let not_supported = lower.contains("not supported") || lower.contains("unsupported");
+    not_supported
+        && lower.contains("responses")
+        && (lower.contains("reasoning_effort")
+            || lower.contains("reasoning effort")
+            || (lower.contains("function") && lower.contains("tool")))
+}
+
+/// Whether a failed `/v1/responses` POST means "this endpoint is not served
+/// here" (so the request should be retried on `/v1/chat/completions`) rather
+/// than a genuine request/auth/quota error.
+///
+/// Deliberately narrow. Observed gateway shapes:
+/// - `404` — the route does not exist, or the upstream 404s the conversion
+///   (new-api: `bad_response_status_code`).
+/// - `501` — explicit "not implemented".
+/// - `500` with `convert_request_failed` / "not implemented" — new-api
+///   accepted the route but has no chat→responses converter for this
+///   upstream.
+///
+/// A generic 4xx/5xx with no such marker is NOT treated as a transport
+/// problem: falling back on those would silently mask real failures (bad
+/// key, quota, malformed tool schema) and hide them behind a second request.
+#[must_use]
+pub fn responses_transport_unsupported(status: u16, body: &str) -> bool {
+    if status == 404 || status == 501 {
+        return true;
+    }
+    let lower = body.to_ascii_lowercase();
+    const MARKERS: &[&str] = &[
+        "convert_request_failed",
+        "not implemented",
+        "not_implemented",
+        "unsupported endpoint",
+        "unknown path",
+        "invalid url",
+        "no such endpoint",
+    ];
+    MARKERS.iter().any(|marker| lower.contains(marker))
+}
+
+/// Whether a `/v1/responses` 400 blames a *replayed reasoning item* rather than
+/// the caller's actual request. Two shapes drive the runtime self-heal (strip
+/// reasoning items from `input`, retry once):
+/// - **Ordering**: "Item 'rs_…' of type 'reasoning' was provided without its
+///   required following item." — the encrypted item's paired output item is not
+///   adjacent (a multi-tool turn, or a hand-edited session).
+/// - **Cross-model / stale**: `encrypted_content` the current model cannot
+///   decrypt (a v1 signature replayed after a model switch — v2 signatures are
+///   dropped on decode, so this only reaches the wire for legacy blocks).
+///
+/// Deliberately strict: the message must mention reasoning/encrypted content
+/// AND carry a structural marker, so an unrelated 400 (bad tool schema, quota,
+/// context overflow) is never masked behind a second request. Prefers the
+/// structured `error.message`; falls back to the raw body only when it will not
+/// parse as JSON.
+#[must_use]
+pub(crate) fn is_reasoning_item_rejected(body: &str) -> bool {
+    if body.is_empty() {
+        return false;
+    }
+    let message = serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|json| {
+            json.get("error")
+                .and_then(|error| error.get("message"))
+                .and_then(|message| message.as_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| body.to_string());
+    let lower = message.to_ascii_lowercase();
+    if !lower.contains("reasoning") && !lower.contains("encrypted") {
+        return false;
+    }
+    const MARKERS: &[&str] = &[
+        "required following item",
+        "without its required",
+        "provided without",
+        "must be followed by",
+        "following item",
+        "decrypt",
+        "encrypted_content",
+        "reasoning item",
+        "reasoning input item",
+    ];
+    MARKERS.iter().any(|marker| lower.contains(marker))
+}
+
+/// Remove every `type == "reasoning"` entry from a `/v1/responses` request
+/// body's `input` array. Returns whether anything was removed, so the send loop
+/// only retries when the body actually changed (and the retry cannot loop).
+fn strip_reasoning_items_from_responses_body(body: &mut Value) -> bool {
+    let Some(input) = body.get_mut("input").and_then(Value::as_array_mut) else {
+        return false;
+    };
+    let before = input.len();
+    input.retain(|item| item.get("type").and_then(Value::as_str) != Some("reasoning"));
+    before != input.len()
 }
 
 /// v0.4.12 P1.C — detect a 400 response whose error body actually fingers
@@ -139,15 +471,18 @@ pub(crate) fn is_context_window_exceeded_error(body: &str) -> bool {
         "exceeds the maximum context",
         "prompt is too long",
         "reduce the length of the messages",
-        "上下文",
     ];
     if DIRECT_PHRASES.iter().any(|p| lower.contains(p)) {
         return true;
     }
     // Looser fallback: a context/length/token subject paired with an
-    // over-limit verb in the same body.
-    const SUBJECT: &[&str] = &["context window", "context length", "token", "tokens"];
-    const OVER_LIMIT: &[&str] = &["exceed", "too long", "too many", "over the limit", "超过"];
+    // over-limit verb in the same body. `上下文` (Chinese "context") is a
+    // subject here rather than a standalone phrase — on its own it matches
+    // unrelated errors ("上下文加载失败") and would misfire force-compaction; it
+    // must co-occur with an over-limit verb (`超过`/`过长`) to count.
+    const SUBJECT: &[&str] = &["context window", "context length", "token", "tokens", "上下文"];
+    const OVER_LIMIT: &[&str] =
+        &["exceed", "too long", "too many", "over the limit", "超过", "过长"];
     SUBJECT.iter().any(|s| lower.contains(s)) && OVER_LIMIT.iter().any(|o| lower.contains(o))
 }
 
@@ -176,22 +511,32 @@ fn word_match(haystack: &str, needle: &str) -> bool {
     false
 }
 
-/// Whether this model EMITS `reasoning_content` blocks in the response that
-/// we should cache and replay on subsequent turns. Superset of
-/// [`supports_reasoning_effort`] — Kimi/Moonshot emit reasoning_content
-/// without accepting reasoning_effort as a request field (the original
-/// reason this cache exists), so we treat the two capabilities separately.
-/// v0.4.7's hardcoded `supports_reasoning = true` shipped reasoning to
-/// every provider; v0.4.9 gates it.
+/// Whether this model accepts `reasoning_content` as a *request* field on
+/// assistant messages, so reasoning captured from its responses should be
+/// cached and replayed on subsequent requests. Limited to the families
+/// whose OpenAI-compatible APIs document that convention: Kimi/Moonshot
+/// interleaved thinking, Xiaomi MiMo, DeepSeek R1/reasoner, and explicit
+/// thinking/reasoner variant aliases.
+///
+/// v0.4.24 (prompt-cache audit): no longer a superset of
+/// [`supports_reasoning_effort`]. OpenAI o-series / gpt-5.x never accept
+/// `reasoning_content` as input — on the official endpoint tool flows use
+/// the Responses API (whose raw reasoning items are persisted in signed
+/// Thinking blocks), and on OpenAI-compatible proxies the
+/// attached field is dropped upstream while its appear/disappear churn
+/// rewrote historical message bytes and broke provider prefix caching
+/// (wire-log data: gpt-5.6 sessions at ~48% cache hit vs 95%+ for
+/// non-replay models over the same gateway).
 #[must_use]
 fn supports_reasoning_content_replay(model: &str) -> bool {
     let m = model.to_ascii_lowercase();
-    supports_reasoning_effort(&m)
-        || m.contains("kimi")
+    m.contains("kimi")
         || m.contains("moonshot")
         || m.contains("mimo")
         || m.contains("deepseek-r1")
         || m.contains("-r1")
+        || m.contains("reasoner")
+        || m.contains("thinking")
 }
 
 /// Effort tier sent alongside reasoning-capable models. Reads
@@ -290,21 +635,41 @@ fn token_usage_from_openai_usage(usage: &Value) -> TokenUsage {
         .or_else(|| usage.get("output_tokens"))
         .and_then(|v| v.as_u64())
         .unwrap_or(0) as u32;
-    let cached_tokens = usage
+    let details = usage
         .get("prompt_tokens_details")
-        .or_else(|| usage.get("input_tokens_details"))
+        .or_else(|| usage.get("input_tokens_details"));
+    let cached_tokens = details
         .and_then(|d| d.get("cached_tokens"))
         .and_then(|v| v.as_u64())
         .unwrap_or(0) as u32;
+    // The Responses API additionally reports how much of the prompt was
+    // *written* into the cache this turn (`cache_write_tokens`); chat
+    // completions has no equivalent and leaves this 0. It is part of
+    // `prompt_tokens` like the cached portion, so it moves out of fresh input
+    // into the Anthropic-style cache_creation bucket rather than being added.
+    // Clamped to the room left after cache reads. `cached_tokens` and
+    // `cache_write_tokens` are meant to be disjoint slices of the prompt, but
+    // gateways vary and some report the whole cached prefix in both. Without
+    // the clamp an overlap inflates `TokenUsage::prompt_tokens()` (input +
+    // creation + read) above the real prompt, and that value drives the
+    // auto-compaction budget — an inflated reading silently compacts a session
+    // that is only half full.
+    let cache_write_tokens = details
+        .and_then(|d| d.get("cache_write_tokens"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as u32;
+    let cache_write_tokens = cache_write_tokens.min(prompt_tokens.saturating_sub(cached_tokens));
 
     // OpenAI-compatible usage reports `prompt_tokens` as cache-inclusive.
     // ARIS stores provider usage in Anthropic-style normalized form: fresh
     // input is separate from cache reads, so input + cache_read == real prompt
     // occupancy without double-counting cache tokens in cost summaries.
     TokenUsage {
-        input_tokens: prompt_tokens.saturating_sub(cached_tokens),
+        input_tokens: prompt_tokens
+            .saturating_sub(cached_tokens)
+            .saturating_sub(cache_write_tokens),
         output_tokens,
-        cache_creation_input_tokens: 0,
+        cache_creation_input_tokens: cache_write_tokens,
         cache_read_input_tokens: cached_tokens,
     }
 }
@@ -383,11 +748,277 @@ fn responses_tool_call_from_output_item(item: &Value) -> Option<(String, String,
     Some((id, name, arguments))
 }
 
-fn responses_reasoning_cache_size(cache: &std::collections::HashMap<usize, Vec<Value>>) -> usize {
-    cache
-        .values()
-        .map(|items| serde_json::to_string(items).map_or(0, |json| json.len()))
-        .sum()
+fn endpoint_for_transport(use_responses_api: bool) -> &'static str {
+    if use_responses_api {
+        "/responses"
+    } else {
+        "/chat/completions"
+    }
+}
+
+fn transport_label(use_responses_api: bool) -> &'static str {
+    if use_responses_api {
+        "responses"
+    } else {
+        "chat_completions"
+    }
+}
+
+/// The `reasoning_effort` value to send on the chat/completions transport,
+/// or `None` when it must be omitted.
+///
+/// OpenAI gate (v0.4.8): when both `tools` and `reasoning_effort` are present,
+/// gpt-5.5+ on the official `/v1/chat/completions` returns 400 "Function tools
+/// with reasoning_effort are not supported …, please use /v1/responses
+/// instead". Third-party proxies without that restriction opt back in with
+/// `ARIS_FORCE_REASONING_WITH_TOOLS=1`. On the Responses transport the effort
+/// travels in `reasoning.effort` instead, so this is never consulted there.
+fn chat_reasoning_effort_for(model: &str, base_url: &str, enable_tools: bool) -> Option<String> {
+    let model_lower = model.to_ascii_lowercase();
+    let blocked = enable_tools
+        && base_url.contains("api.openai.com")
+        && (model_lower.contains("gpt-5.5")
+            || model_lower.contains("gpt-5.6")
+            || word_match(&model_lower, "o3")
+            || word_match(&model_lower, "o4"));
+    let force_with_tools = std::env::var("ARIS_FORCE_REASONING_WITH_TOOLS")
+        .ok()
+        .as_deref()
+        == Some("1");
+    if supports_reasoning_effort(model) && (!blocked || force_with_tools) {
+        return Some(reasoning_effort());
+    }
+    if blocked && !force_with_tools {
+        // One-shot warning per process so users understand why their gpt-5.5
+        // executor is running at default reasoning. Stderr to avoid polluting
+        // stdout JSON parsers.
+        static WARNED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        WARNED.get_or_init(|| {
+            eprintln!(
+                "\x1b[33mwarning:\x1b[0m {model} as executor on OpenAI does not accept \
+`reasoning_effort` when tools are enabled (OpenAI /v1/chat/completions returns 400). \
+Continuing without reasoning_effort. Set ARIS_FORCE_REASONING_WITH_TOOLS=1 to override \
+on a compatible third-party proxy, or select the Responses transport for this model."
+            );
+        });
+    }
+    None
+}
+
+/// Build a `/v1/chat/completions` request body. Kept a free function so the
+/// transport fallback can rebuild it mid-request without re-borrowing the
+/// client.
+fn build_chat_completions_body(
+    model: &str,
+    messages: Vec<Value>,
+    tool_specs: &[ExecutorToolSpec],
+    enable_tools: bool,
+    reasoning_effort_value: Option<String>,
+) -> Value {
+    let mut body = json!({
+        "model": model,
+        "stream": true,
+        // v0.4.10 T35: OpenAI Chat Completions does NOT emit `usage` in
+        // streaming chunks by default. Opt in with
+        // `stream_options.include_usage = true` so we can read
+        // `prompt_tokens_details.cached_tokens` (automatic prefix cache hits)
+        // and report token cost accurately.
+        "stream_options": { "include_usage": true },
+        "messages": messages,
+    });
+    if enable_tools {
+        body["tools"] = json!(tool_specs
+            .iter()
+            .map(convert_tool_spec_openai)
+            .collect::<Vec<_>>());
+        body["tool_choice"] = json!("auto");
+    }
+    if let Some(effort) = reasoning_effort_value {
+        body["reasoning_effort"] = json!(effort);
+    }
+    body
+}
+
+/// Build a `/v1/responses` request body.
+///
+/// `store: false` is deliberate: ARIS owns conversation state locally
+/// (compaction, stop+continue, fork/rotate undo and the independent reviewer
+/// all rewrite history), so server-side threading via `previous_response_id`
+/// would fight the local session. Every request therefore carries the full
+/// input, and `reasoning.encrypted_content` is requested so reasoning items
+/// can be replayed across turns without server-side storage.
+fn build_responses_body(
+    model: &str,
+    input: Vec<Value>,
+    tool_specs: &[ExecutorToolSpec],
+    enable_tools: bool,
+    system_prompt: Option<&str>,
+    prompt_cache_key: &str,
+) -> Value {
+    let mut body = json!({
+        "model": model,
+        "stream": true,
+        "store": false,
+        "include": ["reasoning.encrypted_content"],
+        "input": input,
+        "prompt_cache_key": prompt_cache_key,
+        "reasoning": {
+            "effort": reasoning_effort(),
+            "summary": "auto",
+        },
+    });
+    if let Some(prompt) = system_prompt {
+        body["instructions"] = json!(prompt);
+    }
+    if enable_tools {
+        body["tools"] = json!(tool_specs
+            .iter()
+            .map(convert_tool_spec_responses)
+            .collect::<Vec<_>>());
+        body["tool_choice"] = json!("auto");
+    }
+    body
+}
+
+fn encode_responses_reasoning_signature(items: &[Value], model: &str) -> Option<String> {
+    if items.is_empty() {
+        return None;
+    }
+    let payload = json!({ "model": model, "items": items });
+    serde_json::to_string(&payload).ok().map(|json| {
+        format!(
+            "{OPENAI_RESPONSES_REASONING_SIGNATURE_PREFIX}{OPENAI_RESPONSES_REASONING_V2_TAG}{json}"
+        )
+    })
+}
+
+fn decode_responses_reasoning_signature(signature: &str, current_model: &str) -> Vec<Value> {
+    let Some(body) = signature.strip_prefix(OPENAI_RESPONSES_REASONING_SIGNATURE_PREFIX) else {
+        return Vec::new();
+    };
+    let mut items = if let Some(payload) = body.strip_prefix(OPENAI_RESPONSES_REASONING_V2_TAG) {
+        // v2: encrypted reasoning is model-specific. Replaying one model's items
+        // onto another makes the Responses API reject the request, and a generic
+        // 400 has no transport-fallback marker — so drop them when the producer
+        // model differs from the model this request targets.
+        let Ok(parsed) = serde_json::from_str::<Value>(payload) else {
+            return Vec::new();
+        };
+        let producer = parsed
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if !producer.is_empty() && producer != current_model {
+            return Vec::new();
+        }
+        match parsed.get("items") {
+            Some(Value::Array(items)) => items.clone(),
+            _ => return Vec::new(),
+        }
+    } else {
+        // v1 legacy: a bare array with no model tag. Replayed regardless of
+        // model; the runtime self-heal recovers if the current model rejects it.
+        let Ok(items) = serde_json::from_str::<Vec<Value>>(body) else {
+            return Vec::new();
+        };
+        items
+    };
+    // A session file is local project state and may be edited by hand. Never
+    // let a forged signature inject arbitrary Responses input item types.
+    items.retain(|item| item.get("type").and_then(Value::as_str) == Some("reasoning"));
+    items
+}
+
+fn responses_reasoning_items_from_blocks(blocks: &[ContentBlock], current_model: &str) -> Vec<Value> {
+    blocks
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Thinking { signature, .. } => Some(signature.as_str()),
+            _ => None,
+        })
+        .flat_map(|signature| decode_responses_reasoning_signature(signature, current_model))
+        .collect()
+}
+
+/// Stable, opaque bucketing key for provider-side prompt-cache routing.
+///
+/// The system prompt plus the first user message are stable for an ordinary
+/// session and naturally change after a compaction rewrites the prefix. FNV-1a
+/// is sufficient here: the key is a routing hint, not a security boundary.
+fn responses_prompt_cache_key(
+    model: &str,
+    system_prompt: Option<&str>,
+    messages: &[ConversationMessage],
+) -> String {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+    fn update(mut hash: u64, bytes: &[u8]) -> u64 {
+        for byte in bytes {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(FNV_PRIME);
+        }
+        hash
+    }
+
+    let mut hash = update(FNV_OFFSET, model.as_bytes());
+    if let Some(prompt) = system_prompt {
+        hash = update(hash, prompt.as_bytes());
+    }
+    if let Some(first_user) = messages
+        .iter()
+        .find(|message| message.role == MessageRole::User)
+    {
+        for block in &first_user.blocks {
+            match block {
+                ContentBlock::Text { text } => hash = update(hash, text.as_bytes()),
+                ContentBlock::Image { media_type, data } => {
+                    hash = update(hash, media_type.as_bytes());
+                    hash = update(hash, data.len().to_string().as_bytes());
+                }
+                ContentBlock::ToolUse { id, name, input } => {
+                    hash = update(hash, id.as_bytes());
+                    hash = update(hash, name.as_bytes());
+                    hash = update(hash, input.as_bytes());
+                }
+                ContentBlock::ToolResult {
+                    tool_use_id,
+                    tool_name,
+                    output,
+                    ..
+                } => {
+                    hash = update(hash, tool_use_id.as_bytes());
+                    hash = update(hash, tool_name.as_bytes());
+                    hash = update(hash, output.as_bytes());
+                }
+                ContentBlock::Thinking {
+                    thinking,
+                    signature,
+                } => {
+                    hash = update(hash, thinking.as_bytes());
+                    hash = update(hash, signature.as_bytes());
+                }
+            }
+        }
+    }
+    format!("aris-{hash:016x}")
+}
+
+/// Cap one turn's reasoning text to [`MAX_REASONING_CHARS_PER_TURN`] before it
+/// is persisted as a Thinking block, UTF-8-safe at a char boundary. Truncation
+/// happens once, before the block is ever sent, so its stored bytes stay stable
+/// afterwards (preserving the provider's automatic prefix cache). Empty in →
+/// empty out.
+fn truncate_reasoning_per_turn(mut reasoning: String) -> String {
+    if reasoning.chars().count() > MAX_REASONING_CHARS_PER_TURN {
+        let byte_idx = reasoning
+            .char_indices()
+            .nth(MAX_REASONING_CHARS_PER_TURN)
+            .map(|(i, _)| i)
+            .unwrap_or(reasoning.len());
+        reasoning.truncate(byte_idx);
+    }
+    reasoning
 }
 
 fn response_request_id(headers: &reqwest::header::HeaderMap) -> Option<String> {
@@ -725,13 +1356,9 @@ pub struct OpenAIRuntimeClient {
     tool_specs: Vec<ExecutorToolSpec>,
     observer: Box<dyn StreamObserver>,
     trace_sink: Option<std::sync::Arc<dyn ExecutorTraceSink>>,
-    /// Kimi K2.5: stores reasoning_content per assistant turn for replay.
-    /// Key = message index in session, Value = reasoning text.
-    kimi_reasoning_cache: std::collections::HashMap<usize, String>,
-    /// Raw Responses API reasoning items must be replayed together with a
-    /// function call and its output. Keep them in-memory by assistant-message
-    /// index; final session messages remain provider-neutral and local.
-    responses_reasoning_cache: std::collections::HashMap<usize, Vec<Value>>,
+    /// Configured endpoint preference; `Auto` selects by model capability and
+    /// learns unsupported gateway/model pairs. See [`OpenAiTransport`].
+    transport: OpenAiTransport,
 }
 
 impl OpenAIRuntimeClient {
@@ -755,8 +1382,7 @@ impl OpenAIRuntimeClient {
             tool_specs,
             observer,
             trace_sink: None,
-            kimi_reasoning_cache: std::collections::HashMap::new(),
-            responses_reasoning_cache: std::collections::HashMap::new(),
+            transport: OpenAiTransport::default(),
         })
     }
 
@@ -765,23 +1391,22 @@ impl OpenAIRuntimeClient {
         self.trace_sink = Some(trace_sink);
         self
     }
+
+    /// Select the endpoint for this client. Defaults to
+    /// [`OpenAiTransport::Auto`]; a `Responses` preference still falls back to
+    /// chat/completions at runtime if the gateway rejects the endpoint.
+    #[must_use]
+    pub fn with_transport(mut self, transport: OpenAiTransport) -> Self {
+        self.transport = transport;
+        self
+    }
 }
 
 impl ApiClient for OpenAIRuntimeClient {
-    fn on_session_compacted(&mut self, removed_count: usize) {
-        // reasoning_cache is keyed by absolute message index in the session.
-        // After auto-compaction the session is replaced with [summary,
-        // ...preserved_tail], so every index in the cache now points at the
-        // wrong message (or no message at all). Re-populating organically
-        // from subsequent assistant turns is cheaper and more correct than
-        // attempting an index remap. Clear unconditionally.
-        if removed_count > 0 && !self.kimi_reasoning_cache.is_empty() {
-            self.kimi_reasoning_cache.clear();
-        }
-        if removed_count > 0 && !self.responses_reasoning_cache.is_empty() {
-            self.responses_reasoning_cache.clear();
-        }
-    }
+    // No `on_session_compacted` override: reasoning is now persisted as session
+    // Thinking blocks (not a side cache keyed by message index), so compaction
+    // rewrites and drops it along with the messages it removes — no index remap
+    // to invalidate. The trait's default no-op is correct.
 
     #[allow(clippy::too_many_lines)]
     fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
@@ -791,134 +1416,54 @@ impl ApiClient for OpenAIRuntimeClient {
             Some(request.system_prompt.join("\n\n"))
         };
 
-        // Provider-aware reasoning_content capture. v0.4.9 closes Codex
-        // v0.4.7 audit L4: was hardcoded `true` for every model. We use the
-        // separate `supports_reasoning_content_replay` predicate (superset
-        // of reasoning_effort senders) so Kimi/Moonshot/DeepSeek-R1, which
-        // emit reasoning_content but don't accept reasoning_effort as a
-        // request field, still get cached and replayed.
+        // Provider-aware reasoning_content capture. Deliberately decoupled
+        // from `supports_reasoning_effort`: Kimi/Moonshot/DeepSeek-R1 emit
+        // reasoning_content and accept it back without taking
+        // reasoning_effort as a request field, while OpenAI o-series/gpt-5.x
+        // take reasoning_effort but never accept reasoning_content as input
+        // (replaying it onto them only churned request bytes and broke
+        // provider prefix caching).
         let supports_reasoning = supports_reasoning_content_replay(&self.model);
-        let use_responses_api =
-            uses_openai_responses_api(&self.base_url, &self.model, self.enable_tools);
-        let messages = convert_messages_openai(
-            &request.messages,
-            system_prompt.as_deref(),
-            &self.kimi_reasoning_cache,
+        // Mutable: a `/v1/responses` request that the gateway cannot serve
+        // falls back to chat/completions inside the send loop below, and the
+        // stream parser must follow the transport it actually reached.
+        let (mut use_responses_api, transport_reason) = resolve_transport(
+            self.transport,
+            &self.base_url,
+            &self.model,
+            self.enable_tools,
         );
 
-        let tools: Option<Value> = self.enable_tools.then(|| {
-            json!(self
-                .tool_specs
-                .iter()
-                .map(convert_tool_spec_openai)
-                .collect::<Vec<_>>())
-        });
-
-        let mut body = json!({
-            "model": self.model,
-            "stream": true,
-            // v0.4.10 T35: OpenAI Chat Completions API does NOT emit
-            // `usage` in streaming chunks by default. Opt in with
-            // `stream_options.include_usage = true` so we can read
-            // `prompt_tokens_details.cached_tokens` (automatic prefix
-            // cache hits) and report token cost accurately.
-            "stream_options": { "include_usage": true },
-            "messages": messages,
-        });
-
-        if let Some(tools) = tools {
-            body["tools"] = tools;
-            body["tool_choice"] = json!("auto");
-        }
-
-        // For reasoning-capable models, attach the effort tier so the server
-        // doesn't silently default to medium. Safe for o1/o3/o4/gpt-5.5/
-        // thinking variants; older models would reject this field, hence the
-        // explicit allow-list.
-        //
-        // OpenAI gate (v0.4.8): when both `tools` and `reasoning_effort` are
-        // present, gpt-5.5 + the OpenAI /v1/chat/completions endpoint returns
-        // 400 "Function tools with reasoning_effort are not supported …,
-        // please use /v1/responses instead". The CLI executor always sends
-        // tools (enable_tools = true for the agent loop), so for OpenAI's own
-        // gpt-5.5 we strip reasoning_effort and warn. Third-party providers
-        // that ship gpt-5.5-compatible models without this restriction (e.g.
-        // some proxies) opt back in by setting ARIS_FORCE_REASONING_WITH_TOOLS=1.
-        // Proper fix (Responses API support) is tracked for v0.4.9.
-        let on_openai = self.base_url.contains("api.openai.com");
-        let model_lower = self.model.to_ascii_lowercase();
-        let openai_tool_reasoning_block = !use_responses_api
-            && self.enable_tools
-            && on_openai
-            && (model_lower.contains("gpt-5.5")
-                || model_lower.contains("gpt-5.6")
-                || word_match(&model_lower, "o3")
-                || word_match(&model_lower, "o4"));
-        let force_with_tools = std::env::var("ARIS_FORCE_REASONING_WITH_TOOLS")
-            .ok()
-            .as_deref()
-            == Some("1");
-        if supports_reasoning_effort(&self.model)
-            && (!openai_tool_reasoning_block || force_with_tools)
-        {
-            body["reasoning_effort"] = json!(reasoning_effort());
-        } else if openai_tool_reasoning_block && !force_with_tools {
-            // One-shot warning per process so users understand why their
-            // gpt-5.5 executor is running at default reasoning. Stderr to
-            // avoid polluting stdout JSON parsers.
-            static WARNED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-            WARNED.get_or_init(|| {
-                eprintln!(
-                    "\x1b[33mwarning:\x1b[0m {} as executor on OpenAI does not accept \
-`reasoning_effort` when tools are enabled (OpenAI /v1/chat/completions returns 400). \
-Continuing without reasoning_effort. Set ARIS_FORCE_REASONING_WITH_TOOLS=1 to override \
-on a compatible third-party proxy, or use Claude/another provider as executor and keep \
-{} as reviewer (LlmReview path is unaffected).",
-                    self.model, self.model
-                );
-            });
-        }
-
-        if use_responses_api {
-            let mut responses_body = json!({
-                "model": self.model,
-                "stream": true,
-                "store": false,
-                "include": ["reasoning.encrypted_content"],
-                "input": convert_messages_responses(
+        let mut body = if use_responses_api {
+            build_responses_body(
+                &self.model,
+                convert_messages_responses(&request.messages, &self.model),
+                &self.tool_specs,
+                self.enable_tools,
+                system_prompt.as_deref(),
+                &responses_prompt_cache_key(
+                    &self.model,
+                    system_prompt.as_deref(),
                     &request.messages,
-                    &self.responses_reasoning_cache,
                 ),
-                "reasoning": {
-                    "effort": reasoning_effort(),
-                    "summary": "auto",
-                },
-            });
-            if let Some(prompt) = system_prompt.as_deref() {
-                responses_body["instructions"] = json!(prompt);
-            }
-            if self.enable_tools {
-                responses_body["tools"] = json!(self
-                    .tool_specs
-                    .iter()
-                    .map(convert_tool_spec_responses)
-                    .collect::<Vec<_>>());
-                responses_body["tool_choice"] = json!("auto");
-            }
-            body = responses_body;
-        }
+            )
+        } else {
+            build_chat_completions_body(
+                &self.model,
+                convert_messages_openai(
+                    &request.messages,
+                    system_prompt.as_deref(),
+                    &self.model,
+                ),
+                &self.tool_specs,
+                self.enable_tools,
+                chat_reasoning_effort_for(&self.model, &self.base_url, self.enable_tools),
+            )
+        };
 
-        let endpoint = if use_responses_api {
-            "/responses"
-        } else {
-            "/chat/completions"
-        };
-        let transport = if use_responses_api {
-            "responses"
-        } else {
-            "chat_completions"
-        };
-        let url = format!("{}{}", self.base_url.trim_end_matches('/'), endpoint);
+        let mut endpoint = endpoint_for_transport(use_responses_api);
+        let mut transport = transport_label(use_responses_api);
+        let mut url = format!("{}{}", self.base_url.trim_end_matches('/'), endpoint);
         trace_record(
             &self.trace_sink,
             "llm.tools_snapshot",
@@ -940,6 +1485,7 @@ on a compatible third-party proxy, or use Claude/another provider as executor an
                 "baseUrl": &self.base_url,
                 "endpoint": endpoint,
                 "transport": transport,
+                "transportReason": transport_reason.as_str(),
                 "stream": true,
                 "systemPromptInMessages": system_prompt.is_some(),
                 "messageCount": request.messages.len(),
@@ -959,6 +1505,13 @@ on a compatible third-party proxy, or use Claude/another provider as executor an
             // `stream_options` (sacrificing prefix-cache token reporting
             // for compatibility). Only fires once per request.
             let mut tried_without_stream_options = false;
+            // v0.4.24 — one-shot recovery when a `/v1/responses` request is
+            // rejected for a replayed reasoning item (cross-model encrypted
+            // content, an ordering violation, or a hand-edited session). Strip
+            // the reasoning items and retry once so the turn completes without
+            // reasoning replay instead of hard-failing every turn until the
+            // session is compacted.
+            let mut tried_without_reasoning_items = false;
             let mut response = loop {
                 attempt += 1;
                 if runtime::is_interrupted() {
@@ -999,27 +1552,139 @@ on a compatible third-party proxy, or use Claude/another provider as executor an
                                     "provider": "openai-compatible",
                                     "model": &self.model,
                                     "status": status.as_u16(),
+                                    "transport": transport,
                                     "requestId": response_request_id(resp.headers()),
                                     "stream": true,
                                 }),
                             );
                             break resp;
                         }
+                        // Headers must be read before `text()` consumes the
+                        // response. Every non-success path below wants the body,
+                        // so read it once here.
+                        let request_id = response_request_id(resp.headers());
+                        let response_headers = response_header_trace_value(resp.headers());
+                        let retry_after_secs = resp
+                            .headers()
+                            .get("retry-after")
+                            .and_then(|v| v.to_str().ok())
+                            .and_then(|s| s.parse::<u64>().ok());
+                        let body_text = resp.text().await.unwrap_or_default();
+
+                        // Transport fallback: this gateway does not serve
+                        // `/v1/responses` for this model. Checked *before* the
+                        // retry branch — an unsupported endpoint fails
+                        // identically on every attempt, so retrying it just
+                        // burns the budget and the backoff. Rebuild the request
+                        // for chat/completions and re-send immediately.
+                        if use_responses_api
+                            && responses_transport_unsupported(status.as_u16(), &body_text)
+                        {
+                            use_responses_api = false;
+                            mark_responses_unsupported(&self.base_url, &self.model);
+                            endpoint = endpoint_for_transport(false);
+                            transport = transport_label(false);
+                            url = format!("{}{}", self.base_url.trim_end_matches('/'), endpoint);
+                            body = build_chat_completions_body(
+                                &self.model,
+                                convert_messages_openai(
+                                    &request.messages,
+                                    system_prompt.as_deref(),
+                                    &self.model,
+                                ),
+                                &self.tool_specs,
+                                self.enable_tools,
+                                chat_reasoning_effort_for(
+                                    &self.model,
+                                    &self.base_url,
+                                    self.enable_tools,
+                                ),
+                            );
+                            trace_record(
+                                &trace_sink,
+                                "llm.transport_fallback",
+                                json!({
+                                    "provider": "openai-compatible",
+                                    "model": &self.model,
+                                    "baseUrl": &self.base_url,
+                                    "from": "responses",
+                                    "to": "chat_completions",
+                                    "status": status.as_u16(),
+                                    "requestId": request_id,
+                                    "bodyPreview": body_preview_trace(&body_text),
+                                    "request": &body,
+                                }),
+                            );
+                            eprintln!(
+                                "\x1b[33m  {} does not serve /v1/responses for {} (HTTP {status}); falling back to /v1/chat/completions for the rest of this process\x1b[0m",
+                                self.base_url, self.model
+                            );
+                            // Not a real retry — the request shape changed.
+                            attempt = attempt.saturating_sub(1);
+                            continue;
+                        }
+
+                        // Reverse transport fallback: a `/v1/chat/completions`
+                        // request the backend insists must use `/v1/responses`
+                        // (official OpenAI's gate on gpt-5.5+/o-series tool
+                        // flows, forwarded by a gateway). Symmetric to the
+                        // forward fallback above. Guarded by the responses
+                        // registry so it cannot ping-pong: once responses has
+                        // been learned unsupported, a chat "use responses" 400
+                        // hard-fails rather than flipping back and forth.
+                        if !use_responses_api
+                            && self.enable_tools
+                            && !responses_known_unsupported(&self.base_url, &self.model)
+                            && chat_requires_responses_transport(status.as_u16(), &body_text)
+                        {
+                            use_responses_api = true;
+                            mark_chat_requires_responses(&self.base_url, &self.model);
+                            endpoint = endpoint_for_transport(true);
+                            transport = transport_label(true);
+                            url = format!("{}{}", self.base_url.trim_end_matches('/'), endpoint);
+                            body = build_responses_body(
+                                &self.model,
+                                convert_messages_responses(&request.messages, &self.model),
+                                &self.tool_specs,
+                                self.enable_tools,
+                                system_prompt.as_deref(),
+                                &responses_prompt_cache_key(
+                                    &self.model,
+                                    system_prompt.as_deref(),
+                                    &request.messages,
+                                ),
+                            );
+                            trace_record(
+                                &trace_sink,
+                                "llm.transport_fallback",
+                                json!({
+                                    "provider": "openai-compatible",
+                                    "model": &self.model,
+                                    "baseUrl": &self.base_url,
+                                    "from": "chat_completions",
+                                    "to": "responses",
+                                    "status": status.as_u16(),
+                                    "requestId": request_id,
+                                    "bodyPreview": body_preview_trace(&body_text),
+                                    "request": &body,
+                                }),
+                            );
+                            eprintln!(
+                                "\x1b[33m  {} requires /v1/responses for {} (HTTP {status}); switching to /v1/responses for the rest of this process\x1b[0m",
+                                self.base_url, self.model
+                            );
+                            // Not a real retry — the request shape changed.
+                            attempt = attempt.saturating_sub(1);
+                            continue;
+                        }
+
                         if retryable && attempt < MAX_ATTEMPTS {
-                            let request_id = response_request_id(resp.headers());
-                            let response_headers = response_header_trace_value(resp.headers());
-                            let retry_after_secs = resp
-                                .headers()
-                                .get("retry-after")
-                                .and_then(|v| v.to_str().ok())
-                                .and_then(|s| s.parse::<u64>().ok());
                             let backoff_ms = if let Some(secs) = retry_after_secs {
                                 (secs * 1000).min(10_000)
                             } else {
                                 (1u64 << (attempt - 1)) * 1000 // 1s, 2s, 4s
                             };
-                            let body_preview = resp.text().await.unwrap_or_default();
-                            let preview: String = body_preview.chars().take(160).collect();
+                            let preview: String = body_text.chars().take(160).collect();
                             trace_record(
                                 &trace_sink,
                                 "llm.retry",
@@ -1034,7 +1699,7 @@ on a compatible third-party proxy, or use Claude/another provider as executor an
                                     "backoffMs": backoff_ms,
                                     "retryAfterSeconds": retry_after_secs,
                                     "responseHeaders": response_headers,
-                                    "bodyPreview": body_preview_trace(&body_preview),
+                                    "bodyPreview": body_preview_trace(&body_text),
                                 }),
                             );
                             eprintln!(
@@ -1051,7 +1716,42 @@ on a compatible third-party proxy, or use Claude/another provider as executor an
                             }
                             continue;
                         }
-                        let body_text = resp.text().await.unwrap_or_else(|_| String::new());
+
+                        // Responses reasoning-item rejection: strip the replayed
+                        // reasoning items and retry once. Checked before the
+                        // stream_options fallback because both are 400
+                        // body-shape adjustments, and an unsupported-reasoning
+                        // 400 fails identically on every attempt. Guarded so it
+                        // fires at most once and only when the body actually
+                        // carried reasoning items to remove.
+                        if use_responses_api
+                            && status.as_u16() == 400
+                            && !tried_without_reasoning_items
+                            && is_reasoning_item_rejected(&body_text)
+                            && strip_reasoning_items_from_responses_body(&mut body)
+                        {
+                            tried_without_reasoning_items = true;
+                            trace_record(
+                                &trace_sink,
+                                "llm.request_adjusted",
+                                json!({
+                                    "provider": "openai-compatible",
+                                    "model": &self.model,
+                                    "reason": "reasoning_items_rejected",
+                                    "status": status.as_u16(),
+                                    "requestId": request_id,
+                                    "bodyPreview": body_preview_trace(&body_text),
+                                    "request": &body,
+                                }),
+                            );
+                            eprintln!(
+                                "\x1b[33m  {} rejected a replayed reasoning item for {} (HTTP {status}); retrying without reasoning replay this turn\x1b[0m",
+                                self.base_url, self.model
+                            );
+                            // Not a real retry — the request shape changed.
+                            attempt = attempt.saturating_sub(1);
+                            continue;
+                        }
 
                         // v0.4.12 P1.C — proxy compatibility fallback
                         // for `stream_options`. Only fires on a real 400
@@ -1154,7 +1854,6 @@ on a compatible third-party proxy, or use Claude/another provider as executor an
             // Kimi: accumulate reasoning_content from this turn
             let mut current_reasoning = String::new();
             let mut current_responses_reasoning_items: Vec<Value> = Vec::new();
-            let current_msg_index = request.messages.len(); // index of the new assistant msg
 
             // Accumulate tool calls: index → (id, name, arguments_json)
             let mut pending_tools: Vec<(String, String, String)> = Vec::new();
@@ -1693,62 +2392,62 @@ on a compatible third-party proxy, or use Claude/another provider as executor an
                 events.push(AssistantEvent::MessageStop);
             }
 
-            // Kimi: save reasoning_content for this turn so we can replay it.
-            // v0.4.9 L4: capped at MAX_REASONING_CHARS_PER_TURN per entry +
-            // MAX_REASONING_CACHE_TOTAL_CHARS across all entries (oldest
-            // evicted first) so the request body doesn't balloon over a
-            // long session.
-            if !use_responses_api && supports_reasoning && !current_reasoning.is_empty() {
-                if current_reasoning.chars().count() > MAX_REASONING_CHARS_PER_TURN {
-                    // UTF-8-safe truncate at char boundary
-                    let byte_idx = current_reasoning
-                        .char_indices()
-                        .nth(MAX_REASONING_CHARS_PER_TURN)
-                        .map(|(i, _)| i)
-                        .unwrap_or(current_reasoning.len());
-                    current_reasoning.truncate(byte_idx);
-                }
-                self.kimi_reasoning_cache
-                    .insert(current_msg_index, current_reasoning);
-
-                // Enforce total-size cap by evicting oldest entries (smallest
-                // msg_idx) until we're back under MAX_REASONING_CACHE_TOTAL_CHARS.
-                while self
-                    .kimi_reasoning_cache
-                    .values()
-                    .map(String::len)
-                    .sum::<usize>()
-                    > MAX_REASONING_CACHE_TOTAL_CHARS
-                {
-                    let Some(oldest_idx) =
-                        self.kimi_reasoning_cache.keys().copied().min()
-                    else {
-                        break;
-                    };
-                    if oldest_idx == current_msg_index {
-                        // Never evict the entry we just inserted; if total cap is
-                        // smaller than a single turn, accept the overflow (the
-                        // per-turn truncate already bounded it).
-                        break;
+            // Kimi-family: save this turn's reasoning_content for replay on
+            // later requests. Capped per entry and in total; see
+            // `cache_turn_reasoning` for why the total cap refuses new
+            // entries instead of evicting already-replayed ones.
+            // Persist this turn's reasoning as a session Thinking block so it
+            // survives Desktop's per-turn runtime rebuild. The signature decides
+            // how (if at all) it is replayed on a later request:
+            //   - chat, reasoning_content family (Kimi/MiMo/DeepSeek-R1): tagged
+            //     with `OPENAI_REASONING_CONTENT_SIGNATURE` and replayed as the
+            //     `reasoning_content` field (B4 — was a per-turn side cache that
+            //     never survived the Desktop client rebuild, so replay was dead
+            //     there; the block rides the same persisted-signature path the
+            //     Responses replay already uses successfully).
+            //   - responses with tool calls: the opaque encrypted reasoning
+            //     items, replayed as `input` reasoning items across the tool
+            //     boundary within the agentic turn.
+            //   - everything else (chat non-replay family; a responses no-tool
+            //     turn): an empty signature — display-only, never replayed on any
+            //     transport (B5 — these turns previously dropped their thinking on
+            //     reload while Anthropic turns kept it).
+            let has_encrypted_items = !current_responses_reasoning_items.is_empty();
+            if !current_reasoning.is_empty() || has_encrypted_items {
+                let signature = if use_responses_api {
+                    if events
+                        .iter()
+                        .any(|event| matches!(event, AssistantEvent::ToolUse { .. }))
+                    {
+                        encode_responses_reasoning_signature(
+                            &current_responses_reasoning_items,
+                            &self.model,
+                        )
+                        .unwrap_or_default()
+                    } else {
+                        String::new()
                     }
-                    self.kimi_reasoning_cache.remove(&oldest_idx);
-                }
-            }
-
-            if use_responses_api && !current_responses_reasoning_items.is_empty() {
-                self.responses_reasoning_cache
-                    .insert(current_msg_index, current_responses_reasoning_items);
-                while responses_reasoning_cache_size(&self.responses_reasoning_cache)
-                    > MAX_REASONING_CACHE_TOTAL_CHARS
-                {
-                    let Some(oldest_idx) = self.responses_reasoning_cache.keys().copied().min()
-                    else {
-                        break;
-                    };
-                    if oldest_idx == current_msg_index {
-                        break;
-                    }
-                    self.responses_reasoning_cache.remove(&oldest_idx);
+                } else if supports_reasoning {
+                    OPENAI_REASONING_CONTENT_SIGNATURE.to_string()
+                } else {
+                    String::new()
+                };
+                let thinking = truncate_reasoning_per_turn(std::mem::take(&mut current_reasoning));
+                // Skip a block that carries neither display text nor a replay
+                // payload (nothing to persist).
+                if !thinking.is_empty() || !signature.is_empty() {
+                    // Insert before the first visible/tool output so reasoning
+                    // renders ahead of the answer on reload (matches Anthropic).
+                    let insert_at = events
+                        .iter()
+                        .position(|event| {
+                            matches!(
+                                event,
+                                AssistantEvent::TextDelta(_) | AssistantEvent::ToolUse { .. }
+                            )
+                        })
+                        .unwrap_or(events.len());
+                    events.insert(insert_at, AssistantEvent::Thinking { thinking, signature });
                 }
             }
 
@@ -1800,11 +2499,18 @@ fn flush_pending_tools(
 fn convert_messages_openai(
     messages: &[ConversationMessage],
     system_prompt: Option<&str>,
-    kimi_reasoning_cache: &std::collections::HashMap<usize, String>,
+    model: &str,
 ) -> Vec<Value> {
     let mut result: Vec<Value> = Vec::new();
     let mut pending_tool_call_ids: Vec<String> = Vec::new();
     let mut orphan_tool_results: Vec<String> = Vec::new();
+    // `reasoning_content` replay is only for the families whose chat API accepts
+    // it back as input; for everyone else the persisted Thinking block stays
+    // display-only. Oldest turns spend the shared budget first, so a long
+    // session drops the *newest* reasoning replay while keeping already-sent
+    // historical bytes stable (see [`MAX_REASONING_CONTENT_REPLAY_CHARS`]).
+    let replay_reasoning_content = supports_reasoning_content_replay(model);
+    let mut reasoning_replay_used: usize = 0;
 
     // System message first
     if let Some(prompt) = system_prompt {
@@ -1814,7 +2520,7 @@ fn convert_messages_openai(
         }));
     }
 
-    for (msg_idx, message) in messages.iter().enumerate() {
+    for message in messages {
         match message.role {
             MessageRole::System => {
                 let text = message
@@ -1925,11 +2631,23 @@ fn convert_messages_openai(
                 if !tool_calls.is_empty() {
                     msg["tool_calls"] = json!(tool_calls);
                 }
-                // Attach cached reasoning_content for providers that support
-                // thinking mode (Kimi, Xiaomi MiMo, DeepSeek R1, etc.)
-                if let Some(reasoning) = kimi_reasoning_cache.get(&msg_idx) {
-                    if !reasoning.is_empty() {
+                // Replay this turn's `reasoning_content` for the families whose
+                // chat API accepts it back (Kimi/Moonshot, MiMo, DeepSeek-R1),
+                // sourced from the persisted Thinking block tagged with
+                // `OPENAI_REASONING_CONTENT_SIGNATURE`. Bounded by the shared
+                // budget so a long session does not replay unbounded reasoning.
+                if replay_reasoning_content && reasoning_replay_used < MAX_REASONING_CONTENT_REPLAY_CHARS {
+                    if let Some(reasoning) = message.blocks.iter().find_map(|block| match block {
+                        ContentBlock::Thinking { thinking, signature }
+                            if signature.starts_with(OPENAI_REASONING_CONTENT_SIGNATURE)
+                                && !thinking.is_empty() =>
+                        {
+                            Some(thinking.as_str())
+                        }
+                        _ => None,
+                    }) {
                         msg["reasoning_content"] = json!(reasoning);
+                        reasoning_replay_used = reasoning_replay_used.saturating_add(reasoning.len());
                     }
                 }
                 result.push(msg);
@@ -1945,15 +2663,12 @@ fn convert_messages_openai(
     result
 }
 
-fn convert_messages_responses(
-    messages: &[ConversationMessage],
-    reasoning_cache: &std::collections::HashMap<usize, Vec<Value>>,
-) -> Vec<Value> {
+fn convert_messages_responses(messages: &[ConversationMessage], model: &str) -> Vec<Value> {
     let mut result = Vec::new();
     let mut pending_tool_call_ids = Vec::new();
     let mut orphan_tool_results = Vec::new();
 
-    for (message_index, message) in messages.iter().enumerate() {
+    for message in messages {
         match message.role {
             MessageRole::System => {
                 let text = message_text(&message.blocks);
@@ -2015,9 +2730,7 @@ fn convert_messages_responses(
                     &mut pending_tool_call_ids,
                     &mut orphan_tool_results,
                 );
-                if let Some(reasoning_items) = reasoning_cache.get(&message_index) {
-                    result.extend(reasoning_items.iter().cloned());
-                }
+                result.extend(responses_reasoning_items_from_blocks(&message.blocks, model));
                 let text = message_text(&message.blocks);
                 if !text.is_empty() {
                     result.push(json!({ "role": "assistant", "content": text }));

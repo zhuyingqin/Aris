@@ -78,6 +78,26 @@ fn independent_review_policy_skips_simple_answers_and_gates_tool_work() {
         "请重新审查这份综述",
         &review_test_summary(None)
     ));
+
+    let production_summary = review_test_summary(Some("edit_file"));
+    assert!(should_run_independent_review(
+        false,
+        true,
+        "Fix this function",
+        &production_summary,
+    ));
+    assert!(!should_run_independent_review(
+        false,
+        false,
+        "Fix this function",
+        &production_summary,
+    ));
+    assert!(!should_run_independent_review(
+        true,
+        true,
+        "Fix this function",
+        &production_summary,
+    ));
 }
 
 #[test]

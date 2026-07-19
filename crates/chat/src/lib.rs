@@ -699,7 +699,33 @@ pub enum ChatExecutorConfig {
     OpenAiCompatible {
         api_key: String,
         base_url: String,
+        /// Which endpoint to use. `Auto` keeps the historical base-URL-derived
+        /// choice; an explicit `Responses` preference still falls back to
+        /// chat/completions at runtime when the gateway rejects the endpoint.
+        transport: aris_executor::OpenAiTransport,
     },
+}
+
+impl ChatExecutorConfig {
+    /// Same credentials and endpoint, with any explicit endpoint preference
+    /// reset to [`aris_executor::OpenAiTransport::Auto`].
+    ///
+    /// Transport is a per-model capability, so reusing one model's connection
+    /// for another model (the compaction summarizer) must not carry the
+    /// original model's probed verdict along with it.
+    #[must_use]
+    pub fn with_inferred_transport(self) -> Self {
+        match self {
+            Self::OpenAiCompatible {
+                api_key, base_url, ..
+            } => Self::OpenAiCompatible {
+                api_key,
+                base_url,
+                transport: aris_executor::OpenAiTransport::Auto,
+            },
+            other => other,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -717,6 +743,9 @@ where
         return Ok(ChatExecutorConfig::OpenAiCompatible {
             api_key: config.api_key,
             base_url: config.base_url,
+            transport: std::env::var("EXECUTOR_TRANSPORT")
+                .map(|raw| aris_executor::OpenAiTransport::from_config_value(&raw))
+                .unwrap_or_default(),
         });
     }
     Ok(ChatExecutorConfig::Anthropic {
@@ -773,10 +802,20 @@ pub fn resolve_settings_executor_config(
             })?;
             let base_url =
                 get("executor_base_url").unwrap_or_else(|| DEFAULT_OPENAI_BASE_URL.to_string());
+            // Absent/unknown → `Auto`, i.e. the historical behaviour. A
+            // per-model override lives on the verified-executor entry and is
+            // merged into this object before it reaches here.
+            let transport = get("executor_transport")
+                .map(|raw| aris_executor::OpenAiTransport::from_config_value(&raw))
+                .unwrap_or_default();
             Ok((
                 model,
                 provider,
-                ChatExecutorConfig::OpenAiCompatible { api_key, base_url },
+                ChatExecutorConfig::OpenAiCompatible {
+                    api_key,
+                    base_url,
+                    transport,
+                },
             ))
         }
     }
@@ -835,14 +874,19 @@ pub fn build_executor_client_with_trace(
             }
             Ok(aris_executor::ExecutorClient::Anthropic(client))
         }
-        ChatExecutorConfig::OpenAiCompatible { api_key, base_url } => {
+        ChatExecutorConfig::OpenAiCompatible {
+            api_key,
+            base_url,
+            transport,
+        } => {
             let mut client = aris_executor::OpenAIRuntimeClient::new(
                 aris_executor::OpenAIExecutorConfig { api_key, base_url },
                 model,
                 enable_tools,
                 tool_specs,
                 observer,
-            )?;
+            )?
+            .with_transport(transport);
             if let Some(trace_sink) = trace_sink {
                 client = client.with_trace_sink(trace_sink);
             }
@@ -923,7 +967,11 @@ pub fn resolve_summarizer_client_with_trace(
 
     resolve_summarizer_model(chat_config, chat_model, configured_model).and_then(|summary_model| {
         build_executor_client_with_trace(
-            chat_config.clone(),
+            // Reuses the executor's credentials and endpoint, but the summary
+            // runs a *different* model whose endpoint capability was never
+            // probed — so the executor's explicit transport preference must not
+            // carry over. `Auto` infers it for the summary model instead.
+            chat_config.clone().with_inferred_transport(),
             summary_model,
             false,
             Vec::new(),

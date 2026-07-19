@@ -263,6 +263,9 @@ pub struct VerifiedSummary {
     pub provider: String,
     pub model: String,
     pub base_url: String,
+    /// Probed endpoint capability: `responses` | `chat_completions` | empty
+    /// when never probed. Keys are still never surfaced.
+    pub transport: String,
 }
 
 #[derive(Serialize)]
@@ -273,6 +276,9 @@ pub struct ConfigView {
     pub executor_provider: Option<String>,
     pub executor_model: Option<String>,
     pub executor_base_url: Option<String>,
+    /// Endpoint preference for OpenAI-compatible executors:
+    /// `auto` | `chat_completions` | `responses`.
+    pub executor_transport: Option<String>,
     /// Model used to summarize context on compaction. Empty/absent means "Auto"
     /// (a per-provider default). See `aris_chat::resolve_summarizer_model`.
     pub summarizer_model: Option<String>,
@@ -285,6 +291,7 @@ pub struct ConfigView {
     pub reviewer_provider: Option<String>,
     pub reviewer_model: Option<String>,
     pub reviewer_base_url: Option<String>,
+    pub review_enabled: bool,
     pub has_reviewer_key: bool,
     pub reviewer_key_masked: Option<String>,
     pub has_scopus_key: bool,
@@ -309,6 +316,7 @@ fn build_view(obj: &Map<String, Value>) -> ConfigView {
         executor_provider: get_str(obj, "executor_provider"),
         executor_model: get_str(obj, "executor_model"),
         executor_base_url: get_str(obj, "executor_base_url"),
+        executor_transport: get_str(obj, "executor_transport"),
         summarizer_model: get_str(obj, "summarizer_model"),
         summarizer_provider: get_str(obj, "summarizer_provider"),
         summarizer_base_url: get_str(obj, "summarizer_base_url"),
@@ -319,6 +327,7 @@ fn build_view(obj: &Map<String, Value>) -> ConfigView {
         reviewer_provider: get_str(obj, "reviewer_provider"),
         reviewer_model: get_str(obj, "reviewer_model"),
         reviewer_base_url: get_str(obj, "reviewer_base_url"),
+        review_enabled: review_enabled_from(obj),
         has_reviewer_key: rev_key.is_some(),
         reviewer_key_masked: rev_key.as_deref().map(mask),
         has_scopus_key: scopus_key.is_some(),
@@ -335,9 +344,20 @@ fn build_view(obj: &Map<String, Value>) -> ConfigView {
                 provider: entry.provider,
                 model: entry.model,
                 base_url: entry.base_url,
+                transport: entry.transport,
             })
             .collect(),
     }
+}
+
+fn review_enabled_from(obj: &Map<String, Value>) -> bool {
+    obj.get("review_enabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
+}
+
+pub(crate) fn review_enabled() -> bool {
+    review_enabled_from(&managed_config_object().unwrap_or_else(|_| load_object()))
 }
 
 #[tauri::command]
@@ -575,6 +595,12 @@ pub(crate) struct VerifiedExecutor {
     /// Empty string means "provider default endpoint".
     pub base_url: String,
     pub api_key: String,
+    /// Endpoint capability for this specific `(provider, model, base_url)`:
+    /// `responses` | `chat_completions` | empty for "auto/unprobed". Stored
+    /// per entry because gateways differ per model — on one new-api
+    /// deployment `gpt-5.6-*` serves `/v1/responses` natively while
+    /// `MiniMax-M3` cannot convert the request at all.
+    pub transport: String,
 }
 
 fn parse_verified(value: &Value) -> Option<VerifiedExecutor> {
@@ -602,6 +628,12 @@ fn parse_verified(value: &Value) -> Option<VerifiedExecutor> {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string(),
+        transport: obj
+            .get("transport")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string(),
     })
 }
 
@@ -627,6 +659,13 @@ fn write_verified(obj: &mut Map<String, Value>, list: &[VerifiedExecutor]) {
                 Value::String(entry.base_url.clone()),
             );
             item.insert("api_key".to_string(), Value::String(entry.api_key.clone()));
+            // Omitted when unprobed so existing configs stay byte-identical.
+            if !entry.transport.is_empty() {
+                item.insert(
+                    "transport".to_string(),
+                    Value::String(entry.transport.clone()),
+                );
+            }
             Value::Object(item)
         })
         .collect();
@@ -642,6 +681,11 @@ fn upsert_verified(list: &mut Vec<VerifiedExecutor>, entry: VerifiedExecutor) {
             && item.base_url == entry.base_url
     }) {
         existing.api_key = entry.api_key;
+        // A re-probe may flip capability (gateway upgrade); an unprobed
+        // re-verify must not erase a known-good transport.
+        if !entry.transport.is_empty() {
+            existing.transport = entry.transport;
+        }
     } else {
         list.push(entry);
     }
@@ -654,6 +698,18 @@ pub(crate) fn record_verified_executor(
     model: &str,
     base_url: Option<&str>,
     api_key: &str,
+) -> Result<(), String> {
+    record_verified_executor_with_transport(provider, model, base_url, api_key, "")
+}
+
+/// As [`record_verified_executor`], plus the probed endpoint capability.
+/// Pass `""` to leave any previously probed transport untouched.
+pub(crate) fn record_verified_executor_with_transport(
+    provider: &str,
+    model: &str,
+    base_url: Option<&str>,
+    api_key: &str,
+    transport: &str,
 ) -> Result<(), String> {
     let model = model.trim();
     let api_key = api_key.trim();
@@ -669,10 +725,72 @@ pub(crate) fn record_verified_executor(
             model: model.to_string(),
             base_url: base_url.unwrap_or("").trim().to_string(),
             api_key: api_key.to_string(),
+            transport: transport.trim().to_string(),
         },
     );
     write_verified(&mut obj, &list);
     save_object(&obj)
+}
+
+/// Persist a transport verdict the **runtime** learned — a `/v1/responses`
+/// request fell back to chat/completions, or a chat request was told to use
+/// responses — into the verified-executor registry, and (when it names the
+/// active executor) the `executor_transport` projection. Registered as the
+/// executor's transport hook at startup ([`crate::install_transport_verdict_hook`])
+/// so the Settings badge and the next launch reflect the endpoint actually
+/// used, instead of re-probing on the first request of every process.
+///
+/// Idempotent and change-gated: an unchanged verdict never rewrites the config.
+/// Matches verified entries by `(model, normalized base_url)`; a provider-default
+/// entry stored with an empty base URL is not matched (those run official OpenAI,
+/// where the `Auto` heuristic already resolves the endpoint without learning).
+pub(crate) fn record_runtime_transport_verdict(base_url: &str, model: &str, verdict: &str) {
+    let model = model.trim();
+    let verdict = verdict.trim();
+    if model.is_empty() || !matches!(verdict, "responses" | "chat_completions") {
+        return;
+    }
+    let normalize = |url: &str| url.trim().trim_end_matches('/').to_ascii_lowercase();
+    let target_base = normalize(base_url);
+    if target_base.is_empty() {
+        return;
+    }
+
+    let mut obj = load_object();
+    let mut list = read_verified(&obj);
+    let mut changed = false;
+    for entry in list.iter_mut() {
+        if entry.model == model
+            && normalize(&entry.base_url) == target_base
+            && entry.transport != verdict
+        {
+            entry.transport = verdict.to_string();
+            changed = true;
+        }
+    }
+    if changed {
+        write_verified(&mut obj, &list);
+    }
+    // Keep the active-executor projection in sync so the running session and the
+    // Settings badge agree with the endpoint the runtime just used.
+    let active_model = get_non_empty(&obj, "executor_model");
+    let active_base = obj
+        .get("executor_base_url")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if active_model.as_deref() == Some(model) && normalize(active_base) == target_base {
+        let current = obj
+            .get("executor_transport")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if current != verdict {
+            set_or_clear_executor_transport(&mut obj, verdict);
+            changed = true;
+        }
+    }
+    if changed {
+        let _ = save_object(&obj);
+    }
 }
 
 /// `(provider, model, base_url)` for each verified executor — keys are never
@@ -753,6 +871,24 @@ fn apply_verified_executor(obj: &mut Map<String, Value>, entry: VerifiedExecutor
         );
     }
     obj.insert("executor_api_key".to_string(), Value::String(entry.api_key));
+    // Transport is a per-model capability: carry this entry's probed value, and
+    // clear any stale value from the previously selected model so an unprobed
+    // model falls back to `auto` rather than inheriting `responses`.
+    set_or_clear_executor_transport(obj, &entry.transport);
+}
+
+/// Set `executor_transport` from a per-model capability, removing the key when
+/// the model is unprobed (`""`) so it reads as `auto`.
+fn set_or_clear_executor_transport(obj: &mut Map<String, Value>, transport: &str) {
+    let transport = transport.trim();
+    if transport.is_empty() {
+        obj.remove("executor_transport");
+    } else {
+        obj.insert(
+            "executor_transport".to_string(),
+            Value::String(transport.to_string()),
+        );
+    }
 }
 
 fn apply_managed_executor(obj: &mut Map<String, Value>, model: &str) -> Result<(), String> {
@@ -771,7 +907,22 @@ fn apply_managed_executor(obj: &mut Map<String, Value>, model: &str) -> Result<(
     );
     obj.insert("executor_base_url".to_string(), Value::String(base_url));
     obj.insert("executor_api_key".to_string(), Value::String(api_key));
+    // Reuse this model's previously probed capability if we have one; otherwise
+    // clear so the new model starts at `auto` instead of inheriting the old
+    // model's transport.
+    let probed = verified_transport_for(obj, "openai", model);
+    set_or_clear_executor_transport(obj, &probed);
     Ok(())
+}
+
+/// Look up the probed transport recorded for a `(provider, model)` pair.
+/// Returns `""` when unprobed.
+fn verified_transport_for(obj: &Map<String, Value>, provider: &str, model: &str) -> String {
+    read_verified(obj)
+        .into_iter()
+        .find(|entry| entry.provider == provider && entry.model == model)
+        .map(|entry| entry.transport)
+        .unwrap_or_default()
 }
 
 fn normalize_managed_model_slots(obj: &mut Map<String, Value>) -> Result<bool, String> {
@@ -911,6 +1062,8 @@ pub struct ConfigPatch {
     pub executor_provider: Option<String>,
     pub executor_model: Option<String>,
     pub executor_base_url: Option<String>,
+    /// `auto` | `chat_completions` | `responses`. Absent/unknown means `auto`.
+    pub executor_transport: Option<String>,
     pub summarizer_provider: Option<String>,
     pub summarizer_model: Option<String>,
     pub summarizer_base_url: Option<String>,
@@ -920,6 +1073,7 @@ pub struct ConfigPatch {
     pub reviewer_model: Option<String>,
     pub reviewer_base_url: Option<String>,
     pub reviewer_api_key: Option<String>,
+    pub review_enabled: Option<bool>,
     pub scopus_api_key: Option<String>,
     pub language: Option<String>,
     pub memory_write_approval: Option<bool>,
@@ -1169,12 +1323,17 @@ fn apply_patch(obj: &mut Map<String, Value>, patch: ConfigPatch) {
     set_or_clear(obj, "executor_provider", patch.executor_provider);
     set_or_clear(obj, "executor_model", patch.executor_model);
     set_or_clear(obj, "executor_base_url", patch.executor_base_url);
+    let transport_stated = patch.executor_transport.is_some();
+    set_or_clear(obj, "executor_transport", patch.executor_transport);
     set_or_clear(obj, "summarizer_provider", patch.summarizer_provider);
     set_or_clear(obj, "summarizer_model", patch.summarizer_model);
     set_or_clear(obj, "summarizer_base_url", patch.summarizer_base_url);
     set_or_clear(obj, "reviewer_provider", patch.reviewer_provider);
     set_or_clear(obj, "reviewer_model", patch.reviewer_model);
     set_or_clear(obj, "reviewer_base_url", patch.reviewer_base_url);
+    if let Some(enabled) = patch.review_enabled {
+        obj.insert("review_enabled".to_string(), Value::Bool(enabled));
+    }
     set_or_clear(obj, "language", patch.language);
     if let Some(enabled) = patch.memory_write_approval {
         obj.insert("memory_write_approval".to_string(), Value::Bool(enabled));
@@ -1194,6 +1353,19 @@ fn apply_patch(obj: &mut Map<String, Value>, patch: ConfigPatch) {
         ] {
             obj.remove(key);
         }
+    }
+
+    // `executor_transport` is a per-model capability, so unless this patch
+    // states one explicitly it is re-derived from the probed registry for
+    // whichever model the patch just selected. Without this, `set_or_clear`
+    // leaves the previous model's value in place (a `None` patch field means
+    // "unchanged"), so switching models in the form would carry a stale
+    // endpoint onto the new model.
+    if !transport_stated {
+        let provider = get_str(obj, "executor_provider").unwrap_or_default();
+        let model = get_str(obj, "executor_model").unwrap_or_default();
+        let probed = verified_transport_for(obj, &provider, &model);
+        set_or_clear_executor_transport(obj, &probed);
     }
 }
 
@@ -1491,6 +1663,57 @@ async fn test_openai_compat(
     }
 }
 
+/// Probe whether this endpoint serves `/v1/responses` for `model`.
+///
+/// Gateways differ per model, not per server: on one self-hosted new-api
+/// deployment `gpt-5.6-*` proxies the Responses API natively while
+/// `MiniMax-M3` answers `convert_request_failed` and Kimi/MiMo 404. The
+/// verdict is stored per verified entry so the executor picks the right
+/// endpoint without a failed first request.
+///
+/// Returns `"responses"`, `"chat_completions"`, or `""` when the probe was
+/// inconclusive (auth/quota/network) — the caller then leaves any previously
+/// recorded capability untouched rather than downgrading on a transient error.
+///
+/// Costs one minimal generation (capped at 32 output tokens); a request
+/// without `input` is not used because too many gateways answer a generic 400
+/// for both the supported and unsupported case.
+async fn probe_responses_transport(base_url: &str, model: &str, api_key: &str) -> &'static str {
+    let Ok(client) = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+    else {
+        return "";
+    };
+    let url = format!("{}/responses", base_url.trim_end_matches('/'));
+    let response = client
+        .post(&url)
+        .bearer_auth(api_key)
+        .header("content-type", "application/json")
+        .json(&serde_json::json!({
+            "model": model,
+            "input": "ok",
+            "max_output_tokens": 32,
+            "stream": false,
+            "store": false,
+        }))
+        .send()
+        .await;
+    let Ok(response) = response else {
+        return "";
+    };
+    let status = response.status();
+    if status.is_success() {
+        return "responses";
+    }
+    let body = response.text().await.unwrap_or_default();
+    if aris_executor::responses_transport_unsupported(status.as_u16(), &body) {
+        return "chat_completions";
+    }
+    ""
+}
+
 async fn test_reviewer(obj: &Map<String, Value>) -> Option<ConfigTestDetail> {
     let provider = get_non_empty(obj, "reviewer_provider")?;
     let model = get_non_empty(obj, "reviewer_model").unwrap_or_else(|| "gpt-5.5".to_string());
@@ -1676,7 +1899,13 @@ pub async fn config_test(patch: ConfigPatch) -> Result<ConfigTestResult, String>
         Ok((
             model,
             provider,
-            aris_chat::ChatExecutorConfig::OpenAiCompatible { api_key, base_url },
+            // The connectivity test only proves credentials + model reachability
+            // on chat/completions; transport capability is probed separately.
+            aris_chat::ChatExecutorConfig::OpenAiCompatible {
+                api_key,
+                base_url,
+                transport: _,
+            },
         )) => {
             test_openai_compat(
                 "Executor",
@@ -1703,8 +1932,34 @@ pub async fn config_test(patch: ConfigPatch) -> Result<ConfigTestResult, String>
     if executor.ok {
         if let (Some(provider), Some(model)) = (executor.provider.clone(), executor.model.clone()) {
             if let Some(key) = get_non_empty(&obj, "executor_api_key") {
-                let _ =
-                    record_verified_executor(&provider, &model, executor.base_url.as_deref(), &key);
+                // OpenAI-compatible executors additionally get an endpoint
+                // capability probe, so the Chat turn picks `/v1/responses` (or
+                // not) without spending a failed request to find out. Anthropic
+                // transports have no such choice. An inconclusive probe returns
+                // `""`, which preserves any previously recorded verdict.
+                let transport = if provider == "anthropic" || provider == "anthropic-compat" {
+                    ""
+                } else {
+                    let probe_base = normalized_base_url(
+                        executor.base_url.clone(),
+                        "https://api.openai.com/v1",
+                    );
+                    probe_responses_transport(&probe_base, &model, &key).await
+                };
+                // Only the per-model registry is written here. The live
+                // `executor_transport` slot is derived whenever a model is
+                // actually selected (`apply_patch` / `apply_verified_executor`
+                // / `apply_managed_executor`), because the form being tested
+                // may name a different model than the saved config — stamping
+                // the probed value onto the live slot here would attribute one
+                // model's capability to another.
+                let _ = record_verified_executor_with_transport(
+                    &provider,
+                    &model,
+                    executor.base_url.as_deref(),
+                    &key,
+                    transport,
+                );
             }
         }
     }

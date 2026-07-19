@@ -27,6 +27,7 @@ fn summarizer_model_honors_explicit_setting_over_defaults() {
     let openai = ChatExecutorConfig::OpenAiCompatible {
         api_key: "k".into(),
         base_url: "https://example.test/v1".into(),
+        transport: aris_executor::OpenAiTransport::Auto,
     };
 
     // Explicit setting wins regardless of provider/model. (These paths
@@ -204,7 +205,9 @@ fn resolves_openai_compatible_settings() {
     assert_eq!(model, "gpt-5.5");
     assert_eq!(provider, "openai");
     match config {
-        ChatExecutorConfig::OpenAiCompatible { api_key, base_url } => {
+        ChatExecutorConfig::OpenAiCompatible {
+            api_key, base_url, ..
+        } => {
             assert_eq!(api_key, "sk-test");
             assert_eq!(base_url, "https://example.test/v1");
         }

@@ -1091,17 +1091,22 @@ async function connectInternal(options: ConnectOptions, generation: number): Pro
         });
       },
       onStateChange: (state) => {
-        if (isCurrentConnection(generation) && transport === candidate) {
+        // `connectInternal` detaches and closes the previous transport before
+        // constructing its replacement. During that short handoff both
+        // `transport` and `candidate` are null; without this guard, the old
+        // transport's synchronous `closed` callback is mistaken for the new
+        // connection and resets the mobile UI on every foreground resume.
+        if (candidate !== null && isCurrentConnection(generation) && transport === candidate) {
           showTransportState(state);
         }
       },
       onPlaintextFrame: (frame) => {
-        if (isCurrentConnection(generation) && transport === candidate) {
+        if (candidate !== null && isCurrentConnection(generation) && transport === candidate) {
           showControlResponse(frame);
         }
       },
       onTransportError: (error) => {
-        if (isCurrentConnection(generation) && transport === candidate) {
+        if (candidate !== null && isCurrentConnection(generation) && transport === candidate) {
           rejectPendingControlRequests(error);
           setStatus(error.message);
         }
@@ -2283,9 +2288,17 @@ async function runChatEventSync(
       }
       const initialSnapshot = afterSeq === null;
       afterSeq = batch.nextSeq;
-      for (const event of batch.events) {
+      for (const [index, event] of batch.events.entries()) {
         if (!isCurrentChatEventSync(projectId, sessionId, generation)) return;
-        applyDesktopChatSessionEvent(event, sessionId, initialSnapshot);
+        // A research turn can contain many large tool-card updates. Mutate the
+        // local blocks for every ordered event, but rebuild the message DOM
+        // only once after the encrypted batch has been applied.
+        applyDesktopChatSessionEvent(
+          event,
+          sessionId,
+          initialSnapshot,
+          index === batch.events.length - 1,
+        );
       }
     } catch {
       if (!isCurrentChatEventSync(projectId, sessionId, generation)) return;
@@ -2298,6 +2311,7 @@ function applyDesktopChatSessionEvent(
   event: ChatSessionEvent,
   sessionId: string,
   initialSnapshot: boolean,
+  renderImmediately = true,
 ): void {
   if (event.kind === "reset") {
     void selectChatSession(sessionId);
@@ -2338,9 +2352,11 @@ function applyDesktopChatSessionEvent(
   }
   if (event.kind === "assistant" && turn) {
     turn.blocks = applyChatMessageEvent(turn.blocks, event.event);
-    renderRemoteChatBlocks(turn.reply, turn.blocks, true);
-    chatLog.scrollTop = chatLog.scrollHeight;
-    updateChatComposer();
+    if (renderImmediately) {
+      renderRemoteChatBlocks(turn.reply, turn.blocks, true);
+      chatLog.scrollTop = chatLog.scrollHeight;
+      updateChatComposer();
+    }
     return;
   }
   if (event.kind === "done") {

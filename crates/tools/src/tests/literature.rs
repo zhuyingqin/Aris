@@ -400,9 +400,9 @@ fn dedupe_merges_arxiv_and_crossref_records() {
 }
 
 #[test]
-fn upsert_adds_new_papers_into_the_inbox() {
-    let base = temp_base("upsert-add");
-    let stats = library_upsert_at(
+fn upsert_rejects_untracked_records_instead_of_creating_a_second_write_path() {
+    let base = temp_base("upsert-reject");
+    let error = library_upsert_at(
         &base,
         &[record("arxiv:1111.00001", "Paper One")],
         Some(&UpsertSearch {
@@ -410,22 +410,79 @@ fn upsert_adds_new_papers_into_the_inbox() {
             sources: vec!["arxiv".into()],
         }),
     )
-    .expect("upsert should work");
-    assert_eq!(stats.added, 1);
-    assert_eq!(stats.merged, 0);
-    assert_eq!(stats.total, 1);
-    let library = library_load_at(&base).expect("library loads");
-    let paper = &library["papers"][0];
-    assert_eq!(paper["stage"], "inbox");
-    assert_eq!(paper["unread"], true);
-    assert_eq!(paper["pdf"]["status"], "none");
-    assert_eq!(library["searches"][0]["query"], "paper one");
-    assert_eq!(library["searches"][0]["newCount"], 1);
+    .expect_err("untracked records must be rejected");
+    assert!(error.contains("cannot ingest untracked records"));
+    assert_eq!(
+        library_load_at(&base).expect("library loads")["papers"]
+            .as_array()
+            .map(Vec::len),
+        Some(0)
+    );
     let _ = std::fs::remove_dir_all(base);
 }
 
 #[test]
-fn library_save_keeps_the_previous_version_as_a_backup() {
+fn canonical_records_project_into_library_and_legacy_edits_write_back_to_canonical() {
+    let base = temp_base("canonical-library-projection");
+    let source_record = record("arxiv:2601.00001", "Protocol Result");
+    let canonical = canonical_record_from_remote(&source_record, "run-protocol", "artifact-result");
+    let mut store = runtime::open_literature_store_at(&base).expect("store");
+    let persisted = store
+        .upsert_canonical_record(&canonical)
+        .expect("persist protocol record")
+        .record;
+    let protocol = store
+        .create_protocol(runtime::SearchProtocolDraft {
+            question: "Which protocol result should be screened?".to_string(),
+            scope: "projection test".to_string(),
+            time_window: String::new(),
+            databases: vec!["arxiv".to_string()],
+            queries: BTreeMap::from([("arxiv".to_string(), "local-first review".to_string())]),
+            inclusion_criteria: Vec::new(),
+            exclusion_criteria: Vec::new(),
+            known_key_papers: Vec::new(),
+        })
+        .expect("create protocol");
+    let mut run = store.start_run(&protocol).expect("start run");
+    run.record_ids.push(persisted.id.clone());
+    run.status = runtime::SearchRunStatus::Completed;
+    store.finish_run(&mut run).expect("finish run");
+
+    let mut library = library_load_at(&base).expect("canonical projection");
+    assert_eq!(library["papers"].as_array().map(Vec::len), Some(1));
+    assert_eq!(library["papers"][0]["id"], persisted.id);
+    assert_eq!(
+        library["papers"][0]["searchIds"],
+        json!([format!("search-run:{}", run.id)])
+    );
+    assert_eq!(
+        library["searches"][0]["id"],
+        format!("search-run:{}", run.id)
+    );
+    assert_eq!(
+        library["searches"][0]["query"],
+        format!("SearchRun {}", run.id)
+    );
+    library["papers"][0]["stage"] = Value::String("shortlist".to_string());
+    library_save_at(&base, &library).expect("legacy write bridge");
+
+    let canonical_after = store
+        .load_canonical_record(&persisted.id)
+        .expect("load canonical")
+        .expect("canonical record");
+    assert_eq!(
+        canonical_after.metadata["legacyLibrary"]["stage"],
+        "shortlist"
+    );
+    assert_eq!(
+        library_load_at(&base).expect("reproject")["papers"][0]["stage"],
+        "shortlist"
+    );
+    let _ = std::fs::remove_dir_all(base);
+}
+
+#[test]
+fn library_save_keeps_a_json_backup_while_canonical_store_recovers_the_current_projection() {
     let base = temp_base("save-backup");
     let mut first = empty_library();
     first["projectFocus"] = json!({ "question": "first" });
@@ -447,40 +504,31 @@ fn library_save_keeps_the_previous_version_as_a_backup() {
     std::fs::write(library_path_at(&base), "{broken").expect("corrupt current library");
     assert_eq!(
         library_load_at(&base).expect("recover backup")["projectFocus"]["question"],
-        "first"
+        "second"
     );
     let _ = std::fs::remove_dir_all(base);
 }
 
 #[test]
-fn upsert_enriches_existing_papers_without_touching_user_state() {
-    let base = temp_base("upsert-merge");
-    let mut library = empty_library();
-    library["papers"] = json!([{
-        "id": "arxiv:1111.00001",
-        "title": "Paper One",
-        "authors": ["A. One"],
-        "venue": "",
-        "abstract": "",
-        "tags": ["keeper"],
-        "collectionIds": [],
-        "searchIds": [],
-        "stage": "shortlist",
-        "starred": true,
-        "unread": false,
-        "source": "arXiv",
-        "addedAt": "2026-06-01T00:00:00.000Z",
-        "pdf": { "status": "none" },
-        "evidence": [],
-    }]);
-    library_save_at(&base, &library).expect("seed library");
+fn upsert_only_refreshes_projection_for_existing_canonical_records() {
+    let base = temp_base("upsert-projection");
+    let source_record = record("arxiv:1111.00001", "Paper One");
+    let canonical = canonical_record_from_remote(&source_record, "run-protocol", "artifact-result");
+    let mut store = runtime::open_literature_store_at(&base).expect("store");
+    let persisted = store
+        .upsert_canonical_record(&canonical)
+        .expect("persist canonical record")
+        .record;
+    drop(store);
 
-    let mut incoming = record("arxiv:1111.00001", "Paper One");
-    incoming["authors"] = json!(["A. One"]);
-    incoming["doi"] = Value::from("10.1234/abc");
-    incoming["citedBy"] = Value::from(7);
-    incoming["source"] = Value::from("OpenAlex");
-    let stats = library_upsert_at(&base, &[incoming], None).expect("upsert should work");
+    let mut library = library_load_at(&base).expect("initial projection");
+    library["papers"][0]["stage"] = Value::String("shortlist".to_string());
+    library["papers"][0]["starred"] = Value::Bool(true);
+    library["papers"][0]["tags"] = json!(["keeper"]);
+    library_save_at(&base, &library).expect("save canonical bridge");
+
+    let stats = library_upsert_at(&base, &[json!({ "id": persisted.id })], None)
+        .expect("projection refresh should work");
     assert_eq!(stats.added, 0);
     assert_eq!(stats.merged, 1);
     assert_eq!(stats.total, 1);
@@ -490,12 +538,8 @@ fn upsert_enriches_existing_papers_without_touching_user_state() {
     assert_eq!(paper["stage"], "shortlist");
     assert_eq!(paper["starred"], true);
     assert_eq!(paper["tags"], json!(["keeper"]));
-    assert_eq!(paper["authors"], json!(["A. One"]));
-    assert_eq!(paper["source"], "arXiv + OpenAlex");
-    assert_eq!(paper["doi"], "10.1234/abc");
-    assert_eq!(paper["citedBy"], 7);
+    assert_eq!(paper["title"], "Paper One");
     assert_eq!(paper["abstract"], "An abstract.");
-    assert_eq!(paper["pdf"]["url"], "https://arxiv.org/pdf/x.pdf");
     let _ = std::fs::remove_dir_all(base);
 }
 
@@ -515,6 +559,29 @@ fn sanitizes_pdf_file_names() {
 }
 
 #[test]
+fn refuses_to_overwrite_an_existing_pdf_before_opening_the_network() {
+    let base = temp_base("pdf-no-overwrite");
+    let papers = base.join("papers");
+    std::fs::create_dir_all(&papers).expect("papers directory");
+    let existing = papers.join("existing.pdf");
+    std::fs::write(&existing, b"%PDF-1.4 original").expect("seed PDF");
+
+    let error = download_pdf_at(
+        &base,
+        "https://example.invalid/paper.pdf",
+        "existing.pdf",
+        None,
+    )
+    .expect_err("existing PDF must not be replaced");
+    assert!(error.contains("refusing to overwrite existing PDF"));
+    assert_eq!(
+        std::fs::read(&existing).expect("existing bytes"),
+        b"%PDF-1.4 original"
+    );
+    let _ = std::fs::remove_dir_all(base);
+}
+
+#[test]
 fn strips_arxiv_version_suffixes() {
     assert_eq!(strip_version("2602.01491v2"), "2602.01491");
     assert_eq!(strip_version("2602.01491"), "2602.01491");
@@ -525,12 +592,14 @@ fn strips_arxiv_version_suffixes() {
 #[test]
 fn default_engines_run_published_venues_before_arxiv() {
     // Empty sources with a Scopus key = the full core (Scopus, OpenAlex,
-    // Crossref) ahead of the arXiv supplement, in priority order.
+    // Semantic Scholar, Crossref) ahead of the arXiv supplement, in priority
+    // order.
     assert_eq!(
         planned_engines(&[], true),
         vec![
             Engine::Scopus,
             Engine::OpenAlex,
+            Engine::SemanticScholar,
             Engine::Crossref,
             Engine::Arxiv,
         ],
@@ -541,7 +610,12 @@ fn default_engines_run_published_venues_before_arxiv() {
 fn default_engines_skip_scopus_without_key() {
     assert_eq!(
         planned_engines(&[], false),
-        vec![Engine::OpenAlex, Engine::Crossref, Engine::Arxiv],
+        vec![
+            Engine::OpenAlex,
+            Engine::SemanticScholar,
+            Engine::Crossref,
+            Engine::Arxiv,
+        ],
     );
 }
 
@@ -580,4 +654,142 @@ fn scopus_total_results_parses_string_and_number() {
         42,
     );
     assert_eq!(scopus_total_results(&json!({})), 0);
+}
+
+#[test]
+fn protocol_preview_uses_explicit_sources_and_source_queries() {
+    let protocol = runtime::SearchProtocol {
+        schema_version: runtime::LITERATURE_SCHEMA_VERSION,
+        id: "protocol-test".to_string(),
+        revision: 1,
+        draft: runtime::SearchProtocolDraft {
+            question: "default question".to_string(),
+            scope: String::new(),
+            time_window: String::new(),
+            databases: vec![
+                "arxiv".to_string(),
+                "ARXIV".to_string(),
+                "crossref".to_string(),
+            ],
+            queries: std::collections::BTreeMap::from([
+                ("arxiv".to_string(), "cat:cs.AI".to_string()),
+                ("default".to_string(), "fallback query".to_string()),
+            ]),
+            inclusion_criteria: Vec::new(),
+            exclusion_criteria: Vec::new(),
+            known_key_papers: Vec::new(),
+        },
+        created_at: "2026-01-01T00:00:00Z".to_string(),
+        updated_at: "2026-01-01T00:00:00Z".to_string(),
+    };
+    assert_eq!(
+        effective_protocol_sources(&protocol),
+        vec!["arxiv".to_string(), "crossref".to_string()]
+    );
+    assert_eq!(protocol_query_for(&protocol, "arxiv"), "cat:cs.AI");
+    assert_eq!(protocol_query_for(&protocol, "crossref"), "fallback query");
+}
+
+#[test]
+fn casual_search_creates_a_scoped_ad_hoc_protocol_with_exact_queries() {
+    let draft = casual_search_protocol_draft(&LiteratureSearchInput {
+        query: "retrieval augmented generation evaluation".to_string(),
+        sources: vec!["arxiv".to_string(), "semantic_scholar".to_string()],
+        max_results: Some(12),
+    })
+    .expect("casual query should create a draft");
+
+    assert_eq!(
+        draft.databases,
+        vec!["semantic-scholar".to_string(), "arxiv".to_string()]
+    );
+    assert_eq!(
+        draft.queries["semantic-scholar"],
+        "retrieval augmented generation evaluation"
+    );
+    assert_eq!(
+        draft.queries["arxiv"],
+        "retrieval augmented generation evaluation"
+    );
+    assert!(draft.scope.contains("Automatically created"));
+}
+
+#[test]
+fn execution_requires_an_explicit_confirmation_value() {
+    let error = run_literature_search_execute(LiteratureSearchExecuteInput {
+        protocol_id: "protocol-test".to_string(),
+        confirmation: "yes".to_string(),
+        max_results: None,
+        resume_run_id: None,
+    })
+    .expect_err("unconfirmed execution must not open or write a project store");
+    assert!(error.contains("confirmation"));
+}
+
+#[test]
+fn source_failures_are_classified_for_auditable_coverage_gaps() {
+    assert_eq!(
+        source_failure_status("HTTP status client error (401 Unauthorized)"),
+        runtime::SourceAttemptStatus::Unauthorised
+    );
+    assert_eq!(
+        source_failure_status("HTTP status client error (429 Too Many Requests)"),
+        runtime::SourceAttemptStatus::RateLimited
+    );
+    assert_eq!(
+        source_failure_status("network connection timed out"),
+        runtime::SourceAttemptStatus::Failed
+    );
+}
+
+#[test]
+fn source_adapter_preview_is_sanitized_and_exposes_scopus_downgrade_policy() {
+    let request = adapter_request_preview("scopus", "semantic communication", 50);
+    assert_eq!(request["authentication"], "SCOPUS_API_KEY (redacted)");
+    assert_eq!(request["query"]["view"], "COMPLETE");
+    assert_eq!(
+        request["fallback"],
+        "STANDARD on 401/403 entitlement response"
+    );
+    assert!(!request.to_string().contains("SCOPUS_API_KEY="));
+
+    let semantic = adapter_availability("semantic-scholar");
+    assert_eq!(semantic.status, "available");
+    assert_eq!(semantic.execution_mode, "confirmed_network_search");
+}
+
+#[test]
+fn interrupted_attempts_are_marked_before_a_resume_retries_them() {
+    let mut run = runtime::SearchRun {
+        schema_version: runtime::LITERATURE_SCHEMA_VERSION,
+        id: "run-test".to_string(),
+        revision: 1,
+        protocol_id: "protocol-test".to_string(),
+        protocol_revision: 1,
+        status: runtime::SearchRunStatus::Running,
+        started_at: "2026-01-01T00:00:00Z".to_string(),
+        completed_at: None,
+        source_attempts: vec![runtime::SourceAttempt {
+            source: "crossref".to_string(),
+            request: json!({}),
+            started_at: "2026-01-01T00:00:00Z".to_string(),
+            completed_at: None,
+            status: runtime::SourceAttemptStatus::Running,
+            hit_count: None,
+            returned_count: 0,
+            quota: Value::Null,
+            failure_code: None,
+            failure_message: None,
+            coverage_note: None,
+            artifact_ids: Vec::new(),
+        }],
+        record_ids: Vec::new(),
+        artifact_ids: Vec::new(),
+        notes: Vec::new(),
+    };
+    assert!(mark_interrupted_attempts(&mut run, "crossref"));
+    let attempt = &run.source_attempts[0];
+    assert_eq!(attempt.status, runtime::SourceAttemptStatus::Failed);
+    assert_eq!(attempt.failure_code.as_deref(), Some("interrupted"));
+    assert!(!source_has_completed_attempt(&run, "crossref"));
 }
