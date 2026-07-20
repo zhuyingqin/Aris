@@ -2866,6 +2866,7 @@ mod tests {
 
     use remote_protocol::{
         DeviceId as ProtocolDeviceId, DeviceScope, DeviceSigningKey, KeyAgreementSecret, SessionId,
+        SessionKey, SessionRoute, SecureEnvelope,
     };
 
     struct TestDevice {
@@ -3863,7 +3864,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mobile_relay_offer_reaches_desktop_signal_then_binds_both_relay_endpoints() {
+    async fn remote_flow_pairs_desktop_and_mobile_then_syncs_over_relay_after_p2p_failure() {
         let state = state();
         let desktop = TestDevice::new(DeviceKind::Desktop, "Research workstation");
         let mobile = TestDevice::new(DeviceKind::Mobile, "Research phone");
@@ -3955,6 +3956,45 @@ mod tests {
             .into_text()
             .expect("mobile signal ready is text");
         assert!(mobile_ready.contains("\"type\":\"ready\""));
+
+        let p2p_session_id = SessionId::new().to_string();
+        mobile_signal
+            .send(TungsteniteMessage::text(
+                serde_json::json!({
+                    "type": "signal",
+                    "to": desktop_id,
+                    "session_id": p2p_session_id,
+                    "payload": {
+                        "kind": "p2p_failed",
+                        "reason": "ice_timeout",
+                    },
+                })
+                .to_string(),
+            ))
+            .await
+            .expect("mobile reports the failed direct attempt");
+
+        let desktop_p2p_failure = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let frame = desktop_signal
+                    .next()
+                    .await
+                    .expect("desktop signal frame")
+                    .expect("desktop signal frame is valid")
+                    .into_text()
+                    .expect("desktop signal frame is text");
+                let frame: Value = serde_json::from_str(&frame).expect("gateway signal is JSON");
+                if frame["type"] == "signal" {
+                    break frame;
+                }
+            }
+        })
+        .await
+        .expect("gateway routes the P2P failure");
+        assert_eq!(desktop_p2p_failure["from"], mobile_id);
+        assert_eq!(desktop_p2p_failure["session_id"], p2p_session_id);
+        assert_eq!(desktop_p2p_failure["payload"]["kind"], "p2p_failed");
+        assert_eq!(desktop_p2p_failure["payload"]["reason"], "ice_timeout");
 
         let relay_session_id = SessionId::new().to_string();
         mobile_signal
@@ -4071,9 +4111,36 @@ mod tests {
             .expect("desktop relay peer frame is text");
         assert!(desktop_peer_connected.contains("\"type\":\"peer_connected\""));
 
-        let mobile_ciphertext = vec![0x01, 0x02, 0x03, 0x04];
+        // The gateway sees only serialized SecureEnvelope bytes. The test
+        // opens them at each endpoint to prove that relay forwarding and the
+        // protocol route/sequence metadata preserve an end-to-end session,
+        // rather than merely forwarding arbitrary plaintext.
+        let session_key = SessionKey::from_bytes([9_u8; 32]);
+        let mobile_to_desktop = SessionRoute::new(
+            SessionId::new(),
+            mobile.descriptor.device_id,
+            desktop.descriptor.device_id,
+        );
+        let mobile_envelope = SecureEnvelope::seal(
+            &session_key,
+            mobile_to_desktop.clone(),
+            1,
+            now_unix_ms(),
+            &serde_json::json!({
+                "kind": "chat_event_sync",
+                "session_id": relay_session_id,
+                "sequence": 1,
+                "role": "user",
+                "content": "Continue the desktop research turn",
+            }),
+        )
+        .expect("mobile seals a synchronized chat event");
         mobile_relay
-            .send(TungsteniteMessage::Binary(mobile_ciphertext.clone().into()))
+            .send(TungsteniteMessage::Binary(
+                serde_json::to_vec(&mobile_envelope)
+                    .expect("serialize mobile envelope")
+                    .into(),
+            ))
             .await
             .expect("mobile sends opaque ciphertext");
         let desktop_ciphertext = desktop_relay
@@ -4082,11 +4149,35 @@ mod tests {
             .expect("desktop relay ciphertext")
             .expect("desktop relay ciphertext is valid")
             .into_data();
-        assert_eq!(desktop_ciphertext.as_ref(), mobile_ciphertext.as_slice());
+        let received_mobile: SecureEnvelope =
+            serde_json::from_slice(&desktop_ciphertext).expect("desktop receives an envelope");
+        let mobile_event: Value = received_mobile
+            .open(&session_key)
+            .expect("desktop opens the mobile event");
+        assert_eq!(mobile_event["kind"], "chat_event_sync");
+        assert_eq!(mobile_event["sequence"], 1);
+        assert_eq!(received_mobile.route, mobile_to_desktop);
 
-        let desktop_response = vec![0x05, 0x06, 0x07];
+        let desktop_response = SecureEnvelope::seal(
+            &session_key,
+            mobile_to_desktop.reversed(),
+            2,
+            now_unix_ms(),
+            &serde_json::json!({
+                "kind": "chat_event_sync",
+                "session_id": relay_session_id,
+                "sequence": 2,
+                "role": "assistant",
+                "content": "Desktop accepted the synchronized message",
+            }),
+        )
+        .expect("desktop seals the synchronized response");
         desktop_relay
-            .send(TungsteniteMessage::Binary(desktop_response.clone().into()))
+            .send(TungsteniteMessage::Binary(
+                serde_json::to_vec(&desktop_response)
+                    .expect("serialize desktop envelope")
+                    .into(),
+            ))
             .await
             .expect("desktop returns opaque ciphertext");
         let mobile_response = mobile_relay
@@ -4095,7 +4186,14 @@ mod tests {
             .expect("mobile relay ciphertext")
             .expect("mobile relay ciphertext is valid")
             .into_data();
-        assert_eq!(mobile_response.as_ref(), desktop_response.as_slice());
+        let received_desktop: SecureEnvelope =
+            serde_json::from_slice(&mobile_response).expect("mobile receives an envelope");
+        let desktop_event: Value = received_desktop
+            .open(&session_key)
+            .expect("mobile opens the desktop event");
+        assert_eq!(desktop_event["kind"], "chat_event_sync");
+        assert_eq!(desktop_event["sequence"], 2);
+        assert_eq!(received_desktop.route, mobile_to_desktop.reversed());
 
         let _ = mobile_relay.close(None).await;
         let _ = desktop_relay.close(None).await;

@@ -81,7 +81,7 @@ const PREVIEW_CONFIG_VIEW: ConfigView = {
   reviewerProvider: "openai",
   reviewerModel: "MiniMax-M3",
   reviewerBaseUrl: `${MANAGED_MODEL_SERVER_BASE_URL}/v1`,
-  reviewEnabled: true,
+  reviewEnabled: false,
   hasReviewerKey: true,
   reviewerKeyMasked: "sk-...preview",
   hasScopusKey: false,

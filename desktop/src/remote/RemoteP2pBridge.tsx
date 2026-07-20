@@ -32,7 +32,9 @@ type ActiveP2pSession = RemoteP2pSessionInput & {
   seenRemoteCandidates: Set<string>;
   channel?: RTCDataChannel;
   closed: boolean;
-  timeout?: ReturnType<typeof window.setTimeout>;
+  // This component runs in the browser WebView; keep the timer handle
+  // explicitly browser-typed after @types/node is loaded for test utilities.
+  timeout?: number;
 };
 
 const sessionKey = ({ deviceId, sessionId }: RemoteP2pSessionInput) => `${deviceId}:${sessionId}`;

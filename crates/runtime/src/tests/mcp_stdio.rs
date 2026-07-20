@@ -1215,6 +1215,10 @@ fn interrupt_wait_returns_after_flag_is_set() {
 
 #[test]
 fn manager_respawns_dead_server_on_next_discovery() {
+    // McpStdioProcess inherits ARIS_WORKSPACE_ROOT as its child cwd. Serialize
+    // this lifecycle test with other runtime tests that temporarily mutate
+    // workspace-related environment variables.
+    let _env_lock = crate::test_env_lock();
     let runtime = Builder::new_current_thread()
         .enable_all()
         .build()

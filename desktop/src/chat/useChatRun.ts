@@ -556,9 +556,40 @@ export function useChatRun({
     }
   }, [copy.previewResponse, markBackendContextSynced, onError, patchAssistant, patchTurns, run, status?.model, updateSession, setEditingTurnId]);
 
+  // Resume a stopped OR failed turn without discarding its work: append a
+  // continuation on top of the current transcript and let the backend reuse its
+  // preserved session (an unpreserved failure is instead reconstructed by
+  // `beginRun`'s repair path). Shared by the stopped-turn "Continue" action and
+  // the failed-turn "Retry" action.
+  const resumeSession = useCallback(async (session: ChatSession) => {
+    if (runningSessionIdsRef.current.has(session.id) || sendLocks.current.has(session.id)) return;
+    sendLocks.current.add(session.id);
+    try {
+      await beginRun(
+        session,
+        session.turns,
+        "Continue from where you stopped.",
+        [],
+        false,
+        continueStoppedPrompt(),
+      );
+    } finally {
+      sendLocks.current.delete(session.id);
+    }
+  }, [beginRun]);
+
   const retry = useCallback(async (assistant: ChatTurn) => {
     const session = currentSessionRef.current;
     if (!session || runningSessionIdsRef.current.has(session.id) || sendLocks.current.has(session.id)) return;
+    // A failed turn keeps every tool call/edit it finished before the error —
+    // the backend persists them (session_preserved). Recover by resuming on top
+    // of that work instead of rewinding to the user message and re-running,
+    // which would overwrite everything the turn already did. The destructive
+    // rewind stays only for a deliberate regenerate of a turn that did NOT fail.
+    if (assistant.error) {
+      await resumeSession(session);
+      return;
+    }
     const assistantIndex = session.turns.findIndex((turn) => turn.id === assistant.id);
     const userIndex = assistantIndex - 1;
     const previousUser = session.turns[userIndex];
@@ -577,25 +608,12 @@ export function useChatRun({
     } finally {
       sendLocks.current.delete(session.id);
     }
-  }, [beginRun, currentSessionRef]);
+  }, [beginRun, resumeSession, currentSessionRef]);
 
   const continueStopped = useCallback(async () => {
     const session = currentSessionRef.current;
-    if (!session || runningSessionIdsRef.current.has(session.id) || sendLocks.current.has(session.id)) return;
-    sendLocks.current.add(session.id);
-    try {
-      await beginRun(
-        session,
-        session.turns,
-        "Continue from where you stopped.",
-        [],
-        false,
-        continueStoppedPrompt(),
-      );
-    } finally {
-      sendLocks.current.delete(session.id);
-    }
-  }, [beginRun, currentSessionRef]);
+    if (session) await resumeSession(session);
+  }, [resumeSession, currentSessionRef]);
 
   return {
     // stream

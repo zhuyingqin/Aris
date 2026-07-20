@@ -51,9 +51,9 @@ pub use change_ledger::{
     FileSnapshot,
 };
 pub use compact::{
-    estimate_session_tokens, format_compact_summary, get_compact_continuation_message,
-    should_compact, CompactionConfig, CompactionResult, CompactionSource, CompactionSummarySource,
-    CompactionTokenEstimateSource,
+    estimate_session_tokens, estimate_text_tokens, format_compact_summary,
+    get_compact_continuation_message, should_compact, CompactionConfig, CompactionResult,
+    CompactionSource, CompactionSummarySource, CompactionTokenEstimateSource,
 };
 pub use config::{
     ConfigEntry, ConfigError, ConfigLoader, ConfigSource, McpClaudeAiProxyServerConfig,

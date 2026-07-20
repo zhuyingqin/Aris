@@ -424,22 +424,41 @@ fn fast_tail_loader_keeps_a_single_huge_turn_in_full() {
 }
 
 #[test]
-fn regular_preview_omits_a_single_huge_turn_from_quick_load() {
+fn regular_preview_keeps_the_newest_huge_turn_in_full() {
+    // A session whose newest turn is huge (e.g. a single long answer) must load
+    // with that turn shown in full — never replaced by a "large turn omitted"
+    // placeholder — so opening it doesn't strand the user on a manual
+    // "Load full turn" click for the very content they came to read.
     let huge = format!(
-        "early setup that should be hidden{}FINAL ANSWER",
+        "early setup that should stay visible{}FINAL ANSWER",
         "x".repeat(300_000)
     );
     let turns = vec![text_turn(0, "small"), text_turn(1, huge.clone())];
     let (preview, partial, base_ids) = chat_ui_preview_turns("chat-large", &turns);
 
+    // Nothing was dropped or truncated: both turns fit the tail and the newest
+    // is kept whole, so the preview is a complete representation.
+    assert!(!partial);
+    assert_eq!(preview.len(), 2);
+    assert!(preview[1].get("omittedTurnIndex").is_none());
+    assert_eq!(preview[1]["blocks"][0]["text"], json!(huge));
+    assert_eq!(base_ids[1], "turn-1");
+}
+
+#[test]
+fn regular_preview_omits_an_older_huge_turn_but_keeps_the_newest() {
+    // Keeping the newest turn is a newest-only exemption: an *earlier* oversized
+    // turn still falls back to the on-demand placeholder so the quick preview
+    // stays light, while the latest turn remains immediately readable.
+    let huge = "x".repeat(300_000);
+    let turns = vec![text_turn(0, huge), text_turn(1, "final answer")];
+    let (preview, partial, _base_ids) = chat_ui_preview_turns("chat-large", &turns);
+
     assert!(partial);
     assert_eq!(preview.len(), 2);
-    assert_eq!(preview[1]["omittedTurnIndex"], json!(1));
-    assert_eq!(
-        preview[1]["omittedBytes"],
-        json!(serde_json::to_vec(&turns[1]).unwrap().len())
-    );
-    assert_eq!(base_ids[1], "turn-1");
+    assert_eq!(preview[0]["omittedTurnIndex"], json!(0));
+    assert!(preview[1].get("omittedTurnIndex").is_none());
+    assert_eq!(preview[1]["blocks"][0]["text"], json!("final answer"));
 }
 
 #[test]

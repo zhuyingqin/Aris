@@ -27,7 +27,8 @@ use super::{
 };
 use runtime::{
     ApiRequest, AssistantEvent, ContentBlock, ConversationMessage, ConversationRuntime,
-    RuntimeError, Session, TokenUsage, TurnSummary,
+    RuntimeError, Session, TokenUsage, TurnSummary, ARIS_AGENT_STORE_DIR_ENV,
+    ARIS_WORKSPACE_ROOT_ENV,
 };
 use serde_json::json;
 
@@ -946,7 +947,10 @@ fn agent_fake_runner_can_persist_completion_and_failure() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = temp_path("agent-runner");
-    std::env::set_var("CLAWD_AGENT_STORE", &dir);
+    // SomniQ sessions may set ARIS_AGENT_STORE_DIR globally. Set both the
+    // canonical and legacy variables so this test owns the path it inspects.
+    let _agent_store = EnvGuard::set(ARIS_AGENT_STORE_DIR_ENV, &dir);
+    let _legacy_agent_store = EnvGuard::set("CLAWD_AGENT_STORE", &dir);
 
     let completed = execute_agent_with_spawn(
         AgentInput {
@@ -1030,7 +1034,6 @@ fn agent_fake_runner_can_persist_completion_and_failure() {
     assert!(spawn_error_manifest.contains("\"status\": \"failed\""));
     assert!(spawn_error_manifest.contains("thread creation failed"));
 
-    std::env::remove_var("CLAWD_AGENT_STORE");
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -1606,6 +1609,10 @@ fn subagent_runtime_executes_tool_loop_with_isolated_session() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let path = temp_path("subagent-input.txt");
     std::fs::write(&path, "hello from child").expect("write input file");
+    let _workspace_root = EnvGuard::set(
+        ARIS_WORKSPACE_ROOT_ENV,
+        path.parent().expect("temporary file parent"),
+    );
 
     let mut runtime = ConversationRuntime::new(
         Session::new(),
@@ -1864,6 +1871,9 @@ fn file_tools_cover_read_write_and_edit_behaviors() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let root = temp_path("fs-suite");
     fs::create_dir_all(&root).expect("create root");
+    // Resolve relative artifact paths against this isolated test workspace,
+    // not the SomniQ process workspace that may be injected by the session.
+    let _workspace_root = EnvGuard::set(ARIS_WORKSPACE_ROOT_ENV, &root);
     let original_dir = std::env::current_dir().expect("cwd");
     std::env::set_current_dir(&root).expect("set cwd");
 
@@ -2146,6 +2156,7 @@ fn read_file_tool_repeatedly_returns_long_text_preview_without_error() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let root = temp_path("repeat-read-tool-suite");
     fs::create_dir_all(root.join("book")).expect("create root");
+    let _workspace_root = EnvGuard::set(ARIS_WORKSPACE_ROOT_ENV, &root);
     let original_dir = std::env::current_dir().expect("cwd");
     std::env::set_current_dir(&root).expect("set cwd");
 
@@ -2213,6 +2224,7 @@ fn glob_and_grep_tools_cover_success_and_errors() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let root = temp_path("search-suite");
     fs::create_dir_all(root.join("nested")).expect("create root");
+    let _workspace_root = EnvGuard::set(ARIS_WORKSPACE_ROOT_ENV, &root);
     let original_dir = std::env::current_dir().expect("cwd");
     std::env::set_current_dir(&root).expect("set cwd");
 

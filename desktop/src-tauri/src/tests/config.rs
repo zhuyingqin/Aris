@@ -178,7 +178,7 @@ fn managed_reviewer_disable_does_not_require_admin_api_access() {
 }
 
 #[test]
-fn automatic_review_defaults_on_and_can_be_disabled_without_clearing_reviewer() {
+fn automatic_review_defaults_off_and_can_be_enabled_without_clearing_reviewer() {
     let mut obj = serde_json::json!({
         "reviewer_provider": "openai",
         "reviewer_model": "gpt-5.5",
@@ -188,19 +188,21 @@ fn automatic_review_defaults_on_and_can_be_disabled_without_clearing_reviewer() 
     .expect("object")
     .clone();
 
-    assert!(review_enabled_from(&obj));
-    assert!(build_view(&obj).review_enabled);
+    // Independent review is opt-in: an absent `review_enabled` key means off,
+    // even when a reviewer is fully configured.
+    assert!(!review_enabled_from(&obj));
+    assert!(!build_view(&obj).review_enabled);
 
     apply_patch(
         &mut obj,
         ConfigPatch {
-            review_enabled: Some(false),
+            review_enabled: Some(true),
             ..Default::default()
         },
     );
 
-    assert!(!review_enabled_from(&obj));
-    assert!(!build_view(&obj).review_enabled);
+    assert!(review_enabled_from(&obj));
+    assert!(build_view(&obj).review_enabled);
     assert_eq!(obj["reviewer_provider"], "openai");
     assert_eq!(obj["reviewer_model"], "gpt-5.5");
     assert_eq!(obj["reviewer_api_key"], "reviewer-token");

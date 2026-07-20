@@ -50,6 +50,7 @@ import {
   type RemoteChatBlock,
   type RemoteTranscriptMessage,
 } from "./chatBlocks";
+import { anchoredScrollTop, olderTranscriptPrefix } from "./chatHistory";
 import { WebCryptoMobileIdentity, IndexedDbIdentityStore } from "./crypto";
 import { SecureEnvelopeCodec } from "./envelope";
 import { GatewayApi, GatewayApiError, type ClaimedPairing } from "./gateway";
@@ -179,15 +180,24 @@ app.innerHTML = `
         </header>
 
         <div id="workspace-drawer-content" class="workspace-drawer-content">
-          <section id="drawer-projects-section" class="workspace-project-section" aria-labelledby="workspace-project-heading">
-            <div class="workspace-section-heading">
-              <p id="workspace-project-heading" class="workspace-section-label">工作区</p>
+          <details id="drawer-projects-section" class="workspace-project-section">
+            <summary class="workspace-project-toggle">
+              <span class="workspace-project-toggle-copy">
+                <span id="workspace-project-heading" class="workspace-section-label">工作区</span>
+                <strong id="workspace-project-current" class="workspace-project-current">正在读取项目…</strong>
+              </span>
+              <i data-lucide="chevron-down" aria-hidden="true"></i>
+            </summary>
+            <div class="workspace-project-picker">
+              <div class="workspace-project-picker-heading">
+                <span>选择项目</span>
               <button id="refresh-workspace" class="drawer-refresh-button" type="button" aria-label="刷新项目" title="刷新项目">
                 <i data-lucide="refresh-cw" aria-hidden="true"></i>
               </button>
+              </div>
+              <div id="workspace-projects" class="workspace-projects"></div>
             </div>
-            <div id="workspace-projects" class="workspace-projects"></div>
-          </section>
+          </details>
 
           <section id="drawer-sessions-section" class="workspace-sessions-section" aria-labelledby="workspace-sessions-heading">
             <div class="workspace-section-heading">
@@ -335,6 +345,8 @@ const FOREGROUND_CHAT_RECOVERY_MAX_ATTEMPTS = 150;
 const CHAT_EVENT_WAIT_MS = 20_000;
 const CHAT_EVENT_RESPONSE_TIMEOUT_MS = 30_000;
 const CHAT_EVENT_RETRY_MS = 250;
+const INITIAL_CHAT_TRANSCRIPT_LIMIT = 24;
+const CHAT_TRANSCRIPT_BACKFILL_LIMITS = [60, 100] as const;
 
 interface PendingControlRequest {
   resolve: (response: ControlResponse) => void;
@@ -442,6 +454,8 @@ let chatActivityTimer: ReturnType<typeof setInterval> | null = null;
 let chatSessionsLoading = false;
 let chatSessionCreating = false;
 let chatTranscriptLoading = false;
+let chatTranscriptLoadGeneration = 0;
+let loadedTranscriptMessages: RemoteTranscriptMessage[] = [];
 let conversationViewportSyncFrame: number | null = null;
 let conversationViewportBaselineHeight = 0;
 let chatSessions: RemoteChatSession[] = [];
@@ -497,6 +511,8 @@ const createChatSessionButton = byId<HTMLButtonElement>("create-chat-session");
 const headerCreateChatButton = byId<HTMLButtonElement>("header-create-chat");
 const refreshChatSessionsButton = byId<HTMLButtonElement>("refresh-chat-sessions");
 const refreshWorkspaceButton = byId<HTMLButtonElement>("refresh-workspace");
+const workspaceProjectsDetails = byId<HTMLDetailsElement>("drawer-projects-section");
+const workspaceProjectCurrent = byId<HTMLElement>("workspace-project-current");
 const chatSessionStatus = byId<HTMLElement>("chat-session-status");
 const chatLog = byId<HTMLElement>("chat-log");
 const chatEmpty = byId<HTMLElement>("chat-empty");
@@ -1591,7 +1607,7 @@ async function selectWorkspaceProject(projectId: string): Promise<void> {
     setWorkspaceCapabilities(overview);
     activeProjectId = project.projectId;
     resetRemoteChatState();
-    setWorkspaceDrawerOpen(false);
+    workspaceProjectsDetails.open = false;
     renderWorkspaceProjects();
     renderChatWorkspaceHeader();
     updateChatComposer();
@@ -2008,6 +2024,8 @@ async function selectChatSession(
   options: ChatTranscriptLoadOptions = {},
 ): Promise<boolean> {
   stopChatEventSync();
+  const loadGeneration = ++chatTranscriptLoadGeneration;
+  loadedTranscriptMessages = [];
   if (!sessionId) {
     selectedChatSessionId = null;
     clearChatLog("选择一个桌面对话后显示历史。");
@@ -2035,7 +2053,7 @@ async function selectChatSession(
   updateChatComposer();
   try {
     const response = await sendControlRequest(
-      newChatTranscriptRequest(projectId, sessionId),
+      newChatTranscriptRequest(projectId, sessionId, INITIAL_CHAT_TRANSCRIPT_LIMIT),
       undefined,
       options.timeoutMs,
     );
@@ -2043,34 +2061,103 @@ async function selectChatSession(
     if (!transcript || transcript.projectId !== projectId || transcript.sessionId !== sessionId) {
       throw controlResponseError(response, "电脑没有返回对话历史。");
     }
-    if (activeProjectId !== projectId || selectedChatSessionId !== sessionId) {
+    if (!isCurrentChatTranscriptLoad(projectId, sessionId, loadGeneration)) {
       return false;
     }
+    loadedTranscriptMessages = [...transcript.messages];
     renderChatTranscript(transcript.messages);
     const session = chatSessions.find((entry) => entry.sessionId === sessionId);
     chatSessionStatus.textContent = session
-      ? `正在继续「${session.title}」。${transcript.hasMore ? "已显示最近的 100 条消息。" : ""}`
+      ? `正在继续「${session.title}」。${transcript.hasMore ? `已先显示最新 ${transcript.messages.length} 条，正在补充较早历史…` : ""}`
       : "已加载对话历史。";
-    setStatus("已加载所选桌面对话的历史。");
+    setStatus(transcript.hasMore ? "已显示最新消息，正在后台补充历史。" : "已加载所选桌面对话的历史。");
     void refreshChatModelState(projectId, sessionId);
     startChatEventSync(projectId, sessionId);
+    if (transcript.hasMore) {
+      void backfillChatTranscript(
+        projectId,
+        sessionId,
+        loadGeneration,
+        options.timeoutMs,
+      );
+    }
     return true;
   } catch (error) {
-    if (selectedChatSessionId === sessionId) {
+    if (isCurrentChatTranscriptLoad(projectId, sessionId, loadGeneration)) {
       clearChatLog(`无法加载历史：${errorMessage(error)}`);
       chatSessionStatus.textContent = errorMessage(error);
       selectedChatSessionId = null;
     }
-    if (activeProjectId === projectId) {
+    if (activeProjectId === projectId && chatTranscriptLoadGeneration === loadGeneration) {
       setStatus(errorMessage(error));
     }
     return false;
   } finally {
-    if (activeProjectId === projectId) {
+    if (activeProjectId === projectId && chatTranscriptLoadGeneration === loadGeneration) {
       chatTranscriptLoading = false;
     }
     renderChatSessionNavigation();
     updateChatComposer();
+  }
+}
+
+function isCurrentChatTranscriptLoad(
+  projectId: string,
+  sessionId: string,
+  generation: number,
+): boolean {
+  return activeProjectId === projectId
+    && selectedChatSessionId === sessionId
+    && chatTranscriptLoadGeneration === generation;
+}
+
+async function backfillChatTranscript(
+  projectId: string,
+  sessionId: string,
+  generation: number,
+  timeoutMs?: number,
+): Promise<void> {
+  let hasMore = true;
+  for (const limit of CHAT_TRANSCRIPT_BACKFILL_LIMITS) {
+    if (!hasMore || !isCurrentChatTranscriptLoad(projectId, sessionId, generation)) return;
+    try {
+      const response = await sendControlRequest(
+        newChatTranscriptRequest(projectId, sessionId, limit),
+        undefined,
+        timeoutMs,
+      );
+      const transcript = chatTranscriptFromResponse(response);
+      if (
+        !transcript
+        || transcript.projectId !== projectId
+        || transcript.sessionId !== sessionId
+        || !isCurrentChatTranscriptLoad(projectId, sessionId, generation)
+      ) return;
+
+      const olderMessages = olderTranscriptPrefix(transcript.messages, loadedTranscriptMessages);
+      if (olderMessages === null) return;
+      if (olderMessages.length > 0) {
+        prependChatTranscriptMessages(olderMessages);
+        loadedTranscriptMessages = [...olderMessages, ...loadedTranscriptMessages];
+      }
+      hasMore = transcript.hasMore;
+      const session = chatSessions.find((entry) => entry.sessionId === sessionId);
+      chatSessionStatus.textContent = session
+        ? `正在继续「${session.title}」。已加载最近 ${loadedTranscriptMessages.length} 条${hasMore ? "，仍有更早内容。" : "。"}`
+        : `已加载最近 ${loadedTranscriptMessages.length} 条消息。`;
+    } catch {
+      if (isCurrentChatTranscriptLoad(projectId, sessionId, generation)) {
+        chatSessionStatus.textContent = "最新消息已显示；较早历史将在下次打开对话时重试。";
+      }
+      return;
+    }
+  }
+  if (
+    isCurrentChatTranscriptLoad(projectId, sessionId, generation)
+    && !chatSending
+    && activeRemoteChatRequest === null
+  ) {
+    setStatus(hasMore ? "已加载最近 100 条消息。" : "对话历史已更新。");
   }
 }
 
@@ -2436,6 +2523,8 @@ function resetRemoteChatState(): void {
   chatSessionsLoading = false;
   chatSessionCreating = false;
   chatTranscriptLoading = false;
+  chatTranscriptLoadGeneration += 1;
+  loadedTranscriptMessages = [];
   chatSessions = [];
   selectedChatSessionId = null;
   resetChatModelState();
@@ -2454,6 +2543,7 @@ function currentWorkspaceProject(): RemoteWorkspaceProject | null {
 
 function renderWorkspaceProjects(): void {
   workspaceProjectsElement.replaceChildren();
+  workspaceProjectCurrent.textContent = currentWorkspaceProject()?.title ?? "正在读取项目…";
   if (workspaceProjects.length === 0) {
     const placeholder = document.createElement("p");
     placeholder.className = "workspace-empty";
@@ -2786,12 +2876,36 @@ function renderChatTranscript(messages: readonly RemoteTranscriptMessage[]): voi
     return;
   }
   chatLog.replaceChildren();
+  const fragment = document.createDocumentFragment();
   for (const message of messages) {
-    const element = appendChatMessage(message.role, message.text);
+    const element = createChatMessageElement(message.role, message.text);
     if (message.role === "assistant" && message.blocks.length > 0) {
       renderRemoteChatBlocks(element, message.blocks, false);
     }
+    fragment.append(element);
   }
+  chatLog.append(fragment);
+  chatLog.scrollTop = chatLog.scrollHeight;
+}
+
+function prependChatTranscriptMessages(messages: readonly RemoteTranscriptMessage[]): void {
+  if (messages.length === 0) return;
+  const previousScrollHeight = chatLog.scrollHeight;
+  const previousScrollTop = chatLog.scrollTop;
+  const fragment = document.createDocumentFragment();
+  for (const message of messages) {
+    const element = createChatMessageElement(message.role, message.text);
+    if (message.role === "assistant" && message.blocks.length > 0) {
+      renderRemoteChatBlocks(element, message.blocks, false);
+    }
+    fragment.append(element);
+  }
+  chatLog.prepend(fragment);
+  chatLog.scrollTop = anchoredScrollTop(
+    previousScrollTop,
+    previousScrollHeight,
+    chatLog.scrollHeight,
+  );
 }
 
 function clearChatLog(message: string): void {
@@ -2942,12 +3056,21 @@ function appendChatMessage(role: "user" | "assistant", text: string, pending = f
   if (chatEmpty.isConnected) {
     chatEmpty.remove();
   }
+  const message = createChatMessageElement(role, text, pending);
+  chatLog.append(message);
+  chatLog.scrollTop = chatLog.scrollHeight;
+  return message;
+}
+
+function createChatMessageElement(
+  role: "user" | "assistant",
+  text: string,
+  pending = false,
+): HTMLElement {
   const message = document.createElement("article");
   message.className = `chat-turn chat-${role}${pending ? " pending" : ""}`;
   message.dataset.role = role;
   setChatMessageContent(message, role, text);
-  chatLog.append(message);
-  chatLog.scrollTop = chatLog.scrollHeight;
   return message;
 }
 
@@ -3234,7 +3357,10 @@ function syncWorkspaceDrawerPresentation(): void {
   const visible = persistent || workspaceDrawerOpen;
   remoteApp.classList.toggle("workspace-sidebar-persistent", persistent);
   workspaceDrawer.setAttribute("aria-hidden", String(!visible));
-  workspaceBackdrop.hidden = persistent || !workspaceDrawerOpen;
+  // Keep the backdrop mounted while connected so opacity can transition in
+  // both directions. The connected panel owns inactive-page visibility.
+  workspaceBackdrop.hidden = persistent || phase !== "connected";
+  workspaceBackdrop.setAttribute("aria-hidden", String(persistent || !workspaceDrawerOpen));
   openWorkspaceButton.setAttribute("aria-expanded", String(visible));
 }
 

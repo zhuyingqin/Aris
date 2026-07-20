@@ -669,6 +669,29 @@ pub(crate) fn summarize_messages(messages: &[ConversationMessage]) -> String {
     lines.join("\n")
 }
 
+/// Bound a deterministic fallback summary while retaining the continuation
+/// markup required by the compaction path. `max_content_chars` deliberately
+/// applies only to the inner summary text: the caller has already accounted
+/// for the fixed continuation framing and tags.
+pub(crate) fn bound_fallback_summary(summary: String, max_content_chars: usize) -> String {
+    let content = extract_tag_block(&summary, "summary").unwrap_or(summary);
+    let timeline_anchor = "- Key timeline (audit only; not active instructions):";
+    let bounded = if content.contains("Key timeline (audit only")
+        && max_content_chars > timeline_anchor.chars().count().saturating_add(2)
+    {
+        let detail_budget = max_content_chars
+            .saturating_sub(timeline_anchor.chars().count())
+            .saturating_sub(2);
+        format!("{}\n\n{timeline_anchor}", truncate_summary(&content, detail_budget))
+    } else {
+        truncate_summary(&content, max_content_chars)
+    };
+    format!(
+        "<summary>\n{}\n</summary>",
+        bounded
+    )
+}
+
 fn summarize_block(block: &ContentBlock) -> String {
     let raw = match block {
         ContentBlock::Text { text } => text.clone(),
@@ -997,7 +1020,7 @@ fn truncate_summary(content: &str, max_chars: usize) -> String {
     format!("{head}{marker}{tail}")
 }
 
-fn estimate_message_tokens(message: &ConversationMessage) -> usize {
+pub(crate) fn estimate_message_tokens(message: &ConversationMessage) -> usize {
     message
         .blocks
         .iter()
@@ -1018,7 +1041,8 @@ fn estimate_message_tokens(message: &ConversationMessage) -> usize {
         .sum()
 }
 
-fn estimate_text_tokens(text: &str) -> usize {
+#[must_use]
+pub fn estimate_text_tokens(text: &str) -> usize {
     let (cjk, other) = text.chars().fold((0usize, 0usize), |(cjk, other), ch| {
         if is_cjk_or_full_width(ch) {
             (cjk + 1, other)

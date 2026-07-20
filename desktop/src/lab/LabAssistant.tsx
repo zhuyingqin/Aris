@@ -131,9 +131,12 @@ async function requestFromInput(
 async function contextFromTurns(turns: ChatTurn[], context: string): Promise<ChatContextMessage[]> {
   const messages: ChatContextMessage[] = [{ role: "user", text: `[Lab context]\n${context}` }];
   for (const turn of turns) {
-    // Keep stopped (cleanly cancelled) turns — their partial output and tool
-    // activity is needed to continue coherently. Only drop in-flight/failed.
-    if (turn.streaming || turn.error) continue;
+    // Keep stopped AND failed turns — their partial output and tool activity is
+    // real, backend-preserved context needed to resume coherently. Only an
+    // actually in-flight turn is unsafe to serialize. Dropping failed turns here
+    // is what made a Lab "retry"/"continue" silently wipe everything the failed
+    // turn had already done.
+    if (turn.streaming) continue;
     if (turn.role === "user") {
       const text = textFromTurn(turn).trim();
       if (!text) continue;
@@ -141,10 +144,10 @@ async function contextFromTurns(turns: ChatTurn[], context: string): Promise<Cha
       messages.push({ role: "user", text: request.text.trim() });
     } else {
       // Serialize the full transcript (tool calls + results, interrupted ones
-      // flagged) for every completed and stopped turn. This context replaces the
-      // backend session wholesale, so text-only reconstruction would drop each
-      // turn's tool activity — making an edit/retry from an earlier turn forget
-      // everything the model learned by acting.
+      // flagged) for every completed, stopped, and failed turn. This context
+      // replaces the backend session wholesale, so text-only reconstruction
+      // would drop each turn's tool activity — making an edit/retry from an
+      // earlier turn forget everything the model learned by acting.
       const text = transcriptFromTurn(turn).trim();
       if (!text) continue;
       messages.push({ role: "assistant", text });
@@ -153,13 +156,14 @@ async function contextFromTurns(turns: ChatTurn[], context: string): Promise<Cha
   return messages;
 }
 
-// The stopped turn's partial response (and tool activity) is rebuilt into the
-// backend context by `contextFromTurns`, so the continue prompt no longer embeds
-// — or truncates at 12k — the partial itself.
+// The stopped/failed turn's partial response (and tool activity) is rebuilt into
+// the backend context by `contextFromTurns`, so the continue prompt no longer
+// embeds — or truncates at 12k — the partial itself. Wording is neutral so it
+// reads correctly whether the turn was stopped by the user or failed mid-run.
 function continueStoppedPrompt(): string {
   return [
-    "Continue from where you stopped.",
-    "Your partial response from the interrupted turn — including any tool calls and their results — is already in the conversation above.",
+    "Continue from where the previous turn left off.",
+    "Your partial response — including any tool calls and their results — is already in the conversation above.",
     "Do not repeat the completed portion unless a short overlap is needed for continuity.",
   ].join("\n");
 }
@@ -497,8 +501,29 @@ export default function LabAssistant({
     }
   }, [attachments, beginRun, busy, editingTurnId, input, status?.ready, turns]);
 
+  // Non-destructive recovery shared by the stopped-turn "Continue" and the
+  // failed-turn "Retry": rebuild the backend context from the full transcript —
+  // now including the failed turn's preserved work (see `contextFromTurns`) —
+  // then continue on top of it instead of re-running from scratch.
+  const resume = useCallback(async () => {
+    if (busy || sendLock.current) return;
+    sendLock.current = true;
+    try {
+      await beginRun(turns, "Continue from where you stopped.", [], true, { text: continueStoppedPrompt() });
+    } finally {
+      sendLock.current = false;
+    }
+  }, [beginRun, busy, turns]);
+
   const retry = useCallback(async (assistant: ChatTurn) => {
     if (busy || sendLock.current) return;
+    // A failed turn's completed tool calls/edits are preserved context; resume
+    // from them rather than truncating + re-running, which would discard the
+    // work the failed turn already did.
+    if (assistant.error) {
+      await resume();
+      return;
+    }
     const assistantIndex = turns.findIndex((turn) => turn.id === assistant.id);
     const userIndex = assistantIndex - 1;
     const previousUser = turns[userIndex];
@@ -509,7 +534,7 @@ export default function LabAssistant({
     } finally {
       sendLock.current = false;
     }
-  }, [beginRun, busy, turns]);
+  }, [beginRun, busy, resume, turns]);
 
   const edit = useCallback((turn: ChatTurn) => {
     if (busy) return;
@@ -520,20 +545,8 @@ export default function LabAssistant({
   }, [busy, onAttachmentsChange]);
 
   const continueStopped = useCallback(async () => {
-    if (busy || sendLock.current) return;
-    sendLock.current = true;
-    try {
-      await beginRun(
-        turns,
-        "Continue from where you stopped.",
-        [],
-        true,
-        { text: continueStoppedPrompt() },
-      );
-    } finally {
-      sendLock.current = false;
-    }
-  }, [beginRun, busy, turns]);
+    await resume();
+  }, [resume]);
 
   const changePermission = async (mode: string) => {
     if (!isTauri()) {

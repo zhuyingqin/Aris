@@ -2,9 +2,9 @@ use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
 
 use crate::compact::{
-    assemble_compacted_session_with_usage, estimate_session_tokens, plan_compaction,
-    summarize_messages, CompactionConfig, CompactionResult, CompactionSummarySource,
-    CompactionTokenEstimateSource,
+    assemble_compacted_session_with_usage, bound_fallback_summary, estimate_session_tokens,
+    estimate_text_tokens, get_compact_continuation_message, plan_compaction, summarize_messages,
+    CompactionConfig, CompactionResult, CompactionSummarySource, CompactionTokenEstimateSource,
 };
 use crate::config::RuntimeFeatureConfig;
 use crate::event_sink::{now_iso8601, EventSink, EventType, NoopEventSink, RuntimeEvent};
@@ -31,6 +31,11 @@ const MAX_CONSUMED_TOOL_RESULT_CHARS: usize = 16_000;
 const MAX_CONTEXT_TOOL_INPUT_CHARS: usize = 8_000;
 const MAX_CONTEXT_USER_TEXT_CHARS: usize = 120_000;
 const MAX_CONTEXT_ASSISTANT_TEXT_CHARS: usize = 64_000;
+/// During an overflow recovery, preserve only a short, safe tail of the
+/// active tool loop. Keeping the whole loop makes a single long-running task
+/// impossible to compact: every completed tool exchange after the user's last
+/// prompt is otherwise treated as untouchable.
+const MAX_OVERFLOW_PRESERVED_MESSAGES: usize = 8;
 const MAX_OUTPUT_LIMIT_CONTINUATIONS: usize = 8;
 /// How many times a single turn may force-compact and retry after the provider
 /// rejects the request for exceeding the model's context window. Bounded so an
@@ -275,6 +280,11 @@ pub struct ConversationRuntime<C, T> {
     hook_runner: HookRunner,
     auto_compaction_input_tokens_threshold: u32,
     context_compaction_estimated_tokens_threshold: usize,
+    /// Prompt text and tool schemas are sent on every request but are not part
+    /// of the persisted session. Include their estimated size in proactive
+    /// compaction decisions so the local estimate tracks provider input more
+    /// closely.
+    context_overhead_estimated_tokens: usize,
     event_sink: Box<dyn EventSink>,
     /// Optional cheap-model client used to produce a real LLM summary when the
     /// session is compacted. Same concrete type as `api_client` (in practice a
@@ -316,6 +326,8 @@ where
         feature_config: RuntimeFeatureConfig,
     ) -> Self {
         let usage_tracker = UsageTracker::from_session(&session);
+        let context_overhead_estimated_tokens =
+            estimate_text_tokens(&system_prompt.join("\n\n"));
         Self {
             session,
             api_client,
@@ -327,6 +339,7 @@ where
             hook_runner: HookRunner::from_feature_config(&feature_config),
             auto_compaction_input_tokens_threshold: auto_compaction_threshold_from_env(),
             context_compaction_estimated_tokens_threshold: context_compaction_threshold_from_env(),
+            context_overhead_estimated_tokens,
             event_sink: Box::new(NoopEventSink),
             summarizer: None,
         }
@@ -362,6 +375,17 @@ where
     #[must_use]
     pub fn with_context_compaction_estimated_tokens_threshold(mut self, threshold: usize) -> Self {
         self.context_compaction_estimated_tokens_threshold = threshold.max(1);
+        self
+    }
+
+    /// Add the token estimate for provider request material that lives outside
+    /// [`Session`], such as serialized tool schemas. System-prompt overhead is
+    /// counted automatically by the constructor.
+    #[must_use]
+    pub fn with_additional_context_overhead_estimated_tokens(mut self, tokens: usize) -> Self {
+        self.context_overhead_estimated_tokens = self
+            .context_overhead_estimated_tokens
+            .saturating_add(tokens);
         self
     }
 
@@ -733,8 +757,14 @@ where
         {
             (summary, CompactionSummarySource::Llm, usage)
         } else {
+            let summary = summarize_messages(&plan.removed);
+            let summary = if config.source == crate::compact::CompactionSource::Overflow {
+                bound_fallback_summary(summary, fallback_summary_content_budget(&plan))
+            } else {
+                summary
+            };
             (
-                summarize_messages(&plan.removed),
+                summary,
                 CompactionSummarySource::Fallback,
                 None,
             )
@@ -804,7 +834,7 @@ where
         // because each turn re-sends the whole history, that sum balloons far
         // faster than real occupancy and forced compaction after only a few
         // turns (catastrophic for large-window models like MiniMax/Gemini).
-        let session_tokens = estimate_session_tokens(&self.session);
+        let session_tokens = self.estimated_request_tokens();
         let near_budget_threshold = ((self.context_compaction_estimated_tokens_threshold as f64)
             * AUTO_COMPACT_SESSION_ESTIMATE_RATIO)
             .round() as usize;
@@ -830,7 +860,7 @@ where
         // tool results, inputs, and assistant text stay verbatim. Retroactively
         // shrinking consumed content on every request (the previous behaviour)
         // destroyed context the model still needed long before any overflow.
-        if estimate_session_tokens(&self.session)
+        if self.estimated_request_tokens()
             < self.context_compaction_estimated_tokens_threshold
         {
             return None;
@@ -838,15 +868,16 @@ where
 
         // Step 1 — cheap, lossy: shrink already-consumed tool results and the
         // inputs of completed tool calls. Frequently enough on its own.
-        compact_context_history(&mut self.session);
-        if estimate_session_tokens(&self.session)
+        compact_context_history(&mut self.session, true);
+        if self.estimated_request_tokens()
             < self.context_compaction_estimated_tokens_threshold
         {
             return None;
         }
 
-        // Step 2 — summarize the oldest messages, preserving the active turn.
-        let preserve = active_turn_message_count(&self.session).max(1);
+        // Step 2 — summarize older tool exchanges while preserving a short,
+        // safe tail of the active turn.
+        let preserve = overflow_preserve_message_count(&self.session);
         self.compact_now(CompactionConfig::overflow(preserve))
     }
 
@@ -863,13 +894,15 @@ where
     /// can be removed (an irreducible single oversized turn), so the caller
     /// surfaces the original error.
     fn force_compact_for_overflow(&mut self) -> Option<AutoCompactionEvent> {
-        let before = estimate_session_tokens(&self.session);
+        let before = self.estimated_request_tokens();
 
         // Step 1 — lossy shrink of already-consumed tool inputs/results.
-        compact_context_history(&mut self.session);
+        compact_context_history(&mut self.session, false);
 
-        // Step 2 — summarize the oldest messages, preserving the active turn.
-        let preserve = active_turn_message_count(&self.session).max(1);
+        // Step 2 — an overflow is proof that preserving the whole active tool
+        // loop is unsafe. Keep only a valid tail; the earlier part is carried
+        // forward in the summary.
+        let preserve = overflow_preserve_message_count(&self.session);
         if let Some(event) = self.compact_now(CompactionConfig::overflow(preserve)) {
             return Some(event);
         }
@@ -877,10 +910,10 @@ where
         // No older messages could be summarized, but the lossy step may have
         // shrunk the prompt enough to fit. Signal progress (count 0) so the
         // caller retries; only give up when nothing changed at all.
-        if estimate_session_tokens(&self.session) < before {
+        if self.estimated_request_tokens() < before {
             Some(AutoCompactionEvent {
                 removed_message_count: 0,
-                tokens_after: estimate_session_tokens(&self.session),
+                tokens_after: self.estimated_request_tokens(),
                 token_estimate_source: CompactionTokenEstimateSource::Heuristic,
             })
         } else {
@@ -901,9 +934,14 @@ where
         }
         Some(AutoCompactionEvent {
             removed_message_count,
-            tokens_after: result.tokens_after,
+            tokens_after: self.estimated_request_tokens(),
             token_estimate_source: result.token_estimate_source,
         })
+    }
+
+    fn estimated_request_tokens(&self) -> usize {
+        estimate_session_tokens(&self.session)
+            .saturating_add(self.context_overhead_estimated_tokens)
     }
 
     /// Produce a real LLM summary of `removed` via the attached summarizer, or
@@ -1301,6 +1339,31 @@ fn is_internal_continuation_message(message: &ConversationMessage) -> bool {
     })
 }
 
+fn overflow_preserve_message_count(session: &Session) -> usize {
+    active_turn_message_count(session)
+        .clamp(1, MAX_OVERFLOW_PRESERVED_MESSAGES)
+}
+
+fn fallback_summary_content_budget(plan: &crate::compact::CompactionPlan) -> usize {
+    let preserved_tokens = plan
+        .preserved
+        .iter()
+        .map(crate::compact::estimate_message_tokens)
+        .sum::<usize>();
+    let fixed_continuation_tokens = estimate_text_tokens(&get_compact_continuation_message(
+        "<summary></summary>",
+        true,
+        !plan.preserved.is_empty(),
+    ));
+    // A deterministic summary can cost at most one token per character for
+    // CJK text. Limit it to half of the remaining space, which guarantees a
+    // context-pressure compaction actually shrinks whenever the preserved tail
+    // plus fixed framing leave any room at all.
+    plan.tokens_before
+        .saturating_sub(preserved_tokens.saturating_add(fixed_continuation_tokens))
+        / 2
+}
+
 /// Removes retry-only prompts that were appended by the runtime after a
 /// partial or empty response. They are useful only while recovering the
 /// current request; persisting one after a later failure can make the next
@@ -1329,12 +1392,16 @@ fn bound_incoming_user_message(message: &mut ConversationMessage) {
     }
 }
 
-fn compact_context_history(session: &mut Session) {
-    let unconsumed_tool_index = session
-        .messages
-        .last()
-        .filter(|message| message.role == MessageRole::Tool)
-        .map(|_| session.messages.len().saturating_sub(1));
+fn compact_context_history(session: &mut Session, preserve_latest_tool_result: bool) {
+    let unconsumed_tool_index = preserve_latest_tool_result
+        .then(|| {
+            session
+                .messages
+                .last()
+                .filter(|message| message.role == MessageRole::Tool)
+                .map(|_| session.messages.len().saturating_sub(1))
+        })
+        .flatten();
 
     for (message_index, message) in session.messages.iter_mut().enumerate() {
         if Some(message_index) == unconsumed_tool_index {

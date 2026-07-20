@@ -755,7 +755,11 @@ fn skills_command_shows_bundled_skill_markdown() {
     assert!(result.handled);
     let message = result.message.expect("message");
     assert!(message.contains("/research-lit"));
-    assert!(message.contains("# Research Literature Review"));
+    // `research-lit` is a retired alias that resolves to the canonical
+    // `literature-search` skill, so `show` now surfaces that body plus a
+    // compatibility-profile note instead of the old review workflow.
+    assert!(message.contains("# Literature Search"));
+    assert!(message.contains("Activated compatibility profile"));
 }
 
 #[test]
@@ -1196,10 +1200,11 @@ fn context_action_picks_warn_then_compact_by_usage() {
 fn gpt5_context_window_uses_proxy_budget() {
     assert_eq!(context_window_for_model("gpt-5.6-luna"), 300_000);
     assert_eq!(context_window_for_model("gpt-4.1"), 300_000);
+    assert_eq!(context_window_for_model("kimi-k3"), 1_000_000);
 }
 
 #[test]
-fn chat_done_context_tokens_use_session_estimate_not_provider_total() {
+fn chat_done_context_tokens_uses_the_larger_of_session_and_provider_prompt() {
     let session = Session {
         version: 1,
         messages: vec![
@@ -1217,13 +1222,10 @@ fn chat_done_context_tokens_use_session_estimate_not_provider_total() {
         cache_read_input_tokens: 300_000,
     };
 
-    let context_tokens = chat_done_context_tokens(&session);
     let usage = latest_provider_usage(&[provider_usage]).expect("provider usage");
+    let context_tokens = chat_done_context_tokens(&session, Some(&usage));
 
-    assert_eq!(
-        context_tokens,
-        runtime::estimate_session_tokens(&session) as u64
-    );
+    assert_eq!(context_tokens, u64::from(provider_usage.prompt_tokens()));
     assert_ne!(context_tokens, u64::from(provider_usage.total_tokens()));
     assert_eq!(usage.prompt_tokens, provider_usage.prompt_tokens());
     assert_eq!(usage.total_tokens, provider_usage.total_tokens());

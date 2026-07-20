@@ -351,9 +351,12 @@ fn build_view(obj: &Map<String, Value>) -> ConfigView {
 }
 
 fn review_enabled_from(obj: &Map<String, Value>) -> bool {
+    // Independent review is opt-in: an absent `review_enabled` key means off.
+    // Users turn it on in Settings or via the project-brief toggle; disabling it
+    // never clears the configured reviewer.
     obj.get("review_enabled")
         .and_then(Value::as_bool)
-        .unwrap_or(true)
+        .unwrap_or(false)
 }
 
 pub(crate) fn review_enabled() -> bool {

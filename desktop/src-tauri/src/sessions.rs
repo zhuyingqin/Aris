@@ -29,7 +29,7 @@ const CHAT_UI_SESSION_PREVIEW_MAX_TURNS: usize = 12;
 // Keep enough room for session metadata while preventing rich thinking/tool
 // turns from turning the quick preview into a second full-session file.
 const CHAT_UI_SESSION_PREVIEW_MAX_TURN_BYTES: usize = 192 * 1024;
-const CHAT_UI_PREVIEW_VERSION: u64 = 4;
+const CHAT_UI_PREVIEW_VERSION: u64 = 5;
 
 // Remote chat is a bounded projection of the visible desktop UI session. These
 // limits keep text, thinking, and UI-sanitized tool cards comfortably below the
@@ -211,7 +211,10 @@ fn read_chat_ui_preview_file(id: &str) -> Result<Option<Value>, String> {
         Ok(raw) => {
             let preview = serde_json::from_str::<Value>(&raw).map_err(|e| e.to_string())?;
             // Regenerate older previews: v4 adds a serialized byte budget so
-            // rich thinking/tool turns cannot make quick-load files unbounded.
+            // rich thinking/tool turns cannot make quick-load files unbounded;
+            // v5 always keeps the newest turn in full so opening a conversation
+            // never shows a "large turn omitted" placeholder for its latest
+            // response (re-renders v4 files that omitted a huge newest turn).
             Ok((preview.get("previewVersion").and_then(Value::as_u64)
                 == Some(CHAT_UI_PREVIEW_VERSION))
             .then_some(preview))
@@ -303,6 +306,7 @@ fn chat_ui_preview_turns(id: &str, turns: &[Value]) -> (Vec<Value>, bool, Vec<St
         .filter_map(chat_ui_turn_id)
         .map(str::to_string)
         .collect::<Vec<_>>();
+    let newest_offset = selected.len().saturating_sub(1);
     let mut remaining = CHAT_UI_SESSION_PREVIEW_MAX_TURN_BYTES;
     let mut omitted = false;
     // Spend the byte budget newest-first so the latest normal-sized exchange
@@ -313,6 +317,15 @@ fn chat_ui_preview_turns(id: &str, turns: &[Value]) -> (Vec<Value>, bool, Vec<St
         .enumerate()
         .rev()
         .map(|(offset, turn)| {
+            // The newest turn is always kept in full and never charged against
+            // the budget: the budget bounds how much *older* history to inline,
+            // not whether the latest response is visible. Opening a conversation
+            // must never replace its newest turn — the entire content of a
+            // single-turn or single-exchange session — with a "large turn
+            // omitted" placeholder that strands the user on a manual load.
+            if offset == newest_offset {
+                return turn.clone();
+            }
             let bytes = serde_json::to_vec(turn)
                 .map(|value| value.len())
                 .unwrap_or(remaining + 1);

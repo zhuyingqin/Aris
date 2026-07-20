@@ -188,9 +188,13 @@ pub fn context_compaction_threshold_for_model(model: &str) -> usize {
     } else if m.contains("gpt-5") || m.contains("gpt-4.1") {
         // GPT-5.5/5.6-compatible proxies may advertise a much larger raw
         // window, but the configured agentic route is roughly 300k. Keep the
-        // budget at that practical ceiling so compaction leaves room for the
-        // system prompt, tool schemas, and output.
-        300_000
+        // budget below that ceiling, reserving ~60k for the system prompt,
+        // tool schemas, and output.
+        240_000
+    } else if m.contains("kimi-k3") {
+        // Kimi K3 exposes a 1M-token window. Reserve sufficient room for the
+        // system prompt, tool schemas, and a long completion.
+        850_000
     } else if m.contains("kimi") || m.contains("moonshot") || m.contains("qwen") {
         // ~256k window.
         200_000
@@ -209,12 +213,83 @@ pub fn context_compaction_threshold_for_model(model: &str) -> usize {
     }
 }
 
+/// The nominal context window advertised for a model family, used only for
+/// gauge/telemetry display and the context-warning payload — never for gating
+/// (compaction and warning thresholds run off
+/// [`context_compaction_threshold_for_model`]). Kept next to the budget, in the
+/// same family order and matching semantics (`contains` on a lowercased name),
+/// so the advertised window and the budget share one source of truth; a unit
+/// test asserts `budget <= window` for every family so an inversion like the
+/// former qwen/glm "budget above window" cannot reappear. Callers that need a
+/// `u64` (e.g. the desktop engine) wrap this rather than maintaining a second
+/// table.
+#[must_use]
+pub fn context_window_for_model(model: &str) -> usize {
+    let m = model.to_ascii_lowercase();
+    if m.contains("minimax") || m.contains("gemini") || m.contains("deepseek-v4") {
+        // ~1M window.
+        1_000_000
+    } else if m.contains("gpt-5") || m.contains("gpt-4.1") {
+        // GPT-5.x/4.1 agentic proxy route is ~300k.
+        300_000
+    } else if m.contains("kimi-k3") {
+        // Kimi K3 exposes a 1M-token window.
+        1_000_000
+    } else if m.contains("kimi") || m.contains("moonshot") || m.contains("qwen") {
+        // ~256k window (non-K3 Kimi/Moonshot and Qwen).
+        256_000
+    } else if m.contains("deepseek") {
+        // ~64k window.
+        64_000
+    } else if m.contains("claude") {
+        // Opus negotiates the 1M beta; Haiku is 200k.
+        if m.contains("haiku") {
+            200_000
+        } else {
+            1_000_000
+        }
+    } else if m.contains("glm") {
+        // GLM is ~200k.
+        200_000
+    } else if m.contains("gpt") || m.contains("o1") || m.contains("o3") || m.contains("o4") {
+        // Older GPT / o-series ~128–200k; advertise the upper bound.
+        200_000
+    } else {
+        128_000
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ChatToolSpec {
     pub name: String,
     pub description: String,
     pub input_schema: Value,
     pub required_permission: PermissionMode,
+}
+
+fn tool_schema_context_overhead_tokens(tool_specs: &[ChatToolSpec], enable_tools: bool) -> usize {
+    if !enable_tools || tool_specs.is_empty() {
+        return 0;
+    }
+    let schema = tool_specs
+        .iter()
+        .map(|tool| {
+            serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": tool.name,
+                    "description": tool.description,
+                    "parameters": tool.input_schema,
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    let serialized = serde_json::to_string(&schema).unwrap_or_default();
+    // Account for the provider's tool wrapper and tool-choice directive in
+    // addition to the serialized schemas. This is deliberately small and is
+    // not a context-budget change; it closes the request material that used to
+    // be invisible to the session-only estimator.
+    runtime::estimate_text_tokens(&serialized).saturating_add(128)
 }
 
 impl From<tools::ToolSpec> for ChatToolSpec {
@@ -1079,6 +1154,8 @@ pub fn build_conversation_runtime_with_trace<T>(
 where
     T: ToolExecutor,
 {
+    let tool_schema_overhead_tokens =
+        tool_schema_context_overhead_tokens(&tool_specs, enable_tools);
     let executor_tool_specs = executor_tool_specs_for_tools(tool_specs);
     let context_compaction_threshold = context_compaction_threshold_for_model(&model);
     // Best-effort cheap-model summarizer for compaction. Built before the main
@@ -1108,6 +1185,7 @@ where
         system_prompt,
         feature_config,
     )
+    .with_additional_context_overhead_estimated_tokens(tool_schema_overhead_tokens)
     .with_context_compaction_estimated_tokens_threshold(context_compaction_threshold)
     // Use the same model-derived budget for the real-token (API usage) signal
     // so both triggers agree; clamp to u32 for the threshold field.

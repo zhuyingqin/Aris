@@ -270,15 +270,16 @@ export async function contextForRetry(turns: ChatTurn[]) {
   return messages;
 }
 
-// The stopped turn's partial response (and any tool calls/results) is now
+// The stopped/failed turn's partial response (and any tool calls/results) is now
 // rebuilt into the backend context by `contextForRetry`, so the continue prompt
 // no longer needs to embed — and truncate — the partial itself. It just points
 // the model at the conversation above, avoiding the old 12k cutoff that dropped
-// everything past the seam on long generations.
+// everything past the seam on long generations. Wording is neutral so it reads
+// correctly whether the turn was stopped by the user or failed mid-run.
 export function continueStoppedPrompt(): string {
   return [
-    "Continue from where you stopped.",
-    "Your partial response from the interrupted turn — including any tool calls and their results — is already in the conversation above.",
+    "Continue from where the previous turn left off.",
+    "Your partial response — including any tool calls and their results — is already in the conversation above.",
     "Do not repeat the completed portion unless a short overlap is needed for continuity.",
   ].join("\n");
 }

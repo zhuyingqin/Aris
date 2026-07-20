@@ -384,7 +384,7 @@ describe("Chat export action", () => {
     expect(request.text).toContain("Do not repeat the completed portion");
   });
 
-  it("retries from the backend's authoritative context before the failed user turn", async () => {
+  it("resumes a failed turn from the preserved backend session instead of discarding its work", async () => {
     const session = makeSession("default");
     session.id = "session-retry";
     session.title = "Retry task";
@@ -399,23 +399,23 @@ describe("Chat export action", () => {
     ];
     localStorage.setItem(SESSIONS_KEY, JSON.stringify([session]));
     localStorage.setItem(CURRENT_KEY, session.id);
-    apiMocks.chatRewindToUserMessage.mockResolvedValue(321);
-    apiMocks.chatSend.mockResolvedValue("Retried answer");
+    apiMocks.chatSend.mockResolvedValue("Resumed answer");
 
     render(<Chat />);
 
     await userEvent.click(await screen.findByRole("button", { name: "Retry task" }));
     await userEvent.click(await screen.findByRole("button", { name: "Retry" }));
 
-    await waitFor(() => expect(apiMocks.chatRewindToUserMessage).toHaveBeenCalledWith(
-      session.id,
-      { text: "Inspect the implementation", images: [] },
-    ));
+    // Retry on a failed turn must NOT rewind or replace history: the backend
+    // already preserved the turn's work (session_preserved), so recovery resumes
+    // on top of it. The failed turn's partial output stays visible.
+    await waitFor(() => expect(apiMocks.chatSend).toHaveBeenCalled());
+    expect(apiMocks.chatRewindToUserMessage).not.toHaveBeenCalled();
     expect(apiMocks.chatSetContext).not.toHaveBeenCalled();
-    await waitFor(() => expect(apiMocks.chatSend).toHaveBeenCalledWith(
-      session.id,
-      expect.objectContaining({ text: "Inspect the implementation", model: "MiniMax-M3" }),
-    ));
+    expect(screen.getByText("Partial diagnostic")).toBeTruthy();
+    const request = apiMocks.chatSend.mock.calls[0][1] as { text: string };
+    expect(request.text).toContain("already in the conversation above");
+    expect(request.text).toContain("Do not repeat the completed portion");
   });
 
   it("renders an attached message and clears its draft before file preparation finishes", async () => {
@@ -460,7 +460,14 @@ describe("Chat export action", () => {
     ));
   });
 
-  it("keeps the optimistic retry turn and surfaces a context-reset failure", async () => {
+  it("resumes an unpreserved failed turn by appending its work, never replacing history", async () => {
+    let errorHandler:
+      | ((event: { sessionId: string; message: string; sessionPreserved?: boolean }) => void)
+      | undefined;
+    apiMocks.onChatError.mockImplementation((handler) => {
+      errorHandler = handler;
+      return Promise.resolve(() => undefined);
+    });
     const session = makeSession("default");
     session.id = "session-reset-failure";
     session.title = "Reset failure";
@@ -475,18 +482,29 @@ describe("Chat export action", () => {
     ];
     localStorage.setItem(SESSIONS_KEY, JSON.stringify([session]));
     localStorage.setItem(CURRENT_KEY, session.id);
-    apiMocks.chatRewindToUserMessage.mockResolvedValue(null);
-    apiMocks.chatSetContext.mockRejectedValueOnce(new Error("context service unavailable"));
+    apiMocks.chatSetContext.mockResolvedValue(77);
+    apiMocks.chatSend.mockResolvedValue("Resumed answer");
 
     render(<Chat />);
+    await waitFor(() => expect(apiMocks.onChatError).toHaveBeenCalled());
+    // The backend could not persist this failed turn, so recovery must rebuild
+    // its work by APPENDING the preserved pair — never replacing history and
+    // never losing what the turn already produced.
+    errorHandler?.({ sessionId: session.id, message: "provider failed", sessionPreserved: false });
 
     await userEvent.click(await screen.findByRole("button", { name: "Reset failure" }));
     await userEvent.click(await screen.findByRole("button", { name: "Retry" }));
 
-    await waitFor(() => expect(apiMocks.chatSetContext).toHaveBeenCalledWith(session.id, [], "replace"));
-    expect(screen.getByText("Retry this request")).toBeTruthy();
-    expect(await screen.findByText("Unable to reset chat context: Error: context service unavailable")).toBeTruthy();
-    expect(apiMocks.chatSend).not.toHaveBeenCalled();
+    await waitFor(() => expect(apiMocks.chatSetContext).toHaveBeenCalledWith(
+      session.id,
+      [
+        { role: "user", text: "Retry this request", images: [] },
+        { role: "assistant", text: "Partial answer" },
+      ],
+      "append",
+    ));
+    await waitFor(() => expect(apiMocks.chatSend).toHaveBeenCalled());
+    expect(screen.getByText("Partial answer")).toBeTruthy();
   });
 
   it("appends only an unpreserved failed turn instead of replacing backend history", async () => {
