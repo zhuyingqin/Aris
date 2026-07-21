@@ -184,6 +184,50 @@ fn imports_ris_and_bibtex_through_the_same_canonical_pipeline() {
     let papers = library["papers"].as_array().unwrap();
     assert!(papers.iter().any(|paper| paper["itemType"] == "conferencePaper"));
     assert!(papers.iter().any(|paper| paper["itemType"] == "thesis" && paper["isbn"] == "978-1-23456-789-0"));
+    assert_eq!(papers.iter().find(|paper| paper["title"] == "Auditable Research Workspaces").unwrap()["citationKey"], "lovelace2026");
+
+    let _ = std::fs::remove_dir_all(base);
+}
+
+#[test]
+fn imports_zotero_children_collections_and_common_publication_fields() {
+    let base = temp_base("zotero-children");
+    let export = base.join("zotero.json");
+    std::fs::write(&export, serde_json::to_vec(&json!({
+      "collections": [
+        { "key": "ROOT", "name": "Literature", "parentCollection": false },
+        { "key": "READING", "name": "Reading queue", "parentCollection": "ROOT" }
+      ],
+      "items": [
+        {
+            "key": "PARENT", "itemType": "article", "title": "Linked Zotero Record",
+            "creators": [{ "firstName": "Grace", "lastName": "Hopper", "creatorType": "author" }],
+            "date": "2024-05-16", "publicationTitle": "Journal of Durable Research",
+            "volume": "8", "issue": "2", "pages": "10-29", "publisher": "Research Press",
+            "place": "London", "edition": "2", "series": "Systems", "language": "en",
+            "accessDate": "2026-07-20", "collections": ["READING"]
+        },
+        { "key": "ATTACH", "itemType": "attachment", "parentItem": "PARENT", "title": "Linked PDF", "path": "storage:linked.pdf", "contentType": "application/pdf" },
+        { "key": "NOTE", "itemType": "note", "parentItem": "PARENT", "note": "<p>Keep this Zotero note.</p>" },
+        { "key": "MARK", "itemType": "annotation", "parentItem": "PARENT", "annotationText": "Durable highlight", "annotationComment": "Keep this comment", "annotationPageLabel": "4", "annotationColor": "#2EA8E5" }
+      ]
+    })).unwrap()).unwrap();
+
+    let report = library_import_bibliography_at(&base, &LiteratureBibliographyImportInput {
+        source_path: export.to_string_lossy().into_owned(), format: Some("zotero-json".to_string()),
+    }).expect("import Zotero graph");
+    assert_eq!((report.imported, report.attachments, report.notes, report.annotations, report.collections), (1, 1, 1, 1, 2));
+
+    let library = library_load_at(&base).expect("canonical projection");
+    let paper = &library["papers"][0];
+    assert_eq!(paper["volume"], "8");
+    assert_eq!(paper["pages"], "10-29");
+    assert_eq!(paper["collectionIds"], json!(["zotero:READING"]));
+    assert_eq!(paper["attachments"][0]["externalPath"], "storage:linked.pdf");
+    assert_eq!(paper["notes"][0]["content"], "<p>Keep this Zotero note.</p>");
+    assert_eq!(paper["pdfAnnotations"][0]["page"], 4);
+    assert!(library["collections"].as_array().is_some_and(|collections| collections.iter().any(|collection| collection["id"] == "zotero:READING" && collection["label"] == "Reading queue" && collection["parentId"] == "zotero:ROOT")));
+    assert!(library["collections"].as_array().is_some_and(|collections| collections.iter().any(|collection| collection["id"] == "zotero:ROOT" && collection["label"] == "Literature")));
 
     let _ = std::fs::remove_dir_all(base);
 }
@@ -203,6 +247,8 @@ fn exports_canonical_records_as_bibtex_biblatex_ris_and_csl_json() {
             "doi": "10.1000/export",
             "isbn": "978-1-23456-789-0",
             "citationKey": "lovelace2026export",
+            "volume": "12", "issue": "3", "pages": "44-57", "publisher": "Research Press",
+            "place": "Berlin", "edition": "2", "series": "Local Systems", "language": "en",
             "url": "https://example.test/export",
             "abstract": "A portable local-first bibliography.",
             "tags": ["local-first"],
@@ -226,10 +272,13 @@ fn exports_canonical_records_as_bibtex_biblatex_ris_and_csl_json() {
     assert!(bibtex.content.contains("@article{lovelace2026export"));
     assert!(bibtex.content.contains("doi = {10.1000/export}"));
     assert!(bibtex.content.contains("author = {Ada Lovelace and Chen, Li}"));
+    assert!(bibtex.content.contains("pages = {44-57}"));
+    assert!(bibtex.content.contains("publisher = {Research Press}"));
 
     let biblatex = export("biblatex");
     assert!(biblatex.content.contains("date = {2026}"));
     assert!(biblatex.content.contains("journaltitle = {Journal of Research Tools}"));
+    assert!(biblatex.content.contains("location = {Berlin}"));
 
     let ris = export("ris");
     assert!(ris.content.contains("TY  - JOUR"));

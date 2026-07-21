@@ -97,6 +97,12 @@ pub struct LiteratureBibliographyImportReport {
     pub imported: usize,
     pub merged: usize,
     pub skipped: usize,
+    pub attachments: usize,
+    pub notes: usize,
+    pub annotations: usize,
+    pub collections: usize,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
     pub total: usize,
 }
 
@@ -268,7 +274,7 @@ pub fn literature_search_ad_hoc_at(
         "sourceCounts": source_counts,
         "libraryPath": library_path_at(base),
         "libraryRecordCount": library["papers"].as_array().map_or(0, Vec::len),
-        "note": "This explicit casual search created and executed an automatic ad-hoc SearchProtocol. Its records are already canonical and have been projected to papers/library.json; do not call LiteratureLibraryUpsert to ingest them."
+        "note": "This explicit casual search created and executed an automatic ad-hoc SearchProtocol. Its records are already canonical in the local literature database; the compatibility projection has been refreshed. Do not call LiteratureLibraryUpsert to ingest them."
     }))
 }
 
@@ -1056,6 +1062,7 @@ pub fn library_import_bibliography_at(
         }
     } else { requested };
     let (format, items) = standard_bibliography_items(&format, &bytes)?;
+    let zotero_collections = zotero_collection_catalog(&format, &bytes);
     let mut store = runtime::open_literature_store_at(base)?;
     if !store.has_legacy_library_bootstrap()? {
         drop(store);
@@ -1065,19 +1072,110 @@ pub fn library_import_bibliography_at(
     let mut imported = 0;
     let mut merged = 0;
     let mut skipped = 0;
+    let mut attachments = 0;
+    let mut notes = 0;
+    let mut annotations = 0;
+    let mut warnings = Vec::new();
+    let mut papers_by_record = BTreeMap::<String, Value>::new();
+    let mut record_by_zotero_key = BTreeMap::<String, String>::new();
+    let mut imported_collections = BTreeMap::<String, Value>::new();
+    let mut child_items = Vec::new();
+
     for item in items {
+        if matches!(item["itemType"].as_str(), Some("attachment" | "note" | "annotation")) {
+            child_items.push(item);
+            continue;
+        }
         let Some((record, paper)) = canonical_record_from_standard_json(&item) else {
             skipped += 1;
             continue;
         };
         let result = store.upsert_canonical_record(&record)?;
-        store.update_legacy_library_paper(&result.record.id, &paper)?;
+        let mut paper = merge_imported_paper(&result.record.metadata["legacyLibrary"], paper);
+        let mut collection_ids = paper["collectionIds"].as_array().cloned().unwrap_or_default();
+        for collection in zotero_collection_values(&item, &zotero_collections) {
+            let collection_id = collection["id"].as_str().unwrap_or_default().to_string();
+            if collection_id.is_empty() { continue; }
+            if !collection_ids.iter().any(|id| id.as_str() == Some(collection_id.as_str())) {
+                collection_ids.push(Value::String(collection_id.clone()));
+            }
+            add_zotero_collection_and_parents(&collection, &zotero_collections, &mut imported_collections);
+        }
+        paper["collectionIds"] = Value::Array(collection_ids);
+        if let Some(key) = zotero_item_key(&item) {
+            record_by_zotero_key.insert(key, result.record.id.clone());
+        }
         if result.inserted { imported += 1; } else { merged += 1; }
+        papers_by_record.insert(result.record.id, paper);
+    }
+
+    for item in child_items {
+        let Some(parent_key) = zotero_parent_key(&item) else {
+            skipped += 1;
+            warnings.push("Skipped a Zotero child item without a parent record.".to_string());
+            continue;
+        };
+        let Some(record_id) = record_by_zotero_key.get(&parent_key) else {
+            skipped += 1;
+            warnings.push(format!("Skipped Zotero child item for unavailable parent {parent_key}."));
+            continue;
+        };
+        let Some(paper) = papers_by_record.get_mut(record_id) else { continue; };
+        match item["itemType"].as_str() {
+            Some("attachment") => {
+                let attachment = zotero_attachment_value(base, Path::new(&input.source_path), &item, &mut warnings);
+                if let Some(attachment) = attachment {
+                    if attachment["kind"].as_str() == Some("pdf") && paper["pdf"]["status"].as_str() != Some("downloaded") {
+                        if let Some(path) = attachment["path"].as_str() {
+                            paper["pdf"] = json!({ "status": "downloaded", "path": path, "bytes": attachment["bytes"] });
+                        }
+                    }
+                    append_paper_array_item(paper, "attachments", attachment, "id");
+                    attachments += 1;
+                } else {
+                    skipped += 1;
+                }
+            }
+            Some("note") => {
+                if let Some(note) = zotero_note_value(&item) {
+                    append_paper_array_item(paper, "notes", note, "id");
+                    notes += 1;
+                } else { skipped += 1; }
+            }
+            Some("annotation") => {
+                if let Some(annotation) = zotero_annotation_value(&item) {
+                    append_paper_array_item(paper, "pdfAnnotations", annotation, "id");
+                    annotations += 1;
+                } else { skipped += 1; }
+            }
+            _ => { skipped += 1; }
+        }
+    }
+
+    for (record_id, paper) in papers_by_record {
+        store.update_legacy_library_paper(&record_id, &paper)?;
+    }
+    let mut metadata = store.legacy_library_projection_meta()?;
+    let existing_collections = metadata["collections"].as_array().cloned().unwrap_or_default();
+    let known_collection_ids = existing_collections
+        .iter()
+        .filter_map(|collection| collection["id"].as_str())
+        .collect::<BTreeSet<_>>();
+    let added_collections = imported_collections
+        .into_iter()
+        .filter_map(|(id, collection)| (!known_collection_ids.contains(id.as_str())).then_some(collection))
+        .collect::<Vec<_>>();
+    let collections = added_collections.len();
+    if !added_collections.is_empty() {
+        let mut combined = existing_collections;
+        combined.extend(added_collections);
+        metadata["collections"] = Value::Array(combined);
+        store.set_legacy_library_projection_meta(&metadata)?;
     }
     store.mark_legacy_library_bootstrap()?;
     let projection = project_legacy_library(&store.legacy_library_projection_meta()?, &store.list_canonical_records()?, &store.list_search_runs(None)?);
     write_library_file(&library_path_at(base), &projection)?;
-    Ok(LiteratureBibliographyImportReport { format, imported, merged, skipped, total: projection["papers"].as_array().map_or(0, Vec::len) })
+    Ok(LiteratureBibliographyImportReport { format, imported, merged, skipped, attachments, notes, annotations, collections, warnings, total: projection["papers"].as_array().map_or(0, Vec::len) })
 }
 
 /// Export records projected from the canonical SQLite store.  This intentionally
@@ -1301,10 +1399,41 @@ fn bibtex_entry(entry: &BibliographyExportEntry<'_>, biblatex: bool) -> String {
         };
         fields.push(format!("  {field} = {{{}}}", bibtex_value(&venue)));
     }
+    for (paper_field, bib_field) in [
+        ("volume", "volume"),
+        ("issue", if biblatex { "number" } else { "number" }),
+        ("pages", "pages"),
+        ("edition", "edition"),
+        ("series", "series"),
+        ("language", "language"),
+    ] {
+        let value = paper_string(paper, paper_field);
+        if !value.is_empty() {
+            fields.push(format!("  {bib_field} = {{{}}}", bibtex_value(&value)));
+        }
+    }
+    let publisher = paper_string(paper, "publisher");
+    if !publisher.is_empty() {
+        fields.push(format!("  publisher = {{{}}}", bibtex_value(&publisher)));
+    }
+    let place = paper_string(paper, "place");
+    if !place.is_empty() {
+        fields.push(format!(
+            "  {} = {{{}}}",
+            if biblatex { "location" } else { "address" },
+            bibtex_value(&place),
+        ));
+    }
     for (paper_field, bib_field) in [("doi", "doi"), ("isbn", "isbn"), ("url", "url")] {
         let value = paper_string(paper, paper_field);
         if !value.is_empty() {
             fields.push(format!("  {bib_field} = {{{}}}", bibtex_value(&value)));
+        }
+    }
+    if biblatex {
+        let accessed = paper_string(paper, "accessed");
+        if !accessed.is_empty() {
+            fields.push(format!("  urldate = {{{}}}", bibtex_value(&accessed)));
         }
     }
     let abstract_text = paper_string(paper, "abstract");
@@ -1347,6 +1476,17 @@ fn ris_entry(entry: &BibliographyExportEntry<'_>) -> String {
     if let Some(year) = paper["year"].as_u64() { lines.push(format!("PY  - {year}")); }
     let venue = paper_string(paper, "venue");
     if !venue.is_empty() { lines.push(format!("JO  - {venue}")); }
+    for (paper_field, ris_field) in [("volume", "VL"), ("issue", "IS"), ("publisher", "PB"), ("place", "CY"), ("edition", "ET"), ("language", "LA")] {
+        let value = paper_string(paper, paper_field);
+        if !value.is_empty() { lines.push(format!("{ris_field}  - {value}")); }
+    }
+    let pages = paper_string(paper, "pages");
+    if let Some((start, end)) = pages.split_once('-').or_else(|| pages.split_once('–')) {
+        lines.push(format!("SP  - {}", start.trim()));
+        lines.push(format!("EP  - {}", end.trim()));
+    } else if !pages.is_empty() {
+        lines.push(format!("SP  - {pages}"));
+    }
     for (paper_field, ris_field) in [("doi", "DO"), ("isbn", "SN"), ("url", "UR"), ("abstract", "AB")] {
         let value = paper_string(paper, paper_field);
         if !value.is_empty() { lines.push(format!("{ris_field}  - {value}")); }
@@ -1399,6 +1539,10 @@ fn csl_json_entry(entry: &BibliographyExportEntry<'_>) -> Value {
     }
     let venue = paper_string(paper, "venue");
     if !venue.is_empty() { item.insert("container-title".to_string(), Value::String(venue)); }
+    for (paper_field, csl_field) in [("volume", "volume"), ("issue", "issue"), ("pages", "page"), ("publisher", "publisher"), ("place", "publisher-place"), ("edition", "edition"), ("series", "collection-title"), ("language", "language")] {
+        let value = paper_string(paper, paper_field);
+        if !value.is_empty() { item.insert(csl_field.to_string(), Value::String(value)); }
+    }
     for (paper_field, csl_field) in [("doi", "DOI"), ("isbn", "ISBN"), ("url", "URL"), ("abstract", "abstract")] {
         let value = paper_string(paper, paper_field);
         if !value.is_empty() { item.insert(csl_field.to_string(), Value::String(value)); }
@@ -1441,6 +1585,205 @@ pub fn library_create_pdf_record_at(
     Ok(LiteraturePdfRecordImportReport { record_id: result.record.id, inserted: result.inserted, merged_record_ids: result.merged_record_ids })
 }
 
+fn merge_imported_paper(existing: &Value, imported: Value) -> Value {
+    let Some(existing) = existing.as_object() else { return imported; };
+    let Some(mut merged) = imported.as_object().cloned() else { return imported; };
+    // Preserve researcher-authored working data when a re-import updates the
+    // same DOI/title. Bibliographic values come from the import; local reading
+    // state, files, notes, annotations and evidence must never disappear.
+    for key in ["attachments", "notes", "pdfAnnotations", "evidence", "answerChains", "screenings", "brief", "agentSummary", "verdict"] {
+        if existing.get(key).is_some_and(|value| !value.is_null()) {
+            merged.insert(key.to_string(), existing[key].clone());
+        }
+    }
+    for key in ["stage", "starred", "unread", "addedAt", "pdf"] {
+        if existing.get(key).is_some_and(|value| !value.is_null()) {
+            merged.insert(key.to_string(), existing[key].clone());
+        }
+    }
+    for key in ["tags", "collectionIds"] {
+        let mut values = existing[key].as_array().cloned().unwrap_or_default();
+        for value in imported[key].as_array().into_iter().flatten() {
+            if !values.contains(value) { values.push(value.clone()); }
+        }
+        if !values.is_empty() { merged.insert(key.to_string(), Value::Array(values)); }
+    }
+    Value::Object(merged)
+}
+
+fn append_paper_array_item(paper: &mut Value, field: &str, item: Value, id_field: &str) {
+    let id = item[id_field].as_str().unwrap_or_default();
+    let mut values = paper[field].as_array().cloned().unwrap_or_default();
+    if !id.is_empty() {
+        values.retain(|existing| existing[id_field].as_str() != Some(id));
+    }
+    values.push(item);
+    paper[field] = Value::Array(values);
+}
+
+fn zotero_item_key(item: &Value) -> Option<String> {
+    item["key"].as_str().or_else(|| item["itemKey"].as_str()).map(str::trim).filter(|key| !key.is_empty()).map(ToOwned::to_owned)
+}
+
+fn zotero_parent_key(item: &Value) -> Option<String> {
+    item["parentItem"].as_str()
+        .or_else(|| item["parentItemKey"].as_str())
+        .or_else(|| item["parent"]["key"].as_str())
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn zotero_collection_catalog(format: &str, bytes: &[u8]) -> BTreeMap<String, Value> {
+    if format != "zotero-json" { return BTreeMap::new(); }
+    let Ok(root) = serde_json::from_slice::<Value>(bytes) else { return BTreeMap::new(); };
+    let entries = root["collections"].as_array()
+        .or_else(|| root["library"]["collections"].as_array())
+        .into_iter()
+        .flatten();
+    entries.filter_map(zotero_collection_value).collect()
+}
+
+fn zotero_collection_value(collection: &Value) -> Option<(String, Value)> {
+    let id = collection["key"].as_str()
+        .or_else(|| collection["id"].as_str())
+        .or_else(|| collection["name"].as_str())?
+        .trim()
+        .to_string();
+    let label = collection["name"].as_str()
+        .or_else(|| collection["label"].as_str())
+        .unwrap_or(&id)
+        .trim()
+        .to_string();
+    if id.is_empty() || label.is_empty() { return None; }
+    let mut value = json!({ "id": format!("zotero:{id}"), "label": label });
+    if let Some(parent) = collection["parentCollection"].as_str().or_else(|| collection["parentId"].as_str())
+        .map(str::trim)
+        .filter(|parent| !parent.is_empty()) {
+        value["parentId"] = Value::String(format!("zotero:{parent}"));
+    }
+    Some((id, value))
+}
+
+fn zotero_collection_values(item: &Value, catalog: &BTreeMap<String, Value>) -> Vec<Value> {
+    item["collections"].as_array().into_iter().flatten().filter_map(|collection| {
+        if let Some(key) = collection.as_str().map(str::trim).filter(|key| !key.is_empty()) {
+            return Some(catalog.get(key).cloned().unwrap_or_else(|| json!({ "id": format!("zotero:{key}"), "label": key })));
+        }
+        zotero_collection_value(collection).map(|(_, value)| value)
+    }).collect()
+}
+
+fn add_zotero_collection_and_parents(
+    collection: &Value,
+    catalog: &BTreeMap<String, Value>,
+    imported: &mut BTreeMap<String, Value>,
+) {
+    let mut current = collection.clone();
+    let mut seen = BTreeSet::new();
+    loop {
+        let Some(id) = current["id"].as_str().map(ToOwned::to_owned) else { break; };
+        if !seen.insert(id.clone()) { break; }
+        imported.entry(id).or_insert_with(|| current.clone());
+        let Some(parent_key) = current["parentId"].as_str().and_then(|parent| parent.strip_prefix("zotero:")) else { break; };
+        let Some(parent) = catalog.get(parent_key) else { break; };
+        current = parent.clone();
+    }
+}
+
+fn zotero_attachment_source(source_json: &Path, item: &Value) -> Option<PathBuf> {
+    let raw = item["path"].as_str()?.trim();
+    if raw.is_empty() { return None; }
+    let path = PathBuf::from(raw);
+    if path.is_file() { return Some(path); }
+    let root = source_json.parent()?;
+    let relative = raw.strip_prefix("storage:").unwrap_or(raw);
+    [
+        root.join(raw),
+        root.join(relative),
+        zotero_item_key(item).map(|key| root.join("storage").join(key).join(relative)).unwrap_or_default(),
+    ].into_iter().find(|candidate| candidate.is_file())
+}
+
+fn zotero_attachment_value(base: &Path, source_json: &Path, item: &Value, warnings: &mut Vec<String>) -> Option<Value> {
+    let source_key = zotero_item_key(item).unwrap_or_else(|| format!("item-{}", runtime::now_iso8601()));
+    let raw_path = item["path"].as_str().map(str::trim).filter(|path| !path.is_empty()).map(ToOwned::to_owned);
+    let label = item["title"].as_str().or_else(|| item["filename"].as_str()).filter(|value| !value.trim().is_empty())
+        .map(str::trim).map(ToOwned::to_owned)
+        .or_else(|| raw_path.as_deref().and_then(|path| Path::new(path).file_name()).and_then(|name| name.to_str()).map(ToOwned::to_owned))
+        .unwrap_or_else(|| "Zotero attachment".to_string());
+    let mime_type = item["contentType"].as_str().or_else(|| item["mimeType"].as_str()).map(str::trim).filter(|value| !value.is_empty()).map(ToOwned::to_owned);
+    let is_pdf = mime_type.as_deref().is_some_and(|value| value.eq_ignore_ascii_case("application/pdf")) || label.to_ascii_lowercase().ends_with(".pdf");
+    let added_at = item["dateAdded"].as_str().map(ToOwned::to_owned).unwrap_or_else(runtime::now_iso8601);
+    let mut attachment = json!({
+        "id": format!("zotero-attachment:{source_key}"),
+        "label": label,
+        "kind": if is_pdf { "pdf" } else { "supplement" },
+        "mimeType": mime_type,
+        "addedAt": added_at,
+    });
+    if let Some(url) = item["url"].as_str().map(str::trim).filter(|url| url.starts_with("http://") || url.starts_with("https://")) {
+        attachment["url"] = Value::String(url.to_string());
+        attachment["kind"] = Value::String("externalLink".to_string());
+        return Some(attachment);
+    }
+    if let Some(source) = zotero_attachment_source(source_json, item) {
+        let file_name = source.file_name().and_then(|name| name.to_str()).unwrap_or("attachment");
+        let destination_name = match sanitize_file_name(&format!("zotero-{source_key}-{file_name}")) {
+            Ok(name) => name,
+            Err(error) => { warnings.push(format!("Could not import Zotero attachment {label}: {error}")); return Some(attachment); }
+        };
+        let destination = base.join(PAPERS_DIR).join("attachments").join(destination_name);
+        if let Some(parent) = destination.parent() {
+            if let Err(error) = std::fs::create_dir_all(parent) {
+                warnings.push(format!("Could not create attachment directory for {label}: {error}"));
+                return Some(attachment);
+            }
+        }
+        if !destination.exists() {
+            if let Err(error) = std::fs::copy(&source, &destination) {
+                warnings.push(format!("Could not copy Zotero attachment {label}: {error}"));
+                return Some(attachment);
+            }
+        }
+        match std::fs::metadata(&destination) {
+            Ok(metadata) => {
+                attachment["path"] = Value::String(destination.strip_prefix(base).unwrap_or(&destination).to_string_lossy().replace('\\', "/"));
+                attachment["bytes"] = Value::from(metadata.len());
+            }
+            Err(error) => warnings.push(format!("Could not read imported Zotero attachment {label}: {error}")),
+        }
+    } else if let Some(path) = raw_path {
+        // The export may refer to a linked local Zotero file not included with
+        // the JSON. Retain its location visibly instead of discarding it.
+        attachment["externalPath"] = Value::String(path);
+    }
+    Some(attachment)
+}
+
+fn zotero_note_value(item: &Value) -> Option<Value> {
+    let content = item["note"].as_str().or_else(|| item["noteText"].as_str()).map(str::trim).filter(|value| !value.is_empty())?;
+    let id = zotero_item_key(item).unwrap_or_else(|| format!("note-{}", runtime::now_iso8601()));
+    let created_at = item["dateAdded"].as_str().map(ToOwned::to_owned).unwrap_or_else(runtime::now_iso8601);
+    let updated_at = item["dateModified"].as_str().map(ToOwned::to_owned).unwrap_or_else(|| created_at.clone());
+    Some(json!({ "id": format!("zotero-note:{id}"), "title": item["title"].as_str(), "content": content, "createdAt": created_at, "updatedAt": updated_at, "source": "imported" }))
+}
+
+fn zotero_annotation_value(item: &Value) -> Option<Value> {
+    let quote = item["annotationText"].as_str().unwrap_or("").trim();
+    let note = item["annotationComment"].as_str().unwrap_or("").trim();
+    if quote.is_empty() && note.is_empty() { return None; }
+    let position_page = item["annotationPosition"].as_str().and_then(|position| serde_json::from_str::<Value>(position).ok()).and_then(|position| position["pageIndex"].as_u64()).map(|page| page.saturating_add(1));
+    let page = item["annotationPageLabel"].as_str().and_then(|value| value.trim().parse::<u64>().ok()).or(position_page).unwrap_or(1);
+    let id = zotero_item_key(item).unwrap_or_else(|| format!("annotation-{}", runtime::now_iso8601()));
+    let color = match item["annotationColor"].as_str().unwrap_or("").to_ascii_lowercase().as_str() {
+        "#5fb236" => "green", "#2ea8e5" => "blue", "#a28ae5" => "purple", "#ff6666" => "red", _ => "yellow",
+    };
+    let style = if item["annotationType"].as_str().is_some_and(|value| value.eq_ignore_ascii_case("underline")) { "underline" } else { "highlight" };
+    let created_at = item["dateAdded"].as_str().map(ToOwned::to_owned).unwrap_or_else(runtime::now_iso8601);
+    Some(json!({ "id": format!("zotero-annotation:{id}"), "page": page, "quote": quote, "note": note, "kind": "note", "color": color, "style": style, "createdAt": created_at }))
+}
+
 fn standard_bibliography_items(format: &str, bytes: &[u8]) -> Result<(String, Vec<Value>), String> {
     match format {
         "json" | "zotero-json" | "csl-json" => {
@@ -1477,6 +1820,17 @@ fn parse_ris_items(input: &str) -> Vec<Value> {
             "ISBN": fields.get("SN").and_then(|values| values.first()),
             "url": fields.get("UR").and_then(|values| values.first()),
             "abstract": fields.get("AB").and_then(|values| values.first()),
+            "volume": fields.get("VL").and_then(|values| values.first()),
+            "issue": fields.get("IS").and_then(|values| values.first()),
+            "pages": match (fields.get("SP").and_then(|values| values.first()), fields.get("EP").and_then(|values| values.first())) {
+                (Some(start), Some(end)) => Some(format!("{start}-{end}")),
+                (Some(start), None) => Some(start.clone()),
+                _ => None,
+            },
+            "publisher": fields.get("PB").and_then(|values| values.first()),
+            "place": fields.get("CY").and_then(|values| values.first()),
+            "edition": fields.get("ET").and_then(|values| values.first()),
+            "language": fields.get("LA").and_then(|values| values.first()),
             "tags": tags,
         }));
         fields.clear();
@@ -1531,7 +1885,11 @@ fn parse_bibtex_items(input: &str) -> Vec<Value> {
 }
 
 fn bibtex_item(entry_type: &str, body: &str) -> Option<Value> {
-    let (_, fields) = body.split_once(',')?;
+    // The token before the first comma is the standard BibTeX entry key, not
+    // a field. Retaining it is essential for a Zotero/BibTeX -> SomniQ -> TeX
+    // round trip: existing \cite{key} commands must keep resolving.
+    let (entry_key, fields) = body.split_once(',')?;
+    let entry_key = entry_key.trim();
     let mut values = BTreeMap::new();
     for field in split_bibtex_fields(fields) {
         let Some((key, value)) = field.split_once('=') else { continue; };
@@ -1543,9 +1901,14 @@ fn bibtex_item(entry_type: &str, body: &str) -> Option<Value> {
     let tags = values.get("keywords").map(|value| value.split([',', ';']).map(str::trim).filter(|tag| !tag.is_empty()).collect::<Vec<_>>()).unwrap_or_default();
     Some(json!({
         "itemType": bibtex_item_type(entry_type), "title": title, "author": authors,
-        "date": values.get("year"), "publicationTitle": values.get("journal").or_else(|| values.get("booktitle")).or_else(|| values.get("publisher")),
+        "date": values.get("date").or_else(|| values.get("year")),
+        "publicationTitle": values.get("journaltitle").or_else(|| values.get("journal")).or_else(|| values.get("booktitle")).or_else(|| values.get("publisher")),
         "DOI": values.get("doi"), "ISBN": values.get("isbn"), "url": values.get("url"), "abstract": values.get("abstract"),
-        "citationKey": values.get("citationkey").or_else(|| values.get("key")), "tags": tags,
+        "citationKey": values.get("citationkey").or_else(|| values.get("key")).cloned().or_else(|| (!entry_key.is_empty()).then(|| entry_key.to_string())),
+        "volume": values.get("volume"), "issue": values.get("number").or_else(|| values.get("issue")), "pages": values.get("pages"),
+        "publisher": values.get("publisher"), "place": values.get("location").or_else(|| values.get("address")),
+        "edition": values.get("edition"), "series": values.get("series").or_else(|| values.get("collection")),
+        "language": values.get("language"), "accessDate": values.get("urldate"), "tags": tags,
     }))
 }
 
@@ -1586,13 +1949,23 @@ fn canonical_record_from_standard_json(item: &Value) -> Option<(runtime::Canonic
         .or_else(|| item["issued"]["date-parts"].get(0).and_then(|part| part.get(0)).and_then(Value::as_u64).and_then(|value| u32::try_from(value).ok()));
     let venue = item["publicationTitle"].as_str().or_else(|| item["container-title"].as_str()).or_else(|| item["bookTitle"].as_str()).unwrap_or("").trim().to_string();
     let abstract_text = item["abstractNote"].as_str().or_else(|| item["abstract"].as_str()).unwrap_or("").to_string();
+    let date = item["date"].as_str().or_else(|| item["issued"]["raw"].as_str()).unwrap_or("").trim().to_string();
+    let volume = item["volume"].as_str().unwrap_or("").trim().to_string();
+    let issue = item["issue"].as_str().or_else(|| item["number"].as_str()).unwrap_or("").trim().to_string();
+    let pages = item["pages"].as_str().or_else(|| item["page"].as_str()).unwrap_or("").trim().to_string();
+    let publisher = item["publisher"].as_str().unwrap_or("").trim().to_string();
+    let place = item["place"].as_str().or_else(|| item["publisher-place"].as_str()).or_else(|| item["location"].as_str()).unwrap_or("").trim().to_string();
+    let edition = item["edition"].as_str().unwrap_or("").trim().to_string();
+    let series = item["series"].as_str().or_else(|| item["collection-title"].as_str()).unwrap_or("").trim().to_string();
+    let language = item["language"].as_str().unwrap_or("").trim().to_string();
+    let accessed = item["accessDate"].as_str().or_else(|| item["accessed"]["raw"].as_str()).or_else(|| item["urldate"].as_str()).unwrap_or("").trim().to_string();
     let tags = item["tags"].as_array().map(|tags| tags.iter().filter_map(|tag| {
         tag.as_str().map(str::to_string).or_else(|| tag["tag"].as_str().map(str::to_string))
     }).collect::<Vec<_>>()).unwrap_or_default();
     let now = runtime::now_iso8601();
     let id = runtime::canonical_record_id(doi.as_deref(), None, None, &title);
-    let paper = json!({ "id": id, "title": title, "authors": authors, "year": year, "venue": venue, "doi": doi, "url": url, "abstract": abstract_text, "itemType": item_type, "isbn": isbn, "citationKey": item["citationKey"].as_str().or_else(|| item["citation-key"].as_str()), "tags": tags, "collectionIds": [], "searchIds": [], "stage": "inbox", "starred": false, "unread": true, "source": "standard_import", "addedAt": now, "pdf": { "status": "none" }, "evidence": [], "answerChains": [], "pdfAnnotations": [] });
-    Some((runtime::CanonicalRecord { schema_version: runtime::LITERATURE_SCHEMA_VERSION, id, revision: 1, normalized_title: runtime::normalized_record_title(&title), title, authors, year, venue, abstract_text, url, pdf_url: None, identifiers: runtime::RecordIdentifiers { doi, arxiv_id: None, scopus_id: None, source_ids: BTreeMap::new() }, provenance: vec![runtime::RecordProvenance { source: "standard_import".to_string(), external_id: None, search_run_id: None, artifact_id: None, observed_at: now.clone() }], observations: vec![runtime::RecordObservation { source: "standard_import".to_string(), external_id: None, artifact_id: None, observed_at: now.clone(), fields: item.clone() }], field_conflicts: Vec::new(), metadata: json!({ "standard": { "itemType": item_type, "isbn": isbn, "citationKey": item["citationKey"].as_str().or_else(|| item["citation-key"].as_str()) } }), created_at: now.clone(), updated_at: now }, paper))
+    let paper = json!({ "id": id, "title": title, "authors": authors, "year": year, "date": date, "venue": venue, "doi": doi, "url": url, "abstract": abstract_text, "itemType": item_type, "isbn": isbn, "citationKey": item["citationKey"].as_str().or_else(|| item["citation-key"].as_str()), "volume": volume, "issue": issue, "pages": pages, "publisher": publisher, "place": place, "edition": edition, "series": series, "language": language, "accessed": accessed, "tags": tags, "collectionIds": [], "searchIds": [], "stage": "inbox", "starred": false, "unread": true, "source": "standard_import", "addedAt": now, "pdf": { "status": "none" }, "attachments": [], "evidence": [], "answerChains": [], "pdfAnnotations": [], "notes": [] });
+    Some((runtime::CanonicalRecord { schema_version: runtime::LITERATURE_SCHEMA_VERSION, id, revision: 1, normalized_title: runtime::normalized_record_title(&title), title, authors, year, venue, abstract_text, url, pdf_url: None, identifiers: runtime::RecordIdentifiers { doi, arxiv_id: None, scopus_id: None, source_ids: BTreeMap::new() }, provenance: vec![runtime::RecordProvenance { source: "standard_import".to_string(), external_id: None, search_run_id: None, artifact_id: None, observed_at: now.clone() }], field_conflicts: Vec::new(), observations: vec![runtime::RecordObservation { source: "standard_import".to_string(), external_id: None, artifact_id: None, observed_at: now.clone(), fields: item.clone() }], metadata: json!({ "standard": { "itemType": item_type, "isbn": isbn, "citationKey": item["citationKey"].as_str().or_else(|| item["citation-key"].as_str()), "date": date, "volume": volume, "issue": issue, "pages": pages, "publisher": publisher, "place": place, "edition": edition, "series": series, "language": language, "accessed": accessed } }), created_at: now.clone(), updated_at: now }, paper))
 }
 
 pub fn empty_library() -> Value {
@@ -1693,7 +2066,7 @@ fn write_library_file(path: &Path, library: &Value) -> Result<(), String> {
         if had_existing {
             let _ = std::fs::copy(&backup, &path);
         }
-        return Err(format!("failed to replace library.json: {error}"));
+        return Err(format!("failed to refresh the legacy library projection: {error}"));
     }
     Ok(())
 }

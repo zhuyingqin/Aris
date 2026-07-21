@@ -265,6 +265,13 @@
   padding: 2px 8px;
 }
 
+.lip-metadata-editor .lit-error {
+  margin: 0;
+  color: var(--danger, #d95c5c);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .lit-focus-panel {
   border-bottom: 1px solid var(--border);
   background: var(--bg-1);

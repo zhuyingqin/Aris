@@ -13,6 +13,7 @@ const apiMocks = vi.hoisted(() => ({
   chatUiSessionDelete: vi.fn(() => Promise.resolve()),
   chatUiSessionsSave: vi.fn(() => Promise.resolve()),
   onRemoteChatSessionUpdated: vi.fn(() => Promise.resolve(() => undefined)),
+  onChatUiSessionUpdated: vi.fn(() => Promise.resolve(() => undefined)),
 }));
 
 vi.mock("../../api/tauri", () => apiMocks);
@@ -204,6 +205,7 @@ describe("useChatSessions Tauri persistence", () => {
     apiMocks.chatUiSessionDelete.mockResolvedValue(undefined);
     apiMocks.chatUiSessionsSave.mockResolvedValue(undefined);
     apiMocks.onRemoteChatSessionUpdated.mockResolvedValue(() => undefined);
+    apiMocks.onChatUiSessionUpdated.mockResolvedValue(() => undefined);
   });
 
   it("hydrates Tauri summaries without parsing localStorage or loading turns", async () => {
@@ -273,6 +275,82 @@ describe("useChatSessions Tauri persistence", () => {
       ],
     }));
     expect(apiMocks.chatUiSessionLoad).toHaveBeenCalledWith("remote-chat");
+  });
+
+  it("keeps the live composer draft when a save's own broadcast echo reloads the session", async () => {
+    // A per-session save emits `chat-ui-session-updated` to every webview,
+    // including the one that saved. That echo must not reload the disk copy
+    // over the draft the user is still typing — doing so snapped the controlled
+    // textarea value back mid-keystroke and aborted IME composition.
+    let sessionUpdatedHandler: ((event: { sessionId: string; operation?: string }) => void) | undefined;
+    (apiMocks.onChatUiSessionUpdated as unknown as {
+      mockImplementation: (implementation: (handler: NonNullable<typeof sessionUpdatedHandler>) => Promise<() => void>) => void;
+    }).mockImplementation((handler) => {
+      sessionUpdatedHandler = handler;
+      return Promise.resolve(() => undefined);
+    });
+    const stored = { ...startedSession("echo-chat", "hello"), turnsLoaded: true, turnCount: 1, updatedAt: 100 };
+    apiMocks.chatUiSessionsList.mockResolvedValue([stored]);
+    // The persisted copy the echo reloads still holds the pre-keystroke draft.
+    apiMocks.chatUiSessionLoad.mockResolvedValue({ ...stored, draft: "" });
+
+    const { result } = renderHook(() => useChatSessions("default"));
+    await waitFor(() => expect(result.current.allSessions.some((session) => session.id === "echo-chat")).toBe(true));
+    act(() => result.current.setCurrentId("echo-chat"));
+    await waitFor(() => expect(result.current.currentSession?.id).toBe("echo-chat"));
+
+    act(() => result.current.setDraft("echo-chat", "半成品的中文草稿"));
+    expect(result.current.currentSession?.draft).toBe("半成品的中文草稿");
+
+    await act(async () => {
+      sessionUpdatedHandler?.({ sessionId: "echo-chat", operation: "saved" });
+      await Promise.resolve();
+    });
+
+    expect(result.current.currentSession?.draft).toBe("半成品的中文草稿");
+  });
+
+  it("preserves the live draft while adopting newer turns from a cross-window reload", async () => {
+    // When a companion window (or paired phone) genuinely appends a turn, the
+    // reload must show it — but still keep the local composer draft intact.
+    let sessionUpdatedHandler: ((event: { sessionId: string; operation?: string }) => void) | undefined;
+    (apiMocks.onChatUiSessionUpdated as unknown as {
+      mockImplementation: (implementation: (handler: NonNullable<typeof sessionUpdatedHandler>) => Promise<() => void>) => void;
+    }).mockImplementation((handler) => {
+      sessionUpdatedHandler = handler;
+      return Promise.resolve(() => undefined);
+    });
+    const stored = { ...startedSession("sync-chat", "hello"), turnsLoaded: true, turnCount: 1, updatedAt: 100 };
+    apiMocks.chatUiSessionsList.mockResolvedValue([stored]);
+    apiMocks.chatUiSessionLoad.mockResolvedValue({
+      ...stored,
+      draft: "",
+      updatedAt: 200,
+      turnCount: 2,
+      turns: [
+        { id: "sync-chat-turn", role: "user", blocks: [{ kind: "text", text: "hello" }] },
+        { id: "sync-chat-reply", role: "assistant", blocks: [{ kind: "text", text: "from the companion" }] },
+      ],
+    });
+
+    const { result } = renderHook(() => useChatSessions("default"));
+    await waitFor(() => expect(result.current.allSessions.some((session) => session.id === "sync-chat")).toBe(true));
+    act(() => result.current.setCurrentId("sync-chat"));
+    await waitFor(() => expect(result.current.currentSession?.id).toBe("sync-chat"));
+
+    act(() => result.current.setDraft("sync-chat", "still editing this"));
+
+    await act(async () => {
+      sessionUpdatedHandler?.({ sessionId: "sync-chat", operation: "saved" });
+      await Promise.resolve();
+    });
+
+    await waitFor(() => expect(result.current.currentSession?.turns).toHaveLength(2));
+    expect(result.current.currentSession?.draft).toBe("still editing this");
+    expect(result.current.currentSession?.turns[1]).toMatchObject({
+      id: "sync-chat-reply",
+      blocks: [{ kind: "text", text: "from the companion" }],
+    });
   });
 
   it("keeps an unselected remote session lazy and applies its live buffer after selection", async () => {

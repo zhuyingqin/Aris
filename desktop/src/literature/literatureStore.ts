@@ -109,6 +109,16 @@ const normalizePaper = (paper: Partial<LiteraturePaper>, index: number): Literat
     title: typeof paper.title === "string" && paper.title.trim() ? paper.title : "Untitled paper",
     authors: Array.isArray(paper.authors) ? paper.authors.filter((value) => typeof value === "string") : [],
     venue: typeof paper.venue === "string" ? paper.venue : "",
+    date: typeof paper.date === "string" ? paper.date : undefined,
+    volume: typeof paper.volume === "string" ? paper.volume : undefined,
+    issue: typeof paper.issue === "string" ? paper.issue : undefined,
+    pages: typeof paper.pages === "string" ? paper.pages : undefined,
+    publisher: typeof paper.publisher === "string" ? paper.publisher : undefined,
+    place: typeof paper.place === "string" ? paper.place : undefined,
+    edition: typeof paper.edition === "string" ? paper.edition : undefined,
+    series: typeof paper.series === "string" ? paper.series : undefined,
+    language: typeof paper.language === "string" ? paper.language : undefined,
+    accessed: typeof paper.accessed === "string" ? paper.accessed : undefined,
     abstract: typeof paper.abstract === "string" ? paper.abstract : "",
     tags: Array.isArray(paper.tags) ? paper.tags.filter((value) => typeof value === "string") : [],
     collectionIds: Array.isArray(paper.collectionIds)
@@ -232,6 +242,24 @@ const normalizedTitle = (title: string) =>
 const validCitationKey = (value: string | undefined): string | null => {
   const key = value?.trim() ?? "";
   return /^[A-Za-z][A-Za-z0-9:_.-]*$/.test(key) ? key : null;
+};
+
+/** Validate user-entered keys at edit time instead of silently repairing them
+ * only when a Typeset citation is inserted. */
+export const citationKeyValidationError = (
+  value: string | undefined,
+  paperId: string,
+  papers: LiteraturePaper[],
+): string | null => {
+  const trimmed = value?.trim() ?? "";
+  if (!trimmed) return null;
+  if (!validCitationKey(trimmed)) {
+    return "Citation key 必须以字母开头，只能包含字母、数字、:、_、. 或 -。";
+  }
+  const duplicate = papers.find(
+    (paper) => paper.id !== paperId && validCitationKey(paper.citationKey)?.toLocaleLowerCase() === trimmed.toLocaleLowerCase(),
+  );
+  return duplicate ? `Citation key 已被「${duplicate.title}」使用。` : null;
 };
 
 const citationKeyPart = (value: string) =>
@@ -1431,7 +1459,7 @@ interface LiteratureState {
   addTags: (ids: string[], tags: string[]) => void;
   updatePaperMetadata: (
     id: string,
-    patch: Partial<Pick<LiteraturePaper, "title" | "itemType" | "authors" | "venue" | "year" | "doi" | "isbn" | "citationKey" | "url" | "abstract">>,
+    patch: Partial<Pick<LiteraturePaper, "title" | "itemType" | "authors" | "venue" | "year" | "date" | "doi" | "isbn" | "citationKey" | "url" | "abstract" | "volume" | "issue" | "pages" | "publisher" | "place" | "edition" | "series" | "language" | "accessed">>,
   ) => void;
   /** Assign valid, collision-free keys and wait until SQLite has the change. */
   ensureCitationKeys: (ids: string[]) => Promise<Record<string, string>>;
@@ -1608,7 +1636,7 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
               : reviewTasks[0]?.id ?? null,
         });
         if (!options?.quiet) {
-          log("info", `Loaded ${raw.papers?.length ?? 0} papers from papers/library.json`);
+          log("info", `Loaded ${raw.papers?.length ?? 0} papers from the local literature database.`);
         }
       } catch (error) {
         set({ error: `failed to load library: ${String(error)}` });
@@ -1681,7 +1709,7 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
           } else if (result.name === "LiteratureLibraryUpsert") {
             log(
               "ok",
-              `Agent refreshed papers/library.json for ${Number(output.merged ?? 0)} canonical records.`,
+              `Agent refreshed the local literature database for ${Number(output.merged ?? 0)} canonical records.`,
             );
           } else if (result.name === "LiteraturePdfDownload") {
             log("ok", `Agent downloaded ${String(output.relativePath ?? "PDF")}`);
@@ -2220,8 +2248,16 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
         tags: Array.from(new Set([...paper.tags, ...tags])).sort(),
       })),
 
-    updatePaperMetadata: (id, patch) =>
-      patchPapers([id], (paper) => ({ ...paper, ...patch })),
+    updatePaperMetadata: (id, patch) => {
+      if (Object.prototype.hasOwnProperty.call(patch, "citationKey")) {
+        const message = citationKeyValidationError(patch.citationKey, id, get().library.papers);
+        if (message) {
+          set({ error: message });
+          return;
+        }
+      }
+      patchPapers([id], (paper) => ({ ...paper, ...patch }));
+    },
 
     ensureCitationKeys: async (ids) => {
       const selectedIds = new Set(ids.map((id) => id.trim()).filter(Boolean));

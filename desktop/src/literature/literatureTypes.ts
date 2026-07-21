@@ -1,6 +1,6 @@
-// Shared shapes for the literature library. The on-disk form of
-// `LiteratureLibrary` is `papers/library.json` inside the active project —
-// the same folder the `/arxiv` skill writes PDFs into.
+// Shared shapes for the literature library. The canonical on-disk store is
+// `.somniq/literature/literature.sqlite3`; `papers/library.json` is only a
+// backwards-compatible projection for legacy tools.
 
 export type PaperStage =
   | "inbox"
@@ -37,7 +37,7 @@ export type EvidenceSource = "text" | "vision";
 
 /** Project-level reference frame for the Agent's "for you" judgment — what
  * makes a Brief tailored rather than a generic summary. Stored at the top of
- * library.json. */
+ * the project-local literature database. */
 export interface ProjectFocus {
   question: string;
   motivation: string;
@@ -239,6 +239,9 @@ export interface LiteratureAttachment {
   path?: string;
   /** A deliberately external resource; it is never copied without user action. */
   url?: string;
+  /** Original local path reported by an imported reference manager. It remains
+   * external until the researcher explicitly copies it into this project. */
+  externalPath?: string;
   mimeType?: string;
   bytes?: number;
   addedAt: string;
@@ -284,6 +287,17 @@ export interface LiteraturePaper {
   doi?: string;
   isbn?: string;
   citationKey?: string;
+  /** Original publication date when more precise than `year`. */
+  date?: string;
+  volume?: string;
+  issue?: string;
+  pages?: string;
+  publisher?: string;
+  place?: string;
+  edition?: string;
+  series?: string;
+  language?: string;
+  accessed?: string;
   arxivId?: string;
   url?: string;
   abstract: string;

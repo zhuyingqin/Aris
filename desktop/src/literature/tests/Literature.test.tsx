@@ -537,8 +537,36 @@ describe("Literature library", () => {
       within(log).getByText(/Agent \(Chat\): refreshing the projection for 3 canonical records/),
     ).toBeTruthy();
     expect(
-      within(log).getByText(/Agent refreshed papers\/library.json for 3 canonical records/),
+      within(log).getByText(/Agent refreshed the local literature database for 3 canonical records/),
     ).toBeTruthy();
+  });
+
+  it("rejects malformed and duplicate citation keys before mutating metadata", () => {
+    const library = fixtureLibrary();
+    const second = structuredClone(fixturePaper);
+    second.id = "second-paper";
+    second.title = "Second local record";
+    second.citationKey = "other2025";
+    library.papers[0].citationKey = "first2025";
+    library.papers.push(second);
+    useLiteratureStore.setState({ library, loaded: true, error: null });
+
+    act(() => {
+      useLiteratureStore.getState().updatePaperMetadata(fixturePaper.id, { citationKey: "not a key" });
+    });
+    expect(useLiteratureStore.getState().library.papers[0]?.citationKey).toBe("first2025");
+    expect(useLiteratureStore.getState().error).toContain("Citation key");
+
+    act(() => {
+      useLiteratureStore.getState().updatePaperMetadata(fixturePaper.id, { citationKey: "OTHER2025" });
+    });
+    expect(useLiteratureStore.getState().library.papers[0]?.citationKey).toBe("first2025");
+    expect(useLiteratureStore.getState().error).toContain("Citation key");
+
+    act(() => {
+      useLiteratureStore.getState().updatePaperMetadata(fixturePaper.id, { citationKey: "first2026" });
+    });
+    expect(useLiteratureStore.getState().library.papers[0]?.citationKey).toBe("first2026");
   });
 
   it("downloads a PDF through the backend and records the local path", async () => {

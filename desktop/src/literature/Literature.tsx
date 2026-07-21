@@ -24,7 +24,7 @@ import {
 import { useStore } from "../store";
 import { SvgIcon, type SvgIconName } from "../SvgIcon";
 import type { LiteraturePageView } from "./LiteratureViewTabs";
-import { useLiteratureStore } from "./literatureStore";
+import { citationKeyValidationError, useLiteratureStore } from "./literatureStore";
 import {
   type DetailTab,
   type LiteratureLibrary,
@@ -732,19 +732,33 @@ export default function Literature({
     try {
       const selected = await openDialog({
         multiple: false,
-        filters: [{ name: "Bibliography exports", extensions: ["json", "ris", "bib", "bibtex"] }],
+        filters: [{ name: "Bibliography exports", extensions: ["json", "ris", "bib", "bibtex", "biblatex"] }],
       });
       if (!selected || Array.isArray(selected)) return;
       const report = await literatureImportBibliography<{
         imported: number;
         merged: number;
         skipped: number;
+        attachments?: number;
+        notes?: number;
+        annotations?: number;
+        collections?: number;
+        warnings?: string[];
         format: string;
       }>({ sourcePath: selected });
       await load(projectId, { quiet: true });
+      const migratedChildren = [
+        report.attachments ? `${report.attachments} 个附件` : "",
+        report.notes ? `${report.notes} 条笔记` : "",
+        report.annotations ? `${report.annotations} 条标注` : "",
+        report.collections ? `${report.collections} 个分类` : "",
+      ].filter(Boolean);
+      const warningSummary = report.warnings?.length
+        ? `；${report.warnings.length} 项需手动处理：${report.warnings[0]}`
+        : "";
       logActivity(
         "ok",
-        `已从 ${report.format} 导入 ${report.imported} 条、合并 ${report.merged} 条文献${report.skipped ? `；跳过 ${report.skipped} 条不支持项` : ""}`,
+        `已从 ${report.format} 导入 ${report.imported} 条、合并 ${report.merged} 条文献${migratedChildren.length ? `；同时迁移 ${migratedChildren.join("、")}` : ""}${report.skipped ? `；跳过 ${report.skipped} 条不支持项` : ""}${warningSummary}`,
         { open: true },
       );
     } catch (error) {
@@ -883,7 +897,7 @@ export default function Literature({
       `DOI: ${paper.doi ?? "unknown"}`,
       "Reuse the browser tab/session I approve. Do not bypass paywalls or security interstitials.",
       "If login, CAPTCHA, or user approval is needed, pause and ask me.",
-      "Download into papers/.browser-inbox, verify that the file is a PDF, then move it into papers/ with a stable filename and update only this record in papers/library.json.",
+      "Download into papers/.browser-inbox, verify that the file is a PDF, then move it into papers/ with a stable filename and update only this record in the local literature database.",
     ].join("\n"));
   };
 
@@ -941,6 +955,10 @@ export default function Literature({
   const openAttachment = async (paper: LiteraturePaper, attachment: LiteratureAttachment) => {
     if (attachment.kind === "externalLink" && attachment.url) {
       window.open(attachment.url, "_blank", "noopener,noreferrer");
+      return;
+    }
+    if (attachment.externalPath) {
+      setError(`该 Zotero 附件仍位于原位置：${attachment.externalPath}。请使用“导入附件”将其复制到当前项目后再打开。`);
       return;
     }
     if (!attachment.path) return;
@@ -3109,10 +3127,10 @@ function WorkspaceFiles({
                         : attachment.kind === "webSnapshot" ? "网页快照" : "外部链接"
                   }</span>
                 </div>
-                <p title={attachment.path ?? attachment.url}>{attachment.path ?? attachment.url}</p>
+                <p title={attachment.path ?? attachment.url ?? attachment.externalPath}>{attachment.path ?? attachment.url ?? attachment.externalPath}</p>
                 <div className="lit-note-card-actions">
                   <button type="button" onClick={() => onOpenAttachment(attachment)}>
-                    {attachment.kind === "pdf" ? "设为阅读 PDF" : attachment.kind === "externalLink" ? "打开链接" : "打开"}
+                    {attachment.kind === "pdf" ? "设为阅读 PDF" : attachment.kind === "externalLink" ? "打开链接" : attachment.externalPath ? "查看原路径" : "打开"}
                   </button>
                   <button type="button" className="danger" onClick={() => onRemoveAttachment(attachment.id)}>移除关联</button>
                 </div>
@@ -3244,9 +3262,19 @@ const metadataDraftFor = (paper: LiteraturePaper) => ({
   authors: paper.authors.join("; "),
   venue: paper.venue,
   year: paper.year?.toString() ?? "",
+  date: paper.date ?? "",
   doi: paper.doi ?? "",
   isbn: paper.isbn ?? "",
   citationKey: paper.citationKey ?? "",
+  volume: paper.volume ?? "",
+  issue: paper.issue ?? "",
+  pages: paper.pages ?? "",
+  publisher: paper.publisher ?? "",
+  place: paper.place ?? "",
+  edition: paper.edition ?? "",
+  series: paper.series ?? "",
+  language: paper.language ?? "",
+  accessed: paper.accessed ?? "",
   url: paper.url ?? "",
   abstract: paper.abstract,
 });
@@ -3276,34 +3304,55 @@ function InfoTab({
   onViewEvidence: () => void;
   onViewOverview: () => void;
   onShortlist: () => void;
-  onUpdateMetadata: (patch: Partial<Pick<LiteraturePaper, "title" | "itemType" | "authors" | "venue" | "year" | "doi" | "isbn" | "citationKey" | "url" | "abstract">>) => void;
+  onUpdateMetadata: (patch: Partial<Pick<LiteraturePaper, "title" | "itemType" | "authors" | "venue" | "year" | "date" | "doi" | "isbn" | "citationKey" | "url" | "abstract" | "volume" | "issue" | "pages" | "publisher" | "place" | "edition" | "series" | "language" | "accessed">>) => void;
   onToggleCollection: (colId: string) => void;
   onDelete: () => void;
 }) {
   const fit = paper.verdict?.fit;
+  const papers = useLiteratureStore((state) => state.library.papers);
   const [metadataEditing, setMetadataEditing] = useState(false);
   const [metadataDraft, setMetadataDraft] = useState(() => metadataDraftFor(paper));
+  const [metadataError, setMetadataError] = useState<string | null>(null);
   useEffect(() => {
     if (!metadataEditing) setMetadataDraft(metadataDraftFor(paper));
   }, [metadataEditing, paper]);
+  const validateCitationKey = (value: string | undefined) => {
+    const error = citationKeyValidationError(value, paper.id, papers);
+    setMetadataError(error);
+    return !error;
+  };
   const editCitationKey = () => {
     const next = window.prompt("Citation key", paper.citationKey ?? "");
-    if (next !== null) onUpdateMetadata({ citationKey: next.trim() || undefined });
+    if (next !== null && validateCitationKey(next.trim() || undefined)) {
+      onUpdateMetadata({ citationKey: next.trim() || undefined });
+    }
   };
   const saveMetadata = () => {
     const parsedYear = Number.parseInt(metadataDraft.year, 10);
+    if (!validateCitationKey(metadataDraft.citationKey.trim() || undefined)) return;
     onUpdateMetadata({
       title: metadataDraft.title.trim() || paper.title,
       itemType: metadataDraft.itemType,
       authors: metadataDraft.authors.split(/[;,]/).map((author) => author.trim()).filter(Boolean),
       venue: metadataDraft.venue.trim(),
       year: Number.isFinite(parsedYear) && parsedYear > 0 ? parsedYear : undefined,
+      date: metadataDraft.date.trim() || undefined,
       doi: metadataDraft.doi.trim() || undefined,
       isbn: metadataDraft.isbn.trim() || undefined,
       citationKey: metadataDraft.citationKey.trim() || undefined,
+      volume: metadataDraft.volume.trim() || undefined,
+      issue: metadataDraft.issue.trim() || undefined,
+      pages: metadataDraft.pages.trim() || undefined,
+      publisher: metadataDraft.publisher.trim() || undefined,
+      place: metadataDraft.place.trim() || undefined,
+      edition: metadataDraft.edition.trim() || undefined,
+      series: metadataDraft.series.trim() || undefined,
+      language: metadataDraft.language.trim() || undefined,
+      accessed: metadataDraft.accessed.trim() || undefined,
       url: metadataDraft.url.trim() || undefined,
       abstract: metadataDraft.abstract.trim(),
     });
+    setMetadataError(null);
     setMetadataEditing(false);
   };
   return (
@@ -3331,6 +3380,12 @@ function InfoTab({
           ))}
           {paper.venue && <><dt>出版物</dt><dd>{paper.venue}</dd></>}
           {paper.year && <><dt>日期</dt><dd>{paper.year}</dd></>}
+          {paper.date && paper.date !== String(paper.year ?? "") && <><dt>Date</dt><dd>{paper.date}</dd></>}
+          {paper.volume && <><dt>Volume</dt><dd>{paper.volume}</dd></>}
+          {paper.issue && <><dt>Issue</dt><dd>{paper.issue}</dd></>}
+          {paper.pages && <><dt>Pages</dt><dd>{paper.pages}</dd></>}
+          {paper.publisher && <><dt>Publisher</dt><dd>{paper.publisher}</dd></>}
+          {paper.place && <><dt>Place</dt><dd>{paper.place}</dd></>}
           {paper.citedBy !== undefined && <><dt>引用数</dt><dd>{paper.citedBy}</dd></>}
           {paper.doi && (
             <>
@@ -3424,11 +3479,22 @@ function InfoTab({
           <label>Authors <span>(separate with ;)</span><input value={metadataDraft.authors} onChange={(event) => setMetadataDraft((draft) => ({ ...draft, authors: event.target.value }))} /></label>
           <label>Venue<input value={metadataDraft.venue} onChange={(event) => setMetadataDraft((draft) => ({ ...draft, venue: event.target.value }))} /></label>
           <label>Year<input inputMode="numeric" value={metadataDraft.year} onChange={(event) => setMetadataDraft((draft) => ({ ...draft, year: event.target.value }))} /></label>
+          <label>Date<input value={metadataDraft.date} onChange={(event) => setMetadataDraft((draft) => ({ ...draft, date: event.target.value }))} /></label>
+          <label>Volume<input value={metadataDraft.volume} onChange={(event) => setMetadataDraft((draft) => ({ ...draft, volume: event.target.value }))} /></label>
+          <label>Issue<input value={metadataDraft.issue} onChange={(event) => setMetadataDraft((draft) => ({ ...draft, issue: event.target.value }))} /></label>
+          <label>Pages<input value={metadataDraft.pages} onChange={(event) => setMetadataDraft((draft) => ({ ...draft, pages: event.target.value }))} /></label>
+          <label>Publisher<input value={metadataDraft.publisher} onChange={(event) => setMetadataDraft((draft) => ({ ...draft, publisher: event.target.value }))} /></label>
+          <label>Place<input value={metadataDraft.place} onChange={(event) => setMetadataDraft((draft) => ({ ...draft, place: event.target.value }))} /></label>
+          <label>Edition<input value={metadataDraft.edition} onChange={(event) => setMetadataDraft((draft) => ({ ...draft, edition: event.target.value }))} /></label>
+          <label>Series<input value={metadataDraft.series} onChange={(event) => setMetadataDraft((draft) => ({ ...draft, series: event.target.value }))} /></label>
+          <label>Language<input value={metadataDraft.language} onChange={(event) => setMetadataDraft((draft) => ({ ...draft, language: event.target.value }))} /></label>
+          <label>Accessed<input value={metadataDraft.accessed} onChange={(event) => setMetadataDraft((draft) => ({ ...draft, accessed: event.target.value }))} /></label>
           <label>DOI<input value={metadataDraft.doi} onChange={(event) => setMetadataDraft((draft) => ({ ...draft, doi: event.target.value }))} /></label>
           <label>ISBN<input value={metadataDraft.isbn} onChange={(event) => setMetadataDraft((draft) => ({ ...draft, isbn: event.target.value }))} /></label>
-          <label>Citation key<input value={metadataDraft.citationKey} onChange={(event) => setMetadataDraft((draft) => ({ ...draft, citationKey: event.target.value }))} /></label>
+          <label>Citation key<input value={metadataDraft.citationKey} onChange={(event) => { setMetadataError(null); setMetadataDraft((draft) => ({ ...draft, citationKey: event.target.value })); }} /></label>
           <label>URL<input value={metadataDraft.url} onChange={(event) => setMetadataDraft((draft) => ({ ...draft, url: event.target.value }))} /></label>
           <label>Abstract<textarea rows={5} value={metadataDraft.abstract} onChange={(event) => setMetadataDraft((draft) => ({ ...draft, abstract: event.target.value }))} /></label>
+          {metadataError && <p className="lit-error" role="alert">{metadataError}</p>}
           <div className="lip-metadata-editor-actions">
             <button type="button" className="primary" onClick={saveMetadata}>Save metadata</button>
             <button type="button" onClick={() => setMetadataEditing(false)}>Cancel</button>

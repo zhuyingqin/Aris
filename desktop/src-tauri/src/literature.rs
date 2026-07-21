@@ -1,7 +1,8 @@
 //! Desktop commands for the literature library — thin wrappers over the
 //! shared kernel implementation in `tools::literature`, so the desktop UI,
 //! CLI agents, and the literature skills (`/arxiv`, `/research-lit`) all
-//! operate on the same `papers/library.json` contract.
+//! operate on the same project-local SQLite store; `papers/library.json` is
+//! only a compatibility projection for legacy tools.
 //!
 //! `literature_llm` is the one exception: a one-shot, tool-free completion on
 //! the user's configured chat executor, so screening and Brief generation can
