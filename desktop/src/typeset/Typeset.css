@@ -6414,3 +6414,90 @@
 .typeset-workbench *::-webkit-scrollbar-corner {
   background: transparent !important;
 }
+/* Library citation chooser: kept above the editor and PDF panes so selecting
+ * a reference never loses the current code/visual-editor selection. */
+.typeset-citation-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgb(3 8 18 / 64%);
+}
+
+.typeset-citation-picker {
+  display: grid;
+  grid-template-rows: auto auto minmax(180px, 48vh) auto;
+  width: min(720px, 100%);
+  max-height: min(700px, calc(100vh - 48px));
+  overflow: hidden;
+  border: 1px solid var(--border, #2a3546);
+  border-radius: 10px;
+  background: var(--panel, #121a26);
+  color: var(--text, #e6edf7);
+  box-shadow: 0 24px 64px rgb(0 0 0 / 45%);
+}
+
+.typeset-citation-picker > header,
+.typeset-citation-picker > footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border, #2a3546);
+}
+
+.typeset-citation-picker > header h2 { margin: 0; font-size: 15px; }
+.typeset-citation-picker > header p { margin: 3px 0 0; color: var(--muted, #9aa8bc); font-size: 12px; }
+.typeset-citation-picker > header button,
+.typeset-citation-picker > footer button {
+  border: 1px solid var(--border, #354154);
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  padding: 6px 10px;
+  cursor: pointer;
+}
+.typeset-citation-picker > footer { border-top: 1px solid var(--border, #2a3546); border-bottom: 0; }
+.typeset-citation-picker > footer span { color: var(--muted, #9aa8bc); font-size: 12px; }
+.typeset-citation-picker > footer > div { display: flex; gap: 8px; }
+.typeset-citation-picker button.primary { background: #5793f5; border-color: #5793f5; color: #071326; font-weight: 700; }
+.typeset-citation-picker button:disabled { opacity: .55; cursor: default; }
+
+.typeset-citation-picker > input {
+  width: calc(100% - 32px);
+  margin: 12px 16px;
+  padding: 9px 10px;
+  border: 1px solid var(--border, #354154);
+  border-radius: 6px;
+  background: var(--input, #0b111b);
+  color: inherit;
+}
+
+.typeset-citation-results { overflow: auto; padding: 0 10px 10px; }
+.typeset-citation-results > p { padding: 12px 8px; color: var(--muted, #9aa8bc); }
+.typeset-citation-results > button {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  align-items: center;
+  width: 100%;
+  gap: 10px;
+  padding: 10px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.typeset-citation-results > button:hover,
+.typeset-citation-results > button.selected { background: rgb(87 147 245 / 14%); }
+.typeset-citation-results strong,
+.typeset-citation-results em { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.typeset-citation-results em { margin-top: 3px; color: var(--muted, #9aa8bc); font-size: 12px; font-style: normal; }
+.typeset-citation-results code { color: #9fc3ff; font-size: 12px; }
+.typeset-citation-check { width: 16px; height: 16px; border: 1px solid var(--border, #506079); border-radius: 4px; text-align: center; line-height: 15px; color: #071326; }
+.typeset-citation-results > button.selected .typeset-citation-check { background: #79aaf7; border-color: #79aaf7; }
+.typeset-citation-error { margin: -4px 16px 10px; color: #ff9d9d; font-size: 12px; }

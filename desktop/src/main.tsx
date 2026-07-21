@@ -2,6 +2,7 @@ import React, { useEffect, useState } from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
 import Login from "./auth/Login";
+import ChatCompanion, { isChatCompanionMode } from "./chat/ChatCompanion";
 import DesktopWindowControls from "./DesktopWindowControls";
 import { isTauri } from "./api/tauri";
 import ErrorBoundary from "./ErrorBoundary";
@@ -16,8 +17,8 @@ function isLoginPreviewMode(): boolean {
   return new URLSearchParams(window.location.search).get("loginPreview") === "1";
 }
 
-/** Gate the desktop workspace behind its NewAPI account login. */
-function Root() {
+/** Gate the primary desktop workspace behind its NewAPI account login. */
+function AuthenticatedRoot() {
   const authed = useStore((state) => state.authed);
   const validateAuth = useStore((state) => state.validateAuth);
   const [checkingAuth, setCheckingAuth] = useState(false);
@@ -51,12 +52,19 @@ function Root() {
   return authed && !isLoginPreviewMode() ? <App /> : <Login />;
 }
 
+function Root() {
+  // The companion can only be created by the already-authenticated main
+  // process. Do not make every auxiliary WebView repeat a localStorage-based
+  // login gate; it shares the same backend executor/session state.
+  return isChatCompanionMode() ? <ChatCompanion /> : <AuthenticatedRoot />;
+}
+
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <ErrorBoundary>
       <>
         {/* Remote pairing uses its own device credential, not the desktop account. */}
-        {isTauri() && <RemoteP2pBridge />}
+        {isTauri() && !isChatCompanionMode() && <RemoteP2pBridge />}
         <Root />
       </>
     </ErrorBoundary>

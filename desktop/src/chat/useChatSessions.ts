@@ -6,6 +6,7 @@ import {
   chatUiSessionsList,
   chatUiSessionsSave,
   isTauri,
+  onChatUiSessionUpdated,
   onRemoteChatSessionUpdated,
   type RemoteChatSessionUpdatedEvent,
 } from "../api/tauri";
@@ -276,6 +277,49 @@ export function useChatSessions(projectId?: string | null) {
         hydrated.current = true;
       });
   }, [setError]);
+
+  useEffect(() => {
+    if (!isTauri()) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+
+    void onChatUiSessionUpdated((event) => {
+      const id = typeof event.sessionId === "string" ? event.sessionId.trim() : "";
+      if (!id || disposed) return;
+      if (event.operation === "deleted") {
+        setAllSessions((previous) => previous.some((session) => session.id === id)
+          ? previous.filter((session) => session.id !== id)
+          : previous);
+        return;
+      }
+
+      const known = sessionsRef.current.find((session) => session.id === id);
+      void chatUiSessionLoad<ChatSession>(id)
+        .then((stored) => {
+          if (!stored || disposed) return;
+          const loaded = { ...migrateSession(stored, known?.projectId), turnsLoaded: true };
+          if (loaded.id !== id) return;
+          setAllSessions((previous) => {
+            const current = previous.find((session) => session.id === id);
+            if (current && isSessionStreaming(current)) return previous;
+            const merged = mergeRemoteLoadedSession(current, loaded);
+            if (current === merged) return previous;
+            return current
+              ? previous.map((session) => session.id === id ? merged : session)
+              : [...previous, merged];
+          });
+        })
+        .catch(() => undefined);
+    }).then((nextUnlisten) => {
+      if (disposed) nextUnlisten();
+      else unlisten = nextUnlisten;
+    }).catch(() => undefined);
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
 
   useEffect(() => {
     if (!isTauri()) return;

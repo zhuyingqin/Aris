@@ -24,10 +24,63 @@ mod usage_log;
 mod watcher;
 
 use std::path::PathBuf;
-use std::sync::Once;
-use tauri::{image::Image, Manager};
+use std::sync::{Mutex, Once};
+use tauri::{image::Image, Manager, WebviewUrl, WebviewWindowBuilder};
 
 static SHUTDOWN_CLEANUP: Once = Once::new();
+static CHAT_COMPANION_WINDOW_LOCK: Mutex<()> = Mutex::new(());
+
+fn open_chat_companion_window(app: tauri::AppHandle) -> Result<(), String> {
+    // Serialize rapid repeated clicks. Without this guard, two async command
+    // workers can both observe a missing label before either finishes WebView2
+    // creation, causing duplicate/rejected window builds.
+    let _guard = CHAT_COMPANION_WINDOW_LOCK
+        .lock()
+        .map_err(|_| "chat companion window lock is poisoned".to_string())?;
+    if let Some(window) = app.get_webview_window("chat-companion") {
+        window.show().map_err(|error| error.to_string())?;
+        let _ = window.unminimize();
+        let _ = window.set_always_on_top(true);
+        window.set_focus().map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+
+    let window = WebviewWindowBuilder::new(
+        &app,
+        "chat-companion",
+        // `WebviewUrl::App` accepts an asset path, not a URL-with-query. A
+        // query here is escaped into the asset name and produces a blank
+        // webview. The frontend identifies this surface by its window label.
+        WebviewUrl::App("index.html".into()),
+    )
+    .title("SomniQ Writing Companion")
+    .inner_size(560.0, 800.0)
+    .min_inner_size(390.0, 520.0)
+    .resizable(true)
+    .decorations(false)
+    .shadow(true)
+    .always_on_top(true)
+    .build()
+    .map_err(|error| error.to_string())?;
+
+    if let Ok(icon) = Image::from_bytes(include_bytes!("../icons/icon.png")) {
+        let _ = window.set_icon(icon);
+    }
+    apply_windows_taskbar_icon(&window);
+    window.set_focus().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn open_chat_companion(app: tauri::AppHandle) -> Result<(), String> {
+    // A synchronous Tauri command runs on the webview IPC/main-event path on
+    // Windows. `WebviewWindowBuilder::build` must wait for that same event loop
+    // to create WebView2, so doing both synchronously deadlocks the app: the new
+    // native surface stays white and even window controls stop dispatching.
+    // Keep the event loop free while the builder performs its cross-thread work.
+    tauri::async_runtime::spawn_blocking(move || open_chat_companion_window(app))
+        .await
+        .map_err(|error| error.to_string())?
+}
 
 fn prepend_existing_path_entries(paths: impl IntoIterator<Item = PathBuf>) {
     let existing = std::env::var_os("PATH").unwrap_or_default();
@@ -308,6 +361,20 @@ pub fn run() {
                     let _ = window.set_icon(icon);
                 }
                 apply_windows_taskbar_icon(&window);
+                let app_handle = app.handle().clone();
+                window.on_window_event(move |event| {
+                    if matches!(event, tauri::WindowEvent::Destroyed) {
+                        // The companion's close affordance intentionally hides
+                        // it for fast reuse. Once the primary workspace is
+                        // actually destroyed, tear the hidden singleton down so
+                        // it cannot keep the desktop process alive invisibly.
+                        if let Some(companion) =
+                            app_handle.get_webview_window("chat-companion")
+                        {
+                            let _ = companion.destroy();
+                        }
+                    }
+                });
             }
             watcher::spawn_event_watcher(app.handle().clone());
             mail::spawn_event_watchers(app.handle().clone());
@@ -315,6 +382,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            open_chat_companion,
             commands::skills_list,
             commands::skill_view,
             commands::state_dir,
@@ -389,13 +457,24 @@ pub fn run() {
             sessions::chat_ui_turn_load,
             sessions::chat_ui_session_save,
             sessions::chat_ui_session_delete,
-            sessions::chat_ui_sessions_load,
             sessions::chat_ui_sessions_save,
             chat_events::chat_events_read,
             chat_events::chat_events_export,
             chat_events::chat_events_replay,
             chat_events::chat_events_restore,
             literature::literature_load,
+            literature::literature_storage_status,
+            literature::literature_storage_backup,
+            literature::literature_full_text_search,
+            literature::literature_duplicate_candidates,
+            literature::literature_merge_duplicates,
+            literature::literature_apply_delta,
+            literature::literature_import_bibliography,
+            literature::literature_export_bibliography,
+            literature::literature_write_bibliography_export,
+            literature::literature_import_pdf_as_record,
+            literature::literature_import_attachment,
+            literature::literature_add_identifier,
             literature::literature_save,
             literature::literature_search,
             literature::literature_protocol_create,
@@ -411,6 +490,9 @@ pub fn run() {
             literature::literature_import_pdf,
             literature::literature_image_ocr,
             literature::literature_pdf_open,
+            literature::literature_attachment_open,
+            literature::literature_read_annotation_export,
+            literature::literature_write_annotation_export,
             studio::studio_load,
             studio::studio_save,
             studio::studio_html,
@@ -420,7 +502,6 @@ pub fn run() {
             knowledge::knowledge_confirm,
             knowledge::knowledge_reject,
             knowledge::knowledge_generate,
-            lab::lab_list_kernels,
             lab::lab_list_kernelspecs,
             lab::lab_list_notebooks,
             lab::lab_load_notebook,
@@ -471,7 +552,6 @@ pub fn run() {
             engine::chat_suggest_title,
             engine::project_brief_get,
             engine::project_intent_observe,
-            engine::project_goal_progress,
             engine::chat_reset,
             engine::chat_rewind_to_user_message,
             engine::chat_set_context,
@@ -480,7 +560,6 @@ pub fn run() {
             engine::chat_review_clear,
             engine::chat_change_revert,
             engine::chat_debug_zip_export,
-            usage_log::chat_usage_summary,
             files::file_list_dir,
             files::typeset_list_documents,
             files::file_read_text,

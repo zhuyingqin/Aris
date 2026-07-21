@@ -1,7 +1,7 @@
 #[cfg(windows)]
 use super::{extract_pdf_text_by_page, literature_image_ocr, windows_ocr};
 use super::{
-    import_pdf_at, resolve_pdf_path_at, validate_vision_model, vision_message,
+    import_attachment_at, import_pdf_at, resolve_pdf_path_at, validate_vision_model, vision_message,
     LiteratureVisionImage,
 };
 use runtime::ContentBlock;
@@ -53,6 +53,21 @@ fn imports_only_valid_pdf_files_into_papers() {
     std::fs::write(&replacement, b"%PDF-1.4 replacement").expect("write replacement");
     assert!(import_pdf_at(&base, &replacement, "My Paper.pdf").is_err());
     assert!(import_pdf_at(&base, &invalid, "invalid.pdf").is_err());
+    let _ = std::fs::remove_dir_all(base);
+}
+
+#[test]
+fn imports_non_pdf_attachments_into_a_project_local_folder() {
+    let base = temp_base("attachment-import");
+    let source = base.join("supplement.csv");
+    std::fs::write(&source, b"sample,value\nA,1\n").expect("write attachment");
+
+    let imported = import_attachment_at(&base, &source).expect("import attachment");
+    assert_eq!(imported.file_name, "supplement.csv");
+    assert_eq!(imported.mime_type, Some("text/csv"));
+    assert!(imported.relative_path.starts_with("papers/attachments/"));
+    assert_eq!(std::fs::read(base.join(&imported.relative_path)).expect("read copied attachment"), b"sample,value\nA,1\n");
+
     let _ = std::fs::remove_dir_all(base);
 }
 

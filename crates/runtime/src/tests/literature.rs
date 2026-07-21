@@ -679,3 +679,94 @@ fn separate_store_connections_cannot_finish_or_checkpoint_a_stale_run() {
     stale_finish.completed_at = Some(crate::now_iso8601());
     assert!(second.finish_run(&mut stale_finish).is_err());
 }
+
+#[test]
+fn full_text_search_tracks_metadata_updates_and_user_merges() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let mut store = open_literature_store_at(workspace.path()).expect("open store");
+    let mut primary = test_record(
+        "doi:10.1000/primary",
+        "A Local Research Index",
+        Some("10.1000/primary"),
+        None,
+        None,
+    );
+    primary.abstract_text = "Searchable full text abstraction.".to_string();
+    let duplicate = test_record(
+        "doi:10.1000/duplicate",
+        "A Local Research Index",
+        Some("10.1000/duplicate"),
+        None,
+        None,
+    );
+    assert!(store
+        .upsert_canonical_record(&primary)
+        .expect("insert primary")
+        .inserted);
+    assert!(store
+        .upsert_canonical_record(&duplicate)
+        .expect("insert duplicate")
+        .inserted);
+
+    assert_eq!(
+        store
+            .full_text_search("abstraction", 10)
+            .expect("search abstract")
+            .first()
+            .map(|hit| hit.record_id.as_str()),
+        Some(primary.id.as_str())
+    );
+    store
+        .update_legacy_library_paper(
+            &primary.id,
+            &json!({ "id": primary.id, "tags": ["human-note-needle"] }),
+        )
+        .expect("update local metadata");
+    assert_eq!(
+        store
+            .full_text_search("human-note-needle", 10)
+            .expect("search metadata")
+            .first()
+            .map(|hit| hit.record_id.as_str()),
+        Some(primary.id.as_str())
+    );
+    store
+        .set_record_pdf_text(&primary.id, "A searchable PDF full-text needle.")
+        .expect("index pdf text");
+    assert_eq!(
+        store
+            .full_text_search("full-text", 10)
+            .expect("search PDF text")
+            .first()
+            .map(|hit| hit.record_id.as_str()),
+        Some(primary.id.as_str())
+    );
+
+    let candidates = store.duplicate_candidates().expect("duplicate candidates");
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(
+        [
+            candidates[0].primary_record_id.as_str(),
+            candidates[0].duplicate_record_id.as_str(),
+        ]
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>(),
+        [primary.id.as_str(), duplicate.id.as_str()]
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>(),
+    );
+    let merged = store
+        .merge_canonical_records(&primary.id, &duplicate.id)
+        .expect("merge duplicate");
+    assert_eq!(merged.id, primary.id);
+    assert_eq!(store.list_canonical_records().expect("records").len(), 1);
+    assert!(store.duplicate_candidates().expect("duplicates").is_empty());
+    assert_eq!(
+        store
+            .full_text_search("abstraction", 10)
+            .expect("search after merge")
+            .first()
+            .map(|hit| hit.record_id.as_str()),
+        Some(primary.id.as_str())
+    );
+}

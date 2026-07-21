@@ -11,7 +11,6 @@ const apiMocks = vi.hoisted(() => ({
   chatUiSessionLoad: vi.fn(),
   chatUiSessionSave: vi.fn(() => Promise.resolve()),
   chatUiSessionDelete: vi.fn(() => Promise.resolve()),
-  chatUiSessionsLoad: vi.fn(),
   chatUiSessionsSave: vi.fn(() => Promise.resolve()),
   onRemoteChatSessionUpdated: vi.fn(() => Promise.resolve(() => undefined)),
 }));
@@ -39,7 +38,6 @@ beforeEach(() => {
   apiMocks.chatUiSessionLoad.mockResolvedValue(null);
   apiMocks.chatUiSessionSave.mockResolvedValue(undefined);
   apiMocks.chatUiSessionDelete.mockResolvedValue(undefined);
-  apiMocks.chatUiSessionsLoad.mockResolvedValue([]);
   apiMocks.chatUiSessionsSave.mockResolvedValue(undefined);
   apiMocks.onRemoteChatSessionUpdated.mockResolvedValue(() => undefined);
 });
@@ -204,7 +202,6 @@ describe("useChatSessions Tauri persistence", () => {
     apiMocks.chatUiSessionLoad.mockRejectedValue(new Error("not mocked"));
     apiMocks.chatUiSessionSave.mockResolvedValue(undefined);
     apiMocks.chatUiSessionDelete.mockResolvedValue(undefined);
-    apiMocks.chatUiSessionsLoad.mockResolvedValue([]);
     apiMocks.chatUiSessionsSave.mockResolvedValue(undefined);
     apiMocks.onRemoteChatSessionUpdated.mockResolvedValue(() => undefined);
   });

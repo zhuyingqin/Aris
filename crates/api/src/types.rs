@@ -1,53 +1,12 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// Cache control marker for Anthropic prompt caching.
-///
-/// Reserved for the v0.4.10 T35 work (OpenAI `cache_control` on system
-/// prompt) — declared here so the schema stays consistent across both
-/// providers. Currently unconstructed; `#[allow(dead_code)]` until T35
-/// wires up the actual sender.
-#[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CacheControl {
-    #[serde(rename = "type")]
-    pub kind: String,
-    /// Optional TTL hint. Set to "1h" for 1-hour cache.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ttl: Option<String>,
-}
-
-#[allow(dead_code)]
-impl CacheControl {
-    /// Create an ephemeral cache control with 1-hour TTL.
-    #[must_use]
-    pub fn ephemeral_1h() -> Self {
-        Self {
-            kind: "ephemeral".to_string(),
-            ttl: Some("1h".to_string()),
-        }
-    }
-}
-
-/// A system prompt block with optional cache control. Reserved for
-/// the v0.4.10 T35 work — see [`CacheControl`].
-#[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum SystemBlock {
-    Text {
-        text: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        cache_control: Option<CacheControl>,
-    },
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MessageRequest {
     pub model: String,
     pub max_tokens: u32,
     pub messages: Vec<InputMessage>,
-    /// System prompt — supports both plain string and structured blocks with cache control.
+    /// System prompt — a plain string, or structured blocks encoded as JSON.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub system: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -72,30 +31,6 @@ impl MessageRequest {
     #[must_use]
     pub fn with_streaming(mut self) -> Self {
         self.stream = true;
-        self
-    }
-
-    /// Set system prompt as structured blocks with 1-hour cache control on the last block.
-    #[must_use]
-    pub fn with_cached_system(mut self, prompt: &str) -> Self {
-        if prompt.is_empty() {
-            self.system = None;
-            return self;
-        }
-        self.system = Some(serde_json::json!([
-            {
-                "type": "text",
-                "text": prompt,
-                "cache_control": { "type": "ephemeral", "ttl": "1h" }
-            }
-        ]));
-        self
-    }
-
-    /// Set system prompt as a plain string (no cache control).
-    #[must_use]
-    pub fn with_system(mut self, prompt: Option<String>) -> Self {
-        self.system = prompt.map(|p| serde_json::json!(p));
         self
     }
 }

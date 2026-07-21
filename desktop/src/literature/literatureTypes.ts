@@ -10,6 +10,18 @@ export type PaperStage =
   | "read"
   | "excluded";
 
+export type LiteratureItemType =
+  | "article"
+  | "book"
+  | "bookSection"
+  | "conferencePaper"
+  | "thesis"
+  | "report"
+  | "webpage"
+  | "dataset"
+  | "preprint"
+  | "other";
+
 export type PaperFit = "high" | "medium" | "low";
 
 export type PdfStatus = "none" | "queued" | "downloading" | "downloaded" | "failed";
@@ -211,6 +223,40 @@ export interface PdfAnnotation {
   createdAt: string;
 }
 
+/**
+ * A project-local file or an external resource associated with a paper.
+ * `pdf` remains the compatibility pointer for the PDF reader; attachments are
+ * the canonical UI model so a work can carry its manuscript, supplements,
+ * snapshots, and links together.
+ */
+export type LiteratureAttachmentKind = "pdf" | "supplement" | "webSnapshot" | "externalLink";
+
+export interface LiteratureAttachment {
+  id: string;
+  label: string;
+  kind: LiteratureAttachmentKind;
+  /** Path relative to the active local project. */
+  path?: string;
+  /** A deliberately external resource; it is never copied without user action. */
+  url?: string;
+  mimeType?: string;
+  bytes?: number;
+  addedAt: string;
+}
+
+/** A durable human note, optionally linked back to a highlight or evidence item. */
+export interface LiteratureNote {
+  id: string;
+  title?: string;
+  content: string;
+  createdAt: string;
+  updatedAt: string;
+  annotationId?: string;
+  attachmentId?: string;
+  evidenceId?: string;
+  source?: "manual" | "annotation" | "imported";
+}
+
 export interface AnswerChainSupport {
   annotationId: string;
   role: string;
@@ -230,10 +276,14 @@ export interface LiteraturePaper {
   /** Stable id: `arxiv:<id>`, `doi:<doi>` or `title:<normalized>`. */
   id: string;
   title: string;
+  /** Zotero/CSL-compatible item type, with unknown values retained as `other`. */
+  itemType?: LiteratureItemType | string;
   authors: string[];
   year?: number;
   venue: string;
   doi?: string;
+  isbn?: string;
+  citationKey?: string;
   arxivId?: string;
   url?: string;
   abstract: string;
@@ -248,6 +298,8 @@ export interface LiteraturePaper {
   citedBy?: number;
   addedAt: string;
   pdf: PaperPdf;
+  /** Multiple local and external resources. Optional for legacy projections. */
+  attachments?: LiteratureAttachment[];
   verdict?: AgentVerdict;
   screenings?: Record<string, PaperScreening>;
   brief?: PaperBrief;
@@ -257,6 +309,8 @@ export interface LiteraturePaper {
   answerChains: ReadingAnswerChain[];
   /** Persistent highlights and notes rendered inside the embedded PDF reader. */
   pdfAnnotations: PdfAnnotation[];
+  /** Free-form notes and notes created from reader annotations. */
+  notes?: LiteratureNote[];
 }
 
 export interface LiteratureSearch {
@@ -269,12 +323,21 @@ export interface LiteratureSearch {
   searchRunId?: string;
   protocolId?: string;
   status?: string;
+  /** A local query view that re-evaluates as the library changes. */
+  dynamic?: boolean;
 }
 
 export interface LiteratureCollection {
   id: string;
   label: string;
   parentId?: string;
+}
+
+export interface LiteratureDuplicateCandidate {
+  primaryRecordId: string;
+  duplicateRecordId: string;
+  normalizedTitle: string;
+  reason: string;
 }
 
 export interface LiteratureLibrary {
@@ -285,6 +348,29 @@ export interface LiteratureLibrary {
   reviewTasks: LiteratureReviewTask[];
   screenRuns: LiteratureScreenRun[];
   projectFocus?: ProjectFocus;
+}
+
+/** Read-only health/status surface for the project-local canonical store. */
+export interface LiteratureStorageStatus {
+  schemaVersion: number;
+  databasePath: string;
+  databaseBytes: number;
+  canonicalRecordCount: number;
+  searchRunCount: number;
+  health: {
+    healthy: boolean;
+    integrityCheck: string;
+    foreignKeyViolations: number;
+    journalMode: string;
+  };
+  latestBackup?: {
+    path: string;
+    bytes: number;
+    /** Unix time in milliseconds, represented as a string by the Rust layer. */
+    createdAt: string;
+  } | null;
+  projectionPath: string;
+  projectionExists: boolean;
 }
 
 export type ActivityLevel = "info" | "ok" | "warn" | "error";

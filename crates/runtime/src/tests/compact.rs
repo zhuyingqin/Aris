@@ -1,5 +1,6 @@
 use super::{
-    assemble_compacted_session, collect_key_files, estimate_session_tokens, format_compact_summary,
+    assemble_compacted_session_with_usage, collect_key_files, estimate_session_tokens,
+    format_compact_summary,
     get_compact_continuation_message, infer_latest_user_request, infer_pending_work,
     plan_compaction, summarize_messages, CompactionConfig, CompactionResult,
     CompactionSummarySource, CompactionTokenEstimateSource,
@@ -22,7 +23,13 @@ fn compact_session_for_test(session: &Session, config: CompactionConfig) -> Comp
         },
         Some(plan) => {
             let summary = summarize_messages(&plan.removed);
-            assemble_compacted_session(session, summary, CompactionSummarySource::Fallback, &plan)
+            assemble_compacted_session_with_usage(
+                session,
+                summary,
+                CompactionSummarySource::Fallback,
+                None,
+                &plan,
+            )
         }
     }
 }

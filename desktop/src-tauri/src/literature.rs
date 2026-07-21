@@ -278,7 +278,17 @@ pub fn literature_pdf_text(
     relative_path: String,
 ) -> Result<Value, String> {
     let path = resolve_pdf_path(&projects_state, &relative_path)?;
-    serde_json::to_value(extract_pdf_text_by_page(&path)?).map_err(|error| error.to_string())
+    let extraction = extract_pdf_text_by_page(&path)?;
+    let indexed_for_search = tools::literature::library_index_pdf_text_at(
+        &project_base(&projects_state)?,
+        &relative_path,
+        &extraction.text,
+    )?;
+    let mut response = serde_json::to_value(extraction).map_err(|error| error.to_string())?;
+    if let Some(object) = response.as_object_mut() {
+        object.insert("indexedForSearch".to_string(), Value::Bool(indexed_for_search));
+    }
+    Ok(response)
 }
 
 /// Read a validated local PDF for the embedded PDF.js viewer.
@@ -297,6 +307,74 @@ struct ImportedPdf {
     path: String,
     relative_path: String,
     bytes: u64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ImportedAttachment {
+    path: String,
+    relative_path: String,
+    file_name: String,
+    bytes: u64,
+    mime_type: Option<&'static str>,
+}
+
+fn attachment_mime_type(path: &Path) -> Option<&'static str> {
+    match path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "pdf" => Some("application/pdf"),
+        "txt" | "md" => Some("text/plain"),
+        "html" | "htm" => Some("text/html"),
+        "json" => Some("application/json"),
+        "csv" => Some("text/csv"),
+        "docx" => Some("application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+        "xlsx" => Some("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+        "zip" => Some("application/zip"),
+        _ => None,
+    }
+}
+
+fn import_attachment_at(base: &Path, source_path: &Path) -> Result<ImportedAttachment, String> {
+    const MAX_ATTACHMENT_BYTES: u64 = 512 * 1024 * 1024;
+    if !source_path.is_file() {
+        return Err("selected attachment must be a file".to_string());
+    }
+    let source_metadata = std::fs::metadata(source_path).map_err(|error| error.to_string())?;
+    if source_metadata.len() > MAX_ATTACHMENT_BYTES {
+        return Err("attachments may not exceed 512 MB".to_string());
+    }
+    let source_name = source_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| "selected attachment has no file name".to_string())?;
+    let safe_name = tools::literature::sanitize_file_name(source_name)?;
+    let attachments_dir = base.join("papers").join("attachments");
+    std::fs::create_dir_all(&attachments_dir).map_err(|error| error.to_string())?;
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_millis());
+    let destination_name = format!("{nonce}-{safe_name}");
+    let destination = attachments_dir.join(&destination_name);
+    std::fs::copy(source_path, &destination).map_err(|error| error.to_string())?;
+    let bytes = std::fs::metadata(&destination)
+        .map_err(|error| error.to_string())?
+        .len();
+    Ok(ImportedAttachment {
+        path: destination.to_string_lossy().to_string(),
+        relative_path: PathBuf::from("papers")
+            .join("attachments")
+            .join(&destination_name)
+            .to_string_lossy()
+            .replace('\\', "/"),
+        file_name: source_name.to_string(),
+        bytes,
+        mime_type: attachment_mime_type(source_path),
+    })
 }
 
 fn import_pdf_at(base: &Path, source_path: &Path, file_name: &str) -> Result<ImportedPdf, String> {
@@ -360,6 +438,111 @@ pub fn literature_import_pdf(
     .map_err(|error| error.to_string())
 }
 
+/// Copy an explicit user-selected local file into `papers/attachments/`.
+/// This is intentionally separate from importing a PDF: the item is attached
+/// to an existing bibliography record by the frontend and never becomes a
+/// duplicate literature record by accident.
+#[tauri::command]
+pub fn literature_import_attachment(
+    projects_state: State<ProjectState>,
+    source_path: String,
+) -> Result<Value, String> {
+    serde_json::to_value(import_attachment_at(
+        &project_base(&projects_state)?,
+        Path::new(&source_path),
+    )?)
+    .map_err(|error| error.to_string())
+}
+
+/// Copy a PDF and immediately create (or merge) its local-first literature
+/// record. This is distinct from `literature_import_pdf`, which attaches a
+/// file to an already selected record.
+#[tauri::command]
+pub fn literature_import_pdf_as_record(
+    projects_state: State<ProjectState>,
+    source_path: String,
+    title: Option<String>,
+) -> Result<Value, String> {
+    let base = project_base(&projects_state)?;
+    let source = Path::new(&source_path);
+    let file_name = source
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| "selected PDF has no file name".to_string())?;
+    let imported = import_pdf_at(&base, source, file_name)?;
+    let fallback_title = Path::new(file_name)
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or(file_name);
+    let extracted = extract_pdf_text_by_page(Path::new(&imported.path)).ok();
+    let inferred_title = extracted
+        .as_ref()
+        .and_then(|extraction| infer_pdf_title(&extraction.text));
+    let inferred_doi = extracted
+        .as_ref()
+        .and_then(|extraction| infer_pdf_doi(&extraction.text));
+    let record_title = title
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .or(inferred_title.as_deref())
+        .unwrap_or(fallback_title);
+    let report = tools::literature::library_create_pdf_record_at(
+        &base,
+        record_title,
+        &imported.relative_path,
+        imported.bytes,
+        inferred_doi.as_deref(),
+    )?;
+    let indexed_for_search = extracted
+        .as_ref()
+        .map(|extraction| {
+            tools::literature::library_index_pdf_text_at(
+                &base,
+                &imported.relative_path,
+                &extraction.text,
+            )
+        })
+        .transpose()?
+        .unwrap_or(false);
+    Ok(json!({
+        "pdf": imported,
+        "record": report,
+        "metadata": {
+            "titleInferred": inferred_title.is_some() && title.as_deref().is_none_or(|value| value.trim().is_empty()),
+            "doi": inferred_doi,
+            "indexedForSearch": indexed_for_search,
+        },
+    }))
+}
+
+/// Add an explicitly supplied DOI or ISBN through the same audited source
+/// adapters used by reproducible literature discovery.
+#[tauri::command]
+pub async fn literature_add_identifier(
+    projects_state: State<'_, ProjectState>,
+    identifier: String,
+) -> Result<Value, String> {
+    let identifier = identifier.trim().to_string();
+    let is_doi = identifier.to_ascii_lowercase().starts_with("10.");
+    let isbn_digits = identifier.chars().filter(char::is_ascii_digit).count();
+    if !is_doi && !(isbn_digits == 10 || isbn_digits == 13) {
+        return Err("enter a DOI beginning with 10. or a 10/13-digit ISBN".to_string());
+    }
+    let base = project_base(&projects_state)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        tools::literature::literature_search_ad_hoc_at(
+            &base,
+            tools::literature::LiteratureSearchInput {
+                query: identifier,
+                sources: vec!["crossref".to_string(), "openalex".to_string()],
+                max_results: Some(3),
+            },
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 /// OCR one rendered PDF page supplied by the embedded PDF.js reader. This
 /// keeps page rendering self-contained in the desktop bundle and uses the
 /// platform OCR engine (or Tesseract when available) only for image-only pages.
@@ -416,9 +599,196 @@ pub fn literature_pdf_open(
         .map_err(|error| error.to_string())
 }
 
+fn resolve_attachment_path(
+    projects_state: &ProjectState,
+    relative_path: &str,
+) -> Result<PathBuf, String> {
+    let base = project_base(projects_state)?;
+    let relative = Path::new(relative_path);
+    if relative.is_absolute()
+        || relative
+            .components()
+            .any(|part| matches!(part, std::path::Component::ParentDir))
+    {
+        return Err("invalid attachment path".to_string());
+    }
+    let attachments_root = base
+        .join("papers")
+        .canonicalize()
+        .map_err(|error| format!("papers directory is unavailable: {error}"))?;
+    let path = base
+        .join(relative)
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    if !path.starts_with(&attachments_root) {
+        return Err("attachment must be a local file inside papers/".to_string());
+    }
+    Ok(path)
+}
+
+/// Open a validated project-local attachment in its system-default viewer.
+#[tauri::command]
+pub fn literature_attachment_open(
+    projects_state: State<ProjectState>,
+    relative_path: String,
+) -> Result<(), String> {
+    let path = resolve_attachment_path(&projects_state, &relative_path)?;
+    #[cfg(target_os = "windows")]
+    let mut command = crate::process::hidden_command("explorer.exe");
+    #[cfg(target_os = "macos")]
+    let mut command = crate::process::hidden_command("open");
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut command = crate::process::hidden_command("xdg-open");
+
+    command
+        .arg(path)
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+/// Read a user-selected annotation export. The payload is bounded and must be
+/// a JSON object so malformed files cannot mutate the library state.
+#[tauri::command]
+pub fn literature_read_annotation_export(source_path: String) -> Result<Value, String> {
+    const MAX_ANNOTATION_EXPORT_BYTES: u64 = 10 * 1024 * 1024;
+    let path = Path::new(&source_path);
+    let metadata = std::fs::metadata(path).map_err(|error| error.to_string())?;
+    if !metadata.is_file() || metadata.len() > MAX_ANNOTATION_EXPORT_BYTES {
+        return Err("annotation export must be a JSON file no larger than 10 MB".to_string());
+    }
+    let value: Value = serde_json::from_slice(
+        &std::fs::read(path).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| format!("invalid annotation export: {error}"))?;
+    if !value.is_object() {
+        return Err("annotation export must contain a JSON object".to_string());
+    }
+    Ok(value)
+}
+
+/// Write a portable JSON export to the explicit destination chosen by the
+/// user. Annotation export is intentionally never written into the canonical
+/// database automatically.
+#[tauri::command]
+pub fn literature_write_annotation_export(
+    destination_path: String,
+    payload: Value,
+) -> Result<(), String> {
+    const MAX_ANNOTATION_EXPORT_BYTES: usize = 10 * 1024 * 1024;
+    let destination = Path::new(&destination_path);
+    if destination_path.trim().is_empty() || destination.is_dir() {
+        return Err("select a JSON export destination".to_string());
+    }
+    let encoded = serde_json::to_vec_pretty(&payload).map_err(|error| error.to_string())?;
+    if encoded.len() > MAX_ANNOTATION_EXPORT_BYTES {
+        return Err("annotation export exceeds the 10 MB safety limit".to_string());
+    }
+    std::fs::write(destination, encoded).map_err(|error| error.to_string())
+}
+
 #[tauri::command]
 pub fn literature_load(projects_state: State<ProjectState>) -> Result<Value, String> {
     tools::literature::library_load_at(&project_base(&projects_state)?)
+}
+
+/// The SQLite store is canonical; `papers/library.json` exists only as a
+/// compatibility projection for existing Desktop, CLI, and skill clients.
+#[tauri::command]
+pub fn literature_storage_status(
+    projects_state: State<ProjectState>,
+) -> Result<tools::literature::LiteratureStorageStatus, String> {
+    tools::literature::library_storage_status_at(&project_base(&projects_state)?)
+}
+
+/// Create a consistent copy of the canonical SQLite store.  This intentionally
+/// backs up the database rather than the legacy `papers/library.json` export.
+#[tauri::command]
+pub fn literature_storage_backup(
+    projects_state: State<ProjectState>,
+) -> Result<runtime::literature::LiteratureBackup, String> {
+    tools::literature::library_create_backup_at(&project_base(&projects_state)?)
+}
+
+/// Search titles, abstracts and local literature metadata through the SQLite
+/// FTS5 index. This is read-only and never treats the JSON projection as the
+/// source of truth.
+#[tauri::command]
+pub fn literature_full_text_search(
+    projects_state: State<ProjectState>,
+    query: String,
+    limit: Option<usize>,
+) -> Result<Value, String> {
+    tools::literature::library_full_text_search_at(
+        &project_base(&projects_state)?,
+        &query,
+        limit,
+    )
+}
+
+#[tauri::command]
+pub fn literature_duplicate_candidates(
+    projects_state: State<ProjectState>,
+) -> Result<Vec<runtime::literature::LiteratureDuplicateCandidate>, String> {
+    tools::literature::library_duplicate_candidates_at(&project_base(&projects_state)?)
+}
+
+#[tauri::command]
+pub fn literature_merge_duplicates(
+    projects_state: State<ProjectState>,
+    primary_record_id: String,
+    duplicate_record_id: String,
+) -> Result<Value, String> {
+    tools::literature::library_merge_duplicates_at(
+        &project_base(&projects_state)?,
+        &primary_record_id,
+        &duplicate_record_id,
+    )
+}
+
+#[tauri::command]
+pub fn literature_apply_delta(
+    projects_state: State<ProjectState>,
+    delta: tools::literature::LiteratureLibraryDelta,
+) -> Result<Value, String> {
+    tools::literature::library_apply_delta_at(&project_base(&projects_state)?, &delta)
+}
+
+#[tauri::command]
+pub fn literature_import_bibliography(
+    projects_state: State<ProjectState>,
+    input: tools::literature::LiteratureBibliographyImportInput,
+) -> Result<tools::literature::LiteratureBibliographyImportReport, String> {
+    tools::literature::library_import_bibliography_at(&project_base(&projects_state)?, &input)
+}
+
+/// Render one selected set of canonical records as a standard bibliography
+/// interchange format. The caller chooses any destination separately, keeping
+/// the operation local and explicit.
+#[tauri::command]
+pub fn literature_export_bibliography(
+    projects_state: State<ProjectState>,
+    input: tools::literature::LiteratureBibliographyExportInput,
+) -> Result<tools::literature::LiteratureBibliographyExportReport, String> {
+    tools::literature::library_export_bibliography_at(&project_base(&projects_state)?, &input)
+}
+
+/// Write rendered bibliography content only to a destination chosen through a
+/// desktop save dialog. This does not alter the canonical SQLite library.
+#[tauri::command]
+pub fn literature_write_bibliography_export(
+    destination_path: String,
+    content: String,
+) -> Result<(), String> {
+    const MAX_BIBLIOGRAPHY_EXPORT_BYTES: usize = 25 * 1024 * 1024;
+    let destination = Path::new(&destination_path);
+    if destination_path.trim().is_empty() || destination.is_dir() {
+        return Err("select a bibliography export destination".to_string());
+    }
+    if content.len() > MAX_BIBLIOGRAPHY_EXPORT_BYTES {
+        return Err("bibliography export exceeds the 25 MB safety limit".to_string());
+    }
+    std::fs::write(destination, content).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -626,6 +996,47 @@ fn extract_pdf_text_by_page(path: &Path) -> Result<PdfTextExtraction, String> {
         ocr_used,
         missing_pages,
         warnings,
+    })
+}
+
+/// Infer a conservative display title from the first readable PDF lines. A
+/// user-supplied title always wins; this is only a local fallback for a file
+/// dropped directly into the literature library.
+fn infer_pdf_title(text: &str) -> Option<String> {
+    text.lines()
+        .map(str::trim)
+        .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+        .find(|line| {
+            let lower = line.to_ascii_lowercase();
+            (12..=240).contains(&line.chars().count())
+                && !lower.starts_with("abstract")
+                && !lower.starts_with("introduction")
+                && !lower.starts_with("keywords")
+                && !lower.starts_with("doi")
+                && !lower.starts_with("arxiv")
+                && !lower.starts_with("copyright")
+                && !line.chars().all(|character| character.is_ascii_digit() || character.is_ascii_punctuation())
+        })
+}
+
+/// Extract the first DOI-like token from readable PDF text. It is passed into
+/// the canonical identity resolver, which may safely merge an already-known
+/// work instead of creating a second local record.
+fn infer_pdf_doi(text: &str) -> Option<String> {
+    text.split_whitespace().find_map(|token| {
+        let token = token.trim_matches(|character: char| {
+            matches!(character, '.' | ',' | ';' | ':' | ')' | ']' | '}' | '"' | '\'')
+        });
+        let index = token.to_ascii_lowercase().find("10.")?;
+        let candidate = token[index..]
+            .trim_end_matches(|character: char| matches!(character, '.' | ',' | ';' | ')' | ']' | '}'));
+        let (prefix, suffix) = candidate.split_once('/')?;
+        let registrant = prefix.strip_prefix("10.")?;
+        (registrant.len() >= 4
+            && registrant.len() <= 9
+            && registrant.chars().all(|character| character.is_ascii_digit())
+            && !suffix.is_empty())
+            .then(|| candidate.to_string())
     })
 }
 

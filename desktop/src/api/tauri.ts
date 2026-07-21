@@ -27,6 +27,9 @@ import {
 export const isTauri = (): boolean =>
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
+/** Open or focus the single always-on-top writing companion Chat window. */
+export const openChatCompanion = () => invoke<void>("open_chat_companion");
+
 const PREVIEW_LOCAL_ENVIRONMENT_CHECKS: LocalEnvironmentCheck[] = [
   {
     id: "python",
@@ -133,7 +136,6 @@ import type {
   SessionTranscript,
   SkillMeta,
   SystemPromptView,
-  TokenUsageSummary,
   UserPromptView,
 } from "../types";
 
@@ -363,7 +365,6 @@ export const appUpdateDownloadAndInstall = async (
   return { installed: true, version: update.version };
 };
 
-export const chatUsageSummary = () => invoke<TokenUsageSummary>("chat_usage_summary");
 export const appRelaunch = async () => {
   if (!isTauri()) return;
   const { relaunch } = await import("@tauri-apps/plugin-process");
@@ -452,6 +453,16 @@ export interface RemoteChatSessionUpdatedEvent {
   desktopMirrored?: boolean;
 }
 
+export interface ChatUiSessionUpdatedEvent {
+  sessionId: string;
+  operation: "saved" | "deleted";
+}
+
+/** Keeps multiple desktop windows on the same persisted Chat projection. */
+export const onChatUiSessionUpdated = (
+  handler: (event: ChatUiSessionUpdatedEvent) => void,
+) => listen<ChatUiSessionUpdatedEvent>("chat-ui-session-updated", (event) => handler(event.payload));
+
 export const onRemoteChatSessionUpdated = (
   handler: (event: RemoteChatSessionUpdatedEvent) => void,
 ) => listen<RemoteChatSessionUpdatedEvent>("remote-chat-session-updated", (e) => handler(e.payload));
@@ -476,13 +487,35 @@ export const chatUiSessionSave = <T>(session: T) =>
   invoke<void>("chat_ui_session_save", { session });
 export const chatUiSessionDelete = (id: string) =>
   invoke<void>("chat_ui_session_delete", { id });
-export const chatUiSessionsLoad = <T>() => invoke<T[]>("chat_ui_sessions_load");
 export const chatUiSessionsSave = <T>(sessions: T[]) =>
   invoke<void>("chat_ui_sessions_save", { sessions });
 
 // ── Literature library ────────────────────────────────────────────────────────
 
 export const literatureLoad = <T>() => invoke<T>("literature_load");
+export const literatureStorageStatus = <T>() => invoke<T>("literature_storage_status");
+export const literatureStorageBackup = <T>() => invoke<T>("literature_storage_backup");
+export const literatureFullTextSearch = <T>(query: string, limit?: number) =>
+  invoke<T>("literature_full_text_search", { query, limit: limit ?? null });
+export const literatureDuplicateCandidates = <T>() => invoke<T>("literature_duplicate_candidates");
+export const literatureMergeDuplicates = <T>(primaryRecordId: string, duplicateRecordId: string) =>
+  invoke<T>("literature_merge_duplicates", { primaryRecordId, duplicateRecordId });
+export const literatureApplyDelta = <T>(delta: unknown) =>
+  invoke<T>("literature_apply_delta", { delta });
+export const literatureImportBibliography = <T>(input: {
+  sourcePath: string;
+  format?: string;
+}) => invoke<T>("literature_import_bibliography", { input });
+export const literatureExportBibliography = <T>(input: {
+  format: "bibtex" | "biblatex" | "ris" | "csl-json";
+  recordIds?: string[];
+}) => invoke<T>("literature_export_bibliography", { input });
+export const literatureWriteBibliographyExport = (destinationPath: string, content: string) =>
+  invoke<void>("literature_write_bibliography_export", { destinationPath, content });
+export const literatureImportPdfAsRecord = <T>(sourcePath: string, title?: string) =>
+  invoke<T>("literature_import_pdf_as_record", { sourcePath, title: title ?? null });
+export const literatureAddIdentifier = <T>(identifier: string) =>
+  invoke<T>("literature_add_identifier", { identifier });
 export const literatureSave = <T>(library: T) =>
   invoke<void>("literature_save", { library });
 export const literatureSearch = <T>(
@@ -516,6 +549,8 @@ export const literatureDownloadPdf = <T>(url: string, fileName: string) =>
   invoke<T>("literature_download_pdf", { url, fileName });
 export const literatureImportPdf = <T>(sourcePath: string, fileName: string) =>
   invoke<T>("literature_import_pdf", { sourcePath, fileName });
+export const literatureImportAttachment = <T>(sourcePath: string) =>
+  invoke<T>("literature_import_attachment", { sourcePath });
 export const literatureLlm = (system: string, prompt: string) =>
   invoke<string>("literature_llm", { system, prompt });
 export const literatureReviewLlm = (system: string, prompt: string) =>
@@ -551,6 +586,12 @@ export const literatureImageOcr = (image: number[]) =>
   invoke<string>("literature_image_ocr", { image });
 export const literaturePdfOpen = (relativePath: string) =>
   invoke<void>("literature_pdf_open", { relativePath });
+export const literatureAttachmentOpen = (relativePath: string) =>
+  invoke<void>("literature_attachment_open", { relativePath });
+export const literatureReadAnnotationExport = <T>(sourcePath: string) =>
+  invoke<T>("literature_read_annotation_export", { sourcePath });
+export const literatureWriteAnnotationExport = (destinationPath: string, payload: unknown) =>
+  invoke<void>("literature_write_annotation_export", { destinationPath, payload });
 
 // ── Studio artifacts ──────────────────────────────────────────────────────────
 
@@ -579,8 +620,6 @@ export const knowledgeGenerate = <T>(paperId: string) =>
 const preview = <T>(value: T): Promise<T> => Promise.resolve(value);
 const noopUnlisten = () => undefined;
 
-export const labListKernels = <T>() =>
-  isLabPreviewMode() ? preview<T>([] as T) : invoke<T>("lab_list_kernels");
 export const labListKernelspecs = <T>() =>
   isLabPreviewMode() ? preview<T>(previewKernelspecs() as T) : invoke<T>("lab_list_kernelspecs");
 export const labSetKernelspec = <T>(

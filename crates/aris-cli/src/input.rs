@@ -612,25 +612,6 @@ fn advance_layout(
     }
 }
 
-/// Deprecated: kept for any external/test reference. Use `layout_position`.
-#[cfg(test)]
-fn display_position(display_width: usize, term_w: usize) -> (u16, u16) {
-    let term_w = term_w.max(1);
-    if display_width == 0 {
-        return (0, 0);
-    }
-    let row = (display_width - 1) / term_w;
-    let col = if display_width % term_w == 0 {
-        term_w - 1
-    } else {
-        display_width % term_w
-    };
-    (
-        row.min(u16::MAX as usize) as u16,
-        col.min(u16::MAX as usize) as u16,
-    )
-}
-
 // ── Interactive select menu ──────────────────────────────────────────────────
 
 /// An item in the select menu.

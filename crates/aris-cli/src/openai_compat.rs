@@ -20,13 +20,6 @@ pub struct OpenAIModelInfo {
     pub owned_by: Option<String>,
 }
 
-/// Returns `true` if the given provider string routes through the
-/// OpenAI-compatible executor/reviewer path.
-#[allow(dead_code)] // used in PR C (shared routing)
-pub fn is_openai_compat_provider(provider: &str) -> bool {
-    matches!(provider, "openai" | "custom")
-}
-
 /// Normalize a base URL to a clean `/v1`-style root suitable for appending
 /// `/chat/completions` or `/models`. Strips known suffixes and trailing
 /// slashes so callers can safely `format!("{base}/models")`.
@@ -43,32 +36,6 @@ pub fn normalize_openai_base_url(base_url: &str) -> String {
 
 pub fn models_url(base_url: &str) -> String {
     format!("{}/models", normalize_openai_base_url(base_url))
-}
-
-/// Derive a human-readable provider label from the provider string and base
-/// URL. Used in the startup banner and status displays for custom providers.
-#[allow(dead_code)] // used in PR C (shared routing)
-pub fn openai_provider_label(provider: Option<&str>, base_url: &str) -> &'static str {
-    if provider == Some("custom") {
-        return "Custom OpenAI-compatible";
-    }
-
-    let normalized = normalize_openai_base_url(base_url);
-    if normalized.contains("deepseek") {
-        "DeepSeek"
-    } else if normalized.contains("bigmodel") {
-        "GLM"
-    } else if normalized.contains("minimax") {
-        "MiniMax"
-    } else if normalized.contains("moonshot") {
-        "Moonshot"
-    } else if normalized.contains("dashscope") || normalized.contains("qwen") {
-        "Qwen"
-    } else if normalized.contains("generativelanguage.googleapis") {
-        "Gemini"
-    } else {
-        "OpenAI"
-    }
 }
 
 /// Convert a list of `OpenAIModelInfo` into `SelectItem`s for the REPL

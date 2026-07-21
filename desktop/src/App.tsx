@@ -2,7 +2,7 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { appRelaunch, appUpdateCheck, appUpdateDownloadAndInstall, isTauri, newapiBootstrap, onChatDone, type NewApiAccount } from "./api/tauri";
+import { appRelaunch, appUpdateCheck, appUpdateDownloadAndInstall, isTauri, newapiBootstrap, onChatDone, openChatCompanion, type NewApiAccount } from "./api/tauri";
 import { isManagedAuthInvalidError, useStore, type Language, type Tab } from "./store";
 import type { AppUpdateInfo, AppUpdateProgress } from "./types";
 import ErrorBoundary from "./ErrorBoundary";
@@ -48,6 +48,7 @@ type AppShellCopy = {
   minimizeWindow: string;
   maximizeWindow: string;
   closeWindow: string;
+  openChatCompanion: string;
   userMenu: string;
   settings: string;
   remainingUsage: string;
@@ -96,6 +97,7 @@ const APP_COPY: Record<Language, AppShellCopy> = {
     minimizeWindow: "最小化窗口",
     maximizeWindow: "最大化窗口",
     closeWindow: "关闭窗口",
+    openChatCompanion: "打开论文伴写悬浮窗",
     userMenu: "用户菜单",
     settings: "设置",
     remainingUsage: "剩余用量",
@@ -142,6 +144,7 @@ const APP_COPY: Record<Language, AppShellCopy> = {
     minimizeWindow: "Minimize window",
     maximizeWindow: "Maximize window",
     closeWindow: "Close window",
+    openChatCompanion: "Open writing companion",
     userMenu: "User menu",
     settings: "Settings",
     remainingUsage: "Remaining usage",
@@ -987,6 +990,20 @@ export default function App() {
           <span data-tauri-drag-region>SomniQ Studio</span>
         </div>
         <div className="window-titlebar-controls">
+          {isTauri() && (
+            <button
+              className="chat-companion-launch"
+              type="button"
+              title={copy.openChatCompanion}
+              aria-label={copy.openChatCompanion}
+              onClick={() => void openChatCompanion().catch((error) => setError(String(error)))}
+            >
+              <svg width="16" height="16" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.45" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M3 3.5h12v8H9.8L7 14v-2.5H3z" />
+                <path d="M11.5 2.5h4v4M15.5 2.5l-4.2 4.2" />
+              </svg>
+            </button>
+          )}
           {renderUpdateIndicator()}
           <WindowControlButtons
             labels={{

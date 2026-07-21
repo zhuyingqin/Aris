@@ -592,23 +592,6 @@ fn usize_to_i64(value: usize) -> i64 {
     i64::try_from(value).unwrap_or(i64::MAX)
 }
 
-/// Rotate a session file: foo.json → foo.json.1, foo.json.1 → foo.json.2, etc.
-/// Keeps at most `max_archives` backups.
-#[allow(dead_code)]
-fn rotate_session_file(path: &Path, max_archives: usize) {
-    // Shift existing archives: .3 → delete, .2 → .3, .1 → .2
-    for i in (1..max_archives).rev() {
-        let older = path.with_extension(format!("json.{}", i + 1));
-        let newer = path.with_extension(format!("json.{i}"));
-        if newer.exists() {
-            let _ = fs::rename(&newer, &older);
-        }
-    }
-    // Current → .1
-    let first_archive = path.with_extension("json.1");
-    let _ = fs::rename(path, &first_archive);
-}
-
 fn now_millis() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

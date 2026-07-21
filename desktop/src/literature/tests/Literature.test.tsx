@@ -7,6 +7,13 @@ import type { LiteratureLibrary, LiteraturePaper } from "../literatureTypes";
 
 const mocks = vi.hoisted(() => ({
   literatureLoad: vi.fn(),
+  literatureStorageStatus: vi.fn(),
+  literatureStorageBackup: vi.fn(),
+  literatureFullTextSearch: vi.fn(),
+  literatureDuplicateCandidates: vi.fn(),
+  literatureMergeDuplicates: vi.fn(),
+  literatureImportPdfAsRecord: vi.fn(),
+  literatureApplyDelta: vi.fn(),
   literatureSave: vi.fn(),
   literatureSearch: vi.fn(),
   literatureProtocolCreate: vi.fn(),
@@ -16,6 +23,12 @@ const mocks = vi.hoisted(() => ({
   literatureLibraryUpsert: vi.fn(),
   literatureDownloadPdf: vi.fn(),
   literatureImportPdf: vi.fn(),
+  literatureImportAttachment: vi.fn(),
+  literatureAttachmentOpen: vi.fn(),
+  literatureExportBibliography: vi.fn(),
+  literatureWriteBibliographyExport: vi.fn(),
+  literatureReadAnnotationExport: vi.fn(),
+  literatureWriteAnnotationExport: vi.fn(),
   literatureLlm: vi.fn(),
   literatureReviewLlm: vi.fn(),
   literatureLlmVision: vi.fn(),
@@ -39,6 +52,13 @@ const mocks = vi.hoisted(() => ({
 vi.mock("../../api/tauri", () => ({
   isTauri: () => true,
   literatureLoad: mocks.literatureLoad,
+  literatureStorageStatus: mocks.literatureStorageStatus,
+  literatureStorageBackup: mocks.literatureStorageBackup,
+  literatureFullTextSearch: mocks.literatureFullTextSearch,
+  literatureDuplicateCandidates: mocks.literatureDuplicateCandidates,
+  literatureMergeDuplicates: mocks.literatureMergeDuplicates,
+  literatureImportPdfAsRecord: mocks.literatureImportPdfAsRecord,
+  literatureApplyDelta: mocks.literatureApplyDelta,
   literatureSave: mocks.literatureSave,
   literatureSearch: mocks.literatureSearch,
   literatureProtocolCreate: mocks.literatureProtocolCreate,
@@ -48,6 +68,12 @@ vi.mock("../../api/tauri", () => ({
   literatureLibraryUpsert: mocks.literatureLibraryUpsert,
   literatureDownloadPdf: mocks.literatureDownloadPdf,
   literatureImportPdf: mocks.literatureImportPdf,
+  literatureImportAttachment: mocks.literatureImportAttachment,
+  literatureAttachmentOpen: mocks.literatureAttachmentOpen,
+  literatureExportBibliography: mocks.literatureExportBibliography,
+  literatureWriteBibliographyExport: mocks.literatureWriteBibliographyExport,
+  literatureReadAnnotationExport: mocks.literatureReadAnnotationExport,
+  literatureWriteAnnotationExport: mocks.literatureWriteAnnotationExport,
   literatureLlm: mocks.literatureLlm,
   literatureReviewLlm: mocks.literatureReviewLlm,
   literatureLlmVision: mocks.literatureLlmVision,
@@ -79,6 +105,7 @@ vi.mock("../pdfExtraction", () => ({
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({
   open: vi.fn(),
+  save: vi.fn(),
 }));
 
 import Literature from "../Literature";
@@ -161,6 +188,42 @@ beforeEach(() => {
       },
     );
   mocks.literatureLoad.mockReset().mockResolvedValue(fixtureLibrary());
+  mocks.literatureStorageStatus.mockReset().mockResolvedValue({
+    schemaVersion: 1,
+    databasePath: "C:/project/.somniq/literature/literature.sqlite3",
+    databaseBytes: 4096,
+    canonicalRecordCount: 1,
+    searchRunCount: 0,
+    health: {
+      healthy: true,
+      integrityCheck: "ok",
+      foreignKeyViolations: 0,
+      journalMode: "wal",
+    },
+    latestBackup: null,
+    projectionPath: "C:/project/papers/library.json",
+    projectionExists: true,
+  });
+  mocks.literatureStorageBackup.mockReset().mockResolvedValue({
+    path: "C:/project/.somniq/literature/backups/literature-1.sqlite3",
+    bytes: 4096,
+    createdAt: "1784635200000",
+  });
+  mocks.literatureFullTextSearch.mockReset().mockResolvedValue({ papers: [] });
+  mocks.literatureDuplicateCandidates.mockReset().mockResolvedValue([]);
+  mocks.literatureMergeDuplicates.mockReset().mockResolvedValue({ primaryRecordId: "arxiv:1111.00001" });
+  mocks.literatureImportPdfAsRecord.mockReset().mockResolvedValue({ record: { recordId: "arxiv:1111.00001" } });
+  mocks.literatureApplyDelta.mockReset().mockImplementation((delta) => {
+    const current = fixtureLibrary();
+    const papers = new Map(current.papers.map((paper) => [paper.id, paper]));
+    for (const paper of delta.upsertPapers ?? []) papers.set(paper.id, paper);
+    for (const id of delta.hidePaperIds ?? []) papers.delete(id);
+    return Promise.resolve({
+      ...current,
+      ...delta.projectionMetadata,
+      papers: [...papers.values()],
+    });
+  });
   mocks.literatureSave.mockReset().mockResolvedValue(undefined);
   mocks.literatureSearch.mockReset().mockResolvedValue({
     papers: [
@@ -250,6 +313,16 @@ beforeEach(() => {
     relativePath: "papers/1111.00001.pdf",
     bytes: 654321,
   });
+  mocks.literatureImportAttachment.mockReset().mockResolvedValue({
+    path: "C:/project/papers/attachments/123-supplement.csv",
+    relativePath: "papers/attachments/123-supplement.csv",
+    fileName: "supplement.csv",
+    bytes: 321,
+    mimeType: "text/csv",
+  });
+  mocks.literatureAttachmentOpen.mockReset().mockResolvedValue(undefined);
+  mocks.literatureReadAnnotationExport.mockReset().mockResolvedValue({ annotations: [], notes: [] });
+  mocks.literatureWriteAnnotationExport.mockReset().mockResolvedValue(undefined);
   mocks.literatureLibraryUpsert.mockReset().mockResolvedValue({
     searchId: "search-new",
     added: 1,
@@ -298,6 +371,7 @@ describe("Literature library", () => {
     const user = userEvent.setup();
     render(<Literature />);
 
+    await user.click(screen.getByRole("tab", { name: "检索" }));
     await user.type(screen.getByRole("textbox", { name: "研究问题" }), "What evidence supports local-first review?");
     await user.type(screen.getByRole("textbox", { name: "完整查询式" }), "local-first review");
     await user.type(screen.getByRole("textbox", { name: "openalex 查询式" }), "openalex-local-first");
@@ -329,6 +403,21 @@ describe("Literature library", () => {
     );
     expect(await screen.findByText(/SearchRun run-reproducible-search/)).toBeTruthy();
     expect(screen.getByText(/Sample record from the reproducible run/)).toBeTruthy();
+  });
+
+  it("keeps the reference manager as the default view and exposes the canonical SQLite store", async () => {
+    const user = userEvent.setup();
+    render(<Literature />);
+
+    expect(await screen.findAllByText("Persisted Paper on Grounded Reading")).toBeTruthy();
+    expect(screen.queryByRole("textbox", { name: "研究问题" })).toBeNull();
+    expect(await screen.findByText(/本地 SQLite · 模式 v1 · 健康 · 1 条规范记录 · 4 KB · 尚未备份/)).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: "备份数据库" }));
+    await waitFor(() => expect(mocks.literatureStorageBackup).toHaveBeenCalledTimes(1));
+
+    await user.click(screen.getByRole("tab", { name: "检索" }));
+    expect(screen.getByRole("textbox", { name: "研究问题" })).toBeTruthy();
   });
 
   it("loads the persisted library and shows pipeline counts", async () => {
@@ -531,7 +620,7 @@ describe("Literature library", () => {
       reviewerCount: 1,
       fallbackCount: 0,
     });
-    expect(mocks.literatureSave.mock.calls.length).toBeGreaterThanOrEqual(4);
+    expect(mocks.literatureApplyDelta.mock.calls.length).toBeGreaterThanOrEqual(1);
   });
 
   it("screens large libraries in stable 40-paper chunks", async () => {
@@ -643,6 +732,65 @@ describe("Literature library", () => {
       color: "green",
       kind: "note",
     });
+  });
+
+  it("keeps a note generated from a PDF annotation after the highlight is removed", () => {
+    useLiteratureStore.setState({ library: fixtureLibrary(), loaded: true });
+    const state = useLiteratureStore.getState();
+    act(() => {
+      state.addPdfAnnotation(fixturePaper.id, {
+        page: 4,
+        quote: "A stable reader anchor.",
+        note: "Interpret this result carefully.",
+        kind: "note",
+      });
+    });
+    const annotation = useLiteratureStore.getState().library.papers[0].pdfAnnotations[0];
+
+    act(() => {
+      useLiteratureStore.getState().createNoteFromAnnotation(fixturePaper.id, annotation.id);
+    });
+    const created = useLiteratureStore.getState().library.papers[0].notes?.[0];
+    expect(created).toMatchObject({ annotationId: annotation.id, source: "annotation" });
+    expect(created?.content).toContain("A stable reader anchor.");
+
+    act(() => {
+      useLiteratureStore.getState().deletePdfAnnotation(fixturePaper.id, annotation.id);
+    });
+    const paper = useLiteratureStore.getState().library.papers[0];
+    expect(paper.pdfAnnotations).toEqual([]);
+    expect(paper.notes?.[0]).toMatchObject({ content: expect.stringContaining("Interpret this result carefully.") });
+    expect(paper.notes?.[0]?.annotationId).toBeUndefined();
+  });
+
+  it("imports supplemental attachments and portable annotation JSON without replacing reader data", async () => {
+    useLiteratureStore.setState({ library: fixtureLibrary(), loaded: true });
+
+    await act(async () => {
+      await useLiteratureStore.getState().importAttachment(
+        fixturePaper.id,
+        "C:/Users/researcher/supplement.csv",
+        "supplement",
+      );
+    });
+    expect(mocks.literatureImportAttachment).toHaveBeenCalledWith("C:/Users/researcher/supplement.csv");
+    expect(useLiteratureStore.getState().library.papers[0].attachments).toEqual([
+      expect.objectContaining({ kind: "supplement", path: "papers/attachments/123-supplement.csv" }),
+    ]);
+
+    let imported: { annotations: number; notes: number } | undefined;
+    act(() => {
+      imported = useLiteratureStore.getState().importAnnotations(fixturePaper.id, {
+        annotations: [{ id: "portable-mark", page: 2, quote: "Imported support", note: "Portable annotation", kind: "note" }],
+        notes: [{ title: "Imported note", content: "Keep the provenance.", annotationId: "portable-mark", source: "annotation" }],
+      });
+    });
+    expect(imported).toEqual({ annotations: 1, notes: 1 });
+    const paper = useLiteratureStore.getState().library.papers[0];
+    expect(paper.pdfAnnotations).toEqual([expect.objectContaining({ quote: "Imported support" })]);
+    expect(paper.notes).toEqual([
+      expect.objectContaining({ title: "Imported note", annotationId: "portable-mark", source: "imported" }),
+    ]);
   });
 
   it("opens an already downloaded PDF in the embedded reader", async () => {
@@ -761,13 +909,13 @@ describe("Literature library", () => {
     await user.click(screen.getByRole("button", { name: "删除" }));
 
     expect(screen.getByText("论文库为空。")).toBeTruthy();
-    await waitFor(() => expect(mocks.literatureSave).toHaveBeenCalled(), {
+    await waitFor(() => expect(mocks.literatureApplyDelta).toHaveBeenCalled(), {
       timeout: 2000,
     });
-    const saved = mocks.literatureSave.mock.calls[
-      mocks.literatureSave.mock.calls.length - 1
-    ]?.[0] as LiteratureLibrary;
-    expect(saved.papers).toHaveLength(0);
+    const saved = mocks.literatureApplyDelta.mock.calls[
+      mocks.literatureApplyDelta.mock.calls.length - 1
+    ]?.[0] as { hidePaperIds: string[] };
+    expect(saved.hidePaperIds).toEqual(["arxiv:1111.00001"]);
   });
 
   it("opens Chat from the selected paper detail", async () => {

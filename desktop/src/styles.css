@@ -14798,3 +14798,356 @@ button.chat-workflow-file-path:hover {
     transition: none !important;
   }
 }
+
+/* Compact always-on-top Chat used beside LaTeX and other writing tools. */
+.window-titlebar-controls .chat-companion-launch {
+  color: var(--text-dim);
+}
+
+.window-titlebar-controls .chat-companion-launch:hover {
+  color: var(--text);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+body.chat-companion-window {
+  overflow: hidden;
+  background: var(--bg);
+}
+
+.chat-companion-root {
+  width: 100vw;
+  height: 100vh;
+  display: grid;
+  grid-template-rows: 46px minmax(0, 1fr);
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.chat-companion-titlebar {
+  min-width: 0;
+  display: flex;
+  align-items: stretch;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--panel) 94%, transparent);
+  user-select: none;
+}
+
+.chat-companion-brand {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 0 10px 0 13px;
+}
+
+.chat-companion-mark {
+  width: 27px;
+  height: 27px;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 13%, transparent);
+}
+
+.chat-companion-titles {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  line-height: 1.15;
+}
+
+.chat-companion-titles strong {
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.chat-companion-titles small {
+  max-width: 190px;
+  margin-top: 3px;
+  overflow: hidden;
+  color: var(--text-dim);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-companion-window-actions {
+  flex: 0 0 auto;
+  display: flex;
+}
+
+.chat-companion-window-actions button {
+  width: 40px;
+  border: 0;
+  border-radius: 0;
+  display: grid;
+  place-items: center;
+  color: var(--text-dim);
+  background: transparent;
+  cursor: default;
+}
+
+.chat-companion-window-actions button:hover,
+.chat-companion-window-actions button.active {
+  color: var(--text);
+  background: color-mix(in srgb, var(--text) 8%, transparent);
+}
+
+.chat-companion-window-actions button.active {
+  color: var(--accent);
+}
+
+.chat-companion-window-actions button.close:hover {
+  color: white;
+  background: #c42b1c;
+}
+
+.chat-companion-content {
+  min-width: 0;
+  min-height: 0;
+  position: relative;
+  overflow: hidden;
+}
+
+.chat-companion-content > .chat-root,
+.chat-companion-content .chat {
+  height: 100%;
+  min-height: 0;
+}
+
+.chat-companion-content .chat-sidebar {
+  max-width: calc(100vw - 42px);
+}
+
+.chat-companion-content .chat-project-brief,
+.chat-companion-content .chat-side-task-panel,
+.chat-companion-content .chat-sidebar-resize-handle {
+  display: none;
+}
+
+/* The companion is intentionally denser than the primary Chat surface. It
+   keeps the writing window useful at roughly half-screen width while leaving
+   the comfortable layout available from the title-bar density toggle. */
+.chat-companion-root.is-compact {
+  grid-template-rows: 38px minmax(0, 1fr);
+}
+
+.chat-companion-root.is-compact .chat-companion-brand {
+  gap: 7px;
+  padding-left: 10px;
+}
+
+.chat-companion-root.is-compact .chat-companion-mark {
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
+}
+
+.chat-companion-root.is-compact .chat-companion-titles small {
+  margin-top: 1px;
+}
+
+.chat-companion-root.is-compact .chat-companion-window-actions button {
+  width: 34px;
+}
+
+.chat-companion-root.is-compact .chat-scroll {
+  padding: 14px 12px 10px;
+}
+
+.chat-companion-root.is-compact .chat-turn {
+  width: 100%;
+  margin: 0 auto 8px;
+  padding-bottom: 8px;
+}
+
+.chat-companion-root.is-compact .chat-user .chat-text {
+  max-width: 90%;
+  padding: 7px 10px;
+  border-radius: 11px;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.chat-companion-root.is-compact .chat-assistant .md-content {
+  font-size: 13.25px;
+  line-height: 1.62;
+}
+
+.chat-companion-root.is-compact .md-content p {
+  margin-bottom: 9px;
+}
+
+.chat-companion-root.is-compact .md-content h1,
+.chat-companion-root.is-compact .md-content h2,
+.chat-companion-root.is-compact .md-content h3,
+.chat-companion-root.is-compact .md-content h4,
+.chat-companion-root.is-compact .md-content h5,
+.chat-companion-root.is-compact .md-content h6 {
+  margin: 12px 0 6px;
+}
+
+.chat-companion-root.is-compact .md-content ul,
+.chat-companion-root.is-compact .md-content ol {
+  margin: 4px 0 8px;
+  padding-left: 18px;
+}
+
+.chat-companion-root.is-compact .md-content li {
+  margin: 2px 0;
+  line-height: 1.58;
+}
+
+.chat-companion-root.is-compact .md-inline-code {
+  padding: 1px 4px;
+  font-size: 11.5px;
+}
+
+.chat-companion-root.is-compact .md-code-block {
+  margin: 8px 0;
+  border-radius: 7px;
+}
+
+.chat-companion-root.is-compact .md-code-header {
+  min-height: 28px;
+  padding: 4px 8px;
+}
+
+.chat-companion-root.is-compact .md-code-dots,
+.chat-companion-root.is-compact .md-code-gutter {
+  display: none;
+}
+
+.chat-companion-root.is-compact .md-code-copy {
+  padding: 1px 7px;
+  font-size: 10px;
+}
+
+.chat-companion-root.is-compact .md-code-body {
+  max-height: min(380px, 50vh);
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+.chat-companion-root.is-compact .md-code-block code.md-code-content {
+  min-width: 0;
+  padding: 9px 10px 10px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+.chat-companion-root.is-compact .chat-tool-header {
+  padding: 5px 8px;
+}
+
+.chat-companion-root.is-compact .chat-tool-body {
+  padding: 0 8px 8px;
+}
+
+.chat-companion-root.is-compact .chat-message-actions {
+  min-height: 18px;
+  margin-top: 2px;
+}
+
+.chat-companion-root.is-compact .chat-message-actions button {
+  padding: 1px 5px;
+  font-size: 10px;
+}
+
+.chat-companion-root.is-compact .chat-question-timeline {
+  display: none;
+}
+
+.chat-companion-root.is-compact .chat-input-wrap {
+  right: 0;
+  padding: 0 8px 8px;
+}
+
+.chat-companion-root.is-compact .chat-input {
+  padding: 6px 7px 5px;
+  border-radius: 12px;
+}
+
+.chat-companion-root.is-compact .chat-input textarea {
+  min-height: 34px;
+  max-height: min(24vh, 170px);
+  padding: 6px 7px;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.chat-companion-root.is-compact .chat-input-footer {
+  min-height: 30px;
+  gap: 6px;
+  padding-left: 5px;
+}
+
+.chat-companion-root.is-compact .chat-footer-left,
+.chat-companion-root.is-compact .chat-footer-right {
+  gap: 4px;
+}
+
+.chat-companion-root.is-compact .chat-pill {
+  gap: 3px;
+  padding: 2px 6px;
+  font-size: 10px;
+}
+
+.chat-companion-root.is-compact .chat-upload-btn,
+.chat-companion-root.is-compact .chat-send-btn {
+  width: 28px;
+  height: 28px;
+  flex-basis: 28px;
+}
+
+.chat-companion-root.is-compact .chat-sidebar-open {
+  top: 8px;
+  left: 8px;
+  width: 28px;
+  height: 28px;
+}
+
+.chat-companion-root.is-compact .chat-welcome {
+  padding: 18px 12px 120px;
+}
+
+.chat-companion-root.is-compact .chat-welcome-mark {
+  display: none;
+}
+
+.chat-companion-root.is-compact .chat-welcome h1 {
+  font-size: 19px;
+}
+
+.chat-companion-root.is-compact .chat-starters {
+  grid-template-columns: 1fr;
+  gap: 6px;
+}
+
+@media (max-width: 480px) {
+  .chat-companion-titles small {
+    display: none;
+  }
+
+  .chat-companion-window-actions button {
+    width: 34px;
+  }
+}
+
+@media (max-width: 410px) {
+  .chat-companion-titles small {
+    max-width: 115px;
+  }
+
+  .chat-companion-window-actions button {
+    width: 36px;
+  }
+}

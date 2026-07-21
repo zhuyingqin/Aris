@@ -48,6 +48,84 @@ const SCIENCEDIRECT_ORIGIN: &str = "https://www.sciencedirect.com";
 const ATOM_NS: &str = "http://www.w3.org/2005/Atom";
 const ARXIV_NS: &str = "http://arxiv.org/schemas/atom";
 
+/// Read-only summary of the local canonical literature store.  The Desktop
+/// uses this to distinguish the SQLite source of truth from its legacy JSON
+/// compatibility projection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LiteratureStorageStatus {
+    pub schema_version: u32,
+    pub database_path: String,
+    pub database_bytes: u64,
+    pub canonical_record_count: usize,
+    pub search_run_count: usize,
+    pub health: runtime::literature::LiteratureHealth,
+    pub latest_backup: Option<runtime::literature::LiteratureBackup>,
+    pub projection_path: String,
+    pub projection_exists: bool,
+}
+
+/// A targeted Desktop mutation.  It never accepts a full library snapshot:
+/// canonical rows and compatibility-only metadata are updated independently.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LiteratureLibraryDelta {
+    #[serde(default)]
+    pub upsert_papers: Vec<Value>,
+    #[serde(default)]
+    pub hide_paper_ids: Vec<String>,
+    #[serde(default)]
+    pub projection_metadata: Option<Value>,
+}
+
+/// A user-selected bibliographic export.  `source_path` is intentionally a
+/// local desktop path; no bibliography is uploaded during import.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LiteratureBibliographyImportInput {
+    pub source_path: String,
+    /// Optional explicit parser: `zotero-json`, `csl-json`, `ris`, or
+    /// `bibtex`. When omitted, the extension and JSON shape are used.
+    #[serde(default)]
+    pub format: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LiteratureBibliographyImportReport {
+    pub format: String,
+    pub imported: usize,
+    pub merged: usize,
+    pub skipped: usize,
+    pub total: usize,
+}
+
+/// Request a portable bibliography projection from the canonical local store.
+/// An empty `record_ids` list exports the complete visible library.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LiteratureBibliographyExportInput {
+    pub format: String,
+    #[serde(default)]
+    pub record_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LiteratureBibliographyExportReport {
+    pub format: String,
+    pub exported: usize,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LiteraturePdfRecordImportReport {
+    pub record_id: String,
+    pub inserted: bool,
+    pub merged_record_ids: Vec<String>,
+}
+
 // ── Tool inputs ─────────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
@@ -796,6 +874,725 @@ fn canonical_record_from_remote(
 
 pub fn library_path_at(base: &Path) -> PathBuf {
     base.join(PAPERS_DIR).join(LIBRARY_FILE)
+}
+
+/// Reports the durable local store without treating `papers/library.json` as
+/// an independent database.  Opening the store also ensures a newly created
+/// project has an initialized SQLite schema before the Desktop renders it.
+pub fn library_storage_status_at(base: &Path) -> Result<LiteratureStorageStatus, String> {
+    let store = runtime::open_literature_store_at(base)?;
+    let database_path = store.database_path();
+    let database_bytes = std::fs::metadata(&database_path)
+        .map_err(|error| error.to_string())?
+        .len();
+    let projection_path = library_path_at(base);
+    Ok(LiteratureStorageStatus {
+        schema_version: runtime::LITERATURE_SCHEMA_VERSION,
+        database_path: database_path.to_string_lossy().to_string(),
+        database_bytes,
+        canonical_record_count: store.list_canonical_records()?.len(),
+        search_run_count: store.list_search_runs(None)?.len(),
+        health: store.health()?,
+        latest_backup: store.latest_backup()?,
+        projection_path: projection_path.to_string_lossy().to_string(),
+        projection_exists: projection_path.exists(),
+    })
+}
+
+/// Create an explicit, recoverable SQLite backup without treating the legacy
+/// JSON projection as data that needs to be copied or restored.
+pub fn library_create_backup_at(
+    base: &Path,
+) -> Result<runtime::literature::LiteratureBackup, String> {
+    runtime::open_literature_store_at(base)?.create_backup()
+}
+
+/// Search the canonical local store through its SQLite FTS5 index.  Results
+/// are projected through the same compatibility shape as `library_load_at`,
+/// while ordering is retained from the canonical ranked result set.
+pub fn library_full_text_search_at(
+    base: &Path,
+    query: &str,
+    limit: Option<usize>,
+) -> Result<Value, String> {
+    let store = runtime::open_literature_store_at(base)?;
+    let hits = store.full_text_search(query, limit.unwrap_or(100).clamp(1, 250))?;
+    drop(store);
+
+    let library = library_load_at(base)?;
+    let papers_by_id = library["papers"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|paper| {
+            paper
+                .get("id")
+                .and_then(Value::as_str)
+                .map(|id| (id.to_string(), paper.clone()))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let papers = hits
+        .iter()
+        .filter_map(|hit| papers_by_id.get(&hit.record_id).cloned())
+        .collect::<Vec<_>>();
+    Ok(json!({ "query": query, "hits": hits, "papers": papers }))
+}
+
+/// Index the extracted text for one local PDF without exposing it through the
+/// legacy JSON projection. Returns false when the file is not attached to a
+/// canonical literature record.
+pub fn library_index_pdf_text_at(
+    base: &Path,
+    relative_path: &str,
+    text: &str,
+) -> Result<bool, String> {
+    let normalized_path = relative_path.replace('\\', "/");
+    let mut store = runtime::open_literature_store_at(base)?;
+    let record_id = store
+        .list_canonical_records()?
+        .into_iter()
+        .find(|record| {
+            record.metadata["legacyLibrary"]["pdf"]["path"]
+                .as_str()
+                .map(|path| path.replace('\\', "/") == normalized_path)
+                .unwrap_or(false)
+        })
+        .map(|record| record.id);
+    let Some(record_id) = record_id else {
+        return Ok(false);
+    };
+    store.set_record_pdf_text(&record_id, text)?;
+    Ok(true)
+}
+
+/// List conservative duplicate candidates for the Desktop review panel.
+pub fn library_duplicate_candidates_at(
+    base: &Path,
+) -> Result<Vec<runtime::literature::LiteratureDuplicateCandidate>, String> {
+    runtime::open_literature_store_at(base)?.duplicate_candidates()
+}
+
+/// Apply a deliberate user-selected duplicate merge and regenerate the legacy
+/// JSON projection only after the canonical transaction succeeds.
+pub fn library_merge_duplicates_at(
+    base: &Path,
+    primary_record_id: &str,
+    duplicate_record_id: &str,
+) -> Result<Value, String> {
+    let mut store = runtime::open_literature_store_at(base)?;
+    let primary = store.merge_canonical_records(primary_record_id, duplicate_record_id)?;
+    let projection = project_legacy_library(
+        &store.legacy_library_projection_meta()?,
+        &store.list_canonical_records()?,
+        &store.list_search_runs(None)?,
+    );
+    write_library_file(&library_path_at(base), &projection)?;
+    Ok(json!({ "primaryRecordId": primary.id, "projection": projection }))
+}
+
+/// Apply a minimal Desktop change to the canonical store, then refresh the
+/// JSON compatibility projection.  The JSON file is never read back as a
+/// writable source of truth in this path.
+pub fn library_apply_delta_at(base: &Path, delta: &LiteratureLibraryDelta) -> Result<Value, String> {
+    let mut store = runtime::open_literature_store_at(base)?;
+    if !store.has_legacy_library_bootstrap()? {
+        drop(store);
+        let _ = library_load_at(base)?;
+        store = runtime::open_literature_store_at(base)?;
+    }
+    for paper in &delta.upsert_papers {
+        let record_id = record_str(paper, "id");
+        if record_id.is_empty() {
+            return Err("literature delta paper update requires a canonical record id".to_string());
+        }
+        if store.load_canonical_record(record_id)?.is_none() {
+            return Err(format!(
+                "unknown canonical record {record_id:?}; use a standard import or search protocol to add records"
+            ));
+        }
+        store.update_legacy_library_paper(record_id, paper)?;
+    }
+    for record_id in &delta.hide_paper_ids {
+        let record_id = record_id.trim();
+        if !record_id.is_empty() {
+            store.set_legacy_library_visibility(record_id, false)?;
+        }
+    }
+    if let Some(metadata) = &delta.projection_metadata {
+        if !metadata.is_object() {
+            return Err("literature projection metadata must be a JSON object".to_string());
+        }
+        store.set_legacy_library_projection_meta(metadata)?;
+    }
+    store.mark_legacy_library_bootstrap()?;
+    let projection = project_legacy_library(
+        &store.legacy_library_projection_meta()?,
+        &store.list_canonical_records()?,
+        &store.list_search_runs(None)?,
+    );
+    write_library_file(&library_path_at(base), &projection)?;
+    Ok(projection)
+}
+
+/// Import a standard local bibliography export directly into the canonical
+/// SQLite store. All parsers normalise to one internal JSON shape before the
+/// identity resolver runs, so imports can never create a parallel library.
+pub fn library_import_bibliography_at(
+    base: &Path,
+    input: &LiteratureBibliographyImportInput,
+) -> Result<LiteratureBibliographyImportReport, String> {
+    let source_path = PathBuf::from(input.source_path.trim());
+    if input.source_path.trim().is_empty() || !source_path.is_file() {
+        return Err("select a readable local bibliography export file".to_string());
+    }
+    let bytes = std::fs::read(&source_path).map_err(|error| error.to_string())?;
+    let requested = input.format.as_deref().unwrap_or("").trim().to_ascii_lowercase();
+    let format = if requested.is_empty() {
+        match source_path.extension().and_then(|value| value.to_str()).unwrap_or("").to_ascii_lowercase().as_str() {
+            "json" => "json".to_string(),
+            "ris" => "ris".to_string(),
+            "bib" | "bibtex" => "bibtex".to_string(),
+            _ => return Err("unsupported bibliography extension; choose JSON, RIS, or BibTeX".to_string()),
+        }
+    } else { requested };
+    let (format, items) = standard_bibliography_items(&format, &bytes)?;
+    let mut store = runtime::open_literature_store_at(base)?;
+    if !store.has_legacy_library_bootstrap()? {
+        drop(store);
+        let _ = library_load_at(base)?;
+        store = runtime::open_literature_store_at(base)?;
+    }
+    let mut imported = 0;
+    let mut merged = 0;
+    let mut skipped = 0;
+    for item in items {
+        let Some((record, paper)) = canonical_record_from_standard_json(&item) else {
+            skipped += 1;
+            continue;
+        };
+        let result = store.upsert_canonical_record(&record)?;
+        store.update_legacy_library_paper(&result.record.id, &paper)?;
+        if result.inserted { imported += 1; } else { merged += 1; }
+    }
+    store.mark_legacy_library_bootstrap()?;
+    let projection = project_legacy_library(&store.legacy_library_projection_meta()?, &store.list_canonical_records()?, &store.list_search_runs(None)?);
+    write_library_file(&library_path_at(base), &projection)?;
+    Ok(LiteratureBibliographyImportReport { format, imported, merged, skipped, total: projection["papers"].as_array().map_or(0, Vec::len) })
+}
+
+/// Export records projected from the canonical SQLite store.  This intentionally
+/// reads the same projection used by the Desktop and CLI instead of treating
+/// `papers/library.json` as an independently writable bibliography database.
+pub fn library_export_bibliography_at(
+    base: &Path,
+    input: &LiteratureBibliographyExportInput,
+) -> Result<LiteratureBibliographyExportReport, String> {
+    let format = normalize_bibliography_export_format(&input.format)?;
+    let library = library_load_at(base)?;
+    let papers = library["papers"]
+        .as_array()
+        .ok_or_else(|| "canonical literature projection has no paper list".to_string())?;
+    let requested = input
+        .record_ids
+        .iter()
+        .map(|id| id.trim())
+        .filter(|id| !id.is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<BTreeSet<_>>();
+    let selected = papers
+        .iter()
+        .filter(|paper| {
+            requested.is_empty()
+                || paper["id"]
+                    .as_str()
+                    .is_some_and(|id| requested.contains(id))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if !requested.is_empty() {
+        let found = selected
+            .iter()
+            .filter_map(|paper| paper["id"].as_str())
+            .collect::<BTreeSet<_>>();
+        let missing = requested
+            .iter()
+            .filter(|id| !found.contains(id.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            return Err(format!("cannot export unknown literature record(s): {}", missing.join(", ")));
+        }
+    }
+    let mut used_keys = BTreeSet::new();
+    let entries = selected
+        .iter()
+        .map(|paper| BibliographyExportEntry {
+            paper,
+            citation_key: bibliography_citation_key(paper, &mut used_keys),
+        })
+        .collect::<Vec<_>>();
+    let content = match format.as_str() {
+        "bibtex" => entries
+            .iter()
+            .map(|entry| bibtex_entry(entry, false))
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+        "biblatex" => entries
+            .iter()
+            .map(|entry| bibtex_entry(entry, true))
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+        "ris" => entries.iter().map(ris_entry).collect::<Vec<_>>().join("\n"),
+        "csl-json" => serde_json::to_string_pretty(
+            &entries.iter().map(csl_json_entry).collect::<Vec<_>>(),
+        )
+        .map_err(|error| error.to_string())?,
+        _ => unreachable!("format is validated above"),
+    };
+    Ok(LiteratureBibliographyExportReport {
+        format,
+        exported: entries.len(),
+        content: if content.is_empty() { content } else { format!("{content}\n") },
+    })
+}
+
+struct BibliographyExportEntry<'a> {
+    paper: &'a Value,
+    citation_key: String,
+}
+
+fn normalize_bibliography_export_format(value: &str) -> Result<String, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "bib" | "bibtex" => Ok("bibtex".to_string()),
+        "biblatex" => Ok("biblatex".to_string()),
+        "ris" => Ok("ris".to_string()),
+        "csl" | "csl-json" | "csljson" | "json" => Ok("csl-json".to_string()),
+        _ => Err("choose BibTeX, BibLaTeX, RIS, or CSL-JSON for bibliography export".to_string()),
+    }
+}
+
+fn paper_string(paper: &Value, field: &str) -> String {
+    paper[field].as_str().unwrap_or_default().trim().to_string()
+}
+
+fn paper_authors(paper: &Value) -> Vec<String> {
+    paper["authors"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .filter(|author| !author.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn citation_key_component(value: &str) -> String {
+    value
+        .chars()
+        .filter_map(|character| character.is_ascii_alphanumeric().then_some(character.to_ascii_lowercase()))
+        .collect()
+}
+
+fn valid_citation_key(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    let key = value
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | ':' | '.'))
+        .collect::<String>();
+    if key.is_empty() {
+        None
+    } else if key.chars().next().is_some_and(|character| character.is_ascii_alphabetic()) {
+        Some(key)
+    } else {
+        Some(format!("ref{key}"))
+    }
+}
+
+fn bibliography_citation_key(paper: &Value, used: &mut BTreeSet<String>) -> String {
+    let author = paper_authors(paper)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| "reference".to_string());
+    let family = author
+        .split_once(',')
+        .map(|(family, _)| family)
+        .or_else(|| author.split_whitespace().last())
+        .unwrap_or("reference");
+    let year = paper["year"]
+        .as_u64()
+        .map(|year| year.to_string())
+        .unwrap_or_else(|| "nd".to_string());
+    let title_word = paper_string(paper, "title")
+        .split_whitespace()
+        .map(citation_key_component)
+        .find(|word| word.len() > 2)
+        .unwrap_or_else(|| "work".to_string());
+    let base = paper["citationKey"]
+        .as_str()
+        .and_then(valid_citation_key)
+        .unwrap_or_else(|| {
+            let family = citation_key_component(family);
+            format!("{}{}{}", if family.is_empty() { "ref" } else { &family }, year, title_word)
+        });
+    let mut candidate = base.clone();
+    let mut suffix = 2_usize;
+    while used.contains(&candidate.to_ascii_lowercase()) {
+        candidate = format!("{base}{suffix}");
+        suffix += 1;
+    }
+    used.insert(candidate.to_ascii_lowercase());
+    candidate
+}
+
+fn bibtex_value(value: &str) -> String {
+    value
+        .replace('\\', "\\textbackslash{}")
+        .replace('{', "\\{")
+        .replace('}', "\\}")
+        .replace('%', "\\%")
+        .replace('&', "\\&")
+        .replace('#', "\\#")
+        .replace('_', "\\_")
+}
+
+fn bibtex_entry_type(item_type: &str, biblatex: bool) -> &'static str {
+    match item_type {
+        "article" => "article",
+        "book" => "book",
+        "bookSection" => "incollection",
+        "conferencePaper" => "inproceedings",
+        "thesis" => if biblatex { "thesis" } else { "phdthesis" },
+        "report" => "techreport",
+        "webpage" => if biblatex { "online" } else { "misc" },
+        "dataset" => if biblatex { "dataset" } else { "misc" },
+        "preprint" => "article",
+        _ => "misc",
+    }
+}
+
+fn bibtex_entry(entry: &BibliographyExportEntry<'_>, biblatex: bool) -> String {
+    let paper = entry.paper;
+    let item_type = paper_string(paper, "itemType");
+    let mut fields = vec![format!("  title = {{{}}}", bibtex_value(&paper_string(paper, "title")))];
+    let authors = paper_authors(paper);
+    if !authors.is_empty() {
+        fields.push(format!("  author = {{{}}}", bibtex_value(&authors.join(" and "))));
+    }
+    if let Some(year) = paper["year"].as_u64() {
+        fields.push(if biblatex {
+            format!("  date = {{{year}}}")
+        } else {
+            format!("  year = {{{year}}}")
+        });
+    }
+    let venue = paper_string(paper, "venue");
+    if !venue.is_empty() {
+        let field = match item_type.as_str() {
+            "conferencePaper" | "bookSection" => "booktitle",
+            "book" => "publisher",
+            "thesis" => "school",
+            "report" => "institution",
+            _ if biblatex => "journaltitle",
+            _ => "journal",
+        };
+        fields.push(format!("  {field} = {{{}}}", bibtex_value(&venue)));
+    }
+    for (paper_field, bib_field) in [("doi", "doi"), ("isbn", "isbn"), ("url", "url")] {
+        let value = paper_string(paper, paper_field);
+        if !value.is_empty() {
+            fields.push(format!("  {bib_field} = {{{}}}", bibtex_value(&value)));
+        }
+    }
+    let abstract_text = paper_string(paper, "abstract");
+    if !abstract_text.is_empty() {
+        fields.push(format!("  abstract = {{{}}}", bibtex_value(&abstract_text)));
+    }
+    let tags = paper["tags"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .filter(|tag| !tag.is_empty())
+        .collect::<Vec<_>>();
+    if !tags.is_empty() {
+        fields.push(format!("  keywords = {{{}}}", bibtex_value(&tags.join(", "))));
+    }
+    format!("@{}{{{},\n{}\n}}", bibtex_entry_type(&item_type, biblatex), entry.citation_key, fields.join(",\n"))
+}
+
+fn ris_type(item_type: &str) -> &'static str {
+    match item_type {
+        "article" => "JOUR",
+        "book" => "BOOK",
+        "bookSection" => "CHAP",
+        "conferencePaper" => "CONF",
+        "thesis" => "THES",
+        "report" => "RPRT",
+        "webpage" => "ELEC",
+        _ => "GEN",
+    }
+}
+
+fn ris_entry(entry: &BibliographyExportEntry<'_>) -> String {
+    let paper = entry.paper;
+    let mut lines = vec![format!("TY  - {}", ris_type(&paper_string(paper, "itemType")))];
+    lines.push(format!("ID  - {}", entry.citation_key));
+    lines.push(format!("TI  - {}", paper_string(paper, "title")));
+    lines.extend(paper_authors(paper).into_iter().map(|author| format!("AU  - {author}")));
+    if let Some(year) = paper["year"].as_u64() { lines.push(format!("PY  - {year}")); }
+    let venue = paper_string(paper, "venue");
+    if !venue.is_empty() { lines.push(format!("JO  - {venue}")); }
+    for (paper_field, ris_field) in [("doi", "DO"), ("isbn", "SN"), ("url", "UR"), ("abstract", "AB")] {
+        let value = paper_string(paper, paper_field);
+        if !value.is_empty() { lines.push(format!("{ris_field}  - {value}")); }
+    }
+    lines.push("ER  - ".to_string());
+    lines.join("\n")
+}
+
+fn csl_type(item_type: &str) -> &'static str {
+    match item_type {
+        "article" => "article-journal",
+        "book" => "book",
+        "bookSection" => "chapter",
+        "conferencePaper" => "paper-conference",
+        "thesis" => "thesis",
+        "report" => "report",
+        "webpage" => "webpage",
+        "dataset" => "dataset",
+        "preprint" => "article",
+        _ => "article",
+    }
+}
+
+fn csl_person(author: &str) -> Value {
+    let author = author.trim();
+    if let Some((family, given)) = author.split_once(',') {
+        return json!({ "family": family.trim(), "given": given.trim() });
+    }
+    let mut parts = author.split_whitespace().collect::<Vec<_>>();
+    if parts.len() >= 2 {
+        let family = parts.pop().unwrap_or_default();
+        return json!({ "family": family, "given": parts.join(" ") });
+    }
+    json!({ "literal": author })
+}
+
+fn csl_json_entry(entry: &BibliographyExportEntry<'_>) -> Value {
+    let paper = entry.paper;
+    let mut item = serde_json::Map::new();
+    item.insert("id".to_string(), Value::String(entry.citation_key.clone()));
+    item.insert("citation-key".to_string(), Value::String(entry.citation_key.clone()));
+    item.insert("type".to_string(), Value::String(csl_type(&paper_string(paper, "itemType")).to_string()));
+    item.insert("title".to_string(), Value::String(paper_string(paper, "title")));
+    let authors = paper_authors(paper);
+    if !authors.is_empty() {
+        item.insert("author".to_string(), Value::Array(authors.iter().map(|author| csl_person(author)).collect()));
+    }
+    if let Some(year) = paper["year"].as_u64() {
+        item.insert("issued".to_string(), json!({ "date-parts": [[year]] }));
+    }
+    let venue = paper_string(paper, "venue");
+    if !venue.is_empty() { item.insert("container-title".to_string(), Value::String(venue)); }
+    for (paper_field, csl_field) in [("doi", "DOI"), ("isbn", "ISBN"), ("url", "URL"), ("abstract", "abstract")] {
+        let value = paper_string(paper, paper_field);
+        if !value.is_empty() { item.insert(csl_field.to_string(), Value::String(value)); }
+    }
+    Value::Object(item)
+}
+
+/// Create a local-first record for an already copied PDF. Metadata extraction
+/// can enrich it later, but the attachment is immediately durable and linked
+/// to one canonical row.
+pub fn library_create_pdf_record_at(
+    base: &Path,
+    title: &str,
+    relative_path: &str,
+    bytes: u64,
+    doi: Option<&str>,
+) -> Result<LiteraturePdfRecordImportReport, String> {
+    let title = collapse_whitespace(title);
+    if title.is_empty() { return Err("a PDF record needs a title".to_string()); }
+    let item = json!({
+        "itemType": "other",
+        "title": title,
+        "DOI": doi.map(str::trim).filter(|value| !value.is_empty()),
+        "url": Value::Null,
+        "tags": [],
+    });
+    let (record, mut paper) = canonical_record_from_standard_json(&item)
+        .ok_or_else(|| "could not construct a PDF record".to_string())?;
+    paper["source"] = Value::String("local_pdf".to_string());
+    paper["pdf"] = json!({ "status": "downloaded", "path": relative_path, "bytes": bytes });
+    let mut store = runtime::open_literature_store_at(base)?;
+    if !store.has_legacy_library_bootstrap()? {
+        drop(store); let _ = library_load_at(base)?; store = runtime::open_literature_store_at(base)?;
+    }
+    let result = store.upsert_canonical_record(&record)?;
+    store.update_legacy_library_paper(&result.record.id, &paper)?;
+    store.mark_legacy_library_bootstrap()?;
+    let projection = project_legacy_library(&store.legacy_library_projection_meta()?, &store.list_canonical_records()?, &store.list_search_runs(None)?);
+    write_library_file(&library_path_at(base), &projection)?;
+    Ok(LiteraturePdfRecordImportReport { record_id: result.record.id, inserted: result.inserted, merged_record_ids: result.merged_record_ids })
+}
+
+fn standard_bibliography_items(format: &str, bytes: &[u8]) -> Result<(String, Vec<Value>), String> {
+    match format {
+        "json" | "zotero-json" | "csl-json" => {
+            let value: Value = serde_json::from_slice(bytes)
+                .map_err(|error| format!("invalid bibliography JSON: {error}"))?;
+            let items = value.as_array().cloned().or_else(|| value["items"].as_array().cloned())
+                .ok_or_else(|| "a Zotero or CSL-JSON export must contain an item array".to_string())?;
+            let resolved = if items.iter().any(|item| item.get("itemType").is_some()) { "zotero-json" } else { "csl-json" };
+            Ok((resolved.to_string(), items))
+        }
+        "ris" => Ok(("ris".to_string(), parse_ris_items(std::str::from_utf8(bytes).map_err(|_| "RIS must be UTF-8 text")?))),
+        "bib" | "bibtex" | "biblatex" => Ok(("bibtex".to_string(), parse_bibtex_items(std::str::from_utf8(bytes).map_err(|_| "BibTeX must be UTF-8 text")?))),
+        other => Err(format!("unsupported bibliography format: {other}")),
+    }
+}
+
+fn parse_ris_items(input: &str) -> Vec<Value> {
+    let mut records = Vec::new();
+    let mut fields = BTreeMap::<String, Vec<String>>::new();
+    let finish = |fields: &mut BTreeMap<String, Vec<String>>, records: &mut Vec<Value>| {
+        let title = fields.get("TI").or_else(|| fields.get("T1")).and_then(|values| values.first()).cloned().unwrap_or_default();
+        if title.trim().is_empty() { fields.clear(); return; }
+        let type_code = fields.get("TY").and_then(|values| values.first()).map(String::as_str).unwrap_or("");
+        let item_type = ris_item_type(type_code);
+        let authors = fields.get("AU").or_else(|| fields.get("A1")).cloned().unwrap_or_default();
+        let tags = fields.get("KW").cloned().unwrap_or_default();
+        records.push(json!({
+            "itemType": item_type,
+            "title": title,
+            "author": authors,
+            "date": fields.get("PY").or_else(|| fields.get("Y1")).and_then(|values| values.first()),
+            "publicationTitle": fields.get("JO").or_else(|| fields.get("T2")).or_else(|| fields.get("JF")).and_then(|values| values.first()),
+            "DOI": fields.get("DO").and_then(|values| values.first()),
+            "ISBN": fields.get("SN").and_then(|values| values.first()),
+            "url": fields.get("UR").and_then(|values| values.first()),
+            "abstract": fields.get("AB").and_then(|values| values.first()),
+            "tags": tags,
+        }));
+        fields.clear();
+    };
+    for raw in input.lines() {
+        let line = raw.trim_end();
+        if line.len() < 6 || line.as_bytes().get(2) != Some(&b' ') || line.as_bytes().get(3) != Some(&b' ') || line.as_bytes().get(4) != Some(&b'-') { continue; }
+        let key = line[..2].to_ascii_uppercase();
+        let value = line[6..].trim().to_string();
+        if key == "ER" { finish(&mut fields, &mut records); } else { fields.entry(key).or_default().push(value); }
+    }
+    finish(&mut fields, &mut records);
+    records
+}
+
+fn ris_item_type(code: &str) -> &'static str {
+    match code.trim().to_ascii_uppercase().as_str() {
+        "JOUR" | "JFULL" | "EJOUR" => "article",
+        "CONF" | "CPAPER" => "conferencePaper",
+        "BOOK" | "EBOOK" => "book",
+        "CHAP" => "bookSection",
+        "THES" | "DISS" => "thesis",
+        "RPRT" | "REPORT" => "report",
+        "WEB" | "ELEC" => "webpage",
+        _ => "other",
+    }
+}
+
+fn parse_bibtex_items(input: &str) -> Vec<Value> {
+    let mut items = Vec::new();
+    let bytes = input.as_bytes();
+    let mut cursor = 0;
+    while let Some(relative) = input[cursor..].find('@') {
+        let start = cursor + relative + 1;
+        let type_end = input[start..].find(|character: char| character == '{' || character == '(').map(|offset| start + offset);
+        let Some(type_end) = type_end else { break; };
+        let entry_type = input[start..type_end].trim().to_ascii_lowercase();
+        let opener = bytes[type_end] as char;
+        let closer = if opener == '{' { '}' } else { ')' };
+        let mut depth = 0_i32;
+        let mut end = None;
+        for (offset, character) in input[type_end..].char_indices() {
+            if character == opener { depth += 1; }
+            if character == closer { depth -= 1; if depth == 0 { end = Some(type_end + offset); break; } }
+        }
+        let Some(end) = end else { break; };
+        let body = &input[type_end + 1..end];
+        if let Some(item) = bibtex_item(&entry_type, body) { items.push(item); }
+        cursor = end + 1;
+    }
+    items
+}
+
+fn bibtex_item(entry_type: &str, body: &str) -> Option<Value> {
+    let (_, fields) = body.split_once(',')?;
+    let mut values = BTreeMap::new();
+    for field in split_bibtex_fields(fields) {
+        let Some((key, value)) = field.split_once('=') else { continue; };
+        values.insert(key.trim().to_ascii_lowercase(), unquote_bibtex(value.trim()));
+    }
+    let title = values.get("title")?.trim();
+    if title.is_empty() { return None; }
+    let authors = values.get("author").map(|value| value.split(" and ").map(str::trim).filter(|name| !name.is_empty()).collect::<Vec<_>>()).unwrap_or_default();
+    let tags = values.get("keywords").map(|value| value.split([',', ';']).map(str::trim).filter(|tag| !tag.is_empty()).collect::<Vec<_>>()).unwrap_or_default();
+    Some(json!({
+        "itemType": bibtex_item_type(entry_type), "title": title, "author": authors,
+        "date": values.get("year"), "publicationTitle": values.get("journal").or_else(|| values.get("booktitle")).or_else(|| values.get("publisher")),
+        "DOI": values.get("doi"), "ISBN": values.get("isbn"), "url": values.get("url"), "abstract": values.get("abstract"),
+        "citationKey": values.get("citationkey").or_else(|| values.get("key")), "tags": tags,
+    }))
+}
+
+fn bibtex_item_type(entry_type: &str) -> &'static str {
+    match entry_type { "article" => "article", "book" | "mvbook" => "book", "inbook" | "incollection" => "bookSection", "inproceedings" | "conference" | "proceedings" => "conferencePaper", "phdthesis" | "mastersthesis" | "thesis" => "thesis", "techreport" | "report" => "report", "online" | "www" => "webpage", "unpublished" | "preprint" => "preprint", _ => "other" }
+}
+
+fn split_bibtex_fields(input: &str) -> Vec<&str> {
+    let mut fields = Vec::new(); let mut start = 0; let mut depth = 0_i32; let mut quoted = false;
+    for (index, character) in input.char_indices() {
+        match character { '"' if depth == 0 => quoted = !quoted, '{' if !quoted => depth += 1, '}' if !quoted => depth -= 1, ',' if !quoted && depth == 0 => { fields.push(input[start..index].trim()); start = index + 1; }, _ => {} }
+    }
+    if !input[start..].trim().is_empty() { fields.push(input[start..].trim()); }
+    fields
+}
+
+fn unquote_bibtex(value: &str) -> String {
+    value.trim().trim_matches('"').trim_start_matches('{').trim_end_matches('}').replace(['{', '}'], "").trim().to_string()
+}
+
+fn canonical_record_from_standard_json(item: &Value) -> Option<(runtime::CanonicalRecord, Value)> {
+    let title = item["title"].as_str().map(collapse_whitespace).filter(|value| !value.is_empty())?;
+    let item_type = item["itemType"].as_str().or_else(|| item["type"].as_str()).unwrap_or("article");
+    if matches!(item_type, "attachment" | "note" | "annotation") { return None; }
+    let authors = item["creators"].as_array().or_else(|| item["author"].as_array()).map(|people| people.iter().filter_map(|person| {
+        person.as_str().map(str::to_string).or_else(|| {
+            let family = person["lastName"].as_str().or_else(|| person["family"].as_str()).unwrap_or("").trim();
+            let given = person["firstName"].as_str().or_else(|| person["given"].as_str()).unwrap_or("").trim();
+            let literal = person["name"].as_str().unwrap_or("").trim();
+            let joined = if !literal.is_empty() { literal.to_string() } else { format!("{given} {family}").trim().to_string() };
+            (!joined.is_empty()).then_some(joined)
+        })
+    }).collect()).unwrap_or_default();
+    let doi = non_empty(item["DOI"].as_str().or_else(|| item["doi"].as_str()).unwrap_or(""));
+    let isbn = non_empty(item["ISBN"].as_str().or_else(|| item["isbn"].as_str()).unwrap_or(""));
+    let url = non_empty(item["url"].as_str().or_else(|| item["URL"].as_str()).unwrap_or(""));
+    let year = item["date"].as_str().and_then(|value| value.get(0..4)).and_then(|value| value.parse().ok())
+        .or_else(|| item["issued"]["date-parts"].get(0).and_then(|part| part.get(0)).and_then(Value::as_u64).and_then(|value| u32::try_from(value).ok()));
+    let venue = item["publicationTitle"].as_str().or_else(|| item["container-title"].as_str()).or_else(|| item["bookTitle"].as_str()).unwrap_or("").trim().to_string();
+    let abstract_text = item["abstractNote"].as_str().or_else(|| item["abstract"].as_str()).unwrap_or("").to_string();
+    let tags = item["tags"].as_array().map(|tags| tags.iter().filter_map(|tag| {
+        tag.as_str().map(str::to_string).or_else(|| tag["tag"].as_str().map(str::to_string))
+    }).collect::<Vec<_>>()).unwrap_or_default();
+    let now = runtime::now_iso8601();
+    let id = runtime::canonical_record_id(doi.as_deref(), None, None, &title);
+    let paper = json!({ "id": id, "title": title, "authors": authors, "year": year, "venue": venue, "doi": doi, "url": url, "abstract": abstract_text, "itemType": item_type, "isbn": isbn, "citationKey": item["citationKey"].as_str().or_else(|| item["citation-key"].as_str()), "tags": tags, "collectionIds": [], "searchIds": [], "stage": "inbox", "starred": false, "unread": true, "source": "standard_import", "addedAt": now, "pdf": { "status": "none" }, "evidence": [], "answerChains": [], "pdfAnnotations": [] });
+    Some((runtime::CanonicalRecord { schema_version: runtime::LITERATURE_SCHEMA_VERSION, id, revision: 1, normalized_title: runtime::normalized_record_title(&title), title, authors, year, venue, abstract_text, url, pdf_url: None, identifiers: runtime::RecordIdentifiers { doi, arxiv_id: None, scopus_id: None, source_ids: BTreeMap::new() }, provenance: vec![runtime::RecordProvenance { source: "standard_import".to_string(), external_id: None, search_run_id: None, artifact_id: None, observed_at: now.clone() }], observations: vec![runtime::RecordObservation { source: "standard_import".to_string(), external_id: None, artifact_id: None, observed_at: now.clone(), fields: item.clone() }], field_conflicts: Vec::new(), metadata: json!({ "standard": { "itemType": item_type, "isbn": isbn, "citationKey": item["citationKey"].as_str().or_else(|| item["citation-key"].as_str()) } }), created_at: now.clone(), updated_at: now }, paper))
 }
 
 pub fn empty_library() -> Value {

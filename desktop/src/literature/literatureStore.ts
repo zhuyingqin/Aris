@@ -1,14 +1,15 @@
 import { create } from "zustand";
 import {
   isTauri,
+  literatureApplyDelta,
   literatureDownloadPdf,
+  literatureImportAttachment,
   literatureImportPdf,
   literatureLlm,
   literatureReviewLlm,
   literatureLlmVision,
   literatureLoad,
   literaturePdfOpen,
-  literatureSave,
   onChatDone,
   onChatTool,
   onChatToolResult,
@@ -23,7 +24,10 @@ import {
   type CriteriaSuggestion,
   type EvidenceSource,
   type LiteratureLibrary,
+  type LiteratureCollection,
+  type LiteratureAttachment,
   type LiteraturePaper,
+  type LiteratureNote,
   type LiteratureReviewTask,
   type LiteratureScreenChunk,
   type LiteratureScreenRun,
@@ -54,6 +58,7 @@ const PERSIST_DELAY_MS = 600;
 export const SCREEN_CHUNK_SIZE = 40;
 
 let persistTimer: ReturnType<typeof setTimeout> | null = null;
+let persistedLibrary: LiteratureLibrary | null = null;
 
 const makeId = (prefix: string) =>
   `${prefix}-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
@@ -73,6 +78,31 @@ const PDF_STATUSES = new Set(["none", "queued", "downloading", "downloaded", "fa
 
 const normalizePaper = (paper: Partial<LiteraturePaper>, index: number): LiteraturePaper => {
   const pdf = paper.pdf && typeof paper.pdf === "object" ? paper.pdf : { status: "none" as const };
+  const attachmentCandidates = Array.isArray(paper.attachments)
+    ? paper.attachments.filter(
+        (attachment): attachment is LiteratureAttachment =>
+          Boolean(attachment)
+          && typeof attachment.id === "string"
+          && typeof attachment.label === "string"
+          && ["pdf", "supplement", "webSnapshot", "externalLink"].includes(attachment.kind),
+      )
+    : [];
+  const hasPrimaryPdf = attachmentCandidates.some(
+    (attachment) => attachment.kind === "pdf" && attachment.path === pdf.path,
+  );
+  const attachments = !hasPrimaryPdf && typeof pdf.path === "string" && pdf.path
+    ? [
+        {
+          id: "attachment-primary-pdf",
+          label: "Primary PDF",
+          kind: "pdf" as const,
+          path: pdf.path,
+          bytes: pdf.bytes,
+          addedAt: typeof paper.addedAt === "string" ? paper.addedAt : isoNow(),
+        },
+        ...attachmentCandidates,
+      ]
+    : attachmentCandidates;
   return {
     ...paper,
     id: typeof paper.id === "string" && paper.id.trim() ? paper.id : `paper:${index}`,
@@ -96,6 +126,7 @@ const normalizePaper = (paper: Partial<LiteraturePaper>, index: number): Literat
       ...pdf,
       status: PDF_STATUSES.has(pdf.status) ? pdf.status : "none",
     },
+    attachments,
     evidence: Array.isArray(paper.evidence) ? paper.evidence : [],
     answerChains: Array.isArray(paper.answerChains)
       ? paper.answerChains.map((chain) => ({
@@ -107,6 +138,14 @@ const normalizePaper = (paper: Partial<LiteraturePaper>, index: number): Literat
         }))
       : [],
     pdfAnnotations: Array.isArray(paper.pdfAnnotations) ? paper.pdfAnnotations : [],
+    notes: Array.isArray(paper.notes)
+      ? paper.notes.filter(
+          (note): note is LiteratureNote =>
+            Boolean(note)
+            && typeof note.id === "string"
+            && typeof note.content === "string",
+        )
+      : [],
   };
 };
 
@@ -142,8 +181,78 @@ const normalizeLibrary = (raw: Partial<LiteratureLibrary>): LiteratureLibrary =>
   projectFocus: raw.projectFocus,
 });
 
+const sameJson = (left: unknown, right: unknown) => JSON.stringify(left) === JSON.stringify(right);
+
+const projectionMetadata = (library: LiteratureLibrary) => {
+  const { papers: _papers, searches: _searches, version: _version, ...metadata } = library;
+  return metadata;
+};
+
+/** Return a collection and every nested child.  This keeps deletion and
+ * filtering correct for arbitrarily deep Zotero-style collection trees. */
+const descendantCollectionIds = (collections: LiteratureCollection[], rootId: string) => {
+  const ids = new Set([rootId]);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const collection of collections) {
+      if (collection.parentId && ids.has(collection.parentId) && !ids.has(collection.id)) {
+        ids.add(collection.id);
+        changed = true;
+      }
+    }
+  }
+  return ids;
+};
+
+const libraryDelta = (before: LiteratureLibrary, after: LiteratureLibrary) => {
+  const beforePapers = new Map(before.papers.map((paper) => [paper.id, paper]));
+  const afterIds = new Set(after.papers.map((paper) => paper.id));
+  const upsertPapers = after.papers.filter((paper) => !sameJson(beforePapers.get(paper.id), paper));
+  const hidePaperIds = before.papers
+    .filter((paper) => !afterIds.has(paper.id))
+    .map((paper) => paper.id);
+  const beforeMetadata = projectionMetadata(before);
+  const afterMetadata = projectionMetadata(after);
+  return {
+    upsertPapers,
+    hidePaperIds,
+    ...(sameJson(beforeMetadata, afterMetadata) ? {} : { projectionMetadata: afterMetadata }),
+  };
+};
+
+const isEmptyDelta = (delta: ReturnType<typeof libraryDelta>) =>
+  delta.upsertPapers.length === 0 &&
+  delta.hidePaperIds.length === 0 &&
+  !("projectionMetadata" in delta);
+
 const normalizedTitle = (title: string) =>
   title.toLowerCase().replace(/[^a-z0-9]/g, "");
+
+const validCitationKey = (value: string | undefined): string | null => {
+  const key = value?.trim() ?? "";
+  return /^[A-Za-z][A-Za-z0-9:_.-]*$/.test(key) ? key : null;
+};
+
+const citationKeyPart = (value: string) =>
+  value
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLocaleLowerCase()
+    .replace(/[^a-z0-9]+/g, "");
+
+/** A deterministic fallback used only when a record has no user-supplied key. */
+export const suggestedCitationKey = (paper: LiteraturePaper): string => {
+  const firstAuthor = paper.authors[0] ?? "reference";
+  const family = firstAuthor.includes(",")
+    ? firstAuthor.split(",", 1)[0]
+    : firstAuthor.split(/\s+/).filter(Boolean).at(-1) ?? "reference";
+  const titleWord = paper.title
+    .split(/\s+/)
+    .map(citationKeyPart)
+    .find((word) => word.length > 2) ?? "work";
+  return `${citationKeyPart(family) || "ref"}${paper.year ?? "nd"}${titleWord}`;
+};
 
 const pdfFileName = (paper: LiteraturePaper) => {
   if (paper.arxivId) return `${paper.arxivId.replace(/\//g, "-")}.pdf`;
@@ -1320,6 +1429,13 @@ interface LiteratureState {
   toggleStar: (id: string) => void;
   markRead: (id: string) => void;
   addTags: (ids: string[], tags: string[]) => void;
+  updatePaperMetadata: (
+    id: string,
+    patch: Partial<Pick<LiteraturePaper, "title" | "itemType" | "authors" | "venue" | "year" | "doi" | "isbn" | "citationKey" | "url" | "abstract">>,
+  ) => void;
+  /** Assign valid, collision-free keys and wait until SQLite has the change. */
+  ensureCitationKeys: (ids: string[]) => Promise<Record<string, string>>;
+  saveDynamicSearch: (query: string) => string | null;
   addCollection: (label: string, parentId?: string) => void;
   removeCollection: (id: string) => void;
   assignCollection: (ids: string[], collectionId: string) => void;
@@ -1340,6 +1456,25 @@ interface LiteratureState {
     patch: Partial<Pick<PdfAnnotation, "quote" | "note" | "kind" | "color" | "style">>,
   ) => void;
   deletePdfAnnotation: (paperId: string, annotationId: string) => void;
+  addAttachment: (
+    paperId: string,
+    attachment: Omit<LiteratureAttachment, "id" | "addedAt"> & Partial<Pick<LiteratureAttachment, "id" | "addedAt">>,
+  ) => string | null;
+  removeAttachment: (paperId: string, attachmentId: string) => void;
+  setPrimaryPdfAttachment: (paperId: string, attachmentId: string) => void;
+  importAttachment: (
+    paperId: string,
+    sourcePath: string,
+    kind: Exclude<LiteratureAttachment["kind"], "externalLink">,
+  ) => Promise<void>;
+  addNote: (
+    paperId: string,
+    note: Omit<LiteratureNote, "id" | "createdAt" | "updatedAt"> & Partial<Pick<LiteratureNote, "id" | "createdAt" | "updatedAt">>,
+  ) => string | null;
+  updateNote: (paperId: string, noteId: string, patch: Partial<Pick<LiteratureNote, "title" | "content">>) => void;
+  deleteNote: (paperId: string, noteId: string) => void;
+  createNoteFromAnnotation: (paperId: string, annotationId: string) => string | null;
+  importAnnotations: (paperId: string, payload: unknown) => { annotations: number; notes: number };
   downloadPdf: (id: string) => Promise<void>;
   uploadPdf: (id: string, sourcePath: string) => Promise<void>;
   openPdf: (id: string) => Promise<void>;
@@ -1365,9 +1500,12 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
     if (persistTimer) clearTimeout(persistTimer);
     persistTimer = setTimeout(() => {
       persistTimer = null;
-      literatureSave(get().library).catch((error) =>
-        set({ error: `failed to save library: ${String(error)}` }),
-      );
+      const target = get().library;
+      const delta = libraryDelta(persistedLibrary ?? emptyLibrary(), target);
+      if (isEmptyDelta(delta)) return;
+      void literatureApplyDelta<Partial<LiteratureLibrary>>(delta)
+        .then((projection) => { persistedLibrary = normalizeLibrary(projection); })
+        .catch((error) => set({ error: `failed to save library changes: ${String(error)}` }));
     }, PERSIST_DELAY_MS);
   };
 
@@ -1378,7 +1516,12 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
       persistTimer = null;
     }
     try {
-      await literatureSave(get().library);
+      const target = get().library;
+      const delta = libraryDelta(persistedLibrary ?? emptyLibrary(), target);
+      if (!isEmptyDelta(delta)) {
+        const projection = await literatureApplyDelta<Partial<LiteratureLibrary>>(delta);
+        persistedLibrary = normalizeLibrary(projection);
+      }
     } catch (error) {
       const message = `failed to save ${label}: ${String(error)}`;
       set({ error: message });
@@ -1452,6 +1595,7 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
       }
       try {
         const raw = normalizeLibrary(await literatureLoad<Partial<LiteratureLibrary>>());
+        persistedLibrary = raw;
         const reviewTasks = raw.reviewTasks;
         const currentTaskId = get().activeReviewTaskId;
         set({
@@ -1614,7 +1758,7 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
           persistTimer = null;
         }
         try {
-          await literatureSave(get().library);
+          await persistNow("review task");
         } catch (error) {
           set({ error: `failed to save review task: ${String(error)}` });
           log("error", `Failed to save review task: ${String(error)}`, { open: true });
@@ -2076,6 +2220,69 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
         tags: Array.from(new Set([...paper.tags, ...tags])).sort(),
       })),
 
+    updatePaperMetadata: (id, patch) =>
+      patchPapers([id], (paper) => ({ ...paper, ...patch })),
+
+    ensureCitationKeys: async (ids) => {
+      const selectedIds = new Set(ids.map((id) => id.trim()).filter(Boolean));
+      const papers = get().library.papers;
+      const selected = papers.filter((paper) => selectedIds.has(paper.id));
+      const used = new Set(
+        papers
+          .filter((paper) => !selectedIds.has(paper.id))
+          .map((paper) => validCitationKey(paper.citationKey)?.toLocaleLowerCase())
+          .filter((key): key is string => Boolean(key)),
+      );
+      const assigned: Record<string, string> = {};
+      const updates = new Map<string, string>();
+      for (const paper of selected) {
+        const existing = validCitationKey(paper.citationKey);
+        let key = existing && !used.has(existing.toLocaleLowerCase()) ? existing : suggestedCitationKey(paper);
+        let suffix = 2;
+        while (used.has(key.toLocaleLowerCase())) {
+          key = `${suggestedCitationKey(paper)}${suffix}`;
+          suffix += 1;
+        }
+        used.add(key.toLocaleLowerCase());
+        assigned[paper.id] = key;
+        if (paper.citationKey !== key) updates.set(paper.id, key);
+      }
+      if (updates.size > 0) {
+        patchPapers([...updates.keys()], (paper) => ({
+          ...paper,
+          citationKey: updates.get(paper.id) ?? paper.citationKey,
+        }));
+        await persistNow("citation keys");
+      }
+      return assigned;
+    },
+
+    saveDynamicSearch: (query) => {
+      const trimmed = query.trim();
+      if (!trimmed) return null;
+      const existing = get().library.searches.find(
+        (search) => search.dynamic && search.query.toLocaleLowerCase() === trimmed.toLocaleLowerCase(),
+      );
+      if (existing) return existing.id;
+      const id = makeId("dynamic-search");
+      mutate((library) => ({
+        ...library,
+        searches: [
+          ...library.searches,
+          {
+            id,
+            query: trimmed,
+            sources: ["local-fts5"],
+            ranAt: isoNow(),
+            resultCount: 0,
+            newCount: 0,
+            dynamic: true,
+          },
+        ],
+      }));
+      return id;
+    },
+
     addCollection: (label, parentId) => {
       const trimmed = label.trim();
       if (!trimmed) return;
@@ -2090,8 +2297,7 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
 
     removeCollection: (id) => {
       mutate((library) => {
-        const childIds = library.collections.filter((c) => c.parentId === id).map((c) => c.id);
-        const toRemove = new Set([id, ...childIds]);
+        const toRemove = descendantCollectionIds(library.collections, id);
         return {
           ...library,
           collections: library.collections.filter((c) => !toRemove.has(c.id)),
@@ -2271,7 +2477,243 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
       patchPapers([paperId], (paper) => ({
         ...paper,
         pdfAnnotations: paper.pdfAnnotations.filter((a) => a.id !== annotationId),
+        // Keep a note when its source highlight is removed: its text remains a
+        // durable research observation, but it no longer points at a stale id.
+        notes: (paper.notes ?? []).map((note) =>
+          note.annotationId === annotationId
+            ? { ...note, annotationId: undefined, updatedAt: isoNow() }
+            : note,
+        ),
       })),
+
+    addAttachment: (paperId, attachment) => {
+      let attachmentId: string | null = null;
+      patchPapers([paperId], (paper) => {
+        attachmentId = attachment.id?.trim() || makeId("attachment");
+        const next: LiteratureAttachment = {
+          ...attachment,
+          id: attachmentId,
+          addedAt: attachment.addedAt ?? isoNow(),
+        };
+        return {
+          ...paper,
+          attachments: [...(paper.attachments ?? []).filter((item) => item.id !== next.id), next],
+        };
+      });
+      return attachmentId;
+    },
+
+    removeAttachment: (paperId, attachmentId) =>
+      patchPapers([paperId], (paper) => {
+        const removed = (paper.attachments ?? []).find((attachment) => attachment.id === attachmentId);
+        const attachments = (paper.attachments ?? []).filter((attachment) => attachment.id !== attachmentId);
+        const replacement = removed?.path && paper.pdf.path === removed.path
+          ? attachments.find((attachment) => attachment.kind === "pdf" && attachment.path)
+          : undefined;
+        return {
+          ...paper,
+          attachments,
+          pdf: replacement?.path
+            ? {
+                ...paper.pdf,
+                status: "downloaded",
+                path: replacement.path,
+                bytes: replacement.bytes,
+                error: undefined,
+              }
+            : removed?.path && paper.pdf.path === removed.path
+              ? { status: "none" }
+              : paper.pdf,
+          notes: (paper.notes ?? []).map((note) =>
+            note.attachmentId === attachmentId
+              ? { ...note, attachmentId: undefined, updatedAt: isoNow() }
+              : note,
+          ),
+        };
+      }),
+
+    setPrimaryPdfAttachment: (paperId, attachmentId) =>
+      patchPapers([paperId], (paper) => {
+        const attachment = (paper.attachments ?? []).find(
+          (candidate) => candidate.id === attachmentId && candidate.kind === "pdf" && candidate.path,
+        );
+        if (!attachment?.path) return paper;
+        return {
+          ...paper,
+          stage: paper.stage === "inbox" || paper.stage === "screened" || paper.stage === "shortlist"
+            ? "downloaded"
+            : paper.stage,
+          pdf: {
+            ...paper.pdf,
+            status: "downloaded",
+            path: attachment.path,
+            bytes: attachment.bytes,
+            error: undefined,
+          },
+        };
+      }),
+
+    importAttachment: async (paperId, sourcePath, kind) => {
+      const paper = get().library.papers.find((entry) => entry.id === paperId);
+      if (!paper || !sourcePath.trim()) return;
+      if (!isTauri()) {
+        set({ error: "导入附件需要桌面后端。" });
+        return;
+      }
+      try {
+        const saved = await literatureImportAttachment<{
+          relativePath: string;
+          bytes: number;
+          fileName: string;
+          mimeType?: string;
+        }>(sourcePath);
+        const attachment: LiteratureAttachment = {
+          id: makeId("attachment"),
+          label: saved.fileName || sourcePath.split(/[\\/]/).pop() || "Attachment",
+          kind,
+          path: saved.relativePath,
+          mimeType: saved.mimeType,
+          bytes: saved.bytes,
+          addedAt: isoNow(),
+        };
+        patchPapers([paperId], (entry) => ({
+          ...entry,
+          attachments: [...(entry.attachments ?? []), attachment],
+        }));
+        log("ok", `已导入附件：${saved.relativePath}`);
+      } catch (error) {
+        const message = `附件导入失败：${String(error)}`;
+        set({ error: message });
+        log("error", message, { open: true });
+      }
+    },
+
+    addNote: (paperId, note) => {
+      let noteId: string | null = null;
+      patchPapers([paperId], (paper) => {
+        noteId = note.id?.trim() || makeId("note");
+        const now = isoNow();
+        const next: LiteratureNote = {
+          ...note,
+          id: noteId,
+          content: note.content.trim(),
+          createdAt: note.createdAt ?? now,
+          updatedAt: note.updatedAt ?? now,
+          source: note.source ?? "manual",
+        };
+        if (!next.content) return paper;
+        return { ...paper, notes: [...(paper.notes ?? []).filter((item) => item.id !== next.id), next] };
+      });
+      return noteId;
+    },
+
+    updateNote: (paperId, noteId, patch) =>
+      patchPapers([paperId], (paper) => ({
+        ...paper,
+        notes: (paper.notes ?? []).map((note) =>
+          note.id === noteId
+            ? { ...note, ...patch, content: patch.content?.trim() ?? note.content, updatedAt: isoNow() }
+            : note,
+        ),
+      })),
+
+    deleteNote: (paperId, noteId) =>
+      patchPapers([paperId], (paper) => ({
+        ...paper,
+        notes: (paper.notes ?? []).filter((note) => note.id !== noteId),
+      })),
+
+    createNoteFromAnnotation: (paperId, annotationId) => {
+      const paper = get().library.papers.find((entry) => entry.id === paperId);
+      const annotation = paper?.pdfAnnotations.find((entry) => entry.id === annotationId);
+      if (!paper || !annotation) return null;
+      return get().addNote(paperId, {
+        title: `第 ${annotation.page} 页标注`,
+        content: [annotation.quote, annotation.note].filter(Boolean).join("\n\n"),
+        annotationId,
+        attachmentId: (paper.attachments ?? []).find(
+          (attachment) => attachment.kind === "pdf" && attachment.path === paper.pdf.path,
+        )?.id,
+        evidenceId: annotation.evidenceId,
+        source: "annotation",
+      });
+    },
+
+    importAnnotations: (paperId, payload) => {
+      const source = payload && typeof payload === "object" ? payload as {
+        annotations?: unknown;
+        notes?: unknown;
+      } : {};
+      const paper = get().library.papers.find((entry) => entry.id === paperId);
+      if (!paper) return { annotations: 0, notes: 0 };
+      const currentAnnotationIds = new Set(paper.pdfAnnotations.map((annotation) => annotation.id));
+      const currentNoteIds = new Set((paper.notes ?? []).map((note) => note.id));
+      const importedAnnotationIds = new Map<string, string>();
+      const attachmentIds = new Set((paper.attachments ?? []).map((attachment) => attachment.id));
+      const evidenceIds = new Set(paper.evidence.map((evidence) => evidence.id));
+      const annotations = Array.isArray(source.annotations)
+        ? source.annotations.flatMap((raw): PdfAnnotation[] => {
+            if (!raw || typeof raw !== "object") return [];
+            const entry = raw as Partial<PdfAnnotation>;
+            if (!Number.isInteger(entry.page) || (entry.page ?? 0) < 1 || typeof entry.quote !== "string") return [];
+            const importedId = typeof entry.id === "string" && entry.id.trim() ? entry.id : undefined;
+            let id = importedId ?? makeId("annotation");
+            while (currentAnnotationIds.has(id)) id = makeId("annotation");
+            currentAnnotationIds.add(id);
+            if (importedId) importedAnnotationIds.set(importedId, id);
+            return [{
+              id,
+              page: entry.page!,
+              quote: entry.quote,
+              note: typeof entry.note === "string" ? entry.note : "",
+              kind: entry.kind === "core" || entry.kind === "evidence" || entry.kind === "answer-support" ? entry.kind : "note",
+              color: entry.color,
+              style: entry.style,
+              rects: Array.isArray(entry.rects) ? entry.rects : undefined,
+              source: entry.source,
+              imageFingerprint: entry.imageFingerprint,
+              sourceId: entry.sourceId,
+              evidenceId: entry.evidenceId,
+              createdAt: typeof entry.createdAt === "string" ? entry.createdAt : isoNow(),
+            }];
+          })
+        : [];
+      const notes = Array.isArray(source.notes)
+        ? source.notes.flatMap((raw): LiteratureNote[] => {
+            if (!raw || typeof raw !== "object") return [];
+            const entry = raw as Partial<LiteratureNote>;
+            if (typeof entry.content !== "string" || !entry.content.trim()) return [];
+            let id = typeof entry.id === "string" && entry.id.trim() ? entry.id : makeId("note");
+            while (currentNoteIds.has(id)) id = makeId("note");
+            currentNoteIds.add(id);
+            return [{
+              id,
+              title: typeof entry.title === "string" ? entry.title : undefined,
+              content: entry.content.trim(),
+              createdAt: typeof entry.createdAt === "string" ? entry.createdAt : isoNow(),
+              updatedAt: typeof entry.updatedAt === "string" ? entry.updatedAt : isoNow(),
+              annotationId: typeof entry.annotationId === "string"
+                ? importedAnnotationIds.get(entry.annotationId)
+                : undefined,
+              attachmentId: typeof entry.attachmentId === "string" && attachmentIds.has(entry.attachmentId)
+                ? entry.attachmentId
+                : undefined,
+              evidenceId: typeof entry.evidenceId === "string" && evidenceIds.has(entry.evidenceId)
+                ? entry.evidenceId
+                : undefined,
+              source: "imported",
+            }];
+          })
+        : [];
+      if (annotations.length || notes.length) {
+        patchPapers([paperId], (entry) => ({
+          ...entry,
+          pdfAnnotations: [...entry.pdfAnnotations, ...annotations],
+          notes: [...(entry.notes ?? []), ...notes],
+        }));
+      }
+      return { annotations: annotations.length, notes: notes.length };
+    },
 
     deleteEvidence: (paperId, evidenceId) => {
       const paper = get().library.papers.find((entry) => entry.id === paperId);
@@ -2307,6 +2749,11 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
           ...entry,
           evidence: entry.evidence.filter((item) => item.id !== evidenceId),
           answerChains,
+          notes: (entry.notes ?? []).map((note) =>
+            note.evidenceId === evidenceId
+              ? { ...note, evidenceId: undefined, updatedAt: isoNow() }
+              : note,
+          ),
           pdfAnnotations: entry.pdfAnnotations.filter(
             (annotation) =>
               !(annotation.kind === "evidence" && annotation.sourceId === evidenceId)
@@ -2409,6 +2856,18 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
             bytes: saved.bytes,
             error: undefined,
           },
+          attachments: [
+            ...(entry.attachments ?? []).filter((attachment) => attachment.path !== saved.relativePath),
+            {
+              id: makeId("attachment"),
+              label: "Primary PDF",
+              kind: "pdf" as const,
+              path: saved.relativePath,
+              mimeType: "application/pdf",
+              bytes: saved.bytes,
+              addedAt: isoNow(),
+            },
+          ],
         }));
         log("ok", `已导入用户 PDF：${saved.relativePath}`);
       } catch (error) {
@@ -2446,7 +2905,8 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
 export const briefForTest = briefFromPaper;
 
 /** Test helper: reset the singleton store between cases. */
-export const resetLiteratureStore = () =>
+export const resetLiteratureStore = () => {
+  persistedLibrary = null;
   useLiteratureStore.setState({
     library: emptyLibrary(),
     loaded: false,
@@ -2460,3 +2920,4 @@ export const resetLiteratureStore = () =>
     activityOpen: false,
     activeReviewTaskId: null,
   });
+};

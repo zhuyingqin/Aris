@@ -3669,16 +3669,6 @@ pub async fn project_intent_observe(
     runtime::project_brief(&workspace)
 }
 
-#[tauri::command]
-pub fn project_goal_progress(
-    project_id: String,
-    recent_status: String,
-) -> Result<runtime::ProjectBrief, String> {
-    let workspace = active_project_workspace(&project_id)?;
-    runtime::update_project_goal_progress(&workspace, &recent_status)?;
-    runtime::project_brief(&workspace)
-}
-
 fn active_project_workspace(project_id: &str) -> Result<PathBuf, String> {
     if !crate::state::valid_project_id(project_id) {
         return Err("invalid project id".to_string());

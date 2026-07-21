@@ -24,6 +24,7 @@ import {
   latexCompile,
   latexCompileCancel,
   latexForwardSearch,
+  literatureExportBibliography,
   localEnvironmentCheck,
   onLatexCompileProgress,
   type FileText,
@@ -50,6 +51,8 @@ import {
 import type { VisualPdfCursor } from "./visualModel";
 import type { SharedEditorHandle } from "../editor/editorTypes";
 import { useStore } from "../store";
+import { suggestedCitationKey, useLiteratureStore } from "../literature/literatureStore";
+import type { LiteraturePaper } from "../literature/literatureTypes";
 import { SvgIcon } from "../SvgIcon";
 import "./Typeset.css";
 
@@ -4442,6 +4445,119 @@ const VISUAL_SECTION_LEVELS: Array<{ key: string; label: string }> = [
   { key: "subparagraph", label: "Subparagraph" },
 ];
 
+function bibliographyPathForSource(sourcePath: string): string {
+  const segments = sourcePath.replace(/\\/g, "/").split("/");
+  segments.pop();
+  return [...segments, "references.bib"].filter(Boolean).join("/") || "references.bib";
+}
+
+/** Add the managed bibliography without replacing the author's existing setup. */
+function withSomniqBibliography(source: string): string {
+  const biblatex = /\\addbibresource\s*\{([^}]+)\}/;
+  const bibtex = /\\bibliography\s*\{([^}]+)\}/;
+  const hasReference = (value: string) => value.split(",").some((item) => item.trim().replace(/\.bib$/i, "") === "references");
+  if (biblatex.test(source)) {
+    return source.replace(biblatex, (whole, resource: string) =>
+      hasReference(resource) ? whole : `${whole}\n\\addbibresource{references.bib}`,
+    );
+  }
+  if (bibtex.test(source)) {
+    return source.replace(bibtex, (whole, resources: string) =>
+      hasReference(resources) ? whole : `\\bibliography{${resources.trim()},references}`,
+    );
+  }
+  const block = "\n% SomniQ bibliography (managed)\n\\bibliographystyle{plain}\n\\bibliography{references}\n";
+  const endDocument = source.lastIndexOf("\\end{document}");
+  if (endDocument >= 0) {
+    return `${source.slice(0, endDocument).replace(/\s*$/, "")}${block}\n${source.slice(endDocument)}`;
+  }
+  return `${source.replace(/\s*$/, "")}${block}`;
+}
+
+function TypesetCitationPicker({
+  papers,
+  onClose,
+  onConfirm,
+}: {
+  papers: LiteraturePaper[];
+  onClose: () => void;
+  onConfirm: (ids: string[]) => Promise<void>;
+}) {
+  const [query, setQuery] = useState("");
+  const [selected, setSelected] = useState<Set<string>>(() => new Set());
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const visible = useMemo(() => {
+    const needle = query.trim().toLocaleLowerCase();
+    if (!needle) return papers;
+    return papers.filter((paper) => [paper.title, paper.authors.join(" "), paper.citationKey, paper.doi]
+      .filter(Boolean)
+      .join(" ")
+      .toLocaleLowerCase()
+      .includes(needle));
+  }, [papers, query]);
+  const toggle = (id: string) => setSelected((current) => {
+    const next = new Set(current);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    return next;
+  });
+  const confirm = async () => {
+    if (selected.size === 0) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await onConfirm([...selected]);
+    } catch (reason) {
+      setError(String(reason));
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="typeset-citation-backdrop" role="presentation" onMouseDown={onClose}>
+      <section className="typeset-citation-picker" role="dialog" aria-modal="true" aria-label="Insert library citation" onMouseDown={(event) => event.stopPropagation()}>
+        <header>
+          <div><span>SomniQ Literature</span><strong>Insert citation</strong></div>
+          <button type="button" aria-label="Close citation picker" onClick={onClose}>×</button>
+        </header>
+        <input
+          autoFocus
+          type="search"
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          placeholder="Search title, author, DOI, or key"
+          aria-label="Search literature for citation"
+        />
+        <div className="typeset-citation-results" role="listbox" aria-label="Library papers">
+          {visible.map((paper) => {
+            const checked = selected.has(paper.id);
+            return (
+              <button
+                type="button"
+                role="option"
+                aria-selected={checked}
+                className={checked ? "selected" : ""}
+                key={paper.id}
+                onClick={() => toggle(paper.id)}
+              >
+                <span className="typeset-citation-check" aria-hidden="true">{checked ? "✓" : ""}</span>
+                <span><strong>{paper.title}</strong><em>{paper.authors.join(", ") || "Unknown author"}{paper.year ? ` · ${paper.year}` : ""}</em></span>
+                <code>{paper.citationKey || suggestedCitationKey(paper)}</code>
+              </button>
+            );
+          })}
+          {visible.length === 0 && <p>No matching library papers.</p>}
+        </div>
+        {error && <p className="typeset-citation-error" role="status">{error}</p>}
+        <footer>
+          <span>{selected.size} selected</span>
+          <div><button type="button" onClick={onClose} disabled={busy}>Cancel</button><button type="button" className="primary" onClick={() => void confirm()} disabled={busy || selected.size === 0}>{busy ? "Preparing…" : "Insert \\cite{}"}</button></div>
+        </footer>
+      </section>
+    </div>
+  );
+}
+
 function TypesetEditorToolbar({
   activeOutlineItem,
   activeSlide,
@@ -4464,6 +4580,9 @@ function TypesetEditorToolbar({
   onUndo,
   path,
   linkedPdfLine,
+  citationPapers,
+  onPrepareCitationKeys,
+  onSynchronizeBibliography,
   saving,
 }: {
   activeOutlineItem: NumberedOutlineItem | null;
@@ -4487,12 +4606,17 @@ function TypesetEditorToolbar({
   onUndo: () => void;
   path: string | null;
   linkedPdfLine: number | null;
+  citationPapers: LiteraturePaper[];
+  onPrepareCitationKeys: (ids: string[]) => Promise<string[]>;
+  onSynchronizeBibliography: () => Promise<void>;
   saving: boolean;
 }) {
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchIndex, setSearchIndex] = useState(0);
+  const [citationPickerOpen, setCitationPickerOpen] = useState(false);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const citationAdapterRef = useRef<EditorAdapter | null>(null);
   const searchMatches = useMemo(() => textSearchMatches(draft, searchQuery), [draft, searchQuery]);
   const activeSlideIndex = activeSlide ? slides.indexOf(activeSlide) : -1;
   const safeCompiledVisual = slides.length > 0 && mode === "visual";
@@ -4519,7 +4643,32 @@ function TypesetEditorToolbar({
       insertSnippetAtCursor(adapter, "\\href{", "https://example.com", `}{${linkText}}`);
     });
   const insertRef = () => withSelection((adapter) => insertSnippetAtCursor(adapter, "\\ref{", "sec:label", "}"));
-  const insertCitation = () => withSelection((adapter) => insertSnippetAtCursor(adapter, "\\cite{", "reference", "}"));
+  const insertCitation = () => {
+    const adapter = activeEditorAdapter(mode, editorRef, visualViewRef, draft, onChange);
+    if (!adapter) return;
+    // Preserve the lightweight manual insertion behaviour for a brand-new
+    // project; once there are library records, citations are always selected
+    // from the local database so their keys and BibTeX stay in sync.
+    if (citationPapers.length === 0) {
+      insertSnippetAtCursor(adapter, "\\cite{", "reference", "}");
+      return;
+    }
+    citationAdapterRef.current = adapter;
+    setCitationPickerOpen(true);
+  };
+  const confirmCitation = async (ids: string[]) => {
+    const adapter = citationAdapterRef.current;
+    if (!adapter) throw new Error("The editor selection is no longer available.");
+    const keys = await onPrepareCitationKeys(ids);
+    if (keys.length === 0) throw new Error("The selected papers do not have usable citation keys.");
+    // Insert through the captured live editor first. The synchronization may
+    // replace the document to add the bibliography declaration, so doing it
+    // first would let this stale adapter overwrite that declaration.
+    insertSnippetAtCursor(adapter, "\\cite{", keys.join(","), "}");
+    await onSynchronizeBibliography();
+    citationAdapterRef.current = null;
+    setCitationPickerOpen(false);
+  };
   const insertTable = () =>
     withSelection((adapter) => insertBlockAtCursor(adapter, "\\begin{tabular}{ll}\nA & B \\\\\n1 & 2\n\\end{tabular}"));
   const insertFigure = () =>
@@ -4716,6 +4865,16 @@ function TypesetEditorToolbar({
           <button type="button" role="tab" aria-selected={mode === "visual"} className={mode === "visual" ? "active" : ""} onClick={() => onModeChange("visual")}>Visual</button>
         </div>
       </div>
+      {citationPickerOpen && (
+        <TypesetCitationPicker
+          papers={citationPapers}
+          onClose={() => {
+            citationAdapterRef.current = null;
+            setCitationPickerOpen(false);
+          }}
+          onConfirm={confirmCitation}
+        />
+      )}
     </div>
   );
 }
@@ -5901,6 +6060,9 @@ function scrollCodeEditorToLine(view: EditorView, line: number): void {
 export default function Typeset() {
   const currentProject = useStore((state) => state.currentProject);
   const setTypesetDirty = useStore((state) => state.setTypesetDirty);
+  const literaturePapers = useLiteratureStore((state) => state.library.papers);
+  const loadLiterature = useLiteratureStore((state) => state.load);
+  const ensureCitationKeys = useLiteratureStore((state) => state.ensureCitationKeys);
   const [sourcePath, setSourcePath] = useState<string | null>(null);
   const [previewPath, setPreviewPath] = useState<string | null>(null);
   const [loaded, setLoaded] = useState<FileText | null>(null);
@@ -5978,6 +6140,11 @@ export default function Typeset() {
   useEffect(() => {
     setCompileErrorHandling(loadCompileErrorHandling(currentProject?.id));
   }, [currentProject?.id]);
+
+  useEffect(() => {
+    if (!currentProject?.id || !isTauri()) return;
+    void loadLiterature(currentProject.id, { quiet: true });
+  }, [currentProject?.id, loadLiterature]);
 
   useEffect(() => {
     let active = true;
@@ -6078,6 +6245,30 @@ export default function Typeset() {
     }
     setDraft(nextDraft);
   }, []);
+
+  const prepareCitationKeys = useCallback(async (ids: string[]) => {
+    const keysById = await ensureCitationKeys(ids);
+    return ids.map((id) => keysById[id]).filter((key): key is string => Boolean(key));
+  }, [ensureCitationKeys]);
+
+  const synchronizeBibliography = useCallback(async () => {
+    const activeSourcePath = sourcePathRef.current;
+    if (!activeSourcePath) throw new Error("Open a LaTeX source file before inserting a library citation.");
+    const bibliography = await literatureExportBibliography<{ content: string }>({ format: "bibtex" });
+    const bibliographyPath = bibliographyPathForSource(activeSourcePath);
+    try {
+      await fileWriteText(bibliographyPath, bibliography.content);
+    } catch (writeError) {
+      try {
+        await fileCreateText(bibliographyPath, bibliography.content);
+      } catch {
+        throw writeError;
+      }
+    }
+    const sourceWithBibliography = withSomniqBibliography(draftRef.current);
+    if (sourceWithBibliography !== draftRef.current) changeDraft(sourceWithBibliography);
+    setTreeRefreshKey((value) => value + 1);
+  }, [changeDraft]);
 
   const undoDraft = useCallback(() => {
     const view = editorMode === "code" ? editorRef.current?.view : visualViewRef.current;
@@ -7022,6 +7213,9 @@ export default function Typeset() {
                   onSearch={openCodeRange}
                   onUndo={undoDraft}
                   linkedPdfLine={visualPdfCursor?.line ?? null}
+                  citationPapers={literaturePapers}
+                  onPrepareCitationKeys={prepareCitationKeys}
+                  onSynchronizeBibliography={synchronizeBibliography}
                   saving={saving}
                   compiling={compileStatus === "running"}
                   dirty={dirty}

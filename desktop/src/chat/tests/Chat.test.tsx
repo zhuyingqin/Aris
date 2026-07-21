@@ -20,7 +20,6 @@ const apiMocks = vi.hoisted(() => ({
   configSet: vi.fn((patch: { reviewEnabled?: boolean }) => Promise.resolve({ reviewEnabled: patch.reviewEnabled ?? true })),
   projectBriefGet: vi.fn(() => Promise.resolve({ mission: "Test project mission", goal: null })),
   projectIntentObserve: vi.fn(() => Promise.resolve({ mission: "Test project mission", intent: null, goal: null })),
-  projectGoalProgress: vi.fn(() => Promise.resolve({ mission: "Test project mission", goal: null })),
   chatRewindToUserMessage: vi.fn(() => Promise.resolve<number | null>(null)),
   chatSetContext: vi.fn((_sessionId: string, _messages: unknown[], _mode?: string) => Promise.resolve(0)),
   chatDelete: vi.fn(() => Promise.resolve()),
@@ -31,7 +30,6 @@ const apiMocks = vi.hoisted(() => ({
   chatUiTurnLoad: vi.fn(() => Promise.resolve(null)),
   chatUiSessionSave: vi.fn(() => Promise.resolve()),
   chatUiSessionDelete: vi.fn(() => Promise.resolve()),
-  chatUiSessionsLoad: vi.fn(() => Promise.resolve([])),
   chatUiSessionsSave: vi.fn(() => Promise.resolve()),
   fileRead: vi.fn(() => Promise.resolve("")),
   fileSearch: vi.fn(() => Promise.resolve([])),
@@ -171,7 +169,6 @@ describe("Chat export action", () => {
     apiMocks.chatUiSessionLoad.mockResolvedValue(null);
     apiMocks.chatUiSessionSave.mockResolvedValue(undefined);
     apiMocks.chatUiSessionDelete.mockResolvedValue(undefined);
-    apiMocks.chatUiSessionsLoad.mockResolvedValue([]);
     apiMocks.chatUiSessionsSave.mockResolvedValue(undefined);
     useStore.setState({
       tab: "chat",
