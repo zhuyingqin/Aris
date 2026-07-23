@@ -70,6 +70,51 @@ fn upsert_confirm_and_search_round_trip() {
 }
 
 #[test]
+fn rag_search_uses_fts_without_any_embedding_input() {
+    let base = temp_base("rag-fts-fallback");
+    let mut input = point(
+        "What happens under congestion?",
+        "Throughput improves by 32%.",
+        "The scheme improves throughput under congestion.",
+    );
+    input.id = Some("kp-rag-fallback".to_string());
+    knowledge_upsert_at(&base, &[input], false).expect("upsert");
+    knowledge_confirm_at(&base, "kp-rag-fallback").expect("confirm");
+
+    let result = knowledge_rag_search_at(&base, "throughput congestion", &[], 5)
+        .expect("FTS retrieval should not require an embedding service");
+    assert_eq!(result.results.len(), 1);
+    assert_eq!(result.results[0].knowledge.id, "kp-rag-fallback");
+    assert!(result.retrieval.contains("confirmed-knowledge FTS"));
+
+    let _ = std::fs::remove_dir_all(base);
+}
+
+#[test]
+fn rag_search_fuses_llm_expansions_with_exact_fts_results() {
+    let base = temp_base("rag-expanded-fts");
+    let mut input = point(
+        "What happens under congestion?",
+        "Throughput improves by 32%.",
+        "The scheme improves throughput under congestion.",
+    );
+    input.id = Some("kp-rag-expanded-fts".to_string());
+    knowledge_upsert_at(&base, &[input], false).expect("upsert");
+    knowledge_confirm_at(&base, "kp-rag-expanded-fts").expect("confirm");
+
+    let expansions = vec!["throughput congestion".to_string()];
+    let result = knowledge_rag_search_at(&base, "system behavior", &expansions, 5)
+        .expect("expanded FTS search");
+    assert_eq!(result.results.len(), 1);
+    assert_eq!(result.results[0].knowledge.id, "kp-rag-expanded-fts");
+    assert!(result.results[0]
+        .matched_queries
+        .iter()
+        .any(|query| query == "throughput congestion"));
+    let _ = std::fs::remove_dir_all(base);
+}
+
+#[test]
 fn chinese_query_recall_via_trigram_or_like() {
     let base = temp_base("cjk");
     let input = KnowledgePointInput {

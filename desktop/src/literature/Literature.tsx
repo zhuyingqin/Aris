@@ -11,15 +11,21 @@ import {
   literatureImportBibliography,
   literatureImportPdfAsRecord,
   literatureMergeDuplicates,
-  literatureProtocolCreate,
-  literatureProtocolExecute,
-  literatureProtocolPreview,
+  literatureRagIndexLibrary,
+  literatureRagIndexPdf,
+  literatureRagStatus,
   literatureStorageBackup,
   literatureStorageStatus,
   literatureReadAnnotationExport,
   literatureWriteAnnotationExport,
   literatureWriteBibliographyExport,
-  onLiteratureSearchProgress,
+  knowledgeRetrievalCardsBuild,
+  projectRagAnswer,
+  projectRagSearch,
+  type LiteratureRagIndexLibraryResult,
+  type LiteratureRagDatabaseStatus,
+  type ProjectRagAnswerResult,
+  type ProjectRagSearchResult,
 } from "../api/tauri";
 import { useStore } from "../store";
 import { SvgIcon, type SvgIconName } from "../SvgIcon";
@@ -32,14 +38,10 @@ import {
   type LiteratureAttachment,
   type LiteratureDuplicateCandidate,
   type LiteraturePaper,
-  type LiteratureReviewTask,
-  type LiteratureScreenRun,
-  type LiteratureSearch,
   type LiteratureStorageStatus,
   type LiteratureNote,
   type PaperFit,
   type PaperStage,
-  type ScreeningDecision,
 } from "./literatureTypes";
 import "./Literature.css";
 
@@ -49,6 +51,9 @@ type BibliographyExportFormat = "bibtex" | "biblatex" | "ris" | "csl-json";
 const Knowledge = lazy(() => import("../knowledge/KnowledgeReview"));
 const LazyMathText = lazy(() => import("./MathText"));
 const PdfReader = lazy(() => import("./PdfReader"));
+
+const AUTO_RETRIEVAL_CARDS_STORAGE_KEY = "somniq-literature-auto-retrieval-cards-v1";
+const RETRIEVAL_CARD_BUILD_BATCH_SIZE = 24;
 
 function MathText({
   text,
@@ -110,7 +115,7 @@ export function LiteratureViewTabs({
           className={`lit-mode-tab${pageView === item.id ? " active" : ""}`}
           onClick={() => onPageViewChange(item.id)}
         >
-          <span aria-hidden="true"><SvgIcon name={item.icon} size={15} /></span>
+          <span className="lit-mode-tab-icon" aria-hidden="true"><SvgIcon name={item.icon} size={15} /></span>
           {item.label}
         </button>
       ))}
@@ -234,6 +239,16 @@ function formatStorageBytes(bytes: number) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+function readAutoRetrievalCardsPreference() {
+  if (typeof window === "undefined") return true;
+  try {
+    return window.localStorage.getItem(AUTO_RETRIEVAL_CARDS_STORAGE_KEY) !== "false";
+  } catch {
+    // Storage can be unavailable in a restricted WebView; auto-build remains the useful default.
+    return true;
+  }
+}
+
 function itemTypeLabel(itemType?: string) {
   const labels: Record<string, string> = {
     article: "期刊文章", book: "图书", bookSection: "图书章节", conferencePaper: "会议论文",
@@ -243,265 +258,606 @@ function itemTypeLabel(itemType?: string) {
   return labels[itemType ?? "article"] ?? itemType ?? "其他";
 }
 
-type ProtocolPlanItem = {
-  source: string;
-  query: string;
-  adapterStatus: string;
-  coverageNote?: string;
-  quotaPolicy?: string;
-};
-
-type ProtocolPreview = {
-  protocol: { id: string; question: string; scope: string; timeWindow: string };
-  plan: ProtocolPlanItem[];
-  defaultMaxResults: number;
-  maximumMaxResults: number;
-  fullExport?: { note?: string };
-};
-
-type ProtocolRun = {
-  id: string;
-  status: string;
-  sourceAttempts: Array<{
-    source: string;
-    status: string;
-    hitCount?: number;
-    returnedCount: number;
-    failureMessage?: string;
-    coverageNote?: string;
-  }>;
-};
-
-type ProtocolRecordPreview = {
-  id: string;
-  title: string;
-  authors: string[];
-  year?: number;
-  venue: string;
-  source: string;
-};
-
-type ProtocolExecuteResult = {
-  searchRun: ProtocolRun;
-  warnings: string[];
-  recordPreview?: ProtocolRecordPreview[];
-};
-
-function LiteratureProtocolPanel({
-  onLibraryRefresh,
-}: {
-  onLibraryRefresh: () => Promise<void>;
-}) {
-  const [question, setQuestion] = useState("");
-  const [scope, setScope] = useState("");
-  const [query, setQuery] = useState("");
-  const [sourceQueries, setSourceQueries] = useState<Record<string, string>>({});
-  const [sources, setSources] = useState("openalex, crossref, semantic-scholar, arxiv");
-  const [include, setInclude] = useState("");
-  const [exclude, setExclude] = useState("");
-  const [maxResults, setMaxResults] = useState(20);
-  const [preview, setPreview] = useState<ProtocolPreview | null>(null);
-  const [run, setRun] = useState<ProtocolRun | null>(null);
-  const [recordPreview, setRecordPreview] = useState<ProtocolRecordPreview[]>([]);
-  const [progress, setProgress] = useState<Array<{ source?: string; phase?: string; message?: string }>>([]);
-  const [resumeRunId, setResumeRunId] = useState("");
-  const [confirmed, setConfirmed] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!isTauri()) return undefined;
-    let disposed = false;
-    let unlisten: (() => void) | undefined;
-    void onLiteratureSearchProgress((event) => {
-      if (disposed || !event || typeof event !== "object") return;
-      const value = event as { source?: unknown; phase?: unknown; message?: unknown };
-      setProgress((items) => [...items, {
-        source: typeof value.source === "string" ? value.source : undefined,
-        phase: typeof value.phase === "string" ? value.phase : undefined,
-        message: typeof value.message === "string" ? value.message : undefined,
-      }].slice(-12));
-    }).then((stop) => {
-      if (disposed) stop();
-      else unlisten = stop;
-    });
-    return () => {
-      disposed = true;
-      unlisten?.();
-    };
-  }, []);
-
-  const sourceList = () => Array.from(new Set(sources.split(",")
-    .map((source) => source.trim().toLowerCase())
-    .filter(Boolean)));
-  const criteria = (value: string) => value.split("\n").map((item) => item.trim()).filter(Boolean);
-
-  const previewProtocol = async () => {
-    const normalizedQuestion = question.trim();
-    const selectedSources = sourceList();
-    if (!normalizedQuestion || selectedSources.length === 0) {
-      setError("请输入研究问题，并至少选择一个数据源。");
-      return;
-    }
-    if (!isTauri()) {
-      setError("可复现检索需要 Desktop 后端。");
-      return;
-    }
-    setBusy(true);
-    setError(null);
-    setRun(null);
-    setRecordPreview([]);
-    setConfirmed(false);
-    try {
-      const effectiveQuery = query.trim() || normalizedQuestion;
-      const created = await literatureProtocolCreate<{ protocol: { id: string } }>({
-        question: normalizedQuestion,
-        scope: scope.trim(),
-        timeWindow: "",
-        databases: selectedSources,
-        queries: Object.fromEntries(selectedSources.map((source) => [
-          source,
-          sourceQueries[source]?.trim() || effectiveQuery,
-        ])),
-        inclusionCriteria: criteria(include),
-        exclusionCriteria: criteria(exclude),
-        knownKeyPapers: [],
-      });
-      const nextPreview = await literatureProtocolPreview<ProtocolPreview>(created.protocol.id);
-      setPreview(nextPreview);
-      setProgress([]);
-    } catch (cause) {
-      setError(`无法创建检索协议：${String(cause)}`);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const executeProtocol = async () => {
-    if (!preview || !confirmed || busy) return;
-    setBusy(true);
-    setError(null);
-    setProgress([]);
-    try {
-      const result = await literatureProtocolExecute<ProtocolExecuteResult>(
-        preview.protocol.id,
-        "execute",
-        maxResults,
-        resumeRunId.trim() || undefined,
-      );
-      setRun(result.searchRun);
-      setRecordPreview(result.recordPreview ?? []);
-      await onLibraryRefresh();
-      if (result.warnings.length > 0) setError(result.warnings.join("\n"));
-    } catch (cause) {
-      setError(`检索执行中断：${String(cause)}。如已显示运行 ID，可将其填入恢复字段后重新确认。`);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <section className="lit-protocol-panel" aria-label="Reproducible literature search">
-      <div className="lit-protocol-heading">
-        <div>
-          <strong>可复现检索</strong>
-          <span>协议 → 预览 → 明确确认 → 本地 SearchRun</span>
-        </div>
-        {busy && <span className="lit-search-spinner" aria-label="正在检索" />}
-      </div>
-      {!preview ? (
-        <div className="lit-protocol-form">
-          <input value={question} onChange={(event) => setQuestion(event.target.value)} placeholder="研究问题" aria-label="研究问题" />
-          <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="完整查询式（留空则使用研究问题）" aria-label="完整查询式" />
-          <input value={scope} onChange={(event) => setScope(event.target.value)} placeholder="范围（可选）" aria-label="检索范围" />
-          <input value={sources} onChange={(event) => setSources(event.target.value)} placeholder="数据源，以逗号分隔" aria-label="数据源" />
-          <div className="lit-source-query-editor" aria-label="分源查询式">
-            {sourceList().map((source) => (
-              <label key={source}>
-                <span>{source}</span>
-                <input
-                  value={sourceQueries[source] ?? ""}
-                  onChange={(event) => setSourceQueries((current) => ({
-                    ...current,
-                    [source]: event.target.value,
-                  }))}
-                  placeholder="留空使用默认查询式"
-                  aria-label={`${source} 查询式`}
-                />
-              </label>
-            ))}
-          </div>
-          <details>
-            <summary>纳排标准（可选）</summary>
-            <textarea value={include} onChange={(event) => setInclude(event.target.value)} placeholder="每行一条纳入标准" aria-label="纳入标准" />
-            <textarea value={exclude} onChange={(event) => setExclude(event.target.value)} placeholder="每行一条排除标准" aria-label="排除标准" />
-          </details>
-          <button type="button" className="primary" onClick={() => void previewProtocol()} disabled={busy}>生成并预览协议</button>
-        </div>
-      ) : (
-        <div className="lit-protocol-preview">
-          <div className="lit-protocol-summary">
-            <strong>{preview.protocol.question}</strong>
-            {preview.protocol.scope && <span>{preview.protocol.scope}</span>}
-          </div>
-          <div className="lit-protocol-plan" role="list" aria-label="检索计划">
-            {preview.plan.map((item) => (
-              <div key={item.source} role="listitem" className={`lit-protocol-source ${item.adapterStatus !== "available" ? "unavailable" : ""}`}>
-                <strong>{item.source}</strong>
-                <code>{item.query}</code>
-                <small>{item.coverageNote}</small>
-                <small>{item.quotaPolicy}</small>
-              </div>
-            ))}
-          </div>
-          <div className="lit-protocol-confirm">
-            <label>
-              <input type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} />
-              我已核对查询式、数据源、每源导出上限与覆盖缺口。
-            </label>
-            <label>每源上限
-              <select value={maxResults} onChange={(event) => setMaxResults(Number(event.target.value))}>
-                {[20, 50, 100].map((count) => <option key={count} value={count}>{count}</option>)}
-              </select>
-            </label>
-            <input value={resumeRunId} onChange={(event) => setResumeRunId(event.target.value)} placeholder="恢复运行 ID（可选）" aria-label="恢复运行 ID" />
-            <button type="button" className="primary" onClick={() => void executeProtocol()} disabled={!confirmed || busy}>
-              执行已确认检索
-            </button>
-            <button type="button" onClick={() => { setPreview(null); setConfirmed(false); setRun(null); setRecordPreview([]); }}>修改协议</button>
-          </div>
-        </div>
-      )}
-      {progress.length > 0 && (
-        <div className="lit-protocol-progress" role="status" aria-live="polite">
-          {progress.map((item, index) => <span key={`${item.source}-${item.phase}-${index}`}>{item.source ?? "检索"} · {item.phase ?? "处理中"}{item.message ? `：${item.message}` : ""}</span>)}
-        </div>
-      )}
-      {run && (
-        <div className="lit-protocol-run" aria-label="SearchRun 结果">
-          <strong>SearchRun {run.id} · {run.status}</strong>
-          {run.sourceAttempts.map((attempt, index) => (
-            <span key={`${attempt.source}-${index}`}>{attempt.source}: {attempt.status} · 返回 {attempt.returnedCount}{attempt.hitCount !== undefined ? ` / 命中 ${attempt.hitCount}` : ""}{attempt.failureMessage ? ` · ${attempt.failureMessage}` : ""}</span>
-          ))}
-        </div>
-      )}
-      {recordPreview.length > 0 && (
-        <div className="lit-protocol-record-preview" aria-label="SearchRun 样本记录">
-          <strong>样本记录（尚未筛选）</strong>
-          {recordPreview.map((record) => (
-            <span key={record.id}>{record.title}{record.year ? ` · ${record.year}` : ""}{record.venue ? ` · ${record.venue}` : ""}</span>
-          ))}
-        </div>
-      )}
-      {error && <div className="lit-protocol-error" role="alert">{error}</div>}
-    </section>
-  );
-}
-
 function formatAuthors(authors: string[]) {
   if (authors.length === 0) return "Unknown authors";
   if (authors.length <= 3) return authors.join(", ");
   return `${authors.slice(0, 3).join(", ")} et al.`;
+}
+
+function LiteratureRagPanel({
+  selectedPaper,
+  papers,
+  onOpenCitation,
+  onActivity,
+}: {
+  selectedPaper: LiteraturePaper | null;
+  papers: LiteraturePaper[];
+  onOpenCitation: (paperId: string, page?: number) => void;
+  onActivity: (kind: "ok" | "error", message: string) => void;
+}) {
+  const [busy, setBusy] = useState<"paper" | "library" | "rebuild" | "search" | "answer" | null>(null);
+  const [status, setStatus] = useState("先建立稳定页码的 PDF 原文索引，再由现有 LLM 生成检索卡；查询全程使用本地 SQLite FTS5，不需要 Embedding。");
+  const [libraryResult, setLibraryResult] = useState<LiteratureRagIndexLibraryResult | null>(null);
+  const [query, setQuery] = useState("");
+  const [searchResult, setSearchResult] = useState<ProjectRagSearchResult | null>(null);
+  const [answer, setAnswer] = useState("");
+  const [answerReview, setAnswerReview] = useState<ProjectRagAnswerResult["review"] | null>(null);
+  const [databaseStatus, setDatabaseStatus] = useState<LiteratureRagDatabaseStatus | null>(null);
+  const [databaseStatusError, setDatabaseStatusError] = useState("");
+  const [databaseStatusRefreshing, setDatabaseStatusRefreshing] = useState(false);
+  const [autoRetrievalCards, setAutoRetrievalCards] = useState(readAutoRetrievalCardsPreference);
+  const [retrievalCardBuild, setRetrievalCardBuild] = useState({
+    running: false,
+    batches: 0,
+    attempted: 0,
+    generated: 0,
+    warnings: 0,
+    message: "",
+  });
+  const autoRetrievalCardsRef = useRef(autoRetrievalCards);
+  const retrievalCardBuildRunningRef = useRef(false);
+  const retrievalCardBuildRunRef = useRef(0);
+  const retrievalCardResumeCheckedRef = useRef(false);
+
+  const refreshDatabaseStatus = async () => {
+    if (!isTauri()) return;
+    setDatabaseStatusRefreshing(true);
+    try {
+      setDatabaseStatus(await literatureRagStatus(12));
+      setDatabaseStatusError("");
+    } catch (cause) {
+      setDatabaseStatusError(String(cause));
+    } finally {
+      setDatabaseStatusRefreshing(false);
+    }
+  };
+
+  useEffect(() => {
+    void refreshDatabaseStatus();
+  }, []);
+
+  useEffect(() => {
+    autoRetrievalCardsRef.current = autoRetrievalCards;
+    try {
+      window.localStorage.setItem(AUTO_RETRIEVAL_CARDS_STORAGE_KEY, autoRetrievalCards ? "true" : "false");
+    } catch {
+      // The toggle still works for this session when persistent storage is unavailable.
+    }
+  }, [autoRetrievalCards]);
+
+  useEffect(() => () => {
+    // Do not update this panel after switching projects or leaving the page. The current LLM
+    // request is allowed to finish, but no further batch is started from this panel instance.
+    retrievalCardBuildRunRef.current += 1;
+  }, []);
+
+  const reportFailure = (prefix: string, cause: unknown) => {
+    const message = `${prefix}：${String(cause)}`;
+    setStatus(message);
+    onActivity("error", message);
+  };
+
+  const buildRetrievalCardsInBackground = async (paperId?: string, automatic = false) => {
+    if (!isTauri() || retrievalCardBuildRunningRef.current) return;
+    retrievalCardBuildRunningRef.current = true;
+    const run = retrievalCardBuildRunRef.current + 1;
+    retrievalCardBuildRunRef.current = run;
+    const scope = paperId ? "当前 PDF" : "全文献库";
+    let batches = 0;
+    let attempted = 0;
+    let generated = 0;
+    let warnings = 0;
+    let paused = false;
+    let stalled = false;
+    setRetrievalCardBuild({
+      running: true,
+      batches,
+      attempted,
+      generated,
+      warnings,
+      message: automatic ? `${scope}的检索卡正在后台自动构建…` : `${scope}的检索卡正在后台补建…`,
+    });
+
+    try {
+      while (run === retrievalCardBuildRunRef.current) {
+        if (automatic && !autoRetrievalCardsRef.current) {
+          paused = true;
+          break;
+        }
+        const result = await knowledgeRetrievalCardsBuild(paperId, RETRIEVAL_CARD_BUILD_BATCH_SIZE);
+        if (run !== retrievalCardBuildRunRef.current) break;
+        batches += 1;
+        attempted += result.attempted;
+        generated += result.generated;
+        warnings += result.warnings.length;
+        stalled = result.hasMore && result.generated === 0;
+        setRetrievalCardBuild({
+          running: true,
+          batches,
+          attempted,
+          generated,
+          warnings,
+          message: `检索卡后台构建中：已处理 ${attempted} 个页块，生成 ${generated} 张卡（${batches} 批）。`,
+        });
+        void refreshDatabaseStatus();
+        if (!result.hasMore || stalled) break;
+        // Yield before the next bounded model request so the UI can repaint and the switch can pause it.
+        await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+      }
+
+      if (run !== retrievalCardBuildRunRef.current) return;
+      if (automatic && !autoRetrievalCardsRef.current) paused = true;
+      const message = paused
+        ? `自动生成已暂停；本次已处理 ${attempted} 个页块，生成 ${generated} 张检索卡。`
+        : stalled
+          ? `检索卡构建在 ${batches} 批后暂停：本批没有生成新卡，请检查检索卡模型配置。`
+          : attempted === 0
+            ? "所有已索引页块的检索卡均为最新状态。"
+            : `检索卡后台构建完成：已处理 ${attempted} 个页块，生成 ${generated} 张卡（${batches} 批）。`;
+      setRetrievalCardBuild({ running: false, batches, attempted, generated, warnings, message });
+      onActivity(warnings > 0 || stalled ? "error" : "ok", message);
+    } catch (cause) {
+      if (run !== retrievalCardBuildRunRef.current) return;
+      const message = `检索卡后台构建失败：${String(cause)}`;
+      setRetrievalCardBuild({ running: false, batches, attempted, generated, warnings, message });
+      onActivity("error", message);
+    } finally {
+      retrievalCardBuildRunningRef.current = false;
+      if (run === retrievalCardBuildRunRef.current) void refreshDatabaseStatus();
+    }
+  };
+
+  useEffect(() => {
+    if (
+      !autoRetrievalCards
+      || !databaseStatus
+      || busy
+      || retrievalCardResumeCheckedRef.current
+    ) return;
+    // A project can be closed while a batch is in flight. Its cards are content-hash
+    // keyed, so this is safe to resume from the pending count on the next visit.
+    retrievalCardResumeCheckedRef.current = true;
+    if (databaseStatus.pendingCardCount > 0) void buildRetrievalCardsInBackground(undefined, true);
+  }, [autoRetrievalCards, busy, databaseStatus]);
+
+  const setAutoRetrievalCardBuild = (enabled: boolean) => {
+    autoRetrievalCardsRef.current = enabled;
+    setAutoRetrievalCards(enabled);
+    if (!enabled && retrievalCardBuildRunningRef.current) {
+      setStatus("自动检索卡生成将在当前小批处理结束后暂停。");
+      return;
+    }
+    if (enabled && databaseStatus && databaseStatus.pendingCardCount > 0 && !busy) {
+      void buildRetrievalCardsInBackground(undefined, true);
+    }
+  };
+
+  const indexSelectedPaper = async () => {
+    const relativePath = selectedPaper?.pdf.path;
+    if (!relativePath) {
+      setStatus("当前论文没有已关联的本地 PDF。请先下载或上传 PDF。");
+      return;
+    }
+    if (busy) return;
+    setBusy("paper");
+    setLibraryResult(null);
+    setStatus(`正在通过内置 PDF 阅读器逐页提取《${selectedPaper.title}》并建立本地全文索引…`);
+    try {
+      const result = await literatureRagIndexPdf(
+        relativePath,
+        selectedPaper.id,
+      );
+      const indexedChunks = result.stats?.indexedChunks ?? result.indexedChunks ?? 0;
+      const skipped = result.stats?.skippedAsCurrent ?? result.skippedAsCurrent ?? false;
+      const message = skipped
+        ? `《${selectedPaper.title}》内容未变化，已保留现有全文索引。`
+        : `《${selectedPaper.title}》已建立 ${indexedChunks} 个本地可引用页块；共 ${result.pageCount} 页${result.ocrUsed ? "，包含 OCR 页" : ""}。`;
+      const parserNote = result.parserEngine
+        ? ` 解析器：${result.parserEngine}；图像资产 ${result.assetCount ?? 0} 个。${result.parserWarning ? ` ${result.parserWarning}` : ""}`
+        : "";
+      const cardNote = autoRetrievalCardsRef.current
+        ? " 检索卡将转入后台自动构建。"
+        : " 自动检索卡生成已关闭；可在需要时手动补建。";
+      setStatus(`${message}${parserNote}${cardNote}`);
+      onActivity("ok", `${message}${parserNote}${cardNote}`);
+      if (autoRetrievalCardsRef.current) void buildRetrievalCardsInBackground(selectedPaper.id, true);
+    } catch (cause) {
+      reportFailure("单篇 PDF 索引失败", cause);
+    } finally {
+      setBusy(null);
+      void refreshDatabaseStatus();
+    }
+  };
+
+  const indexLibrary = async (forceRebuild: boolean) => {
+    if (busy) return;
+    if (forceRebuild && !window.confirm("强制重建会清除并重建可再生的 PDF 全文索引与检索卡；原始 PDF 和文献数据不会被修改。继续吗？")) return;
+    setBusy(forceRebuild ? "rebuild" : "library");
+    setLibraryResult(null);
+    setStatus(forceRebuild ? "正在强制重建全部 PDF 全文索引…" : "正在增量更新全文献库 PDF 全文索引…");
+    try {
+      const result = await literatureRagIndexLibrary(forceRebuild);
+      setLibraryResult(result);
+      const message = `PDF 索引完成：共 ${result.total} 篇，更新 ${result.indexed} 篇，跳过 ${result.skipped} 篇，失败 ${result.failed} 篇。`;
+      const cardNote = autoRetrievalCardsRef.current
+        ? " 检索卡将转入后台自动构建。"
+        : " 自动检索卡生成已关闭；可在需要时手动补建。";
+      setStatus(`${message} 原文索引使用本地 SQLite FTS5。${cardNote}`);
+      onActivity(result.failed > 0 ? "error" : "ok", `${message}${cardNote}`);
+      if (autoRetrievalCardsRef.current) void buildRetrievalCardsInBackground(undefined, true);
+    } catch (cause) {
+      reportFailure(forceRebuild ? "强制重建 PDF 索引失败" : "批量建立 PDF 索引失败", cause);
+    } finally {
+      setBusy(null);
+      void refreshDatabaseStatus();
+    }
+  };
+
+  const buildRetrievalCards = () => {
+    if (busy || retrievalCardBuild.running) return;
+    void buildRetrievalCardsInBackground(undefined);
+  };
+
+  const search = async () => {
+    const normalizedQuery = query.trim();
+    if (!normalizedQuery) {
+      setStatus("请输入要在已确认知识和 PDF 原文中检索的问题。");
+      return;
+    }
+    if (busy) return;
+    setBusy("search");
+    setSearchResult(null);
+    setAnswer("");
+    setAnswerReview(null);
+    setStatus("正在由 LLM 生成少量扩展检索式，并行检索原文、检索卡和已确认知识…");
+    try {
+      const result = await projectRagSearch<ProjectRagSearchResult>(normalizedQuery, 8);
+      setSearchResult(result);
+      const warning = result.plannerWarning ? ` 查询扩展不可用，已回退到原问题：${result.plannerWarning}` : "";
+      setStatus(`检索完成：${result.knowledge.results.length} 条已确认知识，${result.literature.results.length} 个 PDF 原文页块。${warning}`);
+    } catch (cause) {
+      reportFailure("本地检索失败", cause);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const answerWithSomni = async () => {
+    const normalizedQuery = query.trim();
+    if (!normalizedQuery) {
+      setStatus("请输入要根据已确认知识和 PDF 原文回答的问题。");
+      return;
+    }
+    if (busy) return;
+    setBusy("answer");
+    setSearchResult(null);
+    setAnswer("");
+    setAnswerReview(null);
+    setStatus("正在扩展问题、检索与重排证据，并由独立 Reviewer 核验页码引用…");
+    try {
+      const result: ProjectRagAnswerResult = await projectRagAnswer(normalizedQuery, 8);
+      setSearchResult(result);
+      setAnswer(result.answer);
+      setAnswerReview(result.review);
+      const reviewNote = result.review.verdict === "pass"
+        ? "独立证据审校通过。"
+        : `独立证据审校：${result.review.verdict}。`;
+      setStatus(`回答完成：引用 ${result.knowledge.results.length} 条已确认知识和 ${result.literature.results.length} 个 PDF 页块。${reviewNote}`);
+    } catch (cause) {
+      reportFailure("检索回答失败", cause);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const paperTitle = (paperId: string) => papers.find((paper) => paper.id === paperId)?.title ?? paperId;
+  const totalResults = (searchResult?.knowledge.results.length ?? 0) + (searchResult?.literature.results.length ?? 0);
+
+  return (
+    <section className="lit-rag-panel" aria-label="本地文献检索">
+      <div className="lit-rag-header">
+        <div className="lit-rag-header-icon" aria-hidden="true">
+          <SvgIcon name="memory" size={22} />
+        </div>
+        <div className="lit-rag-header-copy">
+          <div className="lit-rag-header-meta">
+            <span className="lit-rag-kicker">Local search</span>
+            <div className="lit-rag-header-tags" aria-label="检索特性">
+              <span><SvgIcon name="check" size={12} /> 本地 FTS5</span>
+              <span><SvgIcon name="memory" size={12} /> 零向量存储</span>
+            </div>
+          </div>
+          <h2>本地 PDF 与知识检索</h2>
+          <p>PDF 分页、OCR、页块和 SQLite FTS 索引均保存在项目 <code>papers/rag/</code>；仅在生成检索卡或回答时，才向已配置的模型传入所需页块。</p>
+          <p className="lit-rag-chat-route"><SvgIcon name="inbox" size={12} /> 搜索并保存新文献请直接在 Chat 中提出；此处专注检索本地 PDF 与已确认知识。</p>
+        </div>
+      </div>
+
+      <section className="lit-rag-pipeline" aria-label="无向量检索链路">
+        <div className="lit-rag-pipeline-intro">
+          <SvgIcon name="diagram" size={17} />
+          <div>
+            <strong>证据链路</strong>
+            <span>原始页码始终可追溯</span>
+          </div>
+        </div>
+        <ol>
+          <li><SvgIcon name="attachment" size={14} /><span><strong>PDF / OCR</strong><small>分页与图注</small></span></li>
+          <li><SvgIcon name="search" size={14} /><span><strong>FTS5 召回</strong><small>本地全文检索</small></span></li>
+          <li><SvgIcon name="sparkle" size={14} /><span><strong>LLM 重排</strong><small>受限候选页块</small></span></li>
+          <li><SvgIcon name="check" size={14} /><span><strong>Reviewer</strong><small>独立核验引用</small></span></li>
+        </ol>
+      </section>
+
+      <div className="lit-rag-workspace-grid">
+
+      <section className="lit-rag-database" aria-label="本地检索库状态">
+        <div className="lit-rag-database-head">
+          <div className="lit-rag-database-title">
+            <span className="lit-rag-section-icon" aria-hidden="true"><SvgIcon name="library" size={15} /></span>
+            <div>
+            <strong>本地检索库</strong>
+            <span title={databaseStatus?.indexPath}>
+              {databaseStatus?.relativeIndexPath ?? "papers/rag/literature-retrieval.sqlite"}
+            </span>
+            </div>
+          </div>
+          <div className="lit-rag-database-controls">
+            <span className={`lit-rag-state-pill ${databaseStatus?.exists ? "ready" : "empty"}`}>
+              <i aria-hidden="true" />
+              {databaseStatusRefreshing ? "读取中" : databaseStatus?.exists ? "索引就绪" : "待初始化"}
+            </span>
+            <button type="button" onClick={() => void refreshDatabaseStatus()} disabled={databaseStatusRefreshing} aria-label="刷新检索库状态" title="刷新检索库状态">
+              <SvgIcon name="refresh" size={13} /> <span>{databaseStatusRefreshing ? "读取中" : "刷新"}</span>
+            </button>
+          </div>
+        </div>
+        {databaseStatusError && <p className="lit-rag-database-error">读取失败：{databaseStatusError}</p>}
+        {!databaseStatus && !databaseStatusError && <p className="lit-note-text">正在读取本地索引状态…</p>}
+        {databaseStatus && !databaseStatus.exists && (
+          <div className="lit-rag-database-empty">
+            <span aria-hidden="true"><SvgIcon name="library" size={20} /></span>
+            <div>
+              <strong>还没有全文索引</strong>
+              <p>从右侧更新文献库，系统会在项目内创建可追溯的本地检索库。</p>
+            </div>
+          </div>
+        )}
+        {databaseStatus?.exists && (
+          <>
+            <div className="lit-rag-database-stats">
+              <div><strong>{databaseStatus.documentCount}</strong><span>已索引论文</span></div>
+              <div><strong>{databaseStatus.chunkCount}</strong><span>原文页块</span></div>
+              <div><strong>{databaseStatus.currentCardCount}</strong><span>有效检索卡</span></div>
+              <div><strong>{databaseStatus.pendingCardCount}</strong><span>待生成卡</span></div>
+              <div><strong>{databaseStatus.assetCount}</strong><span>图表资产</span></div>
+              <div><strong>{formatStorageBytes(databaseStatus.databaseBytes)}</strong><span>数据库大小</span></div>
+            </div>
+            <div className="lit-rag-card-coverage">
+              <div>
+                <span>检索卡覆盖</span>
+                <strong>{databaseStatus.currentCardCount}/{databaseStatus.chunkCount}</strong>
+              </div>
+              <progress max={Math.max(databaseStatus.chunkCount, 1)} value={databaseStatus.currentCardCount} />
+              <small>
+                元数据 {databaseStatus.metadataDocumentCount} 篇 · 引用关系 {databaseStatus.citationMentionCount} 条
+                {databaseStatus.staleCardCount > 0 ? ` · 失效卡 ${databaseStatus.staleCardCount} 张` : ""}
+              </small>
+            </div>
+            <details className="lit-rag-card-browser">
+              <summary>查看检索卡内容（最近 {databaseStatus.cardPreviews.length} 张）</summary>
+              {databaseStatus.cardPreviews.length === 0 ? (
+                <p className="lit-note-text">当前还没有检索卡。</p>
+              ) : databaseStatus.cardPreviews.map((preview) => {
+                const terms = [
+                  ...preview.card.concepts,
+                  ...preview.card.aliases,
+                  ...preview.card.methods,
+                  ...preview.card.datasets,
+                  ...preview.card.metrics,
+                  ...preview.card.limitations,
+                  ...preview.card.languageTerms,
+                ].slice(0, 12);
+                return (
+                  <article key={preview.chunkId} className="lit-rag-card-preview">
+                    <div className="lit-rag-card-preview-head">
+                      <strong>{paperTitle(preview.paperId)}</strong>
+                      <button type="button" onClick={() => onOpenCitation(preview.paperId, preview.pageStart)}>
+                        p.{preview.pageStart}
+                      </button>
+                    </div>
+                    {preview.card.sectionHeadings.length > 0 && <small>{preview.card.sectionHeadings.join(" / ")}</small>}
+                    {preview.card.questions.length > 0 && <p>{preview.card.questions.slice(0, 3).join("；")}</p>}
+                    {terms.length > 0 && <div className="lit-rag-card-terms">{terms.map((term) => <span key={term}>{term}</span>)}</div>}
+                    <blockquote>{preview.sourcePreview}</blockquote>
+                    <footer>{preview.card.generatedBy || "configured executor"} · prompt v{preview.card.promptVersion}</footer>
+                  </article>
+                );
+              })}
+            </details>
+          </>
+        )}
+      </section>
+
+      <section className="lit-rag-maintenance" aria-label="索引维护">
+        <div className="lit-rag-maintenance-head">
+          <div>
+            <span className="lit-rag-section-icon" aria-hidden="true"><SvgIcon name="refresh" size={15} /></span>
+            <div>
+              <strong>索引维护</strong>
+              <span>同步 PDF 页块与检索卡</span>
+            </div>
+          </div>
+          <span className={`lit-rag-selection${selectedPaper?.pdf.path ? " available" : ""}`} title={selectedPaper?.title}>
+            {selectedPaper?.pdf.path ? `当前：${selectedPaper.title}` : "当前论文无本地 PDF"}
+          </span>
+        </div>
+
+        <div className="lit-rag-actions" role="toolbar" aria-label="检索索引操作">
+          <button type="button" className="primary lit-rag-library-action" onClick={() => void indexLibrary(false)} disabled={Boolean(busy) || retrievalCardBuild.running}>
+            <SvgIcon name="refresh" size={14} />
+            {busy === "library" ? "正在批量更新…" : "增量更新全文献库全文"}
+          </button>
+          <button type="button" onClick={() => void indexSelectedPaper()} disabled={Boolean(busy) || retrievalCardBuild.running || !selectedPaper?.pdf.path}>
+            <SvgIcon name="target" size={14} />
+            {busy === "paper" ? "正在索引当前 PDF…" : "建立当前 PDF 全文索引"}
+          </button>
+          <button type="button" onClick={buildRetrievalCards} disabled={Boolean(busy) || retrievalCardBuild.running}>
+            <SvgIcon name="sparkle" size={14} />
+            {retrievalCardBuild.running ? "检索卡后台构建中…" : "立即补建检索卡"}
+          </button>
+        </div>
+
+        <label className="lit-rag-auto-cards">
+          <input
+            type="checkbox"
+            aria-label="自动生成检索卡"
+            checked={autoRetrievalCards}
+            onChange={(event) => setAutoRetrievalCardBuild(event.target.checked)}
+          />
+          <span className="lit-rag-switch" aria-hidden="true"><i /></span>
+          <span className="lit-rag-auto-copy">
+            <strong>自动生成检索卡</strong>
+            <small>新索引完成后在后台分批处理</small>
+          </span>
+        </label>
+
+        <div className={`lit-rag-status${libraryResult?.failed ? " warning" : ""}`} role="status" aria-live="polite">
+          <span className="lit-rag-status-icon" aria-hidden="true">
+            {busy
+              ? <span className="lit-search-spinner" />
+              : <SvgIcon name={libraryResult?.failed ? "warning" : "check"} size={14} />}
+          </span>
+          <div><strong>运行状态</strong><span>{status}</span></div>
+        </div>
+        <div className={`lit-rag-card-build${retrievalCardBuild.running ? " running" : ""}`} aria-live="polite">
+          <SvgIcon name="sparkle" size={14} />
+          <div>
+            <strong>检索卡后台任务</strong>
+            <span>{retrievalCardBuild.message || (autoRetrievalCards ? "新建全文索引后会自动开始。" : "自动生成已关闭。")}</span>
+          </div>
+          {retrievalCardBuild.running && <span className="lit-search-spinner" aria-hidden="true" />}
+        </div>
+        {libraryResult && libraryResult.failures.length > 0 && (
+          <details className="lit-rag-failures">
+            <summary>查看 {libraryResult.failures.length} 项失败</summary>
+            {libraryResult.failures.map((failure) => (
+              <div key={`${failure.paperId}-${failure.relativePath}`}>
+                <strong>{paperTitle(failure.paperId)}</strong>
+                <span>{failure.error}</span>
+              </div>
+            ))}
+          </details>
+        )}
+        <details className="lit-rag-advanced">
+          <summary><SvgIcon name="reset" size={13} /> 高级维护 <small>索引异常时使用</small></summary>
+          <button type="button" className="danger" onClick={() => void indexLibrary(true)} disabled={Boolean(busy) || retrievalCardBuild.running}>
+            <SvgIcon name="warning" size={13} />
+            {busy === "rebuild" ? "正在强制重建…" : "强制重建 PDF 全文索引"}
+          </button>
+        </details>
+      </section>
+      </div>
+
+      <form className="lit-rag-search" onSubmit={(event) => { event.preventDefault(); void answerWithSomni(); }}>
+        <div className="lit-rag-search-heading">
+          <span className="lit-rag-search-icon" aria-hidden="true"><SvgIcon name="sparkle" size={18} /></span>
+          <div>
+            <span className="lit-rag-kicker">Ask SomniQ</span>
+            <strong>基于本地证据提问</strong>
+            <span>FTS5 召回原文与已确认知识，LLM 仅重排少量候选；回答由独立 Reviewer 核验页码引用。</span>
+          </div>
+        </div>
+        <div className="lit-rag-search-box">
+          <label className="lit-rag-query-input">
+            <SvgIcon name="search" size={15} />
+            <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="例如：该方法在哪些数据集上验证，主要局限是什么？" aria-label="检索问题" />
+          </label>
+          <button type="button" onClick={() => void search()} disabled={Boolean(busy) || !query.trim()}>
+            <SvgIcon name="search" size={14} /> {busy === "search" ? "检索中…" : "仅检索证据"}
+          </button>
+          <button type="submit" className="primary" disabled={Boolean(busy) || !query.trim()}>
+            <SvgIcon name="sparkle" size={14} /> {busy === "answer" ? "回答中…" : "检索并回答"}
+          </button>
+        </div>
+      </form>
+
+      {answer && (
+        <section className="lit-rag-answer" aria-label="SomniQ 检索回答">
+          <div>
+            <strong>SomniQ 基于本地证据的回答</strong>
+            <span>回答由当前已配置的 LLM 生成；请通过下方来源卡片复核引用。</span>
+          </div>
+          <p>{answer}</p>
+          {answerReview && answerReview.findings.length > 0 && (
+            <small>独立审校：{answerReview.findings.join("；")}</small>
+          )}
+        </section>
+      )}
+
+      {searchResult && (
+        <div className="lit-rag-results" aria-label="检索结果">
+          {totalResults === 0 && <p className="lit-note-text">当前全文索引没有命中。可先为 PDF 建立全文索引，或换用更具体的关键词。</p>}
+          {searchResult.knowledge.results.length > 0 && (
+            <div className="lit-rag-result-group">
+              <div className="lit-rag-result-heading">
+                <strong>已确认知识</strong>
+                <span>{searchResult.knowledge.results.length}</span>
+              </div>
+              {searchResult.knowledge.results.map((hit) => (
+                <article className="lit-rag-result-card knowledge" key={hit.knowledge.id}>
+                  <div className="lit-rag-result-meta">
+                    <span>已确认</span>
+                    <span>#{hit.rank}</span>
+                    {hit.knowledge.kind && <span>{hit.knowledge.kind}</span>}
+                  </div>
+                  <strong>{hit.knowledge.statement || hit.knowledge.answer}</strong>
+                  {hit.knowledge.snippet && <p>{hit.knowledge.snippet}</p>}
+                  <div className="lit-rag-citations">
+                    {hit.knowledge.evidence.map((evidence, index) => (
+                      <button type="button" key={`${evidence.paperId}-${evidence.page}-${index}`} onClick={() => onOpenCitation(evidence.paperId, evidence.page)} title={evidence.quote}>
+                        {paperTitle(evidence.paperId)}{evidence.page ? ` · p.${evidence.page}` : ""}
+                      </button>
+                    ))}
+                    {hit.knowledge.evidence.length === 0 && hit.knowledge.sourcePaperId && (
+                      <button type="button" onClick={() => onOpenCitation(hit.knowledge.sourcePaperId!)}>{paperTitle(hit.knowledge.sourcePaperId)}</button>
+                    )}
+                  </div>
+                </article>
+              ))}
+            </div>
+          )}
+          {searchResult.literature.results.length > 0 && (
+            <div className="lit-rag-result-group">
+              <div className="lit-rag-result-heading">
+                <strong>PDF 原文页块</strong>
+                <span>{searchResult.literature.results.length}</span>
+              </div>
+              {searchResult.literature.results.map((hit) => (
+                <article className="lit-rag-result-card pdf" key={hit.chunk.chunkId}>
+                  <div className="lit-rag-result-meta">
+                    <span>{hit.chunk.pageSource === "ocr" ? "OCR" : "PDF 文本"}</span>
+                    <span>p.{hit.chunk.pageStart}</span>
+                    {hit.sourceRank && <span>原文匹配 #{hit.sourceRank}</span>}
+                    {hit.cardRank && <span>检索卡匹配 #{hit.cardRank}</span>}
+                    {hit.assetRank && <span>图表匹配 #{hit.assetRank}</span>}
+                    {hit.citationRank && <span>引用匹配 #{hit.citationRank}</span>}
+                    {hit.metadataRank && <span>元数据匹配 #{hit.metadataRank}</span>}
+                    {hit.matchedQueries.length > 0 && <span>扩展词：{hit.matchedQueries.slice(0, 2).join(" / ")}</span>}
+                  </div>
+                  <strong>{paperTitle(hit.chunk.paperId)}</strong>
+                  <p>{hit.chunk.text}</p>
+                  <button type="button" className="lit-rag-open-page" onClick={() => onOpenCitation(hit.chunk.paperId, hit.chunk.pageStart)}>
+                    打开原文页 <SvgIcon name="chevronRight" size={13} />
+                  </button>
+                </article>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </section>
+  );
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -518,9 +874,7 @@ export default function Literature({
   const library = useLiteratureStore((s) => s.library);
   const loaded = useLiteratureStore((s) => s.loaded);
   const briefing = useLiteratureStore((s) => s.briefing);
-  const screening = useLiteratureStore((s) => s.screening);
   const generatingAnswerChains = useLiteratureStore((s) => s.generatingAnswerChains);
-  const activeReviewTaskId = useLiteratureStore((s) => s.activeReviewTaskId);
   const storeError = useLiteratureStore((s) => s.error);
   const load = useLiteratureStore((s) => s.load);
   const watchAgentActivity = useLiteratureStore((s) => s.watchAgentActivity);
@@ -535,16 +889,6 @@ export default function Literature({
   const removeCollection = useLiteratureStore((s) => s.removeCollection);
   const saveDynamicSearch = useLiteratureStore((s) => s.saveDynamicSearch);
   const toggleCollection = useLiteratureStore((s) => s.toggleCollection);
-  const setActiveReviewTask = useLiteratureStore((s) => s.setActiveReviewTask);
-  const createReviewTask = useLiteratureStore((s) => s.createReviewTask);
-  const updateReviewQuestion = useLiteratureStore((s) => s.updateReviewQuestion);
-  const updateCriterion = useLiteratureStore((s) => s.updateCriterion);
-  const addCriterion = useLiteratureStore((s) => s.addCriterion);
-  const removeCriterion = useLiteratureStore((s) => s.removeCriterion);
-  const screenPapersForTask = useLiteratureStore((s) => s.screenPapersForTask);
-  const decideScreening = useLiteratureStore((s) => s.decideScreening);
-  const acceptCriteriaSuggestion = useLiteratureStore((s) => s.acceptCriteriaSuggestion);
-  const dismissCriteriaSuggestion = useLiteratureStore((s) => s.dismissCriteriaSuggestion);
   const generateBrief = useLiteratureStore((s) => s.generateBrief);
   const generateAnswerChains = useLiteratureStore((s) => s.generateAnswerChains);
   const deleteEvidence = useLiteratureStore((s) => s.deleteEvidence);
@@ -583,13 +927,11 @@ export default function Literature({
   const [colInput, setColInput] = useState("");
   const [colAddingParentId, setColAddingParentId] = useState<string | null>(null);
   const [expandedCols, setExpandedCols] = useState<Set<string>>(new Set());
-  const [reviewQuestion, setReviewQuestion] = useState("");
   const [readerPage, setReaderPage] = useState(1);
   const [readerAnnotationId, setReaderAnnotationId] = useState<string | null>(null);
-  const [reviewPanelOpen, setReviewPanelOpen] = useState(false);
   const [storageStatus, setStorageStatus] = useState<LiteratureStorageStatus | null>(null);
   const [creatingStorageBackup, setCreatingStorageBackup] = useState(false);
-  const [panelWidths, setPanelWidths] = useState({ sidebar: 220, workspace: 300 });
+  const [panelWidths, setPanelWidths] = useState({ sidebar: 220, workspace: 336 });
   const panelDragRef = useRef<{ panel: "sidebar" | "workspace"; startX: number; startW: number } | null>(null);
   const pageView = controlledPageView ?? localPageView;
   const setPageView = onPageViewChange ?? setLocalPageView;
@@ -603,7 +945,10 @@ export default function Literature({
     const onMove = (ev: MouseEvent) => {
       if (!panelDragRef.current) return;
       const delta = ev.clientX - panelDragRef.current.startX;
-      const newW = Math.max(120, panelDragRef.current.startW + (panel === "sidebar" ? delta : -delta));
+      const minWidth = panel === "sidebar" ? 180 : 280;
+      const maxWidth = panel === "sidebar" ? 420 : 560;
+      const requestedWidth = panelDragRef.current.startW + (panel === "sidebar" ? delta : -delta);
+      const newW = Math.min(maxWidth, Math.max(minWidth, requestedWidth));
       setPanelWidths((prev) => ({ ...prev, [panelDragRef.current!.panel]: newW }));
     };
     const onUp = () => {
@@ -646,12 +991,12 @@ export default function Literature({
           .then(async (result) => {
             await load(projectId, { quiet: true });
             setSelectedId(result.record.recordId);
-            logActivity("ok", "Imported dropped PDF as a local literature record.", { open: true });
+            logActivity("ok", "Imported dropped PDF as a local literature record.");
           })
           .catch((error) => {
             const message = `Could not import dropped PDF: ${String(error)}`;
             setError(message);
-            logActivity("error", message, { open: true });
+            logActivity("error", message);
           });
       }))
       .then((cleanup) => {
@@ -717,11 +1062,11 @@ export default function Literature({
     try {
       await literatureStorageBackup();
       await refreshStorageStatus();
-      logActivity("ok", "已创建本地文献数据库备份", { open: true });
+      logActivity("ok", "已创建本地文献数据库备份");
     } catch (error) {
       const message = `创建文献数据库备份失败：${String(error)}`;
       setError(message);
-      logActivity("error", message, { open: true });
+      logActivity("error", message);
     } finally {
       setCreatingStorageBackup(false);
     }
@@ -759,12 +1104,11 @@ export default function Literature({
       logActivity(
         "ok",
         `已从 ${report.format} 导入 ${report.imported} 条、合并 ${report.merged} 条文献${migratedChildren.length ? `；同时迁移 ${migratedChildren.join("、")}` : ""}${report.skipped ? `；跳过 ${report.skipped} 条不支持项` : ""}${warningSummary}`,
-        { open: true },
       );
     } catch (error) {
       const message = `导入文献库失败：${String(error)}`;
       setError(message);
-      logActivity("error", message, { open: true });
+      logActivity("error", message);
     }
   };
 
@@ -776,11 +1120,11 @@ export default function Literature({
       const result = await literatureImportPdfAsRecord<{ record: { recordId: string } }>(selected);
       await load(projectId, { quiet: true });
       setSelectedId(result.record.recordId);
-      logActivity("ok", "已导入 PDF 并创建本地文献条目", { open: true });
+      logActivity("ok", "已导入 PDF 并创建本地文献条目");
     } catch (error) {
       const message = `导入 PDF 失败：${String(error)}`;
       setError(message);
-      logActivity("error", message, { open: true });
+      logActivity("error", message);
     }
   };
 
@@ -792,11 +1136,11 @@ export default function Literature({
       const result = await literatureAddIdentifier<{ papers?: Array<{ id: string }> }>(identifier);
       await load(projectId, { quiet: true });
       if (result.papers?.[0]?.id) setSelectedId(result.papers[0].id);
-      logActivity("ok", "已通过 DOI/ISBN 查询写入可审计的本地文献记录", { open: true });
+      logActivity("ok", "已通过 DOI/ISBN 查询写入可审计的本地文献记录");
     } catch (error) {
       const message = `添加 DOI/ISBN 失败：${String(error)}`;
       setError(message);
-      logActivity("error", message, { open: true });
+      logActivity("error", message);
     }
   };
 
@@ -924,6 +1268,30 @@ export default function Literature({
       filters: [{ name: "PDF", extensions: ["pdf"] }],
     });
     if (typeof selected === "string") await uploadPdf(id, selected);
+  };
+
+  const openRagCitation = (paperId: string, page?: number) => {
+    const paper = library.papers.find((entry) => entry.id === paperId);
+    if (!paper) {
+      setError(`检索结果关联的文献 ${paperId} 已不在当前文献库中。请重建派生索引。`);
+      return;
+    }
+    setPageView("library");
+    setView("all");
+    setFilter("");
+    setFullTextMatchIds(null);
+    setSelectedId(paper.id);
+    setSelectionCleared(false);
+    if (page && paper.pdf.path) {
+      setReaderPage(page);
+      setReaderAnnotationId(null);
+      setWorkspaceTab("reader");
+    } else {
+      setWorkspaceTab("evidence");
+      if (page && !paper.pdf.path) {
+        setError(`已定位到第 ${page} 页，但当前文献记录没有可打开的本地 PDF。`);
+      }
+    }
   };
 
   const importSelectedAttachment = async (
@@ -1095,11 +1463,11 @@ export default function Literature({
       setChecked(new Set());
       setSelectedId(primaryId);
       await load(projectId, { quiet: true });
-      logActivity("ok", "Merged duplicate literature records and preserved linked material.", { open: true });
+      logActivity("ok", "Merged duplicate literature records and preserved linked material.");
     } catch (error) {
       const message = `Could not merge duplicate records: ${String(error)}`;
       setError(message);
-      logActivity("error", message, { open: true });
+      logActivity("error", message);
     }
   };
 
@@ -1394,34 +1762,6 @@ export default function Literature({
         {library.searches.length === 0 && <div className="lit-col-empty">暂无保存搜索</div>}
       </NavSection>
 
-      <NavSection title="审查任务" defaultOpen>
-        <button
-          type="button"
-          className="lit-review-new-task"
-          onClick={() => {
-            setActiveReviewTask(null);
-            setReviewPanelOpen(true);
-          }}
-        >
-          <SvgIcon name="plus" size={14} />
-          新建审查任务
-        </button>
-        {library.reviewTasks.map((task) => (
-          <NavItem
-            key={task.id}
-            label={task.question}
-            icon="check"
-            count={task.searchIds.length}
-            active={activeReviewTaskId === task.id}
-            onClick={() => {
-              setActiveReviewTask(task.id);
-              setReviewPanelOpen(true);
-            }}
-          />
-        ))}
-        {library.reviewTasks.length === 0 && <div className="lit-col-empty">暂无审查任务</div>}
-      </NavSection>
-
     </aside>
   );
 
@@ -1466,6 +1806,9 @@ export default function Literature({
         onBatchDelete={() => confirmDeletePapers(batchIds)}
         onBatchMergeDuplicates={() => void mergeSelectedDuplicates()}
         onBatchClear={() => setChecked(new Set())}
+        onImportBibliography={() => void importBibliography()}
+        onImportPdf={() => void importPdfAsRecord()}
+        onAddIdentifier={() => void addIdentifier()}
       />
     </div>
   );
@@ -1594,7 +1937,6 @@ export default function Literature({
             {workspaceTab === "notes" && (
               <WorkspaceNotes
                 paper={selectedPaper}
-                task={library.reviewTasks.find((task) => task.id === activeReviewTaskId)}
                 onAddNote={(note) => addNote(selectedPaper.id, note)}
                 onUpdateNote={(noteId, patch) => updateNote(selectedPaper.id, noteId, patch)}
                 onDeleteNote={(noteId) => deleteNote(selectedPaper.id, noteId)}
@@ -1606,11 +1948,6 @@ export default function Literature({
                 }}
                 onExport={() => void exportPaperAnnotations(selectedPaper)}
                 onImport={() => void importPaperAnnotations(selectedPaper)}
-                onDecide={(decision) => {
-                  if (activeReviewTaskId) {
-                    decideScreening(selectedPaper.id, activeReviewTaskId, decision);
-                  }
-                }}
               />
             )}
             {workspaceTab === "evidence" && (
@@ -1680,45 +2017,14 @@ export default function Literature({
         </div>
       )}
 
-      {pageView === "library" && reviewPanelOpen && (
-        <ReviewWorkflowPanel
-          tasks={library.reviewTasks}
-          searches={library.searches}
-          screenRuns={library.screenRuns ?? []}
-          activeTaskId={activeReviewTaskId}
-          questionDraft={reviewQuestion}
-          screening={screening}
-          onQuestionDraft={setReviewQuestion}
-          onSelectTask={setActiveReviewTask}
-          onCreate={async (searchIds) => {
-            await createReviewTask(reviewQuestion, searchIds);
-            setReviewQuestion("");
-          }}
-          onUpdateQuestion={updateReviewQuestion}
-          onUpdateCriterion={updateCriterion}
-          onAddCriterion={addCriterion}
-          onRemoveCriterion={removeCriterion}
-          onScreen={(taskId) => void screenPapersForTask(taskId)}
-          onAcceptSuggestion={acceptCriteriaSuggestion}
-          onDismissSuggestion={dismissCriteriaSuggestion}
-          onClose={() => setReviewPanelOpen(false)}
-        />
-      )}
-
       {pageView === "discover" ? (
-        <section className="lit-discover-workspace" aria-label="可复现文献检索">
-          <div className="lit-discover-intro">
-            <div>
-              <span className="lit-discover-kicker">Discover</span>
-              <h2>可复现文献检索</h2>
-              <p>先确认检索协议，再执行外部查询并将可审计结果写入本地文献数据库。</p>
-            </div>
-            <button type="button" onClick={() => setPageView("library")}>
-              返回文献库
-            </button>
-          </div>
-          <LiteratureProtocolPanel
-            onLibraryRefresh={() => load(currentProject?.id ?? "default", { quiet: true })}
+        <section className="lit-discover-workspace" aria-label="文献检索工作区">
+          <LiteratureRagPanel
+            key={projectId}
+            selectedPaper={selectedPaper}
+            papers={papers}
+            onOpenCitation={openRagCitation}
+            onActivity={(kind, message) => logActivity(kind, message)}
           />
         </section>
       ) : pageView === "graph" ? (
@@ -1843,193 +2149,6 @@ export default function Literature({
 // Paper list
 // ──────────────────────────────────────────────────────────────────────────────
 
-function ReviewWorkflowPanel({
-  tasks,
-  searches,
-  screenRuns,
-  activeTaskId,
-  questionDraft,
-  screening,
-  onQuestionDraft,
-  onSelectTask,
-  onCreate,
-  onUpdateQuestion,
-  onUpdateCriterion,
-  onAddCriterion,
-  onRemoveCriterion,
-  onScreen,
-  onAcceptSuggestion,
-  onDismissSuggestion,
-  onClose,
-}: {
-  tasks: LiteratureReviewTask[];
-  searches: LiteratureSearch[];
-  screenRuns: LiteratureScreenRun[];
-  activeTaskId: string | null;
-  questionDraft: string;
-  screening: boolean;
-  onQuestionDraft: (question: string) => void;
-  onSelectTask: (id: string | null) => void;
-  onCreate: (searchIds: string[]) => Promise<void>;
-  onUpdateQuestion: (taskId: string, question: string) => void;
-  onUpdateCriterion: (taskId: string, criterionId: string, text: string) => void;
-  onAddCriterion: (taskId: string, kind: "include" | "exclude") => void;
-  onRemoveCriterion: (taskId: string, criterionId: string) => void;
-  onScreen: (taskId: string) => void;
-  onAcceptSuggestion: (taskId: string, suggestionId: string) => void;
-  onDismissSuggestion: (taskId: string, suggestionId: string) => void;
-  onClose: () => void;
-}) {
-  const active = tasks.find((task) => task.id === activeTaskId) ?? null;
-  const [newTaskSearchId, setNewTaskSearchId] = useState("");
-  const latestRun = active
-    ? screenRuns.find((run) => run.taskId === active.id) ?? null
-    : null;
-  return (
-    <section className="lit-review-panel" aria-label="文献审查工作流">
-      <div className="lit-review-panel-head">
-        <strong>审查任务</strong>
-        <select
-          value={activeTaskId ?? ""}
-          onChange={(event) => onSelectTask(event.target.value || null)}
-          aria-label="选择审查任务"
-        >
-          <option value="">新任务</option>
-          {tasks.map((task) => (
-            <option value={task.id} key={task.id}>{task.question}</option>
-          ))}
-        </select>
-        <button type="button" onClick={onClose} aria-label="关闭审查工作流">关闭</button>
-      </div>
-      {!active ? (
-        <div className="lit-review-create">
-          <input
-            value={questionDraft}
-            onChange={(event) => onQuestionDraft(event.target.value)}
-            placeholder="输入系统综述或审查问题"
-            aria-label="审查问题"
-          />
-          <label>
-            <span>审查范围</span>
-            <select
-              value={newTaskSearchId}
-              onChange={(event) => setNewTaskSearchId(event.target.value)}
-              aria-label="审查范围"
-            >
-              <option value="">全部论文</option>
-              {searches.map((search) => (
-                <option key={search.id} value={search.id}>
-                  {search.query || search.id}（{search.resultCount}）
-                </option>
-              ))}
-            </select>
-          </label>
-          <button
-            type="button"
-            className="primary"
-            disabled={!questionDraft.trim()}
-            onClick={() => void onCreate(newTaskSearchId ? [newTaskSearchId] : [])}
-          >
-            创建任务
-          </button>
-        </div>
-      ) : (
-        <div className="lit-criteria-editor">
-          <input
-            className="lit-question-input"
-            value={active.question}
-            onChange={(event) => onUpdateQuestion(active.id, event.target.value)}
-            aria-label="当前审查问题"
-          />
-          <div className="lit-criteria-grid">
-            {(["include", "exclude"] as const).map((kind) => (
-              <div className="lit-criteria-column" key={kind}>
-                <div className="lit-criteria-head">
-                  <span>{kind === "include" ? "纳入标准" : "排除标准"}</span>
-                  <button type="button" onClick={() => onAddCriterion(active.id, kind)}>添加</button>
-                </div>
-                {active.criteria.filter((criterion) => criterion.kind === kind).map((criterion) => (
-                  <div className="lit-criterion-row" key={criterion.id}>
-                    <input
-                      value={criterion.text}
-                      onChange={(event) =>
-                        onUpdateCriterion(active.id, criterion.id, event.target.value)
-                      }
-                    />
-                    <button
-                      type="button"
-                      onClick={() => onRemoveCriterion(active.id, criterion.id)}
-                      aria-label={`删除标准 ${criterion.text}`}
-                    >
-                      删除
-                    </button>
-                  </div>
-                ))}
-              </div>
-            ))}
-          </div>
-          <div className="lit-criteria-editor-actions">
-            <button
-              type="button"
-              className="primary"
-              disabled={screening}
-              onClick={() => onScreen(active.id)}
-            >
-              {screening ? "筛选中…" : "按标准筛选论文"}
-            </button>
-            <span className="dim">
-              关联 {active.searchIds.length} 个保存搜索 · {active.criteria.length} 条标准
-            </span>
-          </div>
-          {latestRun && (
-            <div className="lit-screen-run" aria-label="最近筛选运行">
-              <strong>{latestRun.id} · {latestRun.status}</strong>
-              <span>
-                Reviewer {latestRun.reviewerCount}/{latestRun.totalPapers} ·
-                启发式回退 {latestRun.fallbackCount} · 每块 {latestRun.chunkSize}
-              </span>
-              <div className="lit-screen-run-chunks">
-                {latestRun.chunks.map((chunk) => (
-                  <span key={chunk.id} title={chunk.error}>
-                    #{chunk.index} {chunk.status} · {chunk.reviewerCount}/{chunk.expectedCount}
-                    {chunk.missingIndices.length > 0
-                      ? ` · 漏号 ${chunk.missingIndices.join(",")}`
-                      : ""}
-                  </span>
-                ))}
-              </div>
-            </div>
-          )}
-          {active.suggestions.some((suggestion) => !suggestion.accepted && !suggestion.dismissed) && (
-            <div className="lit-review-suggestions">
-              <strong>根据人工改判生成的标准建议</strong>
-              {active.suggestions
-                .filter((suggestion) => !suggestion.accepted && !suggestion.dismissed)
-                .map((suggestion) => (
-                  <div className="lit-review-suggestion" key={suggestion.id}>
-                    <span>{suggestion.text}</span>
-                    <button
-                      type="button"
-                      onClick={() => onAcceptSuggestion(active.id, suggestion.id)}
-                    >
-                      接受
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => onDismissSuggestion(active.id, suggestion.id)}
-                    >
-                      忽略
-                    </button>
-                  </div>
-                ))}
-            </div>
-          )}
-        </div>
-      )}
-    </section>
-  );
-}
-
 function PaperTable({
   papers,
   libraryCount,
@@ -2052,6 +2171,9 @@ function PaperTable({
   onBatchDelete,
   onBatchMergeDuplicates,
   onBatchClear,
+  onImportBibliography,
+  onImportPdf,
+  onAddIdentifier,
 }: {
   papers: LiteraturePaper[];
   libraryCount: number;
@@ -2074,6 +2196,9 @@ function PaperTable({
   onBatchDelete: () => void;
   onBatchMergeDuplicates: () => void;
   onBatchClear: () => void;
+  onImportBibliography: () => void;
+  onImportPdf: () => void;
+  onAddIdentifier: () => void;
 }) {
   const [colWidths, setColWidths] = useState({ venue: 160, year: 52, tags: 130 });
   const dragRef = useRef<{ col: keyof typeof colWidths; startX: number; startW: number } | null>(null);
@@ -2140,13 +2265,13 @@ function PaperTable({
         <div className="lit-empty-state">
           <p>论文库为空。</p>
           <p className="dim">通过 Chat 中的 Agent 检索，或导入 Zotero/CSL-JSON、RIS、BibTeX 文献库。</p>
-          <button type="button" onClick={() => void importBibliography()}>
+          <button type="button" onClick={onImportBibliography}>
             导入文献库
           </button>
-          <button type="button" onClick={() => void importPdfAsRecord()}>
+          <button type="button" onClick={onImportPdf}>
             导入 PDF
           </button>
-          <button type="button" onClick={() => void addIdentifier()}>
+          <button type="button" onClick={onAddIdentifier}>
             添加 DOI / ISBN
           </button>
         </div>
@@ -2563,10 +2688,8 @@ function WorkspaceNotes({
   onOpenAnnotation,
   onExport,
   onImport,
-  onDecide,
 }: {
   paper: LiteraturePaper;
-  task?: LiteratureReviewTask;
   onAddNote: (note: Omit<LiteratureNote, "id" | "createdAt" | "updatedAt">) => string | null;
   onUpdateNote: (noteId: string, patch: Partial<Pick<LiteratureNote, "title" | "content">>) => void;
   onDeleteNote: (noteId: string) => void;
@@ -2574,9 +2697,7 @@ function WorkspaceNotes({
   onOpenAnnotation: (page: number, annotationId: string) => void;
   onExport: () => void;
   onImport: () => void;
-  onDecide: (decision: ScreeningDecision) => void;
 }) {
-  const screening = task ? paper.screenings?.[task.id] : undefined;
   const [draftTitle, setDraftTitle] = useState("");
   const [draftContent, setDraftContent] = useState("");
   const [editingNoteId, setEditingNoteId] = useState<string | null>(null);
@@ -2701,38 +2822,10 @@ function WorkspaceNotes({
           </div>
         )}
       </section>
-      {task && (
-        <div className="lit-section">
-          <div className="lit-section-heading">
-            <span>当前审查任务</span>
-            {screening && <span className="lit-section-badge">{screening.decision}</span>}
-          </div>
-          <p className="lit-note-text">{task.question}</p>
-          <div className="lit-screening-decisions" role="group" aria-label="人工审查决定">
-            {(["include", "maybe", "exclude"] as const).map((decision) => (
-              <button
-                type="button"
-                key={decision}
-                className={screening?.decision === decision ? "active" : ""}
-                onClick={() => onDecide(decision)}
-              >
-                {decision === "include" ? "纳入" : decision === "exclude" ? "排除" : "待定"}
-              </button>
-            ))}
-          </div>
-          {screening?.reasons.map((reason) => (
-            <div className="lit-reason" key={reason.id}>
-              <div>{reason.criteriaText}</div>
-              <blockquote>{reason.anchor.quote}</blockquote>
-              <span>{reason.note}</span>
-            </div>
-          ))}
-        </div>
-      )}
       {paper.verdict && (
         <div className="lit-section">
           <div className="lit-section-heading">
-            <span>{screening?.method === "heuristic" ? "启发式回退" : "Review LLM 判断"}</span>
+            <span>Reviewer 判断</span>
             <span className={`lit-fit fit-${paper.verdict.fit}`}>
               {FIT_LABELS[paper.verdict.fit]} · {paper.verdict.score}
             </span>
@@ -2746,7 +2839,7 @@ function WorkspaceNotes({
           <p className="lit-note-text">{paper.agentSummary}</p>
         </div>
       )}
-      {!task && !paper.verdict && !paper.agentSummary && (
+      {!paper.verdict && !paper.agentSummary && (
         <div className="lit-workspace-empty-content">暂无筛选判断。</div>
       )}
     </div>

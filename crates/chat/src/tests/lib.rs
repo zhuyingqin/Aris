@@ -6,10 +6,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use super::{
     attach_mcp_tools, chat_tool_specs, clear_mcp_discovery_cache,
     context_compaction_threshold_for_model, context_window_for_model, final_assistant_text,
-    merge_mcp_tool_search_results,
-    model_developer, permission_policy_for_tools, resolve_settings_executor_config,
-    resolve_summarizer_model, tool_schema_context_overhead_tokens, ChatExecutorConfig,
-    ChatToolSpec,
+    merge_mcp_tool_search_results, model_developer, permission_policy_for_tools,
+    resolve_settings_executor_config, resolve_summarizer_model,
+    tool_schema_context_overhead_tokens, ChatExecutorConfig, ChatToolSpec,
 };
 use api::AuthSource;
 use runtime::{
@@ -149,7 +148,10 @@ fn tool_schema_overhead_is_included_in_context_estimates() {
         required_permission: PermissionMode::WorkspaceWrite,
     };
 
-    assert_eq!(tool_schema_context_overhead_tokens(&[tool.clone()], false), 0);
+    assert_eq!(
+        tool_schema_context_overhead_tokens(&[tool.clone()], false),
+        0
+    );
     assert!(tool_schema_context_overhead_tokens(&[tool], true) > 128);
 }
 

@@ -19,8 +19,9 @@ use std::sync::Arc;
 mod openai;
 
 pub use openai::{
-    chat_requires_responses_transport, resolve_openai_executor_config, set_transport_verdict_hook,
-    responses_transport_unsupported, OpenAIExecutorConfig, OpenAIRuntimeClient, OpenAiTransport,
+    chat_requires_responses_transport, resolve_openai_executor_config,
+    responses_transport_unsupported, set_transport_verdict_hook, OpenAIExecutorConfig,
+    OpenAIRuntimeClient, OpenAiTransport,
 };
 
 #[derive(Debug, Clone)]

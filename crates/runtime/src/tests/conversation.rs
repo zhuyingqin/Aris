@@ -400,9 +400,8 @@ fn context_overflow_compacts_a_long_active_tool_loop() {
         message_counts: Rc::clone(&message_counts),
         request_tokens: Rc::clone(&request_tokens),
     };
-    let tools = StaticToolExecutor::new().register("echo", |_| {
-        Ok("diagnostic output ".repeat(1_000))
-    });
+    let tools =
+        StaticToolExecutor::new().register("echo", |_| Ok("diagnostic output ".repeat(1_000)));
     let mut runtime = ConversationRuntime::new(
         Session::new(),
         client,

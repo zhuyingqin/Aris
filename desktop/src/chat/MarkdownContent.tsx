@@ -7,6 +7,7 @@ import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
 import "highlight.js/styles/github-dark.css";
 import { fileOpen } from "../api/tauri";
+import { opensInCodePage } from "../lab/labEditorCore";
 import { SvgIcon } from "../SvgIcon";
 import { isExplicitLocalFileHref, normalizeLocalFileHref } from "./localFileLinks";
 import { useStore } from "../store";
@@ -385,6 +386,7 @@ function MarkdownLink({
 }) {
   const setTab = useStore((state) => state.setTab);
   const setPendingStudioArtifactId = useStore((state) => state.setPendingStudioArtifactId);
+  const setPendingLabFilePath = useStore((state) => state.setPendingLabFilePath);
   const setError = useStore((state) => state.setError);
   const language = useStore((state) => state.language);
   const studioArtifactId = href ? studioArtifactIdFromHref(href) : null;
@@ -426,7 +428,13 @@ function MarkdownLink({
       title="Open local file"
       onClick={(event) => {
         event.preventDefault();
-        void fileOpen(decodeLocalHref(href)).catch((error) => {
+        const path = decodeLocalHref(href);
+        if (opensInCodePage(path)) {
+          setPendingLabFilePath(path);
+          setTab("lab");
+          return;
+        }
+        void fileOpen(path).catch((error) => {
           setError(`${language === "cn" ? "无法打开文件" : "Unable to open file"}: ${String(error)}`);
         });
       }}

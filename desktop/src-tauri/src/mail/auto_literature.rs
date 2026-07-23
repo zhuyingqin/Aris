@@ -355,8 +355,9 @@ fn run_literature_help_flow(
             },
         )?;
         let mut papers: Vec<tools::literature::RemotePaper> =
-            serde_json::from_value(search["papers"].clone())
-                .map_err(|error| format!("mail literature search returned invalid papers: {error}"))?;
+            serde_json::from_value(search["papers"].clone()).map_err(|error| {
+                format!("mail literature search returned invalid papers: {error}")
+            })?;
         if request.exact {
             papers = filter_exact_request_matches(papers, &request);
         }

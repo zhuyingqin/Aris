@@ -506,25 +506,55 @@ fn normalize_open_reference(path: &str) -> Result<String, String> {
 fn resolve_open_path(path: &str) -> Result<PathBuf, String> {
     let normalized = normalize_open_reference(path)?;
     let raw = normalized.as_str();
+    let workspace = crate::state::workspace_dir();
 
     let resolve = |candidate: &str| {
         let path = Path::new(candidate);
         if path.is_absolute() {
             path.to_path_buf()
         } else {
-            crate::state::workspace_dir().join(path)
+            workspace.join(path)
         }
     };
-    let direct = resolve(raw);
-    let target = if direct.exists() {
-        direct
-    } else {
-        resolve(strip_location_suffix(raw))
-    };
-    if !target.exists() {
-        return Err(format!("file does not exist: {}", target.display()));
+
+    // Try the path as written, then with any trailing `:line[:col]` editor
+    // location stripped. For each form, fall back to re-anchoring a stale
+    // absolute prefix onto the current workspace so links generated against a
+    // moved or renamed config dir (a different drive, a legacy `aris` → `SomniQ`
+    // migration, or a location the model simply guessed) still open.
+    for candidate in [raw, strip_location_suffix(raw)] {
+        let direct = resolve(candidate);
+        if direct.exists() {
+            return direct.canonicalize().map_err(|error| error.to_string());
+        }
+        if let Some(reanchored) = reanchor_to_workspace(candidate, &workspace) {
+            if reanchored.exists() {
+                return reanchored.canonicalize().map_err(|error| error.to_string());
+            }
+        }
     }
-    target.canonicalize().map_err(|error| error.to_string())
+
+    let target = resolve(strip_location_suffix(raw));
+    Err(format!("file does not exist: {}", target.display()))
+}
+
+/// Recover a workspace file whose link carries a stale absolute prefix.
+///
+/// Links to generated files sometimes embed an absolute path that no longer
+/// resolves: the config dir moved to another drive, a legacy `aris` directory
+/// was migrated to `SomniQ`, or the model guessed the absolute location. In each
+/// case the workspace-relative tail is still correct, so we locate the workspace
+/// directory-name segment (e.g. `desktop-workspace`) inside the path and
+/// re-anchor whatever follows it onto the real workspace root.
+fn reanchor_to_workspace(candidate: &str, workspace: &Path) -> Option<PathBuf> {
+    let anchor = workspace.file_name()?.to_str()?;
+    let normalized = candidate.replace('\\', "/");
+    let needle = format!("/{anchor}/");
+    let tail = normalized.rsplit_once(needle.as_str())?.1;
+    if tail.is_empty() {
+        return None;
+    }
+    Some(workspace.join(tail))
 }
 
 fn workspace_root() -> Result<PathBuf, String> {

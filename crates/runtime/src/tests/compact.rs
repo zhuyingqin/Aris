@@ -1,8 +1,7 @@
 use super::{
     assemble_compacted_session_with_usage, collect_key_files, estimate_session_tokens,
-    format_compact_summary,
-    get_compact_continuation_message, infer_latest_user_request, infer_pending_work,
-    plan_compaction, summarize_messages, CompactionConfig, CompactionResult,
+    format_compact_summary, get_compact_continuation_message, infer_latest_user_request,
+    infer_pending_work, plan_compaction, summarize_messages, CompactionConfig, CompactionResult,
     CompactionSummarySource, CompactionTokenEstimateSource,
 };
 use crate::session::{ContentBlock, ConversationMessage, MessageRole, Session};

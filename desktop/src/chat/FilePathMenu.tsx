@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { fileOpen, fileRead } from "../api/tauri";
 import { SvgIcon } from "../SvgIcon";
+import { opensInCodePage } from "../lab/labEditorCore";
 
 interface Props {
   x: number;
@@ -9,9 +10,10 @@ interface Props {
   projectRoot?: string;
   onClose: () => void;
   onAttach: (path: string, content: string) => void;
+  onOpenInCode: (path: string) => void;
 }
 
-export default function FilePathMenu({ x, y, path, projectRoot, onClose, onAttach }: Props) {
+export default function FilePathMenu({ x, y, path, projectRoot, onClose, onAttach, onOpenInCode }: Props) {
   const [openInOpen, setOpenInOpen] = useState(false);
   const [pos, setPos] = useState({ x, y });
   const menuRef = useRef<HTMLDivElement>(null);
@@ -102,6 +104,11 @@ export default function FilePathMenu({ x, y, path, projectRoot, onClose, onAttac
         复制文件名
       </button>
       <div className="file-path-menu-divider" />
+      {opensInCodePage(path) && (
+        <button role="menuitem" onClick={() => { onOpenInCode(path); onClose(); }}>
+          在 Code 页面打开
+        </button>
+      )}
       <div
         className={`file-path-menu-has-sub${openInOpen ? " open" : ""}`}
         onMouseEnter={() => setOpenInOpen(true)}

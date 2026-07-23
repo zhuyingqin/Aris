@@ -388,6 +388,21 @@ describe("Lab", () => {
     expect(screen.getByText("css")).toBeTruthy();
   });
 
+  it("opens a pending Code-page file after the initial project reset", async () => {
+    useStore.setState({ pendingLabFilePath: "reports/result.md" });
+    mocks.fileReadText.mockResolvedValueOnce({
+      path: "reports/result.md",
+      content: "# Result\n",
+      bytes: 9,
+    });
+
+    const { container } = render(<Lab />);
+
+    await waitFor(() => expect(mocks.fileReadText).toHaveBeenCalledWith("reports/result.md"));
+    expect(container.querySelector(".lab-file-editor-title")?.textContent).toContain("reports/result.md");
+    expect(useStore.getState().pendingLabFilePath).toBeNull();
+  });
+
   it("shows AI file edits with highlight and keep or restore controls", async () => {
     const path = "web/site/main.css";
     const original = "body {\n  color: red;\n}";

@@ -8,6 +8,7 @@ import IndependentReviewBadge from "./IndependentReviewBadge";
 import { CHAT_COPY } from "./i18n";
 import { isFileChangeTool, parseToolBlockJson, parseToolBlockObject, textFromTurn } from "./model";
 import { useStore } from "../store";
+import { opensInCodePage } from "../lab/labEditorCore";
 
 const MAX_TOOL_IMAGE_PREVIEWS = 6;
 const MAX_TOOL_IMAGE_SCAN_CHARS = 8_000;
@@ -442,6 +443,7 @@ function ToolCall({ block }: { block: Extract<ChatBlock, { kind: "tool" }> }) {
   const studioLinks = useMemo(() => studioLinksFromTool(block), [block]);
   const setTab = useStore((state) => state.setTab);
   const setPendingStudioArtifactId = useStore((state) => state.setPendingStudioArtifactId);
+  const setPendingLabFilePath = useStore((state) => state.setPendingLabFilePath);
   const running = block.output === undefined;
   const status = running ? "Running" : block.isError ? "Failed" : change ? "Modified file" : "Succeeded";
   const className = running ? "tool-running" : block.isError ? "tool-error" : change ? "tool-change" : "tool-done";
@@ -472,6 +474,11 @@ function ToolCall({ block }: { block: Extract<ChatBlock, { kind: "tool" }> }) {
             title="Open generated file"
             onClick={(event) => {
               event.stopPropagation();
+              if (opensInCodePage(change.path)) {
+                setPendingLabFilePath(change.path);
+                setTab("lab");
+                return;
+              }
               void fileOpen(change.path).catch((error) => console.error("Unable to open file", error));
             }}
           >
@@ -548,6 +555,8 @@ function reviewDiffForFile(file: TurnFileSummary): string {
 
 export function EditedFilesSummary({ summary }: { summary: TurnFileChangeSummary }) {
   const language = useStore((state) => state.language);
+  const setTab = useStore((state) => state.setTab);
+  const setPendingLabFilePath = useStore((state) => state.setPendingLabFilePath);
   const [reviewOpen, setReviewOpen] = useState(false);
   const [showAll, setShowAll] = useState(false);
   const [selectedPath, setSelectedPath] = useState(summary.files[0]?.path ?? "");
@@ -626,7 +635,14 @@ export function EditedFilesSummary({ summary }: { summary: TurnFileChangeSummary
               type="button"
               className="chat-change-file-path"
               title={file.path}
-              onClick={() => void fileOpen(file.path).catch((error) => console.error("Unable to open file", error))}
+              onClick={() => {
+                if (opensInCodePage(file.path)) {
+                  setPendingLabFilePath(file.path);
+                  setTab("lab");
+                  return;
+                }
+                void fileOpen(file.path).catch((error) => console.error("Unable to open file", error));
+              }}
             >
               {file.path}
             </button>

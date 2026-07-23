@@ -79,23 +79,23 @@ impl Drop for EnvGuard {
     }
 }
 
-#[path = "lib/misc.rs"]
-mod misc;
-#[path = "lib/latex.rs"]
-mod latex;
-#[path = "lib/web.rs"]
-mod web;
-#[path = "lib/skill.rs"]
-mod skill;
 #[path = "lib/agent.rs"]
 mod agent;
-#[path = "lib/team.rs"]
-mod team;
-#[path = "lib/notebook.rs"]
-mod notebook;
 #[path = "lib/file_ops.rs"]
 mod file_ops;
+#[path = "lib/latex.rs"]
+mod latex;
+#[path = "lib/misc.rs"]
+mod misc;
+#[path = "lib/notebook.rs"]
+mod notebook;
 #[path = "lib/repl.rs"]
 mod repl;
 #[path = "lib/reviewer.rs"]
 mod reviewer;
+#[path = "lib/skill.rs"]
+mod skill;
+#[path = "lib/team.rs"]
+mod team;
+#[path = "lib/web.rs"]
+mod web;

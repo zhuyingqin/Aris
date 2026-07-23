@@ -560,4 +560,3 @@ fn agent_rejects_blank_required_fields() {
     .expect_err("blank prompt should fail");
     assert!(missing_prompt.contains("prompt must not be empty"));
 }
-

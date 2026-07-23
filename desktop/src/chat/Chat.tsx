@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties }
 import { createPortal } from "react-dom";
 import { chatReviewClear, chatUiTurnLoad, fileOpen, isTauri } from "../api/tauri";
 import { useStore, type Language } from "../store";
+import { opensInCodePage } from "../lab/labEditorCore";
 import { SvgIcon } from "../SvgIcon";
 import type { ChatTurn } from "../types";
 import ChatComposer from "./ChatComposer";
@@ -121,6 +122,7 @@ export default function Chat() {
   const tab = useStore((state) => state.tab);
   const copy = CHAT_COPY[language];
   const setTab = useStore((state) => state.setTab);
+  const setPendingLabFilePath = useStore((state) => state.setPendingLabFilePath);
   const setError = useStore((state) => state.setError);
   const projects = useStore((state) => state.projects);
   const currentProject = useStore((state) => state.currentProject);
@@ -407,9 +409,14 @@ export default function Chat() {
   }, [currentSessionRef, focusComposer, setDraft]);
 
   const openWorkflowFile = useCallback((path: string) => {
+    if (opensInCodePage(path)) {
+      setPendingLabFilePath(path);
+      setTab("lab");
+      return;
+    }
     if (!isTauri()) return;
     void fileOpen(path).catch((error) => setError(String(error)));
-  }, [setError]);
+  }, [setError, setPendingLabFilePath, setTab]);
 
   const loadOmittedTurn = useCallback(async (turnIndex: number) => {
     const session = currentSessionRef.current;
@@ -818,6 +825,10 @@ export default function Chat() {
           y={composer.fileMenu.y}
           path={composer.fileMenu.path}
           projectRoot={currentProject?.path}
+          onOpenInCode={(path) => {
+            setPendingLabFilePath(path);
+            setTab("lab");
+          }}
           onClose={() => composer.setFileMenu(null)}
           onAttach={(path, content) => void composer.attachFileFromMenu(path, content)}
         />

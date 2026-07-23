@@ -35,8 +35,19 @@ import type {
   SystemPromptView,
   UserPromptView,
 } from "../types";
-import MailSettings, { MailSettingsDetail } from "./MailSettings";
+import { MailSettingsDetail } from "./MailSettings";
 import RemoteControlPanel from "./RemoteControlPanel";
+import Profile from "./Profile";
+import Extensions from "../extensions/Extensions";
+import {
+  SETTINGS_NAV_GROUPS,
+  SETTINGS_NAV_GROUP_LABELS,
+  SETTINGS_NAV_LABELS,
+  SETTINGS_NAV_MISC,
+  resolveLegacySettingsNav,
+  settingsNavMatches,
+  type SettingsNavId,
+} from "./settingsNav";
 
 interface PresetOption {
   label: string;
@@ -56,7 +67,7 @@ interface ProviderMeta {
 type SaveState = "idle" | "saving" | "saved" | "error";
 type TestState = "idle" | "testing" | "passed" | "failed";
 type UpdateState = "idle" | "checking" | "available" | "current" | "downloading" | "ready" | "error";
-type SettingsTab = "general" | "auth" | "usage" | "remote" | "about";
+type SettingsTab = SettingsNavId;
 
 const MANAGED_NEW_API_MODE = true;
 const MANAGED_MODEL_SERVER_LABEL = "通用模型服务器";
@@ -67,13 +78,14 @@ const SETTINGS_TAB_REQUEST_KEY = "somniq-settings-tab-request";
 const SETTINGS_TAB_REQUEST_EVENT = "somniq-settings-tab-request";
 const USAGE_LOG_PAGE_SIZE = 12;
 const PREVIEW_CONFIG_VIEW: ConfigView = {
-  appVersion: "0.4.5",
+  appVersion: "0.4.26",
   configPath: "browser preview - Tauri config is not loaded",
   executorProvider: "openai",
   executorModel: "MiniMax-M3",
   executorBaseUrl: `${MANAGED_MODEL_SERVER_BASE_URL}/v1`,
   summarizerProvider: "",
   summarizerModel: "",
+  retrievalCardModel: "",
   summarizerBaseUrl: "",
   hasSummarizerKey: false,
   hasExecutorKey: true,
@@ -204,16 +216,7 @@ const ENVIRONMENT_CHECK_PLACEHOLDERS = [
   { id: "latex", label: "LaTeX", category: "论文排版" },
 ];
 
-const SETTINGS_TABS: Array<{ id: SettingsTab; label: string }> = [
-  { id: "general", label: "通用" },
-  { id: "auth", label: "认证" },
-  { id: "usage", label: "使用统计" },
-  { id: "remote", label: "远程控制" },
-  { id: "about", label: "关于" },
-];
-
 const SETTINGS_COPY: Record<Language, {
-  tabs: Record<SettingsTab, string>;
   settingsCategories: string;
   loading: string;
   statusModelService: string;
@@ -372,13 +375,39 @@ const SETTINGS_COPY: Record<Language, {
   summaryApiKey: string;
   summaryModel: string;
   summaryModelHint: string;
+  retrievalCardModel: string;
+  retrievalCardModelHint: string;
+  retrievalCardFollowExecutor: string;
   testTesting: string;
   testConnectionConfig: string;
   saveConnectionConfig: string;
   saveConnectionSavedInfo: string;
+  fieldModel: string;
+  fieldBaseUrl: string;
+  fieldApiKey: string;
+  fieldConfigFile: string;
+  fieldScopusKey: string;
+  presetCustom: string;
+  keySaved: (masked: string) => string;
+  keyNone: string;
+  keyConfigured: string;
+  keyKeep: string;
+  keyPasteExecutor: string;
+  keyPasteReviewer: string;
+  keyPasteSummary: string;
+  keyPasteScopus: string;
+  shortcutsSub: string;
+  shortcutOpenSettings: string;
+  shortcutSend: string;
+  shortcutNewline: string;
+  shortcutCloseOverlay: string;
+  aboutLinksTitle: string;
+  aboutLinksSub: string;
+  aboutLinkRepo: string;
+  aboutLinkReleases: string;
+  aboutLinkLicense: string;
 }> = {
   cn: {
-    tabs: { general: "通用", auth: "认证", usage: "使用统计", remote: "远程控制", about: "关于" },
     settingsCategories: "设置分类",
     loading: "加载中...",
     statusModelService: "模型服务",
@@ -516,9 +545,9 @@ const SETTINGS_COPY: Record<Language, {
     envInstallInChat: "前往对话安装",
     advancedExecutor: "执行器",
     advancedReviewer: "审阅",
-    advancedProviderType: "Provider 类型",
+    advancedProviderType: "供应商类型",
     advancedSummaryTools: "摘要与工具",
-    advancedSummaryToolsSub: "摘要模型、Scopus Key 与配置文件路径",
+    advancedSummaryToolsSub: "摘要模型、检索卡模型、Scopus Key 与配置文件路径",
     advancedCollapse: "收起",
     advancedExpand: "展开",
     summaryProvider: "摘要供应商",
@@ -530,13 +559,39 @@ const SETTINGS_COPY: Record<Language, {
     summaryApiKey: "摘要 API Key",
     summaryModel: "摘要模型",
     summaryModelHint: "压缩上下文时生成摘要所用的模型；留空 = 自动",
+    retrievalCardModel: "检索卡生成模型",
+    retrievalCardModelHint: "用于从 PDF 页块提取概念、别名、双语术语和潜在问题；留空则跟随执行模型，仅影响后续生成或重建",
+    retrievalCardFollowExecutor: "跟随执行模型",
     testTesting: "测试中...",
     testConnectionConfig: "测试连接配置",
     saveConnectionConfig: "保存连接配置",
     saveConnectionSavedInfo: "已保存。下次对话时生效。",
+    fieldModel: "模型",
+    fieldBaseUrl: "接口地址",
+    fieldApiKey: "API 密钥",
+    fieldConfigFile: "配置文件",
+    fieldScopusKey: "Scopus 密钥",
+    presetCustom: "自定义 / 手动",
+    keySaved: (masked) => `已保存：${masked}`,
+    keyNone: "未设置密钥",
+    keyConfigured: "已配置",
+    keyKeep: "留空则保持不变",
+    keyPasteExecutor: "粘贴 API 密钥",
+    keyPasteReviewer: "粘贴审核模型密钥",
+    keyPasteSummary: "粘贴摘要模型密钥",
+    keyPasteScopus: "粘贴 Elsevier 密钥",
+    shortcutsSub: "SomniQ 常用键盘快捷键。",
+    shortcutOpenSettings: "打开设置",
+    shortcutSend: "发送消息",
+    shortcutNewline: "换行",
+    shortcutCloseOverlay: "关闭弹层 / 选择器",
+    aboutLinksTitle: "资源链接",
+    aboutLinksSub: "源码、更新日志与许可协议。",
+    aboutLinkRepo: "GitHub 仓库",
+    aboutLinkReleases: "更新日志",
+    aboutLinkLicense: "许可协议",
   },
   en: {
-    tabs: { general: "General", auth: "Auth", usage: "Usage", remote: "Remote", about: "About" },
     settingsCategories: "Settings categories",
     loading: "Loading...",
     statusModelService: "Model service",
@@ -676,7 +731,7 @@ const SETTINGS_COPY: Record<Language, {
     advancedReviewer: "Reviewer",
     advancedProviderType: "Provider Type",
     advancedSummaryTools: "Summary and Tools",
-    advancedSummaryToolsSub: "Summary model, Scopus key, and config file path",
+    advancedSummaryToolsSub: "Summary model, retrieval-card model, Scopus key, and config path",
     advancedCollapse: "Collapse",
     advancedExpand: "Expand",
     summaryProvider: "Summary provider",
@@ -688,10 +743,37 @@ const SETTINGS_COPY: Record<Language, {
     summaryApiKey: "Summary API Key",
     summaryModel: "Summary model",
     summaryModelHint: "Model used to summarize compressed context; leave blank for Auto.",
+    retrievalCardModel: "Retrieval-card model",
+    retrievalCardModelHint: "Extracts concepts, aliases, bilingual terms, and likely questions from PDF chunks; blank follows the executor and changes apply to later generation or rebuilds.",
+    retrievalCardFollowExecutor: "Follow execution model",
     testTesting: "Testing...",
     testConnectionConfig: "Test connection config",
     saveConnectionConfig: "Save connection config",
     saveConnectionSavedInfo: "Saved. Applies to the next chat.",
+    fieldModel: "Model",
+    fieldBaseUrl: "Base URL",
+    fieldApiKey: "API Key",
+    fieldConfigFile: "Config file",
+    fieldScopusKey: "Scopus Key",
+    presetCustom: "Custom / manual",
+    keySaved: (masked) => `Saved: ${masked}`,
+    keyNone: "No key",
+    keyConfigured: "configured",
+    keyKeep: "leave blank to keep",
+    keyPasteExecutor: "paste API key",
+    keyPasteReviewer: "paste reviewer key",
+    keyPasteSummary: "paste summary key",
+    keyPasteScopus: "paste Elsevier key",
+    shortcutsSub: "Common keyboard shortcuts in SomniQ.",
+    shortcutOpenSettings: "Open settings",
+    shortcutSend: "Send message",
+    shortcutNewline: "New line",
+    shortcutCloseOverlay: "Close overlay / picker",
+    aboutLinksTitle: "Resources",
+    aboutLinksSub: "Source code, changelog, and license.",
+    aboutLinkRepo: "GitHub repository",
+    aboutLinkReleases: "Changelog",
+    aboutLinkLicense: "License",
   },
 };
 
@@ -863,6 +945,27 @@ const REVIEWER_PROVIDERS: Record<string, ProviderMeta> = {
   },
 };
 
+// Chinese descriptions for the admin-only provider cards, keyed by provider id.
+// English falls back to each provider meta's own `hint`.
+const EXECUTOR_PROVIDER_HINT_CN: Record<string, string> = {
+  anthropic: "Claude 官方 API",
+  "anthropic-compat": "Claude 兼容的自定义端点",
+  openai: "OpenAI、MiniMax、DeepSeek、Kimi…",
+  custom: "任意其他供应商",
+};
+
+const REVIEWER_PROVIDER_HINT_CN: Record<string, string> = {
+  "": "不使用独立的审核模型",
+  openai: "OpenAI 或兼容的审核 API",
+  gemini: "Google",
+  glm: "智谱",
+  minimax: "MiniMax 审核",
+  kimi: "Moonshot 审核",
+  deepseek: "DeepSeek Anthropic 兼容审核",
+  "anthropic-compat": "Claude 兼容的审核 / 代理",
+  custom: "手动指定供应商与端点",
+};
+
 function readCachedAccount(): NewApiAccount | null {
   try {
     const raw = localStorage.getItem(ACCOUNT_CACHE_KEY) ?? localStorage.getItem(LEGACY_ACCOUNT_CACHE_KEY);
@@ -886,20 +989,13 @@ function writeCachedAccount(account: NewApiAccount | null) {
   }
 }
 
-function isSettingsTab(value: unknown): value is SettingsTab {
-  return value === "general" || value === "auth" || value === "usage" || value === "remote" || value === "about";
-}
-
 function readRequestedSettingsTab(): SettingsTab | null {
   try {
     const value = sessionStorage.getItem(SETTINGS_TAB_REQUEST_KEY);
-    if (value === "models") {
+    const resolved = resolveLegacySettingsNav(value);
+    if (resolved) {
       sessionStorage.removeItem(SETTINGS_TAB_REQUEST_KEY);
-      return "auth";
-    }
-    if (isSettingsTab(value)) {
-      sessionStorage.removeItem(SETTINGS_TAB_REQUEST_KEY);
-      return value;
+      return resolved;
     }
   } catch {
     // Session storage can be disabled in embedded browser contexts.
@@ -1129,6 +1225,7 @@ function PresetTextInput({
   disabled?: boolean;
   formatValue?: (value: string) => string;
 }) {
+  const language = useStore((state) => state.language);
   const currentPreset = options.find((option) => option.value === value)?.value ?? "__custom";
   const inputValue = formatValue ? formatValue(value) : value;
   const displayOnlyValue = inputValue !== value;
@@ -1145,7 +1242,7 @@ function PresetTextInput({
           onChange(event.target.value);
         }}
       >
-        <option value="__custom">Custom / manual</option>
+        <option value="__custom">{SETTINGS_COPY[language].presetCustom}</option>
         {options.map((option) => (
           <option key={`${option.label}:${option.value || "blank"}`} value={option.value}>
             {option.label}{option.hint ? ` - ${option.hint}` : ""}
@@ -1280,6 +1377,7 @@ export default function Settings() {
   const language = useStore((state) => state.language);
   const setLanguage = useStore((state) => state.setLanguage);
   const logout = useStore((state) => state.logout);
+  const setTab = useStore((state) => state.setTab);
   const [configView, setConfigView] = useState<ConfigView | null>(() => isTauri() ? null : PREVIEW_CONFIG_VIEW);
   const [advForm, setAdvForm] = useState<ConfigPatch>({});
   const [execKey, setExecKey] = useState("");
@@ -1327,7 +1425,7 @@ export default function Settings() {
   const [userPromptLoading, setUserPromptLoading] = useState(false);
   const [userPromptError, setUserPromptError] = useState("");
   const [activeSettingsTab, setActiveSettingsTab] = useState<SettingsTab>(() => readRequestedSettingsTab() ?? "general");
-  const [mailDetailOpen, setMailDetailOpen] = useState(false);
+  const [navQuery, setNavQuery] = useState("");
   const savedTimer = useRef<number | null>(null);
   const usageLogPagesRef = useRef(usageLogPages);
   const usageRefreshPendingRef = useRef(false);
@@ -1343,6 +1441,7 @@ export default function Settings() {
       executorBaseUrl: view.executorBaseUrl ?? "",
       summarizerProvider: view.summarizerProvider ?? "",
       summarizerModel: view.summarizerModel ?? "",
+      retrievalCardModel: view.retrievalCardModel ?? "",
       summarizerBaseUrl: view.summarizerBaseUrl ?? "",
       reviewerProvider: normalizeReviewerProvider(view.reviewerProvider),
       reviewerModel: view.reviewerModel ?? "",
@@ -1598,8 +1697,9 @@ export default function Settings() {
     };
     const onSettingsTabRequest = (event: Event) => {
       const detail = (event as CustomEvent<unknown>).detail;
-      if (isSettingsTab(detail)) {
-        openRequestedTab(detail);
+      const resolved = typeof detail === "string" ? resolveLegacySettingsNav(detail) : null;
+      if (resolved) {
+        openRequestedTab(resolved);
         return;
       }
       const requested = readRequestedSettingsTab();
@@ -1614,7 +1714,7 @@ export default function Settings() {
   }, []);
 
   useEffect(() => {
-    if (activeSettingsTab === "about" && environmentChecks.length === 0 && !environmentError && !environmentLoading) {
+    if (activeSettingsTab === "environment" && environmentChecks.length === 0 && !environmentError && !environmentLoading) {
       void loadEnvironmentChecks();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1635,7 +1735,7 @@ export default function Settings() {
   }, [activeSettingsTab, userPromptOpen]);
 
   useEffect(() => {
-    if (!isTauri() || activeSettingsTab !== "usage") return;
+    if (!isTauri() || activeSettingsTab !== "account") return;
     const refreshAccount = usageRefreshPendingRef.current;
     usageRefreshPendingRef.current = false;
     void loadUsageSummary(usageLogPage, refreshAccount ? { force: true, refreshAccount: true } : {});
@@ -1816,21 +1916,6 @@ export default function Settings() {
     }
   };
 
-  if (mailDetailOpen) {
-    return (
-      <div className="st-page sp-detail-page">
-        <div className="sp-detail-head">
-          <button className="sp-back-btn" onClick={() => setMailDetailOpen(false)} type="button">{copy.mailBack}</button>
-          <div className="sp-detail-title">{copy.mailTitle}</div>
-          <div className="sp-detail-badges">
-            <span className="sp-role-badge sp-role-mail">IMAP/SMTP</span>
-          </div>
-        </div>
-        <MailSettingsDetail />
-      </div>
-    );
-  }
-
   if (!configView) return <div className="board"><div className="empty">{copy.loading}</div></div>;
 
   const advExecProvider = advForm.executorProvider ?? "anthropic";
@@ -1874,6 +1959,11 @@ export default function Settings() {
       hint: selectedSummaryProvider?.label,
     })),
   ];
+  const retrievalCardModelOptions = uniqueModelList(
+    [advForm.executorModel],
+    configView.managedModels,
+    (configView.verifiedExecutors ?? []).map((item) => item.model),
+  ).map((model) => ({ label: model, value: model }));
   const chooseExecProvider = (provider: string) => {
     const meta = EXECUTOR_PROVIDERS[provider] ?? EXECUTOR_PROVIDERS.custom;
     resetOpState();
@@ -1990,22 +2080,65 @@ export default function Settings() {
     return (probed || configView.executorTransport || "").trim();
   })();
 
+  const navMisc = SETTINGS_NAV_MISC[language];
+  const navLabels = SETTINGS_NAV_LABELS[language];
+  const navGroupLabels = SETTINGS_NAV_GROUP_LABELS[language];
+  const visibleNavGroups = SETTINGS_NAV_GROUPS
+    .map((group) => ({ ...group, items: group.items.filter((item) => settingsNavMatches(item.id, navQuery)) }))
+    .filter((group) => group.items.length > 0);
+
   return (
-    <div className="st-page sp-list-page sp-settings-page">
-      <div className="sp-settings-tabs" role="tablist" aria-label={copy.settingsCategories}>
-        {SETTINGS_TABS.map((item) => (
-          <button
-            key={item.id}
-            type="button"
-            role="tab"
-            aria-selected={activeSettingsTab === item.id}
-            className={`sp-settings-tab${activeSettingsTab === item.id ? " active" : ""}`}
-            onClick={() => setActiveSettingsTab(item.id)}
-          >
-            {copy.tabs[item.id]}
+    <div className="st-page sp-settings-page sp-settings-shell">
+      <aside className="sp-settings-nav" aria-label={copy.settingsCategories}>
+        <div className="sp-settings-nav-head">
+          <button type="button" className="sp-settings-back" onClick={() => setTab("chat")}>
+            <SvgIcon name="chevronLeft" size={14} />
+            <span>{navMisc.back}</span>
           </button>
-        ))}
-      </div>
+          <div className="sp-settings-search">
+            <SvgIcon name="search" size={14} />
+            <input
+              value={navQuery}
+              onChange={(event) => setNavQuery(event.target.value)}
+              placeholder={navMisc.search}
+              spellCheck={false}
+              aria-label={navMisc.search}
+            />
+          </div>
+        </div>
+        <div className="sp-settings-nav-scroll" role="tablist">
+          {visibleNavGroups.length === 0 ? (
+            <div className="sp-settings-nav-empty">{navMisc.noResults}</div>
+          ) : (
+            visibleNavGroups.map((group) => (
+              <div className="sp-settings-nav-group" key={group.id}>
+                <div className="sp-settings-nav-group-title">{navGroupLabels[group.id]}</div>
+                {group.items.map((item) => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    role="tab"
+                    aria-selected={activeSettingsTab === item.id}
+                    className={`sp-nav-item${activeSettingsTab === item.id ? " active" : ""}`}
+                    onClick={() => setActiveSettingsTab(item.id)}
+                  >
+                    <span className="sp-nav-item-icon">{item.icon}</span>
+                    <span className="sp-nav-item-label">{navLabels[item.id]}</span>
+                    {item.external && (
+                      <span className="sp-nav-item-ext"><SvgIcon name="externalLink" size={12} /></span>
+                    )}
+                  </button>
+                ))}
+              </div>
+            ))
+          )}
+        </div>
+      </aside>
+      <div className={`sp-settings-content${activeSettingsTab === "extensions" ? " sp-settings-content-flush" : ""}`}>
+
+      {activeSettingsTab === "profile" && (
+        <Profile account={account} language={language} />
+      )}
 
       {activeSettingsTab === "general" && (
         <>
@@ -2057,32 +2190,6 @@ export default function Settings() {
             </div>
           </div>
 
-          <div className="sp-appearance-section">
-            <div className="sp-section-head">
-              <div className="sp-section-head-text">
-                <div className="sp-section-title">{copy.appearanceTitle}</div>
-                <div className="sp-section-sub">{copy.appearanceSub}</div>
-              </div>
-              <div className="sp-theme-toggle" role="radiogroup" aria-label={copy.themeLabel}>
-                {([
-                  { value: "light", label: copy.light },
-                  { value: "dark", label: copy.dark },
-                ] as const).map((option) => (
-                  <button
-                    key={option.value}
-                    type="button"
-                    role="radio"
-                    aria-checked={theme === option.value}
-                    className={`sp-theme-option${theme === option.value ? " active" : ""}`}
-                    onClick={() => setTheme(option.value)}
-                  >
-                    <span className="sp-theme-swatch" data-theme-swatch={option.value} aria-hidden="true" />
-                    {option.label}
-                  </button>
-                ))}
-              </div>
-            </div>
-          </div>
           <div className="sp-update-section">
             <div className="sp-section-head">
               <div className="sp-section-head-text">
@@ -2193,7 +2300,60 @@ export default function Settings() {
         </>
       )}
 
-      {activeSettingsTab === "auth" && (
+      {activeSettingsTab === "appearance" && (
+        <div className="sp-appearance-section">
+          <div className="sp-section-head">
+            <div className="sp-section-head-text">
+              <div className="sp-section-title">{copy.appearanceTitle}</div>
+              <div className="sp-section-sub">{copy.appearanceSub}</div>
+            </div>
+            <div className="sp-theme-toggle" role="radiogroup" aria-label={copy.themeLabel}>
+              {([
+                { value: "light", label: copy.light },
+                { value: "dark", label: copy.dark },
+              ] as const).map((option) => (
+                <button
+                  key={option.value}
+                  type="button"
+                  role="radio"
+                  aria-checked={theme === option.value}
+                  className={`sp-theme-option${theme === option.value ? " active" : ""}`}
+                  onClick={() => setTheme(option.value)}
+                >
+                  <span className="sp-theme-swatch" data-theme-swatch={option.value} aria-hidden="true" />
+                  {option.label}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {activeSettingsTab === "shortcuts" && (
+        <div className="sp-update-section">
+          <div className="sp-section-head">
+            <div className="sp-section-head-text">
+              <div className="sp-section-title">{navLabels.shortcuts}</div>
+              <div className="sp-section-sub">{copy.shortcutsSub}</div>
+            </div>
+          </div>
+          <div className="sp-shortcuts-list">
+            {[
+              { label: copy.shortcutOpenSettings, combo: "Ctrl / ⌘ + ," },
+              { label: copy.shortcutSend, combo: "Enter" },
+              { label: copy.shortcutNewline, combo: "Shift + Enter" },
+              { label: copy.shortcutCloseOverlay, combo: "Esc" },
+            ].map((item) => (
+              <div className="sp-shortcut-row" key={item.combo}>
+                <span className="sp-shortcut-label">{item.label}</span>
+                <kbd className="sp-shortcut-key">{item.combo}</kbd>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {activeSettingsTab === "account" && (
         <>
           <div className="sp-update-section">
             <div className="sp-section-head">
@@ -2293,21 +2453,16 @@ export default function Settings() {
             </div>
           </div>
 
-          <div className="sp-providers-section">
-            <div className="sp-section-head">
-              <div className="sp-section-head-text">
-                <div className="sp-section-title">{copy.integratedAuthTitle}</div>
-                <div className="sp-section-sub">{copy.integratedAuthSub}</div>
-              </div>
-            </div>
-            <div className="sp-card-list">
-              <MailSettings onOpen={() => setMailDetailOpen(true)} />
-            </div>
-          </div>
         </>
       )}
 
-      {activeSettingsTab === "auth" && (
+      {activeSettingsTab === "mail" && (
+        <div className="sp-mail-page">
+          <MailSettingsDetail />
+        </div>
+      )}
+
+      {activeSettingsTab === "models" && (
         <>
           <div className="sp-update-section">
             <div className="sp-section-head">
@@ -2394,7 +2549,7 @@ export default function Settings() {
         </>
       )}
 
-      {activeSettingsTab === "auth" && (
+      {activeSettingsTab === "models" && (
         <div className="sp-advanced-wrap sp-advanced-wrap-tab">
           <div className="sp-advanced-body">
             {canConfigureExecutor && (
@@ -2406,15 +2561,15 @@ export default function Settings() {
                     {Object.entries(EXECUTOR_PROVIDERS).map(([key, meta]) => (
                       <button key={key} type="button" className={`st-provider-card${advExecProvider === key ? " active" : ""}`} onClick={() => chooseExecProvider(key)}>
                         <span className="st-provider-label">{meta.label}</span>
-                        <span className="st-provider-hint">{meta.hint}</span>
+                        <span className="st-provider-hint">{language === "cn" ? (EXECUTOR_PROVIDER_HINT_CN[key] ?? meta.hint) : meta.hint}</span>
                       </button>
                     ))}
                   </div>
                 </div>
                 <div className="sp-adv-rows">
-                  <div className="st-row"><div className="st-row-label"><span className="st-label">Model</span></div><div className="st-row-control"><PresetTextInput value={advForm.executorModel ?? ""} placeholder={advExecMeta.defaultModel || "e.g. claude-sonnet-4-6"} options={advExecMeta.models ?? EXECUTOR_MODELS} onChange={(value) => { resetOpState(); setAdvForm((current) => ({ ...current, executorModel: value })); }} /></div></div>
-                  <div className="st-row"><div className="st-row-label"><span className="st-label">Base URL</span></div><div className="st-row-control"><PresetTextInput value={advForm.executorBaseUrl ?? ""} placeholder={advExecMeta.defaultBaseUrl || "(official default)"} options={advExecMeta.baseUrls ?? OPENAI_COMPAT_URLS} formatValue={displayServerValue} onChange={(value) => { resetOpState(); setAdvForm((current) => ({ ...current, executorBaseUrl: value })); }} /></div></div>
-                  <div className="st-row"><div className="st-row-label"><span className="st-label">API Key</span><span className="st-hint">{configView.hasExecutorKey ? `Saved: ${configView.executorKeyMasked ?? "configured"}` : "No key"}</span></div><div className="st-row-control"><KeyInput value={execKey} placeholder={configView.hasExecutorKey ? "leave blank to keep" : "paste API key"} masked={configView.executorKeyMasked} secretKind="executorApiKey" language={language} onChange={(value) => { resetOpState(); setExecKey(value); }} /></div></div>
+                  <div className="st-row"><div className="st-row-label"><span className="st-label">{copy.fieldModel}</span></div><div className="st-row-control"><PresetTextInput value={advForm.executorModel ?? ""} placeholder={advExecMeta.defaultModel || "e.g. claude-sonnet-4-6"} options={advExecMeta.models ?? EXECUTOR_MODELS} onChange={(value) => { resetOpState(); setAdvForm((current) => ({ ...current, executorModel: value })); }} /></div></div>
+                  <div className="st-row"><div className="st-row-label"><span className="st-label">{copy.fieldBaseUrl}</span></div><div className="st-row-control"><PresetTextInput value={advForm.executorBaseUrl ?? ""} placeholder={advExecMeta.defaultBaseUrl || "(official default)"} options={advExecMeta.baseUrls ?? OPENAI_COMPAT_URLS} formatValue={displayServerValue} onChange={(value) => { resetOpState(); setAdvForm((current) => ({ ...current, executorBaseUrl: value })); }} /></div></div>
+                  <div className="st-row"><div className="st-row-label"><span className="st-label">{copy.fieldApiKey}</span><span className="st-hint">{configView.hasExecutorKey ? copy.keySaved(configView.executorKeyMasked ?? copy.keyConfigured) : copy.keyNone}</span></div><div className="st-row-control"><KeyInput value={execKey} placeholder={configView.hasExecutorKey ? copy.keyKeep : copy.keyPasteExecutor} masked={configView.executorKeyMasked} secretKind="executorApiKey" language={language} onChange={(value) => { resetOpState(); setExecKey(value); }} /></div></div>
                 </div>
               </div>
             )}
@@ -2428,16 +2583,16 @@ export default function Settings() {
                     {Object.entries(REVIEWER_PROVIDERS).map(([key, meta]) => (
                       <button key={key} type="button" className={`st-provider-card${advReviewerProvider === key ? " active" : ""}`} onClick={() => chooseReviewerProvider(key)}>
                         <span className="st-provider-label">{meta.label}</span>
-                        <span className="st-provider-hint">{meta.hint}</span>
+                        <span className="st-provider-hint">{language === "cn" ? (REVIEWER_PROVIDER_HINT_CN[key] ?? meta.hint) : meta.hint}</span>
                       </button>
                     ))}
                   </div>
                 </div>
                 {advReviewerProvider !== "" && (
                   <div className="sp-adv-rows">
-                    <div className="st-row"><div className="st-row-label"><span className="st-label">Model</span></div><div className="st-row-control"><PresetTextInput value={advForm.reviewerModel ?? ""} placeholder={advReviewerMeta.defaultModel || "e.g. gpt-5.5"} options={advReviewerMeta.models ?? REVIEWER_MODELS} onChange={(value) => { resetOpState(); setAdvForm((current) => ({ ...current, reviewerModel: value })); }} /></div></div>
-                    <div className="st-row"><div className="st-row-label"><span className="st-label">Base URL</span></div><div className="st-row-control"><PresetTextInput value={advForm.reviewerBaseUrl ?? ""} placeholder={advReviewerMeta.defaultBaseUrl || "(provider default)"} options={advReviewerMeta.baseUrls ?? OPENAI_COMPAT_URLS} formatValue={displayServerValue} onChange={(value) => { resetOpState(); setAdvForm((current) => ({ ...current, reviewerBaseUrl: value })); }} /></div></div>
-                    <div className="st-row"><div className="st-row-label"><span className="st-label">API Key</span><span className="st-hint">{configView.hasReviewerKey ? `Saved: ${configView.reviewerKeyMasked ?? "configured"}` : "No key"}</span></div><div className="st-row-control"><KeyInput value={reviewerKey} placeholder={configView.hasReviewerKey ? "leave blank to keep" : "paste reviewer key"} masked={configView.reviewerKeyMasked} secretKind="reviewerApiKey" language={language} onChange={(value) => { resetOpState(); setReviewerKey(value); }} /></div></div>
+                    <div className="st-row"><div className="st-row-label"><span className="st-label">{copy.fieldModel}</span></div><div className="st-row-control"><PresetTextInput value={advForm.reviewerModel ?? ""} placeholder={advReviewerMeta.defaultModel || "e.g. gpt-5.5"} options={advReviewerMeta.models ?? REVIEWER_MODELS} onChange={(value) => { resetOpState(); setAdvForm((current) => ({ ...current, reviewerModel: value })); }} /></div></div>
+                    <div className="st-row"><div className="st-row-label"><span className="st-label">{copy.fieldBaseUrl}</span></div><div className="st-row-control"><PresetTextInput value={advForm.reviewerBaseUrl ?? ""} placeholder={advReviewerMeta.defaultBaseUrl || "(provider default)"} options={advReviewerMeta.baseUrls ?? OPENAI_COMPAT_URLS} formatValue={displayServerValue} onChange={(value) => { resetOpState(); setAdvForm((current) => ({ ...current, reviewerBaseUrl: value })); }} /></div></div>
+                    <div className="st-row"><div className="st-row-label"><span className="st-label">{copy.fieldApiKey}</span><span className="st-hint">{configView.hasReviewerKey ? copy.keySaved(configView.reviewerKeyMasked ?? copy.keyConfigured) : copy.keyNone}</span></div><div className="st-row-control"><KeyInput value={reviewerKey} placeholder={configView.hasReviewerKey ? copy.keyKeep : copy.keyPasteReviewer} masked={configView.reviewerKeyMasked} secretKind="reviewerApiKey" language={language} onChange={(value) => { resetOpState(); setReviewerKey(value); }} /></div></div>
                   </div>
                 )}
               </div>
@@ -2463,12 +2618,13 @@ export default function Settings() {
                     <>
                       <div className="st-row"><div className="st-row-label"><span className="st-label">{copy.summaryProtocol}</span></div><div className="st-row-control"><select value={advForm.summarizerProvider ?? "openai"} onChange={(event) => { resetOpState(); setAdvForm((current) => ({ ...current, summarizerProvider: event.target.value })); }}><option value="openai">OpenAI-compatible</option><option value="anthropic">Anthropic</option><option value="anthropic-compat">Anthropic-compatible</option></select></div></div>
                       <div className="st-row"><div className="st-row-label"><span className="st-label">{copy.summaryBaseUrl}</span></div><div className="st-row-control"><PresetTextInput value={advForm.summarizerBaseUrl ?? ""} placeholder="https://api.openai.com/v1" options={[...OPENAI_COMPAT_URLS, ...ANTHROPIC_COMPAT_URLS]} formatValue={displayServerValue} onChange={(value) => { resetOpState(); setAdvForm((current) => ({ ...current, summarizerBaseUrl: value })); }} /></div></div>
-                      <div className="st-row"><div className="st-row-label"><span className="st-label">{copy.summaryApiKey}</span><span className="st-hint">{configView.hasSummarizerKey ? `Saved: ${configView.summarizerKeyMasked ?? "configured"}` : "No key"}</span></div><div className="st-row-control"><KeyInput value={summaryKey} placeholder={configView.hasSummarizerKey ? "leave blank to keep" : "paste summary key"} masked={configView.summarizerKeyMasked} secretKind="summarizerApiKey" language={language} onChange={(value) => { resetOpState(); setSummaryKey(value); }} /></div></div>
+                      <div className="st-row"><div className="st-row-label"><span className="st-label">{copy.summaryApiKey}</span><span className="st-hint">{configView.hasSummarizerKey ? copy.keySaved(configView.summarizerKeyMasked ?? copy.keyConfigured) : copy.keyNone}</span></div><div className="st-row-control"><KeyInput value={summaryKey} placeholder={configView.hasSummarizerKey ? copy.keyKeep : copy.keyPasteSummary} masked={configView.summarizerKeyMasked} secretKind="summarizerApiKey" language={language} onChange={(value) => { resetOpState(); setSummaryKey(value); }} /></div></div>
                     </>
                   )}
                   <div className="st-row"><div className="st-row-label"><span className="st-label">{copy.summaryModel}</span><span className="st-hint">{copy.summaryModelHint}</span></div><div className="st-row-control"><PresetTextInput value={advForm.summarizerModel ?? ""} placeholder="Auto" options={summaryModelOptions} onChange={(value) => { resetOpState(); setAdvForm((current) => ({ ...current, summarizerModel: value })); }} /></div></div>
-                  <div className="st-row"><div className="st-row-label"><span className="st-label">Scopus Key</span><span className="st-hint">{configView.hasScopusKey ? `Saved: ${configView.scopusKeyMasked ?? "configured"}` : "No key"}</span></div><div className="st-row-control"><KeyInput value={scopusKey} placeholder={configView.hasScopusKey ? "leave blank to keep" : "paste Elsevier key"} masked={configView.scopusKeyMasked} secretKind="scopusApiKey" language={language} onChange={(value) => { resetOpState(); setScopusKey(value); }} /></div></div>
-                  <div className="st-row"><div className="st-row-label"><span className="st-label">Config file</span></div><div className="st-row-control"><input className="st-readonly-input" value={configView.configPath} readOnly /></div></div>
+                  <div className="st-row"><div className="st-row-label"><span className="st-label">{copy.retrievalCardModel}</span><span className="st-hint">{copy.retrievalCardModelHint}</span></div><div className="st-row-control"><PresetTextInput value={advForm.retrievalCardModel ?? ""} placeholder={copy.retrievalCardFollowExecutor} options={retrievalCardModelOptions} onChange={(value) => { resetOpState(); setAdvForm((current) => ({ ...current, retrievalCardModel: value })); }} /></div></div>
+                  <div className="st-row"><div className="st-row-label"><span className="st-label">{copy.fieldScopusKey}</span><span className="st-hint">{configView.hasScopusKey ? copy.keySaved(configView.scopusKeyMasked ?? copy.keyConfigured) : copy.keyNone}</span></div><div className="st-row-control"><KeyInput value={scopusKey} placeholder={configView.hasScopusKey ? copy.keyKeep : copy.keyPasteScopus} masked={configView.scopusKeyMasked} secretKind="scopusApiKey" language={language} onChange={(value) => { resetOpState(); setScopusKey(value); }} /></div></div>
+                  <div className="st-row"><div className="st-row-label"><span className="st-label">{copy.fieldConfigFile}</span></div><div className="st-row-control"><input className="st-readonly-input" value={configView.configPath} readOnly /></div></div>
                 </div>
               )}
             </div>
@@ -2499,7 +2655,13 @@ export default function Settings() {
         <RemoteControlPanel language={language} onError={setError} />
       )}
 
-      {activeSettingsTab === "usage" && (
+      {activeSettingsTab === "extensions" && (
+        <div className="sp-extensions-embed">
+          <Extensions />
+        </div>
+      )}
+
+      {activeSettingsTab === "account" && (
         <div className="sp-usage-section">
           <div className="sp-usage-page-head">
             <div>
@@ -2685,7 +2847,28 @@ export default function Settings() {
               </div>
             </div>
           </div>
-          <div className="sp-env-section">
+          <div className="sp-about-links">
+            <div className="sp-section-head-text">
+              <div className="sp-section-title">{copy.aboutLinksTitle}</div>
+              <div className="sp-section-sub">{copy.aboutLinksSub}</div>
+            </div>
+            <div className="sp-about-links-row">
+              <a className="sp-about-link" href="https://github.com/zhuyingqin/Aris" target="_blank" rel="noreferrer">
+                <SvgIcon name="externalLink" size={13} />{copy.aboutLinkRepo}
+              </a>
+              <a className="sp-about-link" href="https://github.com/zhuyingqin/Aris/releases" target="_blank" rel="noreferrer">
+                <SvgIcon name="externalLink" size={13} />{copy.aboutLinkReleases}
+              </a>
+              <a className="sp-about-link" href="https://github.com/zhuyingqin/Aris/blob/aris-code/LICENSE" target="_blank" rel="noreferrer">
+                <SvgIcon name="externalLink" size={13} />{copy.aboutLinkLicense}
+              </a>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {activeSettingsTab === "environment" && (
+        <div className="sp-env-section">
             <div className="sp-section-head sp-env-head">
               <div className="sp-section-head-text">
                 <div className="sp-section-title">{copy.envTitle}</div>
@@ -2764,8 +2947,8 @@ export default function Settings() {
               )}
             </div>
           </div>
-        </div>
       )}
+      </div>
     </div>
   );
 }

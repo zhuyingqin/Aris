@@ -326,8 +326,7 @@ where
         feature_config: RuntimeFeatureConfig,
     ) -> Self {
         let usage_tracker = UsageTracker::from_session(&session);
-        let context_overhead_estimated_tokens =
-            estimate_text_tokens(&system_prompt.join("\n\n"));
+        let context_overhead_estimated_tokens = estimate_text_tokens(&system_prompt.join("\n\n"));
         Self {
             session,
             api_client,
@@ -763,11 +762,7 @@ where
             } else {
                 summary
             };
-            (
-                summary,
-                CompactionSummarySource::Fallback,
-                None,
-            )
+            (summary, CompactionSummarySource::Fallback, None)
         };
         let result = assemble_compacted_session_with_usage(
             &self.session,
@@ -860,18 +855,14 @@ where
         // tool results, inputs, and assistant text stay verbatim. Retroactively
         // shrinking consumed content on every request (the previous behaviour)
         // destroyed context the model still needed long before any overflow.
-        if self.estimated_request_tokens()
-            < self.context_compaction_estimated_tokens_threshold
-        {
+        if self.estimated_request_tokens() < self.context_compaction_estimated_tokens_threshold {
             return None;
         }
 
         // Step 1 — cheap, lossy: shrink already-consumed tool results and the
         // inputs of completed tool calls. Frequently enough on its own.
         compact_context_history(&mut self.session, true);
-        if self.estimated_request_tokens()
-            < self.context_compaction_estimated_tokens_threshold
-        {
+        if self.estimated_request_tokens() < self.context_compaction_estimated_tokens_threshold {
             return None;
         }
 
@@ -1340,8 +1331,7 @@ fn is_internal_continuation_message(message: &ConversationMessage) -> bool {
 }
 
 fn overflow_preserve_message_count(session: &Session) -> usize {
-    active_turn_message_count(session)
-        .clamp(1, MAX_OVERFLOW_PRESERVED_MESSAGES)
+    active_turn_message_count(session).clamp(1, MAX_OVERFLOW_PRESERVED_MESSAGES)
 }
 
 fn fallback_summary_content_budget(plan: &crate::compact::CompactionPlan) -> usize {

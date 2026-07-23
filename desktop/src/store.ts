@@ -217,6 +217,10 @@ interface AppState {
   pendingStudioArtifactId: string | null;
   setPendingStudioArtifactId: (value: string | null) => void;
 
+  /** One-shot file-open request consumed by the Code page after it mounts. */
+  pendingLabFilePath: string | null;
+  setPendingLabFilePath: (value: string | null) => void;
+
   stateDir: string;
   error: string | null;
   projects: DesktopProject[];
@@ -310,6 +314,9 @@ export const useStore = create<AppState>((set, get) => ({
 
   pendingStudioArtifactId: null,
   setPendingStudioArtifactId: (value) => set({ pendingStudioArtifactId: value }),
+
+  pendingLabFilePath: null,
+  setPendingLabFilePath: (value) => set({ pendingLabFilePath: value }),
 
   stateDir: "",
   error: null,

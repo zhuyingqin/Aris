@@ -12,6 +12,7 @@ mod mail;
 mod mcp;
 mod newapi;
 mod process;
+mod profile;
 mod projects;
 mod remote;
 mod scheduled;
@@ -368,9 +369,7 @@ pub fn run() {
                         // it for fast reuse. Once the primary workspace is
                         // actually destroyed, tear the hidden singleton down so
                         // it cannot keep the desktop process alive invisibly.
-                        if let Some(companion) =
-                            app_handle.get_webview_window("chat-companion")
-                        {
+                        if let Some(companion) = app_handle.get_webview_window("chat-companion") {
                             let _ = companion.destroy();
                         }
                     }
@@ -427,6 +426,7 @@ pub fn run() {
             newapi::newapi_groups,
             newapi::newapi_update_group,
             newapi::newapi_usage_logs,
+            profile::profile_stats,
             connectors::connector_plugins_list,
             connectors::connector_connect,
             scheduled::scheduled_tasks_list,
@@ -486,6 +486,10 @@ pub fn run() {
             literature::literature_review_llm,
             literature::literature_llm_vision,
             literature::literature_pdf_text,
+            literature::literature_rag_index_pdf,
+            literature::literature_rag_index_library,
+            literature::literature_rag_search,
+            literature::literature_rag_status,
             literature::literature_pdf_bytes,
             literature::literature_import_pdf,
             literature::literature_image_ocr,
@@ -498,6 +502,10 @@ pub fn run() {
             studio::studio_html,
             knowledge::knowledge_load,
             knowledge::knowledge_search,
+            knowledge::knowledge_rag_search,
+            knowledge::knowledge_retrieval_cards_build,
+            knowledge::project_rag_search,
+            knowledge::project_rag_answer,
             knowledge::knowledge_upsert,
             knowledge::knowledge_confirm,
             knowledge::knowledge_reject,

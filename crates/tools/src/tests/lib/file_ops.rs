@@ -424,4 +424,3 @@ fn glob_and_grep_tools_cover_success_and_errors() {
     std::env::set_current_dir(&original_dir).expect("restore cwd");
     let _ = fs::remove_dir_all(root);
 }
-

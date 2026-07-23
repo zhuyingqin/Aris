@@ -17,6 +17,11 @@ import type { ChatSession } from "./types";
 
 const HOME_SESSION_ID = "chat-home";
 const SESSION_PERSIST_DELAY_MS = 250;
+// Streaming deltas can arrive more frequently than the normal debounce. Keep
+// that debounce for ordinary edits, but do not let a busy response defer its
+// first durable checkpoint until the model finishes (or forever, after a
+// crash). This bounds the unsaved UI projection to one second.
+const SESSION_PERSIST_MAX_DELAY_MS = 1_000;
 const MAX_LEGACY_TAURI_LOCAL_SESSIONS_CHARS = 2_000_000;
 
 // Persistence ownership is deliberately split by concern:
@@ -251,6 +256,11 @@ export function useChatSessions(projectId?: string | null) {
   sessionsRef.current = allSessions;
   const pendingPersistSessions = useRef<ChatSession[] | null>(null);
   const persistTimer = useRef<number | null>(null);
+  const persistMaxTimer = useRef<number | null>(null);
+  // Native saves are asynchronous. Keep one immediate, renderer-local
+  // emergency snapshot for each newly dirty session until its first atomic
+  // native checkpoint has succeeded.
+  const crashRecoverySessionIds = useRef(new Set<string>());
   const dirtySessionIds = useRef(new Set<string>());
   const loadingSessionIds = useRef(new Set<string>());
   const remoteSessionUpdateVersions = useRef(new Map<string, number>());
@@ -269,18 +279,33 @@ export function useChatSessions(projectId?: string | null) {
     chatUiSessionsList<ChatSession>()
       .then((stored) => {
         const backendSessions = stored.map((session) => migrateSession(session)).filter(isStartedSession);
-        const legacyLocalSessions = backendSessions.length === 0
-          ? loadLocalSessions(MAX_LEGACY_TAURI_LOCAL_SESSIONS_CHARS)
-          : [];
-        const merged = mergeSessions(backendSessions, legacyLocalSessions, sessionsRef.current);
+        // This is normally empty. When the renderer or app was killed before
+        // its first native checkpoint, it contains only the started chats that
+        // need to be restored into the per-session native store. It must be
+        // considered even when older native chats already exist.
+        const localRecoverySessions = loadLocalSessions(MAX_LEGACY_TAURI_LOCAL_SESSIONS_CHARS);
+        const merged = mergeSessions(backendSessions, localRecoverySessions, sessionsRef.current);
         if (merged.length > 0) setAllSessions(merged);
         setHomeSession(makeHomeSession(activeProjectId));
         hydrated.current = true;
-        if (backendSessions.length > 0) clearLocalSessionSnapshots();
         if (backendSessions.length === 0 && merged.length > 0) {
           void chatUiSessionsSave(persistentSessions(merged))
             .then(clearLocalSessionSnapshots)
             .catch((error) => setError(`Failed to save chat sessions: ${String(error)}`));
+          return;
+        }
+        const backendUpdatedAt = new Map(backendSessions.map((session) => [session.id, session.updatedAt]));
+        const sessionsNeedingRecovery = localRecoverySessions.filter((session) => {
+          const storedUpdatedAt = backendUpdatedAt.get(session.id);
+          return storedUpdatedAt == null || session.updatedAt > storedUpdatedAt;
+        });
+        if (sessionsNeedingRecovery.length > 0) {
+          void Promise.all(sessionsNeedingRecovery.map((session) => chatUiSessionSave(session)))
+            .then(clearLocalSessionSnapshots)
+            .catch((error) => setError(`Failed to recover chat sessions: ${String(error)}`));
+        } else if (localRecoverySessions.length > 0) {
+          // All snapshots were already reflected in the native store.
+          clearLocalSessionSnapshots();
         }
       })
       .catch(() => {
@@ -495,6 +520,10 @@ export function useChatSessions(projectId?: string | null) {
       window.clearTimeout(persistTimer.current);
       persistTimer.current = null;
     }
+    if (persistMaxTimer.current != null) {
+      window.clearTimeout(persistMaxTimer.current);
+      persistMaxTimer.current = null;
+    }
 
     if (!isTauri()) {
       persistLocalSessions(pending);
@@ -506,8 +535,14 @@ export function useChatSessions(projectId?: string | null) {
     for (const id of dirtyIds) dirtySessionIds.current.delete(id);
     const dirtySessions = persistentSessions(pending)
       .filter((session) => dirtyIds.has(session.id));
+    // A desktop stream is already a complete, self-contained UI projection:
+    // it is safe to checkpoint atomically while `streaming` is true. Previously
+    // these sessions were held exclusively in renderer memory until the final
+    // completion event, so an abnormal close could make every active chat
+    // disappear from the sidebar. Remote buffers are intentionally excluded;
+    // they are a bounded phone mirror and the backend owns their durable turn.
     const sessionsToSave = dirtySessions.filter((session) => (
-      !isSessionStreaming(session) && !remoteTurnBuffers.current.has(session.id)
+      !remoteTurnBuffers.current.has(session.id)
     ));
     const savingIds = new Set(sessionsToSave.map((session) => session.id));
     for (const session of dirtySessions) {
@@ -515,7 +550,10 @@ export function useChatSessions(projectId?: string | null) {
     }
     if (sessionsToSave.length === 0) return;
     void Promise.all(sessionsToSave.map((session) => chatUiSessionSave(session)))
-      .then(clearLocalSessionSnapshots)
+      .then(() => {
+        for (const id of savingIds) crashRecoverySessionIds.current.delete(id);
+        if (crashRecoverySessionIds.current.size === 0) clearLocalSessionSnapshots();
+      })
       .catch((error) => {
         for (const id of savingIds) dirtySessionIds.current.add(id);
         setError(`Failed to save chat sessions: ${String(error)}`);
@@ -524,8 +562,34 @@ export function useChatSessions(projectId?: string | null) {
 
   useEffect(() => {
     pendingPersistSessions.current = allSessions;
+    if (isTauri() && hydrated.current) {
+      const startedDirtySessions = persistentSessions(allSessions)
+        .filter((session) => dirtySessionIds.current.has(session.id));
+      const newSnapshotIds = startedDirtySessions
+        .map((session) => session.id)
+        .filter((id) => !crashRecoverySessionIds.current.has(id));
+      if (newSnapshotIds.length > 0) {
+        for (const id of newSnapshotIds) crashRecoverySessionIds.current.add(id);
+        const snapshots = persistentSessions(allSessions).filter((session) => (
+          crashRecoverySessionIds.current.has(session.id)
+        ));
+        // `localStorage.setItem` is synchronous, so this closes the small
+        // window before the first IPC save can complete. The snapshot contains
+        // only uncheckpointed sessions, not the entire chat history.
+        persistLocalSessions(snapshots);
+      }
+    }
     if (persistTimer.current != null) window.clearTimeout(persistTimer.current);
     persistTimer.current = window.setTimeout(flushPendingSessions, SESSION_PERSIST_DELAY_MS);
+    // Reset only the trailing debounce. The maximum timer starts with the
+    // first change and remains armed through subsequent stream deltas, which
+    // guarantees that continuous output reaches disk before completion.
+    if (persistMaxTimer.current == null) {
+      persistMaxTimer.current = window.setTimeout(
+        flushPendingSessions,
+        SESSION_PERSIST_MAX_DELAY_MS,
+      );
+    }
     return () => {
       if (persistTimer.current != null) {
         window.clearTimeout(persistTimer.current);

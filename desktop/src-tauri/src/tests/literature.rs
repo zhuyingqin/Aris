@@ -1,8 +1,8 @@
 #[cfg(windows)]
 use super::{extract_pdf_text_by_page, literature_image_ocr, windows_ocr};
 use super::{
-    import_attachment_at, import_pdf_at, resolve_pdf_path_at, validate_vision_model, vision_message,
-    LiteratureVisionImage,
+    extraction_from_rag_pages, import_attachment_at, import_pdf_at, resolve_pdf_path_at,
+    validate_vision_model, vision_message, LiteratureRagPdfPage, LiteratureVisionImage,
 };
 use runtime::ContentBlock;
 #[cfg(windows)]
@@ -66,7 +66,10 @@ fn imports_non_pdf_attachments_into_a_project_local_folder() {
     assert_eq!(imported.file_name, "supplement.csv");
     assert_eq!(imported.mime_type, Some("text/csv"));
     assert!(imported.relative_path.starts_with("papers/attachments/"));
-    assert_eq!(std::fs::read(base.join(&imported.relative_path)).expect("read copied attachment"), b"sample,value\nA,1\n");
+    assert_eq!(
+        std::fs::read(base.join(&imported.relative_path)).expect("read copied attachment"),
+        b"sample,value\nA,1\n"
+    );
 
     let _ = std::fs::remove_dir_all(base);
 }
@@ -115,6 +118,41 @@ fn minimax_m3_is_the_only_minimax_vision_model() {
     assert!(validate_vision_model("gpt-5.4").is_ok());
 }
 
+#[test]
+fn accepts_pdfjs_pages_for_indexing_without_external_pdf_commands() {
+    let extraction = extraction_from_rag_pages(&[
+        LiteratureRagPdfPage {
+            page: 1,
+            text: "Bundled reader first page text".to_string(),
+            source: "embedded".to_string(),
+        },
+        LiteratureRagPdfPage {
+            page: 2,
+            text: "Recovered OCR second page text".to_string(),
+            source: "ocr".to_string(),
+        },
+    ])
+    .expect("accept PDF.js page payload");
+    assert_eq!(extraction.pages.len(), 2);
+    assert!(extraction.ocr_used);
+    assert!(extraction.text.contains("[[PAGE 2]]"));
+    assert!(extraction.text.contains("Recovered OCR second page text"));
+
+    let duplicate_page = extraction_from_rag_pages(&[
+        LiteratureRagPdfPage {
+            page: 1,
+            text: "first".to_string(),
+            source: "embedded".to_string(),
+        },
+        LiteratureRagPdfPage {
+            page: 1,
+            text: "duplicate".to_string(),
+            source: "embedded".to_string(),
+        },
+    ]);
+    assert!(duplicate_page.is_err());
+}
+
 #[cfg(windows)]
 #[test]
 fn extracts_a_scanned_pdf_with_windows_ocr_when_poppler_is_available() {
@@ -135,6 +173,9 @@ fn extracts_a_scanned_pdf_with_windows_ocr_when_poppler_is_available() {
         let _ = std::fs::remove_dir_all(base);
         return;
     }
+    let embedded =
+        extract_pdf_text_by_page(&base.join("source.pdf")).expect("extract embedded PDF text");
+    assert!(embedded.text.contains("Scanned OCR test 12345"));
     let rendered = crate::process::hidden_command("pdftoppm")
         .current_dir(&base)
         .args([

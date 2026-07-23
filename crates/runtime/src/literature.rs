@@ -584,14 +584,19 @@ impl LiteratureStore {
         limit: usize,
     ) -> Result<Vec<LiteratureFullTextHit>, String> {
         let expression = fts_expression(query);
-        if expression.is_empty() { return Ok(Vec::new()); }
-        let mut statement = self.connection.prepare(
-            "SELECT record_id, bm25(literature_full_text) AS score
+        if expression.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT record_id, bm25(literature_full_text) AS score
              FROM literature_full_text
              WHERE literature_full_text MATCH ?1
              ORDER BY score ASC, record_id ASC
              LIMIT ?2",
-        ).map_err(to_error)?;
+            )
+            .map_err(to_error)?;
         let rows = statement
             .query_map(
                 params![expression, i64::try_from(limit.max(1)).unwrap_or(i64::MAX)],
@@ -695,10 +700,16 @@ impl LiteratureStore {
         }
         remap_record_references(&transaction, duplicate_record_id, primary_record_id)?;
         transaction
-            .execute("DELETE FROM canonical_records WHERE id = ?1", [duplicate_record_id])
+            .execute(
+                "DELETE FROM canonical_records WHERE id = ?1",
+                [duplicate_record_id],
+            )
             .map_err(to_error)?;
         transaction
-            .execute("DELETE FROM literature_full_text WHERE record_id = ?1", [duplicate_record_id])
+            .execute(
+                "DELETE FROM literature_full_text WHERE record_id = ?1",
+                [duplicate_record_id],
+            )
             .map_err(to_error)?;
         upsert_record_aliases(&transaction, &primary, primary_record_id)?;
         upsert_record_aliases(&transaction, &duplicate, primary_record_id)?;
@@ -1804,31 +1815,54 @@ fn insert_canonical_record(
     Ok(())
 }
 
-fn upsert_full_text_index(transaction: &Transaction<'_>, record: &CanonicalRecord) -> Result<(), String> {
-    transaction.execute(
-        "DELETE FROM literature_full_text WHERE record_id = ?1",
-        [&record.id],
-    ).map_err(to_error)?;
-    transaction.execute(
-        "INSERT INTO literature_full_text(record_id, title, body) VALUES (?1, ?2, ?3)",
-        params![record.id, record.title, full_text_body(record)],
-    ).map_err(to_error)?;
+fn upsert_full_text_index(
+    transaction: &Transaction<'_>,
+    record: &CanonicalRecord,
+) -> Result<(), String> {
+    transaction
+        .execute(
+            "DELETE FROM literature_full_text WHERE record_id = ?1",
+            [&record.id],
+        )
+        .map_err(to_error)?;
+    transaction
+        .execute(
+            "INSERT INTO literature_full_text(record_id, title, body) VALUES (?1, ?2, ?3)",
+            params![record.id, record.title, full_text_body(record)],
+        )
+        .map_err(to_error)?;
     Ok(())
 }
 
 fn full_text_body(record: &CanonicalRecord) -> String {
     let metadata = serde_json::to_string(&record.metadata).unwrap_or_default();
-    format!("{}\n{}\n{}", record.authors.join(" "), record.abstract_text, metadata)
+    format!(
+        "{}\n{}\n{}",
+        record.authors.join(" "),
+        record.abstract_text,
+        metadata
+    )
 }
 
 fn rebuild_full_text_index(connection: &Connection) -> Result<(), String> {
-    let mut statement = connection.prepare("SELECT payload FROM canonical_records").map_err(to_error)?;
-    let records = statement.query_map([], |row| row.get::<_, String>(0)).map_err(to_error)?
-        .map(|row| row.map_err(to_error).and_then(|payload| decode_payload::<CanonicalRecord>(&payload)))
+    let mut statement = connection
+        .prepare("SELECT payload FROM canonical_records")
+        .map_err(to_error)?;
+    let records = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(to_error)?
+        .map(|row| {
+            row.map_err(to_error)
+                .and_then(|payload| decode_payload::<CanonicalRecord>(&payload))
+        })
         .collect::<Result<Vec<_>, _>>()?;
     let transaction = connection.unchecked_transaction().map_err(to_error)?;
-    transaction.execute("DELETE FROM literature_full_text", []).map_err(to_error)?;
-    for record in &records { upsert_full_text_index(&transaction, record)?; }
+    transaction
+        .execute("DELETE FROM literature_full_text", [])
+        .map_err(to_error)?;
+    for record in &records {
+        upsert_full_text_index(&transaction, record)?;
+    }
     transaction.commit().map_err(to_error)
 }
 

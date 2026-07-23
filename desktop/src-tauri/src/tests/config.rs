@@ -209,6 +209,42 @@ fn automatic_review_defaults_off_and_can_be_enabled_without_clearing_reviewer() 
 }
 
 #[test]
+fn retrieval_card_model_round_trips_without_changing_executor_credentials() {
+    let mut obj = serde_json::json!({
+        "executor_provider": "openai",
+        "executor_model": "MiniMax-M3",
+        "executor_api_key": "executor-token"
+    })
+    .as_object()
+    .expect("object")
+    .clone();
+
+    apply_patch(
+        &mut obj,
+        ConfigPatch {
+            retrieval_card_model: Some("gpt-5.5".to_string()),
+            ..Default::default()
+        },
+    );
+
+    assert_eq!(
+        build_view(&obj).retrieval_card_model.as_deref(),
+        Some("gpt-5.5")
+    );
+    assert_eq!(obj["executor_model"], "MiniMax-M3");
+    assert_eq!(obj["executor_api_key"], "executor-token");
+
+    apply_patch(
+        &mut obj,
+        ConfigPatch {
+            retrieval_card_model: Some(String::new()),
+            ..Default::default()
+        },
+    );
+    assert!(build_view(&obj).retrieval_card_model.is_none());
+}
+
+#[test]
 fn reviewer_api_update_requires_admin_api_access() {
     let obj = Map::new();
     let patch = ConfigPatch {

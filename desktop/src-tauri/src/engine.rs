@@ -894,6 +894,9 @@ where
         // flows back through the normal `chat-tool-result` emit below.
         let inner_result = if tool_name == ASK_USER_QUESTION_TOOL {
             self.ask_user_question(tool_use_id, input)
+        } else if tool_name == PROJECT_EVIDENCE_SEARCH_TOOL {
+            crate::knowledge::project_evidence_search_tool_at(&self.workspace, input)
+                .map_err(ToolError::new)
         } else {
             let workspace = self.workspace.clone();
             let project_id = self.project_id.clone();
@@ -1218,10 +1221,40 @@ fn tool_specs_for(extra_blocked_tools: &'static [&'static str]) -> Vec<tools::To
     if !is_blocked_tool(ASK_USER_QUESTION_TOOL, extra_blocked_tools) {
         specs.push(ask_user_question_tool_spec());
     }
+    if !is_blocked_tool(PROJECT_EVIDENCE_SEARCH_TOOL, extra_blocked_tools) {
+        specs.push(project_evidence_search_tool_spec());
+    }
     specs
 }
 
 const ASK_USER_QUESTION_TOOL: &str = "AskUserQuestion";
+const PROJECT_EVIDENCE_SEARCH_TOOL: &str = "ProjectEvidenceSearch";
+
+fn project_evidence_search_tool_spec() -> tools::ToolSpec {
+    tools::ToolSpec {
+        name: PROJECT_EVIDENCE_SEARCH_TOOL,
+        description: "Search the current project's already-indexed local confirmed knowledge and PDF full text without embeddings. Call this automatically before answering any question about what the user's local papers, PDFs, or literature library say, including synthesis, comparison, methods, datasets, metrics, findings, limitations, quotations, citations, and page-number requests. Prefer this over LiteratureSearch; LiteratureSearch is only for discovering new external papers. This read-only tool performs bounded LLM query expansion, five-path SQLite FTS retrieval, and reranking, but it never indexes PDFs or generates retrieval cards. Original PDF page chunks and confirmed knowledge are evidence; retrieval cards, query expansions, and ranks are routing hints only. If results are empty, tell the user to run Literature > Full RAG > Incremental update and generate retrieval cards. Cite material claims as [paperId p.PAGE].",
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "The user's evidence question. Preserve concrete entities, methods, metrics, and comparison targets."
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 20,
+                    "description": "Maximum results retained per evidence class; defaults to 8."
+                }
+            },
+            "required": ["query"],
+            "additionalProperties": false
+        }),
+        required_permission: PermissionMode::ReadOnly,
+    }
+}
 
 /// The interactive `AskUserQuestion` tool: the model pauses the turn to ask the
 /// user a question with selectable options, and the turn resumes with the
@@ -2067,6 +2100,7 @@ fn build_system_prompt_uncached(key: &SystemPromptCacheKey) -> Vec<String> {
     };
     let file_links = "When you create or modify files, include Markdown links to the relevant file paths in the final response so the desktop UI can open them directly. For local file destinations, use forward slashes and wrap paths containing spaces in angle brackets, for example `[report](<F:/Research Project/papers/main.tex:42>)`; do not emit `file://` or editor-specific URLs.".to_string();
     let readable_answers = "Readable answers: for explanatory answers, prefer short paragraphs, bullets, or numbered steps. Avoid dense single-paragraph technical summaries, especially in Chinese-English mixed explanations.".to_string();
+    let local_evidence_retrieval = "Local literature evidence routing: when the user asks what the current project's local papers, PDFs, confirmed knowledge, or literature library say, you MUST call `ProjectEvidenceSearch` before answering, even when the user does not name the tool. This includes synthesis, comparisons, methods, datasets, metrics, findings, limitations, quotations, citations, and page-number requests. Base material claims only on returned confirmed knowledge or original PDF page chunks and cite them as `[paperId p.PAGE]`; retrieval cards, expansions, and ranks are not evidence. Use `LiteratureSearch` only to discover new external papers. `ProjectEvidenceSearch` does not build the index, so if it returns empty, explain that the user must run Literature > Full RAG > Incremental update and then generate retrieval cards. Do not silently substitute web or external metadata search for missing local evidence.".to_string();
     let complex_task_contract = "Complex task contract: for code changes, research conclusions, citation work, experiments, artifact generation, or milestone work, first create a concise evidence-oriented plan with TodoWrite before making changes. Include the affected surfaces and verification needed. Simple factual answers do not need a plan. Never declare a complex task complete merely because your own prose sounds correct; the desktop runtime sends the result to a separately configured independent Reviewer and may return concrete findings for up to two revision rounds.".to_string();
     let artifact_layout = "Project artifact layout: place LaTeX paper/report sources and PDFs under `papers/`, slide/PPT/PDF deck outputs under `slides/`, poster outputs under `poster/`, interactive web apps under `web/<name>/` with an `index.html` plus local CSS/assets, notebook programs under `experiments/`, and scratch/temp/cache files under `.somniq/tmp/`. Studio auto-discovers `slides/`, `poster/`, and `web/`; Lab lists notebooks from the workspace and defaults new notebooks into `experiments/`.".to_string();
     let existing_artifact_edits = "Existing artifact edits: when the user asks to modify, revise, continue editing, polish, or fix a current/existing report, paper, slide deck, PDF source, or other generated artifact, first identify and reuse the existing source path from the user message, recent file links, tool outputs, or workspace search. Edit that source in place and rebuild derived outputs at the same base path. Do not create sibling version files such as `_v2`, `_v9`, `_new`, `_final`, or timestamped copies unless the user explicitly asks for a new version, backup, archive, or comparison copy. If the target file cannot be identified, ask for the path instead of creating a new artifact.".to_string();
@@ -2078,6 +2112,7 @@ fn build_system_prompt_uncached(key: &SystemPromptCacheKey) -> Vec<String> {
         access.clone(),
         file_links,
         readable_answers,
+        local_evidence_retrieval,
         complex_task_contract,
         artifact_layout,
         existing_artifact_edits,
@@ -4504,7 +4539,13 @@ fn review_required_for_turn(user_text: &str, summary: &runtime::TurnSummary) -> 
     let verification_tool = tool_names.iter().any(|name| {
         matches!(
             *name,
-            "WebSearch" | "WebFetch" | "LiteratureSearch" | "REPL" | "PowerShell" | "bash"
+            "WebSearch"
+                | "WebFetch"
+                | "LiteratureSearch"
+                | PROJECT_EVIDENCE_SEARCH_TOOL
+                | "REPL"
+                | "PowerShell"
+                | "bash"
         )
     });
     consequential_request && verification_tool
@@ -5381,6 +5422,7 @@ async fn run_chat_turn_with_context(
     turn_runtime: ChatTurnRuntime,
     cancellation: Option<Arc<AtomicBool>>,
 ) -> Result<String, String> {
+    let turn_started = std::time::Instant::now();
     let emit_desktop_chat_events = turn_runtime.emits_desktop_chat_events();
     validate_session_id(&session_id)?;
     if let Err(error) = wait_for_cancelled_turn_to_finish(state, &session_id).await {
@@ -6081,6 +6123,15 @@ async fn run_chat_turn_with_context(
         }
     }
     if !ephemeral {
+        // Turn wall-clock + reasoning effort feed the Profile page's
+        // "longest task" and "top reasoning effort" stats. Effort is only
+        // meaningful for models that actually apply it.
+        let turn_duration_ms = turn_started.elapsed().as_millis() as u64;
+        let executor_effort = if model_supports_reasoning_effort(&usage_model) {
+            crate::config::reasoning_effort()
+        } else {
+            String::new()
+        };
         if let Err(error) = crate::usage_log::append_turn_usage(
             &session_id,
             "executor",
@@ -6088,6 +6139,8 @@ async fn run_chat_turn_with_context(
             &usage_provider,
             &usage_server,
             &turn_usages,
+            turn_duration_ms,
+            &executor_effort,
         ) {
             eprintln!("SomniQ desktop: failed to write usage log: {error}");
         }
@@ -6101,6 +6154,8 @@ async fn run_chat_turn_with_context(
                     &reviewer_provider,
                     &reviewer_server,
                     &reviewer_usages,
+                    0,
+                    "",
                 ) {
                     eprintln!("SomniQ desktop: failed to write Reviewer usage log: {error}");
                 }

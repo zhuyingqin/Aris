@@ -60,6 +60,7 @@ pub mod knowledge;
 pub mod layout;
 pub mod literature;
 pub mod notebook;
+pub mod pdf_rag;
 pub mod runs;
 pub mod studio;
 pub mod sweep;
@@ -468,7 +469,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                         "items": { "type": "string", "enum": ["scopus", "openalex", "semantic-scholar", "crossref", "arxiv"] },
                         "description": "Engines to query (listing order is ignored; results follow Scopus → OpenAlex → Semantic Scholar → Crossref → arXiv priority). Empty or omitted means the full bounded set."
                     },
-                    "maxResults": { "type": "integer", "minimum": 1, "maximum": 100, "description": "Per-source result target (default 50). Core sources fetch up to this; arXiv is capped lower as a supplement." }
+                    "maxResults": { "type": "integer", "minimum": 1, "description": "Per-source result target (default 50). No hard ceiling — set as many as the task needs; every source, including the arXiv supplement, fetches up to this count." }
                 },
                 "required": ["query"],
                 "additionalProperties": false
@@ -521,7 +522,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 "properties": {
                     "protocolId": { "type": "string", "minLength": 1 },
                     "confirmation": { "type": "string", "enum": ["execute"] },
-                    "maxResults": { "type": "integer", "minimum": 1, "maximum": 100 },
+                    "maxResults": { "type": "integer", "minimum": 1 },
                     "resumeRunId": { "type": "string", "minLength": 1 }
                 },
                 "required": ["protocolId", "confirmation"],

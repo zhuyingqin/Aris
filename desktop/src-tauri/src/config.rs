@@ -282,6 +282,10 @@ pub struct ConfigView {
     /// Model used to summarize context on compaction. Empty/absent means "Auto"
     /// (a per-provider default). See `aris_chat::resolve_summarizer_model`.
     pub summarizer_model: Option<String>,
+    /// Model used to generate PDF retrieval cards. Empty/absent follows the
+    /// active executor model; non-empty values resolve through the verified
+    /// executor registry so credentials are never duplicated.
+    pub retrieval_card_model: Option<String>,
     pub summarizer_provider: Option<String>,
     pub summarizer_base_url: Option<String>,
     pub has_summarizer_key: bool,
@@ -318,6 +322,7 @@ fn build_view(obj: &Map<String, Value>) -> ConfigView {
         executor_base_url: get_str(obj, "executor_base_url"),
         executor_transport: get_str(obj, "executor_transport"),
         summarizer_model: get_str(obj, "summarizer_model"),
+        retrieval_card_model: get_str(obj, "retrieval_card_model"),
         summarizer_provider: get_str(obj, "summarizer_provider"),
         summarizer_base_url: get_str(obj, "summarizer_base_url"),
         has_summarizer_key: summarizer_key.is_some(),
@@ -361,6 +366,13 @@ fn review_enabled_from(obj: &Map<String, Value>) -> bool {
 
 pub(crate) fn review_enabled() -> bool {
     review_enabled_from(&managed_config_object().unwrap_or_else(|_| load_object()))
+}
+
+pub(crate) fn retrieval_card_model() -> Option<String> {
+    get_non_empty(
+        &managed_config_object().unwrap_or_else(|_| load_object()),
+        "retrieval_card_model",
+    )
 }
 
 #[tauri::command]
@@ -1069,6 +1081,7 @@ pub struct ConfigPatch {
     pub executor_transport: Option<String>,
     pub summarizer_provider: Option<String>,
     pub summarizer_model: Option<String>,
+    pub retrieval_card_model: Option<String>,
     pub summarizer_base_url: Option<String>,
     pub summarizer_api_key: Option<String>,
     pub executor_api_key: Option<String>,
@@ -1330,6 +1343,7 @@ fn apply_patch(obj: &mut Map<String, Value>, patch: ConfigPatch) {
     set_or_clear(obj, "executor_transport", patch.executor_transport);
     set_or_clear(obj, "summarizer_provider", patch.summarizer_provider);
     set_or_clear(obj, "summarizer_model", patch.summarizer_model);
+    set_or_clear(obj, "retrieval_card_model", patch.retrieval_card_model);
     set_or_clear(obj, "summarizer_base_url", patch.summarizer_base_url);
     set_or_clear(obj, "reviewer_provider", patch.reviewer_provider);
     set_or_clear(obj, "reviewer_model", patch.reviewer_model);
@@ -1943,10 +1957,8 @@ pub async fn config_test(patch: ConfigPatch) -> Result<ConfigTestResult, String>
                 let transport = if provider == "anthropic" || provider == "anthropic-compat" {
                     ""
                 } else {
-                    let probe_base = normalized_base_url(
-                        executor.base_url.clone(),
-                        "https://api.openai.com/v1",
-                    );
+                    let probe_base =
+                        normalized_base_url(executor.base_url.clone(), "https://api.openai.com/v1");
                     probe_responses_transport(&probe_base, &model, &key).await
                 };
                 // Only the per-model registry is written here. The live

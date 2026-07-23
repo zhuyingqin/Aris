@@ -330,6 +330,26 @@ textarea {
   border-radius: 6px;
 }
 
+.app-open-workspace {
+  display: inline-grid;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+  padding: 0;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg-2);
+  color: var(--text-dim);
+}
+
+.app-open-workspace:hover:not(:disabled),
+.app-open-workspace:focus-visible {
+  border-color: color-mix(in srgb, var(--accent) 54%, var(--border));
+  background: color-mix(in srgb, var(--accent) 12%, var(--bg-2));
+  color: var(--text);
+}
+
 .sidebar {
   grid-area: side;
   background: var(--bg-1);
@@ -1057,9 +1077,20 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
     0 8px 18px color-mix(in srgb, #000 18%, transparent);
 }
 
-.lit-mode-tab span {
-  font-size: 13px;
+.lit-mode-tab-icon {
+  align-items: center;
+  display: inline-flex;
+  flex: 0 0 15px;
+  height: 15px;
+  justify-content: center;
+  line-height: 0;
   opacity: 0.9;
+  width: 15px;
+}
+
+.lit-mode-tab-icon svg {
+  display: block;
+  flex: 0 0 auto;
 }
 
 .app-head-literature-tabs {
@@ -15150,4 +15181,363 @@ body.chat-companion-window {
   .chat-companion-window-actions button {
     width: 36px;
   }
+}
+
+/* ============================================================
+   Settings — sidebar shell + Profile analytics (v0.4.27)
+   Left grouped nav + content pane, replacing the horizontal tabs.
+   Built on the theme CSS variables so it adapts to light/dark.
+   ============================================================ */
+.sp-settings-page.sp-settings-shell {
+  flex-direction: row;
+  padding: 0;
+  gap: 0;
+  background: var(--bg);
+  overflow: hidden;
+}
+
+.sp-settings-nav {
+  flex: 0 0 234px;
+  width: 234px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-right: 1px solid var(--border);
+  background: color-mix(in srgb, var(--bg-1) 72%, var(--bg));
+}
+
+.sp-settings-nav-head {
+  padding: 14px 12px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+}
+
+.sp-settings-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  align-self: flex-start;
+  padding: 4px 6px 4px 2px;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.sp-settings-back:hover { color: var(--text); }
+
+.sp-settings-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 9px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-2);
+  color: var(--text-dim);
+}
+.sp-settings-search input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  outline: none;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+}
+.sp-settings-search input::placeholder { color: var(--text-dim); }
+
+.sp-settings-nav-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 8px;
+}
+
+.sp-settings-nav-group { margin-bottom: 10px; }
+.sp-settings-nav-group-title {
+  padding: 6px 8px 4px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  color: var(--text-dim);
+}
+
+.sp-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 8px 9px;
+  border: none;
+  border-radius: 8px;
+  background: none;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 13.5px;
+  text-align: left;
+  cursor: pointer;
+}
+.sp-nav-item:hover {
+  background: color-mix(in srgb, var(--text) 8%, transparent);
+  color: var(--text);
+}
+.sp-nav-item.active {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--text);
+}
+.sp-nav-item.active .sp-nav-item-icon { color: var(--accent); }
+.sp-nav-item-icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+  color: var(--text-dim);
+}
+.sp-nav-item-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sp-nav-item-ext { display: inline-flex; color: var(--text-dim); opacity: 0.7; }
+.sp-settings-nav-empty { padding: 16px 10px; color: var(--text-dim); font-size: 12.5px; }
+
+.sp-settings-content {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 26px clamp(18px, 3vw, 40px) 44px;
+}
+.sp-settings-content > * { width: min(100%, 960px); margin: 0; }
+
+/* Extensions renders as a full sub-surface (its own header/tabs/scroll), so it
+   fills the content pane edge-to-edge instead of the padded 960px column. */
+.sp-settings-content-flush { padding: 0; gap: 0; }
+.sp-settings-content-flush > * { width: 100%; }
+.sp-extensions-embed {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.sp-mail-page { width: min(100%, 960px); }
+
+/* Keyboard shortcuts list */
+.sp-shortcuts-list { display: flex; flex-direction: column; margin-top: 6px; }
+.sp-shortcut-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 9px 2px;
+  border-top: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
+}
+.sp-shortcut-row:first-child { border-top: none; }
+.sp-shortcut-label { color: var(--text); font-size: 13.5px; }
+.sp-shortcut-key {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-dim);
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 2px 8px;
+}
+
+/* About → resource links */
+.sp-about-links { margin-top: 16px; }
+.sp-about-links-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+.sp-about-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-1);
+  color: var(--text);
+  font-size: 13px;
+  text-decoration: none;
+}
+.sp-about-link:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* Profile analytics page */
+.sp-profile { display: flex; flex-direction: column; gap: 22px; }
+.sp-profile-hero {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.sp-profile-identity { display: flex; align-items: center; gap: 14px; }
+.sp-profile-avatar {
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-size: 26px;
+  font-weight: 600;
+  color: #fff;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+}
+.sp-profile-name { font-size: 20px; font-weight: 650; color: var(--text); }
+.sp-profile-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 3px;
+  color: var(--text-dim);
+  font-size: 13px;
+}
+.sp-profile-dot { opacity: 0.5; }
+.sp-profile-plan {
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--accent);
+  font-size: 12px;
+}
+.sp-profile-hero-actions { display: flex; gap: 8px; }
+
+.sp-profile-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 12px;
+}
+.sp-profile-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-1);
+}
+.sp-profile-tile strong { font-size: 22px; font-weight: 650; color: var(--text); }
+.sp-profile-tile span { font-size: 12.5px; color: var(--text-dim); }
+
+.sp-profile-activity,
+.sp-profile-insights,
+.sp-profile-skills {
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-1);
+}
+.sp-profile-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+.sp-profile-section-title { font-size: 14px; font-weight: 600; color: var(--text); }
+.sp-profile-mode-toggle {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 8px;
+  background: var(--bg-2);
+}
+.sp-profile-mode {
+  padding: 4px 10px;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.sp-profile-mode.active { background: var(--bg-3); color: var(--text); }
+
+.sp-profile-heatmap {
+  display: flex;
+  gap: 3px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+.sp-profile-heatmap-week { display: flex; flex-direction: column; gap: 3px; }
+.sp-profile-heatmap-cell {
+  width: 11px;
+  height: 11px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--text) 9%, transparent);
+}
+.sp-profile-heatmap-cell[data-level="1"] { background: color-mix(in srgb, var(--accent) 34%, transparent); }
+.sp-profile-heatmap-cell[data-level="2"] { background: color-mix(in srgb, var(--accent) 54%, transparent); }
+.sp-profile-heatmap-cell[data-level="3"] { background: color-mix(in srgb, var(--accent) 76%, transparent); }
+.sp-profile-heatmap-cell[data-level="4"] { background: var(--accent); }
+.sp-profile-activity-foot,
+.sp-profile-meta-hint { margin-top: 10px; font-size: 12px; color: var(--text-dim); }
+.sp-profile-empty { padding: 12px 0; color: var(--text-dim); font-size: 13px; }
+.sp-profile-loading { padding: 20px 0; color: var(--text-dim); }
+
+.sp-profile-columns {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+.sp-profile-insight-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 0;
+  border-top: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
+  font-size: 13px;
+}
+.sp-profile-insight-row:nth-of-type(2) { border-top: none; }
+.sp-profile-insight-row span { color: var(--text-dim); }
+.sp-profile-insight-row strong { color: var(--text); font-weight: 600; }
+.sp-profile-skill-list { display: flex; flex-direction: column; gap: 8px; }
+.sp-profile-skill-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 13px;
+}
+.sp-profile-skill-name { font-family: var(--font-mono); font-size: 12.5px; color: var(--text); }
+.sp-profile-skill-runs { color: var(--text-dim); font-size: 12px; }
+
+@media (max-width: 760px) {
+  .sp-settings-page.sp-settings-shell { flex-direction: column; }
+  .sp-settings-nav {
+    flex: 0 0 auto;
+    width: 100%;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+  }
+  .sp-settings-nav-scroll {
+    flex-direction: row;
+    overflow-x: auto;
+    padding: 8px 10px;
+  }
+  .sp-settings-nav-group {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    margin: 0 6px 0 0;
+  }
+  .sp-settings-nav-group-title { display: none; }
+  .sp-nav-item { width: auto; white-space: nowrap; }
+  .sp-nav-item-label { white-space: nowrap; }
+  .sp-profile-columns { grid-template-columns: 1fr; }
 }

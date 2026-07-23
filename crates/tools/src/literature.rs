@@ -32,12 +32,11 @@ const PAPERS_DIR: &str = "papers";
 const LIBRARY_FILE: &str = "library.json";
 const HTTP_TIMEOUT: Duration = Duration::from_secs(25);
 const MAX_PDF_BYTES: u64 = 80 * 1024 * 1024;
-/// Per-source result target. The published-venue core (Scopus, OpenAlex,
-/// Crossref) fetches up to this many; the arXiv supplement is capped lower so
-/// preprints don't crowd out peer-reviewed hits.
+/// Default per-source result target, used only when the caller omits
+/// `maxResults`. There is no hard ceiling — the agent (or user) decides how many
+/// records to pull, and every source, including the arXiv supplement, fetches up
+/// to that count.
 const DEFAULT_RESULT_LIMIT: usize = 50;
-const MAX_RESULT_LIMIT: usize = 100;
-const ARXIV_SUPPLEMENT_MAX: usize = 25;
 const USER_AGENT: &str = concat!(
     "aris/",
     env!("CARGO_PKG_VERSION"),
@@ -223,10 +222,7 @@ pub fn literature_search_ad_hoc_at(
     base: &Path,
     input: LiteratureSearchInput,
 ) -> Result<Value, String> {
-    let limit = input
-        .max_results
-        .unwrap_or(DEFAULT_RESULT_LIMIT)
-        .clamp(1, MAX_RESULT_LIMIT);
+    let limit = input.max_results.unwrap_or(DEFAULT_RESULT_LIMIT).max(1);
     let draft = casual_search_protocol_draft(&input)?;
     let protocol = {
         let mut store = runtime::open_literature_store_at(base)?;
@@ -438,11 +434,9 @@ pub fn literature_search_preview_at(
         "confirmationRequired": true,
         "confirmationValue": "execute",
         "defaultMaxResults": DEFAULT_RESULT_LIMIT,
-        "maximumMaxResults": MAX_RESULT_LIMIT,
         "fullExport": {
             "requiresExplicitConfirmation": true,
-            "maximumPerSource": MAX_RESULT_LIMIT,
-            "note": "The result cap applies per source. Scopus is paged and begins with COMPLETE; entitlement failure is recorded before a one-time STANDARD fallback."
+            "note": "maxResults applies per source and has no hard ceiling — the agent or user decides how many to pull. Scopus is paged and begins with COMPLETE; entitlement failure is recorded before a one-time STANDARD fallback."
         },
         "note": "Each supported adapter persists its sanitised request, provider response artifacts, result count, quota headers when exposed, and a restart checkpoint."
     }))
@@ -473,10 +467,7 @@ pub fn literature_search_execute_at(
     let protocol = store
         .load_protocol(&input.protocol_id)?
         .ok_or_else(|| format!("unknown search protocol: {}", input.protocol_id))?;
-    let limit = input
-        .max_results
-        .unwrap_or(DEFAULT_RESULT_LIMIT)
-        .clamp(1, MAX_RESULT_LIMIT);
+    let limit = input.max_results.unwrap_or(DEFAULT_RESULT_LIMIT).max(1);
     let mut run = match input.resume_run_id.as_deref() {
         Some(run_id) => store.resume_run(run_id, &protocol)?,
         None => store.start_run(&protocol)?,
@@ -971,6 +962,99 @@ pub fn library_index_pdf_text_at(
     Ok(true)
 }
 
+/// Index extracted PDF text against an already selected canonical record.
+/// Desktop callers use this after an explicit paper selection so a freshly
+/// attached PDF does not race the delayed compatibility-projection update.
+pub fn library_index_pdf_text_for_record_at(
+    base: &Path,
+    record_id: &str,
+    text: &str,
+) -> Result<(), String> {
+    let record_id = record_id.trim();
+    if record_id.is_empty() {
+        return Err("PDF text indexing requires a canonical record id".to_string());
+    }
+    let mut store = runtime::open_literature_store_at(base)?;
+    if store.load_canonical_record(record_id)?.is_none() {
+        return Err(format!("unknown canonical literature record: {record_id}"));
+    }
+    store.set_record_pdf_text(record_id, text)
+}
+
+/// Resolve the canonical literature record associated with a local PDF.  PDF
+/// RAG uses this to anchor every vector chunk to the stable literature record
+/// instead of treating a file path as an identity.
+pub fn library_record_id_for_pdf_at(
+    base: &Path,
+    relative_path: &str,
+) -> Result<Option<String>, String> {
+    let normalized_path = relative_path.replace('\\', "/");
+    let store = runtime::open_literature_store_at(base)?;
+    Ok(store
+        .list_canonical_records()?
+        .into_iter()
+        .find(|record| {
+            record.metadata["legacyLibrary"]["pdf"]["path"]
+                .as_str()
+                .map(|path| path.replace('\\', "/") == normalized_path)
+                .unwrap_or(false)
+        })
+        .map(|record| record.id))
+}
+
+/// A canonical, local list of PDFs attached to literature records.  The
+/// desktop batch RAG command consumes this instead of scanning directories so
+/// orphaned files never become silently searchable literature.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryPdfRecord {
+    pub paper_id: String,
+    pub relative_path: String,
+}
+
+/// Flatten canonical bibliographic metadata for the rebuildable lexical RAG
+/// projection. The canonical literature database remains authoritative.
+pub fn library_record_retrieval_metadata_at(
+    base: &Path,
+    record_id: &str,
+) -> Result<String, String> {
+    let store = runtime::open_literature_store_at(base)?;
+    let record = store
+        .load_canonical_record(record_id)?
+        .ok_or_else(|| format!("unknown canonical literature record: {record_id}"))?;
+    Ok(format!(
+        "paper id: {}\nbibliographic metadata: {}",
+        record.id, record.metadata["legacyLibrary"]
+    ))
+}
+
+pub fn library_pdf_records_at(base: &Path) -> Result<Vec<LibraryPdfRecord>, String> {
+    let store = runtime::open_literature_store_at(base)?;
+    let mut records = store
+        .list_canonical_records()?
+        .into_iter()
+        .filter_map(|record| {
+            let relative_path = record.metadata["legacyLibrary"]["pdf"]["path"]
+                .as_str()?
+                .trim()
+                .replace('\\', "/");
+            (!relative_path.is_empty()).then_some(LibraryPdfRecord {
+                paper_id: record.id,
+                relative_path,
+            })
+        })
+        .collect::<Vec<_>>();
+    records.sort_by(|left, right| {
+        left.relative_path
+            .cmp(&right.relative_path)
+            .then_with(|| left.paper_id.cmp(&right.paper_id))
+    });
+    records.dedup_by(|left, right| {
+        left.paper_id == right.paper_id && left.relative_path == right.relative_path
+    });
+    Ok(records)
+}
+
 /// List conservative duplicate candidates for the Desktop review panel.
 pub fn library_duplicate_candidates_at(
     base: &Path,
@@ -999,7 +1083,10 @@ pub fn library_merge_duplicates_at(
 /// Apply a minimal Desktop change to the canonical store, then refresh the
 /// JSON compatibility projection.  The JSON file is never read back as a
 /// writable source of truth in this path.
-pub fn library_apply_delta_at(base: &Path, delta: &LiteratureLibraryDelta) -> Result<Value, String> {
+pub fn library_apply_delta_at(
+    base: &Path,
+    delta: &LiteratureLibraryDelta,
+) -> Result<Value, String> {
     let mut store = runtime::open_literature_store_at(base)?;
     if !store.has_legacy_library_bootstrap()? {
         drop(store);
@@ -1052,15 +1139,32 @@ pub fn library_import_bibliography_at(
         return Err("select a readable local bibliography export file".to_string());
     }
     let bytes = std::fs::read(&source_path).map_err(|error| error.to_string())?;
-    let requested = input.format.as_deref().unwrap_or("").trim().to_ascii_lowercase();
+    let requested = input
+        .format
+        .as_deref()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
     let format = if requested.is_empty() {
-        match source_path.extension().and_then(|value| value.to_str()).unwrap_or("").to_ascii_lowercase().as_str() {
+        match source_path
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase()
+            .as_str()
+        {
             "json" => "json".to_string(),
             "ris" => "ris".to_string(),
             "bib" | "bibtex" => "bibtex".to_string(),
-            _ => return Err("unsupported bibliography extension; choose JSON, RIS, or BibTeX".to_string()),
+            _ => {
+                return Err(
+                    "unsupported bibliography extension; choose JSON, RIS, or BibTeX".to_string(),
+                )
+            }
         }
-    } else { requested };
+    } else {
+        requested
+    };
     let (format, items) = standard_bibliography_items(&format, &bytes)?;
     let zotero_collections = zotero_collection_catalog(&format, &bytes);
     let mut store = runtime::open_literature_store_at(base)?;
@@ -1082,7 +1186,10 @@ pub fn library_import_bibliography_at(
     let mut child_items = Vec::new();
 
     for item in items {
-        if matches!(item["itemType"].as_str(), Some("attachment" | "note" | "annotation")) {
+        if matches!(
+            item["itemType"].as_str(),
+            Some("attachment" | "note" | "annotation")
+        ) {
             child_items.push(item);
             continue;
         }
@@ -1092,20 +1199,36 @@ pub fn library_import_bibliography_at(
         };
         let result = store.upsert_canonical_record(&record)?;
         let mut paper = merge_imported_paper(&result.record.metadata["legacyLibrary"], paper);
-        let mut collection_ids = paper["collectionIds"].as_array().cloned().unwrap_or_default();
+        let mut collection_ids = paper["collectionIds"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
         for collection in zotero_collection_values(&item, &zotero_collections) {
             let collection_id = collection["id"].as_str().unwrap_or_default().to_string();
-            if collection_id.is_empty() { continue; }
-            if !collection_ids.iter().any(|id| id.as_str() == Some(collection_id.as_str())) {
+            if collection_id.is_empty() {
+                continue;
+            }
+            if !collection_ids
+                .iter()
+                .any(|id| id.as_str() == Some(collection_id.as_str()))
+            {
                 collection_ids.push(Value::String(collection_id.clone()));
             }
-            add_zotero_collection_and_parents(&collection, &zotero_collections, &mut imported_collections);
+            add_zotero_collection_and_parents(
+                &collection,
+                &zotero_collections,
+                &mut imported_collections,
+            );
         }
         paper["collectionIds"] = Value::Array(collection_ids);
         if let Some(key) = zotero_item_key(&item) {
             record_by_zotero_key.insert(key, result.record.id.clone());
         }
-        if result.inserted { imported += 1; } else { merged += 1; }
+        if result.inserted {
+            imported += 1;
+        } else {
+            merged += 1;
+        }
         papers_by_record.insert(result.record.id, paper);
     }
 
@@ -1117,15 +1240,26 @@ pub fn library_import_bibliography_at(
         };
         let Some(record_id) = record_by_zotero_key.get(&parent_key) else {
             skipped += 1;
-            warnings.push(format!("Skipped Zotero child item for unavailable parent {parent_key}."));
+            warnings.push(format!(
+                "Skipped Zotero child item for unavailable parent {parent_key}."
+            ));
             continue;
         };
-        let Some(paper) = papers_by_record.get_mut(record_id) else { continue; };
+        let Some(paper) = papers_by_record.get_mut(record_id) else {
+            continue;
+        };
         match item["itemType"].as_str() {
             Some("attachment") => {
-                let attachment = zotero_attachment_value(base, Path::new(&input.source_path), &item, &mut warnings);
+                let attachment = zotero_attachment_value(
+                    base,
+                    Path::new(&input.source_path),
+                    &item,
+                    &mut warnings,
+                );
                 if let Some(attachment) = attachment {
-                    if attachment["kind"].as_str() == Some("pdf") && paper["pdf"]["status"].as_str() != Some("downloaded") {
+                    if attachment["kind"].as_str() == Some("pdf")
+                        && paper["pdf"]["status"].as_str() != Some("downloaded")
+                    {
                         if let Some(path) = attachment["path"].as_str() {
                             paper["pdf"] = json!({ "status": "downloaded", "path": path, "bytes": attachment["bytes"] });
                         }
@@ -1140,15 +1274,21 @@ pub fn library_import_bibliography_at(
                 if let Some(note) = zotero_note_value(&item) {
                     append_paper_array_item(paper, "notes", note, "id");
                     notes += 1;
-                } else { skipped += 1; }
+                } else {
+                    skipped += 1;
+                }
             }
             Some("annotation") => {
                 if let Some(annotation) = zotero_annotation_value(&item) {
                     append_paper_array_item(paper, "pdfAnnotations", annotation, "id");
                     annotations += 1;
-                } else { skipped += 1; }
+                } else {
+                    skipped += 1;
+                }
             }
-            _ => { skipped += 1; }
+            _ => {
+                skipped += 1;
+            }
         }
     }
 
@@ -1156,14 +1296,19 @@ pub fn library_import_bibliography_at(
         store.update_legacy_library_paper(&record_id, &paper)?;
     }
     let mut metadata = store.legacy_library_projection_meta()?;
-    let existing_collections = metadata["collections"].as_array().cloned().unwrap_or_default();
+    let existing_collections = metadata["collections"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
     let known_collection_ids = existing_collections
         .iter()
         .filter_map(|collection| collection["id"].as_str())
         .collect::<BTreeSet<_>>();
     let added_collections = imported_collections
         .into_iter()
-        .filter_map(|(id, collection)| (!known_collection_ids.contains(id.as_str())).then_some(collection))
+        .filter_map(|(id, collection)| {
+            (!known_collection_ids.contains(id.as_str())).then_some(collection)
+        })
         .collect::<Vec<_>>();
     let collections = added_collections.len();
     if !added_collections.is_empty() {
@@ -1173,9 +1318,24 @@ pub fn library_import_bibliography_at(
         store.set_legacy_library_projection_meta(&metadata)?;
     }
     store.mark_legacy_library_bootstrap()?;
-    let projection = project_legacy_library(&store.legacy_library_projection_meta()?, &store.list_canonical_records()?, &store.list_search_runs(None)?);
+    let projection = project_legacy_library(
+        &store.legacy_library_projection_meta()?,
+        &store.list_canonical_records()?,
+        &store.list_search_runs(None)?,
+    );
     write_library_file(&library_path_at(base), &projection)?;
-    Ok(LiteratureBibliographyImportReport { format, imported, merged, skipped, attachments, notes, annotations, collections, warnings, total: projection["papers"].as_array().map_or(0, Vec::len) })
+    Ok(LiteratureBibliographyImportReport {
+        format,
+        imported,
+        merged,
+        skipped,
+        attachments,
+        notes,
+        annotations,
+        collections,
+        warnings,
+        total: projection["papers"].as_array().map_or(0, Vec::len),
+    })
 }
 
 /// Export records projected from the canonical SQLite store.  This intentionally
@@ -1218,7 +1378,10 @@ pub fn library_export_bibliography_at(
             .cloned()
             .collect::<Vec<_>>();
         if !missing.is_empty() {
-            return Err(format!("cannot export unknown literature record(s): {}", missing.join(", ")));
+            return Err(format!(
+                "cannot export unknown literature record(s): {}",
+                missing.join(", ")
+            ));
         }
     }
     let mut used_keys = BTreeSet::new();
@@ -1241,16 +1404,20 @@ pub fn library_export_bibliography_at(
             .collect::<Vec<_>>()
             .join("\n\n"),
         "ris" => entries.iter().map(ris_entry).collect::<Vec<_>>().join("\n"),
-        "csl-json" => serde_json::to_string_pretty(
-            &entries.iter().map(csl_json_entry).collect::<Vec<_>>(),
-        )
-        .map_err(|error| error.to_string())?,
+        "csl-json" => {
+            serde_json::to_string_pretty(&entries.iter().map(csl_json_entry).collect::<Vec<_>>())
+                .map_err(|error| error.to_string())?
+        }
         _ => unreachable!("format is validated above"),
     };
     Ok(LiteratureBibliographyExportReport {
         format,
         exported: entries.len(),
-        content: if content.is_empty() { content } else { format!("{content}\n") },
+        content: if content.is_empty() {
+            content
+        } else {
+            format!("{content}\n")
+        },
     })
 }
 
@@ -1288,7 +1455,11 @@ fn paper_authors(paper: &Value) -> Vec<String> {
 fn citation_key_component(value: &str) -> String {
     value
         .chars()
-        .filter_map(|character| character.is_ascii_alphanumeric().then_some(character.to_ascii_lowercase()))
+        .filter_map(|character| {
+            character
+                .is_ascii_alphanumeric()
+                .then_some(character.to_ascii_lowercase())
+        })
         .collect()
 }
 
@@ -1299,11 +1470,17 @@ fn valid_citation_key(value: &str) -> Option<String> {
     }
     let key = value
         .chars()
-        .filter(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | ':' | '.'))
+        .filter(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | ':' | '.')
+        })
         .collect::<String>();
     if key.is_empty() {
         None
-    } else if key.chars().next().is_some_and(|character| character.is_ascii_alphabetic()) {
+    } else if key
+        .chars()
+        .next()
+        .is_some_and(|character| character.is_ascii_alphabetic())
+    {
         Some(key)
     } else {
         Some(format!("ref{key}"))
@@ -1334,7 +1511,12 @@ fn bibliography_citation_key(paper: &Value, used: &mut BTreeSet<String>) -> Stri
         .and_then(valid_citation_key)
         .unwrap_or_else(|| {
             let family = citation_key_component(family);
-            format!("{}{}{}", if family.is_empty() { "ref" } else { &family }, year, title_word)
+            format!(
+                "{}{}{}",
+                if family.is_empty() { "ref" } else { &family },
+                year,
+                title_word
+            )
         });
     let mut candidate = base.clone();
     let mut suffix = 2_usize;
@@ -1363,10 +1545,28 @@ fn bibtex_entry_type(item_type: &str, biblatex: bool) -> &'static str {
         "book" => "book",
         "bookSection" => "incollection",
         "conferencePaper" => "inproceedings",
-        "thesis" => if biblatex { "thesis" } else { "phdthesis" },
+        "thesis" => {
+            if biblatex {
+                "thesis"
+            } else {
+                "phdthesis"
+            }
+        }
         "report" => "techreport",
-        "webpage" => if biblatex { "online" } else { "misc" },
-        "dataset" => if biblatex { "dataset" } else { "misc" },
+        "webpage" => {
+            if biblatex {
+                "online"
+            } else {
+                "misc"
+            }
+        }
+        "dataset" => {
+            if biblatex {
+                "dataset"
+            } else {
+                "misc"
+            }
+        }
         "preprint" => "article",
         _ => "misc",
     }
@@ -1375,10 +1575,16 @@ fn bibtex_entry_type(item_type: &str, biblatex: bool) -> &'static str {
 fn bibtex_entry(entry: &BibliographyExportEntry<'_>, biblatex: bool) -> String {
     let paper = entry.paper;
     let item_type = paper_string(paper, "itemType");
-    let mut fields = vec![format!("  title = {{{}}}", bibtex_value(&paper_string(paper, "title")))];
+    let mut fields = vec![format!(
+        "  title = {{{}}}",
+        bibtex_value(&paper_string(paper, "title"))
+    )];
     let authors = paper_authors(paper);
     if !authors.is_empty() {
-        fields.push(format!("  author = {{{}}}", bibtex_value(&authors.join(" and "))));
+        fields.push(format!(
+            "  author = {{{}}}",
+            bibtex_value(&authors.join(" and "))
+        ));
     }
     if let Some(year) = paper["year"].as_u64() {
         fields.push(if biblatex {
@@ -1449,9 +1655,17 @@ fn bibtex_entry(entry: &BibliographyExportEntry<'_>, biblatex: bool) -> String {
         .filter(|tag| !tag.is_empty())
         .collect::<Vec<_>>();
     if !tags.is_empty() {
-        fields.push(format!("  keywords = {{{}}}", bibtex_value(&tags.join(", "))));
+        fields.push(format!(
+            "  keywords = {{{}}}",
+            bibtex_value(&tags.join(", "))
+        ));
     }
-    format!("@{}{{{},\n{}\n}}", bibtex_entry_type(&item_type, biblatex), entry.citation_key, fields.join(",\n"))
+    format!(
+        "@{}{{{},\n{}\n}}",
+        bibtex_entry_type(&item_type, biblatex),
+        entry.citation_key,
+        fields.join(",\n")
+    )
 }
 
 fn ris_type(item_type: &str) -> &'static str {
@@ -1469,16 +1683,36 @@ fn ris_type(item_type: &str) -> &'static str {
 
 fn ris_entry(entry: &BibliographyExportEntry<'_>) -> String {
     let paper = entry.paper;
-    let mut lines = vec![format!("TY  - {}", ris_type(&paper_string(paper, "itemType")))];
+    let mut lines = vec![format!(
+        "TY  - {}",
+        ris_type(&paper_string(paper, "itemType"))
+    )];
     lines.push(format!("ID  - {}", entry.citation_key));
     lines.push(format!("TI  - {}", paper_string(paper, "title")));
-    lines.extend(paper_authors(paper).into_iter().map(|author| format!("AU  - {author}")));
-    if let Some(year) = paper["year"].as_u64() { lines.push(format!("PY  - {year}")); }
+    lines.extend(
+        paper_authors(paper)
+            .into_iter()
+            .map(|author| format!("AU  - {author}")),
+    );
+    if let Some(year) = paper["year"].as_u64() {
+        lines.push(format!("PY  - {year}"));
+    }
     let venue = paper_string(paper, "venue");
-    if !venue.is_empty() { lines.push(format!("JO  - {venue}")); }
-    for (paper_field, ris_field) in [("volume", "VL"), ("issue", "IS"), ("publisher", "PB"), ("place", "CY"), ("edition", "ET"), ("language", "LA")] {
+    if !venue.is_empty() {
+        lines.push(format!("JO  - {venue}"));
+    }
+    for (paper_field, ris_field) in [
+        ("volume", "VL"),
+        ("issue", "IS"),
+        ("publisher", "PB"),
+        ("place", "CY"),
+        ("edition", "ET"),
+        ("language", "LA"),
+    ] {
         let value = paper_string(paper, paper_field);
-        if !value.is_empty() { lines.push(format!("{ris_field}  - {value}")); }
+        if !value.is_empty() {
+            lines.push(format!("{ris_field}  - {value}"));
+        }
     }
     let pages = paper_string(paper, "pages");
     if let Some((start, end)) = pages.split_once('-').or_else(|| pages.split_once('–')) {
@@ -1487,9 +1721,16 @@ fn ris_entry(entry: &BibliographyExportEntry<'_>) -> String {
     } else if !pages.is_empty() {
         lines.push(format!("SP  - {pages}"));
     }
-    for (paper_field, ris_field) in [("doi", "DO"), ("isbn", "SN"), ("url", "UR"), ("abstract", "AB")] {
+    for (paper_field, ris_field) in [
+        ("doi", "DO"),
+        ("isbn", "SN"),
+        ("url", "UR"),
+        ("abstract", "AB"),
+    ] {
         let value = paper_string(paper, paper_field);
-        if !value.is_empty() { lines.push(format!("{ris_field}  - {value}")); }
+        if !value.is_empty() {
+            lines.push(format!("{ris_field}  - {value}"));
+        }
     }
     lines.push("ER  - ".to_string());
     lines.join("\n")
@@ -1527,25 +1768,57 @@ fn csl_json_entry(entry: &BibliographyExportEntry<'_>) -> Value {
     let paper = entry.paper;
     let mut item = serde_json::Map::new();
     item.insert("id".to_string(), Value::String(entry.citation_key.clone()));
-    item.insert("citation-key".to_string(), Value::String(entry.citation_key.clone()));
-    item.insert("type".to_string(), Value::String(csl_type(&paper_string(paper, "itemType")).to_string()));
-    item.insert("title".to_string(), Value::String(paper_string(paper, "title")));
+    item.insert(
+        "citation-key".to_string(),
+        Value::String(entry.citation_key.clone()),
+    );
+    item.insert(
+        "type".to_string(),
+        Value::String(csl_type(&paper_string(paper, "itemType")).to_string()),
+    );
+    item.insert(
+        "title".to_string(),
+        Value::String(paper_string(paper, "title")),
+    );
     let authors = paper_authors(paper);
     if !authors.is_empty() {
-        item.insert("author".to_string(), Value::Array(authors.iter().map(|author| csl_person(author)).collect()));
+        item.insert(
+            "author".to_string(),
+            Value::Array(authors.iter().map(|author| csl_person(author)).collect()),
+        );
     }
     if let Some(year) = paper["year"].as_u64() {
         item.insert("issued".to_string(), json!({ "date-parts": [[year]] }));
     }
     let venue = paper_string(paper, "venue");
-    if !venue.is_empty() { item.insert("container-title".to_string(), Value::String(venue)); }
-    for (paper_field, csl_field) in [("volume", "volume"), ("issue", "issue"), ("pages", "page"), ("publisher", "publisher"), ("place", "publisher-place"), ("edition", "edition"), ("series", "collection-title"), ("language", "language")] {
-        let value = paper_string(paper, paper_field);
-        if !value.is_empty() { item.insert(csl_field.to_string(), Value::String(value)); }
+    if !venue.is_empty() {
+        item.insert("container-title".to_string(), Value::String(venue));
     }
-    for (paper_field, csl_field) in [("doi", "DOI"), ("isbn", "ISBN"), ("url", "URL"), ("abstract", "abstract")] {
+    for (paper_field, csl_field) in [
+        ("volume", "volume"),
+        ("issue", "issue"),
+        ("pages", "page"),
+        ("publisher", "publisher"),
+        ("place", "publisher-place"),
+        ("edition", "edition"),
+        ("series", "collection-title"),
+        ("language", "language"),
+    ] {
         let value = paper_string(paper, paper_field);
-        if !value.is_empty() { item.insert(csl_field.to_string(), Value::String(value)); }
+        if !value.is_empty() {
+            item.insert(csl_field.to_string(), Value::String(value));
+        }
+    }
+    for (paper_field, csl_field) in [
+        ("doi", "DOI"),
+        ("isbn", "ISBN"),
+        ("url", "URL"),
+        ("abstract", "abstract"),
+    ] {
+        let value = paper_string(paper, paper_field);
+        if !value.is_empty() {
+            item.insert(csl_field.to_string(), Value::String(value));
+        }
     }
     Value::Object(item)
 }
@@ -1561,7 +1834,9 @@ pub fn library_create_pdf_record_at(
     doi: Option<&str>,
 ) -> Result<LiteraturePdfRecordImportReport, String> {
     let title = collapse_whitespace(title);
-    if title.is_empty() { return Err("a PDF record needs a title".to_string()); }
+    if title.is_empty() {
+        return Err("a PDF record needs a title".to_string());
+    }
     let item = json!({
         "itemType": "other",
         "title": title,
@@ -1575,23 +1850,47 @@ pub fn library_create_pdf_record_at(
     paper["pdf"] = json!({ "status": "downloaded", "path": relative_path, "bytes": bytes });
     let mut store = runtime::open_literature_store_at(base)?;
     if !store.has_legacy_library_bootstrap()? {
-        drop(store); let _ = library_load_at(base)?; store = runtime::open_literature_store_at(base)?;
+        drop(store);
+        let _ = library_load_at(base)?;
+        store = runtime::open_literature_store_at(base)?;
     }
     let result = store.upsert_canonical_record(&record)?;
     store.update_legacy_library_paper(&result.record.id, &paper)?;
     store.mark_legacy_library_bootstrap()?;
-    let projection = project_legacy_library(&store.legacy_library_projection_meta()?, &store.list_canonical_records()?, &store.list_search_runs(None)?);
+    let projection = project_legacy_library(
+        &store.legacy_library_projection_meta()?,
+        &store.list_canonical_records()?,
+        &store.list_search_runs(None)?,
+    );
     write_library_file(&library_path_at(base), &projection)?;
-    Ok(LiteraturePdfRecordImportReport { record_id: result.record.id, inserted: result.inserted, merged_record_ids: result.merged_record_ids })
+    Ok(LiteraturePdfRecordImportReport {
+        record_id: result.record.id,
+        inserted: result.inserted,
+        merged_record_ids: result.merged_record_ids,
+    })
 }
 
 fn merge_imported_paper(existing: &Value, imported: Value) -> Value {
-    let Some(existing) = existing.as_object() else { return imported; };
-    let Some(mut merged) = imported.as_object().cloned() else { return imported; };
+    let Some(existing) = existing.as_object() else {
+        return imported;
+    };
+    let Some(mut merged) = imported.as_object().cloned() else {
+        return imported;
+    };
     // Preserve researcher-authored working data when a re-import updates the
     // same DOI/title. Bibliographic values come from the import; local reading
     // state, files, notes, annotations and evidence must never disappear.
-    for key in ["attachments", "notes", "pdfAnnotations", "evidence", "answerChains", "screenings", "brief", "agentSummary", "verdict"] {
+    for key in [
+        "attachments",
+        "notes",
+        "pdfAnnotations",
+        "evidence",
+        "answerChains",
+        "screenings",
+        "brief",
+        "agentSummary",
+        "verdict",
+    ] {
         if existing.get(key).is_some_and(|value| !value.is_null()) {
             merged.insert(key.to_string(), existing[key].clone());
         }
@@ -1604,9 +1903,13 @@ fn merge_imported_paper(existing: &Value, imported: Value) -> Value {
     for key in ["tags", "collectionIds"] {
         let mut values = existing[key].as_array().cloned().unwrap_or_default();
         for value in imported[key].as_array().into_iter().flatten() {
-            if !values.contains(value) { values.push(value.clone()); }
+            if !values.contains(value) {
+                values.push(value.clone());
+            }
         }
-        if !values.is_empty() { merged.insert(key.to_string(), Value::Array(values)); }
+        if !values.is_empty() {
+            merged.insert(key.to_string(), Value::Array(values));
+        }
     }
     Value::Object(merged)
 }
@@ -1622,11 +1925,17 @@ fn append_paper_array_item(paper: &mut Value, field: &str, item: Value, id_field
 }
 
 fn zotero_item_key(item: &Value) -> Option<String> {
-    item["key"].as_str().or_else(|| item["itemKey"].as_str()).map(str::trim).filter(|key| !key.is_empty()).map(ToOwned::to_owned)
+    item["key"]
+        .as_str()
+        .or_else(|| item["itemKey"].as_str())
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 fn zotero_parent_key(item: &Value) -> Option<String> {
-    item["parentItem"].as_str()
+    item["parentItem"]
+        .as_str()
         .or_else(|| item["parentItemKey"].as_str())
         .or_else(|| item["parent"]["key"].as_str())
         .map(str::trim)
@@ -1635,9 +1944,14 @@ fn zotero_parent_key(item: &Value) -> Option<String> {
 }
 
 fn zotero_collection_catalog(format: &str, bytes: &[u8]) -> BTreeMap<String, Value> {
-    if format != "zotero-json" { return BTreeMap::new(); }
-    let Ok(root) = serde_json::from_slice::<Value>(bytes) else { return BTreeMap::new(); };
-    let entries = root["collections"].as_array()
+    if format != "zotero-json" {
+        return BTreeMap::new();
+    }
+    let Ok(root) = serde_json::from_slice::<Value>(bytes) else {
+        return BTreeMap::new();
+    };
+    let entries = root["collections"]
+        .as_array()
         .or_else(|| root["library"]["collections"].as_array())
         .into_iter()
         .flatten();
@@ -1645,33 +1959,54 @@ fn zotero_collection_catalog(format: &str, bytes: &[u8]) -> BTreeMap<String, Val
 }
 
 fn zotero_collection_value(collection: &Value) -> Option<(String, Value)> {
-    let id = collection["key"].as_str()
+    let id = collection["key"]
+        .as_str()
         .or_else(|| collection["id"].as_str())
         .or_else(|| collection["name"].as_str())?
         .trim()
         .to_string();
-    let label = collection["name"].as_str()
+    let label = collection["name"]
+        .as_str()
         .or_else(|| collection["label"].as_str())
         .unwrap_or(&id)
         .trim()
         .to_string();
-    if id.is_empty() || label.is_empty() { return None; }
+    if id.is_empty() || label.is_empty() {
+        return None;
+    }
     let mut value = json!({ "id": format!("zotero:{id}"), "label": label });
-    if let Some(parent) = collection["parentCollection"].as_str().or_else(|| collection["parentId"].as_str())
+    if let Some(parent) = collection["parentCollection"]
+        .as_str()
+        .or_else(|| collection["parentId"].as_str())
         .map(str::trim)
-        .filter(|parent| !parent.is_empty()) {
+        .filter(|parent| !parent.is_empty())
+    {
         value["parentId"] = Value::String(format!("zotero:{parent}"));
     }
     Some((id, value))
 }
 
 fn zotero_collection_values(item: &Value, catalog: &BTreeMap<String, Value>) -> Vec<Value> {
-    item["collections"].as_array().into_iter().flatten().filter_map(|collection| {
-        if let Some(key) = collection.as_str().map(str::trim).filter(|key| !key.is_empty()) {
-            return Some(catalog.get(key).cloned().unwrap_or_else(|| json!({ "id": format!("zotero:{key}"), "label": key })));
-        }
-        zotero_collection_value(collection).map(|(_, value)| value)
-    }).collect()
+    item["collections"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|collection| {
+            if let Some(key) = collection
+                .as_str()
+                .map(str::trim)
+                .filter(|key| !key.is_empty())
+            {
+                return Some(
+                    catalog
+                        .get(key)
+                        .cloned()
+                        .unwrap_or_else(|| json!({ "id": format!("zotero:{key}"), "label": key })),
+                );
+            }
+            zotero_collection_value(collection).map(|(_, value)| value)
+        })
+        .collect()
 }
 
 fn add_zotero_collection_and_parents(
@@ -1682,39 +2017,89 @@ fn add_zotero_collection_and_parents(
     let mut current = collection.clone();
     let mut seen = BTreeSet::new();
     loop {
-        let Some(id) = current["id"].as_str().map(ToOwned::to_owned) else { break; };
-        if !seen.insert(id.clone()) { break; }
+        let Some(id) = current["id"].as_str().map(ToOwned::to_owned) else {
+            break;
+        };
+        if !seen.insert(id.clone()) {
+            break;
+        }
         imported.entry(id).or_insert_with(|| current.clone());
-        let Some(parent_key) = current["parentId"].as_str().and_then(|parent| parent.strip_prefix("zotero:")) else { break; };
-        let Some(parent) = catalog.get(parent_key) else { break; };
+        let Some(parent_key) = current["parentId"]
+            .as_str()
+            .and_then(|parent| parent.strip_prefix("zotero:"))
+        else {
+            break;
+        };
+        let Some(parent) = catalog.get(parent_key) else {
+            break;
+        };
         current = parent.clone();
     }
 }
 
 fn zotero_attachment_source(source_json: &Path, item: &Value) -> Option<PathBuf> {
     let raw = item["path"].as_str()?.trim();
-    if raw.is_empty() { return None; }
+    if raw.is_empty() {
+        return None;
+    }
     let path = PathBuf::from(raw);
-    if path.is_file() { return Some(path); }
+    if path.is_file() {
+        return Some(path);
+    }
     let root = source_json.parent()?;
     let relative = raw.strip_prefix("storage:").unwrap_or(raw);
     [
         root.join(raw),
         root.join(relative),
-        zotero_item_key(item).map(|key| root.join("storage").join(key).join(relative)).unwrap_or_default(),
-    ].into_iter().find(|candidate| candidate.is_file())
+        zotero_item_key(item)
+            .map(|key| root.join("storage").join(key).join(relative))
+            .unwrap_or_default(),
+    ]
+    .into_iter()
+    .find(|candidate| candidate.is_file())
 }
 
-fn zotero_attachment_value(base: &Path, source_json: &Path, item: &Value, warnings: &mut Vec<String>) -> Option<Value> {
-    let source_key = zotero_item_key(item).unwrap_or_else(|| format!("item-{}", runtime::now_iso8601()));
-    let raw_path = item["path"].as_str().map(str::trim).filter(|path| !path.is_empty()).map(ToOwned::to_owned);
-    let label = item["title"].as_str().or_else(|| item["filename"].as_str()).filter(|value| !value.trim().is_empty())
-        .map(str::trim).map(ToOwned::to_owned)
-        .or_else(|| raw_path.as_deref().and_then(|path| Path::new(path).file_name()).and_then(|name| name.to_str()).map(ToOwned::to_owned))
+fn zotero_attachment_value(
+    base: &Path,
+    source_json: &Path,
+    item: &Value,
+    warnings: &mut Vec<String>,
+) -> Option<Value> {
+    let source_key =
+        zotero_item_key(item).unwrap_or_else(|| format!("item-{}", runtime::now_iso8601()));
+    let raw_path = item["path"]
+        .as_str()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(ToOwned::to_owned);
+    let label = item["title"]
+        .as_str()
+        .or_else(|| item["filename"].as_str())
+        .filter(|value| !value.trim().is_empty())
+        .map(str::trim)
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            raw_path
+                .as_deref()
+                .and_then(|path| Path::new(path).file_name())
+                .and_then(|name| name.to_str())
+                .map(ToOwned::to_owned)
+        })
         .unwrap_or_else(|| "Zotero attachment".to_string());
-    let mime_type = item["contentType"].as_str().or_else(|| item["mimeType"].as_str()).map(str::trim).filter(|value| !value.is_empty()).map(ToOwned::to_owned);
-    let is_pdf = mime_type.as_deref().is_some_and(|value| value.eq_ignore_ascii_case("application/pdf")) || label.to_ascii_lowercase().ends_with(".pdf");
-    let added_at = item["dateAdded"].as_str().map(ToOwned::to_owned).unwrap_or_else(runtime::now_iso8601);
+    let mime_type = item["contentType"]
+        .as_str()
+        .or_else(|| item["mimeType"].as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    let is_pdf = mime_type
+        .as_deref()
+        .is_some_and(|value| value.eq_ignore_ascii_case("application/pdf"))
+        || label.to_ascii_lowercase().ends_with(".pdf");
+    let added_at = item["dateAdded"]
+        .as_str()
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(runtime::now_iso8601);
     let mut attachment = json!({
         "id": format!("zotero-attachment:{source_key}"),
         "label": label,
@@ -1722,21 +2107,39 @@ fn zotero_attachment_value(base: &Path, source_json: &Path, item: &Value, warnin
         "mimeType": mime_type,
         "addedAt": added_at,
     });
-    if let Some(url) = item["url"].as_str().map(str::trim).filter(|url| url.starts_with("http://") || url.starts_with("https://")) {
+    if let Some(url) = item["url"]
+        .as_str()
+        .map(str::trim)
+        .filter(|url| url.starts_with("http://") || url.starts_with("https://"))
+    {
         attachment["url"] = Value::String(url.to_string());
         attachment["kind"] = Value::String("externalLink".to_string());
         return Some(attachment);
     }
     if let Some(source) = zotero_attachment_source(source_json, item) {
-        let file_name = source.file_name().and_then(|name| name.to_str()).unwrap_or("attachment");
-        let destination_name = match sanitize_file_name(&format!("zotero-{source_key}-{file_name}")) {
+        let file_name = source
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("attachment");
+        let destination_name = match sanitize_file_name(&format!("zotero-{source_key}-{file_name}"))
+        {
             Ok(name) => name,
-            Err(error) => { warnings.push(format!("Could not import Zotero attachment {label}: {error}")); return Some(attachment); }
+            Err(error) => {
+                warnings.push(format!(
+                    "Could not import Zotero attachment {label}: {error}"
+                ));
+                return Some(attachment);
+            }
         };
-        let destination = base.join(PAPERS_DIR).join("attachments").join(destination_name);
+        let destination = base
+            .join(PAPERS_DIR)
+            .join("attachments")
+            .join(destination_name);
         if let Some(parent) = destination.parent() {
             if let Err(error) = std::fs::create_dir_all(parent) {
-                warnings.push(format!("Could not create attachment directory for {label}: {error}"));
+                warnings.push(format!(
+                    "Could not create attachment directory for {label}: {error}"
+                ));
                 return Some(attachment);
             }
         }
@@ -1748,10 +2151,18 @@ fn zotero_attachment_value(base: &Path, source_json: &Path, item: &Value, warnin
         }
         match std::fs::metadata(&destination) {
             Ok(metadata) => {
-                attachment["path"] = Value::String(destination.strip_prefix(base).unwrap_or(&destination).to_string_lossy().replace('\\', "/"));
+                attachment["path"] = Value::String(
+                    destination
+                        .strip_prefix(base)
+                        .unwrap_or(&destination)
+                        .to_string_lossy()
+                        .replace('\\', "/"),
+                );
                 attachment["bytes"] = Value::from(metadata.len());
             }
-            Err(error) => warnings.push(format!("Could not read imported Zotero attachment {label}: {error}")),
+            Err(error) => warnings.push(format!(
+                "Could not read imported Zotero attachment {label}: {error}"
+            )),
         }
     } else if let Some(path) = raw_path {
         // The export may refer to a linked local Zotero file not included with
@@ -1762,26 +2173,70 @@ fn zotero_attachment_value(base: &Path, source_json: &Path, item: &Value, warnin
 }
 
 fn zotero_note_value(item: &Value) -> Option<Value> {
-    let content = item["note"].as_str().or_else(|| item["noteText"].as_str()).map(str::trim).filter(|value| !value.is_empty())?;
+    let content = item["note"]
+        .as_str()
+        .or_else(|| item["noteText"].as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
     let id = zotero_item_key(item).unwrap_or_else(|| format!("note-{}", runtime::now_iso8601()));
-    let created_at = item["dateAdded"].as_str().map(ToOwned::to_owned).unwrap_or_else(runtime::now_iso8601);
-    let updated_at = item["dateModified"].as_str().map(ToOwned::to_owned).unwrap_or_else(|| created_at.clone());
-    Some(json!({ "id": format!("zotero-note:{id}"), "title": item["title"].as_str(), "content": content, "createdAt": created_at, "updatedAt": updated_at, "source": "imported" }))
+    let created_at = item["dateAdded"]
+        .as_str()
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(runtime::now_iso8601);
+    let updated_at = item["dateModified"]
+        .as_str()
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| created_at.clone());
+    Some(
+        json!({ "id": format!("zotero-note:{id}"), "title": item["title"].as_str(), "content": content, "createdAt": created_at, "updatedAt": updated_at, "source": "imported" }),
+    )
 }
 
 fn zotero_annotation_value(item: &Value) -> Option<Value> {
     let quote = item["annotationText"].as_str().unwrap_or("").trim();
     let note = item["annotationComment"].as_str().unwrap_or("").trim();
-    if quote.is_empty() && note.is_empty() { return None; }
-    let position_page = item["annotationPosition"].as_str().and_then(|position| serde_json::from_str::<Value>(position).ok()).and_then(|position| position["pageIndex"].as_u64()).map(|page| page.saturating_add(1));
-    let page = item["annotationPageLabel"].as_str().and_then(|value| value.trim().parse::<u64>().ok()).or(position_page).unwrap_or(1);
-    let id = zotero_item_key(item).unwrap_or_else(|| format!("annotation-{}", runtime::now_iso8601()));
-    let color = match item["annotationColor"].as_str().unwrap_or("").to_ascii_lowercase().as_str() {
-        "#5fb236" => "green", "#2ea8e5" => "blue", "#a28ae5" => "purple", "#ff6666" => "red", _ => "yellow",
+    if quote.is_empty() && note.is_empty() {
+        return None;
+    }
+    let position_page = item["annotationPosition"]
+        .as_str()
+        .and_then(|position| serde_json::from_str::<Value>(position).ok())
+        .and_then(|position| position["pageIndex"].as_u64())
+        .map(|page| page.saturating_add(1));
+    let page = item["annotationPageLabel"]
+        .as_str()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .or(position_page)
+        .unwrap_or(1);
+    let id =
+        zotero_item_key(item).unwrap_or_else(|| format!("annotation-{}", runtime::now_iso8601()));
+    let color = match item["annotationColor"]
+        .as_str()
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "#5fb236" => "green",
+        "#2ea8e5" => "blue",
+        "#a28ae5" => "purple",
+        "#ff6666" => "red",
+        _ => "yellow",
     };
-    let style = if item["annotationType"].as_str().is_some_and(|value| value.eq_ignore_ascii_case("underline")) { "underline" } else { "highlight" };
-    let created_at = item["dateAdded"].as_str().map(ToOwned::to_owned).unwrap_or_else(runtime::now_iso8601);
-    Some(json!({ "id": format!("zotero-annotation:{id}"), "page": page, "quote": quote, "note": note, "kind": "note", "color": color, "style": style, "createdAt": created_at }))
+    let style = if item["annotationType"]
+        .as_str()
+        .is_some_and(|value| value.eq_ignore_ascii_case("underline"))
+    {
+        "underline"
+    } else {
+        "highlight"
+    };
+    let created_at = item["dateAdded"]
+        .as_str()
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(runtime::now_iso8601);
+    Some(
+        json!({ "id": format!("zotero-annotation:{id}"), "page": page, "quote": quote, "note": note, "kind": "note", "color": color, "style": style, "createdAt": created_at }),
+    )
 }
 
 fn standard_bibliography_items(format: &str, bytes: &[u8]) -> Result<(String, Vec<Value>), String> {
@@ -1789,13 +2244,30 @@ fn standard_bibliography_items(format: &str, bytes: &[u8]) -> Result<(String, Ve
         "json" | "zotero-json" | "csl-json" => {
             let value: Value = serde_json::from_slice(bytes)
                 .map_err(|error| format!("invalid bibliography JSON: {error}"))?;
-            let items = value.as_array().cloned().or_else(|| value["items"].as_array().cloned())
-                .ok_or_else(|| "a Zotero or CSL-JSON export must contain an item array".to_string())?;
-            let resolved = if items.iter().any(|item| item.get("itemType").is_some()) { "zotero-json" } else { "csl-json" };
+            let items = value
+                .as_array()
+                .cloned()
+                .or_else(|| value["items"].as_array().cloned())
+                .ok_or_else(|| {
+                    "a Zotero or CSL-JSON export must contain an item array".to_string()
+                })?;
+            let resolved = if items.iter().any(|item| item.get("itemType").is_some()) {
+                "zotero-json"
+            } else {
+                "csl-json"
+            };
             Ok((resolved.to_string(), items))
         }
-        "ris" => Ok(("ris".to_string(), parse_ris_items(std::str::from_utf8(bytes).map_err(|_| "RIS must be UTF-8 text")?))),
-        "bib" | "bibtex" | "biblatex" => Ok(("bibtex".to_string(), parse_bibtex_items(std::str::from_utf8(bytes).map_err(|_| "BibTeX must be UTF-8 text")?))),
+        "ris" => Ok((
+            "ris".to_string(),
+            parse_ris_items(std::str::from_utf8(bytes).map_err(|_| "RIS must be UTF-8 text")?),
+        )),
+        "bib" | "bibtex" | "biblatex" => Ok((
+            "bibtex".to_string(),
+            parse_bibtex_items(
+                std::str::from_utf8(bytes).map_err(|_| "BibTeX must be UTF-8 text")?,
+            ),
+        )),
         other => Err(format!("unsupported bibliography format: {other}")),
     }
 }
@@ -1804,11 +2276,27 @@ fn parse_ris_items(input: &str) -> Vec<Value> {
     let mut records = Vec::new();
     let mut fields = BTreeMap::<String, Vec<String>>::new();
     let finish = |fields: &mut BTreeMap<String, Vec<String>>, records: &mut Vec<Value>| {
-        let title = fields.get("TI").or_else(|| fields.get("T1")).and_then(|values| values.first()).cloned().unwrap_or_default();
-        if title.trim().is_empty() { fields.clear(); return; }
-        let type_code = fields.get("TY").and_then(|values| values.first()).map(String::as_str).unwrap_or("");
+        let title = fields
+            .get("TI")
+            .or_else(|| fields.get("T1"))
+            .and_then(|values| values.first())
+            .cloned()
+            .unwrap_or_default();
+        if title.trim().is_empty() {
+            fields.clear();
+            return;
+        }
+        let type_code = fields
+            .get("TY")
+            .and_then(|values| values.first())
+            .map(String::as_str)
+            .unwrap_or("");
         let item_type = ris_item_type(type_code);
-        let authors = fields.get("AU").or_else(|| fields.get("A1")).cloned().unwrap_or_default();
+        let authors = fields
+            .get("AU")
+            .or_else(|| fields.get("A1"))
+            .cloned()
+            .unwrap_or_default();
         let tags = fields.get("KW").cloned().unwrap_or_default();
         records.push(json!({
             "itemType": item_type,
@@ -1837,10 +2325,20 @@ fn parse_ris_items(input: &str) -> Vec<Value> {
     };
     for raw in input.lines() {
         let line = raw.trim_end();
-        if line.len() < 6 || line.as_bytes().get(2) != Some(&b' ') || line.as_bytes().get(3) != Some(&b' ') || line.as_bytes().get(4) != Some(&b'-') { continue; }
+        if line.len() < 6
+            || line.as_bytes().get(2) != Some(&b' ')
+            || line.as_bytes().get(3) != Some(&b' ')
+            || line.as_bytes().get(4) != Some(&b'-')
+        {
+            continue;
+        }
         let key = line[..2].to_ascii_uppercase();
         let value = line[6..].trim().to_string();
-        if key == "ER" { finish(&mut fields, &mut records); } else { fields.entry(key).or_default().push(value); }
+        if key == "ER" {
+            finish(&mut fields, &mut records);
+        } else {
+            fields.entry(key).or_default().push(value);
+        }
     }
     finish(&mut fields, &mut records);
     records
@@ -1865,20 +2363,36 @@ fn parse_bibtex_items(input: &str) -> Vec<Value> {
     let mut cursor = 0;
     while let Some(relative) = input[cursor..].find('@') {
         let start = cursor + relative + 1;
-        let type_end = input[start..].find(|character: char| character == '{' || character == '(').map(|offset| start + offset);
-        let Some(type_end) = type_end else { break; };
+        let type_end = input[start..]
+            .find(|character: char| character == '{' || character == '(')
+            .map(|offset| start + offset);
+        let Some(type_end) = type_end else {
+            break;
+        };
         let entry_type = input[start..type_end].trim().to_ascii_lowercase();
         let opener = bytes[type_end] as char;
         let closer = if opener == '{' { '}' } else { ')' };
         let mut depth = 0_i32;
         let mut end = None;
         for (offset, character) in input[type_end..].char_indices() {
-            if character == opener { depth += 1; }
-            if character == closer { depth -= 1; if depth == 0 { end = Some(type_end + offset); break; } }
+            if character == opener {
+                depth += 1;
+            }
+            if character == closer {
+                depth -= 1;
+                if depth == 0 {
+                    end = Some(type_end + offset);
+                    break;
+                }
+            }
         }
-        let Some(end) = end else { break; };
+        let Some(end) = end else {
+            break;
+        };
         let body = &input[type_end + 1..end];
-        if let Some(item) = bibtex_item(&entry_type, body) { items.push(item); }
+        if let Some(item) = bibtex_item(&entry_type, body) {
+            items.push(item);
+        }
         cursor = end + 1;
     }
     items
@@ -1892,13 +2406,38 @@ fn bibtex_item(entry_type: &str, body: &str) -> Option<Value> {
     let entry_key = entry_key.trim();
     let mut values = BTreeMap::new();
     for field in split_bibtex_fields(fields) {
-        let Some((key, value)) = field.split_once('=') else { continue; };
-        values.insert(key.trim().to_ascii_lowercase(), unquote_bibtex(value.trim()));
+        let Some((key, value)) = field.split_once('=') else {
+            continue;
+        };
+        values.insert(
+            key.trim().to_ascii_lowercase(),
+            unquote_bibtex(value.trim()),
+        );
     }
     let title = values.get("title")?.trim();
-    if title.is_empty() { return None; }
-    let authors = values.get("author").map(|value| value.split(" and ").map(str::trim).filter(|name| !name.is_empty()).collect::<Vec<_>>()).unwrap_or_default();
-    let tags = values.get("keywords").map(|value| value.split([',', ';']).map(str::trim).filter(|tag| !tag.is_empty()).collect::<Vec<_>>()).unwrap_or_default();
+    if title.is_empty() {
+        return None;
+    }
+    let authors = values
+        .get("author")
+        .map(|value| {
+            value
+                .split(" and ")
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let tags = values
+        .get("keywords")
+        .map(|value| {
+            value
+                .split([',', ';'])
+                .map(str::trim)
+                .filter(|tag| !tag.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     Some(json!({
         "itemType": bibtex_item_type(entry_type), "title": title, "author": authors,
         "date": values.get("date").or_else(|| values.get("year")),
@@ -1913,59 +2452,233 @@ fn bibtex_item(entry_type: &str, body: &str) -> Option<Value> {
 }
 
 fn bibtex_item_type(entry_type: &str) -> &'static str {
-    match entry_type { "article" => "article", "book" | "mvbook" => "book", "inbook" | "incollection" => "bookSection", "inproceedings" | "conference" | "proceedings" => "conferencePaper", "phdthesis" | "mastersthesis" | "thesis" => "thesis", "techreport" | "report" => "report", "online" | "www" => "webpage", "unpublished" | "preprint" => "preprint", _ => "other" }
+    match entry_type {
+        "article" => "article",
+        "book" | "mvbook" => "book",
+        "inbook" | "incollection" => "bookSection",
+        "inproceedings" | "conference" | "proceedings" => "conferencePaper",
+        "phdthesis" | "mastersthesis" | "thesis" => "thesis",
+        "techreport" | "report" => "report",
+        "online" | "www" => "webpage",
+        "unpublished" | "preprint" => "preprint",
+        _ => "other",
+    }
 }
 
 fn split_bibtex_fields(input: &str) -> Vec<&str> {
-    let mut fields = Vec::new(); let mut start = 0; let mut depth = 0_i32; let mut quoted = false;
+    let mut fields = Vec::new();
+    let mut start = 0;
+    let mut depth = 0_i32;
+    let mut quoted = false;
     for (index, character) in input.char_indices() {
-        match character { '"' if depth == 0 => quoted = !quoted, '{' if !quoted => depth += 1, '}' if !quoted => depth -= 1, ',' if !quoted && depth == 0 => { fields.push(input[start..index].trim()); start = index + 1; }, _ => {} }
+        match character {
+            '"' if depth == 0 => quoted = !quoted,
+            '{' if !quoted => depth += 1,
+            '}' if !quoted => depth -= 1,
+            ',' if !quoted && depth == 0 => {
+                fields.push(input[start..index].trim());
+                start = index + 1;
+            }
+            _ => {}
+        }
     }
-    if !input[start..].trim().is_empty() { fields.push(input[start..].trim()); }
+    if !input[start..].trim().is_empty() {
+        fields.push(input[start..].trim());
+    }
     fields
 }
 
 fn unquote_bibtex(value: &str) -> String {
-    value.trim().trim_matches('"').trim_start_matches('{').trim_end_matches('}').replace(['{', '}'], "").trim().to_string()
+    value
+        .trim()
+        .trim_matches('"')
+        .trim_start_matches('{')
+        .trim_end_matches('}')
+        .replace(['{', '}'], "")
+        .trim()
+        .to_string()
 }
 
 fn canonical_record_from_standard_json(item: &Value) -> Option<(runtime::CanonicalRecord, Value)> {
-    let title = item["title"].as_str().map(collapse_whitespace).filter(|value| !value.is_empty())?;
-    let item_type = item["itemType"].as_str().or_else(|| item["type"].as_str()).unwrap_or("article");
-    if matches!(item_type, "attachment" | "note" | "annotation") { return None; }
-    let authors = item["creators"].as_array().or_else(|| item["author"].as_array()).map(|people| people.iter().filter_map(|person| {
-        person.as_str().map(str::to_string).or_else(|| {
-            let family = person["lastName"].as_str().or_else(|| person["family"].as_str()).unwrap_or("").trim();
-            let given = person["firstName"].as_str().or_else(|| person["given"].as_str()).unwrap_or("").trim();
-            let literal = person["name"].as_str().unwrap_or("").trim();
-            let joined = if !literal.is_empty() { literal.to_string() } else { format!("{given} {family}").trim().to_string() };
-            (!joined.is_empty()).then_some(joined)
+    let title = item["title"]
+        .as_str()
+        .map(collapse_whitespace)
+        .filter(|value| !value.is_empty())?;
+    let item_type = item["itemType"]
+        .as_str()
+        .or_else(|| item["type"].as_str())
+        .unwrap_or("article");
+    if matches!(item_type, "attachment" | "note" | "annotation") {
+        return None;
+    }
+    let authors = item["creators"]
+        .as_array()
+        .or_else(|| item["author"].as_array())
+        .map(|people| {
+            people
+                .iter()
+                .filter_map(|person| {
+                    person.as_str().map(str::to_string).or_else(|| {
+                        let family = person["lastName"]
+                            .as_str()
+                            .or_else(|| person["family"].as_str())
+                            .unwrap_or("")
+                            .trim();
+                        let given = person["firstName"]
+                            .as_str()
+                            .or_else(|| person["given"].as_str())
+                            .unwrap_or("")
+                            .trim();
+                        let literal = person["name"].as_str().unwrap_or("").trim();
+                        let joined = if !literal.is_empty() {
+                            literal.to_string()
+                        } else {
+                            format!("{given} {family}").trim().to_string()
+                        };
+                        (!joined.is_empty()).then_some(joined)
+                    })
+                })
+                .collect()
         })
-    }).collect()).unwrap_or_default();
-    let doi = non_empty(item["DOI"].as_str().or_else(|| item["doi"].as_str()).unwrap_or(""));
-    let isbn = non_empty(item["ISBN"].as_str().or_else(|| item["isbn"].as_str()).unwrap_or(""));
-    let url = non_empty(item["url"].as_str().or_else(|| item["URL"].as_str()).unwrap_or(""));
-    let year = item["date"].as_str().and_then(|value| value.get(0..4)).and_then(|value| value.parse().ok())
-        .or_else(|| item["issued"]["date-parts"].get(0).and_then(|part| part.get(0)).and_then(Value::as_u64).and_then(|value| u32::try_from(value).ok()));
-    let venue = item["publicationTitle"].as_str().or_else(|| item["container-title"].as_str()).or_else(|| item["bookTitle"].as_str()).unwrap_or("").trim().to_string();
-    let abstract_text = item["abstractNote"].as_str().or_else(|| item["abstract"].as_str()).unwrap_or("").to_string();
-    let date = item["date"].as_str().or_else(|| item["issued"]["raw"].as_str()).unwrap_or("").trim().to_string();
+        .unwrap_or_default();
+    let doi = non_empty(
+        item["DOI"]
+            .as_str()
+            .or_else(|| item["doi"].as_str())
+            .unwrap_or(""),
+    );
+    let isbn = non_empty(
+        item["ISBN"]
+            .as_str()
+            .or_else(|| item["isbn"].as_str())
+            .unwrap_or(""),
+    );
+    let url = non_empty(
+        item["url"]
+            .as_str()
+            .or_else(|| item["URL"].as_str())
+            .unwrap_or(""),
+    );
+    let year = item["date"]
+        .as_str()
+        .and_then(|value| value.get(0..4))
+        .and_then(|value| value.parse().ok())
+        .or_else(|| {
+            item["issued"]["date-parts"]
+                .get(0)
+                .and_then(|part| part.get(0))
+                .and_then(Value::as_u64)
+                .and_then(|value| u32::try_from(value).ok())
+        });
+    let venue = item["publicationTitle"]
+        .as_str()
+        .or_else(|| item["container-title"].as_str())
+        .or_else(|| item["bookTitle"].as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let abstract_text = item["abstractNote"]
+        .as_str()
+        .or_else(|| item["abstract"].as_str())
+        .unwrap_or("")
+        .to_string();
+    let date = item["date"]
+        .as_str()
+        .or_else(|| item["issued"]["raw"].as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
     let volume = item["volume"].as_str().unwrap_or("").trim().to_string();
-    let issue = item["issue"].as_str().or_else(|| item["number"].as_str()).unwrap_or("").trim().to_string();
-    let pages = item["pages"].as_str().or_else(|| item["page"].as_str()).unwrap_or("").trim().to_string();
+    let issue = item["issue"]
+        .as_str()
+        .or_else(|| item["number"].as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let pages = item["pages"]
+        .as_str()
+        .or_else(|| item["page"].as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
     let publisher = item["publisher"].as_str().unwrap_or("").trim().to_string();
-    let place = item["place"].as_str().or_else(|| item["publisher-place"].as_str()).or_else(|| item["location"].as_str()).unwrap_or("").trim().to_string();
+    let place = item["place"]
+        .as_str()
+        .or_else(|| item["publisher-place"].as_str())
+        .or_else(|| item["location"].as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
     let edition = item["edition"].as_str().unwrap_or("").trim().to_string();
-    let series = item["series"].as_str().or_else(|| item["collection-title"].as_str()).unwrap_or("").trim().to_string();
+    let series = item["series"]
+        .as_str()
+        .or_else(|| item["collection-title"].as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
     let language = item["language"].as_str().unwrap_or("").trim().to_string();
-    let accessed = item["accessDate"].as_str().or_else(|| item["accessed"]["raw"].as_str()).or_else(|| item["urldate"].as_str()).unwrap_or("").trim().to_string();
-    let tags = item["tags"].as_array().map(|tags| tags.iter().filter_map(|tag| {
-        tag.as_str().map(str::to_string).or_else(|| tag["tag"].as_str().map(str::to_string))
-    }).collect::<Vec<_>>()).unwrap_or_default();
+    let accessed = item["accessDate"]
+        .as_str()
+        .or_else(|| item["accessed"]["raw"].as_str())
+        .or_else(|| item["urldate"].as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let tags = item["tags"]
+        .as_array()
+        .map(|tags| {
+            tags.iter()
+                .filter_map(|tag| {
+                    tag.as_str()
+                        .map(str::to_string)
+                        .or_else(|| tag["tag"].as_str().map(str::to_string))
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     let now = runtime::now_iso8601();
     let id = runtime::canonical_record_id(doi.as_deref(), None, None, &title);
     let paper = json!({ "id": id, "title": title, "authors": authors, "year": year, "date": date, "venue": venue, "doi": doi, "url": url, "abstract": abstract_text, "itemType": item_type, "isbn": isbn, "citationKey": item["citationKey"].as_str().or_else(|| item["citation-key"].as_str()), "volume": volume, "issue": issue, "pages": pages, "publisher": publisher, "place": place, "edition": edition, "series": series, "language": language, "accessed": accessed, "tags": tags, "collectionIds": [], "searchIds": [], "stage": "inbox", "starred": false, "unread": true, "source": "standard_import", "addedAt": now, "pdf": { "status": "none" }, "attachments": [], "evidence": [], "answerChains": [], "pdfAnnotations": [], "notes": [] });
-    Some((runtime::CanonicalRecord { schema_version: runtime::LITERATURE_SCHEMA_VERSION, id, revision: 1, normalized_title: runtime::normalized_record_title(&title), title, authors, year, venue, abstract_text, url, pdf_url: None, identifiers: runtime::RecordIdentifiers { doi, arxiv_id: None, scopus_id: None, source_ids: BTreeMap::new() }, provenance: vec![runtime::RecordProvenance { source: "standard_import".to_string(), external_id: None, search_run_id: None, artifact_id: None, observed_at: now.clone() }], field_conflicts: Vec::new(), observations: vec![runtime::RecordObservation { source: "standard_import".to_string(), external_id: None, artifact_id: None, observed_at: now.clone(), fields: item.clone() }], metadata: json!({ "standard": { "itemType": item_type, "isbn": isbn, "citationKey": item["citationKey"].as_str().or_else(|| item["citation-key"].as_str()), "date": date, "volume": volume, "issue": issue, "pages": pages, "publisher": publisher, "place": place, "edition": edition, "series": series, "language": language, "accessed": accessed } }), created_at: now.clone(), updated_at: now }, paper))
+    Some((
+        runtime::CanonicalRecord {
+            schema_version: runtime::LITERATURE_SCHEMA_VERSION,
+            id,
+            revision: 1,
+            normalized_title: runtime::normalized_record_title(&title),
+            title,
+            authors,
+            year,
+            venue,
+            abstract_text,
+            url,
+            pdf_url: None,
+            identifiers: runtime::RecordIdentifiers {
+                doi,
+                arxiv_id: None,
+                scopus_id: None,
+                source_ids: BTreeMap::new(),
+            },
+            provenance: vec![runtime::RecordProvenance {
+                source: "standard_import".to_string(),
+                external_id: None,
+                search_run_id: None,
+                artifact_id: None,
+                observed_at: now.clone(),
+            }],
+            field_conflicts: Vec::new(),
+            observations: vec![runtime::RecordObservation {
+                source: "standard_import".to_string(),
+                external_id: None,
+                artifact_id: None,
+                observed_at: now.clone(),
+                fields: item.clone(),
+            }],
+            metadata: json!({ "standard": { "itemType": item_type, "isbn": isbn, "citationKey": item["citationKey"].as_str().or_else(|| item["citation-key"].as_str()), "date": date, "volume": volume, "issue": issue, "pages": pages, "publisher": publisher, "place": place, "edition": edition, "series": series, "language": language, "accessed": accessed } }),
+            created_at: now.clone(),
+            updated_at: now,
+        },
+        paper,
+    ))
 }
 
 pub fn empty_library() -> Value {
@@ -2066,7 +2779,9 @@ fn write_library_file(path: &Path, library: &Value) -> Result<(), String> {
         if had_existing {
             let _ = std::fs::copy(&backup, &path);
         }
-        return Err(format!("failed to refresh the legacy library projection: {error}"));
+        return Err(format!(
+            "failed to refresh the legacy library projection: {error}"
+        ));
     }
     Ok(())
 }
@@ -2450,7 +3165,7 @@ fn adapter_request_preview(source: &str, query: &str, limit: usize) -> Value {
         "arxiv" => json!({
             "method": "GET",
             "url": "https://export.arxiv.org/api/query",
-            "query": { "search_query": query, "start": 0, "max_results": supplement_limit(limit) },
+            "query": { "search_query": query, "start": 0, "max_results": limit },
         }),
         _ => json!({ "query": query, "maxResults": limit }),
     }
@@ -2598,12 +3313,6 @@ fn planned_engines(sources: &[String], scopus_available: bool) -> Vec<Engine> {
     engines
 }
 
-/// arXiv is a supplement — cap its result count so preprints don't crowd out
-/// the published-venue core when many overlap.
-fn supplement_limit(limit: usize) -> usize {
-    limit.min(ARXIV_SUPPLEMENT_MAX)
-}
-
 /// Blocking remote metadata search, run in canonical-priority order (Scopus →
 /// OpenAlex → Crossref → arXiv) so dedupe keeps the published-venue record and
 /// arXiv only fills the gaps (e.g. an open PDF link). Empty `sources` means the
@@ -2643,10 +3352,7 @@ pub fn search_remote(
                 search_semantic_scholar(&client, query, limit),
             ),
             Engine::Crossref => run("Crossref", search_crossref(&client, query, limit)),
-            Engine::Arxiv => run(
-                "arXiv",
-                search_arxiv(&client, query, supplement_limit(limit)),
-            ),
+            Engine::Arxiv => run("arXiv", search_arxiv(&client, query, limit)),
         }
     }
     if papers.is_empty() && !warnings.is_empty() {
@@ -2676,7 +3382,7 @@ fn search_source_with_audit(
             search_semantic_scholar(&client, query, limit)
         }
         "crossref" => search_crossref(&client, query, limit),
-        "arxiv" => search_arxiv(&client, query, supplement_limit(limit)),
+        "arxiv" => search_arxiv(&client, query, limit),
         _ => Err(format!("source adapter is not implemented: {source}")),
     }
 }
@@ -2715,7 +3421,7 @@ fn search_arxiv(
         quota: response_quota(&response),
         warnings: Vec::new(),
         coverage_note: Some(
-            "arXiv is a preprint supplement and its result cap is intentionally lower than venue sources."
+            "arXiv runs last as a preprint supplement so dedupe keeps the published-venue record; its result count follows the requested maxResults with no lower cap."
                 .to_string(),
         ),
     })

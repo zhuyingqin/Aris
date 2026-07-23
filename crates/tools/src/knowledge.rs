@@ -8,7 +8,7 @@
 //!   confirmation status and version history. A knowledge point references its
 //!   evidence by stable anchors (annotation/evidence ids + hashes) so a Chat
 //!   citation still resolves back to the existing PDF-reader anchor.
-//! - `retrieval_chunks` + `retrieval_fts` (+ a future `chunk_embeddings`) are a
+//! - `retrieval_chunks` + `retrieval_fts` are a
 //!   derived, rebuildable retrieval sublayer — drop and rebuild them to swap
 //!   the embedding model without touching the knowledge data.
 //!
@@ -177,14 +177,6 @@ pub fn open_db(base: &Path) -> Result<Connection, String> {
                status TEXT
              );
              CREATE INDEX IF NOT EXISTS idx_retrieval_chunks_kp ON retrieval_chunks(kp_id);
-             CREATE TABLE IF NOT EXISTS chunk_embeddings(
-               chunk_id TEXT NOT NULL,
-               model TEXT NOT NULL,
-               dimensions INTEGER,
-               content_hash TEXT,
-               embedding BLOB,
-               PRIMARY KEY(chunk_id, model)
-             );
              CREATE VIRTUAL TABLE IF NOT EXISTS retrieval_fts USING fts5(
                chunk_id UNINDEXED,
                kp_id UNINDEXED,
@@ -618,6 +610,26 @@ pub struct KnowledgeSearchResult {
     pub note: String,
 }
 
+/// A citation-grounded result from multi-query lexical knowledge recall. The
+/// nested object keeps the original human-reviewed evidence anchors.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KnowledgeRagSearchHit {
+    pub rank: usize,
+    pub retrieval_score: f64,
+    pub matched_queries: Vec<String>,
+    pub knowledge: SearchHit,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KnowledgeRagSearchResult {
+    pub query: String,
+    pub retrieval: String,
+    pub results: Vec<KnowledgeRagSearchHit>,
+    pub note: String,
+}
+
 /// Confirmed-only knowledge recall: trigram FTS5 (BM25), expanded with each
 /// hit's evidence anchors and 1-hop relations. Only confirmed points have
 /// chunks, so the status filter is implicit.
@@ -655,6 +667,100 @@ pub fn knowledge_search_at(
                [paperId p.PAGE]; expand the supporting quote when answering."
             .to_string(),
     })
+}
+
+/// Confirmed-only retrieval over the original question and bounded LLM query
+/// rewrites. Each query runs against the same authoritative FTS projection;
+/// reciprocal-rank fusion rewards knowledge points reached through multiple
+/// lexical bridges without treating generated text as evidence.
+pub fn knowledge_rag_search_at(
+    base: &Path,
+    query: &str,
+    expanded_queries: &[String],
+    limit: usize,
+) -> Result<KnowledgeRagSearchResult, String> {
+    let connection = open_db(base)?;
+    let query = query.trim();
+    if query.is_empty() {
+        return Err("knowledge RAG search query is empty".to_string());
+    }
+    let recall = limit.clamp(1, 50).saturating_mul(4).max(12);
+    let mut seen_queries = std::collections::BTreeSet::new();
+    let queries = std::iter::once(query)
+        .chain(expanded_queries.iter().map(String::as_str))
+        .filter_map(|value| {
+            let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
+            (!normalized.is_empty() && seen_queries.insert(normalized.to_lowercase()))
+                .then_some(normalized)
+        })
+        .take(16)
+        .collect::<Vec<_>>();
+    let mut fused = std::collections::BTreeMap::<String, FusedCandidate>::new();
+    for (query_index, expanded) in queries.iter().enumerate() {
+        let mut hits = match fts_match_query(expanded) {
+            Some(match_query) => search_fts(&connection, &match_query, recall)?,
+            None => Vec::new(),
+        };
+        if hits.is_empty() {
+            hits = search_like(&connection, expanded, recall)?;
+        }
+        let query_weight = if query_index == 0 { 1.2 } else { 1.0 };
+        for (index, (kp_id, snippet)) in hits.into_iter().enumerate() {
+            let rank = index + 1;
+            let candidate = fused.entry(kp_id).or_default();
+            if candidate.snippet.is_none() {
+                candidate.snippet = Some(snippet);
+            }
+            candidate.score += query_weight * reciprocal_rank(rank);
+            candidate.matched_queries.insert(expanded.clone());
+        }
+    }
+    let mut fused = fused
+        .into_iter()
+        .map(|(kp_id, candidate)| (kp_id, candidate))
+        .collect::<Vec<_>>();
+    fused.sort_by(|(left_id, left), (right_id, right)| {
+        right
+            .score
+            .total_cmp(&left.score)
+            .then_with(|| left_id.cmp(right_id))
+    });
+    let mut results = Vec::new();
+    for (rank, (kp_id, candidate)) in fused.into_iter().take(limit.clamp(1, 50)).enumerate() {
+        let snippet = candidate
+            .snippet
+            .unwrap_or_else(|| "Semantic retrieval match.".to_string());
+        let Some(knowledge) = load_hit(&connection, &kp_id, snippet)? else {
+            continue;
+        };
+        results.push(KnowledgeRagSearchHit {
+            rank: rank + 1,
+            retrieval_score: candidate.score,
+            matched_queries: candidate.matched_queries.into_iter().collect(),
+            knowledge,
+        });
+    }
+    Ok(KnowledgeRagSearchResult {
+        query: query.to_string(),
+        retrieval: "multi-query reciprocal-rank fusion (confirmed-knowledge FTS)".to_string(),
+        results,
+        note: "Only confirmed knowledge is retrieved. Cite the nested evidence as \
+               [paperId p.PAGE]; retrieval ranking is not evidence confidence."
+            .to_string(),
+    })
+}
+
+#[derive(Default)]
+struct FusedCandidate {
+    score: f64,
+    snippet: Option<String>,
+    matched_queries: std::collections::BTreeSet<String>,
+}
+
+fn reciprocal_rank(rank: usize) -> f64 {
+    // RRF's conventional constant prevents one retrieval channel from
+    // overwhelming the other merely because it has a sharper raw score scale.
+    1.0 / (60.0 + rank as f64)
 }
 
 /// Build an FTS5 MATCH expression. The trigram tokenizer needs ≥3-character

@@ -46,6 +46,8 @@ export interface ConfigView {
   executorBaseUrl?: string | null;
   /** Model used to summarize context on compaction; empty/absent = "Auto". */
   summarizerModel?: string | null;
+  /** Model used to generate retrieval cards; empty/absent follows the executor. */
+  retrievalCardModel?: string | null;
   summarizerProvider?: string | null;
   summarizerBaseUrl?: string | null;
   hasSummarizerKey: boolean;
@@ -115,6 +117,7 @@ export interface ConfigPatch {
   executorBaseUrl?: string;
   summarizerProvider?: string;
   summarizerModel?: string;
+  retrievalCardModel?: string;
   summarizerBaseUrl?: string;
   summarizerApiKey?: string;
   executorApiKey?: string;
@@ -727,4 +730,53 @@ export interface ChatEventsRestoreResult {
   lastSeq: number;
   messageCount: number;
   restoredPath: string;
+}
+
+/** One day's aggregated activity, for the Profile Token-activity heatmap. */
+export interface ProfileDailyBucket {
+  /** Local calendar date, `YYYY-MM-DD`. */
+  date: string;
+  tokens: number;
+  turns: number;
+}
+
+export interface ProfileModelUsage {
+  model: string;
+  provider: string;
+  tokens: number;
+  turns: number;
+}
+
+export interface ProfileSkillCount {
+  name: string;
+  runs: number;
+}
+
+/**
+ * Aggregated local telemetry for the Settings → Profile page. Derived from
+ * `usage-log.jsonl` (tokens/heatmap/streaks/models) plus best-effort session
+ * event logs (skills/tools). Fields that the app does not yet track are
+ * `null`, so the UI can fall back gracefully instead of showing fake data.
+ */
+export interface ProfileStats {
+  cumulativeTokens: number;
+  peakDailyTokens: number;
+  totalTurns: number;
+  activeDays: number;
+  currentStreak: number;
+  longestStreak: number;
+  /** Longest single task in seconds; `null` until turn-duration telemetry accrues. */
+  longestTaskSeconds: number | null;
+  /** Chronological daily buckets (up to ~53 weeks) for the heatmap. */
+  daily: ProfileDailyBucket[];
+  byModel: ProfileModelUsage[];
+  topSkills: ProfileSkillCount[];
+  skillsExplored: number;
+  toolCalls: number;
+  /** `null` until reasoning-effort telemetry accrues. */
+  topReasoningEffort: string | null;
+  /** Whether the runtime meta event log is populated (drives skill/tool stats). */
+  metaLoggingEnabled: boolean;
+  /** Epoch seconds of the earliest recorded activity, or `null` when empty. */
+  since: number | null;
 }

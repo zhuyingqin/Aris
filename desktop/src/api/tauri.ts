@@ -115,6 +115,7 @@ import type {
   McpStdioServerInput,
   McpTestResult,
   PermissionModeView,
+  ProfileStats,
   ProjectView,
   RemoteAuditEntry,
   RemoteConnectPhoneResult,
@@ -308,6 +309,8 @@ export const newapiUpdateGroup = (group: string) =>
   invoke<NewApiAccount>("newapi_update_group", { group });
 export const newapiUsageLogs = (page: number, pageSize: number) =>
   invoke<NewApiUsageLogPage>("newapi_usage_logs", { page, pageSize });
+
+export const profileStats = () => invoke<ProfileStats>("profile_stats");
 
 export const appUpdateCheck = async (): Promise<AppUpdateInfo> => {
   if (!isTauri()) return { available: false };
@@ -580,6 +583,123 @@ export const literaturePdfText = (relativePath: string) =>
     "literature_pdf_text",
     { relativePath },
   );
+export interface LiteratureRagIndexResult {
+  paperId: string;
+  relativePath?: string;
+  pageCount: number;
+  ocrUsed: boolean;
+  indexedForSearch: boolean;
+  documentContentHash?: string;
+  indexedChunks?: number;
+  skippedAsCurrent?: boolean;
+  parserEngine?: string;
+  parserWarning?: string;
+  assetCount?: number;
+  stats?: {
+    indexedChunks: number;
+    skippedAsCurrent: boolean;
+    documentContentHash: string;
+  };
+}
+export interface LiteratureRagSearchHit {
+  chunk: {
+    chunkId: string;
+    paperId: string;
+    relativePath: string;
+    pageStart: number;
+    pageEnd: number;
+    pageSource: "embedded" | "ocr" | "empty" | "liteparse";
+    ordinalOnPage: number;
+    text: string;
+    contentHash: string;
+    chunkerVersion: string;
+  };
+  retrievalScore: number;
+  sourceRank?: number;
+  cardRank?: number;
+  assetRank?: number;
+  citationRank?: number;
+  metadataRank?: number;
+  matchedQueries: string[];
+}
+export interface LiteratureRagIndexLibraryResult {
+  forceRebuild: boolean;
+  total: number;
+  indexed: number;
+  skipped: number;
+  failed: number;
+  results: LiteratureRagIndexResult[];
+  failures: Array<{ paperId: string; relativePath: string; error: string }>;
+}
+export interface RetrievalCardPreview {
+  chunkId: string;
+  paperId: string;
+  relativePath: string;
+  pageStart: number;
+  pageEnd: number;
+  updatedAt: string;
+  sourcePreview: string;
+  card: {
+    chunkId: string;
+    sourceContentHash: string;
+    questions: string[];
+    concepts: string[];
+    sectionHeadings: string[];
+    aliases: string[];
+    methods: string[];
+    datasets: string[];
+    metrics: string[];
+    limitations: string[];
+    languageTerms: string[];
+    generatedBy: string;
+    promptVersion: number;
+  };
+}
+export interface LiteratureRagDatabaseStatus {
+  exists: boolean;
+  indexPath: string;
+  relativeIndexPath: string;
+  databaseBytes: number;
+  documentCount: number;
+  chunkCount: number;
+  currentCardCount: number;
+  staleCardCount: number;
+  pendingCardCount: number;
+  assetCount: number;
+  citationMentionCount: number;
+  metadataDocumentCount: number;
+  cardPreviews: RetrievalCardPreview[];
+}
+export const literatureRagIndexPdf = (
+  relativePath: string,
+  paperId?: string,
+) =>
+  invoke<LiteratureRagIndexResult>("literature_rag_index_pdf", {
+    relativePath,
+    paperId: paperId ?? null,
+    pages: null,
+  });
+export const literatureRagIndexLibrary = (forceRebuild = false) =>
+  invoke<LiteratureRagIndexLibraryResult>("literature_rag_index_library", {
+    forceRebuild,
+  });
+export const literatureRagStatus = (previewLimit = 12) =>
+  invoke<LiteratureRagDatabaseStatus>("literature_rag_status", {
+    previewLimit,
+  });
+export const literatureRagSearch = (
+  query: string,
+  limit?: number,
+) =>
+  invoke<{
+    query: string;
+    queryPlan: RetrievalQueryPlan;
+    retrieval: string;
+    results: LiteratureRagSearchHit[];
+  }>("literature_rag_search", {
+    query,
+    limit: limit ?? null,
+  });
 export const literaturePdfBytes = (relativePath: string) =>
   invoke<number[]>("literature_pdf_bytes", { relativePath });
 export const literatureImageOcr = (image: number[]) =>
@@ -606,6 +726,87 @@ export const studioHtml = (relativePath: string) =>
 export const knowledgeLoad = <T>() => invoke<T>("knowledge_load");
 export const knowledgeSearch = <T>(query: string, limit?: number) =>
   invoke<T>("knowledge_search", { query, limit: limit ?? null });
+export interface RetrievalQueryPlan {
+  originalQuery: string;
+  exactTerms: string[];
+  aliases: string[];
+  subqueries: string[];
+  entities: string[];
+  answerType?: string;
+}
+export interface ProjectRagKnowledgeHit {
+  rank: number;
+  retrievalScore: number;
+  matchedQueries: string[];
+  knowledge: {
+    id: string;
+    question: string;
+    answer: string;
+    statement: string;
+    kind?: string;
+    sourcePaperId?: string;
+    snippet: string;
+    evidence: Array<{
+      paperId: string;
+      page?: number;
+      quote: string;
+      role?: string;
+      annotationId?: string;
+      evidenceId?: string;
+    }>;
+  };
+}
+export interface ProjectRagSearchResult {
+  query: string;
+  queryPlan: RetrievalQueryPlan;
+  knowledge: {
+    query: string;
+    retrieval: string;
+    results: ProjectRagKnowledgeHit[];
+    note: string;
+  };
+  literature: {
+    query: string;
+    queryPlan: RetrievalQueryPlan;
+    retrieval: string;
+    results: LiteratureRagSearchHit[];
+  };
+  plannerWarning?: string;
+  rerank: Array<{ id: string; relevance: number; reason: string }>;
+}
+export interface ProjectRagAnswerResult extends ProjectRagSearchResult {
+  answer: string;
+  review: {
+    verdict: "pass" | "insufficient" | "fail" | "unavailable";
+    findings: string[];
+    gapQueries: string[];
+  };
+}
+export interface RetrievalCardBuildResult {
+  attempted: number;
+  generated: number;
+  hasMore: boolean;
+  warnings: string[];
+  stats: { written: number; unchanged: number; indexPath: string };
+}
+export const knowledgeRetrievalCardsBuild = (paperId?: string, limit?: number) =>
+  invoke<RetrievalCardBuildResult>("knowledge_retrieval_cards_build", {
+    paperId: paperId ?? null,
+    limit: limit ?? null,
+  });
+export const knowledgeRagSearch = <T>(query: string, limit?: number) =>
+  invoke<T>("knowledge_rag_search", { query, limit: limit ?? null });
+/** Multi-query FTS retrieval keeps confirmed knowledge and PDF citations as separate sources. */
+export const projectRagSearch = <T>(query: string, limit?: number) =>
+  invoke<T>("project_rag_search", { query, limit: limit ?? null });
+/** Retrieve locally, then synthesize an evidence-cited answer with SomniQ's configured executor. */
+export const projectRagAnswer = (
+  query: string,
+  limit?: number,
+) => invoke<ProjectRagAnswerResult>("project_rag_answer", {
+  query,
+  limit: limit ?? null,
+});
 export const knowledgeUpsert = <T>(points: unknown[]) =>
   invoke<T>("knowledge_upsert", { points });
 export const knowledgeConfirm = (kpId: string) =>

@@ -55,6 +55,19 @@ const EXTENSION_LANGUAGES = new Map<string, EditorLanguage>([
   [".zsh", "bash"],
 ]);
 
+// Files in this set are understood by the Code workbench (including the
+// generic plain-text editor). Keep binary / document formats out so a click on
+// a generated PDF, image, or Office document still uses its native viewer.
+const CODE_PAGE_FILENAMES = new Set([
+  "makefile",
+  "dockerfile",
+  "compose.yaml",
+  "compose.yml",
+  "readme",
+  "license",
+  "agents.md",
+]);
+
 export function basename(path: string): string {
   return path.replace(/\\/g, "/").replace(/\/+$/, "").split("/").pop() || path;
 }
@@ -67,6 +80,15 @@ export function extension(path: string): string {
 
 export function languageForPath(path: string): EditorLanguage {
   return EXTENSION_LANGUAGES.get(extension(path)) ?? "text";
+}
+
+/** Whether a workspace file should open in SomniQ's Code page rather than in
+ * the operating system's default application. */
+export function opensInCodePage(path: string): boolean {
+  const name = basename(path).toLowerCase();
+  return name.endsWith(".ipynb")
+    || EXTENSION_LANGUAGES.has(extension(path))
+    || CODE_PAGE_FILENAMES.has(name);
 }
 
 export function normalizePath(path: string): string {

@@ -830,6 +830,28 @@ fn desktop_chat_registers_ask_user_question_gated_read_only() {
 }
 
 #[test]
+fn desktop_chat_registers_local_project_evidence_search_as_read_only() {
+    let specs = tool_specs_for(DESKTOP_CHAT_EXTRA_BLOCKED_TOOLS);
+    let spec = specs
+        .iter()
+        .find(|spec| spec.name == PROJECT_EVIDENCE_SEARCH_TOOL)
+        .expect("ProjectEvidenceSearch is registered for desktop chat");
+    assert!(matches!(spec.required_permission, PermissionMode::ReadOnly));
+    assert!(spec.description.contains("Call this automatically"));
+    assert!(spec.description.contains("never indexes PDFs"));
+
+    let plan = desktop_permission_policy(&specs, PermissionMode::ReadOnly);
+    assert_eq!(
+        plan.authorize(
+            PROJECT_EVIDENCE_SEARCH_TOOL,
+            r#"{"query":"What limitations do the local papers report?"}"#,
+            None,
+        ),
+        runtime::PermissionOutcome::Allow
+    );
+}
+
+#[test]
 fn ask_user_question_rejects_inputs_the_ui_cannot_answer() {
     assert!(
         validate_question_input(r#"{"question":"Pick one","options":[{"label":"A"}]}"#).is_ok()
@@ -1072,6 +1094,8 @@ fn desktop_prompt_requests_links_for_generated_files() {
     assert!(prompt.contains("Long file generation"));
     assert!(prompt.contains("24000 characters"));
     assert!(prompt.contains("append_file"));
+    assert!(prompt.contains("MUST call `ProjectEvidenceSearch`"));
+    assert!(prompt.contains("Do not silently substitute web or external metadata search"));
 }
 
 #[test]

@@ -667,14 +667,14 @@ pub(crate) fn bound_fallback_summary(summary: String, max_content_chars: usize) 
         let detail_budget = max_content_chars
             .saturating_sub(timeline_anchor.chars().count())
             .saturating_sub(2);
-        format!("{}\n\n{timeline_anchor}", truncate_summary(&content, detail_budget))
+        format!(
+            "{}\n\n{timeline_anchor}",
+            truncate_summary(&content, detail_budget)
+        )
     } else {
         truncate_summary(&content, max_content_chars)
     };
-    format!(
-        "<summary>\n{}\n</summary>",
-        bounded
-    )
+    format!("<summary>\n{}\n</summary>", bounded)
 }
 
 fn summarize_block(block: &ContentBlock) -> String {

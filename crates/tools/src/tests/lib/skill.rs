@@ -205,4 +205,3 @@ fn tool_search_supports_keyword_and_select_queries() {
     assert_eq!(selected_with_alias_output["matches"][0], "Agent");
     assert_eq!(selected_with_alias_output["matches"][1], "Skill");
 }
-

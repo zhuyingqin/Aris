@@ -26,6 +26,14 @@ pub struct UsageLogEntry {
     pub output_tokens: u32,
     pub cache_creation_input_tokens: u32,
     pub cache_read_input_tokens: u32,
+    /// Wall-clock duration of the turn in milliseconds. `0` on legacy rows
+    /// written before this field existed (and on non-executor entries).
+    #[serde(default)]
+    pub duration_ms: u64,
+    /// Reasoning effort applied for this turn (empty when not applicable or on
+    /// legacy rows).
+    #[serde(default)]
+    pub reasoning_effort: String,
 }
 
 pub fn append_turn_usage(
@@ -35,6 +43,8 @@ pub fn append_turn_usage(
     provider: &str,
     server: &str,
     usages: &[TokenUsage],
+    duration_ms: u64,
+    reasoning_effort: &str,
 ) -> Result<(), String> {
     let entries = usages
         .iter()
@@ -51,6 +61,8 @@ pub fn append_turn_usage(
             output_tokens: usage.output_tokens,
             cache_creation_input_tokens: usage.cache_creation_input_tokens,
             cache_read_input_tokens: usage.cache_read_input_tokens,
+            duration_ms,
+            reasoning_effort: reasoning_effort.to_string(),
         })
         .collect::<Vec<_>>();
     if entries.is_empty() {

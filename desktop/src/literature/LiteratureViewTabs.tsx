@@ -32,7 +32,7 @@ export default function LiteratureViewTabs({
           className={`lit-mode-tab${pageView === item.id ? " active" : ""}`}
           onClick={() => onPageViewChange(item.id)}
         >
-          <span aria-hidden="true"><SvgIcon name={item.icon} size={15} /></span>
+          <span className="lit-mode-tab-icon" aria-hidden="true"><SvgIcon name={item.icon} size={15} /></span>
           {item.label}
         </button>
       ))}
