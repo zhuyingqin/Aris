@@ -1,9 +1,9 @@
 use super::{
     assistant_output_looks_degenerate, assistant_text_from_turn_summary, build_assistant_message,
-    is_internal_continuation_message, parse_auto_compaction_threshold,
-    strip_trailing_internal_continuation_messages, ApiClient, ApiRequest, AssistantEvent,
-    ConversationRuntime, RuntimeError, StaticToolExecutor, ToolError, ToolExecutor, TurnSummary,
-    DEFAULT_AUTO_COMPACTION_INPUT_TOKENS_THRESHOLD,
+    is_internal_continuation_message, overflow_preserve_message_count,
+    parse_auto_compaction_threshold, strip_trailing_internal_continuation_messages, ApiClient,
+    ApiRequest, AssistantEvent, ConversationRuntime, RuntimeError, StaticToolExecutor, ToolError,
+    ToolExecutor, TurnSummary, DEFAULT_AUTO_COMPACTION_INPUT_TOKENS_THRESHOLD,
 };
 use crate::compact::CompactionTokenEstimateSource;
 // The CLI's Opus 4.8 to 4.7 fallback keys off this flag.
@@ -47,6 +47,32 @@ fn turn_summary_assistant_text_keeps_nonempty_text_from_each_iteration() {
         assistant_text_from_turn_summary(&summary),
         "Checking files.\n\nFix complete."
     );
+}
+
+#[test]
+fn overflow_preserves_the_current_and_previous_user_turns() {
+    let mut session = Session::new();
+    session
+        .messages
+        .push(ConversationMessage::user_text("older request"));
+    session
+        .messages
+        .push(ConversationMessage::assistant(vec![ContentBlock::Text {
+            text: "older answer".to_string(),
+        }]));
+    session
+        .messages
+        .push(ConversationMessage::user_text("previous request"));
+    session
+        .messages
+        .push(ConversationMessage::assistant(vec![ContentBlock::Text {
+            text: "previous answer".to_string(),
+        }]));
+    session
+        .messages
+        .push(ConversationMessage::user_text("current request"));
+
+    assert_eq!(overflow_preserve_message_count(&session), 3);
 }
 
 #[test]
@@ -338,13 +364,14 @@ fn context_overflow_force_compacts_and_retries() {
     // Two stream attempts: overflow, then success.
     assert_eq!(summary.iterations, 2);
     assert_eq!(assistant_text_from_turn_summary(&summary), "recovered");
-    // The four preloaded messages were summarized away.
+    // Preserve the immediately preceding q2/a2 exchange verbatim while
+    // summarizing the older q1/a1 exchange.
     assert_eq!(
         summary
             .auto_compaction
             .expect("a compaction should have happened")
             .removed_message_count,
-        4
+        2
     );
 }
 
@@ -1801,9 +1828,11 @@ fn map_reduce_summarizes_early_content_instead_of_truncating_the_front() {
     // discard it before the summarizer ran; Map-Reduce must feed it in.
     let filler = "context ".repeat(900); // ~7.2k chars per message
     let mut session = Session::new();
-    session.messages.push(ConversationMessage::user_text(format!(
-        "SENTINEL_EARLY_FACT api base is api.example.test {filler}"
-    )));
+    session
+        .messages
+        .push(ConversationMessage::user_text(format!(
+            "SENTINEL_EARLY_FACT api base is api.example.test {filler}"
+        )));
     for index in 0..24 {
         session
             .messages
@@ -1865,7 +1894,9 @@ fn map_reduce_handles_a_huge_transcript_without_a_lossy_cliff() {
     for index in 0..110 {
         session
             .messages
-            .push(ConversationMessage::user_text(format!("ask {index} {filler}")));
+            .push(ConversationMessage::user_text(format!(
+                "ask {index} {filler}"
+            )));
         session
             .messages
             .push(ConversationMessage::assistant(vec![ContentBlock::Text {
@@ -2242,7 +2273,11 @@ fn coverage_failure_recovers_via_escalated_retry_before_falling_back() {
                     })
                     .collect::<String>();
                 let escalated = body.contains("CRITICAL: your summary MUST explicitly restate");
-                let text = if escalated { &self.covering } else { &self.plain };
+                let text = if escalated {
+                    &self.covering
+                } else {
+                    &self.plain
+                };
                 return Ok(vec![
                     AssistantEvent::TextDelta(text.clone()),
                     AssistantEvent::MessageStop,
@@ -2406,16 +2441,16 @@ fn overflow_archive_keeps_pristine_tool_content() {
     session
         .messages
         .push(ConversationMessage::user_text("run the big job"));
-    session
-        .messages
-        .push(ConversationMessage::assistant(vec![ContentBlock::ToolUse {
+    session.messages.push(ConversationMessage::assistant(vec![
+        ContentBlock::ToolUse {
             id: "t".into(),
             name: "bash".into(),
             input: "{}".into(),
-        }]));
-    session
-        .messages
-        .push(ConversationMessage::tool_result("t", "bash", big_output, false));
+        },
+    ]));
+    session.messages.push(ConversationMessage::tool_result(
+        "t", "bash", big_output, false,
+    ));
     session
         .messages
         .push(ConversationMessage::assistant(vec![ContentBlock::Text {

@@ -1213,10 +1213,10 @@ fn context_action_picks_warn_then_compact_by_usage() {
     use super::{context_action, ContextAction};
     assert_eq!(context_action(0, 0), ContextAction::None); // unknown window
     assert_eq!(context_action(100, 1_000), ContextAction::None); // 10%
-    assert_eq!(context_action(699, 1_000), ContextAction::None); // just under warn
-    assert_eq!(context_action(700, 1_000), ContextAction::Warn); // 70%
-    assert_eq!(context_action(899, 1_000), ContextAction::Warn); // just under trigger
-    assert_eq!(context_action(900, 1_000), ContextAction::Compact); // 90%
+    assert_eq!(context_action(849, 1_000), ContextAction::None); // just under warn
+    assert_eq!(context_action(850, 1_000), ContextAction::Warn); // 85%
+    assert_eq!(context_action(999, 1_000), ContextAction::Warn); // just under trigger
+    assert_eq!(context_action(1_000, 1_000), ContextAction::Compact);
     assert_eq!(context_action(2_000, 1_000), ContextAction::Compact); // over window
 }
 
@@ -1224,6 +1224,10 @@ fn context_action_picks_warn_then_compact_by_usage() {
 fn gpt5_context_window_uses_proxy_budget() {
     assert_eq!(context_window_for_model("gpt-5.6-luna"), 300_000);
     assert_eq!(context_window_for_model("gpt-4.1"), 300_000);
+    assert_eq!(context_window_for_model("MiniMax-M3"), 1_000_000);
+    assert_eq!(compaction_budget_for_model("MiniMax-M3"), 800_000);
+    assert_eq!(context_window_for_model("MiniMax-M2.7"), 204_800);
+    assert_eq!(compaction_budget_for_model("MiniMax-M2.7"), 160_000);
     assert_eq!(context_window_for_model("kimi-k3"), 1_000_000);
 }
 

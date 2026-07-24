@@ -490,6 +490,7 @@ pub fn run() {
             literature::literature_rag_index_library,
             literature::literature_rag_search,
             literature::literature_rag_status,
+            literature::literature_rag_cards,
             literature::literature_pdf_bytes,
             literature::literature_import_pdf,
             literature::literature_image_ocr,

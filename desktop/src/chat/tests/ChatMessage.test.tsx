@@ -17,7 +17,13 @@ const apiMocks = vi.hoisted(() => ({
 vi.mock("../../api/tauri", () => apiMocks);
 
 beforeEach(() => {
-  useStore.setState({ tab: "chat", language: "en", pendingStudioArtifactId: null, pendingLabFilePath: null });
+  useStore.setState({
+    tab: "chat",
+    language: "en",
+    pendingStudioArtifactId: null,
+    pendingLabFilePath: null,
+    pendingTypesetFilePath: null,
+  });
   apiMocks.isTauri.mockReturnValue(false);
   apiMocks.fileOpen.mockResolvedValue(undefined);
   apiMocks.fileReadBytes.mockResolvedValue([]);
@@ -207,6 +213,37 @@ describe("ChatMessage rendering", () => {
     await user.click(fileLink!);
     expect(useStore.getState().tab).toBe("lab");
     expect(useStore.getState().pendingLabFilePath).toBe("reports/result.md");
+    expect(apiMocks.fileOpen).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["LaTeX source", "papers/main.tex"],
+    ["PDF", "papers/main.pdf"],
+  ])("opens generated %s files in the LaTeX workspace", async (_kind, path) => {
+    const user = userEvent.setup();
+    render(
+      <ChatMessage
+        turn={{
+          id: `assistant-${path}`,
+          role: "assistant",
+          blocks: [{
+            kind: "tool",
+            name: "write_file",
+            input: JSON.stringify({ path, content: "done" }),
+            output: "ok",
+          }],
+        }}
+        canRetry={false}
+        onEdit={() => undefined}
+        onRetry={() => undefined}
+        onContinue={() => undefined}
+      />,
+    );
+
+    await user.click(screen.getAllByRole("button", { name: path })[0]!);
+
+    expect(useStore.getState().tab).toBe("typeset");
+    expect(useStore.getState().pendingTypesetFilePath).toBe(path);
     expect(apiMocks.fileOpen).not.toHaveBeenCalled();
   });
 

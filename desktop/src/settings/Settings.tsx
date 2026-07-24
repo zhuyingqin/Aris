@@ -21,6 +21,7 @@ import {
   type NewApiUsageLogPage,
 } from "../api/tauri";
 import { isManagedAuthInvalidError, useStore, type Language } from "../store";
+import { formatUserFacingError } from "../errorMessage";
 import { SvgIcon } from "../SvgIcon";
 import { handoffEnvironmentInstall, isInstallableEnvironment } from "../environmentInstall";
 import { notifyChatModelsUpdated } from "../modelEvents";
@@ -1319,7 +1320,7 @@ function KeyInput({
         if (secret) setSavedSecret(secret);
         else setError(keyCopy.noSavedSecret);
       } catch (err) {
-        setError(String(err));
+        setError(formatUserFacingError(err, language));
       } finally {
         setLoading(false);
       }
@@ -1499,7 +1500,7 @@ export default function Settings() {
       const nextLogs = await newapiUsageLogs(page, USAGE_LOG_PAGE_SIZE);
       cacheUsageLogPage(nextLogs, options.force);
     } catch (error) {
-      const message = String(error);
+      const message = formatUserFacingError(error, language);
       setUsageLogError(message);
       if (cachedLogs) {
         setUsageLogs(cachedLogs);
@@ -1539,7 +1540,7 @@ export default function Settings() {
       setEnvironmentChecks(await localEnvironmentChecks());
       setEnvironmentCheckedAt(Math.floor(Date.now() / 1000));
     } catch (error) {
-      setEnvironmentError(String(error));
+      setEnvironmentError(formatUserFacingError(error, language));
     } finally {
       setEnvironmentLoading(false);
     }
@@ -1555,7 +1556,7 @@ export default function Settings() {
     try {
       setSystemPrompt(await systemPromptView());
     } catch (error) {
-      const message = String(error);
+      const message = formatUserFacingError(error, language);
       setSystemPromptError(message);
       setError(message);
     } finally {
@@ -1573,7 +1574,7 @@ export default function Settings() {
     try {
       setUserPrompt(await userPromptView());
     } catch (error) {
-      const message = String(error);
+      const message = formatUserFacingError(error, language);
       setUserPromptError(message);
       setError(message);
     } finally {
@@ -1598,7 +1599,7 @@ export default function Settings() {
       notifyChatModelsUpdated();
     } catch (error) {
       setManagedModels([]);
-      setManagedModelsError(String(error));
+      setManagedModelsError(formatUserFacingError(error, language));
     } finally {
       setManagedModelsLoading(false);
     }
@@ -1615,7 +1616,7 @@ export default function Settings() {
     try {
       setGroupOptions(await newapiGroups());
     } catch (error) {
-      setGroupError(String(error));
+      setGroupError(formatUserFacingError(error, language));
     } finally {
       setGroupLoading(false);
     }
@@ -1641,7 +1642,7 @@ export default function Settings() {
       }
       writeCachedAccount(next);
     } catch (error) {
-      const message = String(error);
+      const message = formatUserFacingError(error, language);
       setAccountError(message);
       if (isManagedAuthInvalidError(error)) {
         writeCachedAccount(null);
@@ -1670,7 +1671,7 @@ export default function Settings() {
       }
       writeCachedAccount(next);
     } catch (error) {
-      const message = String(error);
+      const message = formatUserFacingError(error, language);
       setGroupError(message);
       setError(message);
     } finally {
@@ -1815,7 +1816,7 @@ export default function Settings() {
       setTestState(result.ok ? "passed" : "failed");
       if (result.ok) notifyChatModelsUpdated();
     } catch (error) {
-      const message = String(error);
+      const message = formatUserFacingError(error, language);
       setTestResult({ ok: false, message, executor: { ok: false, label: "Settings", message } });
       setTestState("failed");
     }
@@ -1874,7 +1875,7 @@ export default function Settings() {
       }
     } catch (error) {
       setUpdateState("error");
-      setUpdateMessage(String(error));
+      setUpdateMessage(formatUserFacingError(error, language));
     }
   };
 
@@ -1903,7 +1904,7 @@ export default function Settings() {
       }
     } catch (error) {
       setUpdateState("error");
-      setUpdateMessage(String(error));
+      setUpdateMessage(formatUserFacingError(error, language));
     }
   };
 
@@ -1912,7 +1913,7 @@ export default function Settings() {
       await appRelaunch();
     } catch (error) {
       setUpdateState("error");
-      setUpdateMessage(String(error));
+      setUpdateMessage(formatUserFacingError(error, language));
     }
   };
 
@@ -2883,7 +2884,7 @@ export default function Settings() {
               <div className="sp-update-actions">
                 <button
                   className="sp-btn sp-btn-secondary"
-                  onClick={() => { void localEnvironmentChecks(true).then(setEnvironmentChecks).then(() => setEnvironmentCheckedAt(Math.floor(Date.now() / 1000))).catch((e) => setEnvironmentError(String(e))); }}
+                  onClick={() => { void localEnvironmentChecks(true).then(setEnvironmentChecks).then(() => setEnvironmentCheckedAt(Math.floor(Date.now() / 1000))).catch((e) => setEnvironmentError(formatUserFacingError(e, language))); }}
                   disabled={environmentLoading}
                   type="button"
                 >

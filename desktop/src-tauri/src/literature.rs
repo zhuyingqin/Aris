@@ -818,6 +818,35 @@ pub async fn literature_rag_status(
     serde_json::to_value(status).map_err(|error| error.to_string())
 }
 
+/// Browse the generated retrieval cards with an optional text filter and offset
+/// pagination for the Literature card browser. Read-only; does not create an
+/// empty database.
+#[tauri::command]
+pub async fn literature_rag_cards(
+    projects_state: State<'_, ProjectState>,
+    query: Option<String>,
+    paper_id: Option<String>,
+    offset: Option<usize>,
+    limit: Option<usize>,
+) -> Result<Value, String> {
+    let base = project_base(&projects_state)?;
+    let query = query.unwrap_or_default();
+    let offset = offset.unwrap_or(0);
+    let limit = limit.unwrap_or(20).clamp(1, 100);
+    let page = tauri::async_runtime::spawn_blocking(move || {
+        tools::pdf_rag::literature_rag_cards_page_at(
+            &base,
+            &query,
+            paper_id.as_deref(),
+            offset,
+            limit,
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+    serde_json::to_value(page).map_err(|error| error.to_string())
+}
+
 /// Read a validated local PDF for the embedded PDF.js viewer.
 #[tauri::command]
 pub fn literature_pdf_bytes(

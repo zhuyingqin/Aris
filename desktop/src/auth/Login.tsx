@@ -8,6 +8,7 @@ import {
 import appLogo from "../assets/app-logo.png";
 import DesktopWindowControls from "../DesktopWindowControls";
 import { DEFAULT_AUTH_SERVER, useStore } from "../store";
+import { formatUserFacingError } from "../errorMessage";
 import { DreamScene, LoginBackdrop } from "./LoginScene";
 import "./login.css";
 
@@ -22,8 +23,6 @@ type FieldVar = CSSProperties & { "--i"?: number };
 const field = (i: number) => ({ "--i": i } as FieldVar);
 
 type AuthMode = "login" | "register";
-const MANAGED_MODEL_SERVER_LABEL = "通用模型服务器";
-
 function trimServer(server: string) {
   return (server.trim() || DEFAULT_AUTH_SERVER).replace(/\/+$/, "");
 }
@@ -42,8 +41,7 @@ function readAffCode(): string | undefined {
 }
 
 function errorMessage(error: unknown) {
-  return (error instanceof Error ? error.message : String(error))
-    .replace(/(?:https?:\/\/)?106\.53\.28\.124:18080(?:\/v1)?/gi, MANAGED_MODEL_SERVER_LABEL);
+  return formatUserFacingError(error, "cn");
 }
 
 export default function Login() {

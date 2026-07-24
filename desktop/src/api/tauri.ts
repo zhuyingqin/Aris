@@ -687,6 +687,27 @@ export const literatureRagStatus = (previewLimit = 12) =>
   invoke<LiteratureRagDatabaseStatus>("literature_rag_status", {
     previewLimit,
   });
+export interface LiteratureRetrievalCardPage {
+  total: number;
+  offset: number;
+  limit: number;
+  query: string;
+  cards: RetrievalCardPreview[];
+}
+export const literatureRagCards = (
+  params: {
+    query?: string;
+    paperId?: string;
+    offset?: number;
+    limit?: number;
+  } = {},
+) =>
+  invoke<LiteratureRetrievalCardPage>("literature_rag_cards", {
+    query: params.query ?? "",
+    paperId: params.paperId && params.paperId.trim() ? params.paperId : null,
+    offset: params.offset ?? 0,
+    limit: params.limit ?? 20,
+  });
 export const literatureRagSearch = (
   query: string,
   limit?: number,

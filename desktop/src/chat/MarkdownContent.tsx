@@ -7,7 +7,7 @@ import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
 import "highlight.js/styles/github-dark.css";
 import { fileOpen } from "../api/tauri";
-import { opensInCodePage } from "../lab/labEditorCore";
+import { workspaceFileOpenTarget } from "../lab/labEditorCore";
 import { SvgIcon } from "../SvgIcon";
 import { isExplicitLocalFileHref, normalizeLocalFileHref } from "./localFileLinks";
 import { useStore } from "../store";
@@ -387,6 +387,7 @@ function MarkdownLink({
   const setTab = useStore((state) => state.setTab);
   const setPendingStudioArtifactId = useStore((state) => state.setPendingStudioArtifactId);
   const setPendingLabFilePath = useStore((state) => state.setPendingLabFilePath);
+  const setPendingTypesetFilePath = useStore((state) => state.setPendingTypesetFilePath);
   const setError = useStore((state) => state.setError);
   const language = useStore((state) => state.language);
   const studioArtifactId = href ? studioArtifactIdFromHref(href) : null;
@@ -429,9 +430,15 @@ function MarkdownLink({
       onClick={(event) => {
         event.preventDefault();
         const path = decodeLocalHref(href);
-        if (opensInCodePage(path)) {
+        const target = workspaceFileOpenTarget(path);
+        if (target === "code") {
           setPendingLabFilePath(path);
           setTab("lab");
+          return;
+        }
+        if (target === "latex" || target === "pdf") {
+          setPendingTypesetFilePath(path);
+          setTab("typeset");
           return;
         }
         void fileOpen(path).catch((error) => {

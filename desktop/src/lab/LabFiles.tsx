@@ -62,14 +62,119 @@ function defaultFileContent(path: string): string {
   return "";
 }
 
-function iconForFile(path: string): string {
-  const ext = extension(path);
-  if (ext === ".ipynb") return "[]";
-  if (ext === ".json" || ext === ".toml" || ext === ".yaml" || ext === ".yml") return "{}";
-  if (ext === ".md") return "i";
-  if (ext === ".lock") return "=";
-  if ([".ts", ".tsx", ".js", ".jsx", ".rs", ".py", ".sh"].includes(ext)) return "<>";
-  return "-";
+export type WorkspaceFileIconKind =
+  | "folder"
+  | "notebook"
+  | "pdf"
+  | "latex-source"
+  | "latex-template"
+  | "bibliography"
+  | "latex-artifact"
+  | "database"
+  | "data"
+  | "config"
+  | "markdown"
+  | "document"
+  | "log"
+  | "image"
+  | "archive"
+  | "code"
+  | "binary"
+  | "file";
+
+const LATEX_BUILD_ARTIFACT_EXTENSIONS = new Set([
+  ".aux", ".bb", ".bbl", ".blg", ".fdb_latexmk", ".fls", ".lof",
+  ".lot", ".nav", ".out", ".snm", ".synctex", ".toc", ".vrb", ".xdv",
+]);
+const LATEX_TEMPLATE_EXTENSIONS = new Set([".cls", ".sty"]);
+const BIBLIOGRAPHY_EXTENSIONS = new Set([".bib", ".bst"]);
+const DATABASE_EXTENSIONS = new Set([".db", ".duckdb", ".sqlite", ".sqlite3"]);
+const DATA_EXTENSIONS = new Set([
+  ".arrow", ".avro", ".csv", ".feather", ".h5", ".hdf5", ".jsonl", ".mat", ".npy",
+  ".npz", ".parquet", ".pkl", ".pickle", ".rds", ".sav", ".tsv", ".xls", ".xlsx",
+]);
+const CONFIG_EXTENSIONS = new Set([".cfg", ".conf", ".env", ".ini", ".json", ".lock", ".properties", ".toml", ".yaml", ".yml"]);
+const DOCUMENT_EXTENSIONS = new Set([".doc", ".docx", ".odt", ".pdf", ".ppt", ".pptx", ".rtf", ".txt"]);
+const IMAGE_EXTENSIONS = new Set([".avif", ".bmp", ".gif", ".ico", ".jpeg", ".jpg", ".png", ".svg", ".tif", ".tiff", ".webp"]);
+const ARCHIVE_EXTENSIONS = new Set([".7z", ".bz2", ".gz", ".rar", ".tar", ".xz", ".zip"]);
+const CODE_EXTENSIONS = new Set([
+  ".bash", ".c", ".cc", ".cpp", ".cs", ".css", ".cxx", ".go", ".h", ".hpp", ".html",
+  ".java", ".js", ".jsx", ".m", ".mdx", ".mjs", ".ps1", ".py", ".pyw", ".r", ".rb",
+  ".rs", ".sass", ".scss", ".sh", ".sql", ".ts", ".tsx", ".vue", ".xml", ".zsh",
+]);
+
+/** Returns whether a file is a disposable output of LaTeX compilation.
+ * These files are grouped in the explorer, so sources remain easy to scan. */
+export function isLatexBuildArtifact(path: string): boolean {
+  const name = basename(path).toLowerCase().replace(/\.(?:bak|backup|old)$/i, "");
+  return LATEX_BUILD_ARTIFACT_EXTENSIONS.has(extension(name)) || name.endsWith(".synctex.gz");
+}
+
+/** Assigns a recognizable visual family to workspace files. */
+export function workspaceFileIconKind(path: string, directory = false): WorkspaceFileIconKind {
+  if (directory) return "folder";
+  const name = basename(path).toLowerCase();
+  const withoutBackupSuffix = name.replace(/\.(?:bak|backup|old)$/i, "");
+  const ext = extension(withoutBackupSuffix);
+  if (ext === ".ipynb") return "notebook";
+  if (ext === ".pdf") return "pdf";
+  if (ext === ".tex") return "latex-source";
+  if (LATEX_TEMPLATE_EXTENSIONS.has(ext)) return "latex-template";
+  if (BIBLIOGRAPHY_EXTENSIONS.has(ext)) return "bibliography";
+  if (isLatexBuildArtifact(withoutBackupSuffix)) return "latex-artifact";
+  if (DATABASE_EXTENSIONS.has(ext)) return "database";
+  if (DATA_EXTENSIONS.has(ext)) return "data";
+  if (CONFIG_EXTENSIONS.has(ext) || withoutBackupSuffix === "makefile" || withoutBackupSuffix === "dockerfile") return "config";
+  if (ext === ".md" || ext === ".markdown" || ext === ".rst") return "markdown";
+  if (ext === ".log" || ext === ".trace") return "log";
+  if (IMAGE_EXTENSIONS.has(ext)) return "image";
+  if (ARCHIVE_EXTENSIONS.has(ext)) return "archive";
+  if (CODE_EXTENSIONS.has(ext)) return "code";
+  if (DOCUMENT_EXTENSIONS.has(ext)) return "document";
+  if ([".dll", ".dylib", ".exe", ".so", ".wasm"].includes(ext)) return "binary";
+  return "file";
+}
+
+export function WorkspaceFileIcon({
+  path,
+  directory = false,
+  className,
+  kind: explicitKind,
+}: {
+  path: string;
+  directory?: boolean;
+  className?: string;
+  kind?: WorkspaceFileIconKind;
+}) {
+  const kind = explicitKind ?? workspaceFileIconKind(path, directory);
+  return (
+    <svg
+      className={["lab-file-icon", kind, className].filter(Boolean).join(" ")}
+      data-file-kind={kind}
+      viewBox="0 0 16 16"
+      aria-hidden="true"
+      fill="none"
+    >
+      {kind === "folder" && <path d="M2.1 4.5h4l1.2 1.3h6.6v6.5a1.1 1.1 0 0 1-1.1 1.1H3.2a1.1 1.1 0 0 1-1.1-1.1z" />}
+      {kind === "notebook" && <><rect x="3" y="2.8" width="10" height="10.4" rx="1.3" /><path d="M5.3 5.3h1.5M9.2 5.3h1.5M5.3 8h1.5M9.2 8h1.5M5.3 10.7h5.4" /></>}
+      {kind === "pdf" && <><path d="M4 2.4h5.1l2.9 2.9v8.2H4zM9.1 2.4v2.9H12" /><path d="M5.5 8.2h4.6M5.5 10.5h3.1" /></>}
+      {kind === "latex-source" && <><path d="M3.7 2.3h5.1l2.7 2.8v7.6H3.7zM8.8 2.3v2.8h2.7" /><path d="M5.2 8.2h4.7M5.2 10.5h3.3" /></>}
+      {kind === "latex-template" && <><path d="M3.3 2.7h9.4v10.6H3.3z" /><path d="M5.2 5.1h5.6M5.2 7.8h2.2M9.2 7.8h1.6M5.2 10.5h5.6" /></>}
+      {kind === "bibliography" && <><path d="M2.9 3.4c1.8-.8 3.3-.6 5.1.4v8.4c-1.8-1-3.3-1.2-5.1-.4zM13.1 3.4c-1.8-.8-3.3-.6-5.1.4v8.4c1.8-1 3.3-1.2 5.1-.4z" /><path d="M8 3.8v8.4M4.5 6h1.8M9.7 6h1.8" /></>}
+      {kind === "latex-artifact" && <><path d="M3.7 2.5h5.2l2.7 2.8v8.2H3.7zM8.9 2.5v2.8h2.7" /><path d="M5.3 9h4.9M5.3 11.1h3.3" /></>}
+      {kind === "database" && <><ellipse cx="8" cy="4" rx="4.8" ry="1.8" /><path d="M3.2 4v4.1c0 1 2.1 1.8 4.8 1.8s4.8-.8 4.8-1.8V4M3.2 8.1v3.9c0 1 2.1 1.8 4.8 1.8s4.8-.8 4.8-1.8V8.1" /></>}
+      {kind === "data" && <><rect x="2.7" y="3" width="10.6" height="10" rx="1" /><path d="M2.7 6.3h10.6M2.7 9.7h10.6M6.2 3v10M9.8 3v10" /></>}
+      {kind === "config" && <><path d="M3 4.4h10M3 8h10M3 11.6h10" /><circle cx="6.1" cy="4.4" r="1.1" /><circle cx="10.1" cy="8" r="1.1" /><circle cx="5" cy="11.6" r="1.1" /></>}
+      {kind === "markdown" && <><path d="M4 2.5h5.2L12 5.3v8.2H4zM9.2 2.5v2.8H12" /><path d="M5.5 8.2h4.8M5.5 10.6h3.3" /></>}
+      {kind === "document" && <><path d="M4 2.5h5.2L12 5.3v8.2H4zM9.2 2.5v2.8H12" /><path d="M5.6 8h4.6M5.6 10.2h4.6M5.6 12.1h2.8" /></>}
+      {kind === "log" && <><path d="M3.4 2.8h9.2v10.4H3.4z" /><path d="M5.4 5.5h5.2M5.4 8h5.2M5.4 10.5h3.5" /></>}
+      {kind === "image" && <><rect x="2.7" y="3" width="10.6" height="10" rx="1" /><circle cx="6" cy="6.1" r="1" /><path d="m4.2 11 2.7-2.7 1.8 1.7 1.2-1.2 2 2.2" /></>}
+      {kind === "archive" && <><path d="M3.6 3.2h8.8v9.6H3.6zM3.6 5.3h8.8" /><path d="M8 6.8v1.1M8 9v1.1M8 11.2v.1" /></>}
+      {kind === "code" && <path d="m6.2 4-3.1 4 3.1 4M9.8 4l3.1 4-3.1 4M8.9 3.3 7.1 12.7" />}
+      {kind === "binary" && <path d="m8 2.4 4.7 2.7v5.8L8 13.6l-4.7-2.7V5.1zM3.3 5.1 8 7.8l4.7-2.7M8 7.8v5.8" />}
+      {kind === "file" && <path d="M4 2.5h5.2L12 5.3v8.2H4zM9.2 2.5v2.8H12" />}
+    </svg>
+  );
 }
 
 type FileIconName = "file" | "folder" | "open" | "refresh";
@@ -137,6 +242,7 @@ export default function LabFiles({
   onFileChanged,
 }: Props) {
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set([""]));
+  const [artifactGroups, setArtifactGroups] = useState<Set<string>>(() => new Set());
   const [children, setChildren] = useState<Record<string, FileTreeEntry[]>>({});
   const [loading, setLoading] = useState<Set<string>>(() => new Set());
   const [operationBusy, setOperationBusy] = useState(false);
@@ -185,6 +291,7 @@ export default function LabFiles({
 
   useEffect(() => {
     setExpanded(new Set([""]));
+    setArtifactGroups(new Set());
     setChildren({});
     setError(null);
     void loadDir("");
@@ -199,6 +306,15 @@ export default function LabFiles({
         next.add(path);
         if (!children[path] && !loading.has(path)) void loadDir(path);
       }
+      return next;
+    });
+  };
+
+  const toggleArtifactGroup = (path: string) => {
+    setArtifactGroups((items) => {
+      const next = new Set(items);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
       return next;
     });
   };
@@ -305,14 +421,15 @@ export default function LabFiles({
     }
   };
 
-  const renderEntry = (entry: FileTreeEntry, depth: number) => {
+  function renderEntry(entry: FileTreeEntry, depth: number, generated = false) {
     const isExpanded = expanded.has(entry.path);
     const isActive = activePath === entry.path;
     const nested = children[entry.path] ?? [];
+    const iconKind = generated ? "latex-artifact" : workspaceFileIconKind(entry.path, entry.isDir);
     return (
       <div key={entry.path}>
         <div
-          className={`lab-explorer-row${entry.isDir ? " folder" : " file"}${isActive ? " active" : ""}`}
+          className={`lab-explorer-row${entry.isDir ? " folder" : " file"}${iconKind === "latex-artifact" ? " generated" : ""}${isActive ? " active" : ""}`}
           style={{ paddingLeft: `${depth * 14 + 8}px` }}
           onContextMenu={(event) => {
             event.preventDefault();
@@ -331,8 +448,8 @@ export default function LabFiles({
             }}
           >
             <span className="lab-explorer-caret">{entry.isDir ? (isExpanded ? "v" : ">") : ""}</span>
-            <span className={`lab-explorer-icon ${entry.isDir ? "folder" : "file"}`}>
-              {entry.isDir ? "" : iconForFile(entry.path)}
+            <span className="lab-explorer-icon">
+              <WorkspaceFileIcon path={entry.path} directory={entry.isDir} kind={iconKind} />
             </span>
             <span className="lab-explorer-name">{entry.name}</span>
           </button>
@@ -349,12 +466,49 @@ export default function LabFiles({
                 Empty
               </div>
             )}
-            {nested.map((child) => renderEntry(child, depth + 1))}
+            {renderEntries(nested, depth + 1, entry.path)}
           </div>
         )}
       </div>
     );
-  };
+  }
+
+  function renderEntries(entries: FileTreeEntry[], depth: number, parentPath: string) {
+    const isGenerated = (entry: FileTreeEntry) => {
+      if (entry.isDir) return false;
+      if (isLatexBuildArtifact(entry.path)) return true;
+      if (extension(entry.path) !== ".log") return false;
+      const stem = basename(entry.path).slice(0, -4).toLowerCase();
+      return entries.some((candidate) => !candidate.isDir && basename(candidate.path).toLowerCase() === `${stem}.tex`);
+    };
+    const generated = entries.filter(isGenerated);
+    const visible = entries.filter((entry) => !isGenerated(entry));
+    const groupKey = `latex-build:${parentPath}`;
+    const groupOpen = artifactGroups.has(groupKey);
+
+    return (
+      <>
+        {visible.map((entry) => renderEntry(entry, depth))}
+        {generated.length > 0 && (
+          <div className={`lab-explorer-artifact-group${groupOpen ? " open" : ""}`}>
+            <button
+              type="button"
+              className="lab-explorer-artifact-toggle"
+              style={{ paddingLeft: `${depth * 14 + 8}px` }}
+              title={`${generated.length} generated files created by LaTeX compilation`}
+              onClick={() => toggleArtifactGroup(groupKey)}
+            >
+              <span className="lab-explorer-caret">{groupOpen ? "v" : ">"}</span>
+              <WorkspaceFileIcon path="" kind="latex-artifact" />
+              <span>LaTeX build files</span>
+              <em>{generated.length}</em>
+            </button>
+            {groupOpen && generated.map((entry) => renderEntry(entry, depth + 1, true))}
+          </div>
+        )}
+      </>
+    );
+  }
 
   const rootChildren = children[""] ?? [];
 
@@ -378,6 +532,7 @@ export default function LabFiles({
       <div className="lab-explorer-root-row">
         <button className="lab-explorer-root" onClick={() => toggleDir("")}>
           <span className="lab-explorer-caret">{expanded.has("") ? "v" : ">"}</span>
+          <WorkspaceFileIcon path={projectPath ?? ""} directory />
           <span>{rootLabel(projectPath)}</span>
         </button>
         {projectPath && (
@@ -404,7 +559,7 @@ export default function LabFiles({
           {expanded.has("") && (
             <>
               {loading.has("") && <div className="lab-explorer-muted root">Loading...</div>}
-              {!loading.has("") && rootChildren.map((entry) => renderEntry(entry, 0))}
+              {!loading.has("") && renderEntries(rootChildren, 0, "")}
             </>
           )}
         </div>

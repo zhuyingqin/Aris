@@ -1,4 +1,5 @@
 import { Fragment, lazy, Suspense, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import {
   isTauri,
@@ -11,6 +12,7 @@ import {
   literatureImportBibliography,
   literatureImportPdfAsRecord,
   literatureMergeDuplicates,
+  literatureRagCards,
   literatureRagIndexLibrary,
   literatureRagIndexPdf,
   literatureRagStatus,
@@ -24,6 +26,8 @@ import {
   projectRagSearch,
   type LiteratureRagIndexLibraryResult,
   type LiteratureRagDatabaseStatus,
+  type LiteratureRetrievalCardPage,
+  type RetrievalCardPreview,
   type ProjectRagAnswerResult,
   type ProjectRagSearchResult,
 } from "../api/tauri";
@@ -264,6 +268,42 @@ function formatAuthors(authors: string[]) {
   return `${authors.slice(0, 3).join(", ")} et al.`;
 }
 
+/** One retrieval-card preview, shared by the inline inventory and the browser modal. */
+function RetrievalCardPreviewItem({
+  preview,
+  paperTitle,
+  onOpenCitation,
+}: {
+  preview: RetrievalCardPreview;
+  paperTitle: (paperId: string) => string;
+  onOpenCitation: (paperId: string, page?: number) => void;
+}) {
+  const terms = [
+    ...preview.card.concepts,
+    ...preview.card.aliases,
+    ...preview.card.methods,
+    ...preview.card.datasets,
+    ...preview.card.metrics,
+    ...preview.card.limitations,
+    ...preview.card.languageTerms,
+  ].slice(0, 12);
+  return (
+    <article className="lit-rag-card-preview">
+      <div className="lit-rag-card-preview-head">
+        <strong>{paperTitle(preview.paperId)}</strong>
+        <button type="button" onClick={() => onOpenCitation(preview.paperId, preview.pageStart)}>
+          p.{preview.pageStart}
+        </button>
+      </div>
+      {preview.card.sectionHeadings.length > 0 && <small>{preview.card.sectionHeadings.join(" / ")}</small>}
+      {preview.card.questions.length > 0 && <p>{preview.card.questions.slice(0, 3).join("；")}</p>}
+      {terms.length > 0 && <div className="lit-rag-card-terms">{terms.map((term) => <span key={term}>{term}</span>)}</div>}
+      <blockquote>{preview.sourcePreview}</blockquote>
+      <footer>{preview.card.generatedBy || "configured executor"} · prompt v{preview.card.promptVersion}</footer>
+    </article>
+  );
+}
+
 function LiteratureRagPanel({
   selectedPaper,
   papers,
@@ -285,6 +325,7 @@ function LiteratureRagPanel({
   const [databaseStatus, setDatabaseStatus] = useState<LiteratureRagDatabaseStatus | null>(null);
   const [databaseStatusError, setDatabaseStatusError] = useState("");
   const [databaseStatusRefreshing, setDatabaseStatusRefreshing] = useState(false);
+  const [cardBrowserOpen, setCardBrowserOpen] = useState(false);
   const [autoRetrievalCards, setAutoRetrievalCards] = useState(readAutoRetrievalCardsPreference);
   const [retrievalCardBuild, setRetrievalCardBuild] = useState({
     running: false,
@@ -644,37 +685,22 @@ function LiteratureRagPanel({
                 {databaseStatus.staleCardCount > 0 ? ` · 失效卡 ${databaseStatus.staleCardCount} 张` : ""}
               </small>
             </div>
-            <details className="lit-rag-card-browser">
-              <summary>查看检索卡内容（最近 {databaseStatus.cardPreviews.length} 张）</summary>
-              {databaseStatus.cardPreviews.length === 0 ? (
-                <p className="lit-note-text">当前还没有检索卡。</p>
-              ) : databaseStatus.cardPreviews.map((preview) => {
-                const terms = [
-                  ...preview.card.concepts,
-                  ...preview.card.aliases,
-                  ...preview.card.methods,
-                  ...preview.card.datasets,
-                  ...preview.card.metrics,
-                  ...preview.card.limitations,
-                  ...preview.card.languageTerms,
-                ].slice(0, 12);
-                return (
-                  <article key={preview.chunkId} className="lit-rag-card-preview">
-                    <div className="lit-rag-card-preview-head">
-                      <strong>{paperTitle(preview.paperId)}</strong>
-                      <button type="button" onClick={() => onOpenCitation(preview.paperId, preview.pageStart)}>
-                        p.{preview.pageStart}
-                      </button>
-                    </div>
-                    {preview.card.sectionHeadings.length > 0 && <small>{preview.card.sectionHeadings.join(" / ")}</small>}
-                    {preview.card.questions.length > 0 && <p>{preview.card.questions.slice(0, 3).join("；")}</p>}
-                    {terms.length > 0 && <div className="lit-rag-card-terms">{terms.map((term) => <span key={term}>{term}</span>)}</div>}
-                    <blockquote>{preview.sourcePreview}</blockquote>
-                    <footer>{preview.card.generatedBy || "configured executor"} · prompt v{preview.card.promptVersion}</footer>
-                  </article>
-                );
-              })}
-            </details>
+            <div className="lit-rag-card-browser">
+              <button
+                type="button"
+                className="lit-rag-card-browse-btn"
+                onClick={() => setCardBrowserOpen(true)}
+                disabled={databaseStatus.currentCardCount === 0}
+              >
+                <SvgIcon name="library" size={13} />
+                <span>
+                  {databaseStatus.currentCardCount === 0
+                    ? "当前还没有检索卡"
+                    : `浏览全部检索卡（${databaseStatus.currentCardCount} 张）`}
+                </span>
+                {databaseStatus.currentCardCount > 0 && <SvgIcon name="chevronRight" size={13} />}
+              </button>
+            </div>
           </>
         )}
       </section>
@@ -856,7 +882,202 @@ function LiteratureRagPanel({
           )}
         </div>
       )}
+
+      {cardBrowserOpen && (
+        <RetrievalCardBrowser
+          papers={papers}
+          paperTitle={paperTitle}
+          onOpenCitation={onOpenCitation}
+          onClose={() => setCardBrowserOpen(false)}
+        />
+      )}
     </section>
+  );
+}
+
+/** Page size for the retrieval-card browser modal. */
+const CARD_BROWSER_PAGE_SIZE = 20;
+
+/**
+ * Full-screen browser over every generated retrieval card: text filter over the
+ * card's structured terms and source text, per-paper narrowing, and offset
+ * pagination. Replaces the inline recent-12 inventory list so a large card
+ * collection stays reachable.
+ */
+function RetrievalCardBrowser({
+  papers,
+  paperTitle,
+  onOpenCitation,
+  onClose,
+}: {
+  papers: LiteraturePaper[];
+  paperTitle: (paperId: string) => string;
+  onOpenCitation: (paperId: string, page?: number) => void;
+  onClose: () => void;
+}) {
+  const [queryInput, setQueryInput] = useState("");
+  const [query, setQuery] = useState("");
+  const [paperId, setPaperId] = useState("");
+  const [offset, setOffset] = useState(0);
+  const [page, setPage] = useState<LiteratureRetrievalCardPage | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  // Debounce the free-text filter; committing it also resets to the first page.
+  useEffect(() => {
+    const handle = setTimeout(() => {
+      setQuery(queryInput.trim());
+      setOffset(0);
+    }, 220);
+    return () => clearTimeout(handle);
+  }, [queryInput]);
+
+  useEffect(() => {
+    if (!isTauri()) {
+      setLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setLoading(true);
+    literatureRagCards({ query, paperId: paperId || undefined, offset, limit: CARD_BROWSER_PAGE_SIZE })
+      .then((result) => {
+        if (cancelled) return;
+        setPage(result);
+        setError("");
+      })
+      .catch((cause) => {
+        if (!cancelled) setError(String(cause));
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [query, paperId, offset]);
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  const paperOptions = useMemo(
+    () =>
+      [...papers]
+        .map((paper) => ({ id: paper.id, title: paper.title || paper.id }))
+        .sort((a, b) => a.title.localeCompare(b.title)),
+    [papers],
+  );
+
+  const total = page?.total ?? 0;
+  const rangeStart = total === 0 ? 0 : offset + 1;
+  const rangeEnd = Math.min(offset + CARD_BROWSER_PAGE_SIZE, total);
+  const hasPrev = offset > 0;
+  const hasNext = offset + CARD_BROWSER_PAGE_SIZE < total;
+
+  return createPortal(
+    <div
+      className="lit-card-browser-overlay"
+      role="presentation"
+      onClick={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
+      <div className="lit-card-browser-modal" role="dialog" aria-modal="true" aria-label="检索卡浏览器">
+        <header className="lit-card-browser-head">
+          <div className="lit-card-browser-title">
+            <span className="lit-rag-section-icon" aria-hidden="true"><SvgIcon name="library" size={15} /></span>
+            <div>
+              <strong>检索卡浏览器</strong>
+              <span>{total > 0 ? `共 ${total} 张检索卡` : "没有匹配的检索卡"}</span>
+            </div>
+          </div>
+          <button type="button" className="lit-card-browser-close" onClick={onClose} aria-label="关闭">
+            <SvgIcon name="close" size={16} />
+          </button>
+        </header>
+
+        <div className="lit-card-browser-toolbar">
+          <label className="lit-card-browser-search">
+            <SvgIcon name="search" size={14} />
+            <input
+              value={queryInput}
+              onChange={(event) => setQueryInput(event.target.value)}
+              placeholder="按概念、方法、数据集、指标或原文关键词筛选…"
+              aria-label="筛选检索卡"
+            />
+            {queryInput && (
+              <button type="button" onClick={() => setQueryInput("")} aria-label="清除筛选">
+                <SvgIcon name="close" size={12} />
+              </button>
+            )}
+          </label>
+          <select
+            className="lit-card-browser-paper"
+            value={paperId}
+            onChange={(event) => {
+              setPaperId(event.target.value);
+              setOffset(0);
+            }}
+            aria-label="按论文筛选"
+          >
+            <option value="">全部论文</option>
+            {paperOptions.map((paper) => (
+              <option key={paper.id} value={paper.id}>{paper.title}</option>
+            ))}
+          </select>
+        </div>
+
+        <div className="lit-card-browser-body">
+          {error ? (
+            <p className="lit-rag-database-error">读取失败：{error}</p>
+          ) : loading && !page ? (
+            <div className="lit-card-browser-empty"><span className="lit-search-spinner" aria-hidden="true" /> 正在读取检索卡…</div>
+          ) : total === 0 ? (
+            <div className="lit-card-browser-empty">
+              {query || paperId ? "没有匹配的检索卡，换一个关键词或论文试试。" : "当前还没有检索卡。"}
+            </div>
+          ) : (
+            <div className={`lit-card-browser-list${loading ? " loading" : ""}`}>
+              {(page?.cards ?? []).map((preview) => (
+                <RetrievalCardPreviewItem
+                  key={preview.chunkId}
+                  preview={preview}
+                  paperTitle={paperTitle}
+                  onOpenCitation={onOpenCitation}
+                />
+              ))}
+            </div>
+          )}
+        </div>
+
+        {total > CARD_BROWSER_PAGE_SIZE && (
+          <footer className="lit-card-browser-foot">
+            <span>{rangeStart}–{rangeEnd} / {total}</span>
+            <div className="lit-card-browser-pager">
+              <button
+                type="button"
+                onClick={() => setOffset((value) => Math.max(0, value - CARD_BROWSER_PAGE_SIZE))}
+                disabled={!hasPrev || loading}
+              >
+                <SvgIcon name="chevronLeft" size={13} /> 上一页
+              </button>
+              <button
+                type="button"
+                onClick={() => setOffset((value) => value + CARD_BROWSER_PAGE_SIZE)}
+                disabled={!hasNext || loading}
+              >
+                下一页 <SvgIcon name="chevronRight" size={13} />
+              </button>
+            </div>
+          </footer>
+        )}
+      </div>
+    </div>,
+    document.body,
   );
 }
 

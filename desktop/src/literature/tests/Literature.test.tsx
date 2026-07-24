@@ -35,6 +35,7 @@ const mocks = vi.hoisted(() => ({
   literatureRagIndexPdf: vi.fn(),
   literatureRagIndexLibrary: vi.fn(),
   literatureRagStatus: vi.fn(),
+  literatureRagCards: vi.fn(),
   literatureRagSearch: vi.fn(),
   knowledgeLoad: vi.fn(),
   knowledgeSearch: vi.fn(),
@@ -82,6 +83,7 @@ vi.mock("../../api/tauri", () => ({
   literatureRagIndexPdf: mocks.literatureRagIndexPdf,
   literatureRagIndexLibrary: mocks.literatureRagIndexLibrary,
   literatureRagStatus: mocks.literatureRagStatus,
+  literatureRagCards: mocks.literatureRagCards,
   literatureRagSearch: mocks.literatureRagSearch,
   knowledgeLoad: mocks.knowledgeLoad,
   knowledgeSearch: mocks.knowledgeSearch,
@@ -359,6 +361,36 @@ beforeEach(() => {
       },
     }],
   });
+  mocks.literatureRagCards.mockReset().mockResolvedValue({
+    total: 1,
+    offset: 0,
+    limit: 20,
+    query: "",
+    cards: [{
+      chunkId: "chunk-1",
+      paperId: fixturePaper.id,
+      relativePath: "papers/persisted-paper.pdf",
+      pageStart: 2,
+      pageEnd: 2,
+      updatedAt: "123",
+      sourcePreview: "The evaluation protocol is summarized on this page.",
+      card: {
+        chunkId: "chunk-1",
+        sourceContentHash: "hash",
+        questions: ["What are the evaluation limitations?"],
+        concepts: ["small sample"],
+        sectionHeadings: ["Limitations"],
+        aliases: ["limited cohort"],
+        methods: [],
+        datasets: [],
+        metrics: [],
+        limitations: ["sample size"],
+        languageTerms: ["小样本"],
+        generatedBy: "test-model",
+        promptVersion: 1,
+      },
+    }],
+  });
   mocks.literatureRagSearch.mockReset().mockResolvedValue({ query: "", results: [] });
   mocks.knowledgeLoad.mockReset().mockResolvedValue({ points: [] });
   mocks.knowledgeSearch.mockReset().mockResolvedValue({ results: [] });
@@ -437,11 +469,13 @@ describe("Literature library", () => {
     expect(within(inventory).getByText("待生成卡")).toBeTruthy();
     expect(within(inventory).getByText("papers/rag/literature-retrieval.sqlite")).toBeTruthy();
 
-    await user.click(within(inventory).getByText(/查看检索卡内容/));
-    expect(within(inventory).getByText("What are the evaluation limitations?")).toBeTruthy();
-    expect(within(inventory).getByText("small sample")).toBeTruthy();
-    expect(within(inventory).getByText(/evaluation protocol is summarized/)).toBeTruthy();
+    await user.click(within(inventory).getByText(/浏览全部检索卡/));
+    const cardBrowser = await screen.findByRole("dialog", { name: "检索卡浏览器" });
+    expect(within(cardBrowser).getByText("What are the evaluation limitations?")).toBeTruthy();
+    expect(within(cardBrowser).getByText("small sample")).toBeTruthy();
+    expect(within(cardBrowser).getByText(/evaluation protocol is summarized/)).toBeTruthy();
     expect(mocks.literatureRagStatus).toHaveBeenCalledWith(12);
+    expect(mocks.literatureRagCards).toHaveBeenCalled();
   });
 
   it("builds a page-aware local FTS index without requiring an embedding configuration", async () => {

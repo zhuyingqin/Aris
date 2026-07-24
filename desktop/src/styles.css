@@ -316,38 +316,45 @@ textarea {
 }
 
 .app-head .dir {
-  margin-left: 4px;
-  padding: 4px 10px;
+  margin-left: 2px;
+  padding: 4px 6px;
   color: var(--text-dim);
   font-size: 11px;
   font-family: ui-monospace, "Cascadia Code", monospace;
-  max-width: 380px;
+  letter-spacing: -0.1px;
+  max-width: 260px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  background: var(--bg-2);
-  border: 1px solid var(--border);
+  background: transparent;
+  border: 1px solid transparent;
   border-radius: 6px;
 }
 
 .app-open-workspace {
   display: inline-grid;
-  width: 30px;
-  height: 30px;
+  width: 28px;
+  height: 28px;
   flex: 0 0 auto;
   padding: 0;
   place-items: center;
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  background: var(--bg-2);
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
   color: var(--text-dim);
+  transition: background 0.14s, border-color 0.14s, color 0.14s;
 }
 
 .app-open-workspace:hover:not(:disabled),
 .app-open-workspace:focus-visible {
-  border-color: color-mix(in srgb, var(--accent) 54%, var(--border));
-  background: color-mix(in srgb, var(--accent) 12%, var(--bg-2));
+  border-color: var(--border);
+  background: var(--bg-2);
   color: var(--text);
+}
+
+.app-open-workspace:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 .sidebar {
@@ -3923,9 +3930,9 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
 }
 
 .app-head .dir {
-  border: 0;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--bg-2) 72%, transparent);
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
 }
 
 .app.app-chat-shell {
@@ -9713,13 +9720,18 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
 .chat-head-actions button {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 5px;
-  min-height: 30px;
-  padding: 5px 10px;
+  min-width: 28px;
+  min-height: 28px;
+  padding: 4px 8px;
   background: transparent;
-  border-color: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
   color: var(--text-dim);
   font-size: 12px;
+  cursor: pointer;
+  transition: background 0.14s, border-color 0.14s, color 0.14s;
 }
 
 .chat-head-actions button:hover {
@@ -12435,7 +12447,8 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
 }
 
 .chat-project-brief-toggle,
-.chat-side-task-toggle {
+.chat-side-task-toggle,
+.chat-export-btn {
   padding: 4px !important;
 }
 

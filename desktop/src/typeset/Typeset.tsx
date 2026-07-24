@@ -6090,6 +6090,8 @@ function scrollCodeEditorToLine(view: EditorView, line: number): void {
 export default function Typeset() {
   const currentProject = useStore((state) => state.currentProject);
   const setTypesetDirty = useStore((state) => state.setTypesetDirty);
+  const pendingTypesetFilePath = useStore((state) => state.pendingTypesetFilePath);
+  const setPendingTypesetFilePath = useStore((state) => state.setPendingTypesetFilePath);
   const literaturePapers = useLiteratureStore((state) => state.library.papers);
   const loadLiterature = useLiteratureStore((state) => state.load);
   const ensureCitationKeys = useLiteratureStore((state) => state.ensureCitationKeys);
@@ -6218,7 +6220,7 @@ export default function Typeset() {
   const slideFocusActive = editorMode === "visual" && beamerSlides.length > 0 && slideFocusMode;
   const effectiveProjectPanelVisible = projectPanelVisible && !slideFocusActive;
   const effectivePdfPanelVisible = pdfPanelVisible && !slideFocusActive;
-  const activeWorkDir = useMemo(() => workDirForSource(sourcePath), [sourcePath]);
+  const activeWorkDir = useMemo(() => workDirForSource(sourcePath ?? previewPath), [previewPath, sourcePath]);
   const browserPreviewMode = !isTauri();
   const diagnosticsCount = useMemo(() => {
     if (compileResult?.diagnostics?.length) return compileResult.diagnostics.length;
@@ -6429,6 +6431,8 @@ export default function Typeset() {
     }
     if (extension(path) === ".pdf") {
       setPreviewPath(path);
+      setPdfPanelVisible(true);
+      setSlideFocusMode(false);
       setRefreshKey((key) => key + 1);
     }
   }, [openSource]);
@@ -6554,6 +6558,15 @@ export default function Typeset() {
   useEffect(() => {
     void scanProject();
   }, [currentProject?.id, scanProject]);
+
+  // Chat can request a TeX source or a standalone PDF before this lazy-loaded
+  // workspace mounts. Consume that request once the project scan has started;
+  // PDFs keep the source empty and render directly in the right-hand preview.
+  useEffect(() => {
+    if (!pendingTypesetFilePath) return;
+    openPath(pendingTypesetFilePath);
+    setPendingTypesetFilePath(null);
+  }, [openPath, pendingTypesetFilePath, setPendingTypesetFilePath]);
 
   useEffect(() => {
     const lineCount = Math.max(1, draft.split("\n").length);
@@ -7133,9 +7146,10 @@ export default function Typeset() {
     ));
   }, []);
 
+  const hasWorkspaceDocument = Boolean(sourcePath || loaded || previewPath);
   const gridClassName = [
     "typeset-main-grid ide-redesign-body",
-    !sourcePath && !loaded ? "start-mode" : "",
+    !hasWorkspaceDocument ? "start-mode" : "",
     !effectiveProjectPanelVisible ? "project-hidden" : "",
     !effectivePdfPanelVisible ? "pdf-hidden" : "",
     slideFocusActive ? "slide-focus-mode" : "",
@@ -7158,7 +7172,7 @@ export default function Typeset() {
         className={gridClassName}
         style={gridStyle}
       >
-        {(sourcePath || loaded) && (
+        {hasWorkspaceDocument && (
           <nav className="typeset-rail ide-rail" aria-label="Typeset sections">
             <div className="ide-rail-tabs-nav">
               <div className="ide-rail-tabs-wrapper">
@@ -7215,7 +7229,7 @@ export default function Typeset() {
             </div>
           </nav>
         )}
-        {!sourcePath && !loaded ? (
+        {!hasWorkspaceDocument ? (
           <TypesetStartPage
             projectPath={currentProject?.path ?? null}
             documents={startDocuments}
@@ -7300,7 +7314,7 @@ export default function Typeset() {
                 />
               )}
               {error && <div className="typeset-error-bar">{error}</div>}
-              {loading ? (
+              {loading && !previewPath ? (
                 <div className="typeset-empty">Loading source...</div>
               ) : loaded ? (
                 <>
@@ -7365,7 +7379,9 @@ export default function Typeset() {
                   </div>
                 </>
               ) : (
-                <div className="typeset-empty">Create or open a .tex file.</div>
+                <div className="typeset-empty">
+                  {previewPath ? "PDF is open in the side panel." : "Create or open a .tex file."}
+                </div>
               )}
             </section>
             {effectivePdfPanelVisible && (

@@ -32,6 +32,7 @@ import { CHAT_COPY } from "./i18n";
 import { cleanChatTitle, patchLastAssistantTurn, textFromTurn, titleFromTurns } from "./model";
 import type { ChatSession } from "./types";
 import { useChatStream } from "./useChatStream";
+import { formatUserFacingError } from "../errorMessage";
 import { onChatModelsUpdated } from "../modelEvents";
 import { notifyProjectBriefUpdated } from "./ProjectBriefCard";
 import {
@@ -298,6 +299,7 @@ export function useChatRun({
   }, [allSessionsRef]);
 
   const { run, stop, runningSessionIds } = useChatStream({
+    language,
     patchAssistant,
     onComplete,
     onError,
@@ -341,8 +343,8 @@ export function useChatRun({
       return;
     }
     const request = model ? chatModelSet(model, false) : chatStatus();
-    request.then(setStatus).catch((error) => setStatus({ ready: false, message: String(error) }));
-  }, [copy.browserProvider, copy.previewModel]);
+    request.then(setStatus).catch((error) => setStatus({ ready: false, message: formatUserFacingError(error, language) }));
+  }, [copy.browserProvider, copy.previewModel, language]);
 
   const refreshModelOptions = useCallback(() => {
     if (!isTauri()) {
@@ -546,7 +548,7 @@ export function useChatRun({
       // stream hook cannot surface this rejection for us. The optimistic pair
       // is already visible; finish its placeholder through the normal error
       // path and mark the backend for repair on the next send.
-      const detail = String(error);
+      const detail = formatUserFacingError(error, language);
       onError(
         session.id,
         shouldResetContext ? `Unable to reset chat context: ${detail}` : detail,

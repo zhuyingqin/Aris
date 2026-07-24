@@ -150,6 +150,21 @@ pub struct RetrievalCardPreview {
     pub card: RetrievalCardInput,
 }
 
+/// One page of generated retrieval cards for the Desktop card browser. A
+/// read-only projection that supports a text filter over the card's structured
+/// terms and bound source text plus offset pagination, so the user can reach
+/// every card instead of only the most recent ones shown in the status
+/// inventory.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LiteratureRetrievalCardPage {
+    pub total: usize,
+    pub offset: usize,
+    pub limit: usize,
+    pub query: String,
+    pub cards: Vec<RetrievalCardPreview>,
+}
+
 /// Structured output of the fast query-planning LLM. Bounds are enforced by
 /// `queries()` so a bad model response cannot fan out into an unbounded search.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -358,6 +373,126 @@ pub fn literature_rag_database_status_at(
         citation_mention_count,
         metadata_document_count,
         card_previews,
+    })
+}
+
+/// Browse generated retrieval cards with an optional text filter and offset
+/// pagination. Read-only and never creates the database. The filter matches the
+/// card payload (all structured terms) and the bound source text, so a user can
+/// locate any card by concept, method, dataset, metric, alias, or wording; an
+/// optional `paper_id` narrows the browse to a single document.
+pub fn literature_rag_cards_page_at(
+    base: &Path,
+    query: &str,
+    paper_id: Option<&str>,
+    offset: usize,
+    limit: usize,
+) -> Result<LiteratureRetrievalCardPage, String> {
+    let trimmed = query.trim();
+    let limit = limit.clamp(1, 100);
+    let paper_filter = paper_id.map(str::trim).filter(|value| !value.is_empty());
+    let path = literature_fts_path(base);
+    if !path.exists() {
+        return Ok(LiteratureRetrievalCardPage {
+            total: 0,
+            offset: 0,
+            limit,
+            query: trimmed.to_string(),
+            cards: Vec::new(),
+        });
+    }
+
+    let _guard = literature_text_index_lock()
+        .lock()
+        .map_err(|_| "local literature retrieval lock is poisoned".to_string())?;
+    let connection = open_literature_fts(base)?;
+
+    // Escape LIKE wildcards so user input is matched literally with ESCAPE '\'.
+    let like = format!(
+        "%{}%",
+        trimmed
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_")
+    );
+    let paper_bind = paper_filter.unwrap_or_default();
+
+    let total = connection
+        .query_row(
+            "SELECT COUNT(*)
+             FROM literature_retrieval_cards c
+             JOIN literature_pdf_text_chunks t
+               ON t.chunk_id=c.chunk_id AND t.content_hash=c.source_content_hash
+             WHERE (?1='' OR c.paper_id=?1)
+               AND (?2='' OR c.payload LIKE ?3 ESCAPE '\\' OR t.text LIKE ?3 ESCAPE '\\')",
+            params![paper_bind, trimmed, like],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|error| error.to_string())?;
+    let total = usize::try_from(total).unwrap_or(0);
+
+    let mut statement = connection
+        .prepare(
+            "SELECT c.chunk_id,c.paper_id,c.relative_path,c.page_start,c.page_end,
+                    c.updated_at,c.payload,t.text
+             FROM literature_retrieval_cards c
+             JOIN literature_pdf_text_chunks t
+               ON t.chunk_id=c.chunk_id AND t.content_hash=c.source_content_hash
+             WHERE (?1='' OR c.paper_id=?1)
+               AND (?2='' OR c.payload LIKE ?3 ESCAPE '\\' OR t.text LIKE ?3 ESCAPE '\\')
+             ORDER BY CAST(c.updated_at AS INTEGER) DESC,c.paper_id,c.page_start
+             LIMIT ?4 OFFSET ?5",
+        )
+        .map_err(|error| error.to_string())?;
+    let cards = statement
+        .query_map(
+            params![paper_bind, trimmed, like, limit as i64, offset as i64],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
+                ))
+            },
+        )
+        .map_err(|error| error.to_string())?
+        .map(|row| {
+            let (
+                chunk_id,
+                paper_id,
+                relative_path,
+                page_start,
+                page_end,
+                updated_at,
+                payload,
+                text,
+            ) = row.map_err(|error| error.to_string())?;
+            let card = serde_json::from_str::<RetrievalCardInput>(&payload)
+                .map_err(|error| format!("invalid retrieval card `{chunk_id}`: {error}"))?;
+            Ok(RetrievalCardPreview {
+                chunk_id,
+                paper_id,
+                relative_path,
+                page_start,
+                page_end,
+                updated_at,
+                source_preview: text.chars().take(360).collect(),
+                card,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+
+    Ok(LiteratureRetrievalCardPage {
+        total,
+        offset,
+        limit,
+        query: trimmed.to_string(),
+        cards,
     })
 }
 
@@ -1864,6 +1999,115 @@ mod tests {
         assert!(!status.exists);
         assert_eq!(status.chunk_count, 0);
         assert!(!literature_fts_path(&base).exists());
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn card_browser_filters_and_paginates() {
+        let base = temp_base("card-browser");
+
+        // Missing index browses to an empty page rather than creating a database.
+        let empty = literature_rag_cards_page_at(&base, "", None, 0, 20).expect("empty page");
+        assert_eq!(empty.total, 0);
+        assert!(empty.cards.is_empty());
+        assert!(!literature_fts_path(&base).exists());
+
+        // Paper 1: adaptive scheduling.
+        let (chunks, hash) = sample_chunks();
+        index_literature_document_text_at(&base, &chunks, &hash).expect("index paper-1");
+        upsert_retrieval_cards_at(
+            &base,
+            &[RetrievalCardInput {
+                chunk_id: chunks[0].chunk_id.clone(),
+                source_content_hash: chunks[0].content_hash.clone(),
+                questions: vec!["Which technique improves traffic efficiency?".to_string()],
+                concepts: vec!["traffic efficiency".to_string()],
+                section_headings: vec!["Evaluation".to_string()],
+                aliases: Vec::new(),
+                methods: vec!["adaptive scheduler".to_string()],
+                datasets: Vec::new(),
+                metrics: vec!["throughput".to_string()],
+                limitations: Vec::new(),
+                language_terms: vec!["流量效率".to_string()],
+                generated_by: "test-model".to_string(),
+                prompt_version: 1,
+            }],
+        )
+        .expect("card paper-1");
+
+        // Paper 2: diffusion models.
+        let pages2 = vec![
+            PdfPageText {
+                page: 1,
+                text: "Diffusion models denoise images step by step.".to_string(),
+                source: "embedded".to_string(),
+            },
+            PdfPageText {
+                page: 2,
+                text: "Sampling schedules trade speed for quality.".to_string(),
+                source: "embedded".to_string(),
+            },
+        ];
+        let hash2 = pdf_pages_content_hash(&pages2);
+        let chunks2 = chunk_pdf_pages("paper-2", "papers/paper-2.pdf", &pages2).expect("chunks2");
+        index_literature_document_text_at(&base, &chunks2, &hash2).expect("index paper-2");
+        upsert_retrieval_cards_at(
+            &base,
+            &[RetrievalCardInput {
+                chunk_id: chunks2[0].chunk_id.clone(),
+                source_content_hash: chunks2[0].content_hash.clone(),
+                questions: vec!["How do diffusion models sample?".to_string()],
+                concepts: vec!["diffusion models".to_string()],
+                section_headings: vec!["Method".to_string()],
+                aliases: Vec::new(),
+                methods: vec!["denoising".to_string()],
+                datasets: Vec::new(),
+                metrics: Vec::new(),
+                limitations: Vec::new(),
+                language_terms: Vec::new(),
+                generated_by: "test-model".to_string(),
+                prompt_version: 1,
+            }],
+        )
+        .expect("card paper-2");
+
+        // Unfiltered browse sees both cards.
+        let all = literature_rag_cards_page_at(&base, "", None, 0, 20).expect("all cards");
+        assert_eq!(all.total, 2);
+        assert_eq!(all.cards.len(), 2);
+
+        // Text filter over structured terms / source text narrows to one card.
+        let diffusion =
+            literature_rag_cards_page_at(&base, "diffusion", None, 0, 20).expect("diffusion");
+        assert_eq!(diffusion.total, 1);
+        assert_eq!(diffusion.cards.len(), 1);
+        assert_eq!(diffusion.cards[0].paper_id, "paper-2");
+
+        // The filter also matches the bound source text, not only the card payload.
+        let denoise =
+            literature_rag_cards_page_at(&base, "denoise images", None, 0, 20).expect("denoise");
+        assert_eq!(denoise.total, 1);
+        assert_eq!(denoise.cards[0].paper_id, "paper-2");
+
+        // Paper filter narrows to a single document.
+        let paper1 =
+            literature_rag_cards_page_at(&base, "", Some("paper-1"), 0, 20).expect("paper-1 only");
+        assert_eq!(paper1.total, 1);
+        assert_eq!(paper1.cards[0].paper_id, "paper-1");
+
+        // Pagination returns disjoint pages while reporting the full total.
+        let page_a = literature_rag_cards_page_at(&base, "", None, 0, 1).expect("page a");
+        let page_b = literature_rag_cards_page_at(&base, "", None, 1, 1).expect("page b");
+        assert_eq!(page_a.total, 2);
+        assert_eq!(page_b.total, 2);
+        assert_eq!(page_a.cards.len(), 1);
+        assert_eq!(page_b.cards.len(), 1);
+        assert_ne!(page_a.cards[0].chunk_id, page_b.cards[0].chunk_id);
+
+        // LIKE wildcards in user input are matched literally, not as patterns.
+        let literal = literature_rag_cards_page_at(&base, "%", None, 0, 20).expect("literal");
+        assert_eq!(literal.total, 0);
+
         let _ = fs::remove_dir_all(base);
     }
 

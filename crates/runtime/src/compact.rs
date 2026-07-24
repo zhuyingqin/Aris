@@ -16,7 +16,11 @@ const RECENT_MESSAGES_AUTHORITY_PREFIX: &str =
 const RESUME_WITHOUT_QUESTIONS_PREFIX: &str =
     "Continue the conversation from where it left off without asking the user any further questions.";
 const MAX_ACTIVE_USER_GOAL_CHARS: usize = 220;
-const MAX_PRIOR_COMPACTION_SUMMARY_CHARS: usize = 4_000;
+// A pinned block alone may use up to 8k characters. Keeping only 4k from the
+// prior summary could therefore cut away Current Focus, Active Issues, Todo,
+// and Code State during the next compaction. This remains bounded, but leaves
+// enough room for both the pinned facts and the structured working state.
+const MAX_PRIOR_COMPACTION_SUMMARY_CHARS: usize = 16_000;
 /// Token/turn-aware preservation never keeps fewer than this many complete,
 /// non-internal user turns, even when the token target is tiny. Guarantees a
 /// compaction cannot collapse the working set below the last couple of
@@ -899,6 +903,7 @@ fn pinned_context_lines(messages: &[ConversationMessage]) -> Vec<String> {
         .iter()
         .rev()
         .find_map(|summary| extract_prior_current_focus(summary))
+        .or_else(|| carried_pinned_values(messages, "- Carried focus: ", 1).pop())
     {
         lines.push(format!("- Carried focus: {focus}"));
     }
@@ -906,8 +911,19 @@ fn pinned_context_lines(messages: &[ConversationMessage]) -> Vec<String> {
         for todo in todos {
             lines.push(format!("- Todo: {todo}"));
         }
+    } else {
+        for todo in carried_pinned_values(messages, "- Todo: ", 16) {
+            lines.push(format!("- Todo: {todo}"));
+        }
     }
+    let mut errors = carried_pinned_values(messages, "- Unresolved error: ", 3);
     for error in collect_recent_tool_errors(messages, 3) {
+        push_unique_request(&mut errors, error);
+    }
+    if errors.len() > 3 {
+        errors.drain(..errors.len() - 3);
+    }
+    for error in errors {
         lines.push(format!("- Unresolved error: {error}"));
     }
     // Code state: the key files in play and the latest assistant decision/status,
@@ -918,7 +934,9 @@ fn pinned_context_lines(messages: &[ConversationMessage]) -> Vec<String> {
     if !files.is_empty() {
         lines.push(format!("- Key files: {}", files.join(", ")));
     }
-    if let Some(state) = latest_assistant_decision(messages) {
+    if let Some(state) = latest_assistant_decision(messages)
+        .or_else(|| carried_pinned_values(messages, "- Latest assistant state: ", 1).pop())
+    {
         lines.push(format!("- Latest assistant state: {state}"));
     }
     lines
@@ -940,6 +958,19 @@ fn latest_assistant_decision(messages: &[ConversationMessage]) -> Option<String>
 /// carried inside an internal continuation message, so the original
 /// requirements roll forward across repeated compactions.
 fn carried_pinned_requests(messages: &[ConversationMessage]) -> Vec<String> {
+    carried_pinned_values(messages, PINNED_REQUEST_PREFIX, MAX_PINNED_REQUESTS)
+}
+
+/// Recover bounded facts from the newest prior pinned block. User requests were
+/// already rolled forward, but Todo state, unresolved errors, and the latest
+/// assistant decision used to disappear after the second compaction because
+/// only their generated prose survived. Keeping the flat prefixed lines makes
+/// those working-state facts round-trippable without growing the summary.
+fn carried_pinned_values(
+    messages: &[ConversationMessage],
+    prefix: &str,
+    limit: usize,
+) -> Vec<String> {
     for message in messages.iter().rev() {
         if message.role != MessageRole::User || !is_internal_user_message(message) {
             continue;
@@ -950,16 +981,29 @@ fn carried_pinned_requests(messages: &[ConversationMessage]) -> Vec<String> {
         if !text.contains(PINNED_HEADER_MARKER) {
             continue;
         }
-        let requests = text
-            .lines()
-            .filter_map(|line| {
-                line.trim()
-                    .strip_prefix(PINNED_REQUEST_PREFIX)
-                    .map(str::to_string)
-            })
-            .collect::<Vec<_>>();
-        if !requests.is_empty() {
-            return requests;
+        let mut in_pinned = false;
+        let mut values = Vec::new();
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if trimmed.contains(PINNED_HEADER_MARKER) {
+                in_pinned = true;
+                continue;
+            }
+            if in_pinned && trimmed.starts_with("## ") {
+                break;
+            }
+            if !in_pinned {
+                continue;
+            }
+            if let Some(value) = trimmed.strip_prefix(prefix) {
+                push_unique_request(&mut values, value.to_string());
+            }
+        }
+        if !values.is_empty() {
+            if values.len() > limit {
+                values.drain(..values.len() - limit);
+            }
+            return values;
         }
     }
     Vec::new()
@@ -978,8 +1022,7 @@ fn collect_recent_tool_errors(messages: &[ConversationMessage], limit: usize) ->
                 ..
             } => {
                 let text = output.trim();
-                (!text.is_empty())
-                    .then(|| truncate_summary(&format!("{tool_name}: {text}"), 300))
+                (!text.is_empty()).then(|| truncate_summary(&format!("{tool_name}: {text}"), 300))
             }
             _ => None,
         })
@@ -1021,7 +1064,10 @@ pub(crate) fn minimal_pinned_block(
             truncate_summary(&original, OVERFLOW_PINNED_REQUEST_CHARS),
         );
     }
-    if let Some(latest) = collect_pinned_user_requests(messages).into_iter().next_back() {
+    if let Some(latest) = collect_pinned_user_requests(messages)
+        .into_iter()
+        .next_back()
+    {
         push_unique_request(
             &mut requests,
             truncate_summary(&latest, OVERFLOW_PINNED_REQUEST_CHARS),

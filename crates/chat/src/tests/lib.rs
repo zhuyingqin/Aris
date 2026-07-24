@@ -68,6 +68,14 @@ fn summarizer_model_honors_explicit_setting_over_defaults() {
 fn context_budget_scales_with_model_window() {
     // Large-window models get large budgets — the whole point of the fix.
     assert_eq!(
+        context_compaction_threshold_for_model("MiniMax-M3"),
+        800_000
+    );
+    assert_eq!(
+        context_compaction_threshold_for_model("MiniMax-M2.7"),
+        160_000
+    );
+    assert_eq!(
         context_compaction_threshold_for_model("MiniMax-Text-01"),
         320_000
     );
@@ -101,6 +109,8 @@ fn context_window_never_below_compaction_budget() {
     // ~4x inflation — that unifying the two tables in `aris_chat` fixes. One
     // representative model per family.
     for model in [
+        "MiniMax-M3",
+        "MiniMax-M2.7",
         "MiniMax-Text-01",
         "gemini-2.5-pro",
         "deepseek-v4-pro",
@@ -131,6 +141,8 @@ fn context_window_never_below_compaction_budget() {
     assert_eq!(context_window_for_model("kimi-k2"), 256_000);
     assert_eq!(context_window_for_model("qwen-max"), 256_000);
     assert_eq!(context_window_for_model("glm-4.6"), 200_000);
+    assert_eq!(context_window_for_model("MiniMax-M3"), 1_000_000);
+    assert_eq!(context_window_for_model("MiniMax-M2.7"), 204_800);
     // Kimi K3 keeps its genuine 1M window.
     assert_eq!(context_window_for_model("kimi-k3"), 1_000_000);
 }

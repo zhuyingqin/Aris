@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { fileOpen, fileRead } from "../api/tauri";
 import { SvgIcon } from "../SvgIcon";
-import { opensInCodePage } from "../lab/labEditorCore";
+import { workspaceFileOpenTarget } from "../lab/labEditorCore";
 
 interface Props {
   x: number;
@@ -10,10 +10,10 @@ interface Props {
   projectRoot?: string;
   onClose: () => void;
   onAttach: (path: string, content: string) => void;
-  onOpenInCode: (path: string) => void;
+  onOpenInWorkspace: (path: string) => void;
 }
 
-export default function FilePathMenu({ x, y, path, projectRoot, onClose, onAttach, onOpenInCode }: Props) {
+export default function FilePathMenu({ x, y, path, projectRoot, onClose, onAttach, onOpenInWorkspace }: Props) {
   const [openInOpen, setOpenInOpen] = useState(false);
   const [pos, setPos] = useState({ x, y });
   const menuRef = useRef<HTMLDivElement>(null);
@@ -28,6 +28,12 @@ export default function FilePathMenu({ x, y, path, projectRoot, onClose, onAttac
     : path.includes("\\")
       ? path.substring(0, path.lastIndexOf("\\"))
       : ".";
+  const workspaceTarget = workspaceFileOpenTarget(path);
+  const workspaceOpenLabel = workspaceTarget === "code"
+    ? "在 Code 页面打开"
+    : workspaceTarget === "latex"
+      ? "在 LaTeX 页面打开"
+      : "在 LaTeX 侧边预览打开";
 
   // Clamp to viewport after first paint
   useEffect(() => {
@@ -104,9 +110,9 @@ export default function FilePathMenu({ x, y, path, projectRoot, onClose, onAttac
         复制文件名
       </button>
       <div className="file-path-menu-divider" />
-      {opensInCodePage(path) && (
-        <button role="menuitem" onClick={() => { onOpenInCode(path); onClose(); }}>
-          在 Code 页面打开
+      {workspaceTarget !== "external" && (
+        <button role="menuitem" onClick={() => { onOpenInWorkspace(path); onClose(); }}>
+          {workspaceOpenLabel}
         </button>
       )}
       <div

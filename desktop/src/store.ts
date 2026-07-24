@@ -16,6 +16,7 @@ import {
   type NewApiLoginResult,
 } from "./api/tauri";
 import { isLabPreviewMode, isTypesetPreviewMode } from "./api/labPreview";
+import { formatUserFacingError } from "./errorMessage";
 
 const PREVIEW_PROJECT: DesktopProject = {
   id: "default",
@@ -221,13 +222,17 @@ interface AppState {
   pendingLabFilePath: string | null;
   setPendingLabFilePath: (value: string | null) => void;
 
+  /** One-shot file-open request consumed by the LaTeX page after it mounts. */
+  pendingTypesetFilePath: string | null;
+  setPendingTypesetFilePath: (value: string | null) => void;
+
   stateDir: string;
   error: string | null;
   projects: DesktopProject[];
   currentProject: DesktopProject | null;
   projectBusy: boolean;
 
-  setError: (message: string | null) => void;
+  setError: (message: unknown | null) => void;
   addProject: (path: string) => Promise<void>;
   switchProject: (id: string) => Promise<void>;
   reorderProjects: (ids: string[]) => Promise<void>;
@@ -318,13 +323,18 @@ export const useStore = create<AppState>((set, get) => ({
   pendingLabFilePath: null,
   setPendingLabFilePath: (value) => set({ pendingLabFilePath: value }),
 
+  pendingTypesetFilePath: null,
+  setPendingTypesetFilePath: (value) => set({ pendingTypesetFilePath: value }),
+
   stateDir: "",
   error: null,
   projects: [],
   currentProject: null,
   projectBusy: false,
 
-  setError: (message) => set({ error: message }),
+  setError: (message) => set({
+    error: message == null ? null : formatUserFacingError(message, get().language),
+  }),
   addProject: async (path) => {
     set({ projectBusy: true, error: null });
     try {
@@ -335,7 +345,7 @@ export const useStore = create<AppState>((set, get) => ({
       });
       set({ stateDir: await fetchStateDir() });
     } catch (error) {
-      set({ error: String(error) });
+      get().setError(error);
       throw error;
     } finally {
       set({ projectBusy: false });
@@ -352,7 +362,7 @@ export const useStore = create<AppState>((set, get) => ({
       });
       set({ stateDir: await fetchStateDir() });
     } catch (error) {
-      set({ error: String(error) });
+      get().setError(error);
       throw error;
     } finally {
       set({ projectBusy: false });
@@ -386,7 +396,7 @@ export const useStore = create<AppState>((set, get) => ({
       set({
         projects: previousProjects,
         currentProject: previousCurrentProject,
-        error: String(error),
+        error: formatUserFacingError(error, get().language),
       });
       throw error;
     } finally {
@@ -410,7 +420,7 @@ export const useStore = create<AppState>((set, get) => ({
       .catch(() => undefined);
     projectsGet()
       .then((view) => set({ projects: view.projects, currentProject: view.currentProject }))
-      .catch((error) => set({ error: String(error) }));
+      .catch((error) => get().setError(error));
 
     let disposed = false;
     let unlistenProjectChanged: (() => void) | undefined;
@@ -422,7 +432,7 @@ export const useStore = create<AppState>((set, get) => ({
           }
         })
         .catch((error) => {
-          if (!disposed) set({ error: String(error) });
+          if (!disposed) get().setError(error);
         });
     }).then((unlisten) => {
       if (disposed) unlisten();

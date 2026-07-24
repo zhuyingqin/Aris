@@ -2675,8 +2675,8 @@ fn compaction_budget_for_model(model: &str) -> u64 {
 /// Auto-compaction thresholds, as a fraction of the model-derived compaction
 /// budget. The budget is already below the provider's full context window so it
 /// leaves headroom for system prompts, tool schemas, and output.
-const AUTO_COMPACT_WARN_RATIO: f64 = 0.70;
-const AUTO_COMPACT_TRIGGER_RATIO: f64 = 0.90;
+const AUTO_COMPACT_WARN_RATIO: f64 = 0.85;
+const AUTO_COMPACT_TRIGGER_RATIO: f64 = 1.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ContextAction {
@@ -2730,11 +2730,13 @@ fn emit_context_warning(
 }
 
 /// Before running a turn, keep the session within the model-derived budget:
-/// warn at >=70% usage, auto-compact at >=90% (falling back to a warning when
-/// there is too little history to compact). Returns the session to run the turn
-/// against. A compacted session is persisted by the normal success/error turn
-/// boundary; doing an extra full write and FTS rebuild here would delay the
-/// model request without improving durability.
+/// warn at >=85% usage and auto-compact at the budget (falling back to a warning
+/// when there is too little history to compact). The budget already reserves
+/// provider headroom, so applying another 90% multiplier here made Desktop
+/// compact materially earlier than the shared runtime. Returns the session to
+/// run the turn against. A compacted session is persisted by the normal
+/// success/error turn boundary; doing an extra full write and FTS rebuild here
+/// would delay the model request without improving durability.
 fn maybe_auto_compact(
     app: &AppHandle,
     session_id: &str,

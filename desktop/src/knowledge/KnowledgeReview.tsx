@@ -5,6 +5,7 @@ import {
   type RetrievalCardPreview,
 } from "../api/tauri";
 import { useStore } from "../store";
+import { formatUserFacingError } from "../errorMessage";
 import { SvgIcon } from "../SvgIcon";
 import { useKnowledgeStore } from "./knowledgeStore";
 import {
@@ -898,7 +899,7 @@ export default function Knowledge({
       const raw = await literatureLlm(GRAPH_SYSTEM, buildGraphPrompt(graphItems));
       setGraphTaxonomy(normalizeAgentTaxonomy(raw, graphItems));
     } catch (err) {
-      setGraphError(`Agent 重构失败，已保留本地分类图：${String(err)}`);
+      setGraphError(`Agent 重构失败，已保留本地分类图：${formatUserFacingError(err, "cn")}`);
       setGraphTaxonomy(null);
     } finally {
       setGraphRebuilding(false);

@@ -17,7 +17,7 @@ const DEFAULT_AUTO_COMPACTION_INPUT_TOKENS_THRESHOLD: u32 = 200_000;
 const AUTO_COMPACTION_THRESHOLD_ENV_VAR: &str = "CLAUDE_CODE_AUTO_COMPACT_INPUT_TOKENS";
 const DEFAULT_CONTEXT_COMPACTION_ESTIMATED_TOKENS_THRESHOLD: usize = 150_000;
 const CONTEXT_COMPACTION_THRESHOLD_ENV_VAR: &str = "ARIS_CONTEXT_COMPACT_TOKENS";
-const AUTO_COMPACT_SESSION_ESTIMATE_RATIO: f64 = 0.80;
+const AUTO_COMPACT_SESSION_ESTIMATE_RATIO: f64 = 0.90;
 /// Always-on cap applied to a tool result the moment it is produced. A tool
 /// can return arbitrary megabytes; this bounds it once before it ever enters
 /// the session. Generous on purpose — a normal large file read should survive.
@@ -36,6 +36,10 @@ const MAX_CONTEXT_ASSISTANT_TEXT_CHARS: usize = 64_000;
 /// impossible to compact: every completed tool exchange after the user's last
 /// prompt is otherwise treated as untouchable.
 const MAX_OVERFLOW_PRESERVED_MESSAGES: usize = 8;
+/// Even emergency overflow recovery should retain the immediately preceding
+/// exchange when it can do so safely. A later retry may compact more
+/// aggressively if those two turns still do not fit.
+const MIN_OVERFLOW_PRESERVED_USER_TURNS: usize = 2;
 const MAX_OUTPUT_LIMIT_CONTINUATIONS: usize = 8;
 /// How many times a single turn may force-compact and retry after the provider
 /// rejects the request for exceeding the model's context window. Bounded so an
@@ -979,11 +983,7 @@ where
     /// session search — would only ever see the truncated copies. Message count
     /// and order are unchanged by the shrink, so `pristine[..removed_count]` maps
     /// exactly onto the removed range.
-    fn restore_pristine_archive(
-        &mut self,
-        pristine: &[ConversationMessage],
-        removed_count: usize,
-    ) {
+    fn restore_pristine_archive(&mut self, pristine: &[ConversationMessage], removed_count: usize) {
         let take = removed_count.min(pristine.len());
         if take == 0 {
             return;
@@ -1162,7 +1162,10 @@ where
             // A summary cut off by the output-token limit is unsafe to keep: it
             // loses whatever came after the cut. The events already carry the
             // stop reason — honor it instead of accepting a partial summary.
-            if stop_reason.as_deref().is_some_and(is_recoverable_stop_reason) {
+            if stop_reason
+                .as_deref()
+                .is_some_and(is_recoverable_stop_reason)
+            {
                 continue;
             }
             let Some(summary) = normalize_summary(text.trim()) else {
@@ -1743,7 +1746,34 @@ fn is_internal_continuation_message(message: &ConversationMessage) -> bool {
 }
 
 fn overflow_preserve_message_count(session: &Session) -> usize {
-    active_turn_message_count(session).clamp(1, MAX_OVERFLOW_PRESERVED_MESSAGES)
+    let active_turn = active_turn_message_count(session);
+    let recent_turns =
+        recent_complete_user_turn_message_count(session, MIN_OVERFLOW_PRESERVED_USER_TURNS);
+    active_turn
+        .max(recent_turns)
+        .clamp(1, MAX_OVERFLOW_PRESERVED_MESSAGES)
+}
+
+/// Number of trailing messages that span `turns` complete, substantive user
+/// turns. Returns zero when the session contains fewer than that many turns so
+/// an irreducible single-turn overflow can still use the aggressive active-tail
+/// fallback.
+fn recent_complete_user_turn_message_count(session: &Session, turns: usize) -> usize {
+    if turns == 0 {
+        return 0;
+    }
+    let mut found = 0usize;
+    let mut count = 0usize;
+    for message in session.messages.iter().rev() {
+        count += 1;
+        if message.role == MessageRole::User && !crate::compact::is_internal_user_message(message) {
+            found += 1;
+            if found >= turns {
+                return count;
+            }
+        }
+    }
+    0
 }
 
 fn fallback_summary_content_budget(plan: &crate::compact::CompactionPlan) -> usize {

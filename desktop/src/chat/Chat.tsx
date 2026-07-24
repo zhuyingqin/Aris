@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties }
 import { createPortal } from "react-dom";
 import { chatReviewClear, chatUiTurnLoad, fileOpen, isTauri } from "../api/tauri";
 import { useStore, type Language } from "../store";
-import { opensInCodePage } from "../lab/labEditorCore";
+import { workspaceFileOpenTarget } from "../lab/labEditorCore";
 import { SvgIcon } from "../SvgIcon";
 import type { ChatTurn } from "../types";
 import ChatComposer from "./ChatComposer";
@@ -124,6 +124,7 @@ export default function Chat() {
   const copy = CHAT_COPY[language];
   const setTab = useStore((state) => state.setTab);
   const setPendingLabFilePath = useStore((state) => state.setPendingLabFilePath);
+  const setPendingTypesetFilePath = useStore((state) => state.setPendingTypesetFilePath);
   const setError = useStore((state) => state.setError);
   const projects = useStore((state) => state.projects);
   const currentProject = useStore((state) => state.currentProject);
@@ -413,14 +414,20 @@ export default function Chat() {
   }, [currentSessionRef, focusComposer, setDraft]);
 
   const openWorkflowFile = useCallback((path: string) => {
-    if (opensInCodePage(path)) {
+    const target = workspaceFileOpenTarget(path);
+    if (target === "code") {
       setPendingLabFilePath(path);
       setTab("lab");
       return;
     }
+    if (target === "latex" || target === "pdf") {
+      setPendingTypesetFilePath(path);
+      setTab("typeset");
+      return;
+    }
     if (!isTauri()) return;
     void fileOpen(path).catch((error) => setError(String(error)));
-  }, [setError, setPendingLabFilePath, setTab]);
+  }, [setError, setPendingLabFilePath, setPendingTypesetFilePath, setTab]);
 
   const loadOmittedTurn = useCallback(async (turnIndex: number) => {
     const session = currentSessionRef.current;
@@ -615,7 +622,6 @@ export default function Chat() {
               disabled={currentChatBusy || commands.exporting || commands.debugExporting || turns.length === 0}
               title={copy.exportChat}
               aria-label={copy.exportChat}
-              style={{ background: "transparent", border: "none", color: "var(--text-dim)", padding: "4px", cursor: "pointer", display: "flex", alignItems: "center" }}
             >
               {commands.exporting ? (
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" className="spinner">
@@ -633,7 +639,6 @@ export default function Chat() {
               disabled={commands.exporting || commands.debugExporting || turns.length === 0}
               title={copy.exportDebugZip ?? "Export debug zip"}
               aria-label={copy.exportDebugZip ?? "Export debug zip"}
-              style={{ background: "transparent", border: "none", color: "var(--text-dim)", padding: "4px", cursor: "pointer", display: "flex", alignItems: "center" }}
             >
               {commands.debugExporting ? (
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" className="spinner">
@@ -869,10 +874,7 @@ export default function Chat() {
           y={composer.fileMenu.y}
           path={composer.fileMenu.path}
           projectRoot={currentProject?.path}
-          onOpenInCode={(path) => {
-            setPendingLabFilePath(path);
-            setTab("lab");
-          }}
+          onOpenInWorkspace={openWorkflowFile}
           onClose={() => composer.setFileMenu(null)}
           onAttach={(path, content) => void composer.attachFileFromMenu(path, content)}
         />

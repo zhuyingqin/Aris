@@ -6,6 +6,7 @@ import { appRelaunch, appUpdateCheck, appUpdateDownloadAndInstall, fileReveal, i
 import { isManagedAuthInvalidError, useStore, type Language, type Tab } from "./store";
 import type { AppUpdateInfo, AppUpdateProgress } from "./types";
 import ErrorBoundary from "./ErrorBoundary";
+import { formatUserFacingError } from "./errorMessage";
 import Chat from "./chat/Chat";
 import LiteratureViewTabs, { type LiteraturePageView } from "./literature/LiteratureViewTabs";
 import Extensions from "./extensions/Extensions";
@@ -195,11 +196,11 @@ function AppLoadingPane({ copy, label }: { copy: AppShellCopy; label: string }) 
   );
 }
 
-function AppViewFallback({ copy, error, reset }: { copy: AppShellCopy; error: Error; reset: () => void }) {
+function AppViewFallback({ copy, error, reset, language }: { copy: AppShellCopy; error: Error; reset: () => void; language: Language }) {
   return (
     <div className="app-view-error" role="alert">
       <strong>{copy.viewErrorTitle}</strong>
-      <span>{error.message || copy.viewErrorBody}</span>
+      <span>{error.message ? formatUserFacingError(error, language) : copy.viewErrorBody}</span>
       <button type="button" onClick={reset}>{copy.tryAgain}</button>
     </div>
   );
@@ -1288,12 +1289,12 @@ export default function App() {
       <main className="app-main" data-onboarding-target="workspace">
         <ErrorBoundary
           resetKey={renderedTab}
-          fallback={(viewError, reset) => <AppViewFallback copy={copy} error={viewError} reset={reset} />}
+          fallback={(viewError, reset) => <AppViewFallback copy={copy} error={viewError} reset={reset} language={language} />}
         >
           <div hidden={renderedTab !== "chat" && renderedTab !== "scheduled"}>
             <ErrorBoundary
               resetKey="chat"
-              fallback={(viewError, reset) => <AppViewFallback copy={copy} error={viewError} reset={reset} />}
+              fallback={(viewError, reset) => <AppViewFallback copy={copy} error={viewError} reset={reset} language={language} />}
             >
               <ChatPane />
             </ErrorBoundary>
@@ -1302,7 +1303,7 @@ export default function App() {
             <div hidden={renderedTab !== "lab"}>
               <ErrorBoundary
                 resetKey="lab"
-                fallback={(viewError, reset) => <AppViewFallback copy={copy} error={viewError} reset={reset} />}
+                fallback={(viewError, reset) => <AppViewFallback copy={copy} error={viewError} reset={reset} language={language} />}
               >
                 <Suspense fallback={<AppLoadingPane copy={copy} label={TAB_MODULE_LABELS.lab} />}>
                   <LabPane />

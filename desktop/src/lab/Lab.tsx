@@ -11,7 +11,7 @@ import { useLabStore } from "./labStore";
 import CodeEditor, { type CodeDiffLine, type EditorLanguage } from "./CodeEditor";
 import FileEditorPane from "./FileEditorPane";
 import LabAssistant from "./LabAssistant";
-import LabFiles, { type LabFileChange, type LabOpenOptions } from "./LabFiles";
+import LabFiles, { WorkspaceFileIcon, type LabFileChange, type LabOpenOptions } from "./LabFiles";
 import { OutputGroup } from "./outputs";
 import type {
   LabCellOutputEvent,
@@ -1864,7 +1864,7 @@ export default function Lab() {
                     setTabMenu({ x: event.clientX, y: event.clientY, tabId: tab.id });
                   }}
                 >
-                  <span className={cx("lab-editor-tab-icon", tab.kind)}>{tab.kind === "notebook" ? "[]" : "<>"}</span>
+                  <WorkspaceFileIcon path={tab.path} directory={false} className="lab-editor-tab-icon" />
                   <span className="lab-editor-tab-label">{editorTabLabel(tab)}</span>
                   <span className="lab-editor-tab-dir">{dirname(tab.path)}</span>
                   <span

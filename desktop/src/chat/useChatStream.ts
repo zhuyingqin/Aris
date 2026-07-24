@@ -20,6 +20,7 @@ import type { ChatSendRequest, IndependentReviewEvent } from "../api/tauri";
 import type { ChatBlock, ChatTurn } from "../types";
 import { appendTextDelta, appendThinkingDelta } from "./model";
 import { isExpectedStopError } from "./chatRunHelpers";
+import { formatUserFacingError, type ErrorMessageLanguage } from "../errorMessage";
 
 export const MAX_RUNNING_CHAT_SESSIONS = 5;
 
@@ -66,6 +67,7 @@ function reviewBlockFromEvent(event: IndependentReviewEvent): Extract<ChatBlock,
 }
 
 interface StreamHandlers {
+  language?: ErrorMessageLanguage;
   patchAssistant: (sessionId: string, fn: (turn: ChatTurn) => ChatTurn) => void;
   onComplete: (sessionId: string, reply: string) => void;
   onError: (
@@ -93,6 +95,7 @@ interface StreamHandlers {
 }
 
 export function useChatStream({
+  language = "en",
   patchAssistant,
   onComplete,
   onError,
@@ -114,6 +117,7 @@ export function useChatStream({
   const flushTimers = useRef(new Map<string, number>());
   const listenerGeneration = useRef(0);
   const handlersRef = useRef<StreamHandlers>({
+    language,
     patchAssistant,
     onComplete,
     onError,
@@ -123,6 +127,7 @@ export function useChatStream({
     getContextTokens,
   });
   handlersRef.current = {
+    language,
     patchAssistant,
     onComplete,
     onError,
@@ -316,7 +321,12 @@ export function useChatStream({
         // canonical interruption message from an active user stop is expected;
         // a provider/tool failure that races with Stop must remain visible.
         const expectedStop = stopRequested.current.has(sessionId) && isExpectedStopError(message);
-        handlersRef.current.onError(sessionId, message, expectedStop, sessionPreserved);
+        handlersRef.current.onError(
+          sessionId,
+          formatUserFacingError(message, handlersRef.current.language ?? "en"),
+          expectedStop,
+          sessionPreserved,
+        );
       }),
       onChatContextCompacted(({ sessionId, removedMessageCount, tokensAfter }) => {
         if (!isCurrentListener()) return;
@@ -371,7 +381,11 @@ export function useChatStream({
       revisionStreams.current.delete(sessionId);
       const failure = String(error);
       const expectedStop = stopRequested.current.has(sessionId) && isExpectedStopError(failure);
-      handlersRef.current.onError(sessionId, failure, expectedStop);
+      handlersRef.current.onError(
+        sessionId,
+        formatUserFacingError(failure, handlersRef.current.language ?? "en"),
+        expectedStop,
+      );
       return false;
     } finally {
       runningSessions.current.delete(sessionId);
