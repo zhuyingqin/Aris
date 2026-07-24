@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, params_from_iter, types::Value, Connection};
 use serde::Serialize;
 
 use crate::{ContentBlock, MessageRole, Session};
@@ -245,10 +245,19 @@ pub fn search_sessions(
         });
     };
 
+    let candidate_limit = limit.saturating_mul(4).max(4);
     let mut raw_hits = if query.chars().any(is_cjk) {
-        search_like(&connection, query, limit.saturating_mul(4).max(4))?
+        search_like(&connection, query, candidate_limit)?
     } else {
-        search_fts(&connection, query, limit.saturating_mul(4).max(4))?
+        let strict_hits = search_fts(&connection, query, candidate_limit)?;
+        if strict_hits.is_empty() {
+            // Conversation terms often land in adjacent messages rather than a
+            // single message. Preserve precise all-term matching when it works,
+            // then broaden only a zero-result query so recall wins over silence.
+            search_fts_relaxed(&connection, query, candidate_limit)?
+        } else {
+            strict_hits
+        }
     };
     let mut seen = BTreeSet::new();
     raw_hits.retain(|(session_id, _, _)| seen.insert(session_id.clone()));
@@ -352,11 +361,28 @@ fn search_fts(
     query: &str,
     limit: usize,
 ) -> Result<Vec<(String, usize, String)>, String> {
+    search_fts_with_operator(connection, query, " AND ", limit)
+}
+
+fn search_fts_relaxed(
+    connection: &Connection,
+    query: &str,
+    limit: usize,
+) -> Result<Vec<(String, usize, String)>, String> {
+    search_fts_with_operator(connection, query, " OR ", limit)
+}
+
+fn search_fts_with_operator(
+    connection: &Connection,
+    query: &str,
+    operator: &str,
+    limit: usize,
+) -> Result<Vec<(String, usize, String)>, String> {
     let fts_query = query
         .split_whitespace()
         .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
         .collect::<Vec<_>>()
-        .join(" AND ");
+        .join(operator);
     let mut statement = connection
         .prepare(
             "SELECT session_id, message_index, snippet(messages_fts, 3, '[', ']', '...', 24)
@@ -376,18 +402,78 @@ fn search_like(
     query: &str,
     limit: usize,
 ) -> Result<Vec<(String, usize, String)>, String> {
+    let terms = cjk_search_terms(query);
+    if terms.is_empty() {
+        return Ok(Vec::new());
+    }
+    let matches = std::iter::repeat("content LIKE ? ESCAPE '\\'")
+        .take(terms.len())
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    let score = std::iter::repeat("CASE WHEN content LIKE ? ESCAPE '\\' THEN 1 ELSE 0 END")
+        .take(terms.len())
+        .collect::<Vec<_>>()
+        .join(" + ");
+    let sql = format!(
+        "SELECT session_id, message_index, substr(content, 1, 300), ({score}) AS relevance
+         FROM messages WHERE {matches}
+         ORDER BY relevance DESC, message_index DESC LIMIT ?"
+    );
     let mut statement = connection
-        .prepare(
-            "SELECT session_id, message_index, substr(content, 1, 300)
-             FROM messages WHERE content LIKE ?1 ORDER BY rowid DESC LIMIT ?2",
-        )
+        .prepare(&sql)
         .map_err(|error| error.to_string())?;
+    let mut values = terms
+        .iter()
+        .chain(terms.iter())
+        .map(|term| Value::Text(like_pattern(term)))
+        .collect::<Vec<_>>();
+    values.push(Value::Integer(i64::try_from(limit).unwrap_or(i64::MAX)));
     let rows = statement
-        .query_map(params![format!("%{query}%"), limit], |row| {
+        .query_map(params_from_iter(values), |row| {
             Ok((row.get(0)?, row.get(1)?, row.get(2)?))
         })
         .map_err(|error| error.to_string())?;
     Ok(rows.filter_map(Result::ok).collect())
+}
+
+fn cjk_search_terms(query: &str) -> Vec<String> {
+    let mut terms = BTreeSet::new();
+    let mut run = Vec::new();
+    for character in query.chars() {
+        if is_cjk(character) {
+            run.push(character);
+        } else if !run.is_empty() {
+            add_cjk_run_terms(&mut run, &mut terms);
+        }
+    }
+    if !run.is_empty() {
+        add_cjk_run_terms(&mut run, &mut terms);
+    }
+    for term in query.split(|character: char| !character.is_alphanumeric()) {
+        if term.len() > 1 && !term.chars().any(is_cjk) {
+            terms.insert(term.to_string());
+        }
+    }
+    terms.into_iter().collect()
+}
+
+fn add_cjk_run_terms(run: &mut Vec<char>, terms: &mut BTreeSet<String>) {
+    if run.len() == 1 {
+        terms.insert(run.iter().collect());
+    } else {
+        for pair in run.windows(2) {
+            terms.insert(pair.iter().collect());
+        }
+    }
+    run.clear();
+}
+
+fn like_pattern(term: &str) -> String {
+    let escaped = term
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
+    format!("%{escaped}%")
 }
 
 fn load_messages(
