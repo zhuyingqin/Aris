@@ -27,6 +27,7 @@ import IndependentReviewPanel from "./IndependentReviewPanel";
 import { useIndependentReview } from "./useIndependentReview";
 
 const INDEPENDENT_REVIEW_TAB_ID = "independent-review";
+const CHAT_UI_EARLIER_TURN_BATCH_SIZE = 12;
 
 // Pure helpers live in `chatRunHelpers`; re-exported here for existing tests
 // that import them from `./Chat`.
@@ -142,6 +143,7 @@ export default function Chat() {
     updateSession,
     patchTurns,
     hydrateOmittedTurn,
+    prependEarlierTurns,
     newSession,
     setDraft,
     renameSession,
@@ -284,6 +286,8 @@ export default function Chat() {
       description: "SomniQ keeps reasoning, searching, analyzing, and generating in the background—turning questions into progress.",
     };
   const [loadingOmittedTurns, setLoadingOmittedTurns] = useState<Set<string>>(() => new Set());
+  const [loadingEarlierSessions, setLoadingEarlierSessions] = useState<Set<string>>(() => new Set());
+  const loadingEarlierSessionsRef = useRef<Set<string>>(new Set());
 
   const turns = currentSession?.turns ?? [];
   const { editingTurnId, focusComposer, setEditingTurnId } = composer;
@@ -445,6 +449,38 @@ export default function Chat() {
   const isOmittedTurnLoading = useCallback((turnIndex: number) => (
     loadingOmittedTurns.has(`${currentId}:${turnIndex}`)
   ), [currentId, loadingOmittedTurns]);
+
+  const loadEarlierTurns = useCallback(async () => {
+    const session = currentSessionRef.current;
+    if (!session || !isTauri() || loadingEarlierSessionsRef.current.has(session.id)) return;
+    const total = session.turnCount ?? session.turns.length;
+    const missingBefore = Math.max(0, total - session.turns.length);
+    if (!session.turnsPartial || missingBefore === 0) return;
+    const startIndex = Math.max(0, missingBefore - CHAT_UI_EARLIER_TURN_BATCH_SIZE);
+    loadingEarlierSessionsRef.current.add(session.id);
+    setLoadingEarlierSessions((current) => new Set(current).add(session.id));
+    try {
+      const rawTurns = await Promise.all(
+        Array.from(
+          { length: missingBefore - startIndex },
+          (_, offset) => chatUiTurnLoad<Partial<ChatTurn> & Record<string, unknown>>(
+            session.id,
+            startIndex + offset,
+          ),
+        ),
+      );
+      prependEarlierTurns(session.id, startIndex, rawTurns.map(migrateTurn));
+    } catch (error) {
+      setError(`Failed to load earlier messages: ${String(error)}`);
+    } finally {
+      loadingEarlierSessionsRef.current.delete(session.id);
+      setLoadingEarlierSessions((current) => {
+        const next = new Set(current);
+        next.delete(session.id);
+        return next;
+      });
+    }
+  }, [prependEarlierTurns, setError]);
 
   const updateComposerInput = useCallback((value: string) => {
     if (pendingCommandSelection) setPendingCommandSelection(null);
@@ -673,6 +709,14 @@ export default function Chat() {
           onContinue={run.continueStopped}
           onLoadOmittedTurn={loadOmittedTurn}
           isOmittedTurnLoading={isOmittedTurnLoading}
+          hasEarlierTurns={Boolean(
+            currentSession?.turnsPartial
+            && (currentSession.turnCount ?? turns.length) > turns.length
+          )}
+          loadingEarlierTurns={loadingEarlierSessions.has(currentId)}
+          onLoadEarlierTurns={() => void loadEarlierTurns()}
+          loadEarlierLabel={language === "cn" ? "加载更早消息" : "Load earlier messages"}
+          loadingEarlierLabel={language === "cn" ? "正在加载更早消息…" : "Loading earlier messages…"}
           onPermissionRespond={run.respondPermission}
           onQuestionRespond={run.respondQuestion}
           onOpenIndependentReview={openIndependentReview}

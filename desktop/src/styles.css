@@ -11845,6 +11845,37 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   flex: 1;
 }
 
+.chat-thread.has-earlier-turns .chat-scroll {
+  padding-top: 64px;
+}
+
+.chat-history-load-earlier {
+  position: absolute;
+  z-index: 12;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  min-height: 30px;
+  padding: 5px 13px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--bg-1) 92%, transparent);
+  color: var(--text-dim);
+  box-shadow: 0 4px 16px rgb(0 0 0 / 22%);
+  backdrop-filter: blur(10px);
+  cursor: pointer;
+}
+
+.chat-history-load-earlier:hover:not(:disabled) {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+}
+
+.chat-history-load-earlier:disabled {
+  cursor: progress;
+  opacity: 0.72;
+}
+
 /* Project continuity summary: reserve a compact right-hand lane so the card
    keeps its floating appearance without covering conversation content. */
 .chat-root.chat-project-brief-open {

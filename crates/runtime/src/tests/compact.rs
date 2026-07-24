@@ -1,10 +1,29 @@
 use super::{
     assemble_compacted_session_with_usage, collect_key_files, estimate_session_tokens,
     format_compact_summary, get_compact_continuation_message, infer_latest_user_request,
-    infer_pending_work, plan_compaction, summarize_messages, CompactionConfig, CompactionResult,
-    CompactionSummarySource, CompactionTokenEstimateSource,
+    infer_pending_work, minimal_pinned_block, plan_compaction, summarize_messages, CompactionConfig,
+    CompactionResult, CompactionSummarySource, CompactionTokenEstimateSource,
 };
 use crate::session::{ContentBlock, ConversationMessage, MessageRole, Session};
+
+#[test]
+fn minimal_pinned_block_respects_char_budget() {
+    let messages = vec![ConversationMessage::user_text(
+        "please implement the new caching layer for the parser ".repeat(20),
+    )];
+    let full = minimal_pinned_block(&messages, 10_000).expect("full block");
+    assert!(full.contains("please implement"));
+    // A small budget yields a header + a truncated latest request within budget.
+    let bounded = minimal_pinned_block(&messages, 200).expect("bounded block");
+    assert!(bounded.contains("Pinned Context"));
+    assert!(
+        bounded.chars().count() <= 200,
+        "block exceeded the budget: {}",
+        bounded.chars().count()
+    );
+    // Below even the header + prefix, pinning is skipped rather than overflowing.
+    assert!(minimal_pinned_block(&messages, 40).is_none());
+}
 
 fn compact_session_for_test(session: &Session, config: CompactionConfig) -> CompactionResult {
     match plan_compaction(session, &config) {
@@ -27,6 +46,7 @@ fn compact_session_for_test(session: &Session, config: CompactionConfig) -> Comp
                 summary,
                 CompactionSummarySource::Fallback,
                 None,
+                0,
                 &plan,
             )
         }

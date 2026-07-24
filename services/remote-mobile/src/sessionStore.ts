@@ -14,6 +14,12 @@ interface StoredEncryptedSession {
   ciphertext: ArrayBuffer;
 }
 
+export interface PairedSessionCollection {
+  version: 2;
+  activeDesktopDeviceId: string | null;
+  sessions: PairedMobileSession[];
+}
+
 /**
  * Persists a paired mobile credential encrypted with a non-extractable AES-GCM
  * CryptoKey held by IndexedDB. This is suitable for the browser PWA boundary;
@@ -22,6 +28,16 @@ interface StoredEncryptedSession {
  */
 export class BrowserPairedSessionStore {
   async load(): Promise<PairedMobileSession | null> {
+    const collection = await this.loadCollection();
+    if (!collection || !collection.activeDesktopDeviceId) {
+      return null;
+    }
+    return collection.sessions.find(
+      (session) => desktopDeviceId(session) === collection.activeDesktopDeviceId,
+    ) ?? null;
+  }
+
+  async loadCollection(): Promise<PairedSessionCollection | null> {
     const database = await openDatabase();
     try {
       const transaction = database.transaction(STORE_NAME, "readonly");
@@ -48,7 +64,7 @@ export class BrowserPairedSessionStore {
           key,
           encrypted.ciphertext,
         );
-        return parsePairedSession(new TextDecoder("utf-8", { fatal: true }).decode(plaintext));
+        return parseStoredSessionCollection(new TextDecoder("utf-8", { fatal: true }).decode(plaintext));
       } catch (error) {
         if (error instanceof RemoteProtocolError) {
           throw error;
@@ -61,9 +77,69 @@ export class BrowserPairedSessionStore {
   }
 
   async save(session: PairedMobileSession): Promise<void> {
+    await this.saveSession(session);
+  }
+
+  async saveSession(session: PairedMobileSession, makeActive = true): Promise<PairedSessionCollection> {
     // Validate before encrypting so a malformed peer response cannot become
     // durable state even though the browser credential is encrypted at rest.
-    parsePairedSession(JSON.stringify(session));
+    const validatedSession = parsePairedSession(JSON.stringify(session));
+    const current = await this.loadCollection() ?? emptyCollection();
+    const deviceId = desktopDeviceId(validatedSession);
+    const existingIndex = current.sessions.findIndex((entry) => desktopDeviceId(entry) === deviceId);
+    const sessions = [...current.sessions];
+    if (existingIndex >= 0) {
+      sessions[existingIndex] = validatedSession;
+    } else {
+      sessions.push(validatedSession);
+    }
+    const collection: PairedSessionCollection = {
+      version: 2,
+      activeDesktopDeviceId: makeActive || !current.activeDesktopDeviceId
+        ? deviceId
+        : current.activeDesktopDeviceId,
+      sessions,
+    };
+    await this.writeCollection(collection);
+    return collection;
+  }
+
+  async select(desktopDeviceIdToSelect: string): Promise<PairedSessionCollection> {
+    const current = await this.loadCollection() ?? emptyCollection();
+    if (!current.sessions.some((session) => desktopDeviceId(session) === desktopDeviceIdToSelect)) {
+      throw new RemoteProtocolError("The selected desktop pairing is no longer available.");
+    }
+    const collection = {
+      ...current,
+      activeDesktopDeviceId: desktopDeviceIdToSelect,
+    } satisfies PairedSessionCollection;
+    await this.writeCollection(collection);
+    return collection;
+  }
+
+  async remove(desktopDeviceIdToRemove: string): Promise<PairedSessionCollection> {
+    const current = await this.loadCollection() ?? emptyCollection();
+    const sessions = current.sessions.filter(
+      (session) => desktopDeviceId(session) !== desktopDeviceIdToRemove,
+    );
+    const activeDesktopDeviceId = current.activeDesktopDeviceId === desktopDeviceIdToRemove
+      ? sessions[0] ? desktopDeviceId(sessions[0]) : null
+      : current.activeDesktopDeviceId;
+    const collection = {
+      version: 2,
+      activeDesktopDeviceId,
+      sessions,
+    } satisfies PairedSessionCollection;
+    if (sessions.length === 0) {
+      await this.clear();
+      return collection;
+    }
+    await this.writeCollection(collection);
+    return collection;
+  }
+
+  private async writeCollection(collection: PairedSessionCollection): Promise<void> {
+    const validatedCollection = parseStoredSessionCollection(JSON.stringify(collection));
     const database = await openDatabase();
     try {
       // IndexedDB transactions become inactive once awaited work yields back
@@ -73,7 +149,7 @@ export class BrowserPairedSessionStore {
       const key = (await readStorageKey(database)) ?? (await createStorageKey());
       const nonce = new Uint8Array(12);
       requireCrypto().getRandomValues(nonce);
-      const plaintext = new TextEncoder().encode(JSON.stringify(session));
+      const plaintext = new TextEncoder().encode(JSON.stringify(validatedCollection));
       const ciphertext = await requireCrypto().subtle.encrypt(
         { name: "AES-GCM", iv: toArrayBuffer(nonce), additionalData: toArrayBuffer(SESSION_AAD) },
         key,
@@ -114,6 +190,14 @@ export class BrowserPairedSessionStore {
   }
 }
 
+function emptyCollection(): PairedSessionCollection {
+  return { version: 2, activeDesktopDeviceId: null, sessions: [] };
+}
+
+function desktopDeviceId(session: PairedMobileSession): string {
+  return session.invitation.desktop.device_id;
+}
+
 async function readStorageKey(database: IDBDatabase): Promise<CryptoKey | undefined> {
   const transaction = database.transaction(STORE_NAME, "readonly");
   const key = transaction.objectStore(STORE_NAME).get(KEY_RECORD);
@@ -131,6 +215,48 @@ function parsePairedSession(raw: string): PairedMobileSession {
   } catch {
     throw new RemoteProtocolError("The saved mobile pairing is invalid.");
   }
+  return parsePairedSessionValue(value);
+}
+
+function parseStoredSessionCollection(raw: string): PairedSessionCollection {
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    throw new RemoteProtocolError("The saved mobile pairing is invalid.");
+  }
+  if (!isRecord(value) || value.version !== 2) {
+    const legacySession = parsePairedSessionValue(value);
+    return {
+      version: 2,
+      activeDesktopDeviceId: desktopDeviceId(legacySession),
+      sessions: [legacySession],
+    };
+  }
+  if (
+    !Array.isArray(value.sessions) ||
+    value.sessions.length > 32 ||
+    (value.activeDesktopDeviceId !== null && typeof value.activeDesktopDeviceId !== "string")
+  ) {
+    throw new RemoteProtocolError("The saved mobile pairing is invalid.");
+  }
+  const sessions = value.sessions.map(parsePairedSessionValue);
+  const deviceIds = sessions.map(desktopDeviceId);
+  if (
+    new Set(deviceIds).size !== deviceIds.length ||
+    (sessions.length === 0 && value.activeDesktopDeviceId !== null) ||
+    (sessions.length > 0 && !deviceIds.includes(value.activeDesktopDeviceId as string))
+  ) {
+    throw new RemoteProtocolError("The saved mobile pairing is invalid.");
+  }
+  return {
+    version: 2,
+    activeDesktopDeviceId: value.activeDesktopDeviceId as string | null,
+    sessions,
+  };
+}
+
+function parsePairedSessionValue(value: unknown): PairedMobileSession {
   if (!isRecord(value) || !isRecord(value.invitation) || !isRecord(value.mobile)) {
     throw new RemoteProtocolError("The saved mobile pairing is invalid.");
   }

@@ -17,6 +17,11 @@ const RESUME_WITHOUT_QUESTIONS_PREFIX: &str =
     "Continue the conversation from where it left off without asking the user any further questions.";
 const MAX_ACTIVE_USER_GOAL_CHARS: usize = 220;
 const MAX_PRIOR_COMPACTION_SUMMARY_CHARS: usize = 4_000;
+/// Token/turn-aware preservation never keeps fewer than this many complete,
+/// non-internal user turns, even when the token target is tiny. Guarantees a
+/// compaction cannot collapse the working set below the last couple of
+/// exchanges (the near-context-reset failure mode).
+pub(crate) const MIN_PRESERVED_USER_TURNS: usize = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompactionSource {
@@ -68,6 +73,15 @@ impl CompactionSummarySource {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompactionConfig {
     pub preserve_recent_messages: usize,
+    /// When set, preservation is token- and turn-aware: keep the newest
+    /// messages whose cumulative token estimate reaches this target *and* that
+    /// span at least [`MIN_PRESERVED_USER_TURNS`] complete, non-internal user
+    /// turns, instead of the fixed `preserve_recent_messages` count. The
+    /// runtime populates this from its per-model budget for Auto/Manual
+    /// compaction so a tool-heavy turn can no longer collapse the context to a
+    /// couple of messages. `None` keeps the legacy message-count behavior,
+    /// which the aggressive overflow path and the direct unit tests rely on.
+    pub preserve_target_tokens: Option<usize>,
     pub max_estimated_tokens: usize,
     pub source: CompactionSource,
     pub instruction: Option<String>,
@@ -77,6 +91,7 @@ impl Default for CompactionConfig {
     fn default() -> Self {
         Self {
             preserve_recent_messages: 4,
+            preserve_target_tokens: None,
             max_estimated_tokens: 10_000,
             source: CompactionSource::Auto,
             instruction: None,
@@ -92,7 +107,10 @@ impl CompactionConfig {
             // rather than relying entirely on a generated summary. The manual
             // action should differ only in when it is triggered and any custom
             // instruction supplied by the user, not in continuity guarantees.
+            // `preserve_target_tokens` is filled in by the runtime so manual
+            // compaction preserves the same token/turn window as auto.
             preserve_recent_messages: 4,
+            preserve_target_tokens: None,
             max_estimated_tokens: 0,
             source: CompactionSource::Manual,
             instruction,
@@ -103,6 +121,9 @@ impl CompactionConfig {
     pub fn overflow(preserve_recent_messages: usize) -> Self {
         Self {
             preserve_recent_messages,
+            // Overflow recovery deliberately keeps only a short, safe tail; it
+            // must not widen preservation to a token target.
+            preserve_target_tokens: None,
             max_estimated_tokens: 0,
             source: CompactionSource::Overflow,
             instruction: None,
@@ -197,8 +218,28 @@ pub fn plan_compaction(session: &Session, config: &CompactionConfig) -> Option<C
 
     // Manual and automatic compaction share the same continuity boundary. A
     // manual compaction may be requested at any size, but it must not discard
-    // more recent context than automatic compaction would.
-    let split_index = recent_window_safe_split(&session.messages, config.preserve_recent_messages)?;
+    // more recent context than automatic compaction would. When a token target
+    // is present, preservation is token/turn-aware (a tool-heavy turn keeps its
+    // full recent window instead of a fixed handful of messages); otherwise it
+    // falls back to the legacy fixed count.
+    // `min_preserve_messages` is a hard floor on how many newest messages stay:
+    // for the token/turn-aware path it spans the last `MIN_PRESERVED_USER_TURNS`
+    // user turns, so the safe-split search (which may move the boundary to avoid
+    // orphaning a tool pair) can never compact those turns away. The legacy
+    // fixed-count path (overflow, direct tests) keeps its aggressive behavior
+    // with no floor.
+    let (preserve_recent_messages, min_preserve_messages) = match config.preserve_target_tokens {
+        Some(target) => (
+            token_turn_aware_preserve_count(&session.messages, target),
+            user_turns_span(&session.messages, MIN_PRESERVED_USER_TURNS),
+        ),
+        None => (config.preserve_recent_messages, 0),
+    };
+    let split_index = recent_window_safe_split(
+        &session.messages,
+        preserve_recent_messages,
+        min_preserve_messages,
+    )?;
 
     let removed = session.messages[..split_index].to_vec();
     if removed.is_empty() {
@@ -213,19 +254,86 @@ pub fn plan_compaction(session: &Session, config: &CompactionConfig) -> Option<C
     })
 }
 
+/// Number of newest messages to try to preserve so that their cumulative token
+/// estimate reaches `preserve_target_tokens` *and* they span at least
+/// [`MIN_PRESERVED_USER_TURNS`] complete, non-internal user turns. This is a
+/// lower bound handed to [`recent_window_safe_split`], which snaps it to a safe
+/// tool-pair boundary — so it does not need to land exactly on a user message.
+fn token_turn_aware_preserve_count(
+    messages: &[ConversationMessage],
+    preserve_target_tokens: usize,
+) -> usize {
+    let mut tokens = 0usize;
+    let mut user_turns = 0usize;
+    let mut count = 0usize;
+    for message in messages.iter().rev() {
+        let starts_user_turn =
+            message.role == MessageRole::User && !is_internal_user_message(message);
+        // Both targets met and we are at the start of an older user turn: stop
+        // so the extra turn stays in the summarized range, not the preserved
+        // tail. Checked before counting so the boundary turn is excluded.
+        if tokens >= preserve_target_tokens
+            && user_turns >= MIN_PRESERVED_USER_TURNS
+            && starts_user_turn
+        {
+            break;
+        }
+        count += 1;
+        tokens = tokens.saturating_add(estimate_message_tokens(message));
+        if starts_user_turn {
+            user_turns += 1;
+        }
+    }
+    count.min(messages.len())
+}
+
+/// Number of newest messages spanning the last `n` complete, non-internal user
+/// turns (the whole session when there are fewer than `n`). Used as the hard
+/// preservation floor for the token/turn-aware path.
+fn user_turns_span(messages: &[ConversationMessage], n: usize) -> usize {
+    if n == 0 {
+        return 0;
+    }
+    let mut user_turns = 0usize;
+    let mut count = 0usize;
+    for message in messages.iter().rev() {
+        count += 1;
+        if message.role == MessageRole::User && !is_internal_user_message(message) {
+            user_turns += 1;
+            if user_turns >= n {
+                break;
+            }
+        }
+    }
+    count
+}
+
+/// Find a safe compaction boundary preserving at least `preserve_recent_messages`
+/// newest messages. When no safe boundary exists at or before that target, the
+/// search may move forward (preserving fewer) to avoid orphaning a tool pair —
+/// but never past `min_preserve_messages`, which guarantees the token/turn-aware
+/// path keeps its two user turns. Returns `None` if no safe boundary preserves
+/// the floor (caller then skips compaction rather than drop a guaranteed turn).
 fn recent_window_safe_split(
     messages: &[ConversationMessage],
     preserve_recent_messages: usize,
+    min_preserve_messages: usize,
 ) -> Option<usize> {
     if messages.len() <= preserve_recent_messages {
         return None;
     }
     let target_split = messages.len().saturating_sub(preserve_recent_messages);
+    // Largest split index that still preserves the floor (smaller split =
+    // preserves more). `0` floor keeps the legacy behavior (up to len-1).
+    let forward_ceiling = messages
+        .len()
+        .saturating_sub(min_preserve_messages.max(1))
+        .max(target_split);
     (1..=target_split)
         .rev()
         .find(|split_index| can_split_after(messages, split_index - 1))
         .or_else(|| {
-            ((target_split + 1)..messages.len())
+            ((target_split + 1)..=forward_ceiling)
                 .find(|split_index| can_split_after(messages, split_index - 1))
         })
 }
@@ -235,7 +343,17 @@ fn can_split_after(messages: &[ConversationMessage], index: usize) -> bool {
         return false;
     };
     if message.role == MessageRole::User {
-        return false;
+        // Splitting right after a user message is safe only when the next message
+        // also opens a fresh user turn (a clean user→user boundary). Otherwise the
+        // preserved side would begin with an assistant/tool reply to a
+        // now-summarized user message. This lets a lone leading user message be
+        // compacted instead of blocking compaction entirely.
+        if messages
+            .get(index + 1)
+            .is_none_or(|next| next.role != MessageRole::User)
+        {
+            return false;
+        }
     }
     if message.role == MessageRole::Assistant && has_tool_use(message) {
         return false;
@@ -382,6 +500,11 @@ pub fn assemble_compacted_session_with_usage(
     summary: String,
     summary_source: CompactionSummarySource,
     summary_output_tokens: Option<u32>,
+    // Tokens of deterministic text (the pinned-context block) appended to the
+    // summary *after* the provider reported `summary_output_tokens`. Added to
+    // the provider-based `tokens_after` estimate so it is not underestimated;
+    // ignored on the heuristic path, which measures the final string directly.
+    extra_summary_tokens: usize,
     plan: &CompactionPlan,
 ) -> CompactionResult {
     let formatted_summary = format_compact_summary(&summary);
@@ -419,6 +542,7 @@ pub fn assemble_compacted_session_with_usage(
             (
                 usize::try_from(summary_output_tokens)
                     .unwrap_or(usize::MAX)
+                    .saturating_add(extra_summary_tokens)
                     .saturating_add(wrapper_tokens)
                     .saturating_add(preserved_tokens),
                 CompactionTokenEstimateSource::ProviderSummaryUsage,
@@ -654,6 +778,333 @@ pub(crate) fn summarize_messages(messages: &[ConversationMessage]) -> String {
     lines.join("\n")
 }
 
+const PINNED_HEADER: &str = "## Pinned Context (verbatim — authoritative, do not drop)";
+/// Substring of [`PINNED_HEADER`] used to locate a prior pinned block when
+/// rolling it forward across repeated compactions.
+const PINNED_HEADER_MARKER: &str = "## Pinned Context";
+/// Flat, round-trippable prefix for a pinned user request, so the block a
+/// compaction injects can be recovered by the next compaction.
+const PINNED_REQUEST_PREFIX: &str = "- User request: ";
+/// How many recent user requests to consider pinning from the current range.
+const MAX_PINNED_REQUESTS: usize = 8;
+/// The most recent user request is pinned with this generous cap (effectively
+/// verbatim for normal prompts, so tail constraints in a long request survive);
+/// older requests use a smaller cap.
+const PINNED_LATEST_REQUEST_CHARS: usize = 4_000;
+const PINNED_OLDER_REQUEST_CHARS: usize = 1_200;
+/// Total char budget for the pinned request lines. The original (first) request
+/// is always kept and the most recent ones are packed in until the budget is
+/// hit — the middle is dropped rather than truncating verbatim text mid-line.
+const PINNED_REQUESTS_CHAR_BUDGET: usize = 8_000;
+/// Hard per-request cap for the minimal pinned block injected on the overflow
+/// path — small enough not to defeat the emergency shrink.
+const OVERFLOW_PINNED_REQUEST_CHARS: usize = 400;
+
+fn push_unique_request(list: &mut Vec<String>, value: String) {
+    let value = value.trim().to_string();
+    if !value.is_empty() && !list.iter().any(|existing| existing == &value) {
+        list.push(value);
+    }
+}
+
+/// Full text of a user message (all Text blocks joined), for verbatim pinning —
+/// unlike `summarize_message`, which merges blocks and hard-truncates to 500.
+fn user_message_text(message: &ConversationMessage) -> String {
+    message
+        .blocks
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } if !text.trim().is_empty() => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// This range's recent non-internal user requests (oldest-first on return). The
+/// latest is kept near-verbatim; older ones use a smaller cap.
+fn collect_pinned_user_requests(messages: &[ConversationMessage]) -> Vec<String> {
+    let mut recent = messages
+        .iter()
+        .filter(|message| message.role == MessageRole::User && !is_internal_user_message(message))
+        .rev()
+        .map(user_message_text)
+        .filter(|text| !text.trim().is_empty())
+        .take(MAX_PINNED_REQUESTS)
+        .enumerate()
+        .map(|(index, text)| {
+            let cap = if index == 0 {
+                PINNED_LATEST_REQUEST_CHARS
+            } else {
+                PINNED_OLDER_REQUEST_CHARS
+            };
+            truncate_summary(text.trim(), cap)
+        })
+        .collect::<Vec<_>>();
+    recent.reverse();
+    recent
+}
+
+/// Keep the first (original) request plus the most recent requests that fit the
+/// char budget, dropping the middle. Preserves the original requirement across
+/// long sessions without letting the block grow without bound.
+fn bound_pinned_requests(requests: Vec<String>, budget_chars: usize) -> Vec<String> {
+    let total: usize = requests.iter().map(|request| request.chars().count()).sum();
+    if total <= budget_chars || requests.len() <= 2 {
+        return requests;
+    }
+    let first = requests[0].clone();
+    let mut used = first.chars().count();
+    let mut tail = Vec::new();
+    for request in requests[1..].iter().rev() {
+        let cost = request.chars().count();
+        if used.saturating_add(cost) > budget_chars {
+            break;
+        }
+        used += cost;
+        tail.push(request.clone());
+    }
+    tail.reverse();
+    let mut out = vec![first];
+    out.extend(tail);
+    out
+}
+
+/// The deterministic "must-not-lose" facts for the compacted range: user
+/// requests/constraints (rolled forward from a prior compaction, then this
+/// range's recent ones), the carried focus, the latest todo state, and
+/// unresolved tool errors. Rendered both as a MUST-PRESERVE preamble in the
+/// summarizer request and, verbatim, back into the final summary — so these
+/// survive even if the model drops them or repeated compaction would erode
+/// them. Emitted as flat, prefixed lines so [`carried_pinned_requests`] can
+/// recover them on the next round.
+fn pinned_context_lines(messages: &[ConversationMessage]) -> Vec<String> {
+    let mut requests = Vec::new();
+    // Oldest-first: carried forward from a prior compaction, then this range's
+    // recent user messages. Keeping carried entries first preserves the
+    // original requirements across repeated re-summarization.
+    for request in carried_pinned_requests(messages) {
+        push_unique_request(&mut requests, request);
+    }
+    for request in collect_pinned_user_requests(messages) {
+        push_unique_request(&mut requests, request);
+    }
+    let requests = bound_pinned_requests(requests, PINNED_REQUESTS_CHAR_BUDGET);
+
+    let mut lines = requests
+        .into_iter()
+        .map(|request| format!("{PINNED_REQUEST_PREFIX}{request}"))
+        .collect::<Vec<_>>();
+    if let Some(focus) = collect_prior_compaction_summaries(messages)
+        .iter()
+        .rev()
+        .find_map(|summary| extract_prior_current_focus(summary))
+    {
+        lines.push(format!("- Carried focus: {focus}"));
+    }
+    if let Some(todos) = latest_todo_state(messages) {
+        for todo in todos {
+            lines.push(format!("- Todo: {todo}"));
+        }
+    }
+    for error in collect_recent_tool_errors(messages, 3) {
+        lines.push(format!("- Unresolved error: {error}"));
+    }
+    // Code state: the key files in play and the latest assistant decision/status,
+    // so "where the work is" survives even if the summary drops it. Key files
+    // roll forward naturally because `collect_key_files` re-scans the injected
+    // pinned line on the next compaction.
+    let files = collect_key_files(messages);
+    if !files.is_empty() {
+        lines.push(format!("- Key files: {}", files.join(", ")));
+    }
+    if let Some(state) = latest_assistant_decision(messages) {
+        lines.push(format!("- Latest assistant state: {state}"));
+    }
+    lines
+}
+
+/// The most recent substantive assistant text (a decision / status / where the
+/// work stopped), pinned so it survives even if the model summary drops it.
+fn latest_assistant_decision(messages: &[ConversationMessage]) -> Option<String> {
+    messages
+        .iter()
+        .rev()
+        .filter(|message| message.role == MessageRole::Assistant)
+        .filter_map(first_text_block)
+        .find(|text| !text.trim().is_empty())
+        .map(|text| truncate_summary(text.trim(), 400))
+}
+
+/// Recover the user-request lines from the most recent prior pinned block
+/// carried inside an internal continuation message, so the original
+/// requirements roll forward across repeated compactions.
+fn carried_pinned_requests(messages: &[ConversationMessage]) -> Vec<String> {
+    for message in messages.iter().rev() {
+        if message.role != MessageRole::User || !is_internal_user_message(message) {
+            continue;
+        }
+        let Some(text) = first_text_block(message) else {
+            continue;
+        };
+        if !text.contains(PINNED_HEADER_MARKER) {
+            continue;
+        }
+        let requests = text
+            .lines()
+            .filter_map(|line| {
+                line.trim()
+                    .strip_prefix(PINNED_REQUEST_PREFIX)
+                    .map(str::to_string)
+            })
+            .collect::<Vec<_>>();
+        if !requests.is_empty() {
+            return requests;
+        }
+    }
+    Vec::new()
+}
+
+fn collect_recent_tool_errors(messages: &[ConversationMessage], limit: usize) -> Vec<String> {
+    messages
+        .iter()
+        .rev()
+        .flat_map(|message| message.blocks.iter().rev())
+        .filter_map(|block| match block {
+            ContentBlock::ToolResult {
+                tool_name,
+                output,
+                is_error: true,
+                ..
+            } => {
+                let text = output.trim();
+                (!text.is_empty())
+                    .then(|| truncate_summary(&format!("{tool_name}: {text}"), 300))
+            }
+            _ => None,
+        })
+        .take(limit)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect()
+}
+
+fn render_pinned_lines(lines: Vec<String>) -> Option<String> {
+    if lines.is_empty() {
+        return None;
+    }
+    let mut out = vec![PINNED_HEADER.to_string()];
+    out.extend(lines);
+    Some(out.join("\n"))
+}
+
+/// Render the pinned facts as a `## Pinned Context` markdown block, or `None`
+/// when nothing notable was found.
+fn pinned_context_section(messages: &[ConversationMessage]) -> Option<String> {
+    render_pinned_lines(pinned_context_lines(messages))
+}
+
+/// A minimal pinned block for the overflow path: the original (carried) plus the
+/// latest user request only, bounded to `max_chars` so the active task survives
+/// the emergency shrink without re-bloating it past the reserved budget.
+/// Round-trippable so it still rolls forward on the next compaction. When even a
+/// single request cannot fit `max_chars`, returns `None` (skip pinning).
+pub(crate) fn minimal_pinned_block(
+    messages: &[ConversationMessage],
+    max_chars: usize,
+) -> Option<String> {
+    let mut requests = Vec::new();
+    if let Some(original) = carried_pinned_requests(messages).into_iter().next() {
+        push_unique_request(
+            &mut requests,
+            truncate_summary(&original, OVERFLOW_PINNED_REQUEST_CHARS),
+        );
+    }
+    if let Some(latest) = collect_pinned_user_requests(messages).into_iter().next_back() {
+        push_unique_request(
+            &mut requests,
+            truncate_summary(&latest, OVERFLOW_PINNED_REQUEST_CHARS),
+        );
+    }
+    if requests.is_empty() {
+        return None;
+    }
+    let full = {
+        let mut lines = vec![PINNED_HEADER.to_string()];
+        for request in &requests {
+            lines.push(format!("{PINNED_REQUEST_PREFIX}{request}"));
+        }
+        lines.join("\n")
+    };
+    if full.chars().count() <= max_chars {
+        return Some(full);
+    }
+    // Over budget: keep the header + the latest request only, truncated to fit.
+    let latest = requests.last().cloned()?;
+    let prefix_len = PINNED_HEADER.chars().count() + 1 + PINNED_REQUEST_PREFIX.chars().count();
+    let room = max_chars.saturating_sub(prefix_len);
+    if room == 0 {
+        return None;
+    }
+    Some(format!(
+        "{PINNED_HEADER}\n{PINNED_REQUEST_PREFIX}{}",
+        truncate_summary(&latest, room)
+    ))
+}
+
+/// The most recent non-internal user request in the range — the fidelity target
+/// the LLM-summary gate checks the model actually covered. Head-truncated (not
+/// via `truncate_summary`) so no mid-word `" ... "` artifact pollutes the
+/// distinctive-token set the gate compares against.
+pub(crate) fn coverage_target(messages: &[ConversationMessage]) -> Option<String> {
+    messages
+        .iter()
+        .rev()
+        .filter(|message| message.role == MessageRole::User && !is_internal_user_message(message))
+        .filter_map(first_text_block)
+        .find(|text| !text.trim().is_empty())
+        .map(|text| text.trim().chars().take(400).collect::<String>())
+}
+
+/// MUST-PRESERVE preamble for the summarizer request. Empty when nothing pins.
+pub(crate) fn pinned_preamble(messages: &[ConversationMessage]) -> String {
+    let lines = pinned_context_lines(messages);
+    if lines.is_empty() {
+        return String::new();
+    }
+    format!(
+        "\n\nMUST-PRESERVE — retain these verbatim facts in your summary; do not drop or paraphrase them away:\n{}\n",
+        lines.join("\n")
+    )
+}
+
+/// Insert a pinned block at the top of a summary (just inside the `<summary>`
+/// tag when present).
+pub(crate) fn insert_pinned_block(summary: String, block: &str) -> String {
+    if let Some(open) = summary.find("<summary>") {
+        let insert_at = open + "<summary>".len();
+        let mut out = String::with_capacity(summary.len() + block.len() + 2);
+        out.push_str(&summary[..insert_at]);
+        out.push('\n');
+        out.push_str(block);
+        out.push('\n');
+        out.push_str(&summary[insert_at..]);
+        out
+    } else {
+        format!("{block}\n\n{summary}")
+    }
+}
+
+/// Insert the full pinned-context block. Applied to the LLM and deterministic
+/// summaries so the critical facts are guaranteed present verbatim.
+pub(crate) fn inject_pinned_context(summary: String, messages: &[ConversationMessage]) -> String {
+    match pinned_context_section(messages) {
+        Some(block) => insert_pinned_block(summary, &block),
+        None => summary,
+    }
+}
+
 /// Bound a deterministic fallback summary while retaining the continuation
 /// markup required by the compaction path. `max_content_chars` deliberately
 /// applies only to the inner summary text: the caller has already accounted
@@ -858,7 +1309,7 @@ fn first_text_block(message: &ConversationMessage) -> Option<&str> {
     })
 }
 
-fn is_internal_user_message(message: &ConversationMessage) -> bool {
+pub(crate) fn is_internal_user_message(message: &ConversationMessage) -> bool {
     message.role == MessageRole::User
         && message.blocks.iter().any(|block| match block {
             ContentBlock::Text { text } => is_internal_user_text(text),

@@ -1,7 +1,82 @@
-use super::{ContentBlock, ConversationMessage, MessageRole, Session};
+use super::{ContentBlock, ConversationMessage, MessageRole, Session, SessionCompactionRecord};
+use crate::get_compact_continuation_message;
 use crate::usage::TokenUsage;
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+#[test]
+fn logical_messages_restore_compacted_history_without_internal_continuations() {
+    let first_continuation = ConversationMessage::user_text(get_compact_continuation_message(
+        "first summary",
+        true,
+        true,
+    ));
+    let second_continuation = ConversationMessage::user_text(get_compact_continuation_message(
+        "second summary",
+        true,
+        true,
+    ));
+    let mut session = Session::new();
+    session.compactions.push(SessionCompactionRecord {
+        summary: "first summary".to_string(),
+        messages: vec![
+            ConversationMessage::user_text("original request"),
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "original answer".to_string(),
+            }]),
+        ],
+        removed_message_count: 2,
+        preserved_message_count: 2,
+        tokens_before: 100,
+        tokens_after: 50,
+        summary_source: "model".to_string(),
+    });
+    session.compactions.push(SessionCompactionRecord {
+        summary: "second summary".to_string(),
+        messages: vec![
+            first_continuation,
+            ConversationMessage::user_text("middle request"),
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "middle answer".to_string(),
+            }]),
+        ],
+        removed_message_count: 3,
+        preserved_message_count: 1,
+        tokens_before: 120,
+        tokens_after: 55,
+        summary_source: "model".to_string(),
+    });
+    session.messages = vec![
+        second_continuation,
+        ConversationMessage::user_text("latest request"),
+        ConversationMessage::assistant(vec![ContentBlock::Text {
+            text: "latest answer".to_string(),
+        }]),
+    ];
+
+    let visible_text = session
+        .logical_messages()
+        .into_iter()
+        .filter_map(|message| message.blocks.first())
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        visible_text,
+        vec![
+            "original request",
+            "original answer",
+            "middle request",
+            "middle answer",
+            "latest request",
+            "latest answer",
+        ]
+    );
+    assert_eq!(session.logical_message_count(), 6);
+}
 
 #[test]
 fn persists_and_restores_session_json() {

@@ -25,9 +25,11 @@ const apiMocks = vi.hoisted(() => ({
   chatDelete: vi.fn(() => Promise.resolve()),
   chatEventsReplay: vi.fn(() => Promise.resolve({ sessionId: "chat", eventCount: 0, lastSeq: 0, turns: [] })),
   chatEventsRead: vi.fn((_sessionId: string) => Promise.resolve([] as Array<{ kind: string; payload: unknown }>)),
-  chatUiSessionsList: vi.fn(() => Promise.resolve([])),
-  chatUiSessionLoad: vi.fn(() => Promise.resolve(null)),
-  chatUiTurnLoad: vi.fn(() => Promise.resolve(null)),
+  chatUiSessionsList: vi.fn<() => Promise<unknown[]>>(() => Promise.resolve([])),
+  chatUiSessionLoad: vi.fn<(_sessionId: string) => Promise<unknown | null>>(() => Promise.resolve(null)),
+  chatUiTurnLoad: vi.fn<(_sessionId: string, _turnIndex: number) => Promise<unknown | null>>(
+    () => Promise.resolve(null),
+  ),
   chatUiSessionSave: vi.fn(() => Promise.resolve()),
   chatUiSessionDelete: vi.fn(() => Promise.resolve()),
   chatUiSessionsSave: vi.fn(() => Promise.resolve()),
@@ -64,13 +66,32 @@ vi.mock("../ChatThread", () => ({
     onContinue,
     onRetry,
     onOpenIndependentReview,
+    hasEarlierTurns,
+    loadingEarlierTurns,
+    onLoadEarlierTurns,
+    loadEarlierLabel,
+    loadingEarlierLabel,
   }: {
     turns: ChatTurn[];
     onContinue: () => void;
     onRetry: (turn: ChatTurn) => void;
     onOpenIndependentReview?: () => void;
+    hasEarlierTurns?: boolean;
+    loadingEarlierTurns?: boolean;
+    onLoadEarlierTurns?: () => void;
+    loadEarlierLabel?: string;
+    loadingEarlierLabel?: string;
   }) => (
     <div data-testid="chat-thread">
+      {hasEarlierTurns && onLoadEarlierTurns && (
+        <button
+          type="button"
+          disabled={loadingEarlierTurns}
+          onClick={onLoadEarlierTurns}
+        >
+          {loadingEarlierTurns ? loadingEarlierLabel : loadEarlierLabel}
+        </button>
+      )}
       {turns.map((turn) => (
         <article key={turn.id} data-role={turn.role}>
           {turn.blocks.map((block, index) => (
@@ -204,6 +225,53 @@ describe("Chat export action", () => {
     await userEvent.click(screen.getByRole("button", { name: "Collapse project summary" }));
     await waitFor(() => expect(document.getElementById("project-brief-popover")).toBeNull());
     expect(document.querySelector(".chat-root")?.classList.contains("chat-project-brief-open")).toBe(false);
+  });
+
+  it("loads all turns omitted from the restart preview in bounded batches", async () => {
+    const allTurns = Array.from({ length: 30 }, (_, index): ChatTurn => ({
+      id: `saved-turn-${index}`,
+      role: index % 2 === 0 ? "user" : "assistant",
+      blocks: [{ kind: "text", text: `saved message ${index}` }],
+    }));
+    const partial = {
+      ...makeSession("default"),
+      id: "partial-chat",
+      title: "Long saved chat",
+      turns: allTurns.slice(18),
+      turnsLoaded: true,
+      turnsPartial: true,
+      turnCount: allTurns.length,
+      partialBaseTurnIds: allTurns.slice(18).map((turn) => turn.id),
+    };
+    apiMocks.chatUiSessionsList.mockResolvedValue([{
+      ...partial,
+      turns: [],
+      turnsLoaded: false,
+    }]);
+    apiMocks.chatUiSessionLoad.mockResolvedValue(partial);
+    apiMocks.chatUiTurnLoad.mockImplementation((_sessionId: string, turnIndex: number) => (
+      Promise.resolve(allTurns[turnIndex])
+    ));
+    localStorage.setItem(CURRENT_KEY, partial.id);
+
+    render(<Chat />);
+
+    await userEvent.click(await screen.findByRole("button", { name: "Long saved chat" }));
+    const loadEarlier = await screen.findByRole("button", { name: "Load earlier messages" });
+    await userEvent.click(loadEarlier);
+    await waitFor(() => expect(apiMocks.chatUiTurnLoad).toHaveBeenCalledTimes(12));
+    expect(apiMocks.chatUiTurnLoad.mock.calls.map((call) => call[1])).toEqual(
+      Array.from({ length: 12 }, (_, index) => index + 6),
+    );
+    expect(await screen.findByText("saved message 6")).toBeTruthy();
+
+    await userEvent.click(screen.getByRole("button", { name: "Load earlier messages" }));
+    await waitFor(() => expect(apiMocks.chatUiTurnLoad).toHaveBeenCalledTimes(18));
+    expect(apiMocks.chatUiTurnLoad.mock.calls.slice(12).map((call) => call[1])).toEqual(
+      Array.from({ length: 6 }, (_, index) => index),
+    );
+    expect(await screen.findByText("saved message 0")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Load earlier messages" })).toBeNull();
   });
 
   it("persists the automatic review toggle from the project summary", async () => {

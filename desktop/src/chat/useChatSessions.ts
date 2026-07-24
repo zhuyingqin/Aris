@@ -795,6 +795,35 @@ export function useChatSessions(projectId?: string | null) {
     }));
   }, []);
 
+  const prependEarlierTurns = useCallback((id: string, startIndex: number, earlierTurns: ChatTurn[]) => {
+    if (id === HOME_SESSION_ID) return;
+    setAllSessions((previous) => previous.map((session) => {
+      if (session.id !== id) return session;
+      const existingIds = new Set(session.turns.map((turn) => turn.id));
+      const loadedIds = new Set<string>();
+      const prefix = earlierTurns.filter((turn) => {
+        if (existingIds.has(turn.id) || loadedIds.has(turn.id)) return false;
+        loadedIds.add(turn.id);
+        return true;
+      });
+      const turns = [...prefix, ...session.turns];
+      const turnsPartial = startIndex > 0
+        || turns.some((turn) => turn.omittedTurnIndex != null);
+      const turnCount = Math.max(session.turnCount ?? session.turns.length, turns.length);
+      const partialBaseTurnIds = turnsPartial
+        ? [...new Set([...(session.partialBaseTurnIds ?? []), ...prefix.map((turn) => turn.id)])]
+        : undefined;
+      return {
+        ...session,
+        turns,
+        turnsLoaded: true,
+        turnsPartial,
+        turnCount,
+        partialBaseTurnIds,
+      };
+    }));
+  }, []);
+
   const newSession = useCallback(() => {
     if (currentId === HOME_SESSION_ID) {
       if (!isBlankSession(homeSession)) setHomeSession(makeHomeSession(activeProjectId));
@@ -847,6 +876,7 @@ export function useChatSessions(projectId?: string | null) {
     updateSession,
     patchTurns,
     hydrateOmittedTurn,
+    prependEarlierTurns,
     newSession,
     setDraft,
     renameSession,

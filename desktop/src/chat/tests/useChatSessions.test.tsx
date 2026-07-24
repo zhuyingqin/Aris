@@ -242,6 +242,56 @@ describe("useChatSessions Tauri persistence", () => {
     expect(apiMocks.chatUiSessionLoad).not.toHaveBeenCalled();
   });
 
+  it("prepends saved preview batches until the full conversation is loaded", async () => {
+    const allTurns = Array.from({ length: 30 }, (_, index): ChatTurn => ({
+      id: `turn-${index}`,
+      role: index % 2 === 0 ? "user" : "assistant",
+      blocks: [{ kind: "text", text: `message ${index}` }],
+    }));
+    const summary = {
+      ...makeSession("default"),
+      id: "partial-chat",
+      title: "Partial chat",
+      turns: [],
+      turnsLoaded: false,
+      turnsPartial: true,
+      turnCount: allTurns.length,
+    };
+    const preview = {
+      ...summary,
+      turns: allTurns.slice(18),
+      turnsLoaded: true,
+      partialBaseTurnIds: allTurns.slice(18).map((turn) => turn.id),
+    };
+    apiMocks.chatUiSessionsList.mockResolvedValue([summary]);
+    apiMocks.chatUiSessionLoad.mockResolvedValue(preview);
+
+    const { result } = renderHook(() => useChatSessions("default"));
+    await waitFor(() => expect(result.current.allSessions).toHaveLength(1));
+    act(() => result.current.setCurrentId("partial-chat"));
+    await waitFor(() => expect(result.current.currentSession?.turns).toHaveLength(12));
+
+    act(() => result.current.prependEarlierTurns("partial-chat", 6, allTurns.slice(6, 18)));
+    expect(result.current.currentSession).toMatchObject({
+      turnsPartial: true,
+      turnCount: 30,
+    });
+    expect(result.current.currentSession?.turns.map((turn) => turn.id)).toEqual(
+      allTurns.slice(6).map((turn) => turn.id),
+    );
+    expect(result.current.currentSession?.partialBaseTurnIds).toHaveLength(24);
+
+    act(() => result.current.prependEarlierTurns("partial-chat", 0, allTurns.slice(0, 6)));
+    expect(result.current.currentSession?.turns.map((turn) => turn.id)).toEqual(
+      allTurns.map((turn) => turn.id),
+    );
+    expect(result.current.currentSession).toMatchObject({
+      turnsPartial: false,
+      turnCount: 30,
+    });
+    expect(result.current.currentSession?.partialBaseTurnIds).toBeUndefined();
+  });
+
   it("reloads a persisted remote turn instead of retaining its stale session summary", async () => {
     let remoteUpdateHandler: ((event: { sessionId: string }) => void) | undefined;
     (apiMocks.onRemoteChatSessionUpdated as unknown as {

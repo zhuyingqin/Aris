@@ -8,6 +8,11 @@ use serde::Serialize;
 
 use crate::{ContentBlock, MessageRole, Session};
 
+/// Index base for archived (compacted-out) messages. Live sessions never reach
+/// this many messages, so archived rows never collide with live `message_index`
+/// values in the shared `messages` table.
+const ARCHIVE_INDEX_BASE: usize = 1_000_000;
+
 #[derive(Debug, Clone, Serialize)]
 pub struct SessionSearchMessage {
     pub index: usize,
@@ -74,7 +79,12 @@ pub fn index_session(path: &Path, session: &Session) -> Result<(), String> {
              VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(session_id) DO UPDATE SET
                path=excluded.path, updated_at=excluded.updated_at, message_count=excluded.message_count",
-            params![session_id, path.display().to_string(), updated_at, session.messages.len()],
+            params![
+                session_id,
+                path.display().to_string(),
+                updated_at,
+                session.logical_message_count()
+            ],
         )
         .map_err(|error| error.to_string())?;
     transaction
@@ -105,7 +115,51 @@ pub fn index_session(path: &Path, session: &Session) -> Result<(), String> {
             )
             .map_err(|error| error.to_string())?;
     }
+    // Also index the compaction archive (removed messages and their summaries)
+    // so session search can recover content that was compacted out of the live
+    // list. Archived rows use a high index base and an `archived:` role prefix so
+    // they never collide with, or masquerade as, live messages.
+    let mut archive_index = ARCHIVE_INDEX_BASE;
+    for record in &session.compactions {
+        let summary = record.summary.trim();
+        if !summary.is_empty() {
+            index_row(&transaction, session_id, archive_index, "archived:summary", summary)?;
+            archive_index += 1;
+        }
+        for message in &record.messages {
+            let content = searchable_message_text(message);
+            if content.trim().is_empty() {
+                continue;
+            }
+            let role = format!("archived:{}", role_name(message.role));
+            index_row(&transaction, session_id, archive_index, &role, &content)?;
+            archive_index += 1;
+        }
+    }
     transaction.commit().map_err(|error| error.to_string())
+}
+
+/// Insert one row into both `messages` and `messages_fts` within `transaction`.
+fn index_row(
+    transaction: &rusqlite::Transaction<'_>,
+    session_id: &str,
+    message_index: usize,
+    role: &str,
+    content: &str,
+) -> Result<(), String> {
+    transaction
+        .execute(
+            "INSERT INTO messages(session_id, message_index, role, content) VALUES (?1, ?2, ?3, ?4)",
+            params![session_id, message_index, role, content],
+        )
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute(
+            "INSERT INTO messages_fts(session_id, message_index, role, content) VALUES (?1, ?2, ?3, ?4)",
+            params![session_id, message_index, role, content],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 #[must_use]
