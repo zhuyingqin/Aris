@@ -12,7 +12,9 @@ import {
   type FileTreeEntry,
 } from "../api/tauri";
 import { makeId } from "../chat/model";
+import { useStore } from "../store";
 import type { ChatAttachment } from "../types";
+import { LAB_COPY } from "./i18n";
 
 function basename(path: string | null | undefined): string {
   if (!path) return "";
@@ -25,8 +27,8 @@ function extension(path: string): string {
   return index >= 0 ? name.slice(index).toLowerCase() : "";
 }
 
-function rootLabel(projectPath: string | null): string {
-  return (basename(projectPath) || "Project").toUpperCase();
+function rootLabel(projectPath: string | null, projectFallbackLabel: string): string {
+  return (basename(projectPath) || projectFallbackLabel).toUpperCase();
 }
 
 function normalizePath(path: string): string {
@@ -45,7 +47,7 @@ function joinPath(parent: string, name: string): string {
   return cleanParent ? `${cleanParent}/${cleanName}` : cleanName;
 }
 
-function defaultFileContent(path: string): string {
+function defaultFileContent(path: string, copy: (typeof LAB_COPY)[keyof typeof LAB_COPY]): string {
   const ext = extension(path);
   if (ext === ".ipynb") {
     return `${JSON.stringify({
@@ -55,10 +57,10 @@ function defaultFileContent(path: string): string {
       nbformat_minor: 5,
     }, null, 2)}\n`;
   }
-  if (ext === ".py") return "# New experiment\n";
-  if (ext === ".md") return "# Notes\n";
+  if (ext === ".py") return copy.newExperimentComment;
+  if (ext === ".md") return copy.notesHeading;
   if (ext === ".json") return "{}\n";
-  if (ext === ".toml") return "# Configuration\n";
+  if (ext === ".toml") return copy.configurationComment;
   return "";
 }
 
@@ -241,6 +243,8 @@ export default function LabFiles({
   onAttachToAssistant,
   onFileChanged,
 }: Props) {
+  const language = useStore((s) => s.language);
+  const copy = LAB_COPY[language];
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set([""]));
   const [artifactGroups, setArtifactGroups] = useState<Set<string>>(() => new Set());
   const [children, setChildren] = useState<Record<string, FileTreeEntry[]>>({});
@@ -334,12 +338,12 @@ export default function LabFiles({
 
   const createFile = async (parentPath: string) => {
     const suggested = joinPath(parentPath, "untitled.py");
-    const path = window.prompt("New file path", suggested)?.trim();
+    const path = window.prompt(copy.newFilePathPrompt, suggested)?.trim();
     if (!path) return;
     setOperationBusy(true);
     setError(null);
     try {
-      const file = await fileCreateText(path, defaultFileContent(path));
+      const file = await fileCreateText(path, defaultFileContent(path, copy));
       const parent = dirname(file.path);
       setExpanded((items) => new Set(items).add(parent));
       await refreshAfterChange([parent]);
@@ -354,7 +358,7 @@ export default function LabFiles({
 
   const createFolder = async (parentPath: string) => {
     const suggested = joinPath(parentPath, "new-folder");
-    const path = window.prompt("New folder path", suggested)?.trim();
+    const path = window.prompt(copy.newFolderPathPrompt, suggested)?.trim();
     if (!path) return;
     setOperationBusy(true);
     setError(null);
@@ -372,7 +376,7 @@ export default function LabFiles({
   };
 
   const renameEntry = async (entry: FileTreeEntry) => {
-    const nextPath = window.prompt("Rename or move to", entry.path)?.trim();
+    const nextPath = window.prompt(copy.renameOrMoveToPrompt, entry.path)?.trim();
     if (!nextPath || normalizePath(nextPath) === normalizePath(entry.path)) return;
     setOperationBusy(true);
     setError(null);
@@ -398,7 +402,7 @@ export default function LabFiles({
   };
 
   const deleteEntry = async (entry: FileTreeEntry) => {
-    const confirmed = window.confirm(`Delete ${entry.isDir ? "folder" : "file"} "${entry.path}"?`);
+    const confirmed = window.confirm(copy.deleteConfirm(entry.isDir ? copy.folderWord : copy.fileWord, entry.path));
     if (!confirmed) return;
     setOperationBusy(true);
     setError(null);
@@ -438,7 +442,7 @@ export default function LabFiles({
         >
           <button
             className="lab-explorer-main"
-            title={entry.isDir ? entry.path : `${entry.path}\nClick to preview, double-click to keep open. Right-click for more actions.`}
+            title={entry.isDir ? entry.path : copy.clickToPreviewHint(entry.path)}
             onClick={() => {
               if (entry.isDir) toggleDir(entry.path);
               else openFile(entry.path, false);
@@ -458,12 +462,12 @@ export default function LabFiles({
           <div>
             {loading.has(entry.path) && (
               <div className="lab-explorer-muted" style={{ paddingLeft: `${(depth + 1) * 14 + 32}px` }}>
-                Loading...
+                {copy.loadingLabel}
               </div>
             )}
             {!loading.has(entry.path) && nested.length === 0 && children[entry.path] && (
               <div className="lab-explorer-muted" style={{ paddingLeft: `${(depth + 1) * 14 + 32}px` }}>
-                Empty
+                {copy.emptyLabel}
               </div>
             )}
             {renderEntries(nested, depth + 1, entry.path)}
@@ -495,12 +499,12 @@ export default function LabFiles({
               type="button"
               className="lab-explorer-artifact-toggle"
               style={{ paddingLeft: `${depth * 14 + 8}px` }}
-              title={`${generated.length} generated files created by LaTeX compilation`}
+              title={copy.generatedFilesTitle(generated.length)}
               onClick={() => toggleArtifactGroup(groupKey)}
             >
               <span className="lab-explorer-caret">{groupOpen ? "v" : ">"}</span>
               <WorkspaceFileIcon path="" kind="latex-artifact" />
-              <span>LaTeX build files</span>
+              <span>{copy.latexBuildFilesLabel}</span>
               <em>{generated.length}</em>
             </button>
             {groupOpen && generated.map((entry) => renderEntry(entry, depth + 1, true))}
@@ -515,15 +519,15 @@ export default function LabFiles({
   return (
     <div className="lab-explorer">
       <div className="lab-explorer-title">
-        <span>EXPLORER</span>
+        <span>{copy.explorerTitle.toUpperCase()}</span>
         <div className="lab-explorer-title-actions">
-          <button title="New file" disabled={operationBusy} onClick={() => void createFile("")}>
+          <button title={copy.newFileTitle} disabled={operationBusy} onClick={() => void createFile("")}>
             <FileActionIcon name="file" />
           </button>
-          <button title="New folder" disabled={operationBusy} onClick={() => void createFolder("")}>
+          <button title={copy.newFolderTitle} disabled={operationBusy} onClick={() => void createFolder("")}>
             <FileActionIcon name="folder" />
           </button>
-          <button title="Refresh files" disabled={operationBusy} onClick={() => void loadDir("")}>
+          <button title={copy.refreshFilesTitle} disabled={operationBusy} onClick={() => void loadDir("")}>
             <FileActionIcon name="refresh" />
           </button>
         </div>
@@ -533,21 +537,21 @@ export default function LabFiles({
         <button className="lab-explorer-root" onClick={() => toggleDir("")}>
           <span className="lab-explorer-caret">{expanded.has("") ? "v" : ">"}</span>
           <WorkspaceFileIcon path={projectPath ?? ""} directory />
-          <span>{rootLabel(projectPath)}</span>
+          <span>{rootLabel(projectPath, copy.projectFallbackLabel)}</span>
         </button>
         {projectPath && (
           <button
             className="lab-explorer-action"
-            title="Open project folder externally"
+            title={copy.openProjectFolderTitle}
             onClick={() => void fileOpen(projectPath)}
           >
             <FileActionIcon name="open" />
           </button>
         )}
-        <button className="lab-explorer-action" title="New file" disabled={operationBusy} onClick={() => void createFile("")}>
+        <button className="lab-explorer-action" title={copy.newFileTitle} disabled={operationBusy} onClick={() => void createFile("")}>
           <FileActionIcon name="file" />
         </button>
-        <button className="lab-explorer-action" title="New folder" disabled={operationBusy} onClick={() => void createFolder("")}>
+        <button className="lab-explorer-action" title={copy.newFolderTitle} disabled={operationBusy} onClick={() => void createFolder("")}>
           <FileActionIcon name="folder" />
         </button>
       </div>
@@ -558,7 +562,7 @@ export default function LabFiles({
         <div className="lab-explorer-tree">
           {expanded.has("") && (
             <>
-              {loading.has("") && <div className="lab-explorer-muted root">Loading...</div>}
+              {loading.has("") && <div className="lab-explorer-muted root">{copy.loadingLabel}</div>}
               {!loading.has("") && renderEntries(rootChildren, 0, "")}
             </>
           )}
@@ -584,7 +588,7 @@ export default function LabFiles({
               setRowMenu(null);
             }}
           >
-            Attach to assistant
+            {copy.attachToAssistantLabel}
           </button>
           <button
             type="button"
@@ -595,7 +599,7 @@ export default function LabFiles({
               setRowMenu(null);
             }}
           >
-            Rename / Move
+            {copy.renameOrMoveLabel}
           </button>
           <button
             type="button"
@@ -607,7 +611,7 @@ export default function LabFiles({
               setRowMenu(null);
             }}
           >
-            Delete
+            {copy.deleteLabel}
           </button>
         </div>
       )}

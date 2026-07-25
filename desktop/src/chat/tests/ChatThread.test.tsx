@@ -10,6 +10,7 @@ import {
   questionMarkersFromTurns,
   questionPreviewFromTurn,
   shouldIgnoreProgrammaticFollowScroll,
+  shouldLoadEarlierTurnsAtTop,
   shouldPauseAutoFollowForWheel,
 } from "../ChatThread";
 
@@ -24,6 +25,11 @@ describe("ChatThread scroll and timeline helpers", () => {
   it("pauses auto-follow as soon as the reader scrolls upward", () => {
     expect(shouldPauseAutoFollowForWheel(-1)).toBe(true);
     expect(shouldPauseAutoFollowForWheel(1)).toBe(false);
+  });
+
+  it("requests earlier history only after the reader reaches the top edge", () => {
+    expect(shouldLoadEarlierTurnsAtTop({ scrollTop: 96 })).toBe(true);
+    expect(shouldLoadEarlierTurnsAtTop({ scrollTop: 97 })).toBe(false);
   });
 
   it("detects pointer starts in the scrollbar gutter", () => {

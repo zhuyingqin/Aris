@@ -14,12 +14,9 @@ import type {
   McpTestResult,
   PermissionModeView,
 } from "../types";
+import { RUNTIME_ACCESS_COPY } from "./i18n";
 
-const PERMISSIONS = [
-  { mode: "read-only", label: "Plan", description: "Inspect and search only" },
-  { mode: "workspace-write", label: "Accept edits", description: "Read and edit workspace files" },
-  { mode: "danger-full-access", label: "Auto-approve", description: "Auto-approve shell, agents, workflows, and MCP; no OS admin elevation" },
-];
+const PERMISSION_MODES = ["read-only", "workspace-write", "danger-full-access"];
 
 const isWindows =
   typeof navigator !== "undefined" && /win/i.test(navigator.userAgent);
@@ -93,6 +90,8 @@ function uniqueName(base: string, servers: McpStdioServerInput[]) {
 export default function RuntimeAccess() {
   const setError = useStore((state) => state.setError);
   const currentProject = useStore((state) => state.currentProject);
+  const language = useStore((state) => state.language);
+  const copy = RUNTIME_ACCESS_COPY[language];
   const [permission, setPermission] = useState<PermissionModeView | null>(null);
   const [view, setView] = useState<McpConfigView | null>(null);
   const [servers, setServers] = useState<McpStdioServerInput[]>([]);
@@ -166,48 +165,48 @@ export default function RuntimeAccess() {
       <div className="st-layer-head">
         <div className="st-layer-marker">04</div>
         <div className="st-layer-title-wrap">
-          <div className="st-layer-title">Permissions & MCP</div>
-          <div className="st-layer-sub">Project defaults and external STDIO tool servers used by Chat and CLI.</div>
+          <div className="st-layer-title">{copy.title}</div>
+          <div className="st-layer-sub">{copy.subtitle}</div>
         </div>
       </div>
       <div className="st-layer-body">
         <div className="st-field-group">
-          <div className="st-field-label">Default permission mode</div>
+          <div className="st-field-label">{copy.defaultPermissionMode}</div>
           <div className="st-mode-grid">
-            {PERMISSIONS.map((item) => (
+            {PERMISSION_MODES.map((mode) => (
               <button
-                key={item.mode}
+                key={mode}
                 type="button"
-                className={`st-mode-option${permission?.mode === item.mode ? " active" : ""}`}
-                onClick={() => void setProjectPermission(item.mode)}
+                className={`st-mode-option${permission?.mode === mode ? " active" : ""}`}
+                onClick={() => void setProjectPermission(mode)}
               >
-                <span>{item.label}</span>
-                <small>{item.description}</small>
+                <span>{copy.permissionLabel(mode)}</span>
+                <small>{copy.permissionDescription(mode)}</small>
               </button>
             ))}
           </div>
           <div className="st-access-note">
-            New chats use this project default. The Chat header can override it for the active session. Auto-approve gates SomniQ tools only and does not grant administrator rights.
+            {copy.accessNote}
           </div>
         </div>
 
         <div className="st-mcp-head">
           <div>
-            <div className="st-field-label">Project MCP servers</div>
-            <div className="st-access-note">{view?.projectPath ?? "Loading project .mcp.json..."}</div>
+            <div className="st-field-label">{copy.projectMcpServers}</div>
+            <div className="st-access-note">{view?.projectPath ?? copy.loadingProjectPath}</div>
           </div>
           <div className="st-mcp-actions">
-            <button type="button" onClick={() => addPreset("codex")}>+ Codex</button>
-            <button type="button" onClick={() => addPreset("claude")}>+ Claude Code</button>
-            <button type="button" onClick={() => addPreset("playwright")}>+ Playwright</button>
-            <button type="button" onClick={() => addPreset("custom")}>+ Custom</button>
+            <button type="button" onClick={() => addPreset("codex")}>{copy.addCodex}</button>
+            <button type="button" onClick={() => addPreset("claude")}>{copy.addClaudeCode}</button>
+            <button type="button" onClick={() => addPreset("playwright")}>{copy.addPlaywright}</button>
+            <button type="button" onClick={() => addPreset("custom")}>{copy.addCustom}</button>
           </div>
         </div>
 
         {servers.length === 0 ? (
           <div className="st-inline-state">
-            <div className="st-inline-state-title">No project MCP servers</div>
-            <div className="st-inline-state-copy">Add Codex, Claude Code, Playwright, or a custom STDIO server.</div>
+            <div className="st-inline-state-title">{copy.noProjectMcpServers}</div>
+            <div className="st-inline-state-copy">{copy.noProjectMcpServersHint}</div>
           </div>
         ) : (
           <div className="st-mcp-list">
@@ -217,32 +216,32 @@ export default function RuntimeAccess() {
                 <div className="st-mcp-server" key={`${server.name}:${index}`}>
                   <div className="st-mcp-server-head">
                     <input
-                      aria-label={`MCP server ${index + 1} name`}
+                      aria-label={copy.serverNameLabel(index + 1)}
                       value={server.name}
                       onChange={(event) => updateServer(index, { name: event.currentTarget.value })}
-                      placeholder="server name"
+                      placeholder={copy.serverNamePlaceholder}
                     />
                     <span className="st-mcp-transport">STDIO</span>
                     <button
                       type="button"
                       className="st-mcp-remove"
                       onClick={() => setServers((current) => current.filter((_, candidate) => candidate !== index))}
-                      title="Remove MCP server"
+                      title={copy.removeMcpServer}
                     >
-                      Remove
+                      {copy.remove}
                     </button>
                   </div>
                   <div className="st-mcp-fields">
                     <label>
-                      <span>Command</span>
+                      <span>{copy.command}</span>
                       <input
                         value={server.command}
                         onChange={(event) => updateServer(index, { command: event.currentTarget.value })}
-                        placeholder="codex"
+                        placeholder={copy.commandPlaceholder}
                       />
                     </label>
                     <label>
-                      <span>Timeout seconds</span>
+                      <span>{copy.timeoutSeconds}</span>
                       <input
                         type="number"
                         min={1}
@@ -254,7 +253,7 @@ export default function RuntimeAccess() {
                       />
                     </label>
                     <label>
-                      <span>Arguments, one per line</span>
+                      <span>{copy.argumentsOnePerLine}</span>
                       <textarea
                         value={server.args.join("\n")}
                         onChange={(event) => updateServer(index, {
@@ -264,17 +263,17 @@ export default function RuntimeAccess() {
                       />
                     </label>
                     <label>
-                      <span>Environment, KEY=value</span>
+                      <span>{copy.environmentKeyValue}</span>
                       <textarea
                         value={envText(server.env)}
                         onChange={(event) => updateServer(index, { env: parseEnv(event.currentTarget.value) })}
-                        placeholder="TOKEN=value"
+                        placeholder={copy.environmentPlaceholder}
                       />
                     </label>
                   </div>
                   {result && (
                     <div className={`st-mcp-result${result.ok ? " ok" : " failed"}`}>
-                      <strong>{result.ok ? "Connected" : "Failed"}</strong>
+                      <strong>{result.ok ? copy.connected : copy.failed}</strong>
                       <span>{result.message}</span>
                       {result.tools.length > 0 && <code>{result.tools.join(", ")}</code>}
                     </div>
@@ -287,7 +286,7 @@ export default function RuntimeAccess() {
 
         {view && view.mergedServers.length > 0 && (
           <div className="st-mcp-merged">
-            <div className="st-field-label">Effective MCP configuration</div>
+            <div className="st-field-label">{copy.effectiveMcpConfiguration}</div>
             <div className="st-mcp-summary-list">
               {view.mergedServers.map((server) => (
                 <span key={server.name} title={server.command ?? server.transport}>
@@ -300,10 +299,10 @@ export default function RuntimeAccess() {
 
         <div className="st-mcp-footer">
           <button type="button" className="st-test-btn" onClick={() => void test()} disabled={testing || saving}>
-            {testing ? "Testing MCP..." : "Test MCP servers"}
+            {testing ? copy.testingMcp : copy.testMcpServers}
           </button>
           <button type="button" className="st-save-btn" onClick={() => void save()} disabled={saving || testing}>
-            {saving ? "Saving..." : "Save MCP configuration"}
+            {saving ? copy.saving : copy.saveMcpConfiguration}
           </button>
         </div>
       </div>

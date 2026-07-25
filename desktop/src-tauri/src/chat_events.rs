@@ -12,9 +12,7 @@ use runtime::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
-use tauri::{AppHandle, Emitter, State};
-
-use crate::engine::ChatState;
+use tauri::{AppHandle, Emitter};
 
 const EVENT_VERSION: u32 = 1;
 const DEFAULT_WIRE_TRACE_MAX_STRING_CHARS: usize = 64_000;
@@ -62,16 +60,6 @@ pub struct ChatEventsReplay {
     pub event_count: usize,
     pub last_seq: u64,
     pub turns: Vec<Value>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ChatEventsRestoreResult {
-    pub session_id: String,
-    pub event_count: usize,
-    pub last_seq: u64,
-    pub message_count: usize,
-    pub restored_path: String,
 }
 
 fn event_seqs() -> &'static Mutex<HashMap<String, EventSeqState>> {
@@ -163,11 +151,31 @@ fn read_last_seq(path: &Path) -> Result<u64, String> {
         if line.trim().is_empty() {
             continue;
         }
-        let entry: ChatEventLogEntry =
-            serde_json::from_str(&line).map_err(|error| error.to_string())?;
-        last = last.max(entry.seq);
+        match serde_json::from_str::<ChatEventLogEntry>(&line) {
+            Ok(entry) => last = last.max(entry.seq),
+            Err(error) => {
+                // A previous process may have been interrupted while appending
+                // JSONL, or older versions may have interleaved two writers.
+                // Keep valid later records usable instead of making every
+                // subsequent save fail on the first damaged line.
+                eprintln!(
+                    "SomniQ desktop: ignoring malformed chat event while finding sequence: {error}"
+                );
+            }
+        }
     }
     Ok(last)
+}
+
+fn append_jsonl_entry(file: &mut fs::File, entry: &ChatEventLogEntry) -> Result<(), String> {
+    // `serde_json::to_writer` can issue several writes. When another desktop
+    // process has the same event log open for append, those fragments can be
+    // interleaved into invalid JSON. Encode first and append one complete line.
+    let mut encoded = serde_json::to_vec(entry).map_err(|error| error.to_string())?;
+    encoded.push(b'\n');
+    file.write_all(&encoded)
+        .map_err(|error| error.to_string())?;
+    file.flush().map_err(|error| error.to_string())
 }
 
 pub fn append_event(
@@ -177,69 +185,70 @@ pub fn append_event(
 ) -> Result<ChatEventLogEntry, String> {
     validate_session_id(session_id)?;
     let path = chat_event_log_path(session_id)?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    }
-    let current_bytes = fs::metadata(&path)
-        .map(|meta| meta.len())
-        .unwrap_or_default();
+    let kind = kind.into();
+    runtime::with_path_lock(&path, || {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        }
+        let current_bytes = fs::metadata(&path)
+            .map(|meta| meta.len())
+            .unwrap_or_default();
 
-    let mut seqs = event_seqs()
-        .lock()
-        .map_err(|_| "chat event state poisoned".to_string())?;
-    let last = match seqs.get(session_id).copied() {
-        Some(state) if state.bytes == current_bytes => state.seq,
-        None => {
-            let seq = read_last_seq(&path)?;
-            seqs.insert(
-                session_id.to_string(),
-                EventSeqState {
-                    seq,
-                    bytes: current_bytes,
-                },
-            );
-            seq
-        }
-        Some(_) => {
-            let seq = read_last_seq(&path)?;
-            seqs.insert(
-                session_id.to_string(),
-                EventSeqState {
-                    seq,
-                    bytes: current_bytes,
-                },
-            );
-            seq
-        }
-    };
-    let entry = ChatEventLogEntry {
-        version: EVENT_VERSION,
-        seq: last.saturating_add(1),
-        ts: now_millis(),
-        session_id: session_id.to_string(),
-        kind: kind.into(),
-        payload,
-    };
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .map_err(|error| error.to_string())?;
-    serde_json::to_writer(&mut file, &entry).map_err(|error| error.to_string())?;
-    file.write_all(b"\n").map_err(|error| error.to_string())?;
-    file.flush().map_err(|error| error.to_string())?;
-    let bytes = file
-        .metadata()
-        .map(|meta| meta.len())
-        .unwrap_or(current_bytes);
-    seqs.insert(
-        session_id.to_string(),
-        EventSeqState {
-            seq: entry.seq,
-            bytes,
-        },
-    );
-    Ok(entry)
+        let mut seqs = event_seqs()
+            .lock()
+            .map_err(|_| "chat event state poisoned".to_string())?;
+        let last = match seqs.get(session_id).copied() {
+            Some(state) if state.bytes == current_bytes => state.seq,
+            None => {
+                let seq = read_last_seq(&path)?;
+                seqs.insert(
+                    session_id.to_string(),
+                    EventSeqState {
+                        seq,
+                        bytes: current_bytes,
+                    },
+                );
+                seq
+            }
+            Some(_) => {
+                let seq = read_last_seq(&path)?;
+                seqs.insert(
+                    session_id.to_string(),
+                    EventSeqState {
+                        seq,
+                        bytes: current_bytes,
+                    },
+                );
+                seq
+            }
+        };
+        let entry = ChatEventLogEntry {
+            version: EVENT_VERSION,
+            seq: last.saturating_add(1),
+            ts: now_millis(),
+            session_id: session_id.to_string(),
+            kind,
+            payload,
+        };
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .map_err(|error| error.to_string())?;
+        append_jsonl_entry(&mut file, &entry)?;
+        let bytes = file
+            .metadata()
+            .map(|meta| meta.len())
+            .unwrap_or(current_bytes);
+        seqs.insert(
+            session_id.to_string(),
+            EventSeqState {
+                seq: entry.seq,
+                bytes,
+            },
+        );
+        Ok(entry)
+    })
 }
 
 pub fn append_wire_event(
@@ -252,70 +261,71 @@ pub fn append_wire_event(
     }
     validate_session_id(session_id)?;
     let path = chat_wire_log_path(session_id)?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    }
-    rotate_wire_log_if_needed(&path)?;
-    let current_bytes = fs::metadata(&path)
-        .map(|meta| meta.len())
-        .unwrap_or_default();
+    let kind = kind.into();
+    runtime::with_path_lock(&path, || {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        }
+        rotate_wire_log_if_needed(&path)?;
+        let current_bytes = fs::metadata(&path)
+            .map(|meta| meta.len())
+            .unwrap_or_default();
 
-    let mut seqs = wire_seqs()
-        .lock()
-        .map_err(|_| "chat wire trace state poisoned".to_string())?;
-    let last = match seqs.get(session_id).copied() {
-        Some(state) if state.bytes == current_bytes => state.seq,
-        None => {
-            let seq = read_last_seq(&path)?;
-            seqs.insert(
-                session_id.to_string(),
-                EventSeqState {
-                    seq,
-                    bytes: current_bytes,
-                },
-            );
-            seq
-        }
-        Some(_) => {
-            let seq = read_last_seq(&path)?;
-            seqs.insert(
-                session_id.to_string(),
-                EventSeqState {
-                    seq,
-                    bytes: current_bytes,
-                },
-            );
-            seq
-        }
-    };
-    let entry = ChatEventLogEntry {
-        version: EVENT_VERSION,
-        seq: last.saturating_add(1),
-        ts: now_millis(),
-        session_id: session_id.to_string(),
-        kind: kind.into(),
-        payload: govern_wire_payload(payload),
-    };
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .map_err(|error| error.to_string())?;
-    serde_json::to_writer(&mut file, &entry).map_err(|error| error.to_string())?;
-    file.write_all(b"\n").map_err(|error| error.to_string())?;
-    file.flush().map_err(|error| error.to_string())?;
-    let bytes = file
-        .metadata()
-        .map(|meta| meta.len())
-        .unwrap_or(current_bytes);
-    seqs.insert(
-        session_id.to_string(),
-        EventSeqState {
-            seq: entry.seq,
-            bytes,
-        },
-    );
-    Ok(entry)
+        let mut seqs = wire_seqs()
+            .lock()
+            .map_err(|_| "chat wire trace state poisoned".to_string())?;
+        let last = match seqs.get(session_id).copied() {
+            Some(state) if state.bytes == current_bytes => state.seq,
+            None => {
+                let seq = read_last_seq(&path)?;
+                seqs.insert(
+                    session_id.to_string(),
+                    EventSeqState {
+                        seq,
+                        bytes: current_bytes,
+                    },
+                );
+                seq
+            }
+            Some(_) => {
+                let seq = read_last_seq(&path)?;
+                seqs.insert(
+                    session_id.to_string(),
+                    EventSeqState {
+                        seq,
+                        bytes: current_bytes,
+                    },
+                );
+                seq
+            }
+        };
+        let entry = ChatEventLogEntry {
+            version: EVENT_VERSION,
+            seq: last.saturating_add(1),
+            ts: now_millis(),
+            session_id: session_id.to_string(),
+            kind,
+            payload: govern_wire_payload(payload),
+        };
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .map_err(|error| error.to_string())?;
+        append_jsonl_entry(&mut file, &entry)?;
+        let bytes = file
+            .metadata()
+            .map(|meta| meta.len())
+            .unwrap_or(current_bytes);
+        seqs.insert(
+            session_id.to_string(),
+            EventSeqState {
+                seq: entry.seq,
+                bytes,
+            },
+        );
+        Ok(entry)
+    })
 }
 
 pub fn record_event(session_id: &str, kind: &str, payload: Value) {
@@ -552,6 +562,13 @@ pub fn read_events_for_session_in_dir(
 }
 
 fn read_events_from_path(session_id: &str, path: &Path) -> Result<Vec<ChatEventLogEntry>, String> {
+    runtime::with_path_lock(path, || read_events_from_path_unlocked(session_id, path))
+}
+
+fn read_events_from_path_unlocked(
+    session_id: &str,
+    path: &Path,
+) -> Result<Vec<ChatEventLogEntry>, String> {
     let file = match fs::File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -563,10 +580,18 @@ fn read_events_from_path(session_id: &str, path: &Path) -> Result<Vec<ChatEventL
         if line.trim().is_empty() {
             continue;
         }
-        let entry: ChatEventLogEntry = serde_json::from_str(&line)
-            .map_err(|error| format!("invalid chat event at line {}: {error}", index + 1))?;
-        if entry.session_id == session_id {
-            out.push(entry);
+        match serde_json::from_str::<ChatEventLogEntry>(&line) {
+            Ok(entry) if entry.session_id == session_id => out.push(entry),
+            Ok(_) => {}
+            Err(error) => {
+                // Recovery logs are append-only. A malformed historical line
+                // must not hide all later valid events or prevent a session
+                // from reopening.
+                eprintln!(
+                    "SomniQ desktop: ignoring malformed chat event at line {}: {error}",
+                    index + 1
+                );
+            }
         }
     }
     Ok(out)
@@ -596,68 +621,15 @@ pub fn export_wire_to_path(session_id: &str, target: &Path) -> Result<(), String
     runtime::write_file_atomically(target, data).map_err(|error| error.to_string())
 }
 
-fn default_export_path(session_id: &str) -> PathBuf {
-    crate::state::runtime_dir().join(format!("chat-events-{session_id}-{}.jsonl", now_millis()))
-}
-
-fn resolve_export_path(
-    session_id: &str,
-    requested_path: Option<String>,
-) -> Result<PathBuf, String> {
-    let Some(raw) = requested_path else {
-        return Ok(default_export_path(session_id));
-    };
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Ok(default_export_path(session_id));
-    }
-    let path = PathBuf::from(trimmed);
-    if path.is_absolute() {
-        Ok(path)
-    } else {
-        Ok(crate::state::runtime_dir().join(path))
-    }
-}
-
 #[tauri::command]
 pub fn chat_events_read(session_id: String) -> Result<Vec<ChatEventLogEntry>, String> {
     read_events_for_session(&session_id)
 }
 
 #[tauri::command]
-pub fn chat_events_export(session_id: String, path: Option<String>) -> Result<String, String> {
-    let target = resolve_export_path(&session_id, path)?;
-    export_events_to_path(&session_id, &target)?;
-    Ok(target.display().to_string())
-}
-
-#[tauri::command]
 pub fn chat_events_replay(session_id: String) -> Result<ChatEventsReplay, String> {
     let events = read_events_for_session(&session_id)?;
     Ok(replay_events(&session_id, &events))
-}
-
-#[tauri::command]
-pub fn chat_events_restore(
-    state: State<ChatState>,
-    session_id: String,
-) -> Result<ChatEventsRestoreResult, String> {
-    let events = read_events_for_session(&session_id)?;
-    let last_seq = events.last().map(|event| event.seq).unwrap_or_default();
-    let session = session_from_events(&events)?;
-    let message_count = session.messages.len();
-    crate::engine::store_chat_session(&state, session_id.clone(), session)?;
-    let restored_path = crate::state::sessions_dir()
-        .join(format!("{session_id}.json"))
-        .display()
-        .to_string();
-    Ok(ChatEventsRestoreResult {
-        session_id,
-        event_count: events.len(),
-        last_seq,
-        message_count,
-        restored_path,
-    })
 }
 
 fn replay_events(session_id: &str, events: &[ChatEventLogEntry]) -> ChatEventsReplay {
@@ -1092,97 +1064,6 @@ fn update_permission_block(blocks: &mut [Value], payload: &Value) {
     }
 }
 
-fn session_from_events(events: &[ChatEventLogEntry]) -> Result<Session, String> {
-    if events.iter().any(is_canonical_session_event) {
-        return canonical_session_from_events(events);
-    }
-
-    let mut session = Session::new();
-    for event in events {
-        match event.kind.as_str() {
-            "reset" => session = Session::new(),
-            "session_snapshot" => {
-                if let Some(value) = event.payload.get("session") {
-                    session = session_from_value(value)?;
-                }
-            }
-            "user_message" => {
-                if let Some(value) = event.payload.get("message") {
-                    session.messages.push(message_from_value(value)?);
-                }
-            }
-            "assistant_delta" => {
-                let text = payload_str(&event.payload, "text");
-                if !text.is_empty() {
-                    append_assistant_text(&mut session, text);
-                }
-            }
-            "assistant_thinking_delta" => {
-                let thinking = payload_str(&event.payload, "thinking");
-                if !thinking.is_empty() {
-                    append_assistant_thinking(&mut session, thinking);
-                }
-            }
-            "tool_call" => {
-                let id = payload_str(&event.payload, "id");
-                let name = payload_str(&event.payload, "name");
-                if !name.is_empty() {
-                    ensure_assistant_message(&mut session)
-                        .blocks
-                        .push(ContentBlock::ToolUse {
-                            id: id.to_string(),
-                            name: name.to_string(),
-                            input: payload_str(&event.payload, "input").to_string(),
-                        });
-                }
-            }
-            "tool_result" => {
-                let name = payload_str(&event.payload, "name");
-                if !name.is_empty() {
-                    session.messages.push(ConversationMessage::tool_result(
-                        payload_str(&event.payload, "id"),
-                        name,
-                        payload_str(&event.payload, "output"),
-                        event
-                            .payload
-                            .get("isError")
-                            .and_then(Value::as_bool)
-                            .unwrap_or(false),
-                    ));
-                }
-            }
-            "usage" => {
-                if let Some(usage) = latest_usage_from_payload(&event.payload) {
-                    if let Some(message) = session
-                        .messages
-                        .iter_mut()
-                        .rev()
-                        .find(|message| message.role == MessageRole::Assistant)
-                    {
-                        message.usage = Some(usage);
-                    }
-                }
-            }
-            "done" => {
-                let text = payload_str(&event.payload, "text");
-                let has_current_assistant = session
-                    .messages
-                    .last()
-                    .is_some_and(|message| message.role == MessageRole::Assistant);
-                if !text.is_empty() && !has_current_assistant {
-                    session.messages.push(ConversationMessage::assistant(vec![
-                        ContentBlock::Text {
-                            text: text.to_string(),
-                        },
-                    ]));
-                }
-            }
-            _ => {}
-        }
-    }
-    Ok(session)
-}
-
 fn canonical_session_from_events(events: &[ChatEventLogEntry]) -> Result<Session, String> {
     let mut session = Session::new();
     for event in events {
@@ -1218,88 +1099,6 @@ fn canonical_session_from_events(events: &[ChatEventLogEntry]) -> Result<Session
         }
     }
     Ok(session)
-}
-
-fn ensure_assistant_message(session: &mut Session) -> &mut ConversationMessage {
-    let needs_new = session
-        .messages
-        .last()
-        .is_none_or(|message| message.role != MessageRole::Assistant);
-    if needs_new {
-        session
-            .messages
-            .push(ConversationMessage::assistant(Vec::new()));
-    }
-    session.messages.last_mut().expect("assistant exists")
-}
-
-fn append_assistant_text(session: &mut Session, text: &str) {
-    let message = ensure_assistant_message(session);
-    if let Some(ContentBlock::Text { text: existing }) = message.blocks.last_mut() {
-        existing.push_str(text);
-    } else {
-        message.blocks.push(ContentBlock::Text {
-            text: text.to_string(),
-        });
-    }
-}
-
-fn append_assistant_thinking(session: &mut Session, thinking: &str) {
-    let message = ensure_assistant_message(session);
-    if let Some(ContentBlock::Thinking {
-        thinking: existing, ..
-    }) = message.blocks.last_mut()
-    {
-        existing.push_str(thinking);
-    } else {
-        message.blocks.push(ContentBlock::Thinking {
-            thinking: thinking.to_string(),
-            signature: String::new(),
-        });
-    }
-}
-
-fn latest_usage_from_payload(payload: &Value) -> Option<TokenUsage> {
-    payload
-        .get("turnUsages")
-        .and_then(Value::as_array)
-        .and_then(|values| values.last())
-        .or_else(|| payload.get("providerUsage"))
-        .and_then(usage_from_value)
-}
-
-fn session_from_value(value: &Value) -> Result<Session, String> {
-    let object = value
-        .as_object()
-        .ok_or_else(|| "session snapshot must be an object".to_string())?;
-    let version = object
-        .get("version")
-        .and_then(Value::as_u64)
-        .and_then(|value| u32::try_from(value).ok())
-        .unwrap_or(1);
-    let messages = object
-        .get("messages")
-        .and_then(Value::as_array)
-        .ok_or_else(|| "session snapshot missing messages".to_string())?
-        .iter()
-        .map(message_from_value)
-        .collect::<Result<Vec<_>, _>>()?;
-    let compactions = object
-        .get("compactions")
-        .and_then(Value::as_array)
-        .map(|values| {
-            values
-                .iter()
-                .map(compaction_from_value)
-                .collect::<Result<Vec<_>, _>>()
-        })
-        .transpose()?
-        .unwrap_or_default();
-    Ok(Session {
-        version,
-        messages,
-        compactions,
-    })
 }
 
 fn message_from_value(value: &Value) -> Result<ConversationMessage, String> {

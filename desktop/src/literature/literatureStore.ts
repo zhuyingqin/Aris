@@ -14,6 +14,8 @@ import {
   onChatTool,
   onChatToolResult,
 } from "../api/tauri";
+import { useStore, type Language } from "../store";
+import { LITERATURE_COPY } from "./i18n";
 import {
   emptyLibrary,
   type ActivityEntry,
@@ -245,21 +247,25 @@ const validCitationKey = (value: string | undefined): string | null => {
 };
 
 /** Validate user-entered keys at edit time instead of silently repairing them
- * only when a Typeset citation is inserted. */
+ * only when a Typeset citation is inserted. `language` defaults to the store's
+ * current UI language so call sites without a React hook at hand (Zustand
+ * actions) don't need to thread it through explicitly. */
 export const citationKeyValidationError = (
   value: string | undefined,
   paperId: string,
   papers: LiteraturePaper[],
+  language: Language = useStore.getState().language,
 ): string | null => {
   const trimmed = value?.trim() ?? "";
   if (!trimmed) return null;
+  const copy = LITERATURE_COPY[language].store;
   if (!validCitationKey(trimmed)) {
-    return "Citation key 必须以字母开头，只能包含字母、数字、:、_、. 或 -。";
+    return copy.citationKeyInvalid;
   }
   const duplicate = papers.find(
     (paper) => paper.id !== paperId && validCitationKey(paper.citationKey)?.toLocaleLowerCase() === trimmed.toLocaleLowerCase(),
   );
-  return duplicate ? `Citation key 已被「${duplicate.title}」使用。` : null;
+  return duplicate ? copy.citationKeyDuplicate(duplicate.title) : null;
 };
 
 const citationKeyPart = (value: string) =>
@@ -543,79 +549,6 @@ const emptyFocus = (): ProjectFocus => ({
   currentAssumptions: "",
 });
 
-const splitSentences = (text: string) =>
-  text
-    .replace(/\s+/g, " ")
-    .split(/(?<=[.!?])\s+/)
-    .map((sentence) => sentence.trim())
-    .filter((sentence) => sentence.length > 0);
-
-const BRIEF_CUES = {
-  problem: ["problem", "challeng", "difficult", "lack", "gap", "unclear", "bottleneck", "address", "tackle", "struggl"],
-  method: ["propose", "present", "introduc", "method", "approach", "model", "framework", "algorithm", "architecture", "design", "develop", "leverage"],
-  results: ["result", "achiev", "outperform", "improv", "accuracy", "state-of-the-art", "sota", "demonstrat", "show that", "reduc", "gain", "boost", "speedup", "faster"],
-  limits: ["limitation", "future work", "however", "only", "does not", "do not", "fail", "remain", "open problem", "yet to", "not address"],
-};
-
-const abstractSection = (text: string): BriefSection => ({ text, source: "abstract" });
-
-const pickSentence = (
-  sentences: string[],
-  cues: string[],
-  options?: { preferNumbers?: boolean },
-) => {
-  const scored = sentences.map((sentence) => {
-    const lower = sentence.toLowerCase();
-    let score = cues.reduce((total, cue) => (lower.includes(cue) ? total + 1 : total), 0);
-    if (options?.preferNumbers && /\d/.test(sentence)) score += 1;
-    return { sentence, score };
-  });
-  return scored.filter((entry) => entry.score > 0).sort((a, b) => b.score - a.score)[0]?.sentence;
-};
-
-const forYouSection = (paper: LiteraturePaper, focus?: ProjectFocus): BriefSection => {
-  const question = focus?.question.trim();
-  if (!question) {
-    return abstractSection(
-      "Set a research focus (Edit focus above) to get a read tailored to your question.",
-    );
-  }
-  const focusTerms = tokensFrom(`${question} ${focus?.scope ?? ""}`);
-  const paperTerms = new Set(tokensFrom(`${paper.title} ${paper.abstract}`));
-  const shared = focusTerms.filter((term) => paperTerms.has(term));
-  if (shared.length === 0) {
-    return abstractSection(
-      `Tangential to your focus on “${question}” — no direct term overlap with the abstract. Surfaced for breadth.`,
-    );
-  }
-  return abstractSection(
-    `Overlaps your focus on ${shared.slice(0, 4).join(", ")}. Read against your question “${question}”.`,
-  );
-};
-
-const briefFromPaper = (paper: LiteraturePaper, focus?: ProjectFocus): PaperBrief => {
-  const sentences = splitSentences(paper.abstract);
-  const fallback = () =>
-    abstractSection(
-      sentences.length === 0
-        ? "暂无摘要，需查阅全文。"
-        : "摘要中未明确说明，请查阅全文确认。",
-    );
-  const problem = pickSentence(sentences, BRIEF_CUES.problem) ?? sentences[0];
-  const method = pickSentence(sentences, BRIEF_CUES.method);
-  const results = pickSentence(sentences, BRIEF_CUES.results, { preferNumbers: true });
-  const limits = pickSentence(sentences, BRIEF_CUES.limits);
-  return {
-    problem: problem ? abstractSection(problem) : fallback(),
-    method: method ? abstractSection(method) : fallback(),
-    results: results ? abstractSection(results) : fallback(),
-    limits: limits ? abstractSection(limits) : fallback(),
-    forYou: forYouSection(paper, focus),
-    basis: "abstract",
-    generatedAt: isoNow(),
-  };
-};
-
 // ── Real LLM screening + Brief ──────────────────────────────────────────────
 // One-shot calls on the user's configured executor (literature_llm). Any
 // Screening may degrade to its keyword heuristic. Brief generation does not:
@@ -825,8 +758,14 @@ const llmScreen = async (
   };
 };
 
-const BRIEF_SYSTEM =
-  "You are a precise research reading assistant. Produce a structured brief based only on the complete extracted full text supplied by the user. Every claim must cite the page that supports it. Be concrete and include numbers from the paper in Results. Write all section values in Chinese. Respond with a single JSON object and nothing else.";
+/** AI-generated note/summary language follows the UI language toggle — a
+ * confirmed product decision, not something to second-guess. Every prompt
+ * below that instructs the model to write in a specific language reads this
+ * instead of hardcoding Chinese. */
+const outputLanguageName = (language: Language) => (language === "cn" ? "Chinese" : "English");
+
+const BRIEF_SYSTEM = (language: Language) =>
+  `You are a precise research reading assistant. Produce a structured brief based only on the complete extracted full text supplied by the user. Every claim must cite the page that supports it. Be concrete and include numbers from the paper in Results. Write all section values in ${outputLanguageName(language)}. Respond with a single JSON object and nothing else.`;
 
 const normalizeAnchorText = (text: string) =>
   text.normalize("NFKC").replace(/\s+/g, " ").trim();
@@ -842,6 +781,7 @@ const buildBriefPrompt = (
   paper: LiteraturePaper,
   focus: ProjectFocus | undefined,
   fullText: string,
+  language: Language,
 ) => {
   const focusLine = focus?.question?.trim()
     ? `Researcher focus: ${focus.question}${focus.scope ? ` (scope: ${focus.scope})` : ""}`
@@ -854,17 +794,18 @@ ${fullText}
 
 Return a JSON object: {"problem": {"text": "...", "page": 1, "quote": "verbatim supporting sentence"}, "method": {"text": "...", "page": 2, "quote": "verbatim supporting sentence"}, "results": {"text": "...", "page": 3, "quote": "verbatim supporting sentence"}, "limits": {"text": "...", "page": 4, "quote": "verbatim supporting sentence"}, "forYou": {"text": "...", "page": 5, "quote": "verbatim supporting sentence"}}.
 Each field is at most two sentences and MUST cite one valid page number and one verbatim supporting sentence copied from that same [[PAGE N]] page. "results" MUST include concrete numbers if the paper reports any. "limits" states the paper's own limitations or "Not stated". "forYou" relates the paper to the researcher focus, or says it is tangential.
-All values must be written in Chinese.`;
+All values must be written in ${outputLanguageName(language)}.`;
 };
 
 const llmBrief = async (
   paper: LiteraturePaper,
   focus: ProjectFocus | undefined,
   extraction: PdfExtraction,
+  language: Language,
 ): Promise<PaperBrief> => {
   const parsed = await literatureLlmJson(
-    BRIEF_SYSTEM,
-    buildBriefPrompt(paper, focus, extraction.text),
+    BRIEF_SYSTEM(language),
+    buildBriefPrompt(paper, focus, extraction.text, language),
   ) as Record<string, unknown>;
   if (!parsed || typeof parsed !== "object") throw new Error("expected a JSON object");
   const source: AnchorKind = "pdf";
@@ -922,25 +863,22 @@ const llmBrief = async (
   };
 };
 
-const VISUAL_EVIDENCE_SYSTEM =
-  "You are a rigorous visual paper reader. Read every supplied PDF page image directly, including figures, tables, formulas, captions, and body text. Extract only evidence visibly supported by those images. Write every evidence explanation in Chinese while preserving quotes as faithful visible transcriptions in their source language. Return a JSON array and nothing else.";
+const VISUAL_EVIDENCE_SYSTEM = (language: Language) =>
+  `You are a rigorous visual paper reader. Read every supplied PDF page image directly, including figures, tables, formulas, captions, and body text. Extract only evidence visibly supported by those images. Write every evidence explanation in ${outputLanguageName(language)} while preserving quotes as faithful visible transcriptions in their source language. Return a JSON array and nothing else.`;
 
-const TEXT_EVIDENCE_SYSTEM =
-  "You are a rigorous paper reader. Read the supplied extracted PDF page text directly. Extract only evidence explicitly present in that text. Write every evidence explanation in Chinese while preserving quotes as faithful verbatim excerpts in their source language. Return a JSON array and nothing else.";
+const TEXT_EVIDENCE_SYSTEM = (language: Language) =>
+  `You are a rigorous paper reader. Read the supplied extracted PDF page text directly. Extract only evidence explicitly present in that text. Write every evidence explanation in ${outputLanguageName(language)} while preserving quotes as faithful verbatim excerpts in their source language. Return a JSON array and nothing else.`;
 
-const ANSWER_CHAIN_SYSTEM =
-  "You build question-to-final-answer chains only from evidence previously read directly from the PDF (extracted page text and/or rendered page images). Write every question and final answer in Chinese. Return a JSON array and nothing else.";
+const ANSWER_CHAIN_SYSTEM = (language: Language) =>
+  `You build question-to-final-answer chains only from evidence previously read directly from the PDF (extracted page text and/or rendered page images). Write every question and final answer in ${outputLanguageName(language)}. Return a JSON array and nothing else.`;
 
-const EVIDENCE_ROLE_LABELS: Record<string, string> = {
-  premise: "前提",
-  method: "方法",
-  result: "结果",
-  limitation: "局限",
-  support: "支撑",
-  evidence: "证据",
+/** Role label + note, in the language the AI output is being written in
+ * (follows the UI language toggle, not hardcoded). */
+const roleNote = (role: string, note: string, language: Language) => {
+  const labels = LITERATURE_COPY[language].evidenceRole as Record<string, string>;
+  const label = labels[role] ?? role;
+  return language === "cn" ? `${label}：${note}` : `${label}: ${note}`;
 };
-
-const evidenceRoleLabel = (role: string) => EVIDENCE_ROLE_LABELS[role] ?? role;
 
 const literatureVisionLlmJson = async (
   system: string,
@@ -1059,12 +997,13 @@ const llmTextEvidence = async (
   paper: LiteraturePaper,
   question: string,
   pages: PdfPageExtraction[],
+  language: Language,
 ): Promise<PageEvidence[]> => {
   const evidence: PageEvidence[] = [];
   for (const batch of textPageBatches(pages)) {
     const allowed = new Map(batch.map((page) => [page.page, normalizeAnchorText(page.text)]));
     const parsed = await literatureLlmJson(
-      TEXT_EVIDENCE_SYSTEM,
+      TEXT_EVIDENCE_SYSTEM(language),
       `Paper: ${paper.title}
 Research question: ${question || "(identify the paper's most important claims and findings)"}
 
@@ -1073,7 +1012,7 @@ ${batch.map((page) => `[[PAGE ${page.page}]]\n${page.text}`).join("\n\n")}
 Read the page text above. Return up to 6 high-value evidence items from these pages:
 [{"page": 1, "quote": "short faithful verbatim excerpt copied from that page", "note": "why this evidence matters", "role": "premise|method|result|limitation"}]
 The page must be one of the pages shown above, and the quote must be copied verbatim from that page's text. Do not infer content that is not present in the text.
-Write every note in Chinese. Preserve each quote as a faithful verbatim excerpt in the source language. Keep role as one of premise|method|result|limitation.`,
+Write every note in ${outputLanguageName(language)}. Preserve each quote as a faithful verbatim excerpt in the source language. Keep role as one of premise|method|result|limitation.`,
     ) as unknown;
     if (!Array.isArray(parsed)) throw new Error("expected a JSON array of text evidence");
     for (const item of parsed as Array<Record<string, unknown>>) {
@@ -1089,7 +1028,7 @@ Write every note in Chinese. Preserve each quote as a faithful verbatim excerpt 
         id: makeId("evidence"),
         page,
         quote: quote.slice(0, 360),
-        note: `${evidenceRoleLabel(role)}：${note}`,
+        note: roleNote(role, note, language),
         source: "text",
       });
     }
@@ -1101,12 +1040,13 @@ const llmVisualEvidence = async (
   paper: LiteraturePaper,
   question: string,
   pages: PdfPageImage[],
+  language: Language,
 ): Promise<PageEvidence[]> => {
   const evidence: PageEvidence[] = [];
   for (const batch of imageBatches(pages)) {
     const allowed = new Map(batch.map((page) => [page.page, page]));
     const parsed = await literatureVisionLlmJson(
-      VISUAL_EVIDENCE_SYSTEM,
+      VISUAL_EVIDENCE_SYSTEM(language),
       `Paper: ${paper.title}
 Research question: ${question || "(identify the paper's most important claims and findings)"}
 Pages in this batch: ${batch.map((page) => page.page).join(", ")}
@@ -1114,7 +1054,7 @@ Pages in this batch: ${batch.map((page) => page.page).join(", ")}
 Read every attached page image. Return up to 6 high-value evidence items from this batch:
 [{"page": 1, "quote": "short faithful transcription or exact visible figure/table value", "note": "why this visually observed evidence matters", "role": "premise|method|result|limitation"}]
 The page must be one of the supplied page images. Do not infer content that is not visible.
-Write every note in Chinese. Preserve each quote as a faithful transcription in the source language visible on the page. Transcribe mathematical expressions as LaTeX wrapped in $...$ or $$...$$ instead of flattening them into plain Unicode text. Keep role as one of premise|method|result|limitation.`,
+Write every note in ${outputLanguageName(language)}. Preserve each quote as a faithful transcription in the source language visible on the page. Transcribe mathematical expressions as LaTeX wrapped in $...$ or $$...$$ instead of flattening them into plain Unicode text. Keep role as one of premise|method|result|limitation.`,
       batch,
     );
     if (!Array.isArray(parsed)) throw new Error("expected a JSON array of visual evidence");
@@ -1129,7 +1069,7 @@ Write every note in Chinese. Preserve each quote as a faithful transcription in 
         id: makeId("evidence"),
         page,
         quote: quote.slice(0, 360),
-        note: `${evidenceRoleLabel(role)}：${note}`,
+        note: roleNote(role, note, language),
         source: "vision",
         imageFingerprint: pageImage.fingerprint,
       });
@@ -1142,6 +1082,7 @@ const llmAnswerChainsFromEvidence = async (
   paper: LiteraturePaper,
   focus: ProjectFocus | undefined,
   evidence: PageEvidence[],
+  language: Language,
 ): Promise<{ chains: ReadingAnswerChain[]; annotations: PdfAnnotation[] }> => {
   const evidencePayload = evidence.map((item) => ({
     id: item.id,
@@ -1151,7 +1092,7 @@ const llmAnswerChainsFromEvidence = async (
     imageFingerprint: item.imageFingerprint,
   }));
   const parsed = await literatureLlmJson(
-    ANSWER_CHAIN_SYSTEM,
+    ANSWER_CHAIN_SYSTEM(language),
     `Paper: ${paper.title}
 Research focus: ${focus?.question?.trim() || "(generate the most important paper-reading questions)"}
 
@@ -1162,7 +1103,7 @@ Generate 3-4 critical questions and final answers. Use only the supplied evidenc
 Return ONLY:
 [{"question": "...", "answer": "...", "supports": [{"evidenceId": "evidence-id", "role": "premise|method|result|limitation"}]}]
 Each answer requires at least one support and may use at most 3 supports.
-All question and answer values must be written in Chinese. Keep support role as one of premise|method|result|limitation.`,
+All question and answer values must be written in ${outputLanguageName(language)}. Keep support role as one of premise|method|result|limitation.`,
   );
   if (!Array.isArray(parsed)) throw new Error("expected a JSON array of answer chains");
   const evidenceById = new Map(evidence.map((item) => [item.id, item]));
@@ -1187,7 +1128,7 @@ All question and answer values must be written in Chinese. Keep support role as 
           id: makeId("annotation"),
           page: source.page,
           quote: source.quote,
-          note: `${evidenceRoleLabel(role)}：${answer}`,
+          note: roleNote(role, answer, language),
           kind: "answer-support",
           source: source.source,
           imageFingerprint: source.imageFingerprint,
@@ -1244,7 +1185,12 @@ const evidenceAnnotations = (evidence: LiteraturePaper["evidence"]): PdfAnnotati
     createdAt: isoNow(),
   }));
 
-const PREVIEW_LIBRARY: LiteratureLibrary = {
+/** Static fixture for the plain-browser preview (no Tauri backend). The two
+ * demo answer-chain/evidence strings follow the current UI language rather
+ * than being hardcoded. */
+const previewLiteratureLibrary = (): LiteratureLibrary => {
+  const demo = LITERATURE_COPY[useStore.getState().language].preview;
+  return {
   version: 1,
   papers: [
     {
@@ -1283,14 +1229,14 @@ const PREVIEW_LIBRARY: LiteratureLibrary = {
           id: "ev-1",
           page: 3,
           quote: "Screening decisions are recorded before full-text extraction.",
-          note: "方法：该证据说明系统先记录筛选决策，再进入全文提取；状态变换满足 X̂_T(t)=M_T Z_T(t)。",
+          note: demo.evidenceNote,
         },
       ],
       answerChains: [
         {
           id: "chain-preview",
-          question: "论文如何保证文献综合过程有证据支撑？",
-          answer: "论文将筛选与全文阅读分离，并在综合前记录可核验的证据。",
+          question: demo.chainQuestion,
+          answer: demo.chainAnswer,
           supports: [{ annotationId: "annotation-answer-preview", role: "method" }],
           reviewStatus: "unreviewed",
           createdAt: "2026-06-09T08:15:00.000Z",
@@ -1301,7 +1247,7 @@ const PREVIEW_LIBRARY: LiteratureLibrary = {
           id: "annotation-evidence-preview",
           page: 3,
           quote: "Screening decisions are recorded before full-text extraction.",
-          note: "方法：该证据说明系统先记录筛选决策，再进入全文提取；状态变换满足 X̂_T(t)=M_T Z_T(t)。",
+          note: demo.evidenceNote,
           kind: "evidence",
           sourceId: "ev-1",
           createdAt: "2026-06-09T08:15:00.000Z",
@@ -1310,7 +1256,7 @@ const PREVIEW_LIBRARY: LiteratureLibrary = {
           id: "annotation-answer-preview",
           page: 3,
           quote: "Screening decisions are recorded before full-text extraction.",
-          note: "方法：论文在全文提取前记录筛选决策。",
+          note: demo.answerSupportNote,
           kind: "answer-support",
           sourceId: "chain-preview",
           evidenceId: "ev-1",
@@ -1413,6 +1359,7 @@ const PREVIEW_LIBRARY: LiteratureLibrary = {
     },
   ],
   screenRuns: [],
+  };
 };
 
 interface LiteratureState {
@@ -1591,16 +1538,17 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
     setActiveReviewTask: (id) => set({ activeReviewTaskId: id }),
 
     runRemoteSearch: async (query, _sources, _maxResults = 20) => {
+      const copy = LITERATURE_COPY[useStore.getState().language].store;
       const trimmed = query.trim();
       if (!trimmed) {
-        set({ error: "请输入检索问题或关键词。" });
+        set({ error: copy.remoteSearchNeedsQuery });
         return;
       }
       if (!isTauri()) {
-        set({ error: "远程文献检索需要桌面后端。" });
+        set({ error: copy.remoteSearchNeedsDesktop });
         return;
       }
-      const message = "即时检索已迁移至“可复现检索”。请先创建和预览协议，再明确确认执行。";
+      const message = copy.reproducibleSearchOnly;
       set({ searching: false, error: message });
       log("warn", message, { open: true });
     },
@@ -1613,11 +1561,12 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
         persistTimer = null;
       }
       if (!isTauri()) {
+        const previewLibrary = previewLiteratureLibrary();
         set({
-          library: PREVIEW_LIBRARY,
+          library: previewLibrary,
           loaded: true,
           loadedProjectId: projectId,
-          activeReviewTaskId: PREVIEW_LIBRARY.reviewTasks[0]?.id ?? null,
+          activeReviewTaskId: previewLibrary.reviewTasks[0]?.id ?? null,
         });
         return;
       }
@@ -1636,11 +1585,14 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
               : reviewTasks[0]?.id ?? null,
         });
         if (!options?.quiet) {
-          log("info", `Loaded ${raw.papers?.length ?? 0} papers from the local literature database.`);
+          const copy = LITERATURE_COPY[useStore.getState().language].store;
+          log("info", copy.libraryLoaded(raw.papers?.length ?? 0));
         }
       } catch (error) {
-        set({ error: `failed to load library: ${String(error)}` });
-        log("error", `Failed to load library: ${String(error)}`, { open: true });
+        const copy = LITERATURE_COPY[useStore.getState().language].store;
+        const message = copy.libraryLoadFailed(String(error));
+        set({ error: message });
+        log("error", message, { open: true });
       }
     },
 
@@ -1779,7 +1731,8 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
         reviewTasks: [reviewTask, ...library.reviewTasks],
       }));
       set({ activeReviewTaskId: reviewTask.id });
-      log("info", `Review task created: "${reviewTask.question}"`);
+      const copy = LITERATURE_COPY[useStore.getState().language].store;
+      log("info", copy.reviewTaskCreated(reviewTask.question));
       if (isTauri()) {
         if (persistTimer) {
           clearTimeout(persistTimer);
@@ -1788,8 +1741,9 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
         try {
           await persistNow("review task");
         } catch (error) {
-          set({ error: `failed to save review task: ${String(error)}` });
-          log("error", `Failed to save review task: ${String(error)}`, { open: true });
+          const message = copy.reviewTaskSaveFailed(String(error));
+          set({ error: message });
+          log("error", message, { open: true });
         }
       }
       return reviewTask.id;
@@ -2231,7 +2185,7 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
             .filter((suggestion) => suggestion.basisPaperIds.length > 0),
         })),
       }));
-      log("warn", `Deleted ${targets.size} ${targets.size === 1 ? "paper" : "papers"} from the library`, {
+      log("warn", LITERATURE_COPY[useStore.getState().language].store.papersDeleted(targets.size), {
         open: true,
       });
     },
@@ -2369,31 +2323,33 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
     },
 
     generateBrief: async (paperId) => {
+      const language = useStore.getState().language;
+      const copy = LITERATURE_COPY[language].store;
       const focus = get().library.projectFocus;
       const paper = get().library.papers.find((entry) => entry.id === paperId);
       if (!paper) return;
       if (paper.pdf.status !== "downloaded" || !paper.pdf.path) {
-        const message = "请先下载 PDF；全文简报不会从摘要生成。";
+        const message = copy.needPdfForBrief;
         set({ error: message });
         log("warn", message, { open: true });
         return;
       }
       if (!isTauri()) {
-        set({ error: "全文简报需要桌面后端读取 PDF。" });
+        set({ error: copy.briefNeedsDesktop });
         return;
       }
       set({ briefing: paperId });
       try {
-        log("info", `正在提取完整 PDF 文本：${paper.title}`, { open: true });
+        log("info", copy.extractingFullText(paper.title), { open: true });
         const extraction = await extractPdfTextByPage(paper.pdf.path);
         if (extraction.truncated) {
           const missingPages = extraction.missingPages ?? [];
           throw new Error(
-            `PDF 全文不完整${missingPages.length > 0 ? `（无法读取第 ${missingPages.join("、")} 页）` : ""}，已停止生成以避免不完整简报。`,
+            copy.fullTextIncomplete(missingPages.length > 0 ? copy.fullTextMissingPages(missingPages.join("、")) : ""),
           );
         }
-        log("info", `已读取完整全文（${extraction.totalCharacters} 字符），正在生成简报…`);
-        const brief = await llmBrief(paper, focus, extraction);
+        log("info", copy.fullTextRead(extraction.totalCharacters));
+        const brief = await llmBrief(paper, focus, extraction, language);
         const annotations = briefAnnotations(brief);
         patchPapers([paperId], (entry) => ({
           ...entry,
@@ -2404,9 +2360,9 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
             ...annotations,
           ],
         }));
-        log("ok", `全文简报已生成：${paper.title}`);
+        log("ok", copy.briefGenerated(paper.title));
       } catch (error) {
-        const message = `全文简报生成失败：${String(error)}`;
+        const message = copy.briefGenerationFailed(String(error));
         set({ error: message });
         log("error", message, { open: true });
       } finally {
@@ -2415,18 +2371,20 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
     },
 
     generateAnswerChains: async (paperId) => {
+      const language = useStore.getState().language;
+      const copy = LITERATURE_COPY[language].store;
       const paper = get().library.papers.find((entry) => entry.id === paperId);
       if (!paper?.pdf.path || paper.pdf.status !== "downloaded") {
-        set({ error: "请先下载 PDF，再生成问题-答案-证据链。" });
+        set({ error: copy.needPdfForChains });
         return;
       }
       if (!isTauri()) {
-        set({ error: "问题-答案-证据链需要桌面后端读取 PDF。" });
+        set({ error: copy.chainsNeedDesktop });
         return;
       }
       set({ generatingAnswerChains: paperId, error: null });
       try {
-        log("info", `正在读取 PDF 并规划文本/视觉证据来源：${paper.title}`, { open: true });
+        log("info", copy.planningEvidence(paper.title), { open: true });
         const question = get().library.projectFocus?.question ?? "";
 
         // Text extraction is cheap and covers most pages of a typical paper;
@@ -2447,13 +2405,13 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
 
         const evidence: PageEvidence[] = [];
         if (textPages.length > 0) {
-          log("info", `文本证据：${textPages.length} 页`);
-          evidence.push(...await llmTextEvidence(paper, question, textPages));
+          log("info", copy.textEvidenceCount(textPages.length));
+          evidence.push(...await llmTextEvidence(paper, question, textPages, language));
         }
         if (visualPageNumbers === undefined || visualPageNumbers.length > 0) {
           const imageExtraction = await extractPdfPageImages(paper.pdf.path, visualPageNumbers);
-          log("info", `视觉证据：${imageExtraction.pages.length} 页`);
-          evidence.push(...await llmVisualEvidence(paper, question, imageExtraction.pages));
+          log("info", copy.visualEvidenceCount(imageExtraction.pages.length));
+          evidence.push(...await llmVisualEvidence(paper, question, imageExtraction.pages, language));
         }
         const deduped = dedupeAndLimit(evidence, 24);
         if (deduped.length === 0) throw new Error("model returned no evidence");
@@ -2467,7 +2425,7 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
             ...evidenceMarks,
           ],
         }));
-        const result = await llmAnswerChainsFromEvidence(paper, get().library.projectFocus, deduped);
+        const result = await llmAnswerChainsFromEvidence(paper, get().library.projectFocus, deduped, language);
         patchPapers([paperId], (entry) => ({
           ...entry,
           answerChains: result.chains,
@@ -2481,10 +2439,10 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
           : visualPageNumbers.length;
         log(
           "ok",
-          `已读取 ${textPages.length} 文本页 + ${visualPageCount} 视觉页，生成 ${deduped.length} 条证据和 ${result.chains.length} 条问答证据链`,
+          copy.chainsGenerated(textPages.length, visualPageCount, deduped.length, result.chains.length),
         );
       } catch (error) {
-        const message = `问题-答案-证据链生成失败：${String(error)}`;
+        const message = copy.chainsGenerationFailed(String(error));
         set({ error: message });
         log("error", message, { open: true });
       } finally {
@@ -2590,10 +2548,11 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
       }),
 
     importAttachment: async (paperId, sourcePath, kind) => {
+      const copy = LITERATURE_COPY[useStore.getState().language].store;
       const paper = get().library.papers.find((entry) => entry.id === paperId);
       if (!paper || !sourcePath.trim()) return;
       if (!isTauri()) {
-        set({ error: "导入附件需要桌面后端。" });
+        set({ error: copy.importAttachmentNeedsDesktop });
         return;
       }
       try {
@@ -2616,9 +2575,9 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
           ...entry,
           attachments: [...(entry.attachments ?? []), attachment],
         }));
-        log("ok", `已导入附件：${saved.relativePath}`);
+        log("ok", copy.attachmentImported(saved.relativePath));
       } catch (error) {
-        const message = `附件导入失败：${String(error)}`;
+        const message = copy.attachmentImportFailed(String(error));
         set({ error: message });
         log("error", message, { open: true });
       }
@@ -2664,7 +2623,7 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
       const annotation = paper?.pdfAnnotations.find((entry) => entry.id === annotationId);
       if (!paper || !annotation) return null;
       return get().addNote(paperId, {
-        title: `第 ${annotation.page} 页标注`,
+        title: LITERATURE_COPY[useStore.getState().language].store.annotationPageTitle(annotation.page),
         content: [annotation.quote, annotation.note].filter(Boolean).join("\n\n"),
         annotationId,
         attachmentId: (paper.attachments ?? []).find(
@@ -2797,7 +2756,7 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
           ),
         };
       });
-      log("info", `已删除第 ${evidence.page} 页证据，并清理关联问答链支撑。`);
+      log("info", LITERATURE_COPY[useStore.getState().language].store.evidenceDeleted(evidence.page));
     },
 
     updateAnswerChain: (paperId, chainId, patch) =>
@@ -2825,17 +2784,15 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
       }),
 
     downloadPdf: async (id) => {
+      const copy = LITERATURE_COPY[useStore.getState().language].store;
       const paper = get().library.papers.find((entry) => entry.id === id);
       const url = paper?.pdf.url;
       if (!paper || !url) {
-        set({ error: "no direct PDF link is known for this paper" });
+        set({ error: copy.noDirectPdfLink });
         return;
       }
       if (!isTauri()) {
-        set({
-          error:
-            "PDF download needs the desktop backend — run `npm run tauri dev` (browser preview shows sample data only)",
-        });
+        set({ error: copy.pdfDownloadNeedsDesktop });
         return;
       }
       if (paper.pdf.status === "downloading") return;
@@ -2843,7 +2800,7 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
         ...entry,
         pdf: { ...entry.pdf, status: "downloading", error: undefined },
       }));
-      log("info", `Downloading PDF: ${pdfFileName(paper)}`, { open: true });
+      log("info", copy.downloadingPdf(pdfFileName(paper)), { open: true });
       try {
         const saved = await literatureDownloadPdf<PdfDownloadResult>(url, pdfFileName(paper));
         patchPapers([id], (entry) => ({
@@ -2859,22 +2816,24 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
             bytes: saved.bytes,
           },
         }));
-        log("ok", `PDF saved to ${saved.relativePath} (${Math.max(1, Math.round(saved.bytes / 1024))} KB)`);
+        log("ok", copy.pdfSaved(saved.relativePath, Math.max(1, Math.round(saved.bytes / 1024))));
       } catch (error) {
         patchPapers([id], (entry) => ({
           ...entry,
           pdf: { ...entry.pdf, status: "failed", error: String(error) },
         }));
-        set({ error: `PDF download failed: ${String(error)}` });
-        log("error", `PDF download failed: ${String(error)}`, { open: true });
+        const message = copy.pdfDownloadFailed(String(error));
+        set({ error: message });
+        log("error", message, { open: true });
       }
     },
 
     uploadPdf: async (id, sourcePath) => {
+      const copy = LITERATURE_COPY[useStore.getState().language].store;
       const paper = get().library.papers.find((entry) => entry.id === id);
       if (!paper || !sourcePath.trim()) return;
       if (!isTauri()) {
-        set({ error: "上传 PDF 需要桌面后端。" });
+        set({ error: copy.uploadNeedsDesktop });
         return;
       }
       try {
@@ -2905,29 +2864,30 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
             },
           ],
         }));
-        log("ok", `已导入用户 PDF：${saved.relativePath}`);
+        log("ok", copy.userPdfImported(saved.relativePath));
       } catch (error) {
-        const message = `PDF 导入失败：${String(error)}`;
+        const message = copy.pdfImportFailed(String(error));
         set({ error: message });
         log("error", message, { open: true });
       }
     },
 
     openPdf: async (id) => {
+      const copy = LITERATURE_COPY[useStore.getState().language].store;
       const paper = get().library.papers.find((entry) => entry.id === id);
       if (!paper?.pdf.path || paper.pdf.status !== "downloaded") {
-        set({ error: "这篇论文还没有可打开的本地 PDF。" });
+        set({ error: copy.noLocalPdfToOpen });
         return;
       }
       if (!isTauri()) {
-        set({ error: "打开 PDF 需要桌面后端。" });
+        set({ error: copy.openPdfNeedsDesktop });
         return;
       }
       try {
         await literaturePdfOpen(paper.pdf.path);
-        log("ok", `已打开 PDF：${paper.pdf.path}`);
+        log("ok", copy.pdfOpened(paper.pdf.path));
       } catch (error) {
-        const message = `打开 PDF 失败：${String(error)}`;
+        const message = copy.openPdfFailed(String(error));
         set({ error: message });
         log("error", message, { open: true });
       }
@@ -2937,8 +2897,6 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
   };
 });
 
-/** Test helper: build a Brief without going through the store. */
-export const briefForTest = briefFromPaper;
 
 /** Test helper: reset the singleton store between cases. */
 export const resetLiteratureStore = () => {

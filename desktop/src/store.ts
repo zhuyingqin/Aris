@@ -16,7 +16,7 @@ import {
   type NewApiLoginResult,
 } from "./api/tauri";
 import { isLabPreviewMode, isTypesetPreviewMode } from "./api/labPreview";
-import { formatUserFacingError } from "./errorMessage";
+import { AUTH_SESSION_EXPIRED_NEEDLES, AUTH_TOKEN_INVALID_NEEDLES, formatUserFacingError } from "./errorMessage";
 
 const PREVIEW_PROJECT: DesktopProject = {
   id: "default",
@@ -31,7 +31,6 @@ export type Tab =
   | "lab"
   | "typeset"
   | "literature"
-  | "studio"
   | "mail"
   | "extensions"
   | "settings"
@@ -110,10 +109,8 @@ export function isManagedAuthInvalidError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   const lower = message.toLowerCase();
   return (
-    lower.includes("login expired") ||
-    lower.includes("sign in again") ||
-    lower.includes("invalid access token") ||
-    lower.includes("invalid token") ||
+    AUTH_SESSION_EXPIRED_NEEDLES.some((needle) => lower.includes(needle)) ||
+    AUTH_TOKEN_INVALID_NEEDLES.some((needle) => lower.includes(needle)) ||
     lower.includes("401 unauthorized") ||
     (lower.includes("unauthorized") && lower.includes("token"))
   );
@@ -214,10 +211,6 @@ interface AppState {
   pendingChatRunInput: string | null;
   setPendingChatRunInput: (value: string | null) => void;
 
-  /** One-shot deep link consumed by Studio after switching tabs. */
-  pendingStudioArtifactId: string | null;
-  setPendingStudioArtifactId: (value: string | null) => void;
-
   /** One-shot file-open request consumed by the Code page after it mounts. */
   pendingLabFilePath: string | null;
   setPendingLabFilePath: (value: string | null) => void;
@@ -316,9 +309,6 @@ export const useStore = create<AppState>((set, get) => ({
 
   pendingChatRunInput: null,
   setPendingChatRunInput: (value) => set({ pendingChatRunInput: value }),
-
-  pendingStudioArtifactId: null,
-  setPendingStudioArtifactId: (value) => set({ pendingStudioArtifactId: value }),
 
   pendingLabFilePath: null,
   setPendingLabFilePath: (value) => set({ pendingLabFilePath: value }),

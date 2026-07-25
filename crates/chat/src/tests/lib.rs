@@ -83,7 +83,9 @@ fn context_budget_scales_with_model_window() {
         context_compaction_threshold_for_model("gemini-2.5-pro"),
         850_000
     );
-    assert_eq!(context_compaction_threshold_for_model("gpt-5"), 240_000);
+    // Measured ceiling on the new-api route: 358,708 accepted, ~395k rejected.
+    assert_eq!(context_compaction_threshold_for_model("gpt-5"), 350_000);
+    assert_eq!(context_window_for_model("gpt-5.6-luna"), 400_000);
     assert_eq!(context_compaction_threshold_for_model("kimi-k3"), 850_000);
     assert_eq!(
         context_compaction_threshold_for_model("deepseek-v4-pro"),

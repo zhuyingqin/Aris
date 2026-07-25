@@ -12,7 +12,7 @@ use std::{
 };
 
 use remote_protocol::{ChatToolProgress, ChatTranscriptBlock};
-use runtime::{ContentBlock, MessageRole, Session};
+use runtime::Session;
 use tauri::{AppHandle, Emitter};
 
 use crate::state;
@@ -30,7 +30,7 @@ const CHAT_UI_SESSION_PREVIEW_MAX_TURNS: usize = 12;
 // Keep enough room for session metadata while preventing rich thinking/tool
 // turns from turning the quick preview into a second full-session file.
 const CHAT_UI_SESSION_PREVIEW_MAX_TURN_BYTES: usize = 192 * 1024;
-const CHAT_UI_PREVIEW_VERSION: u64 = 5;
+const CHAT_UI_PREVIEW_VERSION: u64 = 6;
 
 // Remote chat is a bounded projection of the visible desktop UI session. These
 // limits keep text, thinking, and UI-sanitized tool cards comfortably below the
@@ -100,6 +100,8 @@ fn remove_client_chat_ui_fields(session: &mut Value) {
         object.remove("turnCount");
         object.remove("turnsPartial");
         object.remove("partialBaseTurnIds");
+        object.remove("loadedTurnStartIndex");
+        object.remove("questionCountBeforeLoadedTurns");
         object.remove("previewVersion");
     }
 }
@@ -215,7 +217,9 @@ fn read_chat_ui_preview_file(id: &str) -> Result<Option<Value>, String> {
             // rich thinking/tool turns cannot make quick-load files unbounded;
             // v5 always keeps the newest turn in full so opening a conversation
             // never shows a "large turn omitted" placeholder for its latest
-            // response (re-renders v4 files that omitted a huge newest turn).
+            // response (re-renders v4 files that omitted a huge newest turn);
+            // v6 records the loaded slice's absolute offset and prior question
+            // count so lazy history prepends do not renumber question navigation.
             Ok((preview.get("previewVersion").and_then(Value::as_u64)
                 == Some(CHAT_UI_PREVIEW_VERSION))
             .then_some(preview))
@@ -297,23 +301,34 @@ fn chat_ui_turn_id(turn: &Value) -> Option<&str> {
     turn.get("id").and_then(Value::as_str)
 }
 
+fn is_chat_ui_question_turn(turn: &Value) -> bool {
+    turn.get("role").and_then(Value::as_str) == Some("user")
+}
+
 fn chat_ui_preview_turns(id: &str, turns: &[Value]) -> (Vec<Value>, bool, Vec<String>) {
     let start = turns
         .len()
         .saturating_sub(CHAT_UI_SESSION_PREVIEW_MAX_TURNS);
-    let selected = &turns[start..];
-    let base_ids = selected
+    chat_ui_preview_turn_slice(id, &turns[start..], start)
+}
+
+fn chat_ui_preview_turn_slice(
+    id: &str,
+    turns: &[Value],
+    loaded_turn_start_index: usize,
+) -> (Vec<Value>, bool, Vec<String>) {
+    let base_ids = turns
         .iter()
         .filter_map(chat_ui_turn_id)
         .map(str::to_string)
         .collect::<Vec<_>>();
-    let newest_offset = selected.len().saturating_sub(1);
+    let newest_offset = turns.len().saturating_sub(1);
     let mut remaining = CHAT_UI_SESSION_PREVIEW_MAX_TURN_BYTES;
     let mut omitted = false;
     // Spend the byte budget newest-first so the latest normal-sized exchange
     // remains immediately visible. Oversized turns stay available through the
     // existing on-demand `chat_ui_turn_load` placeholder path.
-    let mut preview = selected
+    let mut preview = turns
         .iter()
         .enumerate()
         .rev()
@@ -335,24 +350,56 @@ fn chat_ui_preview_turns(id: &str, turns: &[Value]) -> (Vec<Value>, bool, Vec<St
                 turn.clone()
             } else {
                 omitted = true;
-                large_turn_placeholder(id, start + offset, bytes)
+                large_turn_placeholder(id, loaded_turn_start_index + offset, bytes)
             }
         })
         .collect::<Vec<_>>();
     preview.reverse();
-    (preview, start > 0 || omitted, base_ids)
+    (preview, loaded_turn_start_index > 0 || omitted, base_ids)
 }
 
-fn chat_ui_preview_session(mut session: Value, turns: &[Value], turn_count: usize) -> Value {
+fn chat_ui_preview_session(session: Value, turns: &[Value], turn_count: usize) -> Value {
+    let loaded_turn_start_index = turns
+        .len()
+        .saturating_sub(CHAT_UI_SESSION_PREVIEW_MAX_TURNS);
+    let question_count_before_loaded_turns = turns[..loaded_turn_start_index]
+        .iter()
+        .filter(|turn| is_chat_ui_question_turn(turn))
+        .count();
+    chat_ui_preview_session_from_turn_slice(
+        session,
+        &turns[loaded_turn_start_index..],
+        turn_count,
+        loaded_turn_start_index,
+        question_count_before_loaded_turns,
+    )
+}
+
+fn chat_ui_preview_session_from_turn_slice(
+    mut session: Value,
+    turns: &[Value],
+    turn_count: usize,
+    loaded_turn_start_index: usize,
+    question_count_before_loaded_turns: usize,
+) -> Value {
     let id = chat_ui_session_id(&session)
         .unwrap_or("chat-preview")
         .to_string();
-    let (preview_turns, turns_partial, partial_base_turn_ids) = chat_ui_preview_turns(&id, turns);
+    let (preview_turns, turns_partial, partial_base_turn_ids) =
+        chat_ui_preview_turn_slice(&id, turns, loaded_turn_start_index);
     if let Value::Object(object) = &mut session {
         object.insert("turns".to_string(), Value::Array(preview_turns));
         object.insert("turnsLoaded".to_string(), Value::Bool(true));
         object.insert("turnCount".to_string(), json!(turn_count));
         object.insert("turnsPartial".to_string(), Value::Bool(turns_partial));
+        object.insert(
+            "loadedTurnStartIndex".to_string(),
+            json!(loaded_turn_start_index),
+        );
+        object.insert(
+            "questionCountBeforeLoadedTurns".to_string(),
+            json!(question_count_before_loaded_turns),
+        );
         object.insert(
             "partialBaseTurnIds".to_string(),
             json!(partial_base_turn_ids),
@@ -487,7 +534,7 @@ fn tail_turns_from_array(
     array_start: usize,
     array_end: usize,
     id: &str,
-) -> (usize, Vec<Value>) {
+) -> (usize, usize, Vec<Value>) {
     let bytes = raw.as_bytes();
     let mut index = array_start + 1;
     let mut object_depth = 0usize;
@@ -495,6 +542,7 @@ fn tail_turns_from_array(
     let mut escaped = false;
     let mut turn_start = None;
     let mut turn_count = 0usize;
+    let mut question_count = 0usize;
     let mut tail: VecDeque<Value> = VecDeque::new();
 
     while index < array_end {
@@ -527,6 +575,9 @@ fn tail_turns_from_array(
                         let bytes = end.saturating_sub(start);
                         let value = serde_json::from_str::<Value>(&raw[start..end])
                             .unwrap_or_else(|_| large_turn_placeholder(id, turn_count, bytes));
+                        if is_chat_ui_question_turn(&value) {
+                            question_count = question_count.saturating_add(1);
+                        }
                         turn_count += 1;
                         tail.push_back(value);
                         while tail.len() > CHAT_UI_SESSION_PREVIEW_MAX_TURNS {
@@ -540,7 +591,13 @@ fn tail_turns_from_array(
         index += 1;
     }
 
-    (turn_count, tail.into_iter().collect())
+    let tail = tail.into_iter().collect::<Vec<_>>();
+    let question_count_before_tail = question_count.saturating_sub(
+        tail.iter()
+            .filter(|turn| is_chat_ui_question_turn(turn))
+            .count(),
+    );
+    (turn_count, question_count_before_tail, tail)
 }
 
 fn turn_from_array_index(
@@ -610,11 +667,19 @@ fn read_chat_ui_session_fast_preview(id: &str) -> Result<Option<Value>, String> 
     let Some((array_start, array_end)) = find_turns_array_bounds(&raw) else {
         return Ok(None);
     };
-    let (turn_count, tail_turns) = tail_turns_from_array(&raw, array_start, array_end, id);
+    let (turn_count, question_count_before_tail, tail_turns) =
+        tail_turns_from_array(&raw, array_start, array_end, id);
     let Some(base) = chat_ui_index_entry(id)? else {
         return Ok(None);
     };
-    let preview = chat_ui_preview_session(base, &tail_turns, turn_count);
+    let loaded_turn_start_index = turn_count.saturating_sub(tail_turns.len());
+    let preview = chat_ui_preview_session_from_turn_slice(
+        base,
+        &tail_turns,
+        turn_count,
+        loaded_turn_start_index,
+        question_count_before_tail,
+    );
     fs::create_dir_all(chat_ui_previews_dir()).map_err(|e| e.to_string())?;
     let data = serde_json::to_vec(&preview).map_err(|e| e.to_string())?;
     runtime::write_file_atomically(&chat_ui_preview_file_path(id), data)
@@ -1481,59 +1546,6 @@ pub fn sessions_list() -> Vec<SessionSummary> {
     }
     out.sort_by(|a, b| b.modified_epoch_secs.cmp(&a.modified_epoch_secs));
     out
-}
-
-fn block_to_json(block: &ContentBlock) -> Value {
-    match block {
-        ContentBlock::Text { text } => json!({ "kind": "text", "text": text }),
-        ContentBlock::Image { media_type, data } => json!({
-            "kind": "image",
-            "mediaType": media_type,
-            "bytes": data.len(),
-        }),
-        ContentBlock::ToolUse { name, input, .. } => {
-            json!({ "kind": "toolUse", "name": name, "input": input })
-        }
-        ContentBlock::ToolResult {
-            tool_name,
-            output,
-            is_error,
-            ..
-        } => json!({
-            "kind": "toolResult",
-            "toolName": tool_name,
-            "output": output,
-            "isError": is_error,
-        }),
-        ContentBlock::Thinking { thinking, .. } => {
-            json!({ "kind": "thinking", "thinking": thinking })
-        }
-    }
-}
-
-#[tauri::command]
-pub fn session_get(id: String) -> Result<Value, String> {
-    // Defensive: ids come from sessions_list, but never let one walk the FS.
-    if id.contains('/') || id.contains('\\') || id.contains("..") {
-        return Err("invalid session id".to_string());
-    }
-    let path = state::sessions_dir().join(format!("{id}.json"));
-    let session = Session::load_from_path(&path).map_err(|e| e.to_string())?;
-    let messages: Vec<Value> = session
-        .logical_messages()
-        .into_iter()
-        .map(|message| {
-            let role = match message.role {
-                MessageRole::System => "system",
-                MessageRole::User => "user",
-                MessageRole::Assistant => "assistant",
-                MessageRole::Tool => "tool",
-            };
-            let blocks: Vec<Value> = message.blocks.iter().map(block_to_json).collect();
-            json!({ "role": role, "blocks": blocks })
-        })
-        .collect();
-    Ok(json!({ "id": id, "messages": messages }))
 }
 
 #[tauri::command]

@@ -14,25 +14,28 @@ fn temp_base(name: &str) -> std::path::PathBuf {
         std::process::id()
     ));
     let _ = std::fs::remove_dir_all(&base);
-    std::fs::create_dir_all(base.join("papers")).expect("create papers");
+    std::fs::create_dir_all(base.join(".somniq/papers")).expect("create papers");
     base
 }
 
 #[test]
-fn pdf_paths_are_limited_to_library_and_studio_results() {
+fn pdf_paths_are_limited_to_library_and_latex_results() {
     let base = temp_base("paths");
-    std::fs::write(base.join("papers/paper.pdf"), b"%PDF-1.4").expect("write pdf");
-    std::fs::write(base.join("papers/notes.txt"), b"notes").expect("write text");
+    std::fs::write(base.join(".somniq/papers/paper.pdf"), b"%PDF-1.4").expect("write pdf");
+    std::fs::write(base.join(".somniq/papers/notes.txt"), b"notes").expect("write text");
     std::fs::write(base.join("outside.pdf"), b"%PDF-1.4").expect("write outside pdf");
 
-    assert!(resolve_pdf_path_at(&base, "papers/paper.pdf").is_ok());
-    std::fs::create_dir_all(base.join("slides")).expect("slides dir");
-    std::fs::write(base.join("slides/main.pdf"), b"%PDF-1.7").expect("slides pdf");
-    assert!(resolve_pdf_path_at(&base, "slides/main.pdf").is_ok());
-    std::fs::create_dir_all(base.join("studio")).expect("studio dir");
-    std::fs::write(base.join("studio/slides.pdf"), b"%PDF-1.7").expect("studio pdf");
-    assert!(resolve_pdf_path_at(&base, "studio/slides.pdf").is_ok());
-    assert!(resolve_pdf_path_at(&base, "papers/notes.txt").is_err());
+    assert!(resolve_pdf_path_at(&base, ".somniq/papers/paper.pdf").is_ok());
+    std::fs::create_dir_all(base.join(".somniq/slides")).expect("slides dir");
+    std::fs::write(base.join(".somniq/slides/main.pdf"), b"%PDF-1.7").expect("slides pdf");
+    assert!(resolve_pdf_path_at(&base, ".somniq/slides/main.pdf").is_ok());
+    std::fs::create_dir_all(base.join(".somniq/poster")).expect("poster dir");
+    std::fs::write(base.join(".somniq/poster/main.pdf"), b"%PDF-1.7").expect("poster pdf");
+    assert!(resolve_pdf_path_at(&base, ".somniq/poster/main.pdf").is_ok());
+    std::fs::create_dir_all(base.join("papers")).expect("legacy papers dir");
+    std::fs::write(base.join("papers/legacy.pdf"), b"%PDF-1.7").expect("legacy pdf");
+    assert!(resolve_pdf_path_at(&base, "papers/legacy.pdf").is_ok());
+    assert!(resolve_pdf_path_at(&base, ".somniq/papers/notes.txt").is_err());
     assert!(resolve_pdf_path_at(&base, "outside.pdf").is_err());
     assert!(resolve_pdf_path_at(&base, "../outside.pdf").is_err());
     let _ = std::fs::remove_dir_all(base);
@@ -47,8 +50,8 @@ fn imports_only_valid_pdf_files_into_papers() {
     std::fs::write(&invalid, b"not a pdf").expect("write invalid");
 
     let imported = import_pdf_at(&base, &source, "My Paper.pdf").expect("import pdf");
-    assert_eq!(imported.relative_path, "papers/My-Paper.pdf");
-    assert!(base.join("papers/My-Paper.pdf").exists());
+    assert_eq!(imported.relative_path, ".somniq/papers/My-Paper.pdf");
+    assert!(base.join(".somniq/papers/My-Paper.pdf").exists());
     let replacement = base.join("replacement.pdf");
     std::fs::write(&replacement, b"%PDF-1.4 replacement").expect("write replacement");
     assert!(import_pdf_at(&base, &replacement, "My Paper.pdf").is_err());
@@ -65,7 +68,9 @@ fn imports_non_pdf_attachments_into_a_project_local_folder() {
     let imported = import_attachment_at(&base, &source).expect("import attachment");
     assert_eq!(imported.file_name, "supplement.csv");
     assert_eq!(imported.mime_type, Some("text/csv"));
-    assert!(imported.relative_path.starts_with("papers/attachments/"));
+    assert!(imported
+        .relative_path
+        .starts_with(".somniq/papers/attachments/"));
     assert_eq!(
         std::fs::read(base.join(&imported.relative_path)).expect("read copied attachment"),
         b"sample,value\nA,1\n"

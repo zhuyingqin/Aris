@@ -54,7 +54,6 @@ use tokio_tungstenite::{
 };
 
 const STORE_VERSION: u32 = 2;
-const MAX_AUDIT_READ: usize = 200;
 const MAX_PENDING_PAIRINGS: usize = 8;
 const MAX_ACTIVE_RELAY_SESSIONS: usize = 16;
 const MAX_ACTIVE_P2P_SESSIONS: usize = 16;
@@ -226,18 +225,6 @@ pub struct RemoteControlStatus {
     pub ice_servers: Vec<String>,
     pub paired_device_count: usize,
     pub active_device_count: usize,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RemoteControlEnableInput {
-    pub gateway_url: String,
-    pub device_name: Option<String>,
-    /// Optional STUN URLs such as `stun:stun.example.com:3478`. They are
-    /// public routing metadata, not credentials, and are supplied to both
-    /// browser WebRTC stacks only when a P2P attempt begins.
-    #[serde(default)]
-    pub ice_servers: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2504,45 +2491,6 @@ pub fn remote_control_status(
     Ok(status_from_store(&store))
 }
 
-#[tauri::command]
-pub fn remote_control_enable(
-    app: AppHandle,
-    state: State<RemoteAgentState>,
-    input: RemoteControlEnableInput,
-) -> Result<RemoteControlStatus, String> {
-    let gateway_url = normalize_gateway_url(&input.gateway_url)?;
-    let ice_servers = input.ice_servers.map(normalize_ice_servers).transpose()?;
-    let device_name = input
-        .device_name
-        .as_deref()
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(default_remote_desktop_name);
-    if device_name.chars().count() > 120 {
-        return Err("desktop device name is too long".to_string());
-    }
-    let status = with_store(&state, |store| {
-        store.enabled = true;
-        store.gateway_url = Some(gateway_url);
-        store.device_name = Some(device_name);
-        if let Some(ice_servers) = ice_servers {
-            store.ice_servers = ice_servers;
-        }
-        if store
-            .device_id
-            .as_deref()
-            .and_then(|device_id| DeviceId::from_str(device_id).ok())
-            .is_none()
-        {
-            store.device_id = Some(new_desktop_device_id());
-        }
-        Ok(status_from_store(store))
-    })?;
-    start_transport(app, state.inner());
-    Ok(status)
-}
-
 /// Enables the managed deployment without exposing deployment-only values in
 /// Settings. The previous store is retained by the caller so a failed first
 /// enrollment cannot leave a desktop that merely appears enabled.
@@ -2833,14 +2781,6 @@ async fn start_pairing(
         expires_at,
         qr_code_data_url: pairing_qr_data_url(&invitation)?,
     })
-}
-
-#[tauri::command]
-pub async fn remote_control_start_pairing(
-    app: AppHandle,
-    state: State<'_, RemoteAgentState>,
-) -> Result<RemotePairingInvitationView, String> {
-    start_pairing(app, state.inner()).await
 }
 
 /// One-click mobile connection for the managed SomniQ deployment. The first
@@ -3264,14 +3204,6 @@ pub fn remote_control_p2p_closed(
     let _session = p2p_session(&state, &input.device_id, &input.session_id)?;
     remove_p2p_session(&state, &input.device_id, &input.session_id);
     Ok(())
-}
-
-#[tauri::command]
-pub fn remote_control_audit(
-    state: State<RemoteAgentState>,
-    limit: Option<usize>,
-) -> Result<Vec<RemoteAuditEntry>, String> {
-    read_audit(&state.audit_path, limit.unwrap_or(100).min(MAX_AUDIT_READ))
 }
 
 fn read_audit(path: &Path, limit: usize) -> Result<Vec<RemoteAuditEntry>, String> {

@@ -7,7 +7,11 @@ import {
 } from "@codemirror/view";
 import katex from "katex";
 import { fileReadBytes } from "../api/tauri";
+import { renderPdfPageToCanvas } from "../pdf/canvas";
+import { openPdfDocument } from "../pdf/runtime";
 import { createSvgIcon } from "../SvgIcon";
+import { useStore } from "../store";
+import { TYPESET_EDITOR_COPY } from "./i18n";
 
 /**
  * Marker class for "block" widgets (display math, figures, tables) whose source
@@ -23,8 +27,6 @@ import { createSvgIcon } from "../SvgIcon";
  */
 const BLOCK_TARGET_CLASS = "cm-vis-block-target";
 const HEADING_TARGET_SELECTOR = ".cm-vis-heading-line, .cm-vis-h1, .cm-vis-h2, .cm-vis-h3, .cm-vis-h4, .cm-vis-secnum";
-const pdfWorkerSrc = new URL("pdfjs-dist/build/pdf.worker.min.mjs", import.meta.url).toString();
-
 export const visualSourcePath = Facet.define<string | null, string | null>({
   combine: (values) => values[values.length - 1] ?? null,
 });
@@ -429,7 +431,27 @@ class ChipWidget extends WidgetType {
   }
 }
 
-/** A forced line break (`\\` / `\\[len]`) rendered as an actual break. */
+/** Plain inline text emitted for a simple user-defined LaTeX macro. */
+class CustomMacroWidget extends WidgetType {
+  constructor(private readonly text: string) {
+    super();
+  }
+  eq(other: CustomMacroWidget) {
+    return other.text === this.text;
+  }
+  toDOM() {
+    const el = document.createElement("span");
+    el.className = "cm-vis-custom-macro";
+    el.textContent = this.text;
+    el.title = "User-defined LaTeX macro — edit its source in Visual or Code view";
+    return el;
+  }
+  ignoreEvent() {
+    return false;
+  }
+}
+
+/** A forced line break rendered as an actual break. */
 class BreakWidget extends WidgetType {
   eq() {
     return true;
@@ -453,15 +475,17 @@ class PageBreakWidget extends WidgetType {
   toDOM() {
     const el = document.createElement("div");
     el.className = `cm-vis-page-break ${BLOCK_TARGET_CLASS}`;
-    el.setAttribute("aria-label", `分页符（\\${this.command}）`);
-    el.title = `分页符（\\${this.command}）`;
+    const copy = TYPESET_EDITOR_COPY[useStore.getState().language].pageBreak;
+    const pageBreakLabel = copy.label(this.command);
+    el.setAttribute("aria-label", pageBreakLabel);
+    el.title = pageBreakLabel;
     const before = document.createElement("span");
     const label = document.createElement("span");
     const after = document.createElement("span");
     before.className = "cm-vis-page-break-line";
     label.className = "cm-vis-page-break-label";
     after.className = "cm-vis-page-break-line";
-    label.textContent = "分页符";
+    label.textContent = copy.short;
     el.append(before, label, after);
     return el;
   }
@@ -653,18 +677,12 @@ async function renderFigureInto(el: HTMLDivElement, imagePath: string, sourcePat
   const mime = mimeForImage(resolvedPath);
   el.replaceChildren();
   if (mime === "application/pdf") {
-    const pdfjs = await import("pdfjs-dist");
-    pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerSrc;
-    const pdf = await pdfjs.getDocument({ data: new Uint8Array(bytes) }).promise;
+    const pdf = await openPdfDocument(bytes);
     const page = await pdf.getPage(1);
-    const viewport = page.getViewport({ scale: 1.15 });
     const canvas = document.createElement("canvas");
     canvas.className = "cm-vis-figure-pdf";
-    canvas.width = Math.ceil(viewport.width);
-    canvas.height = Math.ceil(viewport.height);
-    const context = canvas.getContext("2d");
-    if (!context) throw new Error("Canvas unavailable");
-    await page.render({ canvas, canvasContext: context, viewport }).promise;
+    const render = renderPdfPageToCanvas(page, canvas, 1.15);
+    await render.task.promise;
     el.append(canvas);
     await pdf.destroy();
   } else if (mime.startsWith("image/")) {
@@ -830,14 +848,21 @@ class DiagramWidget extends WidgetType {
   ignoreEvent = blockIgnoreEvent;
 }
 
-type TabularMatch = { from: number; to: number; body: string; source: string };
+type TabularMatch = {
+  from: number;
+  to: number;
+  body: string;
+  environment: "tabular" | "longtable";
+  source: string;
+};
 
 function findTabularMatches(text: string, from: number, to: number): TabularMatch[] {
   const matches: TabularMatch[] = [];
-  const beginRe = /\\begin\{tabular\}/g;
+  const beginRe = /\\begin\{(tabular|longtable)\}/g;
   beginRe.lastIndex = from;
   let tm: RegExpExecArray | null;
   while ((tm = beginRe.exec(text)) && tm.index < to) {
+    const environment = tm[1] as TabularMatch["environment"];
     let cursor = tm.index + tm[0].length;
     const option = /\s*\[[^\]]*\]/y;
     option.lastIndex = cursor;
@@ -851,7 +876,7 @@ function findTabularMatches(text: string, from: number, to: number): TabularMatc
     const specEnd = matchBrace(text, cursor);
     if (specEnd < 0 || specEnd > to) continue;
     const bodyFrom = specEnd;
-    const endMarker = "\\end{tabular}";
+    const endMarker = `\\end{${environment}}`;
     const end = text.indexOf(endMarker, bodyFrom);
     if (end < 0 || end >= to) continue;
     const matchTo = end + endMarker.length;
@@ -859,6 +884,7 @@ function findTabularMatches(text: string, from: number, to: number): TabularMatc
       from: tm.index,
       to: matchTo,
       body: text.slice(bodyFrom, end),
+      environment,
       source: text.slice(tm.index, matchTo),
     });
     beginRe.lastIndex = matchTo;
@@ -866,24 +892,127 @@ function findTabularMatches(text: string, from: number, to: number): TabularMatc
   return matches;
 }
 
-/** Split a `tabular` body into a grid, dropping booktabs/hline rules. */
+/** Make user-defined table macros legible without changing their source. */
+function stripTableCellMarkup(input: string): string {
+  let output = "";
+  let cursor = 0;
+  while (cursor < input.length) {
+    if (input[cursor] !== "\\") {
+      output += input[cursor];
+      cursor += 1;
+      continue;
+    }
+    const command = /\\([A-Za-z@]+)\s*/y;
+    command.lastIndex = cursor;
+    const match = command.exec(input);
+    if (!match) {
+      output += input[cursor];
+      cursor += 1;
+      continue;
+    }
+    const name = match[1];
+    let argumentStart = command.lastIndex;
+    const argumentsText: string[] = [];
+    while (argumentStart < input.length) {
+      const whitespace = /\s*/y;
+      whitespace.lastIndex = argumentStart;
+      whitespace.exec(input);
+      const nextArgument = whitespace.lastIndex;
+      if (input[nextArgument] !== "{") break;
+      argumentStart = nextArgument;
+      const argumentEnd = matchBrace(input, argumentStart);
+      if (argumentEnd < 0) break;
+      argumentsText.push(stripTableCellMarkup(input.slice(argumentStart + 1, argumentEnd - 1)));
+      argumentStart = argumentEnd;
+    }
+    if (argumentsText.length === 0) {
+      // Formatting-only declarations (for example `\core`) have no readable
+      // text of their own in the table card.
+      cursor = command.lastIndex;
+      continue;
+    }
+    if (name === "textcolor" && argumentsText.length > 1) {
+      output += argumentsText.slice(1).join(" ");
+    } else if (name === "evidence" && argumentsText.length > 1) {
+      output += `[${argumentsText[0]} p.${argumentsText[1]}]`;
+    } else {
+      output += argumentsText.join(" ");
+    }
+    cursor = argumentStart;
+  }
+  return stripMarkup(output);
+}
+
+/** Split a `tabular`/`longtable` body into a grid, dropping layout commands. */
 function parseTabular(body: string): string[][] {
   const cleaned = body
     .replace(/\\(top|mid|bottom)rule/g, "")
     .replace(/\\addlinespace(?:\[[^\]]*\])?/g, "")
     .replace(/\\hline/g, "")
-    .replace(/\\cmidrule\s*(\([^)]*\))?\s*(\[[^\]]*\])?\s*\{[^}]*\}/g, "");
+    .replace(/\\cmidrule\s*(\([^)]*\))?\s*(\[[^\]]*\])?\s*\{[^}]*\}/g, "")
+    .replace(/\\end(?:firsthead|head|foot|lastfoot)\b/g, "");
   return cleaned
     .split(/\\\\/)
     .map((row) => row.trim())
     .filter(Boolean)
     .map((row) => {
       const multicol = /\\multicolumn\s*\{\d+\}\s*\{[^}]*\}\s*\{([\s\S]*)\}/.exec(row);
-      if (multicol) return [stripMarkup(multicol[1]).replace(/\\([%&_#$])/g, "$1").trim()];
+      if (multicol) return [stripTableCellMarkup(multicol[1]).replace(/\\([%&_#$])/g, "$1").trim()];
       return row
         .split(/(?<!\\)&/)
-        .map((cell) => stripMarkup(cell).replace(/\\([%&_#$])/g, "$1").trim());
+        .map((cell) => stripTableCellMarkup(cell).replace(/\\([%&_#$])/g, "$1").trim());
     });
+}
+
+function removeTableCaption(body: string): { body: string; caption: string } {
+  const captionRe = /\\caption\s*(?:\[[^\]]*\]\s*)?\{/g;
+  const caption = captionRe.exec(body);
+  if (!caption) return { body, caption: "" };
+  const openBrace = caption.index + caption[0].length - 1;
+  const captionEnd = matchBrace(body, openBrace);
+  if (captionEnd < 0) return { body, caption: "" };
+  let afterCaption = captionEnd;
+  const labelRe = /\s*\\label\s*\{/y;
+  while (afterCaption < body.length) {
+    labelRe.lastIndex = afterCaption;
+    const label = labelRe.exec(body);
+    if (!label) break;
+    const labelOpenBrace = labelRe.lastIndex - 1;
+    const labelEnd = matchBrace(body, labelOpenBrace);
+    if (labelEnd < 0) break;
+    afterCaption = labelEnd;
+  }
+  const rowBreak = /\s*\\\\(?:\s*\[[^\]]*\])?/y;
+  rowBreak.lastIndex = afterCaption;
+  if (rowBreak.exec(body)) afterCaption = rowBreak.lastIndex;
+  return {
+    body: body.slice(0, caption.index) + body.slice(afterCaption),
+    caption: stripTableCellMarkup(body.slice(openBrace + 1, captionEnd - 1)),
+  };
+}
+
+function longtableRows(body: string): { rows: string[][]; hasHeader: boolean; caption: string } {
+  const withoutCaption = removeTableCaption(body);
+  const firstHead = withoutCaption.body.indexOf("\\endfirsthead");
+  const endFoot = Math.max(
+    withoutCaption.body.indexOf("\\endlastfoot"),
+    withoutCaption.body.indexOf("\\endfoot"),
+  );
+  if (firstHead < 0 || endFoot < 0) {
+    const rows = parseTabular(withoutCaption.body);
+    return { rows, hasHeader: /\\toprule/.test(body), caption: withoutCaption.caption };
+  }
+  const headerRows = parseTabular(withoutCaption.body.slice(0, firstHead));
+  const endFootMarker = withoutCaption.body.startsWith("\\endlastfoot", endFoot)
+    ? "\\endlastfoot"
+    : "\\endfoot";
+  const bodyRows = parseTabular(withoutCaption.body.slice(endFoot + endFootMarker.length));
+  const header = headerRows[headerRows.length - 1];
+  return {
+    rows: header ? [header, ...bodyRows] : bodyRows,
+    hasHeader: Boolean(header),
+    caption: withoutCaption.caption,
+  };
 }
 
 /** KaTeX-rendered math, shown in place of the `$…$` / `\[…\]` source. */
@@ -1000,6 +1129,53 @@ function matchBrace(text: string, openBrace: number): number {
   return -1;
 }
 
+type SimpleMacroDefinition = { argumentCount: number; body: string };
+
+function simpleMacroDefinitions(source: string, preambleEnd: number): Map<string, SimpleMacroDefinition> {
+  const definitions = new Map<string, SimpleMacroDefinition>();
+  const preamble = source.slice(0, preambleEnd);
+  const definitionRe = /\\(?:newcommand|renewcommand)\s*\{\s*\\([A-Za-z@]+)\s*\}\s*(?:\[\s*(\d+)\s*\])?\s*\{/g;
+  let definition: RegExpExecArray | null;
+  while ((definition = definitionRe.exec(preamble))) {
+    const openBrace = definition.index + definition[0].length - 1;
+    const closeBrace = matchBrace(preamble, openBrace);
+    if (closeBrace < 0) continue;
+    definitions.set(definition[1], {
+      argumentCount: Number.parseInt(definition[2] ?? "0", 10) || 0,
+      body: preamble.slice(openBrace + 1, closeBrace - 1),
+    });
+    definitionRe.lastIndex = closeBrace;
+  }
+  return definitions;
+}
+
+function macroCallArguments(
+  source: string,
+  from: number,
+  name: string,
+  argumentCount: number,
+): { argumentsText: string[]; to: number } | null {
+  let cursor = from + name.length + 1;
+  const argumentsText: string[] = [];
+  for (let index = 0; index < argumentCount; index += 1) {
+    while (cursor < source.length && /\s/.test(source[cursor])) cursor += 1;
+    if (source[cursor] !== "{") return null;
+    const closeBrace = matchBrace(source, cursor);
+    if (closeBrace < 0) return null;
+    argumentsText.push(source.slice(cursor + 1, closeBrace - 1));
+    cursor = closeBrace;
+  }
+  return { argumentsText, to: cursor };
+}
+
+function simpleMacroText(definition: SimpleMacroDefinition, argumentsText: string[]): string {
+  let expanded = definition.body;
+  argumentsText.forEach((argument, index) => {
+    expanded = expanded.split("#" + (index + 1)).join(argument);
+  });
+  return stripTableCellMarkup(expanded);
+}
+
 type Decorated = { from: number; to: number; value: Decoration };
 
 type VisualDecorations = { deco: DecorationSet; atomic: DecorationSet };
@@ -1071,6 +1247,13 @@ function buildDecorations(state: EditorState): VisualDecorations {
     floatEnvRanges.push({ from: fr.index, to: fr.index + fr[0].length });
   }
   const withinFloatEnv = (pos: number) => floatEnvRanges.some((r) => pos >= r.from && pos < r.to);
+  // Bare tabular/longtable environments are replaced as a whole later in this
+  // pass.  Do not first place inline math widgets inside them: overlapping
+  // replace decorations would otherwise prevent the enclosing table card from
+  // being emitted.
+  const tableEnvRanges = findTabularMatches(text, bodyStart, scanEnd)
+    .map((table) => ({ from: table.from, to: table.to }));
+  const withinTableEnv = (pos: number) => tableEnvRanges.some((r) => pos >= r.from && pos < r.to);
 
   // --- Beamer frames: keep source editing continuous, but make each frame read
   // as a slide card with an editable title and explicit slide number. ---
@@ -1143,7 +1326,7 @@ function buildDecorations(state: EditorState): VisualDecorations {
   const mathRanges: Range[] = [];
   const withinMath = (pos: number) => mathRanges.some((m) => pos >= m.from && pos < m.to);
   const addMath = (from: number, to: number, latex: string, display: boolean) => {
-    if (withinFloatEnv(from)) return;
+    if (withinFloatEnv(from) || withinTableEnv(from)) return;
     mathRanges.push({ from, to });
     // Both reveal their source on caret — display math used to stay permanently
     // rendered to avoid a page-shifting "jump", but the real bug was the CLICK
@@ -1166,7 +1349,9 @@ function buildDecorations(state: EditorState): VisualDecorations {
     addMath(dm.index, dm.index + dm[0].length, body, true);
   }
 
-  const bracketRe = /\\\[([\s\S]+?)\\\]/g;
+  // A line break with optional vertical space must not be mistaken for
+  // the opening delimiter of a display-math block.
+  const bracketRe = /(?<!\\)\\\[([\s\S]+?)\\\]/g;
   let bm: RegExpExecArray | null;
   bracketRe.lastIndex = bodyStart;
   while ((bm = bracketRe.exec(text)) && bm.index < scanEnd) {
@@ -1219,12 +1404,20 @@ function buildDecorations(state: EditorState): VisualDecorations {
     const caption = readCaption(inner, innerFrom);
     if (fe[1].startsWith("table")) {
       const tabularMatch = findTabularMatches(text, innerFrom, envTo)[0];
-      const rows = tabularMatch ? parseTabular(tabularMatch.body) : [];
+      const parsedTable = tabularMatch?.environment === "longtable"
+        ? longtableRows(tabularMatch.body)
+        : tabularMatch
+          ? { rows: parseTabular(tabularMatch.body), hasHeader: /\\toprule/.test(tabularMatch.source), caption: "" }
+          : null;
+      const rows = parsedTable?.rows ?? [];
       if (tabularMatch && rows.length > 0) {
         hide(
           envFrom,
           envTo,
-          Decoration.replace({ widget: new TableWidget(rows, /\\toprule/.test(tabularMatch.source), caption), block: true }),
+          Decoration.replace({
+            widget: new TableWidget(rows, parsedTable?.hasHeader ?? false, caption || parsedTable?.caption),
+            block: true,
+          }),
         );
         continue;
       }
@@ -1266,10 +1459,16 @@ function buildDecorations(state: EditorState): VisualDecorations {
     const to = tb.to;
     if (withinOpenFloat(from)) continue;
     if (selectionTouches(state, from, to)) continue;
-    const rows = parseTabular(tb.body);
+    const parsedTable = tb.environment === "longtable"
+      ? longtableRows(tb.body)
+      : { rows: parseTabular(tb.body), hasHeader: /\\toprule/.test(tb.source), caption: "" };
+    const rows = parsedTable.rows;
     if (rows.length === 0) continue;
-    const hasHeader = /\\toprule/.test(tb.source);
-    hide(from, to, Decoration.replace({ widget: new TableWidget(rows, hasHeader), block: true }));
+    hide(
+      from,
+      to,
+      Decoration.replace({ widget: new TableWidget(rows, parsedTable.hasHeader, parsedTable.caption), block: true }),
+    );
   }
 
   // --- Figures: bare `\includegraphics{…}` with no enclosing `figure` float ---
@@ -1337,6 +1536,30 @@ function buildDecorations(state: EditorState): VisualDecorations {
   }
 
   const withinHeading = (pos: number) => headingBraces.some((h) => pos >= h.from && pos < h.to);
+
+  // Simple preamble macros are common in research manuscripts for semantic
+  // labels, abbreviations, and evidence citations. Expand their readable text
+  // in the Visual view while preserving the original source for editing.
+  for (const [name, definition] of simpleMacroDefinitions(text, bodyStart)) {
+    const macroRe = new RegExp("\\\\" + name + "(?![A-Za-z@])", "g");
+    macroRe.lastIndex = bodyStart;
+    let macro: RegExpExecArray | null;
+    while ((macro = macroRe.exec(text)) && macro.index < scanEnd) {
+      if (withinMath(macro.index) || withinOpenFloat(macro.index)) {
+        continue;
+      }
+      const call = macroCallArguments(text, macro.index, name, definition.argumentCount);
+      if (!call || selectionTouches(state, macro.index, call.to)) continue;
+      const rendered = simpleMacroText(definition, call.argumentsText);
+      if (!rendered) continue;
+      hide(
+        macro.index,
+        call.to,
+        Decoration.replace({ widget: new CustomMacroWidget(rendered) }),
+      );
+      macroRe.lastIndex = call.to;
+    }
+  }
 
   // --- Theorem-like environments: readable label + hidden wrapper source ---
   // Environment declarations are structural chrome rather than prose. Keep them

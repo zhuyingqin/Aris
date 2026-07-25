@@ -369,14 +369,6 @@ function markdownUrlTransform(url: string, key: string): string {
   return defaultUrlTransform(url);
 }
 
-export function studioArtifactIdFromHref(href: string): string | null {
-  const normalized = href.replace(/^\.\//, "");
-  const prefix = "studio/artifact/";
-  if (!normalized.startsWith(prefix)) return null;
-  const encoded = normalized.slice(prefix.length).split(/[?#]/, 1)[0];
-  return encoded ? decodeLocalHref(encoded) : null;
-}
-
 function MarkdownLink({
   href,
   children,
@@ -385,28 +377,10 @@ function MarkdownLink({
   children?: React.ReactNode;
 }) {
   const setTab = useStore((state) => state.setTab);
-  const setPendingStudioArtifactId = useStore((state) => state.setPendingStudioArtifactId);
   const setPendingLabFilePath = useStore((state) => state.setPendingLabFilePath);
   const setPendingTypesetFilePath = useStore((state) => state.setPendingTypesetFilePath);
   const setError = useStore((state) => state.setError);
   const language = useStore((state) => state.language);
-  const studioArtifactId = href ? studioArtifactIdFromHref(href) : null;
-  if (studioArtifactId) {
-    return (
-      <a
-        href={href}
-        className="md-link md-studio-link"
-        title="Open result in Studio"
-        onClick={(event) => {
-          event.preventDefault();
-          setPendingStudioArtifactId(studioArtifactId);
-          setTab("studio");
-        }}
-      >
-        {children}
-      </a>
-    );
-  }
   if (href && isPreviewableImagePath(href)) {
     const title = textFromReactNode(children) || decodeLocalHref(href);
     return (

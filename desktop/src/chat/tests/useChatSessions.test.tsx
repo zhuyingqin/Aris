@@ -256,6 +256,8 @@ describe("useChatSessions Tauri persistence", () => {
       turnsLoaded: false,
       turnsPartial: true,
       turnCount: allTurns.length,
+      loadedTurnStartIndex: 18,
+      questionCountBeforeLoadedTurns: 9,
     };
     const preview = {
       ...summary,
@@ -275,6 +277,8 @@ describe("useChatSessions Tauri persistence", () => {
     expect(result.current.currentSession).toMatchObject({
       turnsPartial: true,
       turnCount: 30,
+      loadedTurnStartIndex: 6,
+      questionCountBeforeLoadedTurns: 3,
     });
     expect(result.current.currentSession?.turns.map((turn) => turn.id)).toEqual(
       allTurns.slice(6).map((turn) => turn.id),
@@ -288,6 +292,8 @@ describe("useChatSessions Tauri persistence", () => {
     expect(result.current.currentSession).toMatchObject({
       turnsPartial: false,
       turnCount: 30,
+      loadedTurnStartIndex: 0,
+      questionCountBeforeLoadedTurns: 0,
     });
     expect(result.current.currentSession?.partialBaseTurnIds).toBeUndefined();
   });

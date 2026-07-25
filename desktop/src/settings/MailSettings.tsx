@@ -14,8 +14,9 @@ import type {
   MailAutoconfigResult,
   MailSocketSecurity,
 } from "../types";
-import { useStore, type Language } from "../store";
+import { useStore } from "../store";
 import { SvgIcon } from "../SvgIcon";
+import { SETTINGS_COPY, type SettingsMailCopy } from "./i18n";
 
 const DEFAULT_MAIL: GenericMailAccountInput = {
   email: "",
@@ -31,137 +32,6 @@ const DEFAULT_MAIL: GenericMailAccountInput = {
   smtpSecurity: "tls",
   smtpUsername: "",
   smtpPassword: "",
-};
-
-const MAIL_COPY: Record<Language, {
-  mail: string;
-  connected: string;
-  notConnected: string;
-  cardDescription: string;
-  cardError: string;
-  configure: string;
-  accountSummaryEmpty: string;
-  accountSummary: (connected: number, total: number) => string;
-  detailTitle: string;
-  detailSub: string;
-  connectedCount: (count: number) => string;
-  oauthTitle: string;
-  oauthSub: string;
-  connecting: string;
-  genericTitle: string;
-  genericSub: string;
-  emailAddress: string;
-  displayName: string;
-  displayNamePlaceholder: string;
-  discoverTitle: string;
-  discoverSub: string;
-  discoverUsed: (source: string, notes: string[]) => string;
-  discovering: string;
-  discover: string;
-  defaultEmail: string;
-  passwordPlaceholder: string;
-  enableSmtp: string;
-  enableSmtpSub: string;
-  defaultImapUser: string;
-  reuseImapPassword: string;
-  testTesting: string;
-  testConnection: string;
-  connectMailbox: string;
-  connectedAccounts: string;
-  connectedAccountsSub: string;
-  disconnect: string;
-  noConnectedAccounts: string;
-  emailRequired: string;
-  gmailNotice: string;
-  outlookNotice: string;
-  neteaseNotice: string;
-}> = {
-  cn: {
-    mail: "邮箱",
-    connected: "已连接",
-    notConnected: "未连接",
-    cardDescription: "Provider API + IMAP/SMTP · 对话可读取、整理和发送",
-    cardError: "账户状态加载失败，进入详情页重试",
-    configure: "配置邮箱",
-    accountSummaryEmpty: "尚未连接邮箱",
-    accountSummary: (connected, total) => `${connected}/${total} 个账户已连接`,
-    detailTitle: "邮箱连接",
-    detailSub: "Gmail 和 Outlook 使用 OAuth/API。通用 IMAP/SMTP 仅用于仍支持授权码或应用专用密码的邮箱。",
-    connectedCount: (count) => `${count} 已连接`,
-    oauthTitle: "Gmail / Outlook 推荐连接方式",
-    oauthSub: "个人 Gmail、Outlook.com 和 Microsoft 365 应走 OAuth/API。不要在下面的通用 IMAP 表单里输入普通账户密码。",
-    connecting: "连接中...",
-    genericTitle: "通用 IMAP/SMTP",
-    genericSub: "先输入邮箱地址，自动发现服务器；再输入服务商授权码或应用专用密码测试连接。",
-    emailAddress: "邮箱地址",
-    displayName: "显示名称",
-    displayNamePlaceholder: "发件时显示",
-    discoverTitle: "自动发现 IMAP/SMTP",
-    discoverSub: "按 Thunderbird Autoconfig、Thunderbird ISPDB、内置服务商规则和通用域名猜测依次查找配置。",
-    discoverUsed: (source, notes) => `已使用：${source}${notes.length > 0 ? ` · ${notes.join(" ")}` : ""}`,
-    discovering: "发现中...",
-    discover: "自动发现",
-    defaultEmail: "默认使用邮箱地址",
-    passwordPlaceholder: "密码或应用专用密码",
-    enableSmtp: "启用 SMTP 发件",
-    enableSmtpSub: "关闭后对话只能读取和整理邮件。",
-    defaultImapUser: "默认复用 IMAP 用户名",
-    reuseImapPassword: "留空复用 IMAP 密码",
-    testTesting: "测试中...",
-    testConnection: "测试连接",
-    connectMailbox: "连接邮箱",
-    connectedAccounts: "已连接账户",
-    connectedAccountsSub: "连接后，对话和 Mail 页面会复用同一个账户服务。",
-    disconnect: "断开连接",
-    noConnectedAccounts: "没有已连接的邮箱账户。",
-    emailRequired: "请先输入邮箱地址。",
-    gmailNotice: "Gmail 的普通 Google 密码不能用于 IMAP LOGIN。优先使用 Continue with Gmail；只有已启用 IMAP 且生成了 Google 应用专用密码时，才使用下面的通用 IMAP/SMTP。",
-    outlookNotice: "Outlook.com / Microsoft 365 的密码式 IMAP/SMTP 路径不可用。请使用 Continue with Outlook 的 OAuth/Graph 连接。",
-    neteaseNotice: "网易邮箱需要先在网页端开启 IMAP/SMTP 服务，并使用客户端授权码作为密码。若出现 Unsafe Login，说明网易风控拒绝了当前客户端或登录环境，请先完成网页端安全验证，或联系 kefu@188.com。",
-  },
-  en: {
-    mail: "Mail",
-    connected: "Connected",
-    notConnected: "Not connected",
-    cardDescription: "Provider API + IMAP/SMTP · Chat can read, organize, and send",
-    cardError: "Account status failed to load. Open details to retry.",
-    configure: "Configure mail",
-    accountSummaryEmpty: "No mailbox connected",
-    accountSummary: (connected, total) => `${connected}/${total} accounts connected`,
-    detailTitle: "Mail Connections",
-    detailSub: "Gmail and Outlook use OAuth/API. Generic IMAP/SMTP is only for providers that still support app passwords or authorization codes.",
-    connectedCount: (count) => `${count} connected`,
-    oauthTitle: "Recommended for Gmail / Outlook",
-    oauthSub: "Personal Gmail, Outlook.com, and Microsoft 365 should use OAuth/API. Do not enter a normal account password in the generic IMAP form below.",
-    connecting: "Connecting...",
-    genericTitle: "Generic IMAP/SMTP",
-    genericSub: "Enter an email address to discover servers, then test with the provider authorization code or app password.",
-    emailAddress: "Email address",
-    displayName: "Display name",
-    displayNamePlaceholder: "Shown when sending",
-    discoverTitle: "Discover IMAP/SMTP",
-    discoverSub: "Checks Thunderbird Autoconfig, Thunderbird ISPDB, built-in provider rules, and common domain guesses.",
-    discoverUsed: (source, notes) => `Using: ${source}${notes.length > 0 ? ` · ${notes.join(" ")}` : ""}`,
-    discovering: "Discovering...",
-    discover: "Auto-discover",
-    defaultEmail: "Defaults to email address",
-    passwordPlaceholder: "Password or app password",
-    enableSmtp: "Enable SMTP sending",
-    enableSmtpSub: "When off, Chat can only read and organize mail.",
-    defaultImapUser: "Defaults to IMAP username",
-    reuseImapPassword: "Leave blank to reuse IMAP password",
-    testTesting: "Testing...",
-    testConnection: "Test connection",
-    connectMailbox: "Connect mailbox",
-    connectedAccounts: "Connected Accounts",
-    connectedAccountsSub: "After connecting, Chat and Mail reuse the same account service.",
-    disconnect: "Disconnect",
-    noConnectedAccounts: "No connected mail accounts.",
-    emailRequired: "Enter an email address first.",
-    gmailNotice: "A normal Google password cannot be used for Gmail IMAP LOGIN. Prefer Continue with Gmail; use generic IMAP/SMTP only after enabling IMAP and creating a Google app password.",
-    outlookNotice: "Password-based IMAP/SMTP is unavailable for Outlook.com / Microsoft 365. Use Continue with Outlook for OAuth/Graph.",
-    neteaseNotice: "NetEase mail requires IMAP/SMTP to be enabled in webmail and a client authorization code as the password. Unsafe Login means NetEase rejected this client or login environment.",
-  },
 };
 
 function normalizeMail(input: GenericMailAccountInput): GenericMailAccountInput {
@@ -182,12 +52,12 @@ function normalizeMail(input: GenericMailAccountInput): GenericMailAccountInput 
   };
 }
 
-function providerLabel(provider: MailAccount["provider"]) {
-  if (provider === "gmail" || provider === "outlook") return "Provider API";
+function providerLabel(provider: MailAccount["provider"], copy: SettingsMailCopy) {
+  if (provider === "gmail" || provider === "outlook") return copy.providerApiBadge;
   return "IMAP/SMTP";
 }
 
-function providerAuthNotice(email: string, copy: typeof MAIL_COPY[Language]): string | null {
+function providerAuthNotice(email: string, copy: SettingsMailCopy): string | null {
   const domain = email.trim().toLowerCase().split("@").pop() ?? "";
   if (domain === "gmail.com" || domain === "googlemail.com") {
     return copy.gmailNotice;
@@ -201,7 +71,7 @@ function providerAuthNotice(email: string, copy: typeof MAIL_COPY[Language]): st
   return null;
 }
 
-function accountSummary(accounts: MailAccount[], copy: typeof MAIL_COPY[Language]) {
+function accountSummary(accounts: MailAccount[], copy: SettingsMailCopy) {
   const connected = accounts.filter((account) => account.connected).length;
   if (accounts.length === 0) return copy.accountSummaryEmpty;
   return copy.accountSummary(connected, accounts.length);
@@ -209,7 +79,7 @@ function accountSummary(accounts: MailAccount[], copy: typeof MAIL_COPY[Language
 
 export default function MailSettings({ onOpen }: { onOpen: () => void }) {
   const language = useStore((state) => state.language);
-  const copy = MAIL_COPY[language];
+  const copy = SETTINGS_COPY[language].mail;
   const [accounts, setAccounts] = useState<MailAccount[]>([]);
   const [error, setError] = useState<string | null>(null);
 
@@ -246,7 +116,7 @@ export default function MailSettings({ onOpen }: { onOpen: () => void }) {
           <div className="sp-card-body">
             <div className="sp-card-name">
               {copy.mail}
-              <span className="sp-role-badge sp-role-mail">Autoconfig</span>
+              <span className="sp-role-badge sp-role-mail">{copy.autoconfigBadge}</span>
               {connectedCount > 0 && <span className="sp-role-badge sp-role-running">{copy.connected}</span>}
             </div>
             <div className="sp-card-url">{copy.cardDescription}</div>
@@ -263,7 +133,7 @@ export default function MailSettings({ onOpen }: { onOpen: () => void }) {
 
 export function MailSettingsDetail() {
   const language = useStore((state) => state.language);
-  const copy = MAIL_COPY[language];
+  const copy = SETTINGS_COPY[language].mail;
   const [accounts, setAccounts] = useState<MailAccount[]>([]);
   const [form, setForm] = useState<GenericMailAccountInput>(DEFAULT_MAIL);
   const [discoveryResult, setDiscoveryResult] = useState<MailAutoconfigResult | null>(null);
@@ -345,7 +215,7 @@ export function MailSettingsDetail() {
         ok: true,
         imapOk: true,
         smtpOk: Boolean(form.smtpEnabled),
-        message: "Mailbox connected.",
+        message: copy.mailboxConnectedMessage,
       });
     } catch (e) {
       setError(String(e));
@@ -390,7 +260,7 @@ export function MailSettingsDetail() {
           </div>
         </div>
         <div className="mail-settings-summary-badges">
-          <span className="sp-role-badge sp-role-mail">Provider API</span>
+          <span className="sp-role-badge sp-role-mail">{copy.providerApiBadge}</span>
           <span className="sp-role-badge sp-role-mail">IMAP/SMTP</span>
           <span className={`sp-role-badge ${connectedCount > 0 ? "sp-role-running" : "sp-role-muted"}`}>
             {connectedCount > 0 ? copy.connectedCount(connectedCount) : copy.notConnected}
@@ -411,7 +281,7 @@ export function MailSettingsDetail() {
               disabled={busy !== null}
               onClick={() => void connectProvider("gmail")}
             >
-              {busy === "gmail" ? copy.connecting : "Continue with Gmail"}
+              {busy === "gmail" ? copy.connecting : copy.continueWithGmail}
             </button>
             <button
               className="sp-btn sp-btn-secondary"
@@ -419,7 +289,7 @@ export function MailSettingsDetail() {
               disabled={busy !== null}
               onClick={() => void connectProvider("outlook")}
             >
-              {busy === "outlook" ? copy.connecting : "Continue with Outlook"}
+              {busy === "outlook" ? copy.connecting : copy.continueWithOutlook}
             </button>
           </div>
         </div>
@@ -469,9 +339,9 @@ export function MailSettingsDetail() {
           </button>
         </div>
 
-        <div className="mail-settings-subtitle">Incoming IMAP</div>
+        <div className="mail-settings-subtitle">{copy.incomingImapTitle}</div>
         <div className="mail-settings-grid">
-          <Field label="Host">
+          <Field label={copy.fieldHost}>
             <input
               className="sp-input"
               value={form.imapHost}
@@ -479,7 +349,7 @@ export function MailSettingsDetail() {
               onChange={(event) => patch({ imapHost: event.target.value })}
             />
           </Field>
-          <Field label="Port">
+          <Field label={copy.fieldPort}>
             <input
               className="sp-input"
               type="number"
@@ -487,10 +357,10 @@ export function MailSettingsDetail() {
               onChange={(event) => patch({ imapPort: Number(event.target.value) })}
             />
           </Field>
-          <Field label="Security">
-            <SecuritySelect value={form.imapSecurity} onChange={(value) => patch({ imapSecurity: value })} />
+          <Field label={copy.fieldSecurity}>
+            <SecuritySelect value={form.imapSecurity} onChange={(value) => patch({ imapSecurity: value })} copy={copy} />
           </Field>
-          <Field label="Username">
+          <Field label={copy.fieldUsername}>
             <input
               className="sp-input"
               value={form.imapUsername}
@@ -498,7 +368,7 @@ export function MailSettingsDetail() {
               onChange={(event) => patch({ imapUsername: event.target.value })}
             />
           </Field>
-          <Field label="Password">
+          <Field label={copy.fieldPassword}>
             <input
               className="sp-input"
               type="password"
@@ -523,9 +393,9 @@ export function MailSettingsDetail() {
 
         {form.smtpEnabled && (
           <>
-            <div className="mail-settings-subtitle">Outgoing SMTP</div>
+            <div className="mail-settings-subtitle">{copy.outgoingSmtpTitle}</div>
             <div className="mail-settings-grid">
-              <Field label="Host">
+              <Field label={copy.fieldHost}>
                 <input
                   className="sp-input"
                   value={form.smtpHost ?? ""}
@@ -533,7 +403,7 @@ export function MailSettingsDetail() {
                   onChange={(event) => patch({ smtpHost: event.target.value })}
                 />
               </Field>
-              <Field label="Port">
+              <Field label={copy.fieldPort}>
                 <input
                   className="sp-input"
                   type="number"
@@ -541,13 +411,14 @@ export function MailSettingsDetail() {
                   onChange={(event) => patch({ smtpPort: Number(event.target.value) })}
                 />
               </Field>
-              <Field label="Security">
+              <Field label={copy.fieldSecurity}>
                 <SecuritySelect
                   value={form.smtpSecurity ?? "tls"}
                   onChange={(value) => patch({ smtpSecurity: value })}
+                  copy={copy}
                 />
               </Field>
-              <Field label="Username">
+              <Field label={copy.fieldUsername}>
                 <input
                   className="sp-input"
                   value={form.smtpUsername ?? ""}
@@ -555,7 +426,7 @@ export function MailSettingsDetail() {
                   onChange={(event) => patch({ smtpUsername: event.target.value })}
                 />
               </Field>
-              <Field label="Password">
+              <Field label={copy.fieldPassword}>
                 <input
                   className="sp-input"
                   type="password"
@@ -598,8 +469,8 @@ export function MailSettingsDetail() {
                 <div className="mail-account-main">
                   <strong>{account.email}</strong>
                   <span>
-                    {providerLabel(account.provider)}
-                    {!account.connected && " · disconnected"}
+                    {providerLabel(account.provider, copy)}
+                    {!account.connected && copy.disconnectedSuffix}
                   </span>
                 </div>
                 <button
@@ -640,9 +511,11 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
 function SecuritySelect({
   value,
   onChange,
+  copy,
 }: {
   value: MailSocketSecurity;
   onChange: (value: MailSocketSecurity) => void;
+  copy: SettingsMailCopy;
 }) {
   return (
     <select
@@ -652,7 +525,7 @@ function SecuritySelect({
     >
       <option value="tls">TLS</option>
       <option value="starttls">STARTTLS</option>
-      <option value="none">None / local bridge</option>
+      <option value="none">{copy.securityNoneOption}</option>
     </select>
   );
 }

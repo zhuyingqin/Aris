@@ -423,11 +423,6 @@ const TEAM_WORKFLOW_BLOCKED_TOOLS: &[&str] = &[
 
 const DESKTOP_CHAT_EXTRA_BLOCKED_TOOLS: &[&str] = &[];
 
-// Literature agent sessions allow bash so /research-lit can run Python fetchers
-// (arxiv_fetch.py, openalex_fetch.py, etc.). Multi-agent and worktree tools
-// remain blocked — only the shell execution lane is opened.
-const LITERATURE_AGENT_EXTRA_BLOCKED_TOOLS: &[&str] = &["NotebookEdit", "Config", "Agent"];
-
 const DISABLED_DESKTOP_SLASH_COMMANDS: &[&str] = &["team", "workflows"];
 const DESKTOP_COMMAND_DISABLED_MESSAGE: &str = "This desktop command is disabled in this build.";
 
@@ -2102,7 +2097,7 @@ fn build_system_prompt_uncached(key: &SystemPromptCacheKey) -> Vec<String> {
     let readable_answers = "Readable answers: for explanatory answers, prefer short paragraphs, bullets, or numbered steps. Avoid dense single-paragraph technical summaries, especially in Chinese-English mixed explanations.".to_string();
     let local_evidence_retrieval = "Local literature evidence routing: when the user asks what the current project's local papers, PDFs, confirmed knowledge, or literature library say, you MUST call `ProjectEvidenceSearch` before answering, even when the user does not name the tool. This includes synthesis, comparisons, methods, datasets, metrics, findings, limitations, quotations, citations, and page-number requests. Base material claims only on returned confirmed knowledge or original PDF page chunks and cite them as `[paperId p.PAGE]`; retrieval cards, expansions, and ranks are not evidence. Use `LiteratureSearch` only to discover new external papers. `ProjectEvidenceSearch` does not build the index, so if it returns empty, explain that the user must run Literature > Full RAG > Incremental update and then generate retrieval cards. Do not silently substitute web or external metadata search for missing local evidence.".to_string();
     let complex_task_contract = "Complex task contract: for code changes, research conclusions, citation work, experiments, artifact generation, or milestone work, first create a concise evidence-oriented plan with TodoWrite before making changes. Include the affected surfaces and verification needed. Simple factual answers do not need a plan. Never declare a complex task complete merely because your own prose sounds correct; the desktop runtime sends the result to a separately configured independent Reviewer and may return concrete findings for up to two revision rounds.".to_string();
-    let artifact_layout = "Project artifact layout: place LaTeX paper/report sources and PDFs under `papers/`, slide/PPT/PDF deck outputs under `slides/`, poster outputs under `poster/`, interactive web apps under `web/<name>/` with an `index.html` plus local CSS/assets, notebook programs under `experiments/`, and scratch/temp/cache files under `.somniq/tmp/`. Studio auto-discovers `slides/`, `poster/`, and `web/`; Lab lists notebooks from the workspace and defaults new notebooks into `experiments/`.".to_string();
+    let artifact_layout = "Project artifact layout: place application-generated LaTeX paper/report sources and PDFs under `.somniq/papers/`, slide/PPT/PDF deck outputs under `.somniq/slides/`, poster outputs under `.somniq/poster/`, interactive web apps under `.somniq/web/<name>/` with an `index.html` plus local CSS/assets, notebook programs under `.somniq/notebooks/`, executed notebook copies and run artifacts under `.somniq/experiments/`, and scratch/temp/cache files under `.somniq/tmp/`. Preserve and edit a user-specified existing path in place instead of moving it. Lab defaults new notebooks into `.somniq/notebooks/`.".to_string();
     let existing_artifact_edits = "Existing artifact edits: when the user asks to modify, revise, continue editing, polish, or fix a current/existing report, paper, slide deck, PDF source, or other generated artifact, first identify and reuse the existing source path from the user message, recent file links, tool outputs, or workspace search. Edit that source in place and rebuild derived outputs at the same base path. Do not create sibling version files such as `_v2`, `_v9`, `_new`, `_final`, or timestamped copies unless the user explicitly asks for a new version, backup, archive, or comparison copy. If the target file cannot be identified, ask for the path instead of creating a new artifact.".to_string();
     let diagram_output = "Diagram output: when explaining a workflow, process, call path, architecture, state machine, dependency graph, or decision tree, prefer a fenced `mermaid` code block over ASCII art. Keep diagrams compact, use semantic node ids, short readable labels, left-to-right flow for pipelines, meaningful edge labels when they clarify the flow, and avoid oversized text inside nodes. For publication-grade diagram files, use the `mermaid-diagram` skill and verify the rendered output.".to_string();
     let long_document_reading = "Long document reading: when working with books, chapters, transcripts, logs, or converted documents, do not read multiple large files in full. First get a file list and a read_file outline preview, then read one chapter or section window at a time with explicit offset/limit. Treat tool output as a preview, not as a source file; if full text is needed, keep it on disk and reopen precise windows.".to_string();
@@ -3546,35 +3541,6 @@ pub fn chat_run_command(
     }
 }
 
-#[tauri::command]
-pub async fn chat_send(
-    app: AppHandle,
-    state: State<'_, ChatState>,
-    session_id: String,
-    message: String,
-) -> Result<String, String> {
-    remote_chat_send(app, &state, session_id, message).await
-}
-
-/// Send one ordinary desktop chat turn.
-///
-/// This is shared by the Tauri command above, but must never be used for a
-/// paired remote request: the normal desktop chat path can run tools according
-/// to the local session's permissions.
-pub(crate) async fn remote_chat_send(
-    app: AppHandle,
-    state: &ChatState,
-    session_id: String,
-    message: String,
-) -> Result<String, String> {
-    validate_session_id(&session_id)?;
-    if message.trim().is_empty() {
-        return Err("chat message cannot be empty".to_string());
-    }
-    let user_message = ConversationMessage::user_text(message);
-    run_chat_turn(app, state, session_id, user_message, None, None, false).await
-}
-
 /// Send one paired-device chat turn through the selected desktop chat session.
 ///
 /// The session id is supplied by the desktop remote-control boundary, not the
@@ -3634,37 +3600,6 @@ pub async fn chat_send_rich(
         ephemeral,
     )
     .await
-}
-
-/// Variant of `chat_send_rich` used by Literature agent searches.
-/// Bash is allowed so `/research-lit` can run Python paper-fetching helpers;
-/// multi-agent and worktree tools remain blocked.
-#[tauri::command]
-pub async fn literature_agent_send_rich(
-    app: AppHandle,
-    state: State<'_, ChatState>,
-    session_id: String,
-    request: ChatSendRequest,
-) -> Result<String, String> {
-    let project_id = request.project_id.clone();
-    let user_message = user_message_from_request(request)?;
-    run_literature_chat_turn(app, &state, session_id, user_message, project_id).await
-}
-
-/// Variant used by Studio review revisions. It intentionally shares
-/// Literature's restricted bash lane so an existing result can be modified
-/// from page-specific feedback, while multi-agent and worktree tools remain
-/// blocked.
-#[tauri::command]
-pub async fn studio_agent_send_rich(
-    app: AppHandle,
-    state: State<'_, ChatState>,
-    session_id: String,
-    request: ChatSendRequest,
-) -> Result<String, String> {
-    let project_id = request.project_id.clone();
-    let user_message = user_message_from_request(request)?;
-    run_literature_chat_turn(app, &state, session_id, user_message, project_id).await
 }
 
 #[tauri::command]
@@ -3997,30 +3932,6 @@ pub async fn run_background_prompt(
     .await
 }
 
-async fn run_literature_chat_turn(
-    app: AppHandle,
-    state: &ChatState,
-    session_id: String,
-    user_message: ConversationMessage,
-    project_id: Option<String>,
-) -> Result<String, String> {
-    run_chat_turn_with_context(
-        app,
-        state,
-        session_id,
-        user_message,
-        None,
-        project_id,
-        false,
-        ChatTurnRuntime::Desktop {
-            extra_blocked_tools: LITERATURE_AGENT_EXTRA_BLOCKED_TOOLS,
-            full_tool_registry: false,
-        },
-        None,
-    )
-    .await
-}
-
 /// The execution capability and event-delivery behavior of a chat turn.
 #[derive(Clone, Copy)]
 enum ChatTurnRuntime {
@@ -4065,12 +3976,6 @@ impl ChatTurnRuntime {
                 full_tool_registry: true,
                 ..
             } => "Chat",
-            Self::Desktop {
-                extra_blocked_tools,
-                ..
-            } if extra_blocked_tools == LITERATURE_AGENT_EXTRA_BLOCKED_TOOLS => {
-                "Literature/Studio agent"
-            }
             Self::Desktop { .. } => "Restricted agent",
             Self::RemoteApproved => "Paired mobile",
         }
@@ -4500,7 +4405,6 @@ fn review_required_for_turn(user_text: &str, summary: &runtime::TurnSummary) -> 
                 | "LaTeXRender"
                 | "LiteraturePdfDownload"
                 | "KnowledgeUpsert"
-                | "StudioLibraryUpsert"
                 | "Agent"
         ) || name.ends_with("Upsert")
             || name.ends_with("Download")
@@ -6208,23 +6112,6 @@ async fn run_chat_turn_with_context(
         crate::chat_events::record_event(&session_id, "done", payload);
     }
     Ok(text)
-}
-
-#[tauri::command]
-pub fn chat_reset(state: State<ChatState>, session_id: String) -> Result<(), String> {
-    validate_session_id(&session_id)?;
-    let fresh = Session::new();
-    store_chat_session(&state, session_id.clone(), fresh.clone())?;
-    crate::chat_events::record_event(
-        &session_id,
-        "reset",
-        json!({
-            "sessionId": &session_id,
-            "reason": "chat_reset",
-        }),
-    );
-    crate::chat_events::record_session_snapshot(&session_id, "chat_reset", &fresh);
-    Ok(())
 }
 
 #[derive(serde::Deserialize)]
@@ -8181,7 +8068,7 @@ fn render_desktop_agents_md(cwd: &Path) -> String {
         "## Workspace".to_string(),
         format!("- Desktop workspace: `{}`.", cwd.display()),
         "- Keep generated files and research artifacts inside this workspace unless the user explicitly attaches or references external context.".to_string(),
-        "- Artifact layout: slides/PPT/PDF decks live in `slides/`, posters in `poster/`, interactive web apps in `web/<name>/`, notebooks in `experiments/`, and scratch/temp/cache files in `.somniq/tmp/`.".to_string(),
+        "- Artifact layout: application-generated papers, decks, posters, web apps, notebooks, and run outputs live under `.somniq/` (`.somniq/papers/`, `.somniq/slides/`, `.somniq/poster/`, `.somniq/web/<name>/`, `.somniq/notebooks/`, and `.somniq/experiments/`). Preserve user-specified existing paths in place.".to_string(),
         String::new(),
         "## Verification".to_string(),
         "- Record the commands or checks used to validate substantial changes.".to_string(),

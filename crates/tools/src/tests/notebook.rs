@@ -118,7 +118,7 @@ fn notebook_run_with_parameters_writes_executed_copy_not_source() {
     assert!(executed_text.contains("injected-parameters"));
     assert!(executed_text.contains("seed = 7"));
 
-    let runs = std::fs::read_to_string(base.join("experiments").join("runs.json")).unwrap();
+    let runs = std::fs::read_to_string(base.join(".somniq/experiments/runs.json")).unwrap();
     assert!(runs.contains("\"status\": \"ok\""), "runs ledger: {runs}");
     crate::execute_tool(
         "NotebookKernel",

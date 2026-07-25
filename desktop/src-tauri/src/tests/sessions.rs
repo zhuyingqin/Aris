@@ -1,5 +1,6 @@
 use super::{
-    append_remote_chat_text_turns, chat_ui_preview_turns, find_turns_array_bounds,
+    append_remote_chat_text_turns, chat_ui_preview_session,
+    chat_ui_preview_session_from_turn_slice, chat_ui_preview_turns, find_turns_array_bounds,
     merge_missing_remote_chat_ui_turns, partition_chat_ui_index, preserve_remote_chat_updated_at,
     remote_chat_new_session_value, remote_chat_session_summary_for_project,
     remote_chat_sessions_from_index, remote_chat_transcript_for_project, tail_turns_from_array,
@@ -400,6 +401,23 @@ fn chat_ui_preview_limits_only_tail_turns() {
 }
 
 #[test]
+fn chat_ui_preview_records_absolute_tail_offset_and_prior_questions() {
+    let turns = (0..16)
+        .map(|index| text_turn(index, format!("turn {index}")))
+        .collect::<Vec<_>>();
+    let preview = chat_ui_preview_session(
+        chat_session("chat-tail", "default", "Tail", 1, turns.clone()),
+        &turns,
+        turns.len(),
+    );
+
+    assert_eq!(preview["loadedTurnStartIndex"], json!(4));
+    assert_eq!(preview["questionCountBeforeLoadedTurns"], json!(2));
+    assert_eq!(preview["turns"][0]["id"], json!("turn-4"));
+    assert_eq!(preview["turnsPartial"], json!(true));
+}
+
+#[test]
 fn fast_tail_loader_keeps_a_single_huge_turn_in_full() {
     let huge = format!(
         "early setup that should be hidden{}FINAL ANSWER",
@@ -414,13 +432,45 @@ fn fast_tail_loader_keeps_a_single_huge_turn_in_full() {
     }))
     .unwrap();
     let (start, end) = find_turns_array_bounds(&raw).expect("turns array");
-    let (count, tail) = tail_turns_from_array(&raw, start, end, "chat-large");
+    let (count, question_count_before_tail, tail) =
+        tail_turns_from_array(&raw, start, end, "chat-large");
 
     assert_eq!(count, 2);
+    assert_eq!(question_count_before_tail, 0);
     assert_eq!(tail.len(), 2);
     assert_eq!(tail[1]["id"], json!("turn-1"));
     assert!(tail[1].get("omittedTurnIndex").is_none());
     assert_eq!(tail[1]["blocks"][0]["text"], json!(huge));
+}
+
+#[test]
+fn fast_tail_preview_records_full_history_offset_and_prior_questions() {
+    let turns = (0..20)
+        .map(|index| text_turn(index, format!("turn {index}")))
+        .collect::<Vec<_>>();
+    let raw = serde_json::to_string(&chat_session(
+        "chat-fast-tail",
+        "default",
+        "Fast tail",
+        1,
+        turns,
+    ))
+    .expect("serialize stored session");
+    let (array_start, array_end) = find_turns_array_bounds(&raw).expect("turns array");
+    let (turn_count, question_count_before_tail, tail_turns) =
+        tail_turns_from_array(&raw, array_start, array_end, "chat-fast-tail");
+    let preview = chat_ui_preview_session_from_turn_slice(
+        json!({ "id": "chat-fast-tail" }),
+        &tail_turns,
+        turn_count,
+        turn_count.saturating_sub(tail_turns.len()),
+        question_count_before_tail,
+    );
+
+    assert_eq!(preview["loadedTurnStartIndex"], json!(8));
+    assert_eq!(preview["questionCountBeforeLoadedTurns"], json!(4));
+    assert_eq!(preview["turns"][0]["id"], json!("turn-8"));
+    assert_eq!(preview["turnsPartial"], json!(true));
 }
 
 #[test]

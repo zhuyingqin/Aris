@@ -1304,20 +1304,21 @@
 
 .typeset-icon-btn {
   display: inline-flex;
-  width: 30px;
-  height: 30px;
+  width: 28px;
+  height: 28px;
   align-items: center;
   justify-content: center;
   padding: 0;
   border: 1px solid transparent;
-  border-radius: 5px;
+  border-radius: 6px;
   background: transparent;
   color: var(--ol-muted-2);
   cursor: pointer;
+  transition: background 0.14s, border-color 0.14s, color 0.14s;
 }
 
 .typeset-icon-btn:hover:not(:disabled) {
-  border-color: transparent;
+  border-color: var(--ol-border);
   background: color-mix(in srgb, var(--ol-bg-3) 78%, transparent);
   color: var(--ol-text);
 }

@@ -447,24 +447,6 @@ pub async fn lab_interrupt_kernel(
 }
 
 #[tauri::command]
-pub async fn lab_start_file_kernel(
-    projects_state: State<'_, ProjectState>,
-    file_path: String,
-    kernel: Option<String>,
-) -> Result<Value, String> {
-    let path = resolve_file(&projects_state, &file_path)?;
-    ensure_python_file(&path)?;
-    tauri::async_runtime::spawn_blocking(move || {
-        let info =
-            KernelManager::start(&file_session_id(&path), kernel.as_deref(), &workdir(&path))
-                .map_err(|e| e.to_string())?;
-        serde_json::to_value(info).map_err(|e| e.to_string())
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-#[tauri::command]
 pub async fn lab_execute_file(
     app: AppHandle,
     projects_state: State<'_, ProjectState>,
@@ -493,34 +475,6 @@ pub async fn lab_execute_file(
             kernel.as_deref(),
             Some(on_output),
         )
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-#[tauri::command]
-pub async fn lab_interrupt_file_kernel(
-    projects_state: State<'_, ProjectState>,
-    file_path: String,
-) -> Result<(), String> {
-    let path = resolve_file(&projects_state, &file_path)?;
-    ensure_python_file(&path)?;
-    tauri::async_runtime::spawn_blocking(move || {
-        KernelManager::interrupt(&file_session_id(&path)).map_err(|e| e.to_string())
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-#[tauri::command]
-pub async fn lab_shutdown_file_kernel(
-    projects_state: State<'_, ProjectState>,
-    file_path: String,
-) -> Result<(), String> {
-    let path = resolve_file(&projects_state, &file_path)?;
-    ensure_python_file(&path)?;
-    tauri::async_runtime::spawn_blocking(move || {
-        KernelManager::shutdown(&file_session_id(&path)).map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| e.to_string())?
@@ -653,12 +607,6 @@ pub async fn lab_run_all(
 #[tauri::command]
 pub fn runs_load(projects_state: State<ProjectState>) -> Result<Value, String> {
     tools::runs::runs_load_at(&projects::current_project_path(&projects_state)?)
-}
-
-/// Persist the runs ledger (used by UI edits like deleting a run).
-#[tauri::command]
-pub fn runs_save(projects_state: State<ProjectState>, runs: Value) -> Result<(), String> {
-    tools::runs::runs_save_at(&projects::current_project_path(&projects_state)?, &runs)
 }
 
 /// Run a parameter sweep locally (sequential), recording each run in the ledger.
@@ -836,6 +784,8 @@ fn list_notebooks_at(base: &Path) -> Vec<String> {
     for dir in [
         tools::layout::notebooks_dir_at(base),
         tools::layout::experiments_dir_at(base),
+        base.join(tools::layout::NOTEBOOKS_DIR),
+        base.join(tools::layout::LEGACY_NOTEBOOKS_DIR),
     ] {
         if dir.is_dir() {
             collect_notebooks(base, &dir, 0, &mut found, &mut seen);

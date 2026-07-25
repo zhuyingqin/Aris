@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Manager, State};
 
 use runtime::{
     ContentBlock, ConversationMessage, PermissionMode, RuntimeError, RuntimeFeatureConfig, Session,
@@ -249,10 +249,20 @@ fn resolve_pdf_path_at(
     {
         return Err("invalid PDF path".to_string());
     }
-    let allowed_roots = ["papers", "slides", "poster", "studio"]
-        .into_iter()
-        .filter_map(|directory| base.join(directory).canonicalize().ok())
-        .collect::<Vec<_>>();
+    let allowed_roots = [
+        tools::layout::papers_dir_at(base),
+        tools::layout::slides_dir_at(base),
+        tools::layout::poster_dir_at(base),
+        tools::layout::reports_dir_at(base),
+        base.join("papers"),
+        base.join("slides"),
+        base.join("poster"),
+        base.join("posters"),
+        base.join("reports"),
+    ]
+    .into_iter()
+    .filter_map(|directory| directory.canonicalize().ok())
+    .collect::<Vec<_>>();
     let path = base
         .join(relative)
         .canonicalize()
@@ -264,7 +274,7 @@ fn resolve_pdf_path_at(
             .is_some_and(|value| value.eq_ignore_ascii_case("pdf"))
     {
         return Err(
-            "PDF must be a local file inside papers/, slides/, poster/, or studio/".to_string(),
+            "PDF must be a local file inside a managed SomniQ artifact directory".to_string(),
         );
     }
     Ok(path)
@@ -338,31 +348,6 @@ struct LiteParseBridgeAsset {
     mime_type: String,
     path: String,
     content_hash: String,
-}
-
-/// Extract readable text from a downloaded PDF so the Brief can read the full
-/// paper, not just the abstract. The result reports truncation explicitly so
-/// the UI never presents partial extraction as a full-paper brief.
-#[tauri::command]
-pub fn literature_pdf_text(
-    projects_state: State<ProjectState>,
-    relative_path: String,
-) -> Result<Value, String> {
-    let path = resolve_pdf_path(&projects_state, &relative_path)?;
-    let extraction = extract_pdf_text_by_page(&path)?;
-    let indexed_for_search = tools::literature::library_index_pdf_text_at(
-        &project_base(&projects_state)?,
-        &relative_path,
-        &extraction.text,
-    )?;
-    let mut response = serde_json::to_value(extraction).map_err(|error| error.to_string())?;
-    if let Some(object) = response.as_object_mut() {
-        object.insert(
-            "indexedForSearch".to_string(),
-            Value::Bool(indexed_for_search),
-        );
-    }
-    Ok(response)
 }
 
 /// Build or incrementally refresh the page-grounded local text index for one
@@ -449,8 +434,7 @@ fn extract_pdf_with_liteparse(
     bridge_path: &Path,
 ) -> Result<(PdfTextExtraction, Vec<LiteParseBridgeAsset>, String), String> {
     let digest = format!("{:x}", Sha256::digest(relative_path.as_bytes()));
-    let asset_dir = base
-        .join("papers")
+    let asset_dir = tools::layout::papers_dir_at(base)
         .join("rag")
         .join("assets")
         .join(&digest[..20]);
@@ -909,7 +893,7 @@ fn import_attachment_at(base: &Path, source_path: &Path) -> Result<ImportedAttac
         .and_then(|value| value.to_str())
         .ok_or_else(|| "selected attachment has no file name".to_string())?;
     let safe_name = tools::literature::sanitize_file_name(source_name)?;
-    let attachments_dir = base.join("papers").join("attachments");
+    let attachments_dir = tools::layout::papers_dir_at(base).join("attachments");
     std::fs::create_dir_all(&attachments_dir).map_err(|error| error.to_string())?;
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -922,7 +906,8 @@ fn import_attachment_at(base: &Path, source_path: &Path) -> Result<ImportedAttac
         .len();
     Ok(ImportedAttachment {
         path: destination.to_string_lossy().to_string(),
-        relative_path: PathBuf::from("papers")
+        relative_path: PathBuf::from(tools::layout::PROJECT_DATA_DIR)
+            .join(tools::layout::PAPERS_DIR)
             .join("attachments")
             .join(&destination_name)
             .to_string_lossy()
@@ -950,7 +935,7 @@ fn import_pdf_at(base: &Path, source_path: &Path, file_name: &str) -> Result<Imp
     if &header != b"%PDF-" {
         return Err("selected file does not have a valid PDF header".to_string());
     }
-    let papers_dir = base.join("papers");
+    let papers_dir = tools::layout::papers_dir_at(base);
     std::fs::create_dir_all(&papers_dir).map_err(|error| error.to_string())?;
     let safe_name = tools::literature::sanitize_file_name(file_name)?;
     let destination = papers_dir.join(safe_name);
@@ -967,11 +952,13 @@ fn import_pdf_at(base: &Path, source_path: &Path, file_name: &str) -> Result<Imp
     let bytes = std::fs::metadata(&destination)
         .map_err(|error| error.to_string())?
         .len();
-    let relative = PathBuf::from("papers").join(
-        destination
-            .file_name()
-            .ok_or_else(|| "imported PDF has no file name".to_string())?,
-    );
+    let relative = PathBuf::from(tools::layout::PROJECT_DATA_DIR)
+        .join(tools::layout::PAPERS_DIR)
+        .join(
+            destination
+                .file_name()
+                .ok_or_else(|| "imported PDF has no file name".to_string())?,
+        );
     Ok(ImportedPdf {
         path: destination.to_string_lossy().to_string(),
         relative_path: relative.to_string_lossy().replace('\\', "/"),
@@ -1168,16 +1155,19 @@ fn resolve_attachment_path(
     {
         return Err("invalid attachment path".to_string());
     }
-    let attachments_root = base
-        .join("papers")
-        .canonicalize()
-        .map_err(|error| format!("papers directory is unavailable: {error}"))?;
+    let attachment_roots = [
+        tools::layout::papers_dir_at(&base),
+        base.join(tools::layout::PAPERS_DIR),
+    ]
+    .into_iter()
+    .filter_map(|directory| directory.canonicalize().ok())
+    .collect::<Vec<_>>();
     let path = base
         .join(relative)
         .canonicalize()
         .map_err(|error| error.to_string())?;
-    if !path.starts_with(&attachments_root) {
-        return Err("attachment must be a local file inside papers/".to_string());
+    if !attachment_roots.iter().any(|root| path.starts_with(root)) {
+        return Err("attachment must be a local file inside the literature library".to_string());
     }
     Ok(path)
 }
@@ -1343,90 +1333,6 @@ pub fn literature_write_bibliography_export(
 }
 
 #[tauri::command]
-pub fn literature_save(projects_state: State<ProjectState>, library: Value) -> Result<(), String> {
-    tools::literature::library_save_at(&project_base(&projects_state)?, &library)
-}
-
-#[tauri::command]
-pub async fn literature_search(
-    projects_state: State<'_, ProjectState>,
-    query: String,
-    sources: Vec<String>,
-    max_results: Option<usize>,
-) -> Result<Value, String> {
-    let limit = max_results.unwrap_or(20).max(1);
-    let base = project_base(&projects_state)?;
-    tauri::async_runtime::spawn_blocking(move || {
-        tools::literature::literature_search_ad_hoc_at(
-            &base,
-            tools::literature::LiteratureSearchInput {
-                query,
-                sources,
-                max_results: Some(limit),
-            },
-        )
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-/// Create a project-local, reproducible search protocol. The Desktop uses the
-/// same tools-layer operation as Chat and CLI, but supplies its active project
-/// root explicitly rather than relying on a process-wide workspace variable.
-#[tauri::command]
-pub fn literature_protocol_create(
-    projects_state: State<ProjectState>,
-    protocol: runtime::SearchProtocolDraft,
-) -> Result<Value, String> {
-    tools::literature::literature_search_protocol_create_at(
-        &project_base(&projects_state)?,
-        tools::literature::LiteratureSearchProtocolCreateInput { protocol },
-    )
-}
-
-#[tauri::command]
-pub fn literature_protocol_preview(
-    projects_state: State<ProjectState>,
-    protocol_id: String,
-) -> Result<Value, String> {
-    tools::literature::literature_search_preview_at(
-        &project_base(&projects_state)?,
-        tools::literature::LiteratureSearchPreviewInput { protocol_id },
-    )
-}
-
-/// Execute only after Desktop has displayed the provider scope and the user
-/// has explicitly confirmed it. Progress events are advisory; the shared
-/// runtime checkpoints every source transition independently of this window.
-#[tauri::command]
-pub async fn literature_protocol_execute(
-    app: tauri::AppHandle,
-    projects_state: State<'_, ProjectState>,
-    protocol_id: String,
-    confirmation: String,
-    max_results: Option<usize>,
-    resume_run_id: Option<String>,
-) -> Result<Value, String> {
-    let base = project_base(&projects_state)?;
-    tauri::async_runtime::spawn_blocking(move || {
-        tools::literature::literature_search_execute_at(
-            &base,
-            tools::literature::LiteratureSearchExecuteInput {
-                protocol_id,
-                confirmation,
-                max_results,
-                resume_run_id,
-            },
-            |progress| {
-                let _ = app.emit("literature-search-progress", progress.clone());
-            },
-        )
-    })
-    .await
-    .map_err(|error| error.to_string())?
-}
-
-#[tauri::command]
 pub async fn literature_download_pdf(
     projects_state: State<'_, ProjectState>,
     url: String,
@@ -1438,22 +1344,6 @@ pub async fn literature_download_pdf(
     })
     .await
     .map_err(|e| e.to_string())?
-}
-
-#[tauri::command]
-pub fn literature_library_upsert(
-    projects_state: State<ProjectState>,
-    papers: Vec<Value>,
-    query: String,
-    sources: Vec<String>,
-) -> Result<Value, String> {
-    let search = tools::literature::UpsertSearch { query, sources };
-    let stats = tools::literature::library_upsert_at(
-        &project_base(&projects_state)?,
-        &papers,
-        Some(&search),
-    )?;
-    serde_json::to_value(stats).map_err(|error| error.to_string())
 }
 
 const MAX_RAG_PDF_PAGES: usize = 10_000;

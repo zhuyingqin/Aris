@@ -37,6 +37,10 @@ const COPY: Record<ErrorMessageLanguage, ErrorCopy> = {
   },
 };
 
+/** Shared with `isManagedAuthInvalidError` in `store.ts` — keep both needle sets in sync. */
+export const AUTH_SESSION_EXPIRED_NEEDLES = ["login expired", "sign in again"];
+export const AUTH_TOKEN_INVALID_NEEDLES = ["invalid access token", "invalid token"];
+
 const URL_PATTERN = /\b(?:https?|wss?):\/\/[^\s"'<>]+/i;
 const IP_ADDRESS_PATTERN = /\b(?:\d{1,3}\.){3}\d{1,3}(?::\d{1,5})?\b/;
 const HOST_PATTERN = /\b(?:localhost|(?:[a-z0-9-]+\.)+(?:com|net|org|io|ai|cn|dev|app|cloud|local|internal|test|co|uk|us|de|jp|info|online|me|xyz))(?::\d{1,5})?(?:\/[^\s"']*)?/i;
@@ -87,12 +91,11 @@ export function formatUserFacingError(
     return copy.contextLimit;
   }
 
-  if (lower.includes("login expired") || lower.includes("sign in again")) return copy.signInExpired;
+  if (AUTH_SESSION_EXPIRED_NEEDLES.some((needle) => lower.includes(needle))) return copy.signInExpired;
 
   if (
     lower.includes("invalid api key")
-    || lower.includes("invalid access token")
-    || lower.includes("invalid token")
+    || AUTH_TOKEN_INVALID_NEEDLES.some((needle) => lower.includes(needle))
     || lower.includes("unauthorized")
     || lower.includes("authentication failed")
     || lower.includes("http 401")

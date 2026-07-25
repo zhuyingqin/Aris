@@ -1110,8 +1110,7 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   font-size: 13px;
 }
 
-.lit-lazy-loading,
-.studio-loading {
+.lit-lazy-loading {
   display: flex;
   height: 100%;
   min-height: 160px;
@@ -3617,13 +3616,28 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
 .sched-icon-button {
   display: inline-grid;
   place-items: center;
-  width: 34px;
-  height: 34px;
+  width: 28px;
+  height: 28px;
   padding: 0;
-  border: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
   background: transparent;
   color: var(--text-dim);
   font-size: 16px;
+  cursor: pointer;
+  transition: background 0.14s, border-color 0.14s, color 0.14s;
+}
+
+.sched-icon-button:hover:not(:disabled),
+.sched-icon-button:focus-visible {
+  background: var(--bg-2);
+  border-color: var(--border);
+  color: var(--text);
+}
+
+.sched-icon-button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 .sched-form {
@@ -7594,19 +7608,6 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   gap: 6px;
 }
 
-.chat-tool-studio-links {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  padding: 0 10px 8px;
-}
-
-.chat-tool-studio-links button {
-  color: var(--accent);
-  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
-  background: color-mix(in srgb, var(--accent) 8%, transparent);
-}
-
 .chat-tool-images {
   display: flex;
   flex-direction: column;
@@ -8896,15 +8897,6 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   flex: 0 0 auto;
 }
 
-.md-studio-link {
-  display: inline-flex;
-  align-items: center;
-  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
-  border-radius: 5px;
-  padding: 1px 6px;
-  background: color-mix(in srgb, var(--accent) 8%, transparent);
-}
-
 /* ── Codex-style chat surface ── */
 .chat-root {
   grid-template-columns: 218px 1fr;
@@ -9000,21 +8992,6 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
 .chat-scheduled-icon {
   font-size: 13px;
   line-height: 1;
-}
-
-.chat-scheduled-panel {
-  margin: 4px 0 2px;
-  padding: 8px 10px;
-  background: var(--bg-2);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-}
-
-.chat-scheduled-empty {
-  color: var(--text-dim);
-  font-size: 11.5px;
-  text-align: center;
-  padding: 6px 0;
 }
 
 /* ── Scheduled tasks page (定时任务) ───────────────────────────────────────── */
@@ -11857,37 +11834,6 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   flex: 1;
 }
 
-.chat-thread.has-earlier-turns .chat-scroll {
-  padding-top: 64px;
-}
-
-.chat-history-load-earlier {
-  position: absolute;
-  z-index: 12;
-  top: 12px;
-  left: 50%;
-  transform: translateX(-50%);
-  min-height: 30px;
-  padding: 5px 13px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--bg-1) 92%, transparent);
-  color: var(--text-dim);
-  box-shadow: 0 4px 16px rgb(0 0 0 / 22%);
-  backdrop-filter: blur(10px);
-  cursor: pointer;
-}
-
-.chat-history-load-earlier:hover:not(:disabled) {
-  color: var(--text);
-  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
-}
-
-.chat-history-load-earlier:disabled {
-  cursor: progress;
-  opacity: 0.72;
-}
-
 /* Project continuity summary: reserve a compact right-hand lane so the card
    keeps its floating appearance without covering conversation content. */
 .chat-root.chat-project-brief-open {
@@ -14400,8 +14346,6 @@ button.chat-workflow-file-path:hover {
 .independent-review-panel,
 .lit-overview,
 .lit-pdf-reader,
-.studio-web-preview,
-.studio-review-workspace,
 .kb-review,
 .kb-confirmed {
   animation: sq-subpane-in 0.22s ease both;
@@ -14841,8 +14785,6 @@ button.chat-workflow-file-path:hover {
   .independent-review-panel,
   .lit-overview,
   .lit-pdf-reader,
-  .studio-web-preview,
-  .studio-review-workspace,
   .kb-review,
   .kb-confirmed,
   .lit-card,
@@ -14860,7 +14802,6 @@ button.chat-workflow-file-path:hover {
   .chat-send-btn,
   .sq-loading,
   .sq-loaded,
-  .studio-artifact,
   .kb-view-tab,
   .kb-fragment-card,
   .kb-card-actions button,

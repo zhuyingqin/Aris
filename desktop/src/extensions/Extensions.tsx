@@ -9,6 +9,7 @@ import {
 } from "../api/tauri";
 import { useStore } from "../store";
 import { SvgIcon, type SvgIconName } from "../SvgIcon";
+import { EXTENSIONS_COPY } from "./i18n";
 import type {
   McpConfigView,
   McpServerSummary,
@@ -20,11 +21,12 @@ import type {
 // ── Plugins (MCP) helpers ──────────────────────────────────────────────────────
 
 type ExtTab = "plugins" | "skills";
+type ExtensionsCopy = (typeof EXTENSIONS_COPY)[keyof typeof EXTENSIONS_COPY];
 
-function sourceLabel(source: string) {
-  if (source === "project") return "当前项目";
-  if (source === "user") return "用户配置";
-  if (source === "local") return "本地配置";
+function sourceLabel(source: string, copy: ExtensionsCopy) {
+  if (source === "project") return copy.sourceLabels.project;
+  if (source === "user") return copy.sourceLabels.user;
+  if (source === "local") return copy.sourceLabels.local;
   return source;
 }
 
@@ -54,8 +56,8 @@ function tileGlyph(name: string) {
   return (name.trim()[0] ?? "?").toUpperCase();
 }
 
-function skillSourceLabel(skill: SkillMeta) {
-  return skill.path.startsWith("<bundled") ? "内置" : "本地";
+function skillSourceLabel(skill: SkillMeta, copy: ExtensionsCopy) {
+  return skill.path.startsWith("<bundled") ? copy.skillSourceBundled : copy.skillSourceLocal;
 }
 
 const NEW_KEY = "__new__";
@@ -92,51 +94,55 @@ interface CatalogItem {
  *  the server `name` we write so the connected-state check lines up. On Windows,
  *  npm-shim CLIs (codex) must go through `cmd /c` — the runtime spawns via
  *  CreateProcess, which cannot execute a `.cmd` directly. */
-const MCP_CATALOG: CatalogItem[] = [
-  {
-    id: "codex",
-    name: "Codex",
-    description: "把 OpenAI Codex 作为外部推理 / 审稿代理（codex · codex-reply）",
-    icon: "graph",
-    build: () => ({
-      name: "codex",
-      command: isWindows ? "cmd" : "codex",
-      args: isWindows ? ["/c", "codex", "mcp-server"] : ["mcp-server"],
-      env: {},
-      requestTimeoutSecs: 900,
-    }),
-  },
-  {
-    id: "claude",
-    name: "Claude Code",
-    description: "接入 Claude Code 的完整工具集（Read / Edit / Grep / Agent …）",
-    icon: "sparkle",
-    build: () => ({
-      name: "claude",
-      command: "claude",
-      args: ["mcp", "serve"],
-      env: {},
-      requestTimeoutSecs: 900,
-    }),
-  },
-  {
-    id: "playwright",
-    name: "Playwright",
-    description: "Browser automation via SomniQ bundled Playwright MCP.",
-    icon: "externalLink",
-    build: () => ({
-      name: "playwright",
-      command: isWindows ? "cmd" : "aris-playwright-mcp",
-      args: isWindows ? ["/c", "aris-playwright-mcp.cmd", ...playwrightArgs()] : playwrightArgs(),
-      env: {},
-      requestTimeoutSecs: 900,
-    }),
-  },
-];
+function mcpCatalog(copy: ExtensionsCopy): CatalogItem[] {
+  return [
+    {
+      id: "codex",
+      name: "Codex",
+      description: copy.catalog.codexDescription,
+      icon: "graph",
+      build: () => ({
+        name: "codex",
+        command: isWindows ? "cmd" : "codex",
+        args: isWindows ? ["/c", "codex", "mcp-server"] : ["mcp-server"],
+        env: {},
+        requestTimeoutSecs: 900,
+      }),
+    },
+    {
+      id: "claude",
+      name: "Claude Code",
+      description: copy.catalog.claudeDescription,
+      icon: "sparkle",
+      build: () => ({
+        name: "claude",
+        command: "claude",
+        args: ["mcp", "serve"],
+        env: {},
+        requestTimeoutSecs: 900,
+      }),
+    },
+    {
+      id: "playwright",
+      name: "Playwright",
+      description: copy.catalog.playwrightDescription,
+      icon: "externalLink",
+      build: () => ({
+        name: "playwright",
+        command: isWindows ? "cmd" : "aris-playwright-mcp",
+        args: isWindows ? ["/c", "aris-playwright-mcp.cmd", ...playwrightArgs()] : playwrightArgs(),
+        env: {},
+        requestTimeoutSecs: 900,
+      }),
+    },
+  ];
+}
 
 export default function Extensions() {
   const setError = useStore((state) => state.setError);
   const currentProject = useStore((state) => state.currentProject);
+  const language = useStore((state) => state.language);
+  const copy = EXTENSIONS_COPY[language];
 
   const [extTab, setExtTab] = useState<ExtTab>("plugins");
 
@@ -177,7 +183,7 @@ export default function Extensions() {
       return;
     }
     let cancelled = false;
-    setSkillContent("正在读取 SKILL.md…");
+    setSkillContent(copy.loadingSkillContent);
     skillView(selectedSkill)
       .then((value) => !cancelled && setSkillContent(value))
       .catch((error) => !cancelled && setSkillContent(`Error: ${error}`));
@@ -298,7 +304,7 @@ export default function Extensions() {
   const showForm = isNew || (selectedProjectServer !== null && draft !== null);
 
   const shownConnected = servers;
-  const shownCatalog = MCP_CATALOG;
+  const shownCatalog = useMemo(() => mcpCatalog(copy), [copy]);
   const shownSkills = skills;
   const selectedSkillMeta = useMemo(
     () => (selectedSkill ? skills.find((skill) => skill.name === selectedSkill) ?? null : null),
@@ -308,7 +314,11 @@ export default function Extensions() {
   if (!isTauri()) {
     return (
       <div className="board">
-        <div className="empty">插件与技能需要桌面端支持。运行 <code>npm run tauri dev</code>。</div>
+        <div className="empty">
+          {copy.desktopOnlyPrefix}
+          <code>npm run tauri dev</code>
+          {copy.desktopOnlySuffix}
+        </div>
       </div>
     );
   }
@@ -316,7 +326,7 @@ export default function Extensions() {
   return (
     <div className="ext-page">
       <header className="ext-head">
-        <div className="ext-tabs" role="tablist" aria-label="插件与技能">
+        <div className="ext-tabs" role="tablist" aria-label={copy.tabsAriaLabel}>
           <button
             type="button"
             role="tab"
@@ -324,7 +334,7 @@ export default function Extensions() {
             className={`ext-tab${extTab === "plugins" ? " active" : ""}`}
             onClick={() => setExtTab("plugins")}
           >
-            插件
+            {copy.pluginsTab}
           </button>
           <button
             type="button"
@@ -333,7 +343,7 @@ export default function Extensions() {
             className={`ext-tab${extTab === "skills" ? " active" : ""}`}
             onClick={() => setExtTab("skills")}
           >
-            技能
+            {copy.skillsTab}
           </button>
         </div>
       </header>
@@ -342,17 +352,17 @@ export default function Extensions() {
         {extTab === "plugins" ? (
           !view ? (
             <div className="st-inline-state">
-              <div className="st-inline-state-title">正在读取 MCP...</div>
+              <div className="st-inline-state-title">{copy.loadingMcp}</div>
             </div>
           ) : (
             <>
               <section className="ext-section">
                 <div className="ext-section-head">
-                  <h2>已连接</h2>
+                  <h2>{copy.connectedHeading}</h2>
                   <span className="ext-section-count">{servers.length}</span>
                 </div>
                 {shownConnected.length === 0 ? (
-                  <div className="ext-empty">还没有连接任何 MCP 插件</div>
+                  <div className="ext-empty">{copy.noConnectedPlugins}</div>
                 ) : (
                   <div className="ext-connected">
                     {shownConnected.map((server) => (
@@ -361,7 +371,7 @@ export default function Extensions() {
                         className="ext-tile"
                         key={serverKey(server)}
                         onClick={() => openServer(server)}
-                        title={`${server.name} · ${sourceLabel(server.source)}`}
+                        title={`${server.name} · ${sourceLabel(server.source, copy)}`}
                       >
                         <span className="ext-tile-icon" aria-hidden="true">
                           {tileGlyph(server.name)}
@@ -373,14 +383,14 @@ export default function Extensions() {
                   </div>
                 )}
                 <button type="button" className="ext-link" onClick={startAdd}>
-                  <SvgIcon name="plus" size={14} /> 添加自定义 MCP
+                  <SvgIcon name="plus" size={14} /> {copy.addCustomMcp}
                 </button>
               </section>
 
               {shownCatalog.length > 0 && (
                 <section className="ext-section">
                   <div className="ext-section-head">
-                    <h2>推荐</h2>
+                    <h2>{copy.recommended}</h2>
                   </div>
                   <div className="ext-catalog">
                     {shownCatalog.map((item) => {
@@ -400,7 +410,7 @@ export default function Extensions() {
                             disabled={added || saving}
                             onClick={() => void addCatalog(item)}
                           >
-                            {added ? "已添加" : "添加"}
+                            {added ? copy.added : copy.add}
                           </button>
                         </div>
                       );
@@ -414,13 +424,13 @@ export default function Extensions() {
           <section className="ext-section ext-skills-section">
             <div className="ext-section-head">
               <div>
-                <h2>技能</h2>
-                <p className="ext-section-sub">点击一个技能查看说明、路径和完整 SKILL.md。</p>
+                <h2>{copy.skillsHeading}</h2>
+                <p className="ext-section-sub">{copy.skillsSubtitle}</p>
               </div>
               <span className="ext-section-count">{skills.length}</span>
             </div>
             {shownSkills.length === 0 ? (
-              <div className="ext-empty">未发现可用技能</div>
+              <div className="ext-empty">{copy.noSkillsFound}</div>
             ) : (
               <div className="ext-skills-layout">
                 <div className="ext-catalog ext-skills-list" role="list">
@@ -441,25 +451,27 @@ export default function Extensions() {
                         <strong>/{skill.name}</strong>
                         {skill.description && <span>{skill.description}</span>}
                         {skill.argument_hint && (
-                          <span className="ext-card-muted">参数：{skill.argument_hint}</span>
+                          <span className="ext-card-muted">
+                            {copy.argumentHintPrefix(skill.argument_hint)}
+                          </span>
                         )}
                       </div>
                       <span className="ext-card-stack">
-                        <span className="ext-card-tag">{skillSourceLabel(skill)}</span>
-                        <span className="ext-card-action">查看</span>
+                        <span className="ext-card-tag">{skillSourceLabel(skill, copy)}</span>
+                        <span className="ext-card-action">{copy.view}</span>
                       </span>
                     </button>
                   ))}
                 </div>
 
                 {selectedSkillMeta ? (
-                  <aside className="ext-skill-detail" aria-label="技能详情">
+                  <aside className="ext-skill-detail" aria-label={copy.skillDetailsAria}>
                     <div className="ext-skill-detail-head">
                       <div>
                         <span className="ext-drawer-eyebrow">SKILL.md</span>
                         <h3>/{selectedSkillMeta.name}</h3>
                       </div>
-                      <span className="ext-card-tag">{skillSourceLabel(selectedSkillMeta)}</span>
+                      <span className="ext-card-tag">{skillSourceLabel(selectedSkillMeta, copy)}</span>
                     </div>
 
                     {selectedSkillMeta.description && (
@@ -468,18 +480,18 @@ export default function Extensions() {
 
                     <dl className="ext-skill-meta">
                       <div>
-                        <dt>路径</dt>
+                        <dt>{copy.pathLabel}</dt>
                         <dd>{selectedSkillMeta.path}</dd>
                       </div>
                       {selectedSkillMeta.argument_hint && (
                         <div>
-                          <dt>参数</dt>
+                          <dt>{copy.argumentsMetaLabel}</dt>
                           <dd>{selectedSkillMeta.argument_hint}</dd>
                         </div>
                       )}
                       {selectedSkillMeta.allowed_tools && (
                         <div>
-                          <dt>工具</dt>
+                          <dt>{copy.toolsMetaLabel}</dt>
                           <dd>{selectedSkillMeta.allowed_tools}</dd>
                         </div>
                       )}
@@ -488,9 +500,9 @@ export default function Extensions() {
                     <pre className="md-view ext-skill-content">{skillContent}</pre>
                   </aside>
                 ) : (
-                  <aside className="ext-skill-placeholder" aria-label="技能详情">
-                    <strong>选择一个技能</strong>
-                    <span>点开左侧列表后，会在这里查看技能说明和完整 SKILL.md。</span>
+                  <aside className="ext-skill-placeholder" aria-label={copy.skillDetailsAria}>
+                    <strong>{copy.selectASkill}</strong>
+                    <span>{copy.selectSkillHint}</span>
                   </aside>
                 )}
               </div>
@@ -502,16 +514,16 @@ export default function Extensions() {
       {/* ── MCP editor drawer ─────────────────────────────────────────────── */}
       {editorOpen && (selected || isNew) && (
         <>
-          <button className="ext-overlay" aria-label="关闭" onClick={closeEditor} />
-          <aside className="ext-drawer" aria-label="MCP 详情">
+          <button className="ext-overlay" aria-label={copy.closeAria} onClick={closeEditor} />
+          <aside className="ext-drawer" aria-label={copy.mcpDetailsAria}>
             <div className="ext-drawer-head">
               <div>
                 <span className="ext-drawer-eyebrow">
                   {isNew
-                    ? "当前项目 · STDIO"
-                    : `${sourceLabel(selected!.source)} · ${selected!.transport.toUpperCase()}`}
+                    ? copy.currentProjectStdio
+                    : `${sourceLabel(selected!.source, copy)} · ${selected!.transport.toUpperCase()}`}
                 </span>
-                <h2>{isNew ? draft?.name || "新 MCP" : selected!.name}</h2>
+                <h2>{isNew ? draft?.name || copy.newMcpFallbackName : selected!.name}</h2>
               </div>
               <button type="button" className="ext-drawer-close" onClick={closeEditor}>
                 <SvgIcon name="close" size={16} />
@@ -522,10 +534,10 @@ export default function Extensions() {
               {!isNew && (
                 <div className="ext-drawer-actions">
                   <span className={selectedProjectServer ? "mcp-editable" : "mcp-readonly"}>
-                    {selectedProjectServer ? "可编辑" : "只读"}
+                    {selectedProjectServer ? copy.editable : copy.readonly}
                   </span>
                   <button type="button" disabled={testing || saving} onClick={() => void testTools()}>
-                    {testing ? "检测中..." : "检测工具"}
+                    {testing ? copy.checkingTools : copy.testTools}
                   </button>
                   {selectedProjectServer && (
                     <button
@@ -534,7 +546,7 @@ export default function Extensions() {
                       disabled={saving}
                       onClick={() => void deleteServer()}
                     >
-                      删除
+                      {copy.delete}
                     </button>
                   )}
                 </div>
@@ -545,10 +557,10 @@ export default function Extensions() {
                   className={`mcp-runtime-status${selectedTest?.ok ? " ok" : selectedTest ? " failed" : ""}`}
                 >
                   {!selectedTest ? (
-                    <span>配置文件存在不代表工具已经加载。点击"检测工具"确认服务器实际返回的工具。</span>
+                    <span>{copy.runtimeStatusHint(copy.testTools)}</span>
                   ) : (
                     <>
-                      <strong>{selectedTest.ok ? "工具加载成功" : "工具加载失败"}</strong>
+                      <strong>{selectedTest.ok ? copy.toolsLoadedOk : copy.toolsLoadedFailed}</strong>
                       <span>{selectedTest.message}</span>
                       {selectedTest.tools.length > 0 && <code>{selectedTest.tools.join("\n")}</code>}
                     </>
@@ -559,21 +571,21 @@ export default function Extensions() {
               {showForm && draft ? (
                 <div className="mcp-detail-form">
                   <label>
-                    <span>名称</span>
+                    <span>{copy.nameLabel}</span>
                     <input
                       value={draft.name}
                       onChange={(event) => setDraft({ ...draft, name: event.currentTarget.value })}
                     />
                   </label>
                   <label>
-                    <span>命令</span>
+                    <span>{copy.commandLabel}</span>
                     <input
                       value={draft.command}
                       onChange={(event) => setDraft({ ...draft, command: event.currentTarget.value })}
                     />
                   </label>
                   <label>
-                    <span>参数，每行一个</span>
+                    <span>{copy.argsPerLineLabel}</span>
                     <textarea
                       value={draft.args.join("\n")}
                       onChange={(event) =>
@@ -585,7 +597,7 @@ export default function Extensions() {
                     />
                   </label>
                   <label>
-                    <span>环境变量，KEY=value</span>
+                    <span>{copy.envVarsLabel}</span>
                     <textarea
                       value={envText(draft.env)}
                       onChange={(event) =>
@@ -594,7 +606,7 @@ export default function Extensions() {
                     />
                   </label>
                   <label>
-                    <span>超时秒数</span>
+                    <span>{copy.timeoutSecondsLabel}</span>
                     <input
                       type="number"
                       min={1}
@@ -610,35 +622,35 @@ export default function Extensions() {
                   </label>
                   <div className="mcp-form-actions">
                     <button type="button" className="primary" disabled={saving} onClick={() => void save()}>
-                      {saving ? "保存中..." : isNew ? "添加 MCP" : "保存设置"}
+                      {saving ? copy.saving : isNew ? copy.addMcp : copy.saveSettings}
                     </button>
                     <button type="button" onClick={closeEditor}>
-                      取消
+                      {copy.cancel}
                     </button>
                   </div>
-                  <p className="mcp-reload-note">保存后，下一条 Chat 消息会重新发现并加载 MCP 工具。</p>
+                  <p className="mcp-reload-note">{copy.reloadNote}</p>
                 </div>
               ) : (
                 <dl className="mcp-detail-readonly">
                   <div>
-                    <dt>名称</dt>
+                    <dt>{copy.nameLabel}</dt>
                     <dd>{selected!.name}</dd>
                   </div>
                   <div>
-                    <dt>来源</dt>
-                    <dd>{sourceLabel(selected!.source)}</dd>
+                    <dt>{copy.sourceLabelHeading}</dt>
+                    <dd>{sourceLabel(selected!.source, copy)}</dd>
                   </div>
                   <div>
-                    <dt>连接类型</dt>
+                    <dt>{copy.connectionTypeLabel}</dt>
                     <dd>{selected!.transport.toUpperCase()}</dd>
                   </div>
                   {selected!.command && (
                     <div>
-                      <dt>命令</dt>
+                      <dt>{copy.commandLabel}</dt>
                       <dd>{selected!.command}</dd>
                     </div>
                   )}
-                  <p>该 MCP 不属于当前项目的 STDIO 配置，因此只能查看。</p>
+                  <p>{copy.viewOnlyNote}</p>
                 </dl>
               )}
             </div>

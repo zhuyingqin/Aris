@@ -877,6 +877,18 @@ pub fn typeset_list_documents() -> Result<Vec<TypesetDocument>, String> {
     let mut documents = Vec::new();
     let mut tex_file_count = 0usize;
     collect_typeset_documents(&root, &root, &mut documents, &mut tex_file_count)?;
+    // The normal workspace walk intentionally hides `.somniq`, but the LaTeX
+    // library must still list application-created root documents stored there.
+    for directory in [
+        tools::layout::papers_dir_at(&root),
+        tools::layout::slides_dir_at(&root),
+        tools::layout::poster_dir_at(&root),
+        tools::layout::reports_dir_at(&root),
+    ] {
+        if directory.is_dir() {
+            collect_typeset_documents(&directory, &root, &mut documents, &mut tex_file_count)?;
+        }
+    }
     documents.sort_by(|left, right| {
         right
             .modified_epoch_ms
@@ -1162,26 +1174,6 @@ pub fn file_read(path: String, limit: Option<u32>) -> Result<String, String> {
     // ReadFileOutput serialises as { "type": "text", "file": { "content": "..." } }
     let v: serde_json::Value = serde_json::from_str(&result).map_err(|e| e.to_string())?;
     Ok(v["file"]["content"].as_str().unwrap_or("").to_string())
-}
-
-#[tauri::command]
-pub fn project_chat_starters() -> Vec<String> {
-    let root = crate::state::workspace_dir();
-    let mut starters = vec![
-        "Explain this project's architecture and key modules.".to_string(),
-        "Inspect the current project and identify the highest-risk issues.".to_string(),
-    ];
-    if root.join("package.json").exists() && root.join("Cargo.toml").exists() {
-        starters.push("Run the frontend and Rust tests, then fix any failures.".to_string());
-    } else if root.join("package.json").exists() {
-        starters.push("Run the project tests and fix any failures.".to_string());
-    } else if root.join("Cargo.toml").exists() {
-        starters.push("Run the Rust test suite and fix any failures.".to_string());
-    } else {
-        starters
-            .push("Find the project's test commands, run them, and fix any failures.".to_string());
-    }
-    starters
 }
 
 #[cfg(test)]

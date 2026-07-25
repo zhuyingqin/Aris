@@ -267,23 +267,3 @@ pub struct MailDraftAttachment {
     #[serde(default)]
     pub mime_type: String,
 }
-
-/// OAuth client credentials the user supplies in Settings. Secrets are masked
-/// when read back; `*_has_secret` flags tell the UI whether one is stored.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MailOauthConfigView {
-    pub gmail_client_id: String,
-    pub gmail_has_secret: bool,
-    pub outlook_configured: bool,
-    pub outlook_uses_bundled_client: bool,
-    pub outlook_client_id: String,
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MailOauthConfigPatch {
-    pub gmail_client_id: Option<String>,
-    pub gmail_client_secret: Option<String>,
-    pub outlook_client_id: Option<String>,
-}

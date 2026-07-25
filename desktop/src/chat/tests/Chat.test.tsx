@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChatTurn, DesktopProject } from "../../types";
@@ -69,8 +69,6 @@ vi.mock("../ChatThread", () => ({
     hasEarlierTurns,
     loadingEarlierTurns,
     onLoadEarlierTurns,
-    loadEarlierLabel,
-    loadingEarlierLabel,
   }: {
     turns: ChatTurn[];
     onContinue: () => void;
@@ -78,20 +76,17 @@ vi.mock("../ChatThread", () => ({
     onOpenIndependentReview?: () => void;
     hasEarlierTurns?: boolean;
     loadingEarlierTurns?: boolean;
-    onLoadEarlierTurns?: () => void;
-    loadEarlierLabel?: string;
-    loadingEarlierLabel?: string;
+    onLoadEarlierTurns?: () => void | Promise<void>;
   }) => (
     <div data-testid="chat-thread">
-      {hasEarlierTurns && onLoadEarlierTurns && (
-        <button
-          type="button"
-          disabled={loadingEarlierTurns}
-          onClick={onLoadEarlierTurns}
-        >
-          {loadingEarlierTurns ? loadingEarlierLabel : loadEarlierLabel}
-        </button>
-      )}
+      <div
+        data-testid="chat-history-scroll"
+        onScroll={(event) => {
+          if (hasEarlierTurns && !loadingEarlierTurns && event.currentTarget.scrollTop <= 96) {
+            void onLoadEarlierTurns?.();
+          }
+        }}
+      />
       {turns.map((turn) => (
         <article key={turn.id} data-role={turn.role}>
           {turn.blocks.map((block, index) => (
@@ -227,7 +222,7 @@ describe("Chat export action", () => {
     expect(document.querySelector(".chat-root")?.classList.contains("chat-project-brief-open")).toBe(false);
   });
 
-  it("loads all turns omitted from the restart preview in bounded batches", async () => {
+  it("loads earlier restart-preview turns from upward scrolling in bounded batches", async () => {
     const allTurns = Array.from({ length: 30 }, (_, index): ChatTurn => ({
       id: `saved-turn-${index}`,
       role: index % 2 === 0 ? "user" : "assistant",
@@ -241,6 +236,8 @@ describe("Chat export action", () => {
       turnsLoaded: true,
       turnsPartial: true,
       turnCount: allTurns.length,
+      loadedTurnStartIndex: 18,
+      questionCountBeforeLoadedTurns: 9,
       partialBaseTurnIds: allTurns.slice(18).map((turn) => turn.id),
     };
     apiMocks.chatUiSessionsList.mockResolvedValue([{
@@ -257,15 +254,17 @@ describe("Chat export action", () => {
     render(<Chat />);
 
     await userEvent.click(await screen.findByRole("button", { name: "Long saved chat" }));
-    const loadEarlier = await screen.findByRole("button", { name: "Load earlier messages" });
-    await userEvent.click(loadEarlier);
+    expect(screen.queryByRole("button", { name: "Load earlier messages" })).toBeNull();
+    const history = screen.getByTestId("chat-history-scroll");
+    Object.defineProperty(history, "scrollTop", { configurable: true, value: 0 });
+    fireEvent.scroll(history);
     await waitFor(() => expect(apiMocks.chatUiTurnLoad).toHaveBeenCalledTimes(12));
     expect(apiMocks.chatUiTurnLoad.mock.calls.map((call) => call[1])).toEqual(
       Array.from({ length: 12 }, (_, index) => index + 6),
     );
     expect(await screen.findByText("saved message 6")).toBeTruthy();
 
-    await userEvent.click(screen.getByRole("button", { name: "Load earlier messages" }));
+    fireEvent.scroll(history);
     await waitFor(() => expect(apiMocks.chatUiTurnLoad).toHaveBeenCalledTimes(18));
     expect(apiMocks.chatUiTurnLoad.mock.calls.slice(12).map((call) => call[1])).toEqual(
       Array.from({ length: 6 }, (_, index) => index),

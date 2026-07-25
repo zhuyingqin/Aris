@@ -250,8 +250,6 @@ backend reads/writes them locally and never returns raw secrets to the frontend.
 - **💬 Desktop Chat** — streamed tool calls, ordered output, markdown, history, `@`-file mentions, and reasoning/"thinking" content; sessions persist per project.
 - **🔄 Adversarial review** — `LlmReview` runs the reviewer from Settings, so executor and reviewer can be different models from different providers.
 - **📚 Bundled skills** — browse them in the Skills tab or invoke a slash-skill from Chat.
-- **🧩 Workflow Studio** — design agent-team workflows on a visual canvas backed by the SomniQ DSL.
-- **📊 Run Monitor** — start, pause, resume, and cancel runs; watch phase, agent, event, task, and mailbox views live.
 - **📎 PDF attachments** — SomniQ reads text PDFs via `read_file`, so paper review works on local files (text extraction, not OCR).
 - **🗂️ Multi-project** — switch projects from the header; each keeps its own sessions, runs, agents, and workflows.
 - **🔒 Local-first** — config and runtime data stay on your machine.
@@ -291,8 +289,6 @@ Please review this paper for me
 # Literature survey:
 /research-lit latest work on diffusion models for protein design
 ```
-
-To run a workflow: design it in **Workflow Studio**, save the plan, then start and watch it from the **Run Monitor**.
 
 ---
 
@@ -352,7 +348,7 @@ shared crates as libraries.
 | `crates/api/` | Anthropic HTTP/SSE client and OAuth |
 | `crates/executor/` | Provider streaming layer — Anthropic and OpenAI-compatible request/stream parsing, normalized into runtime events (both the Executor and the Reviewer model go through here) |
 | `crates/chat/` | Shared chat assembly — resolves providers from config and builds the executor, tool table, permission policy, and system prompt |
-| `crates/tools/` | Kernel tool registry (~50 tools) — file/shell, web, literature search (Scopus / OpenAlex / arXiv), literature/knowledge/Studio library writes, notebook execution, LaTeX compile, agent/team/workflow coordination |
+| `crates/tools/` | Kernel tool registry (~50 tools) — file/shell, web, literature search (Scopus / OpenAlex / arXiv), literature/knowledge, notebook execution, LaTeX compile, agent/team/workflow coordination |
 | `crates/commands/` | Slash command specs and parsing |
 | `crates/notebook/` | Jupyter kernel client (ZMQ + nbformat) — the execution substrate for Lab |
 | `crates/remote-protocol/` | End-to-end encryption primitives for mobile remote control (X25519 / Ed25519 / ChaCha20-Poly1305) |
@@ -363,8 +359,8 @@ shared crates as libraries.
 
 | Path | Role |
 |------|------|
-| `desktop/src/` | React UI — nine surfaces: Chat, Lab (Jupyter / MATLAB experiments + terminal), Typeset (Overleaf-style LaTeX editing + compile), Literature (paper library + citation graph + knowledge review), Studio (slides/poster review), Mail (Gmail / Outlook), Extensions, Scheduled, Settings — plus login and the session list |
-| `desktop/src-tauri/` | Tauri desktop backend — `engine` (chat execution bridge), per-surface commands (`lab` / `typeset` / `literature` / `knowledge` / `studio` / `mail` / `scheduled` / `terminal`), `newapi` (managed login), `remote` (device pairing), `mcp` / `connectors`, `watcher` / `usage_log` |
+| `desktop/src/` | React UI — eight surfaces: Chat, Lab (Jupyter / MATLAB experiments + terminal), Typeset (Overleaf-style LaTeX editing + compile), Literature (paper library + citation graph + knowledge review), Mail (Gmail / Outlook), Extensions, Scheduled, Settings — plus login and the session list |
+| `desktop/src-tauri/` | Tauri desktop backend — `engine` (chat execution bridge), per-surface commands (`lab` / `typeset` / `literature` / `knowledge` / `mail` / `scheduled` / `terminal`), `newapi` (managed login), `remote` (device pairing), `mcp` / `connectors`, `watcher` / `usage_log` |
 
 **Remote services (optional, self-hosted):**
 
@@ -396,7 +392,7 @@ cargo test -p runtime reads_pdf      # PDF extraction tests (from repo root)
 
 - [x] **P0** — Desktop shell (Tauri 2 + React + Vite): Chat, Settings, Sessions, Skills
 - [x] **P0** — Shared `runtime` / `executor` / `tools` / `chat` / `commands` crates (no `aris-cli` coupling)
-- [x] **P1** — Workflow Studio, Run Monitor, multi-project workspace, PDF auto-review attachments
+- [x] **P1** — Multi-project workspace, PDF auto-review attachments
 - [ ] **P2** — Generated frontend ⇄ Rust type contracts to reduce schema drift
 - [ ] **P2** — macOS / Linux desktop bundles
 - [ ] **P2** — Richer team/agent monitoring and workflow templates

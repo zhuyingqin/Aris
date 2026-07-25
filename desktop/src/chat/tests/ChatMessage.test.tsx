@@ -20,7 +20,6 @@ beforeEach(() => {
   useStore.setState({
     tab: "chat",
     language: "en",
-    pendingStudioArtifactId: null,
     pendingLabFilePath: null,
     pendingTypesetFilePath: null,
   });
@@ -315,39 +314,6 @@ describe("ChatMessage rendering", () => {
     expect(screen.getByRole("link", { name: "the report" }).getAttribute("title")).toBe("Open local file");
   });
 
-  it("renders a direct Studio entry after artifact registration", async () => {
-    const user = userEvent.setup();
-    render(
-      <ChatMessage
-        turn={{
-          id: "assistant-studio",
-          role: "assistant",
-          blocks: [{
-            kind: "tool",
-            name: "StudioLibraryUpsert",
-            input: "{}",
-            output: JSON.stringify({
-              studioLinks: [{
-                id: "web:irl-demo",
-                title: "IRL demo",
-                href: "studio/artifact/web%3Airl-demo",
-              }],
-            }),
-          }],
-        }}
-        canRetry={false}
-        onEdit={() => undefined}
-        onRetry={() => undefined}
-        onContinue={() => undefined}
-      />,
-    );
-
-    await user.click(screen.getByRole("button", { name: "Open IRL demo in Studio" }));
-
-    expect(useStore.getState().tab).toBe("studio");
-    expect(useStore.getState().pendingStudioArtifactId).toBe("web:irl-demo");
-  });
-
   it("renders stopped turns as stopped instead of empty responses", () => {
     render(
       <ChatMessage
@@ -400,9 +366,7 @@ describe("ChatMessage rendering", () => {
     expect(screen.queryByRole("button", { name: /Show .* earlier steps/ })).toBeNull();
   });
 
-  it("offers to load omitted saved turns from the notice", async () => {
-    const user = userEvent.setup();
-    const onLoadOmittedTurn = vi.fn();
+  it("leaves omitted saved turns as passive notices for scroll-driven hydration", () => {
     render(
       <ChatMessage
         turn={{
@@ -419,13 +383,11 @@ describe("ChatMessage rendering", () => {
         onEdit={() => undefined}
         onRetry={() => undefined}
         onContinue={() => undefined}
-        onLoadOmittedTurn={onLoadOmittedTurn}
       />,
     );
 
-    await user.click(screen.getByRole("button", { name: "Load full turn" }));
-
-    expect(onLoadOmittedTurn).toHaveBeenCalledWith(1);
+    expect(screen.getByText("A large saved turn was omitted from the quick preview.")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Load full turn" })).toBeNull();
   });
 
   it("shows which Reviewer Agent is active and opens its details only when clicked", async () => {

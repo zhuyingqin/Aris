@@ -123,7 +123,13 @@ pub fn index_session(path: &Path, session: &Session) -> Result<(), String> {
     for record in &session.compactions {
         let summary = record.summary.trim();
         if !summary.is_empty() {
-            index_row(&transaction, session_id, archive_index, "archived:summary", summary)?;
+            index_row(
+                &transaction,
+                session_id,
+                archive_index,
+                "archived:summary",
+                summary,
+            )?;
             archive_index += 1;
         }
         for message in &record.messages {

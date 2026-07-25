@@ -308,4 +308,80 @@ describe("visualDecorations", () => {
 
     expect(ranges.some((range) => range.from === envFrom && range.to === envTo && range.widget)).toBe(false);
   });
+
+  it("renders a longtable as one visual table and removes its continuation controls", () => {
+    const source = [
+      "\\begin{document}",
+      "\\begin{longtable}{p{0.2\\textwidth}p{0.7\\textwidth}}",
+      "\\caption{Chapter map}\\label{tab:map}\\\\",
+      "\\toprule",
+      "Chapter & Evidence \\\\",
+      "\\midrule",
+      "\\endfirsthead",
+      "\\toprule",
+      "Chapter & Evidence \\\\",
+      "\\midrule",
+      "\\endhead",
+      "\\bottomrule",
+      "\\endfoot",
+      "Ch.1 & \\term{State regulation} \\evidence{doi:10.1/example}{5--6} \\\\",
+      "\\end{longtable}",
+      "\\end{document}",
+    ].join("\n");
+    const envFrom = source.indexOf("\\begin{longtable}");
+    const envTo = source.indexOf("\\end{longtable}") + "\\end{longtable}".length;
+    const ranges = visualDecorationRanges(source);
+    const table = ranges.find((range) => range.from === envFrom && range.to === envTo && range.widget);
+
+    expect(table?.widget).toBeTruthy();
+    const dom = table!.widget!.toDOM();
+    expect(dom.className).toContain("cm-vis-table-wrap");
+    expect(dom.textContent).toContain("Chapter");
+    expect(dom.textContent).toContain("Ch.1");
+    expect(dom.textContent).toContain("State regulation");
+    expect(dom.textContent).toContain("doi:10.1/example");
+    expect(dom.textContent).not.toContain("endfirsthead");
+    expect(dom.textContent).not.toContain("evidence");
+  });
+
+  it("renders simple user-defined text macros without exposing their TeX source", () => {
+    const source = [
+      "\\newcommand{\\term}[1]{\\textbf{\\textcolor{navy}{#1}}}",
+      "\\newcommand{\\evidence}[2]{[\\nolinkurl{#1} p.#2]}",
+      "\\newcommand{\\rc}{\\textit{Reservoir Computing} (RC)}",
+      "\\begin{document}",
+      "\\term{State regulation} is supported by \\evidence{doi:10.1/example}{5--6} in \\rc.",
+      "\\end{document}",
+    ].join("\n");
+    const termFrom = source.indexOf("\\term{State regulation}");
+    const evidenceFrom = source.indexOf("\\evidence{doi:10.1/example}{5--6}");
+    const rcFrom = source.lastIndexOf("\\rc");
+    const ranges = visualDecorationRanges(source);
+    const term = ranges.find((range) => range.from === termFrom && range.widget);
+    const evidence = ranges.find((range) => range.from === evidenceFrom && range.widget);
+    const rc = ranges.find((range) => range.from === rcFrom && range.widget);
+
+    expect(term?.widget?.toDOM().textContent).toBe("State regulation");
+    expect(evidence?.widget?.toDOM().textContent).toBe("[doi:10.1/example p.5--6]");
+    expect(rc?.widget?.toDOM().textContent).toBe("Reservoir Computing (RC)");
+  });
+
+  it("does not treat a forced line break with spacing as display math", () => {
+    const source = [
+      "\\newcommand{\\term}[1]{\\textbf{#1}}",
+      "\\begin{document}",
+      "Cover line\\\\[0.3em]",
+      "\\term{Visible body text}",
+      "\\[x = y\\]",
+      "\\end{document}",
+    ].join("\n");
+    const termFrom = source.indexOf("\\term{Visible body text}");
+    const displayMathFrom = source.lastIndexOf("\\[x = y\\]");
+    const ranges = visualDecorationRanges(source);
+    const term = ranges.find((range) => range.from === termFrom)?.widget?.toDOM();
+    const displayMath = ranges.find((range) => range.from === displayMathFrom)?.widget?.toDOM();
+
+    expect(term?.textContent).toBe("Visible body text");
+    expect(displayMath?.className).toContain("cm-vis-math-display");
+  });
 });

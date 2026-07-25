@@ -1222,8 +1222,12 @@ fn context_action_picks_warn_then_compact_by_usage() {
 
 #[test]
 fn gpt5_context_window_uses_proxy_budget() {
-    assert_eq!(context_window_for_model("gpt-5.6-luna"), 300_000);
-    assert_eq!(context_window_for_model("gpt-4.1"), 300_000);
+    // Measured against the gateway (needle test, 2026-07-25): 358,708 prompt
+    // tokens accepted, ~395k rejected — a 400k total window, not the 300k the
+    // proxy route was assumed to have.
+    assert_eq!(context_window_for_model("gpt-5.6-luna"), 400_000);
+    assert_eq!(compaction_budget_for_model("gpt-5.6-luna"), 350_000);
+    assert_eq!(context_window_for_model("gpt-4.1"), 400_000);
     assert_eq!(context_window_for_model("MiniMax-M3"), 1_000_000);
     assert_eq!(compaction_budget_for_model("MiniMax-M3"), 800_000);
     assert_eq!(context_window_for_model("MiniMax-M2.7"), 204_800);

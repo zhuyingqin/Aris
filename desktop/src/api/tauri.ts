@@ -82,13 +82,10 @@ import type {
   ChatCommandResult,
   ChatEventLogEntry,
   ChatEventsReplay,
-  ChatEventsRestoreResult,
   ChatModelOptions,
   ChatReasoningEffortView,
   ChatToolProgress,
   ChatStatus,
-  ConnectorActionResult,
-  ConnectorPluginView,
   AppUpdateInfo,
   AppUpdateInstallResult,
   AppUpdateProgress,
@@ -109,21 +106,16 @@ import type {
   MailMessageList,
   MailNewMessageEvent,
   MailModifyPatch,
-  MailOauthConfigPatch,
-  MailOauthConfigView,
   McpConfigView,
   McpStdioServerInput,
   McpTestResult,
   PermissionModeView,
   ProfileStats,
   ProjectView,
-  RemoteAuditEntry,
   RemoteConnectPhoneResult,
-  RemoteControlEnableInput,
   RemoteControlStatus,
   RemoteDevice,
   RemotePairingApprovalInput,
-  RemotePairingInvitation,
   RemotePendingPairing,
   RemoteP2pAnswerInput,
   RemoteP2pDataInput,
@@ -134,7 +126,6 @@ import type {
   ScheduledTask,
   ScheduledTaskInput,
   SessionSummary,
-  SessionTranscript,
   SkillMeta,
   SystemPromptView,
   UserPromptView,
@@ -160,14 +151,10 @@ export const projectsReorder = (projectIds: string[]) =>
 // Remote control (P0/P1). These commands configure the desktop-side agent;
 // the network transport itself never becomes a frontend-invokable API.
 export const remoteControlStatus = () => invoke<RemoteControlStatus>("remote_control_status");
-export const remoteControlEnable = (input: RemoteControlEnableInput) =>
-  invoke<RemoteControlStatus>("remote_control_enable", { input });
 export const remoteControlConnectPhone = () =>
   invoke<RemoteConnectPhoneResult>("remote_control_connect_phone");
 export const remoteControlDisable = () => invoke<RemoteControlStatus>("remote_control_disable");
 export const remoteControlDevices = () => invoke<RemoteDevice[]>("remote_control_devices");
-export const remoteControlStartPairing = () =>
-  invoke<RemotePairingInvitation>("remote_control_start_pairing");
 export const remoteControlPendingPairing = (pairingId: string) =>
   invoke<RemotePendingPairing | null>("remote_control_pending_pairing", { pairingId });
 export const remoteControlApprovePairing = (input: RemotePairingApprovalInput) =>
@@ -176,8 +163,6 @@ export const remoteControlDiscardPairing = (pairingId: string) =>
   invoke<void>("remote_control_discard_pairing", { pairingId });
 export const remoteControlRevokeDevice = (deviceId: string) =>
   invoke<void>("remote_control_revoke_device", { deviceId });
-export const remoteControlAudit = (limit?: number) =>
-  invoke<RemoteAuditEntry[]>("remote_control_audit", { limit });
 
 // P2 WebRTC bridge. These are intentionally narrow renderer-to-Rust calls:
 // the renderer handles browser RTC APIs, while Rust retains transport keys,
@@ -392,20 +377,9 @@ export const mcpConfigSet = (servers: McpStdioServerInput[]) =>
   invoke<McpConfigView>("mcp_config_set", { servers });
 export const mcpConfigTest = () => invoke<McpTestResult>("mcp_config_test");
 
-// ── Codex-style connectors ───────────────────────────────────────────────────
-
-export const connectorPluginsList = () =>
-  invoke<ConnectorPluginView[]>("connector_plugins_list");
-export const connectorConnect = (id: string) =>
-  invoke<ConnectorActionResult>("connector_connect", { id });
-
 // ── Mail (Gmail API + Microsoft Graph) ────────────────────────────────────────
 
 export const mailAccountsGet = () => invoke<MailAccount[]>("mail_accounts_get");
-export const mailOauthConfigGet = () =>
-  invoke<MailOauthConfigView>("mail_oauth_config_get");
-export const mailOauthConfigSet = (patch: MailOauthConfigPatch) =>
-  invoke<MailOauthConfigView>("mail_oauth_config_set", { patch });
 export const mailConnect = (provider: "gmail" | "outlook") =>
   invoke<MailAccount>("mail_connect", { provider });
 export const mailAutoconfig = (email: string) =>
@@ -479,8 +453,6 @@ export const skillView = (name: string) =>
   invoke<string>("skill_view", { name });
 
 export const sessionsList = () => invoke<SessionSummary[]>("sessions_list");
-export const sessionGet = (id: string) =>
-  invoke<SessionTranscript>("session_get", { id });
 export const chatUiSessionsList = <T>() => invoke<T[]>("chat_ui_sessions_list");
 export const chatUiSessionLoad = <T>(id: string) =>
   invoke<T>("chat_ui_session_load", { id });
@@ -519,35 +491,6 @@ export const literatureImportPdfAsRecord = <T>(sourcePath: string, title?: strin
   invoke<T>("literature_import_pdf_as_record", { sourcePath, title: title ?? null });
 export const literatureAddIdentifier = <T>(identifier: string) =>
   invoke<T>("literature_add_identifier", { identifier });
-export const literatureSave = <T>(library: T) =>
-  invoke<void>("literature_save", { library });
-export const literatureSearch = <T>(
-  query: string,
-  sources: string[],
-  maxResults?: number,
-) => invoke<T>("literature_search", { query, sources, maxResults: maxResults ?? null });
-export const literatureProtocolCreate = <T>(protocol: unknown) =>
-  invoke<T>("literature_protocol_create", { protocol });
-export const literatureProtocolPreview = <T>(protocolId: string) =>
-  invoke<T>("literature_protocol_preview", { protocolId });
-export const literatureProtocolExecute = <T>(
-  protocolId: string,
-  confirmation: string,
-  maxResults?: number,
-  resumeRunId?: string,
-) => invoke<T>("literature_protocol_execute", {
-  protocolId,
-  confirmation,
-  maxResults: maxResults ?? null,
-  resumeRunId: resumeRunId ?? null,
-});
-export const onLiteratureSearchProgress = (callback: (progress: unknown) => void) =>
-  listen<unknown>("literature-search-progress", (event) => callback(event.payload));
-export const literatureLibraryUpsert = <T>(
-  papers: unknown[],
-  query: string,
-  sources: string[],
-) => invoke<T>("literature_library_upsert", { papers, query, sources });
 export const literatureDownloadPdf = <T>(url: string, fileName: string) =>
   invoke<T>("literature_download_pdf", { url, fileName });
 export const literatureImportPdf = <T>(sourcePath: string, fileName: string) =>
@@ -569,20 +512,6 @@ export const literatureLlmVision = (
   prompt: string,
   images: LiteratureVisionImage[],
 ) => invoke<string>("literature_llm_vision", { system, prompt, images });
-export const literaturePdfText = (relativePath: string) =>
-  invoke<{
-    text: string;
-    pages: Array<{ page: number; text: string; source: "embedded" | "ocr" | "empty" }>;
-    totalCharacters: number;
-    extractedCharacters: number;
-    truncated: boolean;
-    ocrUsed: boolean;
-    missingPages: number[];
-    warnings: string[];
-  }>(
-    "literature_pdf_text",
-    { relativePath },
-  );
 export interface LiteratureRagIndexResult {
   paperId: string;
   relativePath?: string;
@@ -734,14 +663,6 @@ export const literatureReadAnnotationExport = <T>(sourcePath: string) =>
 export const literatureWriteAnnotationExport = (destinationPath: string, payload: unknown) =>
   invoke<void>("literature_write_annotation_export", { destinationPath, payload });
 
-// ── Studio artifacts ──────────────────────────────────────────────────────────
-
-export const studioLoad = <T>() => invoke<T>("studio_load");
-export const studioSave = <T>(library: T) =>
-  invoke<void>("studio_save", { library });
-export const studioHtml = (relativePath: string) =>
-  invoke<string>("studio_html", { relativePath });
-
 // ── Knowledge base ────────────────────────────────────────────────────────────
 
 export const knowledgeLoad = <T>() => invoke<T>("knowledge_load");
@@ -815,8 +736,6 @@ export const knowledgeRetrievalCardsBuild = (paperId?: string, limit?: number) =
     paperId: paperId ?? null,
     limit: limit ?? null,
   });
-export const knowledgeRagSearch = <T>(query: string, limit?: number) =>
-  invoke<T>("knowledge_rag_search", { query, limit: limit ?? null });
 /** Multi-query FTS retrieval keeps confirmed knowledge and PDF citations as separate sources. */
 export const projectRagSearch = <T>(query: string, limit?: number) =>
   invoke<T>("project_rag_search", { query, limit: limit ?? null });
@@ -933,11 +852,6 @@ export const labShutdownKernel = (notebookPath: string) =>
 export const labInterruptKernel = (notebookPath: string) =>
   isLabPreviewMode() ? Promise.resolve() :
   invoke<void>("lab_interrupt_kernel", { notebookPath });
-export const labStartFileKernel = <T>(filePath: string, kernel?: string) =>
-  isLabPreviewMode()
-    ? preview<T>(previewKernelInfo(`file:${filePath}`) as T)
-    :
-  invoke<T>("lab_start_file_kernel", { filePath, kernel: kernel ?? null });
 export const labExecuteFile = <T>(
   filePath: string,
   opts: { code?: string; timeoutSecs?: number; kernel?: string } = {},
@@ -951,12 +865,6 @@ export const labExecuteFile = <T>(
     timeoutSecs: opts.timeoutSecs ?? null,
     kernel: opts.kernel ?? null,
   });
-export const labInterruptFileKernel = (filePath: string) =>
-  isLabPreviewMode() ? Promise.resolve() :
-  invoke<void>("lab_interrupt_file_kernel", { filePath });
-export const labShutdownFileKernel = (filePath: string) =>
-  isLabPreviewMode() ? Promise.resolve() :
-  invoke<void>("lab_shutdown_file_kernel", { filePath });
 export const labInspectFileVars = <T>(filePath: string, kernel?: string) =>
   isLabPreviewMode() ? preview<T>(previewVariables() as T) :
   invoke<T>("lab_inspect_file_vars", { filePath, kernel: kernel ?? null });
@@ -1012,7 +920,6 @@ export const labRunAll = <T>(
 // ── Experiment runs + sweeps ──────────────────────────────────────────────────
 export const runsLoad = <T>() =>
   isLabPreviewMode() ? preview<T>(previewRunsLibrary() as T) : invoke<T>("runs_load");
-export const runsSave = (runs: unknown) => invoke<void>("runs_save", { runs });
 export const labRunSweep = <T>(spec: unknown) =>
   isLabPreviewMode()
     ? preview<T>({ sweepId: "preview-sweep", total: 1, runs: [{ id: "preview-run-1", seed: null, status: "ok" }] } as T)
@@ -1119,7 +1026,6 @@ export const fileOpen = (path: string) =>
 export const fileReveal = (path: string) =>
   isFilePreviewMode() ? Promise.resolve() :
   invoke<void>("file_reveal", { path });
-export const projectChatStarters = () => invoke<string[]>("project_chat_starters");
 
 export interface LatexCompileResult {
   success: boolean;
@@ -1404,18 +1310,6 @@ export const chatSend = (sessionId: string, message: string | ChatSendRequest) =
   return invoke<string>("chat_send_rich", { sessionId, request });
 };
 
-/** Like chatSend but with bash allowed — used by Literature agent searches so
- *  /research-lit can run Python paper-fetching helpers (arxiv, openalex, etc.). */
-export const literatureAgentSend = (sessionId: string, message: string | ChatSendRequest) => {
-  const request = typeof message === "string" ? { text: message } : message;
-  return invoke<string>("literature_agent_send_rich", { sessionId, request });
-};
-export const studioAgentSend = (sessionId: string, message: string | ChatSendRequest) => {
-  const request = typeof message === "string" ? { text: message } : message;
-  return invoke<string>("studio_agent_send_rich", { sessionId, request });
-};
-export const chatReset = (sessionId: string) =>
-  invoke<void>("chat_reset", { sessionId });
 export const chatSetContext = (
   sessionId: string,
   messages: ChatContextMessage[],
@@ -1432,12 +1326,8 @@ export const chatReviewClear = (sessionId: string) =>
   invoke<void>("chat_review_clear", { sessionId });
 export const chatEventsRead = (sessionId: string) =>
   invoke<ChatEventLogEntry[]>("chat_events_read", { sessionId });
-export const chatEventsExport = (sessionId: string, path?: string | null) =>
-  invoke<string>("chat_events_export", { sessionId, path: path ?? null });
 export const chatEventsReplay = (sessionId: string) =>
   invoke<ChatEventsReplay>("chat_events_replay", { sessionId });
-export const chatEventsRestore = (sessionId: string) =>
-  invoke<ChatEventsRestoreResult>("chat_events_restore", { sessionId });
 export const chatDebugZipExport = (sessionId: string, path?: string | null) =>
   invoke<string>("chat_debug_zip_export", { sessionId, path: path ?? null });
 

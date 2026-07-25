@@ -46,6 +46,10 @@ const MAX_OUTPUT_LIMIT_CONTINUATIONS: usize = 8;
 /// irreducible oversized turn surfaces the error instead of looping forever.
 const MAX_CONTEXT_OVERFLOW_RETRIES: usize = 3;
 const MAX_TRANSIENT_REQUEST_RETRIES: usize = 3;
+/// Fraction of the compaction budget a request must reach before an opaque
+/// gateway 5xx is treated as an unlabelled context-window rejection rather than
+/// a transient fault. See the escalation in the conversation loop.
+const OPAQUE_OVERFLOW_MIN_BUDGET_RATIO: f64 = 0.5;
 const CONTINUATION_PROMPT_PREFIX: &str =
     "Continue the unfinished task from the exact point where the previous response stopped";
 /// How many times a turn that ended with no visible output at all (blank /
@@ -486,6 +490,30 @@ where
                 Err(error) if is_transient_runtime_error(&error) => {
                     transient_request_retries += 1;
                     if transient_request_retries > MAX_TRANSIENT_REQUEST_RETRIES {
+                        // Last resort before failing the turn: some gateways
+                        // relay an upstream context-window rejection as a bare
+                        // 5xx whose body carries no context/length/token
+                        // keyword at all, so `is_context_overflow` cannot see
+                        // it and the strict branch above never fires. Measured
+                        // on the new-api route (2026-07-25): a gpt-5.6 request
+                        // at ~395k tokens returns HTTP 502
+                        // `bad_response_status_code`, deterministically and
+                        // identically on every retry. Escalate to a compaction
+                        // only after the ordinary retries are exhausted and the
+                        // request is genuinely large, so a passing upstream blip
+                        // on a small session never costs the user context.
+                        if is_opaque_gateway_failure(&error) && self.request_is_near_budget() {
+                            context_overflow_retries += 1;
+                            if context_overflow_retries <= MAX_CONTEXT_OVERFLOW_RETRIES {
+                                if let Some(event) = self.force_compact_for_overflow() {
+                                    if event.removed_message_count > 0 {
+                                        merge_auto_compaction_event(&mut auto_compaction, event);
+                                        transient_request_retries = 0;
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
                         return Err(error);
                     }
                     std::thread::sleep(std::time::Duration::from_millis(350));
@@ -1009,6 +1037,16 @@ where
     fn estimated_request_tokens(&self) -> usize {
         estimate_session_tokens(&self.session)
             .saturating_add(self.context_overhead_estimated_tokens)
+    }
+
+    /// Whether the pending request is large enough that an otherwise
+    /// unexplained upstream rejection is more likely a context-window overflow
+    /// than a passing fault. Deliberately loose: this only gates a last-resort
+    /// escalation that has already survived every transient retry.
+    fn request_is_near_budget(&self) -> bool {
+        let floor = ((self.context_compaction_estimated_tokens_threshold as f64)
+            * OPAQUE_OVERFLOW_MIN_BUDGET_RATIO) as usize;
+        self.estimated_request_tokens() >= floor.max(1)
     }
 
     /// Number of tokens of the newest messages to preserve verbatim on a
@@ -1712,6 +1750,18 @@ fn is_transient_runtime_error(error: &RuntimeError) -> bool {
         || contains_http_status(&lower, 502)
         || contains_http_status(&lower, 503)
         || contains_http_status(&lower, 504)
+}
+
+/// A gateway relaying an upstream failure it could not classify. new-api emits
+/// `{"error":{"message":"openai_error","type":"bad_response_status_code",...}}`
+/// for anything the upstream rejected without a recognisable body — including
+/// context-window overflows, which therefore carry no context/length/token
+/// keyword for `is_context_window_exceeded_error` to match.
+fn is_opaque_gateway_failure(error: &RuntimeError) -> bool {
+    error
+        .to_string()
+        .to_ascii_lowercase()
+        .contains("bad_response_status_code")
 }
 
 fn contains_http_status(message: &str, status: u16) -> bool {

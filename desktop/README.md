@@ -2,7 +2,7 @@
 
 This directory contains the Tauri desktop application for SomniQ Studio.
 
-The desktop app is the primary user-facing product in this repository. It wraps the shared SomniQ runtime and tool crates with a local UI for chat, skills, project switching, workflow design, run monitoring, settings, and persisted sessions.
+The desktop app is the primary user-facing product in this repository. It wraps the shared SomniQ runtime and tool crates with a local UI for chat, lab experiments, literature, typeset writing, mail, scheduled tasks, settings, and persisted sessions.
 
 ## Architecture
 
@@ -25,7 +25,6 @@ Main frontend areas:
 - `src/lab/` - notebooks (Jupyter/MATLAB kernels), file editor, integrated terminal
 - `src/typeset/` - Overleaf-style LaTeX editing, visual editor, PDF preview, compile
 - `src/literature/` - paper library, citation graph, knowledge review
-- `src/studio/` - slides/poster review surface
 - `src/mail/` - Gmail/Outlook mail client
 - `src/extensions/` - MCP servers and connectors
 - `src/scheduled/` - scheduled/background runs
@@ -41,7 +40,7 @@ Main backend areas:
 - `src-tauri/src/files.rs` - file reads used by attachments and preview
 - `src-tauri/src/projects.rs` - project registration and switching
 - `src-tauri/src/state.rs` - desktop workspace/runtime directory layout
-- `src-tauri/src/lab.rs`, `typeset.rs`, `literature.rs`, `knowledge.rs`, `studio.rs`, `mail/`, `scheduled.rs`, `terminal.rs` - per-surface commands
+- `src-tauri/src/lab.rs`, `typeset.rs`, `literature.rs`, `knowledge.rs`, `mail/`, `scheduled.rs`, `terminal.rs` - per-surface commands
 - `src-tauri/src/newapi.rs` - managed login gateway
 - `src-tauri/src/remote.rs` - mobile remote pairing
 - `src-tauri/src/mcp.rs`, `connectors.rs` - MCP and connector management

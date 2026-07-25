@@ -567,6 +567,123 @@ fn transient_network_errors_retry_three_times_before_success() {
     assert_eq!(summary.iterations, 4);
 }
 
+/// new-api relays an upstream rejection it could not classify — including a
+/// context-window overflow — as a bare 502 with no context/length/token keyword
+/// anywhere in the body, so `is_context_overflow()` is false and the strict
+/// force-compact branch never fires. Measured on gpt-5.6 at ~395k tokens.
+const OPAQUE_GATEWAY_502: &str = concat!(
+    "OpenAI API error 502: {\"error\":{\"message\":\"openai_error\",",
+    "\"type\":\"bad_response_status_code\",\"param\":\"\",",
+    "\"code\":\"bad_response_status_code\"}}"
+);
+
+fn session_with_four_large_turns() -> Session {
+    let mut session = Session::new();
+    session.messages = vec![
+        ConversationMessage::user_text("q1 ".repeat(200)),
+        ConversationMessage::assistant(vec![ContentBlock::Text {
+            text: "a1 ".repeat(200),
+        }]),
+        ConversationMessage::user_text("q2 ".repeat(200)),
+        ConversationMessage::assistant(vec![ContentBlock::Text {
+            text: "a2 ".repeat(200),
+        }]),
+    ];
+    session
+}
+
+#[test]
+fn opaque_gateway_failure_on_a_large_request_escalates_to_compaction() {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    struct OpaqueGatewayClient {
+        calls: Rc<Cell<usize>>,
+        fail_through: usize,
+    }
+    impl ApiClient for OpaqueGatewayClient {
+        fn stream(&mut self, _request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+            self.calls.set(self.calls.get() + 1);
+            if self.calls.get() <= self.fail_through {
+                Err(RuntimeError::new(OPAQUE_GATEWAY_502))
+            } else {
+                Ok(vec![
+                    AssistantEvent::TextDelta("recovered".to_string()),
+                    AssistantEvent::MessageStop,
+                ])
+            }
+        }
+    }
+
+    let calls = Rc::new(Cell::new(0));
+    // Budget is above the session estimate (so the proactive pass stays out of
+    // the way) but no more than 2x it, so the request counts as near-budget.
+    let mut runtime = ConversationRuntime::new(
+        session_with_four_large_turns(),
+        OpaqueGatewayClient {
+            calls: Rc::clone(&calls),
+            fail_through: 4,
+        },
+        StaticToolExecutor::new(),
+        PermissionPolicy::new(PermissionMode::WorkspaceWrite),
+        vec!["system".to_string()],
+    )
+    .with_context_compaction_estimated_tokens_threshold(1_000);
+
+    let summary = runtime
+        .run_turn("q3", None)
+        .expect("an opaque 502 on a large request should compact and recover");
+
+    // Three plain transient retries, then the escalation, then success.
+    assert_eq!(calls.get(), 5);
+    assert_eq!(assistant_text_from_turn_summary(&summary), "recovered");
+    assert!(
+        summary
+            .auto_compaction
+            .expect("the escalation should have compacted")
+            .removed_message_count
+            > 0
+    );
+}
+
+#[test]
+fn opaque_gateway_failure_on_a_small_request_stays_transient() {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    // Same gateway shape, but a session nowhere near the budget: this is an
+    // ordinary upstream blip and must never cost the user context.
+    struct AlwaysFailingClient {
+        calls: Rc<Cell<usize>>,
+    }
+    impl ApiClient for AlwaysFailingClient {
+        fn stream(&mut self, _request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+            self.calls.set(self.calls.get() + 1);
+            Err(RuntimeError::new(OPAQUE_GATEWAY_502))
+        }
+    }
+
+    let calls = Rc::new(Cell::new(0));
+    let mut runtime = ConversationRuntime::new(
+        session_with_four_large_turns(),
+        AlwaysFailingClient {
+            calls: Rc::clone(&calls),
+        },
+        StaticToolExecutor::new(),
+        PermissionPolicy::new(PermissionMode::WorkspaceWrite),
+        vec!["system".to_string()],
+    )
+    .with_context_compaction_estimated_tokens_threshold(10_000_000);
+
+    let error = runtime
+        .run_turn("q3", None)
+        .expect_err("an irreducible opaque failure should surface");
+
+    // Four attempts (initial + 3 transient retries) and no escalation.
+    assert_eq!(calls.get(), 4);
+    assert!(error.to_string().contains("bad_response_status_code"));
+}
+
 #[test]
 fn runtime_error_context_overflow_flag() {
     assert!(!RuntimeError::new("boom").is_context_overflow());

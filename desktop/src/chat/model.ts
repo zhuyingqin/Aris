@@ -76,6 +76,8 @@ export function makeSession(projectId = "default"): ChatSession {
     turnsLoaded: true,
     turnsPartial: false,
     turnCount: 0,
+    loadedTurnStartIndex: 0,
+    questionCountBeforeLoadedTurns: 0,
     draft: "",
     draftAttachments: [],
     pinned: false,
@@ -146,6 +148,18 @@ export function migrateSession(raw: Partial<ChatSession>, fallbackProjectId = "d
   const turnCount = typeof raw.turnCount === "number" && Number.isFinite(raw.turnCount)
     ? raw.turnCount
     : turns.length;
+  const loadedTurnStartIndex = typeof raw.loadedTurnStartIndex === "number"
+    && Number.isFinite(raw.loadedTurnStartIndex)
+    && raw.loadedTurnStartIndex >= 0
+    ? Math.floor(raw.loadedTurnStartIndex)
+    : turnsPartial
+      ? Math.max(0, turnCount - turns.length)
+      : 0;
+  const questionCountBeforeLoadedTurns = typeof raw.questionCountBeforeLoadedTurns === "number"
+    && Number.isFinite(raw.questionCountBeforeLoadedTurns)
+    && raw.questionCountBeforeLoadedTurns >= 0
+    ? Math.floor(raw.questionCountBeforeLoadedTurns)
+    : 0;
   const partialBaseTurnIds = Array.isArray(raw.partialBaseTurnIds)
     ? raw.partialBaseTurnIds.filter((id): id is string => typeof id === "string")
     : undefined;
@@ -158,6 +172,8 @@ export function migrateSession(raw: Partial<ChatSession>, fallbackProjectId = "d
     turnsLoaded,
     turnsPartial,
     turnCount,
+    loadedTurnStartIndex,
+    questionCountBeforeLoadedTurns,
     partialBaseTurnIds,
     draft: raw.draft || "",
     draftAttachments: Array.isArray(raw.draftAttachments) ? raw.draftAttachments : [],

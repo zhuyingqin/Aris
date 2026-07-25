@@ -2,106 +2,9 @@ import { useEffect, useMemo, useState } from "react";
 import { isTauri, profileStats, type NewApiAccount } from "../api/tauri";
 import type { ProfileStats } from "../types";
 import type { Language } from "../store";
+import { SETTINGS_COPY, type SettingsProfileCopy } from "./i18n";
 
 type HeatmapMode = "daily" | "weekly" | "cumulative";
-
-const PROFILE_COPY: Record<Language, {
-  signedOut: string;
-  signedOutSub: string;
-  plan: string;
-  share: string;
-  privateLabel: string;
-  edit: string;
-  statCumulative: string;
-  statPeak: string;
-  statLongestTask: string;
-  statCurrentStreak: string;
-  statLongestStreak: string;
-  tokenUnit: string;
-  days: (n: number) => string;
-  activityTitle: string;
-  modeDaily: string;
-  modeWeekly: string;
-  modeCumulative: string;
-  activityEmpty: string;
-  activitySince: (date: string) => string;
-  insightsTitle: string;
-  insightFastMode: string;
-  insightReasoning: string;
-  insightSkills: string;
-  insightTools: string;
-  topSkillsTitle: string;
-  topSkillsEmpty: string;
-  runs: (n: number) => string;
-  accruing: string;
-  metaHint: string;
-  loading: string;
-}> = {
-  cn: {
-    signedOut: "未登录",
-    signedOutSub: "登录后显示个人资料与活动统计。",
-    plan: "套餐",
-    share: "分享",
-    privateLabel: "私有",
-    edit: "编辑",
-    statCumulative: "累计 Token 数",
-    statPeak: "峰值 Token 数",
-    statLongestTask: "最长任务时长",
-    statCurrentStreak: "当前连续天数",
-    statLongestStreak: "最长连续天数",
-    tokenUnit: "Token",
-    days: (n) => `${n} 天`,
-    activityTitle: "Token 活动",
-    modeDaily: "每日",
-    modeWeekly: "每周",
-    modeCumulative: "累计",
-    activityEmpty: "还没有活动记录，用几次对话后这里会显示 Token 活跃热力图。",
-    activitySince: (date) => `自 ${date} 起`,
-    insightsTitle: "活动洞察",
-    insightFastMode: "快速模式",
-    insightReasoning: "最常用的推理强度",
-    insightSkills: "已探索的技能",
-    insightTools: "工具调用",
-    topSkillsTitle: "最常用的插件",
-    topSkillsEmpty: "尚无技能调用记录。",
-    runs: (n) => `${n} 次运行`,
-    accruing: "累积中",
-    metaHint: "开启元数据日志后统计更完整",
-    loading: "加载中…",
-  },
-  en: {
-    signedOut: "Not signed in",
-    signedOutSub: "Sign in to show your profile and activity stats.",
-    plan: "Plan",
-    share: "Share",
-    privateLabel: "Private",
-    edit: "Edit",
-    statCumulative: "Cumulative tokens",
-    statPeak: "Peak tokens",
-    statLongestTask: "Longest task",
-    statCurrentStreak: "Current streak",
-    statLongestStreak: "Longest streak",
-    tokenUnit: "tokens",
-    days: (n) => `${n} d`,
-    activityTitle: "Token activity",
-    modeDaily: "Daily",
-    modeWeekly: "Weekly",
-    modeCumulative: "Cumulative",
-    activityEmpty: "No activity yet — run a few chats and your Token heatmap will appear here.",
-    activitySince: (date) => `Since ${date}`,
-    insightsTitle: "Activity insights",
-    insightFastMode: "Fast mode",
-    insightReasoning: "Top reasoning effort",
-    insightSkills: "Skills explored",
-    insightTools: "Tool calls",
-    topSkillsTitle: "Most used plugins",
-    topSkillsEmpty: "No skill invocations recorded yet.",
-    runs: (n) => `${n} runs`,
-    accruing: "Accruing",
-    metaHint: "Enable metadata logging for fuller stats",
-    loading: "Loading…",
-  },
-};
 
 const HEATMAP_WEEKS = 53;
 const HEATMAP_DAYS = HEATMAP_WEEKS * 7;
@@ -157,31 +60,26 @@ function buildPreviewStats(): ProfileStats {
 
 const PREVIEW_PROFILE_STATS = buildPreviewStats();
 
-function formatTokens(value: number, language: Language): string {
+function formatTokens(value: number, language: Language, copy: SettingsProfileCopy): string {
   if (!Number.isFinite(value) || value <= 0) return "0";
   if (language === "cn") {
-    if (value >= 1e8) return `${(value / 1e8).toFixed(value >= 1e9 ? 0 : 1)}亿`;
-    if (value >= 1e4) return `${(value / 1e4).toFixed(value >= 1e6 ? 0 : 1)}万`;
+    if (value >= 1e8) return copy.compactHundredMillions((value / 1e8).toFixed(value >= 1e9 ? 0 : 1));
+    if (value >= 1e4) return copy.compactTenThousands((value / 1e4).toFixed(value >= 1e6 ? 0 : 1));
     return Math.round(value).toLocaleString();
   }
-  if (value >= 1e9) return `${(value / 1e9).toFixed(1)}B`;
-  if (value >= 1e6) return `${(value / 1e6).toFixed(1)}M`;
-  if (value >= 1e3) return `${(value / 1e3).toFixed(1)}K`;
+  if (value >= 1e9) return copy.compactBillions((value / 1e9).toFixed(1));
+  if (value >= 1e6) return copy.compactMillions((value / 1e6).toFixed(1));
+  if (value >= 1e3) return copy.compactThousands((value / 1e3).toFixed(1));
   return Math.round(value).toLocaleString();
 }
 
-function formatDuration(seconds: number | null, language: Language, accruing: string): string {
+function formatDuration(seconds: number | null, accruing: string, copy: SettingsProfileCopy): string {
   if (seconds === null || !Number.isFinite(seconds) || seconds <= 0) return accruing;
   const hours = Math.floor(seconds / 3600);
   const minutes = Math.floor((seconds % 3600) / 60);
-  if (language === "cn") {
-    if (hours > 0) return `${hours} 小时 ${minutes} 分`;
-    if (minutes > 0) return `${minutes} 分`;
-    return `${Math.round(seconds)} 秒`;
-  }
-  if (hours > 0) return `${hours}h ${minutes}m`;
-  if (minutes > 0) return `${minutes}m`;
-  return `${Math.round(seconds)}s`;
+  if (hours > 0) return copy.durationHoursMinutes(hours, minutes);
+  if (minutes > 0) return copy.durationMinutes(minutes);
+  return copy.durationSeconds(Math.round(seconds));
 }
 
 function avatarInitial(account: NewApiAccount | null): string {
@@ -254,7 +152,7 @@ export default function Profile({
   account: NewApiAccount | null;
   language: Language;
 }) {
-  const copy = PROFILE_COPY[language];
+  const copy = SETTINGS_COPY[language].profile;
   const [stats, setStats] = useState<ProfileStats | null>(() => (isTauri() ? null : PREVIEW_PROFILE_STATS));
   const [mode, setMode] = useState<HeatmapMode>("daily");
 
@@ -301,9 +199,9 @@ export default function Profile({
 
   const tiles = stats
     ? [
-        { label: copy.statCumulative, value: formatTokens(stats.cumulativeTokens, language) },
-        { label: copy.statPeak, value: formatTokens(stats.peakDailyTokens, language) },
-        { label: copy.statLongestTask, value: formatDuration(stats.longestTaskSeconds, language, copy.accruing) },
+        { label: copy.statCumulative, value: formatTokens(stats.cumulativeTokens, language, copy) },
+        { label: copy.statPeak, value: formatTokens(stats.peakDailyTokens, language, copy) },
+        { label: copy.statLongestTask, value: formatDuration(stats.longestTaskSeconds, copy.accruing, copy) },
         { label: copy.statCurrentStreak, value: copy.days(stats.currentStreak) },
         { label: copy.statLongestStreak, value: copy.days(stats.longestStreak) },
       ]
@@ -375,7 +273,7 @@ export default function Profile({
                           key={cell.date}
                           className="sp-profile-heatmap-cell"
                           data-level={cell.level}
-                          title={`${cell.date} · ${formatTokens(cell.tokens, language)} ${copy.tokenUnit}`}
+                          title={`${cell.date} · ${formatTokens(cell.tokens, language, copy)} ${copy.tokenUnit}`}
                         />
                       ))}
                     </div>

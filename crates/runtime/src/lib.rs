@@ -36,7 +36,7 @@ mod session_index;
 pub mod skill_registry;
 mod usage;
 
-pub use atomic_file::write_replace as write_file_atomically;
+pub use atomic_file::{with_path_lock, write_replace as write_file_atomically};
 pub use bash::{
     execute_bash, execute_bash_with_cancel, execute_bash_with_cancel_and_progress,
     resolve_foreground_shell_timeout_ms, BashCommandInput, BashCommandOutput,

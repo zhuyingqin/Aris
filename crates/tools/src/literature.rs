@@ -28,7 +28,7 @@ use serde_json::{json, Value};
 
 use crate::{collapse_whitespace, read_json_file};
 
-const PAPERS_DIR: &str = "papers";
+const PAPERS_DIR: &str = crate::layout::PAPERS_DIR;
 const LIBRARY_FILE: &str = "library.json";
 const HTTP_TIMEOUT: Duration = Duration::from_secs(25);
 const MAX_PDF_BYTES: u64 = 80 * 1024 * 1024;
@@ -870,7 +870,20 @@ fn canonical_record_from_remote(
 // ── Library persistence ─────────────────────────────────────────────────────
 
 pub fn library_path_at(base: &Path) -> PathBuf {
+    crate::layout::papers_dir_at(base).join(LIBRARY_FILE)
+}
+
+fn legacy_library_path_at(base: &Path) -> PathBuf {
     base.join(PAPERS_DIR).join(LIBRARY_FILE)
+}
+
+fn existing_library_path_at(base: &Path) -> PathBuf {
+    let managed = library_path_at(base);
+    if managed.exists() || managed.with_extension("json.bak").exists() {
+        managed
+    } else {
+        legacy_library_path_at(base)
+    }
 }
 
 /// Reports the durable local store without treating `papers/library.json` as
@@ -2131,8 +2144,7 @@ fn zotero_attachment_value(
                 return Some(attachment);
             }
         };
-        let destination = base
-            .join(PAPERS_DIR)
+        let destination = crate::layout::papers_dir_at(base)
             .join("attachments")
             .join(destination_name);
         if let Some(parent) = destination.parent() {
@@ -2694,15 +2706,16 @@ pub fn empty_library() -> Value {
 
 pub fn library_load_at(base: &Path) -> Result<Value, String> {
     let path = library_path_at(base);
+    let existing_path = existing_library_path_at(base);
     let mut store = runtime::open_literature_store_at(base)?;
     let bootstrapped = store.has_legacy_library_bootstrap()?;
     let legacy = if bootstrapped {
         Value::Null
     } else {
-        load_legacy_library_file(&path)?
+        load_legacy_library_file(&existing_path)?
     };
-    if !bootstrapped && path.exists() {
-        store.import_legacy_library(&path)?;
+    if !bootstrapped && existing_path.exists() {
+        store.import_legacy_library(&existing_path)?;
     } else if !bootstrapped {
         // There is no legacy primary file to import. Mark the bridge active
         // before writing the first canonical projection, otherwise a later
@@ -2731,9 +2744,10 @@ pub fn library_save_at(base: &Path, library: &Value) -> Result<(), String> {
         return Err("library must be a JSON object".to_string());
     }
     let path = library_path_at(base);
+    let existing_path = existing_library_path_at(base);
     let mut store = runtime::open_literature_store_at(base)?;
-    if !store.has_legacy_library_bootstrap()? && path.exists() {
-        store.import_legacy_library(&path)?;
+    if !store.has_legacy_library_bootstrap()? && existing_path.exists() {
+        store.import_legacy_library(&existing_path)?;
     }
     store.sync_legacy_library_snapshot(library)?;
     let projection = project_legacy_library(
@@ -4229,7 +4243,7 @@ pub fn download_pdf_at(
     if !url.starts_with("https://") && !url.starts_with("http://") {
         return Err("PDF URL must be http(s)".to_string());
     }
-    let dir = base.join(PAPERS_DIR);
+    let dir = crate::layout::papers_dir_at(base);
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let path = dir.join(&safe_name);
     if path.exists() {
@@ -4270,7 +4284,10 @@ pub fn download_pdf_at(
         ));
     }
 
-    let relative_path = format!("{PAPERS_DIR}/{safe_name}");
+    let relative_path = format!(
+        "{}/{PAPERS_DIR}/{safe_name}",
+        crate::layout::PROJECT_DATA_DIR
+    );
     if let Some(paper_id) = paper_id {
         mark_pdf_downloaded(base, paper_id, &relative_path, bytes.len())?;
     }
@@ -4369,7 +4386,7 @@ pub fn browser_download_pdf_for_paper_at(
     std::fs::create_dir_all(&work_dir).map_err(|error| error.to_string())?;
     let tasks_path = work_dir.join("tasks.json");
     let results_path = work_dir.join("download-results.json");
-    let output_dir = base.join(PAPERS_DIR);
+    let output_dir = crate::layout::papers_dir_at(base);
     std::fs::create_dir_all(&output_dir).map_err(|error| error.to_string())?;
     let tasks = serde_json::to_vec_pretty(&json!([task])).map_err(|error| error.to_string())?;
     std::fs::write(&tasks_path, tasks).map_err(|error| error.to_string())?;

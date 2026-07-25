@@ -9,6 +9,8 @@ import {
   knowledgeUpsert,
   literatureLoad,
 } from "../api/tauri";
+import { useStore } from "../store";
+import { KNOWLEDGE_COPY } from "./i18n";
 import {
   type KnowledgeFragment,
   type KnowledgePoint,
@@ -85,7 +87,7 @@ const toKnowledgeFragments = (paper: LibraryPaperLite): KnowledgeFragment[] => {
       paperId: paper.id,
       paperTitle: title,
       page: typeof item.page === "number" ? item.page : null,
-      title: clean(item.note) || `第 ${item.page ?? "?"} 页证据`,
+      title: clean(item.note) || KNOWLEDGE_COPY[useStore.getState().language].pageEvidenceFallback(item.page ?? "?"),
       text: clean(item.note) || clean(item.quote),
       quote: clean(item.quote) || null,
       source: item.source ?? null,
@@ -107,7 +109,7 @@ const toKnowledgeFragments = (paper: LibraryPaperLite): KnowledgeFragment[] => {
       paperId: paper.id,
       paperTitle: title,
       page: typeof firstSupport?.page === "number" ? firstSupport.page : null,
-      title: question || "证据链结论",
+      title: question || KNOWLEDGE_COPY[useStore.getState().language].answerChainFallbackTitle,
       text: answer || question,
       quote: clean(firstSupport?.quote) || null,
       role: chain.supports?.[0]?.role ?? null,
@@ -159,8 +161,7 @@ const toUpsertInput = (point: KnowledgePoint) => ({
 });
 
 /** Browser-preview fixture (no Tauri backend) so the Duolingo review flow and
- * the confirmed-knowledge list are demoable and visually reviewable. Mirrors
- * the Literature/Studio PREVIEW_* fixtures. */
+ * the confirmed-knowledge list are demoable and visually reviewable. */
 const PREVIEW_POINTS: KnowledgePoint[] = [
   {
     id: "kp-demo-draft-1",
@@ -243,33 +244,36 @@ const PREVIEW_SOURCE_PAPERS: KnowledgeSourcePaper[] = [
   },
 ];
 
-const PREVIEW_FRAGMENTS: KnowledgeFragment[] = [
-  {
-    id: "arxiv:2602.01491:evidence:ev-1",
-    kind: "evidence",
-    paperId: "arxiv:2602.01491",
-    paperTitle: "Agentic Literature Review: Planning and Synthesis",
-    page: 6,
-    title: "结果：审稿时间下降",
-    text: "视觉证据显示，带引用理由的 agent verdict 让 reviewer 每篇论文花费时间减少 61%。",
-    quote:
-      "Reviewers spent 61% less time per paper when the agent supplied a verdict with a cited rationale.",
-    source: "vision",
-    evidenceIds: ["ev-1"],
-  },
-  {
-    id: "arxiv:2602.01491:answer:chain-1",
-    kind: "answer-chain",
-    paperId: "arxiv:2602.01491",
-    paperTitle: "Agentic Literature Review: Planning and Synthesis",
-    page: 3,
-    title: "什么规则保证 agent claim 可信？",
-    text: "每个生成断言都必须能回到原文逐字证据 span，因此无锚点就不应形成 claim。",
-    quote: "We require every generated assertion to resolve to a verbatim span in the source.",
-    status: "accepted",
-    evidenceIds: ["ev-2"],
-  },
-];
+const previewFragments = (): KnowledgeFragment[] => {
+  const copy = KNOWLEDGE_COPY[useStore.getState().language];
+  return [
+    {
+      id: "arxiv:2602.01491:evidence:ev-1",
+      kind: "evidence",
+      paperId: "arxiv:2602.01491",
+      paperTitle: "Agentic Literature Review: Planning and Synthesis",
+      page: 6,
+      title: copy.previewFragmentEvidenceTitle,
+      text: copy.previewFragmentEvidenceText,
+      quote:
+        "Reviewers spent 61% less time per paper when the agent supplied a verdict with a cited rationale.",
+      source: "vision",
+      evidenceIds: ["ev-1"],
+    },
+    {
+      id: "arxiv:2602.01491:answer:chain-1",
+      kind: "answer-chain",
+      paperId: "arxiv:2602.01491",
+      paperTitle: "Agentic Literature Review: Planning and Synthesis",
+      page: 3,
+      title: copy.previewFragmentAnswerTitle,
+      text: copy.previewFragmentAnswerText,
+      quote: "We require every generated assertion to resolve to a verbatim span in the source.",
+      status: "accepted",
+      evidenceIds: ["ev-2"],
+    },
+  ];
+};
 
 interface KnowledgeState {
   points: KnowledgePoint[];
@@ -306,7 +310,7 @@ export const useKnowledgeStore = create<KnowledgeState>((set, get) => ({
     if (!isTauri()) {
       set({
         points: PREVIEW_POINTS,
-        fragments: PREVIEW_FRAGMENTS,
+        fragments: previewFragments(),
         sourcePapers: PREVIEW_SOURCE_PAPERS,
         loaded: true,
         loadedProjectId: projectId,

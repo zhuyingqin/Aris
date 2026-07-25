@@ -41,6 +41,12 @@ import RemoteControlPanel from "./RemoteControlPanel";
 import Profile from "./Profile";
 import Extensions from "../extensions/Extensions";
 import {
+  ADMIN_ACCOUNT_CONTAINS_MARKERS,
+  ADMIN_ACCOUNT_EXACT_MARKERS,
+  SETTINGS_COPY,
+  type SettingsGeneralCopy,
+} from "./i18n";
+import {
   SETTINGS_NAV_GROUPS,
   SETTINGS_NAV_GROUP_LABELS,
   SETTINGS_NAV_LABELS,
@@ -54,11 +60,11 @@ interface PresetOption {
   label: string;
   value: string;
   hint?: string;
+  hintKey?: string;
+  copyKey?: "official" | "managedModelServer";
 }
 
 interface ProviderMeta {
-  label: string;
-  hint: string;
   defaultModel: string;
   defaultBaseUrl?: string;
   models?: PresetOption[];
@@ -71,752 +77,207 @@ type UpdateState = "idle" | "checking" | "available" | "current" | "downloading"
 type SettingsTab = SettingsNavId;
 
 const MANAGED_NEW_API_MODE = true;
-const MANAGED_MODEL_SERVER_LABEL = "通用模型服务器";
 const MANAGED_MODEL_SERVER_BASE_URL = "http://106.53.28.124:18080";
 const ACCOUNT_CACHE_KEY = "somniq-account-v1";
 const LEGACY_ACCOUNT_CACHE_KEY = "aris-account-v1";
 const SETTINGS_TAB_REQUEST_KEY = "somniq-settings-tab-request";
 const SETTINGS_TAB_REQUEST_EVENT = "somniq-settings-tab-request";
 const USAGE_LOG_PAGE_SIZE = 12;
-const PREVIEW_CONFIG_VIEW: ConfigView = {
-  appVersion: "0.4.26",
-  configPath: "browser preview - Tauri config is not loaded",
-  executorProvider: "openai",
-  executorModel: "MiniMax-M3",
-  executorBaseUrl: `${MANAGED_MODEL_SERVER_BASE_URL}/v1`,
-  summarizerProvider: "",
-  summarizerModel: "",
-  retrievalCardModel: "",
-  summarizerBaseUrl: "",
-  hasSummarizerKey: false,
-  hasExecutorKey: true,
-  executorKeyMasked: "sk-...preview",
-  reviewerProvider: "openai",
-  reviewerModel: "MiniMax-M3",
-  reviewerBaseUrl: `${MANAGED_MODEL_SERVER_BASE_URL}/v1`,
-  reviewEnabled: false,
-  hasReviewerKey: true,
-  reviewerKeyMasked: "sk-...preview",
-  hasScopusKey: false,
-  language: "cn",
-  memoryWriteApproval: true,
-  managedModels: ["MiniMax-M3", "MiniMax-M2.7", "gpt-5.5", "GLM-5", "deepseek-v4-pro"],
+interface PreviewSettingsData {
+  configView: ConfigView;
+  account: NewApiAccount;
+  groupOptions: NewApiGroupOption[];
+  usageLogs: NewApiUsageLogPage;
+  systemPrompt: SystemPromptView;
+  userPrompt: UserPromptView;
+}
+
+function buildPreviewSettingsData(language: Language, copy: SettingsGeneralCopy): PreviewSettingsData {
+  const configView: ConfigView = {
+    appVersion: "0.4.26",
+    configPath: copy.previewConfigPath,
+    executorProvider: "openai",
+    executorModel: "MiniMax-M3",
+    executorBaseUrl: `${MANAGED_MODEL_SERVER_BASE_URL}/v1`,
+    summarizerProvider: "",
+    summarizerModel: "",
+    retrievalCardModel: "",
+    summarizerBaseUrl: "",
+    hasSummarizerKey: false,
+    hasExecutorKey: true,
+    executorKeyMasked: "sk-...preview",
+    reviewerProvider: "openai",
+    reviewerModel: "MiniMax-M3",
+    reviewerBaseUrl: `${MANAGED_MODEL_SERVER_BASE_URL}/v1`,
+    reviewEnabled: false,
+    hasReviewerKey: true,
+    reviewerKeyMasked: "sk-...preview",
+    hasScopusKey: false,
+    language,
+    memoryWriteApproval: true,
+    managedModels: ["MiniMax-M3", "MiniMax-M2.7", "gpt-5.5", "GLM-5", "deepseek-v4-pro"],
   // Transports mirror what the gateway actually serves: OpenAI-family
   // reasoning models get `/v1/responses`, everything else chat/completions.
-  verifiedExecutors: [
-    {
-      provider: "openai",
-      model: "MiniMax-M3",
-      baseUrl: `${MANAGED_MODEL_SERVER_BASE_URL}/v1`,
-      transport: "chat_completions",
-    },
-    {
-      provider: "openai",
-      model: "gpt-5.5",
-      baseUrl: `${MANAGED_MODEL_SERVER_BASE_URL}/v1`,
-      transport: "responses",
-    },
-  ],
-};
-const PREVIEW_ACCOUNT: NewApiAccount = {
-  username: "preview-user",
-  displayName: "Preview User",
-  role: 10,
-  isAdmin: true,
-  subscriptionName: "Team Plan",
-  subscriptionDesc: "Browser preview data",
-  subscriptionQuota: 1_850_000,
-  subscriptionUsedQuota: 650_000,
-  group: "default",
-  groupDesc: "Standard group",
-  groupRatio: "1",
-  quota: 1_250_000,
-  usedQuota: 750_000,
-  models: ["MiniMax-M3", "MiniMax-M2.7", "gpt-5.5", "GLM-5", "deepseek-v4-pro"],
-  model: "MiniMax-M3",
-};
-const PREVIEW_GROUP_OPTIONS: NewApiGroupOption[] = [
-  { name: "default", desc: "Standard group", ratio: "1" },
-  { name: "research", desc: "Research routing", ratio: "0.8" },
-  { name: "premium", desc: "Premium routing", ratio: "1.5" },
-];
-const PREVIEW_USAGE_LOGS: NewApiUsageLogPage = {
-  page: 1,
-  pageSize: USAGE_LOG_PAGE_SIZE,
-  total: 3,
-  items: [
-    {
-      id: "preview-1",
-      createdAt: Math.floor(Date.now() / 1000) - 240,
-      model: "MiniMax-M3",
-      tokenName: "somniq-desktop",
-      channel: "MiniMax",
-      requestId: "req_preview_001928374",
-      upstreamRequestId: "",
-      promptTokens: 4180,
-      completionTokens: 920,
-      totalTokens: 5100,
-      quota: 6200,
-      status: "success",
-      typeLabel: "Consume",
-    },
-    {
-      id: "preview-2",
-      createdAt: Math.floor(Date.now() / 1000) - 3600,
-      model: "gpt-5.5",
-      tokenName: "somniq-desktop",
-      channel: "OpenAI-compatible",
-      requestId: "req_preview_001928375",
-      upstreamRequestId: "",
-      promptTokens: 2310,
-      completionTokens: 780,
-      totalTokens: 3090,
-      quota: 4100,
-      status: "success",
-      typeLabel: "Consume",
-    },
-    {
-      id: "preview-3",
-      createdAt: Math.floor(Date.now() / 1000) - 7200,
-      model: "deepseek-v4-pro",
-      tokenName: "somniq-desktop",
-      channel: "DeepSeek",
-      requestId: "req_preview_001928376",
-      upstreamRequestId: "",
-      promptTokens: 1490,
-      completionTokens: 530,
-      totalTokens: 2020,
-      quota: 2400,
-      status: "success",
-      typeLabel: "Consume",
-    },
-  ],
-};
-let usageLogPageCache: Record<number, NewApiUsageLogPage> = {};
-const PREVIEW_SYSTEM_PROMPT: SystemPromptView = {
-  model: PREVIEW_CONFIG_VIEW.executorModel ?? "preview-model",
-  fullToolRegistry: true,
-  sections: 3,
-  characters: 214,
-  prompt:
-    "# System\nPreview mode: Tauri is not connected, so the live system prompt is unavailable.\n\n# Environment context\n - Model: MiniMax-M3\n - Working directory: browser preview\n\n# Desktop Chat\nFull tool registry: enabled.",
-};
-const PREVIEW_USER_PROMPT: UserPromptView = {
-  sessionId: "preview-session",
-  surface: "Chat",
-  capturedAt: Math.floor(Date.now() / 1000),
-  blocks: 1,
-  images: 0,
-  characters: 86,
-  prompt: "Preview mode: this panel shows the most recent user prompt sent from the Chat composer.",
-};
-const ENVIRONMENT_CHECK_PLACEHOLDERS = [
-  { id: "python", label: "Python", category: "运行环境" },
-  { id: "jupyter", label: "Jupyter", category: "Notebook" },
-  { id: "matlab", label: "MATLAB", category: "数值计算" },
-  { id: "latex", label: "LaTeX", category: "论文排版" },
-];
-
-const SETTINGS_COPY: Record<Language, {
-  settingsCategories: string;
-  loading: string;
-  statusModelService: string;
-  statusVersion: string;
-  languageTitle: string;
-  languageSub: string;
-  saveSaving: string;
-  saveSaved: string;
-  savePrefs: string;
-  appearanceTitle: string;
-  appearanceSub: string;
-  themeLabel: string;
-  light: string;
-  dark: string;
-  localBehaviorTitle: string;
-  localBehaviorSub: string;
-  confirmBeforeWrite: string;
-  autoWrite: string;
-  saveBehavior: string;
-  systemPromptTitle: string;
-  systemPromptSub: string;
-  userPromptTitle: string;
-  userPromptSub: string;
-  promptView: string;
-  promptHide: string;
-  promptModel: string;
-  promptUnknown: string;
-  promptSections: (count: number) => string;
-  promptChars: (count: string) => string;
-  promptFullTools: string;
-  promptLimitedTools: string;
-  promptLoading: string;
-  promptRefresh: string;
-  systemPromptLoading: string;
-  userPromptEmpty: string;
-  userPromptSource: string;
-  userPromptNoSource: string;
-  userPromptNotCaptured: string;
-  userPromptBlocks: (count: number) => string;
-  userPromptImages: (count: number) => string;
-  userPromptLoading: string;
-  creditUnit: string;
-  usageTitle: string;
-  usageSub: string;
-  usageRefresh: string;
-  usageRefreshing: string;
-  accountUsedQuota: string;
-  accountBalance: string;
-  accountTotalQuota: string;
-  accountUsageRatio: string;
-  usedQuota: string;
-  remainingQuota: string;
-  subscriptionUsed: string;
-  subscriptionBalance: string;
-  subscriptionUsageRatio: string;
-  callDetails: string;
-  usageRange: (start: number, end: number, total: number) => string;
-  usageNoRecords: string;
-  usageLoading: string;
-  usageHeaders: {
-    time: string;
-    model: string;
-    token: string;
-    tokens: string;
-    quota: string;
-    request: string;
+    verifiedExecutors: [
+      {
+        provider: "openai",
+        model: "MiniMax-M3",
+        baseUrl: `${MANAGED_MODEL_SERVER_BASE_URL}/v1`,
+        transport: "chat_completions",
+      },
+      {
+        provider: "openai",
+        model: "gpt-5.5",
+        baseUrl: `${MANAGED_MODEL_SERVER_BASE_URL}/v1`,
+        transport: "responses",
+      },
+    ],
   };
-  usagePageSummary: (pageSize: number, page: number, pageCount: number) => string;
-  usagePrev: string;
-  usageNext: string;
-  usageEmpty: string;
-  usageRefreshFailed: (error: string) => string;
-  usageNotSignedIn: string;
-  currentModelFallback: string;
-  authAccountTitle: string;
-  authAccountSub: string;
-  authRefresh: string;
-  authRefreshing: string;
-  authLogout: string;
-  authSignedIn: string;
-  authSignedOut: string;
-  authSignedOutSub: string;
-  authBalanceMeta: (quota: string, used: string) => string;
-  authSubscriptionLabel: string;
-  authSubscriptionEmpty: string;
-  authSubscriptionSource: string;
-  authSubscriptionBalance: string;
-  authAccountBalance: string;
-  authAccountBalanceHint: string;
-  authUsedQuota: string;
-  authUsedQuotaMeta: (percent: number, ratio: string) => string;
-  authGroupTag: (group: string) => string;
-  authGroupMeta: (group: string, ratio?: string, desc?: string) => string;
-  authRefreshFailed: (error: string) => string;
-  modelServiceTitle: string;
-  modelServiceSub: string;
-  modelSync: string;
-  modelSyncing: string;
-  executorModel: string;
-  transportResponses: string;
-  transportChat: string;
-  transportHint: string;
-  reviewerModel: string;
-  reviewerModelOff: string;
-  modelSyncAfterLogin: string;
-  currentExecutor: (model: string) => string;
-  currentReviewer: (model: string) => string;
-  reviewerOff: string;
-  modelSyncingStatus: string;
-  modelSynced: (count: number) => string;
-  modelSyncAfterLoginStatus: string;
-  integratedAuthTitle: string;
-  integratedAuthSub: string;
-  mailBack: string;
-  mailTitle: string;
-  aboutUpdateTitle: string;
-  aboutUpdateSub: string;
-  aboutCheck: string;
-  aboutChecking: string;
-  aboutDownloadInstall: string;
-  aboutRestart: string;
-  aboutUpdateAvailable: (version: string) => string;
-  aboutUpdateReady: (version: string) => string;
-  aboutInstalling: string;
-  aboutConnected: string;
-  aboutCurrentVersion: (version: string) => string;
-  aboutRemoteVersion: (version: string) => string;
-  envTitle: string;
-  envDetectingSub: string;
-  envReadySummary: (ready: number, total: number, checkedAt?: string) => string;
-  envSub: string;
-  envRefresh: string;
-  envDetecting: string;
-  envEmpty: string;
-  envStatusReady: string;
-  envStatusWarning: string;
-  envStatusMissing: string;
-  envVersion: string;
-  envPath: string;
-  envUnknownVersion: string;
-  envNotOnPath: string;
-  envInstallInChat: string;
-  advancedExecutor: string;
-  advancedReviewer: string;
-  advancedProviderType: string;
-  advancedSummaryTools: string;
-  advancedSummaryToolsSub: string;
-  advancedCollapse: string;
-  advancedExpand: string;
-  summaryProvider: string;
-  summaryProviderHint: string;
-  summaryFollowExecutor: string;
-  summaryManual: string;
-  summaryProtocol: string;
-  summaryBaseUrl: string;
-  summaryApiKey: string;
-  summaryModel: string;
-  summaryModelHint: string;
-  retrievalCardModel: string;
-  retrievalCardModelHint: string;
-  retrievalCardFollowExecutor: string;
-  testTesting: string;
-  testConnectionConfig: string;
-  saveConnectionConfig: string;
-  saveConnectionSavedInfo: string;
-  fieldModel: string;
-  fieldBaseUrl: string;
-  fieldApiKey: string;
-  fieldConfigFile: string;
-  fieldScopusKey: string;
-  presetCustom: string;
-  keySaved: (masked: string) => string;
-  keyNone: string;
-  keyConfigured: string;
-  keyKeep: string;
-  keyPasteExecutor: string;
-  keyPasteReviewer: string;
-  keyPasteSummary: string;
-  keyPasteScopus: string;
-  shortcutsSub: string;
-  shortcutOpenSettings: string;
-  shortcutSend: string;
-  shortcutNewline: string;
-  shortcutCloseOverlay: string;
-  aboutLinksTitle: string;
-  aboutLinksSub: string;
-  aboutLinkRepo: string;
-  aboutLinkReleases: string;
-  aboutLinkLicense: string;
-}> = {
-  cn: {
-    settingsCategories: "设置分类",
-    loading: "加载中...",
-    statusModelService: "模型服务",
-    statusVersion: "版本",
-    languageTitle: "界面语言",
-    languageSub: "立即切换桌面界面语言；保存后也会作为助手回复偏好。",
-    saveSaving: "保存中...",
-    saveSaved: "已保存",
-    savePrefs: "保存偏好",
-    appearanceTitle: "外观主题",
-    appearanceSub: "选择应用的明暗主题，立即生效。",
-    themeLabel: "主题",
-    light: "浅色",
-    dark: "深色",
-    localBehaviorTitle: "本地行为",
-    localBehaviorSub: "记忆写入策略仅保存在这台设备。",
-    confirmBeforeWrite: "写入前确认",
-    autoWrite: "自动写入",
-    saveBehavior: "保存行为",
-    systemPromptTitle: "系统提示词",
-    systemPromptSub: "普通对话使用的只读提示词预览。",
-    userPromptTitle: "用户提示词",
-    userPromptSub: "最近一次从对话或代理界面实际发送的用户提示词。",
-    promptView: "查看",
-    promptHide: "收起",
-    promptModel: "模型",
-    promptUnknown: "未知",
-    promptSections: (count) => `${count} 个段落`,
-    promptChars: (count) => `${count} 字符`,
-    promptFullTools: "完整工具",
-    promptLimitedTools: "有限工具",
-    promptLoading: "加载中...",
-    promptRefresh: "刷新",
-    systemPromptLoading: "正在加载系统提示词...",
-    userPromptEmpty: "这个应用会话中还没有发送过用户提示词。",
-    userPromptSource: "来源",
-    userPromptNoSource: "无",
-    userPromptNotCaptured: "尚未捕获",
-    userPromptBlocks: (count) => `${count} 个文本块`,
-    userPromptImages: (count) => `${count} 张图片`,
-    userPromptLoading: "正在加载用户提示词...",
-    creditUnit: "额度",
-    usageTitle: "使用统计",
-    usageSub: "显示当前登录账号在服务器侧的额度和使用量，不再读取本地项目 usage log。",
-    usageRefresh: "刷新",
-    usageRefreshing: "刷新中...",
-    accountUsedQuota: "当前账号已用额度",
-    accountBalance: "账户余额",
-    accountTotalQuota: "账户总额度",
-    accountUsageRatio: "账户消耗比例",
-    usedQuota: "已用额度",
-    remainingQuota: "剩余额度",
-    subscriptionUsed: "订阅已用",
-    subscriptionBalance: "订阅余额",
-    subscriptionUsageRatio: "订阅消耗比例",
-    callDetails: "调用明细",
-    usageRange: (start, end, total) => `第 ${start}-${end} 条 / 共 ${total} 条`,
-    usageNoRecords: "暂无记录",
-    usageLoading: "加载中...",
-    usageHeaders: { time: "时间", model: "模型", token: "令牌", tokens: "令牌数", quota: "额度", request: "请求" },
-    usagePageSummary: (pageSize, page, pageCount) => `每页 ${pageSize} 条，当前第 ${page} / ${pageCount} 页`,
-    usagePrev: "上一页",
-    usageNext: "下一页",
-    usageEmpty: "暂无调用记录。",
-    usageRefreshFailed: (error) => `账号额度刷新失败，当前显示上次缓存 · ${error}`,
-    usageNotSignedIn: "未登录或账号信息未加载。登录后点击刷新获取当前用户使用量。",
-    currentModelFallback: "未选择",
-    authAccountTitle: "账号服务",
-    authAccountSub: "账号、订阅、分组与额度由服务器下发，本地只保留最近一次投影。",
-    authRefresh: "刷新",
-    authRefreshing: "刷新中...",
-    authLogout: "退出登录",
-    authSignedIn: "已登录",
-    authSignedOut: "未登录",
-    authSignedOutSub: "登录后显示账号信息",
-    authBalanceMeta: (quota, used) => `余额 ${quota} · 已用 ${used}`,
-    authSubscriptionLabel: "订阅套餐",
-    authSubscriptionEmpty: "无有效订阅",
-    authSubscriptionSource: "来自 /api/subscription/self",
-    authSubscriptionBalance: "订阅余额",
-    authAccountBalance: "账户余额",
-    authAccountBalanceHint: "可继续用于模型调用",
-    authUsedQuota: "已用额度",
-    authUsedQuotaMeta: (percent, ratio) => `${percent}% 已消耗 · 倍率 ${ratio || "-"}`,
-    authGroupTag: (group) => `分组 ${group}`,
-    authGroupMeta: (group, ratio, desc) => `分组 ${group || "-"}${ratio ? ` · 倍率 ${ratio}` : ""}${desc ? ` · ${desc}` : ""}`,
-    authRefreshFailed: (error) => `刷新失败，当前显示上次缓存 · ${error}`,
-    modelServiceTitle: "模型服务",
-    modelServiceSub: "从账号已有模型中分别选择对话执行模型和审核模型；对话中也可以临时切换任意已同步模型。",
-    modelSync: "同步模型",
-    modelSyncing: "同步中...",
-    executorModel: "执行模型",
-    transportResponses: "Responses 接口",
-    transportChat: "Chat 接口",
-    transportHint: "接口能力在“测试连接”时探测；不支持时会在首次请求后自动回退。",
-    reviewerModel: "审核模型",
-    reviewerModelOff: "关闭审核模型",
-    modelSyncAfterLogin: "登录后同步模型",
-    currentExecutor: (model) => `当前执行：${model}`,
-    currentReviewer: (model) => ` · 审核：${model}`,
-    reviewerOff: " · 审核：关闭",
-    modelSyncingStatus: "正在同步模型",
-    modelSynced: (count) => `已同步 ${count} 个模型`,
-    modelSyncAfterLoginStatus: "登录后将自动同步模型",
-    integratedAuthTitle: "集成认证",
-    integratedAuthSub: "邮箱连接，将 SomniQ 接入 Gmail / Outlook / IMAP。",
-    mailBack: "返回",
-    mailTitle: "邮箱",
-    aboutUpdateTitle: "应用更新",
-    aboutUpdateSub: "通过 GitHub Release 检查、下载并安装 SomniQ Studio 更新。",
-    aboutCheck: "检查更新",
-    aboutChecking: "检查中...",
-    aboutDownloadInstall: "下载并安装",
-    aboutRestart: "重启应用",
-    aboutUpdateAvailable: (version) => `可更新到 v${version}`,
-    aboutUpdateReady: (version) => `v${version} 已安装`,
-    aboutInstalling: "正在安装更新",
-    aboutConnected: "SomniQ Studio 已连接更新通道",
-    aboutCurrentVersion: (version) => `当前版本 v${version}`,
-    aboutRemoteVersion: (version) => `远端版本 v${version}`,
-    envTitle: "本地环境检查",
-    envDetectingSub: "正在检测本机运行环境...",
-    envReadySummary: (ready, total, checkedAt) => `${ready}/${total} 项可用${checkedAt ? ` · 上次检测 ${checkedAt}` : ""}`,
-    envSub: "查看 Python、MATLAB、LaTeX 等运行环境。",
-    envRefresh: "刷新",
-    envDetecting: "检测中...",
-    envEmpty: "点击刷新后显示本机可用的科研与排版运行环境。",
-    envStatusReady: "可用",
-    envStatusWarning: "需检查",
-    envStatusMissing: "未检测到",
-    envVersion: "版本",
-    envPath: "路径",
-    envUnknownVersion: "未获取",
-    envNotOnPath: "未加入 PATH",
-    envInstallInChat: "前往对话安装",
-    advancedExecutor: "执行器",
-    advancedReviewer: "审阅",
-    advancedProviderType: "供应商类型",
-    advancedSummaryTools: "摘要与工具",
-    advancedSummaryToolsSub: "摘要模型、检索卡模型、Scopus Key 与配置文件路径",
-    advancedCollapse: "收起",
-    advancedExpand: "展开",
-    summaryProvider: "摘要供应商",
-    summaryProviderHint: "Auto 会使用这里选择的供应商和已保存 key",
-    summaryFollowExecutor: "跟随执行器",
-    summaryManual: "手动配置",
-    summaryProtocol: "摘要协议",
-    summaryBaseUrl: "摘要 Base URL",
-    summaryApiKey: "摘要 API Key",
-    summaryModel: "摘要模型",
-    summaryModelHint: "压缩上下文时生成摘要所用的模型；留空 = 自动",
-    retrievalCardModel: "检索卡生成模型",
-    retrievalCardModelHint: "用于从 PDF 页块提取概念、别名、双语术语和潜在问题；留空则跟随执行模型，仅影响后续生成或重建",
-    retrievalCardFollowExecutor: "跟随执行模型",
-    testTesting: "测试中...",
-    testConnectionConfig: "测试连接配置",
-    saveConnectionConfig: "保存连接配置",
-    saveConnectionSavedInfo: "已保存。下次对话时生效。",
-    fieldModel: "模型",
-    fieldBaseUrl: "接口地址",
-    fieldApiKey: "API 密钥",
-    fieldConfigFile: "配置文件",
-    fieldScopusKey: "Scopus 密钥",
-    presetCustom: "自定义 / 手动",
-    keySaved: (masked) => `已保存：${masked}`,
-    keyNone: "未设置密钥",
-    keyConfigured: "已配置",
-    keyKeep: "留空则保持不变",
-    keyPasteExecutor: "粘贴 API 密钥",
-    keyPasteReviewer: "粘贴审核模型密钥",
-    keyPasteSummary: "粘贴摘要模型密钥",
-    keyPasteScopus: "粘贴 Elsevier 密钥",
-    shortcutsSub: "SomniQ 常用键盘快捷键。",
-    shortcutOpenSettings: "打开设置",
-    shortcutSend: "发送消息",
-    shortcutNewline: "换行",
-    shortcutCloseOverlay: "关闭弹层 / 选择器",
-    aboutLinksTitle: "资源链接",
-    aboutLinksSub: "源码、更新日志与许可协议。",
-    aboutLinkRepo: "GitHub 仓库",
-    aboutLinkReleases: "更新日志",
-    aboutLinkLicense: "许可协议",
-  },
-  en: {
-    settingsCategories: "Settings categories",
-    loading: "Loading...",
-    statusModelService: "Model service",
-    statusVersion: "Version",
-    languageTitle: "Interface Language",
-    languageSub: "Switch the desktop UI immediately; save to also use it as the assistant reply preference.",
-    saveSaving: "Saving...",
-    saveSaved: "Saved",
-    savePrefs: "Save preference",
-    appearanceTitle: "Appearance",
-    appearanceSub: "Choose the light or dark theme. Changes apply immediately.",
-    themeLabel: "Theme",
-    light: "Light",
-    dark: "Dark",
-    localBehaviorTitle: "Local Behavior",
-    localBehaviorSub: "Memory write behavior is stored only on this device.",
-    confirmBeforeWrite: "Confirm before writing",
-    autoWrite: "Write automatically",
-    saveBehavior: "Save behavior",
-    systemPromptTitle: "System Prompt",
-    systemPromptSub: "Read-only preview of the prompt used by normal Chat sessions.",
-    userPromptTitle: "User Prompt",
-    userPromptSub: "Most recent user prompt actually sent from Chat or an agent surface.",
-    promptView: "View",
-    promptHide: "Hide",
-    promptModel: "Model",
-    promptUnknown: "unknown",
-    promptSections: (count) => `${count} sections`,
-    promptChars: (count) => `${count} chars`,
-    promptFullTools: "Full tools",
-    promptLimitedTools: "Limited tools",
-    promptLoading: "Loading...",
-    promptRefresh: "Refresh",
-    systemPromptLoading: "Loading system prompt...",
-    userPromptEmpty: "No user prompt has been sent in this app session yet.",
-    userPromptSource: "Source",
-    userPromptNoSource: "none",
-    userPromptNotCaptured: "Not captured",
-    userPromptBlocks: (count) => `${count} blocks`,
-    userPromptImages: (count) => `${count} images`,
-    userPromptLoading: "Loading user prompt...",
-    creditUnit: "credits",
-    usageTitle: "Usage",
-    usageSub: "Server-side quota and usage for the signed-in account.",
-    usageRefresh: "Refresh",
-    usageRefreshing: "Refreshing...",
-    accountUsedQuota: "Account used",
-    accountBalance: "Balance",
-    accountTotalQuota: "Total quota",
-    accountUsageRatio: "Account usage",
-    usedQuota: "Used quota",
-    remainingQuota: "Remaining quota",
-    subscriptionUsed: "Subscription used",
-    subscriptionBalance: "Subscription balance",
-    subscriptionUsageRatio: "Subscription usage",
-    callDetails: "Call Details",
-    usageRange: (start, end, total) => `${start}-${end} of ${total}`,
-    usageNoRecords: "No records",
-    usageLoading: "Loading...",
-    usageHeaders: { time: "Time", model: "Model", token: "Token", tokens: "Tokens", quota: "Quota", request: "Request" },
-    usagePageSummary: (pageSize, page, pageCount) => `${pageSize} per page, page ${page} of ${pageCount}`,
-    usagePrev: "Previous",
-    usageNext: "Next",
-    usageEmpty: "No usage records yet.",
-    usageRefreshFailed: (error) => `Failed to refresh account quota. Showing cached data. ${error}`,
-    usageNotSignedIn: "Not signed in, or account information is not loaded. Sign in, then refresh usage.",
-    currentModelFallback: "Not selected",
-    authAccountTitle: "Account Service",
-    authAccountSub: "Account, subscription, group, and quota are provided by the server. This device keeps only the latest snapshot.",
-    authRefresh: "Refresh",
-    authRefreshing: "Refreshing...",
-    authLogout: "Sign out",
-    authSignedIn: "Signed in",
-    authSignedOut: "Not signed in",
-    authSignedOutSub: "Sign in to show account information",
-    authBalanceMeta: (quota, used) => `Balance ${quota} · Used ${used}`,
-    authSubscriptionLabel: "Subscription",
-    authSubscriptionEmpty: "No active subscription",
-    authSubscriptionSource: "From /api/subscription/self",
-    authSubscriptionBalance: "Subscription balance",
-    authAccountBalance: "Account balance",
-    authAccountBalanceHint: "Available for model calls",
-    authUsedQuota: "Used quota",
-    authUsedQuotaMeta: (percent, ratio) => `${percent}% used · ratio ${ratio || "-"}`,
-    authGroupTag: (group) => `Group ${group}`,
-    authGroupMeta: (group, ratio, desc) => `Group ${group || "-"}${ratio ? ` · ratio ${ratio}` : ""}${desc ? ` · ${desc}` : ""}`,
-    authRefreshFailed: (error) => `Refresh failed. Showing cached data. ${error}`,
-    modelServiceTitle: "Model Service",
-    modelServiceSub: "Choose the chat execution model and review model from synced account models. Chat can also switch to any synced model temporarily.",
-    modelSync: "Sync models",
-    modelSyncing: "Syncing...",
-    executorModel: "Execution model",
-    transportResponses: "Responses API",
-    transportChat: "Chat API",
-    transportHint: "Endpoint capability is probed by “Test connection”; unsupported endpoints fall back automatically after the first request.",
-    reviewerModel: "Review model",
-    reviewerModelOff: "Disable review model",
-    modelSyncAfterLogin: "Sync models after sign-in",
-    currentExecutor: (model) => `Current executor: ${model}`,
-    currentReviewer: (model) => ` · reviewer: ${model}`,
-    reviewerOff: " · reviewer: off",
-    modelSyncingStatus: "Syncing models",
-    modelSynced: (count) => `${count} models synced`,
-    modelSyncAfterLoginStatus: "Models will sync automatically after sign-in",
-    integratedAuthTitle: "Integrated Auth",
-    integratedAuthSub: "Connect mail accounts and link SomniQ with Gmail, Outlook, or IMAP.",
-    mailBack: "Back",
-    mailTitle: "Mail",
-    aboutUpdateTitle: "App Updates",
-    aboutUpdateSub: "Check, download, and install SomniQ Studio updates from GitHub Releases.",
-    aboutCheck: "Check for updates",
-    aboutChecking: "Checking...",
-    aboutDownloadInstall: "Download and install",
-    aboutRestart: "Restart app",
-    aboutUpdateAvailable: (version) => `Update available: v${version}`,
-    aboutUpdateReady: (version) => `v${version} installed`,
-    aboutInstalling: "Installing update",
-    aboutConnected: "SomniQ Studio is connected to the update channel",
-    aboutCurrentVersion: (version) => `Current version v${version}`,
-    aboutRemoteVersion: (version) => `Remote version v${version}`,
-    envTitle: "Local Environment",
-    envDetectingSub: "Checking local runtime environment...",
-    envReadySummary: (ready, total, checkedAt) => `${ready}/${total} available${checkedAt ? ` · last checked ${checkedAt}` : ""}`,
-    envSub: "Check Python, MATLAB, LaTeX, and other runtime tools.",
-    envRefresh: "Refresh",
-    envDetecting: "Checking...",
-    envEmpty: "Refresh to show available local research and typesetting tools.",
-    envStatusReady: "Available",
-    envStatusWarning: "Check required",
-    envStatusMissing: "Not detected",
-    envVersion: "Version",
-    envPath: "Path",
-    envUnknownVersion: "Unavailable",
-    envNotOnPath: "Not on PATH",
-    envInstallInChat: "Install with Chat",
-    advancedExecutor: "Executor",
-    advancedReviewer: "Reviewer",
-    advancedProviderType: "Provider Type",
-    advancedSummaryTools: "Summary and Tools",
-    advancedSummaryToolsSub: "Summary model, retrieval-card model, Scopus key, and config path",
-    advancedCollapse: "Collapse",
-    advancedExpand: "Expand",
-    summaryProvider: "Summary provider",
-    summaryProviderHint: "Auto uses the provider selected here and the saved key.",
-    summaryFollowExecutor: "Follow executor",
-    summaryManual: "Manual config",
-    summaryProtocol: "Summary protocol",
-    summaryBaseUrl: "Summary Base URL",
-    summaryApiKey: "Summary API Key",
-    summaryModel: "Summary model",
-    summaryModelHint: "Model used to summarize compressed context; leave blank for Auto.",
-    retrievalCardModel: "Retrieval-card model",
-    retrievalCardModelHint: "Extracts concepts, aliases, bilingual terms, and likely questions from PDF chunks; blank follows the executor and changes apply to later generation or rebuilds.",
-    retrievalCardFollowExecutor: "Follow execution model",
-    testTesting: "Testing...",
-    testConnectionConfig: "Test connection config",
-    saveConnectionConfig: "Save connection config",
-    saveConnectionSavedInfo: "Saved. Applies to the next chat.",
-    fieldModel: "Model",
-    fieldBaseUrl: "Base URL",
-    fieldApiKey: "API Key",
-    fieldConfigFile: "Config file",
-    fieldScopusKey: "Scopus Key",
-    presetCustom: "Custom / manual",
-    keySaved: (masked) => `Saved: ${masked}`,
-    keyNone: "No key",
-    keyConfigured: "configured",
-    keyKeep: "leave blank to keep",
-    keyPasteExecutor: "paste API key",
-    keyPasteReviewer: "paste reviewer key",
-    keyPasteSummary: "paste summary key",
-    keyPasteScopus: "paste Elsevier key",
-    shortcutsSub: "Common keyboard shortcuts in SomniQ.",
-    shortcutOpenSettings: "Open settings",
-    shortcutSend: "Send message",
-    shortcutNewline: "New line",
-    shortcutCloseOverlay: "Close overlay / picker",
-    aboutLinksTitle: "Resources",
-    aboutLinksSub: "Source code, changelog, and license.",
-    aboutLinkRepo: "GitHub repository",
-    aboutLinkReleases: "Changelog",
-    aboutLinkLicense: "License",
-  },
+  const account: NewApiAccount = {
+    username: "preview-user",
+    displayName: copy.previewDisplayName,
+    role: 10,
+    isAdmin: true,
+    subscriptionName: copy.previewSubscriptionName,
+    subscriptionDesc: copy.previewSubscriptionDescription,
+    subscriptionQuota: 1_850_000,
+    subscriptionUsedQuota: 650_000,
+    group: "default",
+    groupDesc: copy.previewStandardGroupDescription,
+    groupRatio: "1",
+    quota: 1_250_000,
+    usedQuota: 750_000,
+    models: ["MiniMax-M3", "MiniMax-M2.7", "gpt-5.5", "GLM-5", "deepseek-v4-pro"],
+    model: "MiniMax-M3",
+  };
+  const groupOptions: NewApiGroupOption[] = [
+    { name: "default", desc: copy.previewStandardGroupDescription, ratio: "1" },
+    { name: "research", desc: copy.previewResearchGroupDescription, ratio: "0.8" },
+    { name: "premium", desc: copy.previewPremiumGroupDescription, ratio: "1.5" },
+  ];
+  const usageLogs: NewApiUsageLogPage = {
+    page: 1,
+    pageSize: USAGE_LOG_PAGE_SIZE,
+    total: 3,
+    items: [
+      {
+        id: "preview-1",
+        createdAt: Math.floor(Date.now() / 1000) - 240,
+        model: "MiniMax-M3",
+        tokenName: "somniq-desktop",
+        channel: "MiniMax",
+        requestId: "req_preview_001928374",
+        upstreamRequestId: "",
+        promptTokens: 4180,
+        completionTokens: 920,
+        totalTokens: 5100,
+        quota: 6200,
+        status: "success",
+        typeLabel: copy.previewUsageType,
+      },
+      {
+        id: "preview-2",
+        createdAt: Math.floor(Date.now() / 1000) - 3600,
+        model: "gpt-5.5",
+        tokenName: "somniq-desktop",
+        channel: SETTINGS_COPY[language].providers.protocolOpenAiCompatible,
+        requestId: "req_preview_001928375",
+        upstreamRequestId: "",
+        promptTokens: 2310,
+        completionTokens: 780,
+        totalTokens: 3090,
+        quota: 4100,
+        status: "success",
+        typeLabel: copy.previewUsageType,
+      },
+      {
+        id: "preview-3",
+        createdAt: Math.floor(Date.now() / 1000) - 7200,
+        model: "deepseek-v4-pro",
+        tokenName: "somniq-desktop",
+        channel: "DeepSeek",
+        requestId: "req_preview_001928376",
+        upstreamRequestId: "",
+        promptTokens: 1490,
+        completionTokens: 530,
+        totalTokens: 2020,
+        quota: 2400,
+        status: "success",
+        typeLabel: copy.previewUsageType,
+      },
+    ],
+  };
+  const systemPrompt: SystemPromptView = {
+    model: configView.executorModel ?? "preview-model",
+    fullToolRegistry: true,
+    sections: 3,
+    characters: copy.previewSystemPrompt.length,
+    prompt: copy.previewSystemPrompt,
+  };
+  const userPrompt: UserPromptView = {
+    sessionId: "preview-session",
+    surface: copy.previewUserPromptSurface,
+    capturedAt: Math.floor(Date.now() / 1000),
+    blocks: 1,
+    images: 0,
+    characters: copy.previewUserPrompt.length,
+    prompt: copy.previewUserPrompt,
+  };
+  return { configView, account, groupOptions, usageLogs, systemPrompt, userPrompt };
+}
+
+const PREVIEW_SETTINGS_DATA: Record<Language, PreviewSettingsData> = {
+  cn: buildPreviewSettingsData("cn", SETTINGS_COPY.cn.general),
+  en: buildPreviewSettingsData("en", SETTINGS_COPY.en.general),
 };
+
+let usageLogPageCache: Record<number, NewApiUsageLogPage> = {};
+// Category labels for these ids are resolved via `environmentCategoryLabel`,
+// which already has a localized cn/en map; `label` below is only the
+// language-agnostic fallback if an id isn't found there.
+const ENVIRONMENT_CHECK_PLACEHOLDERS = [
+  { id: "python", label: "Python" },
+  { id: "jupyter", label: "Jupyter" },
+  { id: "matlab", label: "MATLAB" },
+  { id: "latex", label: "LaTeX" },
+];
 
 function normalizeLanguage(value: string | null | undefined): Language {
   return value === "en" ? "en" : "cn";
 }
 
-const SUMMARIZER_MODELS: PresetOption[] = [
-  { label: "Auto", value: "", hint: "自动选择" },
-  { label: "Claude Haiku 4.5", value: "claude-haiku-4-5-20251001", hint: "便宜快速" },
-  { label: "关闭", value: "off", hint: "不用 LLM 摘要" },
-];
-
 const EXECUTOR_MODELS: PresetOption[] = [
-  { label: "Claude Opus 4.7", value: "claude-opus-4-7", hint: "Anthropic" },
-  { label: "Claude Sonnet 4.6", value: "claude-sonnet-4-6", hint: "Anthropic" },
-  { label: "GPT-5.5", value: "gpt-5.5", hint: "OpenAI-compatible" },
-  { label: "Gemini 2.5 Pro", value: "gemini-2.5-pro", hint: "Google OpenAI-compatible" },
-  { label: "GLM-5", value: "GLM-5", hint: "Zhipu" },
-  { label: "MiniMax M3", value: "MiniMax-M3", hint: "MiniMax" },
-  { label: "MiniMax M2.7", value: "MiniMax-M2.7", hint: "MiniMax" },
-  { label: "Kimi K2.5", value: "kimi-k2.5", hint: "Moonshot" },
-  { label: "DeepSeek V4 Pro", value: "deepseek-v4-pro", hint: "DeepSeek" },
-  { label: "Qwen 3.6 Plus", value: "qwen3.6-plus", hint: "DashScope" },
-  { label: "Doubao Pro 4K", value: "doubao-pro-4k", hint: "Ark" },
+  { label: "Claude Opus 4.7", value: "claude-opus-4-7", hintKey: "anthropic" },
+  { label: "Claude Sonnet 4.6", value: "claude-sonnet-4-6", hintKey: "anthropic" },
+  { label: "GPT-5.5", value: "gpt-5.5", hintKey: "openaiCompatible" },
+  { label: "Gemini 2.5 Pro", value: "gemini-2.5-pro", hintKey: "googleOpenAiCompatible" },
+  { label: "GLM-5", value: "GLM-5", hintKey: "zhipu" },
+  { label: "MiniMax M3", value: "MiniMax-M3", hintKey: "minimax" },
+  { label: "MiniMax M2.7", value: "MiniMax-M2.7", hintKey: "minimax" },
+  { label: "Kimi K2.5", value: "kimi-k2.5", hintKey: "moonshot" },
+  { label: "DeepSeek V4 Pro", value: "deepseek-v4-pro", hintKey: "deepseek" },
+  { label: "Qwen 3.6 Plus", value: "qwen3.6-plus", hintKey: "dashscope" },
+  { label: "Doubao Pro 4K", value: "doubao-pro-4k", hintKey: "ark" },
 ];
 
 const REVIEWER_MODELS: PresetOption[] = [
-  { label: "GPT-5.5", value: "gpt-5.5", hint: "OpenAI" },
-  { label: "GPT-5.4", value: "gpt-5.4", hint: "OpenAI" },
-  { label: "GPT-4o", value: "gpt-4o", hint: "OpenAI" },
-  { label: "Gemini 2.5 Pro", value: "gemini-2.5-pro", hint: "Google" },
-  { label: "GLM-5", value: "GLM-5", hint: "Zhipu" },
-  { label: "MiniMax M3", value: "MiniMax-M3", hint: "MiniMax" },
-  { label: "MiniMax M2.7", value: "MiniMax-M2.7", hint: "MiniMax" },
-  { label: "Kimi K2.5", value: "kimi-k2.5", hint: "Moonshot" },
-  { label: "DeepSeek V4 Pro", value: "deepseek-v4-pro", hint: "DeepSeek" },
-  { label: "Claude Sonnet 4.6", value: "claude-sonnet-4-6", hint: "Anthropic-compatible" },
+  { label: "GPT-5.5", value: "gpt-5.5", hintKey: "openai" },
+  { label: "GPT-5.4", value: "gpt-5.4", hintKey: "openai" },
+  { label: "GPT-4o", value: "gpt-4o", hintKey: "openai" },
+  { label: "Gemini 2.5 Pro", value: "gemini-2.5-pro", hintKey: "google" },
+  { label: "GLM-5", value: "GLM-5", hintKey: "zhipu" },
+  { label: "MiniMax M3", value: "MiniMax-M3", hintKey: "minimax" },
+  { label: "MiniMax M2.7", value: "MiniMax-M2.7", hintKey: "minimax" },
+  { label: "Kimi K2.5", value: "kimi-k2.5", hintKey: "moonshot" },
+  { label: "DeepSeek V4 Pro", value: "deepseek-v4-pro", hintKey: "deepseek" },
+  { label: "Claude Sonnet 4.6", value: "claude-sonnet-4-6", hintKey: "anthropicCompatible" },
 ];
 
 const OPENAI_COMPAT_URLS: PresetOption[] = [
-  { label: MANAGED_MODEL_SERVER_LABEL, value: `${MANAGED_MODEL_SERVER_BASE_URL}/v1` },
+  // Label is a language-agnostic fallback; PresetTextInput swaps it for
+  // `copy.managedModelServerLabel` when rendering (this URL always matches
+  // `isManagedModelServerUrl`).
+  { label: "", value: `${MANAGED_MODEL_SERVER_BASE_URL}/v1`, copyKey: "managedModelServer" },
   { label: "OpenAI", value: "https://api.openai.com/v1" },
   { label: "MiniMax", value: "https://api.minimaxi.com/v1" },
   { label: "Gemini", value: "https://generativelanguage.googleapis.com/v1beta/openai" },
@@ -829,14 +290,14 @@ const OPENAI_COMPAT_URLS: PresetOption[] = [
 ];
 
 const ANTHROPIC_URLS: PresetOption[] = [
-  { label: "Official", value: "" },
+  { label: "", value: "", copyKey: "official" },
   { label: "Anthropic API", value: "https://api.anthropic.com" },
   { label: "NewCLI", value: "https://code.newcli.com/claude" },
   { label: "ModelScope", value: "https://api-inference.modelscope.cn" },
 ];
 
 const ANTHROPIC_COMPAT_URLS: PresetOption[] = [
-  { label: "Official", value: "https://api.anthropic.com" },
+  { label: "", value: "https://api.anthropic.com", copyKey: "official" },
   { label: "MiniMax", value: "https://api.minimaxi.com/anthropic" },
   { label: "DeepSeek", value: "https://api.deepseek.com/anthropic" },
   { label: "NewCLI", value: "https://code.newcli.com/claude" },
@@ -845,15 +306,11 @@ const ANTHROPIC_COMPAT_URLS: PresetOption[] = [
 
 const EXECUTOR_PROVIDERS: Record<string, ProviderMeta> = {
   anthropic: {
-    label: "Anthropic",
-    hint: "Claude official API",
     defaultModel: "claude-opus-4-7",
-    models: EXECUTOR_MODELS.filter((model) => model.hint === "Anthropic"),
+    models: EXECUTOR_MODELS.filter((model) => model.hintKey === "anthropic"),
     baseUrls: ANTHROPIC_URLS,
   },
   "anthropic-compat": {
-    label: "Anthropic-compat",
-    hint: "Claude-compatible custom endpoint",
     defaultModel: "claude-sonnet-4-6",
     models: [
       { label: "Claude Sonnet 4.6", value: "claude-sonnet-4-6" },
@@ -863,16 +320,12 @@ const EXECUTOR_PROVIDERS: Record<string, ProviderMeta> = {
     baseUrls: ANTHROPIC_COMPAT_URLS,
   },
   openai: {
-    label: "OpenAI-compatible",
-    hint: "OpenAI, MiniMax, DeepSeek, Kimi...",
     defaultModel: "MiniMax-M2.7",
     defaultBaseUrl: "https://api.minimaxi.com/v1",
-    models: EXECUTOR_MODELS.filter((model) => model.hint !== "Anthropic"),
+    models: EXECUTOR_MODELS.filter((model) => model.hintKey !== "anthropic"),
     baseUrls: OPENAI_COMPAT_URLS,
   },
   custom: {
-    label: "Custom",
-    hint: "Any other provider",
     defaultModel: "",
     models: EXECUTOR_MODELS,
     baseUrls: [...OPENAI_COMPAT_URLS, ...ANTHROPIC_COMPAT_URLS.filter((url) => url.value)],
@@ -880,91 +333,54 @@ const EXECUTOR_PROVIDERS: Record<string, ProviderMeta> = {
 };
 
 const REVIEWER_PROVIDERS: Record<string, ProviderMeta> = {
-  "": { label: "Disabled", hint: "Use no separate review model", defaultModel: "" },
+  "": { defaultModel: "" },
   openai: {
-    label: "OpenAI-compatible",
-    hint: "OpenAI or compatible reviewer API",
     defaultModel: "gpt-5.5",
     defaultBaseUrl: "https://api.openai.com/v1",
-    models: REVIEWER_MODELS.filter((model) => ["OpenAI", "MiniMax", "Moonshot", "DeepSeek"].includes(model.hint ?? "")),
+    models: REVIEWER_MODELS.filter((model) => ["openai", "minimax", "moonshot", "deepseek"].includes(model.hintKey ?? "")),
     baseUrls: OPENAI_COMPAT_URLS,
   },
   gemini: {
-    label: "Gemini",
-    hint: "Google",
     defaultModel: "gemini-2.5-pro",
     defaultBaseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
-    models: REVIEWER_MODELS.filter((model) => model.hint === "Google"),
+    models: REVIEWER_MODELS.filter((model) => model.hintKey === "google"),
     baseUrls: OPENAI_COMPAT_URLS.filter((url) => url.label === "Gemini"),
   },
   glm: {
-    label: "GLM",
-    hint: "Zhipu",
     defaultModel: "GLM-5",
     defaultBaseUrl: "https://open.bigmodel.cn/api/paas/v4",
-    models: REVIEWER_MODELS.filter((model) => model.hint === "Zhipu"),
+    models: REVIEWER_MODELS.filter((model) => model.hintKey === "zhipu"),
     baseUrls: OPENAI_COMPAT_URLS.filter((url) => url.label === "GLM"),
   },
   minimax: {
-    label: "MiniMax",
-    hint: "MiniMax reviewer",
     defaultModel: "MiniMax-M2.7",
     defaultBaseUrl: "https://api.minimaxi.com/v1",
-    models: REVIEWER_MODELS.filter((model) => model.hint === "MiniMax"),
+    models: REVIEWER_MODELS.filter((model) => model.hintKey === "minimax"),
     baseUrls: OPENAI_COMPAT_URLS.filter((url) => url.label === "MiniMax"),
   },
   kimi: {
-    label: "Kimi",
-    hint: "Moonshot reviewer",
     defaultModel: "kimi-k2.5",
     defaultBaseUrl: "https://api.moonshot.cn/v1",
-    models: REVIEWER_MODELS.filter((model) => model.hint === "Moonshot"),
+    models: REVIEWER_MODELS.filter((model) => model.hintKey === "moonshot"),
     baseUrls: OPENAI_COMPAT_URLS.filter((url) => url.label === "Kimi"),
   },
   deepseek: {
-    label: "DeepSeek",
-    hint: "DeepSeek Anthropic-compatible reviewer",
     defaultModel: "deepseek-v4-pro",
     defaultBaseUrl: "https://api.deepseek.com/anthropic",
-    models: REVIEWER_MODELS.filter((model) => model.hint === "DeepSeek"),
+    models: REVIEWER_MODELS.filter((model) => model.hintKey === "deepseek"),
     baseUrls: ANTHROPIC_COMPAT_URLS.filter((url) => url.label === "DeepSeek"),
   },
   "anthropic-compat": {
-    label: "Anthropic-compat",
-    hint: "Claude-compatible reviewer/proxy",
     defaultModel: "claude-sonnet-4-6",
     defaultBaseUrl: "https://api.anthropic.com",
-    models: REVIEWER_MODELS.filter((model) => ["Anthropic-compatible", "MiniMax", "DeepSeek"].includes(model.hint ?? "")),
+    models: REVIEWER_MODELS.filter((model) => ["anthropicCompatible", "minimax", "deepseek"].includes(model.hintKey ?? "")),
     baseUrls: ANTHROPIC_COMPAT_URLS,
   },
   custom: {
-    label: "Custom",
-    hint: "Manual provider and endpoint",
     defaultModel: "",
     models: REVIEWER_MODELS,
     baseUrls: [...OPENAI_COMPAT_URLS, ...ANTHROPIC_COMPAT_URLS.filter((url) => url.value)],
   },
-};
-
-// Chinese descriptions for the admin-only provider cards, keyed by provider id.
-// English falls back to each provider meta's own `hint`.
-const EXECUTOR_PROVIDER_HINT_CN: Record<string, string> = {
-  anthropic: "Claude 官方 API",
-  "anthropic-compat": "Claude 兼容的自定义端点",
-  openai: "OpenAI、MiniMax、DeepSeek、Kimi…",
-  custom: "任意其他供应商",
-};
-
-const REVIEWER_PROVIDER_HINT_CN: Record<string, string> = {
-  "": "不使用独立的审核模型",
-  openai: "OpenAI 或兼容的审核 API",
-  gemini: "Google",
-  glm: "智谱",
-  minimax: "MiniMax 审核",
-  kimi: "Moonshot 审核",
-  deepseek: "DeepSeek Anthropic 兼容审核",
-  "anthropic-compat": "Claude 兼容的审核 / 代理",
-  custom: "手动指定供应商与端点",
 };
 
 function readCachedAccount(): NewApiAccount | null {
@@ -1045,9 +461,8 @@ function isAdminAccount(account: NewApiAccount | null): boolean {
     const text = value?.trim();
     if (!text) return false;
     const lower = text.toLowerCase();
-    return ["admin", "administrator", "root", "superuser", "super-admin", "owner"].includes(lower)
-      || text.includes("管理员")
-      || text.includes("管理員");
+    return ADMIN_ACCOUNT_EXACT_MARKERS.some((marker) => lower === marker)
+      || ADMIN_ACCOUNT_CONTAINS_MARKERS.some((marker) => text.includes(marker));
   });
 }
 
@@ -1088,8 +503,17 @@ function shortUsageId(value: string): string {
   return `${text.slice(0, 8)}...${text.slice(-4)}`;
 }
 
-function usageLogMeta(status: string, typeLabel: string): string {
-  return [typeLabel, status].map((value) => value.trim()).filter(Boolean).join(" · ");
+function usageLogMeta(status: string, typeLabel: string, language: Language): string {
+  const copy = SETTINGS_COPY[language].general;
+  const normalizedStatus = status.trim().toLowerCase();
+  const statusLabel = normalizedStatus === "success"
+    ? copy.usageStatusSuccess
+    : normalizedStatus === "failed" || normalizedStatus === "error"
+      ? copy.usageStatusFailed
+      : status.trim();
+  const normalizedType = typeLabel.trim().toLowerCase();
+  const type = normalizedType === "consume" ? copy.usageTypeConsume : typeLabel.trim();
+  return [type, statusLabel].filter(Boolean).join(" · ");
 }
 
 function environmentMark(id: string): string {
@@ -1101,35 +525,23 @@ function environmentMark(id: string): string {
 }
 
 function environmentStatusLabel(item: LocalEnvironmentCheck, language: Language): string {
-  const copy = SETTINGS_COPY[language];
+  const copy = SETTINGS_COPY[language].general;
   if (item.status === "ready") return copy.envStatusReady;
   if (item.status === "warning") return copy.envStatusWarning;
   return item.available ? copy.envStatusReady : copy.envStatusMissing;
 }
 
 function environmentCategoryLabel(id: string, language: Language, fallback: string): string {
-  const labels: Record<string, Record<Language, string>> = {
-    python: { cn: "运行环境", en: "Runtime" },
-    jupyter: { cn: "Notebook", en: "Notebook" },
-    matlab: { cn: "数值计算", en: "Numerical computing" },
-    latex: { cn: "论文排版", en: "Typesetting" },
-  };
-  return labels[id]?.[language] ?? fallback;
+  const categories = SETTINGS_COPY[language].general.envCategories;
+  return categories[id as keyof typeof categories] ?? fallback;
 }
 
 function environmentMessage(item: LocalEnvironmentCheck, language: Language): string {
-  if (item.available && item.status === "warning") {
-    return language === "cn" ? "已找到可执行文件，但版本检查未完成。" : "The executable was found, but its version check did not complete.";
-  }
-  if (item.available) {
-    return language === "cn" ? "已检测到可用环境。" : "The runtime is available.";
-  }
-  if (isInstallableEnvironment(item.id)) {
-    return language === "cn"
-      ? `未检测到 ${item.label}，可以转到对话完成安装与验证。`
-      : `${item.label} was not detected. Open Chat to install and verify it.`;
-  }
-  return language === "cn" ? `未检测到 ${item.label}。` : `${item.label} was not detected.`;
+  const copy = SETTINGS_COPY[language].general;
+  if (item.available && item.status === "warning") return copy.envExecutableWarning;
+  if (item.available) return copy.envAvailable;
+  if (isInstallableEnvironment(item.id)) return copy.envMissingInstallable(item.label);
+  return copy.envMissing(item.label);
 }
 
 function normalizeExecutorProvider(provider: string | null | undefined, baseUrl: string | null | undefined): string {
@@ -1166,12 +578,12 @@ function isManagedModelServerUrl(value: string | null | undefined): boolean {
     || normalized === "106.53.28.124:18080/v1";
 }
 
-function displayServerValue(value: string): string {
-  return isManagedModelServerUrl(value) ? MANAGED_MODEL_SERVER_LABEL : value;
+function displayServerValue(value: string, language: Language): string {
+  return isManagedModelServerUrl(value) ? SETTINGS_COPY[language].providers.managedModelServerLabel : value;
 }
 
-function hideManagedServerAddress(value: string): string {
-  return value.replace(/(?:https?:\/\/)?106\.53\.28\.124:18080(?:\/v1)?/gi, MANAGED_MODEL_SERVER_LABEL);
+function hideManagedServerAddress(value: string, language: Language): string {
+  return value.replace(/(?:https?:\/\/)?106\.53\.28\.124:18080(?:\/v1)?/gi, SETTINGS_COPY[language].providers.managedModelServerLabel);
 }
 
 function suggestModels(url: string): string[] {
@@ -1189,10 +601,13 @@ function suggestModels(url: string): string[] {
   return [];
 }
 
-function formatServerLabel(server: string, provider?: string): string {
-  const source = server.trim() || provider?.trim() || "unknown";
-  if (isManagedModelServerUrl(source)) return MANAGED_MODEL_SERVER_LABEL;
-  if (source === "OpenAI-compatible" || source === "Anthropic-compatible" || source === "unknown") return source;
+function formatServerLabel(server: string, language: Language, provider?: string): string {
+  const copy = SETTINGS_COPY[language].providers;
+  const source = server.trim() || provider?.trim() || "";
+  if (!source || source === "unknown") return copy.unknownLabel;
+  if (isManagedModelServerUrl(source)) return copy.managedModelServerLabel;
+  if (source === "OpenAI-compatible") return copy.protocolOpenAiCompatible;
+  if (source === "Anthropic-compatible") return copy.protocolAnthropicCompatible;
   try {
     const url = new URL(source);
     return url.host || source;
@@ -1201,10 +616,10 @@ function formatServerLabel(server: string, provider?: string): string {
   }
 }
 
-function configuredServerLabel(config: ConfigView): string {
+function configuredServerLabel(config: ConfigView, language: Language): string {
   const baseUrl = config.executorBaseUrl?.trim();
-  if (baseUrl) return formatServerLabel(baseUrl, config.executorProvider ?? undefined);
-  return config.executorProvider === "anthropic" ? "api.anthropic.com" : (config.executorProvider || "未配置");
+  if (baseUrl) return formatServerLabel(baseUrl, language, config.executorProvider ?? undefined);
+  return config.executorProvider === "anthropic" ? "api.anthropic.com" : (config.executorProvider || SETTINGS_COPY[language].providers.serverNotConfigured);
 }
 
 function providerKey(provider: string | null | undefined, baseUrl: string | null | undefined): string {
@@ -1227,6 +642,7 @@ function PresetTextInput({
   formatValue?: (value: string) => string;
 }) {
   const language = useStore((state) => state.language);
+  const copy = SETTINGS_COPY[language].providers;
   const currentPreset = options.find((option) => option.value === value)?.value ?? "__custom";
   const inputValue = formatValue ? formatValue(value) : value;
   const displayOnlyValue = inputValue !== value;
@@ -1243,12 +659,20 @@ function PresetTextInput({
           onChange(event.target.value);
         }}
       >
-        <option value="__custom">{SETTINGS_COPY[language].presetCustom}</option>
-        {options.map((option) => (
-          <option key={`${option.label}:${option.value || "blank"}`} value={option.value}>
-            {option.label}{option.hint ? ` - ${option.hint}` : ""}
-          </option>
-        ))}
+        <option value="__custom">{copy.presetCustom}</option>
+        {options.map((option) => {
+          const optionLabel = isManagedModelServerUrl(option.value)
+            ? copy.managedModelServerLabel
+            : option.copyKey === "official"
+              ? copy.presetOfficial
+              : option.label;
+          const optionHint = option.hint ?? (option.hintKey ? copy.presetHints[option.hintKey] : "");
+          return (
+            <option key={`${option.label}:${option.value || "blank"}`} value={option.value}>
+              {optionLabel}{optionHint ? ` - ${optionHint}` : ""}
+            </option>
+          );
+        })}
       </select>
       <input
         value={inputValue}
@@ -1279,22 +703,7 @@ function KeyInput({
   language: Language;
   disabled?: boolean;
 }) {
-  const keyCopy = {
-    cn: {
-      noSavedSecret: "没有可显示的已保存密钥",
-      hideSecret: "隐藏密钥",
-      showSecret: "显示密钥",
-      hide: "隐藏",
-      show: "显示",
-    },
-    en: {
-      noSavedSecret: "No saved key to reveal",
-      hideSecret: "Hide key",
-      showSecret: "Show key",
-      hide: "Hide",
-      show: "Show",
-    },
-  }[language];
+  const keyCopy = SETTINGS_COPY[language].providers;
   const [visible, setVisible] = useState(false);
   const [savedSecret, setSavedSecret] = useState("");
   const [loading, setLoading] = useState(false);
@@ -1318,7 +727,7 @@ function KeyInput({
       try {
         const secret = await configSecretGet(secretKind);
         if (secret) setSavedSecret(secret);
-        else setError(keyCopy.noSavedSecret);
+        else setError(keyCopy.keyNoSavedSecret);
       } catch (err) {
         setError(formatUserFacingError(err, language));
       } finally {
@@ -1348,16 +757,16 @@ function KeyInput({
         className="st-key-eye"
         onClick={() => void toggleVisible()}
         disabled={disabled || loading || (!value && !masked)}
-        title={error || (visible ? keyCopy.hideSecret : keyCopy.showSecret)}
+        title={error || (visible ? keyCopy.keyHideSecret : keyCopy.keyShowSecret)}
       >
-        {loading ? "..." : visible ? keyCopy.hide : keyCopy.show}
+        {loading ? "..." : visible ? keyCopy.keyHide : keyCopy.keyShow}
       </button>
       {error && <span className="st-key-error">{error}</span>}
     </div>
   );
 }
 
-function TestDetail({ detail }: { detail: ConfigTestResult["executor"] }) {
+function TestDetail({ detail, language }: { detail: ConfigTestResult["executor"]; language: Language }) {
   return (
     <div className={`st-test-detail${detail.ok ? " ok" : " failed"}`}>
       <div className="st-test-detail-head">
@@ -1365,8 +774,8 @@ function TestDetail({ detail }: { detail: ConfigTestResult["executor"] }) {
         <span className="st-test-label">{detail.label}</span>
         {detail.model && <span className="st-test-meta">{detail.model}</span>}
       </div>
-      <div className="st-test-message">{hideManagedServerAddress(detail.message)}</div>
-      {detail.baseUrl && <div className="st-test-url">{formatServerLabel(detail.baseUrl)}</div>}
+      <div className="st-test-message">{hideManagedServerAddress(detail.message, language)}</div>
+      {detail.baseUrl && <div className="st-test-url">{formatServerLabel(detail.baseUrl, language)}</div>}
     </div>
   );
 }
@@ -1379,6 +788,20 @@ export default function Settings() {
   const setLanguage = useStore((state) => state.setLanguage);
   const logout = useStore((state) => state.logout);
   const setTab = useStore((state) => state.setTab);
+  const localizedCopy = SETTINGS_COPY[language];
+  const copy = { ...localizedCopy.general, ...localizedCopy.providers };
+  const previewData = PREVIEW_SETTINGS_DATA[language];
+  const PREVIEW_CONFIG_VIEW = previewData.configView;
+  const PREVIEW_ACCOUNT = previewData.account;
+  const PREVIEW_GROUP_OPTIONS = previewData.groupOptions;
+  const PREVIEW_USAGE_LOGS = previewData.usageLogs;
+  const PREVIEW_SYSTEM_PROMPT = previewData.systemPrompt;
+  const PREVIEW_USER_PROMPT = previewData.userPrompt;
+  const SUMMARIZER_MODELS: PresetOption[] = [
+    { label: copy.summaryAutoLabel, value: "", hint: copy.summaryAutoHint },
+    { label: "Claude Haiku 4.5", value: "claude-haiku-4-5-20251001", hint: copy.summaryFastHint },
+    { label: copy.summaryOffLabel, value: "off", hint: copy.summaryOffHint },
+  ];
   const [configView, setConfigView] = useState<ConfigView | null>(() => isTauri() ? null : PREVIEW_CONFIG_VIEW);
   const [advForm, setAdvForm] = useState<ConfigPatch>({});
   const [execKey, setExecKey] = useState("");
@@ -1430,7 +853,6 @@ export default function Settings() {
   const savedTimer = useRef<number | null>(null);
   const usageLogPagesRef = useRef(usageLogPages);
   const usageRefreshPendingRef = useRef(false);
-  const copy = SETTINGS_COPY[language];
 
   const loadConfig = (view: ConfigView) => {
     const nextLanguage = normalizeLanguage(view.language);
@@ -1460,6 +882,22 @@ export default function Settings() {
     if (!isTauri()) return;
     configGet().then(loadConfig).catch((error) => setError(String(error)));
   }, [setError]);
+
+  useEffect(() => {
+    if (isTauri()) return;
+    setConfigView(PREVIEW_CONFIG_VIEW);
+    setManagedModels(PREVIEW_CONFIG_VIEW.managedModels ?? []);
+    setAccount(PREVIEW_ACCOUNT);
+    setGroupOptions(PREVIEW_GROUP_OPTIONS);
+    setGroupDraft(PREVIEW_ACCOUNT.group);
+    const previewPages = { [PREVIEW_USAGE_LOGS.page]: PREVIEW_USAGE_LOGS };
+    setUsageLogPages(previewPages);
+    usageLogPagesRef.current = previewPages;
+    usageLogPageCache = previewPages;
+    setUsageLogs(PREVIEW_USAGE_LOGS);
+    setSystemPrompt(PREVIEW_SYSTEM_PROMPT);
+    setUserPrompt(PREVIEW_USER_PROMPT);
+  }, [language]);
 
   useEffect(() => () => {
     if (savedTimer.current !== null) window.clearTimeout(savedTimer.current);
@@ -1803,9 +1241,9 @@ export default function Settings() {
       if (!isTauri()) {
         const result: ConfigTestResult = {
           ok: true,
-          message: "Browser preview: connection test is simulated.",
-          executor: { ok: true, label: "Executor", model: advForm.executorModel, baseUrl: advForm.executorBaseUrl, message: "Preview mode" },
-          reviewer: canConfigureReviewerApi ? { ok: true, label: "Reviewer", model: advForm.reviewerModel, baseUrl: advForm.reviewerBaseUrl, message: "Preview mode" } : null,
+          message: copy.previewConnectionTest,
+          executor: { ok: true, label: copy.previewExecutorLabel, model: advForm.executorModel, baseUrl: advForm.executorBaseUrl, message: copy.previewMode },
+          reviewer: canConfigureReviewerApi ? { ok: true, label: copy.previewReviewerLabel, model: advForm.reviewerModel, baseUrl: advForm.reviewerBaseUrl, message: copy.previewMode } : null,
         };
         setTestResult(result);
         setTestState("passed");
@@ -1817,7 +1255,7 @@ export default function Settings() {
       if (result.ok) notifyChatModelsUpdated();
     } catch (error) {
       const message = formatUserFacingError(error, language);
-      setTestResult({ ok: false, message, executor: { ok: false, label: "Settings", message } });
+      setTestResult({ ok: false, message, executor: { ok: false, label: copy.previewSettingsLabel, message } });
       setTestState("failed");
     }
   };
@@ -1868,10 +1306,10 @@ export default function Settings() {
       setUpdateInfo(result);
       if (result.available) {
         setUpdateState("available");
-        setUpdateMessage(`发现新版本 v${result.version ?? ""}`.trim());
+        setUpdateMessage(copy.updateMsgNewVersion(result.version ?? ""));
       } else {
         setUpdateState("current");
-        setUpdateMessage("当前已是最新版本");
+        setUpdateMessage(copy.updateMsgUpToDate);
       }
     } catch (error) {
       setUpdateState("error");
@@ -1882,11 +1320,11 @@ export default function Settings() {
   const installUpdate = async () => {
     setUpdateState("downloading");
     setUpdateProgress(null);
-    setUpdateMessage("正在下载安装包");
+    setUpdateMessage(copy.updateMsgDownloading);
     try {
       const result = await appUpdateDownloadAndInstall((progress) => {
         setUpdateProgress(progress);
-        if (progress.stage === "finished") setUpdateMessage("更新已安装，重启后生效");
+        if (progress.stage === "finished") setUpdateMessage(copy.updateMsgInstalled);
       });
       if (result.installed) {
         setUpdateState("ready");
@@ -1897,10 +1335,10 @@ export default function Settings() {
           date: current?.date,
           body: current?.body,
         }));
-        setUpdateMessage("更新已安装，重启后生效");
+        setUpdateMessage(copy.updateMsgInstalled);
       } else {
         setUpdateState("current");
-        setUpdateMessage("没有可安装的更新");
+        setUpdateMessage(copy.updateMsgNoUpdateToInstall);
       }
     } catch (error) {
       setUpdateState("error");
@@ -1935,10 +1373,10 @@ export default function Settings() {
       if (!protocol || options.some((item) => item.key === key)) return;
       options.push({ key, label, provider: protocol, baseUrl: url, model: model?.trim() ?? "" });
     };
-    addOption("Executor", configView.executorProvider, configView.executorBaseUrl, configView.executorModel);
-    if (canConfigureReviewerApi) addOption("Reviewer", configView.reviewerProvider, configView.reviewerBaseUrl, configView.reviewerModel);
+    addOption(copy.summaryProviderExecutor, configView.executorProvider, configView.executorBaseUrl, configView.executorModel);
+    if (canConfigureReviewerApi) addOption(copy.summaryProviderReviewer, configView.reviewerProvider, configView.reviewerBaseUrl, configView.reviewerModel);
     for (const item of configView.verifiedExecutors ?? []) {
-      addOption(`${formatServerLabel(item.baseUrl)} · ${item.model}`, item.provider, item.baseUrl, item.model);
+      addOption(`${formatServerLabel(item.baseUrl, language)} · ${item.model}`, item.provider, item.baseUrl, item.model);
     }
     return options;
   })();
@@ -2020,7 +1458,7 @@ export default function Settings() {
   const updateProgressLabel = updateProgress
     ? updateProgress.contentLength
       ? `${formatUpdateBytes(updateProgress.downloadedBytes)} / ${formatUpdateBytes(updateProgress.contentLength)}${updateProgress.percent !== null && updateProgress.percent !== undefined ? ` - ${updateProgress.percent}%` : ""}`
-      : `${formatUpdateBytes(updateProgress.downloadedBytes)} downloaded`
+      : copy.updateDownloaded(formatUpdateBytes(updateProgress.downloadedBytes))
     : "";
   const environmentReadyCount = environmentChecks.filter((item) => item.available).length;
   const accountUsedQuota = account?.usedQuota ?? 0;
@@ -2030,23 +1468,14 @@ export default function Settings() {
   const subscriptionUsedQuota = account?.subscriptionUsedQuota ?? 0;
   const subscriptionRemainingQuota = account?.subscriptionQuota ?? 0;
   const subscriptionUsagePercent = account ? subscriptionQuotaPercent(account) : 0;
-  const groupCopy = language === "cn"
-    ? {
-      label: "后台分组",
-      hint: "切换后会更新 New API 后台里当前账号的分组，并重新同步额度与模型。",
-      save: "保存分组",
-      saving: "保存中...",
-      loading: "正在加载分组...",
-      empty: "暂无可选分组",
-    }
-    : {
-      label: "Backend group",
-      hint: "Saving updates this account's group in New API, then refreshes quota and models.",
-      save: "Save group",
-      saving: "Saving...",
-      loading: "Loading groups...",
-      empty: "No groups available",
-    };
+  const groupCopy = {
+    label: copy.groupLabel,
+    hint: copy.groupHint,
+    save: copy.groupSave,
+    saving: copy.groupSaving,
+    loading: copy.groupLoading,
+    empty: copy.groupEmpty,
+  };
   const groupOptionsWithCurrent = account?.group && !groupOptions.some((option) => option.name === account.group)
     ? [{ name: account.group, desc: account.groupDesc, ratio: account.groupRatio }, ...groupOptions]
     : groupOptions;
@@ -2067,7 +1496,7 @@ export default function Settings() {
   const managedModelPreview = availableManagedModels.slice(0, 12);
   const currentReviewerModel = configView.reviewerModel?.trim() || "";
   const currentConfiguredModel = configView.executorModel?.trim() || copy.currentModelFallback;
-  const currentServerLabel = configuredServerLabel(configView);
+  const currentServerLabel = configuredServerLabel(configView, language);
   // Endpoint actually used for the selected executor model. Prefer the entry
   // probed for this exact model over the live slot, since a model switch
   // carries the per-model verdict. Empty (unprobed) renders no badge rather
@@ -2166,8 +1595,8 @@ export default function Settings() {
               <div className="sp-update-actions">
                 <div className="st-lang-grid sp-inline-lang-grid">
                   {[
-                    { value: "cn", label: "简体中文" },
-                    { value: "en", label: "English" },
+                    { value: "cn", label: copy.languageSimplifiedChinese },
+                    { value: "en", label: copy.languageEnglish },
                   ].map((item) => (
                     <button
                       key={item.value}
@@ -2559,17 +1988,17 @@ export default function Settings() {
                 <div className="sp-field-group">
                   <div className="st-field-label">{copy.advancedProviderType}</div>
                   <div className="st-provider-grid">
-                    {Object.entries(EXECUTOR_PROVIDERS).map(([key, meta]) => (
+                    {Object.keys(EXECUTOR_PROVIDERS).map((key) => (
                       <button key={key} type="button" className={`st-provider-card${advExecProvider === key ? " active" : ""}`} onClick={() => chooseExecProvider(key)}>
-                        <span className="st-provider-label">{meta.label}</span>
-                        <span className="st-provider-hint">{language === "cn" ? (EXECUTOR_PROVIDER_HINT_CN[key] ?? meta.hint) : meta.hint}</span>
+                        <span className="st-provider-label">{copy.executorProviderLabels[key]}</span>
+                        <span className="st-provider-hint">{copy.executorProviderHints[key]}</span>
                       </button>
                     ))}
                   </div>
                 </div>
                 <div className="sp-adv-rows">
-                  <div className="st-row"><div className="st-row-label"><span className="st-label">{copy.fieldModel}</span></div><div className="st-row-control"><PresetTextInput value={advForm.executorModel ?? ""} placeholder={advExecMeta.defaultModel || "e.g. claude-sonnet-4-6"} options={advExecMeta.models ?? EXECUTOR_MODELS} onChange={(value) => { resetOpState(); setAdvForm((current) => ({ ...current, executorModel: value })); }} /></div></div>
-                  <div className="st-row"><div className="st-row-label"><span className="st-label">{copy.fieldBaseUrl}</span></div><div className="st-row-control"><PresetTextInput value={advForm.executorBaseUrl ?? ""} placeholder={advExecMeta.defaultBaseUrl || "(official default)"} options={advExecMeta.baseUrls ?? OPENAI_COMPAT_URLS} formatValue={displayServerValue} onChange={(value) => { resetOpState(); setAdvForm((current) => ({ ...current, executorBaseUrl: value })); }} /></div></div>
+                  <div className="st-row"><div className="st-row-label"><span className="st-label">{copy.fieldModel}</span></div><div className="st-row-control"><PresetTextInput value={advForm.executorModel ?? ""} placeholder={advExecMeta.defaultModel || "claude-sonnet-4-6"} options={advExecMeta.models ?? EXECUTOR_MODELS} onChange={(value) => { resetOpState(); setAdvForm((current) => ({ ...current, executorModel: value })); }} /></div></div>
+                  <div className="st-row"><div className="st-row-label"><span className="st-label">{copy.fieldBaseUrl}</span></div><div className="st-row-control"><PresetTextInput value={advForm.executorBaseUrl ?? ""} placeholder={advExecMeta.defaultBaseUrl || copy.officialDefaultPlaceholder} options={advExecMeta.baseUrls ?? OPENAI_COMPAT_URLS} formatValue={(value) => displayServerValue(value, language)} onChange={(value) => { resetOpState(); setAdvForm((current) => ({ ...current, executorBaseUrl: value })); }} /></div></div>
                   <div className="st-row"><div className="st-row-label"><span className="st-label">{copy.fieldApiKey}</span><span className="st-hint">{configView.hasExecutorKey ? copy.keySaved(configView.executorKeyMasked ?? copy.keyConfigured) : copy.keyNone}</span></div><div className="st-row-control"><KeyInput value={execKey} placeholder={configView.hasExecutorKey ? copy.keyKeep : copy.keyPasteExecutor} masked={configView.executorKeyMasked} secretKind="executorApiKey" language={language} onChange={(value) => { resetOpState(); setExecKey(value); }} /></div></div>
                 </div>
               </div>
@@ -2581,18 +2010,18 @@ export default function Settings() {
                 <div className="sp-field-group">
                   <div className="st-field-label">{copy.advancedProviderType}</div>
                   <div className="st-provider-grid">
-                    {Object.entries(REVIEWER_PROVIDERS).map(([key, meta]) => (
+                    {Object.keys(REVIEWER_PROVIDERS).map((key) => (
                       <button key={key} type="button" className={`st-provider-card${advReviewerProvider === key ? " active" : ""}`} onClick={() => chooseReviewerProvider(key)}>
-                        <span className="st-provider-label">{meta.label}</span>
-                        <span className="st-provider-hint">{language === "cn" ? (REVIEWER_PROVIDER_HINT_CN[key] ?? meta.hint) : meta.hint}</span>
+                        <span className="st-provider-label">{copy.reviewerProviderLabels[key]}</span>
+                        <span className="st-provider-hint">{copy.reviewerProviderHints[key]}</span>
                       </button>
                     ))}
                   </div>
                 </div>
                 {advReviewerProvider !== "" && (
                   <div className="sp-adv-rows">
-                    <div className="st-row"><div className="st-row-label"><span className="st-label">{copy.fieldModel}</span></div><div className="st-row-control"><PresetTextInput value={advForm.reviewerModel ?? ""} placeholder={advReviewerMeta.defaultModel || "e.g. gpt-5.5"} options={advReviewerMeta.models ?? REVIEWER_MODELS} onChange={(value) => { resetOpState(); setAdvForm((current) => ({ ...current, reviewerModel: value })); }} /></div></div>
-                    <div className="st-row"><div className="st-row-label"><span className="st-label">{copy.fieldBaseUrl}</span></div><div className="st-row-control"><PresetTextInput value={advForm.reviewerBaseUrl ?? ""} placeholder={advReviewerMeta.defaultBaseUrl || "(provider default)"} options={advReviewerMeta.baseUrls ?? OPENAI_COMPAT_URLS} formatValue={displayServerValue} onChange={(value) => { resetOpState(); setAdvForm((current) => ({ ...current, reviewerBaseUrl: value })); }} /></div></div>
+                    <div className="st-row"><div className="st-row-label"><span className="st-label">{copy.fieldModel}</span></div><div className="st-row-control"><PresetTextInput value={advForm.reviewerModel ?? ""} placeholder={advReviewerMeta.defaultModel || "gpt-5.5"} options={advReviewerMeta.models ?? REVIEWER_MODELS} onChange={(value) => { resetOpState(); setAdvForm((current) => ({ ...current, reviewerModel: value })); }} /></div></div>
+                    <div className="st-row"><div className="st-row-label"><span className="st-label">{copy.fieldBaseUrl}</span></div><div className="st-row-control"><PresetTextInput value={advForm.reviewerBaseUrl ?? ""} placeholder={advReviewerMeta.defaultBaseUrl || copy.providerDefaultPlaceholder} options={advReviewerMeta.baseUrls ?? OPENAI_COMPAT_URLS} formatValue={(value) => displayServerValue(value, language)} onChange={(value) => { resetOpState(); setAdvForm((current) => ({ ...current, reviewerBaseUrl: value })); }} /></div></div>
                     <div className="st-row"><div className="st-row-label"><span className="st-label">{copy.fieldApiKey}</span><span className="st-hint">{configView.hasReviewerKey ? copy.keySaved(configView.reviewerKeyMasked ?? copy.keyConfigured) : copy.keyNone}</span></div><div className="st-row-control"><KeyInput value={reviewerKey} placeholder={configView.hasReviewerKey ? copy.keyKeep : copy.keyPasteReviewer} masked={configView.reviewerKeyMasked} secretKind="reviewerApiKey" language={language} onChange={(value) => { resetOpState(); setReviewerKey(value); }} /></div></div>
                   </div>
                 )}
@@ -2617,12 +2046,12 @@ export default function Settings() {
                   <div className="st-row"><div className="st-row-label"><span className="st-label">{copy.summaryProvider}</span><span className="st-hint">{copy.summaryProviderHint}</span></div><div className="st-row-control"><select value={summarySelectValue} onChange={(event) => chooseSummaryProvider(event.target.value)}><option value="">{copy.summaryFollowExecutor}</option><option value="__manual">{copy.summaryManual}</option>{summaryProviderOptions.map((item) => <option key={item.key} value={item.key}>{item.label}{item.model ? ` · ${item.model}` : ""}</option>)}</select></div></div>
                   {isManualSummaryProvider && (
                     <>
-                      <div className="st-row"><div className="st-row-label"><span className="st-label">{copy.summaryProtocol}</span></div><div className="st-row-control"><select value={advForm.summarizerProvider ?? "openai"} onChange={(event) => { resetOpState(); setAdvForm((current) => ({ ...current, summarizerProvider: event.target.value })); }}><option value="openai">OpenAI-compatible</option><option value="anthropic">Anthropic</option><option value="anthropic-compat">Anthropic-compatible</option></select></div></div>
-                      <div className="st-row"><div className="st-row-label"><span className="st-label">{copy.summaryBaseUrl}</span></div><div className="st-row-control"><PresetTextInput value={advForm.summarizerBaseUrl ?? ""} placeholder="https://api.openai.com/v1" options={[...OPENAI_COMPAT_URLS, ...ANTHROPIC_COMPAT_URLS]} formatValue={displayServerValue} onChange={(value) => { resetOpState(); setAdvForm((current) => ({ ...current, summarizerBaseUrl: value })); }} /></div></div>
+                      <div className="st-row"><div className="st-row-label"><span className="st-label">{copy.summaryProtocol}</span></div><div className="st-row-control"><select value={advForm.summarizerProvider ?? "openai"} onChange={(event) => { resetOpState(); setAdvForm((current) => ({ ...current, summarizerProvider: event.target.value })); }}><option value="openai">{copy.protocolOpenAiCompatible}</option><option value="anthropic">Anthropic</option><option value="anthropic-compat">{copy.protocolAnthropicCompatible}</option></select></div></div>
+                      <div className="st-row"><div className="st-row-label"><span className="st-label">{copy.summaryBaseUrl}</span></div><div className="st-row-control"><PresetTextInput value={advForm.summarizerBaseUrl ?? ""} placeholder="https://api.openai.com/v1" options={[...OPENAI_COMPAT_URLS, ...ANTHROPIC_COMPAT_URLS]} formatValue={(value) => displayServerValue(value, language)} onChange={(value) => { resetOpState(); setAdvForm((current) => ({ ...current, summarizerBaseUrl: value })); }} /></div></div>
                       <div className="st-row"><div className="st-row-label"><span className="st-label">{copy.summaryApiKey}</span><span className="st-hint">{configView.hasSummarizerKey ? copy.keySaved(configView.summarizerKeyMasked ?? copy.keyConfigured) : copy.keyNone}</span></div><div className="st-row-control"><KeyInput value={summaryKey} placeholder={configView.hasSummarizerKey ? copy.keyKeep : copy.keyPasteSummary} masked={configView.summarizerKeyMasked} secretKind="summarizerApiKey" language={language} onChange={(value) => { resetOpState(); setSummaryKey(value); }} /></div></div>
                     </>
                   )}
-                  <div className="st-row"><div className="st-row-label"><span className="st-label">{copy.summaryModel}</span><span className="st-hint">{copy.summaryModelHint}</span></div><div className="st-row-control"><PresetTextInput value={advForm.summarizerModel ?? ""} placeholder="Auto" options={summaryModelOptions} onChange={(value) => { resetOpState(); setAdvForm((current) => ({ ...current, summarizerModel: value })); }} /></div></div>
+                  <div className="st-row"><div className="st-row-label"><span className="st-label">{copy.summaryModel}</span><span className="st-hint">{copy.summaryModelHint}</span></div><div className="st-row-control"><PresetTextInput value={advForm.summarizerModel ?? ""} placeholder={copy.automaticPlaceholder} options={summaryModelOptions} onChange={(value) => { resetOpState(); setAdvForm((current) => ({ ...current, summarizerModel: value })); }} /></div></div>
                   <div className="st-row"><div className="st-row-label"><span className="st-label">{copy.retrievalCardModel}</span><span className="st-hint">{copy.retrievalCardModelHint}</span></div><div className="st-row-control"><PresetTextInput value={advForm.retrievalCardModel ?? ""} placeholder={copy.retrievalCardFollowExecutor} options={retrievalCardModelOptions} onChange={(value) => { resetOpState(); setAdvForm((current) => ({ ...current, retrievalCardModel: value })); }} /></div></div>
                   <div className="st-row"><div className="st-row-label"><span className="st-label">{copy.fieldScopusKey}</span><span className="st-hint">{configView.hasScopusKey ? copy.keySaved(configView.scopusKeyMasked ?? copy.keyConfigured) : copy.keyNone}</span></div><div className="st-row-control"><KeyInput value={scopusKey} placeholder={configView.hasScopusKey ? copy.keyKeep : copy.keyPasteScopus} masked={configView.scopusKeyMasked} secretKind="scopusApiKey" language={language} onChange={(value) => { resetOpState(); setScopusKey(value); }} /></div></div>
                   <div className="st-row"><div className="st-row-label"><span className="st-label">{copy.fieldConfigFile}</span></div><div className="st-row-control"><input className="st-readonly-input" value={configView.configPath} readOnly /></div></div>
@@ -2634,8 +2063,8 @@ export default function Settings() {
               <div className={`st-test-panel${testResult.ok ? " ok" : " failed"}`}>
                 <div className="st-test-summary">{testResult.message}</div>
                 <div className="st-test-grid">
-                  {canConfigureExecutor && <TestDetail detail={testResult.executor} />}
-                  {canConfigureReviewerApi && testResult.reviewer && <TestDetail detail={testResult.reviewer} />}
+                  {canConfigureExecutor && <TestDetail detail={testResult.executor} language={language} />}
+                  {canConfigureReviewerApi && testResult.reviewer && <TestDetail detail={testResult.reviewer} language={language} />}
                 </div>
               </div>
             )}
@@ -2758,7 +2187,7 @@ export default function Settings() {
                       </div>
                       {usageLogItems.map((entry) => {
                         const requestId = entry.requestId || entry.upstreamRequestId;
-                        const meta = usageLogMeta(entry.status, entry.typeLabel);
+                        const meta = usageLogMeta(entry.status, entry.typeLabel, language);
                         const createdAt = entry.createdAt > 10_000_000_000 ? entry.createdAt : entry.createdAt * 1000;
                         return (
                           <div className="sp-usage-row sp-usage-row-call" key={entry.id}>
@@ -2901,7 +2330,7 @@ export default function Settings() {
                       <span className="sp-env-mark">{environmentMark(item.id)}</span>
                       <div className="sp-env-title-block">
                         <div className="sp-env-title">{item.label}</div>
-                        <div className="sp-env-category">{environmentCategoryLabel(item.id, language, item.category)}</div>
+                        <div className="sp-env-category">{environmentCategoryLabel(item.id, language, item.label)}</div>
                       </div>
                       <span className="sp-env-badge sp-env-badge-loading">
                         <span className="sp-env-spinner" />

@@ -37,7 +37,6 @@ beforeEach(() => {
   });
   useStore.setState({
     tab: "chat",
-    pendingStudioArtifactId: null,
     pendingLabFilePath: null,
     pendingTypesetFilePath: null,
   });
@@ -45,19 +44,7 @@ beforeEach(() => {
 
 afterEach(() => cleanup());
 
-describe("MarkdownContent Studio links", () => {
-  it("switches to Studio and selects the linked artifact", async () => {
-    const user = userEvent.setup();
-    render(
-      <MarkdownContent text="[Open result](studio/artifact/web%3Airl-demo)" />,
-    );
-
-    await user.click(screen.getByRole("link", { name: "Open result" }));
-
-    expect(useStore.getState().tab).toBe("studio");
-    expect(useStore.getState().pendingStudioArtifactId).toBe("web:irl-demo");
-  });
-
+describe("MarkdownContent", () => {
   it("uses a lightweight preview for very large Markdown messages", () => {
     render(<MarkdownContent text={"x".repeat(90_000)} />);
 

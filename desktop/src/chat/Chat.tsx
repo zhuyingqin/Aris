@@ -29,16 +29,6 @@ import { useIndependentReview } from "./useIndependentReview";
 const INDEPENDENT_REVIEW_TAB_ID = "independent-review";
 const CHAT_UI_EARLIER_TURN_BATCH_SIZE = 12;
 
-// Pure helpers live in `chatRunHelpers`; re-exported here for existing tests
-// that import them from `./Chat`.
-export {
-  completedAssistantBlocks,
-  contextForRetry,
-  continueStoppedPrompt,
-  needsBackendContextReset,
-  visibleTurnError,
-} from "./chatRunHelpers";
-
 const CHAT_STARTERS: Record<Language, ChatStarter[]> = {
   cn: [
     {
@@ -287,6 +277,7 @@ export default function Chat() {
       description: "SomniQ keeps reasoning, searching, analyzing, and generating in the background—turning questions into progress.",
     };
   const [loadingOmittedTurns, setLoadingOmittedTurns] = useState<Set<string>>(() => new Set());
+  const loadingOmittedTurnKeysRef = useRef<Set<string>>(new Set());
   const [loadingEarlierSessions, setLoadingEarlierSessions] = useState<Set<string>>(() => new Set());
   const loadingEarlierSessionsRef = useRef<Set<string>>(new Set());
 
@@ -433,6 +424,8 @@ export default function Chat() {
     const session = currentSessionRef.current;
     if (!session || !isTauri()) return;
     const key = `${session.id}:${turnIndex}`;
+    if (loadingOmittedTurnKeysRef.current.has(key)) return;
+    loadingOmittedTurnKeysRef.current.add(key);
     setLoadingOmittedTurns((current) => {
       if (current.has(key)) return current;
       const next = new Set(current);
@@ -445,6 +438,7 @@ export default function Chat() {
     } catch (error) {
       setError(`Failed to load saved turn: ${String(error)}`);
     } finally {
+      loadingOmittedTurnKeysRef.current.delete(key);
       setLoadingOmittedTurns((current) => {
         const next = new Set(current);
         next.delete(key);
@@ -461,15 +455,16 @@ export default function Chat() {
     const session = currentSessionRef.current;
     if (!session || !isTauri() || loadingEarlierSessionsRef.current.has(session.id)) return;
     const total = session.turnCount ?? session.turns.length;
-    const missingBefore = Math.max(0, total - session.turns.length);
-    if (!session.turnsPartial || missingBefore === 0) return;
-    const startIndex = Math.max(0, missingBefore - CHAT_UI_EARLIER_TURN_BATCH_SIZE);
+    const loadedTurnStartIndex = session.loadedTurnStartIndex
+      ?? Math.max(0, total - session.turns.length);
+    if (!session.turnsPartial || loadedTurnStartIndex === 0) return;
+    const startIndex = Math.max(0, loadedTurnStartIndex - CHAT_UI_EARLIER_TURN_BATCH_SIZE);
     loadingEarlierSessionsRef.current.add(session.id);
     setLoadingEarlierSessions((current) => new Set(current).add(session.id));
     try {
       const rawTurns = await Promise.all(
         Array.from(
-          { length: missingBefore - startIndex },
+          { length: loadedTurnStartIndex - startIndex },
           (_, offset) => chatUiTurnLoad<Partial<ChatTurn> & Record<string, unknown>>(
             session.id,
             startIndex + offset,
@@ -716,12 +711,11 @@ export default function Chat() {
           isOmittedTurnLoading={isOmittedTurnLoading}
           hasEarlierTurns={Boolean(
             currentSession?.turnsPartial
-            && (currentSession.turnCount ?? turns.length) > turns.length
+            && (currentSession.loadedTurnStartIndex
+              ?? Math.max(0, (currentSession.turnCount ?? turns.length) - turns.length)) > 0
           )}
           loadingEarlierTurns={loadingEarlierSessions.has(currentId)}
-          onLoadEarlierTurns={() => void loadEarlierTurns()}
-          loadEarlierLabel={language === "cn" ? "加载更早消息" : "Load earlier messages"}
-          loadingEarlierLabel={language === "cn" ? "正在加载更早消息…" : "Loading earlier messages…"}
+          onLoadEarlierTurns={loadEarlierTurns}
           onPermissionRespond={run.respondPermission}
           onQuestionRespond={run.respondQuestion}
           onOpenIndependentReview={openIndependentReview}
