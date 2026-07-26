@@ -42,8 +42,6 @@ export function SharedEditor({ className, ...options }: SharedEditorProps) {
             view: update.view,
             state: update.state,
             docChanged: update.docChanged,
-            selectionChanged: !update.startState.selection.eq(update.state.selection),
-            transactions: update.transactions,
           });
         }),
       ],

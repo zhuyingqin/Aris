@@ -126,13 +126,3 @@ pub async fn get_or_probe_one(id: &str) -> Result<LocalEnvironmentCheck, String>
         .find(|check| check.id == id)
         .ok_or_else(|| format!("unknown environment runtime: {id}"))
 }
-
-/// Invalidate the in-memory session cache so the next call will re-validate
-/// against the disk cache.
-pub fn invalidate_session_cache() {
-    if let Some(mutex) = SESSION_CACHE.get() {
-        if let Ok(mut guard) = mutex.lock() {
-            *guard = None;
-        }
-    }
-}

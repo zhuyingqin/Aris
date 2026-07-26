@@ -397,7 +397,7 @@ SomniQ Studio 采用「一个内核、多个外壳」的本地优先架构：所
 | `crates/api/` | Anthropic HTTP/SSE 客户端与 OAuth |
 | `crates/executor/` | Provider 流式执行层 —— Anthropic 与 OpenAI 兼容请求 / 流解析，归一化为 runtime 事件（Executor 与 Reviewer 双模型都走这里）|
 | `crates/chat/` | 共享 chat 装配层 —— 从 config 解析 provider，构造 executor、工具表、权限策略与系统提示词 |
-| `crates/tools/` | 内核工具注册表（约 50 个）—— 文件 / shell、Web、文献检索（Scopus / OpenAlex / arXiv）、文献库 / 知识库、Notebook 执行、LaTeX 编译、agent / 团队 / 工作流协调 |
+| `crates/tools/` | 内核工具注册表（约 50 个）—— 文件 / shell、Web、文献检索（Scopus / OpenAlex / arXiv）、文献库 / 知识库、Notebook 执行、LaTeX 编译、agent 子代理生成 |
 | `crates/commands/` | 斜杠命令定义与解析 |
 | `crates/notebook/` | Jupyter 内核客户端（ZMQ + nbformat）—— Lab 的执行底座 |
 | `crates/remote-protocol/` | 手机远程控制的端到端加密协议原语（X25519 / Ed25519 / ChaCha20-Poly1305）|

@@ -90,8 +90,6 @@ export default function CodeEditor({
         },
         dblclick: (event, view) => {
           const pos = view.posAtCoords({ x: event.clientX, y: event.clientY });
-          // eslint-disable-next-line no-console -- temporary forward-search diagnostic, see conversation
-          console.debug("[typeset] Code dblclick", { clientX: event.clientX, clientY: event.clientY, pos, hasCallback: Boolean(onDoubleClickPosRef.current) });
           if (pos == null) return false;
           const line = view.state.doc.lineAt(pos);
           onDoubleClickPosRef.current?.(line.number, pos - line.from + 1);

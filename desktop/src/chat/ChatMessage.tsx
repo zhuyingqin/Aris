@@ -1,6 +1,6 @@
 import { Fragment, memo, useMemo, useState, type ReactNode } from "react";
 import type { ChatBlock, ChatTurn } from "../types";
-import { chatChangeRevert, fileOpen } from "../api/tauri";
+import { chatChangeRevert } from "../api/tauri";
 import { SvgIcon } from "../SvgIcon";
 import ChatImagePreview, { isDirectImageSource, isPreviewableImagePath } from "./ChatImagePreview";
 import MarkdownContent, { ThinkBlock } from "./MarkdownContent";
@@ -8,7 +8,8 @@ import IndependentReviewBadge from "./IndependentReviewBadge";
 import { CHAT_COPY } from "./i18n";
 import { isFileChangeTool, parseToolBlockJson, parseToolBlockObject, textFromTurn } from "./model";
 import { useStore } from "../store";
-import { workspaceFileOpenTarget } from "../lab/labEditorCore";
+import { useOpenChatFile } from "./openChatFile";
+import { displayLocalFilePath } from "./localFileLinks";
 
 const MAX_TOOL_IMAGE_PREVIEWS = 6;
 const MAX_TOOL_IMAGE_SCAN_CHARS = 8_000;
@@ -420,9 +421,7 @@ function ToolCall({ block }: { block: Extract<ChatBlock, { kind: "tool" }> }) {
   const [open, setOpen] = useState(false);
   const change = useMemo(() => diffFromTool(block), [block]);
   const imagePaths = useMemo(() => imagePathsFromTool(block, change), [block, change]);
-  const setTab = useStore((state) => state.setTab);
-  const setPendingLabFilePath = useStore((state) => state.setPendingLabFilePath);
-  const setPendingTypesetFilePath = useStore((state) => state.setPendingTypesetFilePath);
+  const openChatFile = useOpenChatFile();
   const running = block.output === undefined;
   const status = running ? "Running" : block.isError ? "Failed" : change ? "Modified file" : "Succeeded";
   const className = running ? "tool-running" : block.isError ? "tool-error" : change ? "tool-change" : "tool-done";
@@ -450,24 +449,13 @@ function ToolCall({ block }: { block: Extract<ChatBlock, { kind: "tool" }> }) {
           <button
             type="button"
             className="tool-name tool-file-link"
-            title="Open generated file"
+            title={displayLocalFilePath(change.path)}
             onClick={(event) => {
               event.stopPropagation();
-              const target = workspaceFileOpenTarget(change.path);
-              if (target === "code") {
-                setPendingLabFilePath(change.path);
-                setTab("lab");
-                return;
-              }
-              if (target === "latex" || target === "pdf") {
-                setPendingTypesetFilePath(change.path);
-                setTab("typeset");
-                return;
-              }
-              void fileOpen(change.path).catch((error) => console.error("Unable to open file", error));
+              openChatFile(change.path);
             }}
           >
-            {change.path}
+            {displayLocalFilePath(change.path)}
           </button>
         ) : (
           <span className="tool-name">{block.name}</span>
@@ -492,7 +480,7 @@ function ToolCall({ block }: { block: Extract<ChatBlock, { kind: "tool" }> }) {
       {open && (
         <div className="chat-tool-body">
           {change ? (
-            <pre className="tool-diff">{change.diff}</pre>
+            <pre className="tool-diff">{displayDiffPaths(change.diff)}</pre>
           ) : (
             <>
               {block.input && block.input !== "{}" && <pre className="md-view tool-detail">{block.input}</pre>}
@@ -513,20 +501,24 @@ interface ChangeRevertState {
 }
 
 function reviewDiffForFile(file: TurnFileSummary): string {
-  if (file.changes.length === 1) return file.changes[0].diff;
+  if (file.changes.length === 1) return displayDiffPaths(file.changes[0].diff);
   return file.changes
     .map((change, index) => {
       const toolId = change.toolUseId ? ` ${change.toolUseId}` : "";
-      return [`# ${index + 1}. ${change.sourceTool}${toolId}`, change.diff].join("\n");
+      return [`# ${index + 1}. ${change.sourceTool}${toolId}`, displayDiffPaths(change.diff)].join("\n");
     })
     .join("\n\n");
 }
 
+function displayDiffPaths(diff: string): string {
+  return diff.replace(/^(---|\+\+\+) ([^\r\n]+)$/gm, (_line, marker: string, path: string) => (
+    `${marker} ${displayLocalFilePath(path)}`
+  ));
+}
+
 export function EditedFilesSummary({ summary }: { summary: TurnFileChangeSummary }) {
   const language = useStore((state) => state.language);
-  const setTab = useStore((state) => state.setTab);
-  const setPendingLabFilePath = useStore((state) => state.setPendingLabFilePath);
-  const setPendingTypesetFilePath = useStore((state) => state.setPendingTypesetFilePath);
+  const openChatFile = useOpenChatFile();
   const [reviewOpen, setReviewOpen] = useState(false);
   const [showAll, setShowAll] = useState(false);
   const [selectedPath, setSelectedPath] = useState(summary.files[0]?.path ?? "");
@@ -604,23 +596,10 @@ export function EditedFilesSummary({ summary }: { summary: TurnFileChangeSummary
             <button
               type="button"
               className="chat-change-file-path"
-              title={file.path}
-              onClick={() => {
-                const target = workspaceFileOpenTarget(file.path);
-                if (target === "code") {
-                  setPendingLabFilePath(file.path);
-                  setTab("lab");
-                  return;
-                }
-                if (target === "latex" || target === "pdf") {
-                  setPendingTypesetFilePath(file.path);
-                  setTab("typeset");
-                  return;
-                }
-                void fileOpen(file.path).catch((error) => console.error("Unable to open file", error));
-              }}
+              title={displayLocalFilePath(file.path)}
+              onClick={() => openChatFile(file.path)}
             >
-              {file.path}
+              {displayLocalFilePath(file.path)}
             </button>
             <span className="chat-change-file-stats">
               <span className="chat-change-added">{formatCount(file.addedLines, "+")}</span>
@@ -651,10 +630,10 @@ export function EditedFilesSummary({ summary }: { summary: TurnFileChangeSummary
                   type="button"
                   role="tab"
                   aria-selected={file.path === selectedFile.path}
-                  title={file.path}
+                  title={displayLocalFilePath(file.path)}
                   onClick={() => setSelectedPath(file.path)}
                 >
-                  {file.path}
+                  {displayLocalFilePath(file.path)}
                 </button>
               ))}
             </div>

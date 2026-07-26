@@ -18,14 +18,6 @@ fn exposes_mvp_tools() {
     assert!(names.contains(&"session_search"));
     assert!(names.contains(&"Skill"));
     assert!(names.contains(&"Agent"));
-    assert!(names.contains(&"SpawnTeammate"));
-    assert!(names.contains(&"SendMessage"));
-    assert!(names.contains(&"ClaimTask"));
-    assert!(names.contains(&"CompleteTask"));
-    assert!(names.contains(&"ListTeam"));
-    assert!(names.contains(&"AgentSupervisor"));
-    assert!(names.contains(&"Workflow"));
-    assert!(names.contains(&"EnterWorktree"));
     assert!(names.contains(&"ToolSearch"));
     assert!(names.contains(&"NotebookEdit"));
     assert!(names.contains(&"Sleep"));

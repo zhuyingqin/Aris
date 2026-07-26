@@ -681,6 +681,7 @@ fn normalize_gateway_url(value: &str) -> Result<String, String> {
 /// STUN/STUNS URLs; TURN credentials must not be copied into a desktop setting
 /// or bundled mobile PWA, and P2's defined non-direct fallback is the existing
 /// end-to-end encrypted WSS/TCP relay.
+#[allow(dead_code)]
 fn normalize_ice_servers(values: Vec<String>) -> Result<Vec<String>, String> {
     if values.len() > 8 {
         return Err("configure at most eight STUN servers".to_string());
@@ -3206,6 +3207,7 @@ pub fn remote_control_p2p_closed(
     Ok(())
 }
 
+#[allow(dead_code)]
 fn read_audit(path: &Path, limit: usize) -> Result<Vec<RemoteAuditEntry>, String> {
     let raw = match fs::read_to_string(path) {
         Ok(raw) => raw,
@@ -4668,6 +4670,7 @@ pub(crate) async fn execute_control_request(
                         match crate::projects::switch_registered_project(
                             projects.inner(),
                             &requested,
+                            chat_state.inner(),
                         ) {
                             Err(error) if error == "project not found" => {
                                 Err(ControlError::NotFound)

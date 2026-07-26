@@ -163,6 +163,11 @@ export function migrateSession(raw: Partial<ChatSession>, fallbackProjectId = "d
   const partialBaseTurnIds = Array.isArray(raw.partialBaseTurnIds)
     ? raw.partialBaseTurnIds.filter((id): id is string => typeof id === "string")
     : undefined;
+  const contextTokens = typeof raw.contextTokens === "number"
+    && Number.isFinite(raw.contextTokens)
+    && raw.contextTokens >= 0
+    ? Math.floor(raw.contextTokens)
+    : undefined;
   return {
     id: raw.id || makeId("chat"),
     projectId: raw.projectId || fallbackProjectId,
@@ -175,6 +180,7 @@ export function migrateSession(raw: Partial<ChatSession>, fallbackProjectId = "d
     loadedTurnStartIndex,
     questionCountBeforeLoadedTurns,
     partialBaseTurnIds,
+    contextTokens,
     draft: raw.draft || "",
     draftAttachments: Array.isArray(raw.draftAttachments) ? raw.draftAttachments : [],
     pinned: Boolean(raw.pinned),
@@ -694,7 +700,7 @@ export function fuzzyMatch(query: string, value: string): boolean {
   return fuzzyScore(query, value) !== null;
 }
 
-export type SessionGroup = { id: string; label: string; sessions: ChatSession[] };
+type SessionGroup = { id: string; label: string; sessions: ChatSession[] };
 
 export function groupSessionsByProject(
   sessions: ChatSession[],

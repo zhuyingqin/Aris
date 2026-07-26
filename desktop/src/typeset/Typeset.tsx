@@ -7395,7 +7395,6 @@ export default function Typeset() {
                         pdfCursor={visualPdfCursor}
                         onChange={changeDraft}
                         onVisibleLineChange={setCurrentSourceLine}
-                        onOpenCodeAtLine={openCodeAtLine}
                         onOpenCodeRange={openCodeRange}
                         onForwardSearch={jumpToPdfForLine}
                         onViewReady={onVisualViewReady}

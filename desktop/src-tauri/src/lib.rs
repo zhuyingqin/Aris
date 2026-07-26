@@ -532,6 +532,7 @@ pub fn run() {
             engine::project_brief_get,
             engine::project_intent_observe,
             engine::chat_rewind_to_user_message,
+            engine::chat_context_tokens,
             engine::chat_set_context,
             engine::chat_delete,
             engine::chat_cancel,

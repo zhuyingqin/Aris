@@ -22,7 +22,7 @@ import { appendTextDelta, appendThinkingDelta } from "./model";
 import { isExpectedStopError } from "./chatRunHelpers";
 import { formatUserFacingError, type ErrorMessageLanguage } from "../errorMessage";
 
-export const MAX_RUNNING_CHAT_SESSIONS = 5;
+const MAX_RUNNING_CHAT_SESSIONS = 5;
 
 interface RevisionStreamBuffer {
   attempt: number;

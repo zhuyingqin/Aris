@@ -20,12 +20,9 @@ import type { ChatSession } from "./types";
 import { notifyProjectBriefUpdated } from "./ProjectBriefCard";
 import {
   assistantTextTurn,
-  DISABLED_DESKTOP_COMMANDS,
   FALLBACK_SLASH_COMMANDS,
   outgoingMessage,
   userTurn,
-  visibleDesktopCommands,
-  type ContextOverride,
   type PendingCommandSelection,
 } from "./chatRunHelpers";
 
@@ -61,7 +58,7 @@ interface UseChatCommandsArgs {
   focusComposer: () => void;
   beginRun: BeginRun;
   refreshStatus: (model?: string | null) => void;
-  setContextOverrides: React.Dispatch<React.SetStateAction<Map<string, ContextOverride>>>;
+  applyContextTokens: (sessionId: string, tokens: number) => void;
 }
 
 export function useChatCommands({
@@ -76,7 +73,7 @@ export function useChatCommands({
   focusComposer,
   beginRun,
   refreshStatus,
-  setContextOverrides,
+  applyContextTokens,
 }: UseChatCommandsArgs) {
   const language = useStore((state) => state.language);
   const copy = CHAT_COPY[language];
@@ -98,7 +95,7 @@ export function useChatCommands({
   useEffect(() => {
     if (!isTauri()) return;
     chatCommandSpecs()
-      .then((commands) => setDesktopCommands(visibleDesktopCommands(commands)))
+      .then(setDesktopCommands)
       .catch(() => setDesktopCommands(FALLBACK_SLASH_COMMANDS));
     skillsList().then(setSkills).catch(() => undefined);
   }, [currentId, currentProject?.id]);
@@ -111,16 +108,6 @@ export function useChatCommands({
     const trimmed = text.trim();
     if (!trimmed.startsWith("/")) return false;
     const commandName = trimmed.slice(1).split(/\s+/)[0]?.toLowerCase() ?? "";
-    if (DISABLED_DESKTOP_COMMANDS.has(commandName)) {
-      patchTurns(session.id, (turns) => [
-        ...turns,
-        userTurn(text, []),
-        assistantTextTurn(copy.disabledCommand),
-      ]);
-      updateSession(session.id, (item) => ({ ...item, draft: "", draftAttachments: [] }));
-      setEditingTurnId(null);
-      return true;
-    }
     const isKnownSkill = skills.some((skill) => skill.name.toLowerCase() === commandName);
     if (attached.length > 0 && !isKnownSkill) return false;
 
@@ -168,11 +155,7 @@ export function useChatCommands({
         assistantTextTurn(result.message ?? ""),
       ]);
       if (result.contextTokens != null) {
-        // Anchor past the two turns just appended (command echo + report) so
-        // the ring reads the real compacted size now and grows with later turns.
-        const anchor = (result.replaceTurns ? 0 : session.turns.length) + 2;
-        const tokens = result.contextTokens;
-        setContextOverrides((prev) => new Map(prev).set(session.id, { tokens, anchor }));
+        applyContextTokens(session.id, result.contextTokens);
       }
       updateSession(session.id, (item) => ({ ...item, draft: "", draftAttachments: [] }));
       setEditingTurnId(null);
@@ -189,7 +172,7 @@ export function useChatCommands({
       setEditingTurnId(null);
       return true;
     }
-  }, [beginRun, copy.disabledCommand, copy.previewCommandReply, patchTurns, refreshStatus, setContextOverrides, setError, setTab, setEditingTurnId, skills, updateSession]);
+  }, [applyContextTokens, beginRun, copy.previewCommandReply, patchTurns, refreshStatus, setError, setTab, setEditingTurnId, skills, updateSession]);
 
   const selectCommandOption = useCallback(async (value: string) => {
     const pending = pendingCommandSelection;

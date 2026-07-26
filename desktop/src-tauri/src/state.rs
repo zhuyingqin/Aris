@@ -112,8 +112,6 @@ pub fn apply_project_environment(workspace: &PathBuf, project_id: &str) -> io::R
     let run_state = project_runtime.join("run-state");
     let sessions = project_runtime.join("sessions");
     let agent_store = project_runtime.join("agents");
-    let workflows = project_runtime.join("workflows");
-    let user_workflows = project_runtime.join("user-workflows");
 
     if project_id == "default" {
         migrate_legacy_desktop_dirs(workspace, &project_runtime)?;
@@ -123,8 +121,6 @@ pub fn apply_project_environment(workspace: &PathBuf, project_id: &str) -> io::R
     std::fs::create_dir_all(&run_state)?;
     std::fs::create_dir_all(&sessions)?;
     std::fs::create_dir_all(&agent_store)?;
-    std::fs::create_dir_all(&workflows)?;
-    std::fs::create_dir_all(&user_workflows)?;
     configure_readonly_roots()?;
 
     std::env::set_var("ARIS_WORKSPACE_ROOT", workspace);
@@ -133,8 +129,6 @@ pub fn apply_project_environment(workspace: &PathBuf, project_id: &str) -> io::R
     std::env::set_var("ARIS_RUN_STATE_DIR", &run_state);
     std::env::set_var("ARIS_SESSIONS_DIR", &sessions);
     std::env::set_var("ARIS_AGENT_STORE_DIR", &agent_store);
-    std::env::set_var("ARIS_WORKFLOWS_DIR", &workflows);
-    std::env::set_var("ARIS_USER_WORKFLOWS_DIR", &user_workflows);
     std::env::set_var("CLAWD_AGENT_STORE", &agent_store);
     std::env::set_var("CLAWD_TODO_STORE", project_runtime.join("tasks.json"));
     std::env::set_var("ARIS_ALLOWED_TOOLS", DESKTOP_ALLOWED_AGENT_TOOLS.join(","));
@@ -169,7 +163,6 @@ fn migrate_legacy_desktop_dirs(workspace: &PathBuf, runtime: &PathBuf) -> io::Re
     let legacy_claude = workspace.join(".claude");
     migrate_dir(&legacy_claude.join("run-state"), &runtime.join("run-state"))?;
     migrate_dir(&legacy_claude.join("sessions"), &runtime.join("sessions"))?;
-    migrate_dir(&legacy_claude.join("workflows"), &runtime.join("workflows"))?;
     migrate_dir(&workspace.join(".clawd-agents"), &runtime.join("agents"))?;
     let _ = std::fs::remove_dir(&legacy_claude);
     Ok(())

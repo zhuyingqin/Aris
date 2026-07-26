@@ -124,7 +124,6 @@ interface LabState {
   acceptNotebookReview: () => void;
   /** Revert the notebook to the pre-edit baseline, then clear the review. */
   revertNotebookReview: () => Promise<void>;
-  addCell: (cellType: "code" | "markdown") => Promise<void>;
   /** Insert a cell of `cellType` at `index`; resolves to the new cell's index. */
   insertCellAt: (cellType: "code" | "markdown", index: number) => Promise<number>;
   deleteCell: (index: number) => Promise<void>;
@@ -132,7 +131,6 @@ interface LabState {
   moveCell: (index: number, toIndex: number) => Promise<void>;
   duplicateCell: (index: number) => Promise<void>;
   changeCellType: (index: number, cellType: "code" | "markdown") => Promise<void>;
-  clearOutputs: (index: number) => Promise<void>;
   clearAllOutputs: () => Promise<void>;
   restartAndRunAll: () => Promise<void>;
   /** Save a cell's source without reloading the view (code blur-save). */
@@ -140,7 +138,6 @@ interface LabState {
   /** Save a cell's source and reload (markdown render after editing). */
   saveCell: (index: number, source: string) => Promise<void>;
   runCell: (index: number, source: string) => Promise<void>;
-  runAll: (parameters?: Record<string, unknown>) => Promise<void>;
   /** Run every code cell top-to-bottom, lighting each up in turn (Jupyter-style). */
   runAllSequential: () => Promise<void>;
   interruptKernel: () => Promise<void>;
@@ -376,18 +373,6 @@ export const useLabStore = create<LabState>((set, get) => ({
     }
   },
 
-  addCell: async (cellType) => {
-    const { activePath, currentProjectId: projectId } = get();
-    if (!activePath) return;
-    try {
-      const view = await labEditCell<NotebookView>(activePath, "insert", { cellType, source: "" });
-      if (!sameProject(get(), projectId)) return;
-      set({ view });
-    } catch (e) {
-      if (sameProject(get(), projectId)) set({ error: asError(e) });
-    }
-  },
-
   insertCellAt: async (cellType, index) => {
     const { activePath, currentProjectId: projectId, view } = get();
     const at = Math.min(Math.max(index, 0), view?.notebook.cells.length ?? 0);
@@ -463,21 +448,6 @@ export const useLabStore = create<LabState>((set, get) => ({
     }
   },
 
-  clearOutputs: async (index) => {
-    const { activePath, currentProjectId: projectId, view } = get();
-    if (!activePath || !view) return;
-    const cell = view.notebook.cells[index];
-    if (!cell || cell.cell_type !== "code") return;
-    const source = Array.isArray(cell.source) ? cell.source.join("") : cell.source ?? "";
-    try {
-      const next = await labEditCell<NotebookView>(activePath, "replace", { cellIndex: index, source });
-      if (!sameProject(get(), projectId)) return;
-      set({ view: next });
-    } catch (e) {
-      if (sameProject(get(), projectId)) set({ error: asError(e) });
-    }
-  },
-
   clearAllOutputs: async () => {
     const { activePath, currentProjectId: projectId, view } = get();
     if (!activePath || !view) return;
@@ -545,31 +515,6 @@ export const useLabStore = create<LabState>((set, get) => ({
       if (sameProject(get(), projectId)) set({ error: asError(e) });
     } finally {
       if (sameProject(get(), projectId)) set({ runningCell: null, runStartedAt: null });
-    }
-  },
-
-  runAll: async (parameters) => {
-    const { activePath, currentProjectId: projectId } = get();
-    if (!activePath || get().runningCell !== null) return;
-    const hasParameters = parameters && Object.keys(parameters).length > 0;
-    set({ runningAll: true, runStartedAt: Date.now(), error: null });
-    try {
-      await labRunAll<RunAllResult>(activePath, {
-        parameters: hasParameters ? parameters : undefined,
-        kernel: get().selectedKernel ?? undefined,
-      });
-      if (!sameProject(get(), projectId)) return;
-      const view = await labLoadNotebook<NotebookView>(activePath);
-      if (!sameProject(get(), projectId)) return;
-      set({ view });
-      await get().refreshRuns(projectId);
-    } catch (e) {
-      if (sameProject(get(), projectId)) {
-        set({ error: asError(e) });
-        await get().refreshRuns(projectId);
-      }
-    } finally {
-      if (sameProject(get(), projectId)) set({ runningAll: false, runStartedAt: null });
     }
   },
 

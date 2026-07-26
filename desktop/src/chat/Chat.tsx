@@ -1,8 +1,16 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 import { createPortal } from "react-dom";
-import { chatReviewClear, chatUiTurnLoad, fileOpen, isTauri } from "../api/tauri";
+import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
+import { chatReviewClear, chatUiTurnLoad, isTauri } from "../api/tauri";
 import { useStore, type Language } from "../store";
-import { workspaceFileOpenTarget } from "../lab/labEditorCore";
 import { SvgIcon } from "../SvgIcon";
 import type { ChatTurn } from "../types";
 import ChatComposer from "./ChatComposer";
@@ -22,9 +30,13 @@ import { useChatCommands } from "./useChatCommands";
 import { useChatSessionController } from "./useChatSessionController";
 import ProjectBriefCard, { useProjectBrief } from "./ProjectBriefCard";
 import ChatNavigationTabs, { type ChatNavigationTab } from "./ChatNavigationTabs";
-import SideTaskPanel, { type SideTaskMetadata } from "./SideTaskPanel";
+import SideTaskPanel from "./SideTaskPanel";
+import SideFileViewer from "./SideFileViewer";
+import { sideFileTitle, type SidePanelMetadata } from "./sidePanelFiles";
+import { useOpenChatFile } from "./openChatFile";
 import IndependentReviewPanel from "./IndependentReviewPanel";
 import { useIndependentReview } from "./useIndependentReview";
+import { useScopedSelectAll } from "./useScopedSelectAll";
 
 const INDEPENDENT_REVIEW_TAB_ID = "independent-review";
 const CHAT_UI_EARLIER_TURN_BATCH_SIZE = 12;
@@ -84,11 +96,24 @@ const CHAT_STARTERS: Record<Language, ChatStarter[]> = {
   ],
 };
 
-interface SideTaskTab {
-  id: string;
-  projectId: string;
-  title: string;
-  handoff: string | null;
+/**
+ * The right pane is a small workspace, not only a side-task chat: a tab is
+ * either an ephemeral read-only chat ("task") or a reading surface for a file
+ * ("file"). Both report the same metadata back, so the tab strip and the
+ * "send to main task" action stay type-agnostic.
+ */
+type SidePanelTab =
+  | { kind: "task"; id: string; projectId: string; title: string; handoff: string | null }
+  | { kind: "file"; id: string; projectId: string; path: string; title: string; handoff: string | null };
+
+const SIDE_PANEL_WIDTH_KEY = "somniq-side-panel-width";
+const SIDE_PANEL_MIN_WIDTH = 320;
+
+function storedSidePanelWidth(): number | null {
+  if (typeof window === "undefined") return null;
+  const raw = window.localStorage?.getItem(SIDE_PANEL_WIDTH_KEY);
+  const parsed = raw ? Number(raw) : NaN;
+  return Number.isFinite(parsed) && parsed >= SIDE_PANEL_MIN_WIDTH ? parsed : null;
 }
 
 function MemoryBadge({ count }: { count: number }) {
@@ -113,8 +138,8 @@ export default function Chat() {
   const tab = useStore((state) => state.tab);
   const copy = CHAT_COPY[language];
   const setTab = useStore((state) => state.setTab);
-  const setPendingLabFilePath = useStore((state) => state.setPendingLabFilePath);
-  const setPendingTypesetFilePath = useStore((state) => state.setPendingTypesetFilePath);
+  const pendingSidePanelFilePath = useStore((state) => state.pendingSidePanelFilePath);
+  const setPendingSidePanelFilePath = useStore((state) => state.setPendingSidePanelFilePath);
   const setError = useStore((state) => state.setError);
   const projects = useStore((state) => state.projects);
   const currentProject = useStore((state) => state.currentProject);
@@ -149,6 +174,8 @@ export default function Chat() {
   currentSessionRef.current = currentSession;
   const allSessionsRef = useRef(allSessions);
   allSessionsRef.current = allSessions;
+  const chatMainRef = useRef<HTMLElement | null>(null);
+  useScopedSelectAll(chatMainRef);
 
   const composer = useChatComposer({ currentSession, currentSessionRef, updateSession, setDraft });
   const run = useChatRun({
@@ -172,14 +199,15 @@ export default function Chat() {
     focusComposer: composer.focusComposer,
     beginRun: run.beginRun,
     refreshStatus: run.refreshStatus,
-    setContextOverrides: run.setContextOverrides,
+    applyContextTokens: run.applyContextTokens,
   });
   const sessionCtl = useChatSessionController({ removeSession, restoreSession });
   const projectBrief = useProjectBrief(currentProject?.id);
   const independentReview = useIndependentReview(currentId);
-  const [sideTaskTabs, setSideTaskTabs] = useState<SideTaskTab[]>([]);
+  const [sideTaskTabs, setSideTaskTabs] = useState<SidePanelTab[]>([]);
   const [activeSideTaskId, setActiveSideTaskId] = useState<string | null>(null);
   const [sideTaskPaneOpen, setSideTaskPaneOpen] = useState(false);
+  const [sidePanelWidth, setSidePanelWidth] = useState<number | null>(storedSidePanelWidth);
   const sideTaskSequenceRef = useRef(0);
   const previousProjectIdRef = useRef(currentProject?.id);
 
@@ -187,7 +215,8 @@ export default function Chat() {
     if (!currentProject) return;
     sideTaskSequenceRef.current += 1;
     const sideTaskNumber = sideTaskSequenceRef.current;
-    const sideTask: SideTaskTab = {
+    const sideTask: SidePanelTab = {
+      kind: "task",
       id: makeId("side-task-tab"),
       projectId: currentProject.id,
       title: language === "cn" ? `侧边任务 ${sideTaskNumber}` : `Side task ${sideTaskNumber}`,
@@ -197,6 +226,42 @@ export default function Chat() {
     setActiveSideTaskId(sideTask.id);
     setSideTaskPaneOpen(true);
   }, [currentProject, language]);
+
+  /** Open (or re-focus) a file as a reading tab in the side panel. */
+  const openSideFile = useCallback((path: string) => {
+    if (!currentProject) return;
+    const existing = sideTaskTabs.find((tab) => tab.kind === "file" && tab.path === path);
+    if (existing) {
+      setActiveSideTaskId(existing.id);
+      setSideTaskPaneOpen(true);
+      return;
+    }
+    const fileTab: SidePanelTab = {
+      kind: "file",
+      id: makeId("side-file-tab"),
+      projectId: currentProject.id,
+      path,
+      title: sideFileTitle(path),
+      handoff: null,
+    };
+    setSideTaskTabs((current) => [...current, fileTab]);
+    setActiveSideTaskId(fileTab.id);
+    setSideTaskPaneOpen(true);
+  }, [currentProject, sideTaskTabs]);
+
+  const pickSideFile = useCallback(async () => {
+    if (!isTauri()) return;
+    try {
+      const selected = await openFileDialog({
+        multiple: false,
+        directory: false,
+        defaultPath: currentProject?.path ?? undefined,
+      });
+      if (typeof selected === "string") openSideFile(selected);
+    } catch (pickError) {
+      setError(String(pickError));
+    }
+  }, [currentProject?.path, openSideFile, setError]);
 
   const closeSideTask = useCallback((taskId: string) => {
     setSideTaskTabs((current) => {
@@ -212,13 +277,51 @@ export default function Chat() {
     });
   }, [activeSideTaskId, independentReview]);
 
-  const updateSideTaskMetadata = useCallback((taskId: string, metadata: SideTaskMetadata) => {
+  const updateSideTaskMetadata = useCallback((taskId: string, metadata: SidePanelMetadata) => {
     setSideTaskTabs((current) => {
       const target = current.find((task) => task.id === taskId);
       if (!target || (target.title === metadata.title && target.handoff === metadata.handoff)) return current;
       return current.map((task) => task.id === taskId ? { ...task, ...metadata } : task);
     });
   }, []);
+
+  // Drag the divider between the main chat and the side panel. The width lands
+  // on `.chat-root` as a CSS variable and is remembered across sessions.
+  const startSidePanelResize = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    const pointerId = event.pointerId;
+    const handle = event.currentTarget;
+    handle.setPointerCapture?.(pointerId);
+    const onMove = (moveEvent: PointerEvent) => {
+      const available = window.innerWidth;
+      const next = Math.round(available - moveEvent.clientX);
+      setSidePanelWidth(Math.max(SIDE_PANEL_MIN_WIDTH, Math.min(next, Math.max(SIDE_PANEL_MIN_WIDTH, available - 420))));
+    };
+    const onUp = () => {
+      handle.releasePointerCapture?.(pointerId);
+      handle.removeEventListener("pointermove", onMove);
+      handle.removeEventListener("pointerup", onUp);
+      handle.removeEventListener("pointercancel", onUp);
+      document.body.classList.remove("somniq-resizing-col");
+    };
+    document.body.classList.add("somniq-resizing-col");
+    handle.addEventListener("pointermove", onMove);
+    handle.addEventListener("pointerup", onUp);
+    handle.addEventListener("pointercancel", onUp);
+  }, []);
+
+  useEffect(() => {
+    if (sidePanelWidth === null) return;
+    window.localStorage?.setItem(SIDE_PANEL_WIDTH_KEY, String(sidePanelWidth));
+  }, [sidePanelWidth]);
+
+  // File links rendered deep inside the thread (tool cards, markdown links) ask
+  // for the side panel through the store rather than prop-drilling a callback.
+  useEffect(() => {
+    if (!pendingSidePanelFilePath) return;
+    openSideFile(pendingSidePanelFilePath);
+    setPendingSidePanelFilePath(null);
+  }, [openSideFile, pendingSidePanelFilePath, setPendingSidePanelFilePath]);
 
   useEffect(() => {
     if (previousProjectIdRef.current === currentProject?.id) return;
@@ -303,30 +406,43 @@ export default function Chat() {
 
   const navigationCopy = language === "cn"
     ? {
-      label: "侧边任务导航",
-      add: "新增侧边任务标签",
-      close: "关闭侧边任务标签",
-      hide: "隐藏侧边任务栏",
-      toggle: "显示或隐藏侧边任务栏",
+      label: "侧栏导航",
+      add: "新增侧栏标签",
+      addTask: "新建侧边任务",
+      addTaskHint: "继承项目上下文的只读旁路对话",
+      addFile: "打开文件…",
+      addFileHint: "在侧栏阅读 PDF、Markdown、代码等",
+      close: "关闭侧栏标签",
+      hide: "隐藏侧栏",
+      toggle: "显示或隐藏侧栏",
       handoff: "发送到主任务",
+      resize: "调整侧栏宽度",
     }
     : {
-      label: "Side task navigation",
-      add: "Add side task tab",
-      close: "Close side task tab",
-      hide: "Hide side task panel",
-      toggle: "Show or hide side task panel",
+      label: "Side panel navigation",
+      add: "Add side panel tab",
+      addTask: "New side task",
+      addTaskHint: "Read-only detour that inherits project context",
+      addFile: "Open file…",
+      addFileHint: "Read PDFs, markdown, and code beside the chat",
+      close: "Close side panel tab",
+      hide: "Hide side panel",
+      toggle: "Show or hide side panel",
       handoff: "Send to main task",
+      resize: "Resize side panel",
     };
   const navigationTabs = useMemo<ChatNavigationTab[]>(() => ([
     ...(independentReview ? [{
       id: INDEPENDENT_REVIEW_TAB_ID,
       label: language === "cn" ? "独立 Reviewer" : "Independent Reviewer",
+      icon: <SvgIcon name="target" size={13} />,
       closable: false,
     }] : []),
     ...sideTaskTabs.map((sideTask) => ({
       id: sideTask.id,
       label: sideTask.title,
+      icon: <SvgIcon name={sideTask.kind === "file" ? "document" : "sparkle"} size={13} />,
+      title: sideTask.kind === "file" ? sideTask.path : sideTask.title,
       closable: true,
       closeLabel: `${navigationCopy.close}: ${sideTask.title}`,
     })),
@@ -404,21 +520,7 @@ export default function Chat() {
     focusComposer();
   }, [currentSessionRef, focusComposer, setDraft]);
 
-  const openWorkflowFile = useCallback((path: string) => {
-    const target = workspaceFileOpenTarget(path);
-    if (target === "code") {
-      setPendingLabFilePath(path);
-      setTab("lab");
-      return;
-    }
-    if (target === "latex" || target === "pdf") {
-      setPendingTypesetFilePath(path);
-      setTab("typeset");
-      return;
-    }
-    if (!isTauri()) return;
-    void fileOpen(path).catch((error) => setError(String(error)));
-  }, [setError, setPendingLabFilePath, setPendingTypesetFilePath, setTab]);
+  const openWorkflowFile = useOpenChatFile();
 
   const loadOmittedTurn = useCallback(async (turnIndex: number) => {
     const session = currentSessionRef.current;
@@ -504,7 +606,10 @@ export default function Chat() {
   return (
     <div
       className={`chat-root${projectBriefVisible ? " chat-project-brief-open" : ""}${sideTaskPaneOpen && tab === "chat" ? " side-task-open" : ""}`}
-      style={{ "--chat-sidebar-w": `${sessionCtl.chatSidebarWidth}px` } as CSSProperties}
+      style={{
+        "--chat-sidebar-w": `${sessionCtl.chatSidebarWidth}px`,
+        ...(sidePanelWidth === null ? {} : { "--side-panel-w": `${sidePanelWidth}px` }),
+      } as CSSProperties}
     >
       {sessionCtl.sidebarOpen && (
         <button
@@ -564,6 +669,7 @@ export default function Chat() {
         onPointerCancel={sessionCtl.onChatSidebarResizeEnd}
       />
       <main
+        ref={chatMainRef}
         className={`chat${turns.length === 0 ? " chat-empty" : ""}`}
         onContextMenu={composer.handleChatContextMenu}
         onDragEnter={(e) => { e.preventDefault(); composer.setChatDragging(true); }}
@@ -785,11 +891,23 @@ export default function Chat() {
           aria-label={navigationCopy.label}
           hidden={!sideTaskPaneOpen || tab !== "chat"}
         >
+          <div
+            className="side-panel-resizer"
+            role="separator"
+            aria-orientation="vertical"
+            aria-label={navigationCopy.resize}
+            onPointerDown={startSidePanelResize}
+            onDoubleClick={() => setSidePanelWidth(null)}
+          />
           <ChatNavigationTabs
             tabs={navigationTabs}
             activeTabId={activeSideTaskId ?? navigationTabs[0]?.id ?? ""}
             label={navigationCopy.label}
             addLabel={navigationCopy.add}
+            addOptions={[
+              { id: "task", label: navigationCopy.addTask, hint: navigationCopy.addTaskHint, icon: <SvgIcon name="sparkle" size={13} />, onSelect: addSideTask },
+              { id: "file", label: navigationCopy.addFile, hint: navigationCopy.addFileHint, icon: <SvgIcon name="document" size={13} />, onSelect: () => void pickSideFile() },
+            ]}
             hideLabel={navigationCopy.hide}
             action={activeSideTask?.handoff
               ? { label: navigationCopy.handoff, onClick: () => sendHandoffToMain(activeSideTask.handoff!) }
@@ -826,14 +944,23 @@ export default function Chat() {
                 aria-label={sideTask.title}
                 hidden={activeSideTaskId !== sideTask.id}
               >
-                <SideTaskPanel
-                  taskId={sideTask.id}
-                  initialTitle={sideTask.title}
-                  projectId={sideTask.projectId}
-                  model={activeModel}
-                  ready={Boolean(status?.ready)}
-                  onMetadataChange={updateSideTaskMetadata}
-                />
+                {sideTask.kind === "file" ? (
+                  <SideFileViewer
+                    tabId={sideTask.id}
+                    path={sideTask.path}
+                    onOpenInWorkspace={openWorkflowFile}
+                    onMetadataChange={updateSideTaskMetadata}
+                  />
+                ) : (
+                  <SideTaskPanel
+                    taskId={sideTask.id}
+                    initialTitle={sideTask.title}
+                    projectId={sideTask.projectId}
+                    model={activeModel}
+                    ready={Boolean(status?.ready)}
+                    onMetadataChange={updateSideTaskMetadata}
+                  />
+                )}
               </section>
             ))}
           </div>
@@ -869,6 +996,7 @@ export default function Chat() {
           path={composer.fileMenu.path}
           projectRoot={currentProject?.path}
           onOpenInWorkspace={openWorkflowFile}
+          onOpenInSidePanel={openSideFile}
           onClose={() => composer.setFileMenu(null)}
           onAttach={(path, content) => void composer.attachFileFromMenu(path, content)}
         />

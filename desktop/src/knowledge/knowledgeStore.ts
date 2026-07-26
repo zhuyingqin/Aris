@@ -292,7 +292,6 @@ interface KnowledgeState {
   reject: (id: string) => Promise<void>;
   refine: (id: string, patch: Partial<Pick<KnowledgePoint, "question" | "answer" | "statement">>) => Promise<void>;
   search: (query: string) => Promise<void>;
-  setError: (error: string | null) => void;
 }
 
 export const useKnowledgeStore = create<KnowledgeState>((set, get) => ({
@@ -438,8 +437,6 @@ export const useKnowledgeStore = create<KnowledgeState>((set, get) => ({
       set({ error: `failed to search knowledge base: ${String(error)}` });
     }
   },
-
-  setError: (error) => set({ error }),
 }));
 
 export const resetKnowledgeStore = () => {

@@ -11,9 +11,20 @@ interface Props {
   onClose: () => void;
   onAttach: (path: string, content: string) => void;
   onOpenInWorkspace: (path: string) => void;
+  /** Open the file as a reading tab in the chat side panel. */
+  onOpenInSidePanel?: (path: string) => void;
 }
 
-export default function FilePathMenu({ x, y, path, projectRoot, onClose, onAttach, onOpenInWorkspace }: Props) {
+export default function FilePathMenu({
+  x,
+  y,
+  path,
+  projectRoot,
+  onClose,
+  onAttach,
+  onOpenInWorkspace,
+  onOpenInSidePanel,
+}: Props) {
   const [openInOpen, setOpenInOpen] = useState(false);
   const [pos, setPos] = useState({ x, y });
   const menuRef = useRef<HTMLDivElement>(null);
@@ -29,11 +40,9 @@ export default function FilePathMenu({ x, y, path, projectRoot, onClose, onAttac
       ? path.substring(0, path.lastIndexOf("\\"))
       : ".";
   const workspaceTarget = workspaceFileOpenTarget(path);
-  const workspaceOpenLabel = workspaceTarget === "code"
-    ? "在 Code 页面打开"
-    : workspaceTarget === "latex"
-      ? "在 LaTeX 页面打开"
-      : "在 LaTeX 侧边预览打开";
+  // PDFs are covered by the side-panel reader below, so only editable sources
+  // offer a workspace tab here.
+  const workspaceOpenLabel = workspaceTarget === "code" ? "在 Code 页面打开" : "在 LaTeX 页面打开";
 
   // Clamp to viewport after first paint
   useEffect(() => {
@@ -110,7 +119,12 @@ export default function FilePathMenu({ x, y, path, projectRoot, onClose, onAttac
         复制文件名
       </button>
       <div className="file-path-menu-divider" />
-      {workspaceTarget !== "external" && (
+      {onOpenInSidePanel && (
+        <button role="menuitem" onClick={() => { onOpenInSidePanel(path); onClose(); }}>
+          在侧栏阅读
+        </button>
+      )}
+      {(workspaceTarget === "code" || workspaceTarget === "latex") && (
         <button role="menuitem" onClick={() => { onOpenInWorkspace(path); onClose(); }}>
           {workspaceOpenLabel}
         </button>

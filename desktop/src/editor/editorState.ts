@@ -34,7 +34,7 @@ const sharedHighlightStyle = HighlightStyle.define([
  * concerns (visual theme, decorations, surface-specific keymaps) are NOT here —
  * callers add those via `SharedEditorOptions.extensions`.
  */
-export function baseExtensions(options: Pick<SharedEditorOptions, "readOnly" | "lineNumbers" | "dataEditor">): Extension[] {
+export function baseExtensions(options: Pick<SharedEditorOptions, "readOnly" | "dataEditor">): Extension[] {
   const extensions: Extension[] = [
     history(),
     drawSelection(),
@@ -52,8 +52,8 @@ export function baseExtensions(options: Pick<SharedEditorOptions, "readOnly" | "
     sharedKeymap(),
     readOnlyCompartment.of(EditorState.readOnly.of(Boolean(options.readOnly))),
     languageCompartment.of([]),
+    lineNumbers(),
   ];
-  if (options.lineNumbers !== false) extensions.push(lineNumbers());
   if (options.dataEditor !== undefined) {
     extensions.push(EditorView.contentAttributes.of({ "data-editor": options.dataEditor }));
   }

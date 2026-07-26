@@ -17,6 +17,15 @@ function stripEditorLocation(value: string) {
     .replace(/\?(?:line|lineNumber)=\d+(?:&(?:column|col)=\d+)?$/i, "");
 }
 
+/** Formats a local path for UI text without changing the path sent to the
+ * desktop backend. Windows canonical paths may start with `\\?\`, which is
+ * needed by the OS but should not leak into chat file labels or diff headers. */
+export function displayLocalFilePath(path: string) {
+  const normalized = path.replace(/\\/g, "/");
+  if (/^\/\/\?\/unc\//i.test(normalized)) return normalized.replace(/^\/\/\?\/unc\//i, "//");
+  return normalized.replace(/^\/\/\?\//, "");
+}
+
 /** True for local references that react-markdown's default URL sanitizer
  * rejects because a Windows drive letter looks like a custom URI scheme. */
 export function isExplicitLocalFileHref(href: string) {

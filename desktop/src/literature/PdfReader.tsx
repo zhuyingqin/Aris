@@ -6,7 +6,7 @@ import {
   useState,
 } from "react";
 import type { PDFDocumentProxy, PDFPageProxy, RenderTask } from "pdfjs-dist";
-import { isTauri, literaturePdfBytes } from "../api/tauri";
+import { fileReadBytes, isTauri, literaturePdfBytes } from "../api/tauri";
 import { renderPdfPageToCanvas } from "../pdf/canvas";
 import { getPdfJs, openPdfDocument } from "../pdf/runtime";
 import { useStore, type Language } from "../store";
@@ -74,13 +74,22 @@ interface PendingAnnotation {
 }
 
 interface PdfReaderProps {
+  /** Library-relative path by default; a workspace/absolute path when `sourceKind` is "path". */
   relativePath: string;
+  /**
+   * Where the bytes come from. "library" keeps the literature paper store as the
+   * source; "path" lets any surface (Chat's side panel, review views) reuse the
+   * reader for an arbitrary file on disk.
+   */
+  sourceKind?: "library" | "path";
   initialPage?: number;
   /** Change this value to request another jump even when initialPage is unchanged. */
   pageRequestKey?: string | number;
   annotations: PdfAnnotation[];
   focusedAnnotationId?: string | null;
   onOpenExternal: () => void;
+  /** Shows a "reveal in file manager" button in the toolbar; omitted surfaces (e.g. the Literature reader) don't get one. */
+  onReveal?: () => void;
   onAddAnnotation: (
     page: number,
     data: {
@@ -758,11 +767,13 @@ function AnnotationEditor({
 
 export default function PdfReader({
   relativePath,
+  sourceKind = "library",
   initialPage = 1,
   pageRequestKey,
   annotations,
   focusedAnnotationId,
   onOpenExternal,
+  onReveal,
   onAddAnnotation,
   onUpdateAnnotation,
   onDeleteAnnotation,
@@ -861,7 +872,10 @@ export default function PdfReader({
       setLoading(false);
       return () => { disposed = true; };
     }
-    void literaturePdfBytes(relativePath)
+    const bytesPromise = sourceKind === "path"
+      ? fileReadBytes(relativePath)
+      : literaturePdfBytes(relativePath);
+    void bytesPromise
       .then((bytes) => openPdfDocument(bytes))
       .then(async (pdf) => {
         loadedDocument = pdf;
@@ -881,7 +895,7 @@ export default function PdfReader({
       disposed = true;
       if (loadedDocument) void loadedDocument.destroy();
     };
-  }, [relativePath]);
+  }, [relativePath, sourceKind]);
 
   useEffect(() => {
     if (numPages > 0) onDocumentLoaded?.(numPages);
@@ -1172,6 +1186,11 @@ export default function PdfReader({
               {copy.pdfReader.annotationsLabel(annotations.length)}
             </button>
           )}
+          {onReveal && (
+            <button type="button" aria-label={copy.pdfReader.revealAria} title={copy.pdfReader.revealAria} onClick={onReveal}>
+              <SvgIcon name="folder" size={14} />
+            </button>
+          )}
           <button type="button" onClick={onOpenExternal}>
             {copy.pdfReader.systemReader}
           </button>
@@ -1182,7 +1201,7 @@ export default function PdfReader({
         <div className="lit-pdf-scroll" ref={containerRef}>
           {loading && <div className="lit-pdf-state">{copy.pdfReader.loadingPdf}</div>}
           {error && <div className="lit-pdf-state error">{copy.pdfReader.pdfLoadFailed(error)}</div>}
-          {!loading && !error && document && (
+          {!loading && !error && document && !readOnly && (
             <div className="lit-pdf-tip">
               {copy.pdfReader.readerTip}
             </div>

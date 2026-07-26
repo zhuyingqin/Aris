@@ -6,11 +6,9 @@ import rehypeHighlight from "rehype-highlight";
 import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
 import "highlight.js/styles/github-dark.css";
-import { fileOpen } from "../api/tauri";
-import { workspaceFileOpenTarget } from "../lab/labEditorCore";
 import { SvgIcon } from "../SvgIcon";
 import { isExplicitLocalFileHref, normalizeLocalFileHref } from "./localFileLinks";
-import { useStore } from "../store";
+import { useOpenChatFile } from "./openChatFile";
 import ChatImagePreview, { isDirectImageSource, isPreviewableImagePath } from "./ChatImagePreview";
 import MermaidDiagram from "./MermaidDiagram";
 
@@ -376,11 +374,7 @@ function MarkdownLink({
   href?: string;
   children?: React.ReactNode;
 }) {
-  const setTab = useStore((state) => state.setTab);
-  const setPendingLabFilePath = useStore((state) => state.setPendingLabFilePath);
-  const setPendingTypesetFilePath = useStore((state) => state.setPendingTypesetFilePath);
-  const setError = useStore((state) => state.setError);
-  const language = useStore((state) => state.language);
+  const openChatFile = useOpenChatFile();
   if (href && isPreviewableImagePath(href)) {
     const title = textFromReactNode(children) || decodeLocalHref(href);
     return (
@@ -403,21 +397,7 @@ function MarkdownLink({
       title="Open local file"
       onClick={(event) => {
         event.preventDefault();
-        const path = decodeLocalHref(href);
-        const target = workspaceFileOpenTarget(path);
-        if (target === "code") {
-          setPendingLabFilePath(path);
-          setTab("lab");
-          return;
-        }
-        if (target === "latex" || target === "pdf") {
-          setPendingTypesetFilePath(path);
-          setTab("typeset");
-          return;
-        }
-        void fileOpen(path).catch((error) => {
-          setError(`${language === "cn" ? "无法打开文件" : "Unable to open file"}: ${String(error)}`);
-        });
+        openChatFile(decodeLocalHref(href));
       }}
     >
       {children}<SvgIcon name="externalLink" size={12} className="md-local-link-icon" />

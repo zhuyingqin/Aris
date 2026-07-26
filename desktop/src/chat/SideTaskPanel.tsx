@@ -20,6 +20,7 @@ import {
   visibleTurnError,
 } from "./chatRunHelpers";
 import { makeId, patchLastAssistantTurn, textFromTurn } from "./model";
+import type { SidePanelMetadata } from "./sidePanelFiles";
 import { useChatStream } from "./useChatStream";
 
 const READ_ONLY_PERMISSION: PermissionModeView = {
@@ -46,12 +47,7 @@ interface Props {
   projectId: string;
   model?: string | null;
   ready: boolean;
-  onMetadataChange: (taskId: string, metadata: SideTaskMetadata) => void;
-}
-
-export interface SideTaskMetadata {
-  title: string;
-  handoff: string | null;
+  onMetadataChange: (taskId: string, metadata: SidePanelMetadata) => void;
 }
 
 export default function SideTaskPanel({ taskId, initialTitle, projectId, model, ready, onMetadataChange }: Props) {
@@ -63,6 +59,11 @@ export default function SideTaskPanel({ taskId, initialTitle, projectId, model, 
       emptyDescription: "继承当前项目上下文，但不会读取主聊天记录，也不会保存到项目。",
       preview: "浏览器预览中的侧边任务回复。",
       source: "临时侧边任务",
+      starters: [
+        { id: "locate", label: "定位代码", hint: "找到实现某个功能的位置", prompt: "在当前项目里定位实现以下功能的文件与函数，并说明调用关系：" },
+        { id: "explain", label: "解释报错", hint: "读日志并给出可能原因", prompt: "阅读下面这段报错/日志，判断最可能的原因，并指出需要检查的文件：\n" },
+        { id: "check", label: "核对事实", hint: "只读检索，不改动项目", prompt: "帮我核对一个说法是否与项目现状一致，并给出证据出处：" },
+      ],
     }
     : {
       title: "Side task",
@@ -70,6 +71,11 @@ export default function SideTaskPanel({ taskId, initialTitle, projectId, model, 
       emptyDescription: "Uses project context without reading the main chat or saving into the project.",
       preview: "Side task response in browser preview.",
       source: "Temporary side task",
+      starters: [
+        { id: "locate", label: "Locate code", hint: "Find where something is implemented", prompt: "Locate the files and functions that implement the following in this project, and explain how they connect: " },
+        { id: "explain", label: "Explain an error", hint: "Read the log, name likely causes", prompt: "Read this error/log, judge the most likely cause, and point to the files worth checking:\n" },
+        { id: "check", label: "Check a claim", hint: "Read-only lookup, no edits", prompt: "Check whether the following claim matches the current project, and cite the evidence: " },
+      ],
     };
   const sessionIdRef = useRef(makeId("side-task"));
   const sessionId = sessionIdRef.current;
@@ -179,10 +185,10 @@ export default function SideTaskPanel({ taskId, initialTitle, projectId, model, 
           sessionId={sessionId}
           turns={turns}
           composerHeight={composerHeight}
-          starters={[]}
+          starters={copy.starters}
           welcomeTitle={copy.emptyTitle}
           welcomeDescription={copy.emptyDescription}
-          onStarter={() => undefined}
+          onStarter={(prompt) => setInput(prompt)}
           onEdit={() => undefined}
           onRetry={() => undefined}
           onContinue={() => undefined}

@@ -5,9 +5,9 @@ import { useStore } from "../store";
 import { requestWindowAction } from "../windowControls";
 import Chat from "./Chat";
 
-export const CHAT_COMPANION_QUERY = "companion";
-export const CHAT_COMPANION_VALUE = "chat";
-export const CHAT_COMPANION_LABEL = "chat-companion";
+const CHAT_COMPANION_QUERY = "companion";
+const CHAT_COMPANION_VALUE = "chat";
+const CHAT_COMPANION_LABEL = "chat-companion";
 const CHAT_COMPANION_DENSITY_KEY = "somniq-chat-companion-density";
 
 export function isChatCompanionMode(search?: string, windowLabel?: string): boolean {

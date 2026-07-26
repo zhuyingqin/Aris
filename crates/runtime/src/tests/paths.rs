@@ -53,7 +53,6 @@ fn legacy_project_runtime_dirs_migrate_to_runtime_root() {
     let _sessions = EnvGuard::unset(ARIS_SESSIONS_DIR_ENV);
     let _agents = EnvGuard::unset(ARIS_AGENT_STORE_DIR_ENV);
     let _clawd_agents = EnvGuard::unset(CLAWD_AGENT_STORE_ENV);
-    let _workflows = EnvGuard::unset(ARIS_WORKFLOWS_DIR_ENV);
 
     fs::create_dir_all(root.path().join(".claude").join("sessions")).expect("sessions");
     fs::write(

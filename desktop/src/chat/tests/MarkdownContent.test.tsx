@@ -201,17 +201,25 @@ describe("MarkdownContent local links", () => {
     expect(apiMocks.fileOpen).toHaveBeenCalledWith(expectedPath);
   });
 
-  it.each([
-    ["LaTeX source", "[Open source](<F:/研究 项目/论文/main.tex#L12C3>)", "F:/研究 项目/论文/main.tex"],
-    ["PDF", "[Open source](../papers/main.pdf)", "../papers/main.pdf"],
-  ])("opens a local %s in the LaTeX workspace", async (_kind, markdown, expectedPath) => {
+  it("opens a local LaTeX source in the LaTeX workspace", async () => {
     const user = userEvent.setup();
-    render(<MarkdownContent text={markdown} />);
+    render(<MarkdownContent text="[Open source](<F:/研究 项目/论文/main.tex#L12C3>)" />);
 
     await user.click(screen.getByRole("link", { name: "Open source" }));
 
     expect(useStore.getState().tab).toBe("typeset");
-    expect(useStore.getState().pendingTypesetFilePath).toBe(expectedPath);
+    expect(useStore.getState().pendingTypesetFilePath).toBe("F:/研究 项目/论文/main.tex");
+    expect(apiMocks.fileOpen).not.toHaveBeenCalled();
+  });
+
+  it("reads a local PDF link in the chat side panel", async () => {
+    const user = userEvent.setup();
+    render(<MarkdownContent text="[Open source](../papers/main.pdf)" />);
+
+    await user.click(screen.getByRole("link", { name: "Open source" }));
+
+    expect(useStore.getState().pendingSidePanelFilePath).toBe("../papers/main.pdf");
+    expect(useStore.getState().tab).toBe("chat");
     expect(apiMocks.fileOpen).not.toHaveBeenCalled();
   });
 });

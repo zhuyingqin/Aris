@@ -26,7 +26,6 @@ pub struct CommonSystemPromptOptions {
     pub product_surface: String,
     pub language: String,
     pub include_language_preference: bool,
-    pub include_team_orchestration: bool,
     pub extra_sections: Vec<String>,
 }
 
@@ -42,7 +41,6 @@ impl CommonSystemPromptOptions {
             product_surface: "research automation runtime".to_string(),
             language: std::env::var("ARIS_LANGUAGE").unwrap_or_else(|_| "cn".to_string()),
             include_language_preference: true,
-            include_team_orchestration: true,
             extra_sections: Vec::new(),
         }
     }
@@ -66,9 +64,6 @@ pub fn build_common_system_prompt(
         prompt.push(language_preference_section(&options.language));
     }
     prompt.push(llm_review_override_section());
-    if options.include_team_orchestration {
-        prompt.push(runtime::team_orchestration_section());
-    }
     prompt.extend(options.extra_sections);
     Ok(prompt)
 }
@@ -932,16 +927,6 @@ fn normalize_settings_executor_provider(provider: String, base_url: Option<&str>
     }
 }
 
-pub fn build_executor_client(
-    config: ChatExecutorConfig,
-    model: String,
-    enable_tools: bool,
-    tool_specs: Vec<aris_executor::ExecutorToolSpec>,
-    observer: Box<dyn aris_executor::StreamObserver>,
-) -> Result<aris_executor::ExecutorClient, String> {
-    build_executor_client_with_trace(config, model, enable_tools, tool_specs, observer, None)
-}
-
 pub fn build_executor_client_with_trace(
     config: ChatExecutorConfig,
     model: String,
@@ -1019,21 +1004,6 @@ pub fn resolve_summarizer_model(
         return summarizer_choice(config, model, trimmed);
     }
     default_summarizer_model(config, model)
-}
-
-pub fn resolve_summarizer_client(
-    chat_config: &ChatExecutorConfig,
-    chat_model: &str,
-    configured_model: Option<&str>,
-    configured_provider: Option<SummarizerConfig>,
-) -> Option<aris_executor::ExecutorClient> {
-    resolve_summarizer_client_with_trace(
-        chat_config,
-        chat_model,
-        configured_model,
-        configured_provider,
-        None,
-    )
 }
 
 pub fn resolve_summarizer_client_with_trace(

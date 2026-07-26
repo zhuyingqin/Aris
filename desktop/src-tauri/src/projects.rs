@@ -6,7 +6,6 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use tauri::{AppHandle, Emitter, State};
 
 use crate::state;
@@ -248,19 +247,12 @@ fn reorder_registry(registry: &mut ProjectRegistry, project_ids: &[String]) -> R
     Ok(())
 }
 
-fn ensure_switch_allowed() -> Result<(), String> {
+fn ensure_switch_allowed(chat_state: &crate::engine::ChatState) -> Result<(), String> {
     let _env_guard = crate::engine::project_env_lock()
         .lock()
         .map_err(|_| "project environment lock poisoned".to_string())?;
-    let output = tools::execute_tool("Workflow", &json!({ "action": "list" }))?;
-    let value: serde_json::Value =
-        serde_json::from_str(&output).map_err(|error| error.to_string())?;
-    let has_running_workflow = value["runs"].as_array().is_some_and(|runs| {
-        runs.iter()
-            .any(|run| run["status"].as_str() == Some("running"))
-    });
-    if has_running_workflow {
-        return Err("stop or finish the active workflow before switching projects".to_string());
+    if crate::engine::remote_chat_has_running_turns(chat_state)? {
+        return Err("stop or finish the active chat turn before switching projects".to_string());
     }
     Ok(())
 }
@@ -310,8 +302,9 @@ pub(crate) fn registered_projects(
 pub(crate) fn switch_registered_project(
     projects: &ProjectState,
     id: &str,
+    chat_state: &crate::engine::ChatState,
 ) -> Result<DesktopProject, String> {
-    ensure_switch_allowed()?;
+    ensure_switch_allowed(chat_state)?;
     let mut registry = projects
         .registry
         .lock()
@@ -346,8 +339,12 @@ pub fn projects_get(projects: State<ProjectState>) -> Result<ProjectView, String
 }
 
 #[tauri::command]
-pub fn project_add(projects: State<ProjectState>, path: String) -> Result<ProjectView, String> {
-    ensure_switch_allowed()?;
+pub fn project_add(
+    projects: State<ProjectState>,
+    chat_state: State<crate::engine::ChatState>,
+    path: String,
+) -> Result<ProjectView, String> {
+    ensure_switch_allowed(chat_state.inner())?;
     let canonical = clean_canonical_path(
         std::fs::canonicalize(path.trim()).map_err(|error| error.to_string())?,
     );
@@ -384,9 +381,10 @@ pub fn project_add(projects: State<ProjectState>, path: String) -> Result<Projec
 pub fn project_set_current(
     app: AppHandle,
     projects: State<ProjectState>,
+    chat_state: State<crate::engine::ChatState>,
     id: String,
 ) -> Result<ProjectView, String> {
-    ensure_switch_allowed()?;
+    ensure_switch_allowed(chat_state.inner())?;
     let mut registry = projects
         .registry
         .lock()
