@@ -380,7 +380,7 @@ describe("Typeset start page", () => {
     fireEvent.click(screen.getByRole("button", { name: "Create document" }));
 
     await waitFor(() => expect(mocks.fileCreateText).toHaveBeenCalledWith(
-      "slides/Research-talk/main.tex",
+      ".somniq/slides/Research-talk/main.tex",
       expect.stringContaining("\\documentclass[aspectratio=169]{beamer}"),
     ));
   });
@@ -823,6 +823,43 @@ describe("Typeset start page", () => {
     await waitFor(() => expect(container.querySelectorAll(".typeset-pdf-page canvas").length).toBeLessThanOrEqual(1));
   });
 
+  it("renders every page that is visible at once instead of leaving a white placeholder", async () => {
+    mockProjectFiles();
+    pdfMocks.document.numPages = 12;
+    const source = "\\documentclass{article}\n\\begin{document}\nWide viewport\n\\end{document}";
+    mocks.fileReadText.mockResolvedValueOnce({ path: "paper.tex", content: source, bytes: source.length });
+    const { container } = render(<Typeset />);
+
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+    await recompileOpenSource();
+    await screen.findByLabelText("12 PDF pages");
+
+    fireEvent.click(screen.getByRole("button", { name: /PDF zoom \d+%/ }));
+    fireEvent.click(within(await screen.findByRole("menu", { name: "PDF zoom menu" })).getByRole("menuitemradio", { name: "150%" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "PDF zoom 150%" })).toBeTruthy());
+
+    const scroll = container.querySelector<HTMLElement>(".typeset-pdf-scroll");
+    const pages = Array.from(container.querySelectorAll<HTMLElement>(".typeset-pdf-page"));
+    expect(scroll).toBeTruthy();
+    expect(pages).toHaveLength(12);
+    Object.defineProperty(scroll!, "clientHeight", { configurable: true, value: 480 });
+    pages.forEach((page, index) => {
+      Object.defineProperty(page, "offsetTop", { configurable: true, value: index * 160 });
+      Object.defineProperty(page, "offsetHeight", { configurable: true, value: 120 });
+    });
+    scroll!.scrollTop = 320;
+    fireEvent.scroll(scroll!);
+
+    // Page 5 is visible below the reading edge at 150% zoom. Previously it
+    // remained a blank placeholder until the reader scrolled much farther.
+    await waitFor(() => {
+      const renderedPages = Array.from(container.querySelectorAll<HTMLElement>(".typeset-pdf-page"))
+        .flatMap((page, index) => page.querySelector("canvas") ? [index + 1] : []);
+      expect(renderedPages).toContain(5);
+    });
+  });
+
   it("updates the compile log from progress events before compilation completes", async () => {
     mockProjectFiles();
     const source = "\\documentclass{article}\n\\begin{document}\nBody text\n\\end{document}";
@@ -1037,7 +1074,7 @@ describe("Typeset start page", () => {
     expect(within(compiledVisual).getByText(/Slide 1 \/ 2/)).toBeTruthy();
     expect(within(compiledVisual).getByRole("button", { name: "Fit slide to canvas" })).toBeTruthy();
     expect(within(compiledVisual).getByRole("button", { name: "Edit slide source" })).toBeTruthy();
-    const deck = within(compiledVisual).getByRole("navigation", { name: "幻灯片大纲" });
+    const deck = within(compiledVisual).getByRole("navigation", { name: "Slide outline" });
     expect(within(deck).getByRole("button", { name: "Open slide 1: Motivation" }).getAttribute("aria-current")).toBe("page");
     expect(within(deck).getByRole("button", { name: "Open slide 2: Method" })).toBeTruthy();
 
@@ -1055,9 +1092,9 @@ describe("Typeset start page", () => {
     fireEvent.keyDown(slideCanvas, { key: "ArrowLeft" });
     await waitFor(() => expect(navigation.textContent).toContain("Slide 1 / 2"));
     fireEvent.click(within(compiledVisual).getByRole("button", { name: "Hide slide list" }));
-    expect(within(compiledVisual).queryByRole("navigation", { name: "幻灯片大纲" })).toBeNull();
+    expect(within(compiledVisual).queryByRole("navigation", { name: "Slide outline" })).toBeNull();
     fireEvent.click(within(compiledVisual).getByRole("button", { name: "Show slide list" }));
-    expect(within(compiledVisual).getByRole("navigation", { name: "幻灯片大纲" })).toBeTruthy();
+    expect(within(compiledVisual).getByRole("navigation", { name: "Slide outline" })).toBeTruthy();
 
     fireEvent.click(within(compiledVisual).getByRole("button", { name: "Exit slide focus" }));
     expect(await screen.findByRole("region", { name: "PDF preview" })).toBeTruthy();
@@ -2348,7 +2385,7 @@ describe("Typeset start page", () => {
     await waitForSourceOpen(container, "paper.tex");
     fireEvent.click(screen.getByRole("tab", { name: "Code" }));
 
-    const outline = screen.getByLabelText("文档大纲");
+    const outline = screen.getByLabelText("Document outline");
     fireEvent.click(within(outline).getByRole("button", { name: /Method/ }));
 
     const expectedOffset = source.indexOf("\\section{Method}");
@@ -2380,7 +2417,7 @@ describe("Typeset start page", () => {
     fireEvent.click(await screen.findByText("paper.tex"));
     await waitForSourceOpen(container, "paper.tex");
 
-    const outline = screen.getByLabelText("文档大纲");
+    const outline = screen.getByLabelText("Document outline");
     // The \chapter[Short]{Full} form (previously dropped) is recognized and, as
     // the shallowest heading, renders flush-left; deeper headings step inward.
     const chapter = within(outline).getByRole("button", { name: /Introduction to the field/ });
@@ -2415,7 +2452,7 @@ describe("Typeset start page", () => {
     await waitForSourceOpen(container, "paper.tex");
     fireEvent.click(screen.getByRole("button", { name: "Exit slide focus" }));
 
-    const outline = screen.getByLabelText("文档大纲");
+    const outline = screen.getByLabelText("Document outline");
     expect(within(outline).getByRole("button", { name: /Intro/ })).toBeTruthy();
     const method = within(outline).getByRole("button", { name: /Method/ });
     fireEvent.click(method);
@@ -2476,7 +2513,7 @@ describe("Typeset start page", () => {
     await waitForSourceOpen(container, "paper.tex");
 
     const outline = container.querySelector<HTMLElement>(".typeset-outline");
-    const divider = screen.getByRole("separator", { name: "调整大纲大小" });
+    const divider = screen.getByRole("separator", { name: "Resize outline" });
     expect(outline?.style.flexBasis).toBe("33.333%");
     expect(outline?.style.flexShrink).toBe("1");
 
@@ -2489,12 +2526,12 @@ describe("Typeset start page", () => {
     });
 
     fireEvent.pointerUp(window, { pointerType: "mouse", clientY: 240 });
-    fireEvent.click(screen.getByRole("button", { name: "隐藏大纲" }));
+    fireEvent.click(screen.getByRole("button", { name: "Hide outline" }));
 
     await waitFor(() => expect(container.querySelector(".typeset-outline")).toBeNull());
-    expect(screen.getByRole("button", { name: /大纲/ })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /Outline/ })).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("button", { name: /大纲/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Outline/ }));
     await waitFor(() => expect(container.querySelector<HTMLElement>(".typeset-outline")?.style.flexBasis).toBe("244px"));
   });
 
@@ -2509,7 +2546,7 @@ describe("Typeset start page", () => {
     await waitForSourceOpen(container, "paper.tex");
 
     const outline = container.querySelector<HTMLElement>(".typeset-outline.empty");
-    const divider = screen.getByRole("separator", { name: "调整大纲大小" });
+    const divider = screen.getByRole("separator", { name: "Resize outline" });
     expect(outline?.style.flexBasis).toBe("33.333%");
 
     fireEvent.pointerDown(divider, { button: 0, pointerType: "mouse", clientY: 300 });

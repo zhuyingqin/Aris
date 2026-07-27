@@ -25,6 +25,7 @@ import {
   isTauri,
 } from "../api/tauri";
 import { useStore } from "../store";
+import type { Language } from "../store";
 import type {
   MailAccount,
   MailDraft,
@@ -32,6 +33,7 @@ import type {
   MailMessageFull,
   MailMessageSummary,
 } from "../types";
+import { MAIL_INBOX_COPY, type MailCopy } from "./i18n";
 import "./Mail.css";
 
 const FOLDER_ORDER = [
@@ -163,13 +165,17 @@ const ICON_PATHS: Record<IconName, string> = {
     "M6 19a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V7H6v12zM8 4l1-1h6l1 1h3v2H5V4h3z",
 };
 
-const NAV_FALLBACKS: Array<{ id: string; kind: string; name: string; unreadCount: number }> = [
-  { id: "INBOX", kind: "inbox", name: "收件箱", unreadCount: 0 },
-  { id: "sent", kind: "sent", name: "已发送", unreadCount: 0 },
-  { id: "drafts", kind: "drafts", name: "草稿", unreadCount: 0 },
-  { id: "archive", kind: "archive", name: "已归档", unreadCount: 0 },
-  { id: "spam", kind: "spam", name: "垃圾邮件", unreadCount: 0 },
-];
+function navFallbacks(
+  copy: MailCopy,
+): Array<{ id: string; kind: string; name: string; unreadCount: number }> {
+  return [
+    { id: "INBOX", kind: "inbox", name: copy.folderLabels.inbox, unreadCount: 0 },
+    { id: "sent", kind: "sent", name: copy.folderLabels.sent, unreadCount: 0 },
+    { id: "drafts", kind: "drafts", name: copy.folderLabels.drafts, unreadCount: 0 },
+    { id: "archive", kind: "archive", name: copy.folderLabels.archive, unreadCount: 0 },
+    { id: "spam", kind: "spam", name: copy.folderLabels.spam, unreadCount: 0 },
+  ];
+}
 
 const AVATAR_COLORS = [
   "#2563eb",
@@ -193,128 +199,29 @@ interface ComposeState {
 
 const EMPTY_COMPOSE: ComposeState = { to: "", cc: "", subject: "", body: "" };
 
-const PREVIEW_ACCOUNT: MailAccount = {
-  id: "preview-account",
-  provider: "imap",
-  email: "preview.mail@aris.local",
-  displayName: "浏览器预览邮箱",
-  connected: true,
-};
+const PREVIEW_ACCOUNT_ID = "preview-account";
+const PREVIEW_ACCOUNT_EMAIL = "preview.mail@aris.local";
 
-const PREVIEW_FOLDERS: MailFolder[] = [
-  { id: "INBOX", kind: "inbox", name: "收件箱", unreadCount: 3 },
-  { id: "sent", kind: "sent", name: "已发送", unreadCount: 0 },
-  { id: "drafts", kind: "drafts", name: "草稿", unreadCount: 1 },
-  { id: "archive", kind: "archive", name: "已归档", unreadCount: 0 },
-  { id: "trash", kind: "trash", name: "已删除", unreadCount: 0 },
-  { id: "important", kind: "important", name: "重要邮件", unreadCount: 1 },
-];
+function previewAccount(copy: MailCopy): MailAccount {
+  return {
+    id: PREVIEW_ACCOUNT_ID,
+    provider: "imap",
+    email: PREVIEW_ACCOUNT_EMAIL,
+    displayName: copy.demo.accountDisplayName,
+    connected: true,
+  };
+}
 
-const PREVIEW_MESSAGES: MailMessageSummary[] = [
-  {
-    id: "preview-1",
-    threadId: "preview-thread-1",
-    from: "lin.xiaoman@example.com",
-    fromName: "林小满",
-    to: PREVIEW_ACCOUNT.email,
-    subject: "Q3 合作项目进度同步",
-    snippet: "项目里程碑已经完成，市场调研报告也已确认，想同步一下下周安排。",
-    date: "2026-06-18T09:28:00-05:00",
-    unread: true,
-    starred: true,
-    hasAttachments: true,
-    labels: ["重要", "客户"],
-  },
-  {
-    id: "preview-2",
-    threadId: "preview-thread-2",
-    from: "security@example.com",
-    fromName: "安全通知",
-    to: PREVIEW_ACCOUNT.email,
-    subject: "登录安全提醒",
-    snippet: "检测到新设备登录，如果不是你本人操作，请尽快检查账号安全。",
-    date: "2026-06-18T08:05:00-05:00",
-    unread: true,
-    starred: false,
-    hasAttachments: false,
-    labels: [],
-  },
-  {
-    id: "preview-3",
-    threadId: "preview-thread-3",
-    from: "ops@example.com",
-    fromName: "运营团队",
-    to: PREVIEW_ACCOUNT.email,
-    subject: "本周上线清单确认",
-    snippet: "请确认邮件模块、项目设置和会话列表三项改动的上线顺序。",
-    date: "2026-06-17T17:40:00-05:00",
-    unread: false,
-    starred: false,
-    hasAttachments: false,
-    labels: ["内部"],
-  },
-  {
-    id: "preview-4",
-    threadId: "preview-thread-4",
-    from: "newsletter@example.com",
-    fromName: "产品更新",
-    to: PREVIEW_ACCOUNT.email,
-    subject: "6 月产品更新摘要",
-    snippet: "这封示例邮件用于浏览器端测试归档、删除和阅读布局。",
-    date: "2026-06-16T13:10:00-05:00",
-    unread: false,
-    starred: false,
-    hasAttachments: false,
-    labels: [],
-  },
-];
-
-const PREVIEW_FULL_MESSAGES: Record<string, MailMessageFull> = {
-  "preview-1": {
-    ...PREVIEW_MESSAGES[0],
-    cc: "team@example.com",
-    bodyHtml: null,
-    bodyText:
-      "你好，\n\nQ3 合作项目的关键里程碑已经完成，市场调研报告也已确认。\n\n需要你确认三件事：\n1. 下周二的项目对齐会是否照常进行；\n2. 是否需要把附件里的预算表同步给财务；\n3. 对外邮件是否按当前版本发送。\n\n谢谢。",
-    attachments: [
-      {
-        id: "preview-attachment-1",
-        filename: "Q3项目计划.xlsx",
-        mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        size: 1184000,
-      },
-      {
-        id: "preview-attachment-2",
-        filename: "市场调研报告.pdf",
-        mimeType: "application/pdf",
-        size: 2432000,
-      },
-    ],
-  },
-  "preview-2": {
-    ...PREVIEW_MESSAGES[1],
-    cc: "",
-    bodyHtml:
-      "<main style='font-family:Arial,sans-serif;line-height:1.7;color:#202124;max-width:680px;margin:0 auto;padding:28px'><h2>登录安全提醒</h2><p>我们检测到你的账号从一台新设备登录。</p><p>如果这是你本人操作，可以忽略这封邮件；如果不是，请尽快修改密码并检查安全设置。</p><p><a href='#' style='display:inline-block;background:#111827;color:white;padding:10px 16px;border-radius:6px;text-decoration:none'>查看活动</a></p></main>",
-    bodyText: "我们检测到你的账号从一台新设备登录。如果不是你本人操作，请尽快检查账号安全。",
-    attachments: [],
-  },
-  "preview-3": {
-    ...PREVIEW_MESSAGES[2],
-    cc: "",
-    bodyHtml: null,
-    bodyText:
-      "本周上线清单请确认：\n\n- 邮件模块浏览器预览数据\n- 邮件阅读区回复交互\n- 删除和归档的乐观更新\n\n确认后我会安排打包。",
-    attachments: [],
-  },
-  "preview-4": {
-    ...PREVIEW_MESSAGES[3],
-    cc: "",
-    bodyHtml: null,
-    bodyText: "这是一封用于浏览器预览的示例邮件，方便验证空状态、阅读区和列表操作。",
-    attachments: [],
-  },
-};
+function previewFolders(copy: MailCopy): MailFolder[] {
+  return [
+    { id: "INBOX", kind: "inbox", name: copy.folderLabels.inbox, unreadCount: 3 },
+    { id: "sent", kind: "sent", name: copy.folderLabels.sent, unreadCount: 0 },
+    { id: "drafts", kind: "drafts", name: copy.folderLabels.drafts, unreadCount: 1 },
+    { id: "archive", kind: "archive", name: copy.folderLabels.archive, unreadCount: 0 },
+    { id: "trash", kind: "trash", name: copy.folderLabels.trash, unreadCount: 0 },
+    { id: "important", kind: "important", name: copy.folderLabels.important, unreadCount: 1 },
+  ];
+}
 
 interface MailViewCache {
   accounts: MailAccount[];
@@ -350,11 +257,11 @@ function mailListKey(accountId: string, folder: string, query: string): string {
   return `${accountId}\n${folder}\n${query.trim()}`;
 }
 
-function previewMessagesFor(folder: string, query: string): MailMessageSummary[] {
+function previewMessagesFor(folder: string, query: string, copy: MailCopy): MailMessageSummary[] {
   const lowerQuery = query.trim().toLowerCase();
   if (folder !== "INBOX" && folder !== "important") return [];
-  return PREVIEW_MESSAGES.filter((message) => {
-    const inFolder = folder !== "important" || message.labels.includes("重要");
+  return copy.demo.messages.filter((message) => {
+    const inFolder = folder !== "important" || message.labels.includes(copy.demo.importantLabel);
     const matchesQuery =
       !lowerQuery ||
       `${message.fromName} ${message.from} ${message.subject} ${message.snippet}`
@@ -377,18 +284,19 @@ function folderRank(kind: string): number {
   return index === -1 ? FOLDER_ORDER.length : index;
 }
 
-function formatDate(raw: string): string {
+function formatDate(raw: string, language: Language): string {
   if (!raw) return "";
   const parsed = new Date(raw);
   if (Number.isNaN(parsed.getTime())) return raw;
+  const locale = language === "en" ? "en-US" : "zh-CN";
   const now = new Date();
   if (parsed.toDateString() === now.toDateString()) {
-    return parsed.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
+    return parsed.toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit" });
   }
   if (parsed.getFullYear() === now.getFullYear()) {
-    return parsed.toLocaleDateString("zh-CN", { month: "short", day: "numeric" });
+    return parsed.toLocaleDateString(locale, { month: "short", day: "numeric" });
   }
-  return parsed.toLocaleDateString("zh-CN", {
+  return parsed.toLocaleDateString(locale, {
     year: "numeric",
     month: "short",
     day: "numeric",
@@ -470,7 +378,7 @@ function PaneResizer({
   );
 }
 
-function folderMeta(folder: MailFolder): { label: string; icon: IconName } {
+function folderMeta(folder: MailFolder, copy: MailCopy): { label: string; icon: IconName } {
   const raw = folder.name.replace(/^\[Gmail\][\\/]?/i, "").trim();
   // User-created labels (Gmail surfaces these with kind "custom") keep their
   // own name. Only system folders get normalized to localized labels —
@@ -480,14 +388,14 @@ function folderMeta(folder: MailFolder): { label: string; icon: IconName } {
     return { label: raw || folder.name, icon: "label" };
   }
   const key = `${folder.kind} ${raw}`.toLowerCase();
-  if (/inbox|收件/.test(key)) return { label: "收件箱", icon: "inbox" };
-  if (/sent|已发送|发件/.test(key)) return { label: "已发送", icon: "send" };
-  if (/draft|草稿/.test(key)) return { label: "草稿", icon: "drafts" };
-  if (/archive|归档|all mail|所有邮件/.test(key)) return { label: "已归档", icon: "archive" };
-  if (/spam|junk|垃圾/.test(key)) return { label: "垃圾邮件", icon: "spam" };
-  if (/trash|deleted|bin|已删除/.test(key)) return { label: "已删除", icon: "trash" };
-  if (/starred|星标/.test(key)) return { label: "星标邮件", icon: "star" };
-  if (/important|重要/.test(key)) return { label: "重要邮件", icon: "label" };
+  if (/inbox|\u6536\u4ef6/.test(key)) return { label: copy.folderLabels.inbox, icon: "inbox" };
+  if (/sent|\u5df2\u53d1\u9001|\u53d1\u4ef6/.test(key)) return { label: copy.folderLabels.sent, icon: "send" };
+  if (/draft|\u8349\u7a3f/.test(key)) return { label: copy.folderLabels.drafts, icon: "drafts" };
+  if (/archive|\u5f52\u6863|all mail|\u6240\u6709\u90ae\u4ef6/.test(key)) return { label: copy.folderLabels.archive, icon: "archive" };
+  if (/spam|junk|\u5783\u573e/.test(key)) return { label: copy.folderLabels.spam, icon: "spam" };
+  if (/trash|deleted|bin|\u5df2\u5220\u9664/.test(key)) return { label: copy.folderLabels.trash, icon: "trash" };
+  if (/starred|\u661f\u6807/.test(key)) return { label: copy.folderLabels.starred, icon: "star" };
+  if (/important|\u91cd\u8981/.test(key)) return { label: copy.folderLabels.important, icon: "label" };
   return { label: raw || folder.name, icon: "label" };
 }
 
@@ -595,61 +503,71 @@ function cleanSnippet(snippet?: string | null): string {
   return looksLikeMailArtifact(value) ? "" : value;
 }
 
-function replySubject(message: MailMessageFull): string {
-  const subject = fullTitle(message);
+function replySubject(message: MailMessageFull, copy: MailCopy): string {
+  const subject = fullTitle(message, copy);
   return /^re:/i.test(subject) ? subject : `Re: ${subject}`;
 }
 
-function forwardSubject(message: MailMessageFull): string {
-  const subject = fullTitle(message);
+function forwardSubject(message: MailMessageFull, copy: MailCopy): string {
+  const subject = fullTitle(message, copy);
   return /^fwd:/i.test(subject) ? subject : `Fwd: ${subject}`;
 }
 
-function quotedBody(message: MailMessageFull): string {
+function quotedBody(message: MailMessageFull, copy: MailCopy, language: Language): string {
   const sender = message.fromName || message.from;
-  const body = message.bodyText || "这封邮件没有正文。";
-  return `\n\n---------- 转发邮件 ----------\n发件人：${sender} <${message.from}>\n日期：${formatDate(message.date)}\n主题：${fullTitle(message)}\n\n${body}`;
+  const body = message.bodyText || copy.noBodyText;
+  return copy.quotedBodyTemplate(
+    sender,
+    message.from,
+    formatDate(message.date, language),
+    fullTitle(message, copy),
+    body,
+  );
 }
 
-function summaryTitle(message: MailMessageSummary): string {
-  return cleanSubject(message.subject) || cleanSnippet(message.snippet) || "无标题邮件";
+function summaryTitle(message: MailMessageSummary, copy: MailCopy): string {
+  return cleanSubject(message.subject) || cleanSnippet(message.snippet) || copy.noTitleMail;
 }
 
-function fullTitle(message: MailMessageFull): string {
-  return cleanSubject(message.subject) || "无标题邮件";
+function fullTitle(message: MailMessageFull, copy: MailCopy): string {
+  return cleanSubject(message.subject) || copy.noTitleMail;
 }
 
 export default function Mail() {
   const setGlobalError = useStore((s) => s.setError);
   const setTab = useStore((s) => s.setTab);
+  const language = useStore((s) => s.language);
+  const copy = MAIL_INBOX_COPY[language];
   const previewMode = !isTauri();
 
   if (previewMode && MAIL_VIEW_CACHE.accounts.length === 0) {
-    MAIL_VIEW_CACHE.accounts = [PREVIEW_ACCOUNT];
-    MAIL_VIEW_CACHE.accountId = PREVIEW_ACCOUNT.id;
-    MAIL_VIEW_CACHE.folders = PREVIEW_FOLDERS;
+    MAIL_VIEW_CACHE.accounts = [previewAccount(copy)];
+    MAIL_VIEW_CACHE.accountId = PREVIEW_ACCOUNT_ID;
+    MAIL_VIEW_CACHE.folders = previewFolders(copy);
     MAIL_VIEW_CACHE.folder = "INBOX";
-    MAIL_VIEW_CACHE.messages = previewMessagesFor("INBOX", "");
-    MAIL_VIEW_CACHE.listKey = mailListKey(PREVIEW_ACCOUNT.id, "INBOX", "");
+    MAIL_VIEW_CACHE.messages = previewMessagesFor("INBOX", "", copy);
+    MAIL_VIEW_CACHE.listKey = mailListKey(PREVIEW_ACCOUNT_ID, "INBOX", "");
   }
 
   const [accounts, setAccounts] = useState<MailAccount[]>(() =>
     previewMode && MAIL_VIEW_CACHE.accounts.length === 0
-      ? [PREVIEW_ACCOUNT]
+      ? [previewAccount(copy)]
       : MAIL_VIEW_CACHE.accounts,
   );
   const [accountId, setAccountId] = useState(() =>
-    previewMode && !MAIL_VIEW_CACHE.accountId ? PREVIEW_ACCOUNT.id : MAIL_VIEW_CACHE.accountId,
+    previewMode && !MAIL_VIEW_CACHE.accountId ? PREVIEW_ACCOUNT_ID : MAIL_VIEW_CACHE.accountId,
   );
   const [folders, setFolders] = useState<MailFolder[]>(() =>
     previewMode && MAIL_VIEW_CACHE.folders.length === 0
-      ? PREVIEW_FOLDERS
+      ? previewFolders(copy)
       : MAIL_VIEW_CACHE.folders,
   );
   const [folder, setFolder] = useState(() => MAIL_VIEW_CACHE.folder || "INBOX");
   const [messages, setMessages] = useState<MailMessageSummary[]>(() => {
     if (MAIL_VIEW_CACHE.messages.length > 0) return MAIL_VIEW_CACHE.messages;
-    return previewMode ? previewMessagesFor(MAIL_VIEW_CACHE.folder || "INBOX", MAIL_VIEW_CACHE.query) : [];
+    return previewMode
+      ? previewMessagesFor(MAIL_VIEW_CACHE.folder || "INBOX", MAIL_VIEW_CACHE.query, copy)
+      : [];
   });
   const [nextPageToken, setNextPageToken] = useState<string | null>(() => MAIL_VIEW_CACHE.nextPageToken);
   const [selectedId, setSelectedId] = useState(() => MAIL_VIEW_CACHE.selectedId);
@@ -683,9 +601,9 @@ export default function Mail() {
   const connected = useMemo(() => accounts.filter((account) => account.connected), [accounts]);
   const activeAccount = connected.find((account) => account.id === accountId) ?? connected[0];
   const sortedFolders = useMemo(() => {
-    const source = folders.length > 0 ? folders : (NAV_FALLBACKS as MailFolder[]);
+    const source = folders.length > 0 ? folders : (navFallbacks(copy) as MailFolder[]);
     return [...source].sort((a, b) => folderRank(a.kind) - folderRank(b.kind));
-  }, [folders]);
+  }, [folders, copy]);
   const activeFolder = useMemo(
     () => sortedFolders.find((item) => item.id === folder),
     [folder, sortedFolders],
@@ -731,9 +649,9 @@ export default function Mail() {
 
   useEffect(() => {
     if (previewMode) {
-      setAccounts([PREVIEW_ACCOUNT]);
-      setAccountId(PREVIEW_ACCOUNT.id);
-      setFolders(PREVIEW_FOLDERS);
+      setAccounts([previewAccount(copy)]);
+      setAccountId(PREVIEW_ACCOUNT_ID);
+      setFolders(previewFolders(copy));
       setFolder("INBOX");
       setLoadingAccounts(false);
       return;
@@ -747,7 +665,7 @@ export default function Mail() {
       })
       .catch(fail)
       .finally(() => setLoadingAccounts(false));
-  }, [fail, previewMode]);
+  }, [copy, fail, previewMode]);
 
   useEffect(() => {
     if (!accountId) return;
@@ -776,7 +694,7 @@ export default function Mail() {
       setLoadingList(!hasWarmList);
       setError(null);
       if (previewMode) {
-        const visible = previewMessagesFor(folder, query);
+        const visible = previewMessagesFor(folder, query, copy);
         MAIL_VIEW_CACHE.listKey = listKey;
         setMessages((prev) => (reset ? visible : [...prev, ...visible]));
         setNextPageToken(null);
@@ -796,7 +714,7 @@ export default function Mail() {
           setLoadingList(false);
         });
     },
-    [accountId, fail, folder, nextPageToken, previewMode, query],
+    [accountId, copy, fail, folder, nextPageToken, previewMode, query],
   );
 
   const handleMessageListScroll = useCallback(
@@ -866,9 +784,9 @@ export default function Mail() {
       setError(null);
       if (previewMode) {
         window.setTimeout(() => {
-          const full = PREVIEW_FULL_MESSAGES[summary.id];
+          const full = copy.demo.fullMessages[summary.id];
           if (!full) {
-            setError("浏览器示例数据中没有找到这封邮件。");
+            setError(copy.notFoundInPreview);
             setLoadingMessage(false);
             return;
           }
@@ -911,7 +829,7 @@ export default function Mail() {
         .catch(fail)
         .finally(() => setLoadingMessage(false));
     },
-    [accountId, fail, folder, previewMode],
+    [accountId, copy, fail, folder, previewMode],
   );
 
   const applyMessagePatch = useCallback(
@@ -999,8 +917,8 @@ export default function Mail() {
       <div className="agent-mail-empty">
         <div className="agent-mail-empty-card">
           <img src={arisIcon} alt="" decoding="async" />
-          <h2>正在打开邮箱</h2>
-          <p>正在读取已连接账号和文件夹，请稍等。</p>
+          <h2>{copy.loadingMailboxTitle}</h2>
+          <p>{copy.loadingMailboxDesc}</p>
         </div>
       </div>
     );
@@ -1011,14 +929,10 @@ export default function Mail() {
       <div className="agent-mail-empty">
         <div className="agent-mail-empty-card">
           <img src={arisIcon} alt="" decoding="async" />
-          <h2>{previewMode ? "浏览器预览无法读取邮箱" : "连接一个邮箱账号"}</h2>
-          <p>
-            {previewMode
-              ? "当前页面运行在 Vite 浏览器预览中，没有桌面端邮箱后端。请在 SomniQ 桌面应用的 Mail 标签查看真实 Gmail/IMAP/Outlook 内容。"
-              : "添加 IMAP、Gmail 或 Outlook 账号后，SomniQ Mail 会在这里展示真实收件箱、阅读区和邮件助手。"}
-          </p>
+          <h2>{previewMode ? copy.previewNoMailboxTitle : copy.connectMailboxTitle}</h2>
+          <p>{previewMode ? copy.previewNoMailboxDesc : copy.connectMailboxDesc}</p>
           <button className="am-primary" onClick={() => setTab("settings")}>
-            打开邮箱设置
+            {copy.openMailSettings}
           </button>
           {error && <div className="am-error">{error}</div>}
         </div>
@@ -1036,14 +950,14 @@ export default function Mail() {
 
         <button className="am-compose" onClick={() => setCompose(EMPTY_COMPOSE)}>
           <Icon name="edit" />
-          <span>写邮件</span>
+          <span>{copy.compose}</span>
           <span className="am-compose-split" />
           <Icon name="chevronDown" size={18} />
         </button>
 
-        <nav className="am-folder-list" aria-label="邮箱文件夹">
+        <nav className="am-folder-list" aria-label={copy.folderNavAriaLabel}>
           {sortedFolders.map((item) => {
-            const meta = folderMeta(item);
+            const meta = folderMeta(item, copy);
             const isActive = item.id === folder;
             return (
               <button
@@ -1060,30 +974,34 @@ export default function Mail() {
           })}
           <button className="am-folder soft" type="button">
             <Icon name="settings" />
-            <span>设置</span>
+            <span>{copy.settingsNav}</span>
           </button>
         </nav>
 
         <div className="am-sidebar-card am-overview-card">
-          <div className="am-card-kicker">邮箱概览</div>
+          <div className="am-card-kicker">{copy.overviewKicker}</div>
           <div className="am-overview-grid">
             <span>
               <strong>{unreadTotal(folders)}</strong>
-              未读
+              {copy.unreadLabel}
             </span>
             <span>
               <strong>{folders.length}</strong>
-              文件夹
+              {copy.foldersLabel}
             </span>
           </div>
-          <p>{activeFolder ? `${folderMeta(activeFolder).label}：${messages.length} 封已加载` : "选择文件夹查看邮件。"}</p>
+          <p>
+            {activeFolder
+              ? copy.overviewSummary(folderMeta(activeFolder, copy).label, messages.length)
+              : copy.overviewSummaryEmpty}
+          </p>
         </div>
 
         <div className="am-assist-note">
           <Icon name="bot" size={18} />
           <div>
-            <strong>邮件助手</strong>
-            <span>选择邮件后显示上下文操作。</span>
+            <strong>{copy.assistantTitle}</strong>
+            <span>{copy.assistantSidebarDesc}</span>
           </div>
         </div>
 
@@ -1112,33 +1030,33 @@ export default function Mail() {
         <header className="am-topbar">
           <button className="am-compose-top" type="button" onClick={() => setCompose(EMPTY_COMPOSE)}>
             <Icon name="edit" size={18} />
-            <span>写邮件</span>
+            <span>{copy.compose}</span>
           </button>
           <form className="am-search" onSubmit={submitSearch}>
-            <button type="submit" aria-label="搜索">
+            <button type="submit" aria-label={copy.searchAriaLabel}>
               <Icon name="search" size={18} />
             </button>
             <input
               value={searchInput}
-              placeholder="搜索邮件、联系人或关键词"
+              placeholder={copy.searchPlaceholder}
               onChange={(event) => setSearchInput(event.target.value)}
             />
             <kbd>Cmd+K</kbd>
           </form>
-          {previewMode && <span className="am-preview-badge">浏览器示例数据</span>}
+          {previewMode && <span className="am-preview-badge">{copy.previewBadge}</span>}
           <div className="am-top-actions">
             <button
               className={assistantOpen ? "active" : ""}
-              title={assistantOpen ? "关闭邮箱助手" : "打开邮箱助手"}
-              aria-label={assistantOpen ? "关闭邮箱助手" : "打开邮箱助手"}
+              title={copy.toggleAssistant(assistantOpen)}
+              aria-label={copy.toggleAssistant(assistantOpen)}
               onClick={() => setAssistantOpen((value) => !value)}
             >
               <Icon name="bot" />
             </button>
-            <button title="通知" aria-label="通知">
+            <button title={copy.notifications} aria-label={copy.notifications}>
               <Icon name="bell" />
             </button>
-            <button title="帮助" aria-label="帮助">
+            <button title={copy.help} aria-label={copy.help}>
               <Icon name="help" />
             </button>
             <Avatar
@@ -1161,11 +1079,13 @@ export default function Mail() {
         >
           <section className="am-list-pane">
             <div className="am-list-tabs">
-              <button className="active">{activeFolder ? folderMeta(activeFolder).label : "邮件"}</button>
-              <span className="am-list-count">{messages.length} 封</span>
-              <button className="am-filter" title="刷新" onClick={() => loadList(true)}>
+              <button className="active">
+                {activeFolder ? folderMeta(activeFolder, copy).label : copy.folderLabels.genericMail}
+              </button>
+              <span className="am-list-count">{copy.mailCountSuffix(messages.length)}</span>
+              <button className="am-filter" title={copy.refresh} onClick={() => loadList(true)}>
                 <Icon name="refresh" size={18} />
-                刷新
+                {copy.refresh}
               </button>
             </div>
 
@@ -1186,14 +1106,14 @@ export default function Mail() {
               {messages.length === 0 && !loadingList && (
                 <div className="am-list-empty">
                   <Icon name="inbox" size={42} />
-                  <strong>{query ? "没有匹配的邮件" : "这个文件夹是空的"}</strong>
-                  <span>{query ? "换个关键词再试试。" : "新邮件到达后会显示在这里。"}</span>
+                  <strong>{query ? copy.noMatchingMail : copy.emptyFolder}</strong>
+                  <span>{query ? copy.tryDifferentKeyword : copy.newMailHint}</span>
                 </div>
               )}
-              {loadingList && <div className="am-loading">正在加载邮件...</div>}
+              {loadingList && <div className="am-loading">{copy.loadingMail}</div>}
               {nextPageToken && !loadingList && (
                 <button className="am-load-more" onClick={() => loadList(false)}>
-                  查看更多邮件
+                  {copy.loadMore}
                 </button>
               )}
             </div>
@@ -1202,7 +1122,7 @@ export default function Mail() {
           <PaneResizer
             value={listWidth}
             onChange={setListWidth}
-            label="调整邮件列表宽度"
+            label={copy.resizeListLabel}
           />
 
           <ReadingView
@@ -1224,7 +1144,7 @@ export default function Mail() {
                 value={assistantWidth}
                 invert
                 onChange={setAssistantWidth}
-                label="调整邮件助手宽度"
+                label={copy.resizeAssistantLabel}
               />
               <AssistantPanel
                 open={open}
@@ -1261,6 +1181,8 @@ function MessageRow({
   onOpen: () => void;
   onStar: () => void;
 }) {
+  const language = useStore((s) => s.language);
+  const copy = MAIL_INBOX_COPY[language];
   return (
     <article
       className={`am-message-row${active ? " active" : ""}${message.unread ? " unread" : ""}`}
@@ -1275,22 +1197,22 @@ function MessageRow({
       <div className="am-message-main">
         <div className="am-message-head">
           <strong>{message.fromName || message.from}</strong>
-          <time>{formatDate(message.date)}</time>
+          <time>{formatDate(message.date, language)}</time>
         </div>
         <div className={`am-message-subject${cleanSubject(message.subject) ? "" : " empty"}`}>
-          {summaryTitle(message)}
+          {summaryTitle(message, copy)}
         </div>
-        <p>{cleanSnippet(message.snippet) || "这封邮件没有预览内容。"}</p>
+        <p>{cleanSnippet(message.snippet) || copy.noPreviewContent}</p>
       </div>
       <div className="am-message-badges">
         {message.hasAttachments && <Icon name="paperclip" size={16} />}
-        {message.unread && <span className="blue">未读</span>}
+        {message.unread && <span className="blue">{copy.unreadBadge}</span>}
         {visibleLabels(message.labels).map((label) => (
           <span key={label}>{label}</span>
         ))}
         <button
           className={`am-star${message.starred ? " on" : ""}`}
-          title={message.starred ? "取消星标" : "添加星标"}
+          title={copy.toggleStar(message.starred)}
           onClick={(event) => {
             event.stopPropagation();
             onStar();
@@ -1318,6 +1240,8 @@ function ReadingView({
   onBack: () => void;
   onPatch: (id: string, patch: Parameters<typeof mailModify>[2], remove: boolean) => void;
 }) {
+  const language = useStore((s) => s.language);
+  const copy = MAIL_INBOX_COPY[language];
   const [replyOpen, setReplyOpen] = useState(false);
   const [replyText, setReplyText] = useState("");
   const [replyMode, setReplyMode] = useState<"reply" | "replyAll">("reply");
@@ -1336,7 +1260,7 @@ function ReadingView({
     return (
       <section className="am-reading-pane">
         <Toolbar onBack={onBack} />
-        <div className="am-reading-empty">正在打开邮件...</div>
+        <div className="am-reading-empty">{copy.openingMail}</div>
       </section>
     );
   }
@@ -1347,8 +1271,8 @@ function ReadingView({
         <Toolbar onBack={onBack} />
         <div className="am-reading-empty">
           <Icon name="markUnread" size={52} />
-          <strong>{activeFolder ? folderMeta(activeFolder).label : "收件箱"}</strong>
-          <span>从左侧选择一封邮件开始处理。</span>
+          <strong>{activeFolder ? folderMeta(activeFolder, copy).label : copy.folderLabels.inbox}</strong>
+          <span>{copy.selectMailPrompt}</span>
         </div>
       </section>
     );
@@ -1364,19 +1288,18 @@ function ReadingView({
     onCompose({
       to: "",
       cc: "",
-      subject: forwardSubject(open),
-      body: quotedBody(open),
+      subject: forwardSubject(open, copy),
+      body: quotedBody(open, copy, language),
     });
     setMenuOpen(null);
-    setNotice("已打开转发邮件窗口。");
+    setNotice(copy.forwardOpenedNotice);
   };
   const handleSnooze = () => {
     onPatch(open.id, { unread: true }, false);
     setMenuOpen(null);
-    setNotice("已标记为稍后处理。");
+    setNotice(copy.snoozeNotice);
   };
-  const replyPlaceholder =
-    replyMode === "replyAll" ? "快速回复所有收件人..." : "快速回复...";
+  const replyPlaceholder = copy.quickReplyPlaceholder(replyMode === "replyAll");
 
   return (
     <section className="am-reading-pane">
@@ -1391,9 +1314,9 @@ function ReadingView({
 
       <article className={`am-reading${replyOpen ? " reply-active" : ""}`}>
         <div className="am-subject-line">
-          <h1 className={cleanSubject(open.subject) ? "" : "empty"}>{fullTitle(open)}</h1>
-          {open.unread && <span className="tag blue">未读</span>}
-          {open.starred && <span className="tag amber">星标</span>}
+          <h1 className={cleanSubject(open.subject) ? "" : "empty"}>{fullTitle(open, copy)}</h1>
+          {open.unread && <span className="tag blue">{copy.unreadBadge}</span>}
+          {open.starred && <span className="tag amber">{copy.starredBadge}</span>}
           {visibleLabels(open.labels).map((label) => (
             <span className="tag neutral" key={label}>
               {label}
@@ -1401,7 +1324,7 @@ function ReadingView({
           ))}
           <button
             className={`am-star large${open.starred ? " on" : ""}`}
-            title={open.starred ? "取消星标" : "添加星标"}
+            title={copy.toggleStar(open.starred)}
             onClick={() => onPatch(open.id, { starred: !open.starred }, false)}
           >
             <Icon name={open.starred ? "star" : "starOutline"} />
@@ -1416,16 +1339,13 @@ function ReadingView({
           <div>
             <strong>{open.fromName || open.from}</strong>
             {open.fromName && <span>&lt;{open.from}&gt;</span>}
-            <small>
-              收件人：{open.to}
-              {open.cc ? `，抄送：${open.cc}` : ""}
-            </small>
+            <small>{copy.recipientsLine(open.to, open.cc)}</small>
           </div>
-          <time>{formatDate(open.date)}</time>
-          <button title="回复" onClick={() => startReply("reply")}>
+          <time>{formatDate(open.date, language)}</time>
+          <button title={copy.reply} onClick={() => startReply("reply")}>
             <Icon name="reply" size={18} />
           </button>
-          <button title="转发" onClick={startForward}>
+          <button title={copy.forward} onClick={startForward}>
             <Icon name="forward" size={18} />
           </button>
         </div>
@@ -1433,23 +1353,23 @@ function ReadingView({
         <div className="am-message-actions">
           <button onClick={() => startReply("reply")}>
             <Icon name="reply" size={18} />
-            回复
+            {copy.reply}
           </button>
           <button onClick={() => startReply("replyAll")}>
             <Icon name="replyAll" size={18} />
-            回复全部
+            {copy.replyAll}
           </button>
           <button onClick={startForward}>
             <Icon name="forward" size={18} />
-            转发
+            {copy.forward}
           </button>
           <button onClick={handleSnooze}>
             <Icon name="clock" size={18} />
-            稍后处理
+            {copy.snooze}
           </button>
           <div className="am-menu-wrap">
             <button
-              aria-label="更多邮件操作"
+              aria-label={copy.moreMailActionsAria}
               onClick={() => setMenuOpen((value) => (value === "message" ? null : "message"))}
             >
               <Icon name="more" size={18} />
@@ -1457,13 +1377,13 @@ function ReadingView({
             {menuOpen === "message" && (
               <div className="am-action-menu">
                 <button onClick={() => onPatch(open.id, { unread: !open.unread }, false)}>
-                  {open.unread ? "标为已读" : "标为未读"}
+                  {copy.toggleUnreadLabel(open.unread)}
                 </button>
                 <button onClick={() => onPatch(open.id, { starred: !open.starred }, false)}>
-                  {open.starred ? "取消星标" : "添加星标"}
+                  {copy.toggleStar(open.starred)}
                 </button>
-                <button onClick={() => onPatch(open.id, { archive: true }, true)}>归档</button>
-                <button onClick={() => onPatch(open.id, { trash: true }, true)}>删除</button>
+                <button onClick={() => onPatch(open.id, { archive: true }, true)}>{copy.archive}</button>
+                <button onClick={() => onPatch(open.id, { trash: true }, true)}>{copy.deleteAction}</button>
               </div>
             )}
           </div>
@@ -1476,10 +1396,10 @@ function ReadingView({
         {open.attachments.length > 0 && (
           <section className="am-attachments">
             <div className="am-section-title">
-              <span>附件（{open.attachments.length}）</span>
+              <span>{copy.attachmentsHeading(open.attachments.length)}</span>
               <div className="am-menu-wrap">
                 <button
-                  title="更多附件操作"
+                  title={copy.moreAttachmentActionsTitle}
                   onClick={() =>
                     setMenuOpen((value) => (value === "attachments" ? null : "attachments"))
                   }
@@ -1488,11 +1408,11 @@ function ReadingView({
                 </button>
                 {menuOpen === "attachments" && (
                   <div className="am-action-menu right">
-                    <button onClick={() => setNotice("附件预览会在桌面端下载能力接入后启用。")}>
-                      查看附件
+                    <button onClick={() => setNotice(copy.viewAttachmentNotice)}>
+                      {copy.viewAttachment}
                     </button>
-                    <button onClick={() => setNotice("附件下载会在桌面端下载能力接入后启用。")}>
-                      下载全部
+                    <button onClick={() => setNotice(copy.downloadAllNotice)}>
+                      {copy.downloadAll}
                     </button>
                   </div>
                 )}
@@ -1533,11 +1453,11 @@ function ReadingView({
                   event.preventDefault();
                   setReplyOpen(false);
                   setReplyText("");
-                  setNotice(replyMode === "replyAll" ? "已发送回复全部。" : "已发送回复。");
+                  setNotice(copy.replySentNotice(replyMode === "replyAll"));
                 }}
               >
                 <Icon name="send" size={16} />
-                发送
+                {copy.send}
               </button>
               <button
                 type="button"
@@ -1547,7 +1467,7 @@ function ReadingView({
                   setReplyText("");
                 }}
               >
-                取消
+                {copy.cancel}
               </button>
             </div>
           </div>
@@ -1572,43 +1492,45 @@ function Toolbar({
   menuOpen?: boolean;
   onToggleMenu?: () => void;
 }) {
+  const language = useStore((s) => s.language);
+  const copy = MAIL_INBOX_COPY[language];
   return (
     <div className="am-toolbar">
-      <button title="返回" onClick={onBack}>
+      <button title={copy.back} onClick={onBack}>
         <Icon name="back" size={18} />
-        返回
+        {copy.back}
       </button>
       <span />
-      <button title="归档" disabled={!onArchive} onClick={onArchive}>
+      <button title={copy.archive} disabled={!onArchive} onClick={onArchive}>
         <Icon name="archive" size={18} />
-        归档
+        {copy.archive}
       </button>
-      <button title="删除" disabled={!onTrash} onClick={onTrash}>
+      <button title={copy.deleteAction} disabled={!onTrash} onClick={onTrash}>
         <Icon name="trash" size={18} />
-        删除
+        {copy.deleteAction}
       </button>
-      <button title="标记" disabled={!onUnread} onClick={onUnread}>
+      <button title={copy.mark} disabled={!onUnread} onClick={onUnread}>
         <Icon name="markUnread" size={18} />
-        标记
+        {copy.mark}
       </button>
       <div className="am-menu-wrap">
-        <button title="更多" disabled={!onToggleMenu} onClick={onToggleMenu}>
+        <button title={copy.more} disabled={!onToggleMenu} onClick={onToggleMenu}>
           <Icon name="more" size={18} />
-          更多
+          {copy.more}
         </button>
         {menuOpen && (
           <div className="am-action-menu">
-            <button disabled={!onUnread} onClick={onUnread}>切换已读状态</button>
-            <button disabled={!onArchive} onClick={onArchive}>归档</button>
-            <button disabled={!onTrash} onClick={onTrash}>删除</button>
+            <button disabled={!onUnread} onClick={onUnread}>{copy.toggleReadStatus}</button>
+            <button disabled={!onArchive} onClick={onArchive}>{copy.archive}</button>
+            <button disabled={!onTrash} onClick={onTrash}>{copy.deleteAction}</button>
           </div>
         )}
       </div>
       <div className="am-toolbar-pager">
-        <button aria-label="上一封">
+        <button aria-label={copy.prevMail}>
           <Icon name="chevronLeft" size={18} />
         </button>
-        <button aria-label="下一封">
+        <button aria-label={copy.nextMail}>
           <Icon name="chevronRight" size={18} />
         </button>
       </div>
@@ -1618,13 +1540,15 @@ function Toolbar({
 
 function MailBody({ html, text }: { html: string | null; text: string }) {
   const ref = useRef<HTMLIFrameElement | null>(null);
-  if (!html) return <pre className="am-body-text">{text || "这封邮件没有正文。"}</pre>;
+  const language = useStore((s) => s.language);
+  const copy = MAIL_INBOX_COPY[language];
+  if (!html) return <pre className="am-body-text">{text || copy.noBodyText}</pre>;
   return (
     <iframe
       ref={ref}
       className="am-body-frame"
       sandbox=""
-      title="邮件正文"
+      title={copy.mailBodyIframeTitle}
       srcDoc={html}
     />
   );
@@ -1641,9 +1565,11 @@ function AssistantPanel({
   onCompose: (next: ComposeState) => void;
   onPatch: (id: string, patch: Parameters<typeof mailModify>[2], remove: boolean) => void;
 }) {
+  const language = useStore((s) => s.language);
+  const copy = MAIL_INBOX_COPY[language];
   const [assistantText, setAssistantText] = useState("");
   const [assistantResult, setAssistantResult] = useState("");
-  const subject = open ? fullTitle(open) : "当前邮件";
+  const subject = open ? fullTitle(open, copy) : copy.currentMailFallback;
 
   useEffect(() => {
     setAssistantText("");
@@ -1653,15 +1579,15 @@ function AssistantPanel({
   const submitAssistant = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!assistantText.trim()) return;
-    setAssistantResult("已把当前邮件作为临时上下文交给助手，不保存到聊天历史。");
+    setAssistantResult(copy.assistantContextNotice);
     setAssistantText("");
   };
 
   return (
     <aside className="am-assistant">
       <div className="am-assistant-head">
-        <strong>邮件助手</strong>
-        <button aria-label="关闭助手" onClick={onClose}>
+        <strong>{copy.assistantTitle}</strong>
+        <button aria-label={copy.closeAssistantAria} onClick={onClose}>
           <Icon name="close" size={18} />
         </button>
       </div>
@@ -1669,25 +1595,25 @@ function AssistantPanel({
       <section className="am-ai-card">
         <h3>
           <Icon name="sparkle" size={18} />
-          邮件信息
+          {copy.mailInfoHeading}
         </h3>
         {open ? (
           <dl className="am-message-facts">
             <div>
-              <dt>主题</dt>
+              <dt>{copy.subjectLabel}</dt>
               <dd>{subject}</dd>
             </div>
             <div>
-              <dt>发件人</dt>
+              <dt>{copy.fromLabel}</dt>
               <dd>{open.fromName || open.from}</dd>
             </div>
             <div>
-              <dt>附件</dt>
-              <dd>{open.attachments.length} 个</dd>
+              <dt>{copy.attachmentsLabel}</dt>
+              <dd>{copy.attachmentsCount(open.attachments.length)}</dd>
             </div>
           </dl>
         ) : (
-          <p className="am-assistant-empty">选择邮件后显示发件人、主题、附件和可用操作。</p>
+          <p className="am-assistant-empty">{copy.assistantEmptyHint}</p>
         )}
       </section>
 
@@ -1696,31 +1622,31 @@ function AssistantPanel({
           <section className="am-ai-card">
             <h3>
               <Icon name="markUnread" size={18} />
-              快捷操作
+              {copy.quickActionsHeading}
             </h3>
             <TaskRow
               icon="reply"
-              title="回复当前邮件"
-              action="回复"
+              title={copy.replyToMailTitle}
+              action={copy.reply}
               onAction={() =>
                 onCompose({
                   to: open.from,
                   cc: "",
-                  subject: replySubject(open),
+                  subject: replySubject(open, copy),
                   body: "",
                 })
               }
             />
             <TaskRow
               icon="archive"
-              title="归档当前邮件"
-              action="归档"
+              title={copy.archiveMailTitle}
+              action={copy.archive}
               onAction={() => onPatch(open.id, { archive: true }, true)}
             />
             <TaskRow
               icon="star"
-              title="切换星标状态"
-              action={open.starred ? "取消" : "星标"}
+              title={copy.toggleStarActionTitle}
+              action={copy.starActionLabel(open.starred)}
               onAction={() => onPatch(open.id, { starred: !open.starred }, false)}
             />
           </section>
@@ -1730,10 +1656,10 @@ function AssistantPanel({
           <form className="am-assistant-input" onSubmit={submitAssistant}>
             <input
               value={assistantText}
-              placeholder="对这封邮件临时提问"
+              placeholder={copy.askAboutMailPlaceholder}
               onChange={(event) => setAssistantText(event.target.value)}
             />
-            <button type="submit" aria-label="发送给邮件助手">
+            <button type="submit" aria-label={copy.sendToAssistantAria}>
               <Icon name="send" size={18} />
             </button>
           </form>
@@ -1778,38 +1704,40 @@ function ComposeModal({
   onClose: () => void;
   onSend: () => void;
 }) {
+  const language = useStore((s) => s.language);
+  const copy = MAIL_INBOX_COPY[language];
   return (
     <div className="am-compose-overlay" onClick={() => !sending && onClose()}>
       <section className="am-compose-card" onClick={(event) => event.stopPropagation()}>
         <header>
-          <span>新邮件</span>
-          <button disabled={sending} onClick={onClose} aria-label="关闭">
+          <span>{copy.composeNewTitle}</span>
+          <button disabled={sending} onClick={onClose} aria-label={copy.closeAria}>
             <Icon name="close" size={18} />
           </button>
         </header>
         <input
-          placeholder="收件人"
+          placeholder={copy.toFieldPlaceholder}
           value={compose.to}
           onChange={(event) => setCompose({ ...compose, to: event.target.value })}
         />
         <input
-          placeholder="抄送"
+          placeholder={copy.ccFieldPlaceholder}
           value={compose.cc}
           onChange={(event) => setCompose({ ...compose, cc: event.target.value })}
         />
         <input
-          placeholder="主题"
+          placeholder={copy.subjectFieldPlaceholder}
           value={compose.subject}
           onChange={(event) => setCompose({ ...compose, subject: event.target.value })}
         />
         <textarea
-          placeholder="撰写邮件..."
+          placeholder={copy.bodyPlaceholder}
           value={compose.body}
           onChange={(event) => setCompose({ ...compose, body: event.target.value })}
         />
         <footer>
           <button className="am-primary" disabled={sending || !compose.to.trim()} onClick={onSend}>
-            {sending ? "发送中..." : "发送"}
+            {sending ? copy.sending : copy.send}
           </button>
         </footer>
       </section>

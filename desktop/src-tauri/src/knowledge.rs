@@ -1,6 +1,6 @@
 //! Desktop commands for the project knowledge base — thin wrappers over the
 //! shared kernel implementation in `tools::knowledge`, so the desktop UI, CLI
-//! agents, and Chat all operate on the same `papers/knowledge.db` contract.
+//! agents, and Chat all operate on the same `.somniq/papers/knowledge.db` contract.
 //!
 //! Confirmation authority lives here: `knowledge_upsert` only ever writes
 //! drafts (`allow_confirm = false`), and `knowledge_confirm` — driven solely by
@@ -261,50 +261,6 @@ fn to_retrieval_card_input(
         generated_by: generated_by.to_string(),
         prompt_version: 1,
     }
-}
-
-/// Perform citation-grounded retrieval over confirmed knowledge through a
-/// bounded LLM query plan and multi-query FTS fusion.
-#[tauri::command]
-pub async fn knowledge_rag_search(
-    projects_state: State<'_, ProjectState>,
-    query: String,
-    limit: Option<usize>,
-) -> Result<Value, String> {
-    let base = project_base(&projects_state)?;
-    let query = query.trim().to_string();
-    if query.is_empty() {
-        return Err("knowledge RAG search query is empty".to_string());
-    }
-    let query_for_plan = query.clone();
-    let (plan, planner_warning) =
-        tauri::async_runtime::spawn_blocking(move || plan_query(&query_for_plan))
-            .await
-            .map_err(|error| error.to_string())?;
-    let expanded = plan.queries().into_iter().skip(1).collect::<Vec<_>>();
-    let query_for_search = query.clone();
-    let result = tauri::async_runtime::spawn_blocking(move || {
-        tools::knowledge::knowledge_rag_search_at(
-            &base,
-            &query_for_search,
-            &expanded,
-            limit.unwrap_or(8).clamp(1, 50),
-        )
-    })
-    .await
-    .map_err(|error| error.to_string())??;
-    let mut value = serde_json::to_value(result).map_err(|error| error.to_string())?;
-    if let Some(object) = value.as_object_mut() {
-        object.insert(
-            "queryPlan".to_string(),
-            serde_json::to_value(plan).map_err(|e| e.to_string())?,
-        );
-        object.insert(
-            "plannerWarning".to_string(),
-            planner_warning.map_or(Value::Null, Value::String),
-        );
-    }
-    Ok(value)
 }
 
 #[derive(Debug, Serialize)]

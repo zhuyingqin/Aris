@@ -18,7 +18,7 @@ const apiMocks = vi.hoisted(() => ({
 vi.mock("../../api/tauri", () => apiMocks);
 
 beforeEach(() => {
-  useStore.setState({ tab: "chat", language: "en", pendingStudioArtifactId: null });
+  useStore.setState({ tab: "chat", language: "en" });
   apiMocks.isTauri.mockReturnValue(false);
   apiMocks.fileOpen.mockResolvedValue(undefined);
   apiMocks.fileReadBytes.mockResolvedValue([]);

@@ -10,8 +10,6 @@ describe("ambient motion pass wiring", () => {
       ".independent-review-panel",
       ".lit-overview",
       ".lit-pdf-reader",
-      ".studio-web-preview",
-      ".studio-review-workspace",
       ".kb-review",
       ".kb-confirmed",
     ]) {
@@ -28,8 +26,6 @@ describe("ambient motion pass wiring", () => {
       ".independent-review-panel",
       ".lit-overview",
       ".lit-pdf-reader",
-      ".studio-web-preview",
-      ".studio-review-workspace",
       ".kb-review",
       ".kb-confirmed",
       ".ext-overlay",

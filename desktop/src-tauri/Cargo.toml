@@ -5,10 +5,10 @@
 
 [package]
 name = "aris-desktop"
-version = "0.4.29"
+version = "0.4.31"
 edition = "2021"
 license = "MIT"
-description = "ARIS Studio — desktop UI for designing and monitoring agent teams & workflows"
+description = "ARIS Studio — desktop research workspace for chat, lab, literature, mail, typeset, and scheduled tasks"
 publish = false
 
 [lib]

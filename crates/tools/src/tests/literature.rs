@@ -917,7 +917,7 @@ fn sanitizes_pdf_file_names() {
 #[test]
 fn refuses_to_overwrite_an_existing_pdf_before_opening_the_network() {
     let base = temp_base("pdf-no-overwrite");
-    let papers = base.join("papers");
+    let papers = base.join(".somniq/papers");
     std::fs::create_dir_all(&papers).expect("papers directory");
     let existing = papers.join("existing.pdf");
     std::fs::write(&existing, b"%PDF-1.4 original").expect("seed PDF");

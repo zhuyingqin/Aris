@@ -3,8 +3,8 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::{
-    file_read, normalize_open_reference, reanchor_to_workspace, resolve_existing_path_within,
-    strip_location_suffix,
+    collect_typeset_documents, file_read, normalize_open_reference, reanchor_to_workspace,
+    resolve_existing_path_within, strip_location_suffix,
 };
 
 struct EnvGuard {
@@ -169,4 +169,25 @@ fn stale_absolute_links_reanchor_onto_the_current_workspace() {
         reanchor_to_workspace("F:/some/other/place/main.tex", workspace),
         None,
     );
+}
+
+#[test]
+fn typeset_document_discovery_includes_explicitly_scanned_internal_artifacts() {
+    let root_dir = temp_path("typeset-managed-artifacts");
+    let managed_dir = root_dir.join(".somniq/papers");
+    std::fs::create_dir_all(&managed_dir).expect("create managed papers directory");
+    std::fs::write(
+        managed_dir.join("main.tex"),
+        "\\documentclass{article}\n\\begin{document}\nManaged document\n\\end{document}",
+    )
+    .expect("write managed tex source");
+
+    let mut documents = Vec::new();
+    let mut tex_file_count = 0;
+    collect_typeset_documents(&managed_dir, &root_dir, &mut documents, &mut tex_file_count)
+        .expect("collect managed documents");
+
+    assert_eq!(documents.len(), 1);
+    assert_eq!(documents[0].path, ".somniq/papers/main.tex");
+    let _ = std::fs::remove_dir_all(root_dir);
 }

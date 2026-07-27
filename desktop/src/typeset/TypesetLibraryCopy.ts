@@ -5,10 +5,10 @@ export type TypesetLibraryScope = "all" | "recent" | "favorites" | "article" | "
 export type TypesetTemplate = TypesetDocumentKind;
 
 export const TYPESET_LIBRARY_TEMPLATES: Array<{ kind: TypesetTemplate; folder: string }> = [
-  { kind: "article", folder: "papers" },
-  { kind: "beamer", folder: "slides" },
-  { kind: "report", folder: "reports" },
-  { kind: "poster", folder: "posters" },
+  { kind: "article", folder: ".somniq/papers" },
+  { kind: "beamer", folder: ".somniq/slides" },
+  { kind: "report", folder: ".somniq/reports" },
+  { kind: "poster", folder: ".somniq/poster" },
 ];
 
 const EN_COPY = {

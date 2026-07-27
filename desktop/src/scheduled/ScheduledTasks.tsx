@@ -21,6 +21,9 @@ import type {
   ScheduledTaskInput,
   SessionSummary,
 } from "../types";
+import { SCHEDULED_TASKS_COPY, type TaskTemplate } from "./i18n";
+
+type ScheduledTasksCopy = (typeof SCHEDULED_TASKS_COPY)["cn"];
 
 type IntervalUnit = ScheduledTaskInput["intervalUnit"];
 type TaskStatus = NonNullable<ScheduledTaskInput["status"]>;
@@ -47,56 +50,10 @@ interface FormState {
   mailKeywords: string;
 }
 
-const UNIT_LABELS: Record<IntervalUnit, string> = {
-  minutes: "分钟",
-  hours: "小时",
-  days: "天",
-};
-
 const DEFAULT_INTERVAL = 15;
 
-interface TaskTemplate {
-  id: string;
-  label: string;
-  description: string;
-  title: string;
-  prompt: string;
-  triggerKind: TriggerKind;
-  intervalValue: number;
-  intervalUnit: IntervalUnit;
-  mailKeywords?: string;
-}
-
-// Editable workflow templates. They only pre-fill the form below; the saved
-// task remains a normal scheduled task.
-const TASK_TEMPLATES: TaskTemplate[] = [
-  {
-    id: "literature-mail-on-arrival",
-    label: "新邮件触发·论文求助回复",
-    description: "收到含「文献求助/论文求助」等关键词的新邮件时，自动检索并回复 PDF。",
-    title: "新邮件·论文求助自动回复",
-    prompt:
-      "有一封新邮件触发了本任务（邮件信息见末尾）。先用 mail_read 读取该邮件确认是文献/论文求助，然后调用 mail_literature_catch_up（可只针对该账户）完成检索、下载 PDF，并按「设置 > 邮件自动化」配置回复。最后用一句话汇总处理结果；若不是求助邮件则跳过，不要编造。",
-    triggerKind: "mail",
-    intervalValue: DEFAULT_INTERVAL,
-    intervalUnit: "minutes",
-    mailKeywords: "文献求助, 论文求助, paper request, literature request",
-  },
-  {
-    id: "literature-mail-poll",
-    label: "定时轮询·论文求助回复",
-    description: "按间隔扫描收件箱中的文献/论文求助邮件并回复 PDF。",
-    title: "定时轮询·论文求助自动回复",
-    prompt:
-      "检查我已连接邮箱的收件箱，找出文献/论文求助类邮件。调用 mail_literature_catch_up 工具完成检索、下载 PDF，并按「设置 > 邮件自动化」的配置（来源、自动发送、白名单）回复。处理完成后用一句话汇总：本次识别了哪些求助、发送/准备了多少封回复、是否有失败。若没有连接的邮箱或没有匹配邮件，明确说明即可，不要编造。",
-    triggerKind: "interval",
-    intervalValue: 30,
-    intervalUnit: "minutes",
-  },
-];
-
-function formatTaskTime(value: string | null | undefined) {
-  if (!value) return "暂无";
+function formatTaskTime(value: string | null | undefined, copy: ScheduledTasksCopy) {
+  if (!value) return copy.noValue;
   const numeric = Number(value);
   const date = Number.isFinite(numeric) ? new Date(numeric) : new Date(value);
   if (Number.isNaN(date.getTime())) return value;
@@ -108,21 +65,24 @@ function formatTaskTime(value: string | null | undefined) {
   }).format(date);
 }
 
-function runSummary(task: ScheduledTask) {
-  if (taskStatus(task) === "paused") return "已暂停";
-  if (task.lastError) return "最近执行失败";
+function runSummary(task: ScheduledTask, copy: ScheduledTasksCopy) {
+  if (taskStatus(task) === "paused") return copy.paused;
+  if (task.lastError) return copy.lastRunFailed;
   if (task.triggerKind === "mail") {
-    return task.lastRunAt ? `上次 ${formatTaskTime(task.lastRunAt)}` : "等待新邮件触发";
+    return task.lastRunAt ? copy.lastRunAt(formatTaskTime(task.lastRunAt, copy)) : copy.waitingForMail;
   }
-  if (task.nextRun) return `下次 ${formatTaskTime(task.nextRun)}`;
-  if (task.lastRunAt) return `上次 ${formatTaskTime(task.lastRunAt)}`;
-  return "等待首次执行";
+  if (task.nextRun) return copy.nextRunAt(formatTaskTime(task.nextRun, copy));
+  if (task.lastRunAt) return copy.lastRunAt(formatTaskTime(task.lastRunAt, copy));
+  return copy.waitingFirstRun;
 }
 
-function triggerMeta(task: ScheduledTask | FormState): { kind: "interval" | "mail"; label: string } {
+function triggerMeta(
+  task: ScheduledTask | FormState,
+  copy: ScheduledTasksCopy,
+): { kind: "interval" | "mail"; label: string } {
   return task.triggerKind === "mail"
-    ? { kind: "mail", label: "邮件" }
-    : { kind: "interval", label: "间隔" };
+    ? { kind: "mail", label: copy.mailTrigger }
+    : { kind: "interval", label: copy.intervalTrigger };
 }
 
 function shortId(id: string) {
@@ -217,48 +177,51 @@ function addOrReplaceTask(tasks: ScheduledTask[], task: ScheduledTask) {
   return [task, ...tasks.filter((item) => item.id !== task.id)];
 }
 
-function optionFromChatSession(session: ChatSession): SessionOption {
+function optionFromChatSession(session: ChatSession, copy: ScheduledTasksCopy): SessionOption {
   return {
     id: session.id,
-    title: session.title || `对话 ${shortId(session.id)}`,
+    title: session.title || copy.sessionFallbackTitle(shortId(session.id)),
     updatedAt: session.updatedAt ?? 0,
     model: session.model ?? null,
   };
 }
 
-function optionFromRuntimeSession(session: SessionSummary): SessionOption {
+function optionFromRuntimeSession(session: SessionSummary, copy: ScheduledTasksCopy): SessionOption {
   return {
     id: session.id,
-    title: `对话 ${shortId(session.id)}`,
+    title: copy.sessionFallbackTitle(shortId(session.id)),
     updatedAt: session.modifiedEpochSecs * 1000,
   };
 }
 
-async function loadSessionOptions(projectId?: string | null): Promise<SessionOption[]> {
+async function loadSessionOptions(
+  copy: ScheduledTasksCopy,
+  projectId?: string | null,
+): Promise<SessionOption[]> {
   const byId = new Map<string, SessionOption>();
   const uiSessions = await chatUiSessionsList<ChatSession>().catch(() => []);
   for (const session of uiSessions) {
     if (projectId && session.projectId && session.projectId !== projectId) continue;
-    byId.set(session.id, optionFromChatSession(session));
+    byId.set(session.id, optionFromChatSession(session, copy));
   }
   if (byId.size === 0) {
     const runtimeSessions = await sessionsList().catch(() => []);
-    for (const session of runtimeSessions) byId.set(session.id, optionFromRuntimeSession(session));
+    for (const session of runtimeSessions) byId.set(session.id, optionFromRuntimeSession(session, copy));
   }
   return [...byId.values()].sort((left, right) => right.updatedAt - left.updatedAt);
 }
 
-function sessionTitle(sessionId: string | null | undefined, sessions: SessionOption[]) {
-  if (!sessionId) return "未绑定";
-  return sessions.find((session) => session.id === sessionId)?.title ?? `对话 ${shortId(sessionId)}`;
+function sessionTitle(sessionId: string | null | undefined, sessions: SessionOption[], copy: ScheduledTasksCopy) {
+  if (!sessionId) return copy.unboundSession;
+  return sessions.find((session) => session.id === sessionId)?.title ?? copy.sessionFallbackTitle(shortId(sessionId));
 }
 
-function modelLabel(model: string | null | undefined) {
-  return model?.trim() || "跟随当前模型";
+function modelLabel(model: string | null | undefined, copy: ScheduledTasksCopy) {
+  return model?.trim() || copy.followCurrentModel;
 }
 
-function intervalLabel(value: number, unit: IntervalUnit) {
-  return `每 ${Math.max(1, Math.floor(value || 1))} ${UNIT_LABELS[unit]}`;
+function intervalLabel(value: number, unit: IntervalUnit, copy: ScheduledTasksCopy) {
+  return copy.everyInterval(Math.max(1, Math.floor(value || 1)), copy.unitLabels[unit]);
 }
 
 function DetailRow({
@@ -285,6 +248,7 @@ function TaskRow({
   active,
   task,
   sessionName,
+  copy,
   onSelect,
   onStatus,
   onOpenChat,
@@ -292,12 +256,13 @@ function TaskRow({
   active: boolean;
   task: ScheduledTask;
   sessionName: string;
+  copy: ScheduledTasksCopy;
   onSelect: () => void;
   onStatus: (status: TaskStatus) => void;
   onOpenChat: () => void;
 }) {
   const paused = taskStatus(task) === "paused";
-  const meta = triggerMeta(task);
+  const meta = triggerMeta(task, copy);
   return (
     <div
       className={`sched-row${active ? " selected" : ""}`}
@@ -313,13 +278,13 @@ function TaskRow({
     >
       <span className={`sched-row-play${paused ? " paused" : ""}`} aria-hidden="true"><SvgIcon name="play" size={13} /></span>
       <div className="sched-row-main">
-        <span className="sched-row-title">{task.title || "未命名任务"}</span>
+        <span className="sched-row-title">{task.title || copy.untitledTask}</span>
         <span className="sched-row-sub">
           <span>{sessionName}</span>
           <span>{task.scheduleLabel || task.rrule || meta.label}</span>
-          <span>{modelLabel(task.model)}</span>
+          <span>{modelLabel(task.model, copy)}</span>
         </span>
-        <span className={task.lastError ? "sched-row-run error" : "sched-row-run"}>{runSummary(task)}</span>
+        <span className={task.lastError ? "sched-row-run error" : "sched-row-run"}>{runSummary(task, copy)}</span>
       </div>
       <button
         className="sched-row-action"
@@ -329,13 +294,13 @@ function TaskRow({
           onStatus(paused ? "active" : "paused");
         }}
       >
-        {paused ? "启动" : "暂停"}
+        {paused ? copy.start : copy.pause}
       </button>
       <button
         className="sched-row-open"
         type="button"
         disabled={!task.sessionId}
-        title="查看该任务运行的对话记录"
+        title={copy.viewSessionTitle}
         onClick={(event) => {
           event.stopPropagation();
           onOpenChat();
@@ -350,15 +315,17 @@ function TaskRow({
 function TemplateRow({
   template,
   disabled,
+  copy,
   onUse,
 }: {
   template: TaskTemplate;
   disabled: boolean;
+  copy: ScheduledTasksCopy;
   onUse: () => void;
 }) {
   const label = template.triggerKind === "mail"
-    ? "收到新邮件时"
-    : intervalLabel(template.intervalValue, template.intervalUnit);
+    ? copy.onNewMail
+    : intervalLabel(template.intervalValue, template.intervalUnit, copy);
   return (
     <button className="sched-template-row" disabled={disabled} onClick={onUse} type="button">
       <span className="sched-template-title">{template.label}</span>
@@ -368,7 +335,7 @@ function TemplateRow({
   );
 }
 
-function normalizeModelOptions(current: string | undefined, options: ChatModelOption[]) {
+function normalizeModelOptions(current: string | undefined, options: ChatModelOption[], copy: ScheduledTasksCopy) {
   const seen = new Set<string>();
   const out: ChatModelOption[] = [];
   const add = (option: ChatModelOption) => {
@@ -377,7 +344,7 @@ function normalizeModelOptions(current: string | undefined, options: ChatModelOp
     seen.add(value);
     out.push({ ...option, value });
   };
-  if (current?.trim()) add({ value: current.trim(), label: current.trim(), description: "当前模型" });
+  if (current?.trim()) add({ value: current.trim(), label: current.trim(), description: copy.currentModelOption });
   for (const option of options) add(option);
   return out;
 }
@@ -386,6 +353,8 @@ export default function ScheduledTasks() {
   const setTab = useStore((s) => s.setTab);
   const setError = useStore((s) => s.setError);
   const currentProject = useStore((s) => s.currentProject);
+  const language = useStore((s) => s.language);
+  const copy = SCHEDULED_TASKS_COPY[language];
   const projectId = currentProject?.id;
   const [pane, setPane] = useState<Pane>("tasks");
   const [query, setQuery] = useState("");
@@ -407,10 +376,10 @@ export default function ScheduledTasks() {
       return sessions;
     }
     return [
-      { id: form.sessionId, title: `对话 ${shortId(form.sessionId)}`, updatedAt: 0 },
+      { id: form.sessionId, title: copy.sessionFallbackTitle(shortId(form.sessionId)), updatedAt: 0 },
       ...sessions,
     ];
-  }, [form.sessionId, sessions]);
+  }, [copy, form.sessionId, sessions]);
 
   const visibleModelOptions = useMemo(() => {
     const current = form.model.trim();
@@ -428,11 +397,11 @@ export default function ScheduledTasks() {
         task.scheduleLabel,
         task.rrule,
         task.model,
-        sessionTitle(task.sessionId, sessions),
+        sessionTitle(task.sessionId, sessions, copy),
       ].join(" ").toLowerCase();
       return haystack.includes(term);
     });
-  }, [query, sessions, tasks]);
+  }, [copy, query, sessions, tasks]);
 
   const activeTasks = filteredTasks.filter((task) => taskStatus(task) === "active");
   const pausedTasks = filteredTasks.filter((task) => taskStatus(task) === "paused");
@@ -446,7 +415,11 @@ export default function ScheduledTasks() {
     if (!isTauri()) {
       setTasks([]);
       setSessions([]);
-      setModelOptions([{ value: "Preview", label: "Preview", description: "Browser preview" }]);
+      setModelOptions([{
+        value: "Preview",
+        label: copy.previewModelLabel,
+        description: copy.previewModelDescription,
+      }]);
       setSelectedId(null);
       setLoading(false);
       return;
@@ -455,14 +428,14 @@ export default function ScheduledTasks() {
     try {
       const [nextTasks, nextSessions, nextMailAccounts, nextModels] = await Promise.all([
         scheduledTasksList(),
-        loadSessionOptions(projectId),
+        loadSessionOptions(copy, projectId),
         mailAccountsGet().catch(() => [] as MailAccount[]),
         chatModelOptions().catch(() => ({ provider: "", current: "", options: [] as ChatModelOption[] })),
       ]);
       setTasks(nextTasks);
       setSessions(nextSessions);
       setMailAccounts(nextMailAccounts.filter((account) => account.connected));
-      setModelOptions(normalizeModelOptions(nextModels.current, nextModels.options));
+      setModelOptions(normalizeModelOptions(nextModels.current, nextModels.options, copy));
       setSelectedId((current) => {
         if (current === "new") return current;
         if (current && nextTasks.some((task) => task.id === current)) return current;
@@ -473,7 +446,7 @@ export default function ScheduledTasks() {
     } finally {
       setLoading(false);
     }
-  }, [projectId, setError]);
+  }, [copy, projectId, setError]);
 
   useEffect(() => {
     void refresh();
@@ -541,7 +514,7 @@ export default function ScheduledTasks() {
   };
 
   const handleDelete = async () => {
-    if (!selectedTask || !window.confirm(`删除定时任务「${selectedTask.title || selectedTask.id}」？`)) return;
+    if (!selectedTask || !window.confirm(copy.deleteConfirm(selectedTask.title || selectedTask.id))) return;
     setBusy(true);
     try {
       await scheduledTaskDelete(selectedTask.id);
@@ -561,14 +534,15 @@ export default function ScheduledTasks() {
     <div className="sched-group">
       <div className="sched-group-title">{label}</div>
       {items.length === 0 ? (
-        <div className="sched-group-empty">暂无</div>
+        <div className="sched-group-empty">{copy.groupEmpty}</div>
       ) : (
         items.map((task) => (
           <TaskRow
             active={selectedId === task.id}
             key={task.id}
             task={task}
-            sessionName={sessionTitle(task.sessionId, sessions)}
+            sessionName={sessionTitle(task.sessionId, sessions, copy)}
+            copy={copy}
             onSelect={() => {
               setSelectedId(task.id);
               setPane("tasks");
@@ -581,21 +555,21 @@ export default function ScheduledTasks() {
     </div>
   );
 
-  const projectLabel = currentProject?.name || "当前项目";
-  const selectedMeta = selectedTask ? triggerMeta(selectedTask) : triggerMeta(form);
+  const projectLabel = currentProject?.name || copy.currentProjectFallback;
+  const selectedMeta = selectedTask ? triggerMeta(selectedTask, copy) : triggerMeta(form, copy);
 
   return (
     <div className="sched-page">
       <div className="sched-shell">
         <aside className="sched-sidebar">
-          <div className="sched-tabs" role="tablist" aria-label="定时任务视图">
-            <button className={pane === "tasks" ? "selected" : ""} onClick={() => setPane("tasks")} type="button">Tasks</button>
-            <button className={pane === "templates" ? "selected" : ""} onClick={() => setPane("templates")} type="button">Templates</button>
+          <div className="sched-tabs" role="tablist" aria-label={copy.tabsAriaLabel}>
+            <button className={pane === "tasks" ? "selected" : ""} onClick={() => setPane("tasks")} type="button">{copy.tabTasks}</button>
+            <button className={pane === "templates" ? "selected" : ""} onClick={() => setPane("templates")} type="button">{copy.tabTemplates}</button>
           </div>
 
           <div className="sched-sidebar-head">
-            <h1>已安排</h1>
-            <p>管理周期性任务、提醒和监控</p>
+            <h1>{copy.heading}</h1>
+            <p>{copy.subheading}</p>
           </div>
 
           <label className="sched-search">
@@ -603,32 +577,33 @@ export default function ScheduledTasks() {
             <input
               value={query}
               onChange={(event) => setQuery(event.target.value)}
-              placeholder="搜索已安排任务"
+              placeholder={copy.searchPlaceholder}
             />
           </label>
 
           <div className="sched-sidebar-content">
             {loading ? (
-              <div className="sched-loading">加载中...</div>
+              <div className="sched-loading">{copy.loading}</div>
             ) : pane === "templates" ? (
               <div className="sched-template-list">
-                {TASK_TEMPLATES.map((template) => (
+                {copy.taskTemplates.map((template) => (
                   <TemplateRow
                     disabled={!canCreate || busy}
                     key={template.id}
                     template={template}
+                    copy={copy}
                     onUse={() => applyTemplate(template)}
                   />
                 ))}
               </div>
             ) : tasks.length === 0 ? (
               <div className="sched-empty compact">
-                <div className="sched-empty-title">暂无定时任务</div>
+                <div className="sched-empty-title">{copy.emptyTasksTitle}</div>
               </div>
             ) : (
               <>
-                {renderTaskGroup("运行中", activeTasks)}
-                {renderTaskGroup("已暂停", pausedTasks)}
+                {renderTaskGroup(copy.activeGroup, activeTasks)}
+                {renderTaskGroup(copy.paused, pausedTasks)}
               </>
             )}
           </div>
@@ -636,12 +611,12 @@ export default function ScheduledTasks() {
 
         <main className="sched-editor">
           <div className="sched-editor-toolbar">
-            <button className="sched-back" onClick={() => setTab("chat")} type="button">返回对话</button>
+            <button className="sched-back" onClick={() => setTab("chat")} type="button">{copy.backToChat}</button>
             <div className="sched-editor-actions">
               <button className="sched-create" disabled={!canCreate || busy} onClick={selectNew} type="button">
-                创建计划任务 <SvgIcon name="chevronDown" size={13} />
+                {copy.createTask} <SvgIcon name="chevronDown" size={13} />
               </button>
-              <button className="sched-icon-button" onClick={() => void refresh()} type="button" aria-label="刷新定时任务">
+              <button className="sched-icon-button" onClick={() => void refresh()} type="button" aria-label={copy.refreshAriaLabel}>
                 <SvgIcon name="refresh" size={16} />
               </button>
             </div>
@@ -649,7 +624,7 @@ export default function ScheduledTasks() {
 
           {!selectedId ? (
             <div className="sched-detail-empty">
-              {canCreate ? "选择或新建任务" : "需要一个已保存的对话"}
+              {canCreate ? copy.selectOrCreate : copy.needSavedChat}
             </div>
           ) : (
             <form
@@ -663,7 +638,7 @@ export default function ScheduledTasks() {
                 className="sched-title-input"
                 value={form.title}
                 onChange={(event) => setForm((current) => ({ ...current, title: event.target.value }))}
-                placeholder="已安排任务标题"
+                placeholder={copy.titlePlaceholder}
               />
 
               <textarea
@@ -671,35 +646,35 @@ export default function ScheduledTasks() {
                 rows={3}
                 value={form.prompt}
                 onChange={(event) => setForm((current) => ({ ...current, prompt: event.target.value }))}
-                placeholder="添加提示词，例如：在 $sentry 中查找崩溃"
+                placeholder={copy.promptPlaceholder}
               />
 
               <section className="sched-detail-section">
-                <div className="sched-section-title">详情</div>
+                <div className="sched-section-title">{copy.detailsSection}</div>
 
-                <DetailRow label="运行环境" info="后台任务会在当前工作树执行">
-                  <span className="sched-static-value" title={currentProject?.path}>工作树</span>
+                <DetailRow label={copy.environmentLabel} info={copy.environmentInfo}>
+                  <span className="sched-static-value" title={currentProject?.path}>{copy.workspaceValue}</span>
                 </DetailRow>
 
-                <DetailRow label="项目">
+                <DetailRow label={copy.projectLabel}>
                   <span className="sched-static-value" title={currentProject?.path}>{projectLabel}</span>
                 </DetailRow>
 
-                <DetailRow label="绑定对话">
+                <DetailRow label={copy.boundChatLabel}>
                   <select
                     className="sched-inline-select"
                     value={form.sessionId}
                     onChange={(event) => setForm((current) => ({ ...current, sessionId: event.target.value }))}
                     required
                   >
-                    <option value="" disabled>选择对话</option>
+                    <option value="" disabled>{copy.selectChatPlaceholder}</option>
                     {sessionOptions.map((session) => (
                       <option key={session.id} value={session.id}>{session.title}</option>
                     ))}
                   </select>
                 </DetailRow>
 
-                <DetailRow label="触发方式">
+                <DetailRow label={copy.triggerLabel}>
                   <select
                     className="sched-inline-select"
                     value={form.triggerKind}
@@ -708,15 +683,15 @@ export default function ScheduledTasks() {
                       setForm((current) => ({ ...current, triggerKind }));
                     }}
                   >
-                    <option value="interval">按时间间隔</option>
-                    <option value="mail">收到新邮件时</option>
+                    <option value="interval">{copy.triggerIntervalOption}</option>
+                    <option value="mail">{copy.onNewMail}</option>
                   </select>
                 </DetailRow>
 
                 {form.triggerKind === "interval" ? (
-                  <DetailRow label="重复次数">
+                  <DetailRow label={copy.repeatCountLabel}>
                     <div className="sched-inline-interval">
-                      <span>每</span>
+                      <span>{copy.everyLabel}</span>
                       <input
                         min={1}
                         type="number"
@@ -733,7 +708,7 @@ export default function ScheduledTasks() {
                           setForm((current) => ({ ...current, intervalUnit: unit }));
                         }}
                       >
-                        {Object.entries(UNIT_LABELS).map(([value, label]) => (
+                        {Object.entries(copy.unitLabels).map(([value, label]) => (
                           <option key={value} value={value}>{label}</option>
                         ))}
                       </select>
@@ -741,37 +716,37 @@ export default function ScheduledTasks() {
                   </DetailRow>
                 ) : (
                   <>
-                    <DetailRow label="触发账户">
+                    <DetailRow label={copy.triggerAccountLabel}>
                       <select
                         className="sched-inline-select"
                         value={form.mailAccountId}
                         onChange={(event) => setForm((current) => ({ ...current, mailAccountId: event.target.value }))}
                       >
-                        <option value="">任意已连接邮箱</option>
+                        <option value="">{copy.anyConnectedMailbox}</option>
                         {mailAccounts.map((account) => (
                           <option key={account.id} value={account.id}>{account.email}</option>
                         ))}
                       </select>
                     </DetailRow>
 
-                    <DetailRow label="关键词">
+                    <DetailRow label={copy.keywordsLabel}>
                       <input
                         className="sched-inline-input"
                         value={form.mailKeywords}
                         onChange={(event) => setForm((current) => ({ ...current, mailKeywords: event.target.value }))}
-                        placeholder="文献求助, 论文求助"
+                        placeholder={copy.keywordsPlaceholder}
                       />
                     </DetailRow>
                   </>
                 )}
 
-                <DetailRow label="模型">
+                <DetailRow label={copy.modelFieldLabel}>
                   <select
                     className="sched-inline-select"
                     value={form.model}
                     onChange={(event) => setForm((current) => ({ ...current, model: event.target.value }))}
                   >
-                    <option value="">跟随当前模型</option>
+                    <option value="">{copy.followCurrentModel}</option>
                     {visibleModelOptions.map((option) => (
                       <option key={option.value} value={option.value}>
                         {option.label}
@@ -780,21 +755,21 @@ export default function ScheduledTasks() {
                   </select>
                 </DetailRow>
 
-                <DetailRow label="状态">
-                  <div className="sched-status-toggle" role="group" aria-label="任务状态">
+                <DetailRow label={copy.statusLabel}>
+                  <div className="sched-status-toggle" role="group" aria-label={copy.statusGroupAriaLabel}>
                     <button
                       className={form.status === "active" ? "selected" : ""}
                       type="button"
                       onClick={() => setForm((current) => ({ ...current, status: "active" }))}
                     >
-                      启动
+                      {copy.start}
                     </button>
                     <button
                       className={form.status === "paused" ? "selected" : ""}
                       type="button"
                       onClick={() => setForm((current) => ({ ...current, status: "paused" }))}
                     >
-                      暂停
+                      {copy.pause}
                     </button>
                   </div>
                 </DetailRow>
@@ -803,38 +778,38 @@ export default function ScheduledTasks() {
               {selectedTask && (
                 <div className="sched-run-panel">
                   <div>
-                    <span>触发</span>
+                    <span>{copy.runPanelTriggerLabel}</span>
                     <strong>{selectedMeta.label}</strong>
                   </div>
                   <div>
-                    <span>下次执行</span>
-                    <strong>{taskStatus(selectedTask) === "paused" ? "已暂停" : formatTaskTime(selectedTask.nextRun)}</strong>
+                    <span>{copy.nextRunLabel}</span>
+                    <strong>{taskStatus(selectedTask) === "paused" ? copy.paused : formatTaskTime(selectedTask.nextRun, copy)}</strong>
                   </div>
                   <div>
-                    <span>上次执行</span>
-                    <strong>{formatTaskTime(selectedTask.lastRunAt)}</strong>
+                    <span>{copy.lastRunLabel}</span>
+                    <strong>{formatTaskTime(selectedTask.lastRunAt, copy)}</strong>
                   </div>
                   <div className={selectedTask.lastError ? "error" : ""}>
-                    <span>最近错误</span>
-                    <strong>{selectedTask.lastError || "无"}</strong>
+                    <span>{copy.lastErrorLabel}</span>
+                    <strong>{selectedTask.lastError || copy.noErrorValue}</strong>
                   </div>
                 </div>
               )}
 
               <div className="sched-actions">
-                <button className="primary" disabled={!canSave || busy} type="submit">保存</button>
+                <button className="primary" disabled={!canSave || busy} type="submit">{copy.saveButton}</button>
                 {selectedTask && (
                   <button
                     type="button"
                     disabled={!selectedTask.sessionId}
                     onClick={() => openBoundSession(selectedTask.sessionId)}
                   >
-                    查看对话
+                    {copy.viewChatButton}
                   </button>
                 )}
                 {selectedTask && (
                   <button className="sched-danger" disabled={busy} onClick={() => void handleDelete()} type="button">
-                    删除
+                    {copy.deleteButton}
                   </button>
                 )}
               </div>

@@ -262,6 +262,7 @@ export function useChatSessions(projectId?: string | null) {
   // native checkpoint has succeeded.
   const crashRecoverySessionIds = useRef(new Set<string>());
   const dirtySessionIds = useRef(new Set<string>());
+  const sessionSaveQueues = useRef(new Map<string, Promise<void>>());
   const loadingSessionIds = useRef(new Set<string>());
   const remoteSessionUpdateVersions = useRef(new Map<string, number>());
   const remoteTurnBuffers = useRef(new Map<string, RemoteTurnBuffer>());
@@ -272,6 +273,29 @@ export function useChatSessions(projectId?: string | null) {
   );
   const markSessionDirty = useCallback((id: string) => {
     if (id !== HOME_SESSION_ID) dirtySessionIds.current.add(id);
+  }, []);
+  const enqueueSessionSave = useCallback((session: ChatSession) => {
+    const previous = sessionSaveQueues.current.get(session.id) ?? Promise.resolve();
+    // A newer debounced snapshot must wait for the prior IPC write. Otherwise
+    // two native file replacements can race and an older renderer snapshot can
+    // finish last, especially on Windows where replacement may be retried.
+    const save = previous
+      .catch(() => undefined)
+      .then(() => chatUiSessionSave(session));
+    sessionSaveQueues.current.set(session.id, save);
+    void save.then(
+      () => {
+        if (sessionSaveQueues.current.get(session.id) === save) {
+          sessionSaveQueues.current.delete(session.id);
+        }
+      },
+      () => {
+        if (sessionSaveQueues.current.get(session.id) === save) {
+          sessionSaveQueues.current.delete(session.id);
+        }
+      },
+    );
+    return save;
   }, []);
 
   useEffect(() => {
@@ -300,7 +324,7 @@ export function useChatSessions(projectId?: string | null) {
           return storedUpdatedAt == null || session.updatedAt > storedUpdatedAt;
         });
         if (sessionsNeedingRecovery.length > 0) {
-          void Promise.all(sessionsNeedingRecovery.map((session) => chatUiSessionSave(session)))
+          void Promise.all(sessionsNeedingRecovery.map(enqueueSessionSave))
             .then(clearLocalSessionSnapshots)
             .catch((error) => setError(`Failed to recover chat sessions: ${String(error)}`));
         } else if (localRecoverySessions.length > 0) {
@@ -311,7 +335,7 @@ export function useChatSessions(projectId?: string | null) {
       .catch(() => {
         hydrated.current = true;
       });
-  }, [setError]);
+  }, [enqueueSessionSave, setError]);
 
   useEffect(() => {
     if (!isTauri()) return;
@@ -549,7 +573,7 @@ export function useChatSessions(projectId?: string | null) {
       if (!savingIds.has(session.id)) dirtySessionIds.current.add(session.id);
     }
     if (sessionsToSave.length === 0) return;
-    void Promise.all(sessionsToSave.map((session) => chatUiSessionSave(session)))
+    void Promise.all(sessionsToSave.map(enqueueSessionSave))
       .then(() => {
         for (const id of savingIds) crashRecoverySessionIds.current.delete(id);
         if (crashRecoverySessionIds.current.size === 0) clearLocalSessionSnapshots();
@@ -558,7 +582,7 @@ export function useChatSessions(projectId?: string | null) {
         for (const id of savingIds) dirtySessionIds.current.add(id);
         setError(`Failed to save chat sessions: ${String(error)}`);
       });
-  }, [setError]);
+  }, [enqueueSessionSave, setError]);
 
   useEffect(() => {
     pendingPersistSessions.current = allSessions;
@@ -641,6 +665,8 @@ export function useChatSessions(projectId?: string | null) {
         turnsLoaded: true,
         turnsPartial: false,
         turnCount: replay.turns.length,
+        loadedTurnStartIndex: 0,
+        questionCountBeforeLoadedTurns: 0,
         partialBaseTurnIds: undefined,
         title: session.title === "New chat" ? titleFromTurns(replay.turns) : session.title,
       };
@@ -810,6 +836,11 @@ export function useChatSessions(projectId?: string | null) {
       const turnsPartial = startIndex > 0
         || turns.some((turn) => turn.omittedTurnIndex != null);
       const turnCount = Math.max(session.turnCount ?? session.turns.length, turns.length);
+      const loadedQuestionCount = prefix.filter((turn) => turn.role === "user").length;
+      const loadedTurnStartIndex = turnsPartial ? startIndex : 0;
+      const questionCountBeforeLoadedTurns = turnsPartial
+        ? Math.max(0, (session.questionCountBeforeLoadedTurns ?? 0) - loadedQuestionCount)
+        : 0;
       const partialBaseTurnIds = turnsPartial
         ? [...new Set([...(session.partialBaseTurnIds ?? []), ...prefix.map((turn) => turn.id)])]
         : undefined;
@@ -819,6 +850,8 @@ export function useChatSessions(projectId?: string | null) {
         turnsLoaded: true,
         turnsPartial,
         turnCount,
+        loadedTurnStartIndex,
+        questionCountBeforeLoadedTurns,
         partialBaseTurnIds,
       };
     }));

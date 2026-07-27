@@ -15,17 +15,17 @@ fn temp_base(name: &str) -> std::path::PathBuf {
 #[test]
 fn list_notebooks_finds_canonical_nested_ipynb_files_case_insensitively() {
     let base = temp_base("notebooks");
-    let nested = base.join("notebooks/a/b/c/d/e/f/g");
+    let nested = base.join(".somniq/notebooks/a/b/c/d/e/f/g");
     std::fs::create_dir_all(&nested).expect("create nested notebook dir");
     std::fs::write(nested.join("deep.IPYNB"), "{}").expect("write notebook");
 
-    let runs = base.join("experiments/runs/run-1");
+    let runs = base.join(".somniq/experiments/runs/run-1");
     std::fs::create_dir_all(&runs).expect("create runs dir");
     std::fs::write(runs.join("ignored.ipynb"), "{}").expect("write ignored notebook");
 
     let found = list_notebooks_at(&base);
 
-    assert_eq!(found, vec!["notebooks/a/b/c/d/e/f/g/deep.IPYNB"]);
+    assert_eq!(found, vec![".somniq/notebooks/a/b/c/d/e/f/g/deep.IPYNB"]);
     let _ = std::fs::remove_dir_all(base);
 }
 

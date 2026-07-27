@@ -9,6 +9,10 @@ export interface ChatSession {
   turnsLoaded?: boolean;
   turnsPartial?: boolean;
   turnCount?: number;
+  /** Absolute index of the first loaded turn when the transcript is partial. */
+  loadedTurnStartIndex?: number;
+  /** Number of user questions preceding the currently loaded transcript. */
+  questionCountBeforeLoadedTurns?: number;
   partialBaseTurnIds?: string[];
   draft: string;
   draftAttachments: ChatAttachment[];

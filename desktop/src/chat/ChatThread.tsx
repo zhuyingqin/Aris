@@ -15,6 +15,13 @@ export function shouldPauseAutoFollowForWheel(deltaY: number) {
   return deltaY < 0;
 }
 
+export function shouldLoadEarlierTurnsAtTop(
+  element: Pick<HTMLElement, "scrollTop">,
+  threshold = 96,
+) {
+  return element.scrollTop <= threshold;
+}
+
 export function isScrollbarPointer(element: HTMLElement, clientX: number, gutter = 18) {
   const rect = element.getBoundingClientRect();
   return clientX >= rect.right - gutter;
@@ -136,9 +143,7 @@ interface Props {
   isOmittedTurnLoading?: (turnIndex: number) => boolean;
   hasEarlierTurns?: boolean;
   loadingEarlierTurns?: boolean;
-  onLoadEarlierTurns?: () => void;
-  loadEarlierLabel?: string;
-  loadingEarlierLabel?: string;
+  onLoadEarlierTurns?: () => void | Promise<void>;
   onPermissionRespond: (promptId: string, allow: boolean) => void;
   onQuestionRespond: (toolUseId: string, answer: string) => void;
   onOpenIndependentReview?: () => void;
@@ -246,8 +251,6 @@ export default function ChatThread({
   hasEarlierTurns = false,
   loadingEarlierTurns = false,
   onLoadEarlierTurns,
-  loadEarlierLabel = "Load earlier messages",
-  loadingEarlierLabel = "Loading earlier messages…",
   onPermissionRespond,
   onQuestionRespond,
   onOpenIndependentReview,
@@ -255,8 +258,19 @@ export default function ChatThread({
   const scrollRef = useRef<HTMLDivElement>(null);
   const [following, setFollowing] = useState(true);
   const [firstVisibleTurnIndex, setFirstVisibleTurnIndex] = useState(0);
+  const [historyRevealEnabled, setHistoryRevealEnabled] = useState(false);
   const followingRef = useRef(true);
   const programmaticScrollUntilRef = useRef(0);
+  const navigationScrollUntilRef = useRef(0);
+  const previousScrollTopRef = useRef<number | null>(null);
+  const historyRevealEnabledRef = useRef(false);
+  const earlierLoadInFlightRef = useRef(false);
+  const prependScrollRef = useRef<{
+    turnCount: number;
+    scrollTop: number;
+    scrollHeight: number;
+    visibleTurnId: string | null;
+  } | null>(null);
   // True while the initial scroll for a session is still settling. Dynamic row
   // measurement means the first scroll lands on *estimated* offsets, then rows
   // measure and the total size shifts; during that window we ignore the
@@ -285,6 +299,12 @@ export default function ChatThread({
     setFollowing(next);
   }, []);
 
+  const markHistoryRevealEnabled = useCallback(() => {
+    if (historyRevealEnabledRef.current) return;
+    historyRevealEnabledRef.current = true;
+    setHistoryRevealEnabled(true);
+  }, []);
+
   const markProgrammaticScroll = useCallback(() => {
     programmaticScrollUntilRef.current = window.performance.now() + 180;
   }, []);
@@ -309,6 +329,7 @@ export default function ChatThread({
 
   const scrollToTurn = useCallback((turnIndex: number) => {
     markProgrammaticScroll();
+    navigationScrollUntilRef.current = window.performance.now() + 1_000;
     virtualizer.scrollToIndex(turnIndex, { align: "start", behavior: "smooth" });
     setFollowingValue(false);
   }, [markProgrammaticScroll, setFollowingValue, virtualizer]);
@@ -318,6 +339,70 @@ export default function ChatThread({
     setFirstVisibleTurnIndex((current) => current === next ? current : next);
   }, [virtualizer]);
 
+  const loadEarlierAtTop = useCallback(() => {
+    const element = scrollRef.current;
+    if (
+      !element
+      || !hasEarlierTurns
+      || loadingEarlierTurns
+      || earlierLoadInFlightRef.current
+      || !onLoadEarlierTurns
+      || window.performance.now() <= navigationScrollUntilRef.current
+      || !shouldLoadEarlierTurnsAtTop(element)
+    ) return;
+    earlierLoadInFlightRef.current = true;
+    const visibleTurnIndex = firstVisibleTurnIndexFromVirtualItems(
+      virtualizer.getVirtualItems(),
+      element.scrollTop,
+    );
+    prependScrollRef.current = {
+      turnCount: turns.length,
+      scrollTop: element.scrollTop,
+      scrollHeight: element.scrollHeight,
+      visibleTurnId: turns[visibleTurnIndex]?.id ?? null,
+    };
+    Promise.resolve(onLoadEarlierTurns()).finally(() => {
+      earlierLoadInFlightRef.current = false;
+    });
+  }, [hasEarlierTurns, loadingEarlierTurns, onLoadEarlierTurns, turns, virtualizer]);
+
+  // Prepending rows changes the virtual list's total height. Restore the old
+  // viewport anchor after React commits the new rows, then once more after the
+  // browser measures their real heights so the reader does not jump.
+  useLayoutEffect(() => {
+    const pending = prependScrollRef.current;
+    const element = scrollRef.current;
+    if (!pending || !element) return;
+    if (turns.length <= pending.turnCount) {
+      if (!loadingEarlierTurns) prependScrollRef.current = null;
+      return;
+    }
+    prependScrollRef.current = null;
+    const visibleTurnIndex = pending.visibleTurnId == null
+      ? -1
+      : turns.findIndex((turn) => turn.id === pending.visibleTurnId);
+    if (visibleTurnIndex >= 0) setFirstVisibleTurnIndex(visibleTurnIndex);
+    const restore = () => {
+      const delta = element.scrollHeight - pending.scrollHeight;
+      element.scrollTop = pending.scrollTop + delta;
+    };
+    restore();
+    const frame = window.requestAnimationFrame(restore);
+    return () => window.cancelAnimationFrame(frame);
+  }, [firstVisibleTurnIndex, loadingEarlierTurns, turns]);
+
+  // Omitted preview rows hydrate as they enter the virtual window. The full
+  // saved turn remains local; the reader should not need a second click to see
+  // it after scrolling to that point in history.
+  useEffect(() => {
+    if (!historyRevealEnabled || !onLoadOmittedTurn) return;
+    for (const item of virtualizer.getVirtualItems()) {
+      const omittedTurnIndex = turns[item.index]?.omittedTurnIndex;
+      if (omittedTurnIndex == null || isOmittedTurnLoading(omittedTurnIndex)) continue;
+      onLoadOmittedTurn(omittedTurnIndex);
+    }
+  }, [historyRevealEnabled, isOmittedTurnLoading, onLoadOmittedTurn, turns, virtualWindowKey, virtualizer]);
+
   useEffect(() => {
     syncFirstVisibleTurnIndex();
   }, [syncFirstVisibleTurnIndex, virtualWindowKey]);
@@ -325,6 +410,10 @@ export default function ChatThread({
   // Land at the latest message when a conversation opens, re-pinning across a few
   // frames so the scrollbar converges as rows measure instead of jumping around.
   useEffect(() => {
+    historyRevealEnabledRef.current = false;
+    setHistoryRevealEnabled(false);
+    previousScrollTopRef.current = null;
+    navigationScrollUntilRef.current = 0;
     setFollowingValue(true);
     settlingRef.current = true;
     let frame = 0;
@@ -335,6 +424,8 @@ export default function ChatThread({
         raf = window.requestAnimationFrame(settle);
       } else {
         settlingRef.current = false;
+        previousScrollTopRef.current = scrollRef.current?.scrollTop ?? null;
+        loadEarlierAtTop();
       }
     });
     return () => {
@@ -364,35 +455,45 @@ export default function ChatThread({
 
   return (
     <div className={`chat-thread${hasEarlierTurns ? " has-earlier-turns" : ""}`}>
-      {hasEarlierTurns && onLoadEarlierTurns && (
-        <button
-          type="button"
-          className="chat-history-load-earlier"
-          disabled={loadingEarlierTurns}
-          aria-busy={loadingEarlierTurns}
-          onClick={onLoadEarlierTurns}
-        >
-          {loadingEarlierTurns ? loadingEarlierLabel : loadEarlierLabel}
-        </button>
-      )}
       <div
         className="chat-scroll"
         ref={scrollRef}
         onWheel={(event) => {
-          if (shouldPauseAutoFollowForWheel(event.deltaY)) pauseAutoFollow();
+          if (shouldPauseAutoFollowForWheel(event.deltaY)) {
+            navigationScrollUntilRef.current = 0;
+            markHistoryRevealEnabled();
+            pauseAutoFollow();
+          }
         }}
-        onTouchStart={pauseAutoFollow}
+        onTouchStart={() => {
+          navigationScrollUntilRef.current = 0;
+          pauseAutoFollow();
+        }}
         onPointerDown={(event) => {
-          if (isScrollbarPointer(event.currentTarget, event.clientX)) pauseAutoFollow();
+          if (isScrollbarPointer(event.currentTarget, event.clientX)) {
+            navigationScrollUntilRef.current = 0;
+            pauseAutoFollow();
+          }
         }}
         onScroll={(event) => {
           if (settlingRef.current) return;
           const now = window.performance.now();
+          const scrollTop = event.currentTarget.scrollTop;
+          const previousScrollTop = previousScrollTopRef.current;
+          previousScrollTopRef.current = scrollTop;
+          if (
+            previousScrollTop != null
+            && scrollTop < previousScrollTop - 1
+            && now > navigationScrollUntilRef.current
+          ) {
+            markHistoryRevealEnabled();
+          }
           if (shouldIgnoreProgrammaticFollowScroll(programmaticScrollUntilRef.current, now, followingRef.current)) {
             return;
           }
-          syncFirstVisibleTurnIndex(event.currentTarget.scrollTop);
+          syncFirstVisibleTurnIndex(scrollTop);
           setFollowingValue(isNearBottom(event.currentTarget));
+          loadEarlierAtTop();
         }}
         style={{ paddingBottom: composerHeight + 24 }}
       >
@@ -457,8 +558,6 @@ export default function ChatThread({
                       onEdit={onEdit}
                       onRetry={onRetry}
                       onContinue={onContinue}
-                      onLoadOmittedTurn={onLoadOmittedTurn}
-                      omittedTurnLoading={turn.omittedTurnIndex != null && isOmittedTurnLoading(turn.omittedTurnIndex)}
                       onPermissionRespond={onPermissionRespond}
                       onQuestionRespond={onQuestionRespond}
                       onOpenIndependentReview={onOpenIndependentReview}

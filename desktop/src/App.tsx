@@ -18,13 +18,11 @@ import { WindowControlButtons } from "./WindowControlButtons";
 import { SvgIcon } from "./SvgIcon";
 
 const loadLiterature = () => import("./literature/Literature");
-const loadStudio = () => import("./studio/Studio");
 const loadMail = () => import("./mail/Mail");
 const loadTypeset = () => import("./typeset/Typeset");
 const loadLab = () => import("./lab/Lab");
 
 const Literature = lazy(loadLiterature);
-const Studio = lazy(loadStudio);
 const Mail = lazy(loadMail);
 const Typeset = lazy(loadTypeset);
 const LabPane = lazy(loadLab);
@@ -77,7 +75,6 @@ const APP_COPY: Record<Language, AppShellCopy> = {
       lab: "代码",
       typeset: "LaTeX",
       literature: "文献",
-      studio: "工作室",
       mail: "邮箱",
       extensions: "扩展",
       settings: "设置",
@@ -125,7 +122,6 @@ const APP_COPY: Record<Language, AppShellCopy> = {
       lab: "Code",
       typeset: "LaTeX",
       literature: "Literature",
-      studio: "Studio",
       mail: "Mail",
       extensions: "Extensions",
       settings: "Settings",
@@ -168,21 +164,8 @@ const APP_COPY: Record<Language, AppShellCopy> = {
   },
 };
 
-const TAB_MODULE_LABELS: Record<Tab, string> = {
-  chat: "Chat",
-  lab: "Lab",
-  typeset: "Typeset",
-  literature: "Literature",
-  studio: "Studio",
-  mail: "Mail",
-  extensions: "Extensions",
-  settings: "Settings",
-  scheduled: "Scheduled",
-};
-
 function preloadTabModule(tabId: string) {
   if (tabId === "literature") void loadLiterature();
-  else if (tabId === "studio") void loadStudio();
   else if (tabId === "mail") void loadMail();
   else if (tabId === "typeset") void loadTypeset();
 }
@@ -320,10 +303,6 @@ const PRIMARY_NAV_ITEMS: NavItem[] = [
       d="M8 13.5V4C7 2.5 4.5 2.5 2 3.5V13c2.5-1 5-1 6 .5z"
       extra="M8 13.5V4c1-1.5 3.5-1.5 6-.5V13c-2.5-1-5-1-6 .5z"
     />,
-  },
-  {
-    id: "studio", label: "Studio",
-    icon: <IC d="M2.5 3.5h11v7h-11zM5 13h6M8 10.5V13" />,
   },
   {
     id: "mail", label: "Mail",
@@ -705,7 +684,7 @@ export default function App() {
   }, []);
   useEffect(() => {
     let disposed = false;
-    const heavyTabs = ["literature", "studio", "mail"];
+    const heavyTabs = ["literature", "mail"];
     const idleWindow = window as Window & {
       requestIdleCallback?: (callback: () => void, options?: { timeout?: number }) => number;
       cancelIdleCallback?: (id: number) => void;
@@ -1305,7 +1284,7 @@ export default function App() {
                 resetKey="lab"
                 fallback={(viewError, reset) => <AppViewFallback copy={copy} error={viewError} reset={reset} language={language} />}
               >
-                <Suspense fallback={<AppLoadingPane copy={copy} label={TAB_MODULE_LABELS.lab} />}>
+                <Suspense fallback={<AppLoadingPane copy={copy} label={copy.nav.lab} />}>
                   <LabPane />
                 </Suspense>
               </ErrorBoundary>
@@ -1313,23 +1292,18 @@ export default function App() {
           )}
           {typesetMounted && (
             <div className="app-typeset-pane" hidden={renderedTab !== "typeset"}>
-              <Suspense fallback={<AppLoadingPane copy={copy} label={TAB_MODULE_LABELS.typeset} />}>
+              <Suspense fallback={<AppLoadingPane copy={copy} label={copy.nav.typeset} />}>
                 <Typeset />
               </Suspense>
             </div>
           )}
           {renderedTab === "literature" && (
-            <Suspense fallback={<AppLoadingPane copy={copy} label={TAB_MODULE_LABELS.literature} />}>
+            <Suspense fallback={<AppLoadingPane copy={copy} label={copy.nav.literature} />}>
               <Literature pageView={literaturePageView} onPageViewChange={setLiteraturePageView} />
             </Suspense>
           )}
-          {renderedTab === "studio" && (
-            <Suspense fallback={<AppLoadingPane copy={copy} label={TAB_MODULE_LABELS.studio} />}>
-              <Studio />
-            </Suspense>
-          )}
           {renderedTab === "mail" && (
-            <Suspense fallback={<AppLoadingPane copy={copy} label={TAB_MODULE_LABELS.mail} />}>
+            <Suspense fallback={<AppLoadingPane copy={copy} label={copy.nav.mail} />}>
               <Mail />
             </Suspense>
           )}

@@ -38,6 +38,21 @@ fn indexes_and_searches_persisted_sessions() {
         SessionSearchResult::Search { ref results, .. } if results.len() == 1
     ));
 
+    let chinese_natural_language =
+        search_sessions(&sessions_dir, Some("如何完成中文会话检索"), None, 3, 2)
+            .expect("natural-language chinese search");
+    assert!(matches!(
+        chinese_natural_language,
+        SessionSearchResult::Search { ref results, .. } if results.len() == 1
+    ));
+
+    let english_relaxed = search_sessions(&sessions_dir, Some("SQLite indexing"), None, 3, 2)
+        .expect("relaxed english search");
+    assert!(matches!(
+        english_relaxed,
+        SessionSearchResult::Search { ref results, .. } if results.len() == 1
+    ));
+
     let full_session =
         search_sessions(&sessions_dir, None, Some("session-a"), 3, 2).expect("session read");
     assert!(matches!(

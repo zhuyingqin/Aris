@@ -1,5 +1,9 @@
 import { literatureImageOcr, literaturePdfBytes } from "../api/tauri";
 import type { PDFPageProxy } from "pdfjs-dist";
+import { renderPdfPageToCanvas } from "../pdf/canvas";
+import { openPdfDocument } from "../pdf/runtime";
+import { useStore } from "../store";
+import { LITERATURE_COPY } from "./i18n";
 
 export interface PdfPageExtraction {
   page: number;
@@ -32,8 +36,6 @@ export interface PdfImageExtraction {
   totalBytes: number;
 }
 
-const workerSrc = new URL("pdfjs-dist/build/pdf.worker.min.mjs", import.meta.url).toString();
-
 const hasReadableText = (text: string) =>
   Array.from(text).filter((character) => /[\p{L}\p{N}]/u.test(character)).length >= 8;
 
@@ -43,6 +45,8 @@ const normalizeText = (text: string) =>
     .replace(/[ \t]{2,}/g, " ")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
+
+const PDF_IMAGE_MAX_PIXELS = 16_000_000;
 
 const pageEmbeddedText = async (page: PDFPageProxy) => {
   const content = await page.getTextContent();
@@ -56,13 +60,12 @@ const pageEmbeddedText = async (page: PDFPageProxy) => {
 };
 
 const renderPagePng = async (page: PDFPageProxy) => {
-  const viewport = page.getViewport({ scale: 2 });
   const canvas = document.createElement("canvas");
-  canvas.width = Math.ceil(viewport.width);
-  canvas.height = Math.ceil(viewport.height);
-  const context = canvas.getContext("2d");
-  if (!context) throw new Error("Canvas rendering is unavailable for OCR.");
-  await page.render({ canvas, canvasContext: context, viewport }).promise;
+  const render = renderPdfPageToCanvas(page, canvas, 2, {
+    devicePixelRatio: 1,
+    maxPixels: PDF_IMAGE_MAX_PIXELS,
+  });
+  await render.task.promise;
   const blob = await new Promise<Blob>((resolve, reject) =>
     canvas.toBlob(
       (value) => value ? resolve(value) : reject(new Error("Could not encode OCR page image.")),
@@ -110,15 +113,9 @@ const renderPageJpeg = async (page: PDFPageProxy): Promise<Uint8Array> => {
   if (!Number.isFinite(scale) || scale <= 0) {
     throw new Error("PDF page has invalid dimensions for visual reading.");
   }
-  const viewport = page.getViewport({ scale });
   const canvas = document.createElement("canvas");
-  canvas.width = Math.ceil(viewport.width);
-  canvas.height = Math.ceil(viewport.height);
-  const context = canvas.getContext("2d");
-  if (!context) throw new Error("Canvas rendering is unavailable for visual reading.");
-  context.fillStyle = "#ffffff";
-  context.fillRect(0, 0, canvas.width, canvas.height);
-  await page.render({ canvas, canvasContext: context, viewport }).promise;
+  const render = renderPdfPageToCanvas(page, canvas, scale, { devicePixelRatio: 1 });
+  await render.task.promise;
   const encode = (quality: number) =>
     new Promise<Blob>((resolve, reject) =>
       canvas.toBlob(
@@ -145,9 +142,7 @@ export const extractPdfPageImages = async (
   relativePath: string,
   pageNumbers?: number[],
 ): Promise<PdfImageExtraction> => {
-  const [bytes, pdfjs] = await Promise.all([literaturePdfBytes(relativePath), import("pdfjs-dist")]);
-  pdfjs.GlobalWorkerOptions.workerSrc = workerSrc;
-  const document = await pdfjs.getDocument({ data: new Uint8Array(bytes) }).promise;
+  const document = await openPdfDocument(await literaturePdfBytes(relativePath));
   const totalPages = document.numPages;
   const targetPages = pageNumbers && pageNumbers.length > 0
     ? pageNumbers.filter((pageNumber) => pageNumber >= 1 && pageNumber <= totalPages)
@@ -181,9 +176,7 @@ export const extractPdfPageImages = async (
 };
 
 export const extractPdfTextByPage = async (relativePath: string): Promise<PdfExtraction> => {
-  const [bytes, pdfjs] = await Promise.all([literaturePdfBytes(relativePath), import("pdfjs-dist")]);
-  pdfjs.GlobalWorkerOptions.workerSrc = workerSrc;
-  const document = await pdfjs.getDocument({ data: new Uint8Array(bytes) }).promise;
+  const document = await openPdfDocument(await literaturePdfBytes(relativePath));
   const pages: PdfPageExtraction[] = [];
   const warnings: string[] = [];
   let ocrUsed = false;
@@ -205,7 +198,8 @@ export const extractPdfTextByPage = async (relativePath: string): Promise<PdfExt
           pages.push({ page: pageNumber, text: "", source: "empty" });
         }
       } catch (error) {
-        warnings.push(`第 ${pageNumber} 页 OCR 失败：${String(error)}`);
+        const copy = LITERATURE_COPY[useStore.getState().language].pdfReader;
+        warnings.push(copy.ocrFailed(pageNumber, String(error)));
         pages.push({ page: pageNumber, text: "", source: "empty" });
       }
     }
@@ -218,7 +212,10 @@ export const extractPdfTextByPage = async (relativePath: string): Promise<PdfExt
     .filter((page) => hasReadableText(page.text))
     .map((page) => `[[PAGE ${page.page}]]\n${page.text}`)
     .join("\n\n");
-  if (!text) throw new Error(`PDF 没有可读取文本。${warnings.join(" ")}`);
+  if (!text) {
+    const copy = LITERATURE_COPY[useStore.getState().language].pdfReader;
+    throw new Error(copy.noReadableText(warnings.join(" ")));
+  }
   const characters = Array.from(text).length;
   return {
     text,

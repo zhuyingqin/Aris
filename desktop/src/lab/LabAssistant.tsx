@@ -13,22 +13,25 @@ import {
   type ChatSendRequest,
 } from "../api/tauri";
 import ChatMessage from "../chat/ChatMessage";
+import { continueStoppedPrompt, visibleTurnError } from "../chat/chatRunHelpers";
 import { makeId, patchLastAssistantTurn, textFromTurn, transcriptFromTurn } from "../chat/model";
 import { useChatStream } from "../chat/useChatStream";
+import { formatUserFacingError } from "../errorMessage";
+import { useStore } from "../store";
 import type { ChatAttachment, ChatBlock, ChatStatus, ChatTurn, PermissionModeView } from "../types";
+import { LAB_COPY } from "./i18n";
 import { useLabStore } from "./labStore";
 import type { NotebookCell } from "./labTypes";
 
-const EMPTY_ASSISTANT_RESPONSE = "Model returned an empty response.";
 const LAB_ASSISTANT_SESSIONS_KEY = "somniq-lab-assistant-sessions-v1";
 const LAB_ASSISTANT_LEGACY_SESSIONS_KEY = "aris-lab-assistant-sessions-v1";
 const MAX_LAB_ASSISTANT_SESSIONS = 30;
 
-const PERMISSION_OPTIONS = [
-  { value: "read-only", label: "Plan" },
-  { value: "workspace-write", label: "Accept edits" },
-  { value: "prompt", label: "Ask" },
-  { value: "danger-full-access", label: "Auto-approve" },
+const PERMISSION_ORDER: Array<"read-only" | "workspace-write" | "prompt" | "danger-full-access"> = [
+  "read-only",
+  "workspace-write",
+  "prompt",
+  "danger-full-access",
 ];
 
 type LabAssistantIconName = "file" | "more" | "new" | "send" | "shield" | "stop";
@@ -156,18 +159,6 @@ async function contextFromTurns(turns: ChatTurn[], context: string): Promise<Cha
   return messages;
 }
 
-// The stopped/failed turn's partial response (and tool activity) is rebuilt into
-// the backend context by `contextFromTurns`, so the continue prompt no longer
-// embeds — or truncates at 12k — the partial itself. Wording is neutral so it
-// reads correctly whether the turn was stopped by the user or failed mid-run.
-function continueStoppedPrompt(): string {
-  return [
-    "Continue from where the previous turn left off.",
-    "Your partial response — including any tool calls and their results — is already in the conversation above.",
-    "Do not repeat the completed portion unless a short overlap is needed for continuity.",
-  ].join("\n");
-}
-
 function userTurn(text: string, attachments: ChatAttachment[]): ChatTurn {
   return {
     id: makeId("turn"),
@@ -205,32 +196,13 @@ function hasRenderableBlock(turn: ChatTurn): boolean {
   });
 }
 
-function completedAssistantBlocks(turn: ChatTurn, reply: string): ChatBlock[] {
+function completedAssistantBlocks(turn: ChatTurn, reply: string, emptyResponseText: string): ChatBlock[] {
   if (textBlocksHaveContent(turn.blocks)) return turn.blocks;
   if (reply.trim()) return [...turn.blocks, { kind: "text", text: reply }];
   const fallback = thinkingFallbackText(turn.blocks);
   if (fallback) return [{ kind: "text", text: fallback }];
   if (hasRenderableBlock(turn)) return turn.blocks;
-  return [{ kind: "text", text: EMPTY_ASSISTANT_RESPONSE }];
-}
-
-function isExpectedStopError(message: string): boolean {
-  const lower = message.toLowerCase();
-  return [
-    "interrupted by user",
-    "operation canceled",
-    "operation cancelled",
-    "canceled by user",
-    "cancelled by user",
-    "aborterror",
-  ].some((needle) => lower.includes(needle));
-}
-
-function visibleTurnError(error: string, stopped: boolean): string | undefined {
-  const message = error.trim();
-  if (!message) return undefined;
-  if (stopped && isExpectedStopError(message)) return undefined;
-  return message;
+  return [{ kind: "text", text: emptyResponseText }];
 }
 
 function firstUserText(turns: ChatTurn[]): string {
@@ -334,6 +306,8 @@ export default function LabAssistant({
   attachments,
   onAttachmentsChange,
 }: Props) {
+  const language = useStore((s) => s.language);
+  const copy = LAB_COPY[language];
   const labProjectId = projectId ?? "default";
   const initialState = useRef<ReturnType<typeof initialLabAssistantState> | null>(null);
   if (initialState.current === null) {
@@ -390,12 +364,12 @@ export default function LabAssistant({
   const onComplete = useCallback((eventSessionId: string, reply: string) => {
     patchAssistant(eventSessionId, (turn) => ({
       ...turn,
-      blocks: completedAssistantBlocks(turn, reply),
+      blocks: completedAssistantBlocks(turn, reply, copy.emptyAssistantResponse),
       streaming: false,
       error: undefined,
       stopped: false,
     }));
-  }, [patchAssistant]);
+  }, [copy.emptyAssistantResponse, patchAssistant]);
 
   const onError = useCallback((eventSessionId: string, error: string, stopped: boolean) => {
     const visible = visibleTurnError(error, stopped);
@@ -412,9 +386,9 @@ export default function LabAssistant({
     try {
       await chatQuestionRespond(toolUseId, answer);
     } catch (error) {
-      onError(sessionId, String(error), false);
+      onError(sessionId, formatUserFacingError(error, language), false);
     }
-  }, [onError, sessionId]);
+  }, [language, onError, sessionId]);
 
   const { run, stop, runningSessionIds } = useChatStream({ patchAssistant, onComplete, onError });
   const busy = runningSessionIds.has(sessionId);
@@ -430,13 +404,13 @@ export default function LabAssistant({
 
   useEffect(() => {
     if (!isTauri()) {
-      setStatus({ ready: true, model: "Preview", provider: "Browser" });
-      setPermission({ mode: "workspace-write", label: "Accept edits", description: "" });
+      setStatus({ ready: true, model: copy.previewStatusModelLabel, provider: copy.browserProviderLabel });
+      setPermission({ mode: "workspace-write", label: copy.permissionOptionLabels["workspace-write"], description: "" });
       return;
     }
-    chatStatus().then(setStatus).catch((error) => setStatus({ ready: false, message: String(error) }));
+    chatStatus().then(setStatus).catch((error) => setStatus({ ready: false, message: formatUserFacingError(error, language) }));
     chatPermissionGet(sessionId).then(setPermission).catch(() => setPermission(null));
-  }, [sessionId]);
+  }, [copy.browserProviderLabel, copy.permissionOptionLabels, copy.previewStatusModelLabel, language, sessionId]);
 
   useEffect(() => {
     const scroller = scrollRef.current;
@@ -470,7 +444,7 @@ export default function LabAssistant({
   ) => {
     const prompt = promptOverride ?? (await requestFromInput(text, attached, context));
     if (!isTauri()) {
-      setTurns([...prefix, userTurn(text, attached), assistantTextTurn("Browser preview response. Run the Tauri app for live Lab Assistant.")]);
+      setTurns([...prefix, userTurn(text, attached), assistantTextTurn(copy.labPreviewResponse)]);
       setInput("");
       onAttachmentsChange([]);
       setEditingTurnId(null);
@@ -485,7 +459,7 @@ export default function LabAssistant({
     onAttachmentsChange([]);
     setEditingTurnId(null);
     await run(sessionId, prompt);
-  }, [context, onAttachmentsChange, run, sessionId]);
+  }, [context, copy.labPreviewResponse, onAttachmentsChange, run, sessionId]);
 
   const send = useCallback(async () => {
     if (sendLock.current || busy || (!input.trim() && attachments.length === 0)) return;
@@ -509,11 +483,11 @@ export default function LabAssistant({
     if (busy || sendLock.current) return;
     sendLock.current = true;
     try {
-      await beginRun(turns, "Continue from where you stopped.", [], true, { text: continueStoppedPrompt() });
+      await beginRun(turns, copy.continueFromStoppedLabel, [], true, { text: continueStoppedPrompt() });
     } finally {
       sendLock.current = false;
     }
-  }, [beginRun, busy, turns]);
+  }, [beginRun, busy, copy.continueFromStoppedLabel, turns]);
 
   const retry = useCallback(async (assistant: ChatTurn) => {
     if (busy || sendLock.current) return;
@@ -550,8 +524,8 @@ export default function LabAssistant({
 
   const changePermission = async (mode: string) => {
     if (!isTauri()) {
-      const opt = PERMISSION_OPTIONS.find((item) => item.value === mode);
-      setPermission({ mode, label: opt?.label ?? mode, description: "" });
+      const label = copy.permissionOptionLabels[mode as keyof typeof copy.permissionOptionLabels] ?? mode;
+      setPermission({ mode, label, description: "" });
       return;
     }
     setPermissionBusy(true);
@@ -574,9 +548,9 @@ export default function LabAssistant({
   const ready = Boolean(status?.ready);
   const canSubmit = !busy && (ready || !isTauri()) && (input.trim().length > 0 || attachments.length > 0);
   const modelLabel = status?.ready
-    ? `${status.provider ?? "Model"}${status.model ? ` / ${status.model}` : ""}`
-    : status?.message ?? "Checking model...";
-  const activeLabel = activePath ? basename(activePath) : "No item";
+    ? `${status.provider ?? copy.modelFallbackLabel}${status.model ? ` / ${status.model}` : ""}`
+    : status?.message ?? copy.checkingModelLabel;
+  const activeLabel = activePath ? basename(activePath) : copy.noItemLabel;
   const openSavedSession = (session: LabAssistantSession) => {
     if (busy) return;
     setSessionId(session.id);
@@ -603,13 +577,13 @@ export default function LabAssistant({
   return (
     <div className="lab-assistant">
       <div className="lab-assistant-head">
-        <div className="lab-assistant-tabs" aria-label="Lab assistant tabs">
-          <button className="lab-assistant-tab active" type="button">CHAT</button>
+        <div className="lab-assistant-tabs" aria-label={copy.labAssistantTabsAria}>
+          <button className="lab-assistant-tab active" type="button">{copy.chatTabLabel}</button>
           <button
             className="lab-assistant-icon-btn lab-assistant-history-toggle"
             type="button"
-            title="Lab chat history"
-            aria-label="Lab chat history"
+            title={copy.historyToggleTitle}
+            aria-label={copy.historyToggleTitle}
             aria-expanded={historyOpen}
             onClick={() => setHistoryOpen((open) => !open)}
           >
@@ -622,17 +596,17 @@ export default function LabAssistant({
             type="button"
             onClick={resetAssistant}
             disabled={busy}
-            title="New Lab chat"
-            aria-label="New Lab chat"
+            title={copy.newChatTitle}
+            aria-label={copy.newChatTitle}
           >
             <LabAssistantIcon name="new" />
           </button>
         </div>
         {historyOpen && (
-          <div className="lab-assistant-history" role="menu" aria-label="Lab chat history">
-            <div className="lab-assistant-history-title">历史记录</div>
+          <div className="lab-assistant-history" role="menu" aria-label={copy.historyToggleTitle}>
+            <div className="lab-assistant-history-title">{copy.historyTitle}</div>
             {projectSessions.length === 0 ? (
-              <div className="lab-assistant-history-empty">暂无 Lab Chat 历史</div>
+              <div className="lab-assistant-history-empty">{copy.historyEmpty}</div>
             ) : (
               projectSessions.map((session) => (
                 <button
@@ -644,7 +618,7 @@ export default function LabAssistant({
                 >
                   <span className="lab-assistant-history-name">{session.title}</span>
                   <span className="lab-assistant-history-meta">
-                    {new Date(session.updatedAt).toLocaleString()} · {session.turns.length} messages
+                    {copy.historyMeta(new Date(session.updatedAt).toLocaleString(), session.turns.length)}
                   </span>
                 </button>
               ))
@@ -663,15 +637,15 @@ export default function LabAssistant({
       <div className="lab-assistant-turns" ref={scrollRef}>
         {turns.length === 0 ? (
           <div className="lab-assistant-empty">
-            <strong>Ask about the current notebook or workspace.</strong>
-            <button onClick={() => setStarter("Explain the current notebook and identify the next useful experiment.")}>
-              Explain this notebook
+            <strong>{copy.askAboutNotebookHint}</strong>
+            <button onClick={() => setStarter(copy.explainNotebookPrompt)}>
+              {copy.explainNotebookStarter}
             </button>
-            <button onClick={() => setStarter("Inspect the current project files and suggest where to implement the next code change.")}>
-              Inspect project files
+            <button onClick={() => setStarter(copy.inspectProjectFilesPrompt)}>
+              {copy.inspectProjectFilesStarter}
             </button>
-            <button onClick={() => setStarter("Modify the code needed for this Lab workflow, then summarize the changed files.")}>
-              Modify code
+            <button onClick={() => setStarter(copy.modifyCodePrompt)}>
+              {copy.modifyCodeStarter}
             </button>
           </div>
         ) : (
@@ -696,7 +670,7 @@ export default function LabAssistant({
             {attachments.map((attachment) => (
               <span key={attachment.id}>
                 {attachment.name}
-                <button type="button" onClick={() => removeAttachment(attachment.id)} aria-label={`Remove ${attachment.name}`}>
+                <button type="button" onClick={() => removeAttachment(attachment.id)} aria-label={copy.removeAttachmentAria(attachment.name)}>
                   x
                 </button>
               </span>
@@ -705,15 +679,15 @@ export default function LabAssistant({
         )}
         {editingTurnId && (
           <div className="lab-assistant-editing">
-            Editing earlier message
-            <button type="button" onClick={() => setEditingTurnId(null)}>Cancel</button>
+            {copy.editingEarlierMessage}
+            <button type="button" onClick={() => setEditingTurnId(null)}>{copy.cancelLabel}</button>
           </div>
         )}
         <textarea
           ref={textareaRef}
           value={input}
           disabled={busy}
-          placeholder={ready ? "Ask SomniQ to explain, inspect, or change code..." : "Configure a model in Settings first"}
+          placeholder={ready ? copy.askSomniqPlaceholder : copy.configureModelFirstPlaceholder}
           rows={4}
           onChange={(event) => setInput(event.target.value)}
           onKeyDown={(event) => {
@@ -728,27 +702,27 @@ export default function LabAssistant({
             <LabAssistantIcon name="file" />
             <span className="lab-assistant-footer-text">{activeLabel}</span>
           </span>
-          <label className="lab-assistant-permission" title="Tool permission mode">
+          <label className="lab-assistant-permission" title={copy.toolPermissionModeTitle}>
             <LabAssistantIcon name="shield" />
             <select
               className="lab-mini-select"
               value={permission?.mode ?? ""}
               disabled={permissionBusy || busy}
               onChange={(event) => void changePermission(event.target.value)}
-              aria-label="Tool permission mode"
+              aria-label={copy.toolPermissionModeTitle}
             >
-              {!permission && <option value="">Permission</option>}
-              {PERMISSION_OPTIONS.map((option) => (
-                <option key={option.value} value={option.value}>{option.label}</option>
+              {!permission && <option value="">{copy.permissionFallbackOption}</option>}
+              {PERMISSION_ORDER.map((value) => (
+                <option key={value} value={value}>{copy.permissionOptionLabels[value]}</option>
               ))}
             </select>
           </label>
           {busy ? (
-            <button className="lab-assistant-send is-stop" onClick={() => void stop(sessionId)} aria-label="Stop response" title="Stop response">
+            <button className="lab-assistant-send is-stop" onClick={() => void stop(sessionId)} aria-label={copy.stopResponseTitle} title={copy.stopResponseTitle}>
               <LabAssistantIcon name="stop" />
             </button>
           ) : (
-            <button className="lab-assistant-send" disabled={!canSubmit} onClick={() => void send()} aria-label="Send message" title="Send message">
+            <button className="lab-assistant-send" disabled={!canSubmit} onClick={() => void send()} aria-label={copy.sendMessageTitle} title={copy.sendMessageTitle}>
               <LabAssistantIcon name="send" />
             </button>
           )}

@@ -26,7 +26,6 @@ pub const PDF_CHUNKER_VERSION: &str = "pdf-page-v2-no-embedding";
 pub const DEFAULT_PDF_CHUNK_CHARS: usize = 2_400;
 pub const DEFAULT_PDF_CHUNK_OVERLAP_CHARS: usize = 320;
 
-const PAPERS_DIR: &str = "papers";
 const RAG_DIR: &str = "rag";
 const LITERATURE_FTS_FILE: &str = "literature-retrieval.sqlite";
 
@@ -253,7 +252,8 @@ pub fn literature_rag_database_status_at(
     preview_limit: usize,
 ) -> Result<LiteratureRagDatabaseStatus, String> {
     let path = literature_fts_path(base);
-    let relative_index_path = Path::new(PAPERS_DIR)
+    let relative_index_path = Path::new(crate::layout::PROJECT_DATA_DIR)
+        .join(crate::layout::PAPERS_DIR)
         .join(RAG_DIR)
         .join(LITERATURE_FTS_FILE)
         .to_string_lossy()
@@ -1172,7 +1172,7 @@ fn delete_document_projection(
 }
 
 fn literature_fts_path(base: &Path) -> PathBuf {
-    base.join(PAPERS_DIR)
+    crate::layout::papers_dir_at(base)
         .join(RAG_DIR)
         .join(LITERATURE_FTS_FILE)
 }

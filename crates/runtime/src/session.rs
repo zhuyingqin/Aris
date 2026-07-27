@@ -151,9 +151,12 @@ impl Session {
         }
 
         let event_path = session_event_log_path(path);
-        append_canonical_session_events(path, &event_path, self)?;
-        let manifest = session_manifest_json(path, self).render();
-        crate::write_file_atomically(path, manifest.as_bytes())?;
+        crate::with_path_lock(&event_path, || -> Result<(), SessionError> {
+            append_canonical_session_events(path, &event_path, self)?;
+            let manifest = session_manifest_json(path, self).render();
+            crate::atomic_file::write_replace_unlocked(path, manifest.as_bytes())?;
+            Ok(())
+        })?;
         if crate::session_index::should_index_session_path(path) {
             let _ = crate::session_index::index_session(path, self);
         }
@@ -164,7 +167,9 @@ impl Session {
         let path = path.as_ref();
         let event_path = session_event_log_path(path);
         if event_path.exists() {
-            let replayed = replay_canonical_session_events(&event_path)?;
+            let replayed = crate::with_path_lock(&event_path, || {
+                replay_canonical_session_events(&event_path)
+            })?;
             if replayed.saw_canonical {
                 return Ok(replayed.session);
             }
@@ -680,6 +685,7 @@ struct CanonicalReplay {
     session: Session,
     saw_canonical: bool,
     last_seq: u64,
+    invalid_line_count: usize,
 }
 
 fn replay_canonical_session_events(path: &Path) -> Result<CanonicalReplay, SessionError> {
@@ -690,6 +696,7 @@ fn replay_canonical_session_events(path: &Path) -> Result<CanonicalReplay, Sessi
                 session: Session::new(),
                 saw_canonical: false,
                 last_seq: 0,
+                invalid_line_count: 0,
             });
         }
         Err(error) => return Err(SessionError::Io(error)),
@@ -698,17 +705,23 @@ fn replay_canonical_session_events(path: &Path) -> Result<CanonicalReplay, Sessi
     let mut session = Session::new();
     let mut saw_canonical = false;
     let mut last_seq = 0;
-    for (line_index, line) in BufReader::new(file).lines().enumerate() {
+    let mut invalid_line_count: usize = 0;
+    for line in BufReader::new(file).lines() {
         let line = line?;
         if line.trim().is_empty() {
             continue;
         }
-        let entry: SerdeValue = serde_json::from_str(&line).map_err(|error| {
-            SessionError::Format(format!(
-                "invalid session event at line {}: {error}",
-                line_index + 1
-            ))
-        })?;
+        let entry: SerdeValue = match serde_json::from_str::<SerdeValue>(&line) {
+            Ok(entry) if entry.is_object() => entry,
+            // This file also carries best-effort UI telemetry. Older builds
+            // could interleave two telemetry writes, leaving one or two bad
+            // JSONL rows. Preserve the canonical history around those rows
+            // instead of making the entire session impossible to restore.
+            Ok(_) | Err(_) => {
+                invalid_line_count = invalid_line_count.saturating_add(1);
+                continue;
+            }
+        };
         last_seq = last_seq.max(entry.get("seq").and_then(SerdeValue::as_u64).unwrap_or(0));
         let kind = entry
             .get("kind")
@@ -758,6 +771,7 @@ fn replay_canonical_session_events(path: &Path) -> Result<CanonicalReplay, Sessi
         session,
         saw_canonical,
         last_seq,
+        invalid_line_count,
     })
 }
 
@@ -766,9 +780,15 @@ fn append_canonical_session_events(
     event_path: &Path,
     session: &Session,
 ) -> Result<(), SessionError> {
-    let replayed = replay_canonical_session_events(event_path)?;
+    let mut replayed = replay_canonical_session_events(event_path)?;
+    let needs_repair = replayed.invalid_line_count > 0;
+    if needs_repair {
+        repair_session_event_log(event_path)?;
+        replayed = replay_canonical_session_events(event_path)?;
+    }
     let mut events = Vec::new();
-    let append_only = replayed.saw_canonical
+    let append_only = !needs_repair
+        && replayed.saw_canonical
         && has_prefix(&session.messages, &replayed.session.messages)
         && has_prefix(&session.compactions, &replayed.session.compactions);
 
@@ -851,12 +871,39 @@ fn append_canonical_session_events(
             "kind": kind,
             "payload": payload,
         });
-        serde_json::to_writer(&mut file, &entry).map_err(|error| {
+        let mut encoded = serde_json::to_vec(&entry).map_err(|error| {
             SessionError::Format(format!("failed to encode session event: {error}"))
         })?;
-        file.write_all(b"\n")?;
+        encoded.push(b'\n');
+        file.write_all(&encoded)?;
     }
     file.flush()?;
+    Ok(())
+}
+
+/// Remove malformed JSONL rows while retaining valid canonical and UI events.
+/// The caller holds the per-path write lock, so the rewrite cannot race with a
+/// normal in-process append. A fresh `session_reset` is appended afterwards to
+/// make the supplied in-memory session authoritative again.
+fn repair_session_event_log(path: &Path) -> Result<(), SessionError> {
+    let file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(SessionError::Io(error)),
+    };
+    let mut repaired = Vec::new();
+    for line in BufReader::new(file).lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        if !matches!(serde_json::from_str::<SerdeValue>(&line), Ok(value) if value.is_object()) {
+            continue;
+        }
+        repaired.extend_from_slice(line.as_bytes());
+        repaired.push(b'\n');
+    }
+    crate::atomic_file::write_replace_unlocked(path, &repaired)?;
     Ok(())
 }
 

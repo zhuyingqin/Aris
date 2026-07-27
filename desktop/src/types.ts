@@ -177,13 +177,6 @@ export interface RemoteControlStatus {
   activeDeviceCount: number;
 }
 
-export interface RemoteControlEnableInput {
-  gatewayUrl: string;
-  deviceName?: string;
-  /** STUN/STUNS URLs; leave empty for LAN host-candidate P2P only. */
-  iceServers?: string[];
-}
-
 export interface RemotePairingInvitation {
   pairingId: string;
   expiresAt: number;
@@ -722,14 +715,6 @@ export interface ChatEventsReplay {
   eventCount: number;
   lastSeq: number;
   turns: ChatTurn[];
-}
-
-export interface ChatEventsRestoreResult {
-  sessionId: string;
-  eventCount: number;
-  lastSeq: number;
-  messageCount: number;
-  restoredPath: string;
 }
 
 /** One day's aggregated activity, for the Profile Token-activity heatmap. */

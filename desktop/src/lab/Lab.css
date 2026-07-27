@@ -3226,23 +3226,26 @@
   align-items: center;
   justify-content: center;
   padding: 0;
-  border: 0;
-  border-radius: 4px;
+  border: 1px solid transparent;
+  border-radius: 6px;
   background: transparent;
-  color: #a8a8a8;
+  color: var(--text-dim);
   line-height: 1;
+  cursor: pointer;
+  transition: background 0.14s, border-color 0.14s, color 0.14s;
 }
 
 .lab-assistant-icon-btn:hover:not(:disabled),
 .lab-assistant-send:hover:not(:disabled) {
-  background: #2a2a2a;
-  color: #dcdcdc;
+  background: var(--bg-2);
+  border-color: var(--border);
+  color: var(--text);
 }
 
 .lab-assistant-icon-btn:disabled,
 .lab-assistant-send:disabled {
   cursor: default;
-  opacity: 0.38;
+  opacity: 0.4;
 }
 
 .lab-assistant-icon-btn svg,

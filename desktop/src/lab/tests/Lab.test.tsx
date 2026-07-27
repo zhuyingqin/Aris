@@ -12,7 +12,6 @@ const mocks = vi.hoisted(() => ({
   labExportSweepManifest: vi.fn(),
   labInspectFileVars: vi.fn(),
   labInspectVars: vi.fn(),
-  labInterruptFileKernel: vi.fn(),
   labInterruptKernel: vi.fn(),
   labListKernelspecs: vi.fn(),
   labListNotebooks: vi.fn(),
@@ -21,9 +20,7 @@ const mocks = vi.hoisted(() => ({
   labRunAll: vi.fn(),
   labRunSweep: vi.fn(),
   labSetKernelspec: vi.fn(),
-  labShutdownFileKernel: vi.fn(),
   labShutdownKernel: vi.fn(),
-  labStartFileKernel: vi.fn(),
   labStartKernel: vi.fn(),
   chatCancel: vi.fn(),
   chatPermissionGet: vi.fn(),
@@ -70,7 +67,6 @@ vi.mock("../../api/tauri", () => ({
   labExportSweepManifest: mocks.labExportSweepManifest,
   labInspectFileVars: mocks.labInspectFileVars,
   labInspectVars: mocks.labInspectVars,
-  labInterruptFileKernel: mocks.labInterruptFileKernel,
   labInterruptKernel: mocks.labInterruptKernel,
   labListKernelspecs: mocks.labListKernelspecs,
   labListNotebooks: mocks.labListNotebooks,
@@ -79,9 +75,7 @@ vi.mock("../../api/tauri", () => ({
   labRunAll: mocks.labRunAll,
   labRunSweep: mocks.labRunSweep,
   labSetKernelspec: mocks.labSetKernelspec,
-  labShutdownFileKernel: mocks.labShutdownFileKernel,
   labShutdownKernel: mocks.labShutdownKernel,
-  labStartFileKernel: mocks.labStartFileKernel,
   labStartKernel: mocks.labStartKernel,
   chatCancel: mocks.chatCancel,
   chatPermissionGet: mocks.chatPermissionGet,
@@ -181,6 +175,7 @@ beforeEach(() => {
   localStorage.removeItem("aris-lab-assistant-sessions-v1");
   useStore.setState({
     tab: "lab",
+    language: "en",
     projects: [projectA],
     currentProject: projectA,
     projectBusy: false,
@@ -224,13 +219,10 @@ beforeEach(() => {
   mocks.labExportSweepManifest.mockReset().mockResolvedValue("");
   mocks.labInspectFileVars.mockReset().mockResolvedValue({ status: "ok", variables: [] });
   mocks.labInspectVars.mockReset().mockResolvedValue({ status: "ok", variables: [] });
-  mocks.labInterruptFileKernel.mockReset().mockResolvedValue(undefined);
   mocks.labInterruptKernel.mockReset().mockResolvedValue(undefined);
   mocks.labRunAll.mockReset().mockResolvedValue({ status: "ok", ran: 1, cells: [], outline: [] });
   mocks.labRunSweep.mockReset().mockResolvedValue({ sweepId: "sweep-1", total: 0, runs: [] });
-  mocks.labShutdownFileKernel.mockReset().mockResolvedValue(undefined);
   mocks.labShutdownKernel.mockReset().mockResolvedValue(undefined);
-  mocks.labStartFileKernel.mockReset().mockResolvedValue({ id: "file:src/main.py", pid: 1, kernelName: "python3" });
   mocks.labStartKernel.mockReset().mockResolvedValue({});
   mocks.labListKernelspecs.mockReset().mockResolvedValue([
     { name: "python3", displayName: "Python 3", language: "python" },
@@ -454,21 +446,21 @@ describe("Lab", () => {
 
     mocks.fileReadText.mockResolvedValue({ path, content: changed, bytes: changed.length });
 
-    await waitFor(() => expect(screen.getByText("检测到 AI 修改")).toBeTruthy(), { timeout: 3000 });
+    await waitFor(() => expect(screen.getByText("AI changes detected")).toBeTruthy(), { timeout: 3000 });
     expect(window.__somniqEditors?.get("file")?.state.doc.toString()).toBe(changed);
     expect(container.querySelector(".cm-diff-added")).toBeTruthy();
-    expect(screen.getByLabelText("新增 3 行，移除 0 行")).toBeTruthy();
+    expect(screen.getByLabelText("3 lines added, 0 lines removed")).toBeTruthy();
 
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "恢复" }));
+      fireEvent.click(screen.getByRole("button", { name: "Restore" }));
     });
     await waitFor(() => expect(mocks.fileWriteText).toHaveBeenCalledWith(path, original));
-    expect(screen.queryByText("检测到 AI 修改")).toBeNull();
+    expect(screen.queryByText("AI changes detected")).toBeNull();
 
-    await waitFor(() => expect(screen.getByText("检测到 AI 修改")).toBeTruthy(), { timeout: 3000 });
+    await waitFor(() => expect(screen.getByText("AI changes detected")).toBeTruthy(), { timeout: 3000 });
 
-    fireEvent.click(screen.getByRole("button", { name: "保留" }));
-    expect(screen.queryByText("检测到 AI 修改")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Keep" }));
+    expect(screen.queryByText("AI changes detected")).toBeNull();
   });
 
   it("flags external (AI) notebook edits with cell highlights and review controls", async () => {
@@ -501,7 +493,7 @@ describe("Lab", () => {
     await openNotebookFromPanel(container, path);
 
     // The 2s poll detects the disk change → review bar + highlighted cells.
-    await waitFor(() => expect(screen.getByText("检测到 AI 修改")).toBeTruthy(), { timeout: 5000 });
+    await waitFor(() => expect(screen.getByText("AI changes detected")).toBeTruthy(), { timeout: 5000 });
     await waitFor(() => {
       expect(container.querySelector(".lab-cell.cell-modified")).toBeTruthy();
       expect(container.querySelector(".lab-cell.cell-added")).toBeTruthy();
@@ -511,9 +503,9 @@ describe("Lab", () => {
     expect(modifiedCell?.querySelector(".cm-diff-added")).toBeTruthy();
     expect(addedCell?.querySelector(".cm-diff-added")).toBeTruthy();
 
-    // 保留 accepts the changes and clears the review highlighting.
-    fireEvent.click(screen.getByRole("button", { name: "保留" }));
-    await waitFor(() => expect(screen.queryByText("检测到 AI 修改")).toBeNull());
+    // "Keep" accepts the changes and clears the review highlighting.
+    fireEvent.click(screen.getByRole("button", { name: "Keep" }));
+    await waitFor(() => expect(screen.queryByText("AI changes detected")).toBeNull());
     expect(container.querySelector(".lab-cell.cell-modified")).toBeNull();
   });
 

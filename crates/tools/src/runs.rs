@@ -1,9 +1,9 @@
-//! Experiment run library: one `experiments/runs.json` per project.
+//! Experiment run library: one `.somniq/experiments/runs.json` per project.
 //!
-//! Mirrors the literature `papers/library.json` contract (atomic write +
+//! Mirrors the literature `.somniq/papers/library.json` contract (atomic write +
 //! `.bak` recovery + id-keyed upsert). A *run* is one execution of a notebook,
 //! optionally parameterized; its executed copy + outputs live under
-//! `experiments/runs/<id>/`. Local-kernel runs and GPU hand-offs (`backend:
+//! `.somniq/experiments/runs/<id>/`. Local-kernel runs and GPU hand-offs (`backend:
 //! "gpu"`) are recorded in the same ledger so the UI shows one unified list.
 
 use std::path::{Path, PathBuf};
@@ -16,12 +16,12 @@ use crate::layout;
 
 const RUNS_FILE: &str = "runs.json";
 
-/// `<project>/experiments`.
+/// `<project>/.somniq/experiments`.
 pub fn experiments_dir_at(base: &Path) -> PathBuf {
     layout::experiments_dir_at(base)
 }
 
-/// `<project>/experiments/runs.json`.
+/// `<project>/.somniq/experiments/runs.json`.
 pub fn runs_path_at(base: &Path) -> PathBuf {
     experiments_dir_at(base).join(RUNS_FILE)
 }

@@ -26,7 +26,6 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-const PAPERS_DIR: &str = "papers";
 const KNOWLEDGE_FILE: &str = "knowledge.db";
 
 // ── Tool inputs ─────────────────────────────────────────────────────────────
@@ -116,15 +115,27 @@ pub fn run_knowledge_search(input: KnowledgeSearchInput) -> Result<String, Strin
 
 #[must_use]
 pub fn knowledge_db_path_at(base: &Path) -> PathBuf {
-    base.join(PAPERS_DIR).join(KNOWLEDGE_FILE)
+    let managed = crate::layout::papers_dir_at(base).join(KNOWLEDGE_FILE);
+    if managed.exists() {
+        return managed;
+    }
+    let legacy = base.join(crate::layout::PAPERS_DIR).join(KNOWLEDGE_FILE);
+    if legacy.exists() {
+        legacy
+    } else {
+        managed
+    }
 }
 
 /// Open (creating if needed) the per-project knowledge database. The schema is
 /// applied idempotently on every open, mirroring `session_index::open_index`.
 pub fn open_db(base: &Path) -> Result<Connection, String> {
-    let dir = base.join(PAPERS_DIR);
+    let path = knowledge_db_path_at(base);
+    let dir = path
+        .parent()
+        .ok_or_else(|| "knowledge database has no parent directory".to_string())?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let connection = Connection::open(dir.join(KNOWLEDGE_FILE)).map_err(|e| e.to_string())?;
+    let connection = Connection::open(&path).map_err(|e| e.to_string())?;
     connection
         .execute_batch(
             "PRAGMA journal_mode=WAL;

@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import type { Language } from "../store";
+import { SETTINGS_COPY } from "./i18n";
 
 /**
  * Left-sidebar navigation model for the Settings surface. The settings page was
@@ -149,58 +150,22 @@ export const SETTINGS_NAV_GROUPS: SettingsNavGroupDef[] = [
 ];
 
 export const SETTINGS_NAV_LABELS: Record<Language, Record<SettingsNavId, string>> = {
-  cn: {
-    profile: "个人资料",
-    general: "常规",
-    appearance: "外观",
-    shortcuts: "键盘快捷键",
-    account: "账户与用量",
-    models: "模型服务",
-    mail: "邮箱",
-    remote: "远程控制",
-    extensions: "扩展",
-    environment: "环境",
-    about: "关于",
-  },
-  en: {
-    profile: "Profile",
-    general: "General",
-    appearance: "Appearance",
-    shortcuts: "Keyboard shortcuts",
-    account: "Account & usage",
-    models: "Model service",
-    mail: "Mail",
-    remote: "Remote control",
-    extensions: "Extensions",
-    environment: "Environment",
-    about: "About",
-  },
+  cn: SETTINGS_COPY.cn.nav.labels,
+  en: SETTINGS_COPY.en.nav.labels,
 };
 
 export const SETTINGS_NAV_GROUP_LABELS: Record<Language, Record<SettingsNavGroupId, string>> = {
-  cn: { personal: "个人", integration: "模型与集成", system: "系统" },
-  en: { personal: "Personal", integration: "Models & integration", system: "System" },
+  cn: SETTINGS_COPY.cn.nav.groupLabels,
+  en: SETTINGS_COPY.en.nav.groupLabels,
 };
 
 export const SETTINGS_NAV_MISC: Record<Language, { back: string; search: string; noResults: string }> = {
-  cn: { back: "返回应用", search: "搜索设置…", noResults: "没有匹配的设置" },
-  en: { back: "Back to app", search: "Search settings…", noResults: "No matching settings" },
+  cn: SETTINGS_COPY.cn.nav.misc,
+  en: SETTINGS_COPY.en.nav.misc,
 };
 
 /** Extra search terms (both languages) so search matches synonyms, not just the visible label. */
-const SETTINGS_NAV_KEYWORDS: Record<SettingsNavId, string> = {
-  profile: "profile 个人资料 头像 token 活跃 统计 heatmap streak",
-  general: "general 常规 语言 language 记忆 memory 提示词 prompt 偏好",
-  appearance: "appearance 外观 主题 theme 深色 浅色 dark light 字号",
-  shortcuts: "shortcuts 键盘 快捷键 keyboard hotkey keybinding",
-  account: "account 账户 登录 logout 订阅 subscription 套餐 分组 group 退出 usage billing 使用 计费 额度 quota token 用量",
-  models: "models 模型 executor reviewer provider 执行 审核 base url api key 摘要 summary scopus 测试 test",
-  mail: "mail 邮箱 gmail outlook imap smtp 邮件",
-  remote: "remote 远程 控制 手机 配对 pairing phone qr",
-  extensions: "extensions 扩展 拓展 插件 plugin mcp 技能 skill server 连接器 connector",
-  environment: "environment 环境 python jupyter matlab latex 运行 runtime",
-  about: "about 关于 更新 update 版本 version github 更新日志",
-};
+const SETTINGS_NAV_KEYWORDS = SETTINGS_COPY.cn.nav.keywords as Record<SettingsNavId, string>;
 
 export function settingsNavMatches(id: SettingsNavId, query: string): boolean {
   const q = query.trim().toLowerCase();

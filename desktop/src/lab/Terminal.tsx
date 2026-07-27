@@ -11,6 +11,8 @@ import {
   terminalResize,
   terminalWrite,
 } from "../api/tauri";
+import { useStore } from "../store";
+import { LAB_COPY } from "./i18n";
 
 /** Decode a base64 chunk (PTY output arrives base64-encoded) to raw bytes so
  *  xterm can decode UTF-8 itself and never splits a multi-byte sequence. */
@@ -31,6 +33,8 @@ interface TerminalProps {
 }
 
 export default function TerminalPane({ cwd, refitSignal }: TerminalProps) {
+  const language = useStore((s) => s.language);
+  const copy = LAB_COPY[language];
   const hostRef = useRef<HTMLDivElement>(null);
   const fitRef = useRef<FitAddon | null>(null);
 
@@ -62,7 +66,7 @@ export default function TerminalPane({ cwd, refitSignal }: TerminalProps) {
     let unlistenExit: (() => void) | null = null;
 
     void terminalOpen(id, cwd, term.cols || 80, term.rows || 24).catch((error) => {
-      term.write(`\r\n\x1b[31mFailed to open terminal: ${String(error)}\x1b[0m\r\n`);
+      term.write(`\r\n\x1b[31m${copy.terminalFailedToOpen(String(error))}\x1b[0m\r\n`);
     });
 
     void onTerminalOutput((event) => {
@@ -70,7 +74,7 @@ export default function TerminalPane({ cwd, refitSignal }: TerminalProps) {
     }).then((fn) => (disposed ? fn() : (unlistenOutput = fn)));
 
     void onTerminalExit((event) => {
-      if (event.id === id) term.write("\r\n\x1b[90m[process exited]\x1b[0m\r\n");
+      if (event.id === id) term.write(`\r\n\x1b[90m${copy.terminalProcessExited}\x1b[0m\r\n`);
     }).then((fn) => (disposed ? fn() : (unlistenExit = fn)));
 
     const dataSub = term.onData((data) => void terminalWrite(id, data));

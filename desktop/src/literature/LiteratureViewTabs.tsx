@@ -1,3 +1,7 @@
+import { useStore } from "../store";
+import { SvgIcon } from "../SvgIcon";
+import { LITERATURE_COPY } from "./i18n";
+
 export type LiteraturePageView = "library" | "discover" | "graph";
 
 interface LiteratureViewTabsProps {
@@ -6,24 +10,25 @@ interface LiteratureViewTabsProps {
   className?: string;
 }
 
-const LITERATURE_PAGE_VIEWS = [
-  { id: "library", label: "文献库", icon: "library" },
-  { id: "discover", label: "检索", icon: "search" },
-  { id: "graph", label: "知识图谱", icon: "graph" },
-] as const;
-
 export default function LiteratureViewTabs({
   pageView,
   onPageViewChange,
   className,
 }: LiteratureViewTabsProps) {
+  const language = useStore((s) => s.language);
+  const copy = LITERATURE_COPY[language];
+  const pageViews = [
+    { id: "library" as const, label: copy.tabs.library, icon: "library" as const },
+    { id: "discover" as const, label: copy.tabs.discover, icon: "search" as const },
+    { id: "graph" as const, label: copy.tabs.graph, icon: "graph" as const },
+  ];
   return (
     <div
       className={`lit-mode-switch${className ? ` ${className}` : ""}`}
       role="tablist"
-      aria-label="文献视图切换"
+      aria-label={copy.tabs.viewSwitchAria}
     >
-      {LITERATURE_PAGE_VIEWS.map((item) => (
+      {pageViews.map((item) => (
         <button
           key={item.id}
           type="button"
@@ -39,4 +44,3 @@ export default function LiteratureViewTabs({
     </div>
   );
 }
-import { SvgIcon } from "../SvgIcon";

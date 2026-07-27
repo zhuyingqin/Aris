@@ -1,5 +1,9 @@
-use super::{replay_events, session_from_events, ChatEventLogEntry};
+use super::{read_events_from_path, read_last_seq, replay_events, ChatEventLogEntry};
 use serde_json::json;
+use std::{
+    fs,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 fn event(seq: u64, kind: &str, payload: serde_json::Value) -> ChatEventLogEntry {
     ChatEventLogEntry {
@@ -43,30 +47,6 @@ fn replay_projects_stream_events_into_turns() {
 }
 
 #[test]
-fn restore_rebuilds_runtime_session_from_basic_events() {
-    let events = vec![
-        event(
-            1,
-            "user_message",
-            json!({"message":{"role":"user","blocks":[{"type":"text","text":"hi"}]}}),
-        ),
-        event(2, "assistant_delta", json!({"text":"hello"})),
-        event(
-            3,
-            "tool_call",
-            json!({"id":"t1","name":"bash","input":"{}"}),
-        ),
-        event(
-            4,
-            "tool_result",
-            json!({"id":"t1","name":"bash","output":"ok","isError":false}),
-        ),
-    ];
-    let session = session_from_events(&events).expect("session restores");
-    assert_eq!(session.messages.len(), 3);
-}
-
-#[test]
 fn canonical_session_events_are_replayable_without_snapshots() {
     let events = vec![
         event(1, "session_reset", json!({"reason":"initial"})),
@@ -91,7 +71,29 @@ fn canonical_session_events_are_replayable_without_snapshots() {
     let replay = replay_events("chat-test", &events);
     assert_eq!(replay.turns.len(), 2);
     assert_eq!(replay.turns[0]["blocks"][0]["text"], json!("from events"));
+}
 
-    let session = session_from_events(&events).expect("canonical session restores");
-    assert_eq!(session.messages.len(), 2);
+#[test]
+fn malformed_event_rows_do_not_block_later_recovery_or_saves() {
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("somniq-chat-events-{suffix}"));
+    fs::create_dir_all(&dir).expect("create temp dir");
+    let path = dir.join("chat-test.events.jsonl");
+    let first = serde_json::to_string(&event(1, "assistant_delta", json!({ "text": "first" })))
+        .expect("serialize first event");
+    let second = serde_json::to_string(&event(3, "done", json!({ "text": "second" })))
+        .expect("serialize second event");
+    fs::write(&path, format!("{first}\n{{invalid json\n{second}\n")).expect("write event log");
+
+    assert_eq!(read_last_seq(&path).expect("last sequence"), 3);
+    let events = read_events_from_path("chat-test", &path).expect("read recoverable events");
+    assert_eq!(
+        events.iter().map(|entry| entry.seq).collect::<Vec<_>>(),
+        vec![1, 3]
+    );
+
+    let _ = fs::remove_dir_all(dir);
 }

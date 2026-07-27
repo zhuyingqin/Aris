@@ -333,7 +333,7 @@ chat 前端恢复链路、LabAssistant、remote-gateway/mobile），实测测试
 - 动作：把同款串行化/守卫扩展到 desktop tests（env-mutating 测试共持一把锁，或改为 EnvGuard +
   锁组合），纳入正在进行的测试隔离工作流，不必等 P2。
 
-### N3. 模型能力双表漂移（新增合并候选 B6-能力表）
+### N3. 模型能力双表漂移（新增合并候选 B6-能力表） — **2026-07-25 复核：已解决**
 
 - 两张手维表：`aris_chat::context_compaction_threshold_for_model`（压缩预算）与
   `engine::context_window_for_model`（UI 展示窗口/告警 payload）。本轮增量各自新增 kimi 分支后，

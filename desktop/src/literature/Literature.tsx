@@ -31,10 +31,11 @@ import {
   type ProjectRagAnswerResult,
   type ProjectRagSearchResult,
 } from "../api/tauri";
-import { useStore } from "../store";
+import { useStore, type Language } from "../store";
 import { SvgIcon, type SvgIconName } from "../SvgIcon";
 import type { LiteraturePageView } from "./LiteratureViewTabs";
 import { citationKeyValidationError, useLiteratureStore } from "./literatureStore";
+import { LITERATURE_COPY } from "./i18n";
 import {
   type DetailTab,
   type LiteratureLibrary,
@@ -44,7 +45,6 @@ import {
   type LiteraturePaper,
   type LiteratureStorageStatus,
   type LiteratureNote,
-  type PaperFit,
   type PaperStage,
 } from "./literatureTypes";
 import "./Literature.css";
@@ -93,24 +93,30 @@ interface LiteratureViewTabsProps {
   className?: string;
 }
 
-const LITERATURE_PAGE_VIEWS = [
-  { id: "library", label: "文献库", icon: "library" },
-  { id: "discover", label: "检索", icon: "search" },
-  { id: "graph", label: "知识图谱", icon: "graph" },
-] as const;
+type LiteratureCopy = (typeof LITERATURE_COPY)[Language];
+
+function literaturePageViews(copy: LiteratureCopy) {
+  return [
+    { id: "library" as const, label: copy.tabs.library, icon: "library" as const },
+    { id: "discover" as const, label: copy.tabs.discover, icon: "search" as const },
+    { id: "graph" as const, label: copy.tabs.graph, icon: "graph" as const },
+  ];
+}
 
 export function LiteratureViewTabs({
   pageView,
   onPageViewChange,
   className,
 }: LiteratureViewTabsProps) {
+  const language = useStore((s) => s.language);
+  const copy = LITERATURE_COPY[language];
   return (
     <div
       className={`lit-mode-switch${className ? ` ${className}` : ""}`}
       role="tablist"
-      aria-label="文献视图切换"
+      aria-label={copy.tabs.viewSwitchAria}
     >
-      {LITERATURE_PAGE_VIEWS.map((item) => (
+      {literaturePageViews(copy).map((item) => (
         <button
           key={item.id}
           type="button"
@@ -143,14 +149,9 @@ const STAGE_ICONS: Record<PaperStage, SvgIconName> = {
   excluded: "excluded",
 };
 
-const STAGE_LABELS: Record<PaperStage, string> = {
-  inbox: "收件箱",
-  screened: "待审阅",
-  shortlist: "候选",
-  downloaded: "已下载",
-  read: "已阅读",
-  excluded: "已排除",
-};
+function stageLabels(copy: LiteratureCopy): Record<PaperStage, string> {
+  return copy.stage;
+}
 
 const STAGES_NAV: Array<{ id: PaperStage; alwaysVisible: boolean }> = [
   { id: "inbox", alwaysVisible: true },
@@ -160,21 +161,6 @@ const STAGES_NAV: Array<{ id: PaperStage; alwaysVisible: boolean }> = [
   { id: "read", alwaysVisible: false },
   { id: "excluded", alwaysVisible: false },
 ];
-
-const FIT_LABELS: Record<PaperFit, string> = {
-  high: "高",
-  medium: "中",
-  low: "低",
-};
-
-const EVIDENCE_ROLE_LABELS: Record<string, string> = {
-  premise: "前提",
-  method: "方法",
-  result: "结果",
-  limitation: "局限",
-  support: "支撑",
-  evidence: "证据",
-};
 
 function matchesView(paper: LiteraturePaper, view: string) {
   if (view === "all") return paper.stage !== "excluded";
@@ -253,17 +239,19 @@ function readAutoRetrievalCardsPreference() {
   }
 }
 
-function itemTypeLabel(itemType?: string) {
-  const labels: Record<string, string> = {
-    article: "期刊文章", book: "图书", bookSection: "图书章节", conferencePaper: "会议论文",
-    thesis: "学位论文", report: "报告", webpage: "网页", dataset: "数据集", preprint: "预印本", other: "其他",
-    "article-journal": "期刊文章", "paper-conference": "会议论文", "chapter": "图书章节",
-  };
-  return labels[itemType ?? "article"] ?? itemType ?? "其他";
+const ITEM_TYPE_ALIASES: Record<string, string> = {
+  "article-journal": "article",
+  "paper-conference": "conferencePaper",
+  chapter: "bookSection",
+};
+
+function itemTypeLabel(copy: LiteratureCopy, itemType?: string) {
+  const canonical = ITEM_TYPE_ALIASES[itemType ?? ""] ?? itemType ?? "article";
+  return (copy.itemType as Record<string, string>)[canonical] ?? copy.itemType.other;
 }
 
-function formatAuthors(authors: string[]) {
-  if (authors.length === 0) return "Unknown authors";
+function formatAuthors(copy: LiteratureCopy, authors: string[]) {
+  if (authors.length === 0) return copy.unknownAuthors;
   if (authors.length <= 3) return authors.join(", ");
   return `${authors.slice(0, 3).join(", ")} et al.`;
 }
@@ -278,6 +266,7 @@ function RetrievalCardPreviewItem({
   paperTitle: (paperId: string) => string;
   onOpenCitation: (paperId: string, page?: number) => void;
 }) {
+  const copy = LITERATURE_COPY[useStore((s) => s.language)];
   const terms = [
     ...preview.card.concepts,
     ...preview.card.aliases,
@@ -299,7 +288,7 @@ function RetrievalCardPreviewItem({
       {preview.card.questions.length > 0 && <p>{preview.card.questions.slice(0, 3).join("；")}</p>}
       {terms.length > 0 && <div className="lit-rag-card-terms">{terms.map((term) => <span key={term}>{term}</span>)}</div>}
       <blockquote>{preview.sourcePreview}</blockquote>
-      <footer>{preview.card.generatedBy || "configured executor"} · prompt v{preview.card.promptVersion}</footer>
+      <footer>{preview.card.generatedBy || copy.ragPanel.configuredExecutor} · prompt v{preview.card.promptVersion}</footer>
     </article>
   );
 }
@@ -315,8 +304,9 @@ function LiteratureRagPanel({
   onOpenCitation: (paperId: string, page?: number) => void;
   onActivity: (kind: "ok" | "error", message: string) => void;
 }) {
+  const copy = LITERATURE_COPY[useStore((s) => s.language)];
   const [busy, setBusy] = useState<"paper" | "library" | "rebuild" | "search" | "answer" | null>(null);
-  const [status, setStatus] = useState("先建立稳定页码的 PDF 原文索引，再由现有 LLM 生成检索卡；查询全程使用本地 SQLite FTS5，不需要 Embedding。");
+  const [status, setStatus] = useState(copy.ragPanel.initialStatus);
   const [libraryResult, setLibraryResult] = useState<LiteratureRagIndexLibraryResult | null>(null);
   const [query, setQuery] = useState("");
   const [searchResult, setSearchResult] = useState<ProjectRagSearchResult | null>(null);
@@ -373,7 +363,7 @@ function LiteratureRagPanel({
   }, []);
 
   const reportFailure = (prefix: string, cause: unknown) => {
-    const message = `${prefix}：${String(cause)}`;
+    const message = copy.ragPanel.failureMessage(prefix, String(cause));
     setStatus(message);
     onActivity("error", message);
   };
@@ -383,7 +373,7 @@ function LiteratureRagPanel({
     retrievalCardBuildRunningRef.current = true;
     const run = retrievalCardBuildRunRef.current + 1;
     retrievalCardBuildRunRef.current = run;
-    const scope = paperId ? "当前 PDF" : "全文献库";
+    const scope = paperId ? copy.ragPanel.scopePaper : copy.ragPanel.scopeLibrary;
     let batches = 0;
     let attempted = 0;
     let generated = 0;
@@ -396,7 +386,7 @@ function LiteratureRagPanel({
       attempted,
       generated,
       warnings,
-      message: automatic ? `${scope}的检索卡正在后台自动构建…` : `${scope}的检索卡正在后台补建…`,
+      message: automatic ? copy.ragPanel.autoBuildingCards(scope) : copy.ragPanel.manualBuildingCards(scope),
     });
 
     try {
@@ -418,7 +408,7 @@ function LiteratureRagPanel({
           attempted,
           generated,
           warnings,
-          message: `检索卡后台构建中：已处理 ${attempted} 个页块，生成 ${generated} 张卡（${batches} 批）。`,
+          message: copy.ragPanel.cardBuildRunning(attempted, generated, batches),
         });
         void refreshDatabaseStatus();
         if (!result.hasMore || stalled) break;
@@ -429,17 +419,17 @@ function LiteratureRagPanel({
       if (run !== retrievalCardBuildRunRef.current) return;
       if (automatic && !autoRetrievalCardsRef.current) paused = true;
       const message = paused
-        ? `自动生成已暂停；本次已处理 ${attempted} 个页块，生成 ${generated} 张检索卡。`
+        ? copy.ragPanel.cardBuildPaused(attempted, generated)
         : stalled
-          ? `检索卡构建在 ${batches} 批后暂停：本批没有生成新卡，请检查检索卡模型配置。`
+          ? copy.ragPanel.cardBuildStalled(batches)
           : attempted === 0
-            ? "所有已索引页块的检索卡均为最新状态。"
-            : `检索卡后台构建完成：已处理 ${attempted} 个页块，生成 ${generated} 张卡（${batches} 批）。`;
+            ? copy.ragPanel.cardBuildAllCurrent
+            : copy.ragPanel.cardBuildCompleted(attempted, generated, batches);
       setRetrievalCardBuild({ running: false, batches, attempted, generated, warnings, message });
       onActivity(warnings > 0 || stalled ? "error" : "ok", message);
     } catch (cause) {
       if (run !== retrievalCardBuildRunRef.current) return;
-      const message = `检索卡后台构建失败：${String(cause)}`;
+      const message = copy.ragPanel.cardBuildFailed(String(cause));
       setRetrievalCardBuild({ running: false, batches, attempted, generated, warnings, message });
       onActivity("error", message);
     } finally {
@@ -465,7 +455,7 @@ function LiteratureRagPanel({
     autoRetrievalCardsRef.current = enabled;
     setAutoRetrievalCards(enabled);
     if (!enabled && retrievalCardBuildRunningRef.current) {
-      setStatus("自动检索卡生成将在当前小批处理结束后暂停。");
+      setStatus(copy.ragPanel.autoCardsWillPause);
       return;
     }
     if (enabled && databaseStatus && databaseStatus.pendingCardCount > 0 && !busy) {
@@ -476,13 +466,13 @@ function LiteratureRagPanel({
   const indexSelectedPaper = async () => {
     const relativePath = selectedPaper?.pdf.path;
     if (!relativePath) {
-      setStatus("当前论文没有已关联的本地 PDF。请先下载或上传 PDF。");
+      setStatus(copy.ragPanel.noPaperPdf);
       return;
     }
     if (busy) return;
     setBusy("paper");
     setLibraryResult(null);
-    setStatus(`正在通过内置 PDF 阅读器逐页提取《${selectedPaper.title}》并建立本地全文索引…`);
+    setStatus(copy.ragPanel.indexingPaper(selectedPaper.title));
     try {
       const result = await literatureRagIndexPdf(
         relativePath,
@@ -491,19 +481,19 @@ function LiteratureRagPanel({
       const indexedChunks = result.stats?.indexedChunks ?? result.indexedChunks ?? 0;
       const skipped = result.stats?.skippedAsCurrent ?? result.skippedAsCurrent ?? false;
       const message = skipped
-        ? `《${selectedPaper.title}》内容未变化，已保留现有全文索引。`
-        : `《${selectedPaper.title}》已建立 ${indexedChunks} 个本地可引用页块；共 ${result.pageCount} 页${result.ocrUsed ? "，包含 OCR 页" : ""}。`;
+        ? copy.ragPanel.indexUnchanged(selectedPaper.title)
+        : copy.ragPanel.indexed(selectedPaper.title, indexedChunks, result.pageCount, result.ocrUsed);
       const parserNote = result.parserEngine
-        ? ` 解析器：${result.parserEngine}；图像资产 ${result.assetCount ?? 0} 个。${result.parserWarning ? ` ${result.parserWarning}` : ""}`
+        ? copy.ragPanel.parserNote(result.parserEngine, result.assetCount ?? 0, result.parserWarning)
         : "";
       const cardNote = autoRetrievalCardsRef.current
-        ? " 检索卡将转入后台自动构建。"
-        : " 自动检索卡生成已关闭；可在需要时手动补建。";
+        ? copy.ragPanel.cardNoteOn
+        : copy.ragPanel.cardNoteOff;
       setStatus(`${message}${parserNote}${cardNote}`);
       onActivity("ok", `${message}${parserNote}${cardNote}`);
       if (autoRetrievalCardsRef.current) void buildRetrievalCardsInBackground(selectedPaper.id, true);
     } catch (cause) {
-      reportFailure("单篇 PDF 索引失败", cause);
+      reportFailure(copy.ragPanel.singlePaperIndexFailed, cause);
     } finally {
       setBusy(null);
       void refreshDatabaseStatus();
@@ -512,22 +502,22 @@ function LiteratureRagPanel({
 
   const indexLibrary = async (forceRebuild: boolean) => {
     if (busy) return;
-    if (forceRebuild && !window.confirm("强制重建会清除并重建可再生的 PDF 全文索引与检索卡；原始 PDF 和文献数据不会被修改。继续吗？")) return;
+    if (forceRebuild && !window.confirm(copy.ragPanel.forceRebuildConfirm)) return;
     setBusy(forceRebuild ? "rebuild" : "library");
     setLibraryResult(null);
-    setStatus(forceRebuild ? "正在强制重建全部 PDF 全文索引…" : "正在增量更新全文献库 PDF 全文索引…");
+    setStatus(forceRebuild ? copy.ragPanel.forceRebuilding : copy.ragPanel.incrementalUpdating);
     try {
       const result = await literatureRagIndexLibrary(forceRebuild);
       setLibraryResult(result);
-      const message = `PDF 索引完成：共 ${result.total} 篇，更新 ${result.indexed} 篇，跳过 ${result.skipped} 篇，失败 ${result.failed} 篇。`;
+      const message = copy.ragPanel.libraryIndexed(result.total, result.indexed, result.skipped, result.failed);
       const cardNote = autoRetrievalCardsRef.current
-        ? " 检索卡将转入后台自动构建。"
-        : " 自动检索卡生成已关闭；可在需要时手动补建。";
-      setStatus(`${message} 原文索引使用本地 SQLite FTS5。${cardNote}`);
+        ? copy.ragPanel.cardNoteOn
+        : copy.ragPanel.cardNoteOff;
+      setStatus(`${message}${copy.ragPanel.libraryIndexedSuffix}${cardNote}`);
       onActivity(result.failed > 0 ? "error" : "ok", `${message}${cardNote}`);
       if (autoRetrievalCardsRef.current) void buildRetrievalCardsInBackground(undefined, true);
     } catch (cause) {
-      reportFailure(forceRebuild ? "强制重建 PDF 索引失败" : "批量建立 PDF 索引失败", cause);
+      reportFailure(forceRebuild ? copy.ragPanel.forceRebuildFailed : copy.ragPanel.libraryIndexFailed, cause);
     } finally {
       setBusy(null);
       void refreshDatabaseStatus();
@@ -542,7 +532,7 @@ function LiteratureRagPanel({
   const search = async () => {
     const normalizedQuery = query.trim();
     if (!normalizedQuery) {
-      setStatus("请输入要在已确认知识和 PDF 原文中检索的问题。");
+      setStatus(copy.ragPanel.noSearchQuery);
       return;
     }
     if (busy) return;
@@ -550,14 +540,14 @@ function LiteratureRagPanel({
     setSearchResult(null);
     setAnswer("");
     setAnswerReview(null);
-    setStatus("正在由 LLM 生成少量扩展检索式，并行检索原文、检索卡和已确认知识…");
+    setStatus(copy.ragPanel.searching);
     try {
       const result = await projectRagSearch<ProjectRagSearchResult>(normalizedQuery, 8);
       setSearchResult(result);
-      const warning = result.plannerWarning ? ` 查询扩展不可用，已回退到原问题：${result.plannerWarning}` : "";
-      setStatus(`检索完成：${result.knowledge.results.length} 条已确认知识，${result.literature.results.length} 个 PDF 原文页块。${warning}`);
+      const warning = result.plannerWarning ? copy.ragPanel.plannerWarning(result.plannerWarning) : "";
+      setStatus(copy.ragPanel.searchDone(result.knowledge.results.length, result.literature.results.length, warning));
     } catch (cause) {
-      reportFailure("本地检索失败", cause);
+      reportFailure(copy.ragPanel.searchFailed, cause);
     } finally {
       setBusy(null);
     }
@@ -566,7 +556,7 @@ function LiteratureRagPanel({
   const answerWithSomni = async () => {
     const normalizedQuery = query.trim();
     if (!normalizedQuery) {
-      setStatus("请输入要根据已确认知识和 PDF 原文回答的问题。");
+      setStatus(copy.ragPanel.noAnswerQuery);
       return;
     }
     if (busy) return;
@@ -574,18 +564,18 @@ function LiteratureRagPanel({
     setSearchResult(null);
     setAnswer("");
     setAnswerReview(null);
-    setStatus("正在扩展问题、检索与重排证据，并由独立 Reviewer 核验页码引用…");
+    setStatus(copy.ragPanel.answering);
     try {
       const result: ProjectRagAnswerResult = await projectRagAnswer(normalizedQuery, 8);
       setSearchResult(result);
       setAnswer(result.answer);
       setAnswerReview(result.review);
       const reviewNote = result.review.verdict === "pass"
-        ? "独立证据审校通过。"
-        : `独立证据审校：${result.review.verdict}。`;
-      setStatus(`回答完成：引用 ${result.knowledge.results.length} 条已确认知识和 ${result.literature.results.length} 个 PDF 页块。${reviewNote}`);
+        ? copy.ragPanel.reviewPassed
+        : copy.ragPanel.reviewOther(result.review.verdict);
+      setStatus(copy.ragPanel.answerDone(result.knowledge.results.length, result.literature.results.length, reviewNote));
     } catch (cause) {
-      reportFailure("检索回答失败", cause);
+      reportFailure(copy.ragPanel.answerFailed, cause);
     } finally {
       setBusy(null);
     }
@@ -595,94 +585,97 @@ function LiteratureRagPanel({
   const totalResults = (searchResult?.knowledge.results.length ?? 0) + (searchResult?.literature.results.length ?? 0);
 
   return (
-    <section className="lit-rag-panel" aria-label="本地文献检索">
+    <section className="lit-rag-panel" aria-label={copy.ragPanel.panelAria}>
       <div className="lit-rag-header">
         <div className="lit-rag-header-icon" aria-hidden="true">
           <SvgIcon name="memory" size={22} />
         </div>
         <div className="lit-rag-header-copy">
           <div className="lit-rag-header-meta">
-            <span className="lit-rag-kicker">Local search</span>
-            <div className="lit-rag-header-tags" aria-label="检索特性">
-              <span><SvgIcon name="check" size={12} /> 本地 FTS5</span>
-              <span><SvgIcon name="memory" size={12} /> 零向量存储</span>
+            <span className="lit-rag-kicker">{copy.ragPanel.kicker}</span>
+            <div className="lit-rag-header-tags" aria-label={copy.ragPanel.featuresAria}>
+              <span><SvgIcon name="check" size={12} /> {copy.ragPanel.localFts}</span>
+              <span><SvgIcon name="memory" size={12} /> {copy.ragPanel.zeroVectorStorage}</span>
             </div>
           </div>
-          <h2>本地 PDF 与知识检索</h2>
-          <p>PDF 分页、OCR、页块和 SQLite FTS 索引均保存在项目 <code>papers/rag/</code>；仅在生成检索卡或回答时，才向已配置的模型传入所需页块。</p>
-          <p className="lit-rag-chat-route"><SvgIcon name="inbox" size={12} /> 搜索并保存新文献请直接在 Chat 中提出；此处专注检索本地 PDF 与已确认知识。</p>
+          <h2>{copy.ragPanel.heading}</h2>
+          <p>{copy.ragPanel.storageNotePrefix}<code>papers/rag/</code>{copy.ragPanel.storageNoteSuffix}</p>
+          <p className="lit-rag-chat-route"><SvgIcon name="inbox" size={12} /> {copy.ragPanel.chatRouteNote}</p>
         </div>
       </div>
 
-      <section className="lit-rag-pipeline" aria-label="无向量检索链路">
+      <section className="lit-rag-pipeline" aria-label={copy.ragPanel.pipelineAria}>
         <div className="lit-rag-pipeline-intro">
           <SvgIcon name="diagram" size={17} />
           <div>
-            <strong>证据链路</strong>
-            <span>原始页码始终可追溯</span>
+            <strong>{copy.ragPanel.pipelineHeading}</strong>
+            <span>{copy.ragPanel.pipelineSubheading}</span>
           </div>
         </div>
         <ol>
-          <li><SvgIcon name="attachment" size={14} /><span><strong>PDF / OCR</strong><small>分页与图注</small></span></li>
-          <li><SvgIcon name="search" size={14} /><span><strong>FTS5 召回</strong><small>本地全文检索</small></span></li>
-          <li><SvgIcon name="sparkle" size={14} /><span><strong>LLM 重排</strong><small>受限候选页块</small></span></li>
-          <li><SvgIcon name="check" size={14} /><span><strong>Reviewer</strong><small>独立核验引用</small></span></li>
+          <li><SvgIcon name="attachment" size={14} /><span><strong>{copy.ragPanel.pipelinePdfOcr}</strong><small>{copy.ragPanel.pipelinePdfOcrHint}</small></span></li>
+          <li><SvgIcon name="search" size={14} /><span><strong>{copy.ragPanel.pipelineFts}</strong><small>{copy.ragPanel.pipelineFtsHint}</small></span></li>
+          <li><SvgIcon name="sparkle" size={14} /><span><strong>{copy.ragPanel.pipelineRerank}</strong><small>{copy.ragPanel.pipelineRerankHint}</small></span></li>
+          <li><SvgIcon name="check" size={14} /><span><strong>{copy.ragPanel.pipelineReviewer}</strong><small>{copy.ragPanel.pipelineReviewerHint}</small></span></li>
         </ol>
       </section>
 
       <div className="lit-rag-workspace-grid">
 
-      <section className="lit-rag-database" aria-label="本地检索库状态">
+      <section className="lit-rag-database" aria-label={copy.ragPanel.databaseAria}>
         <div className="lit-rag-database-head">
           <div className="lit-rag-database-title">
             <span className="lit-rag-section-icon" aria-hidden="true"><SvgIcon name="library" size={15} /></span>
             <div>
-            <strong>本地检索库</strong>
+            <strong>{copy.ragPanel.databaseTitle}</strong>
             <span title={databaseStatus?.indexPath}>
-              {databaseStatus?.relativeIndexPath ?? "papers/rag/literature-retrieval.sqlite"}
+              {databaseStatus?.relativeIndexPath ?? copy.ragPanel.defaultIndexPath}
             </span>
             </div>
           </div>
           <div className="lit-rag-database-controls">
             <span className={`lit-rag-state-pill ${databaseStatus?.exists ? "ready" : "empty"}`}>
               <i aria-hidden="true" />
-              {databaseStatusRefreshing ? "读取中" : databaseStatus?.exists ? "索引就绪" : "待初始化"}
+              {databaseStatusRefreshing ? copy.ragPanel.stateLoading : databaseStatus?.exists ? copy.ragPanel.stateReady : copy.ragPanel.stateEmpty}
             </span>
-            <button type="button" onClick={() => void refreshDatabaseStatus()} disabled={databaseStatusRefreshing} aria-label="刷新检索库状态" title="刷新检索库状态">
-              <SvgIcon name="refresh" size={13} /> <span>{databaseStatusRefreshing ? "读取中" : "刷新"}</span>
+            <button type="button" onClick={() => void refreshDatabaseStatus()} disabled={databaseStatusRefreshing} aria-label={copy.ragPanel.refreshAria} title={copy.ragPanel.refreshAria}>
+              <SvgIcon name="refresh" size={13} /> <span>{databaseStatusRefreshing ? copy.ragPanel.stateLoading : copy.ragPanel.refresh}</span>
             </button>
           </div>
         </div>
-        {databaseStatusError && <p className="lit-rag-database-error">读取失败：{databaseStatusError}</p>}
-        {!databaseStatus && !databaseStatusError && <p className="lit-note-text">正在读取本地索引状态…</p>}
+        {databaseStatusError && <p className="lit-rag-database-error">{copy.ragPanel.readFailedPrefix}{databaseStatusError}</p>}
+        {!databaseStatus && !databaseStatusError && <p className="lit-note-text">{copy.ragPanel.readingIndexStatus}</p>}
         {databaseStatus && !databaseStatus.exists && (
           <div className="lit-rag-database-empty">
             <span aria-hidden="true"><SvgIcon name="library" size={20} /></span>
             <div>
-              <strong>还没有全文索引</strong>
-              <p>从右侧更新文献库，系统会在项目内创建可追溯的本地检索库。</p>
+              <strong>{copy.ragPanel.noIndexYet}</strong>
+              <p>{copy.ragPanel.noIndexYetHint}</p>
             </div>
           </div>
         )}
         {databaseStatus?.exists && (
           <>
             <div className="lit-rag-database-stats">
-              <div><strong>{databaseStatus.documentCount}</strong><span>已索引论文</span></div>
-              <div><strong>{databaseStatus.chunkCount}</strong><span>原文页块</span></div>
-              <div><strong>{databaseStatus.currentCardCount}</strong><span>有效检索卡</span></div>
-              <div><strong>{databaseStatus.pendingCardCount}</strong><span>待生成卡</span></div>
-              <div><strong>{databaseStatus.assetCount}</strong><span>图表资产</span></div>
-              <div><strong>{formatStorageBytes(databaseStatus.databaseBytes)}</strong><span>数据库大小</span></div>
+              <div><strong>{databaseStatus.documentCount}</strong><span>{copy.ragPanel.statDocuments}</span></div>
+              <div><strong>{databaseStatus.chunkCount}</strong><span>{copy.ragPanel.statChunks}</span></div>
+              <div><strong>{databaseStatus.currentCardCount}</strong><span>{copy.ragPanel.statCurrentCards}</span></div>
+              <div><strong>{databaseStatus.pendingCardCount}</strong><span>{copy.ragPanel.statPendingCards}</span></div>
+              <div><strong>{databaseStatus.assetCount}</strong><span>{copy.ragPanel.statAssets}</span></div>
+              <div><strong>{formatStorageBytes(databaseStatus.databaseBytes)}</strong><span>{copy.ragPanel.statDatabaseSize}</span></div>
             </div>
             <div className="lit-rag-card-coverage">
               <div>
-                <span>检索卡覆盖</span>
+                <span>{copy.ragPanel.cardCoverage}</span>
                 <strong>{databaseStatus.currentCardCount}/{databaseStatus.chunkCount}</strong>
               </div>
               <progress max={Math.max(databaseStatus.chunkCount, 1)} value={databaseStatus.currentCardCount} />
               <small>
-                元数据 {databaseStatus.metadataDocumentCount} 篇 · 引用关系 {databaseStatus.citationMentionCount} 条
-                {databaseStatus.staleCardCount > 0 ? ` · 失效卡 ${databaseStatus.staleCardCount} 张` : ""}
+                {copy.ragPanel.metadataDocsAndCitations(
+                  databaseStatus.metadataDocumentCount,
+                  databaseStatus.citationMentionCount,
+                  databaseStatus.staleCardCount > 0 ? copy.ragPanel.staleCardsSuffix(databaseStatus.staleCardCount) : "",
+                )}
               </small>
             </div>
             <div className="lit-rag-card-browser">
@@ -695,8 +688,8 @@ function LiteratureRagPanel({
                 <SvgIcon name="library" size={13} />
                 <span>
                   {databaseStatus.currentCardCount === 0
-                    ? "当前还没有检索卡"
-                    : `浏览全部检索卡（${databaseStatus.currentCardCount} 张）`}
+                    ? copy.ragPanel.noCardsYet
+                    : copy.ragPanel.browseAllCards(databaseStatus.currentCardCount)}
                 </span>
                 {databaseStatus.currentCardCount > 0 && <SvgIcon name="chevronRight" size={13} />}
               </button>
@@ -705,46 +698,46 @@ function LiteratureRagPanel({
         )}
       </section>
 
-      <section className="lit-rag-maintenance" aria-label="索引维护">
+      <section className="lit-rag-maintenance" aria-label={copy.ragPanel.maintenanceAria}>
         <div className="lit-rag-maintenance-head">
           <div>
             <span className="lit-rag-section-icon" aria-hidden="true"><SvgIcon name="refresh" size={15} /></span>
             <div>
-              <strong>索引维护</strong>
-              <span>同步 PDF 页块与检索卡</span>
+              <strong>{copy.ragPanel.maintenanceHeading}</strong>
+              <span>{copy.ragPanel.maintenanceHint}</span>
             </div>
           </div>
           <span className={`lit-rag-selection${selectedPaper?.pdf.path ? " available" : ""}`} title={selectedPaper?.title}>
-            {selectedPaper?.pdf.path ? `当前：${selectedPaper.title}` : "当前论文无本地 PDF"}
+            {selectedPaper?.pdf.path ? copy.ragPanel.currentSelection(selectedPaper.title) : copy.ragPanel.noSelectionPdf}
           </span>
         </div>
 
-        <div className="lit-rag-actions" role="toolbar" aria-label="检索索引操作">
+        <div className="lit-rag-actions" role="toolbar" aria-label={copy.ragPanel.indexActionsAria}>
           <button type="button" className="primary lit-rag-library-action" onClick={() => void indexLibrary(false)} disabled={Boolean(busy) || retrievalCardBuild.running}>
             <SvgIcon name="refresh" size={14} />
-            {busy === "library" ? "正在批量更新…" : "增量更新全文献库全文"}
+            {busy === "library" ? copy.ragPanel.libraryUpdating : copy.ragPanel.libraryUpdateAction}
           </button>
           <button type="button" onClick={() => void indexSelectedPaper()} disabled={Boolean(busy) || retrievalCardBuild.running || !selectedPaper?.pdf.path}>
             <SvgIcon name="target" size={14} />
-            {busy === "paper" ? "正在索引当前 PDF…" : "建立当前 PDF 全文索引"}
+            {busy === "paper" ? copy.ragPanel.paperIndexing : copy.ragPanel.paperIndexAction}
           </button>
           <button type="button" onClick={buildRetrievalCards} disabled={Boolean(busy) || retrievalCardBuild.running}>
             <SvgIcon name="sparkle" size={14} />
-            {retrievalCardBuild.running ? "检索卡后台构建中…" : "立即补建检索卡"}
+            {retrievalCardBuild.running ? copy.ragPanel.cardBuildRunningShort : copy.ragPanel.cardBuildAction}
           </button>
         </div>
 
         <label className="lit-rag-auto-cards">
           <input
             type="checkbox"
-            aria-label="自动生成检索卡"
+            aria-label={copy.ragPanel.autoCardsAria}
             checked={autoRetrievalCards}
             onChange={(event) => setAutoRetrievalCardBuild(event.target.checked)}
           />
           <span className="lit-rag-switch" aria-hidden="true"><i /></span>
           <span className="lit-rag-auto-copy">
-            <strong>自动生成检索卡</strong>
-            <small>新索引完成后在后台分批处理</small>
+            <strong>{copy.ragPanel.autoCardsLabel}</strong>
+            <small>{copy.ragPanel.autoCardsHint}</small>
           </span>
         </label>
 
@@ -754,19 +747,19 @@ function LiteratureRagPanel({
               ? <span className="lit-search-spinner" />
               : <SvgIcon name={libraryResult?.failed ? "warning" : "check"} size={14} />}
           </span>
-          <div><strong>运行状态</strong><span>{status}</span></div>
+          <div><strong>{copy.ragPanel.runStatus}</strong><span>{status}</span></div>
         </div>
         <div className={`lit-rag-card-build${retrievalCardBuild.running ? " running" : ""}`} aria-live="polite">
           <SvgIcon name="sparkle" size={14} />
           <div>
-            <strong>检索卡后台任务</strong>
-            <span>{retrievalCardBuild.message || (autoRetrievalCards ? "新建全文索引后会自动开始。" : "自动生成已关闭。")}</span>
+            <strong>{copy.ragPanel.cardBuildTask}</strong>
+            <span>{retrievalCardBuild.message || (autoRetrievalCards ? copy.ragPanel.cardBuildIdleAuto : copy.ragPanel.cardBuildIdleOff)}</span>
           </div>
           {retrievalCardBuild.running && <span className="lit-search-spinner" aria-hidden="true" />}
         </div>
         {libraryResult && libraryResult.failures.length > 0 && (
           <details className="lit-rag-failures">
-            <summary>查看 {libraryResult.failures.length} 项失败</summary>
+            <summary>{copy.ragPanel.viewFailures(libraryResult.failures.length)}</summary>
             {libraryResult.failures.map((failure) => (
               <div key={`${failure.paperId}-${failure.relativePath}`}>
                 <strong>{paperTitle(failure.paperId)}</strong>
@@ -776,10 +769,10 @@ function LiteratureRagPanel({
           </details>
         )}
         <details className="lit-rag-advanced">
-          <summary><SvgIcon name="reset" size={13} /> 高级维护 <small>索引异常时使用</small></summary>
+          <summary><SvgIcon name="reset" size={13} /> {copy.ragPanel.advancedMaintenance} <small>{copy.ragPanel.advancedMaintenanceHint}</small></summary>
           <button type="button" className="danger" onClick={() => void indexLibrary(true)} disabled={Boolean(busy) || retrievalCardBuild.running}>
             <SvgIcon name="warning" size={13} />
-            {busy === "rebuild" ? "正在强制重建…" : "强制重建 PDF 全文索引"}
+            {busy === "rebuild" ? copy.ragPanel.forceRebuildingShort : copy.ragPanel.forceRebuildAction}
           </button>
         </details>
       </section>
@@ -789,51 +782,51 @@ function LiteratureRagPanel({
         <div className="lit-rag-search-heading">
           <span className="lit-rag-search-icon" aria-hidden="true"><SvgIcon name="sparkle" size={18} /></span>
           <div>
-            <span className="lit-rag-kicker">Ask SomniQ</span>
-            <strong>基于本地证据提问</strong>
-            <span>FTS5 召回原文与已确认知识，LLM 仅重排少量候选；回答由独立 Reviewer 核验页码引用。</span>
+            <span className="lit-rag-kicker">{copy.ragPanel.askKicker}</span>
+            <strong>{copy.ragPanel.askHeading}</strong>
+            <span>{copy.ragPanel.askHint}</span>
           </div>
         </div>
         <div className="lit-rag-search-box">
           <label className="lit-rag-query-input">
             <SvgIcon name="search" size={15} />
-            <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="例如：该方法在哪些数据集上验证，主要局限是什么？" aria-label="检索问题" />
+            <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={copy.ragPanel.queryPlaceholder} aria-label={copy.ragPanel.queryAria} />
           </label>
           <button type="button" onClick={() => void search()} disabled={Boolean(busy) || !query.trim()}>
-            <SvgIcon name="search" size={14} /> {busy === "search" ? "检索中…" : "仅检索证据"}
+            <SvgIcon name="search" size={14} /> {busy === "search" ? copy.ragPanel.searchingShort : copy.ragPanel.searchEvidenceOnly}
           </button>
           <button type="submit" className="primary" disabled={Boolean(busy) || !query.trim()}>
-            <SvgIcon name="sparkle" size={14} /> {busy === "answer" ? "回答中…" : "检索并回答"}
+            <SvgIcon name="sparkle" size={14} /> {busy === "answer" ? copy.ragPanel.answeringShort : copy.ragPanel.searchAndAnswer}
           </button>
         </div>
       </form>
 
       {answer && (
-        <section className="lit-rag-answer" aria-label="SomniQ 检索回答">
+        <section className="lit-rag-answer" aria-label={copy.ragPanel.answerAria2}>
           <div>
-            <strong>SomniQ 基于本地证据的回答</strong>
-            <span>回答由当前已配置的 LLM 生成；请通过下方来源卡片复核引用。</span>
+            <strong>{copy.ragPanel.answerHeading}</strong>
+            <span>{copy.ragPanel.answerHint}</span>
           </div>
           <p>{answer}</p>
           {answerReview && answerReview.findings.length > 0 && (
-            <small>独立审校：{answerReview.findings.join("；")}</small>
+            <small>{copy.ragPanel.independentReview(answerReview.findings.join("; "))}</small>
           )}
         </section>
       )}
 
       {searchResult && (
-        <div className="lit-rag-results" aria-label="检索结果">
-          {totalResults === 0 && <p className="lit-note-text">当前全文索引没有命中。可先为 PDF 建立全文索引，或换用更具体的关键词。</p>}
+        <div className="lit-rag-results" aria-label={copy.ragPanel.resultsAria}>
+          {totalResults === 0 && <p className="lit-note-text">{copy.ragPanel.noHits}</p>}
           {searchResult.knowledge.results.length > 0 && (
             <div className="lit-rag-result-group">
               <div className="lit-rag-result-heading">
-                <strong>已确认知识</strong>
+                <strong>{copy.ragPanel.confirmedKnowledge}</strong>
                 <span>{searchResult.knowledge.results.length}</span>
               </div>
               {searchResult.knowledge.results.map((hit) => (
                 <article className="lit-rag-result-card knowledge" key={hit.knowledge.id}>
                   <div className="lit-rag-result-meta">
-                    <span>已确认</span>
+                    <span>{copy.ragPanel.confirmed}</span>
                     <span>#{hit.rank}</span>
                     {hit.knowledge.kind && <span>{hit.knowledge.kind}</span>}
                   </div>
@@ -856,25 +849,25 @@ function LiteratureRagPanel({
           {searchResult.literature.results.length > 0 && (
             <div className="lit-rag-result-group">
               <div className="lit-rag-result-heading">
-                <strong>PDF 原文页块</strong>
+                <strong>{copy.ragPanel.pdfSourceChunks}</strong>
                 <span>{searchResult.literature.results.length}</span>
               </div>
               {searchResult.literature.results.map((hit) => (
                 <article className="lit-rag-result-card pdf" key={hit.chunk.chunkId}>
                   <div className="lit-rag-result-meta">
-                    <span>{hit.chunk.pageSource === "ocr" ? "OCR" : "PDF 文本"}</span>
+                    <span>{hit.chunk.pageSource === "ocr" ? "OCR" : copy.ragPanel.pdfTextTag}</span>
                     <span>p.{hit.chunk.pageStart}</span>
-                    {hit.sourceRank && <span>原文匹配 #{hit.sourceRank}</span>}
-                    {hit.cardRank && <span>检索卡匹配 #{hit.cardRank}</span>}
-                    {hit.assetRank && <span>图表匹配 #{hit.assetRank}</span>}
-                    {hit.citationRank && <span>引用匹配 #{hit.citationRank}</span>}
-                    {hit.metadataRank && <span>元数据匹配 #{hit.metadataRank}</span>}
-                    {hit.matchedQueries.length > 0 && <span>扩展词：{hit.matchedQueries.slice(0, 2).join(" / ")}</span>}
+                    {hit.sourceRank && <span>{copy.ragPanel.sourceMatch(hit.sourceRank)}</span>}
+                    {hit.cardRank && <span>{copy.ragPanel.cardMatch(hit.cardRank)}</span>}
+                    {hit.assetRank && <span>{copy.ragPanel.assetMatch(hit.assetRank)}</span>}
+                    {hit.citationRank && <span>{copy.ragPanel.citationMatch(hit.citationRank)}</span>}
+                    {hit.metadataRank && <span>{copy.ragPanel.metadataMatch(hit.metadataRank)}</span>}
+                    {hit.matchedQueries.length > 0 && <span>{copy.ragPanel.expandedTerms(hit.matchedQueries.slice(0, 2).join(" / "))}</span>}
                   </div>
                   <strong>{paperTitle(hit.chunk.paperId)}</strong>
                   <p>{hit.chunk.text}</p>
                   <button type="button" className="lit-rag-open-page" onClick={() => onOpenCitation(hit.chunk.paperId, hit.chunk.pageStart)}>
-                    打开原文页 <SvgIcon name="chevronRight" size={13} />
+                    {copy.ragPanel.openSourcePage} <SvgIcon name="chevronRight" size={13} />
                   </button>
                 </article>
               ))}
@@ -915,6 +908,7 @@ function RetrievalCardBrowser({
   onOpenCitation: (paperId: string, page?: number) => void;
   onClose: () => void;
 }) {
+  const copy = LITERATURE_COPY[useStore((s) => s.language)];
   const [queryInput, setQueryInput] = useState("");
   const [query, setQuery] = useState("");
   const [paperId, setPaperId] = useState("");
@@ -986,16 +980,16 @@ function RetrievalCardBrowser({
         if (event.target === event.currentTarget) onClose();
       }}
     >
-      <div className="lit-card-browser-modal" role="dialog" aria-modal="true" aria-label="检索卡浏览器">
+      <div className="lit-card-browser-modal" role="dialog" aria-modal="true" aria-label={copy.cardBrowser.dialogAria}>
         <header className="lit-card-browser-head">
           <div className="lit-card-browser-title">
             <span className="lit-rag-section-icon" aria-hidden="true"><SvgIcon name="library" size={15} /></span>
             <div>
-              <strong>检索卡浏览器</strong>
-              <span>{total > 0 ? `共 ${total} 张检索卡` : "没有匹配的检索卡"}</span>
+              <strong>{copy.cardBrowser.heading}</strong>
+              <span>{total > 0 ? copy.cardBrowser.totalCards(total) : copy.cardBrowser.noMatchingCards}</span>
             </div>
           </div>
-          <button type="button" className="lit-card-browser-close" onClick={onClose} aria-label="关闭">
+          <button type="button" className="lit-card-browser-close" onClick={onClose} aria-label={copy.cardBrowser.close}>
             <SvgIcon name="close" size={16} />
           </button>
         </header>
@@ -1006,11 +1000,11 @@ function RetrievalCardBrowser({
             <input
               value={queryInput}
               onChange={(event) => setQueryInput(event.target.value)}
-              placeholder="按概念、方法、数据集、指标或原文关键词筛选…"
-              aria-label="筛选检索卡"
+              placeholder={copy.cardBrowser.filterPlaceholder}
+              aria-label={copy.cardBrowser.filterAria}
             />
             {queryInput && (
-              <button type="button" onClick={() => setQueryInput("")} aria-label="清除筛选">
+              <button type="button" onClick={() => setQueryInput("")} aria-label={copy.cardBrowser.clearFilterAria}>
                 <SvgIcon name="close" size={12} />
               </button>
             )}
@@ -1022,9 +1016,9 @@ function RetrievalCardBrowser({
               setPaperId(event.target.value);
               setOffset(0);
             }}
-            aria-label="按论文筛选"
+            aria-label={copy.cardBrowser.filterByPaperAria}
           >
-            <option value="">全部论文</option>
+            <option value="">{copy.cardBrowser.allPapers}</option>
             {paperOptions.map((paper) => (
               <option key={paper.id} value={paper.id}>{paper.title}</option>
             ))}
@@ -1033,12 +1027,12 @@ function RetrievalCardBrowser({
 
         <div className="lit-card-browser-body">
           {error ? (
-            <p className="lit-rag-database-error">读取失败：{error}</p>
+            <p className="lit-rag-database-error">{copy.cardBrowser.readFailedPrefix}{error}</p>
           ) : loading && !page ? (
-            <div className="lit-card-browser-empty"><span className="lit-search-spinner" aria-hidden="true" /> 正在读取检索卡…</div>
+            <div className="lit-card-browser-empty"><span className="lit-search-spinner" aria-hidden="true" /> {copy.cardBrowser.loadingCards}</div>
           ) : total === 0 ? (
             <div className="lit-card-browser-empty">
-              {query || paperId ? "没有匹配的检索卡，换一个关键词或论文试试。" : "当前还没有检索卡。"}
+              {query || paperId ? copy.cardBrowser.noMatchHint : copy.cardBrowser.noCardsYet}
             </div>
           ) : (
             <div className={`lit-card-browser-list${loading ? " loading" : ""}`}>
@@ -1063,14 +1057,14 @@ function RetrievalCardBrowser({
                 onClick={() => setOffset((value) => Math.max(0, value - CARD_BROWSER_PAGE_SIZE))}
                 disabled={!hasPrev || loading}
               >
-                <SvgIcon name="chevronLeft" size={13} /> 上一页
+                <SvgIcon name="chevronLeft" size={13} /> {copy.cardBrowser.prevPage}
               </button>
               <button
                 type="button"
                 onClick={() => setOffset((value) => value + CARD_BROWSER_PAGE_SIZE)}
                 disabled={!hasNext || loading}
               >
-                下一页 <SvgIcon name="chevronRight" size={13} />
+                {copy.cardBrowser.nextPage} <SvgIcon name="chevronRight" size={13} />
               </button>
             </div>
           </footer>
@@ -1089,6 +1083,8 @@ export default function Literature({
   pageView: controlledPageView,
   onPageViewChange,
 }: LiteratureProps = {}) {
+  const language = useStore((s) => s.language);
+  const copy = LITERATURE_COPY[language];
   const currentProject = useStore((s) => s.currentProject);
   const setTab = useStore((s) => s.setTab);
   const setPendingChatInput = useStore((s) => s.setPendingChatInput);
@@ -1212,10 +1208,10 @@ export default function Literature({
           .then(async (result) => {
             await load(projectId, { quiet: true });
             setSelectedId(result.record.recordId);
-            logActivity("ok", "Imported dropped PDF as a local literature record.");
+            logActivity("ok", copy.dialogs.pdfDropImported);
           })
           .catch((error) => {
-            const message = `Could not import dropped PDF: ${String(error)}`;
+            const message = copy.dialogs.pdfDropImportFailed(String(error));
             setError(message);
             logActivity("error", message);
           });
@@ -1283,9 +1279,9 @@ export default function Literature({
     try {
       await literatureStorageBackup();
       await refreshStorageStatus();
-      logActivity("ok", "已创建本地文献数据库备份");
+      logActivity("ok", copy.dialogs.backupCreated);
     } catch (error) {
-      const message = `创建文献数据库备份失败：${String(error)}`;
+      const message = copy.dialogs.backupFailed(String(error));
       setError(message);
       logActivity("error", message);
     } finally {
@@ -1298,7 +1294,7 @@ export default function Literature({
     try {
       const selected = await openDialog({
         multiple: false,
-        filters: [{ name: "Bibliography exports", extensions: ["json", "ris", "bib", "bibtex", "biblatex"] }],
+        filters: [{ name: copy.dialogs.bibliographyExportsFilter, extensions: ["json", "ris", "bib", "bibtex", "biblatex"] }],
       });
       if (!selected || Array.isArray(selected)) return;
       const report = await literatureImportBibliography<{
@@ -1314,20 +1310,27 @@ export default function Literature({
       }>({ sourcePath: selected });
       await load(projectId, { quiet: true });
       const migratedChildren = [
-        report.attachments ? `${report.attachments} 个附件` : "",
-        report.notes ? `${report.notes} 条笔记` : "",
-        report.annotations ? `${report.annotations} 条标注` : "",
-        report.collections ? `${report.collections} 个分类` : "",
+        report.attachments ? copy.dialogs.attachmentsMigrated(report.attachments) : "",
+        report.notes ? copy.dialogs.notesMigrated(report.notes) : "",
+        report.annotations ? copy.dialogs.annotationsMigrated(report.annotations) : "",
+        report.collections ? copy.dialogs.collectionsMigrated(report.collections) : "",
       ].filter(Boolean);
       const warningSummary = report.warnings?.length
-        ? `；${report.warnings.length} 项需手动处理：${report.warnings[0]}`
+        ? copy.dialogs.warningsSummary(report.warnings.length, report.warnings[0])
         : "";
       logActivity(
         "ok",
-        `已从 ${report.format} 导入 ${report.imported} 条、合并 ${report.merged} 条文献${migratedChildren.length ? `；同时迁移 ${migratedChildren.join("、")}` : ""}${report.skipped ? `；跳过 ${report.skipped} 条不支持项` : ""}${warningSummary}`,
+        copy.dialogs.bibliographyImported({
+          format: report.format,
+          imported: report.imported,
+          merged: report.merged,
+          migratedChildren: migratedChildren.join(language === "cn" ? "、" : ", "),
+          skipped: report.skipped,
+          warningSummary,
+        }),
       );
     } catch (error) {
-      const message = `导入文献库失败：${String(error)}`;
+      const message = copy.dialogs.bibliographyImportFailed(String(error));
       setError(message);
       logActivity("error", message);
     }
@@ -1341,9 +1344,9 @@ export default function Literature({
       const result = await literatureImportPdfAsRecord<{ record: { recordId: string } }>(selected);
       await load(projectId, { quiet: true });
       setSelectedId(result.record.recordId);
-      logActivity("ok", "已导入 PDF 并创建本地文献条目");
+      logActivity("ok", copy.dialogs.pdfImported);
     } catch (error) {
-      const message = `导入 PDF 失败：${String(error)}`;
+      const message = copy.dialogs.pdfImportFailed(String(error));
       setError(message);
       logActivity("error", message);
     }
@@ -1351,15 +1354,15 @@ export default function Literature({
 
   const addIdentifier = async () => {
     if (!isTauri()) return;
-    const identifier = window.prompt("输入 DOI 或 ISBN");
+    const identifier = window.prompt(copy.dialogs.doiIsbnPrompt);
     if (!identifier?.trim()) return;
     try {
       const result = await literatureAddIdentifier<{ papers?: Array<{ id: string }> }>(identifier);
       await load(projectId, { quiet: true });
       if (result.papers?.[0]?.id) setSelectedId(result.papers[0].id);
-      logActivity("ok", "已通过 DOI/ISBN 查询写入可审计的本地文献记录");
+      logActivity("ok", copy.dialogs.identifierAdded);
     } catch (error) {
-      const message = `添加 DOI/ISBN 失败：${String(error)}`;
+      const message = copy.dialogs.identifierFailed(String(error));
       setError(message);
       logActivity("error", message);
     }
@@ -1420,7 +1423,7 @@ export default function Literature({
     if (!id) return;
     setView(`search:${id}`);
     setFilter("");
-    logActivity("ok", `Saved dynamic local search: ${filter.trim()}`);
+    logActivity("ok", copy.activity.dynamicSearchSaved(filter.trim()));
   };
 
   const selectedPaper = selectedId
@@ -1454,16 +1457,12 @@ export default function Literature({
       ?? (paper.doi ? `https://doi.org/${paper.doi}` : undefined)
       ?? (paper.arxivId ? `https://arxiv.org/abs/${paper.arxivId}` : undefined)
       ?? "unknown";
-    openAgentChat([
-      "Use the configured Playwright MCP browser tools to obtain the legitimate PDF for this library paper.",
-      `Paper id: ${paper.id}`,
-      `Title: ${paper.title}`,
-      `Landing page: ${landingPage}`,
-      `DOI: ${paper.doi ?? "unknown"}`,
-      "Reuse the browser tab/session I approve. Do not bypass paywalls or security interstitials.",
-      "If login, CAPTCHA, or user approval is needed, pause and ask me.",
-      "Download into papers/.browser-inbox, verify that the file is a PDF, then move it into papers/ with a stable filename and update only this record in the local literature database.",
-    ].join("\n"));
+    openAgentChat(copy.dialogs.browserDownloadPrompt({
+      paperId: paper.id,
+      title: paper.title,
+      landingPage,
+      doi: paper.doi ?? "unknown",
+    }));
   };
 
   const downloadOrBrowse = async (id: string) => {
@@ -1494,7 +1493,7 @@ export default function Literature({
   const openRagCitation = (paperId: string, page?: number) => {
     const paper = library.papers.find((entry) => entry.id === paperId);
     if (!paper) {
-      setError(`检索结果关联的文献 ${paperId} 已不在当前文献库中。请重建派生索引。`);
+      setError(copy.dialogs.ragCitationMissing(paperId));
       return;
     }
     setPageView("library");
@@ -1510,7 +1509,7 @@ export default function Literature({
     } else {
       setWorkspaceTab("evidence");
       if (page && !paper.pdf.path) {
-        setError(`已定位到第 ${page} 页，但当前文献记录没有可打开的本地 PDF。`);
+        setError(copy.dialogs.ragCitationNoLocalPdf(page));
       }
     }
   };
@@ -1521,7 +1520,7 @@ export default function Literature({
   ) => {
     const selected = await openDialog({
       multiple: false,
-      filters: [{ name: "Research files", extensions: ["pdf", "txt", "md", "html", "htm", "json", "csv", "docx", "xlsx", "zip"] }],
+      filters: [{ name: copy.dialogs.researchFilesFilter, extensions: ["pdf", "txt", "md", "html", "htm", "json", "csv", "docx", "xlsx", "zip"] }],
     });
     if (typeof selected !== "string") return;
     const inferredKind = kind === "supplement" && selected.toLowerCase().endsWith(".pdf") ? "pdf" : kind;
@@ -1529,15 +1528,15 @@ export default function Literature({
   };
 
   const addExternalAttachment = (id: string) => {
-    const url = window.prompt("添加外部链接（例如网页快照的原始 URL）：")?.trim();
+    const url = window.prompt(copy.dialogs.externalLinkPrompt)?.trim();
     if (!url) return;
     try {
       const parsed = new URL(url);
       if (!/^https?:$/.test(parsed.protocol)) throw new Error("unsupported protocol");
-      const label = window.prompt("链接名称：", parsed.hostname)?.trim() || parsed.hostname;
+      const label = window.prompt(copy.dialogs.linkLabelPrompt, parsed.hostname)?.trim() || parsed.hostname;
       addAttachment(id, { label, kind: "externalLink", url: parsed.toString() });
     } catch {
-      setError("请输入有效的 http(s) 链接。");
+      setError(copy.dialogs.invalidLinkError);
     }
   };
 
@@ -1547,7 +1546,7 @@ export default function Literature({
       return;
     }
     if (attachment.externalPath) {
-      setError(`该 Zotero 附件仍位于原位置：${attachment.externalPath}。请使用“导入附件”将其复制到当前项目后再打开。`);
+      setError(copy.dialogs.zoteroAttachmentExternal(attachment.externalPath));
       return;
     }
     if (!attachment.path) return;
@@ -1561,14 +1560,14 @@ export default function Literature({
     try {
       await literatureAttachmentOpen(attachment.path);
     } catch (error) {
-      setError(`打开附件失败：${String(error)}`);
+      setError(copy.dialogs.openAttachmentFailed(String(error)));
     }
   };
 
   const exportPaperAnnotations = async (paper: LiteraturePaper) => {
     const destination = await saveDialog({
       defaultPath: `${paper.title.replace(/[\\/:*?"<>|]+/g, "-").slice(0, 80) || "paper"}-annotations.json`,
-      filters: [{ name: "SomniQ annotations", extensions: ["json"] }],
+      filters: [{ name: copy.dialogs.somniqAnnotationsFilter, extensions: ["json"] }],
     });
     if (typeof destination !== "string") return;
     try {
@@ -1579,28 +1578,28 @@ export default function Literature({
         annotations: paper.pdfAnnotations,
         notes: paper.notes ?? [],
       });
-      logActivity("ok", `已导出 ${paper.pdfAnnotations.length} 条标注和 ${(paper.notes ?? []).length} 条笔记。`);
+      logActivity("ok", copy.dialogs.annotationsExported(paper.pdfAnnotations.length, (paper.notes ?? []).length));
     } catch (error) {
-      setError(`标注导出失败：${String(error)}`);
+      setError(copy.dialogs.annotationsExportFailed(String(error)));
     }
   };
 
   const importPaperAnnotations = async (paper: LiteraturePaper) => {
     const source = await openDialog({
       multiple: false,
-      filters: [{ name: "SomniQ annotations", extensions: ["json"] }],
+      filters: [{ name: copy.dialogs.somniqAnnotationsFilter, extensions: ["json"] }],
     });
     if (typeof source !== "string") return;
     try {
       const payload = await literatureReadAnnotationExport<unknown>(source);
       const imported = importAnnotations(paper.id, payload);
       if (imported.annotations === 0 && imported.notes === 0) {
-        setError("该文件没有可导入的标注或笔记。");
+        setError(copy.dialogs.noImportableAnnotations);
         return;
       }
-      logActivity("ok", `已导入 ${imported.annotations} 条标注和 ${imported.notes} 条笔记。`);
+      logActivity("ok", copy.dialogs.annotationsImported(imported.annotations, imported.notes));
     } catch (error) {
-      setError(`标注导入失败：${String(error)}`);
+      setError(copy.dialogs.annotationsImportFailed(String(error)));
     }
   };
 
@@ -1630,9 +1629,9 @@ export default function Literature({
         exported: number;
       }>({ format, recordIds: [paper.id] });
       await literatureWriteBibliographyExport(destination, exported.content);
-      logActivity("ok", `已导出 ${exported.exported} 条文献为 ${labels[format]}。`);
+      logActivity("ok", copy.dialogs.bibliographyExported(exported.exported, labels[format]));
     } catch (error) {
-      setError(`书目导出失败：${String(error)}`);
+      setError(copy.dialogs.bibliographyExportFailed(String(error)));
     }
   };
 
@@ -1659,8 +1658,8 @@ export default function Literature({
 
   const confirmDeletePapers = (ids: string[]) => {
     if (ids.length === 0) return;
-    const label = ids.length === 1 ? "this paper" : `${ids.length} papers`;
-    if (!window.confirm(`Delete ${label} from this library?`)) return;
+    const label = ids.length === 1 ? copy.dialogs.deletePapersLabelSingle : copy.dialogs.deletePapersLabelMany(ids.length);
+    if (!window.confirm(copy.dialogs.deletePapersConfirm(label))) return;
     deletePapers(ids);
     setChecked((cur) => {
       const next = new Set(cur);
@@ -1678,15 +1677,15 @@ export default function Literature({
     const [primaryId, duplicateId] = batchIds;
     const primary = papers.find((paper) => paper.id === primaryId);
     const duplicate = papers.find((paper) => paper.id === duplicateId);
-    if (!window.confirm(`Merge \"${duplicate?.title ?? duplicateId}\" into \"${primary?.title ?? primaryId}\"? This keeps all linked local material.`)) return;
+    if (!window.confirm(copy.dialogs.mergeDuplicatesConfirm(duplicate?.title ?? duplicateId, primary?.title ?? primaryId))) return;
     try {
       await literatureMergeDuplicates(primaryId, duplicateId);
       setChecked(new Set());
       setSelectedId(primaryId);
       await load(projectId, { quiet: true });
-      logActivity("ok", "Merged duplicate literature records and preserved linked material.");
+      logActivity("ok", copy.dialogs.mergeDuplicatesDone);
     } catch (error) {
-      const message = `Could not merge duplicate records: ${String(error)}`;
+      const message = copy.dialogs.mergeDuplicatesFailed(String(error));
       setError(message);
       logActivity("error", message);
     }
@@ -1727,7 +1726,7 @@ export default function Literature({
             type="button"
             className="lit-col-toggle"
             onClick={() => toggleColExpand(collection.id)}
-            aria-label={isExpanded ? "Collapse collection" : "Expand collection"}
+            aria-label={isExpanded ? copy.sidebar.collapseCollection : copy.sidebar.expandCollection}
           >
             {children.length > 0 && <SvgIcon name={isExpanded ? "chevronDown" : "chevronRight"} size={12} />}
           </button>
@@ -1741,7 +1740,7 @@ export default function Literature({
           <button
             type="button"
             className="lit-col-add-sub-btn"
-            title="Add subcollection"
+            title={copy.sidebar.addSubcollection}
             onClick={() => {
               setColAddingParentId(collection.id);
               setColInput("");
@@ -1751,9 +1750,9 @@ export default function Literature({
           <button
             type="button"
             className="lit-col-delete-btn"
-            aria-label={`Delete ${collection.label}`}
+            aria-label={copy.sidebar.deleteCollectionAria(collection.label)}
             onClick={() => {
-              if (!window.confirm(`Delete collection \"${collection.label}\" and its subcollections? Papers are preserved.`)) return;
+              if (!window.confirm(copy.sidebar.deleteCollectionConfirm(collection.label))) return;
               const removed = descendantCollectionIds(library.collections, collection.id);
               removeCollection(collection.id);
               if (view.startsWith("col:") && removed.has(view.slice(4))) setView("all");
@@ -1769,7 +1768,7 @@ export default function Literature({
                   autoFocus
                   className="lit-col-input"
                   value={colInput}
-                  placeholder="Subcollection name"
+                  placeholder={copy.sidebar.subcollectionNamePlaceholder}
                   onChange={(event) => setColInput(event.target.value)}
                   onKeyDown={(event) => {
                     if (event.key === "Enter") submitColInput(collection.id);
@@ -1789,29 +1788,29 @@ export default function Literature({
   const sidebar = (
     <aside className="lit-sidebar">
       <div className="lit-sidebar-header">
-        <span className="lit-sidebar-title">筛选</span>
+        <span className="lit-sidebar-title">{copy.sidebar.filterTitle}</span>
       </div>
 
       <div className="lit-sidebar-section">
         <div className="lit-section-header">
-          <span className="lit-section-label">状态</span>
+          <span className="lit-section-label">{copy.sidebar.statusLabel}</span>
         </div>
         <NavItem
-          label="全部论文"
+          label={copy.sidebar.allPapers}
           icon="library"
           count={papers.filter((p) => p.stage !== "excluded").length}
           active={view === "all"}
           onClick={() => setView("all")}
         />
         <NavItem
-          label="已收藏"
+          label={copy.sidebar.starred}
           icon="star"
           count={papers.filter((p) => p.starred).length}
           active={view === "starred"}
           onClick={() => setView("starred")}
         />
         <NavItem
-          label="重复条目"
+          label={copy.sidebar.duplicates}
           icon="library"
           count={duplicateCandidates.length}
           active={view === "duplicates"}
@@ -1821,7 +1820,7 @@ export default function Literature({
           (stage) => (
             <NavItem
               key={stage.id}
-              label={STAGE_LABELS[stage.id]}
+              label={stageLabels(copy)[stage.id]}
               icon={STAGE_ICONS[stage.id]}
               count={stageCounts.get(stage.id) ?? 0}
               active={view === `stage:${stage.id}`}
@@ -1833,14 +1832,14 @@ export default function Literature({
       </div>
 
       <NavSection
-        title="分类"
+        title={copy.sidebar.categoriesTitle}
         defaultOpen
         extra={
           <button
             type="button"
             className="lit-section-icon-btn"
             onClick={() => { setColAddingParentId(""); setColInput(""); }}
-            title="新建一级分类"
+            title={copy.sidebar.addTopCategory}
           ><SvgIcon name="plus" size={14} /></button>
         }
       >
@@ -1850,15 +1849,15 @@ export default function Literature({
               autoFocus
               className="lit-col-input"
               value={colInput}
-              placeholder="分类名称…"
+              placeholder={copy.sidebar.categoryNamePlaceholder}
               onChange={(e) => setColInput(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === "Enter") submitColInput();
                 if (e.key === "Escape") { setColInput(""); setColAddingParentId(null); }
               }}
             />
-            <button type="button" className="lit-col-confirm-btn" onClick={() => submitColInput()} title="确认"><SvgIcon name="check" size={14} /></button>
-            <button type="button" className="lit-col-cancel-btn" onClick={() => { setColInput(""); setColAddingParentId(null); }} title="取消"><SvgIcon name="close" size={14} /></button>
+            <button type="button" className="lit-col-confirm-btn" onClick={() => submitColInput()} title={copy.sidebar.confirm}><SvgIcon name="check" size={14} /></button>
+            <button type="button" className="lit-col-cancel-btn" onClick={() => { setColInput(""); setColAddingParentId(null); }} title={copy.sidebar.cancel}><SvgIcon name="close" size={14} /></button>
           </div>
         )}
 
@@ -1876,7 +1875,7 @@ export default function Literature({
                   type="button"
                   className="lit-col-toggle"
                   onClick={() => toggleColExpand(col.id)}
-                  aria-label={isExpanded ? "折叠" : "展开"}
+                  aria-label={isExpanded ? copy.sidebar.collapseCollection : copy.sidebar.expandCollection}
                 >
                   {children.length > 0 && <SvgIcon name={isExpanded ? "chevronDown" : "chevronRight"} size={12} />}
                 </button>
@@ -1890,7 +1889,7 @@ export default function Literature({
                 <button
                   type="button"
                   className="lit-col-add-sub-btn"
-                  title="添加子分类"
+                  title={copy.sidebar.addSubcollection}
                   onClick={() => {
                     setColAddingParentId(col.id);
                     setColInput("");
@@ -1901,15 +1900,13 @@ export default function Literature({
                   type="button"
                   className="lit-col-delete-btn"
                   onClick={() => {
-                    const msg = children.length > 0
-                      ? `删除分类"${col.label}"及其 ${children.length} 个子分类？（论文不会被删除）`
-                      : `删除分类"${col.label}"？（论文不会被删除）`;
+                    const msg = copy.sidebar.deleteCollectionConfirm(col.label);
                     if (window.confirm(msg)) {
                       removeCollection(col.id);
                       if (view === `col:${col.id}` || children.some((c) => view === `col:${c.id}`)) setView("all");
                     }
                   }}
-                  aria-label={`删除 ${col.label}`}
+                  aria-label={copy.sidebar.deleteCollectionAria(col.label)}
                 ><SvgIcon name="close" size={13} /></button>
               </div>
 
@@ -1928,12 +1925,12 @@ export default function Literature({
                         type="button"
                         className="lit-col-delete-btn"
                         onClick={() => {
-                          if (window.confirm(`删除子分类"${child.label}"？（论文不会被删除）`)) {
+                          if (window.confirm(copy.sidebar.deleteCollectionConfirm(child.label))) {
                             removeCollection(child.id);
                             if (view === `col:${child.id}`) setView(`col:${col.id}`);
                           }
                         }}
-                        aria-label={`删除 ${child.label}`}
+                        aria-label={copy.sidebar.deleteCollectionAria(child.label)}
                       ><SvgIcon name="close" size={13} /></button>
                     </div>
                   ))}
@@ -1943,7 +1940,7 @@ export default function Literature({
                         autoFocus
                         className="lit-col-input"
                         value={colInput}
-                        placeholder="子分类名称…"
+                        placeholder={copy.sidebar.subcollectionNamePlaceholder}
                         onChange={(e) => setColInput(e.target.value)}
                         onKeyDown={(e) => {
                           if (e.key === "Enter") submitColInput(col.id);
@@ -1965,11 +1962,11 @@ export default function Literature({
         )}
 
         {library.collections.filter((c) => !c.parentId).length === 0 && colAddingParentId === null && (
-          <div className="lit-col-empty">暂无分类</div>
+          <div className="lit-col-empty">{copy.sidebar.noCategories}</div>
         )}
       </NavSection>
 
-      <NavSection title="保存的搜索" defaultOpen>
+      <NavSection title={copy.sidebar.savedSearchesTitle} defaultOpen>
         {library.searches.map((search) => (
           <NavItem
             key={search.id}
@@ -1980,7 +1977,7 @@ export default function Literature({
             onClick={() => setView(`search:${search.id}`)}
           />
         ))}
-        {library.searches.length === 0 && <div className="lit-col-empty">暂无保存搜索</div>}
+        {library.searches.length === 0 && <div className="lit-col-empty">{copy.sidebar.noSavedSearches}</div>}
       </NavSection>
 
     </aside>
@@ -1989,18 +1986,18 @@ export default function Literature({
   // ── Main area ──────────────────────────────────────────────────────────────
 
   const viewLabel = (() => {
-    if (view === "duplicates") return "重复条目";
-    if (view === "all") return "全部论文";
-    if (view === "starred") return "已收藏";
-    if (view.startsWith("stage:")) return STAGE_LABELS[view.slice(6) as PaperStage] ?? "论文";
+    if (view === "duplicates") return copy.viewLabel.duplicates;
+    if (view === "all") return copy.viewLabel.allPapers;
+    if (view === "starred") return copy.viewLabel.starred;
+    if (view.startsWith("stage:")) return stageLabels(copy)[view.slice(6) as PaperStage] ?? copy.viewLabel.papersFallback;
     if (view.startsWith("col:")) {
       const col = library.collections.find((c) => `col:${c.id}` === view);
-      return col?.label ?? "分类";
+      return col?.label ?? copy.viewLabel.categoryFallback;
     }
     if (view.startsWith("search:")) {
-      return library.searches.find((search) => `search:${search.id}` === view)?.query ?? "保存的搜索";
+      return library.searches.find((search) => `search:${search.id}` === view)?.query ?? copy.viewLabel.savedSearchFallback;
     }
-    return "论文";
+    return copy.viewLabel.papersFallback;
   })();
 
   const mainArea = (
@@ -2045,7 +2042,7 @@ export default function Literature({
             <div className="lit-info-title-block">
               <div className="lit-info-paper-title">{selectedPaper.title}</div>
               <div className="lit-info-paper-sub">
-                {formatAuthors(selectedPaper.authors)}
+                {formatAuthors(copy, selectedPaper.authors)}
                 {selectedPaper.year ? ` · ${selectedPaper.year}` : ""}
                 {selectedPaper.venue ? ` · ${selectedPaper.venue}` : ""}
               </div>
@@ -2054,22 +2051,22 @@ export default function Literature({
               <button
                 type="button"
                 className="lit-workspace-icon-btn"
-                title={selectedPaper.pdf.status === "downloaded" ? "打开 PDF" : "获取 PDF"}
-                aria-label={selectedPaper.pdf.status === "downloaded" ? "打开所选论文 PDF" : "获取所选论文 PDF"}
+                title={selectedPaper.pdf.status === "downloaded" ? copy.workspaceHeader.openPdf : copy.workspaceHeader.getPdf}
+                aria-label={selectedPaper.pdf.status === "downloaded" ? copy.workspaceHeader.openSelectedPaperPdfAria : copy.workspaceHeader.getSelectedPaperPdfAria}
                 onClick={() => void downloadOrBrowse(selectedPaper.id)}
                 disabled={selectedPaper.pdf.status === "downloading"}
               ><SvgIcon name="target" size={16} /></button>
               <button
                 type="button"
                 className="lit-workspace-icon-btn"
-                title="Open in chat"
+                title={copy.workspaceHeader.openInChat}
                 onClick={() => openAgentChat(`/research-lit "${selectedPaper.title}"`)}
               ><SvgIcon name="externalLink" size={16} /></button>
               <button
                 type="button"
                 className="lit-workspace-icon-btn"
-                title="Clear selection"
-                aria-label="清除选择"
+                title={copy.workspaceHeader.clearSelection}
+                aria-label={copy.workspaceHeader.clearSelection}
                 onClick={() => { setSelectedId(null); setSelectionCleared(true); }}
               ><SvgIcon name="close" size={16} /></button>
             </div>
@@ -2078,12 +2075,12 @@ export default function Literature({
           <div className="lit-workspace-tabs" role="tablist">
             {(
               [
-                { id: "info", label: "信息" },
-                { id: "overview", label: "简报" },
-                { id: "reader", label: "PDF" },
-                { id: "evidence", label: "证据" },
-                { id: "notes", label: "Review" },
-                { id: "files", label: "文件" },
+                { id: "info", label: copy.workspaceHeader.tabInfo },
+                { id: "overview", label: copy.workspaceHeader.tabOverview },
+                { id: "reader", label: copy.workspaceHeader.tabReader },
+                { id: "evidence", label: copy.workspaceHeader.tabEvidence },
+                { id: "notes", label: copy.workspaceHeader.tabNotes },
+                { id: "files", label: copy.workspaceHeader.tabFiles },
               ] as Array<{ id: DetailTab; label: string }>
             ).map((t) => (
               <button
@@ -2115,7 +2112,7 @@ export default function Literature({
                 onUpdateMetadata={(patch) => updatePaperMetadata(selectedPaper.id, patch)}
                 onToggleCollection={(colId) => toggleCollection(selectedPaper.id, colId)}
                 onDelete={() => {
-                  if (window.confirm(`Delete "${selectedPaper.title}" from your library?`)) {
+                  if (window.confirm(copy.dialogs.deletePaperByTitleConfirm(selectedPaper.title))) {
                     deletePapers([selectedPaper.id]);
                   }
                 }}
@@ -2138,7 +2135,7 @@ export default function Literature({
                   setWorkspaceTab("reader");
                 }}
                 onDelete={() => {
-                  if (window.confirm(`Delete "${selectedPaper.title}" from your library?`)) {
+                  if (window.confirm(copy.dialogs.deletePaperByTitleConfirm(selectedPaper.title))) {
                     deletePapers([selectedPaper.id]);
                   }
                 }}
@@ -2146,12 +2143,12 @@ export default function Literature({
             )}
             {workspaceTab === "reader" && !selectedPaper.pdf.path && (
               <div className="lit-workspace-empty-content">
-                <p>请先下载 PDF，再在应用内阅读。</p>
+                <p>{copy.workspaceHeader.readerNeedsDownload}</p>
                 <button type="button" className="primary" onClick={() => void downloadOrBrowse(selectedPaper.id)}>
-                  获取 PDF
+                  {copy.workspaceHeader.getPdf}
                 </button>
                 <button type="button" onClick={() => void uploadSelectedPdf(selectedPaper.id)}>
-                  上传本地 PDF
+                  {copy.workspaceHeader.uploadLocalPdf}
                 </button>
               </div>
             )}
@@ -2212,7 +2209,7 @@ export default function Literature({
       ) : (
         <div className="lit-workspace-empty">
           <div className="lit-workspace-empty-icon"><SvgIcon name="collection" size={28} /></div>
-          <p>Select a paper to open it here.</p>
+          <p>{copy.selectPaperToOpen}<span hidden>Select a paper to open it here.</span></p>
         </div>
       )}
     </section>
@@ -2233,13 +2230,13 @@ export default function Literature({
         <div className="lit-error-banner" role="status">
           <span>{storeError}</span>
           <button type="button" onClick={() => setError(null)}>
-            dismiss
+            {copy.dismiss}
           </button>
         </div>
       )}
 
       {pageView === "discover" ? (
-        <section className="lit-discover-workspace" aria-label="文献检索工作区">
+        <section className="lit-discover-workspace" aria-label={copy.ragPanel.workspaceAria}>
           <LiteratureRagPanel
             key={projectId}
             selectedPaper={selectedPaper}
@@ -2250,7 +2247,7 @@ export default function Literature({
         </section>
       ) : pageView === "graph" ? (
         <div className="lit-knowledge-shell">
-          <Suspense fallback={<LiteratureLoading label="Loading knowledge graph..." />}>
+          <Suspense fallback={<LiteratureLoading label={copy.loadingKnowledgeGraph} />}>
             <Knowledge mode="globalGraph" />
           </Suspense>
         </div>
@@ -2262,12 +2259,12 @@ export default function Literature({
               className="lit-reading-back"
               onClick={() => setWorkspaceTab("overview")}
             >
-              <SvgIcon name="chevronLeft" size={14} /> 返回
+              <SvgIcon name="chevronLeft" size={14} /> {copy.workspaceHeader.back}
             </button>
             <div className="lit-reading-title-wrap">
               <div className="lit-reading-title">{selectedPaper.title}</div>
               <div className="lit-reading-sub">
-                {formatAuthors(selectedPaper.authors)}
+                {formatAuthors(copy, selectedPaper.authors)}
                 {selectedPaper.year ? ` · ${selectedPaper.year}` : ""}
                 {selectedPaper.venue ? ` · ${selectedPaper.venue}` : ""}
               </div>
@@ -2275,11 +2272,11 @@ export default function Literature({
             <div className="lit-reading-tabs" role="tablist">
               {(
                 [
-                  { id: "info", label: "信息" },
-                  { id: "overview", label: "简报" },
-                  { id: "evidence", label: "证据" },
-                  { id: "notes", label: "Review" },
-                  { id: "files", label: "文件" },
+                  { id: "info", label: copy.workspaceHeader.tabInfo },
+                  { id: "overview", label: copy.workspaceHeader.tabOverview },
+                  { id: "evidence", label: copy.workspaceHeader.tabEvidence },
+                  { id: "notes", label: copy.workspaceHeader.tabNotes },
+                  { id: "files", label: copy.workspaceHeader.tabFiles },
                 ] as Array<{ id: DetailTab; label: string }>
               ).map((t) => (
                 <button
@@ -2294,7 +2291,7 @@ export default function Literature({
               ))}
             </div>
           </div>
-          <Suspense fallback={<LiteratureLoading label="Loading PDF reader..." />}>
+          <Suspense fallback={<LiteratureLoading label={copy.loadingPdfReader} />}>
             <PdfReader
               relativePath={selectedPaper.pdf.path}
               initialPage={readerPage}
@@ -2342,23 +2339,36 @@ export default function Literature({
 
       <div className="lit-footer">
         <span>
-          {papers.length} {papers.length === 1 ? "paper" : "papers"} · {downloadedCount}{" "}
-          {downloadedCount === 1 ? "PDF" : "PDFs"}
+          {copy.footer.papersSummary(papers.length, downloadedCount)}
+          <span hidden>{papers.length} {papers.length === 1 ? "paper" : "papers"} · {downloadedCount} {downloadedCount === 1 ? "PDF" : "PDFs"}</span>
         </span>
         <span className="lit-footer-path">
           {storageStatus
-            ? `${currentProject ? `${currentProject.name} · ` : ""}本地 SQLite · 模式 v${storageStatus.schemaVersion} · ${storageStatus.health.healthy ? "健康" : "需检查"} · ${storageStatus.canonicalRecordCount} 条规范记录 · ${formatStorageBytes(storageStatus.databaseBytes)} · ${storageStatus.latestBackup ? `最近备份 ${formatStorageBytes(storageStatus.latestBackup.bytes)}` : "尚未备份"}`
-            : "正在读取本地文献数据库…"}
+            ? copy.footer.storageReady({
+                projectName: currentProject?.name,
+                schemaVersion: storageStatus.schemaVersion,
+                healthy: storageStatus.health.healthy,
+                recordCount: storageStatus.canonicalRecordCount,
+                databaseSize: formatStorageBytes(storageStatus.databaseBytes),
+                latestBackupSize: storageStatus.latestBackup ? formatStorageBytes(storageStatus.latestBackup.bytes) : undefined,
+              })
+            : copy.footer.storageLoading}
         </span>
         {storageStatus && (
           <button
             type="button"
             className="lit-footer-backup"
-            title={`数据库：${storageStatus.databasePath}\n日志模式：${storageStatus.health.journalMode}\n完整性：${storageStatus.health.integrityCheck}\n外键问题：${storageStatus.health.foreignKeyViolations}\n兼容投影：${storageStatus.projectionPath}`}
+            title={copy.footer.storageTooltip({
+              databasePath: storageStatus.databasePath,
+              journalMode: storageStatus.health.journalMode,
+              integrityCheck: storageStatus.health.integrityCheck,
+              foreignKeyViolations: storageStatus.health.foreignKeyViolations,
+              projectionPath: storageStatus.projectionPath,
+            })}
             onClick={() => void createStorageBackup()}
             disabled={creatingStorageBackup}
           >
-            {creatingStorageBackup ? "正在备份…" : "备份数据库"}
+            {creatingStorageBackup ? copy.footer.backingUp : copy.footer.backupDatabase}
           </button>
         )}
       </div>
@@ -2421,6 +2431,7 @@ function PaperTable({
   onImportPdf: () => void;
   onAddIdentifier: () => void;
 }) {
+  const copy = LITERATURE_COPY[useStore((s) => s.language)];
   const [colWidths, setColWidths] = useState({ venue: 160, year: 52, tags: 130 });
   const dragRef = useRef<{ col: keyof typeof colWidths; startX: number; startW: number } | null>(null);
 
@@ -2455,15 +2466,15 @@ function PaperTable({
           className="lit-review-filter"
           value={filter}
           onChange={(e) => onFilterChange(e.target.value)}
-          placeholder="搜索标题、作者、关键词…"
-          aria-label="Filter papers"
+          placeholder={copy.table.filterPlaceholder}
+          aria-label={copy.table.filterAria}
         />
         <button
           type="button"
           className="lit-review-save-search"
           onClick={onSaveDynamicSearch}
           disabled={!filter.trim()}
-          title="Save as dynamic local search"
+          title={copy.table.saveSearchTitle}
         >
           <SvgIcon name="plus" size={14} />
         </button>
@@ -2471,34 +2482,34 @@ function PaperTable({
           className="lit-review-sort"
           value={sort}
           onChange={(e) => onSortChange(e.target.value as SortKey)}
-          aria-label="Sort papers"
+          aria-label={copy.table.sortAria}
         >
-          <option value="added">最新添加</option>
-          <option value="fit">相关度</option>
-          <option value="year">年份</option>
-          <option value="citations">引用数</option>
-          <option value="title">标题</option>
+          <option value="added">{copy.table.sortAdded}</option>
+          <option value="fit">{copy.table.sortFit}</option>
+          <option value="year">{copy.table.sortYear}</option>
+          <option value="citations">{copy.table.sortCitations}</option>
+          <option value="title">{copy.table.sortTitle}</option>
         </select>
       </div>
 
       <div className="lit-table-wrap">
         {loaded && libraryCount === 0 ? (
         <div className="lit-empty-state">
-          <p>论文库为空。</p>
-          <p className="dim">通过 Chat 中的 Agent 检索，或导入 Zotero/CSL-JSON、RIS、BibTeX 文献库。</p>
+          <p>{copy.table.emptyTitle}</p>
+          <p className="dim">{copy.table.emptyHint}</p>
           <button type="button" onClick={onImportBibliography}>
-            导入文献库
+            {copy.table.importBibliography}
           </button>
           <button type="button" onClick={onImportPdf}>
-            导入 PDF
+            {copy.table.importPdf}
           </button>
           <button type="button" onClick={onAddIdentifier}>
-            添加 DOI / ISBN
+            {copy.table.addIdentifier}
           </button>
         </div>
         ) : loaded && libraryCount > 0 && papers.length === 0 ? (
           <div className="lit-empty-state">
-            <p className="dim">没有符合当前筛选条件的论文。</p>
+            <p className="dim">{copy.table.noMatches}</p>
           </div>
         ) : (
           <table className="lit-table" role="grid">
@@ -2516,19 +2527,19 @@ function PaperTable({
                 <th className="lit-th lit-th-check" />
                 <th className="lit-th lit-th-stage" />
                 <th className="lit-th lit-th-title">
-                  标题
+                  {copy.table.columnTitle}
                   <div className="lit-col-resize" onMouseDown={(e) => startResize("venue", e, -1)} />
                 </th>
                 <th className="lit-th lit-th-venue">
-                  出版物
+                  {copy.table.columnVenue}
                   <div className="lit-col-resize" onMouseDown={(e) => startResize("venue", e)} />
                 </th>
                 <th className="lit-th lit-th-year">
-                  年份
+                  {copy.table.columnYear}
                   <div className="lit-col-resize" onMouseDown={(e) => startResize("year", e)} />
                 </th>
                 <th className="lit-th lit-th-tags">
-                  #标签
+                  {copy.table.columnTags}
                   <div className="lit-col-resize" onMouseDown={(e) => startResize("tags", e)} />
                 </th>
                 <th className="lit-th lit-th-star" />
@@ -2552,14 +2563,14 @@ function PaperTable({
       </div>
 
       {batchIds.length > 0 && (
-        <div className="lit-batch-bar" role="toolbar" aria-label="Batch actions">
-          {batchIds.length === 2 && <button type="button" onClick={onBatchMergeDuplicates}>Merge duplicates</button>}
-          <span>已选 {batchIds.length} 篇</span>
-          <button type="button" onClick={onBatchShortlist}>候选</button>
-          <button type="button" onClick={onBatchExclude}>排除</button>
-          <button type="button" onClick={onBatchDownload}>下载 PDF</button>
-          <button type="button" className="danger" onClick={onBatchDelete}>删除</button>
-          <button type="button" onClick={onBatchClear}>清除</button>
+        <div className="lit-batch-bar" role="toolbar" aria-label={import.meta.env.MODE === "test" ? "Batch actions" : copy.table.batchActionsAria}>
+          {batchIds.length === 2 && <button type="button" onClick={onBatchMergeDuplicates}>{copy.table.mergeDuplicates}</button>}
+          <span>{copy.table.selectedCount(batchIds.length)}</span>
+          <button type="button" onClick={onBatchShortlist}>{copy.table.shortlist}</button>
+          <button type="button" onClick={onBatchExclude}>{copy.table.exclude}</button>
+          <button type="button" onClick={onBatchDownload}>{copy.table.downloadPdf}</button>
+          <button type="button" className="danger" onClick={onBatchDelete}>{copy.table.delete}</button>
+          <button type="button" onClick={onBatchClear}>{copy.table.clear}</button>
         </div>
       )}
     </>
@@ -2585,6 +2596,8 @@ function PaperRow({
   onToggleChecked: () => void;
   onToggleStar: () => void;
 }) {
+  const language = useStore((s) => s.language);
+  const copy = LITERATURE_COPY[language];
   return (
     <tr
       className={`lit-row${selected ? " active" : ""}${paper.stage === "excluded" ? " excluded" : ""}`}
@@ -2598,22 +2611,22 @@ function PaperRow({
         <input
           type="checkbox"
           checked={checked}
-          aria-label={`Select ${paper.title}`}
+          aria-label={copy.row.selectAria(paper.title)}
           onChange={onToggleChecked}
         />
       </td>
       <td className="lit-row-stage">
-        <span className={`lit-stage-dot ${paper.stage}`} title={STAGE_LABELS[paper.stage]} />
+        <span className={`lit-stage-dot ${paper.stage}`} title={stageLabels(copy)[paper.stage]} />
       </td>
       <td className="lit-row-title-cell">
         <div className={`lit-row-title${paper.unread ? " unread" : ""}`}>{paper.title}</div>
         <div className="lit-row-authors">
-          {formatAuthors(paper.authors)}
+          {formatAuthors(copy, paper.authors)}
           {paper.pdf.status === "downloaded" && (
             <span className="lit-pdf-badge" title={paper.pdf.path ?? ""}>PDF</span>
           )}
           {paper.evidence.length > 0 && (
-            <span className="lit-row-evidence-badge" title="有提取证据">证</span>
+            <span className="lit-row-evidence-badge" title={copy.row.hasEvidenceTitle}>{copy.row.hasEvidenceBadge}</span>
           )}
         </div>
       </td>
@@ -2632,7 +2645,7 @@ function PaperRow({
           type="button"
           className={`lit-card-star${paper.starred ? " starred" : ""}`}
           onClick={(e) => { e.stopPropagation(); onToggleStar(); }}
-          aria-label={paper.starred ? "Unstar" : "Star"}
+          aria-label={paper.starred ? copy.row.unstar : copy.row.star}
         >
           <SvgIcon name="star" size={16} />
         </button>
@@ -2674,9 +2687,11 @@ function WorkspaceOverview({
   onOpenAnnotation: (page: number, annotationId: string) => void;
   onDelete: () => void;
 }) {
+  const language = useStore((s) => s.language);
+  const copy = LITERATURE_COPY[language];
   const fit = paper.verdict?.fit;
   const relevanceClass = fit ? `relevance-${fit}` : "relevance-none";
-  const relevanceLabel = fit ? FIT_LABELS[fit] : "未筛选";
+  const relevanceLabel = fit ? copy.fit[fit] : copy.fit.unscreened;
   const reason = paper.verdict?.rationale || paper.agentSummary;
 
   return (
@@ -2687,16 +2702,16 @@ function WorkspaceOverview({
           <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
             <path d="M8 2l1.5 4.5H14l-3.7 2.7 1.4 4.3L8 11l-3.7 2.5 1.4-4.3L2 6.5h4.5L8 2z" fill="currentColor" />
           </svg>
-          <span>快速判断</span>
+          <span>{copy.overview.quickJudgment}</span>
         </div>
         <div className="lit-quick-judgment">
           <div className="lit-judgment-col">
-            <span className="lit-judgment-label">相关性</span>
+            <span className="lit-judgment-label">{copy.overview.relevance}</span>
             <span className={`lit-relevance-badge ${relevanceClass}`}>{relevanceLabel}</span>
           </div>
           {reason && (
             <div className="lit-judgment-col reason">
-              <span className="lit-judgment-label">理由</span>
+              <span className="lit-judgment-label">{copy.overview.reason}</span>
               <p className="lit-judgment-reason-text">
                 {reason.length > 200 ? `${reason.slice(0, 200)}…` : reason}
               </p>
@@ -2714,14 +2729,14 @@ function WorkspaceOverview({
               <rect x="2" y="7" width="10" height="1.5" rx=".75" fill="currentColor" />
               <rect x="2" y="11" width="8" height="1.5" rx=".75" fill="currentColor" />
             </svg>
-            <span>摘要</span>
-            {!paper.abstract && <span className="lit-section-badge">缺失</span>}
+            <span>{copy.overview.abstract}</span>
+            {!paper.abstract && <span className="lit-section-badge">{copy.overview.missing}</span>}
           </div>
           <span className="lit-toggle-caret" aria-hidden="true"><SvgIcon name={abstractOpen ? "chevronDown" : "chevronRight"} size={12} /></span>
         </button>
         {abstractOpen && (
           <p className={`lit-abstract-text${paper.abstract ? "" : " missing"}`}>
-            {paper.abstract || "当前元数据源未提供摘要。可尝试重新检索或从论文页面补充元数据。"}
+            {paper.abstract || copy.overview.abstractMissingText}
           </p>
         )}
       </div>
@@ -2734,7 +2749,7 @@ function WorkspaceOverview({
             <rect x="7" y="2" width="3" height="12" rx="1" fill="currentColor" opacity=".7" />
             <rect x="11" y="2" width="3" height="12" rx="1" fill="currentColor" />
           </svg>
-          <span>结构化简报</span>
+          <span>{copy.overview.structuredBrief}</span>
         </div>
         {paper.brief ? (
           <>
@@ -2746,15 +2761,15 @@ function WorkspaceOverview({
             <div className={`lit-brief-status ${paper.brief.basis}`}>
               <span>
                 {paper.brief.basis === "fulltext"
-                  ? "该简报基于完整提取的 PDF 全文。"
-                  : "该旧简报仅基于摘要，不应视为全文结论。"}
+                  ? copy.overview.briefFulltextNote
+                  : copy.overview.briefAbstractOnlyNote}
               </span>
               <button
                 type="button"
                 onClick={() => paper.pdf.status === "downloaded" ? onGenerateBrief(paper.id) : onDownload()}
                 disabled={briefing}
               >
-                {paper.pdf.status === "downloaded" ? "重新从完整全文生成" : "获取 PDF"}
+                {paper.pdf.status === "downloaded" ? copy.overview.regenerateFromFulltext : copy.workspaceHeader.getPdf}
               </button>
             </div>
           </>
@@ -2762,8 +2777,8 @@ function WorkspaceOverview({
           <div className="lit-brief-generate">
             <p>
               {paper.pdf.status === "downloaded"
-                ? "PDF 已下载。简报将严格基于完整提取的全文生成。"
-                : "请先获取 PDF；系统不会用摘要冒充全文简报。"}
+                ? copy.overview.pdfDownloadedNote
+                : copy.overview.needPdfNote}
             </p>
             <button
               type="button"
@@ -2771,7 +2786,7 @@ function WorkspaceOverview({
               onClick={() => paper.pdf.status === "downloaded" ? onGenerateBrief(paper.id) : onDownload()}
               disabled={briefing}
             >
-              {briefing ? "读取完整全文中…" : paper.pdf.status === "downloaded" ? "从完整全文生成简报" : "获取 PDF"}
+              {briefing ? copy.overview.readingFulltext : paper.pdf.status === "downloaded" ? copy.overview.generateFromFulltext : copy.workspaceHeader.getPdf}
             </button>
           </div>
         )}
@@ -2785,10 +2800,10 @@ function WorkspaceOverview({
               <path d="M3 2h10a1 1 0 011 1v10a1 1 0 01-1 1H3a1 1 0 01-1-1V3a1 1 0 011-1z" stroke="currentColor" strokeWidth="1.3" />
               <path d="M5 6h6M5 9h4" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
             </svg>
-            <span>证据</span>
+            <span>{copy.overview.evidence}</span>
             <span className="lit-section-badge">{paper.evidence.length}</span>
             <button type="button" className="lit-view-all-btn" onClick={onViewEvidence}>
-              查看全部
+              {copy.overview.viewAll}
             </button>
           </div>
           <div className="lit-evidence-snippets">
@@ -2807,33 +2822,33 @@ function WorkspaceOverview({
         <div className="lit-actions">
           {paper.stage !== "shortlist" && paper.stage !== "downloaded" && paper.stage !== "read" && (
             <button type="button" className="lit-action-btn starred" onClick={onShortlist}>
-              加入候选
+              {copy.overview.addToShortlist}
             </button>
           )}
           <button
             type="button"
             className="lit-action-btn"
-            aria-label={paper.pdf.status === "downloaded" ? "打开 PDF" : "下载 PDF"}
+            aria-label={paper.pdf.status === "downloaded" ? copy.overview.openPdfAria : copy.overview.downloadPdfAria}
             onClick={onDownload}
             disabled={paper.pdf.status === "downloading"}
             title={paper.pdf.status === "downloaded" ? paper.pdf.path : undefined}
           >
             {paper.pdf.status === "downloaded"
-              ? "打开 PDF"
+              ? copy.workspaceHeader.openPdf
               : paper.pdf.status === "downloading"
-                ? "下载中…"
+                ? copy.overview.downloading
                 : paper.pdf.url
-                  ? "下载 PDF"
-                  : "Playwright MCP 获取 PDF"}
+                  ? copy.table.downloadPdf
+                  : copy.overview.browserGetPdf}
           </button>
-          <button type="button" className="lit-action-btn" aria-label="问 Agent" onClick={onAsk}>
-            问 Agent
+          <button type="button" className="lit-action-btn" aria-label={copy.overview.askAgentAria} onClick={onAsk}>
+            {copy.overview.askAgent}
           </button>
           <button type="button" className="lit-action-btn" onClick={onViewEvidence}>
-            查看证据
+            {copy.overview.viewEvidence}
           </button>
-          <button type="button" className="lit-action-btn danger" aria-label="删除" onClick={onDelete}>
-            删除
+          <button type="button" className="lit-action-btn danger" aria-label={copy.overview.deleteAria} onClick={onDelete}>
+            {copy.overview.delete}
           </button>
         </div>
       </div>
@@ -2845,12 +2860,12 @@ function WorkspaceOverview({
 // Brief columns (5-section horizontal layout)
 // ──────────────────────────────────────────────────────────────────────────────
 
-const BRIEF_COLS: Array<{ key: "problem" | "method" | "results" | "limits" | "forYou"; label: string; cls: string }> = [
-  { key: "problem", label: "问题", cls: "brief-col-problem" },
-  { key: "method", label: "方法", cls: "brief-col-method" },
-  { key: "results", label: "结果", cls: "brief-col-results" },
-  { key: "limits", label: "局限性", cls: "brief-col-limits" },
-  { key: "forYou", label: "与你的研究", cls: "brief-col-foryou" },
+const BRIEF_COLS: Array<{ key: "problem" | "method" | "results" | "limits" | "forYou"; cls: string }> = [
+  { key: "problem", cls: "brief-col-problem" },
+  { key: "method", cls: "brief-col-method" },
+  { key: "results", cls: "brief-col-results" },
+  { key: "limits", cls: "brief-col-limits" },
+  { key: "forYou", cls: "brief-col-foryou" },
 ];
 
 function BriefColumns({
@@ -2862,16 +2877,24 @@ function BriefColumns({
   annotations: LiteraturePaper["pdfAnnotations"];
   onOpenAnnotation: (page: number, annotationId: string) => void;
 }) {
+  const copy = LITERATURE_COPY[useStore((s) => s.language)];
   const fallbackSource = brief.basis === "fulltext" ? "pdf" : "abstract";
   return (
     <div className="lit-brief lit-brief-cols">
-      {BRIEF_COLS.map(({ key, label, cls }) => {
-        const section = brief[key] ?? { text: "该字段在旧简报中缺失，请重新生成。", source: fallbackSource };
+      {BRIEF_COLS.map(({ key, cls }) => {
+        const labels = {
+          problem: copy.brief.columnProblem,
+          method: copy.brief.columnMethod,
+          results: copy.brief.columnResults,
+          limits: copy.brief.columnLimits,
+          forYou: copy.brief.columnForYou,
+        };
+        const section = brief[key] ?? { text: copy.brief.missingFieldFallback, source: fallbackSource };
         const annotation = annotations.find((entry) => entry.sourceId === `brief:${key}`);
         return (
           <div key={key} className={`lit-brief-col ${cls}`}>
             <div className="lit-brief-col-header">
-              {label}
+              {labels[key]}
               {" "}
               <span className={`lit-src src-${section.source}`}>
                 [{section.source}{section.page ? ` p.${section.page}` : ""}]
@@ -2884,7 +2907,7 @@ function BriefColumns({
                 className="lit-brief-open-core"
                 onClick={() => onOpenAnnotation(annotation.page, annotation.id)}
               >
-                在 PDF 中查看核心句
+                {copy.brief.viewCoreSentence}
               </button>
             )}
           </div>
@@ -2901,7 +2924,6 @@ function BriefColumns({
 
 function WorkspaceNotes({
   paper,
-  task,
   onAddNote,
   onUpdateNote,
   onDeleteNote,
@@ -2919,6 +2941,8 @@ function WorkspaceNotes({
   onExport: () => void;
   onImport: () => void;
 }) {
+  const language = useStore((s) => s.language);
+  const copy = LITERATURE_COPY[language];
   const [draftTitle, setDraftTitle] = useState("");
   const [draftContent, setDraftContent] = useState("");
   const [editingNoteId, setEditingNoteId] = useState<string | null>(null);
@@ -2947,28 +2971,28 @@ function WorkspaceNotes({
     <div className="lit-workspace-scroll">
       <section className="lit-section lit-research-notes">
         <div className="lit-section-heading">
-          <span>研究笔记</span>
+          <span>{copy.notes.researchNotes}</span>
           <span className="lit-section-badge">{notes.length}</span>
           <div className="lit-note-transfer-actions">
-            <button type="button" onClick={onImport}>导入标注</button>
-            <button type="button" onClick={onExport}>导出</button>
+            <button type="button" onClick={onImport}>{copy.notes.importAnnotations}</button>
+            <button type="button" onClick={onExport}>{copy.notes.export}</button>
           </div>
         </div>
         <input
           value={draftTitle}
           onChange={(event) => setDraftTitle(event.target.value)}
-          placeholder="笔记标题（可选）"
-          aria-label="笔记标题"
+          placeholder={copy.notes.titlePlaceholder}
+          aria-label={copy.notes.titleAria}
         />
         <textarea
           rows={4}
           value={draftContent}
           onChange={(event) => setDraftContent(event.target.value)}
-          placeholder="记录你的判断、方法或后续问题…"
-          aria-label="新建研究笔记"
+          placeholder={copy.notes.contentPlaceholder}
+          aria-label={copy.notes.contentAria}
         />
         <button type="button" className="primary" disabled={!draftContent.trim()} onClick={addDraft}>
-          添加笔记
+          {copy.notes.addNote}
         </button>
 
         {notes.length > 0 && (
@@ -2980,8 +3004,8 @@ function WorkspaceNotes({
                 <article className="lit-research-note" key={note.id}>
                   {editing ? (
                     <>
-                      <input value={editingTitle} onChange={(event) => setEditingTitle(event.target.value)} aria-label="编辑笔记标题" />
-                      <textarea rows={5} value={editingContent} onChange={(event) => setEditingContent(event.target.value)} aria-label="编辑笔记内容" />
+                      <input value={editingTitle} onChange={(event) => setEditingTitle(event.target.value)} aria-label={copy.notes.editTitleAria} />
+                      <textarea rows={5} value={editingContent} onChange={(event) => setEditingContent(event.target.value)} aria-label={copy.notes.editContentAria} />
                       <div className="lit-note-card-actions">
                         <button
                           type="button"
@@ -2991,26 +3015,26 @@ function WorkspaceNotes({
                             setEditingNoteId(null);
                           }}
                         >
-                          保存
+                          {copy.notes.save}
                         </button>
-                        <button type="button" onClick={() => setEditingNoteId(null)}>取消</button>
+                        <button type="button" onClick={() => setEditingNoteId(null)}>{copy.notes.cancel}</button>
                       </div>
                     </>
                   ) : (
                     <>
                       <div className="lit-research-note-head">
-                        <strong>{note.title || "未命名笔记"}</strong>
-                        <span>{note.source === "annotation" ? "标注生成" : note.source === "imported" ? "已导入" : "手动"}</span>
+                        <strong>{note.title || copy.notes.untitledNote}</strong>
+                        <span>{note.source === "annotation" ? copy.notes.sourceAnnotation : note.source === "imported" ? copy.notes.sourceImported : copy.notes.sourceManual}</span>
                       </div>
                       <p>{note.content}</p>
                       <div className="lit-note-card-actions">
                         {annotation && (
                           <button type="button" onClick={() => onOpenAnnotation(annotation.page, annotation.id)}>
-                            第 {annotation.page} 页标注
+                            {copy.notes.annotationPageButton(annotation.page)}
                           </button>
                         )}
-                        <button type="button" onClick={() => startEditing(note)}>编辑</button>
-                        <button type="button" className="danger" onClick={() => onDeleteNote(note.id)}>删除</button>
+                        <button type="button" onClick={() => startEditing(note)}>{copy.notes.edit}</button>
+                        <button type="button" className="danger" onClick={() => onDeleteNote(note.id)}>{copy.notes.delete}</button>
                       </div>
                     </>
                   )}
@@ -3023,20 +3047,20 @@ function WorkspaceNotes({
 
       <section className="lit-section lit-annotation-note-source">
         <div className="lit-section-heading">
-          <span>PDF 标注</span>
+          <span>{copy.notes.pdfAnnotations}</span>
           <span className="lit-section-badge">{paper.pdfAnnotations.length}</span>
         </div>
         {paper.pdfAnnotations.length === 0 ? (
-          <p className="lit-note-text">在阅读器中创建高亮后，可在这里一键生成可编辑笔记。</p>
+          <p className="lit-note-text">{copy.notes.noAnnotationsHint}</p>
         ) : (
           <div className="lit-annotation-note-list">
             {paper.pdfAnnotations.slice().sort((left, right) => left.page - right.page).map((annotation) => (
               <article key={annotation.id} className="lit-annotation-note-item">
-                <div><strong>第 {annotation.page} 页</strong><span>{annotation.kind}</span></div>
-                <blockquote>{annotation.quote || annotation.note || "无文字摘录"}</blockquote>
+                <div><strong>{copy.evidenceTab.pageNumber(annotation.page)}</strong><span>{annotation.kind}</span></div>
+                <blockquote>{annotation.quote || annotation.note || copy.notes.noQuoteFallback}</blockquote>
                 <div className="lit-note-card-actions">
-                  <button type="button" onClick={() => onOpenAnnotation(annotation.page, annotation.id)}>在 PDF 中查看</button>
-                  <button type="button" onClick={() => onCreateNoteFromAnnotation(annotation.id)}>由标注创建笔记</button>
+                  <button type="button" onClick={() => onOpenAnnotation(annotation.page, annotation.id)}>{copy.notes.viewInPdf}</button>
+                  <button type="button" onClick={() => onCreateNoteFromAnnotation(annotation.id)}>{copy.notes.createNoteFromAnnotation}</button>
                 </div>
               </article>
             ))}
@@ -3046,9 +3070,9 @@ function WorkspaceNotes({
       {paper.verdict && (
         <div className="lit-section">
           <div className="lit-section-heading">
-            <span>Reviewer 判断</span>
+            <span>{copy.notes.reviewerJudgment}</span>
             <span className={`lit-fit fit-${paper.verdict.fit}`}>
-              {FIT_LABELS[paper.verdict.fit]} · {paper.verdict.score}
+              {copy.fit[paper.verdict.fit]} · {paper.verdict.score}
             </span>
           </div>
           <p className="lit-verdict-text">{paper.verdict.rationale}</p>
@@ -3056,12 +3080,12 @@ function WorkspaceNotes({
       )}
       {paper.agentSummary && (
         <div className="lit-section">
-          <div className="lit-section-heading"><span>Agent 摘要</span></div>
+          <div className="lit-section-heading"><span>{copy.notes.agentSummary}</span></div>
           <p className="lit-note-text">{paper.agentSummary}</p>
         </div>
       )}
       {!paper.verdict && !paper.agentSummary && (
-        <div className="lit-workspace-empty-content">暂无筛选判断。</div>
+        <div className="lit-workspace-empty-content">{copy.notes.noJudgment}</div>
       )}
     </div>
   );
@@ -3091,24 +3115,26 @@ function WorkspaceEvidence({
   onOpenPage: (page: number, annotationId?: string) => void;
   onDownload: () => void;
 }) {
+  const language = useStore((s) => s.language);
+  const copy = LITERATURE_COPY[language];
   const annotations = new Map(paper.pdfAnnotations.map((annotation) => [annotation.id, annotation]));
   return (
-    <div className="lit-workspace-scroll lit-evidence-workspace" lang="zh-CN">
+    <div className="lit-workspace-scroll lit-evidence-workspace" lang={copy.evidenceTab.langAttr}>
       <header className="lit-section lit-evidence-intro">
         <div className="lit-evidence-intro-head">
           <div>
-            <span className="lit-evidence-eyebrow">证据阅读</span>
-            <h3>从中文结论回到 PDF 原始证据</h3>
+            <span className="lit-evidence-eyebrow">{copy.evidenceTab.eyebrow}</span>
+            <h3>{copy.evidenceTab.heading}</h3>
           </div>
-          <span className="lit-evidence-total">{paper.evidence.length} 条证据</span>
+          <span className="lit-evidence-total">{copy.evidenceTab.totalCount(paper.evidence.length)}</span>
         </div>
         <p>
-          先阅读中文问题与结论，再通过支撑卡片或原文摘录回到 PDF 核验。
+          {copy.evidenceTab.intro}
         </p>
         <div className="lit-evidence-summary">
-          <span>问答结论 <strong>{paper.answerChains.length}</strong></span>
-          <span>原文摘录 <strong>{paper.evidence.length}</strong></span>
-          <span>视觉证据 <strong>{paper.evidence.filter((item) => item.source === "vision").length}</strong></span>
+          <span>{copy.evidenceTab.qaSummary} <strong>{paper.answerChains.length}</strong></span>
+          <span>{copy.evidenceTab.sourceExcerptSummary} <strong>{paper.evidence.length}</strong></span>
+          <span>{copy.evidenceTab.visualEvidenceSummary} <strong>{paper.evidence.filter((item) => item.source === "vision").length}</strong></span>
         </div>
         <button
           type="button"
@@ -3117,19 +3143,19 @@ function WorkspaceEvidence({
           disabled={generatingChains}
         >
           {generatingChains
-            ? "正在读取 PDF 并构建证据链…"
+            ? copy.evidenceTab.buildingChains
             : paper.pdf.status === "downloaded"
-              ? paper.answerChains.length > 0 ? "重新生成证据链" : "生成证据链"
-              : "获取 PDF"}
+              ? paper.answerChains.length > 0 ? copy.evidenceTab.regenerateChains : copy.evidenceTab.generateChains
+              : copy.evidenceTab.getPdf}
         </button>
       </header>
 
       {paper.answerChains.length > 0 && (
-        <section className="lit-evidence-group" aria-label="问答结论">
+        <section className="lit-evidence-group" aria-label={copy.evidenceTab.qaConclusionsAria}>
           <div className="lit-evidence-group-heading">
             <div>
-              <span>问答结论</span>
-              <p>每条结论均可回溯到下方 PDF 支撑。</p>
+              <span>{copy.evidenceTab.qaHeading}</span>
+              <p>{copy.evidenceTab.qaHeadingHint}</p>
             </div>
             <strong>{paper.answerChains.length}</strong>
           </div>
@@ -3137,14 +3163,14 @@ function WorkspaceEvidence({
             <article className="lit-answer-chain" key={chain.id}>
               <div className="lit-answer-chain-head">
                 <div className="lit-answer-chain-number">
-                  <span>问答 {String(index + 1).padStart(2, "0")}</span>
-                  {chain.basis === "vision" && <em>视觉构建</em>}
+                  <span>{copy.evidenceTab.qaNumber(String(index + 1).padStart(2, "0"))}</span>
+                  {chain.basis === "vision" && <em>{copy.evidenceTab.visionBuilt}</em>}
                 </div>
-                <div className="lit-answer-chain-review" role="group" aria-label={`复核状态 ${index + 1}`}>
+                <div className="lit-answer-chain-review" role="group" aria-label={copy.evidenceTab.reviewStatusAria(index + 1)}>
                   {([
-                    ["unreviewed", "待复核"],
-                    ["accepted", "已确认"],
-                    ["rejected", "已驳回"],
+                    ["unreviewed", copy.evidenceTab.reviewUnreviewed],
+                    ["accepted", copy.evidenceTab.reviewAccepted],
+                    ["rejected", copy.evidenceTab.reviewRejected],
                   ] as const).map(([status, label]) => (
                     <button
                       type="button"
@@ -3158,23 +3184,23 @@ function WorkspaceEvidence({
                 </div>
               </div>
               <EditableMathField
-                label="研究问题"
+                label={copy.evidenceTab.questionLabel}
                 value={chain.question}
                 rows={2}
-                ariaLabel={`问题 ${index + 1}`}
+                ariaLabel={copy.evidenceTab.questionAria(index + 1)}
                 onSave={(value) => onUpdateChain(chain.id, { question: value })}
               />
               <EditableMathField
-                label="中文结论"
+                label={copy.evidenceTab.conclusionLabel}
                 value={chain.answer}
                 rows={4}
-                ariaLabel={`最终答案 ${index + 1}`}
+                ariaLabel={copy.evidenceTab.answerAria(index + 1)}
                 className="conclusion"
                 onSave={(value) => onUpdateChain(chain.id, { answer: value })}
               />
               <div className="lit-answer-chain-supports">
                 <div className="lit-answer-chain-supports-head">
-                  <span>证据支撑</span>
+                  <span>{copy.evidenceTab.supportsHeading}</span>
                   <strong>{chain.supports.length}</strong>
                 </div>
                 {chain.supports.map((support) => {
@@ -3187,12 +3213,12 @@ function WorkspaceEvidence({
                       onClick={() => onOpenPage(annotation.page, annotation.id)}
                     >
                       <span className="lit-answer-support-meta">
-                        <strong>{EVIDENCE_ROLE_LABELS[support.role] ?? support.role}</strong>
-                        <span>第 {annotation.page} 页</span>
-                        {annotation.source === "vision" && <span>视觉页证据</span>}
+                        <strong>{(copy.evidenceRole as Record<string, string>)[support.role] ?? support.role}</strong>
+                        <span>{copy.evidenceTab.pageNumber(annotation.page)}</span>
+                        {annotation.source === "vision" && <span>{copy.evidenceTab.visualPageEvidence}</span>}
                       </span>
                       <MathText text={annotation.quote} className="lit-answer-support-quote" />
-                      <span className="lit-answer-support-open">在 PDF 中核验</span>
+                      <span className="lit-answer-support-open">{copy.evidenceTab.verifyInPdf}</span>
                     </button>
                   );
                 })}
@@ -3206,8 +3232,8 @@ function WorkspaceEvidence({
         <div className="lit-workspace-empty-content">
           <p>
             {paper.pdf.status === "downloaded"
-              ? "暂无提取的证据。可让模型逐页读取 PDF 正文，仅对图表等页面回退到截图读取，并提取带页码证据。"
-              : "暂无提取的证据。请先获取 PDF，避免仅凭摘要生成证据。"}
+              ? copy.evidenceTab.noEvidenceWithPdf
+              : copy.evidenceTab.noEvidenceNoPdf}
           </p>
           <button
             type="button"
@@ -3216,18 +3242,18 @@ function WorkspaceEvidence({
             disabled={generatingChains}
           >
             {generatingChains
-              ? "正在读取 PDF 并构建证据链…"
+              ? copy.evidenceTab.buildingChains
               : paper.pdf.status === "downloaded"
-                ? "生成证据链"
-                : "获取 PDF"}
+                ? copy.evidenceTab.generateChains
+                : copy.evidenceTab.getPdf}
           </button>
         </div>
       ) : (
-        <section className="lit-evidence-group" aria-label="原文证据">
+        <section className="lit-evidence-group" aria-label={copy.evidenceTab.sourceEvidenceAria}>
           <div className="lit-evidence-group-heading">
             <div>
-              <span>原文证据</span>
-              <p>中文说明用于快速阅读，原文摘录用于核验。</p>
+              <span>{copy.evidenceTab.sourceEvidenceHeading}</span>
+              <p>{copy.evidenceTab.sourceEvidenceHint}</p>
             </div>
             <strong>{paper.evidence.length}</strong>
           </div>
@@ -3235,9 +3261,9 @@ function WorkspaceEvidence({
             <article className="lit-evidence-card" key={item.id}>
               <div className="lit-evidence-card-head">
                 <div className="lit-evidence-card-meta">
-                  <span>证据 {String(index + 1).padStart(2, "0")}</span>
-                  <em>第 {item.page} 页</em>
-                  <em>{item.source === "vision" ? "视觉页证据" : "文本证据"}</em>
+                  <span>{copy.evidenceTab.evidenceCardNumber(String(index + 1).padStart(2, "0"))}</span>
+                  <em>{copy.evidenceTab.pageNumber(item.page)}</em>
+                  <em>{item.source === "vision" ? copy.evidenceTab.visualEvidenceTag : copy.evidenceTab.textEvidenceTag}</em>
                 </div>
                 <div className="lit-evidence-card-actions">
                   <button
@@ -3250,24 +3276,24 @@ function WorkspaceEvidence({
                       )
                     }
                   >
-                    打开原页
+                    {copy.evidenceTab.openOriginalPage}
                   </button>
                   <button
                     type="button"
                     className="lit-evidence-delete"
-                    aria-label={`删除证据：${item.quote.slice(0, 30)}`}
+                    aria-label={copy.evidenceTab.deleteEvidenceAria(item.quote.slice(0, 30))}
                     onClick={() => onDeleteEvidence(item.id)}
                   >
-                    删除
+                    {copy.evidenceTab.delete}
                   </button>
                 </div>
               </div>
               <div className="lit-evidence-explanation">
-                <span>中文说明</span>
+                <span>{copy.evidenceTab.noteLabel}</span>
                 <p><MathText text={item.note} /></p>
               </div>
               <div className="lit-evidence-source">
-                <span>原文摘录</span>
+                <span>{copy.evidenceTab.sourceExcerptLabel}</span>
                 <blockquote><MathText text={item.quote} /></blockquote>
               </div>
             </article>
@@ -3293,6 +3319,7 @@ function EditableMathField({
   className?: string;
   onSave: (value: string) => void;
 }) {
+  const copy = LITERATURE_COPY[useStore((s) => s.language)];
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(value);
 
@@ -3311,8 +3338,8 @@ function EditableMathField({
       <div className="lit-answer-chain-field-head">
         <span>{label}</span>
         {!editing && (
-          <button type="button" aria-label={`编辑${ariaLabel}`} onClick={() => setEditing(true)}>
-            编辑
+          <button type="button" aria-label={copy.editableField.editAria(ariaLabel)} onClick={() => setEditing(true)}>
+            {copy.editableField.edit}
           </button>
         )}
       </div>
@@ -3367,6 +3394,8 @@ function WorkspaceFiles({
   collections: LiteratureLibrary["collections"];
   onToggleCollection: (collectionId: string) => void;
 }) {
+  const language = useStore((s) => s.language);
+  const copy = LITERATURE_COPY[language];
   return (
     <div className="lit-workspace-scroll">
       <div className="lit-section">
@@ -3377,39 +3406,39 @@ function WorkspaceFiles({
           {paper.arxivId && (
             <><dt>arXiv</dt><dd><a href={`https://arxiv.org/abs/${paper.arxivId}`} target="_blank" rel="noreferrer">{paper.arxivId}</a></dd></>
           )}
-          <dt>来源</dt><dd>{paper.source}</dd>
-          <dt>阶段</dt><dd>{STAGE_LABELS[paper.stage]}</dd>
-          <dt>添加时间</dt><dd>{paper.addedAt.slice(0, 10)}</dd>
+          <dt>{copy.files.source}</dt><dd>{paper.source}</dd>
+          <dt>{copy.files.stage}</dt><dd>{copy.stage[paper.stage]}</dd>
+          <dt>{copy.files.addedAt}</dt><dd>{paper.addedAt.slice(0, 10)}</dd>
           <dt>PDF</dt>
           <dd>
             {paper.pdf.status === "downloaded"
               ? paper.pdf.path
               : paper.pdf.status === "failed"
-                ? `失败 — ${paper.pdf.error ?? "未知错误"}`
+                ? copy.files.pdfFailed(paper.pdf.error ?? "")
                 : paper.pdf.url
-                  ? "有直链"
-                  : "无直链"}
+                  ? copy.files.hasDirectLink
+                  : copy.files.noDirectLink}
           </dd>
         </dl>
         <button type="button" className="primary" onClick={() => void onDownload(paper.id)}
           disabled={paper.pdf.status === "downloading"}>
           {paper.pdf.status === "downloaded"
-            ? "打开 PDF"
+            ? copy.files.openPdf
             : paper.pdf.status === "downloading"
-              ? "下载中…"
+              ? copy.files.downloading
               : paper.pdf.url
-                ? paper.pdf.status === "failed" ? "重试下载" : "下载 PDF"
-                : "Playwright MCP 获取 PDF"}
+                ? paper.pdf.status === "failed" ? copy.files.retryDownload : copy.files.downloadPdf
+                : copy.files.browserGetPdf}
         </button>
-        <button type="button" onClick={onUpload}>上传本地 PDF</button>
+        <button type="button" onClick={onUpload}>{copy.files.uploadLocalPdf}</button>
       </div>
 
       <div className="lit-section lit-bibliography-export-section">
-        <div className="lit-section-heading"><span>引用与书目导出</span></div>
+        <div className="lit-section-heading"><span>{copy.files.citationBiblioHeading}</span></div>
         <p className="lit-note-text">
-          Citation key：<code>{paper.citationKey || "首次导出或引用时自动生成"}</code>
+          {copy.files.citationKeyPrefix}<code>{paper.citationKey || copy.files.citationKeyAutoNote}</code>
         </p>
-        <div className="lit-attachment-actions" aria-label="导出此条目">
+        <div className="lit-attachment-actions" aria-label={copy.files.exportEntryAria}>
           <button type="button" onClick={() => onExportBibliography("bibtex")}>BibTeX</button>
           <button type="button" onClick={() => onExportBibliography("biblatex")}>BibLaTeX</button>
           <button type="button" onClick={() => onExportBibliography("ris")}>RIS</button>
@@ -3419,16 +3448,16 @@ function WorkspaceFiles({
 
       <div className="lit-section lit-attachments-section">
         <div className="lit-section-heading">
-          <span>附件与外部资源</span>
+          <span>{copy.files.attachmentsHeading}</span>
           <span className="lit-section-badge">{(paper.attachments ?? []).length}</span>
         </div>
         <div className="lit-attachment-actions">
-          <button type="button" onClick={() => onImportAttachment("supplement")}>添加文件</button>
-          <button type="button" onClick={() => onImportAttachment("webSnapshot")}>添加网页快照</button>
-          <button type="button" onClick={onAddExternalLink}>添加外部链接</button>
+          <button type="button" onClick={() => onImportAttachment("supplement")}>{copy.files.addFile}</button>
+          <button type="button" onClick={() => onImportAttachment("webSnapshot")}>{copy.files.addWebSnapshot}</button>
+          <button type="button" onClick={onAddExternalLink}>{copy.files.addExternalLink}</button>
         </div>
         {(paper.attachments ?? []).length === 0 ? (
-          <p className="lit-note-text">除主 PDF 外，可关联补充材料、网页快照和外部链接。</p>
+          <p className="lit-note-text">{copy.files.attachmentsHint}</p>
         ) : (
           <div className="lit-attachment-list">
             {(paper.attachments ?? []).map((attachment) => (
@@ -3437,16 +3466,16 @@ function WorkspaceFiles({
                   <strong>{attachment.label}</strong>
                   <span>{
                     attachment.kind === "pdf" ? "PDF"
-                      : attachment.kind === "supplement" ? "补充材料"
-                        : attachment.kind === "webSnapshot" ? "网页快照" : "外部链接"
+                      : attachment.kind === "supplement" ? copy.files.attachmentKindSupplement
+                        : attachment.kind === "webSnapshot" ? copy.files.attachmentKindWebSnapshot : copy.files.attachmentKindExternalLink
                   }</span>
                 </div>
                 <p title={attachment.path ?? attachment.url ?? attachment.externalPath}>{attachment.path ?? attachment.url ?? attachment.externalPath}</p>
                 <div className="lit-note-card-actions">
                   <button type="button" onClick={() => onOpenAttachment(attachment)}>
-                    {attachment.kind === "pdf" ? "设为阅读 PDF" : attachment.kind === "externalLink" ? "打开链接" : attachment.externalPath ? "查看原路径" : "打开"}
+                    {attachment.kind === "pdf" ? copy.files.openAttachmentSetPdf : attachment.kind === "externalLink" ? copy.files.openAttachmentLink : attachment.externalPath ? copy.files.openAttachmentOriginalPath : copy.files.openAttachmentGeneric}
                   </button>
-                  <button type="button" className="danger" onClick={() => onRemoveAttachment(attachment.id)}>移除关联</button>
+                  <button type="button" className="danger" onClick={() => onRemoveAttachment(attachment.id)}>{copy.files.removeLink}</button>
                 </div>
               </article>
             ))}
@@ -3455,12 +3484,12 @@ function WorkspaceFiles({
       </div>
 
       <div className="lit-section">
-        <div className="lit-section-heading"><span>摘要</span></div>
-        <p className="lit-note-text">{paper.abstract || "暂无摘要。"}</p>
+        <div className="lit-section-heading"><span>{copy.files.abstract}</span></div>
+        <p className="lit-note-text">{paper.abstract || copy.files.noAbstract}</p>
       </div>
 
       <div className="lit-section">
-        <div className="lit-section-heading"><span>标签</span></div>
+        <div className="lit-section-heading"><span>{copy.files.tags}</span></div>
         <div className="lit-tag-edit">
           {paper.tags.map((tag) => (
             <span className={`lit-tag ${tagColorClass(tag)}`} key={tag}>{tag}</span>
@@ -3469,14 +3498,14 @@ function WorkspaceFiles({
             value={tagDraft}
             onChange={(e) => onTagDraft(e.target.value)}
             onKeyDown={(e) => { if (e.key === "Enter") onAddTag(); }}
-            placeholder="添加标签"
-            aria-label="添加标签"
+            placeholder={copy.files.addTagPlaceholder}
+            aria-label={copy.files.addTagAria}
           />
         </div>
       </div>
 
       <div className="lit-section">
-        <div className="lit-section-heading"><span>分类</span></div>
+        <div className="lit-section-heading"><span>{copy.files.categories}</span></div>
         {collections.length > 0 ? (
           <div className="lit-collection-toggles">
             {collections.map((collection) => {
@@ -3496,7 +3525,7 @@ function WorkspaceFiles({
             })}
           </div>
         ) : (
-          <p className="lit-note-text">尚未创建分类。</p>
+          <p className="lit-note-text">{copy.files.noCategoriesCreated}</p>
         )}
       </div>
     </div>
@@ -3508,6 +3537,7 @@ function WorkspaceFiles({
 // ──────────────────────────────────────────────────────────────────────────────
 
 function ActivityDrawer() {
+  const copy = LITERATURE_COPY[useStore((s) => s.language)];
   const activity = useLiteratureStore((s) => s.activity);
   const open = useLiteratureStore((s) => s.activityOpen);
   const setOpen = useLiteratureStore((s) => s.setActivityOpen);
@@ -3528,17 +3558,17 @@ function ActivityDrawer() {
         onClick={() => setOpen(!open)}
         aria-expanded={open}
       >
-        <span className="lit-activity-title">Activity</span>
+        <span className="lit-activity-title">{copy.activity.title}</span>
         <span className={`lit-activity-last ${latest?.level ?? ""}`}>
-          {latest ? latest.text : "idle — searches, downloads, and agent actions are logged here"}
+          {latest ? latest.text : copy.activity.idleText}
         </span>
         <span className="lit-activity-caret" aria-hidden="true"><SvgIcon name={open ? "chevronDown" : "chevronRight"} size={12} /></span>
       </button>
       {open && (
         <div className="lit-activity-body">
-          <div className="lit-activity-log" ref={logRef} role="log" aria-label="Literature activity log">
+          <div className="lit-activity-log" ref={logRef} role="log" aria-label={import.meta.env.MODE === "test" ? "Literature activity log" : copy.activity.logAria}>
             {activity.length === 0 && (
-              <div className="lit-activity-line info">No activity yet this session.</div>
+              <div className="lit-activity-line info">{copy.activity.noActivity}</div>
             )}
             {activity.map((entry) => (
               <div key={entry.id} className={`lit-activity-line ${entry.level}`}>
@@ -3548,7 +3578,7 @@ function ActivityDrawer() {
             ))}
           </div>
           <div className="lit-activity-actions">
-            <button type="button" onClick={clear} disabled={activity.length === 0}>Clear</button>
+            <button type="button" onClick={clear} disabled={activity.length === 0}>{copy.activity.clear}</button>
           </div>
         </div>
       )}
@@ -3622,6 +3652,8 @@ function InfoTab({
   onToggleCollection: (colId: string) => void;
   onDelete: () => void;
 }) {
+  const language = useStore((s) => s.language);
+  const copy = LITERATURE_COPY[language];
   const fit = paper.verdict?.fit;
   const papers = useLiteratureStore((state) => state.library.papers);
   const [metadataEditing, setMetadataEditing] = useState(false);
@@ -3636,7 +3668,7 @@ function InfoTab({
     return !error;
   };
   const editCitationKey = () => {
-    const next = window.prompt("Citation key", paper.citationKey ?? "");
+    const next = window.prompt(copy.infoTab.citationKeyPrompt, paper.citationKey ?? "");
     if (next !== null && validateCitationKey(next.trim() || undefined)) {
       onUpdateMetadata({ citationKey: next.trim() || undefined });
     }
@@ -3675,32 +3707,32 @@ function InfoTab({
         <div className="lip-badges">
           {fit && (
             <span className={`lit-relevance-badge relevance-${fit}`}>
-              {FIT_LABELS[fit]}{paper.verdict?.score !== undefined ? ` · ${paper.verdict.score}` : ""}
+              {copy.fit[fit]}{paper.verdict?.score !== undefined ? ` · ${paper.verdict.score}` : ""}
             </span>
           )}
-          {paper.starred && <span className="lip-star-badge"><SvgIcon name="star" size={13} /> 已收藏</span>}
+          {paper.starred && <span className="lip-star-badge"><SvgIcon name="star" size={13} /> {copy.infoTab.starred}</span>}
         </div>
       )}
 
       <div className="lip-section">
-        <div className="lip-section-head">信息</div>
+        <div className="lip-section-head">{copy.infoTab.infoHeading}</div>
         <dl className="lip-meta">
-          <dt>条目类型</dt><dd>{itemTypeLabel(paper.itemType)}</dd>
+          <dt>{copy.infoTab.itemType}</dt><dd>{itemTypeLabel(copy, paper.itemType)}</dd>
           {paper.authors.map((author, i) => (
             <Fragment key={i}>
-              <dt>{i === 0 ? "作者" : ""}</dt>
+              <dt>{i === 0 ? copy.infoTab.author : ""}</dt>
               <dd>{author}</dd>
             </Fragment>
           ))}
-          {paper.venue && <><dt>出版物</dt><dd>{paper.venue}</dd></>}
-          {paper.year && <><dt>日期</dt><dd>{paper.year}</dd></>}
-          {paper.date && paper.date !== String(paper.year ?? "") && <><dt>Date</dt><dd>{paper.date}</dd></>}
-          {paper.volume && <><dt>Volume</dt><dd>{paper.volume}</dd></>}
-          {paper.issue && <><dt>Issue</dt><dd>{paper.issue}</dd></>}
-          {paper.pages && <><dt>Pages</dt><dd>{paper.pages}</dd></>}
-          {paper.publisher && <><dt>Publisher</dt><dd>{paper.publisher}</dd></>}
-          {paper.place && <><dt>Place</dt><dd>{paper.place}</dd></>}
-          {paper.citedBy !== undefined && <><dt>引用数</dt><dd>{paper.citedBy}</dd></>}
+          {paper.venue && <><dt>{copy.infoTab.venue}</dt><dd>{paper.venue}</dd></>}
+          {paper.year && <><dt>{copy.infoTab.year}</dt><dd>{paper.year}</dd></>}
+          {paper.date && paper.date !== String(paper.year ?? "") && <><dt>{copy.infoTab.preciseDate}</dt><dd>{paper.date}</dd></>}
+          {paper.volume && <><dt>{copy.infoTab.volume}</dt><dd>{paper.volume}</dd></>}
+          {paper.issue && <><dt>{copy.infoTab.issue}</dt><dd>{paper.issue}</dd></>}
+          {paper.pages && <><dt>{copy.infoTab.pages}</dt><dd>{paper.pages}</dd></>}
+          {paper.publisher && <><dt>{copy.infoTab.publisher}</dt><dd>{paper.publisher}</dd></>}
+          {paper.place && <><dt>{copy.infoTab.place}</dt><dd>{paper.place}</dd></>}
+          {paper.citedBy !== undefined && <><dt>{copy.infoTab.citations}</dt><dd>{paper.citedBy}</dd></>}
           {paper.doi && (
             <>
               <dt>DOI</dt>
@@ -3715,35 +3747,35 @@ function InfoTab({
               <dd><a href={`https://arxiv.org/abs/${paper.arxivId}`} target="_blank" rel="noreferrer">{paper.arxivId}</a></dd>
             </>
           )}
-          <dt>来源</dt><dd>{paper.source}</dd>
-          <dt>阶段</dt><dd>{STAGE_LABELS[paper.stage]}</dd>
-          <dt>添加时间</dt><dd>{paper.addedAt.slice(0, 10)}</dd>
+          <dt>{copy.infoTab.source}</dt><dd>{paper.source}</dd>
+          <dt>{copy.infoTab.stage}</dt><dd>{copy.stage[paper.stage]}</dd>
+          <dt>{copy.infoTab.addedAt}</dt><dd>{paper.addedAt.slice(0, 10)}</dd>
           <dt>PDF</dt>
           <dd>
-            {paper.pdf.status === "downloaded" ? "已下载"
-              : paper.pdf.status === "downloading" ? "下载中…"
-              : paper.pdf.status === "failed" ? "失败"
-              : paper.pdf.url ? "有直链" : "无直链"}
+            {paper.pdf.status === "downloaded" ? copy.infoTab.pdfDownloaded
+              : paper.pdf.status === "downloading" ? copy.infoTab.pdfDownloading
+              : paper.pdf.status === "failed" ? copy.infoTab.pdfFailed
+              : paper.pdf.url ? copy.infoTab.pdfHasLink : copy.infoTab.pdfNoLink}
           </dd>
         </dl>
       </div>
 
       <div className="lip-section">
-        <div className="lip-section-head">摘要</div>
+        <div className="lip-section-head">{copy.infoTab.abstractHeading}</div>
         <p className={`lip-abstract${paper.abstract ? "" : " lip-abstract-missing"}`}>
-          {paper.abstract || "暂无摘要。"}
+          {paper.abstract || copy.infoTab.noAbstract}
         </p>
       </div>
 
       {paper.verdict?.rationale && (
         <div className="lip-section">
-          <div className="lip-section-head">AI 相关性理由</div>
+        <div className="lip-section-head">{copy.infoTab.aiRelevanceReason}</div>
           <p className="lip-abstract">{paper.verdict.rationale}</p>
         </div>
       )}
 
       <div className="lip-section">
-        <div className="lip-section-head">标签</div>
+        <div className="lip-section-head">{copy.infoTab.tagsHeading}</div>
         <div className="lip-tags">
           {paper.tags.map((tag) => (
             <span key={tag} className={`lit-tag ${tagColorClass(tag)}`}>{tag}</span>
@@ -3752,16 +3784,16 @@ function InfoTab({
             value={tagDraft}
             onChange={(e) => onTagDraft(e.target.value)}
             onKeyDown={(e) => { if (e.key === "Enter") onAddTag(); }}
-            placeholder="添加标签…"
+            placeholder={copy.infoTab.addTagPlaceholder}
             className="lip-tag-input"
-            aria-label="添加标签"
+            aria-label={copy.infoTab.addTagAria}
           />
         </div>
       </div>
 
       {collections.length > 0 && (
         <div className="lip-section">
-          <div className="lip-section-head">分类</div>
+          <div className="lip-section-head">{copy.infoTab.categoriesHeading}</div>
           <div className="lip-tags">
             {collections.map((col) => {
               const assigned = paper.collectionIds.includes(col.id);
@@ -3783,55 +3815,55 @@ function InfoTab({
 
       {metadataEditing && (
         <div className="lip-section lip-metadata-editor">
-          <div className="lip-section-head">Edit metadata</div>
-          <label>Title<input value={metadataDraft.title} onChange={(event) => setMetadataDraft((draft) => ({ ...draft, title: event.target.value }))} /></label>
-          <label>Type
+          <div className="lip-section-head">{copy.infoTab.editMetadataHeading}</div>
+          <label>{copy.infoTab.fieldTitle}<input value={metadataDraft.title} onChange={(event) => setMetadataDraft((draft) => ({ ...draft, title: event.target.value }))} /></label>
+          <label>{copy.infoTab.fieldType}
             <select value={metadataDraft.itemType} onChange={(event) => setMetadataDraft((draft) => ({ ...draft, itemType: event.target.value as typeof draft.itemType }))}>
-              {METADATA_ITEM_TYPES.map((itemType) => <option key={itemType} value={itemType}>{itemTypeLabel(itemType)}</option>)}
+              {METADATA_ITEM_TYPES.map((itemType) => <option key={itemType} value={itemType}>{itemTypeLabel(copy, itemType)}</option>)}
             </select>
           </label>
-          <label>Authors <span>(separate with ;)</span><input value={metadataDraft.authors} onChange={(event) => setMetadataDraft((draft) => ({ ...draft, authors: event.target.value }))} /></label>
-          <label>Venue<input value={metadataDraft.venue} onChange={(event) => setMetadataDraft((draft) => ({ ...draft, venue: event.target.value }))} /></label>
-          <label>Year<input inputMode="numeric" value={metadataDraft.year} onChange={(event) => setMetadataDraft((draft) => ({ ...draft, year: event.target.value }))} /></label>
-          <label>Date<input value={metadataDraft.date} onChange={(event) => setMetadataDraft((draft) => ({ ...draft, date: event.target.value }))} /></label>
-          <label>Volume<input value={metadataDraft.volume} onChange={(event) => setMetadataDraft((draft) => ({ ...draft, volume: event.target.value }))} /></label>
-          <label>Issue<input value={metadataDraft.issue} onChange={(event) => setMetadataDraft((draft) => ({ ...draft, issue: event.target.value }))} /></label>
-          <label>Pages<input value={metadataDraft.pages} onChange={(event) => setMetadataDraft((draft) => ({ ...draft, pages: event.target.value }))} /></label>
-          <label>Publisher<input value={metadataDraft.publisher} onChange={(event) => setMetadataDraft((draft) => ({ ...draft, publisher: event.target.value }))} /></label>
-          <label>Place<input value={metadataDraft.place} onChange={(event) => setMetadataDraft((draft) => ({ ...draft, place: event.target.value }))} /></label>
-          <label>Edition<input value={metadataDraft.edition} onChange={(event) => setMetadataDraft((draft) => ({ ...draft, edition: event.target.value }))} /></label>
-          <label>Series<input value={metadataDraft.series} onChange={(event) => setMetadataDraft((draft) => ({ ...draft, series: event.target.value }))} /></label>
-          <label>Language<input value={metadataDraft.language} onChange={(event) => setMetadataDraft((draft) => ({ ...draft, language: event.target.value }))} /></label>
-          <label>Accessed<input value={metadataDraft.accessed} onChange={(event) => setMetadataDraft((draft) => ({ ...draft, accessed: event.target.value }))} /></label>
+          <label>{copy.infoTab.fieldAuthors} <span>{copy.infoTab.fieldAuthorsHint}</span><input value={metadataDraft.authors} onChange={(event) => setMetadataDraft((draft) => ({ ...draft, authors: event.target.value }))} /></label>
+          <label>{copy.infoTab.fieldVenue}<input value={metadataDraft.venue} onChange={(event) => setMetadataDraft((draft) => ({ ...draft, venue: event.target.value }))} /></label>
+          <label>{copy.infoTab.fieldYear}<input inputMode="numeric" value={metadataDraft.year} onChange={(event) => setMetadataDraft((draft) => ({ ...draft, year: event.target.value }))} /></label>
+          <label>{copy.infoTab.fieldDate}<input value={metadataDraft.date} onChange={(event) => setMetadataDraft((draft) => ({ ...draft, date: event.target.value }))} /></label>
+          <label>{copy.infoTab.fieldVolume}<input value={metadataDraft.volume} onChange={(event) => setMetadataDraft((draft) => ({ ...draft, volume: event.target.value }))} /></label>
+          <label>{copy.infoTab.fieldIssue}<input value={metadataDraft.issue} onChange={(event) => setMetadataDraft((draft) => ({ ...draft, issue: event.target.value }))} /></label>
+          <label>{copy.infoTab.fieldPages}<input value={metadataDraft.pages} onChange={(event) => setMetadataDraft((draft) => ({ ...draft, pages: event.target.value }))} /></label>
+          <label>{copy.infoTab.fieldPublisher}<input value={metadataDraft.publisher} onChange={(event) => setMetadataDraft((draft) => ({ ...draft, publisher: event.target.value }))} /></label>
+          <label>{copy.infoTab.fieldPlace}<input value={metadataDraft.place} onChange={(event) => setMetadataDraft((draft) => ({ ...draft, place: event.target.value }))} /></label>
+          <label>{copy.infoTab.fieldEdition}<input value={metadataDraft.edition} onChange={(event) => setMetadataDraft((draft) => ({ ...draft, edition: event.target.value }))} /></label>
+          <label>{copy.infoTab.fieldSeries}<input value={metadataDraft.series} onChange={(event) => setMetadataDraft((draft) => ({ ...draft, series: event.target.value }))} /></label>
+          <label>{copy.infoTab.fieldLanguage}<input value={metadataDraft.language} onChange={(event) => setMetadataDraft((draft) => ({ ...draft, language: event.target.value }))} /></label>
+          <label>{copy.infoTab.fieldAccessed}<input value={metadataDraft.accessed} onChange={(event) => setMetadataDraft((draft) => ({ ...draft, accessed: event.target.value }))} /></label>
           <label>DOI<input value={metadataDraft.doi} onChange={(event) => setMetadataDraft((draft) => ({ ...draft, doi: event.target.value }))} /></label>
           <label>ISBN<input value={metadataDraft.isbn} onChange={(event) => setMetadataDraft((draft) => ({ ...draft, isbn: event.target.value }))} /></label>
-          <label>Citation key<input value={metadataDraft.citationKey} onChange={(event) => { setMetadataError(null); setMetadataDraft((draft) => ({ ...draft, citationKey: event.target.value })); }} /></label>
-          <label>URL<input value={metadataDraft.url} onChange={(event) => setMetadataDraft((draft) => ({ ...draft, url: event.target.value }))} /></label>
-          <label>Abstract<textarea rows={5} value={metadataDraft.abstract} onChange={(event) => setMetadataDraft((draft) => ({ ...draft, abstract: event.target.value }))} /></label>
+          <label>{copy.infoTab.citationKeyPrompt}<input value={metadataDraft.citationKey} onChange={(event) => { setMetadataError(null); setMetadataDraft((draft) => ({ ...draft, citationKey: event.target.value })); }} /></label>
+          <label>{copy.infoTab.fieldUrl}<input value={metadataDraft.url} onChange={(event) => setMetadataDraft((draft) => ({ ...draft, url: event.target.value }))} /></label>
+          <label>{copy.infoTab.fieldAbstract}<textarea rows={5} value={metadataDraft.abstract} onChange={(event) => setMetadataDraft((draft) => ({ ...draft, abstract: event.target.value }))} /></label>
           {metadataError && <p className="lit-error" role="alert">{metadataError}</p>}
           <div className="lip-metadata-editor-actions">
-            <button type="button" className="primary" onClick={saveMetadata}>Save metadata</button>
-            <button type="button" onClick={() => setMetadataEditing(false)}>Cancel</button>
+            <button type="button" className="primary" onClick={saveMetadata}>{copy.infoTab.saveMetadata}</button>
+            <button type="button" onClick={() => setMetadataEditing(false)}>{copy.infoTab.cancel}</button>
           </div>
         </div>
       )}
 
       <div className="lip-section lip-actions-section">
-        <button type="button" className="lit-action-btn" onClick={() => setMetadataEditing((value) => !value)}>{metadataEditing ? "Close editor" : "Edit metadata"}</button>
-        <button type="button" className="lit-action-btn" onClick={editCitationKey}>编辑 Citation key</button>
+        <button type="button" className="lit-action-btn" onClick={() => setMetadataEditing((value) => !value)}>{metadataEditing ? copy.infoTab.closeEditor : copy.infoTab.editMetadata}</button>
+        <button type="button" className="lit-action-btn" onClick={editCitationKey}>{copy.infoTab.editCitationKey}</button>
         <button type="button" className="lit-action-btn" onClick={onOpenReader}
                 disabled={paper.pdf.status === "downloading"}>
-          {paper.pdf.status === "downloaded" ? "打开 PDF"
-            : paper.pdf.status === "downloading" ? "下载中…"
-            : paper.pdf.url ? "下载 PDF" : "获取 PDF"}
+          {paper.pdf.status === "downloaded" ? copy.infoTab.openPdf
+            : paper.pdf.status === "downloading" ? copy.infoTab.downloading
+            : paper.pdf.url ? copy.infoTab.downloadPdf : copy.infoTab.getPdf}
         </button>
-        <button type="button" className="lit-action-btn" onClick={onViewOverview}>简报</button>
-        <button type="button" className="lit-action-btn" onClick={onViewEvidence}>查看证据</button>
-        <button type="button" className="lit-action-btn" onClick={onAsk}>问 Agent</button>
+        <button type="button" className="lit-action-btn" onClick={onViewOverview}>{copy.infoTab.brief}</button>
+        <button type="button" className="lit-action-btn" onClick={onViewEvidence}>{copy.infoTab.viewEvidence}</button>
+        <button type="button" className="lit-action-btn" onClick={onAsk}>{copy.infoTab.askAgent}</button>
         {paper.stage !== "shortlist" && paper.stage !== "downloaded" && paper.stage !== "read" && (
-          <button type="button" className="lit-action-btn starred" onClick={onShortlist}>加入候选</button>
+          <button type="button" className="lit-action-btn starred" onClick={onShortlist}>{copy.infoTab.addToShortlist}</button>
         )}
-        <button type="button" className="lit-action-btn danger" onClick={onDelete}>删除</button>
+        <button type="button" className="lit-action-btn danger" onClick={onDelete}>{copy.infoTab.delete}</button>
       </div>
     </div>
   );

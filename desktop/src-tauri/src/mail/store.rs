@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use super::model::{
     GenericMailAccountInput, IncomingServerConfig, MailAccount, MailIdentityConfig,
-    MailOauthConfigPatch, MailOauthConfigView, OutgoingServerConfig, Provider,
+    OutgoingServerConfig, Provider,
 };
 
 static STORE_LOCK: Mutex<()> = Mutex::new(());
@@ -123,10 +123,6 @@ pub fn oauth_config() -> OauthConfig {
     load().oauth
 }
 
-fn mask(value: &str) -> bool {
-    !value.trim().is_empty()
-}
-
 pub fn bundled_outlook_client_id() -> Option<&'static str> {
     option_env!("ARIS_OUTLOOK_CLIENT_ID")
         .map(str::trim)
@@ -142,45 +138,6 @@ pub fn effective_outlook_client_id(cfg: &OauthConfig) -> Option<String> {
             Some(saved.to_string())
         }
     })
-}
-
-pub fn oauth_config_view() -> MailOauthConfigView {
-    let cfg = oauth_config();
-    let has_bundled_outlook = bundled_outlook_client_id().is_some();
-    let has_saved_outlook = mask(&cfg.outlook_client_id);
-    MailOauthConfigView {
-        gmail_client_id: cfg.gmail_client_id,
-        gmail_has_secret: mask(&cfg.gmail_client_secret),
-        outlook_configured: has_bundled_outlook || has_saved_outlook,
-        outlook_uses_bundled_client: has_bundled_outlook,
-        // Kept for old local developer builds only. Official builds use the
-        // compile-time bundled client and don't expose it to the UI.
-        outlook_client_id: if has_bundled_outlook {
-            String::new()
-        } else {
-            cfg.outlook_client_id
-        },
-    }
-}
-
-pub fn set_oauth_config(patch: MailOauthConfigPatch) -> Result<MailOauthConfigView, String> {
-    with_store(|store| {
-        if let Some(id) = patch.gmail_client_id {
-            store.oauth.gmail_client_id = id.trim().to_string();
-        }
-        if let Some(secret) = patch.gmail_client_secret {
-            let secret = secret.trim();
-            // Empty string clears; otherwise replace.
-            if !secret.is_empty() {
-                store.oauth.gmail_client_secret = secret.to_string();
-            }
-        }
-        if let Some(id) = patch.outlook_client_id {
-            store.oauth.outlook_client_id = id.trim().to_string();
-        }
-        Ok(())
-    })?;
-    Ok(oauth_config_view())
 }
 
 pub fn list_accounts() -> Vec<MailAccount> {

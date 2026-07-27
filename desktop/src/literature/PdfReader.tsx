@@ -7,7 +7,11 @@ import {
 } from "react";
 import type { PDFDocumentProxy, PDFPageProxy, RenderTask } from "pdfjs-dist";
 import { isTauri, literaturePdfBytes } from "../api/tauri";
+import { renderPdfPageToCanvas } from "../pdf/canvas";
+import { getPdfJs, openPdfDocument } from "../pdf/runtime";
+import { useStore, type Language } from "../store";
 import { SvgIcon } from "../SvgIcon";
+import { LITERATURE_COPY } from "./i18n";
 import type {
   PdfAnnotation,
   PdfAnnotationColor,
@@ -16,46 +20,47 @@ import type {
   PdfAnnotationStyle,
 } from "./literatureTypes";
 
-const workerSrc = new URL("pdfjs-dist/build/pdf.worker.min.mjs", import.meta.url).toString();
-
 const ZOOM_MIN = 0.4;
 const ZOOM_MAX = 3;
 const ZOOM_STEP = 0.15;
 const clampZoom = (value: number) => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, value));
 
-const KIND_LABELS: Record<PdfAnnotationKind, string> = {
-  note: "用户标注",
-  core: "核心句",
-  evidence: "证据",
-  "answer-support": "问答支撑",
-};
-const COLOR_SWATCHES: { key: PdfAnnotationColor; hex: string; label: string }[] = [
-  { key: "yellow", hex: "#ffd54f", label: "黄色" },
-  { key: "green", hex: "#81c784", label: "绿色" },
-  { key: "blue", hex: "#4fc3f7", label: "蓝色" },
-  { key: "red", hex: "#ef5350", label: "红色" },
-  { key: "purple", hex: "#ba68c8", label: "紫色" },
+const kindLabels = (copy: (typeof LITERATURE_COPY)[Language]): Record<PdfAnnotationKind, string> => ({
+  note: copy.pdfReader.kindNote,
+  core: copy.pdfReader.kindCore,
+  evidence: copy.pdfReader.kindEvidence,
+  "answer-support": copy.pdfReader.kindAnswerSupport,
+});
+const colorSwatches = (
+  copy: (typeof LITERATURE_COPY)[Language],
+): { key: PdfAnnotationColor; hex: string; label: string }[] => [
+  { key: "yellow", hex: "#ffd54f", label: copy.pdfReader.colorYellow },
+  { key: "green", hex: "#81c784", label: copy.pdfReader.colorGreen },
+  { key: "blue", hex: "#4fc3f7", label: copy.pdfReader.colorBlue },
+  { key: "red", hex: "#ef5350", label: copy.pdfReader.colorRed },
+  { key: "purple", hex: "#ba68c8", label: copy.pdfReader.colorPurple },
 ];
-const STYLE_OPTIONS: { key: PdfAnnotationStyle; label: string; glyph: string }[] = [
-  { key: "highlight", label: "高亮", glyph: "A" },
-  { key: "underline", label: "下划线", glyph: "A" },
-  { key: "strikethrough", label: "删除线", glyph: "A" },
+const styleOptions = (
+  copy: (typeof LITERATURE_COPY)[Language],
+): { key: PdfAnnotationStyle; label: string; glyph: string }[] => [
+  { key: "highlight", label: copy.pdfReader.styleHighlight, glyph: "A" },
+  { key: "underline", label: copy.pdfReader.styleUnderline, glyph: "A" },
+  { key: "strikethrough", label: copy.pdfReader.styleStrikethrough, glyph: "A" },
 ];
 
 /** Selection-driven AI actions. List-shaped so explain/summarize/ask can be
- * appended later without touching the popover wiring. */
+ * appended later without touching the popover wiring. The translate action's
+ * output language follows the UI language toggle rather than being hardcoded. */
 interface AiAction {
   key: string;
   label: string;
   system: string;
 }
-const AI_ACTIONS: AiAction[] = [
+const aiActions = (language: Language): AiAction[] => [
   {
     key: "translate",
-    label: "翻译",
-    system:
-      "你是严谨的学术译者。把用户提供的文本翻译成流畅、自然的中文，" +
-      "保留专业术语、数学符号与引用标记（如 [1]）。只输出译文，不要任何前言或解释。",
+    label: LITERATURE_COPY[language].pdfReader.translateAction,
+    system: LITERATURE_COPY[language].pdfReader.translateSystem,
   },
 ];
 
@@ -218,6 +223,8 @@ function PdfPage({
   onHighlightHover: (annotationId: string | null) => void;
   onHighlightActivate: (annotationId: string, anchor: HighlightAnchor) => void;
 }) {
+  const language = useStore((s) => s.language);
+  const copy = LITERATURE_COPY[language];
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const textLayerRef = useRef<HTMLDivElement | null>(null);
   const taskRef = useRef<RenderTask | null>(null);
@@ -244,17 +251,10 @@ function PdfPage({
       .then(async (pdfPage) => {
         if (disposed || !canvasRef.current) return;
         onMeasured(page, pdfPage.getViewport({ scale: 1 }).height);
-        const viewport = pdfPage.getViewport({ scale: zoom });
-
-        // Canvas render
         const canvas = canvasRef.current;
-        const context = canvas.getContext("2d");
-        if (!context) throw new Error("Canvas rendering is unavailable.");
-        canvas.width = Math.ceil(viewport.width);
-        canvas.height = Math.ceil(viewport.height);
-        const renderTask = pdfPage.render({ canvas, canvasContext: context, viewport });
-        taskRef.current = renderTask;
-        await renderTask.promise;
+        const render = renderPdfPageToCanvas(pdfPage, canvas, zoom);
+        taskRef.current = render.task;
+        await render.task.promise;
         if (disposed) return;
 
         // Text layer for selection — rendered transparently over the canvas.
@@ -264,7 +264,7 @@ function PdfPage({
         if (textLayerDiv) {
           textLayerDiv.innerHTML = "";
           textLayerDiv.style.setProperty("--total-scale-factor", String(zoom));
-          const pdfjs = await import("pdfjs-dist");
+          const pdfjs = await getPdfJs();
           if (!disposed && "TextLayer" in pdfjs && typeof pdfjs.TextLayer === "function") {
             const textContent = await pdfPage.getTextContent();
             if (!disposed) {
@@ -272,7 +272,7 @@ function PdfPage({
                 const textLayer = new pdfjs.TextLayer({
                   textContentSource: textContent,
                   container: textLayerDiv,
-                  viewport,
+                  viewport: render.viewport,
                 });
                 textTaskRef.current = textLayer;
                 await textLayer.render();
@@ -352,7 +352,7 @@ function PdfPage({
 
   return (
     <>
-      <canvas ref={canvasRef} aria-label={`PDF 第 ${page} 页`} />
+      <canvas ref={canvasRef} aria-label={copy.pdfReader.pageAria(page)} />
       {/* Transparent text layer — enables native browser text selection */}
       <div
         ref={textLayerRef}
@@ -404,6 +404,12 @@ function QuickSelectionPopup({
   onRunAi: (system: string, prompt: string) => Promise<string>;
   onCancel: () => void;
 }) {
+  const language = useStore((s) => s.language);
+  const copy = LITERATURE_COPY[language];
+  const kindLabelsForLanguage = kindLabels(copy);
+  const colorSwatchesForLanguage = colorSwatches(copy);
+  const styleOptionsForLanguage = styleOptions(copy);
+  const aiActionsForLanguage = aiActions(language);
   const [color, setColor] = useState<PdfAnnotationColor>("yellow");
   const [kind, setKind] = useState<PdfAnnotationKind>("note");
   const [note, setNote] = useState("");
@@ -411,7 +417,9 @@ function QuickSelectionPopup({
   const [showDetails, setShowDetails] = useState(false);
   const [ai, setAi] = useState<AiState | null>(null);
   const styleVerb =
-    style === "underline" ? "下划线" : style === "strikethrough" ? "删除线" : "高亮";
+    style === "underline" ? copy.pdfReader.styleUnderline
+      : style === "strikethrough" ? copy.pdfReader.styleStrikethrough
+        : copy.pdfReader.styleHighlight;
 
   const runAi = useCallback(
     (action: AiAction) => {
@@ -445,16 +453,16 @@ function QuickSelectionPopup({
         zIndex: 1000,
       }}
       role="toolbar"
-      aria-label="选区操作"
+      aria-label={copy.pdfReader.selectionToolbarAria}
     >
       {aiActive ? (
         <div className="lit-pdf-ai-panel">
           <div className="lit-pdf-ai-head">
-            <button type="button" className="lit-pdf-ai-back" aria-label="返回标记" onClick={() => setAi(null)}>
-              <SvgIcon name="chevronLeft" size={14} /> 返回
+            <button type="button" className="lit-pdf-ai-back" aria-label={copy.pdfReader.back} onClick={() => setAi(null)}>
+              <SvgIcon name="chevronLeft" size={14} /> {copy.pdfReader.back}
             </button>
             <span className="lit-pdf-ai-title">{ai.action.label}</span>
-            <button type="button" className="lit-pdf-popup-close" aria-label="关闭" onClick={onCancel}>
+            <button type="button" className="lit-pdf-popup-close" aria-label={copy.pdfReader.close} onClick={onCancel}>
               <SvgIcon name="close" size={14} />
             </button>
           </div>
@@ -462,29 +470,29 @@ function QuickSelectionPopup({
             {ai.status === "loading" && (
               <div className="lit-pdf-ai-loading">
                 <span className="lit-search-spinner" aria-hidden="true" />
-                正在{ai.action.label}…
+                {copy.pdfReader.aiLoading(ai.action.label)}
               </div>
             )}
-            {ai.status === "error" && <div className="lit-pdf-ai-error">出错了：{ai.text}</div>}
+            {ai.status === "error" && <div className="lit-pdf-ai-error">{copy.pdfReader.aiError(ai.text)}</div>}
             {ai.status === "done" && <div className="lit-pdf-ai-result">{ai.text}</div>}
           </div>
           <div className="lit-pdf-ai-actions">
             {ai.status === "error" && (
               <button type="button" onClick={() => runAi(ai.action)}>
-                重试
+                {copy.pdfReader.retry}
               </button>
             )}
             {ai.status === "done" && (
               <>
                 <button type="button" onClick={() => void navigator.clipboard?.writeText(ai.text)}>
-                  复制
+                  {copy.pdfReader.copy}
                 </button>
                 <button
                   type="button"
                   className="lit-pdf-select-popup-save"
-                  onClick={() => onSaveNote("blue", "note", `【${ai.action.label}】\n${ai.text}`, "highlight")}
+                  onClick={() => onSaveNote("blue", "note", copy.pdfReader.aiResultNote(ai.action.label, ai.text), "highlight")}
                 >
-                  保存到标注
+                  {copy.pdfReader.saveToAnnotation}
                 </button>
               </>
             )}
@@ -493,8 +501,8 @@ function QuickSelectionPopup({
       ) : (
         <>
           <div className="lit-pdf-select-popup-row">
-            <div className="lit-pdf-style-seg" role="group" aria-label="标记样式">
-              {STYLE_OPTIONS.map(({ key, label, glyph }) => (
+            <div className="lit-pdf-style-seg" role="group" aria-label={copy.pdfReader.markStyleAria}>
+              {styleOptionsForLanguage.map(({ key, label, glyph }) => (
                 <button
                   key={key}
                   type="button"
@@ -509,15 +517,15 @@ function QuickSelectionPopup({
               ))}
             </div>
             <div className="lit-pdf-select-popup-colors">
-              {COLOR_SWATCHES.map(({ key, hex, label }) => (
+              {colorSwatchesForLanguage.map(({ key, hex, label }) => (
                 <button
                   key={key}
                   type="button"
                   className={`lit-pdf-color-swatch${color === key ? " active" : ""}`}
                   style={{ background: hex }}
-                  aria-label={`用${label}${styleVerb}`}
+                  aria-label={copy.pdfReader.setColorAria(label, styleVerb)}
                   aria-pressed={color === key}
-                  title={`用${label}${styleVerb}`}
+                  title={copy.pdfReader.setColorAria(label, styleVerb)}
                   onClick={() => {
                     setColor(key);
                     if (!showDetails) onQuickHighlight(key, style);
@@ -531,14 +539,14 @@ function QuickSelectionPopup({
               aria-expanded={showDetails}
               onClick={() => setShowDetails((value) => !value)}
             >
-              加备注
+              {copy.pdfReader.addNoteToggle}
             </button>
-            <button type="button" className="lit-pdf-popup-close" aria-label="取消选区" onClick={onCancel}>
+            <button type="button" className="lit-pdf-popup-close" aria-label={copy.pdfReader.cancelSelectionAria} onClick={onCancel}>
               <SvgIcon name="close" size={14} />
             </button>
           </div>
           <div className="lit-pdf-select-popup-ai-row">
-            {AI_ACTIONS.map((action) => (
+            {aiActionsForLanguage.map((action) => (
               <button
                 key={action.key}
                 type="button"
@@ -552,27 +560,27 @@ function QuickSelectionPopup({
           {showDetails && (
             <div className="lit-pdf-select-popup-details">
               <div className="lit-pdf-select-popup-quote">
-                {pending.quote.length > 140 ? `${pending.quote.slice(0, 140)}…` : pending.quote}
+                {pending.quote.length > 140 ? copy.pdfReader.quotePreviewTruncated(pending.quote.slice(0, 140)) : pending.quote}
               </div>
               <select
                 className="lit-pdf-select-popup-kind"
                 value={kind}
                 onChange={(event) => setKind(event.target.value as PdfAnnotationKind)}
-                aria-label="标注类型"
+                aria-label={copy.pdfReader.annotationKindAria}
               >
-                {(Object.keys(KIND_LABELS) as PdfAnnotationKind[]).map((value) => (
+                {(Object.keys(kindLabelsForLanguage) as PdfAnnotationKind[]).map((value) => (
                   <option key={value} value={value}>
-                    {KIND_LABELS[value]}
+                    {kindLabelsForLanguage[value]}
                   </option>
                 ))}
               </select>
               <textarea
                 className="lit-pdf-select-popup-note"
-                placeholder="添加备注（可选）"
+                placeholder={copy.pdfReader.notePlaceholder}
                 value={note}
                 onChange={(event) => setNote(event.target.value)}
                 rows={3}
-                aria-label="标注备注"
+                aria-label={copy.pdfReader.noteAria}
                 autoFocus
               />
               <button
@@ -580,7 +588,7 @@ function QuickSelectionPopup({
                 className="lit-pdf-select-popup-save"
                 onClick={() => onSaveNote(color, kind, note, style)}
               >
-                保存备注
+                {copy.pdfReader.saveNote}
               </button>
             </div>
           )}
@@ -605,6 +613,8 @@ function HighlightPopover({
   onDelete: () => void;
   onClose: () => void;
 }) {
+  const language = useStore((s) => s.language);
+  const copy = LITERATURE_COPY[language];
   const width = 240;
   const left = Math.min(window.innerWidth - width - 8, Math.max(8, anchor.x - width / 2));
   const placeBelow = anchor.y < 140;
@@ -622,27 +632,27 @@ function HighlightPopover({
         zIndex: 1000,
       }}
       role="dialog"
-      aria-label="高亮操作"
+      aria-label={copy.pdfReader.highlightActionsAria}
     >
       <div className="lit-pdf-highlight-popover-head">
-        <span className="lit-pdf-annotation-kind-badge">{KIND_LABELS[annotation.kind]}</span>
-        <span className="lit-pdf-highlight-popover-page">第 {annotation.page} 页</span>
-        <button type="button" className="lit-pdf-popup-close" aria-label="关闭" onClick={onClose}>
+        <span className="lit-pdf-annotation-kind-badge">{kindLabels(copy)[annotation.kind]}</span>
+        <span className="lit-pdf-highlight-popover-page">{copy.pdfReader.pageLabel(annotation.page)}</span>
+        <button type="button" className="lit-pdf-popup-close" aria-label={copy.pdfReader.close} onClick={onClose}>
           <SvgIcon name="close" size={14} />
         </button>
       </div>
       <blockquote className="lit-pdf-highlight-popover-quote">
-        {annotation.quote.length > 120 ? `${annotation.quote.slice(0, 120)}…` : annotation.quote}
+        {annotation.quote.length > 120 ? copy.pdfReader.quotePreviewTruncated(annotation.quote.slice(0, 120)) : annotation.quote}
       </blockquote>
       <p className={`lit-pdf-highlight-popover-note${annotation.note ? "" : " empty"}`}>
-        {annotation.note || "无备注"}
+        {annotation.note || copy.pdfReader.noNote}
       </p>
       <div className="lit-pdf-highlight-popover-actions">
         <button type="button" className="danger" onClick={onDelete}>
-          删除
+          {copy.pdfReader.delete}
         </button>
         <button type="button" onClick={onEdit}>
-          编辑
+          {copy.pdfReader.edit}
         </button>
       </div>
       <div className={`lit-pdf-select-popup-arrow${placeBelow ? " below" : ""}`} />
@@ -668,6 +678,8 @@ function AnnotationEditor({
   onDelete: () => void;
   onClose: () => void;
 }) {
+  const language = useStore((s) => s.language);
+  const copy = LITERATURE_COPY[language];
   const width = 286;
   const left = Math.min(window.innerWidth - width - 8, Math.max(8, anchor.x - width));
   const top = Math.max(8, Math.min(window.innerHeight - 340, anchor.y));
@@ -677,35 +689,35 @@ function AnnotationEditor({
       className="lit-pdf-annotation-editor"
       style={{ position: "fixed", left, top, zIndex: 1000 }}
       role="dialog"
-      aria-label="编辑标注"
+      aria-label={copy.pdfReader.editAnnotationAria}
     >
       <div className="lit-pdf-annotation-editor-head">
-        <span>第 {annotation.page} 页</span>
-        <button type="button" className="lit-pdf-popup-close" aria-label="关闭标注编辑器" onClick={onClose}>
+        <span>{copy.pdfReader.pageLabel(annotation.page)}</span>
+        <button type="button" className="lit-pdf-popup-close" aria-label={copy.pdfReader.closeAnnotationEditorAria} onClick={onClose}>
           <SvgIcon name="close" size={14} />
         </button>
       </div>
       <blockquote>{annotation.quote}</blockquote>
-      <div className="lit-pdf-annotation-editor-colors" aria-label="标注颜色">
-        {COLOR_SWATCHES.map(({ key, hex, label }) => (
+      <div className="lit-pdf-annotation-editor-colors" aria-label={copy.pdfReader.annotationColorAria}>
+        {colorSwatches(copy).map(({ key, hex, label }) => (
           <button
             key={key}
             type="button"
             className={`lit-pdf-color-swatch${(annotation.color ?? "yellow") === key ? " active" : ""}`}
             style={{ background: hex }}
-            aria-label={`设为${label}`}
+            aria-label={copy.pdfReader.setColorPlain(label)}
             aria-pressed={(annotation.color ?? "yellow") === key}
             onClick={() => onUpdate({ color: key })}
           />
         ))}
       </div>
-      <div className="lit-pdf-style-seg" role="group" aria-label="标记样式">
-        {STYLE_OPTIONS.map(({ key, label, glyph }) => (
+      <div className="lit-pdf-style-seg" role="group" aria-label={copy.pdfReader.markStyleAria}>
+        {styleOptions(copy).map(({ key, label, glyph }) => (
           <button
             key={key}
             type="button"
             className={`lit-pdf-style-btn style-${key}${(annotation.style ?? "highlight") === key ? " active" : ""}`}
-            aria-label={`设为${label}`}
+            aria-label={copy.pdfReader.setColorPlain(label)}
             aria-pressed={(annotation.style ?? "highlight") === key}
             title={label}
             onClick={() => onUpdate({ style: key })}
@@ -716,28 +728,28 @@ function AnnotationEditor({
       </div>
       <select
         value={annotation.kind}
-        aria-label="标注类型"
+        aria-label={copy.pdfReader.annotationKindAria}
         onChange={(event) => onUpdate({ kind: event.target.value as PdfAnnotationKind })}
       >
-        {(Object.keys(KIND_LABELS) as PdfAnnotationKind[]).map((value) => (
+        {(Object.keys(kindLabels(copy)) as PdfAnnotationKind[]).map((value) => (
           <option key={value} value={value}>
-            {KIND_LABELS[value]}
+            {kindLabels(copy)[value]}
           </option>
         ))}
       </select>
       <textarea
         defaultValue={annotation.note}
-        aria-label="标注备注"
-        placeholder="添加备注"
+        aria-label={copy.pdfReader.noteAria}
+        placeholder={copy.pdfReader.addNotePlaceholder}
         rows={4}
         onBlur={(event) => onUpdate({ note: event.target.value })}
       />
       <div className="lit-pdf-annotation-editor-actions">
         <button type="button" className="danger" onClick={onDelete}>
-          删除
+          {copy.pdfReader.delete}
         </button>
         <button type="button" onClick={onClose}>
-          完成
+          {copy.pdfReader.done}
         </button>
       </div>
     </div>
@@ -759,6 +771,8 @@ export default function PdfReader({
   onPageChange,
   onDocumentLoaded,
 }: PdfReaderProps) {
+  const language = useStore((s) => s.language);
+  const copy = LITERATURE_COPY[language];
   const containerRef = useRef<HTMLDivElement | null>(null);
   const slotRefs = useRef<Array<HTMLDivElement | null>>([]);
   const sidebarRef = useRef<HTMLElement | null>(null);
@@ -838,20 +852,17 @@ export default function PdfReader({
     setPageBaseHeights({});
     setRenderPages(new Set());
     if (!isTauri()) {
-      setError("内嵌 PDF 阅读器需要桌面后端；浏览器预览不读取本地文件。");
+      setError(copy.pdfReader.desktopOnlyError);
       setLoading(false);
       return () => { disposed = true; };
     }
     if (typeof DOMMatrix === "undefined") {
-      setError("当前 WebView 不支持 PDF 画布渲染。");
+      setError(copy.pdfReader.canvasUnsupportedError);
       setLoading(false);
       return () => { disposed = true; };
     }
-    void Promise.all([literaturePdfBytes(relativePath), import("pdfjs-dist")])
-      .then(([bytes, pdfjs]) => {
-        pdfjs.GlobalWorkerOptions.workerSrc = workerSrc;
-        return pdfjs.getDocument({ data: new Uint8Array(bytes) }).promise;
-      })
+    void literaturePdfBytes(relativePath)
+      .then((bytes) => openPdfDocument(bytes))
       .then(async (pdf) => {
         loadedDocument = pdf;
         if (disposed) { void pdf.destroy(); return; }
@@ -1105,7 +1116,7 @@ export default function PdfReader({
             type="button"
             onClick={() => jumpToPage(currentPage - 1)}
             disabled={!document || currentPage <= 1}
-            aria-label="上一页"
+            aria-label={copy.pdfReader.prevPageAria}
           >
             <SvgIcon name="chevronLeft" size={15} />
           </button>
@@ -1119,7 +1130,7 @@ export default function PdfReader({
                 const n = Number(e.target.value);
                 if (Number.isFinite(n)) jumpToPage(n);
               }}
-              aria-label="PDF 页码"
+              aria-label={copy.pdfReader.pageNumberAria}
             />
             <span>/ {numPages || "-"}</span>
           </label>
@@ -1127,18 +1138,18 @@ export default function PdfReader({
             type="button"
             onClick={() => jumpToPage(currentPage + 1)}
             disabled={!document || currentPage >= numPages}
-            aria-label="下一页"
+            aria-label={copy.pdfReader.nextPageAria}
           >
             <SvgIcon name="chevronRight" size={15} />
           </button>
         </div>
 
         <div className="lit-pdf-zoom">
-          <button type="button" onClick={() => adjustZoom(-ZOOM_STEP)} aria-label="缩小">
+          <button type="button" onClick={() => adjustZoom(-ZOOM_STEP)} aria-label={copy.pdfReader.zoomOutAria}>
             <SvgIcon name="minus" size={15} />
           </button>
           <span className="lit-pdf-zoom-value">{Math.round(effectiveZoom * 100)}%</span>
-          <button type="button" onClick={() => adjustZoom(ZOOM_STEP)} aria-label="放大">
+          <button type="button" onClick={() => adjustZoom(ZOOM_STEP)} aria-label={copy.pdfReader.zoomInAria}>
             <SvgIcon name="plus" size={15} />
           </button>
           <button
@@ -1146,7 +1157,7 @@ export default function PdfReader({
             className={fitWidth ? "active" : ""}
             onClick={() => setFitWidth(true)}
           >
-            适应宽度
+            {copy.pdfReader.fitWidth}
           </button>
         </div>
 
@@ -1156,24 +1167,24 @@ export default function PdfReader({
               type="button"
               className={annotationsVisible ? "active" : ""}
               onClick={() => setShowAnnotations((v) => !v)}
-              title="切换标注侧栏"
+              title={copy.pdfReader.toggleAnnotationsSidebarTitle}
             >
-              标注{annotations.length > 0 ? ` · ${annotations.length}` : ""}
+              {copy.pdfReader.annotationsLabel(annotations.length)}
             </button>
           )}
           <button type="button" onClick={onOpenExternal}>
-            系统阅读器
+            {copy.pdfReader.systemReader}
           </button>
         </div>
       </div>
 
       <div className={`lit-pdf-reader-body${annotationsVisible ? " with-annotations" : ""}`}>
         <div className="lit-pdf-scroll" ref={containerRef}>
-          {loading && <div className="lit-pdf-state">正在加载 PDF…</div>}
-          {error && <div className="lit-pdf-state error">PDF 加载失败：{error}</div>}
+          {loading && <div className="lit-pdf-state">{copy.pdfReader.loadingPdf}</div>}
+          {error && <div className="lit-pdf-state error">{copy.pdfReader.pdfLoadFailed(error)}</div>}
           {!loading && !error && document && (
             <div className="lit-pdf-tip">
-              选中文字即可标记 · 点击高亮可编辑或删除
+              {copy.pdfReader.readerTip}
             </div>
           )}
           {document && baseSize
@@ -1243,13 +1254,13 @@ export default function PdfReader({
           <aside
             ref={sidebarRef}
             className="lit-pdf-annotations"
-            aria-label="PDF 标注列表"
+            aria-label={copy.pdfReader.annotationsListAria}
           >
             <div className="lit-pdf-annotations-head">
-              标注{annotations.length > 0 ? ` (${annotations.length})` : ""}
+              {copy.pdfReader.annotationsHead(annotations.length)}
             </div>
             {annotations.length === 0 ? (
-              <p className="lit-pdf-annotations-empty">选中 PDF 正文中的文字以添加标注。</p>
+              <p className="lit-pdf-annotations-empty">{copy.pdfReader.annotationsEmpty}</p>
             ) : (
               annotations.map((annotation) => (
                 <article
@@ -1277,9 +1288,9 @@ export default function PdfReader({
                 >
                   <div className="lit-pdf-annotation-card-header">
                     <span className="lit-pdf-annotation-kind-badge">
-                      {KIND_LABELS[annotation.kind]}
+                      {kindLabels(copy)[annotation.kind]}
                     </span>
-                    <span className="lit-pdf-annotation-page-badge">第 {annotation.page} 页</span>
+                    <span className="lit-pdf-annotation-page-badge">{copy.pdfReader.pageLabel(annotation.page)}</span>
                   </div>
                   <p className="lit-pdf-annotation-summary">{annotation.quote}</p>
                   {annotation.note && (

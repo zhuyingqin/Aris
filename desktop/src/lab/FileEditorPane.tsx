@@ -12,6 +12,8 @@ import {
 } from "../api/tauri";
 import CodeEditor from "./CodeEditor";
 import type { SharedEditorHandle } from "../editor/editorTypes";
+import { useStore } from "../store";
+import { LAB_COPY } from "./i18n";
 import {
   basename,
   detectExternalFileChange,
@@ -97,6 +99,8 @@ export default function FileEditorPane({
   onSelectKernel,
   onDirtyChange,
 }: Props) {
+  const uiLanguage = useStore((s) => s.language);
+  const copy = LAB_COPY[uiLanguage];
   const [loaded, setLoaded] = useState<FileText | null>(null);
   const [draft, setDraft] = useState("");
   const [loading, setLoading] = useState(false);
@@ -293,7 +297,7 @@ export default function FileEditorPane({
     if (scope === "file" && !(await save())) return;
 
     setRunStatus("running");
-    setRunLabel(scope === "file" ? "Run Python File" : "Run Selection/Line");
+    setRunLabel(scope === "file" ? copy.runPythonFileTitle : copy.runSelectionLineLabel);
     setOutputs([]);
     setError(null);
     try {
@@ -361,8 +365,8 @@ export default function FileEditorPane({
               type="button"
               disabled={loading || saving || running || !loaded}
               onClick={() => void runPython("file")}
-              title="Run Python File"
-              aria-label="Run Python File"
+              title={copy.runPythonFileTitle}
+              aria-label={copy.runPythonFileTitle}
             >
               <FileToolIcon name="run" />
             </button>
@@ -372,8 +376,8 @@ export default function FileEditorPane({
       {externalChangePending && (
         <div className="lab-file-review-bar" role="status" aria-live="polite">
           <div>
-            <strong>检测到 AI 修改</strong>
-            <span aria-label={`新增 ${reviewAdded} 行，移除 ${reviewRemoved} 行`}>
+            <strong>{copy.aiChangesDetected}</strong>
+            <span aria-label={copy.linesChangedAria(reviewAdded, reviewRemoved)}>
               {reviewAdded > 0 ? `+${reviewAdded}` : "+0"} {reviewRemoved > 0 ? `-${reviewRemoved}` : "-0"}
             </span>
             {removedReviewLines.length > 0 && (
@@ -381,16 +385,16 @@ export default function FileEditorPane({
                 {removedReviewLines.slice(0, 3).map((line, index) => (
                   <code key={`${line.line}:${index}`}>- {line.text || " "}</code>
                 ))}
-                {removedReviewLines.length > 3 && <em>还有 {removedReviewLines.length - 3} 行删除</em>}
+                {removedReviewLines.length > 3 && <em>{copy.moreRemovedLines(removedReviewLines.length - 3)}</em>}
               </div>
             )}
           </div>
           <div className="lab-file-review-actions">
-            <button className="lab-btn primary" type="button" onClick={keepExternalChange} disabled={saving} title="保留 AI 修改">
-              保留
+            <button className="lab-btn primary" type="button" onClick={keepExternalChange} disabled={saving} title={copy.keepAiChangesTitle}>
+              {copy.keepAiChanges}
             </button>
-            <button className="lab-btn" type="button" onClick={() => void revertExternalChange()} disabled={saving} title="恢复修改前内容">
-              恢复
+            <button className="lab-btn" type="button" onClick={() => void revertExternalChange()} disabled={saving} title={copy.restoreFileTitle}>
+              {copy.restoreLabel}
             </button>
           </div>
         </div>
@@ -403,11 +407,11 @@ export default function FileEditorPane({
             value={activeRuntime ?? ""}
             disabled={running || runtimeSpecs.length === 0}
             onChange={(event) => onSelectKernel(event.target.value)}
-            title="Select Python interpreter / Jupyter kernel"
+            title={copy.selectInterpreterKernelTitle}
           >
             {runtimeSpecs.length === 0 ? (
               <option value="" disabled>
-                No kernels found
+                {copy.noKernelsFound}
               </option>
             ) : (
               runtimeSpecs.map((spec) => (
@@ -419,20 +423,20 @@ export default function FileEditorPane({
           </select>
           <span className={kernelName ? "lab-file-kernel on" : "lab-file-kernel"}>
             <span className="lab-dot" />
-            {kernelName ?? activeSpec?.displayName ?? selectedKernel ?? "No interpreter"}
+            {kernelName ?? activeSpec?.displayName ?? selectedKernel ?? copy.noInterpreter}
           </span>
         </div>
       )}
 
       {error && (
         <div className="lab-file-editor-error">
-          <strong>Cannot complete this Lab action.</strong>
+          <strong>{copy.cannotCompleteAction}</strong>
           <span>{error}</span>
         </div>
       )}
 
       {loading ? (
-        <div className="lab-empty">Loading file...</div>
+        <div className="lab-empty">{copy.loadingFile}</div>
       ) : loaded ? (
         <CodeEditor
           value={draft}
@@ -443,13 +447,13 @@ export default function FileEditorPane({
           onReady={(handle) => {
             editorRef.current = handle;
           }}
-          placeholder="Start typing..."
+          placeholder={copy.startTypingPlaceholder}
           readOnly={saving}
           wrap={false}
           dataEditor="file"
         />
       ) : !error ? (
-        <div className="lab-empty">Select a text file from Files to open it here.</div>
+        <div className="lab-empty">{copy.selectFileToOpenHint}</div>
       ) : null}
 
       {isPython && (
@@ -457,23 +461,23 @@ export default function FileEditorPane({
           <section className="lab-file-output-panel">
             <div className="lab-file-panel-head">
               <div>
-                <strong>Output</strong>
-                <span>{runStatus === "idle" ? "Ready" : `${runLabel}: ${runStatus}`}</span>
+                <strong>{copy.outputLabel}</strong>
+                <span>{runStatus === "idle" ? copy.readyLabel : `${runLabel}: ${runStatus}`}</span>
               </div>
               <button
                 className="lab-file-tool"
                 type="button"
                 disabled={running || outputs.length === 0}
                 onClick={() => setOutputs([])}
-                title="Clear output"
-                aria-label="Clear output"
+                title={copy.clearOutputTitle}
+                aria-label={copy.clearOutputTitle}
               >
                 <FileToolIcon name="clear" />
               </button>
             </div>
             <div className="lab-file-output-body">
               {outputs.length === 0 ? (
-                <div className="lab-muted">Run this Python file or a selection to see kernel output here.</div>
+                <div className="lab-muted">{copy.runToSeeOutputHint}</div>
               ) : (
                 <OutputGroup outputs={outputs} />
               )}
@@ -483,23 +487,23 @@ export default function FileEditorPane({
           <section className="lab-file-vars-panel">
             <div className="lab-file-panel-head">
               <div>
-                <strong>Variables</strong>
-                <span>{variables.length ? `${variables.length} live` : "Kernel scope"}</span>
+                <strong>{copy.variablesLabel}</strong>
+                <span>{variables.length ? copy.liveCount(variables.length) : copy.kernelScopeLabel}</span>
               </div>
               <button
                 className="lab-file-tool"
                 type="button"
                 disabled={running || variablesBusy}
                 onClick={() => void inspectVariables()}
-                title="Refresh variables"
-                aria-label="Refresh variables"
+                title={copy.refreshVariablesTitle}
+                aria-label={copy.refreshVariablesTitle}
               >
                 <FileToolIcon name="refresh" />
               </button>
             </div>
             <div className="lab-file-vars-body">
               {variables.length === 0 ? (
-                <div className="lab-muted">No variables captured yet.</div>
+                <div className="lab-muted">{copy.noVariablesCaptured}</div>
               ) : (
                 variables.map((variable) => <VariableRow key={variable.name} variable={variable} />)
               )}

@@ -29,8 +29,7 @@ mod store;
 
 use model::{
     GenericMailAccountInput, GenericMailTestResult, MailAccount, MailAutoconfigResult, MailDraft,
-    MailFolder, MailMessageFull, MailMessageList, MailModifyPatch, MailOauthConfigPatch,
-    MailOauthConfigView, Provider,
+    MailFolder, MailMessageFull, MailMessageList, MailModifyPatch, Provider,
 };
 
 pub fn is_mail_tool(name: &str) -> bool {
@@ -62,30 +61,6 @@ where
 #[tauri::command]
 pub fn mail_accounts_get() -> Vec<MailAccount> {
     store::list_accounts()
-}
-
-pub fn connected_account_labels(provider: &str) -> Vec<String> {
-    store::list_accounts()
-        .into_iter()
-        .filter(|account| account.provider.as_str() == provider && account.connected)
-        .map(|account| {
-            if account.display_name.is_empty() || account.display_name == account.email {
-                account.email
-            } else {
-                format!("{} <{}>", account.display_name, account.email)
-            }
-        })
-        .collect()
-}
-
-#[tauri::command]
-pub fn mail_oauth_config_get() -> MailOauthConfigView {
-    store::oauth_config_view()
-}
-
-#[tauri::command]
-pub fn mail_oauth_config_set(patch: MailOauthConfigPatch) -> Result<MailOauthConfigView, String> {
-    store::set_oauth_config(patch)
 }
 
 #[tauri::command]

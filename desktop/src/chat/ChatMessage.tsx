@@ -84,26 +84,6 @@ function formatCount(value: number, sign: "+" | "-") {
   return `${sign}${value.toLocaleString()}`;
 }
 
-interface StudioLink {
-  id: string;
-  title: string;
-  href: string;
-}
-
-function studioLinksFromTool(block: Extract<ChatBlock, { kind: "tool" }>): StudioLink[] {
-  if (block.name !== "StudioLibraryUpsert" || block.isError || !block.output) return [];
-  const output = parseToolBlockObject(block, "output");
-  const studioLinks = output?.studioLinks;
-  if (!Array.isArray(studioLinks)) return [];
-  return studioLinks.filter((link): link is StudioLink => {
-    if (!link || typeof link !== "object") return false;
-    const value = link as Partial<StudioLink>;
-    return typeof value.id === "string"
-      && typeof value.title === "string"
-      && typeof value.href === "string";
-  });
-}
-
 function cleanImageCandidate(value: string): string {
   return value
     .trim()
@@ -440,9 +420,7 @@ function ToolCall({ block }: { block: Extract<ChatBlock, { kind: "tool" }> }) {
   const [open, setOpen] = useState(false);
   const change = useMemo(() => diffFromTool(block), [block]);
   const imagePaths = useMemo(() => imagePathsFromTool(block, change), [block, change]);
-  const studioLinks = useMemo(() => studioLinksFromTool(block), [block]);
   const setTab = useStore((state) => state.setTab);
-  const setPendingStudioArtifactId = useStore((state) => state.setPendingStudioArtifactId);
   const setPendingLabFilePath = useStore((state) => state.setPendingLabFilePath);
   const setPendingTypesetFilePath = useStore((state) => state.setPendingTypesetFilePath);
   const running = block.output === undefined;
@@ -497,22 +475,6 @@ function ToolCall({ block }: { block: Extract<ChatBlock, { kind: "tool" }> }) {
         {!running && <span className="tool-collapse-btn"><SvgIcon name={open ? "chevronDown" : "chevronRight"} size={11} /></span>}
       </div>
       <ToolProgressView block={block} />
-      {studioLinks.length > 0 && (
-        <div className="chat-tool-studio-links">
-          {studioLinks.map((link) => (
-            <button
-              key={link.id}
-              type="button"
-              onClick={() => {
-                setPendingStudioArtifactId(link.id);
-                setTab("studio");
-              }}
-            >
-              Open {link.title} in Studio
-            </button>
-          ))}
-        </div>
-      )}
       {imagePaths.length > 0 && (
         <div className="chat-tool-images">
           {imagePaths.map((path) => (
@@ -958,8 +920,6 @@ function renderSingleBlock(
   turn: ChatTurn,
   onPermissionRespond: (promptId: string, allow: boolean) => void,
   onQuestionRespond: (toolUseId: string, answer: string) => void,
-  onLoadOmittedTurn: ((turnIndex: number) => void) | undefined,
-  omittedTurnLoading: boolean,
   onOpenIndependentReview: () => void,
 ) {
   if (block.kind === "text") {
@@ -986,21 +946,10 @@ function renderSingleBlock(
     ) : null;
   }
   if (block.kind === "notice") {
-    const omittedTurnIndex = typeof turn.omittedTurnIndex === "number" ? turn.omittedTurnIndex : null;
     return block.message ? (
       <div key={index} className="chat-context-notice">
         <SvgIcon name="pending" size={14} className="chat-context-notice-icon" />
         <span className="chat-context-notice-message">{block.message}</span>
-        {omittedTurnIndex != null && onLoadOmittedTurn && (
-          <button
-            type="button"
-            className="chat-context-notice-action"
-            disabled={omittedTurnLoading}
-            onClick={() => onLoadOmittedTurn(omittedTurnIndex)}
-          >
-            {omittedTurnLoading ? "Loading..." : "Load full turn"}
-          </button>
-        )}
       </div>
     ) : null;
   }
@@ -1072,8 +1021,6 @@ function renderBlocks(
   turn: ChatTurn,
   onPermissionRespond: (promptId: string, allow: boolean) => void,
   onQuestionRespond: (toolUseId: string, answer: string) => void,
-  onLoadOmittedTurn: ((turnIndex: number) => void) | undefined,
-  omittedTurnLoading: boolean,
   onOpenIndependentReview: () => void,
 ) {
   const blocks = turn.blocks;
@@ -1118,8 +1065,6 @@ function renderBlocks(
       turn,
       onPermissionRespond,
       onQuestionRespond,
-      onLoadOmittedTurn,
-      omittedTurnLoading,
       onOpenIndependentReview,
     ));
     i += 1;
@@ -1162,8 +1107,6 @@ interface Props {
   onEdit: (turn: ChatTurn) => void;
   onRetry: (turn: ChatTurn) => void;
   onContinue: () => void;
-  onLoadOmittedTurn?: (turnIndex: number) => void;
-  omittedTurnLoading?: boolean;
   onPermissionRespond?: (promptId: string, allow: boolean) => void;
   onQuestionRespond?: (toolUseId: string, answer: string) => void;
   onOpenIndependentReview?: () => void;
@@ -1175,8 +1118,6 @@ function ChatMessage({
   onEdit,
   onRetry,
   onContinue,
-  onLoadOmittedTurn,
-  omittedTurnLoading = false,
   onPermissionRespond = () => undefined,
   onQuestionRespond = () => undefined,
   onOpenIndependentReview = () => undefined,
@@ -1189,8 +1130,6 @@ function ChatMessage({
     turn,
     onPermissionRespond,
     onQuestionRespond,
-    onLoadOmittedTurn,
-    omittedTurnLoading,
     onOpenIndependentReview,
   );
   return (

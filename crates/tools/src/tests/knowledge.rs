@@ -249,6 +249,19 @@ fn point_version(base: &Path, id: &str) -> i64 {
         .expect("version")
 }
 
+#[test]
+fn existing_legacy_knowledge_database_is_not_moved_implicitly() {
+    let base = std::env::temp_dir().join(format!("somniq-legacy-knowledge-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let legacy = base.join("papers/knowledge.db");
+    std::fs::create_dir_all(legacy.parent().expect("legacy parent")).expect("create legacy dir");
+    std::fs::write(&legacy, b"").expect("seed legacy database");
+
+    assert_eq!(knowledge_db_path_at(&base), legacy);
+    assert!(!base.join(".somniq/papers/knowledge.db").exists());
+    let _ = std::fs::remove_dir_all(base);
+}
+
 fn version_count(base: &Path, id: &str) -> i64 {
     let connection = open_db(base).expect("open");
     connection

@@ -14,9 +14,6 @@ const mocks = vi.hoisted(() => ({
   literatureMergeDuplicates: vi.fn(),
   literatureImportPdfAsRecord: vi.fn(),
   literatureApplyDelta: vi.fn(),
-  literatureSave: vi.fn(),
-  literatureSearch: vi.fn(),
-  literatureLibraryUpsert: vi.fn(),
   literatureDownloadPdf: vi.fn(),
   literatureImportPdf: vi.fn(),
   literatureImportAttachment: vi.fn(),
@@ -47,7 +44,6 @@ const mocks = vi.hoisted(() => ({
   projectRagSearch: vi.fn(),
   projectRagAnswer: vi.fn(),
   chatRunCommand: vi.fn(),
-  literatureAgentSend: vi.fn(),
   onChatDone: vi.fn(),
   onChatTool: vi.fn(),
   onChatToolResult: vi.fn(),
@@ -63,9 +59,6 @@ vi.mock("../../api/tauri", () => ({
   literatureMergeDuplicates: mocks.literatureMergeDuplicates,
   literatureImportPdfAsRecord: mocks.literatureImportPdfAsRecord,
   literatureApplyDelta: mocks.literatureApplyDelta,
-  literatureSave: mocks.literatureSave,
-  literatureSearch: mocks.literatureSearch,
-  literatureLibraryUpsert: mocks.literatureLibraryUpsert,
   literatureDownloadPdf: mocks.literatureDownloadPdf,
   literatureImportPdf: mocks.literatureImportPdf,
   literatureImportAttachment: mocks.literatureImportAttachment,
@@ -78,7 +71,6 @@ vi.mock("../../api/tauri", () => ({
   literatureReviewLlm: mocks.literatureReviewLlm,
   literatureLlmVision: mocks.literatureLlmVision,
   literaturePdfOpen: mocks.literaturePdfOpen,
-  literaturePdfText: mocks.literaturePdfText,
   literaturePdfBytes: mocks.literaturePdfBytes,
   literatureRagIndexPdf: mocks.literatureRagIndexPdf,
   literatureRagIndexLibrary: mocks.literatureRagIndexLibrary,
@@ -95,7 +87,6 @@ vi.mock("../../api/tauri", () => ({
   projectRagSearch: mocks.projectRagSearch,
   projectRagAnswer: mocks.projectRagAnswer,
   chatRunCommand: mocks.chatRunCommand,
-  literatureAgentSend: mocks.literatureAgentSend,
   onChatDone: mocks.onChatDone,
   onChatTool: mocks.onChatTool,
   onChatToolResult: mocks.onChatToolResult,
@@ -234,43 +225,6 @@ beforeEach(() => {
       papers: [...papers.values()],
     });
   });
-  mocks.literatureSave.mockReset().mockResolvedValue(undefined);
-  mocks.literatureSearch.mockReset().mockResolvedValue({
-    papers: [
-      {
-        id: "arxiv:2602.01491",
-        title: "Deep Retrieval Agents for Literature Triage",
-        authors: ["M. Rivera"],
-        year: 2026,
-        venue: "arXiv",
-        doi: null,
-        arxivId: "2602.01491",
-        abstract: "Fresh result coming back from the remote search.",
-        url: "https://arxiv.org/abs/2602.01491",
-        pdfUrl: "https://arxiv.org/pdf/2602.01491.pdf",
-        source: "arXiv",
-        published: "2026-02-03",
-        citedBy: null,
-      },
-      {
-        id: "arxiv:1111.00001",
-        title: "Persisted Paper on Grounded Reading",
-        authors: ["A. One", "B. Two"],
-        year: 2025,
-        venue: "arXiv",
-        doi: "10.48550/arxiv.1111.00001",
-        arxivId: "1111.00001",
-        abstract: "Duplicate of the stored record.",
-        url: "https://arxiv.org/abs/1111.00001",
-        pdfUrl: "https://arxiv.org/pdf/1111.00001.pdf",
-        source: "arXiv",
-        published: "2025-01-15",
-        citedBy: 4,
-      },
-    ],
-    warnings: [],
-    sourceCounts: [{ source: "arXiv", count: 2 }],
-  });
   mocks.literatureDownloadPdf.mockReset().mockResolvedValue({
     path: "C:/project/papers/1111.00001.pdf",
     relativePath: "papers/1111.00001.pdf",
@@ -291,13 +245,6 @@ beforeEach(() => {
   mocks.literatureAttachmentOpen.mockReset().mockResolvedValue(undefined);
   mocks.literatureReadAnnotationExport.mockReset().mockResolvedValue({ annotations: [], notes: [] });
   mocks.literatureWriteAnnotationExport.mockReset().mockResolvedValue(undefined);
-  mocks.literatureLibraryUpsert.mockReset().mockResolvedValue({
-    searchId: "search-new",
-    added: 1,
-    merged: 1,
-    total: 2,
-    libraryPath: "papers/library.json",
-  });
   // Default: no executor configured, so screening/brief fall back to the
   // offline heuristic. Individual tests opt into the LLM path.
   mocks.literatureLlm.mockReset().mockRejectedValue(new Error("no executor configured"));
@@ -430,7 +377,6 @@ beforeEach(() => {
     openSettings: false,
     refreshStatus: false,
   });
-  mocks.literatureAgentSend.mockReset().mockResolvedValue("done");
 });
 
 afterEach(() => {
@@ -1111,8 +1057,6 @@ describe("Literature library", () => {
     });
 
     expect(useLiteratureStore.getState().error).toMatch(/可复现检索/);
-    expect(mocks.literatureSearch).not.toHaveBeenCalled();
-    expect(mocks.literatureLibraryUpsert).not.toHaveBeenCalled();
   });
 
   it("hands papers without a direct PDF link to Playwright MCP", async () => {
@@ -1765,7 +1709,7 @@ describe("Literature library", () => {
     await screen.findAllByText("Persisted Paper on Grounded Reading");
 
     await user.click(
-      screen.getByLabelText("Select Persisted Paper on Grounded Reading"),
+      screen.getByLabelText("选择 Persisted Paper on Grounded Reading"),
     );
     const batchBar = screen.getByRole("toolbar", { name: "Batch actions" });
     await user.click(within(batchBar).getByRole("button", { name: "候选" }));

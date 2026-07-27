@@ -52,7 +52,7 @@ SomniQ Studio 采用「一个内核、多个外壳」的本地优先架构：所
 └────────────────────────────────────────────────────────────┘
 ```
 
-- **桌面端九个工作表面**：Chat、Lab（Jupyter / MATLAB 实验）、Typeset（LaTeX 写作与编译）、Literature（文献库与引用图谱）、Studio（讲稿 / 海报审阅）、Mail、Extensions、Scheduled、Settings。
+- **桌面端八个工作表面**：Chat、Lab（Jupyter / MATLAB 实验）、Typeset（LaTeX 写作与编译）、Literature（文献库与引用图谱）、Mail、Extensions、Scheduled、Settings。
 - **双模型闭环**：Executor（Anthropic 系）推进工作，Independent Reviewer（OpenAI 兼容：GPT、Gemini、GLM 等）独立审查，两者由同一个流式执行层驱动。
 - **一个内核、多个外壳**：桌面端绝不调用 CLI；CLI 与桌面端共享同一套 runtime、工具注册表与会话格式。
 - **本地优先**：研究项目的目标、证据、会话、文献与知识全部落在本地磁盘，云端只在显式配置模型 provider 或远程网关时参与。

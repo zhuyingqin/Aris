@@ -12,6 +12,7 @@ import CodeEditor, { type CodeDiffLine, type EditorLanguage } from "./CodeEditor
 import FileEditorPane from "./FileEditorPane";
 import LabAssistant from "./LabAssistant";
 import LabFiles, { WorkspaceFileIcon, type LabFileChange, type LabOpenOptions } from "./LabFiles";
+import { LAB_COPY } from "./i18n";
 import { OutputGroup } from "./outputs";
 import type {
   LabCellOutputEvent,
@@ -226,8 +227,8 @@ function editorTabId(kind: LabEditorKind, path: string): string {
   return `${kind}:${path}`;
 }
 
-function editorTabLabel(tab: LabEditorTab): string {
-  return basename(tab.path) || (tab.kind === "notebook" ? "Notebook" : "File");
+function editorTabLabel(tab: LabEditorTab, copy: (typeof LAB_COPY)[keyof typeof LAB_COPY]): string {
+  return basename(tab.path) || (tab.kind === "notebook" ? copy.notebookFallbackLabel : copy.fileFallbackLabel);
 }
 
 function formatRunTime(value?: number | null): string {
@@ -283,28 +284,32 @@ const IconTerminal = () => (
   </svg>
 );
 
-function normalizeSweepSpec(raw: unknown, activePath: string | null): SweepSpec {
+function normalizeSweepSpec(
+  raw: unknown,
+  activePath: string | null,
+  copy: (typeof LAB_COPY)[keyof typeof LAB_COPY],
+): SweepSpec {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-    throw new Error("Sweep spec must be a JSON object.");
+    throw new Error(copy.sweepSpecMustBeObject);
   }
   const obj = raw as Record<string, unknown>;
   const notebook = typeof obj.notebook === "string" && obj.notebook.trim() ? obj.notebook : activePath ?? "";
-  if (!notebook) throw new Error("Sweep spec requires notebook.");
+  if (!notebook) throw new Error(copy.sweepSpecRequiresNotebook);
 
   const spec: SweepSpec = { notebook };
   if (obj.seeds !== undefined) {
     if (!Array.isArray(obj.seeds) || obj.seeds.some((seed) => typeof seed !== "number")) {
-      throw new Error("seeds must be an array of numbers.");
+      throw new Error(copy.seedsMustBeArray);
     }
     spec.seeds = obj.seeds as number[];
   }
   if (obj.params !== undefined) {
     if (!obj.params || typeof obj.params !== "object" || Array.isArray(obj.params)) {
-      throw new Error("params must be an object of value arrays.");
+      throw new Error(copy.paramsMustBeObject);
     }
     const params: Record<string, unknown[]> = {};
     for (const [key, value] of Object.entries(obj.params as Record<string, unknown>)) {
-      if (!Array.isArray(value)) throw new Error(`params.${key} must be an array.`);
+      if (!Array.isArray(value)) throw new Error(copy.paramKeyMustBeArray(key));
       params[key] = value;
     }
     spec.params = params;
@@ -312,12 +317,12 @@ function normalizeSweepSpec(raw: unknown, activePath: string | null): SweepSpec 
 
   const stopOnError = obj.stop_on_error ?? obj.stopOnError;
   if (stopOnError !== undefined) {
-    if (typeof stopOnError !== "boolean") throw new Error("stop_on_error must be a boolean.");
+    if (typeof stopOnError !== "boolean") throw new Error(copy.stopOnErrorMustBeBoolean);
     spec.stop_on_error = stopOnError;
   }
   const timeoutSecs = obj.timeout_secs ?? obj.timeoutSecs;
   if (timeoutSecs !== undefined) {
-    if (typeof timeoutSecs !== "number") throw new Error("timeout_secs must be a number.");
+    if (typeof timeoutSecs !== "number") throw new Error(copy.timeoutSecsMustBeNumber);
     spec.timeout_secs = timeoutSecs;
   }
   if (typeof obj.kernel === "string" && obj.kernel.trim()) {
@@ -373,6 +378,8 @@ function areCellPropsEqual(previous: CellViewProps, next: CellViewProps): boolea
 
 const CellView = memo(function CellView(props: CellViewProps) {
   const { cell, index, total, selected, mode, phase, elapsedMs, source, disabled, changeStatus, diffLines } = props;
+  const language = useStore((s) => s.language);
+  const copy = LAB_COPY[language];
   const code = !isMarkdown(cell);
   // CodeMirror captures `extraKeymap` once at mount (see CodeEditor's "extensions
   // are creation-time only" contract), so the binding bodies read through this
@@ -423,7 +430,7 @@ const CellView = memo(function CellView(props: CellViewProps) {
       <div className={cx("lab-rail", railClass)} aria-hidden="true" />
       <div className="lab-gutter">
         {code ? (
-          <span className="lab-prompt" title="Execution count">
+          <span className="lab-prompt" title={copy.executionCountTitle}>
             [{running || queued ? "*" : cell.execution_count ?? " "}]
           </span>
         ) : (
@@ -433,7 +440,7 @@ const CellView = memo(function CellView(props: CellViewProps) {
         {changeStatus && (
           <span
             className={cx("lab-cell-change-tag", changeStatus)}
-            title={changeStatus === "added" ? "AI 新增的 cell" : "AI 修改的 cell"}
+            title={changeStatus === "added" ? copy.aiAddedCellTitle : copy.aiModifiedCellTitle}
           >
             {changeStatus === "added" ? "+AI" : "~AI"}
           </span>
@@ -441,27 +448,27 @@ const CellView = memo(function CellView(props: CellViewProps) {
       </div>
 
       <div className="lab-cell-body">
-        <div className="lab-cell-toolbar" role="toolbar" aria-label="Cell actions">
-          <button className="lab-tool" title="Run (Shift+Enter)" disabled={disabled} onClick={() => props.actions.current.onRun(index)}>
+        <div className="lab-cell-toolbar" role="toolbar" aria-label={copy.cellActionsAria}>
+          <button className="lab-tool" title={copy.runShiftEnterTitle} disabled={disabled} onClick={() => props.actions.current.onRun(index)}>
             <IconRun />
           </button>
-          <button className="lab-tool" title="Move up" disabled={index === 0} onClick={() => props.actions.current.onMoveUp(index)}>
+          <button className="lab-tool" title={copy.moveUpTitle} disabled={index === 0} onClick={() => props.actions.current.onMoveUp(index)}>
             <IconUp />
           </button>
-          <button className="lab-tool" title="Move down" disabled={index === total - 1} onClick={() => props.actions.current.onMoveDown(index)}>
+          <button className="lab-tool" title={copy.moveDownTitle} disabled={index === total - 1} onClick={() => props.actions.current.onMoveDown(index)}>
             <IconDown />
           </button>
-          <button className="lab-tool" title="Duplicate" onClick={() => props.actions.current.onDuplicate(index)}>
+          <button className="lab-tool" title={copy.duplicateTitle} onClick={() => props.actions.current.onDuplicate(index)}>
             <IconCopy />
           </button>
           <button
             className="lab-tool lab-tool-type"
-            title={code ? "Convert to Markdown (m)" : "Convert to Code (y)"}
+            title={code ? copy.convertToMarkdownTitle : copy.convertToCodeTitle}
             onClick={() => props.actions.current.onChangeType(index, code ? "markdown" : "code")}
           >
             {code ? "MD" : "</>"}
           </button>
-          <button className="lab-tool danger" title="Delete (dd)" onClick={() => props.actions.current.onDelete(index)}>
+          <button className="lab-tool danger" title={copy.deleteCellTitle} onClick={() => props.actions.current.onDelete(index)}>
             <IconTrash />
           </button>
         </div>
@@ -470,19 +477,19 @@ const CellView = memo(function CellView(props: CellViewProps) {
           <div
             className="lab-md"
             onDoubleClick={() => props.actions.current.onSelect(index, "edit")}
-            title="Double-click to edit"
+            title={copy.doubleClickToEditTitle}
           >
             {source.trim() ? (
               <MarkdownContent text={source} />
             ) : (
-              <span className="lab-md-empty">Empty markdown cell - double-click to edit</span>
+              <span className="lab-md-empty">{copy.emptyMarkdownCellHint}</span>
             )}
           </div>
         ) : (
           <CodeEditor
             value={source}
             language={code ? props.editorLanguage : "markdown"}
-            placeholder={code ? "Type code here..." : "Type Markdown here..."}
+            placeholder={code ? copy.typeCodeHerePlaceholder : copy.typeMarkdownHerePlaceholder}
             dataEditor={index}
             diffLines={diffLines}
             onChange={(value) => props.actions.current.onChange(index, value)}
@@ -505,15 +512,17 @@ const CellView = memo(function CellView(props: CellViewProps) {
 }, areCellPropsEqual);
 
 function InsertBar({ at, onInsert }: { at: number; onInsert: (type: "code" | "markdown", at: number) => void }) {
+  const language = useStore((s) => s.language);
+  const copy = LAB_COPY[language];
   return (
     <div className="lab-insert">
       <div className="lab-insert-line" />
       <div className="lab-insert-actions">
-        <button className="lab-insert-btn" title="Insert code cell here" onClick={() => onInsert("code", at)}>
-          <IconPlus /> Code
+        <button className="lab-insert-btn" title={copy.insertCodeCellTitle} onClick={() => onInsert("code", at)}>
+          <IconPlus /> {copy.codeLabel}
         </button>
-        <button className="lab-insert-btn" title="Insert markdown cell here" onClick={() => onInsert("markdown", at)}>
-          <IconPlus /> Markdown
+        <button className="lab-insert-btn" title={copy.insertMarkdownCellTitle} onClick={() => onInsert("markdown", at)}>
+          <IconPlus /> {copy.markdownLabel}
         </button>
       </div>
     </div>
@@ -521,6 +530,8 @@ function InsertBar({ at, onInsert }: { at: number; onInsert: (type: "code" | "ma
 }
 
 function RunRow({ run, onOpen }: { run: RunRecord; onOpen: (path: string) => void }) {
+  const language = useStore((s) => s.language);
+  const copy = LAB_COPY[language];
   const when = formatRunTime(run.finishedAt ?? run.startedAt);
   return (
     <div className="lab-run-row">
@@ -532,7 +543,7 @@ function RunRow({ run, onOpen }: { run: RunRecord; onOpen: (path: string) => voi
       {when && <div className="lab-run-meta">{when}</div>}
       {run.executedPath && (
         <button className="lab-btn ghost lab-run-open" onClick={() => onOpen(run.executedPath!)}>
-          Open executed
+          {copy.openExecutedLabel}
         </button>
       )}
     </div>
@@ -556,6 +567,8 @@ function VariableRow({ variable }: { variable: VariableInfo }) {
 }
 
 export default function Lab() {
+  const language = useStore((s) => s.language);
+  const copy = LAB_COPY[language];
   const {
     notebooks,
     kernelspecs,
@@ -877,8 +890,8 @@ export default function Lab() {
     return (
       <div className="lab">
         <div className="lab-empty">
-          The Lab runs Jupyter notebooks through the desktop backend. Launch the app with{" "}
-          <code>npm run tauri dev</code> to use it.
+          {copy.labBackendRequiredPrefix}{" "}
+          <code>npm run tauri dev</code> {copy.labBackendRequiredSuffix}
         </div>
       </div>
     );
@@ -905,12 +918,12 @@ export default function Lab() {
   const kernelState = running ? (busyRunning ? "busy" : "on") : busy ? "starting" : "off";
   const kernelTitle =
     kernelState === "busy"
-      ? "Kernel busy"
+      ? copy.kernelBusy
       : kernelState === "starting"
-        ? "Kernel starting..."
+        ? copy.kernelStarting
         : kernelState === "on"
-          ? "Kernel ready"
-          : "No kernel running";
+          ? copy.kernelReady
+          : copy.kernelNotRunning;
   const toc = showingNotebook ? buildToc(cells) : [];
   const codeTotal = showingNotebook ? cells.filter((c) => c.cell_type === "code").length : 0;
   const codeDone = showingNotebook && runningCell !== null
@@ -1114,7 +1127,7 @@ export default function Lab() {
 
   const parseSweepSpec = (): SweepSpec | null => {
     try {
-      const spec = normalizeSweepSpec(JSON.parse(sweepSpecText), activePath);
+      const spec = normalizeSweepSpec(JSON.parse(sweepSpecText), activePath, copy);
       setSweepParseError(null);
       return spec;
     } catch (e) {
@@ -1410,7 +1423,7 @@ export default function Lab() {
     setMode("command");
   };
 
-  const sideTitle = sideTab === "files" ? "Explorer" : sideTab === "notebook" ? "Notebook" : "Runtime";
+  const sideTitle = sideTab === "files" ? copy.explorerTitle : sideTab === "notebook" ? copy.notebookTab : copy.runtimeTab;
   const labStyle = {
     "--lab-side-w": `${sideWidth}px`,
     "--lab-assistant-w": `${assistantWidth}px`,
@@ -1472,58 +1485,58 @@ export default function Lab() {
       {error && (
         <div className="lab-error" role="alert">
           <span>{error}</span>
-          <button onClick={clearError}>dismiss</button>
+          <button onClick={clearError}>{copy.dismissLabel}</button>
         </div>
       )}
 
       <div className="lab-workspace">
-        <nav className="lab-activitybar" role="tablist" aria-label="Lab workbench views">
+        <nav className="lab-activitybar" role="tablist" aria-label={copy.workbenchViewsAria}>
           <button
             className={cx("lab-activity", sideTab === "files" && !sideCollapsed && "active")}
             role="tab"
             aria-selected={sideTab === "files" && !sideCollapsed}
-            title={sideTab === "files" && !sideCollapsed ? "Hide Files" : "Files"}
+            title={sideTab === "files" && !sideCollapsed ? copy.hideLabel(copy.filesTab) : copy.filesTab}
             onClick={() => handleActivitySelect("files")}
           >
             <IconFiles />
-            <span>Files</span>
+            <span>{copy.filesTab}</span>
           </button>
           <button
             className={cx("lab-activity", sideTab === "notebook" && !sideCollapsed && "active")}
             role="tab"
             aria-selected={sideTab === "notebook" && !sideCollapsed}
-            title={sideTab === "notebook" && !sideCollapsed ? "Hide Notebook" : "Notebook"}
+            title={sideTab === "notebook" && !sideCollapsed ? copy.hideLabel(copy.notebookTab) : copy.notebookTab}
             onClick={() => handleActivitySelect("notebook")}
           >
             <IconNotebook />
-            <span>Notebook</span>
+            <span>{copy.notebookTab}</span>
           </button>
           <button
             className={cx("lab-activity", sideTab === "runtime" && !sideCollapsed && "active")}
             role="tab"
             aria-selected={sideTab === "runtime" && !sideCollapsed}
-            title={sideTab === "runtime" && !sideCollapsed ? "Hide Runtime" : "Runtime"}
+            title={sideTab === "runtime" && !sideCollapsed ? copy.hideLabel(copy.runtimeTab) : copy.runtimeTab}
             onClick={() => handleActivitySelect("runtime")}
           >
             <IconRuntime />
-            <span>Runtime</span>
+            <span>{copy.runtimeTab}</span>
           </button>
           <div className="lab-activity-spacer" />
           <button
             className={cx("lab-activity", terminalStarted && showTerminal && "active")}
-            title={terminalStarted && showTerminal ? "Hide Terminal" : "Show Terminal"}
+            title={terminalStarted && showTerminal ? copy.hideLabel(copy.terminalTab) : copy.showLabel(copy.terminalTab)}
             onClick={toggleTerminal}
           >
             <IconTerminal />
-            <span>Terminal</span>
+            <span>{copy.terminalTab}</span>
           </button>
           <button
             className={cx("lab-activity", assistantOpen && "active")}
-            title={assistantOpen ? "Hide Assistant" : "Show Assistant"}
+            title={assistantOpen ? copy.hideLabel(copy.assistantTab) : copy.showLabel(copy.assistantTab)}
             onClick={() => setAssistantOpen((open) => !open)}
           >
             <IconAssistant />
-            <span>Assistant</span>
+            <span>{copy.assistantTab}</span>
             {assistantAttachments.length > 0 && <em>{assistantAttachments.length}</em>}
           </button>
         </nav>
@@ -1552,9 +1565,9 @@ export default function Lab() {
               <>
                 <section className="lab-panel lab-notebook-controls">
                   <div className="lab-panel-head">
-                    <h3>Notebook</h3>
+                    <h3>{copy.notebookTab}</h3>
                     <button className="lab-btn ghost" onClick={() => void refreshNotebooks()} disabled={busy}>
-                      Refresh
+                      {copy.refreshLabel}
                     </button>
                   </div>
                   <select
@@ -1562,10 +1575,10 @@ export default function Lab() {
                     value={activePath ?? ""}
                     onChange={(event) => void handleOpenNotebook(event.target.value)}
                     disabled={busy || notebooks.length === 0}
-                    title="Open notebook"
+                    title={copy.openNotebookTitle}
                   >
                     <option value="" disabled>
-                      {notebooks.length === 0 ? "No notebooks found" : "Open notebook..."}
+                      {notebooks.length === 0 ? copy.noNotebooksFound : copy.openNotebookOption}
                     </option>
                     {notebooks.map((nb) => (
                       <option key={nb} value={nb}>
@@ -1576,7 +1589,7 @@ export default function Lab() {
                   <div className="lab-new-row">
                     <input
                       className="lab-new"
-                      placeholder="notebooks/new-notebook.ipynb"
+                      placeholder={copy.newNotebookPathPlaceholder}
                       value={newName}
                       onChange={(event) => setNewName(event.target.value)}
                       onKeyDown={(event) => {
@@ -1584,17 +1597,17 @@ export default function Lab() {
                       }}
                     />
                     <button className="lab-btn" onClick={handleCreate} disabled={busy || !newName.trim()}>
-                      New
+                      {copy.newLabel}
                     </button>
                   </div>
                 </section>
 
                 <section className="lab-panel lab-notebook-controls">
                   <div className="lab-panel-head">
-                    <h3>Run</h3>
+                    <h3>{copy.runHeading}</h3>
                     <span className={`lab-kernel ${kernelState}`} title={kernelTitle}>
                       <span className="lab-dot" />
-                      {running ? kernelName ?? selectedKernel ?? "kernel" : "no kernel"}
+                      {running ? kernelName ?? selectedKernel ?? copy.kernelWord : copy.noKernelWordLower}
                     </span>
                   </div>
                   <div className="lab-command-stack">
@@ -1602,26 +1615,26 @@ export default function Lab() {
                       className="lab-btn primary lab-run-all-btn"
                       onClick={() => void handleRunAll()}
                       disabled={!hasCode || busyRunning}
-                      title="Run every code cell top to bottom"
+                      title={copy.runAllTitle}
                     >
                       <IconRunAll />
-                      <span>{runningAll ? `Running ${codeDone}/${codeTotal}...` : "Run all cells"}</span>
+                      <span>{runningAll ? copy.runningProgressEllipsis(codeDone, codeTotal) : copy.runAllCellsLabel}</span>
                     </button>
                     <button
                       className="lab-btn"
                       onClick={() => void handleRestartRunAll()}
                       disabled={!hasCode || busyRunning}
-                      title="Restart the kernel, then run all cells"
+                      title={copy.restartRunAllTitle}
                     >
-                      Restart &amp; Run all
+                      {copy.restartRunAllLabel}
                     </button>
                     {busyRunning ? (
-                      <button className="lab-btn warn" onClick={() => void interruptKernel()} title="Interrupt the kernel">
-                        Interrupt
+                      <button className="lab-btn warn" onClick={() => void interruptKernel()} title={copy.interruptTitle}>
+                        {copy.interruptLabel}
                       </button>
                     ) : (
-                      <button className="lab-btn ghost" onClick={() => void clearAllOutputs()} disabled={!showingNotebook} title="Clear all outputs">
-                        Clear outputs
+                      <button className="lab-btn ghost" onClick={() => void clearAllOutputs()} disabled={!showingNotebook} title={copy.clearAllOutputsTitle}>
+                        {copy.clearOutputsLabel}
                       </button>
                     )}
                   </div>
@@ -1630,7 +1643,7 @@ export default function Lab() {
                 {toc.length > 0 && (
                   <section className="lab-panel">
                     <div className="lab-panel-head">
-                      <h3>Contents</h3>
+                      <h3>{copy.contentsHeading}</h3>
                     </div>
                     <nav className="lab-toc">
                       {toc.map((item, i) => (
@@ -1650,17 +1663,17 @@ export default function Lab() {
 
                 <section className="lab-panel">
                   <div className="lab-panel-head">
-                    <h3>Variables {variables.length > 0 && <span className="lab-count-badge">{variables.length}</span>}</h3>
+                    <h3>{copy.variablesLabel} {variables.length > 0 && <span className="lab-count-badge">{variables.length}</span>}</h3>
                     <button
                       className="lab-btn ghost"
                       disabled={variablesBusy || busyRunning}
                       onClick={() => void inspectVariables()}
                     >
-                      {variablesBusy ? "Inspecting..." : "Refresh"}
+                      {variablesBusy ? copy.inspectingLabel : copy.refreshLabel}
                     </button>
                   </div>
                   {variables.length === 0 ? (
-                    <div className="lab-muted">Run a cell, then refresh to inspect kernel variables.</div>
+                    <div className="lab-muted">{copy.runCellThenRefreshHint}</div>
                   ) : (
                     <div className="lab-var-list">
                       {variables.map((variable) => (
@@ -1672,13 +1685,13 @@ export default function Lab() {
 
                 <section className="lab-panel">
                   <div className="lab-panel-head">
-                    <h3>Runs</h3>
+                    <h3>{copy.runsHeading}</h3>
                     <button className="lab-btn ghost" onClick={() => void refreshRuns()}>
-                      Refresh
+                      {copy.refreshLabel}
                     </button>
                   </div>
                   {recentRuns.length === 0 ? (
-                    <div className="lab-muted">No runs yet.</div>
+                    <div className="lab-muted">{copy.noRunsYet}</div>
                   ) : (
                     <div className="lab-run-list">
                       {recentRuns.map((run) => (
@@ -1690,7 +1703,7 @@ export default function Lab() {
 
                 <details className="lab-panel lab-panel-details">
                   <summary className="lab-panel-head">
-                    <h3>Parameter sweep</h3>
+                    <h3>{copy.parameterSweepHeading}</h3>
                   </summary>
                   <textarea
                     className="lab-sweep-src"
@@ -1702,23 +1715,23 @@ export default function Lab() {
                   {sweepParseError && <div className="lab-inline-error">{sweepParseError}</div>}
                   <div className="lab-row">
                     <button className="lab-btn primary" disabled={sweepBusy} onClick={() => void handleRunSweep()}>
-                      {sweepBusy ? "Working..." : "Run sweep"}
+                      {sweepBusy ? copy.workingLabel : copy.runSweepLabel}
                     </button>
                     <button className="lab-btn" disabled={sweepBusy} onClick={() => void handleExportSweep()}>
-                      Export manifest
+                      {copy.exportManifestLabel}
                     </button>
                   </div>
                   {sweepResult && (
                     <div className="lab-muted">
-                      Sweep {sweepResult.sweepId}: {sweepResult.runs.length}/{sweepResult.total} runs recorded.
+                      {copy.sweepRecorded(sweepResult.sweepId, sweepResult.runs.length, sweepResult.total)}
                     </div>
                   )}
                   {sweepManifest && (
                     <div className="lab-manifest">
                       <div className="lab-panel-subhead">
-                        <span>Manifest</span>
+                        <span>{copy.manifestLabel}</span>
                         <button className="lab-btn ghost" onClick={clearSweepManifest}>
-                          Clear
+                          {copy.clearLabel}
                         </button>
                       </div>
                       <textarea className="lab-sweep-src" readOnly rows={8} value={sweepManifest} />
@@ -1732,9 +1745,9 @@ export default function Lab() {
               <>
                 <section className="lab-panel lab-runtime-panel">
                   <div className="lab-panel-head">
-                    <h3>Interpreter</h3>
+                    <h3>{copy.interpreterHeading}</h3>
                     <button className="lab-btn ghost" onClick={() => void refreshKernelspecs()}>
-                      Refresh
+                      {copy.refreshLabel}
                     </button>
                   </div>
                   <select
@@ -1745,11 +1758,11 @@ export default function Lab() {
                       else selectKernel(event.target.value);
                     }}
                     disabled={busy || busyRunning || kernelspecs.length === 0}
-                    title="Select Python interpreter / notebook kernel"
+                    title={copy.selectInterpreterNotebookTitle}
                   >
                     {kernelspecs.length === 0 ? (
                       <option value="" disabled>
-                        No kernels found
+                        {copy.noKernelsFound}
                       </option>
                     ) : (
                       kernelspecs.map((spec) => (
@@ -1760,37 +1773,37 @@ export default function Lab() {
                     )}
                   </select>
                   <div className="lab-runtime-summary">
-                    <span>Active</span>
-                    <strong>{activeSpec?.displayName ?? selectedKernel ?? "No interpreter selected"}</strong>
+                    <span>{copy.activeLabel}</span>
+                    <strong>{activeSpec?.displayName ?? selectedKernel ?? copy.noInterpreterSelected}</strong>
                     {activeSpec && <em>{activeSpec.language || activeSpec.name}</em>}
                   </div>
                   <div className="lab-muted">
-                    Lab uses installed Jupyter kernelspecs. Python files run against a file-scoped kernel session; notebooks persist this choice into nbformat metadata.
+                    {copy.kernelHintText}
                   </div>
                 </section>
 
                 <section className="lab-panel lab-runtime-panel">
                   <div className="lab-panel-head">
-                    <h3>Notebook Kernel</h3>
+                    <h3>{copy.notebookKernelHeading}</h3>
                   </div>
                   <div className="lab-runtime-kernel-card">
                     <span className={`lab-kernel ${kernelState}`} title={kernelTitle}>
                       <span className="lab-dot" />
-                      {running ? kernelName ?? selectedKernel ?? "kernel" : "no kernel"}
+                      {running ? kernelName ?? selectedKernel ?? copy.kernelWord : copy.noKernelWordLower}
                     </span>
                     <div className="lab-row">
                       {running ? (
                         <>
                           <button className="lab-btn" onClick={() => void restartKernel()} disabled={busy || !showingNotebook}>
-                            Restart
+                            {copy.restartLabel}
                           </button>
                           <button className="lab-btn" onClick={() => void shutdownKernel()} disabled={busy || !showingNotebook}>
-                            Stop
+                            {copy.stopLabel}
                           </button>
                         </>
                       ) : (
                         <button className="lab-btn primary" onClick={() => void startKernel()} disabled={busy || !showingNotebook}>
-                          Start kernel
+                          {copy.startKernelLabel}
                         </button>
                       )}
                     </div>
@@ -1799,11 +1812,11 @@ export default function Lab() {
 
                 <section className="lab-panel lab-runtime-panel">
                   <div className="lab-panel-head">
-                    <h3>Kernels</h3>
+                    <h3>{copy.kernelsHeading}</h3>
                   </div>
                   <div className="lab-kernelspec-list">
                     {kernelspecs.length === 0 ? (
-                      <div className="lab-muted">No kernels discovered.</div>
+                      <div className="lab-muted">{copy.noKernelsDiscovered}</div>
                     ) : (
                       kernelspecs.map((spec) => (
                         <button
@@ -1827,9 +1840,9 @@ export default function Lab() {
           <div
             className={cx("lab-side-resize-handle", resizingPanel === "side" && "dragging")}
             role="separator"
-            aria-label="Resize Lab side panel"
+            aria-label={copy.resizeSidePanelAria}
             aria-orientation="vertical"
-            title="Resize side panel"
+            title={copy.resizeSidePanelTitle}
             onPointerDown={handleSideResizeStart}
             onPointerMove={handleSideResizeMove}
             onPointerUp={handleSideResizeEnd}
@@ -1839,9 +1852,9 @@ export default function Lab() {
         )}
 
         <main className="lab-main">
-          <div className="lab-editor-tabs" role="tablist" aria-label="Open editors">
+          <div className="lab-editor-tabs" role="tablist" aria-label={copy.openEditorsAria}>
             {allTabs.length === 0 ? (
-              <div className="lab-editor-tab-empty">No editors open</div>
+              <div className="lab-editor-tab-empty">{copy.noEditorsOpen}</div>
             ) : (
               allTabs.map((tab) => {
                 const isPreview = previewTab?.id === tab.id;
@@ -1854,7 +1867,7 @@ export default function Lab() {
                   className={cx("lab-editor-tab", activeEditorTabId === tab.id && "active", isPreview && "preview", isDirty && "dirty")}
                   role="tab"
                   aria-selected={activeEditorTabId === tab.id}
-                  title={isPreview ? `${tab.path} (preview — double-click to keep open)` : `${tab.path}${isDirty ? " (unsaved)" : ""}`}
+                  title={isPreview ? copy.previewTabTitle(tab.path) : copy.pathTabTitle(tab.path, isDirty)}
                   onClick={() => void activateEditorTab(tab)}
                   onDoubleClick={() => {
                     if (isPreview) ensureEditorTab(tab.kind, tab.path);
@@ -1865,13 +1878,13 @@ export default function Lab() {
                   }}
                 >
                   <WorkspaceFileIcon path={tab.path} directory={false} className="lab-editor-tab-icon" />
-                  <span className="lab-editor-tab-label">{editorTabLabel(tab)}</span>
+                  <span className="lab-editor-tab-label">{editorTabLabel(tab, copy)}</span>
                   <span className="lab-editor-tab-dir">{dirname(tab.path)}</span>
                   <span
                     role="button"
                     tabIndex={0}
                     className="lab-editor-tab-close"
-                    title={isDirty ? "Unsaved changes — click to close" : "Close editor"}
+                    title={isDirty ? copy.unsavedCloseTitle : copy.closeEditorTitle}
                     onClick={(event) => {
                       event.stopPropagation();
                       closeEditorTab(tab.id);
@@ -1908,7 +1921,7 @@ export default function Lab() {
                   setTabMenu(null);
                 }}
               >
-                Close
+                {copy.closeLabel}
               </button>
               <button
                 type="button"
@@ -1919,7 +1932,7 @@ export default function Lab() {
                   setTabMenu(null);
                 }}
               >
-                Close others
+                {copy.closeOthersLabel}
               </button>
               <button
                 type="button"
@@ -1930,7 +1943,7 @@ export default function Lab() {
                   setTabMenu(null);
                 }}
               >
-                Close all
+                {copy.closeAllLabel}
               </button>
             </div>
           )}
@@ -1949,23 +1962,23 @@ export default function Lab() {
             <div className="lab-empty-state">
               <div className="lab-empty-state-mark" aria-hidden="true">&lt;/&gt;</div>
               <span className="lab-empty-state-kicker">SOMNIQ CODE</span>
-              <h2>Start from a research file</h2>
-              <p>Open a notebook or code file, then let SomniQ help you inspect, run, and improve it.</p>
+              <h2>{copy.startFromResearchFile}</h2>
+              <p>{copy.openNotebookOrCodeHint}</p>
               <div className="lab-empty-state-actions">
                 <button type="button" className="lab-empty-state-action primary" onClick={() => handleActivitySelect("notebook")}>
                   <IconNotebook />
-                  <span>Open notebook</span>
+                  <span>{copy.openNotebookLabel}</span>
                 </button>
                 <button type="button" className="lab-empty-state-action" onClick={() => handleActivitySelect("files")}>
                   <IconFiles />
-                  <span>Browse files</span>
+                  <span>{copy.browseFilesLabel}</span>
                 </button>
                 <button type="button" className="lab-empty-state-action" onClick={() => setAssistantOpen(true)}>
                   <IconAssistant />
-                  <span>Ask SomniQ</span>
+                  <span>{copy.askSomniqLabel}</span>
                 </button>
               </div>
-              <span className="lab-empty-state-hint">Python · Jupyter Notebook · project files</span>
+              <span className="lab-empty-state-hint">{copy.pythonJupyterHint}</span>
             </div>
           </div>
         ) : (
@@ -1982,21 +1995,21 @@ export default function Lab() {
             {hasReview && review && (
               <div className="lab-nb-review-bar" role="status" aria-live="polite">
                 <div className="lab-nb-review-info">
-                  <strong>检测到 AI 修改</strong>
+                  <strong>{copy.aiChangesDetected}</strong>
                   <div className="lab-nb-review-counts">
-                    {review.added > 0 && <em className="add">+{review.added} 新增</em>}
-                    {review.modified > 0 && <em className="mod">~{review.modified} 修改</em>}
-                    {review.removed.length > 0 && <em className="del">-{review.removed.length} 删除</em>}
+                    {review.added > 0 && <em className="add">{copy.addedCount(review.added)}</em>}
+                    {review.modified > 0 && <em className="mod">{copy.modifiedCount(review.modified)}</em>}
+                    {review.removed.length > 0 && <em className="del">{copy.removedCount(review.removed.length)}</em>}
                   </div>
                   {review.removed.length > 0 && (
                     <div className="lab-nb-review-removed">
                       {review.removed.slice(0, 3).map((cell, i) => (
                         <code key={i} title={cell.source}>
-                          - {firstLine(cell.source) || `(空 ${cell.cellType} cell)`}
+                          - {firstLine(cell.source) || copy.emptyCellPlaceholder(cell.cellType)}
                         </code>
                       ))}
                       {review.removed.length > 3 && (
-                        <em>还有 {review.removed.length - 3} 个被删除的 cell</em>
+                        <em>{copy.moreRemovedCells(review.removed.length - 3)}</em>
                       )}
                     </div>
                   )}
@@ -2007,27 +2020,27 @@ export default function Lab() {
                     type="button"
                     onClick={acceptNotebookReview}
                     disabled={busy}
-                    title="保留 AI 修改"
+                    title={copy.keepAiChangesTitle}
                   >
-                    保留
+                    {copy.keepAiChanges}
                   </button>
                   <button
                     className="lab-btn"
                     type="button"
                     onClick={() => void revertNotebookReview()}
                     disabled={busy}
-                    title="恢复修改前的 notebook"
+                    title={copy.restoreNotebookTitle}
                   >
-                    恢复
+                    {copy.restoreLabel}
                   </button>
                 </div>
               </div>
             )}
             {cellCount === 0 ? (
               <div className="lab-empty-nb">
-                <p>This notebook is empty.</p>
+                <p>{copy.thisNotebookEmpty}</p>
                 <button className="lab-btn primary" onClick={() => void insertAndSelect("code", 0, "edit")}>
-                  <IconPlus /> Add a code cell
+                  <IconPlus /> {copy.addCodeCellLabel}
                 </button>
               </div>
             ) : (
@@ -2067,8 +2080,8 @@ export default function Lab() {
                 className="lab-terminal-resize-handle"
                 role="separator"
                 aria-orientation="horizontal"
-                aria-label="Resize terminal"
-                title="Resize terminal"
+                aria-label={copy.resizeTerminalAria}
+                title={copy.resizeTerminalAria}
                 onPointerDown={handleTerminalResizeStart}
                 onPointerMove={handleTerminalResizeMove}
                 onPointerUp={handleTerminalResizeEnd}
@@ -2077,13 +2090,13 @@ export default function Lab() {
               <div className="lab-terminal-header">
                 <span className="lab-terminal-title">
                   <IconTerminal />
-                  Terminal
+                  {copy.terminalTab}
                 </span>
-                <button type="button" className="lab-terminal-hide" title="Hide terminal" onClick={() => setShowTerminal(false)}>
+                <button type="button" className="lab-terminal-hide" title={copy.hideTerminalDockTitle} onClick={() => setShowTerminal(false)}>
                   <IconClose />
                 </button>
               </div>
-              <Suspense fallback={<div className="lab-terminal-loading">Starting terminal…</div>}>
+              <Suspense fallback={<div className="lab-terminal-loading">{copy.startingTerminalFallback}</div>}>
                 <TerminalPane key={currentProjectId ?? "no-project"} cwd={currentProjectPath} refitSignal={terminalRefit} />
               </Suspense>
             </div>
@@ -2095,9 +2108,9 @@ export default function Lab() {
             <div
               className={cx("lab-assistant-resize-handle", resizingPanel === "assistant" && "dragging")}
               role="separator"
-              aria-label="Resize Lab Assistant"
+              aria-label={copy.resizeAssistantAria}
               aria-orientation="vertical"
-              title="Resize Lab Assistant"
+              title={copy.resizeAssistantAria}
               onPointerDown={handleAssistantResizeStart}
               onPointerMove={handleAssistantResizeMove}
               onPointerUp={handleAssistantResizeEnd}
@@ -2120,20 +2133,20 @@ export default function Lab() {
         <div className="lab-statusbar">
           <span className={`lab-status-item lab-status-kernel ${kernelState}`}>
             <span className="lab-dot" />
-            {running ? kernelName ?? selectedKernel ?? "kernel" : "No kernel"}
+            {running ? kernelName ?? selectedKernel ?? copy.kernelWord : copy.noKernelWordCapital}
           </span>
           {activeSpec && <span className="lab-status-item">{activeSpec.language || activeSpec.name}</span>}
           {activeItemKind === "file" && (
-            <span className="lab-status-item">{activeSpec?.displayName ?? selectedKernel ?? "No interpreter"}</span>
+            <span className="lab-status-item">{activeSpec?.displayName ?? selectedKernel ?? copy.noInterpreter}</span>
           )}
           {showingNotebook && (
             <span className="lab-status-item">
-              {selected != null ? `Cell ${selected + 1} of ${cellCount}` : `${cellCount} cells`}
+              {selected != null ? copy.cellOfTotal(selected + 1, cellCount) : copy.cellsCount(cellCount)}
             </span>
           )}
           {runningAll && (
             <span className="lab-status-item lab-status-progress">
-              Running {codeDone}/{codeTotal}
+              {copy.runningProgressStatus(codeDone, codeTotal)}
             </span>
           )}
           <span className="lab-spacer" />

@@ -36,6 +36,8 @@ import {
   typesetListDocuments,
 } from "../api/tauri";
 import { isTypesetPreviewMode } from "../api/labPreview";
+import { renderPdfPageToCanvas } from "../pdf/canvas";
+import { openPdfDocument } from "../pdf/runtime";
 import CodeEditor from "../lab/CodeEditor";
 import { handoffEnvironmentInstall } from "../environmentInstall";
 import { TypesetVisualEditor } from "./TypesetVisualEditor";
@@ -48,16 +50,16 @@ import {
   type TypesetLibraryScope,
   type TypesetTemplate,
 } from "./TypesetLibraryCopy";
+import { TYPESET_EDITOR_COPY } from "./i18n";
 import type { VisualPdfCursor } from "./visualModel";
 import type { SharedEditorHandle } from "../editor/editorTypes";
-import { useStore } from "../store";
+import { useStore, type Language } from "../store";
 import { suggestedCitationKey, useLiteratureStore } from "../literature/literatureStore";
 import type { LiteraturePaper } from "../literature/literatureTypes";
 import { SvgIcon } from "../SvgIcon";
 import "./Typeset.css";
 
-const pdfWorkerSrc = new URL("pdfjs-dist/build/pdf.worker.min.mjs", import.meta.url).toString();
-const DEFAULT_SOURCE_PATH = "papers/main.tex";
+const DEFAULT_SOURCE_PATH = ".somniq/papers/main.tex";
 const DEFAULT_LATEX_DOCUMENT = `\\documentclass{article}
 \\usepackage[margin=1in]{geometry}
 \\usepackage{hyperref}
@@ -125,8 +127,6 @@ const PDF_ZOOM_MIN = 0.25;
 const PDF_ZOOM_MAX = 4;
 const PDF_ZOOM_PRESETS = [0.5, 0.75, 1, 1.25, 1.5, 2, 4] as const;
 const PDF_WHEEL_ZOOM_SETTLE_MS = 80;
-/** About 32 MiB of RGBA backing storage for one mounted PDF page. */
-const PDF_CANVAS_MAX_PIXELS = 8_000_000;
 const TYPESET_LIBRARY_PREFERENCES_STORAGE_PREFIX = "somniq-typeset-library:";
 
 type VisualBlock =
@@ -466,11 +466,12 @@ function preferredSource(paths: string[]): string | null {
   const sorted = [...paths].sort((left, right) => {
     const score = (path: string) => {
       const normalized = path.toLowerCase().replace(/\\/g, "/");
-      if (normalized === "papers/main.tex") return 0;
-      if (normalized === "main.tex") return 1;
-      if (normalized.endsWith("/main.tex")) return 2;
-      if (normalized.endsWith(".tex")) return 3;
-      return 4;
+      if (normalized === ".somniq/papers/main.tex") return 0;
+      if (normalized === "papers/main.tex") return 1;
+      if (normalized === "main.tex") return 2;
+      if (normalized.endsWith("/main.tex")) return 3;
+      if (normalized.endsWith(".tex")) return 4;
+      return 5;
     };
     return score(left) - score(right) || left.localeCompare(right);
   });
@@ -486,14 +487,15 @@ function sortedSources(paths: string[]): string[] {
   });
 }
 
-function compileStatusText(status: CompileStatus, result: CompileResult | null): string {
-  if (status === "running") return "Compiling";
+function compileStatusText(status: CompileStatus, result: CompileResult | null, language: Language): string {
+  const copy = TYPESET_EDITOR_COPY[language].compileStatus;
+  if (status === "running") return copy.compiling;
   if (status === "success") {
-    if (!result) return "Compiled";
-    return `${result.engine} in ${result.durationMs} ms`;
+    if (!result) return copy.compiled;
+    return copy.compiledDuration(result.engine, result.durationMs);
   }
-  if (status === "partial") return "Compiled with errors";
-  if (status === "error") return "Compile failed";
+  if (status === "partial") return copy.compiledWithErrors;
+  if (status === "error") return copy.compileFailed;
   return "";
 }
 
@@ -2037,6 +2039,8 @@ function TypesetExplorer({
   onOpenPath,
   onFileMutation,
 }: ExplorerProps) {
+  const language = useStore((state) => state.language);
+  const copy = TYPESET_EDITOR_COPY[language].explorer;
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set(["", "papers"]));
   const [children, setChildren] = useState<Record<string, FileTreeEntry[]>>({});
   const [loading, setLoading] = useState<Set<string>>(() => new Set());
@@ -2047,7 +2051,7 @@ function TypesetExplorer({
   const [renameValue, setRenameValue] = useState("");
   const [deleteTarget, setDeleteTarget] = useState<FileTreeEntry | null>(null);
   const renameInputRef = useRef<HTMLInputElement | null>(null);
-  const rootName = basename(rootPath) || basename(projectPath) || "Project";
+  const rootName = basename(rootPath) || basename(projectPath) || copy.rootFallback;
 
   const loadDir = useCallback(async (path: string) => {
     setLoading((items) => new Set(items).add(path));
@@ -2125,7 +2129,7 @@ function TypesetExplorer({
     if (!renameTarget) return;
     const nextName = renameValue.trim();
     if (!nextName || /[\\/]/.test(nextName)) {
-      setError("Enter a file or folder name without path separators.");
+      setError(copy.renameNameError);
       return;
     }
     if (nextName === renameTarget.name) {
@@ -2208,7 +2212,7 @@ function TypesetExplorer({
     try {
       await navigator.clipboard?.writeText(path);
     } catch (copyError) {
-      setError(`Could not copy path: ${String(copyError)}`);
+      setError(copy.copyPathError(String(copyError)));
     } finally {
       setRowMenu(null);
     }
@@ -2227,7 +2231,7 @@ function TypesetExplorer({
           type="button"
           className={`typeset-tree-row entity-name${entry.isDir ? " folder" : " file"}${sourceActive ? " active selected" : ""}${previewActive ? " preview-active" : ""}`}
           style={{ paddingLeft: `${depth * 14 + 10}px` }}
-          title={openable ? entry.path : `${entry.path}\nRight-click for file actions.`}
+          title={openable ? entry.path : copy.rightClickHint(entry.path)}
           onClick={() => {
             if (!openable) return;
             if (entry.isDir) toggleDir(entry.path);
@@ -2246,12 +2250,12 @@ function TypesetExplorer({
           <div>
             {loading.has(entry.path) && (
               <div className="typeset-tree-muted" style={{ paddingLeft: `${(depth + 1) * 14 + 34}px` }}>
-                Loading
+                {copy.loading}
               </div>
             )}
             {!loading.has(entry.path) && nested.length === 0 && children[entry.path] && (
               <div className="typeset-tree-muted" style={{ paddingLeft: `${(depth + 1) * 14 + 34}px` }}>
-                Empty
+                {copy.empty}
               </div>
             )}
             {nested.map((child) => renderEntry(child, depth + 1))}
@@ -2264,11 +2268,11 @@ function TypesetExplorer({
   const rootChildren = children[rootPath] ?? [];
 
   return (
-    <aside className="typeset-sidebar file-tree ide-react-file-tree-panel editor-sidebar" aria-label="Typesetting files">
+    <aside className="typeset-sidebar file-tree ide-react-file-tree-panel editor-sidebar" aria-label={copy.fileTreeLabel}>
       <div className="file-tree-toolbar typeset-sidebar-head">
         <div className="file-tree-expand-collapse-button">
           <ToolIcon name="chevron" className="file-tree-expand-icon" />
-          <h4>File tree</h4>
+          <h4>{copy.fileTreeHeading}</h4>
         </div>
         <span className="typeset-sidebar-subpath" title={rootPath || rootName}>{rootPath || rootName}</span>
       </div>
@@ -2281,7 +2285,7 @@ function TypesetExplorer({
         </button>
         {expanded.has(rootPath) && (
           <div>
-            {loading.has(rootPath) && <div className="typeset-tree-muted root">Loading</div>}
+            {loading.has(rootPath) && <div className="typeset-tree-muted root">{copy.loading}</div>}
             {rootChildren.map((entry) => renderEntry(entry, 0))}
           </div>
         )}
@@ -2291,14 +2295,14 @@ function TypesetExplorer({
           className="typeset-tree-menu"
           style={{ left: rowMenu.x, top: rowMenu.y }}
           role="menu"
-          aria-label="File actions"
+          aria-label={copy.fileActionsLabel}
           onPointerDown={(event) => event.stopPropagation()}
         >
           <button type="button" role="menuitem" disabled={operationBusy} onClick={() => void copyPath(rowMenu.entry.path)}>
-            Copy path
+            {copy.copyPath}
           </button>
           <button type="button" role="menuitem" disabled={operationBusy} onClick={() => void duplicateEntry(rowMenu.entry)}>
-            Duplicate
+            {copy.duplicate}
           </button>
           <button
             type="button"
@@ -2309,10 +2313,10 @@ function TypesetExplorer({
               setRowMenu(null);
             }}
           >
-            Show in folder
+            {copy.showInFolder}
           </button>
           <button type="button" role="menuitem" disabled={operationBusy} onClick={() => openRenameDialog(rowMenu.entry)}>
-            Rename
+            {copy.rename}
           </button>
           <button
             type="button"
@@ -2324,7 +2328,7 @@ function TypesetExplorer({
               setRowMenu(null);
             }}
           >
-            Delete
+            {copy.delete}
           </button>
         </div>,
         document.body,
@@ -2341,9 +2345,9 @@ function TypesetExplorer({
               void renameEntry();
             }}
           >
-            <h3 id="typeset-rename-title">Rename {renameTarget.isDir ? "folder" : "file"}</h3>
+            <h3 id="typeset-rename-title">{copy.renameTitle(renameTarget.isDir)}</h3>
             <label>
-              Name
+              {copy.nameLabel}
               <input
                 ref={renameInputRef}
                 value={renameValue}
@@ -2352,8 +2356,8 @@ function TypesetExplorer({
               />
             </label>
             <div className="typeset-file-dialog-actions">
-              <button type="button" disabled={operationBusy} onClick={() => setRenameTarget(null)}>Cancel</button>
-              <button type="submit" className="primary" disabled={operationBusy || !renameValue.trim()}>Rename</button>
+              <button type="button" disabled={operationBusy} onClick={() => setRenameTarget(null)}>{copy.cancel}</button>
+              <button type="submit" className="primary" disabled={operationBusy || !renameValue.trim()}>{copy.rename}</button>
             </div>
           </form>
         </div>,
@@ -2362,11 +2366,11 @@ function TypesetExplorer({
       {deleteTarget && typeof document !== "undefined" && createPortal(
         <div className="typeset-file-dialog-backdrop" role="presentation">
           <div className="typeset-file-dialog" role="alertdialog" aria-modal="true" aria-labelledby="typeset-delete-title">
-            <h3 id="typeset-delete-title">Delete {deleteTarget.isDir ? "folder" : "file"}?</h3>
-            <p><strong>{deleteTarget.name}</strong> will be permanently deleted.</p>
+            <h3 id="typeset-delete-title">{copy.deleteTitle(deleteTarget.isDir)}</h3>
+            <p>{copy.deleteConfirmBody(deleteTarget.name)}</p>
             <div className="typeset-file-dialog-actions">
-              <button type="button" disabled={operationBusy} onClick={() => setDeleteTarget(null)}>Cancel</button>
-              <button type="button" className="danger" disabled={operationBusy} onClick={() => void deleteEntry()}>Delete</button>
+              <button type="button" disabled={operationBusy} onClick={() => setDeleteTarget(null)}>{copy.cancel}</button>
+              <button type="button" className="danger" disabled={operationBusy} onClick={() => void deleteEntry()}>{copy.delete}</button>
             </div>
           </div>
         </div>,
@@ -2496,6 +2500,8 @@ const PdfPage = memo(function PdfPage({
   pageRef,
   highlight,
 }: PdfPageProps) {
+  const language = useStore((state) => state.language);
+  const copy = TYPESET_EDITOR_COPY[language].pdfPage;
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const renderTask = useRef<RenderTask | null>(null);
   const renderedDocumentRef = useRef<{ pdf: PDFDocumentProxy; page: number } | null>(null);
@@ -2535,30 +2541,15 @@ const PdfPage = memo(function PdfPage({
       .getPage(page)
       .then((pdfPage: PDFPageProxy) => {
         if (disposed || !canvasRef.current) return;
-        const viewport = pdfPage.getViewport({ scale: zoom });
-        setPageSize({ width: viewport.width, height: viewport.height });
-        onPageSize?.(viewport.width / zoom, viewport.height / zoom);
         const canvas = canvasRef.current;
-        const context = canvas.getContext("2d");
-        if (!context) throw new Error("Canvas rendering is unavailable.");
-        // Render the backing store at the device pixel ratio so the PDF stays
-        // crisp and identical across a plain browser and the Tauri WebView2
-        // window (which can run at a different Windows display scale / DPR).
-        const requestedOutputScale = window.devicePixelRatio || 1;
-        const pagePixels = Math.max(1, viewport.width * viewport.height);
-        const pixelBudgetScale = Math.sqrt(PDF_CANVAS_MAX_PIXELS / pagePixels);
-        const outputScale = Math.min(requestedOutputScale, Math.max(0.01, pixelBudgetScale));
-        canvas.width = Math.ceil(viewport.width * outputScale);
-        canvas.height = Math.ceil(viewport.height * outputScale);
-        canvas.style.width = `${viewport.width}px`;
-        canvas.style.height = `${viewport.height}px`;
-        const transform = outputScale !== 1 ? [outputScale, 0, 0, outputScale, 0, 0] : undefined;
-        const task = pdfPage.render({ canvas, canvasContext: context, viewport, transform });
-        renderTask.current = task;
-        return Promise.all([task.promise, pdfPage.getTextContent()]).then(([, textContent]) => {
+        const render = renderPdfPageToCanvas(pdfPage, canvas, zoom);
+        setPageSize({ width: render.cssWidth, height: render.cssHeight });
+        onPageSize?.(render.cssWidth / zoom, render.cssHeight / zoom);
+        renderTask.current = render.task;
+        return Promise.all([render.task.promise, pdfPage.getTextContent()]).then(([, textContent]) => {
           if (disposed) return;
-          const runs = textRunsFromPdfContent(textContent, viewport, zoom);
-          setTextRuns(runs.map((run) => ({ ...run, ...samplePdfTextColors(canvas, run, outputScale) })));
+          const runs = textRunsFromPdfContent(textContent, render.viewport, zoom);
+          setTextRuns(runs.map((run) => ({ ...run, ...samplePdfTextColors(canvas, run, render.outputScale) })));
         });
       })
       .catch((renderError) => {
@@ -2637,12 +2628,12 @@ const PdfPage = memo(function PdfPage({
         height: `${estimatedSize.height * zoom}px`,
       } : undefined}
     >
-      <canvas ref={canvasRef} aria-label={`PDF page ${page}`} />
+      <canvas ref={canvasRef} aria-label={copy.pdfPageLabel(page)} />
       {pageSize && (
         <div
           className="typeset-pdf-text-layer"
           style={{ width: `${pageSize.width}px`, height: `${pageSize.height}px` }}
-          aria-label={`PDF text layer page ${page}`}
+          aria-label={copy.pdfTextLayerLabel(page)}
         >
           {textRuns.map((run, index) => {
             const context = textRuns.slice(Math.max(0, index - 2), index + 3).map((item) => item.text).join(" ");
@@ -2692,7 +2683,7 @@ const PdfPage = memo(function PdfPage({
                   className="typeset-slide-object-editor"
                   style={style}
                   value={editingText}
-                  aria-label={`Edit slide text: ${displayed.text}`}
+                  aria-label={copy.editSlideTextLabel(displayed.text)}
                   autoFocus
                   onChange={(event) => setEditingText(event.currentTarget.value)}
                   onClick={(event) => event.stopPropagation()}
@@ -2729,8 +2720,8 @@ const PdfPage = memo(function PdfPage({
                 type="button"
                 className={`typeset-pdf-text-run${editable ? " direct-object" : ""}${selected ? " selected" : ""}${draft ? " moved" : ""}`}
                 style={style}
-                title={editable ? "Drag to move · double-click to edit" : "Jump to source"}
-                aria-label={editable ? `Slide text object: ${displayed.text}` : `Jump to source text: ${displayed.text}`}
+                title={editable ? copy.dragMoveTitle : copy.jumpToSourceTitle}
+                aria-label={editable ? copy.slideTextObjectLabel(displayed.text) : copy.jumpToSourceTextLabel(displayed.text)}
                 aria-pressed={editable ? selected : undefined}
                 onPointerDown={(event) => {
                   if (!editable || event.button !== 0 || dragRef.current) return;
@@ -2884,6 +2875,8 @@ function TypesetCompiledVisual({
   focused,
   onToggleFocus,
 }: CompiledVisualProps) {
+  const language = useStore((state) => state.language);
+  const copy = TYPESET_EDITOR_COPY[language].compiledVisual;
   const [pdf, setPdf] = useState<PDFDocumentProxy | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -2912,11 +2905,8 @@ function TypesetCompiledVisual({
     setError(null);
     if (!path) return () => undefined;
     setLoading(true);
-    void Promise.all([fileReadBytes(path), import("pdfjs-dist")])
-      .then(([bytes, pdfjs]) => {
-        pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerSrc;
-        return pdfjs.getDocument({ data: new Uint8Array(bytes) }).promise;
-      })
+    void fileReadBytes(path)
+      .then((bytes) => openPdfDocument(bytes))
       .then((document) => {
         loadedPdf = document;
         if (disposed) {
@@ -3055,22 +3045,22 @@ function TypesetCompiledVisual({
   };
 
   return (
-    <section className="typeset-compiled-visual typeset-visual-pane" aria-label="Compiled slide visual editor">
+    <section className="typeset-compiled-visual typeset-visual-pane" aria-label={copy.editorLabel}>
       <div className="typeset-slide-canvas-toolbar">
         <div className="typeset-slide-canvas-identity">
-          <span>Slide {safePage}{pdf ? ` / ${pdf.numPages}` : ""}</span>
-          <strong>{slide?.title || "Compiled slide"}</strong>
-          <span className="typeset-slide-direct-mode">Direct edit</span>
+          <span>{copy.slideOf(safePage, pdf ? pdf.numPages : null)}</span>
+          <strong>{slide?.title || copy.compiledSlideFallback}</strong>
+          <span className="typeset-slide-direct-mode">{copy.directEdit}</span>
           <em className={dirty ? "stale" : "current"} role="status">
-            {dirty ? "Draft · save to update preview" : "Compiled preview"}
+            {dirty ? copy.draftStatus : copy.compiledPreview}
           </em>
         </div>
-        <div className="typeset-slide-canvas-actions" aria-label="Slide canvas controls">
+        <div className="typeset-slide-canvas-actions" aria-label={copy.canvasControlsLabel}>
           <button
             type="button"
             className="zoom-step"
-            title="Zoom out"
-            aria-label="Zoom out slide"
+            title={copy.zoomOut}
+            aria-label={copy.zoomOutSlide}
             onClick={() => changeZoom(-0.1)}
           >
             <ToolIcon name="minus" />
@@ -3078,21 +3068,21 @@ function TypesetCompiledVisual({
           <button
             type="button"
             className={fitMode ? "active fit" : "fit"}
-            title="Fit slide to canvas"
-            aria-label="Fit slide to canvas"
+            title={copy.fitToCanvas}
+            aria-label={copy.fitToCanvas}
             aria-pressed={fitMode}
             onClick={() => {
               setFitMode(true);
               void fitSlide();
             }}
           >
-            Fit <span>{Math.round(zoom * 100)}%</span>
+            {copy.fit} <span>{Math.round(zoom * 100)}%</span>
           </button>
           <button
             type="button"
             className="zoom-step"
-            title="Zoom in"
-            aria-label="Zoom in slide"
+            title={copy.zoomIn}
+            aria-label={copy.zoomInSlide}
             onClick={() => changeZoom(0.1)}
           >
             <ToolIcon name="plus" />
@@ -3101,59 +3091,59 @@ function TypesetCompiledVisual({
           <button
             type="button"
             className="add-text"
-            title="Add a draggable text object"
-            aria-label="Add text object"
+            title={copy.addTextObjectTitle}
+            aria-label={copy.addTextObjectLabel}
             disabled={compiling}
             onClick={addTextObject}
           >
             <ToolIcon name="plus" />
-            Add text
+            {copy.addText}
           </button>
           {focused && (
             <button
               type="button"
               className={deckOpen ? "active deck" : "deck"}
-              title={deckOpen ? "Hide slide list" : "Show slide list"}
-              aria-label={deckOpen ? "Hide slide list" : "Show slide list"}
+              title={deckOpen ? copy.hideSlideList : copy.showSlideList}
+              aria-label={deckOpen ? copy.hideSlideList : copy.showSlideList}
               aria-pressed={deckOpen}
               onClick={() => setDeckOpen((open) => !open)}
             >
               <ToolIcon name="list" />
-              Slides
+              {copy.slides}
             </button>
           )}
           <button
             type="button"
             className={focused ? "active focus" : "focus"}
-            title={focused ? "Restore project and PDF panels" : "Hide surrounding panels and focus the slide"}
-            aria-label={focused ? "Exit slide focus" : "Focus slide canvas"}
+            title={focused ? copy.restorePanelsTitle : copy.focusSlideTitle}
+            aria-label={focused ? copy.exitSlideFocus : copy.focusSlideCanvas}
             aria-pressed={focused}
             onClick={onToggleFocus}
           >
             <ToolIcon name="visual" />
-            {focused ? "Exit focus" : "Focus"}
+            {focused ? copy.exitFocus : copy.focus}
           </button>
           <button
             type="button"
             className={sourceOpen ? "active source" : "source"}
-            aria-label={sourceOpen ? "Close slide source" : "Edit slide source"}
+            aria-label={sourceOpen ? copy.closeSlideSource : copy.editSlideSourceLabel}
             aria-pressed={sourceOpen}
             onClick={() => setSourceOpen((open) => !open)}
           >
             <ToolIcon name="code" />
-            {sourceOpen ? "Close source" : "Edit source"}
+            {sourceOpen ? copy.closeSource : copy.editSource}
           </button>
         </div>
       </div>
       <div className={`typeset-slide-workspace${focused && deckOpen ? " deck-open" : ""}${sourceOpen ? " source-open" : ""}`}>
         {focused && deckOpen && (
-          <nav className="typeset-slide-deck" aria-label="幻灯片大纲">
+          <nav className="typeset-slide-deck" aria-label={copy.slideDeckLabel}>
             <header>
               <div>
-                <span>Presentation</span>
-                <strong>{slides.length} slides</strong>
+                <span>{copy.presentation}</span>
+                <strong>{copy.slidesCount(slides.length)}</strong>
               </div>
-              <span className={dirty ? "stale" : "current"}>{dirty ? "Draft" : "Synced"}</span>
+              <span className={dirty ? "stale" : "current"}>{dirty ? copy.draft : copy.synced}</span>
             </header>
             <div className="typeset-slide-deck-list">
               {slides.map((item, index) => {
@@ -3164,11 +3154,11 @@ function TypesetCompiledVisual({
                     key={`${item.line}:${item.title}`}
                     className={active ? "active" : ""}
                     aria-current={active ? "page" : undefined}
-                    aria-label={`Open slide ${index + 1}: ${item.title}`}
+                    aria-label={copy.openSlideLabel(index + 1, item.title)}
                     onClick={() => onNavigateToLine(item.line)}
                   >
                     <span>{String(index + 1).padStart(2, "0")}</span>
-                    <strong>{item.title || `Slide ${index + 1}`}</strong>
+                    <strong>{item.title || copy.slideFallback(index + 1)}</strong>
                     {active && <i aria-hidden="true" />}
                   </button>
                 );
@@ -3177,15 +3167,15 @@ function TypesetCompiledVisual({
           </nav>
         )}
         <div className="typeset-compiled-visual-scroll" ref={scrollRef}>
-          {!path && <div className="typeset-empty">Compile the slide deck to open the Visual canvas.</div>}
-          {path && loading && <div className="typeset-empty">Loading compiled slide...</div>}
+          {!path && <div className="typeset-empty">{copy.compileToOpenCanvas}</div>}
+          {path && loading && <div className="typeset-empty">{copy.loadingCompiledSlide}</div>}
           {path && error && <PdfFallbackPage error={error} outputPath={path} sourcePath={null} />}
           {pdf && !error && (
             <div
               className="typeset-slide-stage"
               role="group"
               tabIndex={0}
-              aria-label={`Slide ${safePage} canvas. Use left and right arrow keys to change slides.`}
+              aria-label={copy.slideStageLabel(safePage)}
               onKeyDown={(event) => {
                 if (event.target !== event.currentTarget) return;
                 if (event.key === "ArrowLeft") {
@@ -3208,31 +3198,31 @@ function TypesetCompiledVisual({
                 onTextObjectMove={moveTextObject}
                 onPageSize={(width, height) => setPageNaturalSize({ width, height })}
               />
-              <span className="typeset-slide-click-hint">Select · drag to move · double-click to edit · F2 to rename</span>
+              <span className="typeset-slide-click-hint">{copy.slideClickHint}</span>
             </div>
           )}
         </div>
         {sourceOpen && (
-          <aside className="typeset-slide-source-drawer" aria-label="Current slide source editor">
+          <aside className="typeset-slide-source-drawer" aria-label={copy.currentSlideSourceLabel}>
             <header>
               <div>
-                <span>Current frame</span>
-                <strong>{slide?.title || `Slide ${safePage}`}</strong>
+                <span>{copy.currentFrame}</span>
+                <strong>{slide?.title || copy.slideFallback(safePage)}</strong>
               </div>
               <button
                 type="button"
-                title="Open full Code editor"
+                title={copy.openFullEditorTitle}
                 onClick={() => selectedSourceRange
                   ? onOpenCodeRange(selectedSourceRange.start, selectedSourceRange.end)
                   : onOpenCodeAtLine(slide?.line ?? 1)}
               >
-                Full editor
+                {copy.fullEditor}
               </button>
             </header>
             <textarea
               ref={sourceEditorRef}
               value={frameSource}
-              aria-label="LaTeX source for current slide"
+              aria-label={copy.slideSourceAriaLabel}
                 aria-keyshortcuts="Control+S Meta+S Escape"
               spellCheck={false}
               onChange={(event) => changeFrameSource(event.currentTarget.value)}
@@ -3246,12 +3236,12 @@ function TypesetCompiledVisual({
             />
             <footer>
               <span>
-                Lines {slide?.line ?? 1}–{slide?.endLine ?? 1} · {frameLineCount} lines · {frameSource.length} chars
+                {copy.linesInfo(slide?.line ?? 1, slide?.endLine ?? 1, frameLineCount, frameSource.length)}
                 <kbd>Ctrl S</kbd>
               </span>
               <button type="button" disabled={!dirty || compiling} onClick={onSave}>
                 <ToolIcon name="save" />
-                {compiling ? "Compiling…" : dirty ? "Save & update preview" : "Preview is current"}
+                {compiling ? copy.compiling : dirty ? copy.saveUpdatePreview : copy.previewCurrent}
               </button>
             </footer>
           </aside>
@@ -3262,12 +3252,14 @@ function TypesetCompiledVisual({
 }
 
 function PdfFallbackPage({ error, outputPath, sourcePath }: { error: string; outputPath: string | null; sourcePath: string | null }) {
+  const language = useStore((state) => state.language);
+  const copy = TYPESET_EDITOR_COPY[language].pdfFallback;
   return (
-    <div className="typeset-pdf-unavailable" role="status" aria-label="Compiled PDF unavailable">
+    <div className="typeset-pdf-unavailable" role="status" aria-label={copy.unavailableLabel}>
       <ToolIcon name="logs" />
-      <strong>Compiled PDF unavailable</strong>
+      <strong>{copy.unavailableLabel}</strong>
       <span>{outputPath || outputPathFor(sourcePath || DEFAULT_SOURCE_PATH)}</span>
-      <p>Recompile the LaTeX source to produce a PDF, then this panel will show the compiled output.</p>
+      <p>{copy.recompileHint}</p>
       <code>{error}</code>
     </div>
   );
@@ -3295,6 +3287,8 @@ function TypesetPdfPreview({
   forwardTarget,
   forwardSearchNotice,
 }: PdfPreviewProps) {
+  const language = useStore((state) => state.language);
+  const copy = TYPESET_EDITOR_COPY[language].pdfPreview;
   const [pdf, setPdf] = useState<PDFDocumentProxy | null>(null);
   const [numPages, setNumPages] = useState(0);
   const [zoom, setZoom] = useState(1);
@@ -3316,9 +3310,11 @@ function TypesetPdfPreview({
   const zoomMenuPopoverRef = useRef<HTMLDivElement | null>(null);
   const pageInputFocusedRef = useRef(false);
   const userZoomedRef = useRef(false);
+  const currentPageRef = useRef(currentPage);
   const zoomRef = useRef(zoom);
   const pendingWheelZoomRef = useRef<number | null>(null);
   const wheelZoomTimerRef = useRef<number | null>(null);
+  const scrollFrameRef = useRef(0);
   const pageElementsRef = useRef(new Map<number, HTMLDivElement>());
   const registerPageRef = useCallback((page: number, el: HTMLDivElement | null) => {
     if (el) pageElementsRef.current.set(page, el);
@@ -3345,8 +3341,16 @@ function TypesetPdfPreview({
   }, [numPages, zoom]);
 
   useEffect(() => {
-    showPagesAround(currentPage);
-  }, [currentPage, showPagesAround]);
+    currentPageRef.current = currentPage;
+  }, [currentPage]);
+
+  useEffect(() => {
+    // A zoom change can make the existing render window unnecessarily large.
+    // Do not subscribe to currentPage here: scroll updates calculate the full
+    // visible range separately, and must not be overwritten with a smaller
+    // current-page window after their render range commits.
+    showPagesAround(currentPageRef.current);
+  }, [showPagesAround]);
 
   useEffect(() => {
     zoomRef.current = zoom;
@@ -3410,11 +3414,8 @@ function TypesetPdfPreview({
     setError(null);
     if (!path) return () => undefined;
     setLoading(true);
-    void Promise.all([fileReadBytes(path), import("pdfjs-dist")])
-      .then(([bytes, pdfjs]) => {
-        pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerSrc;
-        return pdfjs.getDocument({ data: new Uint8Array(bytes) }).promise;
-      })
+    void fileReadBytes(path)
+      .then((bytes) => openPdfDocument(bytes))
       .then((document) => {
         loadedPdf = document;
         if (disposed) {
@@ -3499,62 +3500,73 @@ function TypesetPdfPreview({
     };
   }, [pdf]);
 
-  useEffect(() => {
+  const updateVisiblePages = useCallback(() => {
     const scroll = scrollRef.current;
     if (!pdf || !scroll || numPages < 1) return;
-    let frame = 0;
-    const updateCurrentPage = () => {
-      // Track the page at the reading edge, rather than the viewport center.
-      // A short landscape PDF can show two pages at once; center tracking would
-      // report the following page immediately after jumping to the current one.
-      const viewportAnchor = scroll.scrollTop + Math.min(48, scroll.clientHeight / 4);
-      const viewportHeight = scroll.clientHeight;
-      const overscan = viewportHeight * 0.75;
-      const renderTop = Math.max(0, scroll.scrollTop - overscan);
-      const renderBottom = scroll.scrollTop + viewportHeight + overscan;
-      const pageAtOffset = (offset: number) => {
-        let low = 1;
-        let high = numPages;
-        let match = 1;
-        while (low <= high) {
-          const middle = Math.floor((low + high) / 2);
-          const element = pageElementsRef.current.get(middle);
-          if (!element) break;
-          const top = element.offsetTop;
-          const bottom = top + element.offsetHeight;
-          match = middle;
-          if (offset < top) high = middle - 1;
-          else if (offset > bottom) low = middle + 1;
-          else return middle;
-        }
-        return clampNumber(match, 1, numPages);
-      };
-      const nextPage = pageAtOffset(viewportAnchor);
-      const visibleStart = pageAtOffset(renderTop);
-      const visibleEnd = pageAtOffset(renderBottom);
-      setCurrentPage((page) => page === nextPage ? page : nextPage);
-      if (viewportHeight > 0 && visibleEnd > 0) {
-        const radius = zoom >= 2 ? 0 : zoom >= 1.1 ? 1 : 2;
-        const nextRange = {
-          start: Math.max(visibleStart, nextPage - radius),
-          end: Math.min(visibleEnd, nextPage + radius),
-        };
-        setRenderRange((range) => (
-          range.start === nextRange.start && range.end === nextRange.end ? range : nextRange
-        ));
+    // Track the page at the reading edge, rather than the viewport center.
+    // A short landscape PDF can show two pages at once; center tracking would
+    // report the following page immediately after jumping to the current one.
+    const viewportAnchor = scroll.scrollTop + Math.min(48, scroll.clientHeight / 4);
+    const viewportHeight = scroll.clientHeight;
+    const overscan = viewportHeight * 0.75;
+    const renderTop = Math.max(0, scroll.scrollTop - overscan);
+    const renderBottom = scroll.scrollTop + viewportHeight + overscan;
+    const pageAtOffset = (offset: number) => {
+      let low = 1;
+      let high = numPages;
+      let match = 1;
+      while (low <= high) {
+        const middle = Math.floor((low + high) / 2);
+        const element = pageElementsRef.current.get(middle);
+        if (!element) break;
+        const top = element.offsetTop;
+        const bottom = top + element.offsetHeight;
+        match = middle;
+        if (offset < top) high = middle - 1;
+        else if (offset > bottom) low = middle + 1;
+        else return middle;
       }
+      return clampNumber(match, 1, numPages);
     };
-    const onScroll = () => {
-      window.cancelAnimationFrame(frame);
-      frame = window.requestAnimationFrame(updateCurrentPage);
-    };
-    scroll.addEventListener("scroll", onScroll, { passive: true });
-    onScroll();
-    return () => {
-      window.cancelAnimationFrame(frame);
-      scroll.removeEventListener("scroll", onScroll);
-    };
+    const nextPage = pageAtOffset(viewportAnchor);
+    const visibleStart = pageAtOffset(renderTop);
+    const visibleEnd = pageAtOffset(renderBottom);
+    setCurrentPage((page) => page === nextPage ? page : nextPage);
+    if (viewportHeight > 0 && visibleEnd > 0) {
+      const radius = zoom >= 2 ? 0 : zoom >= 1.1 ? 1 : 2;
+      const nextRange = {
+        // The viewport can show several short/landscape pages at once. Use
+        // its full measured range as the source of truth, then preload the
+        // immediate neighbors so a page never remains a white placeholder
+        // until the preceding page has completely scrolled away.
+        start: Math.max(1, visibleStart - radius),
+        end: Math.min(numPages, visibleEnd + radius),
+      };
+      setRenderRange((range) => (
+        range.start === nextRange.start && range.end === nextRange.end ? range : nextRange
+      ));
+    }
   }, [numPages, pdf, zoom]);
+
+  const scheduleVisiblePagesUpdate = useCallback(() => {
+    window.cancelAnimationFrame(scrollFrameRef.current);
+    scrollFrameRef.current = window.requestAnimationFrame(() => {
+      scrollFrameRef.current = 0;
+      updateVisiblePages();
+    });
+  }, [updateVisiblePages]);
+
+  useEffect(() => {
+    if (!pdf || numPages < 1) return;
+    // Recalculate after document and zoom updates. User scrolling is handled
+    // by the scroll surface itself so the first scroll event is never missed
+    // while React is committing a preview update.
+    if ((scrollRef.current?.clientHeight ?? 0) > 0) scheduleVisiblePagesUpdate();
+    return () => {
+      window.cancelAnimationFrame(scrollFrameRef.current);
+      scrollFrameRef.current = 0;
+    };
+  }, [numPages, pdf, scheduleVisiblePagesUpdate]);
 
   useEffect(() => {
     if (!pageInputFocusedRef.current) setPageDraft(String(currentPage));
@@ -3676,17 +3688,17 @@ function TypesetPdfPreview({
     return () => window.removeEventListener("keydown", onPageNavigationKey);
   }, [compileMenuOpen, currentPage, logOpen, numPages, scrollToPage, zoomMenuOpen]);
 
-  const statusText = dirty ? "Unsaved changes" : compileStatusText(status, result);
+  const statusText = dirty ? copy.unsavedChanges : compileStatusText(status, result, language);
 
   return (
     <section
       className={`typeset-preview pdf${!path ? " pdf-empty" : ""}`}
-      aria-label="PDF preview"
+      aria-label={copy.pdfPreviewLabel}
       aria-keyshortcuts="ArrowLeft ArrowRight"
     >
       <div className="typeset-preview-toolbar toolbar toolbar-pdf toolbar-pdf-hybrid">
         <div className="typeset-pdf-left toolbar-pdf-left">
-          <span className="typeset-pdf-panel-label">Compiled PDF</span>
+          <span className="typeset-pdf-panel-label">{copy.compiledPdfLabel}</span>
           <div
             ref={compileMenuRef}
             className={`typeset-compile-button-group compile-button-group${dirty ? " has-changes" : ""}`}
@@ -3699,14 +3711,14 @@ function TypesetPdfPreview({
             >
               <ToolIcon name={status === "running" ? "clear" : "compile"} />
               <span className="typeset-recompile-label">
-                {status === "running" ? "Stop compilation" : "Recompile"}
+                {status === "running" ? copy.stopCompilation : copy.recompile}
               </span>
             </button>
             <button
               type="button"
               className="typeset-compile-options compile-dropdown-toggle"
-              title="Compile options"
-              aria-label="Compile options"
+              title={copy.compileOptions}
+              aria-label={copy.compileOptions}
               aria-haspopup="menu"
               aria-expanded={compileMenuOpen}
               disabled={disabled}
@@ -3730,11 +3742,11 @@ function TypesetPdfPreview({
                 ref={compileMenuPopoverRef}
                 className="typeset-compile-menu"
                 role="menu"
-                aria-label="Compile options menu"
+                aria-label={copy.compileOptionsMenu}
                 style={compileMenuPosition}
               >
                 <div className="typeset-compile-menu-section" role="presentation">
-                  <span>Compile error handling</span>
+                  <span>{copy.compileErrorHandling}</span>
                 </div>
                 <button
                   type="button"
@@ -3746,8 +3758,8 @@ function TypesetPdfPreview({
                   }}
                 >
                   <span>
-                    <strong>Stop on first error</strong>
-                    <small>Fail fast and preserve the last verified PDF.</small>
+                    <strong>{copy.stopOnFirstError}</strong>
+                    <small>{copy.stopOnFirstErrorDesc}</small>
                   </span>
                   {!continueOnError && <b aria-hidden="true"><SvgIcon name="check" size={14} /></b>}
                 </button>
@@ -3761,8 +3773,8 @@ function TypesetPdfPreview({
                   }}
                 >
                   <span>
-                    <strong>Try to compile despite errors</strong>
-                    <small>Show a newly generated PDF when TeX can recover; it remains marked as having errors.</small>
+                    <strong>{copy.tryDespiteErrors}</strong>
+                    <small>{copy.tryDespiteErrorsDesc}</small>
                   </span>
                   {continueOnError && <b aria-hidden="true"><SvgIcon name="check" size={14} /></b>}
                 </button>
@@ -3779,8 +3791,8 @@ function TypesetPdfPreview({
                   >
                     <ToolIcon name="clear" />
                     <span>
-                      <strong>Stop compilation</strong>
-                      <small>Cancel the active TeX process and keep the last verified PDF.</small>
+                      <strong>{copy.stopCompilation}</strong>
+                      <small>{copy.stopCompilationDesc}</small>
                     </span>
                   </button>
                 )}
@@ -3795,8 +3807,8 @@ function TypesetPdfPreview({
                 >
                   <ToolIcon name="clear" />
                   <span>
-                    <strong>Clear cache &amp; recompile</strong>
-                    <small>Remove LaTeX auxiliary files, then rebuild the PDF.</small>
+                    <strong>{copy.clearCacheRecompile}</strong>
+                    <small>{copy.clearCacheRecompileDesc}</small>
                   </span>
                 </button>
               </div>,
@@ -3806,8 +3818,8 @@ function TypesetPdfPreview({
           <button
             type="button"
             className={`typeset-log-toggle pdf-toolbar-btn log-btn${logOpen ? " active" : ""}`}
-            title="Compile log"
-            aria-label="Compile log"
+            title={copy.compileLog}
+            aria-label={copy.compileLog}
             onClick={onToggleLog}
           >
             <ToolIcon name="logs" />
@@ -3815,21 +3827,21 @@ function TypesetPdfPreview({
           </button>
           {statusText && <span className={`typeset-pdf-status ${status}`}>{statusText}</span>}
           {result?.pdfState === "stale" && (
-            <span className="typeset-pdf-status stale" role="status">Showing last verified PDF</span>
+            <span className="typeset-pdf-status stale" role="status">{copy.showingLastVerified}</span>
           )}
           {result?.pdfState === "missing" && (
-            <span className="typeset-pdf-status error" role="status">No PDF was produced by this build</span>
+            <span className="typeset-pdf-status error" role="status">{copy.noPdfProduced}</span>
           )}
           {forwardSearchNotice && <span className="typeset-pdf-status error" role="status">{forwardSearchNotice}</span>}
         </div>
         <div className="typeset-preview-actions toolbar-pdf-right">
-          <span className="typeset-preview-file" title={path ?? ""}>{path ? basename(path) : "Preview"}</span>
-          <div className="typeset-pdf-page-control" aria-label="PDF page navigation">
+          <span className="typeset-preview-file" title={path ?? ""}>{path ? basename(path) : copy.preview}</span>
+          <div className="typeset-pdf-page-control" aria-label={copy.pdfPageNavigationLabel}>
             <input
               type="text"
               inputMode="numeric"
               value={pageDraft}
-              aria-label="Current PDF page"
+              aria-label={copy.currentPdfPage}
               disabled={numPages < 1}
               onFocus={(event) => {
                 pageInputFocusedRef.current = true;
@@ -3851,15 +3863,15 @@ function TypesetPdfPreview({
                 }
               }}
             />
-            <span aria-label={`${numPages} PDF pages`}>/ {numPages || 0}</span>
+            <span aria-label={copy.pdfPagesLabel(numPages)}>/ {numPages || 0}</span>
           </div>
           <div className="toolbar-pdf-controls pdfjs-viewer-controls-small">
             <button
               ref={zoomMenuRef}
               type="button"
               className="typeset-zoom-label pdfjs-zoom-dropdown-button"
-              title="Choose PDF zoom"
-              aria-label={`PDF zoom ${Math.round(zoom * 100)}%`}
+              title={copy.choosePdfZoom}
+              aria-label={copy.pdfZoomLabel(Math.round(zoom * 100))}
               aria-haspopup="menu"
               aria-expanded={zoomMenuOpen}
               onClick={(event) => {
@@ -3885,7 +3897,7 @@ function TypesetPdfPreview({
               ref={zoomMenuPopoverRef}
               className="typeset-zoom-menu"
               role="menu"
-              aria-label="PDF zoom menu"
+              aria-label={copy.pdfZoomMenu}
               style={zoomMenuPosition}
             >
               <form
@@ -3898,13 +3910,13 @@ function TypesetPdfPreview({
                 <input
                   value={zoomDraft}
                   inputMode="decimal"
-                  aria-label="PDF zoom percentage"
+                  aria-label={copy.pdfZoomPercentage}
                   onChange={(event) => setZoomDraft(event.currentTarget.value.replace(/[^0-9.]/g, ""))}
                 />
                 <span>%</span>
               </form>
-              <button type="button" role="menuitem" onClick={() => void fitPdf("width")}>Fit to width</button>
-              <button type="button" role="menuitem" onClick={() => void fitPdf("height")}>Fit to height</button>
+              <button type="button" role="menuitem" onClick={() => void fitPdf("width")}>{copy.fitToWidth}</button>
+              <button type="button" role="menuitem" onClick={() => void fitPdf("height")}>{copy.fitToHeight}</button>
               <div className="typeset-zoom-menu-divider" role="presentation" />
               {PDF_ZOOM_PRESETS.map((preset) => (
                 <button
@@ -3921,11 +3933,11 @@ function TypesetPdfPreview({
             </div>,
             document.body,
           )}
-          <button type="button" className="typeset-icon-btn pdf-open-external" title="Open PDF externally" aria-label="Open PDF externally" disabled={!path} onClick={() => path && void fileOpen(path)}>
+          <button type="button" className="typeset-icon-btn pdf-open-external" title={copy.openPdfExternally} aria-label={copy.openPdfExternally} disabled={!path} onClick={() => path && void fileOpen(path)}>
             <ToolIcon name="open" />
           </button>
           {onHide && (
-            <button type="button" className="typeset-icon-btn pdf-hide-preview" title="Hide PDF preview" aria-label="Hide PDF preview" onClick={onHide}>
+            <button type="button" className="typeset-icon-btn pdf-hide-preview" title={copy.hidePdfPreview} aria-label={copy.hidePdfPreview} onClick={onHide}>
               <ToolIcon name="next" />
             </button>
           )}
@@ -3934,10 +3946,11 @@ function TypesetPdfPreview({
       <div
         className="typeset-pdf-scroll"
         ref={scrollRef}
+        onScroll={scheduleVisiblePagesUpdate}
         onWheel={handlePdfWheel}
       >
-        {!path && <div className="typeset-empty">No PDF selected.</div>}
-        {path && loading && <div className="typeset-empty">Loading PDF...</div>}
+        {!path && <div className="typeset-empty">{copy.noPdfSelected}</div>}
+        {path && loading && <div className="typeset-empty">{copy.loadingPdf}</div>}
         {path && error ? (
           <PdfFallbackPage error={error} outputPath={path} sourcePath={sourcePath} />
         ) : (
@@ -3953,7 +3966,7 @@ function TypesetPdfPreview({
                 className="typeset-pdf-page typeset-pdf-page-placeholder"
                 ref={(element) => registerPageRef(page, element)}
                 style={{ width: `${estimatedSize.width * zoom}px`, height: `${estimatedSize.height * zoom}px` }}
-                aria-label={`PDF page ${page} placeholder`}
+                aria-label={copy.pdfPagePlaceholderLabel(page)}
               />
             );
           }
@@ -4002,12 +4015,14 @@ function CompileLog({
   onClearCacheCompile?: () => void;
   disabled?: boolean;
 }) {
+  const language = useStore((state) => state.language);
+  const copy = TYPESET_EDITOR_COPY[language].compileLog;
   const text = status === "running"
     ? [error, liveLog?.stderr, liveLog?.stdout].filter(Boolean).join("\n\n").trim()
     : [error, result?.stderr, result?.stdout].filter(Boolean).join("\n\n").trim();
   const pdfState = result?.pdfState ?? (result?.success ? "fresh" : result?.partialOutput ? "partial" : "missing");
   const sourceHash = result?.rootSourceHash ?? "";
-  const buildTime = result?.compiledAtUnixMs ? new Date(result.compiledAtUnixMs).toLocaleTimeString() : "not recorded";
+  const buildTime = result?.compiledAtUnixMs ? new Date(result.compiledAtUnixMs).toLocaleTimeString() : copy.notRecorded;
   const diagnostics = useMemo(() => (result?.diagnostics ?? []).map((diagnostic, index) => {
     const level: CompileLogLevel = diagnostic.severity === "warning" && /(?:over|under)full\s+\\?hbox/i.test(diagnostic.message)
       ? "info"
@@ -4036,32 +4051,32 @@ function CompileLog({
     { error: 0, warning: 0, info: 0 },
   );
   const filters: Array<{ id: CompileLogFilter; label: string; count: number }> = [
-    { id: "all", label: "All logs", count: diagnostics.length },
-    { id: "error", label: "Errors", count: counts.error },
-    { id: "warning", label: "Warnings", count: counts.warning },
-    { id: "info", label: "Info", count: counts.info },
+    { id: "all", label: copy.allLogs, count: diagnostics.length },
+    { id: "error", label: copy.errors, count: counts.error },
+    { id: "warning", label: copy.warnings, count: counts.warning },
+    { id: "info", label: copy.info, count: counts.info },
   ];
 
   const diagnosticLocation = (diagnostic: LatexDiagnostic) => diagnostic.filePath
     ? `${diagnostic.filePath}${diagnostic.line ? `, ${diagnostic.line}` : ""}`
-    : diagnostic.line ? `line ${diagnostic.line}` : "No source location";
+    : diagnostic.line ? copy.lineLabel(diagnostic.line) : copy.noSourceLocation;
   const canOpenDiagnostic = (diagnostic: LatexDiagnostic) => Boolean(
     onDiagnosticClick && (diagnostic.filePath || diagnostic.line),
   );
   const diagnosticGuidance = (diagnostic: LatexDiagnostic) => {
     if (diagnostic.code === "table_alignment") {
-      return "An alignment character (&) was used outside a table or alignment environment. Escape it as \\& when it is ordinary text.";
+      return copy.tableAlignmentGuidance;
     }
     if (/citation .*undefined/i.test(diagnostic.message)) {
-      return "The citation key is not available in the active bibliography. Check the .bib entry and the bibliography declaration.";
+      return copy.undefinedCitationGuidance;
     }
     return diagnostic.severity === "error"
-      ? "Open the source location, make the smallest correction, then recompile."
-      : "This does not necessarily stop the PDF build, but it is worth reviewing at the reported source location.";
+      ? copy.errorGuidance
+      : copy.warningGuidance;
   };
   const diagnosticExcerpt = (diagnostic: LatexDiagnostic) => {
     const lines = text.split(/\r?\n/).filter(Boolean);
-    if (!lines.length) return "No compiler output was captured for this diagnostic.";
+    if (!lines.length) return copy.noExcerptCaptured;
     const message = diagnostic.message.toLocaleLowerCase();
     const match = lines.findIndex((line) => line.toLocaleLowerCase().includes(message));
     const start = match < 0 ? 0 : Math.max(0, match - 1);
@@ -4069,8 +4084,8 @@ function CompileLog({
   };
 
   return (
-    <section className={`typeset-log new-logs-pane ${status === "error" ? "error" : ""}`} aria-label="Compile log">
-      <div className="typeset-log-tabs" role="tablist" aria-label="Compile log filters">
+    <section className={`typeset-log new-logs-pane ${status === "error" ? "error" : ""}`} aria-label={copy.compileLogLabel}>
+      <div className="typeset-log-tabs" role="tablist" aria-label={copy.compileLogFiltersLabel}>
         {filters.map((item) => (
           <button
             key={item.id}
@@ -4087,7 +4102,7 @@ function CompileLog({
       </div>
       <div className="logs-pane-content">
         {filteredDiagnostics.length > 0 && (
-          <div className="typeset-diagnostics typeset-diagnostics-accordion" aria-label="LaTeX diagnostics">
+          <div className="typeset-diagnostics typeset-diagnostics-accordion" aria-label={copy.latexDiagnosticsLabel}>
             {filteredDiagnostics.map(({ diagnostic, id, level }) => {
               const expanded = expandedDiagnosticId === id;
               const openable = canOpenDiagnostic(diagnostic);
@@ -4097,7 +4112,7 @@ function CompileLog({
                     <button
                       type="button"
                       className="typeset-diagnostic-expand"
-                      aria-label={`${expanded ? "Collapse" : "Expand"} diagnostic: ${diagnostic.message}`}
+                      aria-label={copy.expandCollapseLabel(expanded, diagnostic.message)}
                       aria-expanded={expanded}
                       onClick={() => setExpandedDiagnosticId((current) => current === id ? null : id)}
                     >
@@ -4125,8 +4140,8 @@ function CompileLog({
                       <button
                         type="button"
                         className="typeset-diagnostic-locate"
-                        aria-label={`Open ${diagnosticLocation(diagnostic)}`}
-                        title="Open source location"
+                        aria-label={copy.openLabel(diagnosticLocation(diagnostic))}
+                        title={copy.openSourceLocation}
                         onClick={() => onDiagnosticClick?.(diagnostic)}
                       >
                         <ToolIcon name="ref" />
@@ -4147,15 +4162,15 @@ function CompileLog({
         )}
         {!filteredDiagnostics.length && (
           <div className="typeset-log-empty" role="status">
-            {diagnostics.length ? "No logs match this filter." : status === "running" ? "Waiting for TeX Live output..." : "No diagnostics."}
+            {diagnostics.length ? copy.noLogsMatchFilter : status === "running" ? copy.waitingForOutput : copy.noDiagnostics}
           </div>
         )}
         <details className="typeset-raw-logs">
           <summary>
             <ToolIcon name="chevron" />
-            <span>Raw logs</span>
+            <span>{copy.rawLogs}</span>
           </summary>
-          <pre>{text || (status === "running" ? "Waiting for TeX Live output..." : "No compiler output was captured.")}</pre>
+          <pre>{text || (status === "running" ? copy.waitingForOutput : copy.noOutputCaptured)}</pre>
         </details>
       </div>
       <footer className="typeset-log-footer">
@@ -4167,18 +4182,18 @@ function CompileLog({
             onClick={onClearCacheCompile}
           >
             <ToolIcon name="clear" />
-            <span>Clear cached files</span>
+            <span>{copy.clearCachedFiles}</span>
           </button>
         )}
         <details className="typeset-log-build-details">
           <summary>
-            <span>Other logs and files</span>
+            <span>{copy.otherLogsAndFiles}</span>
             <ToolIcon name="chevron" />
           </summary>
-          <div className="typeset-build-provenance" aria-label="PDF build provenance">
-            <span>PDF: {pdfState}</span>
-            <span>Built {buildTime}</span>
-            <code title={sourceHash}>inputs {sourceHash.slice(0, 12) || "unavailable"}</code>
+          <div className="typeset-build-provenance" aria-label={copy.pdfBuildProvenanceLabel}>
+            <span>{copy.pdfState(pdfState)}</span>
+            <span>{copy.built(buildTime)}</span>
+            <code title={sourceHash}>{copy.inputsHash(sourceHash.slice(0, 12) || copy.unavailable)}</code>
           </div>
         </details>
       </footer>
@@ -4205,12 +4220,14 @@ function TypesetOutlinePanel({
   onResizePointerDown: (event: ReactPointerEvent<HTMLDivElement>) => void;
   onToggleCollapsed: () => void;
 }) {
+  const language = useStore((state) => state.language);
+  const copy = TYPESET_EDITOR_COPY[language].outline;
   if (collapsed) {
     return (
-      <section className="typeset-outline-collapsed" aria-label="文档大纲">
+      <section className="typeset-outline-collapsed" aria-label={copy.documentOutlineLabel}>
         <button type="button" onClick={onToggleCollapsed}>
           <ToolIcon name="list" />
-          <span>大纲</span>
+          <span>{copy.outline}</span>
           <em>{outline.length}</em>
         </button>
       </section>
@@ -4223,13 +4240,13 @@ function TypesetOutlinePanel({
     <div
       className="typeset-outline-resize"
       role="separator"
-      aria-label="调整大纲大小"
+      aria-label={copy.resizeLabel}
       aria-orientation="horizontal"
       aria-valuemin={OUTLINE_PANEL_MIN_H}
       aria-valuemax={OUTLINE_PANEL_MAX_H}
       aria-valuenow={height ?? undefined}
-      aria-valuetext={height == null ? "侧边栏高度的三分之一" : `${height} 像素`}
-      title="拖动调整大纲大小"
+      aria-valuetext={height == null ? copy.resizeThirdHeight : copy.resizePixels(height)}
+      title={copy.resizeTitle}
       tabIndex={0}
       onKeyDown={onResizeKeyDown}
       onPointerDown={onResizePointerDown}
@@ -4242,15 +4259,15 @@ function TypesetOutlinePanel({
     return (
       <>
         {resizeHandle}
-        <section className="typeset-outline empty" aria-label="文档大纲" style={panelStyle}>
+        <section className="typeset-outline empty" aria-label={copy.documentOutlineLabel} style={panelStyle}>
           <div className="typeset-outline-head">
-            <strong>大纲</strong>
+            <strong>{copy.outline}</strong>
             <span>0</span>
-            <button type="button" className="typeset-outline-toggle" title="隐藏大纲" aria-label="隐藏大纲" onClick={onToggleCollapsed}>
+            <button type="button" className="typeset-outline-toggle" title={copy.hideOutline} aria-label={copy.hideOutline} onClick={onToggleCollapsed}>
               <ToolIcon name="clear" />
             </button>
           </div>
-          <span className="typeset-outline-empty">未找到章节。</span>
+          <span className="typeset-outline-empty">{copy.notFoundSections}</span>
         </section>
       </>
     );
@@ -4259,11 +4276,11 @@ function TypesetOutlinePanel({
   return (
     <>
       {resizeHandle}
-      <section className="typeset-outline" aria-label="文档大纲" style={panelStyle}>
+      <section className="typeset-outline" aria-label={copy.documentOutlineLabel} style={panelStyle}>
       <div className="typeset-outline-head">
-        <strong>大纲</strong>
+        <strong>{copy.outline}</strong>
         <span>{outline.length}</span>
-        <button type="button" className="typeset-outline-toggle" title="隐藏大纲" aria-label="隐藏大纲" onClick={onToggleCollapsed}>
+        <button type="button" className="typeset-outline-toggle" title={copy.hideOutline} aria-label={copy.hideOutline} onClick={onToggleCollapsed}>
           <ToolIcon name="clear" />
         </button>
       </div>
@@ -4436,14 +4453,17 @@ function VisualMenuItem({
   );
 }
 
-const VISUAL_SECTION_LEVELS: Array<{ key: string; label: string }> = [
-  { key: "text", label: "Normal text" },
-  { key: "section", label: "Section" },
-  { key: "subsection", label: "Subsection" },
-  { key: "subsubsection", label: "Subsubsection" },
-  { key: "paragraph", label: "Paragraph" },
-  { key: "subparagraph", label: "Subparagraph" },
-];
+function visualSectionLevels(language: Language): Array<{ key: string; label: string }> {
+  const copy = TYPESET_EDITOR_COPY[language].sectionLevels;
+  return [
+    { key: "text", label: copy.text },
+    { key: "section", label: copy.section },
+    { key: "subsection", label: copy.subsection },
+    { key: "subsubsection", label: copy.subsubsection },
+    { key: "paragraph", label: copy.paragraph },
+    { key: "subparagraph", label: copy.subparagraph },
+  ];
+}
 
 const SOMNIQ_BIBLIOGRAPHY_STEM = "somniq-references";
 const SOMNIQ_BIBLIOGRAPHY_FILE = `${SOMNIQ_BIBLIOGRAPHY_STEM}.bib`;
@@ -4513,6 +4533,8 @@ function TypesetCitationPicker({
   onClose: () => void;
   onConfirm: (ids: string[]) => Promise<void>;
 }) {
+  const language = useStore((state) => state.language);
+  const copy = TYPESET_EDITOR_COPY[language].citationPicker;
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
   const [busy, setBusy] = useState(false);
@@ -4545,20 +4567,20 @@ function TypesetCitationPicker({
   };
   return (
     <div className="typeset-citation-backdrop" role="presentation" onMouseDown={onClose}>
-      <section className="typeset-citation-picker" role="dialog" aria-modal="true" aria-label="Insert library citation" onMouseDown={(event) => event.stopPropagation()}>
+      <section className="typeset-citation-picker" role="dialog" aria-modal="true" aria-label={copy.insertLibraryCitationLabel} onMouseDown={(event) => event.stopPropagation()}>
         <header>
-          <div><span>SomniQ Literature</span><strong>Insert citation</strong></div>
-          <button type="button" aria-label="Close citation picker" onClick={onClose}>×</button>
+          <div><span>{copy.somniqLiterature}</span><strong>{copy.insertCitation}</strong></div>
+          <button type="button" aria-label={copy.closeCitationPicker} onClick={onClose}>×</button>
         </header>
         <input
           autoFocus
           type="search"
           value={query}
           onChange={(event) => setQuery(event.target.value)}
-          placeholder="Search title, author, DOI, or key"
-          aria-label="Search literature for citation"
+          placeholder={copy.searchPlaceholder}
+          aria-label={copy.searchLiteratureLabel}
         />
-        <div className="typeset-citation-results" role="listbox" aria-label="Library papers">
+        <div className="typeset-citation-results" role="listbox" aria-label={copy.libraryPapersLabel}>
           {visible.map((paper) => {
             const checked = selected.has(paper.id);
             return (
@@ -4571,17 +4593,17 @@ function TypesetCitationPicker({
                 onClick={() => toggle(paper.id)}
               >
                 <span className="typeset-citation-check" aria-hidden="true">{checked ? "✓" : ""}</span>
-                <span><strong>{paper.title}</strong><em>{paper.authors.join(", ") || "Unknown author"}{paper.year ? ` · ${paper.year}` : ""}</em></span>
+                <span><strong>{paper.title}</strong><em>{paper.authors.join(", ") || copy.unknownAuthor}{paper.year ? ` · ${paper.year}` : ""}</em></span>
                 <code>{paper.citationKey || suggestedCitationKey(paper)}</code>
               </button>
             );
           })}
-          {visible.length === 0 && <p>No matching library papers.</p>}
+          {visible.length === 0 && <p>{copy.noMatchingPapers}</p>}
         </div>
         {error && <p className="typeset-citation-error" role="status">{error}</p>}
         <footer>
-          <span>{selected.size} selected</span>
-          <div><button type="button" onClick={onClose} disabled={busy}>Cancel</button><button type="button" className="primary" onClick={() => void confirm()} disabled={busy || selected.size === 0}>{busy ? "Preparing…" : "Insert \\cite{}"}</button></div>
+          <span>{copy.selectedCount(selected.size)}</span>
+          <div><button type="button" onClick={onClose} disabled={busy}>{copy.cancel}</button><button type="button" className="primary" onClick={() => void confirm()} disabled={busy || selected.size === 0}>{busy ? copy.preparing : copy.insertCiteCmd}</button></div>
         </footer>
       </section>
     </div>
@@ -4641,6 +4663,9 @@ function TypesetEditorToolbar({
   onSynchronizeBibliography: () => Promise<void>;
   saving: boolean;
 }) {
+  const language = useStore((state) => state.language);
+  const copy = TYPESET_EDITOR_COPY[language].toolbar;
+  const sectionLevels = useMemo(() => visualSectionLevels(language), [language]);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchIndex, setSearchIndex] = useState(0);
@@ -4688,9 +4713,9 @@ function TypesetEditorToolbar({
   };
   const confirmCitation = async (ids: string[]) => {
     const adapter = citationAdapterRef.current;
-    if (!adapter) throw new Error("The editor selection is no longer available.");
+    if (!adapter) throw new Error(TYPESET_EDITOR_COPY[language].citationPicker.editorSelectionUnavailable);
     const keys = await onPrepareCitationKeys(ids);
-    if (keys.length === 0) throw new Error("The selected papers do not have usable citation keys.");
+    if (keys.length === 0) throw new Error(TYPESET_EDITOR_COPY[language].citationPicker.noUsableCitationKeys);
     // Insert through the captured live editor first. The synchronization may
     // replace the document to add the bibliography declaration, so doing it
     // first would let this stale adapter overwrite that declaration.
@@ -4729,42 +4754,42 @@ function TypesetEditorToolbar({
   }, [searchOpen]);
 
   return (
-    <div className={`typeset-visual-toolbar ol-cm-toolbar-wrapper${safeCompiledVisual ? " safe-visual" : ""}`} aria-label="Editor tools">
-      <div className="typeset-visual-toolbar-row ol-cm-toolbar toolbar-editor" role="toolbar" aria-label="Editor toolbar">
+    <div className={`typeset-visual-toolbar ol-cm-toolbar-wrapper${safeCompiledVisual ? " safe-visual" : ""}`} aria-label={copy.editorToolsLabel}>
+      <div className="typeset-visual-toolbar-row ol-cm-toolbar toolbar-editor" role="toolbar" aria-label={copy.editorToolbarLabel}>
         {safeCompiledVisual && (
           <div className="typeset-safe-visual-toolbar">
             <ToolIcon name="visual" />
-            <strong>Compiled slide preview</strong>
-            <span>Click visible text to edit its exact LaTeX source.</span>
+            <strong>{copy.compiledSlidePreview}</strong>
+            <span>{copy.clickToEditHint}</span>
             <button
               type="button"
               onClick={() => onEditSlideSource((activeSlide ?? slides[0]).line)}
             >
-              Edit slide source
+              {copy.editSlideSource}
             </button>
           </div>
         )}
-        <div className="ol-cm-toolbar-button-group" aria-label="Undo Redo actions">
-          <button type="button" className="ol-cm-toolbar-button" title="Undo" aria-label="Undo" disabled={!canUndo} onClick={onUndo}><ToolIcon name="undo" /></button>
-          <button type="button" className="ol-cm-toolbar-button" title="Redo" aria-label="Redo" disabled={!canRedo} onClick={onRedo}><ToolIcon name="redo" /></button>
+        <div className="ol-cm-toolbar-button-group" aria-label={copy.undoRedoLabel}>
+          <button type="button" className="ol-cm-toolbar-button" title={copy.undo} aria-label={copy.undo} disabled={!canUndo} onClick={onUndo}><ToolIcon name="undo" /></button>
+          <button type="button" className="ol-cm-toolbar-button" title={copy.redo} aria-label={copy.redo} disabled={!canRedo} onClick={onRedo}><ToolIcon name="redo" /></button>
           <button
             type="button"
             className="ol-cm-toolbar-button"
-            title={dirty ? (mode === "visual" ? "Save and update preview" : "Save") : "No unsaved changes"}
-            aria-label="Save"
+            title={dirty ? (mode === "visual" ? copy.saveVisualTitle : copy.saveTitle) : copy.noUnsavedChanges}
+            aria-label={copy.saveTitle}
             disabled={saving || compiling || !dirty}
             onClick={onSave}
           >
             <ToolIcon name="save" />
           </button>
         </div>
-        <div className="ol-cm-toolbar-button-group" aria-label="Text formatting">
+        <div className="ol-cm-toolbar-button-group" aria-label={copy.textFormattingLabel}>
           <VisualToolbarMenu
-            label="Section heading"
+            label={copy.sectionHeading}
             wide
             icon={<><span className="typeset-visual-text-icon">H</span><ToolIcon name="chevron" /></>}
           >
-            {VISUAL_SECTION_LEVELS.map((level) => (
+            {sectionLevels.map((level) => (
               <VisualMenuItem
                 key={level.key}
                 label={level.label}
@@ -4773,27 +4798,27 @@ function TypesetEditorToolbar({
             ))}
           </VisualToolbarMenu>
         </div>
-        <div className="ol-cm-toolbar-button-group" aria-label="Text style">
-          <button type="button" className="ol-cm-toolbar-button" title="Bold" aria-label="Bold" onClick={insertBold}><strong className="typeset-visual-text-icon">B</strong></button>
-          <button type="button" className="ol-cm-toolbar-button" title="Italic" aria-label="Italic" onClick={insertItalic}><em className="typeset-visual-text-icon">I</em></button>
+        <div className="ol-cm-toolbar-button-group" aria-label={copy.textStyleLabel}>
+          <button type="button" className="ol-cm-toolbar-button" title={copy.bold} aria-label={copy.bold} onClick={insertBold}><strong className="typeset-visual-text-icon">B</strong></button>
+          <button type="button" className="ol-cm-toolbar-button" title={copy.italic} aria-label={copy.italic} onClick={insertItalic}><em className="typeset-visual-text-icon">I</em></button>
         </div>
-        <div className="ol-cm-toolbar-button-group" aria-label="Insert math and symbols">
-          <VisualToolbarMenu label="Insert math" icon={<span className="typeset-visual-text-icon">&Sigma;</span>}>
-            <VisualMenuItem label="Inline" icon={<span className="typeset-visual-text-icon">$x$</span>} onSelect={insertInlineMath} />
-            <VisualMenuItem label="Display" icon={<span className="typeset-visual-text-icon">[x]</span>} onSelect={insertMath} />
+        <div className="ol-cm-toolbar-button-group" aria-label={copy.insertMathSymbolsLabel}>
+          <VisualToolbarMenu label={copy.insertMath} icon={<span className="typeset-visual-text-icon">&Sigma;</span>}>
+            <VisualMenuItem label={copy.inline} icon={<span className="typeset-visual-text-icon">$x$</span>} onSelect={insertInlineMath} />
+            <VisualMenuItem label={copy.display} icon={<span className="typeset-visual-text-icon">[x]</span>} onSelect={insertMath} />
           </VisualToolbarMenu>
         </div>
-        <div className="ol-cm-toolbar-button-group" aria-label="Insert misc">
-          <button type="button" className="ol-cm-toolbar-button" title="Insert link" aria-label="Insert link" onClick={insertHref}><ToolIcon name="link" /></button>
-          <button type="button" className="ol-cm-toolbar-button" title="Insert cross-reference" aria-label="Insert cross-reference" onClick={insertRef}><ToolIcon name="ref" /></button>
-          <button type="button" className="ol-cm-toolbar-button" title="Insert citation" aria-label="Insert citation" onClick={insertCitation}><ToolIcon name="citation" /></button>
-          <button type="button" className="ol-cm-toolbar-button" title="Insert figure" aria-label="Insert figure" onClick={insertFigure}><ToolIcon name="figure" /></button>
-          <button type="button" className="ol-cm-toolbar-button" title="Insert table" aria-label="Insert table" onClick={insertTable}><ToolIcon name="table" /></button>
+        <div className="ol-cm-toolbar-button-group" aria-label={copy.insertMiscLabel}>
+          <button type="button" className="ol-cm-toolbar-button" title={copy.insertLink} aria-label={copy.insertLink} onClick={insertHref}><ToolIcon name="link" /></button>
+          <button type="button" className="ol-cm-toolbar-button" title={copy.insertCrossReference} aria-label={copy.insertCrossReference} onClick={insertRef}><ToolIcon name="ref" /></button>
+          <button type="button" className="ol-cm-toolbar-button" title={copy.insertCitationTitle} aria-label={copy.insertCitationTitle} onClick={insertCitation}><ToolIcon name="citation" /></button>
+          <button type="button" className="ol-cm-toolbar-button" title={copy.insertFigure} aria-label={copy.insertFigure} onClick={insertFigure}><ToolIcon name="figure" /></button>
+          <button type="button" className="ol-cm-toolbar-button" title={copy.insertTable} aria-label={copy.insertTable} onClick={insertTable}><ToolIcon name="table" /></button>
         </div>
-        <div className="ol-cm-toolbar-button-group" aria-label="List indentation">
-          <VisualToolbarMenu label="Insert list" horizontal icon={<ToolIcon name="list" />}>
-            <VisualMenuItem label="Bulleted list" icon={<ToolIcon name="list" />} onSelect={insertBulletList} />
-            <VisualMenuItem label="Numbered list" icon={<ToolIcon name="numberedList" />} onSelect={insertNumberedList} />
+        <div className="ol-cm-toolbar-button-group" aria-label={copy.listIndentationLabel}>
+          <VisualToolbarMenu label={copy.insertList} horizontal icon={<ToolIcon name="list" />}>
+            <VisualMenuItem label={copy.bulletedList} icon={<ToolIcon name="list" />} onSelect={insertBulletList} />
+            <VisualMenuItem label={copy.numberedList} icon={<ToolIcon name="numberedList" />} onSelect={insertNumberedList} />
           </VisualToolbarMenu>
         </div>
         <div className="ol-cm-toolbar-button-group ol-cm-toolbar-stretch" />
@@ -4811,17 +4836,17 @@ function TypesetEditorToolbar({
                 ref={searchInputRef}
                 type="search"
                 value={searchQuery}
-                aria-label="Search source"
-                placeholder="Find"
+                aria-label={copy.searchSource}
+                placeholder={copy.find}
                 onChange={(event) => setSearchQuery(event.currentTarget.value)}
               />
               <span className="typeset-toolbar-search-count" aria-live="polite">
                 {searchMatches.length ? `${(searchIndex % searchMatches.length) + 1}/${searchMatches.length}` : "0"}
               </span>
-              <button type="button" className="ol-cm-toolbar-button" title="Previous match" aria-label="Previous match" disabled={!searchMatches.length} onClick={() => runSearch(-1)}>
+              <button type="button" className="ol-cm-toolbar-button" title={copy.previousMatch} aria-label={copy.previousMatch} disabled={!searchMatches.length} onClick={() => runSearch(-1)}>
                 <ToolIcon name="previous" />
               </button>
-              <button type="button" className="ol-cm-toolbar-button" title="Next match" aria-label="Next match" disabled={!searchMatches.length} onClick={() => runSearch(1)}>
+              <button type="button" className="ol-cm-toolbar-button" title={copy.nextMatch} aria-label={copy.nextMatch} disabled={!searchMatches.length} onClick={() => runSearch(1)}>
                 <ToolIcon name="next" />
               </button>
             </form>
@@ -4829,8 +4854,8 @@ function TypesetEditorToolbar({
           <button
             type="button"
             className="ol-cm-toolbar-button"
-            title={searchOpen ? "Close search" : "Search"}
-            aria-label="Search"
+            title={searchOpen ? copy.closeSearch : copy.search}
+            aria-label={copy.search}
             aria-pressed={searchOpen}
             onClick={() => setSearchOpen((open) => !open)}
           >
@@ -4841,14 +4866,14 @@ function TypesetEditorToolbar({
       <div className="typeset-visual-filebar editor-tabs-container">
         <div className="typeset-visual-filetab editor-tab" role="tab" aria-selected="true">
           <FileIcon path={path || "untitled.tex"} />
-          <strong>{path ? basename(path) : "Untitled"}</strong>
+          <strong>{path ? basename(path) : copy.untitled}</strong>
         </div>
         {slides.length > 0 ? (
-          <nav className="typeset-slide-nav" aria-label="Slide navigation">
+          <nav className="typeset-slide-nav" aria-label={copy.slideNavigationLabel}>
             <button
               type="button"
-              aria-label="Previous slide"
-              title="Previous slide"
+              aria-label={copy.previousSlide}
+              title={copy.previousSlide}
               disabled={activeSlideIndex <= 0}
               onClick={() => onNavigateToLine(slides[activeSlideIndex - 1]?.line ?? slides[0].line)}
             >
@@ -4857,16 +4882,16 @@ function TypesetEditorToolbar({
             <button
               type="button"
               className="typeset-slide-nav-label"
-              title={activeSlide?.title ?? "Open first slide"}
+              title={activeSlide?.title ?? copy.openFirstSlide}
               onClick={() => onNavigateToLine((activeSlide ?? slides[0]).line)}
             >
-              <span>{activeSlideIndex >= 0 ? `Slide ${activeSlideIndex + 1} / ${slides.length}` : `${slides.length} slides`}</span>
+              <span>{activeSlideIndex >= 0 ? copy.slideOfTotal(activeSlideIndex + 1, slides.length) : copy.slidesCountLabel(slides.length)}</span>
               <strong>{activeSlide?.title ?? slides[0].title}</strong>
             </button>
             <button
               type="button"
-              aria-label="Next slide"
-              title="Next slide"
+              aria-label={copy.nextSlide}
+              title={copy.nextSlide}
               disabled={activeSlideIndex < 0 || activeSlideIndex >= slides.length - 1}
               onClick={() => onNavigateToLine(slides[activeSlideIndex + 1]?.line ?? slides[slides.length - 1].line)}
             >
@@ -4874,25 +4899,25 @@ function TypesetEditorToolbar({
             </button>
           </nav>
         ) : (
-          <div className="typeset-current-section" aria-live="polite" title={activeOutlineItem?.title ?? "No section selected"}>
+          <div className="typeset-current-section" aria-live="polite" title={activeOutlineItem?.title ?? copy.noSectionSelected}>
             <ToolIcon name="list" />
-            <span>{activeOutlineItem ? `Section ${activeOutlineItem.number} ${activeOutlineItem.title}` : "No section"}</span>
+            <span>{activeOutlineItem ? copy.sectionLabel(activeOutlineItem.number, activeOutlineItem.title) : copy.noSection}</span>
           </div>
         )}
         <div className="typeset-editor-context" aria-live="polite">
-          {linkedPdfLine != null && <span className="typeset-sync-chip">PDF line {linkedPdfLine}</span>}
-          {dirty && <span className="typeset-stale-chip">PDF needs recompile</span>}
+          {linkedPdfLine != null && <span className="typeset-sync-chip">{copy.pdfLineChip(linkedPdfLine)}</span>}
+          {dirty && <span className="typeset-stale-chip">{copy.pdfNeedsRecompile}</span>}
           <span className="typeset-interaction-hint">
             {safeCompiledVisual
-              ? "Select objects · drag to move · double-click to edit"
+              ? copy.interactionHintSafeVisual
               : mode === "visual"
-                ? "Click to edit · double-click to locate in PDF"
-                : "Double-click source to locate in PDF"}
+                ? copy.interactionHintVisual
+                : copy.interactionHintCode}
           </span>
         </div>
-        <div className="typeset-visual-mode-switch editor-switch" role="tablist" aria-label="Editor mode">
-          <button type="button" role="tab" aria-selected={mode === "code"} className={mode === "code" ? "active" : ""} onClick={() => onModeChange("code")}>Code</button>
-          <button type="button" role="tab" aria-selected={mode === "visual"} className={mode === "visual" ? "active" : ""} onClick={() => onModeChange("visual")}>Visual</button>
+        <div className="typeset-visual-mode-switch editor-switch" role="tablist" aria-label={copy.editorModeLabel}>
+          <button type="button" role="tab" aria-selected={mode === "code"} className={mode === "code" ? "active" : ""} onClick={() => onModeChange("code")}>{copy.code}</button>
+          <button type="button" role="tab" aria-selected={mode === "visual"} className={mode === "visual" ? "active" : ""} onClick={() => onModeChange("visual")}>{copy.visual}</button>
         </div>
       </div>
       {citationPickerOpen && (
@@ -6088,6 +6113,8 @@ function scrollCodeEditorToLine(view: EditorView, line: number): void {
 }
 
 export default function Typeset() {
+  const language = useStore((state) => state.language);
+  const copy = TYPESET_EDITOR_COPY[language].workbench;
   const currentProject = useStore((state) => state.currentProject);
   const setTypesetDirty = useStore((state) => state.setTypesetDirty);
   const pendingTypesetFilePath = useStore((state) => state.pendingTypesetFilePath);
@@ -6285,7 +6312,7 @@ export default function Typeset() {
 
   const synchronizeBibliography = useCallback(async () => {
     const activeSourcePath = sourcePathRef.current;
-    if (!activeSourcePath) throw new Error("Open a LaTeX source file before inserting a library citation.");
+    if (!activeSourcePath) throw new Error(copy.openSourceBeforeCitation);
     const bibliography = await literatureExportBibliography<{ content: string }>({ format: "bibtex" });
     const bibliographyPath = bibliographyPathForSource(activeSourcePath);
     const managedContent = `${SOMNIQ_BIBLIOGRAPHY_HEADER}${bibliography.content}`;
@@ -6297,9 +6324,7 @@ export default function Typeset() {
       // are caught by the subsequent write/create operation.
     }
     if (existing && !existing.content.startsWith(SOMNIQ_BIBLIOGRAPHY_HEADER)) {
-      throw new Error(
-        `${SOMNIQ_BIBLIOGRAPHY_FILE} already exists and is not SomniQ-managed; it was left unchanged to protect your bibliography.`,
-      );
+      throw new Error(copy.bibAlreadyExists(SOMNIQ_BIBLIOGRAPHY_FILE));
     }
     try {
       await fileWriteText(bibliographyPath, managedContent);
@@ -6341,7 +6366,7 @@ export default function Typeset() {
     let active = true;
     const timer = window.setTimeout(() => {
       void synchronizeBibliography().catch((syncError) => {
-        if (active) setError(`Could not synchronize ${SOMNIQ_BIBLIOGRAPHY_FILE}: ${String(syncError)}`);
+        if (active) setError(copy.couldNotSyncBibliography(SOMNIQ_BIBLIOGRAPHY_FILE, String(syncError)));
       });
     }, 150);
     return () => {
@@ -6394,7 +6419,7 @@ export default function Typeset() {
       currentPath
       && currentFile
       && draftRef.current !== currentFile.content
-      && !window.confirm(`Discard unsaved changes in ${basename(currentPath)} and open ${basename(path)}?`)
+      && !window.confirm(copy.discardUnsavedChangesOpen(basename(currentPath), basename(path)))
     ) {
       return false;
     }
@@ -6594,7 +6619,7 @@ export default function Typeset() {
           setLoaded(diskFile);
           resetDraft(diskFile.content);
           setSourcePath(diskFile.path);
-          setError(`${basename(savePath)} changed outside SomniQ Studio, so the editor was refreshed before compiling.`);
+          setError(copy.fileChangedOutside(basename(savePath)));
           return diskFile;
         }
       }
@@ -6726,7 +6751,7 @@ export default function Typeset() {
   const saveCurrentEditor = useCallback(() => {
     if (!loaded || draftRef.current === loaded.content) return;
     if (activeCompileRunIdRef.current) {
-      setError("The current compile is still reading the project. Wait for it to finish or cancel it before saving.");
+      setError(copy.compileStillReading);
       return;
     }
     // The Beamer compiled-visual editor renders the built PDF, so its Save has
@@ -6877,7 +6902,7 @@ export default function Typeset() {
   // all real, visible-to-the-user reasons the jump didn't happen.
   const jumpToPdfForLine = useCallback((line: number, column: number) => {
     if (!sourcePath || !previewPath) {
-      setForwardSearchNotice("Compile the PDF before jumping to it.");
+      setForwardSearchNotice(copy.compileBeforeJumping);
       return;
     }
     void latexForwardSearch(sourcePath, previewPath, line, column)
@@ -6887,7 +6912,7 @@ export default function Typeset() {
           setPdfForwardTarget({ location, nonce: Date.now() });
           setForwardSearchNotice(null);
         } else {
-          setForwardSearchNotice("No PDF match for this line yet — recompile and try again.");
+          setForwardSearchNotice(copy.noPdfMatchForLine);
         }
       })
       .catch((forwardError) => {
@@ -6917,7 +6942,7 @@ export default function Typeset() {
   }, [forwardSearchNotice]);
 
   const returnToStart = useCallback(() => {
-    if (dirty && !window.confirm("Discard unsaved changes and return to the source list?")) {
+    if (dirty && !window.confirm(copy.discardReturnToList)) {
       return;
     }
     void scanProject();
@@ -7163,9 +7188,9 @@ export default function Typeset() {
     <div className={`typeset-workbench ide-redesign-main${browserPreviewMode ? " browser-preview" : ""}`}>
       {browserPreviewMode && (
         <div className="typeset-runtime-banner" role="status">
-          <strong>Browser preview</strong>
-          <span>Sample data only</span>
-          <em>Desktop mode uses local files and local compilation.</em>
+          <strong>{copy.browserPreview}</strong>
+          <span>{copy.sampleDataOnly}</span>
+          <em>{copy.desktopModeHint}</em>
         </div>
       )}
       <div
@@ -7173,14 +7198,14 @@ export default function Typeset() {
         style={gridStyle}
       >
         {hasWorkspaceDocument && (
-          <nav className="typeset-rail ide-rail" aria-label="Typeset sections">
+          <nav className="typeset-rail ide-rail" aria-label={copy.typesetSectionsLabel}>
             <div className="ide-rail-tabs-nav">
               <div className="ide-rail-tabs-wrapper">
                 <button
                   type="button"
                   className={`ide-rail-tab-link${effectiveProjectPanelVisible ? " open-rail active" : ""}`}
-                  title={effectiveProjectPanelVisible ? "Hide Project files" : "Show Project files"}
-                  aria-label={effectiveProjectPanelVisible ? "Hide Project files" : "Show Project files"}
+                  title={effectiveProjectPanelVisible ? copy.hideProjectFiles : copy.showProjectFiles}
+                  aria-label={effectiveProjectPanelVisible ? copy.hideProjectFiles : copy.showProjectFiles}
                   aria-pressed={effectiveProjectPanelVisible}
                   onClick={() => {
                     if (slideFocusActive) {
@@ -7196,8 +7221,8 @@ export default function Typeset() {
                 <button
                   type="button"
                   className={`ide-rail-tab-link${effectivePdfPanelVisible ? " open-rail active" : ""}`}
-                  title={effectivePdfPanelVisible ? "Hide PDF panel" : "Show PDF panel"}
-                  aria-label={effectivePdfPanelVisible ? "Hide PDF panel" : "Show PDF panel"}
+                  title={effectivePdfPanelVisible ? copy.hidePdfPanel : copy.showPdfPanel}
+                  aria-label={effectivePdfPanelVisible ? copy.hidePdfPanel : copy.showPdfPanel}
                   aria-pressed={effectivePdfPanelVisible}
                   onClick={() => {
                     if (slideFocusActive) {
@@ -7214,15 +7239,15 @@ export default function Typeset() {
                   type="button"
                   className="ide-rail-tab-link"
                   disabled={saving || compileStatus === "running"}
-                  title="Back to source list"
-                  aria-label="Home"
+                  title={copy.backToSourceList}
+                  aria-label={copy.home}
                   onClick={returnToStart}
                 >
                   <ToolIcon name="home" className="ide-rail-tab-link-icon" />
                 </button>
               </div>
-              <nav aria-label="Settings">
-                <button type="button" className="ide-rail-tab-link" title="Settings" aria-label="Settings">
+              <nav aria-label={copy.settingsLabel}>
+                <button type="button" className="ide-rail-tab-link" title={copy.settingsLabel} aria-label={copy.settingsLabel}>
                   <ToolIcon name="settings" className="ide-rail-tab-link-icon" />
                 </button>
               </nav>
@@ -7269,12 +7294,12 @@ export default function Typeset() {
                   className="typeset-resize-handle project"
                   data-resize-panel="project"
                   role="separator"
-                  aria-label="Resize Project files"
+                  aria-label={copy.resizeProjectFiles}
                   aria-orientation="vertical"
                   aria-valuemin={PROJECT_PANEL_MIN_W}
                   aria-valuemax={PROJECT_PANEL_MAX_W}
                   aria-valuenow={projectPanelWidth}
-                  title="Drag to resize Project files"
+                  title={copy.dragResizeProjectFiles}
                   tabIndex={0}
                   onPointerDown={(event) => beginPanelResizeFromPointer("project", event)}
                   onKeyDown={(event) => handlePanelResizeKey("project", event)}
@@ -7283,7 +7308,7 @@ export default function Typeset() {
                 </div>
               </>
             )}
-            <section className={`typeset-editor-pane ide-redesign-editor-container ${editorMode === "visual" ? "visual-mode" : "code-mode"}`} aria-label="Source editor">
+            <section className={`typeset-editor-pane ide-redesign-editor-container ${editorMode === "visual" ? "visual-mode" : "code-mode"}`} aria-label={copy.sourceEditorLabel}>
               {loaded && (
                 <TypesetEditorToolbar
                   activeOutlineItem={activeOutlineItem}
@@ -7315,7 +7340,7 @@ export default function Typeset() {
               )}
               {error && <div className="typeset-error-bar">{error}</div>}
               {loading && !previewPath ? (
-                <div className="typeset-empty">Loading source...</div>
+                <div className="typeset-empty">{copy.loadingSource}</div>
               ) : loaded ? (
                 <>
                   <div
@@ -7380,7 +7405,7 @@ export default function Typeset() {
                 </>
               ) : (
                 <div className="typeset-empty">
-                  {previewPath ? "PDF is open in the side panel." : "Create or open a .tex file."}
+                  {previewPath ? copy.pdfOpenInSidePanel : copy.createOrOpenTex}
                 </div>
               )}
             </section>
@@ -7390,12 +7415,12 @@ export default function Typeset() {
                   className="typeset-resize-handle pdf"
                   data-resize-panel="pdf"
                   role="separator"
-                  aria-label="Resize PDF preview"
+                  aria-label={copy.resizePdfPreview}
                   aria-orientation="vertical"
                   aria-valuemin={PDF_PANEL_MIN_W}
                   aria-valuemax={PDF_PANEL_MAX_W}
                   aria-valuenow={pdfPanelWidth}
-                  title="Drag to resize PDF preview"
+                  title={copy.dragResizePdfPreview}
                   tabIndex={0}
                   onPointerDown={(event) => beginPanelResizeFromPointer("pdf", event)}
                   onKeyDown={(event) => handlePanelResizeKey("pdf", event)}

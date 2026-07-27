@@ -187,8 +187,9 @@ pub fn export_manifest(spec: &SweepSpec) -> Result<String, String> {
             .map_err(|e| e.to_string())?;
         out.push_str(&format!("  - name: run-{i:03}\n"));
         out.push_str(&format!(
-            "    cmd: papermill {} {}/{}/gpu-out-{i:03}.ipynb -y '{}'\n",
+            "    cmd: papermill {} {}/{}/{}/gpu-out-{i:03}.ipynb -y '{}'\n",
             spec.notebook,
+            layout::PROJECT_DATA_DIR,
             layout::EXPERIMENTS_DIR,
             layout::RUNS_SUBDIR,
             params_json

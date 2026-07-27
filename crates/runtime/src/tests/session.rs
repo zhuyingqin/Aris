@@ -1,8 +1,13 @@
 use super::{ContentBlock, ConversationMessage, MessageRole, Session, SessionCompactionRecord};
 use crate::get_compact_continuation_message;
 use crate::usage::TokenUsage;
-use std::fs;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    fs,
+    io::Write,
+    sync::{Arc, Barrier},
+    thread,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 #[test]
 fn logical_messages_restore_compacted_history_without_internal_continuations() {
@@ -168,6 +173,107 @@ fn appends_new_messages_to_event_log_without_rewriting_snapshot() {
     assert_eq!(events.matches("\"kind\":\"session_message\"").count(), 2);
     let restored = Session::load_from_path(&path).expect("session restores from events");
     assert_eq!(restored, session);
+
+    fs::remove_file(path).expect("remove manifest");
+    fs::remove_file(event_path).expect("remove event log");
+}
+
+#[test]
+fn restores_and_repairs_event_logs_with_malformed_telemetry_rows() {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time should be after epoch")
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!("runtime-session-repair-{nanos}.json"));
+    let event_path = path.with_extension("events.jsonl");
+    let mut session = Session::new();
+    session
+        .messages
+        .push(ConversationMessage::user_text("before repair"));
+    session.save_to_path(&path).expect("initial save");
+
+    let mut event_file = fs::OpenOptions::new()
+        .append(true)
+        .open(&event_path)
+        .expect("open event log");
+    writeln!(
+        event_file,
+        r#"{{"version":1,"seq":99,"kind":"assistant_delta","payload":{{"text":"telemetry"}}}}"#
+    )
+    .expect("write valid telemetry");
+    // Matches the failure mode of two independent JSONL writes interleaving:
+    // neither fragment is a valid complete JSON document.
+    writeln!(event_file, r#"{{{{"version":1,"kind":"assistant_delta"}}"#)
+        .expect("write malformed first fragment");
+    writeln!(event_file, r#""payload":{{"text":"orphan"}}}}"#)
+        .expect("write malformed second fragment");
+    event_file.flush().expect("flush telemetry");
+    drop(event_file);
+
+    let before_repair = Session::load_from_path(&path).expect("malformed telemetry is ignored");
+    assert_eq!(before_repair, session);
+
+    session
+        .messages
+        .push(ConversationMessage::assistant(vec![ContentBlock::Text {
+            text: "after repair".to_string(),
+        }]));
+    session.save_to_path(&path).expect("save repairs event log");
+
+    let repaired = fs::read_to_string(&event_path).expect("read repaired event log");
+    assert!(repaired.contains(r#""kind":"assistant_delta""#));
+    assert!(!repaired.contains("orphan"));
+    for line in repaired.lines().filter(|line| !line.trim().is_empty()) {
+        let value = serde_json::from_str::<serde_json::Value>(line)
+            .expect("every repaired event row is valid JSON");
+        assert!(value.is_object(), "event rows must be JSON objects");
+    }
+    let restored = Session::load_from_path(&path).expect("session restores after repair");
+    assert_eq!(restored, session);
+
+    fs::remove_file(path).expect("remove manifest");
+    fs::remove_file(event_path).expect("remove event log");
+}
+
+#[test]
+fn concurrent_session_saves_leave_a_parseable_event_log() {
+    const WRITERS: usize = 8;
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time should be after epoch")
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!("runtime-session-concurrent-{nanos}.json"));
+    let start = Arc::new(Barrier::new(WRITERS));
+    let mut writers = Vec::new();
+
+    for index in 0..WRITERS {
+        let path = path.clone();
+        let start = Arc::clone(&start);
+        writers.push(thread::spawn(move || {
+            let mut session = Session::new();
+            session
+                .messages
+                .push(ConversationMessage::user_text(format!("writer {index}")));
+            start.wait();
+            session.save_to_path(&path)
+        }));
+    }
+    for writer in writers {
+        writer
+            .join()
+            .expect("writer thread should not panic")
+            .expect("concurrent session save should succeed");
+    }
+
+    let event_path = path.with_extension("events.jsonl");
+    let events = fs::read_to_string(&event_path).expect("event log");
+    for line in events.lines().filter(|line| !line.trim().is_empty()) {
+        let value = serde_json::from_str::<serde_json::Value>(line)
+            .expect("concurrent writes must not interleave JSON rows");
+        assert!(value.is_object(), "event rows must be JSON objects");
+    }
+    let restored = Session::load_from_path(&path).expect("concurrent event log restores");
+    assert_eq!(restored.messages.len(), 1);
 
     fs::remove_file(path).expect("remove manifest");
     fs::remove_file(event_path).expect("remove event log");

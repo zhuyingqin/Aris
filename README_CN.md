@@ -285,8 +285,6 @@ Playwright 预设时不需要自己安装 Node.js / npm。默认预设使用 Mic
 - **💬 桌面 Chat** —— 流式工具调用、有序输出、markdown、会话历史、`@` 文件提及，以及 reasoning/"thinking" 内容；会话按项目持久化。
 - **🔄 对抗式 Review** —— `LlmReview` 走 Settings 中的 reviewer，executor 与 reviewer 可以是不同 provider 的不同模型。
 - **📚 内置 Skills** —— 在 Skills 页浏览，或在 Chat 中通过 slash skill 调用。
-- **🧩 Workflow Studio** —— 在可视化画布上设计智能体团队工作流，底层基于 SomniQ DSL。
-- **📊 运行监控** —— 启动 / 暂停 / 恢复 / 取消运行，实时查看 phase、agent、event、task、mailbox。
 - **📎 PDF 附件** —— SomniQ 通过 `read_file` 读取文本型 PDF，可直接审本地论文（文本提取，非 OCR）。
 - **🗂️ 多项目** —— 在顶部切换项目，各自独立的 sessions、runs、agents、workflows。
 - **🔒 本地优先** —— 配置与运行数据都留在你的机器上。
@@ -326,8 +324,6 @@ Playwright 预设时不需要自己安装 Node.js / npm。默认预设使用 Mic
 # 文献调研：
 /research-lit diffusion model 做蛋白质设计的最新工作
 ```
-
-跑工作流：在 **Workflow Studio** 设计并保存计划，再到 **运行监控** 启动并实时观察。
 
 ---
 
@@ -401,7 +397,7 @@ SomniQ Studio 采用「一个内核、多个外壳」的本地优先架构：所
 | `crates/api/` | Anthropic HTTP/SSE 客户端与 OAuth |
 | `crates/executor/` | Provider 流式执行层 —— Anthropic 与 OpenAI 兼容请求 / 流解析，归一化为 runtime 事件（Executor 与 Reviewer 双模型都走这里）|
 | `crates/chat/` | 共享 chat 装配层 —— 从 config 解析 provider，构造 executor、工具表、权限策略与系统提示词 |
-| `crates/tools/` | 内核工具注册表（约 50 个）—— 文件 / shell、Web、文献检索（Scopus / OpenAlex / arXiv）、文献库 / 知识库 / Studio 库写入、Notebook 执行、LaTeX 编译、agent / 团队 / 工作流协调 |
+| `crates/tools/` | 内核工具注册表（约 50 个）—— 文件 / shell、Web、文献检索（Scopus / OpenAlex / arXiv）、文献库 / 知识库、Notebook 执行、LaTeX 编译、agent / 团队 / 工作流协调 |
 | `crates/commands/` | 斜杠命令定义与解析 |
 | `crates/notebook/` | Jupyter 内核客户端（ZMQ + nbformat）—— Lab 的执行底座 |
 | `crates/remote-protocol/` | 手机远程控制的端到端加密协议原语（X25519 / Ed25519 / ChaCha20-Poly1305）|
@@ -412,8 +408,8 @@ SomniQ Studio 采用「一个内核、多个外壳」的本地优先架构：所
 
 | 路径 | 作用 |
 |------|------|
-| `desktop/src/` | React UI —— Chat、Lab（Jupyter / MATLAB 实验 + 终端）、Typeset（Overleaf 式 LaTeX 编辑 + 编译）、Literature（文献库 + 引用图谱 + 知识审核）、Studio（讲稿 / 海报审阅）、Mail（Gmail / Outlook）、Extensions、Scheduled、Settings 九个工作表面，外加登录与会话列表 |
-| `desktop/src-tauri/` | Tauri 桌面后端 —— `engine`（chat 执行桥）、`lab` / `typeset` / `literature` / `knowledge` / `studio` / `mail` / `scheduled` / `terminal` 各表面命令、`newapi`（托管登录）、`remote`（远程配对）、`mcp` / `connectors`、`watcher` / `usage_log` |
+| `desktop/src/` | React UI —— Chat、Lab（Jupyter / MATLAB 实验 + 终端）、Typeset（Overleaf 式 LaTeX 编辑 + 编译）、Literature（文献库 + 引用图谱 + 知识审核）、Mail（Gmail / Outlook）、Extensions、Scheduled、Settings 八个工作表面，外加登录与会话列表 |
+| `desktop/src-tauri/` | Tauri 桌面后端 —— `engine`（chat 执行桥）、`lab` / `typeset` / `literature` / `knowledge` / `mail` / `scheduled` / `terminal` 各表面命令、`newapi`（托管登录）、`remote`（远程配对）、`mcp` / `connectors`、`watcher` / `usage_log` |
 
 **远程服务（可选，自托管）：**
 
@@ -445,7 +441,7 @@ cargo test -p runtime reads_pdf      # PDF 读取测试（仓库根目录）
 
 - [x] **P0** —— 桌面 shell（Tauri 2 + React + Vite）：Chat、Settings、Sessions、Skills
 - [x] **P0** —— 共享 `runtime` / `executor` / `tools` / `chat` / `commands` crate（不耦合 `aris-cli`）
-- [x] **P1** —— Workflow Studio、运行监控、多项目工作区、PDF 自动 Review 附件
+- [x] **P1** —— 多项目工作区、PDF 自动 Review 附件
 - [ ] **P2** —— 生成前端 ⇄ Rust 类型契约，减少 schema 漂移
 - [ ] **P2** —— macOS / Linux 桌面打包
 - [ ] **P2** —— 更丰富的 team/agent 监控与工作流模板

@@ -1,6 +1,8 @@
 import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
 
 import MarkdownContent from "../chat/MarkdownContent";
+import { useStore } from "../store";
+import { LAB_COPY } from "./i18n";
 import type { CellOutput } from "./labTypes";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -112,6 +114,8 @@ export function AnsiText({ text, className }: { text: string; className?: string
 // running locally), so we render them as-is.
 
 function RichData({ data }: { data: Record<string, unknown> }) {
+  const language = useStore((s) => s.language);
+  const copy = LAB_COPY[language];
   const html = outputText(data["text/html"]);
   if (html.trim()) return <div className="lab-out-html" dangerouslySetInnerHTML={{ __html: html }} />;
 
@@ -119,10 +123,10 @@ function RichData({ data }: { data: Record<string, unknown> }) {
   if (svg.trim()) return <div className="lab-out-svg" dangerouslySetInnerHTML={{ __html: svg }} />;
 
   const png = outputText(data["image/png"]);
-  if (png) return <img className="lab-out-img" src={`data:image/png;base64,${png}`} alt="cell output" />;
+  if (png) return <img className="lab-out-img" src={`data:image/png;base64,${png}`} alt={copy.cellOutputAlt} />;
 
   const jpeg = outputText(data["image/jpeg"]);
-  if (jpeg) return <img className="lab-out-img" src={`data:image/jpeg;base64,${jpeg}`} alt="cell output" />;
+  if (jpeg) return <img className="lab-out-img" src={`data:image/jpeg;base64,${jpeg}`} alt={copy.cellOutputAlt} />;
 
   const markdown = outputText(data["text/markdown"]);
   if (markdown.trim()) {
@@ -178,6 +182,8 @@ const OUTPUT_CAP_PX = 420;
  * blow out the notebook scroll. Re-measures on every streamed output change.
  */
 export function OutputGroup({ outputs }: { outputs: CellOutput[] }) {
+  const language = useStore((s) => s.language);
+  const copy = LAB_COPY[language];
   const bodyRef = useRef<HTMLDivElement>(null);
   const [overflowing, setOverflowing] = useState(false);
   const [expanded, setExpanded] = useState(false);
@@ -198,7 +204,7 @@ export function OutputGroup({ outputs }: { outputs: CellOutput[] }) {
       </div>
       {overflowing && (
         <button type="button" className="lab-out-toggle" onClick={() => setExpanded((value) => !value)}>
-          {expanded ? "Collapse output" : "Show full output"}
+          {expanded ? copy.collapseOutput : copy.showFullOutput}
         </button>
       )}
     </div>

@@ -62,7 +62,6 @@ pub mod literature;
 pub mod notebook;
 pub mod pdf_rag;
 pub mod runs;
-pub mod studio;
 pub mod sweep;
 mod team_state;
 mod workflow_state;
@@ -224,7 +223,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             description: concat!(
                 "Write a complete text file in the workspace. Use write_file for new files, full replacements, or generated content with little continuity from an existing file; read the target first before overwriting an existing path. ",
                 "For incremental edits to existing files, prefer edit_file; do not use write_file, append_file, shell redirection, heredocs, or scripts for small localized changes. ",
-                "Place generated artifacts in canonical project folders: slide/PPT/PDF deck outputs under slides/, posters under poster/, interactive web apps under web/<name>/ with index.html plus local CSS/assets, source notebooks under notebooks/, run artifacts under experiments/runs/, and scratch/temp/cache files under .somniq/tmp/. ",
+                "Place application-generated artifacts under .somniq/: papers under .somniq/papers/, slide/PPT/PDF deck outputs under .somniq/slides/, posters under .somniq/poster/, interactive web apps under .somniq/web/<name>/ with index.html plus local CSS/assets, source notebooks under .somniq/notebooks/, run artifacts under .somniq/experiments/runs/, and scratch/temp/cache files under .somniq/tmp/. Preserve a user-specified existing path in place. ",
                 "When the user asks to modify an existing/current artifact, reuse the existing path and update it in place; do not create sibling version files such as _v2, _new, _final, or timestamped copies unless explicitly requested. ",
                 "Keep content under 24000 characters in a single call; for longer generated files, write a small scaffold, append chunks with append_file, and verify the final file."
             ),
@@ -244,7 +243,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             description: concat!(
                 "Append one text chunk to a workspace file without returning the full file. Use append_file mainly for long generated artifacts after a small write_file scaffold; do not use it for localized edits to existing files. ",
                 "For existing/current artifacts, append only to the identified existing path and do not create a new versioned sibling unless explicitly requested. ",
-                "Keep generated artifacts in the same canonical folders as write_file: slides/, poster/, web/<name>/, notebooks/, experiments/runs/, or .somniq/tmp/ for scratch/temp/cache files. ",
+                "Keep generated artifacts in the same internal folders as write_file: .somniq/papers/, .somniq/slides/, .somniq/poster/, .somniq/web/<name>/, .somniq/notebooks/, .somniq/experiments/runs/, or .somniq/tmp/. ",
                 "Keep content under 24000 characters; after chunked writes, verify the final file with read_file, line counts, tests, or compilation as appropriate."
             ),
             input_schema: json!({
@@ -532,7 +531,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "LiteratureLibraryUpsert",
-            description: "Compatibility-only refresh of the `papers/library.json` projection. Every supplied paper must already exist in the canonical literature store under its canonical id; this tool rejects untracked records and never creates a search or imports raw results. LiteratureSearch already persists and projects its results, so normally this tool is unnecessary.",
+            description: "Compatibility-only refresh of the `.somniq/papers/library.json` projection. Every supplied paper must already exist in the canonical literature store under its canonical id; this tool rejects untracked records and never creates a search or imports raw results. LiteratureSearch already persists and projects its results, so normally this tool is unnecessary.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -559,7 +558,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "LiteraturePdfDownload",
-            description: "Download a paper PDF into the project's papers/ directory (verifies the response is a real PDF). When paperId is given, the paper's pdf status and stage are updated in papers/library.json.",
+            description: "Download a paper PDF into `.somniq/papers/` (verifies the response is a real PDF). When paperId is given, the paper's pdf status and stage are updated in `.somniq/papers/library.json`.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -654,23 +653,6 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                     }
                 },
                 "required": ["points"],
-                "additionalProperties": false
-            }),
-            required_permission: PermissionMode::WorkspaceWrite,
-        },
-        ToolSpec {
-            name: "StudioLibraryUpsert",
-            description: "Record externally generated slide decks, posters, and interactive HTML pages in the project's shared Studio review index (studio/library.json). Studio also auto-discovers viewable outputs from slides/, poster/, and web/, so this tool is for richer metadata and direct links rather than mandatory registration. Existing user title, pinned state, notes, and page-specific review feedback are preserved when generated metadata is refreshed. The result returns studioLinks; include the relevant link in the final response so the user can jump directly to the generated artifact in Studio.",
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "artifacts": {
-                        "type": "array",
-                        "items": { "type": "object" },
-                        "description": "Generated artifact records with kind (slides, poster, or web) and at least one result path (pdfPath, pptxPath, svgPath, texPath, or htmlPath). Use htmlPath for interactive web artifacts."
-                    }
-                },
-                "required": ["artifacts"],
                 "additionalProperties": false
             }),
             required_permission: PermissionMode::WorkspaceWrite,
@@ -1357,8 +1339,6 @@ pub fn execute_tool_with_cancel_and_progress_with_context(
             .and_then(knowledge::run_knowledge_search),
         "KnowledgeUpsert" => from_value::<knowledge::KnowledgeUpsertInput>(input)
             .and_then(knowledge::run_knowledge_upsert),
-        "StudioLibraryUpsert" => from_value::<studio::StudioLibraryUpsertInput>(input)
-            .and_then(studio::run_studio_library_upsert),
         "LaTeXCompile" => from_value::<LatexCompileInput>(input)
             .and_then(|input| run_latex_compile(input, should_cancel, &mut on_progress)),
         "LaTeXRender" => from_value::<LatexRenderInput>(input)
@@ -3421,34 +3401,6 @@ fn parse_skill_frontmatter(dir_name: &str, content: &str, path: std::path::PathB
         allowed_tools,
         path,
     }
-}
-
-/// Render a system prompt section listing all available skills.
-pub fn render_skill_discovery_section() -> Option<String> {
-    let skills = discover_skills();
-    if skills.is_empty() {
-        return None;
-    }
-
-    let mut lines = vec![
-        "# Available skills".to_string(),
-        String::new(),
-        "The following skills are available via the Skill tool. Invoke with `/skill-name` or via the Skill tool.".to_string(),
-        String::new(),
-    ];
-
-    for skill in &skills {
-        let desc = skill.description.as_deref().unwrap_or("No description");
-        // Truncate description to 200 chars (char-safe for CJK)
-        let desc_short: String = desc.chars().take(200).collect();
-        let hint = skill
-            .argument_hint
-            .as_deref()
-            .map_or(String::new(), |h| format!(" {h}"));
-        lines.push(format!("- `/{}{hint}` — {}", skill.name, desc_short));
-    }
-
-    Some(lines.join("\n"))
 }
 
 const DEFAULT_AGENT_MODEL: &str = "claude-opus-4-8";
@@ -6752,16 +6704,6 @@ fn reviewer_stream_observer(cancelled: Option<Arc<AtomicBool>>) -> Box<dyn Strea
         || Box::new(NoopStreamObserver) as Box<dyn StreamObserver>,
         |cancelled| Box::new(ReviewerCancelObserver { cancelled }) as Box<dyn StreamObserver>,
     )
-}
-
-/// Execute the configured Reviewer while preserving provider usage for callers
-/// that own audit and billing logs. The ordinary `LlmReview` tool still returns
-/// only the review text for backwards compatibility.
-pub fn execute_llm_review_observed(
-    prompt: String,
-    model: Option<String>,
-) -> Result<LlmReviewRun, String> {
-    run_llm_review_observed(LlmReviewInput { prompt, model }, None)
 }
 
 /// Execute a Reviewer request that can be cancelled by the owning desktop

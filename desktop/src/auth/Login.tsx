@@ -7,9 +7,10 @@ import {
 } from "../api/tauri";
 import appLogo from "../assets/app-logo.png";
 import DesktopWindowControls from "../DesktopWindowControls";
-import { DEFAULT_AUTH_SERVER, useStore } from "../store";
+import { DEFAULT_AUTH_SERVER, useStore, type Language } from "../store";
 import { formatUserFacingError } from "../errorMessage";
 import { DreamScene, LoginBackdrop } from "./LoginScene";
+import { LOGIN_COPY } from "./i18n";
 import "./login.css";
 
 // Self-contained sign-in screen shown before the app shell when the user has
@@ -40,14 +41,16 @@ function readAffCode(): string | undefined {
   }
 }
 
-function errorMessage(error: unknown) {
-  return formatUserFacingError(error, "cn");
+function errorMessage(error: unknown, language: Language) {
+  return formatUserFacingError(error, language);
 }
 
 export default function Login() {
   const login = useStore((s) => s.login);
   const register = useStore((s) => s.register);
   const storedServer = useStore((s) => s.authServer);
+  const language = useStore((s) => s.language);
+  const copy = LOGIN_COPY[language];
   const [mode, setMode] = useState<AuthMode>("login");
   const resolvedServer = useMemo(() => trimServer(storedServer), [storedServer]);
   const [authStatus, setAuthStatus] = useState<NewApiAuthStatus | null>(null);
@@ -78,7 +81,7 @@ export default function Login() {
         .catch((err) => {
           if (!cancelled) {
             setAuthStatus(null);
-            setStatusError(`无法读取服务器注册配置：${errorMessage(err)}`);
+            setStatusError(copy.fetchStatusFailed(errorMessage(err, language)));
           }
         })
         .finally(() => {
@@ -89,7 +92,7 @@ export default function Login() {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [resolvedServer]);
+  }, [resolvedServer, copy, language]);
 
   useEffect(() => {
     if (codeCooldown <= 0) return;
@@ -105,10 +108,10 @@ export default function Login() {
   const legalRequired = Boolean(authStatus?.userAgreementEnabled || authStatus?.privacyPolicyEnabled);
   const tabs: Array<[AuthMode, string]> = showRegisterTab
     ? [
-        ["login", "登录"],
-        ["register", "注册"],
+        ["login", copy.tabLogin],
+        ["register", copy.tabRegister],
       ]
-    : [["login", "登录"]];
+    : [["login", copy.tabLogin]];
 
   useEffect(() => {
     if (authStatus && !registerSupported && mode === "register") {
@@ -128,11 +131,11 @@ export default function Login() {
     setError(null);
     setNotice(null);
     if (!email.trim()) {
-      setError("请先输入邮箱");
+      setError(copy.errorEmailRequired);
       return;
     }
     if (turnstileRequired) {
-      setError("当前服务器开启了人机验证，请先在网页端完成注册");
+      setError(copy.errorTurnstileRequired);
       return;
     }
     setCodeBusy(true);
@@ -141,10 +144,10 @@ export default function Login() {
         baseUrl: resolvedServer,
         email: email.trim(),
       });
-      setNotice("验证码已发送，请检查邮箱");
+      setNotice(copy.noticeCodeSent);
       setCodeCooldown(30);
     } catch (err) {
-      setError(errorMessage(err));
+      setError(errorMessage(err, language));
     } finally {
       setCodeBusy(false);
     }
@@ -159,26 +162,26 @@ export default function Login() {
     try {
       if (mode === "register") {
         if (!authStatus) {
-          throw new Error("正在读取服务器注册配置，请稍后");
+          throw new Error(copy.errorStatusLoading);
         }
         if (!registerSupported) {
-          throw new Error("当前服务器未开放账号密码注册");
+          throw new Error(copy.errorRegisterNotSupported);
         }
         if (turnstileRequired) {
-          throw new Error("当前服务器开启了人机验证，请先在网页端完成注册");
+          throw new Error(copy.errorTurnstileRequired);
         }
         if (password !== confirmPassword) {
-          throw new Error("两次输入的密码不一致");
+          throw new Error(copy.errorPasswordMismatch);
         }
         if (password.length < 8 || password.length > 20) {
-          throw new Error("密码长度需要为 8-20 位");
+          throw new Error(copy.errorPasswordLength);
         }
         if (legalRequired && !legalAccepted) {
-          throw new Error("请先同意相关条款");
+          throw new Error(copy.errorLegalRequired);
         }
         if (needsEmailVerification) {
-          if (!email.trim()) throw new Error("请输入邮箱");
-          if (!verificationCode.trim()) throw new Error("请输入验证码");
+          if (!email.trim()) throw new Error(copy.errorEmailRequiredShort);
+          if (!verificationCode.trim()) throw new Error(copy.errorVerificationCodeRequired);
         }
         await register(resolvedServer, username.trim(), password, {
           email: needsEmailVerification ? email.trim() : undefined,
@@ -189,15 +192,15 @@ export default function Login() {
         setPassword("");
         setConfirmPassword("");
         setVerificationCode("");
-        setNotice("注册成功，请登录");
+        setNotice(copy.noticeRegisterSuccess);
       } else {
         if (!passwordLoginEnabled) {
-          throw new Error("当前服务器未开放账号密码登录");
+          throw new Error(copy.errorPasswordLoginNotSupported);
         }
         await login(resolvedServer, username.trim(), password);
       }
     } catch (err) {
-      setError(errorMessage(err));
+      setError(errorMessage(err, language));
     } finally {
       setBusy(false);
     }
@@ -211,8 +214,8 @@ export default function Login() {
         <div className="sq-login-hero" aria-hidden="true">
           <DreamScene />
           <div className="sq-tagline">
-            <div className="sq-tagline-main">睡梦中科研 · 灵感出鞘</div>
-            <div className="sq-tagline-sub">RESEARCH NEVER SLEEPS — IT DREAMS.</div>
+            <div className="sq-tagline-main">{copy.taglineMain}</div>
+            <div className="sq-tagline-sub">{copy.taglineSub}</div>
           </div>
         </div>
 
@@ -222,7 +225,7 @@ export default function Login() {
             <div>
               <div className="sq-brand-name">SomniQ Studio</div>
               <div className="sq-brand-sub">
-                {mode === "register" ? "创建 New API 账号" : "登录以继续"}
+                {mode === "register" ? copy.brandSubRegister : copy.brandSubLogin}
               </div>
             </div>
           </div>
@@ -231,7 +234,7 @@ export default function Login() {
             className="sq-tabs sq-field"
             style={{ ...field(1), gridTemplateColumns: `repeat(${tabs.length}, minmax(0, 1fr))` }}
             role="tablist"
-            aria-label="认证方式"
+            aria-label={copy.authMethodAriaLabel}
           >
             {tabs.map(([value, text]) => (
               <button
@@ -252,59 +255,59 @@ export default function Login() {
           </div>
 
           <div className="sq-field" style={field(2)}>
-            <div className="sq-label">账号</div>
+            <div className="sq-label">{copy.accountLabel}</div>
             <input
               className="sq-input"
               value={username}
               autoFocus
               autoComplete="username"
               onChange={(e) => setUsername(e.target.value)}
-              placeholder="用户名"
+              placeholder={copy.usernamePlaceholder}
             />
           </div>
 
           <div className="sq-field" style={field(3)}>
-            <div className="sq-label">密码</div>
+            <div className="sq-label">{copy.passwordLabel}</div>
             <input
               className="sq-input"
               type="password"
               value={password}
               autoComplete={mode === "register" ? "new-password" : "current-password"}
               onChange={(e) => setPassword(e.target.value)}
-              placeholder={mode === "register" ? "8-20 位密码" : "密码"}
+              placeholder={mode === "register" ? copy.passwordPlaceholderRegister : copy.passwordPlaceholderLogin}
             />
           </div>
 
           {mode === "register" && (
             <>
               <div className="sq-field" style={field(0)}>
-                <div className="sq-label">确认密码</div>
+                <div className="sq-label">{copy.confirmPasswordLabel}</div>
                 <input
                   className="sq-input"
                   type="password"
                   value={confirmPassword}
                   autoComplete="new-password"
                   onChange={(e) => setConfirmPassword(e.target.value)}
-                  placeholder="再次输入密码"
+                  placeholder={copy.confirmPasswordPlaceholder}
                 />
               </div>
 
               {needsEmailVerification && (
                 <>
                   <div className="sq-field" style={field(1)}>
-                    <div className="sq-label">邮箱</div>
+                    <div className="sq-label">{copy.emailLabel}</div>
                     <input
                       className="sq-input"
                       type="email"
                       value={email}
                       autoComplete="email"
                       onChange={(e) => setEmail(e.target.value)}
-                      placeholder="name@example.com"
+                      placeholder={copy.emailPlaceholder}
                     />
                   </div>
 
                   <div className="sq-field" style={field(2)}>
-                    <div className="sq-label">验证码</div>
+                    <div className="sq-label">{copy.verificationCodeLabel}</div>
                     <div style={{ display: "flex", gap: 8 }}>
                       <input
                         className="sq-input"
@@ -312,7 +315,7 @@ export default function Login() {
                         autoComplete="one-time-code"
                         spellCheck={false}
                         onChange={(e) => setVerificationCode(e.target.value)}
-                        placeholder="邮箱验证码"
+                        placeholder={copy.verificationCodePlaceholder}
                       />
                       <button
                         type="button"
@@ -320,7 +323,7 @@ export default function Login() {
                         onClick={sendVerificationCode}
                         disabled={codeBusy || codeCooldown > 0 || !email.trim() || turnstileRequired}
                       >
-                        {codeCooldown > 0 ? `${codeCooldown}s` : codeBusy ? "发送中" : "发送"}
+                        {codeCooldown > 0 ? copy.sendCodeCooldown(codeCooldown) : codeBusy ? copy.sendingCode : copy.sendCode}
                       </button>
                     </div>
                   </div>
@@ -334,19 +337,19 @@ export default function Login() {
                     checked={legalAccepted}
                     onChange={(e) => setLegalAccepted(e.target.checked)}
                   />
-                  我已阅读并同意服务条款和隐私政策
+                  {copy.legalAgreement}
                 </label>
               )}
 
               {turnstileRequired && (
                 <div role="alert" className="sq-alert sq-alert-warn">
-                  当前服务器开启了人机验证，请在网页端注册后返回登录。
+                  {copy.turnstileNotice}
                   <button
                     type="button"
                     className="sq-linkbtn"
                     onClick={() => void openExternalUrl(`${resolvedServer}/sign-up`)}
                   >
-                    打开网页注册
+                    {copy.openWebRegister}
                   </button>
                 </div>
               )}
@@ -372,7 +375,13 @@ export default function Login() {
           )}
 
           <button type="submit" className="sq-btn sq-field" style={field(4)} disabled={submitDisabled}>
-            {busy ? (mode === "register" ? "注册中..." : "登录中...") : mode === "register" ? "创建账号" : "登录"}
+            {busy
+              ? mode === "register"
+                ? copy.submitRegistering
+                : copy.submitLoggingIn
+              : mode === "register"
+                ? copy.submitRegister
+                : copy.submitLogin}
           </button>
         </form>
       </div>

@@ -196,11 +196,16 @@ pub fn context_compaction_threshold_for_model(model: &str) -> usize {
         // ~1M window → compact near the top, reserving ~150k for prompt+output.
         850_000
     } else if m.contains("gpt-5") || m.contains("gpt-4.1") {
-        // GPT-5.5/5.6-compatible proxies may advertise a much larger raw
-        // window, but the configured agentic route is roughly 300k. Keep the
-        // budget below that ceiling, reserving ~60k for the system prompt,
-        // tool schemas, and output.
-        240_000
+        // Measured against the new-api gateway with gpt-5.6-luna (needle test,
+        // 2026-07-25): 329,863 and 358,708 prompt tokens are accepted with the
+        // needle at the head of the conversation still recalled verbatim, while
+        // ~395k and ~450k are rejected — consistent with a 400k total window
+        // shared by input, reasoning, and output. The wall is on tokens, not
+        // request bytes: the 450k rejection carried a *smaller* body (1.34 MB)
+        // than the 330k request that passed (1.4 MB). Budget sits below the
+        // measured pass point, leaving room for `max_tokens_for_model` (16,384),
+        // reasoning tokens, and the ~4.4k prefix this route injects per request.
+        350_000
     } else if m.contains("kimi-k3") {
         // Kimi K3 exposes a 1M-token window. Reserve sufficient room for the
         // system prompt, tool schemas, and a long completion.
@@ -246,8 +251,9 @@ pub fn context_window_for_model(model: &str) -> usize {
         // ~1M window.
         1_000_000
     } else if m.contains("gpt-5") || m.contains("gpt-4.1") {
-        // GPT-5.x/4.1 agentic proxy route is ~300k.
-        300_000
+        // 400k total window, measured (see the budget above) rather than
+        // assumed from the proxy route.
+        400_000
     } else if m.contains("kimi-k3") {
         // Kimi K3 exposes a 1M-token window.
         1_000_000
