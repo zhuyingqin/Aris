@@ -43,7 +43,7 @@ use crossterm::{
 use init::initialize_repo;
 use render::{MarkdownStreamState, Spinner, TerminalRenderer};
 #[cfg(test)]
-use runtime::AssistantEvent;
+use runtime::{AssistantEvent, ConversationMessage, TokenUsage};
 use runtime::{
     clear_oauth_credentials, format_compact_report, format_cost_report, format_status_report,
     generate_pkce_pair, generate_state, load_system_prompt, parse_oauth_callback_request_target,
