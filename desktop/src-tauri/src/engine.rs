@@ -1952,10 +1952,10 @@ fn full_output_note(artifact: Option<&ToolOutputArtifact>) -> String {
 
 fn compact_literature_search_output(output: String) -> String {
     const MAX_ABSTRACT: usize = 250;
-    // The LLM records results by copying this array into LiteratureLibraryUpsert,
-    // so the cap also bounds how many papers reach the library per search. Keep
-    // it generous enough for a comprehensive Scopus/OpenAlex-led sweep while the
-    // trimmed abstracts hold the context cost down.
+    // LiteratureSearch persists its full bounded result set before this
+    // presentation compaction. Keep enough samples for Chat reasoning while
+    // trimming abstracts only affects the transcript, never the SearchRun or
+    // canonical library projection.
     const MAX_PAPERS: usize = 30;
 
     let Ok(mut root) = serde_json::from_str::<serde_json::Value>(&output) else {
@@ -4526,6 +4526,15 @@ fn review_required_for_turn(user_text: &str, summary: &runtime::TurnSummary) -> 
     consequential_request && verification_tool
 }
 
+fn should_run_independent_review(
+    ephemeral: bool,
+    review_enabled: bool,
+    user_text: &str,
+    summary: &runtime::TurnSummary,
+) -> bool {
+    !ephemeral && review_enabled && review_required_for_turn(user_text, summary)
+}
+
 fn review_tool_trace(summary: &runtime::TurnSummary) -> String {
     let mut lines = Vec::new();
     for message in &summary.assistant_messages {
@@ -5764,7 +5773,12 @@ async fn run_chat_turn_with_context(
         let mut reviewer_usages = Vec::new();
         let mut review_revision_count = 0usize;
         let mut text = aris_chat::final_assistant_text(&summary);
-        if !ephemeral && review_required_for_turn(&worker_user_text, &summary) {
+        if should_run_independent_review(
+            ephemeral,
+            crate::config::review_enabled(),
+            &worker_user_text,
+            &summary,
+        ) {
             let mut trace_sections = vec![review_tool_trace(&summary)];
             let mut evidence_sections =
                 vec![review_materialized_evidence(&summary, &worker_workspace)];
@@ -6651,6 +6665,9 @@ fn resolve_summarizer_config(
                 api_key,
                 base_url: base_url
                     .unwrap_or_else(|| aris_chat::DEFAULT_OPENAI_BASE_URL.to_string()),
+                // The summary model is a separate (usually small) model with no
+                // probed capability of its own; keep the inferred default.
+                transport: aris_executor::OpenAiTransport::default(),
             }
         }
     };

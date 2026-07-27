@@ -977,6 +977,94 @@
   border-color: transparent;
 }
 
+/* Reproducible retrieval: the Desktop is the confirmation and audit surface;
+   network execution remains in the shared tools/runtime path. */
+.lit-protocol-panel {
+  flex: 0 0 auto;
+  max-height: 320px;
+  overflow: auto;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-1);
+}
+
+.lit-protocol-heading,
+.lit-protocol-heading > div,
+.lit-protocol-confirm,
+.lit-protocol-run,
+.lit-protocol-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.lit-protocol-heading {
+  justify-content: space-between;
+  margin-bottom: 9px;
+}
+
+.lit-protocol-heading > div { align-items: baseline; }
+.lit-protocol-heading span,
+.lit-protocol-summary span,
+.lit-protocol-source small,
+.lit-protocol-progress,
+.lit-protocol-run span { color: var(--text-dim); font-size: 11px; }
+
+.lit-protocol-form {
+  display: grid;
+  grid-template-columns: minmax(180px, 1.2fr) minmax(180px, 1.2fr) minmax(120px, .8fr) minmax(170px, 1fr) auto;
+  gap: 7px;
+  align-items: center;
+}
+
+.lit-protocol-form input,
+.lit-protocol-confirm input,
+.lit-protocol-confirm select,
+.lit-protocol-form textarea {
+  min-width: 0;
+  font: inherit;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 6px 8px;
+}
+
+.lit-protocol-form details { grid-column: 1 / -1; color: var(--text-dim); font-size: 12px; }
+.lit-protocol-form summary { cursor: pointer; }
+.lit-protocol-form textarea { width: calc(50% - 5px); min-height: 42px; margin: 7px 6px 0 0; resize: vertical; }
+.lit-protocol-form .primary { justify-self: end; }
+
+.lit-protocol-preview { display: grid; gap: 8px; }
+.lit-protocol-summary { display: flex; gap: 8px; align-items: baseline; }
+.lit-protocol-plan { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 6px; }
+.lit-protocol-source { display: grid; gap: 3px; padding: 7px 8px; border: 1px solid var(--border); border-radius: 5px; }
+.lit-protocol-source.unavailable { border-color: var(--red); opacity: .8; }
+.lit-protocol-source code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg-2); font-size: 11px; }
+.lit-protocol-confirm { flex-wrap: wrap; padding-top: 2px; }
+.lit-protocol-confirm label { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-dim); }
+.lit-protocol-confirm input[aria-label="恢复运行 ID"] { width: 180px; }
+
+.lit-protocol-progress,
+.lit-protocol-run,
+.lit-protocol-record-preview {
+  flex-wrap: wrap;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+.lit-protocol-progress span,
+.lit-protocol-run span { padding-right: 8px; border-right: 1px solid var(--border); }
+.lit-protocol-run strong { font-size: 12px; }
+.lit-protocol-record-preview { display: grid; gap: 3px; font-size: 12px; }
+.lit-protocol-record-preview span { color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lit-protocol-error { white-space: pre-wrap; margin-top: 8px; color: var(--red); font-size: 12px; }
+
+@media (max-width: 1100px) {
+  .lit-protocol-form { grid-template-columns: 1fr 1fr; }
+  .lit-protocol-form .primary { justify-self: start; }
+}
+
 .lit-card-star.starred .svg-icon {
   fill: currentColor;
 }
@@ -4200,4 +4288,83 @@ kbd {
   justify-content: center;
   font-size: 12px;
   padding: 6px 12px;
+}
+
+/* ======================================================================
+   Motion pass — entrance transitions. Timing/easing match the shared
+   sq-* pass in styles.css; disabled under prefers-reduced-motion.
+   ====================================================================== */
+
+/* Library cards rise in on first render / after a search refresh. The
+   stagger is capped at the first eight cards so long lists stay snappy. */
+.lit-card {
+  animation: sq-fade-up 0.26s ease both;
+}
+
+.lit-card:nth-child(1) { animation-delay: 0.02s; }
+.lit-card:nth-child(2) { animation-delay: 0.05s; }
+.lit-card:nth-child(3) { animation-delay: 0.08s; }
+.lit-card:nth-child(4) { animation-delay: 0.11s; }
+.lit-card:nth-child(5) { animation-delay: 0.14s; }
+.lit-card:nth-child(6) { animation-delay: 0.17s; }
+.lit-card:nth-child(7) { animation-delay: 0.20s; }
+.lit-card:nth-child(n+8) { animation-delay: 0.23s; }
+.lit-source-query-editor {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 8px;
+}
+
+.lit-source-query-editor label,
+.lit-review-create label {
+  display: grid;
+  gap: 4px;
+}
+
+.lit-source-query-editor span,
+.lit-review-create label > span {
+  color: var(--text-dim);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.lit-review-new-task {
+  align-items: center;
+  background: transparent;
+  border: 1px dashed var(--border);
+  border-radius: 7px;
+  color: var(--text-dim);
+  cursor: pointer;
+  display: flex;
+  gap: 7px;
+  margin: 4px 8px 7px;
+  padding: 7px 9px;
+  width: calc(100% - 16px);
+}
+
+.lit-review-new-task:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.lit-screen-run {
+  background: color-mix(in srgb, var(--bg-2) 82%, var(--accent) 18%);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  display: grid;
+  gap: 6px;
+  padding: 9px 10px;
+}
+
+.lit-screen-run > span,
+.lit-screen-run-chunks span {
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.lit-screen-run-chunks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
 }

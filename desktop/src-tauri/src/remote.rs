@@ -92,10 +92,17 @@ const MAX_REMOTE_CHAT_RICH_STREAM_BYTES: usize = 1024 * 1024;
 /// One durable desktop event must always fit in a bounded sync batch. This
 /// prevents a single unusually large provider delta from pinning the cursor.
 const MAX_REMOTE_CHAT_EVENT_CONTENT_BYTES: usize = 64 * 1024;
+/// Tool cards are rendered in the mobile browser on every progress batch.
+/// Keep their previews substantially smaller than prose so a research turn
+/// with many large fetch results cannot stall the paired client.
+const MAX_REMOTE_CHAT_TOOL_INPUT_BYTES: usize = 16 * 1024;
+const MAX_REMOTE_CHAT_TOOL_OUTPUT_BYTES: usize = 12 * 1024;
 /// Secure envelopes encode ciphertext as JSON/base64. Keep plaintext event
 /// batches well below the 256 KiB relay and WebRTC frame ceiling.
 const MAX_REMOTE_CHAT_EVENT_BATCH_BYTES: usize = 160 * 1024;
 const MAX_REMOTE_CHAT_EVENT_ERROR_BYTES: usize = 8 * 1024;
+const REMOTE_CHAT_TOOL_OUTPUT_TRUNCATION_NOTICE: &str =
+    "\n\n[Remote preview truncated; full tool output remains available on Desktop.]";
 const MAX_REMOTE_CHAT_IDEMPOTENCY_ENTRIES: usize = 128;
 const REMOTE_CHAT_IDEMPOTENCY_TTL_MILLIS: u64 = 10 * 60 * 1_000;
 const PAIRING_TTL_MILLIS: u64 = 5 * 60 * 1_000;
@@ -3754,6 +3761,19 @@ fn truncate_remote_chat_event_text(text: &str, maximum: usize) -> String {
     text[..end].to_string()
 }
 
+fn truncate_remote_chat_tool_output(text: &str) -> String {
+    if text.len() <= MAX_REMOTE_CHAT_TOOL_OUTPUT_BYTES {
+        return text.to_string();
+    }
+    let preview_bytes = MAX_REMOTE_CHAT_TOOL_OUTPUT_BYTES
+        .saturating_sub(REMOTE_CHAT_TOOL_OUTPUT_TRUNCATION_NOTICE.len());
+    format!(
+        "{}{}",
+        truncate_remote_chat_event_text(text, preview_bytes),
+        REMOTE_CHAT_TOOL_OUTPUT_TRUNCATION_NOTICE
+    )
+}
+
 fn bounded_remote_chat_session_message_event(event: ChatMessageEvent) -> ChatMessageEvent {
     match event {
         ChatMessageEvent::TextDelta { delta } => ChatMessageEvent::TextDelta {
@@ -3771,7 +3791,7 @@ fn bounded_remote_chat_session_message_event(event: ChatMessageEvent) -> ChatMes
                 truncate_remote_chat_event_text(&value, MAX_REMOTE_CHAT_EVENT_ERROR_BYTES)
             }),
             name: truncate_remote_chat_event_text(&name, MAX_REMOTE_CHAT_EVENT_ERROR_BYTES),
-            input: truncate_remote_chat_event_text(&input, MAX_REMOTE_CHAT_EVENT_CONTENT_BYTES),
+            input: truncate_remote_chat_event_text(&input, MAX_REMOTE_CHAT_TOOL_INPUT_BYTES),
         },
         ChatMessageEvent::ToolProgress {
             tool_use_id,
@@ -3809,10 +3829,30 @@ fn bounded_remote_chat_session_message_event(event: ChatMessageEvent) -> ChatMes
                 truncate_remote_chat_event_text(&value, MAX_REMOTE_CHAT_EVENT_ERROR_BYTES)
             }),
             name: truncate_remote_chat_event_text(&name, MAX_REMOTE_CHAT_EVENT_ERROR_BYTES),
-            output: truncate_remote_chat_event_text(&output, MAX_REMOTE_CHAT_EVENT_CONTENT_BYTES),
+            output: truncate_remote_chat_tool_output(&output),
             is_error,
         },
     }
+}
+
+fn remote_chat_review_status(payload: &Value) -> Option<String> {
+    let phase = payload.get("phase")?.as_str()?;
+    let attempt = payload.get("attempt").and_then(Value::as_u64);
+    let max_revisions = payload.get("maxRevisions").and_then(Value::as_u64);
+    let round = match (attempt, max_revisions) {
+        (Some(attempt), Some(max_revisions)) if attempt > 0 && max_revisions > 0 => {
+            format!(" (round {attempt}/{max_revisions})")
+        }
+        _ => String::new(),
+    };
+    let status = match phase {
+        "reviewing" => format!("Independent review in progress{round}."),
+        "result" => "Independent review returned findings; preparing the next step.".to_string(),
+        "revising" => "Applying independent-review findings.".to_string(),
+        "complete" => "Independent review complete; preparing the final response.".to_string(),
+        _ => return None,
+    };
+    Some(status)
 }
 
 fn remote_chat_session_event(
@@ -3875,6 +3915,16 @@ fn remote_chat_session_event(
                 MAX_REMOTE_CHAT_EVENT_ERROR_BYTES,
             ),
         }),
+        // The full review payload may include private evidence and internal
+        // instructions. Remote clients receive only an activity-style status
+        // so a long independent review is visibly alive without widening the
+        // paired-device data surface.
+        "independent_review" => Some(ChatSessionEvent::Assistant {
+            seq: entry.seq,
+            event: ChatMessageEvent::ThinkingDelta {
+                delta: remote_chat_review_status(&entry.payload)?,
+            },
+        }),
         "reset" => Some(ChatSessionEvent::Reset { seq: entry.seq }),
         _ => None,
     }
@@ -3919,8 +3969,15 @@ fn remote_chat_event_batch(
 
     let mut events = Vec::new();
     let mut event_bytes = 0usize;
-    for entry in entries[start_index..].iter().take(usize::from(limit)) {
+    for entry in &entries[start_index..] {
         if let Some(event) = remote_chat_session_event(entry, session_id) {
+            // `limit` is the requested number of visible events. Durable
+            // session snapshots are intentionally invisible to the paired
+            // device, so they must not consume the page and strand `done`
+            // behind an empty reconnect response.
+            if events.len() >= usize::from(limit) {
+                break;
+            }
             let serialized_bytes =
                 serde_json::to_vec(&event).map_or(usize::MAX, |value| value.len());
             if serialized_bytes > MAX_REMOTE_CHAT_EVENT_BATCH_BYTES.saturating_sub(event_bytes) {
@@ -3975,6 +4032,7 @@ async fn remote_chat_events_result(
             "chat-tool",
             "chat-tool-progress",
             "chat-tool-result",
+            "chat-review",
             "chat-done",
             "chat-error",
         ] {

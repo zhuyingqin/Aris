@@ -16,6 +16,8 @@ const apiMocks = vi.hoisted(() => ({
   skillsList: vi.fn(() => Promise.resolve([])),
   chatRunCommand: vi.fn(),
   chatSuggestTitle: vi.fn(() => Promise.resolve("Concise title")),
+  configGet: vi.fn(() => Promise.resolve({ reviewEnabled: true })),
+  configSet: vi.fn((patch: { reviewEnabled?: boolean }) => Promise.resolve({ reviewEnabled: patch.reviewEnabled ?? true })),
   projectBriefGet: vi.fn(() => Promise.resolve({ mission: "Test project mission", goal: null })),
   projectIntentObserve: vi.fn(() => Promise.resolve({ mission: "Test project mission", intent: null, goal: null })),
   projectGoalProgress: vi.fn(() => Promise.resolve({ mission: "Test project mission", goal: null })),
@@ -204,6 +206,19 @@ describe("Chat export action", () => {
     await userEvent.click(screen.getByRole("button", { name: "Collapse project summary" }));
     await waitFor(() => expect(document.getElementById("project-brief-popover")).toBeNull());
     expect(document.querySelector(".chat-root")?.classList.contains("chat-project-brief-open")).toBe(false);
+  });
+
+  it("persists the automatic review toggle from the project summary", async () => {
+    render(<Chat />);
+
+    const toggle = await screen.findByRole("switch", { name: "Toggle automatic review" });
+    expect(toggle.getAttribute("aria-checked")).toBe("true");
+
+    await userEvent.click(toggle);
+
+    await waitFor(() => expect(apiMocks.configSet).toHaveBeenCalledWith({ reviewEnabled: false }));
+    await waitFor(() => expect(toggle.getAttribute("aria-checked")).toBe("false"));
+    expect(screen.getByText("Future chat turns will skip the automatic Reviewer")).toBeTruthy();
   });
 
   it("keeps the main task visible beside a hideable, extensible side-task panel", async () => {

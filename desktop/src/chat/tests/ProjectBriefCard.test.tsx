@@ -39,6 +39,8 @@ describe("ProjectBriefCard", () => {
         brief={brief}
         language="cn"
         onHide={vi.fn()}
+        reviewEnabled
+        onReviewEnabledChange={vi.fn()}
       />,
     );
 
@@ -57,10 +59,30 @@ describe("ProjectBriefCard", () => {
         brief={brief}
         language="cn"
         onHide={onHide}
+        reviewEnabled
+        onReviewEnabledChange={vi.fn()}
       />,
     );
 
     fireEvent.click(screen.getByLabelText("收回项目摘要"));
     expect(onHide).toHaveBeenCalledTimes(1);
+  });
+
+  it("lets the user disable automatic review from the project summary", () => {
+    const onReviewEnabledChange = vi.fn();
+    render(
+      <ProjectBriefCard
+        brief={brief}
+        language="cn"
+        onHide={vi.fn()}
+        reviewEnabled
+        onReviewEnabledChange={onReviewEnabledChange}
+      />,
+    );
+
+    const toggle = screen.getByRole("switch", { name: "切换自动审核" });
+    expect(toggle.getAttribute("aria-checked")).toBe("true");
+    fireEvent.click(toggle);
+    expect(onReviewEnabledChange).toHaveBeenCalledWith(false);
   });
 });

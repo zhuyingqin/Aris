@@ -15,6 +15,7 @@ mod hooks;
 mod hot_memory;
 mod json;
 mod knowledge_memory;
+pub mod literature;
 mod mcp;
 mod mcp_client;
 mod mcp_stdio;
@@ -32,6 +33,7 @@ mod reports;
 pub mod sandbox;
 mod session;
 mod session_index;
+pub mod skill_registry;
 mod usage;
 
 pub use atomic_file::write_replace as write_file_atomically;
@@ -86,6 +88,14 @@ pub use hot_memory::{
 pub use knowledge_memory::{
     load_knowledge_memory_catalog, migrate_legacy_knowledge_memory, render_knowledge_memory_prompt,
     KnowledgeMemoryEntry,
+};
+pub use literature::{
+    canonical_record_id, literature_root_for, normalized_record_title, open_literature_store_at,
+    CanonicalRecord, CanonicalRecordUpsert, CitationLocator, DecisionActor, EvidenceCard,
+    EvidenceStrength, LegacyImportReport, LiteratureStore, RawArtifact, RecordFieldConflict,
+    RecordIdentifiers, RecordObservation, RecordProvenance, ScreenDecision, ScreeningOutcome,
+    SearchProtocol, SearchProtocolDraft, SearchRun, SearchRunStatus, SourceAttempt,
+    SourceAttemptStatus, LITERATURE_DIRECTORY, LITERATURE_SCHEMA_VERSION,
 };
 pub use mcp::{
     mcp_server_signature, mcp_tool_name, mcp_tool_prefix, normalize_name_for_mcp,
@@ -168,6 +178,10 @@ pub use session::{
 pub use session_index::{
     index_session, search_sessions, sessions_dir_from_env, sync_sessions_dir, SessionBrowseEntry,
     SessionSearchHit, SessionSearchMessage, SessionSearchResult,
+};
+pub use skill_registry::{
+    activated_canonical_skill_name, registered_literature_skill, RegisteredSkillResolution,
+    SkillLifecycle, SkillRegistryEntry, LITERATURE_SKILL_REGISTRY,
 };
 pub use usage::{
     format_usd, pricing_for_model, ModelPricing, TokenUsage, UsageCostEstimate, UsageTracker,

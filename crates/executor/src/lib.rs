@@ -18,7 +18,10 @@ use std::sync::Arc;
 
 mod openai;
 
-pub use openai::{resolve_openai_executor_config, OpenAIExecutorConfig, OpenAIRuntimeClient};
+pub use openai::{
+    chat_requires_responses_transport, resolve_openai_executor_config, set_transport_verdict_hook,
+    responses_transport_unsupported, OpenAIExecutorConfig, OpenAIRuntimeClient, OpenAiTransport,
+};
 
 #[derive(Debug, Clone)]
 pub struct ExecutorToolSpec {

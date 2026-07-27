@@ -579,3 +579,41 @@
   text-align: center;
   padding: 32px 0;
 }
+
+/* ======================================================================
+   Motion pass — entrance & hover transitions. Timing/easing match the
+   shared sq-* pass in styles.css; disabled under prefers-reduced-motion.
+   ====================================================================== */
+
+.kb-view-tab {
+  transition: border-color 0.12s ease, color 0.12s ease, background 0.12s ease;
+}
+
+/* Fragment and review cards rise in as the queue renders them. */
+.kb-fragment-card,
+.kb-card,
+.kb-confirmed-card {
+  animation: sq-fade-up 0.26s ease both;
+  transition: border-color 0.14s ease, box-shadow 0.14s ease;
+}
+
+.kb-fragment-card:hover {
+  border-color: color-mix(in srgb, var(--accent) 38%, var(--border));
+  box-shadow: 0 8px 22px color-mix(in srgb, #000 14%, transparent);
+}
+
+.kb-card-actions button,
+.kb-edit-actions button,
+.kb-graph-toggle,
+.kb-graph-zoom-btn {
+  transition: border-color 0.12s ease, color 0.12s ease, background 0.12s ease;
+}
+
+/* Knowledge-graph nodes highlight smoothly on hover. */
+.kb-graph-node {
+  transition: border-color 0.16s ease, box-shadow 0.16s ease;
+}
+
+.kb-graph-node:hover {
+  border-color: var(--accent);
+}

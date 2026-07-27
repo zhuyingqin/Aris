@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import {
+  configGet,
+  configSet,
   isTauri,
   projectBriefGet,
   type ProjectBriefView,
@@ -37,6 +39,9 @@ export function useProjectBrief(projectId?: string | null) {
   const id = projectId ?? "default";
   const [brief, setBrief] = useState<ProjectBriefView | null>(null);
   const [preference, setPreference] = useState<ProjectBriefPreference>(() => loadPreference(id));
+  const [reviewEnabled, setReviewEnabledState] = useState(true);
+  const [reviewSaving, setReviewSaving] = useState(false);
+  const [reviewError, setReviewError] = useState<string | null>(null);
 
   const refresh = useCallback(() => {
     if (!isTauri()) return Promise.resolve(null);
@@ -53,6 +58,21 @@ export function useProjectBrief(projectId?: string | null) {
     setBrief(null);
     void refresh();
   }, [id, refresh]);
+
+  useEffect(() => {
+    if (!isTauri()) return;
+    let active = true;
+    void configGet()
+      .then((config) => {
+        if (active) setReviewEnabledState(config.reviewEnabled !== false);
+      })
+      .catch((error) => {
+        if (active) setReviewError(String(error));
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   useEffect(() => {
     const listener = () => void refresh();
@@ -72,11 +92,33 @@ export function useProjectBrief(projectId?: string | null) {
     });
   }, [id]);
 
+  const setReviewEnabled = useCallback(async (enabled: boolean) => {
+    setReviewSaving(true);
+    setReviewError(null);
+    if (!isTauri()) {
+      setReviewEnabledState(enabled);
+      setReviewSaving(false);
+      return;
+    }
+    try {
+      const config = await configSet({ reviewEnabled: enabled });
+      setReviewEnabledState(config.reviewEnabled !== false);
+    } catch (error) {
+      setReviewError(String(error));
+    } finally {
+      setReviewSaving(false);
+    }
+  }, []);
+
   return {
     brief,
     hidden: preference.hidden,
+    reviewEnabled,
+    reviewSaving,
+    reviewError,
     refresh,
     setHidden: (hidden: boolean) => updatePreference({ hidden }),
+    setReviewEnabled,
   };
 }
 
@@ -94,6 +136,12 @@ const COPY = {
     active: "进行中",
     paused: "已暂停",
     complete: "已完成",
+    review: "自动审核",
+    reviewOn: "已开启",
+    reviewOff: "已关闭",
+    reviewToggle: "切换自动审核",
+    reviewHintOn: "实质性任务完成后由独立 Reviewer 核验",
+    reviewHintOff: "后续聊天将跳过自动 Reviewer",
   },
   en: {
     title: "Project summary",
@@ -108,6 +156,12 @@ const COPY = {
     active: "Active",
     paused: "Paused",
     complete: "Complete",
+    review: "Automatic review",
+    reviewOn: "On",
+    reviewOff: "Off",
+    reviewToggle: "Toggle automatic review",
+    reviewHintOn: "An independent Reviewer checks substantive completed work",
+    reviewHintOff: "Future chat turns will skip the automatic Reviewer",
   },
 } satisfies Record<Language, Record<string, string>>;
 
@@ -138,10 +192,18 @@ export default function ProjectBriefCard({
   brief,
   language,
   onHide,
+  reviewEnabled,
+  reviewSaving,
+  reviewError,
+  onReviewEnabledChange,
 }: {
   brief: ProjectBriefView;
   language: Language;
   onHide: () => void;
+  reviewEnabled: boolean;
+  reviewSaving?: boolean;
+  reviewError?: string | null;
+  onReviewEnabledChange: (enabled: boolean) => void;
 }) {
   const copy = COPY[language];
   const labels = language === "cn"
@@ -172,6 +234,28 @@ export default function ProjectBriefCard({
             <rect x="3.5" y="4" width="17" height="16" rx="2.5" />
             <path d="M15.5 4v16M11.5 9l-3 3 3 3" />
           </svg>
+        </button>
+      </div>
+      <div className="project-brief-review-control">
+        <div className="project-brief-review-copy">
+          <strong>{copy.review}</strong>
+          <small>{reviewEnabled ? copy.reviewHintOn : copy.reviewHintOff}</small>
+          {reviewError && <small className="project-brief-review-error" role="alert">{reviewError}</small>}
+        </div>
+        <button
+          type="button"
+          role="switch"
+          className={`project-brief-review-switch${reviewEnabled ? " enabled" : ""}`}
+          aria-checked={reviewEnabled}
+          aria-label={copy.reviewToggle}
+          title={reviewEnabled ? copy.reviewOn : copy.reviewOff}
+          disabled={reviewSaving}
+          onClick={() => onReviewEnabledChange(!reviewEnabled)}
+        >
+          <span className="project-brief-review-switch-track" aria-hidden="true">
+            <span />
+          </span>
+          <span>{reviewSaving ? "…" : reviewEnabled ? copy.reviewOn : copy.reviewOff}</span>
         </button>
       </div>
       <div className="project-brief-body">

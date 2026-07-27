@@ -799,6 +799,10 @@ export default function Chat() {
             brief={projectBrief.brief}
             language={language}
             onHide={() => projectBrief.setHidden(true)}
+            reviewEnabled={projectBrief.reviewEnabled}
+            reviewSaving={projectBrief.reviewSaving}
+            reviewError={projectBrief.reviewError}
+            onReviewEnabledChange={(enabled) => void projectBrief.setReviewEnabled(enabled)}
           />
         </aside>
       )}

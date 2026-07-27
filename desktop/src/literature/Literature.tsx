@@ -1,6 +1,13 @@
 import { Fragment, lazy, Suspense, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { literatureLlm } from "../api/tauri";
+import {
+  isTauri,
+  literatureLlm,
+  literatureProtocolCreate,
+  literatureProtocolExecute,
+  literatureProtocolPreview,
+  onLiteratureSearchProgress,
+} from "../api/tauri";
 import { useStore } from "../store";
 import { SvgIcon, type SvgIconName } from "../SvgIcon";
 import type { LiteraturePageView } from "./LiteratureViewTabs";
@@ -10,6 +17,8 @@ import {
   type LiteratureLibrary,
   type LiteraturePaper,
   type LiteratureReviewTask,
+  type LiteratureScreenRun,
+  type LiteratureSearch,
   type PaperFit,
   type PaperStage,
   type ScreeningDecision,
@@ -182,6 +191,261 @@ function sortPapers(papers: LiteraturePaper[], sort: SortKey) {
       sorted.sort((a, b) => b.addedAt.localeCompare(a.addedAt));
   }
   return sorted;
+}
+
+type ProtocolPlanItem = {
+  source: string;
+  query: string;
+  adapterStatus: string;
+  coverageNote?: string;
+  quotaPolicy?: string;
+};
+
+type ProtocolPreview = {
+  protocol: { id: string; question: string; scope: string; timeWindow: string };
+  plan: ProtocolPlanItem[];
+  defaultMaxResults: number;
+  maximumMaxResults: number;
+  fullExport?: { note?: string };
+};
+
+type ProtocolRun = {
+  id: string;
+  status: string;
+  sourceAttempts: Array<{
+    source: string;
+    status: string;
+    hitCount?: number;
+    returnedCount: number;
+    failureMessage?: string;
+    coverageNote?: string;
+  }>;
+};
+
+type ProtocolRecordPreview = {
+  id: string;
+  title: string;
+  authors: string[];
+  year?: number;
+  venue: string;
+  source: string;
+};
+
+type ProtocolExecuteResult = {
+  searchRun: ProtocolRun;
+  warnings: string[];
+  recordPreview?: ProtocolRecordPreview[];
+};
+
+function LiteratureProtocolPanel({
+  onLibraryRefresh,
+}: {
+  onLibraryRefresh: () => Promise<void>;
+}) {
+  const [question, setQuestion] = useState("");
+  const [scope, setScope] = useState("");
+  const [query, setQuery] = useState("");
+  const [sourceQueries, setSourceQueries] = useState<Record<string, string>>({});
+  const [sources, setSources] = useState("openalex, crossref, semantic-scholar, arxiv");
+  const [include, setInclude] = useState("");
+  const [exclude, setExclude] = useState("");
+  const [maxResults, setMaxResults] = useState(20);
+  const [preview, setPreview] = useState<ProtocolPreview | null>(null);
+  const [run, setRun] = useState<ProtocolRun | null>(null);
+  const [recordPreview, setRecordPreview] = useState<ProtocolRecordPreview[]>([]);
+  const [progress, setProgress] = useState<Array<{ source?: string; phase?: string; message?: string }>>([]);
+  const [resumeRunId, setResumeRunId] = useState("");
+  const [confirmed, setConfirmed] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!isTauri()) return undefined;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void onLiteratureSearchProgress((event) => {
+      if (disposed || !event || typeof event !== "object") return;
+      const value = event as { source?: unknown; phase?: unknown; message?: unknown };
+      setProgress((items) => [...items, {
+        source: typeof value.source === "string" ? value.source : undefined,
+        phase: typeof value.phase === "string" ? value.phase : undefined,
+        message: typeof value.message === "string" ? value.message : undefined,
+      }].slice(-12));
+    }).then((stop) => {
+      if (disposed) stop();
+      else unlisten = stop;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+
+  const sourceList = () => Array.from(new Set(sources.split(",")
+    .map((source) => source.trim().toLowerCase())
+    .filter(Boolean)));
+  const criteria = (value: string) => value.split("\n").map((item) => item.trim()).filter(Boolean);
+
+  const previewProtocol = async () => {
+    const normalizedQuestion = question.trim();
+    const selectedSources = sourceList();
+    if (!normalizedQuestion || selectedSources.length === 0) {
+      setError("请输入研究问题，并至少选择一个数据源。");
+      return;
+    }
+    if (!isTauri()) {
+      setError("可复现检索需要 Desktop 后端。");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    setRun(null);
+    setRecordPreview([]);
+    setConfirmed(false);
+    try {
+      const effectiveQuery = query.trim() || normalizedQuestion;
+      const created = await literatureProtocolCreate<{ protocol: { id: string } }>({
+        question: normalizedQuestion,
+        scope: scope.trim(),
+        timeWindow: "",
+        databases: selectedSources,
+        queries: Object.fromEntries(selectedSources.map((source) => [
+          source,
+          sourceQueries[source]?.trim() || effectiveQuery,
+        ])),
+        inclusionCriteria: criteria(include),
+        exclusionCriteria: criteria(exclude),
+        knownKeyPapers: [],
+      });
+      const nextPreview = await literatureProtocolPreview<ProtocolPreview>(created.protocol.id);
+      setPreview(nextPreview);
+      setProgress([]);
+    } catch (cause) {
+      setError(`无法创建检索协议：${String(cause)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const executeProtocol = async () => {
+    if (!preview || !confirmed || busy) return;
+    setBusy(true);
+    setError(null);
+    setProgress([]);
+    try {
+      const result = await literatureProtocolExecute<ProtocolExecuteResult>(
+        preview.protocol.id,
+        "execute",
+        maxResults,
+        resumeRunId.trim() || undefined,
+      );
+      setRun(result.searchRun);
+      setRecordPreview(result.recordPreview ?? []);
+      await onLibraryRefresh();
+      if (result.warnings.length > 0) setError(result.warnings.join("\n"));
+    } catch (cause) {
+      setError(`检索执行中断：${String(cause)}。如已显示运行 ID，可将其填入恢复字段后重新确认。`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section className="lit-protocol-panel" aria-label="Reproducible literature search">
+      <div className="lit-protocol-heading">
+        <div>
+          <strong>可复现检索</strong>
+          <span>协议 → 预览 → 明确确认 → 本地 SearchRun</span>
+        </div>
+        {busy && <span className="lit-search-spinner" aria-label="正在检索" />}
+      </div>
+      {!preview ? (
+        <div className="lit-protocol-form">
+          <input value={question} onChange={(event) => setQuestion(event.target.value)} placeholder="研究问题" aria-label="研究问题" />
+          <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="完整查询式（留空则使用研究问题）" aria-label="完整查询式" />
+          <input value={scope} onChange={(event) => setScope(event.target.value)} placeholder="范围（可选）" aria-label="检索范围" />
+          <input value={sources} onChange={(event) => setSources(event.target.value)} placeholder="数据源，以逗号分隔" aria-label="数据源" />
+          <div className="lit-source-query-editor" aria-label="分源查询式">
+            {sourceList().map((source) => (
+              <label key={source}>
+                <span>{source}</span>
+                <input
+                  value={sourceQueries[source] ?? ""}
+                  onChange={(event) => setSourceQueries((current) => ({
+                    ...current,
+                    [source]: event.target.value,
+                  }))}
+                  placeholder="留空使用默认查询式"
+                  aria-label={`${source} 查询式`}
+                />
+              </label>
+            ))}
+          </div>
+          <details>
+            <summary>纳排标准（可选）</summary>
+            <textarea value={include} onChange={(event) => setInclude(event.target.value)} placeholder="每行一条纳入标准" aria-label="纳入标准" />
+            <textarea value={exclude} onChange={(event) => setExclude(event.target.value)} placeholder="每行一条排除标准" aria-label="排除标准" />
+          </details>
+          <button type="button" className="primary" onClick={() => void previewProtocol()} disabled={busy}>生成并预览协议</button>
+        </div>
+      ) : (
+        <div className="lit-protocol-preview">
+          <div className="lit-protocol-summary">
+            <strong>{preview.protocol.question}</strong>
+            {preview.protocol.scope && <span>{preview.protocol.scope}</span>}
+          </div>
+          <div className="lit-protocol-plan" role="list" aria-label="检索计划">
+            {preview.plan.map((item) => (
+              <div key={item.source} role="listitem" className={`lit-protocol-source ${item.adapterStatus !== "available" ? "unavailable" : ""}`}>
+                <strong>{item.source}</strong>
+                <code>{item.query}</code>
+                <small>{item.coverageNote}</small>
+                <small>{item.quotaPolicy}</small>
+              </div>
+            ))}
+          </div>
+          <div className="lit-protocol-confirm">
+            <label>
+              <input type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} />
+              我已核对查询式、数据源、每源导出上限与覆盖缺口。
+            </label>
+            <label>每源上限
+              <select value={maxResults} onChange={(event) => setMaxResults(Number(event.target.value))}>
+                {[20, 50, 100].map((count) => <option key={count} value={count}>{count}</option>)}
+              </select>
+            </label>
+            <input value={resumeRunId} onChange={(event) => setResumeRunId(event.target.value)} placeholder="恢复运行 ID（可选）" aria-label="恢复运行 ID" />
+            <button type="button" className="primary" onClick={() => void executeProtocol()} disabled={!confirmed || busy}>
+              执行已确认检索
+            </button>
+            <button type="button" onClick={() => { setPreview(null); setConfirmed(false); setRun(null); setRecordPreview([]); }}>修改协议</button>
+          </div>
+        </div>
+      )}
+      {progress.length > 0 && (
+        <div className="lit-protocol-progress" role="status" aria-live="polite">
+          {progress.map((item, index) => <span key={`${item.source}-${item.phase}-${index}`}>{item.source ?? "检索"} · {item.phase ?? "处理中"}{item.message ? `：${item.message}` : ""}</span>)}
+        </div>
+      )}
+      {run && (
+        <div className="lit-protocol-run" aria-label="SearchRun 结果">
+          <strong>SearchRun {run.id} · {run.status}</strong>
+          {run.sourceAttempts.map((attempt, index) => (
+            <span key={`${attempt.source}-${index}`}>{attempt.source}: {attempt.status} · 返回 {attempt.returnedCount}{attempt.hitCount !== undefined ? ` / 命中 ${attempt.hitCount}` : ""}{attempt.failureMessage ? ` · ${attempt.failureMessage}` : ""}</span>
+          ))}
+        </div>
+      )}
+      {recordPreview.length > 0 && (
+        <div className="lit-protocol-record-preview" aria-label="SearchRun 样本记录">
+          <strong>样本记录（尚未筛选）</strong>
+          {recordPreview.map((record) => (
+            <span key={record.id}>{record.title}{record.year ? ` · ${record.year}` : ""}{record.venue ? ` · ${record.venue}` : ""}</span>
+          ))}
+        </div>
+      )}
+      {error && <div className="lit-protocol-error" role="alert">{error}</div>}
+    </section>
+  );
 }
 
 function formatAuthors(authors: string[]) {
@@ -629,6 +893,17 @@ export default function Literature({
       </NavSection>
 
       <NavSection title="审查任务" defaultOpen>
+        <button
+          type="button"
+          className="lit-review-new-task"
+          onClick={() => {
+            setActiveReviewTask(null);
+            setReviewPanelOpen(true);
+          }}
+        >
+          <SvgIcon name="plus" size={14} />
+          新建审查任务
+        </button>
         {library.reviewTasks.map((task) => (
           <NavItem
             key={task.id}
@@ -666,6 +941,9 @@ export default function Literature({
 
   const mainArea = (
     <div className="lit-main">
+      <LiteratureProtocolPanel
+        onLibraryRefresh={() => load(currentProject?.id ?? "default", { quiet: true })}
+      />
       <PaperTable
         papers={visiblePapers}
         libraryCount={papers.length}
@@ -886,16 +1164,15 @@ export default function Literature({
       {pageView === "library" && reviewPanelOpen && (
         <ReviewWorkflowPanel
           tasks={library.reviewTasks}
+          searches={library.searches}
+          screenRuns={library.screenRuns ?? []}
           activeTaskId={activeReviewTaskId}
           questionDraft={reviewQuestion}
           screening={screening}
           onQuestionDraft={setReviewQuestion}
           onSelectTask={setActiveReviewTask}
-          onCreate={async () => {
-            const matchingSearch = library.searches.find(
-              (search) => search.query.trim().toLowerCase() === reviewQuestion.trim().toLowerCase(),
-            );
-            await createReviewTask(reviewQuestion, matchingSearch ? [matchingSearch.id] : []);
+          onCreate={async (searchIds) => {
+            await createReviewTask(reviewQuestion, searchIds);
             setReviewQuestion("");
           }}
           onUpdateQuestion={updateReviewQuestion}
@@ -1020,6 +1297,8 @@ export default function Literature({
 
 function ReviewWorkflowPanel({
   tasks,
+  searches,
+  screenRuns,
   activeTaskId,
   questionDraft,
   screening,
@@ -1036,12 +1315,14 @@ function ReviewWorkflowPanel({
   onClose,
 }: {
   tasks: LiteratureReviewTask[];
+  searches: LiteratureSearch[];
+  screenRuns: LiteratureScreenRun[];
   activeTaskId: string | null;
   questionDraft: string;
   screening: boolean;
   onQuestionDraft: (question: string) => void;
   onSelectTask: (id: string | null) => void;
-  onCreate: () => Promise<void>;
+  onCreate: (searchIds: string[]) => Promise<void>;
   onUpdateQuestion: (taskId: string, question: string) => void;
   onUpdateCriterion: (taskId: string, criterionId: string, text: string) => void;
   onAddCriterion: (taskId: string, kind: "include" | "exclude") => void;
@@ -1052,6 +1333,10 @@ function ReviewWorkflowPanel({
   onClose: () => void;
 }) {
   const active = tasks.find((task) => task.id === activeTaskId) ?? null;
+  const [newTaskSearchId, setNewTaskSearchId] = useState("");
+  const latestRun = active
+    ? screenRuns.find((run) => run.taskId === active.id) ?? null
+    : null;
   return (
     <section className="lit-review-panel" aria-label="文献审查工作流">
       <div className="lit-review-panel-head">
@@ -1076,11 +1361,26 @@ function ReviewWorkflowPanel({
             placeholder="输入系统综述或审查问题"
             aria-label="审查问题"
           />
+          <label>
+            <span>审查范围</span>
+            <select
+              value={newTaskSearchId}
+              onChange={(event) => setNewTaskSearchId(event.target.value)}
+              aria-label="审查范围"
+            >
+              <option value="">全部论文</option>
+              {searches.map((search) => (
+                <option key={search.id} value={search.id}>
+                  {search.query || search.id}（{search.resultCount}）
+                </option>
+              ))}
+            </select>
+          </label>
           <button
             type="button"
             className="primary"
             disabled={!questionDraft.trim()}
-            onClick={() => void onCreate()}
+            onClick={() => void onCreate(newTaskSearchId ? [newTaskSearchId] : [])}
           >
             创建任务
           </button>
@@ -1133,6 +1433,25 @@ function ReviewWorkflowPanel({
               关联 {active.searchIds.length} 个保存搜索 · {active.criteria.length} 条标准
             </span>
           </div>
+          {latestRun && (
+            <div className="lit-screen-run" aria-label="最近筛选运行">
+              <strong>{latestRun.id} · {latestRun.status}</strong>
+              <span>
+                Reviewer {latestRun.reviewerCount}/{latestRun.totalPapers} ·
+                启发式回退 {latestRun.fallbackCount} · 每块 {latestRun.chunkSize}
+              </span>
+              <div className="lit-screen-run-chunks">
+                {latestRun.chunks.map((chunk) => (
+                  <span key={chunk.id} title={chunk.error}>
+                    #{chunk.index} {chunk.status} · {chunk.reviewerCount}/{chunk.expectedCount}
+                    {chunk.missingIndices.length > 0
+                      ? ` · 漏号 ${chunk.missingIndices.join(",")}`
+                      : ""}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
           {active.suggestions.some((suggestion) => !suggestion.accepted && !suggestion.dismissed) && (
             <div className="lit-review-suggestions">
               <strong>根据人工改判生成的标准建议</strong>
@@ -1706,7 +2025,7 @@ function WorkspaceNotes({
       {paper.verdict && (
         <div className="lit-section">
           <div className="lit-section-heading">
-            <span>Review LLM 判断</span>
+            <span>{screening?.method === "heuristic" ? "启发式回退" : "Review LLM 判断"}</span>
             <span className={`lit-fit fit-${paper.verdict.fit}`}>
               {FIT_LABELS[paper.verdict.fit]} · {paper.verdict.score}
             </span>
@@ -1721,7 +2040,7 @@ function WorkspaceNotes({
         </div>
       )}
       {!task && !paper.verdict && !paper.agentSummary && (
-        <div className="lit-workspace-empty-content">暂无 Review LLM 判断。</div>
+        <div className="lit-workspace-empty-content">暂无筛选判断。</div>
       )}
     </div>
   );

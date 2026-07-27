@@ -122,8 +122,51 @@ export interface PaperScreening {
   confidence: number;
   reasons: ScreeningReason[];
   decidedAt: string;
+  /** How this individual decision was produced. Older records omit it. */
+  method?: "review-llm" | "heuristic";
+  /** Durable batch checkpoint that produced this decision. */
+  screenRunId?: string;
+  chunkId?: string;
   userConfirmed?: boolean;
   flippedFrom?: ScreeningDecision;
+}
+
+export type LiteratureScreenRunStatus =
+  | "planned"
+  | "running"
+  | "completed"
+  | "partial"
+  | "fallback"
+  | "failed";
+
+export interface LiteratureScreenChunk {
+  id: string;
+  index: number;
+  paperIds: string[];
+  status: LiteratureScreenRunStatus;
+  expectedCount: number;
+  reviewerCount: number;
+  fallbackCount: number;
+  /** Local zero-based indices omitted or duplicated by the Reviewer reply. */
+  missingIndices: number[];
+  startedAt?: string;
+  completedAt?: string;
+  error?: string;
+}
+
+/** Append-only screening batch manifest used for resume/audit in the Desktop. */
+export interface LiteratureScreenRun {
+  id: string;
+  taskId: string;
+  status: LiteratureScreenRunStatus;
+  chunkSize: number;
+  totalPapers: number;
+  reviewerCount: number;
+  fallbackCount: number;
+  criteriaUpdatedAt: string;
+  startedAt: string;
+  completedAt?: string;
+  chunks: LiteratureScreenChunk[];
 }
 
 export interface EvidenceNote {
@@ -223,6 +266,9 @@ export interface LiteratureSearch {
   ranAt: string;
   resultCount: number;
   newCount: number;
+  searchRunId?: string;
+  protocolId?: string;
+  status?: string;
 }
 
 export interface LiteratureCollection {
@@ -237,6 +283,7 @@ export interface LiteratureLibrary {
   searches: LiteratureSearch[];
   collections: LiteratureCollection[];
   reviewTasks: LiteratureReviewTask[];
+  screenRuns: LiteratureScreenRun[];
   projectFocus?: ProjectFocus;
 }
 
@@ -292,4 +339,5 @@ export const emptyLibrary = (): LiteratureLibrary => ({
   searches: [],
   collections: [],
   reviewTasks: [],
+  screenRuns: [],
 });

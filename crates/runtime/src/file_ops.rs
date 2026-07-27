@@ -387,6 +387,8 @@ pub fn write_file_with_context(
 ) -> io::Result<WriteFileOutput> {
     let absolute_path = normalize_path_allow_missing(path)?;
     let original_file = fs::read_to_string(&absolute_path).ok();
+    let harmonized_content = harmonize_write_eol(original_file.as_deref(), content);
+    let content = harmonized_content.as_str();
     if let Some(parent) = absolute_path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -458,6 +460,8 @@ pub fn append_file_with_context(
     } else {
         Some(fs::read_to_string(&absolute_path)?)
     };
+    let harmonized_content = harmonize_write_eol(original_file.as_deref(), content);
+    let content = harmonized_content.as_str();
     if let Some(parent) = absolute_path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -524,24 +528,41 @@ pub fn edit_file_with_context(
 ) -> io::Result<EditFileOutput> {
     let absolute_path = normalize_path(path)?;
     let original_file = fs::read_to_string(&absolute_path)?;
-    if old_string == new_string {
+    if old_string.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "old_string must not be empty",
+        ));
+    }
+    if normalize_newlines(old_string) == normalize_newlines(new_string) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "old_string and new_string must differ",
         ));
     }
-    if !original_file.contains(old_string) {
+    let matches = find_edit_matches(&original_file, old_string);
+    if matches.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
-            "old_string not found in file",
+            edit_not_found_message(&original_file, old_string),
+        ));
+    }
+    if !replace_all && matches.len() > 1 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "old_string matches {} locations in the file; add surrounding context to make it unique, or set replace_all=true to replace every match",
+                matches.len()
+            ),
         ));
     }
 
-    let updated = if replace_all {
-        original_file.replace(old_string, new_string)
+    let selected = if replace_all {
+        &matches[..]
     } else {
-        original_file.replacen(old_string, new_string, 1)
+        &matches[..1]
     };
+    let updated = splice_ranges(&original_file, selected, new_string);
     fs::write(&absolute_path, &updated)?;
 
     let file_path = display_path(&absolute_path);
@@ -572,6 +593,140 @@ pub fn edit_file_with_context(
         git_diff: None,
         change_id,
     })
+}
+
+fn normalize_newlines(text: &str) -> String {
+    text.replace("\r\n", "\n")
+}
+
+/// `read_file` presents LF-normalized text to the model (`str::lines` drops
+/// `\r`), so a faithfully copied multi-line `old_string` never byte-matches a
+/// CRLF file. Exact byte matches win; otherwise fall back to a line-ending- and
+/// BOM-insensitive scan and map hits back to byte ranges in the original.
+fn find_edit_matches(original: &str, old_string: &str) -> Vec<(usize, usize)> {
+    let exact = original
+        .match_indices(old_string)
+        .map(|(start, matched)| (start, start + matched.len()))
+        .collect::<Vec<_>>();
+    if !exact.is_empty() {
+        return exact;
+    }
+
+    let (normalized, offsets) = normalized_haystack(original);
+    let needle_owned = normalize_newlines(old_string);
+    let needle = needle_owned
+        .strip_prefix('\u{feff}')
+        .unwrap_or(&needle_owned);
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    normalized
+        .match_indices(needle)
+        .map(|(start, matched)| (offsets[start], offsets[start + matched.len() - 1] + 1))
+        .collect()
+}
+
+/// LF-normalized copy of `original` (CRLF collapsed to LF, leading BOM
+/// dropped) plus a map from each normalized byte index to its byte index in
+/// `original`. Only whole bytes are ever dropped, so UTF-8 validity holds.
+fn normalized_haystack(original: &str) -> (String, Vec<usize>) {
+    let bytes = original.as_bytes();
+    let mut normalized = Vec::with_capacity(bytes.len());
+    let mut offsets = Vec::with_capacity(bytes.len());
+    let mut index = if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
+        3
+    } else {
+        0
+    };
+    while index < bytes.len() {
+        if bytes[index] == b'\r' && bytes.get(index + 1) == Some(&b'\n') {
+            index += 1;
+            continue;
+        }
+        normalized.push(bytes[index]);
+        offsets.push(index);
+        index += 1;
+    }
+    let normalized =
+        String::from_utf8(normalized).expect("dropping CR and BOM bytes preserves UTF-8 validity");
+    (normalized, offsets)
+}
+
+/// Replaces each range with `new_string` converted to the replaced region's
+/// line-ending style, so edits stop planting LF islands inside CRLF files.
+fn splice_ranges(original: &str, ranges: &[(usize, usize)], new_string: &str) -> String {
+    let mut updated = String::with_capacity(original.len() + new_string.len());
+    let mut cursor = 0;
+    for &(start, end) in ranges {
+        updated.push_str(&original[cursor..start]);
+        updated.push_str(&match_eol(new_string, eol_for_range(original, start, end)));
+        cursor = end;
+    }
+    updated.push_str(&original[cursor..]);
+    updated
+}
+
+fn eol_counts(text: &str) -> (usize, usize) {
+    let crlf = text.matches("\r\n").count();
+    let bare_lf = text.matches('\n').count() - crlf;
+    (crlf, bare_lf)
+}
+
+fn eol_for_range(original: &str, start: usize, end: usize) -> &'static str {
+    let (crlf, bare_lf) = eol_counts(&original[start..end]);
+    if crlf != bare_lf {
+        return if crlf > bare_lf { "\r\n" } else { "\n" };
+    }
+    let (crlf, bare_lf) = eol_counts(original);
+    if crlf > bare_lf {
+        "\r\n"
+    } else {
+        "\n"
+    }
+}
+
+fn match_eol(text: &str, eol: &str) -> String {
+    let normalized = normalize_newlines(text);
+    if eol == "\r\n" {
+        normalized.replace('\n', "\r\n")
+    } else {
+        normalized
+    }
+}
+
+/// Models emit LF-only content; writing it verbatim over an existing CRLF file
+/// flips every line ending in the diff. Full-file writes and appends adopt the
+/// existing file's dominant ending; brand-new files are written verbatim.
+fn harmonize_write_eol(original: Option<&str>, content: &str) -> String {
+    let Some(original) = original else {
+        return content.to_owned();
+    };
+    let (crlf, bare_lf) = eol_counts(original);
+    if crlf == 0 && bare_lf == 0 {
+        return content.to_owned();
+    }
+    match_eol(content, if crlf > bare_lf { "\r\n" } else { "\n" })
+}
+
+fn edit_not_found_message(original: &str, old_string: &str) -> String {
+    let needle_owned = normalize_newlines(old_string);
+    let needle_lines = needle_owned.lines().map(str::trim).collect::<Vec<_>>();
+    let file_lines = original.lines().map(str::trim).collect::<Vec<_>>();
+    if !needle_lines.is_empty() {
+        if let Some(start) = file_lines
+            .windows(needle_lines.len())
+            .position(|window| window == needle_lines)
+        {
+            return format!(
+                "old_string not found in file, though lines {}-{} match it when indentation and trailing whitespace are ignored; re-read the file and copy the exact text",
+                start + 1,
+                start + needle_lines.len()
+            );
+        }
+    }
+    String::from(
+        "old_string not found in file; if the file may have changed since it was last read, call read_file again and take old_string from the current contents",
+    )
 }
 
 pub fn glob_search(pattern: &str, path: Option<&str>) -> io::Result<GlobSearchOutput> {

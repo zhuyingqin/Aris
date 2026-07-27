@@ -576,3 +576,191 @@ fn workspace_root_allows_glob_from_readonly_root_ancestor() {
     assert_eq!(globbed.num_files, 1);
     assert!(globbed.filenames[0].ends_with("skills/scopus-search/scripts/scopus_search.py"));
 }
+
+fn assert_uniform_crlf(text: &str) {
+    let crlf = text.matches("\r\n").count();
+    let lf = text.matches('\n').count();
+    assert_eq!(crlf, lf, "file should contain no bare LF endings: {text:?}");
+}
+
+#[test]
+fn edit_file_matches_lf_old_string_in_crlf_file() {
+    let _lock = crate::test_env_lock();
+    let _env = EnvGuard::unset("ARIS_WORKSPACE_ROOT");
+    let path = temp_path("edit-crlf.css");
+    std::fs::write(
+        &path,
+        b".a {\r\n  color: red;\r\n}\r\n\r\n.b {\r\n  color: blue;\r\n}\r\n",
+    )
+    .expect("write CRLF file");
+
+    edit_file(
+        path.to_string_lossy().as_ref(),
+        ".a {\n  color: red;\n}",
+        ".a {\n  color: green;\n}",
+        false,
+    )
+    .expect("LF old_string should match the CRLF file");
+
+    let text = std::fs::read_to_string(&path).expect("read back");
+    assert!(text.contains(".a {\r\n  color: green;\r\n}"));
+    assert!(text.contains(".b {\r\n  color: blue;\r\n}"));
+    assert_uniform_crlf(&text);
+}
+
+#[test]
+fn edit_file_converts_multiline_new_string_to_region_eol() {
+    let _lock = crate::test_env_lock();
+    let _env = EnvGuard::unset("ARIS_WORKSPACE_ROOT");
+    let path = temp_path("edit-crlf-island.txt");
+    std::fs::write(&path, b"alpha\r\nbeta\r\ngamma\r\n").expect("write CRLF file");
+
+    edit_file(
+        path.to_string_lossy().as_ref(),
+        "beta",
+        "beta\nbeta-extra",
+        false,
+    )
+    .expect("single-line anchor should still match");
+
+    let text = std::fs::read_to_string(&path).expect("read back");
+    assert_eq!(text, "alpha\r\nbeta\r\nbeta-extra\r\ngamma\r\n");
+    assert_uniform_crlf(&text);
+}
+
+#[test]
+fn edit_file_keeps_lf_island_style_in_mixed_file() {
+    let _lock = crate::test_env_lock();
+    let _env = EnvGuard::unset("ARIS_WORKSPACE_ROOT");
+    let path = temp_path("edit-mixed.txt");
+    std::fs::write(&path, b"one\r\ntwo\r\nisland-a\nisland-b\nisland-c\nthree\r\n")
+        .expect("write mixed file");
+
+    edit_file(
+        path.to_string_lossy().as_ref(),
+        "island-a\nisland-b",
+        "island-a\nISLAND-B",
+        false,
+    )
+    .expect("edit inside the LF island should match");
+
+    let text = std::fs::read_to_string(&path).expect("read back");
+    assert_eq!(text, "one\r\ntwo\r\nisland-a\nISLAND-B\nisland-c\nthree\r\n");
+}
+
+#[test]
+fn edit_file_replace_all_preserves_crlf() {
+    let _lock = crate::test_env_lock();
+    let _env = EnvGuard::unset("ARIS_WORKSPACE_ROOT");
+    let path = temp_path("edit-crlf-all.txt");
+    std::fs::write(&path, b"item\r\nkeep\r\nitem\r\n").expect("write CRLF file");
+
+    edit_file(path.to_string_lossy().as_ref(), "item", "entry", true)
+        .expect("replace_all should succeed");
+
+    let text = std::fs::read_to_string(&path).expect("read back");
+    assert_eq!(text, "entry\r\nkeep\r\nentry\r\n");
+}
+
+#[test]
+fn edit_file_rejects_ambiguous_old_string() {
+    let _lock = crate::test_env_lock();
+    let _env = EnvGuard::unset("ARIS_WORKSPACE_ROOT");
+    let path = temp_path("edit-ambiguous.txt");
+    std::fs::write(&path, "alpha\nbeta\nalpha\n").expect("write file");
+
+    let error = edit_file(path.to_string_lossy().as_ref(), "alpha", "omega", false)
+        .expect_err("ambiguous old_string should fail");
+
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    let message = error.to_string();
+    assert!(message.contains("matches 2 locations"), "{message}");
+    assert!(message.contains("replace_all"), "{message}");
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("read back"),
+        "alpha\nbeta\nalpha\n",
+        "file should be untouched"
+    );
+}
+
+#[test]
+fn edit_file_rejects_empty_old_string() {
+    let _lock = crate::test_env_lock();
+    let _env = EnvGuard::unset("ARIS_WORKSPACE_ROOT");
+    let path = temp_path("edit-empty-old.txt");
+    std::fs::write(&path, "alpha\n").expect("write file");
+
+    let error = edit_file(path.to_string_lossy().as_ref(), "", "omega", false)
+        .expect_err("empty old_string should fail");
+
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(error.to_string().contains("must not be empty"));
+}
+
+#[test]
+fn edit_file_not_found_reports_whitespace_near_miss() {
+    let _lock = crate::test_env_lock();
+    let _env = EnvGuard::unset("ARIS_WORKSPACE_ROOT");
+    let path = temp_path("edit-near-miss.rs");
+    std::fs::write(&path, "fn main() {\n    let value = 1;\n}\n").expect("write file");
+
+    let error = edit_file(
+        path.to_string_lossy().as_ref(),
+        "fn main() {\n  let value = 1;\n}",
+        "fn main() {\n  let value = 2;\n}",
+        false,
+    )
+    .expect_err("indentation drift should not match");
+
+    let message = error.to_string();
+    assert!(message.contains("lines 1-3"), "{message}");
+    assert!(message.contains("re-read the file"), "{message}");
+}
+
+#[test]
+fn edit_file_matches_through_leading_bom() {
+    let _lock = crate::test_env_lock();
+    let _env = EnvGuard::unset("ARIS_WORKSPACE_ROOT");
+    let path = temp_path("edit-bom.txt");
+    std::fs::write(&path, b"\xEF\xBB\xBFalpha\r\nbeta\r\n").expect("write BOM file");
+
+    edit_file(
+        path.to_string_lossy().as_ref(),
+        "alpha\nbeta",
+        "ALPHA\nbeta",
+        false,
+    )
+    .expect("match should skip the BOM");
+
+    let text = std::fs::read_to_string(&path).expect("read back");
+    assert!(text.starts_with('\u{feff}'), "BOM should be preserved");
+    assert!(text.contains("ALPHA\r\nbeta"));
+}
+
+#[test]
+fn write_file_preserves_existing_crlf_style() {
+    let _lock = crate::test_env_lock();
+    let _env = EnvGuard::unset("ARIS_WORKSPACE_ROOT");
+    let path = temp_path("write-crlf.txt");
+    std::fs::write(&path, b"old\r\ncontent\r\n").expect("write CRLF file");
+
+    write_file(path.to_string_lossy().as_ref(), "new\ncontent\nhere\n")
+        .expect("overwrite should succeed");
+
+    let text = std::fs::read_to_string(&path).expect("read back");
+    assert_eq!(text, "new\r\ncontent\r\nhere\r\n");
+}
+
+#[test]
+fn append_file_matches_existing_eol() {
+    let _lock = crate::test_env_lock();
+    let _env = EnvGuard::unset("ARIS_WORKSPACE_ROOT");
+    let path = temp_path("append-crlf.txt");
+    std::fs::write(&path, b"head\r\n").expect("write CRLF file");
+
+    append_file(path.to_string_lossy().as_ref(), "tail\nmore\n", false)
+        .expect("append should succeed");
+
+    let text = std::fs::read_to_string(&path).expect("read back");
+    assert_eq!(text, "head\r\ntail\r\nmore\r\n");
+}

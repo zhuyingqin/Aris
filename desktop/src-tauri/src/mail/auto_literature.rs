@@ -22,11 +22,6 @@ const DEFAULT_MAX_RESULTS: usize = 5;
 const DEFAULT_MAX_DOWNLOADS: usize = 2;
 const MAX_RUN_LOG: usize = 100;
 static RUN_LOG_LOCK: Mutex<()> = Mutex::new(());
-/// Serializes read-modify-write access to `papers/library.json`. A scheduled
-/// catch-up and a chat-tool catch-up can run concurrently in separate sessions,
-/// so without this lock two simultaneous sweeps could clobber each other's
-/// upsert.
-static LIBRARY_WRITE_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Clone)]
 struct LiteratureRequest {
@@ -346,29 +341,31 @@ fn run_literature_help_flow(
             .max_results
             .unwrap_or(DEFAULT_MAX_RESULTS)
             .clamp(1, 20);
-        let mut outcome = tools::literature::search_remote(&request.query, &config.sources, limit)?;
+        // Mail automation is an explicitly enabled surface, but it still uses
+        // the one canonical literature write path. Its automatic ad-hoc
+        // protocol/run makes the external request auditable instead of adding
+        // another direct `library.json` writer.
+        let base = state::workspace_dir();
+        let search = tools::literature::literature_search_ad_hoc_at(
+            &base,
+            tools::literature::LiteratureSearchInput {
+                query: request.query.clone(),
+                sources: config.sources.clone(),
+                max_results: Some(limit),
+            },
+        )?;
+        let mut papers: Vec<tools::literature::RemotePaper> =
+            serde_json::from_value(search["papers"].clone())
+                .map_err(|error| format!("mail literature search returned invalid papers: {error}"))?;
         if request.exact {
-            outcome.papers = filter_exact_request_matches(outcome.papers, &request);
+            papers = filter_exact_request_matches(papers, &request);
         }
-        run.paper_count = outcome.papers.len();
+        run.paper_count = papers.len();
         // Use the canonical desktop workspace, not the process cwd. The cwd can
         // drift (project switches call `set_current_dir`) or point at a
-        // read-only install dir, scattering library.json / downloaded PDFs.
-        let base = state::workspace_dir();
-        let search = tools::literature::UpsertSearch {
-            query: request.query.clone(),
-            sources: config.sources.clone(),
-        };
-        let records = serde_json::to_value(&outcome.papers)
-            .ok()
-            .and_then(|value| value.as_array().cloned())
-            .unwrap_or_default();
-        {
-            let _guard = LIBRARY_WRITE_LOCK
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let _ = tools::literature::library_upsert_at(&base, &records, Some(&search));
-        }
+        // read-only install dir, scattering canonical records or downloaded
+        // PDFs. `literature_search_ad_hoc_at` already projected the durable
+        // SearchRun and canonical records to the compatibility library.
 
         let mut max_downloads = config
             .max_downloads
@@ -379,7 +376,7 @@ fn run_literature_help_flow(
         }
         let mut attachments = Vec::new();
         let mut lines = Vec::new();
-        for paper in outcome.papers.iter().take(limit) {
+        for paper in papers.iter().take(limit) {
             lines.push(format!(
                 "- {}{}",
                 paper.title,
@@ -408,7 +405,7 @@ fn run_literature_help_flow(
                 }
             }
         }
-        if request.exact && outcome.papers.is_empty() {
+        if request.exact && papers.is_empty() {
             lines.push(format!(
                 "- No exact DOI/title match was found for {}.",
                 request

@@ -32,6 +32,9 @@ fn ignores_unrelated_errors() {
     // A bare "token" mention without an over-limit verb must not match.
     assert!(!is_context_window_exceeded_error("your token was rejected"));
     assert!(!is_context_window_exceeded_error("rate limit exceeded"));
+    // Bare Chinese "上下文" without an over-limit verb must not misfire
+    // force-compaction (e.g. an unrelated context-load error).
+    assert!(!is_context_window_exceeded_error("上下文加载失败，请重试"));
 }
 
 #[test]
@@ -46,7 +49,7 @@ fn convert_messages_preserves_internal_system_instructions() {
         },
         ConversationMessage::user_text("next question"),
     ];
-    let result = convert_messages_openai(&messages, None, &std::collections::HashMap::new());
+    let result = convert_messages_openai(&messages, None, "MiniMax-M3");
     assert_eq!(result.len(), 2);
     assert_eq!(result[0]["role"], "system");
     assert_eq!(result[0]["content"], "compaction summary");
@@ -58,7 +61,7 @@ fn convert_messages_preserves_internal_system_instructions() {
 }
 
 #[test]
-fn official_openai_tool_reasoning_uses_responses_transport_only() {
+fn openai_reasoning_tool_models_use_responses_on_compatible_gateways() {
     assert!(uses_openai_responses_api(
         "https://api.openai.com/v1",
         "gpt-5.6-sol",
@@ -69,7 +72,7 @@ fn official_openai_tool_reasoning_uses_responses_transport_only() {
         "o4-mini",
         true,
     ));
-    assert!(!uses_openai_responses_api(
+    assert!(uses_openai_responses_api(
         "https://proxy.example/v1",
         "gpt-5.6-sol",
         true,
@@ -79,31 +82,47 @@ fn official_openai_tool_reasoning_uses_responses_transport_only() {
         "gpt-5.6-sol",
         false,
     ));
+    assert!(!uses_openai_responses_api(
+        "https://proxy.example/v1",
+        "deepseek-reasoner",
+        true,
+    ));
+    assert!(!uses_openai_responses_api(
+        "https://proxy.example/v1",
+        "MiniMax-M3",
+        true,
+    ));
 }
 
 #[test]
 fn responses_messages_replay_reasoning_and_pair_tool_outputs() {
-    let messages = vec![
-        ConversationMessage::user_text("inspect the workspace"),
-        ConversationMessage::assistant(vec![ContentBlock::ToolUse {
-            id: "call-1".to_string(),
-            name: "bash".to_string(),
-            input: r#"{"command":"cargo check"}"#.to_string(),
-        }]),
-        ConversationMessage::tool_result("call-1", "bash", "finished", false),
-    ];
-    let mut reasoning = std::collections::HashMap::new();
-    reasoning.insert(
-        1,
-        vec![json!({
+    let signature = encode_responses_reasoning_signature(
+        &[json!({
             "type": "reasoning",
             "id": "rs-1",
             "encrypted_content": "opaque",
             "summary": [],
         })],
-    );
+        "gpt-5.6-sol",
+    )
+    .expect("encoded reasoning signature");
+    let messages = vec![
+        ConversationMessage::user_text("inspect the workspace"),
+        ConversationMessage::assistant(vec![
+            ContentBlock::Thinking {
+                thinking: "inspect files".to_string(),
+                signature,
+            },
+            ContentBlock::ToolUse {
+                id: "call-1".to_string(),
+                name: "bash".to_string(),
+                input: r#"{"command":"cargo check"}"#.to_string(),
+            },
+        ]),
+        ConversationMessage::tool_result("call-1", "bash", "finished", false),
+    ];
 
-    let result = convert_messages_responses(&messages, &reasoning);
+    let result = convert_messages_responses(&messages, "gpt-5.6-sol");
 
     assert_eq!(result[1]["type"], "reasoning");
     assert_eq!(result[2]["type"], "function_call");
@@ -111,6 +130,155 @@ fn responses_messages_replay_reasoning_and_pair_tool_outputs() {
     assert_eq!(result[3]["type"], "function_call_output");
     assert_eq!(result[3]["call_id"], "call-1");
     assert_eq!(result[3]["output"], "finished");
+}
+
+#[test]
+fn responses_reasoning_signature_is_provider_scoped_and_filters_item_types() {
+    let signature = encode_responses_reasoning_signature(
+        &[
+            json!({
+                "type": "reasoning",
+                "id": "rs-1",
+                "encrypted_content": "opaque",
+            }),
+            json!({
+                "type": "function_call",
+                "call_id": "must-not-be-injected",
+            }),
+        ],
+        "gpt-5.6-sol",
+    )
+    .expect("signature");
+    let decoded = decode_responses_reasoning_signature(&signature, "gpt-5.6-sol");
+    assert_eq!(decoded.len(), 1);
+    assert_eq!(decoded[0]["type"], "reasoning");
+    assert!(decode_responses_reasoning_signature("anthropic-signature", "gpt-5.6-sol").is_empty());
+}
+
+#[test]
+fn responses_reasoning_signature_v2_is_dropped_for_a_different_model() {
+    // Encrypted reasoning is model-specific; replaying it onto another model
+    // makes the Responses API 400. A v2 signature carries the producer model so
+    // decode drops it when the target model differs (B1).
+    let signature = encode_responses_reasoning_signature(
+        &[json!({
+            "type": "reasoning",
+            "id": "rs-1",
+            "encrypted_content": "opaque",
+        })],
+        "gpt-5.5",
+    )
+    .expect("signature");
+
+    // Same model: replayed.
+    assert_eq!(
+        decode_responses_reasoning_signature(&signature, "gpt-5.5").len(),
+        1
+    );
+    // Switched model: dropped rather than replayed onto the wrong model.
+    assert!(decode_responses_reasoning_signature(&signature, "gpt-5.6-sol").is_empty());
+}
+
+#[test]
+fn responses_reasoning_signature_v1_legacy_is_replayed_regardless_of_model() {
+    // Pre-v2 blocks are a bare array with no model tag. They must still replay
+    // (rewriting them would change historical bytes and break prefix caching);
+    // the runtime self-heal covers a cross-model rejection instead.
+    let legacy = format!(
+        "{}{}",
+        "openai-responses-reasoning:",
+        serde_json::to_string(&[json!({
+            "type": "reasoning",
+            "id": "rs-legacy",
+            "encrypted_content": "opaque",
+        })])
+        .unwrap()
+    );
+    let decoded = decode_responses_reasoning_signature(&legacy, "any-model");
+    assert_eq!(decoded.len(), 1);
+    assert_eq!(decoded[0]["id"], "rs-legacy");
+}
+
+#[test]
+fn reasoning_item_rejection_matches_ordering_and_encrypted_errors() {
+    // Ordering violation (multi-tool turn / hand-edited session).
+    assert!(is_reasoning_item_rejected(
+        r#"{"error":{"message":"Item 'rs_abc' of type 'reasoning' was provided without its required following item.","type":"invalid_request_error","param":"input"}}"#
+    ));
+    // Cross-model / stale encrypted content.
+    assert!(is_reasoning_item_rejected(
+        r#"{"error":{"message":"Invalid value: the encrypted reasoning content could not be decrypted for this model."}}"#
+    ));
+    // Non-JSON body fallback.
+    assert!(is_reasoning_item_rejected(
+        "reasoning item was provided without its required following item"
+    ));
+
+    // Unrelated 400s must NOT be swallowed behind a silent retry.
+    assert!(!is_reasoning_item_rejected(
+        r#"{"error":{"message":"Invalid schema for function 'bash': 'command' is required.","param":"tools"}}"#
+    ));
+    assert!(!is_reasoning_item_rejected(
+        r#"{"error":{"message":"You exceeded your current quota."}}"#
+    ));
+    // Mentions reasoning but carries no structural marker → not a replay reject.
+    assert!(!is_reasoning_item_rejected(
+        r#"{"error":{"message":"reasoning_effort must be one of low, medium, high."}}"#
+    ));
+    assert!(!is_reasoning_item_rejected(""));
+}
+
+#[test]
+fn strip_reasoning_items_removes_only_reasoning_and_reports_change() {
+    let mut body = json!({
+        "model": "gpt-5.6-sol",
+        "input": [
+            { "type": "reasoning", "id": "rs-1", "encrypted_content": "opaque" },
+            { "role": "user", "content": "hello" },
+            { "type": "function_call", "call_id": "call-1", "name": "bash", "arguments": "{}" },
+        ],
+    });
+    assert!(strip_reasoning_items_from_responses_body(&mut body));
+    let input = body["input"].as_array().expect("input array");
+    assert_eq!(input.len(), 2);
+    assert!(input
+        .iter()
+        .all(|item| item.get("type").and_then(|t| t.as_str()) != Some("reasoning")));
+
+    // Idempotent: a second strip removes nothing and reports no change (so the
+    // send loop's retry cannot loop).
+    assert!(!strip_reasoning_items_from_responses_body(&mut body));
+
+    // No `input` key (chat/completions body) → no change.
+    let mut chat = json!({ "model": "gpt-5.6-sol", "messages": [] });
+    assert!(!strip_reasoning_items_from_responses_body(&mut chat));
+}
+
+#[test]
+fn responses_prompt_cache_key_is_stable_for_appended_history() {
+    let first = ConversationMessage::user_text("stable mission");
+    let initial = vec![first.clone()];
+    let appended = vec![
+        first,
+        ConversationMessage::assistant(vec![ContentBlock::Text {
+            text: "progress".to_string(),
+        }]),
+        ConversationMessage::user_text("continue"),
+    ];
+
+    let key = responses_prompt_cache_key("gpt-5.6-terra", Some("system"), &initial);
+    assert_eq!(
+        key,
+        responses_prompt_cache_key("gpt-5.6-terra", Some("system"), &appended)
+    );
+    assert_ne!(
+        key,
+        responses_prompt_cache_key(
+            "gpt-5.6-terra",
+            Some("system"),
+            &[ConversationMessage::user_text("different mission")],
+        )
+    );
 }
 
 #[test]
@@ -124,7 +292,7 @@ fn responses_messages_use_native_image_and_function_shapes() {
             data: "ZmFrZQ==".into(),
         },
     ])];
-    let result = convert_messages_responses(&messages, &std::collections::HashMap::new());
+    let result = convert_messages_responses(&messages, "gpt-5.6-sol");
     assert_eq!(result[0]["content"][0]["type"], "input_text");
     assert_eq!(result[0]["content"][1]["type"], "input_image");
     assert_eq!(
@@ -232,7 +400,7 @@ fn convert_messages_preserves_user_role_continuation() {
         },
         ConversationMessage::user_text("next question"),
     ];
-    let result = convert_messages_openai(&messages, None, &std::collections::HashMap::new());
+    let result = convert_messages_openai(&messages, None, "MiniMax-M3");
     // Both User messages present.
     assert_eq!(result.len(), 2);
     assert_eq!(result[0]["role"], "user");
@@ -256,7 +424,7 @@ fn convert_messages_preserves_valid_failed_tool_result() {
         ConversationMessage::user_text("continue"),
     ];
 
-    let result = convert_messages_openai(&messages, None, &std::collections::HashMap::new());
+    let result = convert_messages_openai(&messages, None, "MiniMax-M3");
 
     assert_eq!(result.len(), 4);
     assert_eq!(result[1]["role"], "assistant");
@@ -279,7 +447,7 @@ fn convert_messages_repairs_dangling_tool_call_before_next_user() {
         ConversationMessage::user_text("continue after the crash"),
     ];
 
-    let result = convert_messages_openai(&messages, None, &std::collections::HashMap::new());
+    let result = convert_messages_openai(&messages, None, "MiniMax-M3");
 
     assert_eq!(result.len(), 4);
     assert_eq!(result[1]["role"], "assistant");
@@ -301,7 +469,7 @@ fn convert_messages_downgrades_orphan_tool_result() {
         ConversationMessage::user_text("continue"),
     ];
 
-    let result = convert_messages_openai(&messages, None, &std::collections::HashMap::new());
+    let result = convert_messages_openai(&messages, None, "MiniMax-M3");
 
     assert_eq!(result.len(), 2);
     assert_eq!(result[0]["role"], "user");
@@ -324,7 +492,7 @@ fn convert_messages_maps_images_to_openai_image_url_blocks() {
         },
     ])];
 
-    let result = convert_messages_openai(&messages, None, &std::collections::HashMap::new());
+    let result = convert_messages_openai(&messages, None, "MiniMax-M3");
 
     assert_eq!(result.len(), 1);
     assert_eq!(result[0]["role"], "user");
@@ -448,6 +616,75 @@ fn live_openai_failure_context_diagnostics() {
         short_for_log(&repaired)
     );
     assert!(!repaired.trim().is_empty());
+}
+
+#[test]
+#[ignore = "requires ARIS_LIVE_LLM_TEST=1 and a Responses-capable GPT executor"]
+fn live_responses_reasoning_survives_client_rebuild() {
+    let Some((config, model)) = live_openai_test_config() else {
+        return;
+    };
+    assert!(
+        uses_openai_responses_api(&config.base_url, &model, true),
+        "live persistence diagnostic requires a GPT/o Responses model"
+    );
+
+    let prompt = "Compute (137 * 89) - (47 * 23). Then call aris_probe exactly once with the integer result encoded as action result:<integer>. Do not answer before the tool call.";
+    let mut first_client = live_openai_client(&config, &model, true);
+    let first_events = first_client
+        .stream(ApiRequest {
+            system_prompt: vec![live_openai_system_prompt()],
+            messages: vec![ConversationMessage::user_text(prompt)],
+        })
+        .expect("first Responses tool request");
+
+    let mut blocks = Vec::new();
+    let mut tool = None;
+    for event in first_events {
+        match event {
+            AssistantEvent::Thinking {
+                thinking,
+                signature,
+            } => {
+                assert!(signature.starts_with(OPENAI_RESPONSES_REASONING_SIGNATURE_PREFIX));
+                blocks.push(ContentBlock::Thinking {
+                    thinking,
+                    signature,
+                });
+            }
+            AssistantEvent::ToolUse { id, name, input } => {
+                tool = Some((id.clone(), name.clone()));
+                blocks.push(ContentBlock::ToolUse { id, name, input });
+            }
+            _ => {}
+        }
+    }
+    assert!(
+        blocks
+            .iter()
+            .any(|block| matches!(block, ContentBlock::Thinking { .. })),
+        "xhigh Responses tool call should persist an encrypted reasoning item"
+    );
+    let (tool_id, tool_name) = tool.expect("tool call");
+
+    // A completely fresh client models Desktop's next top-level chat turn.
+    // The continuation must work using only the persisted session blocks.
+    let mut second_client = live_openai_client(&config, &model, true);
+    second_client
+        .stream(ApiRequest {
+            system_prompt: vec![live_openai_system_prompt()],
+            messages: vec![
+                ConversationMessage::user_text(prompt),
+                ConversationMessage::assistant(blocks),
+                ConversationMessage::tool_result(
+                    tool_id,
+                    tool_name,
+                    "persisted-reasoning-ok",
+                    false,
+                ),
+            ],
+        })
+        .expect("fresh client should replay persisted Responses reasoning");
 }
 
 fn live_openai_test_config() -> Option<(OpenAIExecutorConfig, String)> {
@@ -924,4 +1161,362 @@ fn sse_data_payload_tolerates_missing_space() {
     // Blank / comment lines → None.
     assert_eq!(sse_data_payload(""), None);
     assert_eq!(sse_data_payload(": keep-alive"), None);
+}
+
+// v0.4.24 prompt-cache audit: reasoning_content replay is limited to model
+// families whose APIs document it as an input field. OpenAI o-series/gpt-5.x
+// must NOT replay — attaching the non-standard field through proxies churned
+// historical message bytes and broke provider prefix caching.
+#[test]
+fn reasoning_replay_is_limited_to_reasoning_content_input_families() {
+    assert!(supports_reasoning_content_replay("kimi-k3"));
+    assert!(supports_reasoning_content_replay("moonshot-v1-128k"));
+    assert!(supports_reasoning_content_replay("mimo-v2.5-pro"));
+    assert!(supports_reasoning_content_replay("deepseek-r1"));
+    assert!(supports_reasoning_content_replay("deepseek-reasoner"));
+    assert!(supports_reasoning_content_replay("glm-4.6-thinking"));
+
+    assert!(!supports_reasoning_content_replay("gpt-5.6-terra"));
+    assert!(!supports_reasoning_content_replay("gpt-5.5"));
+    assert!(!supports_reasoning_content_replay("o3-mini"));
+    assert!(!supports_reasoning_content_replay("o4"));
+    assert!(!supports_reasoning_content_replay("MiniMax-M3"));
+    assert!(!supports_reasoning_content_replay("deepseek-v4-flash"));
+
+    // The effort-tier sender is unchanged: OpenAI reasoning families still
+    // receive reasoning_effort (and the official Responses API transport).
+    assert!(supports_reasoning_effort("gpt-5.6-terra"));
+    assert!(supports_reasoning_effort("o3-mini"));
+}
+
+fn reasoning_content_thinking_turn(reasoning: &str, answer: &str) -> ConversationMessage {
+    ConversationMessage::assistant(vec![
+        ContentBlock::Thinking {
+            thinking: reasoning.to_string(),
+            signature: OPENAI_REASONING_CONTENT_SIGNATURE.to_string(),
+        },
+        ContentBlock::Text {
+            text: answer.to_string(),
+        },
+    ])
+}
+
+fn assistant_messages(converted: &[serde_json::Value]) -> Vec<&serde_json::Value> {
+    converted
+        .iter()
+        .filter(|message| message["role"] == "assistant")
+        .collect()
+}
+
+#[test]
+fn reasoning_content_replayed_from_thinking_block_for_replay_families_only() {
+    let messages = vec![
+        ConversationMessage::user_text("hi"),
+        reasoning_content_thinking_turn("deep thought", "the answer"),
+    ];
+
+    // Replay family (Kimi): reasoning_content is sourced from the tagged block —
+    // B4, which was dead in Desktop because the old side cache never survived the
+    // per-turn client rebuild.
+    let kimi = convert_messages_openai(&messages, None, "kimi-k3");
+    let asst = assistant_messages(&kimi);
+    assert_eq!(asst[0]["reasoning_content"], "deep thought");
+    assert_eq!(asst[0]["content"], "the answer");
+
+    // Non-replay family (gpt-5.x on chat): the block persists for display but is
+    // never replayed as reasoning_content (would churn bytes / error upstream).
+    let gpt = convert_messages_openai(&messages, None, "gpt-5.5");
+    assert!(assistant_messages(&gpt)[0].get("reasoning_content").is_none());
+
+    // A display-only block (empty signature) is never replayed, even for Kimi.
+    let display_only = vec![
+        ConversationMessage::user_text("hi"),
+        ConversationMessage::assistant(vec![
+            ContentBlock::Thinking {
+                thinking: "shown only".to_string(),
+                signature: String::new(),
+            },
+            ContentBlock::Text {
+                text: "the answer".to_string(),
+            },
+        ]),
+    ];
+    let kimi_display = convert_messages_openai(&display_only, None, "kimi-k3");
+    assert!(assistant_messages(&kimi_display)[0]
+        .get("reasoning_content")
+        .is_none());
+}
+
+#[test]
+fn reasoning_content_replay_budget_keeps_oldest_drops_newest() {
+    // The 128k budget is exactly four 32k turns. Six turns → the oldest four
+    // carry reasoning_content and the newest two are dropped, so already-sent
+    // historical bytes stay stable while the request stays bounded.
+    let big = "r".repeat(MAX_REASONING_CHARS_PER_TURN);
+    let mut messages = vec![ConversationMessage::user_text("go")];
+    for n in 0..6 {
+        messages.push(reasoning_content_thinking_turn(&big, &format!("answer {n}")));
+        messages.push(ConversationMessage::user_text("next"));
+    }
+
+    let out = convert_messages_openai(&messages, None, "kimi-k3");
+    let asst = assistant_messages(&out);
+    let replayed = asst
+        .iter()
+        .filter(|message| message.get("reasoning_content").is_some())
+        .count();
+    assert_eq!(replayed, 4);
+    assert!(asst[0].get("reasoning_content").is_some());
+    assert!(asst[3].get("reasoning_content").is_some());
+    assert!(asst[4].get("reasoning_content").is_none());
+    assert!(asst[5].get("reasoning_content").is_none());
+}
+
+#[test]
+fn truncate_reasoning_per_turn_caps_at_char_boundary() {
+    let oversized = "思".repeat(MAX_REASONING_CHARS_PER_TURN + 5_000);
+    let truncated = truncate_reasoning_per_turn(oversized);
+    assert_eq!(truncated.chars().count(), MAX_REASONING_CHARS_PER_TURN);
+    assert!(truncated.chars().all(|c| c == '思'));
+    // Under-cap and empty pass through unchanged.
+    assert_eq!(truncate_reasoning_per_turn("short".to_string()), "short");
+    assert_eq!(truncate_reasoning_per_turn(String::new()), "");
+}
+
+// Real error envelopes captured from a self-hosted new-api gateway on
+// 2026-07-18 while probing `/v1/responses` per model. These exact shapes drive
+// the runtime fallback, so they are pinned here.
+#[test]
+fn responses_transport_unsupported_matches_observed_gateway_errors() {
+    // MiniMax-M3: gateway has no chat→responses converter for this upstream.
+    assert!(responses_transport_unsupported(
+        500,
+        r#"{"error":{"message":"not implemented (request id: 20260718...)","type":"new_api_error","param":"","code":"convert_request_failed"}}"#
+    ));
+    // kimi-k3 / mimo-v2.5: upstream 404s the endpoint.
+    assert!(responses_transport_unsupported(
+        404,
+        r#"{"error":{"message":"openai_error","type":"bad_response_status_code","param":"","code":"bad_response_status_code"}}"#
+    ));
+    // Wrong path shape (double /v1) — also a routing miss.
+    assert!(responses_transport_unsupported(
+        404,
+        r#"{"error":{"message":"Invalid URL (POST /v1/v1/responses)","type":"invalid_request_error"}}"#
+    ));
+    assert!(responses_transport_unsupported(501, ""));
+
+    // Genuine failures must NOT be mistaken for an unsupported endpoint:
+    // falling back would mask them behind a second request.
+    assert!(!responses_transport_unsupported(
+        401,
+        r#"{"error":{"message":"invalid api key","code":"invalid_api_key"}}"#
+    ));
+    assert!(!responses_transport_unsupported(
+        429,
+        r#"{"error":{"message":"rate limit exceeded","code":"rate_limit"}}"#
+    ));
+    assert!(!responses_transport_unsupported(
+        400,
+        r#"{"error":{"message":"Error from provider (Console): Upstream request failed","code":"invalid_request_error"}}"#
+    ));
+    assert!(!responses_transport_unsupported(500, "internal server error"));
+    // A 200 never reaches this classifier, but it must not claim unsupported.
+    assert!(!responses_transport_unsupported(200, ""));
+}
+
+#[test]
+fn transport_preference_overrides_and_learned_fallback() {
+    // Explicit preference wins over the Auto heuristic in both directions.
+    assert!(
+        resolve_transport(
+            OpenAiTransport::Responses,
+            "https://gateway.example/v1",
+            "MiniMax-M3",
+            true,
+        )
+        .0
+    );
+    assert!(
+        !resolve_transport(
+            OpenAiTransport::ChatCompletions,
+            "https://api.openai.com/v1",
+            "gpt-5.6-terra",
+            true,
+        )
+        .0
+    );
+
+    // A learned "this server/model cannot serve /v1/responses" fact overrides
+    // even an explicit preference, so one failed request per process is the
+    // worst case rather than one per turn.
+    let base = "https://learned-fallback.example/v1";
+    assert!(resolve_transport(OpenAiTransport::Responses, base, "gpt-5.6-terra", true).0);
+    mark_responses_unsupported(base, "gpt-5.6-terra");
+    let (use_responses, reason) =
+        resolve_transport(OpenAiTransport::Responses, base, "gpt-5.6-terra", true);
+    assert!(!use_responses);
+    assert_eq!(reason, TransportReason::LearnedResponsesUnsupported);
+    // Scoped to the (server, model) pair — a sibling model is unaffected.
+    assert!(resolve_transport(OpenAiTransport::Responses, base, "gpt-5.6-luna", true).0);
+
+    // Symmetric reverse fact: a chat pair told to use responses starts there.
+    let reverse = "https://requires-responses.example/v1";
+    assert!(
+        !resolve_transport(OpenAiTransport::ChatCompletions, reverse, "gpt-5.5", true).0,
+        "configured chat before learning"
+    );
+    mark_chat_requires_responses(reverse, "gpt-5.5");
+    let (use_responses, reason) =
+        resolve_transport(OpenAiTransport::ChatCompletions, reverse, "gpt-5.5", true);
+    assert!(use_responses, "reverse fact overrides configured chat");
+    assert_eq!(reason, TransportReason::LearnedRequiresResponses);
+}
+
+#[test]
+fn chat_requires_responses_transport_matches_official_openai_gate() {
+    // The official OpenAI 400 a gateway forwards verbatim.
+    assert!(chat_requires_responses_transport(
+        400,
+        "Function tools with reasoning_effort are not supported on gpt-5.5 with /v1/chat/completions, please use /v1/responses instead."
+    ));
+    // Variant without the literal path but the same verdict.
+    assert!(chat_requires_responses_transport(
+        400,
+        r#"{"error":{"message":"reasoning_effort is not supported here; use responses"}}"#
+    ));
+    // Unrelated 400s and non-400 statuses must not flip transport.
+    assert!(!chat_requires_responses_transport(
+        400,
+        r#"{"error":{"message":"invalid api key"}}"#
+    ));
+    assert!(!chat_requires_responses_transport(429, "please use /v1/responses"));
+}
+
+#[test]
+fn transport_config_values_round_trip() {
+    for (raw, expected) in [
+        ("responses", OpenAiTransport::Responses),
+        ("chat_completions", OpenAiTransport::ChatCompletions),
+        ("chat-completions", OpenAiTransport::ChatCompletions),
+        ("chat", OpenAiTransport::ChatCompletions),
+        ("  Responses  ", OpenAiTransport::Responses),
+        ("auto", OpenAiTransport::Auto),
+        // Unknown/garbage must degrade to Auto, never wedge a provider onto an
+        // endpoint it does not serve.
+        ("", OpenAiTransport::Auto),
+        ("nonsense", OpenAiTransport::Auto),
+    ] {
+        assert_eq!(OpenAiTransport::from_config_value(raw), expected, "raw={raw:?}");
+    }
+    assert_eq!(OpenAiTransport::default(), OpenAiTransport::Auto);
+    assert_eq!(
+        OpenAiTransport::from_config_value(OpenAiTransport::Responses.as_config_value()),
+        OpenAiTransport::Responses
+    );
+}
+
+// `TokenUsage::prompt_tokens()` (input + creation + read) drives the
+// auto-compaction budget, so cache buckets must never sum above the prompt the
+// provider actually reported. Gateways disagree on whether `cache_write_tokens`
+// is disjoint from `cached_tokens`; the normalizer must survive either reading.
+#[test]
+fn openai_usage_never_inflates_prompt_occupancy_via_cache_write() {
+    // Disjoint (documented) shape: buckets partition the prompt exactly.
+    let usage = token_usage_from_openai_usage(&json!({
+        "input_tokens": 1_000,
+        "output_tokens": 50,
+        "input_tokens_details": { "cached_tokens": 600, "cache_write_tokens": 100 }
+    }));
+    assert_eq!(usage.input_tokens, 300);
+    assert_eq!(usage.cache_creation_input_tokens, 100);
+    assert_eq!(usage.cache_read_input_tokens, 600);
+    assert_eq!(usage.prompt_tokens(), 1_000);
+
+    // Overlapping shape: a gateway reports the whole cached prefix in both
+    // fields. Unclamped this would report 1900 tokens of occupancy for a 1000
+    // token prompt and force a premature compaction.
+    let usage = token_usage_from_openai_usage(&json!({
+        "input_tokens": 1_000,
+        "output_tokens": 50,
+        "input_tokens_details": { "cached_tokens": 950, "cache_write_tokens": 950 }
+    }));
+    assert_eq!(usage.prompt_tokens(), 1_000);
+    assert_eq!(usage.cache_read_input_tokens, 950);
+    assert_eq!(usage.cache_creation_input_tokens, 50);
+    assert_eq!(usage.input_tokens, 0);
+
+    // Chat completions has no write counter at all — unchanged behaviour.
+    let usage = token_usage_from_openai_usage(&json!({
+        "prompt_tokens": 500,
+        "completion_tokens": 10,
+        "prompt_tokens_details": { "cached_tokens": 400 }
+    }));
+    assert_eq!(usage.input_tokens, 100);
+    assert_eq!(usage.cache_creation_input_tokens, 0);
+    assert_eq!(usage.cache_read_input_tokens, 400);
+    assert_eq!(usage.prompt_tokens(), 500);
+}
+
+// Models without a Responses endpoint must keep the exact chat/completions
+// request they had before the transport work: same endpoint, no reasoning
+// fields, no Responses-only keys. MiniMax-M3 carries the bulk of real traffic,
+// so its request shape is pinned here.
+#[test]
+fn non_responses_models_keep_their_original_chat_request() {
+    for model in ["MiniMax-M3", "deepseek-v4-flash", "kimi-k3", "mimo-v2.5-pro"] {
+        // Stays on chat/completions under Auto, on any gateway.
+        assert!(
+            !uses_openai_responses_api("http://gateway.local/v1", model, true),
+            "{model} must not be routed to /v1/responses"
+        );
+        assert!(
+            !resolve_transport(OpenAiTransport::Auto, "http://gateway.local/v1", model, true).0,
+            "{model} must resolve to chat/completions"
+        );
+    }
+
+    let spec = ExecutorToolSpec::new("bash", "Run", json!({ "type": "object" }));
+    let body = build_chat_completions_body(
+        "MiniMax-M3",
+        vec![json!({ "role": "user", "content": "hi" })],
+        std::slice::from_ref(&spec),
+        true,
+        chat_reasoning_effort_for("MiniMax-M3", "http://gateway.local/v1", true),
+    );
+
+    assert_eq!(body["model"], "MiniMax-M3");
+    assert_eq!(body["stream"], true);
+    assert_eq!(body["stream_options"]["include_usage"], true);
+    assert_eq!(body["messages"][0]["role"], "user");
+    assert_eq!(body["tool_choice"], "auto");
+    assert_eq!(body["tools"][0]["function"]["name"], "bash");
+    // No reasoning_effort (the model does not accept it) and none of the
+    // Responses-only keys leak into the chat body.
+    for absent in [
+        "reasoning_effort",
+        "reasoning",
+        "prompt_cache_key",
+        "instructions",
+        "input",
+        "store",
+        "include",
+    ] {
+        assert!(
+            body.get(absent).is_none(),
+            "chat body must not carry `{absent}`"
+        );
+    }
+
+    // Usage accounting is also untouched: these gateways report no
+    // `cache_write_tokens`, so the cache_creation bucket stays empty and fresh
+    // input is still `prompt - cached`.
+    let usage = token_usage_from_openai_usage(&json!({
+        "prompt_tokens": 195_916,
+        "completion_tokens": 98,
+        "prompt_tokens_details": { "cached_tokens": 194_048 }
+    }));
+    assert_eq!(usage.input_tokens, 1_868);
+    assert_eq!(usage.cache_read_input_tokens, 194_048);
+    assert_eq!(usage.cache_creation_input_tokens, 0);
+    assert_eq!(usage.prompt_tokens(), 195_916);
 }

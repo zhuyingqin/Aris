@@ -81,13 +81,29 @@ const PREVIEW_CONFIG_VIEW: ConfigView = {
   reviewerProvider: "openai",
   reviewerModel: "MiniMax-M3",
   reviewerBaseUrl: `${MANAGED_MODEL_SERVER_BASE_URL}/v1`,
+  reviewEnabled: true,
   hasReviewerKey: true,
   reviewerKeyMasked: "sk-...preview",
   hasScopusKey: false,
   language: "cn",
   memoryWriteApproval: true,
   managedModels: ["MiniMax-M3", "MiniMax-M2.7", "gpt-5.5", "GLM-5", "deepseek-v4-pro"],
-  verifiedExecutors: [],
+  // Transports mirror what the gateway actually serves: OpenAI-family
+  // reasoning models get `/v1/responses`, everything else chat/completions.
+  verifiedExecutors: [
+    {
+      provider: "openai",
+      model: "MiniMax-M3",
+      baseUrl: `${MANAGED_MODEL_SERVER_BASE_URL}/v1`,
+      transport: "chat_completions",
+    },
+    {
+      provider: "openai",
+      model: "gpt-5.5",
+      baseUrl: `${MANAGED_MODEL_SERVER_BASE_URL}/v1`,
+      transport: "responses",
+    },
+  ],
 };
 const PREVIEW_ACCOUNT: NewApiAccount = {
   username: "preview-user",
@@ -297,6 +313,9 @@ const SETTINGS_COPY: Record<Language, {
   modelSync: string;
   modelSyncing: string;
   executorModel: string;
+  transportResponses: string;
+  transportChat: string;
+  transportHint: string;
   reviewerModel: string;
   reviewerModelOff: string;
   modelSyncAfterLogin: string;
@@ -452,6 +471,9 @@ const SETTINGS_COPY: Record<Language, {
     modelSync: "同步模型",
     modelSyncing: "同步中...",
     executorModel: "执行模型",
+    transportResponses: "Responses 接口",
+    transportChat: "Chat 接口",
+    transportHint: "接口能力在“测试连接”时探测；不支持时会在首次请求后自动回退。",
     reviewerModel: "审核模型",
     reviewerModelOff: "关闭审核模型",
     modelSyncAfterLogin: "登录后同步模型",
@@ -607,6 +629,9 @@ const SETTINGS_COPY: Record<Language, {
     modelSync: "Sync models",
     modelSyncing: "Syncing...",
     executorModel: "Execution model",
+    transportResponses: "Responses API",
+    transportChat: "Chat API",
+    transportHint: "Endpoint capability is probed by “Test connection”; unsupported endpoints fall back automatically after the first request.",
     reviewerModel: "Review model",
     reviewerModelOff: "Disable review model",
     modelSyncAfterLogin: "Sync models after sign-in",
@@ -1952,6 +1977,18 @@ export default function Settings() {
   const currentReviewerModel = configView.reviewerModel?.trim() || "";
   const currentConfiguredModel = configView.executorModel?.trim() || copy.currentModelFallback;
   const currentServerLabel = configuredServerLabel(configView);
+  // Endpoint actually used for the selected executor model. Prefer the entry
+  // probed for this exact model over the live slot, since a model switch
+  // carries the per-model verdict. Empty (unprobed) renders no badge rather
+  // than guessing.
+  const executorTransport = (() => {
+    const model = configView.executorModel?.trim();
+    if (!model) return "";
+    const probed = (configView.verifiedExecutors ?? []).find(
+      (item) => item.model === model && item.provider === (configView.executorProvider ?? "openai"),
+    )?.transport;
+    return (probed || configView.executorTransport || "").trim();
+  })();
 
   return (
     <div className="st-page sp-list-page sp-settings-page">
@@ -2300,6 +2337,14 @@ export default function Settings() {
                 ) : (
                   <span className="sp-model-select-empty">{copy.modelSyncAfterLogin}</span>
                 )}
+                {executorTransport ? (
+                  <span
+                    className={`sp-model-transport${executorTransport === "responses" ? " is-responses" : ""}`}
+                    title={copy.transportHint}
+                  >
+                    {executorTransport === "responses" ? copy.transportResponses : copy.transportChat}
+                  </span>
+                ) : null}
               </label>
               <label className="sp-model-select-row">
                 <span>{copy.reviewerModel}</span>

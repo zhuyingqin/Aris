@@ -55,6 +55,7 @@ export interface ConfigView {
   reviewerProvider?: string | null;
   reviewerModel?: string | null;
   reviewerBaseUrl?: string | null;
+  reviewEnabled: boolean;
   hasReviewerKey: boolean;
   reviewerKeyMasked?: string | null;
   hasScopusKey: boolean;
@@ -62,7 +63,14 @@ export interface ConfigView {
   language?: string | null;
   memoryWriteApproval: boolean;
   managedModels?: string[];
-  verifiedExecutors?: { provider: string; model: string; baseUrl: string }[];
+  executorTransport?: string | null;
+  verifiedExecutors?: {
+    provider: string;
+    model: string;
+    baseUrl: string;
+    /** Probed endpoint capability: "responses" | "chat_completions" | "" when unprobed. */
+    transport?: string;
+  }[];
 }
 
 export type ConfigSecretKind = "executorApiKey" | "summarizerApiKey" | "reviewerApiKey" | "scopusApiKey";
@@ -114,6 +122,7 @@ export interface ConfigPatch {
   reviewerModel?: string;
   reviewerBaseUrl?: string;
   reviewerApiKey?: string;
+  reviewEnabled?: boolean;
   scopusApiKey?: string;
   language?: string;
   memoryWriteApproval?: boolean;

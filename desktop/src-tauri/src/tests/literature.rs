@@ -49,6 +49,9 @@ fn imports_only_valid_pdf_files_into_papers() {
     let imported = import_pdf_at(&base, &source, "My Paper.pdf").expect("import pdf");
     assert_eq!(imported.relative_path, "papers/My-Paper.pdf");
     assert!(base.join("papers/My-Paper.pdf").exists());
+    let replacement = base.join("replacement.pdf");
+    std::fs::write(&replacement, b"%PDF-1.4 replacement").expect("write replacement");
+    assert!(import_pdf_at(&base, &replacement, "My Paper.pdf").is_err());
     assert!(import_pdf_at(&base, &invalid, "invalid.pdf").is_err());
     let _ = std::fs::remove_dir_all(base);
 }
