@@ -16,10 +16,11 @@ use sha2::{Digest, Sha256};
 
 use crate::{now_iso8601, somniq_project_dir, write_file_atomically};
 
-pub const LITERATURE_SCHEMA_VERSION: u32 = 1;
+pub const LITERATURE_SCHEMA_VERSION: u32 = 2;
 pub const LITERATURE_DIRECTORY: &str = "literature";
 const DATABASE_FILE: &str = "literature.sqlite3";
 const ARTIFACTS_DIRECTORY: &str = "artifacts";
+const BACKUPS_DIRECTORY: &str = "backups";
 const LEGACY_LIBRARY_BOOTSTRAP_KEY: &str = "legacy_library_bootstrap_v1";
 const LEGACY_LIBRARY_META_KEY: &str = "legacy_library_projection_meta_v1";
 
@@ -363,6 +364,45 @@ pub struct LiteratureStore {
     connection: Connection,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LiteratureFullTextHit {
+    pub record_id: String,
+    pub score: f64,
+}
+
+/// A deliberately conservative duplicate suggestion. The rows remain
+/// separate until a user explicitly chooses to merge them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LiteratureDuplicateCandidate {
+    pub primary_record_id: String,
+    pub duplicate_record_id: String,
+    pub normalized_title: String,
+    pub reason: String,
+}
+
+/// A recoverable, point-in-time SQLite copy stored beside the canonical
+/// literature database.  The copy is created with SQLite's `VACUUM INTO`, so
+/// it is consistent even while the primary database uses WAL mode.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LiteratureBackup {
+    pub path: String,
+    pub bytes: u64,
+    pub created_at: String,
+}
+
+/// A lightweight health report safe to expose to Desktop and CLI callers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LiteratureHealth {
+    pub healthy: bool,
+    pub integrity_check: String,
+    pub foreign_key_violations: u64,
+    pub journal_mode: String,
+}
+
 #[must_use]
 pub fn literature_root_for(workspace: &Path) -> PathBuf {
     somniq_project_dir(workspace).join(LITERATURE_DIRECTORY)
@@ -381,6 +421,99 @@ impl LiteratureStore {
     #[must_use]
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Path to the project-local SQLite database that owns canonical
+    /// literature records, protocols, audit history, and evidence.
+    #[must_use]
+    pub fn database_path(&self) -> PathBuf {
+        self.root.join(DATABASE_FILE)
+    }
+
+    /// Validate the SQLite file without mutating canonical records.
+    pub fn health(&self) -> Result<LiteratureHealth, String> {
+        let integrity_check = self
+            .connection
+            .query_row("PRAGMA quick_check(1)", [], |row| row.get::<_, String>(0))
+            .map_err(to_error)?;
+        let journal_mode = self
+            .connection
+            .query_row("PRAGMA journal_mode", [], |row| row.get::<_, String>(0))
+            .map_err(to_error)?;
+        let foreign_key_violations = self
+            .connection
+            .prepare("PRAGMA foreign_key_check")
+            .map_err(to_error)?
+            .query_map([], |_| Ok(()))
+            .map_err(to_error)?
+            .count();
+        let foreign_key_violations = u64::try_from(foreign_key_violations).unwrap_or(u64::MAX);
+        Ok(LiteratureHealth {
+            healthy: integrity_check.eq_ignore_ascii_case("ok") && foreign_key_violations == 0,
+            integrity_check,
+            foreign_key_violations,
+            journal_mode,
+        })
+    }
+
+    /// Return the most recently created local database backup, if one exists.
+    pub fn latest_backup(&self) -> Result<Option<LiteratureBackup>, String> {
+        let directory = self.root.join(BACKUPS_DIRECTORY);
+        if !directory.exists() {
+            return Ok(None);
+        }
+        let mut candidates = fs::read_dir(&directory)
+            .map_err(to_error)?
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                let path = entry.path();
+                (path.extension().and_then(|value| value.to_str()) == Some("sqlite3"))
+                    .then_some(path)
+            })
+            .filter_map(|path| {
+                let metadata = fs::metadata(&path).ok()?;
+                let modified = metadata.modified().ok()?;
+                Some((modified, path, metadata.len()))
+            })
+            .collect::<Vec<_>>();
+        candidates.sort_by(|left, right| right.0.cmp(&left.0));
+        let Some((modified, path, bytes)) = candidates.into_iter().next() else {
+            return Ok(None);
+        };
+        let created_at = modified
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_millis().to_string())
+            .unwrap_or_default();
+        Ok(Some(LiteratureBackup {
+            path: path.to_string_lossy().into_owned(),
+            bytes,
+            created_at,
+        }))
+    }
+
+    /// Create a transactionally consistent SQLite backup under
+    /// `.somniq/literature/backups/`.
+    pub fn create_backup(&self) -> Result<LiteratureBackup, String> {
+        let directory = self.root.join(BACKUPS_DIRECTORY);
+        fs::create_dir_all(&directory).map_err(to_error)?;
+        let created_at = now_iso8601();
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(to_error)?
+            .as_millis();
+        let path = directory.join(format!("literature-{timestamp}.sqlite3"));
+        // The destination is generated locally, but quote it defensively so a
+        // project path containing an apostrophe cannot change the SQL command.
+        let destination = path.to_string_lossy().replace('\'', "''");
+        self.connection
+            .execute_batch(&format!("VACUUM INTO '{destination}'"))
+            .map_err(to_error)?;
+        let bytes = fs::metadata(&path).map_err(to_error)?.len();
+        Ok(LiteratureBackup {
+            path: path.to_string_lossy().into_owned(),
+            bytes,
+            created_at,
+        })
     }
 
     pub fn create_protocol(
@@ -440,6 +573,145 @@ impl LiteratureStore {
             })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(records)
+    }
+
+    /// Search title, abstract, tags, notes, annotations, and other local
+    /// record metadata through SQLite FTS5. The returned identifiers remain
+    /// canonical record ids, so callers can fetch the authoritative payload.
+    pub fn full_text_search(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<LiteratureFullTextHit>, String> {
+        let expression = fts_expression(query);
+        if expression.is_empty() { return Ok(Vec::new()); }
+        let mut statement = self.connection.prepare(
+            "SELECT record_id, bm25(literature_full_text) AS score
+             FROM literature_full_text
+             WHERE literature_full_text MATCH ?1
+             ORDER BY score ASC, record_id ASC
+             LIMIT ?2",
+        ).map_err(to_error)?;
+        let rows = statement
+            .query_map(
+                params![expression, i64::try_from(limit.max(1)).unwrap_or(i64::MAX)],
+                |row| {
+                    Ok(LiteratureFullTextHit {
+                        record_id: row.get(0)?,
+                        score: row.get(1)?,
+                    })
+                },
+            )
+            .map_err(to_error)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(to_error)
+    }
+
+    /// Suggest title-normalized duplicate candidates without merging them.
+    /// Strong-identifier conflicts are intentionally left for a human to
+    /// resolve in the Desktop merge panel.
+    pub fn duplicate_candidates(&self) -> Result<Vec<LiteratureDuplicateCandidate>, String> {
+        let mut grouped = BTreeMap::<String, Vec<CanonicalRecord>>::new();
+        for record in self.list_canonical_records()? {
+            grouped
+                .entry(record.normalized_title.clone())
+                .or_default()
+                .push(record);
+        }
+        let mut candidates = Vec::new();
+        for (title, mut records) in grouped {
+            if records.len() < 2 {
+                continue;
+            }
+            records.sort_by(canonical_record_precedence);
+            for duplicate in records.iter().skip(1) {
+                candidates.push(LiteratureDuplicateCandidate {
+                    primary_record_id: records[0].id.clone(),
+                    duplicate_record_id: duplicate.id.clone(),
+                    normalized_title: title.clone(),
+                    reason: "same_normalized_title".to_string(),
+                });
+            }
+        }
+        Ok(candidates)
+    }
+
+    /// Merge two explicitly user-selected canonical records. Related search
+    /// runs, screening decisions, evidence cards, legacy tags, collections,
+    /// attachments, notes, and annotations are remapped before the duplicate
+    /// row is removed.
+    pub fn merge_canonical_records(
+        &mut self,
+        primary_record_id: &str,
+        duplicate_record_id: &str,
+    ) -> Result<CanonicalRecord, String> {
+        if primary_record_id.trim().is_empty() || duplicate_record_id.trim().is_empty() {
+            return Err("choose both a primary and duplicate record".to_string());
+        }
+        if primary_record_id == duplicate_record_id {
+            return Err("a record cannot be merged into itself".to_string());
+        }
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(to_error)?;
+        let load = |id: &str| -> Result<CanonicalRecord, String> {
+            let payload = transaction
+                .query_row(
+                    "SELECT payload FROM canonical_records WHERE id = ?1",
+                    [id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(to_error)?
+                .ok_or_else(|| format!("unknown canonical record: {id}"))?;
+            decode_payload(&payload)
+        };
+        let mut primary = load(primary_record_id)?;
+        let duplicate = load(duplicate_record_id)?;
+        let expected_revision = primary.revision.max(initial_revision());
+        merge_record_observation(&mut primary, &duplicate);
+        primary.revision = expected_revision.saturating_add(1);
+        primary.updated_at = now_iso8601();
+        let changed = transaction
+            .execute(
+                "UPDATE canonical_records SET normalized_title = ?2, doi = ?3, arxiv_id = ?4,
+                 scopus_id = ?5, revision = ?6, payload = ?7, updated_at = ?8
+                 WHERE id = ?1 AND revision = ?9",
+                params![
+                    primary.id,
+                    primary.normalized_title,
+                    primary.identifiers.doi,
+                    primary.identifiers.arxiv_id,
+                    primary.identifiers.scopus_id,
+                    primary.revision,
+                    encode_payload(&primary)?,
+                    primary.updated_at,
+                    expected_revision,
+                ],
+            )
+            .map_err(to_error)?;
+        if changed == 0 {
+            return Err("primary record changed in another process; retry the merge".to_string());
+        }
+        remap_record_references(&transaction, duplicate_record_id, primary_record_id)?;
+        transaction
+            .execute("DELETE FROM canonical_records WHERE id = ?1", [duplicate_record_id])
+            .map_err(to_error)?;
+        transaction
+            .execute("DELETE FROM literature_full_text WHERE record_id = ?1", [duplicate_record_id])
+            .map_err(to_error)?;
+        upsert_record_aliases(&transaction, &primary, primary_record_id)?;
+        upsert_record_aliases(&transaction, &duplicate, primary_record_id)?;
+        upsert_full_text_index(&transaction, &primary)?;
+        append_audit(
+            &transaction,
+            "canonical_record",
+            primary_record_id,
+            "user_merged_duplicate",
+            &json!({ "duplicateRecordId": duplicate_record_id }),
+        )?;
+        transaction.commit().map_err(to_error)?;
+        Ok(primary)
     }
 
     /// Read-side API for protocol history. Consumers should use this instead
@@ -795,6 +1067,12 @@ impl LiteratureStore {
                     [&duplicate.id],
                 )
                 .map_err(to_error)?;
+            transaction
+                .execute(
+                    "DELETE FROM literature_full_text WHERE record_id = ?1",
+                    [&duplicate.id],
+                )
+                .map_err(to_error)?;
             merged_record_ids.push(duplicate.id);
         }
         let changed = merge_record_observation(&mut canonical, record);
@@ -825,6 +1103,7 @@ impl LiteratureStore {
                 canonical.id
             ));
         }
+        upsert_full_text_index(&transaction, &canonical)?;
         // Every alias observed on this upsert must resolve to the surviving
         // canonical row. In particular, `record.id` can be an incoming
         // provisional id that has never had its own database row.
@@ -1139,6 +1418,7 @@ impl LiteratureStore {
                 "canonical record {record_id} changed in another process; retry library visibility update"
             ));
         }
+        upsert_full_text_index(&transaction, &record)?;
         transaction.commit().map_err(to_error)
     }
 
@@ -1184,6 +1464,7 @@ impl LiteratureStore {
                 "canonical record {record_id} changed in another process; retry legacy projection"
             ));
         }
+        upsert_full_text_index(&transaction, &record)?;
         append_audit(
             &transaction,
             "canonical_record",
@@ -1193,6 +1474,83 @@ impl LiteratureStore {
         )?;
         transaction.commit().map_err(to_error)?;
         Ok(record)
+    }
+
+    /// Update only the Desktop compatibility metadata for one already
+    /// canonical record.  This is deliberately narrower than importing a
+    /// whole legacy library snapshot: callers cannot hide, overwrite, or
+    /// re-ingest unrelated records through this path.
+    pub fn update_legacy_library_paper(
+        &mut self,
+        record_id: &str,
+        paper: &Value,
+    ) -> Result<CanonicalRecord, String> {
+        self.set_legacy_library_paper(record_id, paper)
+    }
+
+    /// Store extracted local PDF text only in the canonical SQLite payload and
+    /// refresh its FTS5 row. The compatibility JSON projection never needs to
+    /// carry a large full-text copy.
+    pub fn set_record_pdf_text(&mut self, record_id: &str, text: &str) -> Result<(), String> {
+        const MAX_INDEXED_PDF_CHARS: usize = 5_000_000;
+        let text = text.trim();
+        if text.is_empty() {
+            return Ok(());
+        }
+        let text = text.chars().take(MAX_INDEXED_PDF_CHARS).collect::<String>();
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(to_error)?;
+        let (stored_revision, payload) = transaction
+            .query_row(
+                "SELECT revision, payload FROM canonical_records WHERE id = ?1",
+                [record_id],
+                |row| Ok((row.get::<_, u64>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .map_err(to_error)?
+            .ok_or_else(|| format!("unknown canonical record: {record_id}"))?;
+        let mut record = decode_payload::<CanonicalRecord>(&payload)?;
+        let mut metadata = record.metadata.as_object().cloned().unwrap_or_default();
+        if metadata
+            .get("extractedPdfText")
+            .and_then(Value::as_str)
+            .is_some_and(|existing| existing == text)
+        {
+            return Ok(());
+        }
+        metadata.insert("extractedPdfText".to_string(), Value::String(text));
+        record.metadata = Value::Object(metadata);
+        record.revision = stored_revision.saturating_add(1);
+        record.updated_at = now_iso8601();
+        let changed = transaction
+            .execute(
+                "UPDATE canonical_records SET revision = ?2, payload = ?3, updated_at = ?4
+                 WHERE id = ?1 AND revision = ?5",
+                params![
+                    record.id,
+                    record.revision,
+                    encode_payload(&record)?,
+                    record.updated_at,
+                    stored_revision,
+                ],
+            )
+            .map_err(to_error)?;
+        if changed == 0 {
+            return Err(format!(
+                "canonical record {record_id} changed in another process; retry PDF text indexing"
+            ));
+        }
+        upsert_full_text_index(&transaction, &record)?;
+        append_audit(
+            &transaction,
+            "canonical_record",
+            record_id,
+            "pdf_text_indexed",
+            &json!({ "characters": record.metadata["extractedPdfText"].as_str().map_or(0, str::len) }),
+        )?;
+        transaction.commit().map_err(to_error)
     }
 
     fn write_legacy_artifact(&self, run_id: &str, bytes: &[u8]) -> Result<RawArtifact, String> {
@@ -1299,7 +1657,9 @@ fn initialize_schema(connection: &Connection) -> Result<(), String> {
              CREATE TABLE IF NOT EXISTS literature_audit_log(
                sequence INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT NOT NULL,
                entity_type TEXT NOT NULL, entity_id TEXT NOT NULL, action TEXT NOT NULL, payload TEXT NOT NULL
-             );",
+             );
+             CREATE VIRTUAL TABLE IF NOT EXISTS literature_full_text
+               USING fts5(record_id UNINDEXED, title, body);",
         )
         .map_err(to_error)?;
     ensure_column(
@@ -1322,6 +1682,7 @@ fn initialize_schema(connection: &Connection) -> Result<(), String> {
         )
         .optional()
         .map_err(to_error)?;
+    let mut rebuild_full_text = false;
     if let Some(stored) = stored {
         let version = stored
             .parse::<u32>()
@@ -1331,6 +1692,15 @@ fn initialize_schema(connection: &Connection) -> Result<(), String> {
                 "literature store schema {version} is newer than this runtime ({LITERATURE_SCHEMA_VERSION})"
             ));
         }
+        if version < LITERATURE_SCHEMA_VERSION {
+            connection
+                .execute(
+                    "UPDATE metadata SET value = ?1 WHERE key = 'schema_version'",
+                    [LITERATURE_SCHEMA_VERSION.to_string()],
+                )
+                .map_err(to_error)?;
+            rebuild_full_text = true;
+        }
     } else {
         connection
             .execute(
@@ -1338,6 +1708,10 @@ fn initialize_schema(connection: &Connection) -> Result<(), String> {
                 [LITERATURE_SCHEMA_VERSION.to_string()],
             )
             .map_err(to_error)?;
+        rebuild_full_text = true;
+    }
+    if rebuild_full_text {
+        rebuild_full_text_index(connection)?;
     }
     Ok(())
 }
@@ -1426,7 +1800,45 @@ fn insert_canonical_record(
             ],
         )
         .map_err(to_error)?;
+    upsert_full_text_index(transaction, record)?;
     Ok(())
+}
+
+fn upsert_full_text_index(transaction: &Transaction<'_>, record: &CanonicalRecord) -> Result<(), String> {
+    transaction.execute(
+        "DELETE FROM literature_full_text WHERE record_id = ?1",
+        [&record.id],
+    ).map_err(to_error)?;
+    transaction.execute(
+        "INSERT INTO literature_full_text(record_id, title, body) VALUES (?1, ?2, ?3)",
+        params![record.id, record.title, full_text_body(record)],
+    ).map_err(to_error)?;
+    Ok(())
+}
+
+fn full_text_body(record: &CanonicalRecord) -> String {
+    let metadata = serde_json::to_string(&record.metadata).unwrap_or_default();
+    format!("{}\n{}\n{}", record.authors.join(" "), record.abstract_text, metadata)
+}
+
+fn rebuild_full_text_index(connection: &Connection) -> Result<(), String> {
+    let mut statement = connection.prepare("SELECT payload FROM canonical_records").map_err(to_error)?;
+    let records = statement.query_map([], |row| row.get::<_, String>(0)).map_err(to_error)?
+        .map(|row| row.map_err(to_error).and_then(|payload| decode_payload::<CanonicalRecord>(&payload)))
+        .collect::<Result<Vec<_>, _>>()?;
+    let transaction = connection.unchecked_transaction().map_err(to_error)?;
+    transaction.execute("DELETE FROM literature_full_text", []).map_err(to_error)?;
+    for record in &records { upsert_full_text_index(&transaction, record)?; }
+    transaction.commit().map_err(to_error)
+}
+
+fn fts_expression(query: &str) -> String {
+    query
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|term| !term.is_empty())
+        .map(|term| format!("\"{term}\""))
+        .collect::<Vec<_>>()
+        .join(" AND ")
 }
 
 fn resolve_equivalent_records(

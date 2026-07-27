@@ -54,6 +54,9 @@ main.tex
 # Local scratch benchmarks
 _bench*.mjs
 
+# pnpm local cache (mirrors pnpm install, never tracked)
+.pnpm-store/
+
 # Local release/deployment staging and diagnostic output
 .codex-deploy-stage/
 desktop-build.log

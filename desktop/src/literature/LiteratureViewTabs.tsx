@@ -1,4 +1,4 @@
-export type LiteraturePageView = "library" | "graph";
+export type LiteraturePageView = "library" | "discover" | "graph";
 
 interface LiteratureViewTabsProps {
   pageView: LiteraturePageView;
@@ -8,6 +8,7 @@ interface LiteratureViewTabsProps {
 
 const LITERATURE_PAGE_VIEWS = [
   { id: "library", label: "文献库", icon: "library" },
+  { id: "discover", label: "检索", icon: "search" },
   { id: "graph", label: "知识图谱", icon: "graph" },
 ] as const;
 

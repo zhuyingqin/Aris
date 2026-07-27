@@ -1,6 +1,6 @@
-// Shared shapes for the literature library. The on-disk form of
-// `LiteratureLibrary` is `papers/library.json` inside the active project —
-// the same folder the `/arxiv` skill writes PDFs into.
+// Shared shapes for the literature library. The canonical on-disk store is
+// `.somniq/literature/literature.sqlite3`; `papers/library.json` is only a
+// backwards-compatible projection for legacy tools.
 
 export type PaperStage =
   | "inbox"
@@ -9,6 +9,18 @@ export type PaperStage =
   | "downloaded"
   | "read"
   | "excluded";
+
+export type LiteratureItemType =
+  | "article"
+  | "book"
+  | "bookSection"
+  | "conferencePaper"
+  | "thesis"
+  | "report"
+  | "webpage"
+  | "dataset"
+  | "preprint"
+  | "other";
 
 export type PaperFit = "high" | "medium" | "low";
 
@@ -25,7 +37,7 @@ export type EvidenceSource = "text" | "vision";
 
 /** Project-level reference frame for the Agent's "for you" judgment — what
  * makes a Brief tailored rather than a generic summary. Stored at the top of
- * library.json. */
+ * the project-local literature database. */
 export interface ProjectFocus {
   question: string;
   motivation: string;
@@ -211,6 +223,43 @@ export interface PdfAnnotation {
   createdAt: string;
 }
 
+/**
+ * A project-local file or an external resource associated with a paper.
+ * `pdf` remains the compatibility pointer for the PDF reader; attachments are
+ * the canonical UI model so a work can carry its manuscript, supplements,
+ * snapshots, and links together.
+ */
+export type LiteratureAttachmentKind = "pdf" | "supplement" | "webSnapshot" | "externalLink";
+
+export interface LiteratureAttachment {
+  id: string;
+  label: string;
+  kind: LiteratureAttachmentKind;
+  /** Path relative to the active local project. */
+  path?: string;
+  /** A deliberately external resource; it is never copied without user action. */
+  url?: string;
+  /** Original local path reported by an imported reference manager. It remains
+   * external until the researcher explicitly copies it into this project. */
+  externalPath?: string;
+  mimeType?: string;
+  bytes?: number;
+  addedAt: string;
+}
+
+/** A durable human note, optionally linked back to a highlight or evidence item. */
+export interface LiteratureNote {
+  id: string;
+  title?: string;
+  content: string;
+  createdAt: string;
+  updatedAt: string;
+  annotationId?: string;
+  attachmentId?: string;
+  evidenceId?: string;
+  source?: "manual" | "annotation" | "imported";
+}
+
 export interface AnswerChainSupport {
   annotationId: string;
   role: string;
@@ -230,10 +279,25 @@ export interface LiteraturePaper {
   /** Stable id: `arxiv:<id>`, `doi:<doi>` or `title:<normalized>`. */
   id: string;
   title: string;
+  /** Zotero/CSL-compatible item type, with unknown values retained as `other`. */
+  itemType?: LiteratureItemType | string;
   authors: string[];
   year?: number;
   venue: string;
   doi?: string;
+  isbn?: string;
+  citationKey?: string;
+  /** Original publication date when more precise than `year`. */
+  date?: string;
+  volume?: string;
+  issue?: string;
+  pages?: string;
+  publisher?: string;
+  place?: string;
+  edition?: string;
+  series?: string;
+  language?: string;
+  accessed?: string;
   arxivId?: string;
   url?: string;
   abstract: string;
@@ -248,6 +312,8 @@ export interface LiteraturePaper {
   citedBy?: number;
   addedAt: string;
   pdf: PaperPdf;
+  /** Multiple local and external resources. Optional for legacy projections. */
+  attachments?: LiteratureAttachment[];
   verdict?: AgentVerdict;
   screenings?: Record<string, PaperScreening>;
   brief?: PaperBrief;
@@ -257,6 +323,8 @@ export interface LiteraturePaper {
   answerChains: ReadingAnswerChain[];
   /** Persistent highlights and notes rendered inside the embedded PDF reader. */
   pdfAnnotations: PdfAnnotation[];
+  /** Free-form notes and notes created from reader annotations. */
+  notes?: LiteratureNote[];
 }
 
 export interface LiteratureSearch {
@@ -269,12 +337,21 @@ export interface LiteratureSearch {
   searchRunId?: string;
   protocolId?: string;
   status?: string;
+  /** A local query view that re-evaluates as the library changes. */
+  dynamic?: boolean;
 }
 
 export interface LiteratureCollection {
   id: string;
   label: string;
   parentId?: string;
+}
+
+export interface LiteratureDuplicateCandidate {
+  primaryRecordId: string;
+  duplicateRecordId: string;
+  normalizedTitle: string;
+  reason: string;
 }
 
 export interface LiteratureLibrary {
@@ -285,6 +362,29 @@ export interface LiteratureLibrary {
   reviewTasks: LiteratureReviewTask[];
   screenRuns: LiteratureScreenRun[];
   projectFocus?: ProjectFocus;
+}
+
+/** Read-only health/status surface for the project-local canonical store. */
+export interface LiteratureStorageStatus {
+  schemaVersion: number;
+  databasePath: string;
+  databaseBytes: number;
+  canonicalRecordCount: number;
+  searchRunCount: number;
+  health: {
+    healthy: boolean;
+    integrityCheck: string;
+    foreignKeyViolations: number;
+    journalMode: string;
+  };
+  latestBackup?: {
+    path: string;
+    bytes: number;
+    /** Unix time in milliseconds, represented as a string by the Rust layer. */
+    createdAt: string;
+  } | null;
+  projectionPath: string;
+  projectionExists: boolean;
 }
 
 export type ActivityLevel = "info" | "ok" | "warn" | "error";

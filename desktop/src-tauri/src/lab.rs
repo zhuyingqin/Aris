@@ -189,11 +189,6 @@ fn notebook_view(path: &Path) -> Result<Value, String> {
     }))
 }
 
-#[tauri::command]
-pub fn lab_list_kernels() -> Result<Value, String> {
-    serde_json::to_value(KernelManager::list()).map_err(|e| e.to_string())
-}
-
 /// All kernels the user can pick: installed Jupyter kernelspecs plus the native
 /// MATLAB backend when a MATLAB install is detected. Reads kernelspec dirs, so it
 /// runs on a blocking thread.

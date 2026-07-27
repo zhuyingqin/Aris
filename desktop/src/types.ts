@@ -308,66 +308,6 @@ export interface AppUpdateInstallResult {
   version?: string;
 }
 
-export interface TokenUsageBucket {
-  server: string;
-  model: string;
-  provider: string;
-  requests: number;
-  inputTokens: number;
-  outputTokens: number;
-  cacheCreationInputTokens: number;
-  cacheReadInputTokens: number;
-  promptTokens: number;
-  totalTokens: number;
-  estimatedCostUsd: number;
-}
-
-export interface TokenUsageServerBucket {
-  server: string;
-  provider: string;
-  requests: number;
-  inputTokens: number;
-  outputTokens: number;
-  cacheCreationInputTokens: number;
-  cacheReadInputTokens: number;
-  promptTokens: number;
-  totalTokens: number;
-  estimatedCostUsd: number;
-  byModel: TokenUsageBucket[];
-}
-
-export interface TokenUsageLogEntry {
-  createdAt: number;
-  sessionId: string;
-  role: "executor" | "reviewer" | string;
-  server: string;
-  model: string;
-  provider: string;
-  inputTokens: number;
-  outputTokens: number;
-  cacheCreationInputTokens: number;
-  cacheReadInputTokens: number;
-  promptTokens: number;
-  totalTokens: number;
-  estimatedCostUsd: number;
-}
-
-export interface TokenUsageSummary {
-  logPath: string;
-  requests: number;
-  inputTokens: number;
-  outputTokens: number;
-  cacheCreationInputTokens: number;
-  cacheReadInputTokens: number;
-  promptTokens: number;
-  totalTokens: number;
-  estimatedCostUsd: number;
-  unpricedRequests: number;
-  byServer: TokenUsageServerBucket[];
-  byModel: TokenUsageBucket[];
-  recent: TokenUsageLogEntry[];
-}
-
 // ── Mail (Gmail API + Microsoft Graph) ───────────────────────────────────────
 
 export type MailProvider = "gmail" | "outlook" | "imap";

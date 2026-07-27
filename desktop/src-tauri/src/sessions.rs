@@ -13,6 +13,7 @@ use std::{
 
 use remote_protocol::{ChatToolProgress, ChatTranscriptBlock};
 use runtime::{ContentBlock, MessageRole, Session};
+use tauri::{AppHandle, Emitter};
 
 use crate::state;
 
@@ -1536,29 +1537,6 @@ pub fn session_get(id: String) -> Result<Value, String> {
 }
 
 #[tauri::command]
-pub fn chat_ui_sessions_load() -> Result<Value, String> {
-    // Full export path (backup/tests): reassemble every conversation from its
-    // own file. Not on the hot path — the UI uses the index + lazy load instead.
-    read_chat_ui_index()?;
-    let mut sessions = Vec::new();
-    if let Ok(entries) = fs::read_dir(chat_ui_sessions_dir()) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("json") {
-                continue;
-            }
-            let Some(id) = path.file_stem().and_then(|s| s.to_str()) else {
-                continue;
-            };
-            if let Some(session) = read_chat_ui_session_file(id)? {
-                sessions.push(session);
-            }
-        }
-    }
-    Ok(Value::Array(sessions))
-}
-
-#[tauri::command]
 pub fn chat_ui_sessions_list() -> Result<Value, String> {
     // Reads only the summary index — no turn bodies are touched, so the sidebar
     // list stays fast regardless of how large the conversation history grows.
@@ -1664,14 +1642,22 @@ fn chat_ui_session_save_blocking(session: Value) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn chat_ui_session_save(session: Value) -> Result<(), String> {
+pub async fn chat_ui_session_save(session: Value, app: AppHandle) -> Result<(), String> {
+    let id = chat_ui_session_id(&session)
+        .ok_or_else(|| "chat UI session must include an id".to_string())?
+        .to_string();
     tauri::async_runtime::spawn_blocking(move || chat_ui_session_save_blocking(session))
         .await
-        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())??;
+    let _ = app.emit(
+        "chat-ui-session-updated",
+        json!({ "sessionId": id, "operation": "saved" }),
+    );
+    Ok(())
 }
 
 #[tauri::command]
-pub fn chat_ui_session_delete(id: String) -> Result<(), String> {
+pub fn chat_ui_session_delete(id: String, app: AppHandle) -> Result<(), String> {
     validate_chat_ui_session_id(&id)?;
     ensure_chat_ui_migrated()?;
     match fs::remove_file(chat_ui_session_file_path(&id)) {
@@ -1684,7 +1670,12 @@ pub fn chat_ui_session_delete(id: String) -> Result<(), String> {
         Err(error) if error.kind() == ErrorKind::NotFound => {}
         Err(error) => return Err(error.to_string()),
     }
-    upsert_chat_ui_index(&id, None)
+    upsert_chat_ui_index(&id, None)?;
+    let _ = app.emit(
+        "chat-ui-session-updated",
+        json!({ "sessionId": id, "operation": "deleted" }),
+    );
+    Ok(())
 }
 
 #[tauri::command]

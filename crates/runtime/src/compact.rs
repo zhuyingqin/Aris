@@ -371,21 +371,6 @@ fn legacy_plan_compaction_tail_scan(
     })
 }
 
-/// Build the compacted session from a plan and an already-produced summary. The
-/// `summary` is expected to contain a `<summary>...</summary>` block (both the
-/// text-assembly and LLM paths produce one) so `format_compact_summary` and the
-/// continuation framing behave identically regardless of source.
-#[allow(dead_code)]
-#[must_use]
-pub fn assemble_compacted_session(
-    session: &Session,
-    summary: String,
-    summary_source: CompactionSummarySource,
-    plan: &CompactionPlan,
-) -> CompactionResult {
-    assemble_compacted_session_with_usage(session, summary, summary_source, None, plan)
-}
-
 /// Build a compacted session while optionally using the summarizer provider's
 /// reported output token count. The provider count is more faithful than the
 /// character heuristic for the generated summary; preserved messages and the

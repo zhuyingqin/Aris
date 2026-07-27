@@ -6,6 +6,7 @@ import {
   chatUiSessionsList,
   chatUiSessionsSave,
   isTauri,
+  onChatUiSessionUpdated,
   onRemoteChatSessionUpdated,
   type RemoteChatSessionUpdatedEvent,
 } from "../api/tauri";
@@ -112,8 +113,18 @@ function mergeRemoteLoadedSession(current: ChatSession | undefined, loaded: Chat
   if (loaded.updatedAt < current.updatedAt) return current;
   const loadedTurnCount = loaded.turnCount ?? loaded.turns.length;
   const currentTurnCount = current.turnCount ?? current.turns.length;
-  if (loaded.updatedAt === current.updatedAt && loadedTurnCount < currentTurnCount) return current;
-  return loaded;
+  // Equal timestamp + no extra turns means the disk copy carries no new
+  // transcript (every turn mutation bumps `updatedAt`), so keep the in-memory
+  // session untouched. This makes a save's own broadcast echo a no-op instead
+  // of a full re-render on every keystroke's debounced persist.
+  if (loaded.updatedAt === current.updatedAt && loadedTurnCount <= currentTurnCount) return current;
+  // `loaded` owns the transcript, but the composer draft and its attachments are
+  // window-local editing state — never sourced from disk while the user has the
+  // session open. A background reload (our own save's broadcast echo, a paired
+  // phone sync, or a companion-window save) that overwrote the live draft would
+  // snap the controlled <textarea> value back mid-keystroke and abort IME
+  // composition, leaking the pending candidate keys (Space/PageDown/Shift/Delete).
+  return { ...loaded, draft: current.draft, draftAttachments: current.draftAttachments };
 }
 
 interface RemoteTurnBuffer {
@@ -276,6 +287,49 @@ export function useChatSessions(projectId?: string | null) {
         hydrated.current = true;
       });
   }, [setError]);
+
+  useEffect(() => {
+    if (!isTauri()) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+
+    void onChatUiSessionUpdated((event) => {
+      const id = typeof event.sessionId === "string" ? event.sessionId.trim() : "";
+      if (!id || disposed) return;
+      if (event.operation === "deleted") {
+        setAllSessions((previous) => previous.some((session) => session.id === id)
+          ? previous.filter((session) => session.id !== id)
+          : previous);
+        return;
+      }
+
+      const known = sessionsRef.current.find((session) => session.id === id);
+      void chatUiSessionLoad<ChatSession>(id)
+        .then((stored) => {
+          if (!stored || disposed) return;
+          const loaded = { ...migrateSession(stored, known?.projectId), turnsLoaded: true };
+          if (loaded.id !== id) return;
+          setAllSessions((previous) => {
+            const current = previous.find((session) => session.id === id);
+            if (current && isSessionStreaming(current)) return previous;
+            const merged = mergeRemoteLoadedSession(current, loaded);
+            if (current === merged) return previous;
+            return current
+              ? previous.map((session) => session.id === id ? merged : session)
+              : [...previous, merged];
+          });
+        })
+        .catch(() => undefined);
+    }).then((nextUnlisten) => {
+      if (disposed) nextUnlisten();
+      else unlisten = nextUnlisten;
+    }).catch(() => undefined);
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
 
   useEffect(() => {
     if (!isTauri()) return;

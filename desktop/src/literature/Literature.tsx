@@ -1,24 +1,42 @@
 import { Fragment, lazy, Suspense, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import {
   isTauri,
+  literatureAttachmentOpen,
   literatureLlm,
+  literatureAddIdentifier,
+  literatureDuplicateCandidates,
+  literatureExportBibliography,
+  literatureFullTextSearch,
+  literatureImportBibliography,
+  literatureImportPdfAsRecord,
+  literatureMergeDuplicates,
   literatureProtocolCreate,
   literatureProtocolExecute,
   literatureProtocolPreview,
+  literatureStorageBackup,
+  literatureStorageStatus,
+  literatureReadAnnotationExport,
+  literatureWriteAnnotationExport,
+  literatureWriteBibliographyExport,
   onLiteratureSearchProgress,
 } from "../api/tauri";
 import { useStore } from "../store";
 import { SvgIcon, type SvgIconName } from "../SvgIcon";
 import type { LiteraturePageView } from "./LiteratureViewTabs";
-import { useLiteratureStore } from "./literatureStore";
+import { citationKeyValidationError, useLiteratureStore } from "./literatureStore";
 import {
   type DetailTab,
   type LiteratureLibrary,
+  type LiteratureCollection,
+  type LiteratureAttachment,
+  type LiteratureDuplicateCandidate,
   type LiteraturePaper,
   type LiteratureReviewTask,
   type LiteratureScreenRun,
   type LiteratureSearch,
+  type LiteratureStorageStatus,
+  type LiteratureNote,
   type PaperFit,
   type PaperStage,
   type ScreeningDecision,
@@ -26,6 +44,7 @@ import {
 import "./Literature.css";
 
 type SortKey = "added" | "fit" | "year" | "title" | "citations";
+type BibliographyExportFormat = "bibtex" | "biblatex" | "ris" | "csl-json";
 
 const Knowledge = lazy(() => import("../knowledge/KnowledgeReview"));
 const LazyMathText = lazy(() => import("./MathText"));
@@ -67,6 +86,7 @@ interface LiteratureViewTabsProps {
 
 const LITERATURE_PAGE_VIEWS = [
   { id: "library", label: "文献库", icon: "library" },
+  { id: "discover", label: "检索", icon: "search" },
   { id: "graph", label: "知识图谱", icon: "graph" },
 ] as const;
 
@@ -172,6 +192,21 @@ function matchesQuery(paper: LiteraturePaper, needle: string) {
     .includes(needle);
 }
 
+function descendantCollectionIds(collections: LiteratureLibrary["collections"], rootId: string) {
+  const ids = new Set([rootId]);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const collection of collections) {
+      if (collection.parentId && ids.has(collection.parentId) && !ids.has(collection.id)) {
+        ids.add(collection.id);
+        changed = true;
+      }
+    }
+  }
+  return ids;
+}
+
 function sortPapers(papers: LiteraturePaper[], sort: SortKey) {
   const sorted = [...papers];
   switch (sort) {
@@ -191,6 +226,21 @@ function sortPapers(papers: LiteraturePaper[], sort: SortKey) {
       sorted.sort((a, b) => b.addedAt.localeCompare(a.addedAt));
   }
   return sorted;
+}
+
+function formatStorageBytes(bytes: number) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function itemTypeLabel(itemType?: string) {
+  const labels: Record<string, string> = {
+    article: "期刊文章", book: "图书", bookSection: "图书章节", conferencePaper: "会议论文",
+    thesis: "学位论文", report: "报告", webpage: "网页", dataset: "数据集", preprint: "预印本", other: "其他",
+    "article-journal": "期刊文章", "paper-conference": "会议论文", "chapter": "图书章节",
+  };
+  return labels[itemType ?? "article"] ?? itemType ?? "其他";
 }
 
 type ProtocolPlanItem = {
@@ -479,8 +529,11 @@ export default function Literature({
   const toggleStar = useLiteratureStore((s) => s.toggleStar);
   const markRead = useLiteratureStore((s) => s.markRead);
   const addTags = useLiteratureStore((s) => s.addTags);
+  const updatePaperMetadata = useLiteratureStore((s) => s.updatePaperMetadata);
+  const ensureCitationKeys = useLiteratureStore((s) => s.ensureCitationKeys);
   const addCollection = useLiteratureStore((s) => s.addCollection);
   const removeCollection = useLiteratureStore((s) => s.removeCollection);
+  const saveDynamicSearch = useLiteratureStore((s) => s.saveDynamicSearch);
   const toggleCollection = useLiteratureStore((s) => s.toggleCollection);
   const setActiveReviewTask = useLiteratureStore((s) => s.setActiveReviewTask);
   const createReviewTask = useLiteratureStore((s) => s.createReviewTask);
@@ -499,14 +552,27 @@ export default function Literature({
   const addPdfAnnotation = useLiteratureStore((s) => s.addPdfAnnotation);
   const updatePdfAnnotation = useLiteratureStore((s) => s.updatePdfAnnotation);
   const deletePdfAnnotation = useLiteratureStore((s) => s.deletePdfAnnotation);
+  const addAttachment = useLiteratureStore((s) => s.addAttachment);
+  const removeAttachment = useLiteratureStore((s) => s.removeAttachment);
+  const setPrimaryPdfAttachment = useLiteratureStore((s) => s.setPrimaryPdfAttachment);
+  const importAttachment = useLiteratureStore((s) => s.importAttachment);
+  const addNote = useLiteratureStore((s) => s.addNote);
+  const updateNote = useLiteratureStore((s) => s.updateNote);
+  const deleteNote = useLiteratureStore((s) => s.deleteNote);
+  const createNoteFromAnnotation = useLiteratureStore((s) => s.createNoteFromAnnotation);
+  const importAnnotations = useLiteratureStore((s) => s.importAnnotations);
   const downloadPdf = useLiteratureStore((s) => s.downloadPdf);
   const uploadPdf = useLiteratureStore((s) => s.uploadPdf);
   const openPdf = useLiteratureStore((s) => s.openPdf);
   const setError = useLiteratureStore((s) => s.setError);
+  const logActivity = useLiteratureStore((s) => s.logActivity);
 
   const [view, setView] = useState("all");
   const [localPageView, setLocalPageView] = useState<LiteraturePageView>("library");
   const [filter, setFilter] = useState("");
+  const [fullTextMatchIds, setFullTextMatchIds] = useState<Set<string> | null>(null);
+  const [duplicateCandidates, setDuplicateCandidates] = useState<LiteratureDuplicateCandidate[]>([]);
+  const [pdfDragging, setPdfDragging] = useState(false);
   const [sort, setSort] = useState<SortKey>("added");
   const [checked, setChecked] = useState<Set<string>>(new Set());
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -521,6 +587,8 @@ export default function Literature({
   const [readerPage, setReaderPage] = useState(1);
   const [readerAnnotationId, setReaderAnnotationId] = useState<string | null>(null);
   const [reviewPanelOpen, setReviewPanelOpen] = useState(false);
+  const [storageStatus, setStorageStatus] = useState<LiteratureStorageStatus | null>(null);
+  const [creatingStorageBackup, setCreatingStorageBackup] = useState(false);
   const [panelWidths, setPanelWidths] = useState({ sidebar: 220, workspace: 300 });
   const panelDragRef = useRef<{ panel: "sidebar" | "workspace"; startX: number; startW: number } | null>(null);
   const pageView = controlledPageView ?? localPageView;
@@ -559,24 +627,236 @@ export default function Literature({
 
   useEffect(() => watchAgentActivity(), [watchAgentActivity]);
 
+  useEffect(() => {
+    if (!isTauri()) return;
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+    void import("@tauri-apps/api/webview")
+      .then(({ getCurrentWebview }) => getCurrentWebview().onDragDropEvent((event) => {
+        if (disposed) return;
+        if (event.payload.type === "enter" || event.payload.type === "over") {
+          setPdfDragging(true);
+          return;
+        }
+        setPdfDragging(false);
+        if (event.payload.type !== "drop") return;
+        const sourcePath = event.payload.paths.find((path) => path.toLocaleLowerCase().endsWith(".pdf"));
+        if (!sourcePath) return;
+        void literatureImportPdfAsRecord<{ record: { recordId: string } }>(sourcePath)
+          .then(async (result) => {
+            await load(projectId, { quiet: true });
+            setSelectedId(result.record.recordId);
+            logActivity("ok", "Imported dropped PDF as a local literature record.", { open: true });
+          })
+          .catch((error) => {
+            const message = `Could not import dropped PDF: ${String(error)}`;
+            setError(message);
+            logActivity("error", message, { open: true });
+          });
+      }))
+      .then((cleanup) => {
+        if (disposed) cleanup();
+        else unlisten = cleanup;
+      })
+      .catch(() => undefined);
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [load, logActivity, projectId, setError]);
+
   const papers = library.papers;
 
+  const refreshStorageStatus = async () => {
+    if (!isTauri()) {
+      setStorageStatus(null);
+      return;
+    }
+    try {
+      setStorageStatus(await literatureStorageStatus<LiteratureStorageStatus>());
+    } catch {
+      setStorageStatus(null);
+    }
+  };
+
+  useEffect(() => {
+    let disposed = false;
+    if (!isTauri()) {
+      setStorageStatus(null);
+      return () => { disposed = true; };
+    }
+    void literatureStorageStatus<LiteratureStorageStatus>()
+      .then((nextStatus) => {
+        if (!disposed) setStorageStatus(nextStatus);
+      })
+      .catch(() => {
+        if (!disposed) setStorageStatus(null);
+      });
+    return () => { disposed = true; };
+  }, [library.searches.length, papers.length, projectId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!isTauri()) {
+      setDuplicateCandidates([]);
+      return () => { cancelled = true; };
+    }
+    void literatureDuplicateCandidates<LiteratureDuplicateCandidate[]>()
+      .then((candidates) => {
+        if (!cancelled) setDuplicateCandidates(candidates);
+      })
+      .catch(() => {
+        if (!cancelled) setDuplicateCandidates([]);
+      });
+    return () => { cancelled = true; };
+  }, [papers.length, projectId]);
+
+  const createStorageBackup = async () => {
+    if (!isTauri() || creatingStorageBackup) return;
+    setCreatingStorageBackup(true);
+    try {
+      await literatureStorageBackup();
+      await refreshStorageStatus();
+      logActivity("ok", "已创建本地文献数据库备份", { open: true });
+    } catch (error) {
+      const message = `创建文献数据库备份失败：${String(error)}`;
+      setError(message);
+      logActivity("error", message, { open: true });
+    } finally {
+      setCreatingStorageBackup(false);
+    }
+  };
+
+  const importBibliography = async () => {
+    if (!isTauri()) return;
+    try {
+      const selected = await openDialog({
+        multiple: false,
+        filters: [{ name: "Bibliography exports", extensions: ["json", "ris", "bib", "bibtex", "biblatex"] }],
+      });
+      if (!selected || Array.isArray(selected)) return;
+      const report = await literatureImportBibliography<{
+        imported: number;
+        merged: number;
+        skipped: number;
+        attachments?: number;
+        notes?: number;
+        annotations?: number;
+        collections?: number;
+        warnings?: string[];
+        format: string;
+      }>({ sourcePath: selected });
+      await load(projectId, { quiet: true });
+      const migratedChildren = [
+        report.attachments ? `${report.attachments} 个附件` : "",
+        report.notes ? `${report.notes} 条笔记` : "",
+        report.annotations ? `${report.annotations} 条标注` : "",
+        report.collections ? `${report.collections} 个分类` : "",
+      ].filter(Boolean);
+      const warningSummary = report.warnings?.length
+        ? `；${report.warnings.length} 项需手动处理：${report.warnings[0]}`
+        : "";
+      logActivity(
+        "ok",
+        `已从 ${report.format} 导入 ${report.imported} 条、合并 ${report.merged} 条文献${migratedChildren.length ? `；同时迁移 ${migratedChildren.join("、")}` : ""}${report.skipped ? `；跳过 ${report.skipped} 条不支持项` : ""}${warningSummary}`,
+        { open: true },
+      );
+    } catch (error) {
+      const message = `导入文献库失败：${String(error)}`;
+      setError(message);
+      logActivity("error", message, { open: true });
+    }
+  };
+
+  const importPdfAsRecord = async () => {
+    if (!isTauri()) return;
+    try {
+      const selected = await openDialog({ multiple: false, filters: [{ name: "PDF", extensions: ["pdf"] }] });
+      if (!selected || Array.isArray(selected)) return;
+      const result = await literatureImportPdfAsRecord<{ record: { recordId: string } }>(selected);
+      await load(projectId, { quiet: true });
+      setSelectedId(result.record.recordId);
+      logActivity("ok", "已导入 PDF 并创建本地文献条目", { open: true });
+    } catch (error) {
+      const message = `导入 PDF 失败：${String(error)}`;
+      setError(message);
+      logActivity("error", message, { open: true });
+    }
+  };
+
+  const addIdentifier = async () => {
+    if (!isTauri()) return;
+    const identifier = window.prompt("输入 DOI 或 ISBN");
+    if (!identifier?.trim()) return;
+    try {
+      const result = await literatureAddIdentifier<{ papers?: Array<{ id: string }> }>(identifier);
+      await load(projectId, { quiet: true });
+      if (result.papers?.[0]?.id) setSelectedId(result.papers[0].id);
+      logActivity("ok", "已通过 DOI/ISBN 查询写入可审计的本地文献记录", { open: true });
+    } catch (error) {
+      const message = `添加 DOI/ISBN 失败：${String(error)}`;
+      setError(message);
+      logActivity("error", message, { open: true });
+    }
+  };
+
+  const dynamicSearchQuery = view.startsWith("search:")
+    ? library.searches.find((search) => search.id === view.slice(7) && search.dynamic)?.query ?? ""
+    : "";
+  const fullTextQuery = dynamicSearchQuery || filter;
+
+  useEffect(() => {
+    const query = fullTextQuery.trim();
+    if (!query || !isTauri()) {
+      setFullTextMatchIds(null);
+      return;
+    }
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      void literatureFullTextSearch<{ papers: Array<{ id: string }> }>(query, 250)
+        .then((result) => {
+          if (!cancelled) setFullTextMatchIds(new Set(result.papers.map((paper) => paper.id)));
+        })
+        .catch(() => {
+          if (!cancelled) setFullTextMatchIds(null);
+        });
+    }, 180);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [fullTextQuery, projectId]);
+
   const visiblePapers = useMemo(() => {
-    const needle = filter.trim().toLowerCase();
+    const needle = fullTextQuery.trim().toLowerCase();
     let viewFilter: (p: LiteraturePaper) => boolean;
     if (view.startsWith("col:")) {
       const colId = view.slice(4);
-      const childIds = library.collections.filter((c) => c.parentId === colId).map((c) => c.id);
-      const allIds = new Set([colId, ...childIds]);
+      const allIds = descendantCollectionIds(library.collections, colId);
       viewFilter = (p) => p.collectionIds.some((id) => allIds.has(id));
+    } else if (view === "duplicates") {
+      const duplicateIds = new Set(
+        duplicateCandidates.flatMap((candidate) => [candidate.primaryRecordId, candidate.duplicateRecordId]),
+      );
+      viewFilter = (paper) => duplicateIds.has(paper.id);
+    } else if (dynamicSearchQuery) {
+      viewFilter = () => true;
     } else {
       viewFilter = (p) => matchesView(p, view);
     }
     return sortPapers(
-      papers.filter((p) => viewFilter(p) && matchesQuery(p, needle)),
+      papers.filter((p) => viewFilter(p) && (fullTextMatchIds ? fullTextMatchIds.has(p.id) : matchesQuery(p, needle))),
       sort,
     );
-  }, [filter, library.collections, papers, sort, view]);
+  }, [duplicateCandidates, dynamicSearchQuery, fullTextMatchIds, fullTextQuery, library.collections, papers, sort, view]);
+
+  const saveCurrentFilter = () => {
+    const id = saveDynamicSearch(filter);
+    if (!id) return;
+    setView(`search:${id}`);
+    setFilter("");
+    logActivity("ok", `Saved dynamic local search: ${filter.trim()}`);
+  };
 
   const selectedPaper = selectedId
     ? visiblePapers.find((p) => p.id === selectedId) ?? null
@@ -617,7 +897,7 @@ export default function Literature({
       `DOI: ${paper.doi ?? "unknown"}`,
       "Reuse the browser tab/session I approve. Do not bypass paywalls or security interstitials.",
       "If login, CAPTCHA, or user approval is needed, pause and ask me.",
-      "Download into papers/.browser-inbox, verify that the file is a PDF, then move it into papers/ with a stable filename and update only this record in papers/library.json.",
+      "Download into papers/.browser-inbox, verify that the file is a PDF, then move it into papers/ with a stable filename and update only this record in the local literature database.",
     ].join("\n"));
   };
 
@@ -644,6 +924,127 @@ export default function Literature({
       filters: [{ name: "PDF", extensions: ["pdf"] }],
     });
     if (typeof selected === "string") await uploadPdf(id, selected);
+  };
+
+  const importSelectedAttachment = async (
+    id: string,
+    kind: Exclude<LiteratureAttachment["kind"], "externalLink">,
+  ) => {
+    const selected = await openDialog({
+      multiple: false,
+      filters: [{ name: "Research files", extensions: ["pdf", "txt", "md", "html", "htm", "json", "csv", "docx", "xlsx", "zip"] }],
+    });
+    if (typeof selected !== "string") return;
+    const inferredKind = kind === "supplement" && selected.toLowerCase().endsWith(".pdf") ? "pdf" : kind;
+    await importAttachment(id, selected, inferredKind);
+  };
+
+  const addExternalAttachment = (id: string) => {
+    const url = window.prompt("添加外部链接（例如网页快照的原始 URL）：")?.trim();
+    if (!url) return;
+    try {
+      const parsed = new URL(url);
+      if (!/^https?:$/.test(parsed.protocol)) throw new Error("unsupported protocol");
+      const label = window.prompt("链接名称：", parsed.hostname)?.trim() || parsed.hostname;
+      addAttachment(id, { label, kind: "externalLink", url: parsed.toString() });
+    } catch {
+      setError("请输入有效的 http(s) 链接。");
+    }
+  };
+
+  const openAttachment = async (paper: LiteraturePaper, attachment: LiteratureAttachment) => {
+    if (attachment.kind === "externalLink" && attachment.url) {
+      window.open(attachment.url, "_blank", "noopener,noreferrer");
+      return;
+    }
+    if (attachment.externalPath) {
+      setError(`该 Zotero 附件仍位于原位置：${attachment.externalPath}。请使用“导入附件”将其复制到当前项目后再打开。`);
+      return;
+    }
+    if (!attachment.path) return;
+    if (attachment.kind === "pdf") {
+      setPrimaryPdfAttachment(paper.id, attachment.id);
+      setReaderPage(1);
+      setReaderAnnotationId(null);
+      setWorkspaceTab("reader");
+      return;
+    }
+    try {
+      await literatureAttachmentOpen(attachment.path);
+    } catch (error) {
+      setError(`打开附件失败：${String(error)}`);
+    }
+  };
+
+  const exportPaperAnnotations = async (paper: LiteraturePaper) => {
+    const destination = await saveDialog({
+      defaultPath: `${paper.title.replace(/[\\/:*?"<>|]+/g, "-").slice(0, 80) || "paper"}-annotations.json`,
+      filters: [{ name: "SomniQ annotations", extensions: ["json"] }],
+    });
+    if (typeof destination !== "string") return;
+    try {
+      await literatureWriteAnnotationExport(destination, {
+        version: 1,
+        exportedAt: new Date().toISOString(),
+        paper: { id: paper.id, title: paper.title },
+        annotations: paper.pdfAnnotations,
+        notes: paper.notes ?? [],
+      });
+      logActivity("ok", `已导出 ${paper.pdfAnnotations.length} 条标注和 ${(paper.notes ?? []).length} 条笔记。`);
+    } catch (error) {
+      setError(`标注导出失败：${String(error)}`);
+    }
+  };
+
+  const importPaperAnnotations = async (paper: LiteraturePaper) => {
+    const source = await openDialog({
+      multiple: false,
+      filters: [{ name: "SomniQ annotations", extensions: ["json"] }],
+    });
+    if (typeof source !== "string") return;
+    try {
+      const payload = await literatureReadAnnotationExport<unknown>(source);
+      const imported = importAnnotations(paper.id, payload);
+      if (imported.annotations === 0 && imported.notes === 0) {
+        setError("该文件没有可导入的标注或笔记。");
+        return;
+      }
+      logActivity("ok", `已导入 ${imported.annotations} 条标注和 ${imported.notes} 条笔记。`);
+    } catch (error) {
+      setError(`标注导入失败：${String(error)}`);
+    }
+  };
+
+  const exportPaperBibliography = async (paper: LiteraturePaper, format: BibliographyExportFormat) => {
+    const extensions: Record<BibliographyExportFormat, string> = {
+      bibtex: "bib",
+      biblatex: "bib",
+      ris: "ris",
+      "csl-json": "json",
+    };
+    const labels: Record<BibliographyExportFormat, string> = {
+      bibtex: "BibTeX",
+      biblatex: "BibLaTeX",
+      ris: "RIS",
+      "csl-json": "CSL-JSON",
+    };
+    try {
+      const keys = await ensureCitationKeys([paper.id]);
+      const key = keys[paper.id] ?? paper.citationKey ?? "reference";
+      const destination = await saveDialog({
+        defaultPath: `${key}.${extensions[format]}`,
+        filters: [{ name: labels[format], extensions: [extensions[format]] }],
+      });
+      if (typeof destination !== "string") return;
+      const exported = await literatureExportBibliography<{
+        content: string;
+        exported: number;
+      }>({ format, recordIds: [paper.id] });
+      await literatureWriteBibliographyExport(destination, exported.content);
+      logActivity("ok", `已导出 ${exported.exported} 条文献为 ${labels[format]}。`);
+    } catch (error) {
+      setError(`书目导出失败：${String(error)}`);
+    }
   };
 
   const selectPaper = (paper: LiteraturePaper) => {
@@ -683,6 +1084,25 @@ export default function Literature({
     }
   };
 
+  const mergeSelectedDuplicates = async () => {
+    if (!isTauri() || batchIds.length !== 2) return;
+    const [primaryId, duplicateId] = batchIds;
+    const primary = papers.find((paper) => paper.id === primaryId);
+    const duplicate = papers.find((paper) => paper.id === duplicateId);
+    if (!window.confirm(`Merge \"${duplicate?.title ?? duplicateId}\" into \"${primary?.title ?? primaryId}\"? This keeps all linked local material.`)) return;
+    try {
+      await literatureMergeDuplicates(primaryId, duplicateId);
+      setChecked(new Set());
+      setSelectedId(primaryId);
+      await load(projectId, { quiet: true });
+      logActivity("ok", "Merged duplicate literature records and preserved linked material.", { open: true });
+    } catch (error) {
+      const message = `Could not merge duplicate records: ${String(error)}`;
+      setError(message);
+      logActivity("error", message, { open: true });
+    }
+  };
+
   const addTagToSelected = () => {
     const tag = tagDraft.trim().toLowerCase();
     if (!tag || !selectedPaper) return;
@@ -705,6 +1125,77 @@ export default function Literature({
       next.has(id) ? next.delete(id) : next.add(id);
       return next;
     });
+
+  const renderCollectionNode = (collection: LiteratureCollection, depth: number): ReactNode => {
+    const children = library.collections.filter((candidate) => candidate.parentId === collection.id);
+    const descendantIds = descendantCollectionIds(library.collections, collection.id);
+    const isExpanded = expandedCols.has(collection.id);
+    const count = papers.filter((paper) => paper.collectionIds.some((id) => descendantIds.has(id))).length;
+    return (
+      <div key={collection.id} className="lit-col-group" style={{ marginLeft: depth * 14 }}>
+        <div className="lit-col-row">
+          <button
+            type="button"
+            className="lit-col-toggle"
+            onClick={() => toggleColExpand(collection.id)}
+            aria-label={isExpanded ? "Collapse collection" : "Expand collection"}
+          >
+            {children.length > 0 && <SvgIcon name={isExpanded ? "chevronDown" : "chevronRight"} size={12} />}
+          </button>
+          <NavItem
+            label={collection.label}
+            icon={depth === 0 ? "collection" : "circle"}
+            count={count}
+            active={view === `col:${collection.id}`}
+            onClick={() => setView(`col:${collection.id}`)}
+          />
+          <button
+            type="button"
+            className="lit-col-add-sub-btn"
+            title="Add subcollection"
+            onClick={() => {
+              setColAddingParentId(collection.id);
+              setColInput("");
+              setExpandedCols((previous) => new Set(previous).add(collection.id));
+            }}
+          ><SvgIcon name="plus" size={13} /></button>
+          <button
+            type="button"
+            className="lit-col-delete-btn"
+            aria-label={`Delete ${collection.label}`}
+            onClick={() => {
+              if (!window.confirm(`Delete collection \"${collection.label}\" and its subcollections? Papers are preserved.`)) return;
+              const removed = descendantCollectionIds(library.collections, collection.id);
+              removeCollection(collection.id);
+              if (view.startsWith("col:") && removed.has(view.slice(4))) setView("all");
+            }}
+          ><SvgIcon name="close" size={13} /></button>
+        </div>
+        {isExpanded && (
+          <>
+            {children.map((child) => renderCollectionNode(child, depth + 1))}
+            {colAddingParentId === collection.id && (
+              <div className="lit-col-input-row" style={{ marginLeft: 16 }}>
+                <input
+                  autoFocus
+                  className="lit-col-input"
+                  value={colInput}
+                  placeholder="Subcollection name"
+                  onChange={(event) => setColInput(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") submitColInput(collection.id);
+                    if (event.key === "Escape") { setColInput(""); setColAddingParentId(null); }
+                  }}
+                />
+                <button type="button" className="lit-col-confirm-btn" onClick={() => submitColInput(collection.id)}><SvgIcon name="check" size={14} /></button>
+                <button type="button" className="lit-col-cancel-btn" onClick={() => { setColInput(""); setColAddingParentId(null); }}><SvgIcon name="close" size={14} /></button>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    );
+  };
 
   const sidebar = (
     <aside className="lit-sidebar">
@@ -729,6 +1220,13 @@ export default function Literature({
           count={papers.filter((p) => p.starred).length}
           active={view === "starred"}
           onClick={() => setView("starred")}
+        />
+        <NavItem
+          label="重复条目"
+          icon="library"
+          count={duplicateCandidates.length}
+          active={view === "duplicates"}
+          onClick={() => setView("duplicates")}
         />
         {STAGES_NAV.filter((s) => s.alwaysVisible || (stageCounts.get(s.id) ?? 0) > 0).map(
           (stage) => (
@@ -775,7 +1273,7 @@ export default function Literature({
           </div>
         )}
 
-        {library.collections.filter((c) => !c.parentId).map((col) => {
+        {false && <>{library.collections.filter((c) => !c.parentId).map((col) => {
           const children = library.collections.filter((c) => c.parentId === col.id);
           const isExpanded = expandedCols.has(col.id);
           const parentCount = papers.filter((p) => {
@@ -871,7 +1369,11 @@ export default function Literature({
               )}
             </div>
           );
-        })}
+        })}</>}
+
+        {library.collections.filter((collection) => !collection.parentId).map((collection) =>
+          renderCollectionNode(collection, 0),
+        )}
 
         {library.collections.filter((c) => !c.parentId).length === 0 && colAddingParentId === null && (
           <div className="lit-col-empty">暂无分类</div>
@@ -926,6 +1428,7 @@ export default function Literature({
   // ── Main area ──────────────────────────────────────────────────────────────
 
   const viewLabel = (() => {
+    if (view === "duplicates") return "重复条目";
     if (view === "all") return "全部论文";
     if (view === "starred") return "已收藏";
     if (view.startsWith("stage:")) return STAGE_LABELS[view.slice(6) as PaperStage] ?? "论文";
@@ -940,10 +1443,7 @@ export default function Literature({
   })();
 
   const mainArea = (
-    <div className="lit-main">
-      <LiteratureProtocolPanel
-        onLibraryRefresh={() => load(currentProject?.id ?? "default", { quiet: true })}
-      />
+    <div className={`lit-main${pdfDragging ? " lit-pdf-drop-active" : ""}`}>
       <PaperTable
         papers={visiblePapers}
         libraryCount={papers.length}
@@ -954,6 +1454,7 @@ export default function Literature({
         selectedId={selectedPaper?.id ?? null}
         viewLabel={viewLabel}
         onFilterChange={setFilter}
+        onSaveDynamicSearch={saveCurrentFilter}
         onSortChange={setSort}
         onSelectPaper={selectPaper}
         onToggleChecked={toggleChecked}
@@ -963,6 +1464,7 @@ export default function Literature({
         onBatchExclude={() => runBatch((ids) => setStage(ids, "excluded"))}
         onBatchDownload={() => runBatch((ids) => { for (const id of ids) void downloadOrBrowse(id); })}
         onBatchDelete={() => confirmDeletePapers(batchIds)}
+        onBatchMergeDuplicates={() => void mergeSelectedDuplicates()}
         onBatchClear={() => setChecked(new Set())}
       />
     </div>
@@ -1046,6 +1548,7 @@ export default function Literature({
                 onViewEvidence={() => setWorkspaceTab("evidence")}
                 onViewOverview={() => setWorkspaceTab("overview")}
                 onShortlist={() => setStage([selectedPaper.id], "shortlist")}
+                onUpdateMetadata={(patch) => updatePaperMetadata(selectedPaper.id, patch)}
                 onToggleCollection={(colId) => toggleCollection(selectedPaper.id, colId)}
                 onDelete={() => {
                   if (window.confirm(`Delete "${selectedPaper.title}" from your library?`)) {
@@ -1092,6 +1595,17 @@ export default function Literature({
               <WorkspaceNotes
                 paper={selectedPaper}
                 task={library.reviewTasks.find((task) => task.id === activeReviewTaskId)}
+                onAddNote={(note) => addNote(selectedPaper.id, note)}
+                onUpdateNote={(noteId, patch) => updateNote(selectedPaper.id, noteId, patch)}
+                onDeleteNote={(noteId) => deleteNote(selectedPaper.id, noteId)}
+                onCreateNoteFromAnnotation={(annotationId) => createNoteFromAnnotation(selectedPaper.id, annotationId)}
+                onOpenAnnotation={(page, annotationId) => {
+                  setReaderPage(page);
+                  setReaderAnnotationId(annotationId);
+                  setWorkspaceTab("reader");
+                }}
+                onExport={() => void exportPaperAnnotations(selectedPaper)}
+                onImport={() => void importPaperAnnotations(selectedPaper)}
                 onDecide={(decision) => {
                   if (activeReviewTaskId) {
                     decideScreening(selectedPaper.id, activeReviewTaskId, decision);
@@ -1124,6 +1638,11 @@ export default function Literature({
                 onAddTag={addTagToSelected}
                 onDownload={downloadOrBrowse}
                 onUpload={() => void uploadSelectedPdf(selectedPaper.id)}
+                onImportAttachment={(kind) => void importSelectedAttachment(selectedPaper.id, kind)}
+                onAddExternalLink={() => addExternalAttachment(selectedPaper.id)}
+                onOpenAttachment={(attachment) => void openAttachment(selectedPaper, attachment)}
+                onRemoveAttachment={(attachmentId) => removeAttachment(selectedPaper.id, attachmentId)}
+                onExportBibliography={(format) => void exportPaperBibliography(selectedPaper, format)}
                 collections={library.collections}
                 onToggleCollection={(collectionId) =>
                   toggleCollection(selectedPaper.id, collectionId)
@@ -1186,7 +1705,23 @@ export default function Literature({
         />
       )}
 
-      {pageView === "graph" ? (
+      {pageView === "discover" ? (
+        <section className="lit-discover-workspace" aria-label="可复现文献检索">
+          <div className="lit-discover-intro">
+            <div>
+              <span className="lit-discover-kicker">Discover</span>
+              <h2>可复现文献检索</h2>
+              <p>先确认检索协议，再执行外部查询并将可审计结果写入本地文献数据库。</p>
+            </div>
+            <button type="button" onClick={() => setPageView("library")}>
+              返回文献库
+            </button>
+          </div>
+          <LiteratureProtocolPanel
+            onLibraryRefresh={() => load(currentProject?.id ?? "default", { quiet: true })}
+          />
+        </section>
+      ) : pageView === "graph" ? (
         <div className="lit-knowledge-shell">
           <Suspense fallback={<LiteratureLoading label="Loading knowledge graph..." />}>
             <Knowledge mode="globalGraph" />
@@ -1284,8 +1819,21 @@ export default function Literature({
           {downloadedCount === 1 ? "PDF" : "PDFs"}
         </span>
         <span className="lit-footer-path">
-          {currentProject ? `${currentProject.name} · papers/library.json` : "papers/library.json"}
+          {storageStatus
+            ? `${currentProject ? `${currentProject.name} · ` : ""}本地 SQLite · 模式 v${storageStatus.schemaVersion} · ${storageStatus.health.healthy ? "健康" : "需检查"} · ${storageStatus.canonicalRecordCount} 条规范记录 · ${formatStorageBytes(storageStatus.databaseBytes)} · ${storageStatus.latestBackup ? `最近备份 ${formatStorageBytes(storageStatus.latestBackup.bytes)}` : "尚未备份"}`
+            : "正在读取本地文献数据库…"}
         </span>
+        {storageStatus && (
+          <button
+            type="button"
+            className="lit-footer-backup"
+            title={`数据库：${storageStatus.databasePath}\n日志模式：${storageStatus.health.journalMode}\n完整性：${storageStatus.health.integrityCheck}\n外键问题：${storageStatus.health.foreignKeyViolations}\n兼容投影：${storageStatus.projectionPath}`}
+            onClick={() => void createStorageBackup()}
+            disabled={creatingStorageBackup}
+          >
+            {creatingStorageBackup ? "正在备份…" : "备份数据库"}
+          </button>
+        )}
       </div>
     </div>
   );
@@ -1492,6 +2040,7 @@ function PaperTable({
   selectedId,
   viewLabel,
   onFilterChange,
+  onSaveDynamicSearch,
   onSortChange,
   onSelectPaper,
   onToggleChecked,
@@ -1501,6 +2050,7 @@ function PaperTable({
   onBatchExclude,
   onBatchDownload,
   onBatchDelete,
+  onBatchMergeDuplicates,
   onBatchClear,
 }: {
   papers: LiteraturePaper[];
@@ -1512,6 +2062,7 @@ function PaperTable({
   selectedId: string | null;
   viewLabel: string;
   onFilterChange: (v: string) => void;
+  onSaveDynamicSearch: () => void;
   onSortChange: (v: SortKey) => void;
   onSelectPaper: (p: LiteraturePaper) => void;
   onToggleChecked: (id: string) => void;
@@ -1521,6 +2072,7 @@ function PaperTable({
   onBatchExclude: () => void;
   onBatchDownload: () => void;
   onBatchDelete: () => void;
+  onBatchMergeDuplicates: () => void;
   onBatchClear: () => void;
 }) {
   const [colWidths, setColWidths] = useState({ venue: 160, year: 52, tags: 130 });
@@ -1560,6 +2112,15 @@ function PaperTable({
           placeholder="搜索标题、作者、关键词…"
           aria-label="Filter papers"
         />
+        <button
+          type="button"
+          className="lit-review-save-search"
+          onClick={onSaveDynamicSearch}
+          disabled={!filter.trim()}
+          title="Save as dynamic local search"
+        >
+          <SvgIcon name="plus" size={14} />
+        </button>
         <select
           className="lit-review-sort"
           value={sort}
@@ -1576,10 +2137,19 @@ function PaperTable({
 
       <div className="lit-table-wrap">
         {loaded && libraryCount === 0 ? (
-          <div className="lit-empty-state">
-            <p>论文库为空。</p>
-            <p className="dim">通过 Chat 中的 Agent 导入论文。</p>
-          </div>
+        <div className="lit-empty-state">
+          <p>论文库为空。</p>
+          <p className="dim">通过 Chat 中的 Agent 检索，或导入 Zotero/CSL-JSON、RIS、BibTeX 文献库。</p>
+          <button type="button" onClick={() => void importBibliography()}>
+            导入文献库
+          </button>
+          <button type="button" onClick={() => void importPdfAsRecord()}>
+            导入 PDF
+          </button>
+          <button type="button" onClick={() => void addIdentifier()}>
+            添加 DOI / ISBN
+          </button>
+        </div>
         ) : loaded && libraryCount > 0 && papers.length === 0 ? (
           <div className="lit-empty-state">
             <p className="dim">没有符合当前筛选条件的论文。</p>
@@ -1637,6 +2207,7 @@ function PaperTable({
 
       {batchIds.length > 0 && (
         <div className="lit-batch-bar" role="toolbar" aria-label="Batch actions">
+          {batchIds.length === 2 && <button type="button" onClick={onBatchMergeDuplicates}>Merge duplicates</button>}
           <span>已选 {batchIds.length} 篇</span>
           <button type="button" onClick={onBatchShortlist}>候选</button>
           <button type="button" onClick={onBatchExclude}>排除</button>
@@ -1985,15 +2556,151 @@ function BriefColumns({
 function WorkspaceNotes({
   paper,
   task,
+  onAddNote,
+  onUpdateNote,
+  onDeleteNote,
+  onCreateNoteFromAnnotation,
+  onOpenAnnotation,
+  onExport,
+  onImport,
   onDecide,
 }: {
   paper: LiteraturePaper;
   task?: LiteratureReviewTask;
+  onAddNote: (note: Omit<LiteratureNote, "id" | "createdAt" | "updatedAt">) => string | null;
+  onUpdateNote: (noteId: string, patch: Partial<Pick<LiteratureNote, "title" | "content">>) => void;
+  onDeleteNote: (noteId: string) => void;
+  onCreateNoteFromAnnotation: (annotationId: string) => string | null;
+  onOpenAnnotation: (page: number, annotationId: string) => void;
+  onExport: () => void;
+  onImport: () => void;
   onDecide: (decision: ScreeningDecision) => void;
 }) {
   const screening = task ? paper.screenings?.[task.id] : undefined;
+  const [draftTitle, setDraftTitle] = useState("");
+  const [draftContent, setDraftContent] = useState("");
+  const [editingNoteId, setEditingNoteId] = useState<string | null>(null);
+  const [editingTitle, setEditingTitle] = useState("");
+  const [editingContent, setEditingContent] = useState("");
+  const annotationsById = useMemo(
+    () => new Map(paper.pdfAnnotations.map((annotation) => [annotation.id, annotation])),
+    [paper.pdfAnnotations],
+  );
+  const notes = paper.notes ?? [];
+
+  const addDraft = () => {
+    if (!draftContent.trim()) return;
+    onAddNote({ title: draftTitle.trim() || undefined, content: draftContent, source: "manual" });
+    setDraftTitle("");
+    setDraftContent("");
+  };
+
+  const startEditing = (note: LiteratureNote) => {
+    setEditingNoteId(note.id);
+    setEditingTitle(note.title ?? "");
+    setEditingContent(note.content);
+  };
+
   return (
     <div className="lit-workspace-scroll">
+      <section className="lit-section lit-research-notes">
+        <div className="lit-section-heading">
+          <span>研究笔记</span>
+          <span className="lit-section-badge">{notes.length}</span>
+          <div className="lit-note-transfer-actions">
+            <button type="button" onClick={onImport}>导入标注</button>
+            <button type="button" onClick={onExport}>导出</button>
+          </div>
+        </div>
+        <input
+          value={draftTitle}
+          onChange={(event) => setDraftTitle(event.target.value)}
+          placeholder="笔记标题（可选）"
+          aria-label="笔记标题"
+        />
+        <textarea
+          rows={4}
+          value={draftContent}
+          onChange={(event) => setDraftContent(event.target.value)}
+          placeholder="记录你的判断、方法或后续问题…"
+          aria-label="新建研究笔记"
+        />
+        <button type="button" className="primary" disabled={!draftContent.trim()} onClick={addDraft}>
+          添加笔记
+        </button>
+
+        {notes.length > 0 && (
+          <div className="lit-research-note-list">
+            {notes.map((note) => {
+              const annotation = note.annotationId ? annotationsById.get(note.annotationId) : undefined;
+              const editing = editingNoteId === note.id;
+              return (
+                <article className="lit-research-note" key={note.id}>
+                  {editing ? (
+                    <>
+                      <input value={editingTitle} onChange={(event) => setEditingTitle(event.target.value)} aria-label="编辑笔记标题" />
+                      <textarea rows={5} value={editingContent} onChange={(event) => setEditingContent(event.target.value)} aria-label="编辑笔记内容" />
+                      <div className="lit-note-card-actions">
+                        <button
+                          type="button"
+                          className="primary"
+                          onClick={() => {
+                            if (editingContent.trim()) onUpdateNote(note.id, { title: editingTitle.trim() || undefined, content: editingContent });
+                            setEditingNoteId(null);
+                          }}
+                        >
+                          保存
+                        </button>
+                        <button type="button" onClick={() => setEditingNoteId(null)}>取消</button>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <div className="lit-research-note-head">
+                        <strong>{note.title || "未命名笔记"}</strong>
+                        <span>{note.source === "annotation" ? "标注生成" : note.source === "imported" ? "已导入" : "手动"}</span>
+                      </div>
+                      <p>{note.content}</p>
+                      <div className="lit-note-card-actions">
+                        {annotation && (
+                          <button type="button" onClick={() => onOpenAnnotation(annotation.page, annotation.id)}>
+                            第 {annotation.page} 页标注
+                          </button>
+                        )}
+                        <button type="button" onClick={() => startEditing(note)}>编辑</button>
+                        <button type="button" className="danger" onClick={() => onDeleteNote(note.id)}>删除</button>
+                      </div>
+                    </>
+                  )}
+                </article>
+              );
+            })}
+          </div>
+        )}
+      </section>
+
+      <section className="lit-section lit-annotation-note-source">
+        <div className="lit-section-heading">
+          <span>PDF 标注</span>
+          <span className="lit-section-badge">{paper.pdfAnnotations.length}</span>
+        </div>
+        {paper.pdfAnnotations.length === 0 ? (
+          <p className="lit-note-text">在阅读器中创建高亮后，可在这里一键生成可编辑笔记。</p>
+        ) : (
+          <div className="lit-annotation-note-list">
+            {paper.pdfAnnotations.slice().sort((left, right) => left.page - right.page).map((annotation) => (
+              <article key={annotation.id} className="lit-annotation-note-item">
+                <div><strong>第 {annotation.page} 页</strong><span>{annotation.kind}</span></div>
+                <blockquote>{annotation.quote || annotation.note || "无文字摘录"}</blockquote>
+                <div className="lit-note-card-actions">
+                  <button type="button" onClick={() => onOpenAnnotation(annotation.page, annotation.id)}>在 PDF 中查看</button>
+                  <button type="button" onClick={() => onCreateNoteFromAnnotation(annotation.id)}>由标注创建笔记</button>
+                </div>
+              </article>
+            ))}
+          </div>
+        )}
+      </section>
       {task && (
         <div className="lit-section">
           <div className="lit-section-heading">
@@ -2324,6 +3031,11 @@ function WorkspaceFiles({
   onAddTag,
   onDownload,
   onUpload,
+  onImportAttachment,
+  onAddExternalLink,
+  onOpenAttachment,
+  onRemoveAttachment,
+  onExportBibliography,
   collections,
   onToggleCollection,
 }: {
@@ -2333,6 +3045,11 @@ function WorkspaceFiles({
   onAddTag: () => void;
   onDownload: (id: string) => Promise<void>;
   onUpload: () => void;
+  onImportAttachment: (kind: Exclude<LiteratureAttachment["kind"], "externalLink">) => void;
+  onAddExternalLink: () => void;
+  onOpenAttachment: (attachment: LiteratureAttachment) => void;
+  onRemoveAttachment: (attachmentId: string) => void;
+  onExportBibliography: (format: BibliographyExportFormat) => void;
   collections: LiteratureLibrary["collections"];
   onToggleCollection: (collectionId: string) => void;
 }) {
@@ -2371,6 +3088,56 @@ function WorkspaceFiles({
                 : "Playwright MCP 获取 PDF"}
         </button>
         <button type="button" onClick={onUpload}>上传本地 PDF</button>
+      </div>
+
+      <div className="lit-section lit-bibliography-export-section">
+        <div className="lit-section-heading"><span>引用与书目导出</span></div>
+        <p className="lit-note-text">
+          Citation key：<code>{paper.citationKey || "首次导出或引用时自动生成"}</code>
+        </p>
+        <div className="lit-attachment-actions" aria-label="导出此条目">
+          <button type="button" onClick={() => onExportBibliography("bibtex")}>BibTeX</button>
+          <button type="button" onClick={() => onExportBibliography("biblatex")}>BibLaTeX</button>
+          <button type="button" onClick={() => onExportBibliography("ris")}>RIS</button>
+          <button type="button" onClick={() => onExportBibliography("csl-json")}>CSL-JSON</button>
+        </div>
+      </div>
+
+      <div className="lit-section lit-attachments-section">
+        <div className="lit-section-heading">
+          <span>附件与外部资源</span>
+          <span className="lit-section-badge">{(paper.attachments ?? []).length}</span>
+        </div>
+        <div className="lit-attachment-actions">
+          <button type="button" onClick={() => onImportAttachment("supplement")}>添加文件</button>
+          <button type="button" onClick={() => onImportAttachment("webSnapshot")}>添加网页快照</button>
+          <button type="button" onClick={onAddExternalLink}>添加外部链接</button>
+        </div>
+        {(paper.attachments ?? []).length === 0 ? (
+          <p className="lit-note-text">除主 PDF 外，可关联补充材料、网页快照和外部链接。</p>
+        ) : (
+          <div className="lit-attachment-list">
+            {(paper.attachments ?? []).map((attachment) => (
+              <article className="lit-attachment-item" key={attachment.id}>
+                <div className="lit-attachment-item-head">
+                  <strong>{attachment.label}</strong>
+                  <span>{
+                    attachment.kind === "pdf" ? "PDF"
+                      : attachment.kind === "supplement" ? "补充材料"
+                        : attachment.kind === "webSnapshot" ? "网页快照" : "外部链接"
+                  }</span>
+                </div>
+                <p title={attachment.path ?? attachment.url ?? attachment.externalPath}>{attachment.path ?? attachment.url ?? attachment.externalPath}</p>
+                <div className="lit-note-card-actions">
+                  <button type="button" onClick={() => onOpenAttachment(attachment)}>
+                    {attachment.kind === "pdf" ? "设为阅读 PDF" : attachment.kind === "externalLink" ? "打开链接" : attachment.externalPath ? "查看原路径" : "打开"}
+                  </button>
+                  <button type="button" className="danger" onClick={() => onRemoveAttachment(attachment.id)}>移除关联</button>
+                </div>
+              </article>
+            ))}
+          </div>
+        )}
       </div>
 
       <div className="lit-section">
@@ -2485,6 +3252,33 @@ function formatLogTime(at: string) {
 // Info tab — Zotero-style metadata panel
 // ──────────────────────────────────────────────────────────────────────────────
 
+const METADATA_ITEM_TYPES = [
+  "article", "book", "bookSection", "conferencePaper", "thesis", "report", "webpage", "dataset", "preprint", "other",
+] as const;
+
+const metadataDraftFor = (paper: LiteraturePaper) => ({
+  title: paper.title,
+  itemType: paper.itemType ?? "article",
+  authors: paper.authors.join("; "),
+  venue: paper.venue,
+  year: paper.year?.toString() ?? "",
+  date: paper.date ?? "",
+  doi: paper.doi ?? "",
+  isbn: paper.isbn ?? "",
+  citationKey: paper.citationKey ?? "",
+  volume: paper.volume ?? "",
+  issue: paper.issue ?? "",
+  pages: paper.pages ?? "",
+  publisher: paper.publisher ?? "",
+  place: paper.place ?? "",
+  edition: paper.edition ?? "",
+  series: paper.series ?? "",
+  language: paper.language ?? "",
+  accessed: paper.accessed ?? "",
+  url: paper.url ?? "",
+  abstract: paper.abstract,
+});
+
 function InfoTab({
   paper,
   collections,
@@ -2496,6 +3290,7 @@ function InfoTab({
   onViewEvidence,
   onViewOverview,
   onShortlist,
+  onUpdateMetadata,
   onToggleCollection,
   onDelete,
 }: {
@@ -2509,10 +3304,57 @@ function InfoTab({
   onViewEvidence: () => void;
   onViewOverview: () => void;
   onShortlist: () => void;
+  onUpdateMetadata: (patch: Partial<Pick<LiteraturePaper, "title" | "itemType" | "authors" | "venue" | "year" | "date" | "doi" | "isbn" | "citationKey" | "url" | "abstract" | "volume" | "issue" | "pages" | "publisher" | "place" | "edition" | "series" | "language" | "accessed">>) => void;
   onToggleCollection: (colId: string) => void;
   onDelete: () => void;
 }) {
   const fit = paper.verdict?.fit;
+  const papers = useLiteratureStore((state) => state.library.papers);
+  const [metadataEditing, setMetadataEditing] = useState(false);
+  const [metadataDraft, setMetadataDraft] = useState(() => metadataDraftFor(paper));
+  const [metadataError, setMetadataError] = useState<string | null>(null);
+  useEffect(() => {
+    if (!metadataEditing) setMetadataDraft(metadataDraftFor(paper));
+  }, [metadataEditing, paper]);
+  const validateCitationKey = (value: string | undefined) => {
+    const error = citationKeyValidationError(value, paper.id, papers);
+    setMetadataError(error);
+    return !error;
+  };
+  const editCitationKey = () => {
+    const next = window.prompt("Citation key", paper.citationKey ?? "");
+    if (next !== null && validateCitationKey(next.trim() || undefined)) {
+      onUpdateMetadata({ citationKey: next.trim() || undefined });
+    }
+  };
+  const saveMetadata = () => {
+    const parsedYear = Number.parseInt(metadataDraft.year, 10);
+    if (!validateCitationKey(metadataDraft.citationKey.trim() || undefined)) return;
+    onUpdateMetadata({
+      title: metadataDraft.title.trim() || paper.title,
+      itemType: metadataDraft.itemType,
+      authors: metadataDraft.authors.split(/[;,]/).map((author) => author.trim()).filter(Boolean),
+      venue: metadataDraft.venue.trim(),
+      year: Number.isFinite(parsedYear) && parsedYear > 0 ? parsedYear : undefined,
+      date: metadataDraft.date.trim() || undefined,
+      doi: metadataDraft.doi.trim() || undefined,
+      isbn: metadataDraft.isbn.trim() || undefined,
+      citationKey: metadataDraft.citationKey.trim() || undefined,
+      volume: metadataDraft.volume.trim() || undefined,
+      issue: metadataDraft.issue.trim() || undefined,
+      pages: metadataDraft.pages.trim() || undefined,
+      publisher: metadataDraft.publisher.trim() || undefined,
+      place: metadataDraft.place.trim() || undefined,
+      edition: metadataDraft.edition.trim() || undefined,
+      series: metadataDraft.series.trim() || undefined,
+      language: metadataDraft.language.trim() || undefined,
+      accessed: metadataDraft.accessed.trim() || undefined,
+      url: metadataDraft.url.trim() || undefined,
+      abstract: metadataDraft.abstract.trim(),
+    });
+    setMetadataError(null);
+    setMetadataEditing(false);
+  };
   return (
     <div className="lip-panel">
       {(fit || paper.starred) && (
@@ -2529,7 +3371,7 @@ function InfoTab({
       <div className="lip-section">
         <div className="lip-section-head">信息</div>
         <dl className="lip-meta">
-          <dt>条目类型</dt><dd>期刊文章</dd>
+          <dt>条目类型</dt><dd>{itemTypeLabel(paper.itemType)}</dd>
           {paper.authors.map((author, i) => (
             <Fragment key={i}>
               <dt>{i === 0 ? "作者" : ""}</dt>
@@ -2538,6 +3380,12 @@ function InfoTab({
           ))}
           {paper.venue && <><dt>出版物</dt><dd>{paper.venue}</dd></>}
           {paper.year && <><dt>日期</dt><dd>{paper.year}</dd></>}
+          {paper.date && paper.date !== String(paper.year ?? "") && <><dt>Date</dt><dd>{paper.date}</dd></>}
+          {paper.volume && <><dt>Volume</dt><dd>{paper.volume}</dd></>}
+          {paper.issue && <><dt>Issue</dt><dd>{paper.issue}</dd></>}
+          {paper.pages && <><dt>Pages</dt><dd>{paper.pages}</dd></>}
+          {paper.publisher && <><dt>Publisher</dt><dd>{paper.publisher}</dd></>}
+          {paper.place && <><dt>Place</dt><dd>{paper.place}</dd></>}
           {paper.citedBy !== undefined && <><dt>引用数</dt><dd>{paper.citedBy}</dd></>}
           {paper.doi && (
             <>
@@ -2545,6 +3393,8 @@ function InfoTab({
               <dd><a href={`https://doi.org/${paper.doi}`} target="_blank" rel="noreferrer">{paper.doi}</a></dd>
             </>
           )}
+          {paper.isbn && <><dt>ISBN</dt><dd>{paper.isbn}</dd></>}
+          {paper.citationKey && <><dt>Citation key</dt><dd>{paper.citationKey}</dd></>}
           {paper.arxivId && (
             <>
               <dt>arXiv</dt>
@@ -2617,7 +3467,44 @@ function InfoTab({
         </div>
       )}
 
+      {metadataEditing && (
+        <div className="lip-section lip-metadata-editor">
+          <div className="lip-section-head">Edit metadata</div>
+          <label>Title<input value={metadataDraft.title} onChange={(event) => setMetadataDraft((draft) => ({ ...draft, title: event.target.value }))} /></label>
+          <label>Type
+            <select value={metadataDraft.itemType} onChange={(event) => setMetadataDraft((draft) => ({ ...draft, itemType: event.target.value as typeof draft.itemType }))}>
+              {METADATA_ITEM_TYPES.map((itemType) => <option key={itemType} value={itemType}>{itemTypeLabel(itemType)}</option>)}
+            </select>
+          </label>
+          <label>Authors <span>(separate with ;)</span><input value={metadataDraft.authors} onChange={(event) => setMetadataDraft((draft) => ({ ...draft, authors: event.target.value }))} /></label>
+          <label>Venue<input value={metadataDraft.venue} onChange={(event) => setMetadataDraft((draft) => ({ ...draft, venue: event.target.value }))} /></label>
+          <label>Year<input inputMode="numeric" value={metadataDraft.year} onChange={(event) => setMetadataDraft((draft) => ({ ...draft, year: event.target.value }))} /></label>
+          <label>Date<input value={metadataDraft.date} onChange={(event) => setMetadataDraft((draft) => ({ ...draft, date: event.target.value }))} /></label>
+          <label>Volume<input value={metadataDraft.volume} onChange={(event) => setMetadataDraft((draft) => ({ ...draft, volume: event.target.value }))} /></label>
+          <label>Issue<input value={metadataDraft.issue} onChange={(event) => setMetadataDraft((draft) => ({ ...draft, issue: event.target.value }))} /></label>
+          <label>Pages<input value={metadataDraft.pages} onChange={(event) => setMetadataDraft((draft) => ({ ...draft, pages: event.target.value }))} /></label>
+          <label>Publisher<input value={metadataDraft.publisher} onChange={(event) => setMetadataDraft((draft) => ({ ...draft, publisher: event.target.value }))} /></label>
+          <label>Place<input value={metadataDraft.place} onChange={(event) => setMetadataDraft((draft) => ({ ...draft, place: event.target.value }))} /></label>
+          <label>Edition<input value={metadataDraft.edition} onChange={(event) => setMetadataDraft((draft) => ({ ...draft, edition: event.target.value }))} /></label>
+          <label>Series<input value={metadataDraft.series} onChange={(event) => setMetadataDraft((draft) => ({ ...draft, series: event.target.value }))} /></label>
+          <label>Language<input value={metadataDraft.language} onChange={(event) => setMetadataDraft((draft) => ({ ...draft, language: event.target.value }))} /></label>
+          <label>Accessed<input value={metadataDraft.accessed} onChange={(event) => setMetadataDraft((draft) => ({ ...draft, accessed: event.target.value }))} /></label>
+          <label>DOI<input value={metadataDraft.doi} onChange={(event) => setMetadataDraft((draft) => ({ ...draft, doi: event.target.value }))} /></label>
+          <label>ISBN<input value={metadataDraft.isbn} onChange={(event) => setMetadataDraft((draft) => ({ ...draft, isbn: event.target.value }))} /></label>
+          <label>Citation key<input value={metadataDraft.citationKey} onChange={(event) => { setMetadataError(null); setMetadataDraft((draft) => ({ ...draft, citationKey: event.target.value })); }} /></label>
+          <label>URL<input value={metadataDraft.url} onChange={(event) => setMetadataDraft((draft) => ({ ...draft, url: event.target.value }))} /></label>
+          <label>Abstract<textarea rows={5} value={metadataDraft.abstract} onChange={(event) => setMetadataDraft((draft) => ({ ...draft, abstract: event.target.value }))} /></label>
+          {metadataError && <p className="lit-error" role="alert">{metadataError}</p>}
+          <div className="lip-metadata-editor-actions">
+            <button type="button" className="primary" onClick={saveMetadata}>Save metadata</button>
+            <button type="button" onClick={() => setMetadataEditing(false)}>Cancel</button>
+          </div>
+        </div>
+      )}
+
       <div className="lip-section lip-actions-section">
+        <button type="button" className="lit-action-btn" onClick={() => setMetadataEditing((value) => !value)}>{metadataEditing ? "Close editor" : "Edit metadata"}</button>
+        <button type="button" className="lit-action-btn" onClick={editCitationKey}>编辑 Citation key</button>
         <button type="button" className="lit-action-btn" onClick={onOpenReader}
                 disabled={paper.pdf.status === "downloading"}>
           {paper.pdf.status === "downloaded" ? "打开 PDF"

@@ -1,10 +1,11 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { highlightingFor } from "@codemirror/language";
 import { tags as t } from "@lezer/highlight";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Typeset from "../Typeset";
+import { resetLiteratureStore, useLiteratureStore } from "../../literature/literatureStore";
 import { useStore } from "../../store";
 
 const mocks = vi.hoisted(() => ({
@@ -23,6 +24,9 @@ const mocks = vi.hoisted(() => ({
   latexCompile: vi.fn(),
   latexCompileCancel: vi.fn(),
   latexForwardSearch: vi.fn(),
+  literatureApplyDelta: vi.fn(),
+  literatureExportBibliography: vi.fn(),
+  literatureLoad: vi.fn(),
   localEnvironmentCheck: vi.fn(),
   onLatexCompileProgress: vi.fn(),
   projectAdd: vi.fn(),
@@ -80,6 +84,9 @@ vi.mock("../../api/tauri", () => ({
   latexCompile: mocks.latexCompile,
   latexCompileCancel: mocks.latexCompileCancel,
   latexForwardSearch: mocks.latexForwardSearch,
+  literatureApplyDelta: mocks.literatureApplyDelta,
+  literatureExportBibliography: mocks.literatureExportBibliography,
+  literatureLoad: mocks.literatureLoad,
   localEnvironmentCheck: mocks.localEnvironmentCheck,
   onLatexCompileProgress: mocks.onLatexCompileProgress,
   projectAdd: mocks.projectAdd,
@@ -121,6 +128,7 @@ class MockPointerEvent extends MouseEvent {
 }
 
 beforeEach(() => {
+  resetLiteratureStore();
   window.localStorage.removeItem("somniq-typeset-preview");
   window.localStorage.removeItem("somniq-lab-preview");
   window.localStorage.removeItem("aris-lab-preview");
@@ -176,6 +184,16 @@ beforeEach(() => {
     error: null,
   });
   mocks.fileCreateText.mockReset().mockResolvedValue({ path: "papers/main.tex", content: "", bytes: 0 });
+  mocks.literatureLoad.mockReset().mockResolvedValue({
+    version: 1,
+    papers: [],
+    searches: [],
+    collections: [],
+    reviewTasks: [],
+    screenRuns: [],
+  });
+  mocks.literatureExportBibliography.mockReset().mockResolvedValue({ content: "", exported: 0 });
+  mocks.literatureApplyDelta.mockReset().mockResolvedValue({});
   mocks.fileDelete.mockReset().mockResolvedValue(undefined);
   mocks.fileDuplicate.mockReset().mockResolvedValue({ name: "notes copy.md", path: "sections/notes copy.md", isDir: false });
   mocks.fileOpen.mockReset().mockResolvedValue(undefined);
@@ -1798,6 +1816,189 @@ describe("Typeset start page", () => {
       expect(after.state.doc.toString()).toBe(`${source.slice(0, cursorPos)}\\cite{reference}${source.slice(cursorPos)}`);
       const { from, to } = after.state.selection.main;
       expect(after.state.doc.toString().slice(from, to)).toBe("reference");
+    });
+  });
+
+  it("selects a local library paper, persists its key, and synchronizes a separate managed bibliography", async () => {
+    mockProjectFiles();
+    const source = "\\documentclass{article}\n\\begin{document}\nFirst.\n\\end{document}";
+    mocks.fileReadText
+      .mockResolvedValueOnce({ path: "paper.tex", content: source, bytes: source.length })
+      .mockRejectedValueOnce(new Error("not found"));
+    mocks.literatureLoad.mockResolvedValueOnce({
+      version: 1,
+      papers: [{
+        id: "library-paper",
+        title: "Citable Local Paper",
+        authors: ["Ada Lovelace"],
+        year: 2025,
+        venue: "SomniQ Journal",
+        abstract: "",
+        tags: [],
+        collectionIds: [],
+        searchIds: [],
+        stage: "inbox",
+        starred: false,
+        unread: true,
+        source: "local",
+        addedAt: "2026-07-20T00:00:00.000Z",
+        pdf: { status: "none" },
+        evidence: [],
+        answerChains: [],
+        pdfAnnotations: [],
+      }],
+      searches: [],
+      collections: [],
+      reviewTasks: [],
+      screenRuns: [],
+    });
+    mocks.literatureExportBibliography.mockResolvedValueOnce({ content: "@article{ada2025citable,}", exported: 1 });
+
+    const { container } = render(<Typeset />);
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+    fireEvent.click(screen.getByRole("tab", { name: "Code" }));
+    await waitFor(() => expect(useLiteratureStore.getState().library.papers).toHaveLength(1));
+
+    const view = await waitFor(() => {
+      const editor = typesetCodeView();
+      expect(editor).toBeTruthy();
+      return editor!;
+    });
+    const cursorPos = view.state.doc.toString().indexOf("First.") + "First.".length;
+    view.dispatch({ selection: { anchor: cursorPos, head: cursorPos } });
+    const toolbar = container.querySelector<HTMLElement>(".typeset-visual-toolbar");
+    fireEvent.click(within(toolbar!).getByRole("button", { name: "Insert citation" }));
+    fireEvent.click((await screen.findByText("Citable Local Paper")).closest("button")!);
+    fireEvent.click(screen.getByRole("button", { name: "Insert \\cite{}" }));
+
+    await waitFor(() => {
+      const key = useLiteratureStore.getState().library.papers[0]?.citationKey;
+      expect(key).toBeTruthy();
+      expect(typesetCodeView()?.state.doc.toString()).toContain(`\\cite{${key}}`);
+      expect(typesetCodeView()?.state.doc.toString()).toContain("\\bibliography{somniq-references}");
+      expect(mocks.literatureExportBibliography).toHaveBeenCalledWith({ format: "bibtex" });
+      expect(mocks.fileWriteText).toHaveBeenCalledWith(
+        "somniq-references.bib",
+        "% SomniQ managed bibliography — do not edit this file directly.\n@article{ada2025citable,}",
+      );
+      expect(mocks.fileWriteText).not.toHaveBeenCalledWith("references.bib", expect.anything());
+    });
+  });
+
+  it("adds a managed resource and print command for BibLaTeX without replacing user resources", async () => {
+    mockProjectFiles();
+    const source = "\\documentclass{article}\n\\usepackage{biblatex}\n\\addbibresource{references.bib}\n\\begin{document}\nFirst.\n\\end{document}";
+    mocks.fileReadText
+      .mockResolvedValueOnce({ path: "paper.tex", content: source, bytes: source.length })
+      .mockRejectedValueOnce(new Error("not found"));
+    mocks.literatureLoad.mockResolvedValueOnce({
+      version: 1,
+      papers: [{
+        id: "library-paper",
+        title: "Citable Local Paper",
+        authors: ["Ada Lovelace"],
+        year: 2025,
+        venue: "SomniQ Journal",
+        abstract: "",
+        tags: [],
+        collectionIds: [],
+        searchIds: [],
+        stage: "inbox",
+        starred: false,
+        unread: true,
+        source: "local",
+        addedAt: "2026-07-20T00:00:00.000Z",
+        pdf: { status: "none" },
+        evidence: [],
+        answerChains: [],
+        pdfAnnotations: [],
+      }],
+      searches: [],
+      collections: [],
+      reviewTasks: [],
+      screenRuns: [],
+    });
+    mocks.literatureExportBibliography.mockResolvedValueOnce({ content: "@article{ada2025citable,}", exported: 1 });
+
+    const { container } = render(<Typeset />);
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+    fireEvent.click(screen.getByRole("tab", { name: "Code" }));
+    await waitFor(() => expect(useLiteratureStore.getState().library.papers).toHaveLength(1));
+
+    const view = await waitFor(() => {
+      const editor = typesetCodeView();
+      expect(editor).toBeTruthy();
+      return editor!;
+    });
+    const cursorPos = view.state.doc.toString().indexOf("First.") + "First.".length;
+    view.dispatch({ selection: { anchor: cursorPos, head: cursorPos } });
+    const toolbar = container.querySelector<HTMLElement>(".typeset-visual-toolbar");
+    fireEvent.click(within(toolbar!).getByRole("button", { name: "Insert citation" }));
+    fireEvent.click((await screen.findByText("Citable Local Paper")).closest("button")!);
+    fireEvent.click(screen.getByRole("button", { name: "Insert \\cite{}" }));
+
+    await waitFor(() => {
+      const result = typesetCodeView()?.state.doc.toString() ?? "";
+      expect(result).toContain("\\addbibresource{references.bib}");
+      expect(result).toContain("\\addbibresource{somniq-references.bib}");
+      expect(result).toContain("\\printbibliography");
+      expect(result).not.toContain("\\bibliography{somniq-references}");
+      expect(result.indexOf("\\addbibresource{somniq-references.bib}")).toBeLessThan(result.indexOf("\\begin{document}"));
+      expect(result.indexOf("\\printbibliography")).toBeLessThan(result.indexOf("\\end{document}"));
+    });
+  });
+
+  it("refreshes an established managed bibliography when local metadata changes", async () => {
+    mockProjectFiles();
+    const source = "\\documentclass{article}\n\\begin{document}\nFirst.\n\\bibliographystyle{plain}\n\\bibliography{somniq-references}\n\\end{document}";
+    mocks.fileReadText.mockImplementation((path: string) => Promise.resolve({
+      path,
+      content: path === "paper.tex" ? source : "% SomniQ managed bibliography — do not edit this file directly.\n",
+      bytes: source.length,
+    }));
+    mocks.literatureLoad.mockResolvedValueOnce({
+      version: 1,
+      papers: [{
+        id: "library-paper",
+        title: "Citable Local Paper",
+        citationKey: "lovelace2025citable",
+        authors: ["Ada Lovelace"],
+        year: 2025,
+        venue: "SomniQ Journal",
+        abstract: "",
+        tags: [],
+        collectionIds: [],
+        searchIds: [],
+        stage: "inbox",
+        starred: false,
+        unread: true,
+        source: "local",
+        addedAt: "2026-07-20T00:00:00.000Z",
+        pdf: { status: "none" },
+        evidence: [],
+        answerChains: [],
+        pdfAnnotations: [],
+      }],
+      searches: [],
+      collections: [],
+      reviewTasks: [],
+      screenRuns: [],
+    });
+    mocks.literatureExportBibliography.mockResolvedValue({ content: "@article{lovelace2025citable,}", exported: 1 });
+
+    const { container } = render(<Typeset />);
+    fireEvent.click(await screen.findByText("paper.tex"));
+    await waitForSourceOpen(container, "paper.tex");
+    await waitFor(() => expect(mocks.literatureExportBibliography).toHaveBeenCalled());
+    const beforeRefreshes = mocks.literatureExportBibliography.mock.calls.length;
+
+    act(() => {
+      useLiteratureStore.getState().updatePaperMetadata("library-paper", { title: "Updated Local Paper" });
+    });
+    await waitFor(() => {
+      expect(mocks.literatureExportBibliography.mock.calls.length).toBeGreaterThan(beforeRefreshes);
     });
   });
 
