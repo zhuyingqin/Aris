@@ -379,10 +379,19 @@ impl Drop for ChatBusyGuard<'_> {
 /// worker still needs time to preserve its partial session.  A follow-up or
 /// context replacement for that same session must wait for the worker's guard
 /// to drop; otherwise its later session write can overwrite the new context.
+/// How long an edit/retry will wait for a just-stopped turn to actually
+/// release its session lock before giving up. Cancellation is cooperative
+/// (`chat_cancel` only flips a flag; the streaming loop notices it and exits
+/// on its own timing), so this can't be instant — but it must be bounded, or
+/// a stalled network read leaves the caller awaiting a promise that never
+/// settles, which the desktop UI shows as a silent, unexplained non-response.
+const CANCELLED_TURN_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
+
 async fn wait_for_cancelled_turn_to_finish(
     state: &ChatState,
     session_id: &str,
 ) -> Result<(), String> {
+    let deadline = tokio::time::Instant::now() + CANCELLED_TURN_WAIT_TIMEOUT;
     loop {
         let cancelled = state
             .running_turns
@@ -395,6 +404,11 @@ async fn wait_for_cancelled_turn_to_finish(
         };
         if !cancelled.load(Ordering::SeqCst) {
             return Err("this chat already has a running turn".to_string());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(
+                "the previous turn is still stopping; wait a moment and try again".to_string(),
+            );
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
@@ -1368,6 +1382,7 @@ fn compact_tool_input_json_for_ui(tool_name: &str, value: &mut serde_json::Value
             omit_large_json_string_field(value, "old_text", "edit_file.old_text");
             omit_large_json_string_field(value, "new_text", "edit_file.new_text");
         }
+        "multi_edit" => compact_json_string_values_for_ui(value),
         "bash" | "PowerShell" => {
             compact_large_json_string_field(value, "command", "shell command");
         }
@@ -2070,7 +2085,7 @@ fn build_system_prompt_uncached(key: &SystemPromptCacheKey) -> Vec<String> {
     let file_links = "When you create or modify files, include Markdown links to the relevant file paths in the final response so the desktop UI can open them directly. For local file destinations, use forward slashes and wrap paths containing spaces in angle brackets, for example `[report](<F:/Research Project/papers/main.tex:42>)`; do not emit `file://` or editor-specific URLs.".to_string();
     let readable_answers = "Readable answers: for explanatory answers, prefer short paragraphs, bullets, or numbered steps. Avoid dense single-paragraph technical summaries, especially in Chinese-English mixed explanations.".to_string();
     let local_evidence_retrieval = "Local literature evidence routing: when the user asks what the current project's local papers, PDFs, confirmed knowledge, or literature library say, you MUST call `ProjectEvidenceSearch` before answering, even when the user does not name the tool. This includes synthesis, comparisons, methods, datasets, metrics, findings, limitations, quotations, citations, and page-number requests. Base material claims only on returned confirmed knowledge or original PDF page chunks and cite them as `[paperId p.PAGE]`; retrieval cards, expansions, and ranks are not evidence. Use `LiteratureSearch` only to discover new external papers. `ProjectEvidenceSearch` does not build the index, so if it returns empty, explain that the user must run Literature > Full RAG > Incremental update and then generate retrieval cards. Do not silently substitute web or external metadata search for missing local evidence.".to_string();
-    let complex_task_contract = "Complex task contract: for code changes, research conclusions, citation work, experiments, artifact generation, or milestone work, first create a concise evidence-oriented plan with TodoWrite before making changes. Include the affected surfaces and verification needed. Simple factual answers do not need a plan. Never declare a complex task complete merely because your own prose sounds correct; the desktop runtime sends the result to a separately configured independent Reviewer and may return concrete findings for up to two revision rounds.".to_string();
+    let complex_task_contract = "Complex task contract: for code changes, research conclusions, citation work, experiments, artifact generation, or milestone work, first create a concise evidence-oriented plan with TodoWrite before making changes. Keep it at phase/milestone level and update only when a phase changes status or the plan materially changes, not after every tool call. When two or more replacements in one file are already known, batch them with multi_edit instead of using edit/read loops. Include the affected surfaces and verification needed. Simple factual answers do not need a plan. Never declare a complex task complete merely because your own prose sounds correct; the desktop runtime sends the result to a separately configured independent Reviewer and may return concrete findings for up to two revision rounds.".to_string();
     let artifact_layout = "Project artifact layout: place application-generated LaTeX paper/report sources and PDFs under `.somniq/papers/`, slide/PPT/PDF deck outputs under `.somniq/slides/`, poster outputs under `.somniq/poster/`, interactive web apps under `.somniq/web/<name>/` with an `index.html` plus local CSS/assets, notebook programs under `.somniq/notebooks/`, executed notebook copies and run artifacts under `.somniq/experiments/`, and scratch/temp/cache files under `.somniq/tmp/`. Preserve and edit a user-specified existing path in place instead of moving it. Lab defaults new notebooks into `.somniq/notebooks/`.".to_string();
     let existing_artifact_edits = "Existing artifact edits: when the user asks to modify, revise, continue editing, polish, or fix a current/existing report, paper, slide deck, PDF source, or other generated artifact, first identify and reuse the existing source path from the user message, recent file links, tool outputs, or workspace search. Edit that source in place and rebuild derived outputs at the same base path. Do not create sibling version files such as `_v2`, `_v9`, `_new`, `_final`, or timestamped copies unless the user explicitly asks for a new version, backup, archive, or comparison copy. If the target file cannot be identified, ask for the path instead of creating a new artifact.".to_string();
     let diagram_output = "Diagram output: when explaining a workflow, process, call path, architecture, state machine, dependency graph, or decision tree, prefer a fenced `mermaid` code block over ASCII art. Keep diagrams compact, use semantic node ids, short readable labels, left-to-right flow for pipelines, meaningful edge labels when they clarify the flow, and avoid oversized text inside nodes. For publication-grade diagram files, use the `mermaid-diagram` skill and verify the rendered output.".to_string();
@@ -2729,6 +2744,7 @@ fn maybe_auto_compact(
             emit_remote_chat_activity(event_delivery, app, session_id, "compacting");
             let started = Instant::now();
             let result = compact_session_with_runtime(
+                session_id,
                 session.clone(),
                 executor_config,
                 model.to_string(),
@@ -2783,6 +2799,7 @@ fn maybe_auto_compact(
 }
 
 fn compact_session_with_runtime(
+    session_id: &str,
     session: Session,
     executor_config: aris_chat::ChatExecutorConfig,
     model: String,
@@ -2790,7 +2807,7 @@ fn compact_session_with_runtime(
     summarizer_config: Option<aris_chat::SummarizerConfig>,
     compaction: CompactionConfig,
 ) -> Result<runtime::CompactionResult, String> {
-    let mut runtime = aris_chat::build_conversation_runtime(
+    let runtime = aris_chat::build_conversation_runtime(
         session,
         executor_config,
         model,
@@ -2804,7 +2821,9 @@ fn compact_session_with_runtime(
         summarizer_model,
         summarizer_config,
     )?;
-    Ok(runtime.compact(compaction))
+    Ok(runtime
+        .with_compaction_session_id(session_id)
+        .compact(compaction))
 }
 
 fn chat_status_for(model: String, provider: String) -> ChatStatus {
@@ -3354,6 +3373,7 @@ pub fn chat_run_command(
                 }
             };
             let result = compact_session_with_runtime(
+                &session_id,
                 session,
                 executor_config,
                 model,
@@ -4361,6 +4381,7 @@ fn review_required_for_turn(user_text: &str, summary: &runtime::TurnSummary) -> 
                 | "write_file"
                 | "append_file"
                 | "edit_file"
+                | "multi_edit"
                 | "change_revert"
                 | "NotebookEdit"
                 | "NotebookExecute"
@@ -5642,7 +5663,8 @@ async fn run_chat_turn_with_context(
         .map_err(|error| ChatTurnWorkerFailure {
             message: error.to_string(),
             session: Some(build_failure_session),
-        })?;
+        })?
+        .with_compaction_session_id(worker_session_id.clone());
         emit_remote_chat_activity(event_delivery, &worker_app, &worker_session_id, "thinking");
         let mut permission_prompter = DesktopPermissionPrompter {
             app: worker_app.clone(),

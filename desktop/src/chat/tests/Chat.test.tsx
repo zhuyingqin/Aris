@@ -118,14 +118,16 @@ vi.mock("../ChatThread", () => ({
 vi.mock("../ChatComposer", () => ({
   default: ({
     input,
+    busy,
     onInputChange,
     onSubmit,
   }: {
     input: string;
+    busy: boolean;
     onInputChange: (value: string) => void;
     onSubmit: () => void;
   }) => (
-    <div data-testid="chat-composer">
+    <div data-testid="chat-composer" data-busy={String(busy)}>
       <textarea
         aria-label="Message SomniQ"
         value={input}
@@ -701,6 +703,36 @@ describe("Chat export action", () => {
       session.id,
       expect.objectContaining({ text: "What should I change?", model: "MiniMax-M3" }),
     ));
+  });
+
+  it("does not leave the composer busy because an older assistant turn has a stale streaming flag", async () => {
+    const session = makeSession("default");
+    session.id = "session-stale-streaming";
+    session.title = "Stale streaming state";
+    session.turns = [
+      { id: "turn-user-old", role: "user", blocks: [{ kind: "text", text: "Old request" }] },
+      {
+        id: "turn-assistant-old",
+        role: "assistant",
+        streaming: true,
+        blocks: [{ kind: "text", text: "Old partial answer" }],
+      },
+      { id: "turn-user-current", role: "user", blocks: [{ kind: "text", text: "Current request" }] },
+      {
+        id: "turn-assistant-current",
+        role: "assistant",
+        streaming: false,
+        stopped: true,
+        blocks: [{ kind: "text", text: "Current stopped answer" }],
+      },
+    ];
+    localStorage.setItem(SESSIONS_KEY, JSON.stringify([session]));
+    localStorage.setItem(CURRENT_KEY, session.id);
+
+    render(<Chat />);
+
+    await userEvent.click(await screen.findByRole("button", { name: "Stale streaming state" }));
+    await waitFor(() => expect(screen.getByTestId("chat-composer").getAttribute("data-busy")).toBe("false"));
   });
 
   it("uses the configured LLM to create a concise title after the first reply", async () => {

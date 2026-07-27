@@ -1,9 +1,9 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc,
+    Arc, Mutex, OnceLock,
 };
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -18,18 +18,21 @@ use aris_executor::{
 use reqwest::blocking::Client;
 use runtime::{
     append_file_with_context, edit_file_with_context, get_file_change, glob_search, grep_search,
-    list_file_changes, load_system_prompt, read_file, record_text_file_change, revert_file_change,
-    write_file_with_context, ApiClient, ApiRequest, AssistantEvent, BashCommandInput,
-    ConversationRuntime, FileChangeGetInput, FileChangeListInput, FileChangeOperation,
-    FileChangeRecord, FileChangeRevertInput, FileMutationContext, GrepSearchInput, PermissionMode,
-    PermissionPolicy, RuntimeError, Session, StructuredPatchHunk, TokenUsage, ToolError,
-    ToolExecutor,
+    list_file_changes, load_system_prompt, multi_edit_file_with_context, read_file_with_images,
+    record_text_file_change, revert_file_change, write_file_with_context, ApiClient, ApiRequest,
+    AssistantEvent, BashCommandInput, ConversationRuntime, FileChangeGetInput, FileChangeListInput,
+    FileChangeOperation, FileChangeRecord, FileChangeRevertInput, FileMutationContext,
+    GrepSearchInput, MultiEditOperation, PermissionMode, PermissionPolicy, RuntimeError, Session,
+    StructuredPatchHunk, TokenUsage, ToolError, ToolExecutor,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 const MAX_WRITE_FILE_CONTENT_CHARS: usize = 24_000;
+const READ_FILE_CACHE_TTL: Duration = Duration::from_secs(60);
+const READ_FILE_CACHE_CAPACITY: usize = 64;
+const READ_FILE_CACHE_MAX_ENTRY_BYTES: usize = 256_000;
 const TOOL_PROGRESS_NEAR_TIMEOUT_RATIO: f64 = 0.80;
 const WORKSPACE_AUDIT_MAX_FILE_BYTES: u64 = 2_000_000;
 const WORKSPACE_AUDIT_MAX_FILES: usize = 8_000;
@@ -161,7 +164,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             name: "bash",
             description: concat!(
                 "Execute a shell command in the current workspace for shell semantics, package managers, build/test runners, scripts, and process control. ",
-                "Prefer dedicated tools when they fit: read_file for known-path reads, glob_search for file discovery, grep_search for content search, and write_file/append_file/edit_file for file changes. ",
+                "Prefer dedicated tools when they fit: read_file for known-path reads, glob_search for file discovery, grep_search for content search, and write_file/append_file/edit_file/multi_edit for file changes. ",
                 "Do not use shell redirection, heredocs, sed/awk in-place edits, or ad hoc scripts to modify files unless a justified bulk mechanical rewrite is safer than edit_file. ",
                 "Foreground commands default to a 120000 ms timeout; pass a larger timeout for legitimately long work. ",
                 "Use run_in_background only for long-running services or watchers whose immediate output is not needed; include a short description and do not start duplicate background processes. ",
@@ -186,7 +189,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "read_file",
-            description: "Read a text file or extract readable text from a PDF in the workspace. Large files without offset/limit return a safe outline preview; use offset and limit to read one section window at a time.",
+            description: "Read a text file or extract readable text from a PDF in the workspace. Large files without offset/limit return a safe outline preview; use offset and limit to read one section window at a time. Identical reads of an unchanged file may be served from a 60-second cache.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -255,18 +258,54 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 "Replace text directly in a workspace file. Use edit_file for small and medium edits to existing/current artifacts instead of write_file, append_file, new version files, shell redirection, sed/awk in-place edits, or generated helper scripts. ",
                 "Read the target file first and take old_string from the current file contents, not stale memory; old_string should be unique — if it matches multiple locations the call fails unless replace_all is set. ",
                 "CRLF/LF line-ending differences are matched automatically and the file's existing endings are preserved on write. ",
-                "When multiple edits target the same file, apply one edit, read the file again, then make the next edit so old_string does not go stale. ",
-                "It returns Codex-style structured file changes."
+                "For two or more known replacements in the same file, prefer one multi_edit call; keep edit_file for a single replacement or when the next edit genuinely depends on inspecting a result. ",
+                "Prefer the shortest stable unique span; avoid copying an entire long table or section when a smaller anchor is sufficient, and never submit text containing the Unicode replacement character `�`. ",
+                "By default the result contains only success/change metadata and a numeric diff summary, never the full file or diff text. Set include_content=true only when the complete updated file is genuinely needed in the tool result."
             ),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string" },
-                    "old_string": { "type": "string" },
-                    "new_string": { "type": "string" },
-                    "replace_all": { "type": "boolean" }
+                    "old_string": { "type": "string", "description": "Exact current text to replace. Use the shortest stable unique span and do not include the Unicode replacement character `�`." },
+                    "new_string": { "type": "string", "description": "Replacement text. Do not include the Unicode replacement character `�` unless it already exists in the matched source and is intentionally being preserved." },
+                    "replace_all": { "type": "boolean" },
+                    "include_content": { "type": "boolean", "description": "Opt in to returning the complete updated file content. Defaults to false." }
                 },
                 "required": ["path", "old_string", "new_string"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::WorkspaceWrite,
+        },
+        ToolSpec {
+            name: "multi_edit",
+            description: concat!(
+                "Apply 1-64 ordered old_string/new_string replacements to one existing workspace file in a single tool call. ",
+                "Use this when two or more edits to the same file are already known. Each edit sees the result of the previous edit, all edits are validated in memory before the file is written, and a validation failure leaves the file unchanged. ",
+                "old_string must be unique unless replace_all is true. The batch is written once and recorded as one auditable change. ",
+                "Use short stable unique spans rather than one whole long table/section replacement; split independent rows or paragraphs into separate edits. Never submit old_string or new_string containing the Unicode replacement character `�` because it normally signals lossy decoding. ",
+                "The result includes a bounded diff and five-line context windows; do not re-read only to confirm the literal replacements."
+            ),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "edits": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 64,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "old_string": { "type": "string", "description": "Exact current text to replace. Use the shortest stable unique span and do not include the Unicode replacement character `�`." },
+                                "new_string": { "type": "string", "description": "Replacement text. Do not include the Unicode replacement character `�` unless it already exists in the matched source and is intentionally being preserved." },
+                                "replace_all": { "type": "boolean" }
+                            },
+                            "required": ["old_string", "new_string"],
+                            "additionalProperties": false
+                        }
+                    }
+                },
+                "required": ["path", "edits"],
                 "additionalProperties": false
             }),
             required_permission: PermissionMode::WorkspaceWrite,
@@ -775,7 +814,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "TodoWrite",
-            description: "Update the structured task list for the current session.",
+            description: "Update the structured task list for the current session. Keep todos at phase/milestone level rather than creating one item per file edit or tool call. Update only when a phase changes status or the plan materially changes; do not resend an unchanged list.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -966,7 +1005,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             name: "PowerShell",
             description: concat!(
                 "Execute a PowerShell command when Windows-specific shell semantics are needed. ",
-                "Prefer dedicated tools when they fit: read_file for known-path reads, glob_search for file discovery, grep_search for content search, and write_file/append_file/edit_file for file changes. ",
+                "Prefer dedicated tools when they fit: read_file for known-path reads, glob_search for file discovery, grep_search for content search, and write_file/append_file/edit_file/multi_edit for file changes. ",
                 "Do not use shell redirection, here-strings, ad hoc scripts, or Set-Content/Add-Content for file edits unless a justified bulk mechanical rewrite is safer than edit_file. ",
                 "Foreground commands default to a 120000 ms timeout; pass a larger timeout for legitimately long work. ",
                 "Use run_in_background only for long-running services or watchers whose immediate output is not needed; include a short description and do not start duplicate background processes. ",
@@ -1043,6 +1082,9 @@ pub fn execute_tool_with_cancel_and_progress_with_context(
         }
         "edit_file" => {
             from_value::<EditFileInput>(input).and_then(|input| run_edit_file(input, &context))
+        }
+        "multi_edit" => {
+            from_value::<MultiEditInput>(input).and_then(|input| run_multi_edit(input, &context))
         }
         "change_list" => from_value::<FileChangeListInput>(input).and_then(run_change_list),
         "change_get" => from_value::<FileChangeGetInput>(input).and_then(run_change_get),
@@ -1156,7 +1198,19 @@ fn managed_progress_to_tool_progress(progress: runtime::ManagedCommandProgress) 
 
 #[allow(clippy::needless_pass_by_value)]
 fn run_read_file(input: ReadFileInput) -> Result<String, String> {
-    to_pretty_json(read_file(&input.path, input.offset, input.limit).map_err(io_to_string)?)
+    let cache_key = read_file_cache_key(&input);
+    if let Some(cache_key) = cache_key.as_ref() {
+        if let Some(output) = read_file_cache_get(cache_key) {
+            return Ok(output);
+        }
+    }
+    let output = to_pretty_json(
+        read_file_with_images(&input.path, input.offset, input.limit).map_err(io_to_string)?,
+    )?;
+    if let Some(cache_key) = cache_key {
+        read_file_cache_put(cache_key, output.clone());
+    }
+    Ok(output)
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -1198,15 +1252,58 @@ fn run_append_file(input: AppendFileInput, context: &ToolRunContext) -> Result<S
 
 #[allow(clippy::needless_pass_by_value)]
 fn run_edit_file(input: EditFileInput, context: &ToolRunContext) -> Result<String, String> {
+    let output = edit_file_with_context(
+        &input.path,
+        &input.old_string,
+        &input.new_string,
+        input.replace_all.unwrap_or(false),
+        &context.mutation_context("edit_file"),
+    )
+    .map_err(io_to_string)?;
+    let added_lines = output
+        .structured_patch
+        .iter()
+        .flat_map(|hunk| &hunk.lines)
+        .filter(|line| line.starts_with('+'))
+        .count();
+    let removed_lines = output
+        .structured_patch
+        .iter()
+        .flat_map(|hunk| &hunk.lines)
+        .filter(|line| line.starts_with('-'))
+        .count();
+    let mut result = json!({
+        "ok": true,
+        "changeId": output.change_id,
+        "diff_summary": {
+            "filePath": output.file_path,
+            "replacements": output.replacements,
+            "replaceAll": output.replace_all,
+            "hunks": output.structured_patch.len(),
+            "addedLines": added_lines,
+            "removedLines": removed_lines,
+        },
+    });
+    if input.include_content.unwrap_or(false) {
+        result["content"] = Value::String(output.updated_file);
+    }
+    to_pretty_json(result)
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn run_multi_edit(input: MultiEditInput, context: &ToolRunContext) -> Result<String, String> {
+    let edits = input
+        .edits
+        .into_iter()
+        .map(|edit| MultiEditOperation {
+            old_string: edit.old_string,
+            new_string: edit.new_string,
+            replace_all: edit.replace_all.unwrap_or(false),
+        })
+        .collect::<Vec<_>>();
     to_pretty_json(
-        edit_file_with_context(
-            &input.path,
-            &input.old_string,
-            &input.new_string,
-            input.replace_all.unwrap_or(false),
-            &context.mutation_context("edit_file"),
-        )
-        .map_err(io_to_string)?,
+        multi_edit_file_with_context(&input.path, &edits, &context.mutation_context("multi_edit"))
+            .map_err(io_to_string)?,
     )
 }
 
@@ -1713,6 +1810,77 @@ struct ReadFileInput {
     limit: Option<usize>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReadFileCacheKey {
+    path: PathBuf,
+    modified: SystemTime,
+    len: u64,
+    offset: Option<usize>,
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Clone)]
+struct ReadFileCacheEntry {
+    key: ReadFileCacheKey,
+    inserted_at: Instant,
+    output: String,
+}
+
+static READ_FILE_CACHE: OnceLock<Mutex<VecDeque<ReadFileCacheEntry>>> = OnceLock::new();
+
+fn read_file_cache_key(input: &ReadFileInput) -> Option<ReadFileCacheKey> {
+    let path = PathBuf::from(&input.path);
+    let candidate = if path.is_absolute() {
+        path
+    } else {
+        runtime::workspace_root_from_env().join(path)
+    };
+    let path = candidate.canonicalize().ok()?;
+    let metadata = fs::metadata(&path).ok()?;
+    Some(ReadFileCacheKey {
+        path,
+        modified: metadata.modified().ok()?,
+        len: metadata.len(),
+        offset: input.offset,
+        limit: input.limit,
+    })
+}
+
+fn read_file_cache_get(key: &ReadFileCacheKey) -> Option<String> {
+    let now = Instant::now();
+    let mut cache = READ_FILE_CACHE
+        .get_or_init(|| Mutex::new(VecDeque::new()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    cache.retain(|entry| now.duration_since(entry.inserted_at) < READ_FILE_CACHE_TTL);
+    let index = cache.iter().position(|entry| entry.key == *key)?;
+    let entry = cache.remove(index)?;
+    let output = entry.output.clone();
+    cache.push_back(entry);
+    Some(output)
+}
+
+fn read_file_cache_put(key: ReadFileCacheKey, output: String) {
+    if output.len() > READ_FILE_CACHE_MAX_ENTRY_BYTES {
+        return;
+    }
+    let mut cache = READ_FILE_CACHE
+        .get_or_init(|| Mutex::new(VecDeque::new()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(index) = cache.iter().position(|entry| entry.key == key) {
+        cache.remove(index);
+    }
+    while cache.len() >= READ_FILE_CACHE_CAPACITY {
+        cache.pop_front();
+    }
+    cache.push_back(ReadFileCacheEntry {
+        key,
+        inserted_at: Instant::now(),
+        output,
+    });
+}
+
 #[derive(Debug, Deserialize)]
 struct WriteFileInput {
     path: String,
@@ -1729,6 +1897,20 @@ struct AppendFileInput {
 #[derive(Debug, Deserialize)]
 struct EditFileInput {
     path: String,
+    old_string: String,
+    new_string: String,
+    replace_all: Option<bool>,
+    include_content: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MultiEditInput {
+    path: String,
+    edits: Vec<MultiEditItemInput>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MultiEditItemInput {
     old_string: String,
     new_string: String,
     replace_all: Option<bool>,
@@ -3342,6 +3524,7 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
             "write_file",
             "append_file",
             "edit_file",
+            "multi_edit",
             "glob_search",
             "grep_search",
             "ToolSearch",
@@ -3352,6 +3535,7 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
             "write_file",
             "append_file",
             "edit_file",
+            "multi_edit",
             "glob_search",
             "grep_search",
             "WebFetch",
@@ -3602,6 +3786,7 @@ fn deferred_tool_specs() -> Vec<ToolSpec> {
                     | "write_file"
                     | "append_file"
                     | "edit_file"
+                    | "multi_edit"
                     | "change_list"
                     | "change_get"
                     | "change_revert"

@@ -487,7 +487,7 @@ fn push_tool_result_nodes(
 fn diff_from_tool_result(tool_name: &str, output: &str) -> Option<TimelineDiff> {
     if !matches!(
         tool_name,
-        "write_file" | "append_file" | "edit_file" | "NotebookEdit"
+        "write_file" | "append_file" | "edit_file" | "multi_edit" | "NotebookEdit"
     ) {
         return None;
     }

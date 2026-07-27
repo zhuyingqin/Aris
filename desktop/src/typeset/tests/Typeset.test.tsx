@@ -1688,7 +1688,7 @@ describe("Typeset start page", () => {
     });
   });
 
-  it("opens the complete theorem source in Code mode when its Visual label is clicked", async () => {
+  it("opens the complete theorem source in Code mode when its Visual label is double-clicked", async () => {
     mockProjectFiles();
     const source = [
       "\\documentclass{article}",
@@ -1712,6 +1712,8 @@ describe("Typeset start page", () => {
     });
 
     fireEvent.click(label);
+    expect(screen.getByRole("tab", { name: "Visual" }).getAttribute("aria-selected")).toBe("true");
+    fireEvent.doubleClick(label);
 
     await waitFor(() => {
       expect(screen.getByRole("tab", { name: "Code" }).getAttribute("aria-selected")).toBe("true");
@@ -1721,7 +1723,7 @@ describe("Typeset start page", () => {
     });
   });
 
-  it("clicking the rendered title jumps to Code mode with the \\title{} source selected", async () => {
+  it("double-clicking the rendered title jumps to Code mode with the \\title{} source selected", async () => {
     mockProjectFiles();
     const source = [
       "\\documentclass{article}",
@@ -1745,7 +1747,7 @@ describe("Typeset start page", () => {
       expect(item).toBeTruthy();
       return item!;
     });
-    fireEvent.click(titleEl);
+    fireEvent.doubleClick(titleEl);
 
     await waitFor(() => expect(screen.getByRole("tab", { name: "Code" }).getAttribute("aria-selected")).toBe("true"));
     await waitFor(() => {
@@ -1756,7 +1758,7 @@ describe("Typeset start page", () => {
     });
   });
 
-  it("clicking the rendered author jumps to Code mode with the \\author{} source selected", async () => {
+  it("double-clicking the rendered author jumps to Code mode with the \\author{} source selected", async () => {
     mockProjectFiles();
     const source = [
       "\\documentclass{article}",
@@ -1780,7 +1782,7 @@ describe("Typeset start page", () => {
       expect(item).toBeTruthy();
       return item!;
     });
-    fireEvent.click(authorEl);
+    fireEvent.doubleClick(authorEl);
 
     await waitFor(() => expect(screen.getByRole("tab", { name: "Code" }).getAttribute("aria-selected")).toBe("true"));
     await waitFor(() => {

@@ -463,7 +463,7 @@
   border-radius: 6px;
   background: var(--bg-1);
   color: var(--accent-2);
-  font-family: var(--mono, monospace);
+  font-family: var(--font-mono);
   font-size: 11px;
 }
 

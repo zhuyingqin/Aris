@@ -123,7 +123,7 @@ dependencies = [
 
 [[package]]
 name = "aris-desktop"
-version = "0.4.31"
+version = "0.4.33"
 dependencies = [
  "api",
  "aris-chat",
@@ -142,6 +142,7 @@ dependencies = [
  "remote-protocol",
  "reqwest 0.12.28",
  "runtime",
+ "semver",
  "serde",
  "serde_json",
  "sha2",
@@ -3842,6 +3843,7 @@ checksum = "6c20b6793b5c2fa6553b250154b78d6d0db37e72700ae35fad9387a46f487c97"
 name = "runtime"
 version = "0.4.15"
 dependencies = [
+ "base64 0.22.1",
  "encoding_rs",
  "flate2",
  "getrandom 0.3.4",

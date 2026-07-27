@@ -45,7 +45,9 @@ export default function TerminalPane({ cwd, refitSignal }: TerminalProps) {
 
     const term = new XTerm({
       cursorBlink: true,
-      fontFamily: 'ui-monospace, "SF Mono", Menlo, Consolas, monospace',
+      // xterm renders to canvas. Modern WebView2 / Chromium resolves var() in
+      // canvas font strings; falls back to a stack matching --font-mono if not.
+      fontFamily: 'Cascadia Code, "SFMono-Regular", Consolas, "Liberation Mono", ui-monospace, monospace',
       fontSize: 12.5,
       // xterm needs concrete colors (it can't read CSS vars); these track the
       // app's dark surface. See `.lab-terminal` in Lab.css for the surround.

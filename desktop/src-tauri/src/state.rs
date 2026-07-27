@@ -8,6 +8,7 @@ const DESKTOP_ALLOWED_AGENT_TOOLS: &[&str] = &[
     "write_file",
     "append_file",
     "edit_file",
+    "multi_edit",
     "glob_search",
     "grep_search",
     "WebFetch",

@@ -22,12 +22,35 @@ mod typeset;
 mod usage_log;
 mod watcher;
 
+use semver::Version;
 use std::path::PathBuf;
 use std::sync::{Mutex, Once};
 use tauri::{image::Image, Manager, WebviewUrl, WebviewWindowBuilder};
 
 static SHUTDOWN_CLEANUP: Once = Once::new();
 static CHAT_COMPANION_WINDOW_LOCK: Mutex<()> = Mutex::new(());
+
+fn embedded_release_unix_timestamp() -> Option<i64> {
+    option_env!("SOMNIQ_RELEASE_UNIX_TIMESTAMP").and_then(|value| value.parse().ok())
+}
+
+fn should_offer_update(
+    current_version: &Version,
+    remote_version: &Version,
+    current_release_timestamp: Option<i64>,
+    remote_release_timestamp: Option<i64>,
+) -> bool {
+    use std::cmp::Ordering;
+
+    match remote_version.cmp(current_version) {
+        Ordering::Greater => true,
+        Ordering::Less => false,
+        Ordering::Equal => matches!(
+            (current_release_timestamp, remote_release_timestamp),
+            (Some(current), Some(remote)) if remote > current
+        ),
+    }
+}
 
 fn open_chat_companion_window(app: tauri::AppHandle) -> Result<(), String> {
     // Serialize rapid repeated clicks. Without this guard, two async command
@@ -330,7 +353,20 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(
+            tauri_plugin_updater::Builder::new()
+                .default_version_comparator(|current_version, remote_release| {
+                    let remote_release_timestamp =
+                        remote_release.pub_date.map(|date| date.unix_timestamp());
+                    should_offer_update(
+                        &current_version,
+                        &remote_release.version,
+                        embedded_release_unix_timestamp(),
+                        remote_release_timestamp,
+                    )
+                })
+                .build(),
+        )
         .manage(engine::ChatState::default())
         .manage(projects::ProjectState::default())
         .manage(remote::RemoteAgentState::default())

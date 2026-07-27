@@ -1,4 +1,5 @@
-use super::{configure_bundled_tectonic_environment, tectonic_binary_name};
+use super::{configure_bundled_tectonic_environment, should_offer_update, tectonic_binary_name};
+use semver::Version;
 use std::sync::{Mutex, OnceLock};
 
 fn env_lock() -> std::sync::MutexGuard<'static, ()> {
@@ -77,4 +78,44 @@ fn bundled_tectonic_preserves_valid_override() {
     assert!(std::env::var_os("ARIS_TECTONIC").is_none());
     let _ = std::fs::remove_dir_all(dir);
     restore_env(previous_somniq, previous_aris);
+}
+
+#[test]
+fn updater_prefers_a_newer_version_regardless_of_release_time() {
+    assert!(should_offer_update(
+        &Version::parse("0.4.33").unwrap(),
+        &Version::parse("0.4.34").unwrap(),
+        Some(200),
+        Some(100),
+    ));
+}
+
+#[test]
+fn updater_accepts_a_newer_upload_of_the_same_version() {
+    assert!(should_offer_update(
+        &Version::parse("0.4.33").unwrap(),
+        &Version::parse("0.4.33").unwrap(),
+        Some(100),
+        Some(101),
+    ));
+}
+
+#[test]
+fn updater_rejects_older_versions_and_non_newer_same_version_uploads() {
+    let current = Version::parse("0.4.33").unwrap();
+
+    assert!(!should_offer_update(
+        &current,
+        &Version::parse("0.4.32").unwrap(),
+        Some(100),
+        Some(200),
+    ));
+    assert!(!should_offer_update(
+        &current,
+        &current,
+        Some(100),
+        Some(100),
+    ));
+    assert!(!should_offer_update(&current, &current, Some(100), None));
+    assert!(!should_offer_update(&current, &current, None, Some(200)));
 }

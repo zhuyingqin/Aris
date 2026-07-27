@@ -68,6 +68,10 @@ body,
 #root {
   margin: 0;
   height: 100%;
+  /* The desktop shell owns its viewport. Individual work surfaces (such as
+     `.chat-scroll`) provide their own scrolling; letting the document scroll
+     as well produces a second, competing scrollbar on the Chat home page. */
+  overflow: hidden;
   background: var(--bg);
   color: var(--text);
   font-family: var(--font-sans);
@@ -320,7 +324,7 @@ textarea {
   padding: 4px 6px;
   color: var(--text-dim);
   font-size: 11px;
-  font-family: ui-monospace, "Cascadia Code", monospace;
+  font-family: var(--font-mono);
   letter-spacing: -0.1px;
   max-width: 260px;
   overflow: hidden;
@@ -1166,7 +1170,7 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   color: var(--red);
   font-size: 12px;
   padding: 6px 12px;
-  font-family: ui-monospace, monospace;
+  font-family: var(--font-mono);
 }
 
 .tag {
@@ -1209,7 +1213,7 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
 .run-row .sub {
   color: var(--text-dim);
   font-size: 11px;
-  font-family: ui-monospace, monospace;
+  font-family: var(--font-mono);
 }
 
 .board {
@@ -1303,7 +1307,7 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
 .msg-row .ts {
   color: var(--text-dim);
   font-size: 10px;
-  font-family: ui-monospace, monospace;
+  font-family: var(--font-mono);
 }
 
 .scroll {
@@ -1371,7 +1375,7 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
 .md-view {
   white-space: pre-wrap;
   word-break: break-word;
-  font-family: ui-monospace, "Cascadia Code", monospace;
+  font-family: var(--font-mono);
   font-size: 12.5px;
   line-height: 1.55;
   background: var(--bg-1);
@@ -1693,7 +1697,7 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
 }
 
 .st-preset-control input {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-family: var(--font-mono);
   letter-spacing: 0;
 }
 
@@ -1709,7 +1713,7 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
 
 .st-key-input {
   min-width: 0;
-  font-family: ui-monospace, monospace;
+  font-family: var(--font-mono);
   letter-spacing: 0;
 }
 
@@ -1937,7 +1941,7 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
 .st-mcp-fields textarea {
   width: 100%;
   min-width: 0;
-  font-family: ui-monospace, "Cascadia Code", monospace;
+  font-family: var(--font-mono);
   font-size: var(--st-small);
   letter-spacing: 0;
 }
@@ -2752,7 +2756,7 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
 .ext-skill-meta dd {
   margin: 0;
   color: var(--text);
-  font-family: ui-monospace, "Cascadia Code", monospace;
+  font-family: var(--font-mono);
   font-size: 11px;
   line-height: 1.45;
   overflow-wrap: anywhere;
@@ -2927,7 +2931,7 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
 
 .st-readonly-input {
   color: var(--text-dim);
-  font-family: ui-monospace, monospace;
+  font-family: var(--font-mono);
   font-size: var(--st-small);
   text-overflow: ellipsis;
 }
@@ -3074,7 +3078,7 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
 
 .st-test-meta {
   color: var(--text-dim);
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-family: var(--font-mono);
   font-size: var(--st-small);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -3091,7 +3095,7 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
 
 .st-test-url {
   color: var(--text-dim);
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-family: var(--font-mono);
   font-size: var(--st-meta);
   line-height: 1.4;
   margin-top: 5px;
@@ -4568,7 +4572,7 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   font-size: 11px;
   color: var(--accent);
   margin-top: 6px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-family: var(--font-mono);
   line-height: 1.4;
   overflow-wrap: anywhere;
 }
@@ -4835,7 +4839,7 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   font-size: 11px;
   color: var(--text-dim);
   margin-top: 2px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-family: var(--font-mono);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -5602,7 +5606,7 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   border-radius: 8px;
   color: var(--text);
   font-size: 12px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-family: var(--font-mono);
   line-height: 1.6;
   resize: vertical;
   min-height: 120px;
@@ -6058,7 +6062,7 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   display: block;
   margin-top: 4px;
   color: var(--text);
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
   font-weight: 700;
   overflow: hidden;
@@ -6384,7 +6388,7 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   border-radius: 8px;
   background: var(--bg-1);
   color: var(--text);
-  font-family: var(--font-mono, "SFMono-Regular", Consolas, "Liberation Mono", monospace);
+  font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.55;
 }
@@ -6760,7 +6764,7 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
 .sp-secret-value {
   width: 100%;
   min-width: 0;
-  font-family: ui-monospace, "Cascadia Code", monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
   letter-spacing: 0;
 }
@@ -7130,7 +7134,7 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
 
 .sp-bridge-notice pre {
   margin: 6px 0 0;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-family: var(--font-mono);
   font-size: 11px;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -7396,7 +7400,7 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   border: 1px solid var(--border);
   border-radius: 4px;
   padding: 0 5px;
-  font-family: ui-monospace, monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.5;
   color: var(--accent);
@@ -7549,7 +7553,7 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
 
 .tool-name {
   font-weight: 600;
-  font-family: ui-monospace, "Cascadia Code", monospace;
+  font-family: var(--font-mono);
   flex: 1;
   /* Let long tool names / AskUserQuestion headers ellipsize instead of
      overflowing the (overflow:hidden) tool card on narrow windows. */
@@ -7587,7 +7591,7 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   border-radius: 999px;
   background: var(--bg-2);
   color: var(--text-dim);
-  font-family: ui-monospace, "Cascadia Code", monospace;
+  font-family: var(--font-mono);
   font-size: 11px;
   font-variant-numeric: tabular-nums;
 }
@@ -7802,7 +7806,7 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   gap: 8px;
   align-items: center;
   color: var(--text-dim);
-  font-family: ui-monospace, "Cascadia Code", monospace;
+  font-family: var(--font-mono);
   font-size: 11px;
   font-variant-numeric: tabular-nums;
 }
@@ -7961,7 +7965,7 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   font-weight: 700;
   font-size: 12.5px;
   color: var(--accent);
-  font-family: ui-monospace, monospace;
+  font-family: var(--font-mono);
   flex-shrink: 0;
   min-width: 140px;
 }
@@ -7998,7 +8002,7 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   font-weight: 600;
   font-size: 12.5px;
   color: var(--text);
-  font-family: ui-monospace, monospace;
+  font-family: var(--font-mono);
   flex-shrink: 0;
 }
 
@@ -8053,7 +8057,7 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
 }
 
 .file-change-op {
-  font-family: ui-monospace, monospace;
+  font-family: var(--font-mono);
   font-weight: 700;
   font-size: 13px;
   width: 14px;
@@ -8070,7 +8074,7 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
 }
 
 .file-change-path {
-  font-family: ui-monospace, "Cascadia Code", monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
   color: var(--text);
   white-space: nowrap;
@@ -8296,7 +8300,7 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   background: var(--bg-3);
   border: 1px solid var(--border);
   border-radius: 5px;
-  font-family: ui-monospace, "Cascadia Code", monospace;
+  font-family: var(--font-mono);
   font-size: 11px;
 }
 
@@ -8524,7 +8528,7 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
 
 /* Inline code */
 .md-inline-code {
-  font-family: ui-monospace, "Cascadia Code", "Fira Code", monospace;
+  font-family: var(--font-mono);
   font-size: 12.5px;
   background: color-mix(in srgb, var(--accent) 14%, transparent);
   border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent);
@@ -8544,7 +8548,7 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   box-shadow:
     0 1px 0 rgba(255, 255, 255, 0.04) inset,
     0 4px 16px rgba(0, 0, 0, 0.22);
-  font-family: ui-monospace, "Cascadia Code", "Fira Code", monospace;
+  font-family: var(--font-mono);
 }
 
 .md-code-header {
@@ -8695,7 +8699,7 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
 
 .md-mermaid-lang {
   color: var(--text-dim);
-  font-family: ui-monospace, "Cascadia Code", monospace;
+  font-family: var(--font-mono);
   font-size: 11px;
   text-transform: lowercase;
 }
@@ -8735,7 +8739,7 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
 .md-mermaid-zoom-label {
   min-width: 42px;
   color: var(--text-dim);
-  font-family: ui-monospace, "Cascadia Code", monospace;
+  font-family: var(--font-mono);
   font-size: 11px;
   text-align: center;
 }
@@ -8823,7 +8827,7 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
 
 .md-mermaid-error-detail {
   color: var(--text-dim);
-  font-family: ui-monospace, "Cascadia Code", monospace;
+  font-family: var(--font-mono);
   font-size: 11.5px;
   line-height: 1.45;
   white-space: pre-wrap;
@@ -9274,7 +9278,7 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
 
 .sched-detail-kicker {
   color: var(--text-dim);
-  font-family: ui-monospace, "Cascadia Code", monospace;
+  font-family: var(--font-mono);
   font-size: 11px;
   margin-bottom: 6px;
 }
@@ -10815,7 +10819,7 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   background: var(--settings-surface-2);
   color: var(--settings-text);
   font: inherit;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-family: var(--font-mono);
 }
 
 .sp-remote-field textarea {
@@ -11125,7 +11129,7 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
 }
 
 .sp-remote-device-details .sp-remote-fingerprint {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-family: var(--font-mono);
 }
 
 .sp-remote-revoke-confirm {
@@ -11443,7 +11447,7 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   margin-top: 2px;
   font-size: 10px;
   color: var(--text-dim);
-  font-family: ui-monospace, "Cascadia Code", monospace;
+  font-family: var(--font-mono);
 }
 
 .project-current-dot {
@@ -13481,7 +13485,7 @@ button.chat-workflow-file-path:hover {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  font-family: ui-monospace, "Cascadia Code", monospace;
+  font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
 }
 
@@ -13857,7 +13861,7 @@ button.chat-workflow-file-path:hover {
 .command-select-label {
   overflow: hidden;
   color: var(--accent);
-  font-family: ui-monospace, "Cascadia Code", monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
   font-weight: 700;
   text-overflow: ellipsis;

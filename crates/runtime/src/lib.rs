@@ -74,9 +74,11 @@ pub use event_sink::{
 };
 pub use file_ops::{
     append_file, append_file_with_context, decode_process_text, edit_file, edit_file_with_context,
-    glob_search, grep_search, read_file, write_file, write_file_with_context, AppendFileOutput,
-    EditFileOutput, FileChange, GlobSearchOutput, GrepSearchInput, GrepSearchOutput,
-    ReadFileOutput, StructuredPatchHunk, TextFilePayload, WriteFileOutput,
+    glob_search, grep_search, multi_edit_file, multi_edit_file_with_context, read_file,
+    read_file_with_images, write_file, write_file_with_context, AppendFileOutput,
+    EditContextWindow, EditFileOutput, FileChange, GlobSearchOutput, GrepSearchInput,
+    GrepSearchOutput, MultiEditOperation, MultiEditOutput, ReadFileOutput, ReadFileResult,
+    ReadImageOutput, StructuredPatchHunk, TextFilePayload, WriteFileOutput,
 };
 pub use hooks::{HookEvent, HookRunResult, HookRunner};
 pub use hot_memory::{
@@ -157,8 +159,7 @@ pub use project_intent::{
 };
 pub use prompt::{
     instruction_files_fingerprint, load_system_prompt, prepend_bullets, ContextFile,
-    ProjectContext, PromptBuildError, SystemPromptBuilder,
-    SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
+    ProjectContext, PromptBuildError, SystemPromptBuilder, SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
 };
 pub use remote::{
     inherited_upstream_proxy_env, no_proxy_list, read_token, upstream_proxy_ws_url,

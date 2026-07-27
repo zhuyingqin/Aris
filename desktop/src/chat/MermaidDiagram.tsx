@@ -36,7 +36,7 @@ async function renderMermaid(code: string): Promise<string> {
         lineColor: "#9fb8d8",
         secondaryColor: "#14251d",
         tertiaryColor: "#2b2416",
-        fontFamily: "Segoe UI, system-ui, sans-serif",
+        fontFamily: "var(--font-sans)",
         fontSize: "14px",
       },
       flowchart: {

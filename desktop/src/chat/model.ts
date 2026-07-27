@@ -289,11 +289,14 @@ const FILE_CHANGE_TOOL_NAMES = new Set([
   "write_file",
   "append_file",
   "edit_file",
+  "multi_edit",
   "str_replace_based_edit_tool",
   "NotebookEdit",
   "bash",
   "PowerShell",
   "REPL",
+  "LaTeXCompile",
+  "LaTeXRender",
 ]);
 
 export function isFileChangeTool(name: string): boolean {
@@ -370,6 +373,22 @@ function normalizeFileChangePath(path: string, projectRoot?: string | null): str
     if (lowerPath.startsWith(`${lowerRoot}/`)) return normalized.slice(root.length + 1);
   }
   return normalized.replace(/^\.\//, "");
+}
+
+/**
+ * Whether a tracked file change and an already-open side-panel path (usually
+ * absolute) refer to the same file. Side-panel tabs don't share the
+ * project-relative form `latestFileChangesFromTurns` normalizes to, so both
+ * sides run through the same normalization before comparing.
+ */
+export function fileChangePathMatches(
+  changePath: string,
+  openPath: string,
+  projectRoot?: string | null,
+): boolean {
+  const normalizedChange = normalizeFileChangePath(changePath, projectRoot).toLowerCase();
+  const normalizedOpen = normalizeFileChangePath(openPath, projectRoot).toLowerCase();
+  return Boolean(normalizedChange) && normalizedChange === normalizedOpen;
 }
 
 function unquoteGitStatusPath(path: string): string {
@@ -456,7 +475,7 @@ function changesFromWriteTool(
   const codexChanges = changesFromCodexOutput(output, block.name, projectRoot);
   if (codexChanges.length > 0) return codexChanges;
 
-  const outputPath = stringField(output, ["filePath", "path", "target_file", "notebook_path", "notebookPath"]);
+  const outputPath = stringField(output, ["filePath", "path", "target_file", "notebook_path", "notebookPath", "outputPath"]);
   const path = normalizeFileChangePath(outputPath ?? toolInputPath(input) ?? "", projectRoot);
   if (!path) return [];
 

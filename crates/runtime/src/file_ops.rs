@@ -6,6 +6,7 @@ use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::time::Instant;
 
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use encoding_rs::{GB18030, GBK};
 use flate2::read::{DeflateDecoder, ZlibDecoder};
 use glob::Pattern;
@@ -16,11 +17,19 @@ use walkdir::WalkDir;
 use crate::change_ledger::{record_text_file_change, FileChangeOperation, FileMutationContext};
 
 const MAX_READ_FILE_CONTENT_CHARS: usize = 64_000;
+/// Matches the desktop composer's own image attachment cap
+/// (`MAX_IMAGE_BYTES` in `ChatComposer.tsx`) so the two entry points into the
+/// model's vision input behave consistently.
+const MAX_READ_IMAGE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_IMPLICIT_READ_FILE_CHARS: usize = 48_000;
 const MAX_IMPLICIT_READ_FILE_LINES: usize = 800;
 const LONG_FILE_HEAD_LINES: usize = 120;
 const LONG_FILE_TAIL_LINES: usize = 40;
 const LONG_FILE_MAX_OUTLINE_LINES: usize = 200;
+const EDIT_CONTEXT_LINES: usize = 5;
+const MAX_EDIT_CONTEXT_WINDOWS: usize = 4;
+const MAX_EDIT_TOOL_DIFF_CHARS: usize = 24_000;
+const MAX_MULTI_EDIT_OPERATIONS: usize = 64;
 const MAX_GLOB_SEARCH_RESULTS: usize = 100;
 const READONLY_ROOTS_ENV: &str = "ARIS_READONLY_ROOTS";
 
@@ -45,6 +54,29 @@ pub struct ReadFileOutput {
     #[serde(rename = "type")]
     pub kind: String,
     pub file: TextFilePayload,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReadImageOutput {
+    #[serde(rename = "type")]
+    pub kind: String,
+    #[serde(rename = "filePath")]
+    pub file_path: String,
+    #[serde(rename = "mediaType")]
+    pub media_type: String,
+    pub base64: String,
+    pub bytes: usize,
+}
+
+/// `read_file` result once image files are recognized rather than rejected
+/// as unreadable binary. Untagged: each variant already carries its own
+/// `"type"` discriminator (`"text"` / `"image"`), matching `ReadFileOutput`'s
+/// existing convention instead of introducing a second, redundant tag.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum ReadFileResult {
+    Text(ReadFileOutput),
+    Image(ReadImageOutput),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -120,21 +152,59 @@ pub struct AppendFileOutput {
 pub struct EditFileOutput {
     #[serde(rename = "filePath")]
     pub file_path: String,
-    #[serde(rename = "oldString")]
+    #[serde(skip_serializing)]
+    pub updated_file: String,
+    #[serde(rename = "oldString", skip_serializing)]
     pub old_string: String,
-    #[serde(rename = "newString")]
+    #[serde(rename = "newString", skip_serializing)]
     pub new_string: String,
-    #[serde(rename = "originalFile")]
+    #[serde(rename = "originalFile", skip_serializing)]
     pub original_file: String,
-    #[serde(rename = "structuredPatch")]
+    #[serde(rename = "structuredPatch", skip_serializing)]
     pub structured_patch: Vec<StructuredPatchHunk>,
     pub changes: BTreeMap<String, FileChange>,
+    pub context: Vec<EditContextWindow>,
+    pub replacements: usize,
     #[serde(rename = "userModified")]
     pub user_modified: bool,
     #[serde(rename = "replaceAll")]
     pub replace_all: bool,
-    #[serde(rename = "gitDiff")]
+    #[serde(rename = "gitDiff", skip_serializing_if = "Option::is_none")]
     pub git_diff: Option<serde_json::Value>,
+    #[serde(rename = "changeId", skip_serializing_if = "Option::is_none")]
+    pub change_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EditContextWindow {
+    #[serde(rename = "startLine")]
+    pub start_line: usize,
+    #[serde(rename = "endLine")]
+    pub end_line: usize,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MultiEditOperation {
+    #[serde(rename = "oldString")]
+    pub old_string: String,
+    #[serde(rename = "newString")]
+    pub new_string: String,
+    #[serde(rename = "replaceAll")]
+    pub replace_all: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MultiEditOutput {
+    #[serde(rename = "filePath")]
+    pub file_path: String,
+    #[serde(rename = "editsApplied")]
+    pub edits_applied: usize,
+    pub replacements: usize,
+    pub changes: BTreeMap<String, FileChange>,
+    pub context: Vec<EditContextWindow>,
+    #[serde(rename = "structuredPatch", skip_serializing)]
+    pub structured_patch: Vec<StructuredPatchHunk>,
     #[serde(rename = "changeId", skip_serializing_if = "Option::is_none")]
     pub change_id: Option<String>,
 }
@@ -203,6 +273,63 @@ pub fn read_file(
         decode_text_bytes(&fs::read(&absolute_path)?)?
     };
     Ok(read_text_payload(absolute_path, &content, offset, limit))
+}
+
+/// Entry point for tool dispatch: like `read_file`, but recognized image
+/// formats are inlined as base64 instead of failing `decode_text_bytes` with
+/// a "not a supported text file" error. The turn loop splits the returned
+/// `ReadFileResult::Image` into a text tool result plus a following
+/// `ContentBlock::Image`, so the model actually sees the picture instead of
+/// just being told the read failed.
+pub fn read_file_with_images(
+    path: &str,
+    offset: Option<usize>,
+    limit: Option<usize>,
+) -> io::Result<ReadFileResult> {
+    if image_media_type(path).is_some() {
+        return read_image_file(path).map(ReadFileResult::Image);
+    }
+    read_file(path, offset, limit).map(ReadFileResult::Text)
+}
+
+fn image_media_type(path: &str) -> Option<&'static str> {
+    let extension = Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())?
+        .to_ascii_lowercase();
+    match extension.as_str() {
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "png" => Some("image/png"),
+        "gif" => Some("image/gif"),
+        "webp" => Some("image/webp"),
+        "bmp" => Some("image/bmp"),
+        _ => None,
+    }
+}
+
+fn read_image_file(path: &str) -> io::Result<ReadImageOutput> {
+    let absolute_path = normalize_read_path(path)?;
+    let bytes = fs::read(&absolute_path)?;
+    if bytes.len() > MAX_READ_IMAGE_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "image is {} bytes, over the {}MB read_file limit; ask the user to attach it in Chat instead so you can see it directly",
+                bytes.len(),
+                MAX_READ_IMAGE_BYTES / 1024 / 1024
+            ),
+        ));
+    }
+    // media_type is `Some` here: `read_file_with_images` only calls this
+    // function after `image_media_type` already matched.
+    let media_type = image_media_type(path).unwrap_or("application/octet-stream");
+    Ok(ReadImageOutput {
+        kind: "image".to_string(),
+        file_path: absolute_path.to_string_lossy().into_owned(),
+        media_type: media_type.to_string(),
+        bytes: bytes.len(),
+        base64: BASE64_STANDARD.encode(&bytes),
+    })
 }
 
 fn decode_text_bytes(bytes: &[u8]) -> io::Result<String> {
@@ -542,9 +669,26 @@ pub fn edit_file_with_context(
     }
     let matches = find_edit_matches(&original_file, old_string);
     if matches.is_empty() {
+        if old_string.contains('\u{fffd}') {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                lossy_unicode_edit_message(
+                    new_string
+                        .contains('\u{fffd}')
+                        .then_some("old_string and new_string")
+                        .unwrap_or("old_string"),
+                ),
+            ));
+        }
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
             edit_not_found_message(&original_file, old_string),
+        ));
+    }
+    if new_string.contains('\u{fffd}') && !old_string.contains('\u{fffd}') {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            lossy_unicode_edit_message("new_string"),
         ));
     }
     if !replace_all && matches.len() > 1 {
@@ -567,8 +711,9 @@ pub fn edit_file_with_context(
 
     let file_path = display_path(&absolute_path);
     let structured_patch = make_patch(&original_file, &updated);
-    let changes = make_file_changes(&file_path, Some(&original_file), Some(&updated));
     let unified_diff = make_unified_diff(&file_path, &original_file, &updated);
+    let changes = make_compact_update_changes(&file_path, &unified_diff);
+    let context_windows = edit_context_windows(&updated, &structured_patch);
     let change_id = record_text_file_change(
         context,
         &absolute_path,
@@ -583,14 +728,159 @@ pub fn edit_file_with_context(
 
     Ok(EditFileOutput {
         file_path,
+        updated_file: updated,
         old_string: old_string.to_owned(),
         new_string: new_string.to_owned(),
         original_file: original_file.clone(),
         structured_patch,
         changes,
+        context: context_windows,
+        replacements: selected.len(),
         user_modified: false,
         replace_all,
         git_diff: None,
+        change_id,
+    })
+}
+
+pub fn multi_edit_file(path: &str, edits: &[MultiEditOperation]) -> io::Result<MultiEditOutput> {
+    let context = FileMutationContext::from_env("multi_edit");
+    multi_edit_file_with_context(path, edits, &context)
+}
+
+pub fn multi_edit_file_with_context(
+    path: &str,
+    edits: &[MultiEditOperation],
+    context: &FileMutationContext,
+) -> io::Result<MultiEditOutput> {
+    if edits.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "edits must contain at least one replacement",
+        ));
+    }
+    if edits.len() > MAX_MULTI_EDIT_OPERATIONS {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "edits contains {} replacements; the per-call limit is {MAX_MULTI_EDIT_OPERATIONS}",
+                edits.len()
+            ),
+        ));
+    }
+
+    let absolute_path = normalize_path(path)?;
+    let original_file = fs::read_to_string(&absolute_path)?;
+    let mut updated = original_file.clone();
+    let mut replacements = 0usize;
+
+    // Apply to an in-memory copy first. A validation failure therefore leaves
+    // the workspace untouched, while later edits can intentionally depend on
+    // text inserted by an earlier edit in the same batch.
+    for (index, edit) in edits.iter().enumerate() {
+        if edit.old_string.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("edit {}: old_string must not be empty", index + 1),
+            ));
+        }
+        if normalize_newlines(&edit.old_string) == normalize_newlines(&edit.new_string) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("edit {}: old_string and new_string must differ", index + 1),
+            ));
+        }
+
+        let matches = find_edit_matches(&updated, &edit.old_string);
+        if matches.is_empty() {
+            if edit.old_string.contains('\u{fffd}') {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "edit {}: {}",
+                        index + 1,
+                        lossy_unicode_edit_message(
+                            edit.new_string
+                                .contains('\u{fffd}')
+                                .then_some("old_string and new_string")
+                                .unwrap_or("old_string")
+                        )
+                    ),
+                ));
+            }
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!(
+                    "edit {}: {}",
+                    index + 1,
+                    edit_not_found_message(&updated, &edit.old_string)
+                ),
+            ));
+        }
+        if edit.new_string.contains('\u{fffd}') && !edit.old_string.contains('\u{fffd}') {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "edit {}: {}",
+                    index + 1,
+                    lossy_unicode_edit_message("new_string")
+                ),
+            ));
+        }
+        if !edit.replace_all && matches.len() > 1 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "edit {}: old_string matches {} locations in the file; add surrounding context to make it unique, or set replace_all=true to replace every match",
+                    index + 1,
+                    matches.len()
+                ),
+            ));
+        }
+
+        let selected = if edit.replace_all {
+            &matches[..]
+        } else {
+            &matches[..1]
+        };
+        replacements = replacements.saturating_add(selected.len());
+        updated = splice_ranges(&updated, selected, &edit.new_string);
+    }
+
+    if updated == original_file {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "the edit batch produces no net file change",
+        ));
+    }
+
+    // One workspace write and one ledger record make the batch independently
+    // reviewable and prevent a half-applied file when a later replacement fails.
+    fs::write(&absolute_path, &updated)?;
+    let file_path = display_path(&absolute_path);
+    let structured_patch = make_patch(&original_file, &updated);
+    let unified_diff = make_unified_diff(&file_path, &original_file, &updated);
+    let changes = make_compact_update_changes(&file_path, &unified_diff);
+    let context_windows = edit_context_windows(&updated, &structured_patch);
+    let change_id = record_text_file_change(
+        context,
+        &absolute_path,
+        FileChangeOperation::Update,
+        Some(&original_file),
+        Some(&updated),
+        structured_patch.clone(),
+        unified_diff,
+        None,
+    )?
+    .map(|record| record.change_id);
+
+    Ok(MultiEditOutput {
+        file_path,
+        edits_applied: edits.len(),
+        replacements,
+        changes,
+        context: context_windows,
+        structured_patch,
         change_id,
     })
 }
@@ -708,6 +998,12 @@ fn harmonize_write_eol(original: Option<&str>, content: &str) -> String {
     match_eol(content, if crlf > bare_lf { "\r\n" } else { "\n" })
 }
 
+fn lossy_unicode_edit_message(fields: &str) -> String {
+    format!(
+        "{fields} contains the Unicode replacement character U+FFFD (`�`), which usually means text was decoded or copied with data loss; re-read a focused file window and regenerate exact UTF-8 text before retrying. No changes were written"
+    )
+}
+
 fn edit_not_found_message(original: &str, old_string: &str) -> String {
     let needle_owned = normalize_newlines(old_string);
     let needle_lines = needle_owned.lines().map(str::trim).collect::<Vec<_>>();
@@ -724,9 +1020,67 @@ fn edit_not_found_message(original: &str, old_string: &str) -> String {
             );
         }
     }
+    if let Some(message) = drifting_block_message(&file_lines, &needle_lines) {
+        return message;
+    }
     String::from(
         "old_string not found in file; if the file may have changed since it was last read, call read_file again and take old_string from the current contents",
     )
+}
+
+fn drifting_block_message(file_lines: &[&str], needle_lines: &[&str]) -> Option<String> {
+    if needle_lines.len() < 4 {
+        return None;
+    }
+    let (anchor_offset, anchor) = needle_lines
+        .iter()
+        .enumerate()
+        .find(|(_, line)| line.chars().count() >= 8 && !line.is_empty())?;
+    let anchor_hits = file_lines
+        .iter()
+        .enumerate()
+        .filter_map(|(index, line)| (*line == *anchor).then_some(index))
+        .collect::<Vec<_>>();
+    if anchor_hits.len() != 1 || anchor_hits[0] < anchor_offset {
+        return None;
+    }
+
+    let start = anchor_hits[0] - anchor_offset;
+    let mismatch = needle_lines.iter().enumerate().find(|(offset, expected)| {
+        file_lines
+            .get(start + offset)
+            .is_none_or(|actual| actual != *expected)
+    })?;
+    let mismatch_offset = mismatch.0;
+    if mismatch_offset == 0 {
+        return None;
+    }
+
+    let expected = preview_error_line(mismatch.1);
+    let actual = file_lines.get(start + mismatch_offset).map_or_else(
+        || "<end of file>".to_string(),
+        |line| preview_error_line(line),
+    );
+    let suggested_end = start
+        .saturating_add(needle_lines.len())
+        .min(file_lines.len())
+        .max(start + 1);
+    Some(format!(
+        "old_string block starts at file line {}, but first differs at file line {}: expected `{expected}`, found `{actual}`. Re-read lines {}-{suggested_end} and split the change into shorter unique replacements instead of matching the entire block",
+        start + 1,
+        start + mismatch_offset + 1,
+        start + 1,
+    ))
+}
+
+fn preview_error_line(line: &str) -> String {
+    const MAX_CHARS: usize = 120;
+    let total = line.chars().count();
+    if total <= MAX_CHARS {
+        return line.to_string();
+    }
+    let preview = line.chars().take(MAX_CHARS).collect::<String>();
+    format!("{preview}…")
 }
 
 pub fn glob_search(pattern: &str, path: Option<&str>) -> io::Result<GlobSearchOutput> {
@@ -1933,6 +2287,109 @@ fn make_patch(original: &str, updated: &str) -> Vec<StructuredPatchHunk> {
         new_lines: new_end.saturating_sub(start),
         lines,
     }]
+}
+
+fn edit_context_windows(
+    updated: &str,
+    structured_patch: &[StructuredPatchHunk],
+) -> Vec<EditContextWindow> {
+    let lines = updated.lines().collect::<Vec<_>>();
+    if lines.is_empty() || structured_patch.is_empty() {
+        return Vec::new();
+    }
+
+    let mut ranges = Vec::<(usize, usize)>::new();
+    for hunk in structured_patch {
+        let changed_start = hunk
+            .new_start
+            .saturating_sub(1)
+            .min(lines.len().saturating_sub(1));
+        let changed_lines = hunk.new_lines.max(1);
+        let changed_end = changed_start.saturating_add(changed_lines).min(lines.len());
+        if changed_lines <= EDIT_CONTEXT_LINES * 2 {
+            ranges.push((
+                changed_start.saturating_sub(EDIT_CONTEXT_LINES),
+                changed_end
+                    .saturating_add(EDIT_CONTEXT_LINES)
+                    .min(lines.len()),
+            ));
+        } else {
+            ranges.push((
+                changed_start.saturating_sub(EDIT_CONTEXT_LINES),
+                changed_start
+                    .saturating_add(EDIT_CONTEXT_LINES + 1)
+                    .min(lines.len()),
+            ));
+            let last_changed = changed_end.saturating_sub(1);
+            ranges.push((
+                last_changed.saturating_sub(EDIT_CONTEXT_LINES),
+                last_changed
+                    .saturating_add(EDIT_CONTEXT_LINES + 1)
+                    .min(lines.len()),
+            ));
+        }
+    }
+
+    ranges.sort_unstable();
+    let mut merged = Vec::<(usize, usize)>::new();
+    for (start, end) in ranges {
+        if let Some(last) = merged.last_mut() {
+            if start <= last.1 {
+                last.1 = last.1.max(end);
+                continue;
+            }
+        }
+        merged.push((start, end));
+    }
+
+    merged
+        .into_iter()
+        .take(MAX_EDIT_CONTEXT_WINDOWS)
+        .map(|(start, end)| EditContextWindow {
+            start_line: start + 1,
+            end_line: end,
+            content: numbered_lines(&lines[start..end], start + 1).join("\n"),
+        })
+        .collect()
+}
+
+fn make_compact_update_changes(
+    file_path: &str,
+    unified_diff: &str,
+) -> BTreeMap<String, FileChange> {
+    let mut changes = BTreeMap::new();
+    changes.insert(
+        file_path.to_string(),
+        FileChange::Update {
+            unified_diff: compact_tool_diff(unified_diff),
+            move_path: None,
+        },
+    );
+    changes
+}
+
+fn compact_tool_diff(unified_diff: &str) -> String {
+    let total_chars = unified_diff.chars().count();
+    if total_chars <= MAX_EDIT_TOOL_DIFF_CHARS {
+        return unified_diff.to_string();
+    }
+
+    let marker = format!(
+        "\n[SomniQ compacted this tool-result diff: {total_chars} chars total. The complete audited diff remains available through change_get.]\n"
+    );
+    let remaining = MAX_EDIT_TOOL_DIFF_CHARS.saturating_sub(marker.chars().count());
+    let head_chars = remaining / 2;
+    let tail_chars = remaining.saturating_sub(head_chars);
+    let head = unified_diff.chars().take(head_chars).collect::<String>();
+    let tail = unified_diff
+        .chars()
+        .rev()
+        .take(tail_chars)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect::<String>();
+    format!("{head}{marker}{tail}")
 }
 
 fn make_file_changes(

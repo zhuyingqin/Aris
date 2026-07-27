@@ -1,5 +1,9 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::{Display, Formatter};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc, Condvar, Mutex, OnceLock,
+};
 
 use crate::compact::{
     assemble_compacted_session_with_usage, bound_fallback_summary, estimate_session_tokens,
@@ -8,10 +12,12 @@ use crate::compact::{
 };
 use crate::config::RuntimeFeatureConfig;
 use crate::event_sink::{now_iso8601, EventSink, EventType, NoopEventSink, RuntimeEvent};
+use crate::file_ops::ReadImageOutput;
 use crate::hooks::{HookRunResult, HookRunner};
 use crate::permissions::{PermissionOutcome, PermissionPolicy, PermissionPrompter};
 use crate::session::{ContentBlock, ConversationMessage, MessageRole, Session};
 use crate::usage::{TokenUsage, UsageTracker};
+use sha2::{Digest, Sha256};
 
 const DEFAULT_AUTO_COMPACTION_INPUT_TOKENS_THRESHOLD: u32 = 200_000;
 const AUTO_COMPACTION_THRESHOLD_ENV_VAR: &str = "CLAUDE_CODE_AUTO_COMPACT_INPUT_TOKENS";
@@ -65,6 +71,129 @@ const LEGACY_BLANK_RESPONSE_PROMPT_PREFIX: &str =
 /// produced nothing visible. Guarantees the turn returns non-empty text
 /// instead of finishing silently with an empty bubble.
 const BLANK_RESPONSE_PLACEHOLDER: &str = "[ARIS: the model returned an empty response and did not continue after automatic retries. It may have treated the task as already complete, or the output was filtered. Try rephrasing, or ask it to proceed.]";
+static NEXT_COMPACTION_RUNTIME_ID: AtomicU64 = AtomicU64::new(1);
+
+type SharedCompactionSummary = Option<(String, Option<u32>)>;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct CompactionFlightKey {
+    session_id: String,
+    slice_hash: [u8; 32],
+}
+
+#[derive(Debug, Clone)]
+enum CompactionFlightState {
+    Running,
+    Finished(SharedCompactionSummary),
+}
+
+#[derive(Debug)]
+struct CompactionFlight {
+    state: Mutex<CompactionFlightState>,
+    ready: Condvar,
+}
+
+impl CompactionFlight {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(CompactionFlightState::Running),
+            ready: Condvar::new(),
+        }
+    }
+}
+
+static IN_FLIGHT_COMPACTIONS: OnceLock<Mutex<HashMap<CompactionFlightKey, Arc<CompactionFlight>>>> =
+    OnceLock::new();
+
+fn in_flight_compactions() -> &'static Mutex<HashMap<CompactionFlightKey, Arc<CompactionFlight>>> {
+    IN_FLIGHT_COMPACTIONS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+struct CompactionFlightLeader {
+    key: CompactionFlightKey,
+    flight: Arc<CompactionFlight>,
+    published: bool,
+}
+
+impl CompactionFlightLeader {
+    fn finish(mut self, result: SharedCompactionSummary) -> SharedCompactionSummary {
+        self.publish(result.clone());
+        self.published = true;
+        result
+    }
+
+    fn publish(&self, result: SharedCompactionSummary) {
+        {
+            let mut state = self
+                .flight
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            *state = CompactionFlightState::Finished(result);
+            self.flight.ready.notify_all();
+        }
+        let mut flights = in_flight_compactions()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if flights
+            .get(&self.key)
+            .is_some_and(|current| Arc::ptr_eq(current, &self.flight))
+        {
+            flights.remove(&self.key);
+        }
+    }
+}
+
+impl Drop for CompactionFlightLeader {
+    fn drop(&mut self) {
+        if !self.published {
+            self.publish(None);
+        }
+    }
+}
+
+fn run_compaction_singleflight(
+    key: CompactionFlightKey,
+    run: impl FnOnce() -> SharedCompactionSummary,
+) -> SharedCompactionSummary {
+    let (flight, is_leader) = {
+        let mut flights = in_flight_compactions()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(flight) = flights.get(&key) {
+            (Arc::clone(flight), false)
+        } else {
+            let flight = Arc::new(CompactionFlight::new());
+            flights.insert(key.clone(), Arc::clone(&flight));
+            (flight, true)
+        }
+    };
+
+    if is_leader {
+        return CompactionFlightLeader {
+            key,
+            flight,
+            published: false,
+        }
+        .finish(run());
+    }
+
+    let mut state = flight
+        .state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    loop {
+        match &*state {
+            CompactionFlightState::Running => {
+                state = flight
+                    .ready
+                    .wait(state)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+            }
+            CompactionFlightState::Finished(result) => return result.clone(),
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApiRequest {
@@ -299,6 +428,10 @@ pub struct ConversationRuntime<C, T> {
     /// second `ExecutorClient` pointed at a small model). `None` falls back to
     /// the deterministic text-assembly summary.
     summarizer: Option<C>,
+    /// Stable identity used to coalesce concurrent attempts to summarize the
+    /// same archived slice. Desktop supplies its real chat/session id; direct
+    /// runtimes receive a process-unique fallback to avoid cross-session reuse.
+    compaction_session_id: String,
 }
 
 impl<C, T> ConversationRuntime<C, T>
@@ -349,6 +482,7 @@ where
             context_overhead_estimated_tokens,
             event_sink: Box::new(NoopEventSink),
             summarizer: None,
+            compaction_session_id: default_compaction_session_id(),
         }
     }
 
@@ -357,6 +491,17 @@ where
     #[must_use]
     pub fn with_summarizer(mut self, summarizer: C) -> Self {
         self.summarizer = Some(summarizer);
+        self
+    }
+
+    /// Attach the durable session identity used by compaction single-flight
+    /// deduplication. Empty values keep the process-unique fallback.
+    #[must_use]
+    pub fn with_compaction_session_id(mut self, session_id: impl Into<String>) -> Self {
+        let session_id = session_id.into();
+        if !session_id.trim().is_empty() {
+            self.compaction_session_id = session_id;
+        }
         self
     }
 
@@ -651,6 +796,20 @@ where
                                     }
                                     Err(error) => (error.to_string(), true),
                                 };
+                                // `read_file` on a recognized image format returns a JSON
+                                // blob carrying the base64 payload instead of erroring out.
+                                // Swap it for a short text summary before hooks/bounding run
+                                // — hooks operate on human-readable tool text, and the
+                                // char-based `bound_tool_result` truncation would otherwise
+                                // corrupt the base64 mid-string for any real photo. The raw
+                                // image bytes are carried separately in `read_file_image` and
+                                // reattached as their own content block below.
+                                let read_file_image = (tool_name == "read_file" && !is_error)
+                                    .then(|| parse_read_file_image(&output))
+                                    .flatten();
+                                if let Some(image) = &read_file_image {
+                                    output = read_file_image_summary(image);
+                                }
                                 output =
                                     merge_hook_feedback(pre_hook_result.messages(), output, false);
 
@@ -665,7 +824,9 @@ where
                                     output,
                                     post_hook_result.is_denied(),
                                 );
-                                output = bound_tool_result(output, MAX_TOOL_RESULT_CHARS);
+                                if read_file_image.is_none() {
+                                    output = bound_tool_result(output, MAX_TOOL_RESULT_CHARS);
+                                }
 
                                 // Emit tool call event
                                 if tool_name == "Skill" {
@@ -705,12 +866,24 @@ where
                                     },
                                 });
 
-                                Some(vec![ContentBlock::ToolResult {
+                                let mut blocks = vec![ContentBlock::ToolResult {
                                     tool_use_id,
                                     tool_name,
                                     output,
                                     is_error,
-                                }])
+                                }];
+                                // A post-tool-use hook can still deny an image read after the
+                                // fact (`is_error` above); don't attach the picture when that
+                                // happens.
+                                if !is_error {
+                                    if let Some(image) = read_file_image {
+                                        blocks.push(ContentBlock::Image {
+                                            media_type: image.media_type,
+                                            data: image.base64,
+                                        });
+                                    }
+                                }
+                                Some(blocks)
                             }
                         }
                     }
@@ -1081,15 +1254,30 @@ where
         if self.summarizer.is_none() {
             return None;
         }
-        let preamble = crate::compact::pinned_preamble(removed);
-        let coverage = crate::compact::coverage_target(removed);
         let segments = build_transcript_segments(removed);
         if segments.is_empty() {
             return None;
         }
+        let key = CompactionFlightKey {
+            session_id: self.compaction_session_id.clone(),
+            slice_hash: compaction_slice_hash(&segments, instruction),
+        };
+        run_compaction_singleflight(key, || {
+            self.llm_summarize_segments(removed, &segments, instruction)
+        })
+    }
+
+    fn llm_summarize_segments(
+        &mut self,
+        removed: &[ConversationMessage],
+        segments: &[String],
+        instruction: Option<&str>,
+    ) -> Option<(String, Option<u32>)> {
+        let preamble = crate::compact::pinned_preamble(removed);
+        let coverage = crate::compact::coverage_target(removed);
         let mut remaining_calls = MAX_SUMMARY_CALLS;
         self.map_reduce_summarize(
-            &segments,
+            segments,
             &preamble,
             coverage.as_deref(),
             instruction,
@@ -1223,6 +1411,34 @@ where
         }
         None
     }
+}
+
+fn default_compaction_session_id() -> String {
+    std::env::var("ARIS_SESSION_ID")
+        .ok()
+        .filter(|session_id| !session_id.trim().is_empty())
+        .unwrap_or_else(|| {
+            format!(
+                "runtime-{}",
+                NEXT_COMPACTION_RUNTIME_ID.fetch_add(1, Ordering::Relaxed)
+            )
+        })
+}
+
+fn compaction_slice_hash(segments: &[String], instruction: Option<&str>) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    for segment in segments {
+        hasher.update(segment.len().to_le_bytes());
+        hasher.update(segment.as_bytes());
+    }
+    if let Some(instruction) = instruction.map(str::trim).filter(|value| !value.is_empty()) {
+        hasher.update([1]);
+        hasher.update(instruction.len().to_le_bytes());
+        hasher.update(instruction.as_bytes());
+    } else {
+        hasher.update([0]);
+    }
+    hasher.finalize().into()
 }
 
 /// System prompt steering the summarizer model toward a continuation-ready
@@ -1923,6 +2139,21 @@ fn compact_context_history(session: &mut Session, preserve_latest_tool_result: b
 
 fn bound_tool_result(output: String, max_chars: usize) -> String {
     bound_context_text(output, max_chars, "tool result")
+}
+
+/// Recognizes `read_file_with_images`' JSON output for an image path
+/// (`ReadFileResult::Image`). A plain text/PDF `read_file` result has no
+/// top-level `mediaType`/`base64`/`bytes` fields, so it never matches here.
+fn parse_read_file_image(output: &str) -> Option<ReadImageOutput> {
+    let image: ReadImageOutput = serde_json::from_str(output).ok()?;
+    (image.kind == "image").then_some(image)
+}
+
+fn read_file_image_summary(image: &ReadImageOutput) -> String {
+    format!(
+        "Read `{}` as an image ({}, {} bytes). The image content is attached to this turn as an image block.",
+        image.file_path, image.media_type, image.bytes
+    )
 }
 
 fn bound_context_text(output: String, max_chars: usize, label: &str) -> String {

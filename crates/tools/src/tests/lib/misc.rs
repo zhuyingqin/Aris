@@ -8,6 +8,7 @@ fn exposes_mvp_tools() {
         .collect::<Vec<_>>();
     assert!(names.contains(&"bash"));
     assert!(names.contains(&"read_file"));
+    assert!(names.contains(&"multi_edit"));
     assert!(names.contains(&"WebFetch"));
     assert!(names.contains(&"WebSearch"));
     assert!(names.contains(&"LiteratureSearchProtocolCreate"));

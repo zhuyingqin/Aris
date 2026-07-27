@@ -5,7 +5,7 @@
 
 [package]
 name = "aris-desktop"
-version = "0.4.32"
+version = "0.4.33"
 edition = "2021"
 license = "MIT"
 description = "ARIS Studio — desktop research workspace for chat, lab, literature, mail, typeset, and scheduled tasks"
@@ -23,6 +23,7 @@ tauri = { version = "2", features = ["image-png"] }
 tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+semver = "1"
 toml = "0.8"
 encoding_rs = "0.8"
 pdf-extract = "0.12"
