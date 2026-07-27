@@ -1,4 +1,8 @@
 use super::*;
+use crate::{read_file_cache_get, read_file_cache_put, ReadFileCacheKey, READ_FILE_CACHE};
+use std::collections::VecDeque;
+use std::sync::Mutex;
+use std::time::SystemTime;
 
 #[test]
 fn file_tools_cover_read_write_and_edit_behaviors() {
@@ -118,12 +122,16 @@ fn file_tools_cover_read_write_and_edit_behaviors() {
     )
     .expect("single edit should succeed");
     let edit_once_output: serde_json::Value = serde_json::from_str(&edit_once).expect("json");
-    assert_eq!(edit_once_output["replaceAll"], false);
-    let edit_once_path = edit_once_output["filePath"].as_str().expect("file path");
-    assert_eq!(
-        edit_once_output["changes"][edit_once_path]["type"],
-        "update"
-    );
+    assert_eq!(edit_once_output["ok"], true);
+    assert_eq!(edit_once_output["diff_summary"]["replaceAll"], false);
+    assert_eq!(edit_once_output["diff_summary"]["replacements"], 1);
+    assert_eq!(edit_once_output["diff_summary"]["hunks"], 1);
+    assert!(edit_once_output.get("originalFile").is_none());
+    assert!(edit_once_output.get("oldString").is_none());
+    assert!(edit_once_output.get("newString").is_none());
+    assert!(edit_once_output.get("changes").is_none());
+    assert!(edit_once_output.get("context").is_none());
+    assert!(edit_once_output.get("content").is_none());
     assert_eq!(
         fs::read_to_string(root.join("nested/demo.txt")).expect("read file"),
         "omega\nbeta\ngamma\n"
@@ -145,10 +153,27 @@ fn file_tools_cover_read_write_and_edit_behaviors() {
     )
     .expect("replace all should succeed");
     let edit_all_output: serde_json::Value = serde_json::from_str(&edit_all).expect("json");
-    assert_eq!(edit_all_output["replaceAll"], true);
+    assert_eq!(edit_all_output["diff_summary"]["replaceAll"], true);
     assert_eq!(
         fs::read_to_string(root.join("nested/demo.txt")).expect("read file"),
         "omega\nbeta\nomega\n"
+    );
+
+    let edit_with_content = execute_tool(
+        "edit_file",
+        &json!({
+            "path": "nested/demo.txt",
+            "old_string": "beta",
+            "new_string": "BETA",
+            "include_content": true
+        }),
+    )
+    .expect("explicit full-content edit should succeed");
+    let edit_with_content: serde_json::Value =
+        serde_json::from_str(&edit_with_content).expect("json");
+    assert_eq!(
+        edit_with_content["content"], "omega\nBETA\nomega\n",
+        "full updated content is returned only after explicit opt-in"
     );
 
     let edit_same = execute_tool(
@@ -165,8 +190,112 @@ fn file_tools_cover_read_write_and_edit_behaviors() {
     .expect_err("missing substring should fail");
     assert!(edit_missing.contains("old_string not found"));
 
+    execute_tool(
+        "write_file",
+        &json!({ "path": "nested/demo.txt", "content": "alpha\nbeta\ngamma\n" }),
+    )
+    .expect("reset file before multi edit");
+    let multi = execute_tool(
+        "multi_edit",
+        &json!({
+            "path": "nested/demo.txt",
+            "edits": [
+                { "old_string": "alpha", "new_string": "one" },
+                { "old_string": "beta", "new_string": "two" },
+                { "old_string": "one", "new_string": "ONE" }
+            ]
+        }),
+    )
+    .expect("multi edit should succeed");
+    let multi: serde_json::Value = serde_json::from_str(&multi).expect("json");
+    assert_eq!(multi["editsApplied"], 3);
+    assert_eq!(multi["replacements"], 3);
+    assert!(multi.get("structuredPatch").is_none());
+    assert_eq!(
+        fs::read_to_string(root.join("nested/demo.txt")).expect("read file"),
+        "ONE\ntwo\ngamma\n"
+    );
+
+    let before_failed_batch =
+        fs::read_to_string(root.join("nested/demo.txt")).expect("read before failure");
+    let multi_error = execute_tool(
+        "multi_edit",
+        &json!({
+            "path": "nested/demo.txt",
+            "edits": [
+                { "old_string": "ONE", "new_string": "changed" },
+                { "old_string": "missing", "new_string": "never written" }
+            ]
+        }),
+    )
+    .expect_err("failed batch should not partially write");
+    assert!(multi_error.contains("edit 2"));
+    assert_eq!(
+        fs::read_to_string(root.join("nested/demo.txt")).expect("read after failure"),
+        before_failed_batch
+    );
+
+    let lossy_error = execute_tool(
+        "multi_edit",
+        &json!({
+            "path": "nested/demo.txt",
+            "edits": [
+                { "old_string": "ONE���", "new_string": "clean" }
+            ]
+        }),
+    )
+    .expect_err("lossy Unicode should produce an actionable tool error");
+    assert!(lossy_error.contains("edit 1"));
+    assert!(lossy_error.contains("U+FFFD"));
+    assert!(lossy_error.contains("No changes were written"));
+    assert_eq!(
+        fs::read_to_string(root.join("nested/demo.txt")).expect("read after lossy input"),
+        before_failed_batch
+    );
+
     std::env::set_current_dir(&original_dir).expect("restore cwd");
     let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn read_file_cache_is_lru_and_keys_distinct_read_windows() {
+    let mut cache = READ_FILE_CACHE
+        .get_or_init(|| Mutex::new(VecDeque::new()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    cache.clear();
+    drop(cache);
+
+    let path = PathBuf::from("cache-unit.txt");
+    let modified = SystemTime::UNIX_EPOCH;
+    let first = ReadFileCacheKey {
+        path: path.clone(),
+        modified,
+        len: 12,
+        offset: None,
+        limit: None,
+    };
+    let window = ReadFileCacheKey {
+        path,
+        modified,
+        len: 12,
+        offset: Some(2),
+        limit: Some(3),
+    };
+
+    read_file_cache_put(first.clone(), "full".to_string());
+    read_file_cache_put(window.clone(), "window".to_string());
+    assert_eq!(read_file_cache_get(&first).as_deref(), Some("full"));
+    assert_eq!(read_file_cache_get(&window).as_deref(), Some("window"));
+
+    let changed_file = ReadFileCacheKey {
+        modified: modified + std::time::Duration::from_secs(1),
+        ..first
+    };
+    assert!(
+        read_file_cache_get(&changed_file).is_none(),
+        "a changed mtime must invalidate the cached read"
+    );
 }
 
 #[test]
@@ -213,6 +342,67 @@ fn change_tools_list_and_revert_audited_file_writes() {
     let reverted: serde_json::Value = serde_json::from_str(&reverted).expect("json");
     assert_eq!(reverted["reverted"], true);
     assert!(!root.join("tracked.txt").exists());
+
+    std::env::set_current_dir(&original_dir).expect("restore cwd");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn multi_edit_creates_one_revertible_audit_record() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let root = temp_path("multi-edit-ledger");
+    fs::create_dir_all(&root).expect("create root");
+    let original_dir = std::env::current_dir().expect("cwd");
+    let _workspace = EnvGuard::set("ARIS_WORKSPACE_ROOT", &root);
+    let _session = EnvGuard::set("ARIS_SESSION_ID", "multi-edit-ledger-session");
+    std::env::set_current_dir(&root).expect("set cwd");
+    fs::write(root.join("tracked.txt"), "alpha\nbeta\n").expect("write initial file");
+
+    let output = execute_tool_with_context(
+        "multi_edit",
+        &json!({
+            "path": "tracked.txt",
+            "edits": [
+                { "old_string": "alpha", "new_string": "one" },
+                { "old_string": "beta", "new_string": "two" }
+            ]
+        }),
+        ToolRunContext {
+            tool_use_id: Some("toolu-multi-edit-1".to_string()),
+            session_id: None,
+            turn_id: None,
+        },
+    )
+    .expect("multi edit should succeed");
+    let output: serde_json::Value = serde_json::from_str(&output).expect("json");
+    let change_id = output["changeId"].as_str().expect("change id").to_string();
+
+    let listed = execute_tool(
+        "change_list",
+        &json!({ "session_id": "multi-edit-ledger-session" }),
+    )
+    .expect("list changes");
+    let listed: serde_json::Value = serde_json::from_str(&listed).expect("json");
+    let records = listed["records"].as_array().expect("records");
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["changeId"], change_id);
+    assert_eq!(records[0]["toolUseId"], "toolu-multi-edit-1");
+    assert_eq!(records[0]["toolName"], "multi_edit");
+
+    execute_tool(
+        "change_revert",
+        &json!({
+            "change_id": change_id,
+            "session_id": "multi-edit-ledger-session"
+        }),
+    )
+    .expect("revert batch");
+    assert_eq!(
+        fs::read_to_string(root.join("tracked.txt")).expect("read reverted file"),
+        "alpha\nbeta\n"
+    );
 
     std::env::set_current_dir(&original_dir).expect("restore cwd");
     let _ = fs::remove_dir_all(root);

@@ -41,6 +41,15 @@ const repository = process.env.GITHUB_REPOSITORY || "zhuyingqin/Aris";
 const tag = process.env.GITHUB_REF_NAME || `v${version}`;
 const releaseBaseUrl =
   process.env.ARIS_UPDATE_BASE_URL || `https://github.com/${repository}/releases/download/${tag}`;
+const requestedPubDate =
+  argValue("--pub-date", process.env.ARIS_RELEASE_TIMESTAMP) || new Date().toISOString();
+const parsedPubDate = Date.parse(requestedPubDate);
+
+if (!Number.isFinite(parsedPubDate)) {
+  throw new Error(`Invalid updater publish timestamp: ${requestedPubDate}`);
+}
+
+const pubDate = new Date(parsedPubDate).toISOString();
 
 if (!fs.existsSync(bundleDir)) {
   throw new Error(`Bundle directory does not exist: ${bundleDir}`);
@@ -100,7 +109,7 @@ const platforms =
 const manifest = {
   version,
   notes,
-  pub_date: new Date().toISOString(),
+  pub_date: pubDate,
   platforms,
 };
 

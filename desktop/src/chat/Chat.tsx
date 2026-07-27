@@ -19,7 +19,14 @@ import ChatSidebar from "./ChatSidebar";
 import ChatThread, { type ChatStarter } from "./ChatThread";
 import FilePathMenu from "./FilePathMenu";
 import { CHAT_COPY } from "./i18n";
-import { latestFileChangesFromTurns, latestTodosFromTurns, makeId, migrateTurn, textFromTurn } from "./model";
+import {
+  fileChangePathMatches,
+  latestFileChangesFromTurns,
+  latestTodosFromTurns,
+  makeId,
+  migrateTurn,
+  textFromTurn,
+} from "./model";
 import { fileChangeSummaryFromTurns } from "./ChatMessage";
 import WorkflowFlow from "./WorkflowFlow";
 import ScheduledTasks from "../scheduled/ScheduledTasks";
@@ -388,10 +395,17 @@ export default function Chat() {
   const { editingTurnId, focusComposer, setEditingTurnId } = composer;
   const { status, activeModel } = run;
   // Remote phone turns are rendered from the encrypted bridge rather than the
-  // local stream hook. Treat their visible streaming state as busy too, so the
-  // desktop composer exposes the same Stop control for either origin.
-  const currentChatBusy = run.currentChatBusy
-    || turns.some((turn) => turn.role === "assistant" && turn.streaming);
+  // local stream hook. Treat only the newest assistant turn as a remote
+  // fallback: a stale `streaming` flag on an older, persisted turn must not
+  // keep the composer in its running state after the current turn has stopped.
+  const latestAssistantStreaming = (() => {
+    for (let index = turns.length - 1; index >= 0; index -= 1) {
+      const turn = turns[index];
+      if (turn.role === "assistant") return turn.streaming === true;
+    }
+    return false;
+  })();
+  const currentChatBusy = run.currentChatBusy || latestAssistantStreaming;
   const { pendingCommandSelection, setPendingCommandSelection } = commands;
 
   const workflowTodos = useMemo(() => latestTodosFromTurns(turns), [turns]);
@@ -399,6 +413,32 @@ export default function Chat() {
     () => latestFileChangesFromTurns(turns, currentProject?.path),
     [currentProject?.path, turns],
   );
+  // A file already open as a side-panel reading tab (a compiled PDF, most
+  // commonly) doesn't otherwise notice the agent regenerated it mid-turn —
+  // the tab keeps rendering whatever it first loaded. Bump a per-tab
+  // remount generation once the turn that touched it finishes, rather than
+  // on every intermediate change, so a compile/fix/recompile loop within one
+  // turn doesn't remount the viewer repeatedly.
+  const [sideFileReloadGenerations, setSideFileReloadGenerations] = useState<Record<string, number>>({});
+  const wasChatBusyRef = useRef(currentChatBusy);
+  useEffect(() => {
+    const wasBusy = wasChatBusyRef.current;
+    wasChatBusyRef.current = currentChatBusy;
+    if (!wasBusy || currentChatBusy || workflowFileChanges.length === 0) return;
+    setSideFileReloadGenerations((current) => {
+      let changed = false;
+      const next = { ...current };
+      for (const tab of sideTaskTabs) {
+        if (tab.kind !== "file") continue;
+        const touched = workflowFileChanges.some((change) => fileChangePathMatches(change.path, tab.path, currentProject?.path));
+        if (!touched) continue;
+        next[tab.id] = (next[tab.id] ?? 0) + 1;
+        changed = true;
+      }
+      return changed ? next : current;
+    });
+  }, [currentChatBusy, currentProject?.path, sideTaskTabs, workflowFileChanges]);
+
   const workflowFileChangeSummary = useMemo(
     () => fileChangeSummaryFromTurns(turns),
     [turns],
@@ -946,6 +986,7 @@ export default function Chat() {
               >
                 {sideTask.kind === "file" ? (
                   <SideFileViewer
+                    key={`${sideTask.id}::${sideFileReloadGenerations[sideTask.id] ?? 0}`}
                     tabId={sideTask.id}
                     path={sideTask.path}
                     onOpenInWorkspace={openWorkflowFile}

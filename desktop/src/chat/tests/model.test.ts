@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { ChatAttachment, ChatTurn, DesktopProject } from "../../types";
 import {
   cleanChatTitle,
+  fileChangePathMatches,
   fuzzyScore,
   groupSessionsByProject,
   latestFileChangesFromTurns,
@@ -144,6 +145,17 @@ describe("latestFileChangesFromTurns", () => {
         { filePath: "F:\\Agent\\Aris\\desktop\\src\\App.tsx" },
       ),
       toolTurn(
+        "multi_edit",
+        {
+          path: "desktop/src/store.ts",
+          edits: [
+            { old_string: "oldA", new_string: "newA" },
+            { old_string: "oldB", new_string: "newB" },
+          ],
+        },
+        { filePath: "F:\\Agent\\Aris\\desktop\\src\\store.ts", editsApplied: 2 },
+      ),
+      toolTurn(
         "append_file",
         { path: "slides/chapter3.tex", content: "\\begin{frame}\n" },
         { type: "append", filePath: "F:\\Agent\\Aris\\slides\\chapter3.tex", created: false },
@@ -153,7 +165,31 @@ describe("latestFileChangesFromTurns", () => {
     expect(latestFileChangesFromTurns(turns, "F:\\Agent\\Aris")).toEqual([
       { path: "desktop/src/new.ts", status: "added", sourceTool: "write_file" },
       { path: "desktop/src/App.tsx", status: "modified", sourceTool: "edit_file" },
+      { path: "desktop/src/store.ts", status: "modified", sourceTool: "multi_edit" },
       { path: "slides/chapter3.tex", status: "modified", sourceTool: "append_file" },
+    ]);
+  });
+
+  it("tracks a recompiled PDF as a file change via LaTeXCompile's outputPath", () => {
+    const changes = latestFileChangesFromTurns(
+      [
+        userTurn("recompile the paper"),
+        toolTurn(
+          "LaTeXCompile",
+          { path: "papers/main.tex" },
+          {
+            success: true,
+            inputPath: "F:\\Agent\\Aris\\papers\\main.tex",
+            outputPath: "F:\\Agent\\Aris\\papers\\main.pdf",
+            engine: "latexmk",
+          },
+        ),
+      ],
+      "F:\\Agent\\Aris",
+    );
+
+    expect(changes).toEqual([
+      { path: "papers/main.pdf", status: "modified", sourceTool: "LaTeXCompile" },
     ]);
   });
 
@@ -225,6 +261,26 @@ Path(r"C:\Users\wt\.config\aris\desktop-workspace\papers\longyoung\report.pdf").
       { path: "desktop/src/App.tsx", status: "modified", sourceTool: "edit_file" },
       { path: "desktop/src/new.ts", status: "added", sourceTool: "edit_file" },
     ]);
+  });
+});
+
+describe("fileChangePathMatches", () => {
+  it("matches a project-relative change against an already-open absolute side-panel path", () => {
+    expect(
+      fileChangePathMatches("papers/main.pdf", "F:\\Agent\\Aris\\papers\\main.pdf", "F:\\Agent\\Aris"),
+    ).toBe(true);
+  });
+
+  it("is case-insensitive, matching Windows path conventions", () => {
+    expect(
+      fileChangePathMatches("Papers/Main.PDF", "f:\\agent\\aris\\papers\\main.pdf", "F:\\Agent\\Aris"),
+    ).toBe(true);
+  });
+
+  it("does not match an unrelated open file", () => {
+    expect(
+      fileChangePathMatches("papers/main.pdf", "F:\\Agent\\Aris\\papers\\other.pdf", "F:\\Agent\\Aris"),
+    ).toBe(false);
   });
 });
 

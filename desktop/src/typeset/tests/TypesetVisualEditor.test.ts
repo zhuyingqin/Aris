@@ -1,14 +1,19 @@
 // @vitest-environment jsdom
 
 import { EditorSelection, EditorState } from "@codemirror/state";
+import { EditorView } from "@codemirror/view";
 import { describe, expect, it } from "vitest";
 import { latexListEnterInsertion } from "../TypesetVisualEditor";
-import { visualDecorations } from "../visualDecorations";
+import {
+  onOpenCodeRange,
+  visualBlockClick,
+  visualDecorations,
+} from "../visualDecorations";
 
-function visualDecorationRanges(source: string, anchor = 0) {
+function visualDecorationRanges(source: string, anchor = 0, head = anchor) {
   const state = EditorState.create({
     doc: source,
-    selection: EditorSelection.cursor(anchor),
+    selection: EditorSelection.range(anchor, head),
     extensions: [visualDecorations],
   });
   const ranges: Array<{
@@ -256,6 +261,99 @@ describe("visualDecorations", () => {
     // `\begin{abstract}`, an inconsistent half-reveal.
     expect(ranges.some((range) => range.from === beginFrom && range.to === beginTo)).toBe(false);
     expect(ranges.some((range) => range.from === endFrom && range.to === endTo)).toBe(false);
+  });
+
+  it("keeps rendered blocks stable while dragging a non-empty selection", () => {
+    const source = [
+      "\\begin{document}",
+      "\\begin{abstract}",
+      "This is the abstract body.",
+      "\\end{abstract}",
+      "Body text.",
+      "\\end{document}",
+    ].join("\n");
+    const selectionFrom = source.indexOf("This");
+    const selectionTo = source.indexOf("body.") + "body.".length;
+    const beginFrom = source.indexOf("\\begin{abstract}");
+    const ranges = visualDecorationRanges(source, selectionFrom, selectionTo);
+    const labelRange = ranges.find((range) => range.from === beginFrom && range.widget);
+
+    expect(labelRange?.widget?.toDOM().textContent).toBe("Abstract");
+    expect(labelRange?.widget?.toDOM().className).toContain("cm-vis-block-target");
+    expect(ranges.some((range) => range.className === "cm-vis-active-abstract-source")).toBe(false);
+  });
+
+  it("does not collapse a drag selection when mouseup lands on a visual heading", () => {
+    const source = [
+      "\\begin{document}",
+      "\\section{Selection target}",
+      "Paragraph text remains selected.",
+      "\\end{document}",
+    ].join("\n");
+    const selectionFrom = source.indexOf("Selection target");
+    const selectionTo = source.indexOf("remains selected") + "remains selected".length;
+    const parent = document.createElement("div");
+    document.body.append(parent);
+    const view = new EditorView({
+      parent,
+      state: EditorState.create({
+        doc: source,
+        selection: EditorSelection.range(selectionFrom, selectionTo),
+        extensions: [visualDecorations, visualBlockClick],
+      }),
+    });
+
+    try {
+      const heading = view.dom.querySelector<HTMLElement>(".cm-vis-heading-line");
+      expect(heading).not.toBeNull();
+      heading!.dispatchEvent(new MouseEvent("mouseup", {
+        bubbles: true,
+        cancelable: true,
+        clientX: 20,
+        clientY: 20,
+      }));
+      expect(view.state.selection.main.from).toBe(selectionFrom);
+      expect(view.state.selection.main.to).toBe(selectionTo);
+    } finally {
+      view.destroy();
+      parent.remove();
+    }
+  });
+
+  it("only opens title source in Code mode on an explicit double-click", () => {
+    const source = [
+      "\\documentclass{article}",
+      "\\title{Stable selection}",
+      "\\begin{document}",
+      "\\maketitle",
+      "\\end{document}",
+    ].join("\n");
+    const titleFrom = source.indexOf("Stable selection");
+    const titleTo = titleFrom + "Stable selection".length;
+    const jumps: Array<[number, number]> = [];
+    const state = EditorState.create({
+      doc: source,
+      extensions: [
+        onOpenCodeRange.of((from, to) => jumps.push([from, to])),
+        visualDecorations,
+      ],
+    });
+    let titleWidget: HTMLElement | null = null;
+    state.field(visualDecorations).deco.between(0, source.length, (_from, _to, value) => {
+      const dom = value.spec.widget?.toDOM();
+      const title = dom?.querySelector<HTMLElement>(".cm-vis-title-name");
+      if (title) titleWidget = title;
+    });
+
+    expect(titleWidget).not.toBeNull();
+    (titleWidget as HTMLElement).dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(jumps).toEqual([]);
+
+    (titleWidget as HTMLElement).dispatchEvent(new MouseEvent("dblclick", {
+      bubbles: true,
+      cancelable: true,
+    }));
+    expect(jumps).toEqual([[titleFrom, titleTo]]);
   });
 
   it("collapses a TikZ figure (no \\includegraphics) into one diagram card instead of flowing raw \\node/\\draw lines", () => {

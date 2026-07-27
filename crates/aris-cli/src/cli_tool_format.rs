@@ -38,6 +38,14 @@ pub(crate) fn format_tool_call_start(name: &str, input: &str) -> String {
                     .unwrap_or_default()
             )
         }
+        "multi_edit" => {
+            let path = extract_tool_path(&parsed);
+            let edits = parsed
+                .get("edits")
+                .and_then(|value| value.as_array())
+                .map_or(0, Vec::len);
+            format!("\x1b[1;33m📝 Editing {path}\x1b[0m \x1b[2m({edits} edits)\x1b[0m")
+        }
         "glob_search" | "Glob" => format_search_start("🔎 Glob", &parsed),
         "grep_search" | "Grep" => format_search_start("🔎 Grep", &parsed),
         "web_search" | "WebSearch" => parsed
@@ -74,6 +82,7 @@ pub(crate) fn format_tool_result(name: &str, output: &str, is_error: bool) -> St
         "read_file" | "Read" => format_read_result(icon, &parsed),
         "write_file" | "Write" => format_write_result(icon, &parsed),
         "edit_file" | "Edit" => format_edit_result(icon, &parsed),
+        "multi_edit" => format_multi_edit_result(icon, &parsed),
         "glob_search" | "Glob" => format_glob_result(icon, &parsed),
         "grep_search" | "Grep" => format_grep_result(icon, &parsed),
         "web_search" | "WebSearch" => {
@@ -118,6 +127,11 @@ fn extract_tool_path(parsed: &serde_json::Value) -> String {
         .get("file_path")
         .or_else(|| parsed.get("filePath"))
         .or_else(|| parsed.get("path"))
+        .or_else(|| {
+            parsed
+                .get("diff_summary")
+                .and_then(|summary| summary.get("filePath"))
+        })
         .and_then(|value| value.as_str())
         .unwrap_or("?")
         .to_string()
@@ -263,9 +277,35 @@ fn format_structured_patch_preview(parsed: &serde_json::Value) -> Option<String>
     }
 }
 
+fn format_codex_change_preview(parsed: &serde_json::Value) -> Option<String> {
+    let changes = parsed.get("changes")?.as_object()?;
+    let diff = changes.values().find_map(|change| {
+        change
+            .get("unified_diff")
+            .and_then(serde_json::Value::as_str)
+    })?;
+    let preview = diff
+        .lines()
+        .filter(|line| {
+            (line.starts_with('+') && !line.starts_with("+++"))
+                || (line.starts_with('-') && !line.starts_with("---"))
+        })
+        .take(6)
+        .map(|line| {
+            if line.starts_with('+') {
+                format!("\x1b[38;5;70m{line}\x1b[0m")
+            } else {
+                format!("\x1b[38;5;203m{line}\x1b[0m")
+            }
+        })
+        .collect::<Vec<_>>();
+    (!preview.is_empty()).then(|| preview.join("\n"))
+}
+
 fn format_edit_result(icon: &str, parsed: &serde_json::Value) -> String {
     let path = extract_tool_path(parsed);
-    let suffix = if parsed
+    let summary = parsed.get("diff_summary").unwrap_or(parsed);
+    let suffix = if summary
         .get("replaceAll")
         .and_then(|value| value.as_bool())
         .unwrap_or(false)
@@ -274,22 +314,50 @@ fn format_edit_result(icon: &str, parsed: &serde_json::Value) -> String {
     } else {
         ""
     };
-    let preview = format_structured_patch_preview(parsed).or_else(|| {
-        let old_value = parsed
-            .get("oldString")
-            .and_then(|value| value.as_str())
-            .unwrap_or_default();
-        let new_value = parsed
-            .get("newString")
-            .and_then(|value| value.as_str())
-            .unwrap_or_default();
-        format_patch_preview(old_value, new_value)
-    });
+    let preview = format_structured_patch_preview(parsed)
+        .or_else(|| format_codex_change_preview(parsed))
+        .or_else(|| {
+            let old_value = parsed
+                .get("oldString")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default();
+            let new_value = parsed
+                .get("newString")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default();
+            format_patch_preview(old_value, new_value)
+        });
 
     match preview {
         Some(preview) => format!("{icon} \x1b[1;33m📝 Edited {path}{suffix}\x1b[0m\n{preview}"),
-        None => format!("{icon} \x1b[1;33m📝 Edited {path}{suffix}\x1b[0m"),
+        None => {
+            let replacements = summary
+                .get("replacements")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            format!(
+                "{icon} \x1b[1;33m📝 Edited {path}{suffix}\x1b[0m \x1b[2m({replacements} replacements)\x1b[0m"
+            )
+        }
     }
+}
+
+fn format_multi_edit_result(icon: &str, parsed: &serde_json::Value) -> String {
+    let path = extract_tool_path(parsed);
+    let edits = parsed
+        .get("editsApplied")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let replacements = parsed
+        .get("replacements")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let heading = format!(
+        "{icon} \x1b[1;33m📝 Edited {path}\x1b[0m \x1b[2m({edits} edits, {replacements} replacements)\x1b[0m"
+    );
+    format_codex_change_preview(parsed)
+        .map(|preview| format!("{heading}\n{preview}"))
+        .unwrap_or(heading)
 }
 
 fn format_glob_result(icon: &str, parsed: &serde_json::Value) -> String {

@@ -62,6 +62,10 @@
   --visual-widget-bg: rgb(255 255 255 / 4%);
   --visual-widget-hover: rgb(255 255 255 / 7%);
   --visual-accent: #2f8b3a;
+  --visual-selection-bg: rgb(46 142 230 / 34%);
+  --visual-selection-bg-focused: rgb(46 155 255 / 50%);
+  --visual-selection-border: rgb(129 199 255 / 62%);
+  --visual-selection-border-focused: rgb(157 216 255 / 92%);
   --ide-redesign-background: var(--ol-bg);
   --ide-redesign-color: var(--ol-text);
   --redesign-toolbar-background: var(--ol-bg);
@@ -1532,13 +1536,22 @@
 .typeset-editor-body .lab-editor.typeset-latex-vscode .cm-editor {
   background: #1e1e1e;
   color: #d4d4d4;
-  font-family: "Cascadia Code", "Cascadia Mono", Consolas, "Courier New", monospace;
+  font-family: var(--font-mono);
   font-size: 13px;
   line-height: 1.55;
 }
 
+.typeset-editor-body .lab-editor.typeset-latex-vscode .cm-editor {
+  height: 100%;
+  min-height: 0;
+}
+
 .typeset-editor-body .lab-editor.typeset-latex-vscode .cm-scroller {
   background: #1e1e1e;
+  font-family: inherit;
+  line-height: inherit;
+  min-height: 0;
+  overflow: auto;
 }
 
 .typeset-editor-body .lab-editor.typeset-latex-vscode .cm-content {
@@ -1576,12 +1589,15 @@
   padding: 0;
 }
 
-.typeset-editor-body .lab-editor.typeset-latex-vscode .cm-activeLine,
-.typeset-editor-body .lab-editor.typeset-latex-vscode .cm-activeLineGutter {
-  background: #2a2d2e;
+.typeset-editor-body .lab-editor.typeset-latex-vscode .cm-activeLine {
+  /* CodeMirror draws its selection layer behind the editable lines. Keep the
+     active-line tint translucent so a selection within that same line remains
+     visible instead of being covered by an opaque row background. */
+  background: rgb(255 255 255 / 5%);
 }
 
 .typeset-editor-body .lab-editor.typeset-latex-vscode .cm-activeLineGutter {
+  background: #2a2d2e;
   color: #c6c6c6;
   font-weight: 400;
 }
@@ -1606,8 +1622,8 @@
 }
 
 .typeset-editor-pane.code-mode .typeset-editor-body .lab-editor {
-  grid-template-columns: 52px minmax(0, 1fr);
-  overflow: auto;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .typeset-editor-body .lab-editor-lines {
@@ -2575,7 +2591,7 @@
 
 /* Editing a display equation edits its LaTeX source — monospace reads better. */
 .typeset-visual-block.math textarea.typeset-visual-math-editor {
-  font-family: ui-monospace, "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+  font-family: var(--font-mono);
   font-size: 13px;
   line-height: 1.5;
   overflow: auto;
@@ -3147,7 +3163,7 @@
   box-shadow:
     0 0 0 3px color-mix(in srgb, var(--visual-link) 18%, transparent),
     0 5px 18px rgb(0 0 0 / 22%);
-  font-family: sans-serif;
+  font-family: var(--font-sans);
   line-height: 1;
 }
 
@@ -3217,7 +3233,7 @@
   background: #1e1e1e;
   color: #d4d4d4;
   caret-color: #aeafad;
-  font-family: "Cascadia Code", "Cascadia Mono", Consolas, "Courier New", monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.6;
   tab-size: 2;
@@ -3569,7 +3585,7 @@
   border-radius: 5px;
   background: color-mix(in srgb, var(--visual-accent) 12%, var(--visual-page-bg));
   color: var(--visual-text);
-  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  font-family: var(--font-sans);
   font-size: 12px;
   line-height: 1.2;
   box-shadow: 0 6px 18px rgb(0 0 0 / 14%);
@@ -3605,7 +3621,7 @@
   border-radius: 4px;
   background: var(--visual-accent);
   color: #fff;
-  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  font-family: var(--font-sans);
   font-size: 11px;
   font-weight: 700;
   line-height: 1;
@@ -4267,7 +4283,7 @@
   padding: 26px clamp(22px, 4vw, 46px) 70px;
   background: #f1f3f5;
   color: #111827;
-  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  font-family: var(--font-sans);
   font-size: 14px;
   line-height: 1.45;
 }
@@ -4356,7 +4372,7 @@
   border-radius: 8px;
   background: #f8f9fb;
   color: #202936;
-  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  font-family: var(--font-sans);
   font-size: 14px;
   line-height: 1.42;
 }
@@ -5290,7 +5306,7 @@
   background: transparent;
   color: transparent;
   cursor: text;
-  font-family: sans-serif;
+  font-family: var(--font-sans);
   line-height: 1;
   overflow: hidden;
   pointer-events: auto;
@@ -6298,6 +6314,10 @@
   --visual-widget-bg: #f7f9fa;
   --visual-widget-hover: #eef4f0;
   --visual-accent: #2f8b3a;
+  --visual-selection-bg: rgb(31 102 177 / 26%);
+  --visual-selection-bg-focused: rgb(31 102 177 / 38%);
+  --visual-selection-border: rgb(31 102 177 / 48%);
+  --visual-selection-border-focused: rgb(20 82 151 / 76%);
   --ide-redesign-background: var(--ol-bg);
   --ide-redesign-color: var(--ol-text);
   --redesign-toolbar-background: #ffffff;
@@ -6358,7 +6378,7 @@
 }
 
 .typeset-visual-page.typeset-visual-cm.beamer-deck {
-  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  font-family: var(--font-sans);
   font-size: 15px;
   line-height: 1.45;
 }

@@ -612,4 +612,64 @@ describe("AskUserQuestion card", () => {
     expect(screen.queryByRole("button", { name: /Postgres/ })).toBeNull();
     expect(onQuestionRespond).not.toHaveBeenCalled();
   });
+
+  it("only makes the first of several questions in one turn answerable, queuing the rest", async () => {
+    const user = userEvent.setup();
+    const onQuestionRespond = vi.fn();
+    const first = { ...questionBlock({ question: "Which database?" }), id: "ask-1" };
+    const second = {
+      ...questionBlock({
+        question: "Which cache?",
+        options: [{ label: "Redis" }, { label: "Memcached" }],
+      }),
+      id: "ask-2",
+    };
+    const turn: ChatTurn = { id: "assistant-q", role: "assistant", streaming: true, blocks: [first, second] };
+
+    render(
+      <ChatMessage
+        turn={turn}
+        canRetry={false}
+        onEdit={() => undefined}
+        onRetry={() => undefined}
+        onContinue={() => undefined}
+        onQuestionRespond={onQuestionRespond}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: /Postgres/ })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Redis/ })).toBeNull();
+    expect(screen.getByText("Answer the question above first — this one will follow.")).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: /Postgres/ }));
+    expect(onQuestionRespond).toHaveBeenCalledWith("ask-1", "Postgres");
+    expect(onQuestionRespond).not.toHaveBeenCalledWith("ask-2", expect.anything());
+  });
+
+  it("makes the second question answerable once the first one resolves", () => {
+    const first = { ...questionBlock({ question: "Which database?" }), id: "ask-1", output: "Postgres" };
+    const second = {
+      ...questionBlock({
+        question: "Which cache?",
+        options: [{ label: "Redis" }, { label: "Memcached" }],
+      }),
+      id: "ask-2",
+    };
+    const turn: ChatTurn = { id: "assistant-q", role: "assistant", streaming: true, blocks: [first, second] };
+
+    render(
+      <ChatMessage
+        turn={turn}
+        canRetry={false}
+        onEdit={() => undefined}
+        onRetry={() => undefined}
+        onContinue={() => undefined}
+        onQuestionRespond={() => undefined}
+      />,
+    );
+
+    expect(screen.getByText("You answered")).toBeTruthy();
+    expect(screen.getByRole("button", { name: /Redis/ })).toBeTruthy();
+    expect(screen.queryByText("Answer the question above first — this one will follow.")).toBeNull();
+  });
 });

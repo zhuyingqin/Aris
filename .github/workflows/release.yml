@@ -9,8 +9,28 @@ permissions:
   contents: write
 
 jobs:
+  release-metadata:
+    runs-on: ubuntu-22.04
+    outputs:
+      release_timestamp: ${{ steps.timestamp.outputs.release_timestamp }}
+      release_unix_timestamp: ${{ steps.timestamp.outputs.release_unix_timestamp }}
+
+    steps:
+      - name: Capture release upload timestamp
+        id: timestamp
+        shell: bash
+        run: |
+          release_timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          release_unix_timestamp=$(date -u -d "$release_timestamp" +%s)
+          echo "release_timestamp=$release_timestamp" >> "$GITHUB_OUTPUT"
+          echo "release_unix_timestamp=$release_unix_timestamp" >> "$GITHUB_OUTPUT"
+
   desktop-windows:
+    needs: release-metadata
     runs-on: windows-latest
+    env:
+      ARIS_RELEASE_TIMESTAMP: ${{ needs.release-metadata.outputs.release_timestamp }}
+      ARIS_RELEASE_UNIX_TIMESTAMP: ${{ needs.release-metadata.outputs.release_unix_timestamp }}
 
     steps:
       - uses: actions/checkout@v4
@@ -54,10 +74,14 @@ jobs:
             desktop/src-tauri/target/release/bundle/nsis/latest.json
 
   desktop-macos:
+    needs: release-metadata
     # Unsigned universal .app + .dmg. End users will need to
     # right-click → Open the first time to bypass Gatekeeper
     # (no Apple Developer ID signing/notarization).
     runs-on: macos-latest
+    env:
+      ARIS_RELEASE_TIMESTAMP: ${{ needs.release-metadata.outputs.release_timestamp }}
+      ARIS_RELEASE_UNIX_TIMESTAMP: ${{ needs.release-metadata.outputs.release_unix_timestamp }}
 
     steps:
       - uses: actions/checkout@v4

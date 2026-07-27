@@ -779,10 +779,13 @@ function parseQuestionSpec(input: string): QuestionSpec | null {
 function QuestionCall({
   block,
   active,
+  queued,
   onQuestionRespond,
 }: {
   block: Extract<ChatBlock, { kind: "tool" }>;
   active: boolean;
+  /** An earlier AskUserQuestion call in the same turn hasn't been answered yet. */
+  queued: boolean;
   onQuestionRespond: (toolUseId: string, answer: string) => void;
 }) {
   const spec = useMemo(() => parseQuestionSpec(block.input), [block.input]);
@@ -820,9 +823,14 @@ function QuestionCall({
   };
   const canSubmit = spec.multiSelect ? selected.size > 0 || custom.trim().length > 0 : custom.trim().length > 0;
   const answered = resolved && !block.isError;
-  const statusClass = answered ? "tool-done" : interactive ? "tool-running" : "tool-error";
-  const statusIcon = answered ? <SvgIcon name="check" size={11} /> : interactive ? <SvgIcon name="pending" size={11} /> : <SvgIcon name="warning" size={11} />;
-  const statusLabel = answered ? "Answered" : interactive ? "Awaiting your answer" : "Unanswered";
+  // Queued (an earlier question in the same turn is still unanswered) is a
+  // normal waiting state, not a problem — it gets the same pending look as
+  // "awaiting answer" rather than the warning styling used for a genuinely
+  // stale/unanswerable question.
+  const pending = !resolved && (interactive || queued);
+  const statusClass = answered ? "tool-done" : pending ? "tool-running" : "tool-error";
+  const statusIcon = answered ? <SvgIcon name="check" size={11} /> : pending ? <SvgIcon name="pending" size={11} /> : <SvgIcon name="warning" size={11} />;
+  const statusLabel = answered ? "Answered" : interactive ? "Awaiting your answer" : queued ? "Queued" : "Unanswered";
 
   return (
     <div className={`chat-tool chat-question-card ${statusClass}`}>
@@ -839,7 +847,11 @@ function QuestionCall({
             <span className="chat-question-answer-value">{block.output}</span>
           </div>
         ) : !interactive ? (
-          <p className="chat-question-stale">This question is no longer awaiting an answer.</p>
+          <p className="chat-question-stale">
+            {queued
+              ? "Answer the question above first — this one will follow."
+              : "This question is no longer awaiting an answer."}
+          </p>
         ) : (
           <>
             <div className={`chat-question-options${spec.multiSelect ? " is-multi" : ""}`}>
@@ -897,6 +909,7 @@ function renderSingleBlock(
   block: ChatBlock,
   index: number,
   turn: ChatTurn,
+  firstPendingQuestionIndex: number,
   onPermissionRespond: (promptId: string, allow: boolean) => void,
   onQuestionRespond: (toolUseId: string, answer: string) => void,
   onOpenIndependentReview: () => void,
@@ -945,7 +958,8 @@ function renderSingleBlock(
       <QuestionCall
         key={block.id ?? index}
         block={block}
-        active={Boolean(turn.streaming)}
+        active={Boolean(turn.streaming) && index === firstPendingQuestionIndex}
+        queued={index !== firstPendingQuestionIndex}
         onQuestionRespond={onQuestionRespond}
       />
     );
@@ -1011,6 +1025,13 @@ function renderBlocks(
       break;
     }
   }
+  // Multiple AskUserQuestion calls can land in one turn when the model asks
+  // several clarifying questions at once; the backend still resolves them one
+  // at a time, so only the earliest unanswered one is interactive — the rest
+  // wait their turn instead of all popping up together.
+  const firstPendingQuestionIndex = blocks.findIndex(
+    (block) => block.kind === "tool" && block.name === "AskUserQuestion" && block.output === undefined,
+  );
   let i = 0;
   while (i < blocks.length) {
     const block = blocks[i];
@@ -1042,6 +1063,7 @@ function renderBlocks(
       block,
       i,
       turn,
+      firstPendingQuestionIndex,
       onPermissionRespond,
       onQuestionRespond,
       onOpenIndependentReview,

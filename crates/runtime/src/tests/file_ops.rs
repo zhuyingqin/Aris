@@ -7,8 +7,9 @@ use encoding_rs::{GB18030, GBK};
 use flate2::{write::ZlibEncoder, Compression};
 
 use super::{
-    append_file, display_path, edit_file, glob_search, grep_search, read_file, write_file,
-    FileChange, GrepSearchInput, MAX_READ_FILE_CONTENT_CHARS, READONLY_ROOTS_ENV,
+    append_file, display_path, edit_file, glob_search, grep_search, multi_edit_file, read_file,
+    read_file_with_images, write_file, FileChange, GrepSearchInput, MultiEditOperation,
+    ReadFileResult, MAX_READ_FILE_CONTENT_CHARS, MAX_READ_IMAGE_BYTES, READONLY_ROOTS_ENV,
 };
 
 struct EnvGuard {
@@ -341,6 +342,57 @@ end
 }
 
 #[test]
+fn reads_a_small_image_as_base64_instead_of_erroring() {
+    let _lock = crate::test_env_lock();
+    let _env = EnvGuard::unset("ARIS_WORKSPACE_ROOT");
+    let path = temp_path("photo").with_extension("jpg");
+    let bytes = b"\xFF\xD8\xFFnot a real jpeg but that's fine, read_file never decodes it";
+    std::fs::write(&path, bytes).expect("image should be written");
+
+    let result = read_file_with_images(path.to_string_lossy().as_ref(), None, None)
+        .expect("image read should succeed instead of hitting the binary-file error");
+
+    let ReadFileResult::Image(image) = result else {
+        panic!("expected an image result, got {result:?}");
+    };
+    assert_eq!(image.kind, "image");
+    assert_eq!(image.media_type, "image/jpeg");
+    assert_eq!(image.bytes, bytes.len());
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    assert_eq!(STANDARD.decode(&image.base64).expect("valid base64"), bytes);
+}
+
+#[test]
+fn rejects_an_oversized_image_with_a_clear_message_instead_of_inlining_it() {
+    let _lock = crate::test_env_lock();
+    let _env = EnvGuard::unset("ARIS_WORKSPACE_ROOT");
+    let path = temp_path("huge-photo").with_extension("png");
+    std::fs::write(&path, vec![0u8; MAX_READ_IMAGE_BYTES + 1])
+        .expect("huge image should be written");
+
+    let error = read_file_with_images(path.to_string_lossy().as_ref(), None, None)
+        .expect_err("oversized image should be rejected, not truncated or panicking");
+
+    assert!(error.to_string().contains("MB read_file limit"));
+}
+
+#[test]
+fn read_file_with_images_still_delegates_plain_text_to_read_file() {
+    let _lock = crate::test_env_lock();
+    let _env = EnvGuard::unset("ARIS_WORKSPACE_ROOT");
+    let path = temp_path("notes").with_extension("txt");
+    std::fs::write(&path, "just some notes").expect("text file should be written");
+
+    let result = read_file_with_images(path.to_string_lossy().as_ref(), None, None)
+        .expect("text read should succeed");
+
+    let ReadFileResult::Text(output) = result else {
+        panic!("expected a text result, got {result:?}");
+    };
+    assert_eq!(output.file.content, "just some notes");
+}
+
+#[test]
 fn edits_file_contents() {
     let _lock = crate::test_env_lock();
     let _env = EnvGuard::unset("ARIS_WORKSPACE_ROOT");
@@ -379,6 +431,185 @@ fn edit_file_reports_only_changed_patch_window() {
                 && unified_diff.contains("-three")
                 && unified_diff.contains("+THREE")
     ));
+}
+
+#[test]
+fn edit_file_serializes_a_compact_diff_and_bounded_context() {
+    let _lock = crate::test_env_lock();
+    let _env = EnvGuard::unset("ARIS_WORKSPACE_ROOT");
+    let path = temp_path("compact-edit-output.txt");
+    let original = (1..=1_000)
+        .map(|line| format!("line {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    write_file(path.to_string_lossy().as_ref(), &original).expect("initial write");
+
+    let output = edit_file(
+        path.to_string_lossy().as_ref(),
+        "line 500",
+        "line five hundred",
+        false,
+    )
+    .expect("edit should succeed");
+    let serialized = serde_json::to_value(&output).expect("serialize output");
+
+    assert!(serialized.get("originalFile").is_none());
+    assert!(serialized.get("oldString").is_none());
+    assert!(serialized.get("newString").is_none());
+    assert!(serialized.get("structuredPatch").is_none());
+    assert_eq!(serialized["replacements"], 1);
+    assert_eq!(serialized["context"][0]["startLine"], 495);
+    assert_eq!(serialized["context"][0]["endLine"], 505);
+    let context = serialized["context"][0]["content"]
+        .as_str()
+        .expect("context text");
+    assert!(context.contains("L500: line five hundred"));
+    assert!(!context.contains("line 1\n"));
+}
+
+#[test]
+fn multi_edit_validates_the_whole_batch_before_one_write() {
+    let _lock = crate::test_env_lock();
+    let _env = EnvGuard::unset("ARIS_WORKSPACE_ROOT");
+    let path = temp_path("multi-edit.txt");
+    write_file(path.to_string_lossy().as_ref(), "alpha\nbeta\ngamma\n").expect("initial write");
+
+    let output = multi_edit_file(
+        path.to_string_lossy().as_ref(),
+        &[
+            MultiEditOperation {
+                old_string: "alpha".to_string(),
+                new_string: "one".to_string(),
+                replace_all: false,
+            },
+            MultiEditOperation {
+                old_string: "beta".to_string(),
+                new_string: "two".to_string(),
+                replace_all: false,
+            },
+            MultiEditOperation {
+                old_string: "one".to_string(),
+                new_string: "ONE".to_string(),
+                replace_all: false,
+            },
+        ],
+    )
+    .expect("batch edit should succeed");
+
+    assert_eq!(output.edits_applied, 3);
+    assert_eq!(output.replacements, 3);
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("read edited file"),
+        "ONE\ntwo\ngamma\n"
+    );
+
+    let before_failed_batch = std::fs::read_to_string(&path).expect("read before failure");
+    let error = multi_edit_file(
+        path.to_string_lossy().as_ref(),
+        &[
+            MultiEditOperation {
+                old_string: "ONE".to_string(),
+                new_string: "changed".to_string(),
+                replace_all: false,
+            },
+            MultiEditOperation {
+                old_string: "not present".to_string(),
+                new_string: "never written".to_string(),
+                replace_all: false,
+            },
+        ],
+    )
+    .expect_err("a later validation failure should reject the batch");
+
+    assert!(error.to_string().contains("edit 2"));
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("read unchanged file"),
+        before_failed_batch
+    );
+}
+
+#[test]
+fn multi_edit_rejects_lossy_unicode_without_touching_the_file() {
+    let _lock = crate::test_env_lock();
+    let _env = EnvGuard::unset("ARIS_WORKSPACE_ROOT");
+    let path = temp_path("multi-edit-lossy-unicode.txt");
+    write_file(path.to_string_lossy().as_ref(), "6.6 & 区域内与跨区划分\n").expect("initial write");
+
+    let error = multi_edit_file(
+        path.to_string_lossy().as_ref(),
+        &[MultiEditOperation {
+            old_string: "6.6 & 区域���与跨区划分".to_string(),
+            new_string: "6.6 & 区域内和跨区划分".to_string(),
+            replace_all: false,
+        }],
+    )
+    .expect_err("lossy old_string should be rejected explicitly");
+    let message = error.to_string();
+    assert!(message.contains("edit 1"));
+    assert!(message.contains("old_string"));
+    assert!(message.contains("U+FFFD"));
+    assert!(message.contains("No changes were written"));
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("read unchanged file"),
+        "6.6 & 区域内与跨区划分\n"
+    );
+
+    let error = multi_edit_file(
+        path.to_string_lossy().as_ref(),
+        &[MultiEditOperation {
+            old_string: "区域内".to_string(),
+            new_string: "区域���".to_string(),
+            replace_all: false,
+        }],
+    )
+    .expect_err("lossy new_string should be rejected before write");
+    assert!(error.to_string().contains("new_string"));
+    assert!(error.to_string().contains("U+FFFD"));
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("read unchanged file"),
+        "6.6 & 区域内与跨区划分\n"
+    );
+}
+
+#[test]
+fn edit_file_reports_the_first_drifted_line_in_a_long_block() {
+    let _lock = crate::test_env_lock();
+    let _env = EnvGuard::unset("ARIS_WORKSPACE_ROOT");
+    let path = temp_path("edit-block-drift.txt");
+    write_file(
+        path.to_string_lossy().as_ref(),
+        "\\caption{Chapter 6：章节引言}\n\\toprule\n6.1 & actual current row\n\\end{longtable}\n",
+    )
+    .expect("initial write");
+
+    let error = edit_file(
+        path.to_string_lossy().as_ref(),
+        "\\caption{Chapter 6：章节引言}\n\\toprule\n6.1 & stale expected row\n\\end{longtable}",
+        "replacement",
+        false,
+    )
+    .expect_err("drifted block should fail with line diagnostics");
+    let message = error.to_string();
+    assert!(message.contains("starts at file line 1"));
+    assert!(message.contains("first differs at file line 3"));
+    assert!(message.contains("expected `6.1 & stale expected row`"));
+    assert!(message.contains("found `6.1 & actual current row`"));
+    assert!(message.contains("shorter unique replacements"));
+}
+
+#[test]
+fn edit_file_can_repair_a_replacement_character_that_is_really_in_the_file() {
+    let _lock = crate::test_env_lock();
+    let _env = EnvGuard::unset("ARIS_WORKSPACE_ROOT");
+    let path = temp_path("edit-existing-replacement-char.txt");
+    write_file(path.to_string_lossy().as_ref(), "bad � text\n").expect("initial write");
+
+    edit_file(path.to_string_lossy().as_ref(), "�", "decoded", false)
+        .expect("an existing replacement character should remain repairable");
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("read repaired file"),
+        "bad decoded text\n"
+    );
 }
 
 #[test]

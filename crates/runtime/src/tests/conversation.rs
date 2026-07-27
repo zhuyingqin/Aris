@@ -1,11 +1,80 @@
 use super::{
     assistant_output_looks_degenerate, assistant_text_from_turn_summary, build_assistant_message,
-    is_internal_continuation_message, overflow_preserve_message_count,
-    parse_auto_compaction_threshold, strip_trailing_internal_continuation_messages, ApiClient,
-    ApiRequest, AssistantEvent, ConversationRuntime, RuntimeError, StaticToolExecutor, ToolError,
+    in_flight_compactions, is_internal_continuation_message, overflow_preserve_message_count,
+    parse_auto_compaction_threshold, run_compaction_singleflight,
+    strip_trailing_internal_continuation_messages, ApiClient, ApiRequest, AssistantEvent,
+    CompactionFlightKey, ConversationRuntime, RuntimeError, StaticToolExecutor, ToolError,
     ToolExecutor, TurnSummary, DEFAULT_AUTO_COMPACTION_INPUT_TOKENS_THRESHOLD,
 };
 use crate::compact::CompactionTokenEstimateSource;
+
+#[test]
+fn concurrent_identical_compactions_share_one_in_flight_summary() {
+    let key = CompactionFlightKey {
+        session_id: "single-flight-session".to_string(),
+        slice_hash: [0x5a; 32],
+    };
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+
+    let leader_key = key.clone();
+    let leader_calls = std::sync::Arc::clone(&calls);
+    let leader = std::thread::spawn(move || {
+        run_compaction_singleflight(leader_key, || {
+            leader_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            started_tx.send(()).expect("announce leader");
+            release_rx.recv().expect("release leader");
+            Some(("<summary>shared</summary>".to_string(), Some(7)))
+        })
+    });
+    started_rx.recv().expect("leader should start");
+
+    let follower_key = key.clone();
+    let follower_calls = std::sync::Arc::clone(&calls);
+    let follower = std::thread::spawn(move || {
+        run_compaction_singleflight(follower_key, || {
+            follower_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Some(("<summary>duplicate</summary>".to_string(), Some(99)))
+        })
+    });
+
+    let mut follower_registered = false;
+    for _ in 0..1_000 {
+        let strong_count = in_flight_compactions()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&key)
+            .map_or(0, std::sync::Arc::strong_count);
+        if strong_count >= 3 {
+            follower_registered = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert!(
+        follower_registered,
+        "the duplicate caller should join the existing flight"
+    );
+    release_tx.send(()).expect("release compaction");
+
+    let leader_result = leader.join().expect("leader thread");
+    let follower_result = follower.join().expect("follower thread");
+    assert_eq!(leader_result, follower_result);
+    assert_eq!(
+        calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "only the flight leader may invoke the summarizer"
+    );
+    assert!(
+        !in_flight_compactions()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains_key(&key),
+        "completed flights must not leak into later compactions"
+    );
+}
+
 // The CLI's Opus 4.8 to 4.7 fallback keys off this flag.
 #[test]
 fn runtime_error_model_unavailable_flag() {
@@ -256,6 +325,96 @@ fn runs_user_to_tool_to_result_loop_end_to_end_and_tracks_usage() {
             ..
         }
     ));
+}
+
+#[test]
+fn read_file_image_result_is_split_into_a_tool_result_and_an_image_block() {
+    struct AllowReadFile;
+    impl PermissionPrompter for AllowReadFile {
+        fn decide(&mut self, request: &PermissionRequest) -> PermissionPromptDecision {
+            assert_eq!(request.tool_name, "read_file");
+            PermissionPromptDecision::Allow
+        }
+    }
+
+    struct ReadsFileThenAnswersApiClient {
+        call_count: usize,
+    }
+    impl ApiClient for ReadsFileThenAnswersApiClient {
+        fn stream(&mut self, _request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+            self.call_count += 1;
+            match self.call_count {
+                1 => Ok(vec![
+                    AssistantEvent::ToolUse {
+                        id: "tool-1".to_string(),
+                        name: "read_file".to_string(),
+                        input: r#"{"path":"photo.jpg"}"#.to_string(),
+                    },
+                    AssistantEvent::MessageStop,
+                ]),
+                2 => Ok(vec![
+                    AssistantEvent::TextDelta("It's a photo.".to_string()),
+                    AssistantEvent::MessageStop,
+                ]),
+                _ => Err(RuntimeError::new("unexpected extra API call")),
+            }
+        }
+    }
+
+    let api_client = ReadsFileThenAnswersApiClient { call_count: 0 };
+    let tool_executor = StaticToolExecutor::new().register("read_file", |_input| {
+        Ok(r#"{"type":"image","filePath":"/tmp/photo.jpg","mediaType":"image/png","base64":"aGVsbG8=","bytes":5}"#
+            .to_string())
+    });
+    let permission_policy = PermissionPolicy::new(PermissionMode::WorkspaceWrite);
+    let system_prompt = SystemPromptBuilder::new()
+        .with_project_context(ProjectContext {
+            cwd: PathBuf::from("/tmp/project"),
+            current_date: "2026-03-31".to_string(),
+            git_status: None,
+            git_diff: None,
+            directory_tree: None,
+            instruction_files: Vec::new(),
+        })
+        .with_os("linux", "6.8")
+        .build();
+    let mut runtime = ConversationRuntime::new(
+        Session::new(),
+        api_client,
+        tool_executor,
+        permission_policy,
+        system_prompt,
+    );
+
+    runtime
+        .run_turn("what's in this image?", Some(&mut AllowReadFile))
+        .expect("conversation loop should succeed");
+
+    let tool_message_blocks = &runtime.session().messages[2].blocks;
+    assert_eq!(
+        tool_message_blocks.len(),
+        2,
+        "expected a text summary plus an image block"
+    );
+    match &tool_message_blocks[0] {
+        ContentBlock::ToolResult {
+            is_error, output, ..
+        } => {
+            assert!(!is_error);
+            assert!(
+                !output.contains("base64"),
+                "the raw base64 must not leak into the text summary"
+            );
+        }
+        other => panic!("expected a ToolResult, got {other:?}"),
+    }
+    match &tool_message_blocks[1] {
+        ContentBlock::Image { media_type, data } => {
+            assert_eq!(media_type, "image/png");
+            assert_eq!(data, "aGVsbG8=");
+        }
+        other => panic!("expected an Image block, got {other:?}"),
+    }
 }
 
 #[test]

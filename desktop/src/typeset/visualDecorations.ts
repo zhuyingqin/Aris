@@ -27,6 +27,8 @@ import { TYPESET_EDITOR_COPY } from "./i18n";
  */
 const BLOCK_TARGET_CLASS = "cm-vis-block-target";
 const HEADING_TARGET_SELECTOR = ".cm-vis-heading-line, .cm-vis-h1, .cm-vis-h2, .cm-vis-h3, .cm-vis-h4, .cm-vis-secnum";
+const VISUAL_DRAG_THRESHOLD_PX = 4;
+const visualPointerStarts = new WeakMap<HTMLElement, { x: number; y: number }>();
 export const visualSourcePath = Facet.define<string | null, string | null>({
   combine: (values) => values[values.length - 1] ?? null,
 });
@@ -55,6 +57,10 @@ export const onForwardSearch = Facet.define<ForwardSearch, ForwardSearch>({
 
 /** Shared `ignoreEvent`: let CM's own mouseup bookkeeping run, but nothing else. */
 function blockIgnoreEvent(event: Event): boolean {
+  if (event.type === "mousedown" && event instanceof MouseEvent) {
+    const editor = eventElement(event.target)?.closest<HTMLElement>(".cm-editor");
+    if (editor) visualPointerStarts.set(editor, { x: event.clientX, y: event.clientY });
+  }
   return event.type !== "mouseup";
 }
 
@@ -353,9 +359,12 @@ class TheoremLabelWidget extends WidgetType {
     el.textContent = this.label;
     if (this.onJump) {
       el.classList.add("cm-vis-theorem-editable");
-      el.title = "Click to edit theorem source in Code mode";
-      el.addEventListener("mousedown", (event) => event.preventDefault());
-      el.addEventListener("click", () => this.onJump?.(this.sourceRange.from, this.sourceRange.to));
+      el.title = "Double-click to edit theorem source in Code mode";
+      el.addEventListener("dblclick", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        this.onJump?.(this.sourceRange.from, this.sourceRange.to);
+      });
     }
     return el;
   }
@@ -549,9 +558,12 @@ class TitleWidget extends WidgetType {
     if (!range || !this.onJump) return;
     const onJump = this.onJump;
     el.classList.add("cm-vis-title-editable");
-    el.title = "Click to edit in Code mode";
-    el.addEventListener("mousedown", (event) => event.preventDefault());
-    el.addEventListener("click", () => onJump(range.from, range.to));
+    el.title = "Double-click to edit in Code mode";
+    el.addEventListener("dblclick", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      onJump(range.from, range.to);
+    });
   }
   toDOM() {
     const el = document.createElement("div");
@@ -1058,19 +1070,36 @@ class MathWidget extends WidgetType {
  * own `placeSelectionInsideBlock` (source-editor/extensions/visual/selection.ts).
  */
 export const visualBlockClick = EditorView.domEventHandlers({
+  mousedown(event, view) {
+    visualPointerStarts.set(view.dom, { x: event.clientX, y: event.clientY });
+    return false;
+  },
   mouseup(event, view) {
+    const pointerStart = visualPointerStarts.get(view.dom);
+    visualPointerStarts.delete(view.dom);
     const target = eventElement(event.target);
     if (!target) return false;
     const isBlockTarget = Boolean(target.closest(`.${BLOCK_TARGET_CLASS}`));
     const isHeadingTarget = Boolean(target.closest(HEADING_TARGET_SELECTOR));
     if (!isBlockTarget && !isHeadingTarget) return false;
+    // A drag selection can end over a rendered block or heading. Treating that
+    // mouseup as a click collapses the range and scrolls to the derived source
+    // position, which makes Visual mode appear to jump while text is selected.
+    // Track pointer movement as well as selection state so a genuine click can
+    // still replace an older non-empty selection.
+    const dragged = pointerStart
+      ? Math.hypot(event.clientX - pointerStart.x, event.clientY - pointerStart.y) > VISUAL_DRAG_THRESHOLD_PX
+      : view.state.selection.ranges.some((range) => !range.empty);
+    if (dragged) return false;
     event.preventDefault();
     const line = view.lineBlockAtHeight(event.clientY - view.documentTop);
     const headingRange = isHeadingTarget ? headingTitleRangeAtLine(view.state, line.from) : null;
     const pos = headingRange
       ? positionInRangeAtCoords(view, headingRange.from, headingRange.to, event.clientX, event.clientY)
       : line.to;
-    view.dispatch({ selection: EditorSelection.cursor(pos), scrollIntoView: true });
+    // The target was just clicked, so it is already visible. Avoid a redundant
+    // scroll request that can move the page when decorations are measured.
+    view.dispatch({ selection: EditorSelection.cursor(pos) });
     return true;
   },
 });
@@ -1098,10 +1127,12 @@ export const visualForwardSearchClick = EditorView.domEventHandlers({
   },
 });
 
-/** True when a selection range touches [from, to] — used to reveal raw syntax. */
+/** True when a collapsed caret touches [from, to] and may reveal raw syntax. */
 function selectionTouches(state: EditorState, from: number, to: number): boolean {
   for (const range of state.selection.ranges) {
-    if (range.from <= to && range.to >= from) return true;
+    // Only a caret reveals raw syntax for inline editing. Keeping non-empty
+    // selections rendered prevents line-height changes underneath a drag.
+    if (range.empty && range.from >= from && range.from <= to) return true;
   }
   return false;
 }
@@ -1675,7 +1706,7 @@ function buildDecorations(state: EditorState): VisualDecorations {
     // that region made a click on `\\begin{itemize}` leak raw syntax while the
     // individual item widgets remained rendered.
     const listIsEditing = state.selection.ranges.some((range) =>
-      range.from < bodyTo && range.to > bodyFrom,
+      range.empty && range.from > bodyFrom && range.from < bodyTo,
     );
     if (listIsEditing) {
       openListRanges.push({ from: lm.index, to: listTo });

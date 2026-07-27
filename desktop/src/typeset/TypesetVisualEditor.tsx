@@ -326,7 +326,7 @@ const visualTheme = EditorView.theme({
     borderRight: "0",
     backgroundColor: "transparent",
     color: "var(--visual-muted)",
-    fontFamily: 'ui-monospace, "Cascadia Code", "SFMono-Regular", Consolas, monospace',
+    fontFamily: "var(--font-mono)",
     fontSize: "11px",
     lineHeight: "inherit",
   },
@@ -350,11 +350,14 @@ const visualTheme = EditorView.theme({
   ".cm-activeLine, .cm-activeLineGutter": {
     backgroundColor: "rgba(47, 139, 58, 0.08)",
   },
-  "&.cm-editor .cm-selectionBackground, .cm-selectionBackground": {
-    backgroundColor: "rgba(47, 139, 58, 0.18)",
+  "&.cm-editor > .cm-scroller > .cm-selectionLayer .cm-selectionBackground": {
+    backgroundColor: "var(--visual-selection-bg)",
+    borderRadius: "1px",
+    boxShadow: "inset 0 0 0 1px var(--visual-selection-border)",
   },
-  "&.cm-focused .cm-selectionBackground": {
-    backgroundColor: "rgba(47, 139, 58, 0.24)",
+  "&.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground": {
+    backgroundColor: "var(--visual-selection-bg-focused)",
+    boxShadow: "inset 0 0 0 1px var(--visual-selection-border-focused)",
   },
 
   // --- Rich-text decorations (visualDecorations) ---
@@ -362,7 +365,7 @@ const visualTheme = EditorView.theme({
   ".cm-vis-italic": { fontStyle: "italic" },
   ".cm-vis-underline": { textDecoration: "underline" },
   ".cm-vis-mono": {
-    fontFamily: 'var(--mono, ui-monospace, "Cascadia Code", Consolas, monospace)',
+    fontFamily: "var(--font-mono)",
     fontSize: "0.92em",
   },
   ".cm-vis-smallcaps": { fontVariant: "small-caps" },
@@ -393,7 +396,7 @@ const visualTheme = EditorView.theme({
   },
   ".cm-vis-frame-title": {
     color: "var(--visual-accent-bright)",
-    fontFamily: '"Segoe UI", system-ui, -apple-system, sans-serif',
+    fontFamily: "var(--font-sans)",
     fontSize: "1.18em",
     fontWeight: "700",
     lineHeight: "1.35",
@@ -458,7 +461,7 @@ const visualTheme = EditorView.theme({
   // revealed source reads as "raw markup", distinct from the serif prose
   // around it, without needing a filled box.
   ".cm-vis-active-math-source": {
-    fontFamily: 'ui-monospace, "Cascadia Code", "SFMono-Regular", Consolas, monospace',
+    fontFamily: "var(--font-mono)",
     fontSize: "0.88em",
   },
   // Inline math ($…$) is always a single short run — no multi-line seam risk —
@@ -476,7 +479,7 @@ const visualTheme = EditorView.theme({
     display: "inline-block",
     padding: "0 6px",
     borderRadius: "3px",
-    fontFamily: '"Segoe UI", system-ui, -apple-system, sans-serif',
+    fontFamily: "var(--font-sans)",
     fontSize: "0.82em",
     lineHeight: "1.5",
     verticalAlign: "baseline",
@@ -538,7 +541,7 @@ const visualTheme = EditorView.theme({
     borderRadius: "3px",
     backgroundColor: "var(--visual-widget-bg)",
     color: "var(--visual-accent-bright)",
-    fontFamily: '"Segoe UI", system-ui, -apple-system, sans-serif',
+    fontFamily: "var(--font-sans)",
     fontSize: "0.78em",
     fontWeight: "700",
     letterSpacing: "0.02em",
@@ -570,7 +573,7 @@ const visualTheme = EditorView.theme({
   },
   ".cm-vis-figure-icon": { fontSize: "28px", lineHeight: "1" },
   ".cm-vis-figure-name": {
-    fontFamily: '"Segoe UI", system-ui, -apple-system, sans-serif',
+    fontFamily: "var(--font-sans)",
     fontSize: "13px",
     color: "var(--visual-muted)",
   },
@@ -618,7 +621,8 @@ const visualTheme = EditorView.theme({
   ".cm-vis-title-author": { fontSize: "15px", marginTop: "10px", lineHeight: "1.5", whiteSpace: "pre-line" },
   ".cm-vis-title-date": { fontSize: "13.5px", color: "var(--visual-muted)", marginTop: "6px" },
   // `\title{}`/`\author{}`/`\date{}` live in the always-folded preamble, so a
-  // click here jumps to Code mode with that source selected (see TitleWidget)
+  // deliberate double-click jumps to Code mode with that source selected
+  // (see TitleWidget)
   // rather than revealing inline like math/abstract do. Underline-on-hover
   // signals "editable, but elsewhere" instead of implying an inline reveal.
   ".cm-vis-title-editable": { cursor: "pointer", borderRadius: "3px" },
@@ -669,7 +673,7 @@ const visualTheme = EditorView.theme({
     gap: "10px",
     padding: "18px 0 14px",
     color: "var(--visual-muted)",
-    fontFamily: 'ui-monospace, "Cascadia Code", "SFMono-Regular", Consolas, monospace',
+    fontFamily: "var(--font-mono)",
     fontSize: "11px",
     letterSpacing: "0.08em",
     lineHeight: "1",

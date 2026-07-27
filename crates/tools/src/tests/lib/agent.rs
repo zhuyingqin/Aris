@@ -222,6 +222,12 @@ fn file_tool_descriptions_preserve_existing_artifact_paths() {
     assert!(description("edit_file").contains("existing/current artifacts"));
     assert!(description("edit_file").contains("Read the target file first"));
     assert!(description("edit_file").contains("old_string should be unique"));
+    assert!(description("edit_file").contains("prefer one multi_edit call"));
+    assert!(description("multi_edit").contains("validated in memory"));
+    assert!(description("multi_edit").contains("one auditable change"));
+    assert!(description("multi_edit").contains("short stable unique spans"));
+    assert!(description("multi_edit").contains("Unicode replacement character"));
+    assert!(description("TodoWrite").contains("phase/milestone level"));
 }
 
 #[test]
