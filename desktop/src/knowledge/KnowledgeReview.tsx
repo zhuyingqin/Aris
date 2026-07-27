@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { literatureLlm } from "../api/tauri";
 import { useStore } from "../store";
+import { SvgIcon } from "../SvgIcon";
 import { useKnowledgeStore } from "./knowledgeStore";
 import {
   type KnowledgeEvidence,
@@ -490,8 +491,8 @@ function KnowledgeGraph({
         <div className="kb-graph-toolbar-copy">
           <strong>全局知识图谱</strong>
           <span>
-            左到右整理所有知识碎片：全局图谱 → 大类 → 小类
-            {showItems ? " → 知识节点" : "。知识节点已隐藏，可展开查看。"}
+            从左到右整理所有知识碎片：全局图谱、大类和小类
+            {showItems ? "，以及知识节点。" : "。知识节点已隐藏，可展开查看。"}
           </span>
         </div>
         <div className="kb-graph-toolbar-actions">
@@ -513,7 +514,7 @@ function KnowledgeGraph({
             title="缩小（Ctrl + 滚轮向下）"
             aria-label="缩小"
           >
-            −
+            <SvgIcon name="minus" size={17} />
           </button>
           <button
             type="button"
@@ -523,7 +524,7 @@ function KnowledgeGraph({
             title="放大（Ctrl + 滚轮向上）"
             aria-label="放大"
           >
-            +
+            <SvgIcon name="plus" size={17} />
           </button>
           <button
             type="button"
@@ -532,7 +533,7 @@ function KnowledgeGraph({
             title="适配视图"
             aria-label="适配视图"
           >
-            ⛶
+            <SvgIcon name="fit" size={17} />
           </button>
           <button
             type="button"
@@ -541,7 +542,7 @@ function KnowledgeGraph({
             title="重置视图"
             aria-label="重置视图"
           >
-            ⤢
+            <SvgIcon name="reset" size={17} />
           </button>
           <span className="kb-graph-zoom-hint">滚轮缩放 · 拖动平移</span>
           <button type="button" className="kb-primary" onClick={onRebuild} disabled={rebuilding}>

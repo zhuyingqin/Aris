@@ -1,12 +1,16 @@
 import { useMemo, type CSSProperties } from "react";
 
 // Animated sign-in dreamscape. Two pieces: a full-bleed night backdrop
-// (aurora drift, twinkling starfield, shooting stars) and the hero scene —
-// the app-logo moon/constellation above a sleeping researcher whose soul
-// rises out of the body to light up the knowledge graph. Pure SVG + CSS
-// keyframes (see login.css); no JS animation loops.
+// (aurora drift, twinkling starfield, shooting stars, drifting dust motes)
+// and the hero scene — faithful to the app logo: a left-opening crescent
+// moon holding the knowledge-graph constellation in its mouth, sparkles at
+// the logo's positions (upper-left of the moon, below it, above the graph),
+// and the logo's luminous wave sweeping from the moon's lower horn down to
+// a glowing pearl. Below, a sleeping researcher whose soul rises out of the
+// body, plucks a star off the moon's horn, and lights up the graph.
+// Pure SVG + CSS keyframes (see login.css); no JS animation loops.
 
-type StarVar = CSSProperties & { "--delay"?: string; "--dur"?: string; "--i"?: number };
+type StarVar = CSSProperties & { "--delay"?: string; "--dur"?: string; "--i"?: number; "--dx"?: string };
 
 /** Deterministic PRNG so the starfield is stable across re-renders. */
 function mulberry32(seed: number) {
@@ -31,6 +35,19 @@ export function LoginBackdrop() {
     }));
   }, []);
 
+  // Slow luminous dust drifting up — the Kimi-style ambient layer.
+  const dust = useMemo(() => {
+    const rand = mulberry32(915);
+    return Array.from({ length: 9 }, () => ({
+      x: +(rand() * 100).toFixed(2),
+      y: +(52 + rand() * 46).toFixed(2),
+      s: +(2 + rand() * 3.5).toFixed(1),
+      dur: +(14 + rand() * 16).toFixed(1),
+      delay: +(-rand() * 30).toFixed(1),
+      dx: +((rand() - 0.5) * 10).toFixed(1),
+    }));
+  }, []);
+
   return (
     <div className="sq-backdrop" aria-hidden="true">
       <div className="sq-aurora sq-aurora-a" />
@@ -48,20 +65,36 @@ export function LoginBackdrop() {
           />
         ))}
       </svg>
+      {dust.map((d, i) => (
+        <div
+          key={`dust-${i}`}
+          className="sq-dust"
+          style={{
+            left: `${d.x}%`,
+            top: `${d.y}%`,
+            width: `${d.s}px`,
+            height: `${d.s}px`,
+            "--delay": `${d.delay}s`,
+            "--dur": `${d.dur}s`,
+            "--dx": `${d.dx}vw`,
+          } as StarVar}
+        />
+      ))}
       <div className="sq-shooting sq-shooting-a" />
       <div className="sq-shooting sq-shooting-b" />
     </div>
   );
 }
 
-// Knowledge-graph constellation nested in the moon's embrace, mirroring the logo.
+// Knowledge-graph constellation nested in the moon's embrace, mirroring the
+// logo: it sits in the crescent's open mouth, right of the moon's belly.
 const NODES: Array<[number, number, number, "a" | "b" | "c"]> = [
-  [405, 300, 6.5, "b"], // n1 crown
-  [345, 345, 5.5, "b"], // n2 upper-left
-  [465, 348, 6, "b"], // n3 upper-right
-  [405, 388, 7.5, "a"], // n4 hub — the soul touches here first
-  [342, 428, 5.5, "c"], // n5 lower-left
-  [468, 424, 5.5, "c"], // n6 lower-right
+  [405, 258, 6.5, "b"], // n1 crown
+  [345, 303, 5.5, "b"], // n2 upper-left
+  [465, 306, 6, "b"], // n3 upper-right
+  [405, 346, 7.5, "a"], // n4 hub — the plucked star lands here
+  [342, 382, 5.5, "c"], // n5 lower-left
+  [468, 378, 5.5, "c"], // n6 lower-right
 ];
 
 const EDGES: Array<[number, number, "a" | "b" | "c"]> = [
@@ -76,13 +109,21 @@ const EDGES: Array<[number, number, "a" | "b" | "c"]> = [
   [2, 5, "c"],
 ];
 
-const GLYPHS: Array<{ x: number; y: number; size: number; delay: number; dur: number; text: string }> = [
-  { x: 505, y: 480, size: 17, delay: 0.8, dur: 11 , text: "∑" },
-  { x: 552, y: 400, size: 14, delay: 4.2, dur: 13, text: "ψ" },
-  { x: 178, y: 430, size: 15, delay: 2.6, dur: 12, text: "∇" },
-  { x: 540, y: 545, size: 13, delay: 6.5, dur: 10, text: "π" },
-  { x: 150, y: 330, size: 13, delay: 8.2, dur: 12, text: "∞" },
+const GLYPHS: Array<{ x: number; y: number; size: number; delay: number; dur: number; kind: "sum" | "psi" | "nabla" | "pi" | "infinity" }> = [
+  { x: 582, y: 468, size: 17, delay: 0.8, dur: 11, kind: "sum" },
+  { x: 566, y: 380, size: 14, delay: 4.2, dur: 13, kind: "psi" },
+  { x: 178, y: 430, size: 15, delay: 2.6, dur: 12, kind: "nabla" },
+  { x: 552, y: 545, size: 13, delay: 6.5, dur: 10, kind: "pi" },
+  { x: 150, y: 330, size: 13, delay: 8.2, dur: 12, kind: "infinity" },
 ];
+
+function DreamGlyph({ kind }: { kind: (typeof GLYPHS)[number]["kind"] }) {
+  if (kind === "sum") return <path d="M6-7h-12l7 7-7 7H6L-1 0z" fill="none" stroke="currentColor" strokeLinejoin="round" />;
+  if (kind === "psi") return <path d="M0-8v16M-5-3c0 8 10 8 10 0M0-8v-2" fill="none" stroke="currentColor" strokeLinecap="round" />;
+  if (kind === "nabla") return <path d="M0-7 6 6H-6z" fill="none" stroke="currentColor" strokeLinejoin="round" />;
+  if (kind === "pi") return <path d="M-6-6H6M-4-6v12M4-6v12" fill="none" stroke="currentColor" strokeLinecap="round" />;
+  return <path d="M-7 0c2-5 5-5 7 0 2 5 5 5 7 0 2-5 5-5 7 0-2 5-5 5-7 0-2-5-5-5-7 0-2 5-5 5-7 0z" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" />;
+}
 
 export function DreamScene() {
   return (
@@ -101,14 +142,21 @@ export function DreamScene() {
           <stop offset="78%" stopColor="rgba(125,180,252,0.35)" />
           <stop offset="100%" stopColor="rgba(125,180,252,0.04)" />
         </linearGradient>
-        <linearGradient id="sq-beam-g" x1="0" y1="0" x2="1" y2="1">
-          <stop offset="0%" stopColor="rgba(165,243,252,0.95)" />
-          <stop offset="100%" stopColor="rgba(59,130,246,0.55)" />
-        </linearGradient>
         <linearGradient id="sq-wisp-g" x1="0" y1="0" x2="0" y2="1">
           <stop offset="0%" stopColor="rgba(147,197,253,0.55)" />
           <stop offset="100%" stopColor="rgba(147,197,253,0.05)" />
         </linearGradient>
+        {/* the logo's wave: dim at the moon's horn, brightening toward the pearl */}
+        <linearGradient id="sq-tail-g" gradientUnits="userSpaceOnUse" x1="298" y1="380" x2="512" y2="466">
+          <stop offset="0%" stopColor="rgba(199,221,255,0.22)" />
+          <stop offset="55%" stopColor="rgba(214,232,255,0.72)" />
+          <stop offset="100%" stopColor="#f4faff" />
+        </linearGradient>
+        <radialGradient id="sq-orb-g" cx="0.38" cy="0.35" r="0.9">
+          <stop offset="0%" stopColor="#ffffff" />
+          <stop offset="55%" stopColor="#d9ecff" />
+          <stop offset="100%" stopColor="#8fb8e8" />
+        </radialGradient>
         <radialGradient id="sq-head-g" cx="0.35" cy="0.3" r="1">
           <stop offset="0%" stopColor="#2a3a5e" />
           <stop offset="100%" stopColor="#1a2440" />
@@ -128,7 +176,7 @@ export function DreamScene() {
         </mask>
       </defs>
 
-      {/* -------- moon (crescent + Q-tail, echoing the logo) -------- */}
+      {/* -------- moon (crescent + the logo's luminous wave, orbit ring) -------- */}
       <g>
         <circle
           className="sq-moon-glow"
@@ -138,6 +186,37 @@ export function DreamScene() {
           fill="#93b8f0"
           filter="url(#sq-blur-l)"
         />
+        {/* breathing pulse ring radiating from the moon */}
+        <circle
+          className="sq-pulse"
+          cx="250"
+          cy="240"
+          r="150"
+          fill="none"
+          stroke="#93c5fd"
+          strokeWidth="2"
+        />
+        {/* tilted orbit shell with a satellite light riding it */}
+        <g transform="rotate(-16 250 240)">
+          <ellipse
+            cx="250"
+            cy="240"
+            rx="205"
+            ry="92"
+            fill="none"
+            stroke="#7dd3fc"
+            strokeWidth="1"
+            opacity="0.22"
+            strokeDasharray="2 7"
+          />
+          <circle
+            className="sq-sat"
+            r="3.5"
+            fill="#a5f3fc"
+            filter="url(#sq-blur-s)"
+            style={{ offsetPath: "path('M 45 240 a 205 92 0 1 1 410 0 a 205 92 0 1 1 -410 0')" }}
+          />
+        </g>
         <rect
           x="86"
           y="76"
@@ -146,31 +225,54 @@ export function DreamScene() {
           fill="url(#sq-moon-g)"
           mask="url(#sq-moon-mask)"
         />
-        {/* Q tail swoosh at the crescent's mouth */}
+        {/* the logo's wave: rooted on the crescent's lower horn (298,380),
+            sweeping right-down to a glowing pearl — like the logo's ribbon */}
         <path
-          d="M 296 362 C 330 392 362 396 398 372 C 370 412 316 404 292 380 Z"
-          fill="url(#sq-moon-g)"
-          opacity="0.95"
+          d="M 298 380 C 330 442 352 500 424 508 C 452 511 484 496 505 468"
+          stroke="url(#sq-tail-g)"
+          strokeWidth="24"
+          strokeLinecap="round"
+          fill="none"
+          opacity="0.85"
         />
-        {/* four-point sparkles, from the logo */}
+        {/* light flowing along the wave into the pearl */}
+        <path
+          className="sq-tail-shimmer"
+          d="M 298 380 C 330 442 352 500 424 508 C 452 511 484 496 505 468"
+          stroke="#e0fbff"
+          strokeWidth="3.5"
+          strokeLinecap="round"
+          fill="none"
+        />
+        <circle
+          className="sq-orb-glow"
+          cx="508"
+          cy="462"
+          r="26"
+          fill="#a5f3fc"
+          filter="url(#sq-blur-m)"
+        />
+        <circle cx="508" cy="462" r="16" fill="url(#sq-orb-g)" />
+        {/* four-point sparkles at the logo's positions: upper-left of the
+            moon (the big one), below the moon, above the constellation */}
         <path
           className="sq-sparkle"
           d="M 0 -9 L 2 -2 L 9 0 L 2 2 L 0 9 L -2 2 L -9 0 L -2 -2 Z"
-          transform="translate(372 196)"
+          transform="translate(100 125)"
           fill="#a5f3fc"
           style={{ "--delay": "0.6s" } as StarVar}
         />
         <path
           className="sq-sparkle"
           d="M 0 -6 L 1.4 -1.4 L 6 0 L 1.4 1.4 L 0 6 L -1.4 1.4 L -6 0 L -1.4 -1.4 Z"
-          transform="translate(432 158)"
+          transform="translate(115 385)"
           fill="#a5f3fc"
           style={{ "--delay": "2.4s" } as StarVar}
         />
         <path
           className="sq-sparkle"
           d="M 0 -5 L 1.2 -1.2 L 5 0 L 1.2 1.2 L 0 5 L -1.2 1.2 L -5 0 L -1.2 -1.2 Z"
-          transform="translate(505 250)"
+          transform="translate(478 152)"
           fill="#a5f3fc"
           style={{ "--delay": "4.1s" } as StarVar}
         />
@@ -195,19 +297,14 @@ export function DreamScene() {
         ))}
       </g>
 
-      {/* -------- dream glyphs drifting up around the scene -------- */}
+      {/* -------- SVG science marks drifting up around the scene -------- */}
       <g>
         {GLYPHS.map((g, i) => (
-          <text
-            key={i}
-            className="sq-glyph"
-            x={g.x}
-            y={g.y}
-            fontSize={g.size}
-            style={{ "--delay": `${g.delay}s`, "--dur": `${g.dur}s` } as StarVar}
-          >
-            {g.text}
-          </text>
+          <g key={i} transform={`translate(${g.x} ${g.y}) scale(${g.size / 16})`}>
+            <g className="sq-glyph" style={{ "--delay": `${g.delay}s`, "--dur": `${g.dur}s` } as StarVar}>
+              <DreamGlyph kind={g.kind} />
+            </g>
+          </g>
         ))}
       </g>
 
@@ -273,6 +370,26 @@ export function DreamScene() {
         <text className="sq-zzz" x="386" y="466" fontSize="22" style={{ "--delay": "3.2s" } as StarVar}>Z</text>
       </g>
 
+      {/* dream motes rising off the sleeper, drifting through the wave */}
+      <g>
+        {([
+          [338, 522, 3.2, 0, 9, -14],
+          [368, 508, 2.4, 2.8, 11, 10],
+          [392, 532, 2.8, 5.4, 10, -8],
+          [356, 548, 2.2, 7.6, 12, 16],
+          [414, 518, 2.6, 4.1, 9.5, -18],
+        ] as Array<[number, number, number, number, number, number]>).map(([x, y, r, delay, dur, dx], i) => (
+          <circle
+            key={`mote-${i}`}
+            className="sq-mote"
+            cx={x}
+            cy={y}
+            r={r}
+            style={{ "--delay": `${delay}s`, "--dur": `${dur}s`, "--dx": `${dx}px` } as StarVar}
+          />
+        ))}
+      </g>
+
       {/* -------- the soul, rising out of the sleeper -------- */}
       <g className="sq-soul-rise">
         {/* wisp tail tethering soul to body */}
@@ -302,7 +419,7 @@ export function DreamScene() {
             fill="none"
           />
           <path
-            d="M 280 385 Q 325 368 365 350"
+            d="M 280 385 Q 295 379 306 371"
             stroke="url(#sq-soul-g)"
             strokeWidth="15"
             strokeLinecap="round"
@@ -320,18 +437,24 @@ export function DreamScene() {
           <circle className="sq-star" cx="300" cy="292" r="1.6" style={{ "--delay": "1.4s", "--dur": "3.6s" } as StarVar} />
           <circle className="sq-star" cx="243" cy="366" r="1.4" style={{ "--delay": "2.2s", "--dur": "3.2s" } as StarVar} />
         </g>
-        {/* beam from the reaching hand to the graph hub */}
-        <line
-          className="sq-beam"
-          x1="365"
-          y1="350"
-          x2="405"
-          y2="388"
-          stroke="url(#sq-beam-g)"
-          strokeWidth="2.5"
-          strokeLinecap="round"
-        />
       </g>
+
+      {/* the star plucked off the moon's lower horn, arcing over to seed the graph */}
+      <circle
+        className="sq-pluck-flash"
+        cx="298"
+        cy="380"
+        r="10"
+        fill="#a5f3fc"
+        filter="url(#sq-blur-m)"
+      />
+      <path
+        className="sq-pluck-star"
+        d="M 0 -7 L 1.7 -1.7 L 7 0 L 1.7 1.7 L 0 7 L -1.7 1.7 L -7 0 L -1.7 -1.7 Z"
+        fill="#e0fbff"
+        filter="url(#sq-blur-s)"
+        style={{ offsetPath: "path('M 298 380 Q 345 305 405 346')" }}
+      />
 
       {/* -------- bright constellation overlay: lights up when touched -------- */}
       <g>
@@ -366,7 +489,7 @@ export function DreamScene() {
         filter="url(#sq-blur-s)"
         style={{
           offsetPath:
-            "path('M 405 388 Q 370 345 330 352 Q 285 362 271 395 Q 262 430 263 470 Q 262 505 312 527')",
+            "path('M 405 346 Q 368 316 330 330 Q 284 350 271 392 Q 262 432 263 470 Q 262 505 312 527')",
         }}
       />
       <circle

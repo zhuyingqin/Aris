@@ -4,7 +4,10 @@ use std::fs;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex, OnceLock,
+};
 use std::thread;
 use std::time::Duration;
 
@@ -16,10 +19,11 @@ use super::{
     latex_input_snapshot_changed, latex_pdf_state, mvp_tool_specs, persist_agent_terminal_state,
     preferred_latex_engine, render_latex_template, repl_invokes_latex_compiler,
     resolve_anthropic_compat_reviewer_model, resolve_existing_workspace_path,
-    resolve_output_workspace_path, resolve_reviewer_model, route_openai_compat_model,
-    run_llm_review, skill_markdown, tex_tool_path, workspace_path_candidate, AgentInput, AgentJob,
-    LatexEnginePreference, LatexOutputFingerprint, LatexPdfState, LlmReviewInput,
-    SubagentToolExecutor, ToolRunContext, MAX_WRITE_FILE_CONTENT_CHARS,
+    resolve_output_workspace_path, resolve_reviewer_model, reviewer_stream_observer,
+    route_openai_compat_model, run_llm_review, skill_markdown, tex_tool_path,
+    workspace_path_candidate, AgentInput, AgentJob, LatexEnginePreference, LatexOutputFingerprint,
+    LatexPdfState, LlmReviewInput, SubagentToolExecutor, ToolRunContext,
+    MAX_WRITE_FILE_CONTENT_CHARS,
 };
 use runtime::{
     ApiRequest, AssistantEvent, ContentBlock, ConversationMessage, ConversationRuntime,
@@ -2783,6 +2787,16 @@ fn llm_review_disabled_reviewer_does_not_fall_back_to_gpt() {
 
     assert!(error.contains("reviewer is disabled"));
     assert!(!error.contains("gpt-5.5"));
+}
+
+#[test]
+fn reviewer_stream_observer_tracks_desktop_cancellation() {
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let observer = reviewer_stream_observer(Some(cancelled.clone()));
+    assert!(!observer.is_cancelled());
+
+    cancelled.store(true, Ordering::SeqCst);
+    assert!(observer.is_cancelled());
 }
 
 #[test]

@@ -21,7 +21,6 @@ import {
   chatStatus,
   chatSuggestTitle,
   isTauri,
-  projectGoalProgress,
   projectIntentObserve,
   type ChatSendRequest,
 } from "../api/tauri";
@@ -82,7 +81,12 @@ export function useChatRun({
   const [permissionBusy, setPermissionBusy] = useState(false);
   const [modelOptions, setModelOptions] = useState<ChatModelOption[]>([]);
   const [modelBusy, setModelBusy] = useState(false);
-  const [reasoning, setReasoning] = useState<ChatReasoningEffortView>({ supported: false, effort: "high" });
+  const [reasoning, setReasoning] = useState<ChatReasoningEffortView>({
+    supported: false,
+    applied: false,
+    effort: "high",
+    transport: "unsupported",
+  });
   const [reasoningBusy, setReasoningBusy] = useState(false);
   // After `/compact` the backend session shrinks but the visible transcript is
   // kept intact, so the transcript-derived token estimate (and thus the
@@ -154,36 +158,21 @@ export function useChatRun({
   const syncProjectContinuity = useCallback((sessionId: string, nextTurns: ChatTurn[]) => {
     if (!isTauri() || !currentProject?.id) return;
     const userTurns = nextTurns.filter((turn) => turn.role === "user");
-    const assistantTurns = nextTurns.filter((turn) => turn.role === "assistant");
-    const latestAssistant = assistantTurns[assistantTurns.length - 1];
-    const assistantText = latestAssistant ? textFromTurn(latestAssistant).trim() : "";
-    if (!assistantText) return;
-
-    const observations = userTurns
-      .map((turn) => ({ id: turn.id, text: textFromTurn(turn).trim() }))
-      .filter((observation) => observation.text.length > 0);
-    const newestObservation = observations[observations.length - 1];
+    const latestUser = userTurns[userTurns.length - 1];
+    const newestObservation = latestUser
+      ? { id: latestUser.id, text: textFromTurn(latestUser).trim() }
+      : null;
     if (newestObservation) {
       const requestKey = `${sessionId}:${newestObservation.id}`;
       if (!intentRequests.current.has(requestKey)) {
         intentRequests.current.add(requestKey);
-        void projectIntentObserve(currentProject.id, sessionId, observations)
+        void projectIntentObserve(currentProject.id, sessionId, [newestObservation])
         .then(notifyProjectBriefUpdated)
         .catch(() => {
           intentRequests.current.delete(requestKey);
         });
       }
     }
-
-    const recentStatus = assistantText
-      .split(/\r?\n/)
-      .map((line) => line.replace(/^#+\s*/, "").trim())
-      .find(Boolean)
-      ?.slice(0, 260);
-    if (!recentStatus) return;
-    void projectGoalProgress(currentProject.id, recentStatus)
-      .then(notifyProjectBriefUpdated)
-      .catch(() => undefined);
   }, [currentProject?.id]);
 
   const onComplete = useCallback((sessionId: string, reply: string) => {
@@ -365,11 +354,11 @@ export function useChatRun({
 
   const refreshReasoning = useCallback((model?: string | null) => {
     if (!isTauri() || !model) {
-      setReasoning({ supported: false, effort: "high" });
+      setReasoning({ supported: false, applied: false, effort: "high", transport: "unsupported" });
       return;
     }
     chatReasoningEffortGet(model).then(setReasoning).catch(() => {
-      setReasoning({ supported: false, effort: "high" });
+      setReasoning({ supported: false, applied: false, effort: "high", transport: "unsupported" });
     });
   }, []);
 

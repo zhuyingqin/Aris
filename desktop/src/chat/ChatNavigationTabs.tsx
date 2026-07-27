@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { SvgIcon } from "../SvgIcon";
 
 export interface ChatNavigationTab {
   id: string;
@@ -67,7 +68,7 @@ export default function ChatNavigationTabs({
                   aria-label={tab.closeLabel}
                   onClick={() => onClose(tab.id)}
                 >
-                  ×
+                  <SvgIcon name="close" size={14} />
                 </button>
               )}
             </div>
@@ -75,7 +76,7 @@ export default function ChatNavigationTabs({
         })}
       </div>
       <button type="button" className="chat-navigation-add" aria-label={addLabel} title={addLabel} onClick={onAdd}>
-        +
+        <SvgIcon name="plus" size={15} />
       </button>
       {action && (
         <button type="button" className="chat-navigation-action" onClick={action.onClick}>

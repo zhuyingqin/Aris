@@ -372,27 +372,55 @@ Desktop 还会维护 `verified_executors`，用于在 Chat 顶部模型下拉里
 
 ## 🧱 架构
 
-SomniQ Studio 复用 SomniQ kernel，而不是在前端重写 agent 逻辑：UI 调用本地 Tauri 后端，后端再调用共享 Rust crate。
+SomniQ Studio 采用「一个内核、多个外壳」的本地优先架构：所有 agent 逻辑都在共享 Rust 内核（`crates/*`）里，桌面端、CLI 和手机远程只是同一内核之上的三个产品外壳。UI 从不重写 agent 逻辑——桌面前端调用本地 Tauri 后端，后端再以库调用方式进入共享 crate。
 
 ```text
-React + Vite 前端
-        │  Tauri invoke / listen
-        ▼
-desktop/src-tauri 后端
-        │  共享 Rust crate
-        ▼
-crates/runtime + crates/executor + crates/tools + crates/chat + crates/commands
+┌───────────────────────── 产品外壳 ─────────────────────────┐
+│  Desktop (Tauri 2)        CLI (aris)      Mobile 远程       │
+│  React + Vite 前端         终端 UI         PWA + 自托管网关   │
+│  src-tauri Rust 后端                                        │
+└──────┬──────────────────────┬──────────────────┬───────────┘
+       │ Tauri invoke/listen  │ 库调用            │ 端到端加密配对/中继
+┌──────▼──────────────────────▼──────────────────▼───────────┐
+│                 共享 Rust 内核（crates/*）                    │
+│   runtime · api · executor · chat · tools · commands        │
+│   notebook · remote-protocol · compat-harness               │
+│   + 70 个内置科研技能（assets/skills，编译进 runtime）         │
+└───────────────────────────┬─────────────────────────────────┘
+┌───────────────────────────▼─────────────────────────────────┐
+│  本地数据：config.json · 会话 · 运行状态 · 文献库（papers +    │
+│  SQLite）· 知识库（knowledge.db）· 用量日志                    │
+└─────────────────────────────────────────────────────────────┘
 ```
+
+**内核 crate：**
 
 | 路径 | 作用 |
 |------|------|
-| `desktop/src/` | React UI —— chat、settings、skills、sessions、studio、monitor、teams |
-| `desktop/src-tauri/` | Tauri commands 与桌面后端 |
-| `crates/runtime/` | 文件系统、权限、session、PDF 文本读取 |
-| `crates/executor/` | provider 客户端与流式 |
-| `crates/tools/` | agent 与桌面命令共用的工具注册表 |
-| `crates/chat/` | 共享 chat 运行时装配 |
-| `crates/commands/` | 共享命令解析与定义 |
+| `crates/runtime/` | 内核运行时 —— 会话循环与会话存储、权限、上下文压缩、MCP 客户端、记忆 / 项目目标 / 项目意图、技能装载、PDF 文本读取 |
+| `crates/api/` | Anthropic HTTP/SSE 客户端与 OAuth |
+| `crates/executor/` | Provider 流式执行层 —— Anthropic 与 OpenAI 兼容请求 / 流解析，归一化为 runtime 事件（Executor 与 Reviewer 双模型都走这里）|
+| `crates/chat/` | 共享 chat 装配层 —— 从 config 解析 provider，构造 executor、工具表、权限策略与系统提示词 |
+| `crates/tools/` | 内核工具注册表（约 50 个）—— 文件 / shell、Web、文献检索（Scopus / OpenAlex / arXiv）、文献库 / 知识库 / Studio 库写入、Notebook 执行、LaTeX 编译、agent / 团队 / 工作流协调 |
+| `crates/commands/` | 斜杠命令定义与解析 |
+| `crates/notebook/` | Jupyter 内核客户端（ZMQ + nbformat）—— Lab 的执行底座 |
+| `crates/remote-protocol/` | 手机远程控制的端到端加密协议原语（X25519 / Ed25519 / ChaCha20-Poly1305）|
+| `crates/aris-cli/` | 终端外壳（`aris` 命令）|
+| `crates/compat-harness/` | 上游 Claude Code 命令 / 工具清单提取，供审计比对 |
+
+**桌面端：**
+
+| 路径 | 作用 |
+|------|------|
+| `desktop/src/` | React UI —— Chat、Lab（Jupyter / MATLAB 实验 + 终端）、Typeset（Overleaf 式 LaTeX 编辑 + 编译）、Literature（文献库 + 引用图谱 + 知识审核）、Studio（讲稿 / 海报审阅）、Mail（Gmail / Outlook）、Extensions、Scheduled、Settings 九个工作表面，外加登录与会话列表 |
+| `desktop/src-tauri/` | Tauri 桌面后端 —— `engine`（chat 执行桥）、`lab` / `typeset` / `literature` / `knowledge` / `studio` / `mail` / `scheduled` / `terminal` 各表面命令、`newapi`（托管登录）、`remote`（远程配对）、`mcp` / `connectors`、`watcher` / `usage_log` |
+
+**远程服务（可选，自托管）：**
+
+| 路径 | 作用 |
+|------|------|
+| `services/remote-gateway/` | 设备配对、私有信令与加密中继（独立 Cargo workspace；不存储项目文件、聊天与中继内容）|
+| `services/remote-mobile/` | 手机远程 PWA（React + Vite）|
 
 > **设计铁律：** 桌面端绝不 spawn 或解析 `aris-cli` —— CLI 与 Desktop 是同一核心 runtime 之上的两个 shell。
 > 参见 [cli-desktop-architecture.md](docs/development-logic/cli-desktop-architecture.md)。

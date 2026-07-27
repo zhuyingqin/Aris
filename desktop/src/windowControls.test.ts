@@ -3,7 +3,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { createElement } from "react";
-import DesktopWindowCloseControl from "./DesktopWindowCloseControl";
+import DesktopWindowControls from "./DesktopWindowControls";
 import { requestWindowAction } from "./windowControls";
 
 const mocks = vi.hoisted(() => ({
@@ -48,12 +48,18 @@ describe("window controls", () => {
     expect(nativeWindow.close).toHaveBeenCalledOnce();
   });
 
-  it("renders a close control on a frameless pre-workspace screen", () => {
+  it("renders minimize, maximize and close controls on a frameless pre-workspace screen", () => {
     mocks.isTauri.mockReturnValue(true);
 
-    render(createElement(DesktopWindowCloseControl));
-    fireEvent.click(screen.getByRole("button", { name: "关闭窗口" }));
+    render(createElement(DesktopWindowControls));
 
+    fireEvent.click(screen.getByRole("button", { name: "最小化窗口" }));
+    expect(nativeWindow.minimize).toHaveBeenCalledOnce();
+
+    fireEvent.click(screen.getByRole("button", { name: "最大化窗口" }));
+    expect(nativeWindow.toggleMaximize).toHaveBeenCalledOnce();
+
+    fireEvent.click(screen.getByRole("button", { name: "关闭窗口" }));
     expect(nativeWindow.close).toHaveBeenCalledOnce();
   });
 });

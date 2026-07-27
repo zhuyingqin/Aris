@@ -13,6 +13,8 @@ import Settings from "./settings/Settings";
 import OnboardingTutorial from "./OnboardingTutorial";
 import { installBrowserUnsavedChangesGuard, shouldPreventDesktopClose } from "./windowCloseGuard";
 import { requestWindowAction } from "./windowControls";
+import { WindowControlButtons } from "./WindowControlButtons";
+import { SvgIcon } from "./SvgIcon";
 
 const loadLiterature = () => import("./literature/Literature");
 const loadStudio = () => import("./studio/Studio");
@@ -237,28 +239,6 @@ const Chevron = (p: { dir: "left" | "right" | "down"; size?: number }) => {
       <path d={d} />
     </svg>
   );
-};
-
-// Windows-style window controls, 10脳10 viewBox centered in a 46脳36 hit area.
-const WinCtl = {
-  minimize: (
-    <svg className="win-ctl-glyph" width="10" height="10" viewBox="0 0 10 10"
-      fill="none" stroke="currentColor" strokeWidth="1" aria-hidden="true">
-      <path d="M1.5 5h7" />
-    </svg>
-  ),
-  maximize: (
-    <svg className="win-ctl-glyph" width="10" height="10" viewBox="0 0 10 10"
-      fill="none" stroke="currentColor" strokeWidth="1" aria-hidden="true">
-      <rect x="1.5" y="1.5" width="7" height="7" rx="0.75" />
-    </svg>
-  ),
-  close: (
-    <svg className="win-ctl-glyph" width="10" height="10" viewBox="0 0 10 10"
-      fill="none" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" aria-hidden="true">
-      <path d="M1.6 1.6 8.4 8.4M8.4 1.6 1.6 8.4" />
-    </svg>
-  ),
 };
 
 const GripIcon = () => (
@@ -1008,15 +988,13 @@ export default function App() {
         </div>
         <div className="window-titlebar-controls">
           {renderUpdateIndicator()}
-          <button type="button" aria-label={copy.minimizeWindow} onClick={() => requestWindowAction("minimize")}>
-            {WinCtl.minimize}
-          </button>
-          <button type="button" aria-label={copy.maximizeWindow} onClick={() => requestWindowAction("maximize")}>
-            {WinCtl.maximize}
-          </button>
-          <button type="button" className="close" aria-label={copy.closeWindow} onClick={() => requestWindowAction("close")}>
-            {WinCtl.close}
-          </button>
+          <WindowControlButtons
+            labels={{
+              minimize: copy.minimizeWindow,
+              maximize: copy.maximizeWindow,
+              close: copy.closeWindow,
+            }}
+          />
         </div>
       </div>
       <header className="app-head">
@@ -1071,7 +1049,7 @@ export default function App() {
                   >
                     <span className="product-menu-icon">{item.icon}</span>
                     <span>{copy.nav[item.id]}</span>
-                    <span className="product-menu-check" aria-hidden="true">{tab === item.id ? "✓" : ""}</span>
+                    <span className="product-menu-check" aria-hidden="true">{tab === item.id && <SvgIcon name="check" size={14} />}</span>
                   </button>
                 ))}
                 <div className="product-menu-divider" role="separator" />
@@ -1086,7 +1064,7 @@ export default function App() {
                   >
                     <span className="product-menu-icon">{item.icon}</span>
                     <span>{copy.nav[item.id]}</span>
-                    <span className="product-menu-check" aria-hidden="true">{tab === item.id ? "✓" : ""}</span>
+                    <span className="product-menu-check" aria-hidden="true">{tab === item.id && <SvgIcon name="check" size={14} />}</span>
                   </button>
                 ))}
               </div>

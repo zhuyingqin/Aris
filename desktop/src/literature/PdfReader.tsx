@@ -7,6 +7,7 @@ import {
 } from "react";
 import type { PDFDocumentProxy, PDFPageProxy, RenderTask } from "pdfjs-dist";
 import { isTauri, literaturePdfBytes } from "../api/tauri";
+import { SvgIcon } from "../SvgIcon";
 import type {
   PdfAnnotation,
   PdfAnnotationColor,
@@ -450,11 +451,11 @@ function QuickSelectionPopup({
         <div className="lit-pdf-ai-panel">
           <div className="lit-pdf-ai-head">
             <button type="button" className="lit-pdf-ai-back" aria-label="返回标记" onClick={() => setAi(null)}>
-              ‹ 返回
+              <SvgIcon name="chevronLeft" size={14} /> 返回
             </button>
             <span className="lit-pdf-ai-title">{ai.action.label}</span>
             <button type="button" className="lit-pdf-popup-close" aria-label="关闭" onClick={onCancel}>
-              ×
+              <SvgIcon name="close" size={14} />
             </button>
           </div>
           <div className="lit-pdf-ai-body">
@@ -533,7 +534,7 @@ function QuickSelectionPopup({
               加备注
             </button>
             <button type="button" className="lit-pdf-popup-close" aria-label="取消选区" onClick={onCancel}>
-              ×
+              <SvgIcon name="close" size={14} />
             </button>
           </div>
           <div className="lit-pdf-select-popup-ai-row">
@@ -544,7 +545,7 @@ function QuickSelectionPopup({
                 className="lit-pdf-ai-btn"
                 onClick={() => runAi(action)}
               >
-                ✦ {action.label}
+                <SvgIcon name="sparkle" size={13} /> {action.label}
               </button>
             ))}
           </div>
@@ -627,7 +628,7 @@ function HighlightPopover({
         <span className="lit-pdf-annotation-kind-badge">{KIND_LABELS[annotation.kind]}</span>
         <span className="lit-pdf-highlight-popover-page">第 {annotation.page} 页</span>
         <button type="button" className="lit-pdf-popup-close" aria-label="关闭" onClick={onClose}>
-          ×
+          <SvgIcon name="close" size={14} />
         </button>
       </div>
       <blockquote className="lit-pdf-highlight-popover-quote">
@@ -681,7 +682,7 @@ function AnnotationEditor({
       <div className="lit-pdf-annotation-editor-head">
         <span>第 {annotation.page} 页</span>
         <button type="button" className="lit-pdf-popup-close" aria-label="关闭标注编辑器" onClick={onClose}>
-          ×
+          <SvgIcon name="close" size={14} />
         </button>
       </div>
       <blockquote>{annotation.quote}</blockquote>
@@ -1106,7 +1107,7 @@ export default function PdfReader({
             disabled={!document || currentPage <= 1}
             aria-label="上一页"
           >
-            ‹
+            <SvgIcon name="chevronLeft" size={15} />
           </button>
           <label className="lit-pdf-page-input">
             <input
@@ -1128,17 +1129,17 @@ export default function PdfReader({
             disabled={!document || currentPage >= numPages}
             aria-label="下一页"
           >
-            ›
+            <SvgIcon name="chevronRight" size={15} />
           </button>
         </div>
 
         <div className="lit-pdf-zoom">
           <button type="button" onClick={() => adjustZoom(-ZOOM_STEP)} aria-label="缩小">
-            −
+            <SvgIcon name="minus" size={15} />
           </button>
           <span className="lit-pdf-zoom-value">{Math.round(effectiveZoom * 100)}%</span>
           <button type="button" onClick={() => adjustZoom(ZOOM_STEP)} aria-label="放大">
-            +
+            <SvgIcon name="plus" size={15} />
           </button>
           <button
             type="button"

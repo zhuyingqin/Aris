@@ -319,28 +319,59 @@ specific `ARIS_*_DIR` variable is set.
 
 ## 🧱 Architecture
 
-SomniQ Studio reuses the SomniQ kernel instead of reimplementing agent logic in the frontend: the UI calls the
-local Tauri backend, which calls the shared Rust crates.
+SomniQ Studio follows a local-first "one kernel, many shells" architecture: all agent logic lives in the shared
+Rust kernel (`crates/*`), and Desktop, CLI, and mobile remote are three product shells over that same kernel.
+The UI never reimplements agent logic — the desktop frontend calls the local Tauri backend, which calls the
+shared crates as libraries.
 
 ```text
-React + Vite frontend
-        │  Tauri invoke / listen
-        ▼
-desktop/src-tauri backend
-        │  shared Rust crates
-        ▼
-crates/runtime + crates/executor + crates/tools + crates/chat + crates/commands
+┌──────────────────────── Product shells ────────────────────────┐
+│  Desktop (Tauri 2)        CLI (aris)      Mobile remote        │
+│  React + Vite frontend    terminal UI     PWA + self-hosted    │
+│  src-tauri Rust backend                   gateway              │
+└──────┬──────────────────────┬──────────────────┬───────────────┘
+       │ Tauri invoke/listen  │ library calls    │ E2E-encrypted pairing/relay
+┌──────▼──────────────────────▼──────────────────▼───────────────┐
+│                Shared Rust kernel (crates/*)                   │
+│   runtime · api · executor · chat · tools · commands           │
+│   notebook · remote-protocol · compat-harness                  │
+│   + 70 bundled research skills (assets/skills, compiled in)    │
+└───────────────────────────┬────────────────────────────────────┘
+┌───────────────────────────▼────────────────────────────────────┐
+│  Local data: config.json · sessions · run state · paper        │
+│  library (papers + SQLite) · knowledge base (knowledge.db)     │
+│  · usage log                                                   │
+└────────────────────────────────────────────────────────────────┘
 ```
+
+**Kernel crates:**
 
 | Path | Role |
 |------|------|
-| `desktop/src/` | React UI — chat, settings, skills, sessions, studio, monitor, teams |
-| `desktop/src-tauri/` | Tauri commands and desktop backend |
-| `crates/runtime/` | Filesystem, permissions, session, PDF text utilities |
-| `crates/executor/` | Provider clients and streaming |
-| `crates/tools/` | Tool registry for agents and desktop commands |
-| `crates/chat/` | Shared chat runtime assembly |
-| `crates/commands/` | Shared command parsing and specs |
+| `crates/runtime/` | Kernel runtime — conversation loop and session storage, permissions, context compaction, MCP client, memory / project goal / project intent, skill loading, PDF text extraction |
+| `crates/api/` | Anthropic HTTP/SSE client and OAuth |
+| `crates/executor/` | Provider streaming layer — Anthropic and OpenAI-compatible request/stream parsing, normalized into runtime events (both the Executor and the Reviewer model go through here) |
+| `crates/chat/` | Shared chat assembly — resolves providers from config and builds the executor, tool table, permission policy, and system prompt |
+| `crates/tools/` | Kernel tool registry (~50 tools) — file/shell, web, literature search (Scopus / OpenAlex / arXiv), literature/knowledge/Studio library writes, notebook execution, LaTeX compile, agent/team/workflow coordination |
+| `crates/commands/` | Slash command specs and parsing |
+| `crates/notebook/` | Jupyter kernel client (ZMQ + nbformat) — the execution substrate for Lab |
+| `crates/remote-protocol/` | End-to-end encryption primitives for mobile remote control (X25519 / Ed25519 / ChaCha20-Poly1305) |
+| `crates/aris-cli/` | Terminal shell (the `aris` command) |
+| `crates/compat-harness/` | Upstream Claude Code command/tool manifest extraction for audit comparison |
+
+**Desktop:**
+
+| Path | Role |
+|------|------|
+| `desktop/src/` | React UI — nine surfaces: Chat, Lab (Jupyter / MATLAB experiments + terminal), Typeset (Overleaf-style LaTeX editing + compile), Literature (paper library + citation graph + knowledge review), Studio (slides/poster review), Mail (Gmail / Outlook), Extensions, Scheduled, Settings — plus login and the session list |
+| `desktop/src-tauri/` | Tauri desktop backend — `engine` (chat execution bridge), per-surface commands (`lab` / `typeset` / `literature` / `knowledge` / `studio` / `mail` / `scheduled` / `terminal`), `newapi` (managed login), `remote` (device pairing), `mcp` / `connectors`, `watcher` / `usage_log` |
+
+**Remote services (optional, self-hosted):**
+
+| Path | Role |
+|------|------|
+| `services/remote-gateway/` | Device pairing, private signaling, and encrypted relay (standalone Cargo workspace; never stores project files, chat, or relay payloads) |
+| `services/remote-mobile/` | Mobile remote PWA (React + Vite) |
 
 > **Design rule:** Desktop never spawns or parses `aris-cli` — CLI and Desktop are two shells over the same
 > core runtime. See [cli-desktop-architecture.md](docs/development-logic/cli-desktop-architecture.md).

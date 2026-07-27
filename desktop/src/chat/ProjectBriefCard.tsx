@@ -6,6 +6,7 @@ import {
   type ProjectIntentStatus,
 } from "../api/tauri";
 import type { Language } from "../store";
+import { SvgIcon } from "../SvgIcon";
 
 export const PROJECT_BRIEF_UPDATED_EVENT = "somniq:project-brief-updated";
 
@@ -187,6 +188,28 @@ export default function ProjectBriefCard({
             <div className="project-brief-row">
               <RowIcon kind="criteria" />
               <div><span>{labels.milestone}</span><p>{milestone.objective}</p></div>
+            </div>
+            <div className="project-brief-row">
+              <RowIcon kind="criteria" />
+              <div>
+                <span>{copy.criteria}</span>
+                {milestone.successCriteria.length > 0 ? (
+                  <ul className="project-brief-criteria">
+                    {milestone.successCriteria.map((criterion, index) => {
+                      const verification = milestone.verifiedCriteria?.find((item) => item.criterionIndex === index);
+                      return (
+                        <li key={criterion} className={verification ? "verified" : "pending"}>
+                          <span aria-hidden="true"><SvgIcon name={verification ? "check" : "circle"} size={12} /></span>
+                          <span>{criterion}</span>
+                          {verification && <small title={verification.evidence.join("\n")}>{verification.reviewer}</small>}
+                        </li>
+                      );
+                    })}
+                  </ul>
+                ) : (
+                  <p>{language === "cn" ? "尚未记录可核验的成功标准" : "No verifiable success criteria recorded"}</p>
+                )}
+              </div>
             </div>
             <div className="project-brief-row">
               <RowIcon kind="status" />

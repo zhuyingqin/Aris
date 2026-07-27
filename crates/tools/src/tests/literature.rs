@@ -521,3 +521,63 @@ fn strips_arxiv_version_suffixes() {
     assert_eq!(strip_version("cs/9901002v11"), "cs/9901002");
     assert_eq!(strip_version("cs/9901002"), "cs/9901002");
 }
+
+#[test]
+fn default_engines_run_published_venues_before_arxiv() {
+    // Empty sources with a Scopus key = the full core (Scopus, OpenAlex,
+    // Crossref) ahead of the arXiv supplement, in priority order.
+    assert_eq!(
+        planned_engines(&[], true),
+        vec![
+            Engine::Scopus,
+            Engine::OpenAlex,
+            Engine::Crossref,
+            Engine::Arxiv,
+        ],
+    );
+}
+
+#[test]
+fn default_engines_skip_scopus_without_key() {
+    assert_eq!(
+        planned_engines(&[], false),
+        vec![Engine::OpenAlex, Engine::Crossref, Engine::Arxiv],
+    );
+}
+
+#[test]
+fn explicit_scopus_runs_even_without_key() {
+    // The key error is surfaced as a warning downstream, not by skipping.
+    assert_eq!(
+        planned_engines(&["scopus".to_string()], false),
+        vec![Engine::Scopus],
+    );
+}
+
+#[test]
+fn explicit_sources_follow_priority_not_request_order() {
+    // arXiv is listed first but still runs last as the supplement.
+    assert_eq!(
+        planned_engines(&["arxiv".to_string(), "scopus".to_string()], true),
+        vec![Engine::Scopus, Engine::Arxiv],
+    );
+}
+
+#[test]
+fn arxiv_supplement_is_capped_but_core_is_not() {
+    assert_eq!(supplement_limit(100), ARXIV_SUPPLEMENT_MAX);
+    assert_eq!(supplement_limit(10), 10);
+}
+
+#[test]
+fn scopus_total_results_parses_string_and_number() {
+    assert_eq!(
+        scopus_total_results(&json!({ "opensearch:totalResults": "137" })),
+        137,
+    );
+    assert_eq!(
+        scopus_total_results(&json!({ "opensearch:totalResults": 42 })),
+        42,
+    );
+    assert_eq!(scopus_total_results(&json!({})), 0);
+}

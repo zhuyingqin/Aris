@@ -6,7 +6,7 @@ import {
   type NewApiAuthStatus,
 } from "../api/tauri";
 import appLogo from "../assets/app-logo.png";
-import DesktopWindowCloseControl from "../DesktopWindowCloseControl";
+import DesktopWindowControls from "../DesktopWindowControls";
 import { DEFAULT_AUTH_SERVER, useStore } from "../store";
 import { DreamScene, LoginBackdrop } from "./LoginScene";
 import "./login.css";
@@ -208,7 +208,7 @@ export default function Login() {
   return (
     <div className="sq-login-root">
       <LoginBackdrop />
-      <DesktopWindowCloseControl />
+      <DesktopWindowControls />
       <div className="sq-login-columns">
         <div className="sq-login-hero" aria-hidden="true">
           <DreamScene />

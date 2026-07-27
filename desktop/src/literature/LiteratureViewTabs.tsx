@@ -7,8 +7,8 @@ interface LiteratureViewTabsProps {
 }
 
 const LITERATURE_PAGE_VIEWS = [
-  { id: "library", label: "文献库", icon: "□" },
-  { id: "graph", label: "知识图谱", icon: "◇" },
+  { id: "library", label: "文献库", icon: "library" },
+  { id: "graph", label: "知识图谱", icon: "graph" },
 ] as const;
 
 export default function LiteratureViewTabs({
@@ -31,10 +31,11 @@ export default function LiteratureViewTabs({
           className={`lit-mode-tab${pageView === item.id ? " active" : ""}`}
           onClick={() => onPageViewChange(item.id)}
         >
-          <span aria-hidden="true">{item.icon}</span>
+          <span aria-hidden="true"><SvgIcon name={item.icon} size={15} /></span>
           {item.label}
         </button>
       ))}
     </div>
   );
 }
+import { SvgIcon } from "../SvgIcon";

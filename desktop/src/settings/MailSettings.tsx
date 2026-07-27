@@ -15,6 +15,7 @@ import type {
   MailSocketSecurity,
 } from "../types";
 import { useStore, type Language } from "../store";
+import { SvgIcon } from "../SvgIcon";
 
 const DEFAULT_MAIL: GenericMailAccountInput = {
   email: "",
@@ -253,7 +254,7 @@ export default function MailSettings({ onOpen }: { onOpen: () => void }) {
           </div>
         </div>
         <div className="sp-card-actions" onClick={(event) => event.stopPropagation()}>
-          <button className="sp-card-btn" title={copy.configure} type="button" onClick={onOpen}>✎</button>
+          <button className="sp-card-btn" title={copy.configure} type="button" onClick={onOpen}><SvgIcon name="edit" size={15} /></button>
         </div>
       </div>
     </div>
@@ -608,7 +609,7 @@ export function MailSettingsDetail() {
                   disabled={busy !== null}
                   onClick={() => void disconnect(account.id)}
                 >
-                  ✕
+                  <SvgIcon name="close" size={15} />
                 </button>
               </div>
             ))}

@@ -46,6 +46,7 @@ const mocks = vi.hoisted(() => ({
   onChatContextWarning: vi.fn(),
   onChatPermissionRequest: vi.fn(),
   onChatPermissionResolved: vi.fn(),
+  onChatReview: vi.fn(),
   onChatThinkingDelta: vi.fn(),
   onChatTool: vi.fn(),
   onChatToolProgress: vi.fn(),
@@ -103,6 +104,7 @@ vi.mock("../../api/tauri", () => ({
   onChatContextWarning: mocks.onChatContextWarning,
   onChatPermissionRequest: mocks.onChatPermissionRequest,
   onChatPermissionResolved: mocks.onChatPermissionResolved,
+  onChatReview: mocks.onChatReview,
   onChatThinkingDelta: mocks.onChatThinkingDelta,
   onChatTool: mocks.onChatTool,
   onChatToolProgress: mocks.onChatToolProgress,
@@ -257,6 +259,7 @@ beforeEach(() => {
   mocks.onChatContextWarning.mockReset().mockResolvedValue(unlisten);
   mocks.onChatPermissionRequest.mockReset().mockResolvedValue(unlisten);
   mocks.onChatPermissionResolved.mockReset().mockResolvedValue(unlisten);
+  mocks.onChatReview.mockReset().mockResolvedValue(unlisten);
   mocks.onChatThinkingDelta.mockReset().mockResolvedValue(unlisten);
   mocks.onChatTool.mockReset().mockResolvedValue(unlisten);
   mocks.onChatToolProgress.mockReset().mockResolvedValue(unlisten);

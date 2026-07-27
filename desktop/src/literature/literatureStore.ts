@@ -1418,7 +1418,7 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
         }
       } catch (error) {
         set({ error: `failed to load library: ${String(error)}` });
-        log("error", `✗ Failed to load library: ${String(error)}`, { open: true });
+        log("error", `Failed to load library: ${String(error)}`, { open: true });
       }
     },
 
@@ -1448,16 +1448,16 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
             // tool input is informational only
           }
           if (tool.name === "LiteratureSearch") {
-            log("info", `→ Agent (Chat): searching "${String(input.query ?? "…")}"`, {
+            log("info", `Agent (Chat): searching "${String(input.query ?? "...")}"`, {
               open: true,
             });
           } else if (tool.name === "LiteratureLibraryUpsert") {
             const count = Array.isArray(input.papers) ? input.papers.length : "?";
-            log("info", `→ Agent (Chat): saving ${count} records to the library…`, {
+            log("info", `Agent (Chat): saving ${count} records to the library...`, {
               open: true,
             });
           } else if (tool.name === "LiteraturePdfDownload") {
-            log("info", `→ Agent (Chat): downloading PDF ${String(input.fileName ?? "")}`, {
+            log("info", `Agent (Chat): downloading PDF ${String(input.fileName ?? "")}`, {
               open: true,
             });
           }
@@ -1480,10 +1480,10 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
           if (result.name === "LiteratureLibraryUpsert") {
             log(
               "ok",
-              `✓ Agent saved ${Number(output.added ?? 0)} new / ${Number(output.merged ?? 0)} merged → papers/library.json`,
+              `Agent saved ${Number(output.added ?? 0)} new / ${Number(output.merged ?? 0)} merged to papers/library.json`,
             );
           } else if (result.name === "LiteraturePdfDownload") {
-            log("ok", `✓ Agent downloaded ${String(output.relativePath ?? "PDF")}`);
+            log("ok", `Agent downloaded ${String(output.relativePath ?? "PDF")}`);
           }
         }),
       );
@@ -1530,7 +1530,7 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
               log(
                 delta > 0 ? "ok" : "info",
                 delta > 0
-                  ? `✓ Library reloaded after chat turn: +${delta} ${delta === 1 ? "paper" : "papers"}`
+                  ? `Library reloaded after chat turn: ${delta} new ${delta === 1 ? "paper" : "papers"}`
                   : "Library reloaded after chat turn (no new papers)",
               );
             });
@@ -2160,7 +2160,7 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
         ...entry,
         pdf: { ...entry.pdf, status: "downloading", error: undefined },
       }));
-      log("info", `→ Downloading PDF: ${pdfFileName(paper)}`, { open: true });
+      log("info", `Downloading PDF: ${pdfFileName(paper)}`, { open: true });
       try {
         const saved = await literatureDownloadPdf<PdfDownloadResult>(url, pdfFileName(paper));
         patchPapers([id], (entry) => ({
@@ -2176,14 +2176,14 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
             bytes: saved.bytes,
           },
         }));
-        log("ok", `✓ PDF saved → ${saved.relativePath} (${Math.max(1, Math.round(saved.bytes / 1024))} KB)`);
+        log("ok", `PDF saved to ${saved.relativePath} (${Math.max(1, Math.round(saved.bytes / 1024))} KB)`);
       } catch (error) {
         patchPapers([id], (entry) => ({
           ...entry,
           pdf: { ...entry.pdf, status: "failed", error: String(error) },
         }));
         set({ error: `PDF download failed: ${String(error)}` });
-        log("error", `✗ PDF download failed: ${String(error)}`, { open: true });
+        log("error", `PDF download failed: ${String(error)}`, { open: true });
       }
     },
 

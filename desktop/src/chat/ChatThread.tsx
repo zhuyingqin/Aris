@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, typ
 import { useVirtualizer } from "@tanstack/react-virtual";
 import type { ChatTurn } from "../types";
 import ErrorBoundary from "../ErrorBoundary";
+import { SvgIcon } from "../SvgIcon";
 import ChatMessage from "./ChatMessage";
 import arisIcon from "../assets/app-logo.png";
 import { textFromTurn } from "./model";
@@ -135,6 +136,7 @@ interface Props {
   isOmittedTurnLoading?: (turnIndex: number) => boolean;
   onPermissionRespond: (promptId: string, allow: boolean) => void;
   onQuestionRespond: (toolUseId: string, answer: string) => void;
+  onOpenIndependentReview?: () => void;
 }
 
 function ChatMessageFallback({ error, reset }: { error: Error; reset: () => void }) {
@@ -215,6 +217,7 @@ function turnRenderKey(turn: ChatTurn): string {
     if (block.kind === "text") return `t:${block.text.length}`;
     if (block.kind === "thinking") return `r:${block.thinking.length}`;
     if (block.kind === "notice") return `n:${block.message.length}`;
+    if (block.kind === "review") return `v:${block.phase}:${block.attempt}:${block.verdict ?? "pending"}:${block.reviewerModel ?? ""}`;
     if (block.kind === "permission") return `p:${block.id}:${block.status ?? "pending"}:${block.input.length}`;
     return `c:${block.id ?? ""}:${block.name}:${block.input.length}:${block.output?.length ?? -1}`;
   }).join("|");
@@ -237,6 +240,7 @@ export default function ChatThread({
   isOmittedTurnLoading = () => false,
   onPermissionRespond,
   onQuestionRespond,
+  onOpenIndependentReview,
 }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [following, setFollowing] = useState(true);
@@ -436,6 +440,7 @@ export default function ChatThread({
                       omittedTurnLoading={turn.omittedTurnIndex != null && isOmittedTurnLoading(turn.omittedTurnIndex)}
                       onPermissionRespond={onPermissionRespond}
                       onQuestionRespond={onQuestionRespond}
+                      onOpenIndependentReview={onOpenIndependentReview}
                     />
                   </ErrorBoundary>
                 </div>
@@ -450,7 +455,7 @@ export default function ChatThread({
           style={{ bottom: composerHeight + 12 }}
           onClick={() => scrollToBottom(true)}
         >
-          ↓ Back to bottom
+          <SvgIcon name="download" size={14} /> Back to bottom
         </button>
       )}
       <QuestionTimeline

@@ -1123,7 +1123,7 @@ export default function Mail() {
               placeholder="搜索邮件、联系人或关键词"
               onChange={(event) => setSearchInput(event.target.value)}
             />
-            <kbd>⌘K</kbd>
+            <kbd>Cmd+K</kbd>
           </form>
           {previewMode && <span className="am-preview-badge">浏览器示例数据</span>}
           <div className="am-top-actions">

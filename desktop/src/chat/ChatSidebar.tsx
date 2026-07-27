@@ -11,6 +11,7 @@ import {
 import { createPortal } from "react-dom";
 import type { DesktopProject } from "../types";
 import { useStore } from "../store";
+import { SvgIcon } from "../SvgIcon";
 import { CHAT_COPY } from "./i18n";
 import { groupSessionsByProject } from "./model";
 import type { ChatSession } from "./types";
@@ -572,16 +573,16 @@ export default function ChatSidebar({
       <div className="chat-sidebar-head">
         <div className="chat-sidebar-top-row">
           <button className="chat-new-btn" onClick={() => void onNew()} disabled={busy}>
-            <span className="chat-new-icon">+</span>
+            <span className="chat-new-icon"><SvgIcon name="plus" size={14} /></span>
             <span>{copy.newChat}</span>
           </button>
-          <button className="chat-sidebar-close" onClick={onClose} aria-label={copy.closeSidebar}>×</button>
+          <button className="chat-sidebar-close" onClick={onClose} aria-label={copy.closeSidebar}><SvgIcon name="close" size={15} /></button>
         </div>
         <button
           className="chat-scheduled-btn"
           onClick={() => setTab("scheduled")}
         >
-          <span className="chat-scheduled-icon">⚡</span>
+          <span className="chat-scheduled-icon"><SvgIcon name="lightning" size={14} /></span>
           <span>{copy.scheduledTasks}</span>
         </button>
       </div>

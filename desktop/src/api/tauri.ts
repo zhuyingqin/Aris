@@ -998,6 +998,12 @@ export type ProjectGoalStatus = "active" | "paused" | "complete";
 export interface ProjectGoalView {
   objective: string;
   successCriteria: string[];
+  verifiedCriteria: Array<{
+    criterionIndex: number;
+    evidence: string[];
+    reviewer: string;
+    verifiedAt: string;
+  }>;
   recentStatus: string;
   status: ProjectGoalStatus;
   sourceSessionId?: string | null;
@@ -1034,8 +1040,46 @@ export const projectIntentObserve = (
   sessionId: string,
   observations: ProjectIntentObservation[],
 ) => invoke<ProjectBriefView>("project_intent_observe", { projectId, sessionId, observations });
-export const projectGoalProgress = (projectId: string, recentStatus: string) =>
-  invoke<ProjectBriefView>("project_goal_progress", { projectId, recentStatus });
+
+export type IndependentReviewVerdict = "pass" | "revise" | "needs_user" | "unavailable";
+
+export interface IndependentReviewIssue {
+  severity: string;
+  title: string;
+  detail: string;
+  evidence: string;
+  recommendation: string;
+}
+
+export interface IndependentReviewResult {
+  verdict: IndependentReviewVerdict;
+  summary: string;
+  issues: IndependentReviewIssue[];
+  evidenceChecked: string[];
+  missingChecks: string[];
+  revisionInstructions: string[];
+  relevantToGoal: boolean;
+  progressDelta?: string | null;
+  criteriaSatisfied: number[];
+  reviewerProvider: string;
+  reviewerModel: string;
+  executorProvider: string;
+  executorModel: string;
+  independent: boolean;
+  exhausted: boolean;
+}
+
+export interface IndependentReviewEvent {
+  sessionId: string;
+  phase: "reviewing" | "result" | "revising" | "complete" | "cleared";
+  attempt: number;
+  /** Local automatic-revision index for the current reviewed turn. */
+  revision?: number;
+  maxRevisions: number;
+  reviewerProvider?: string | null;
+  reviewerModel?: string | null;
+  result?: IndependentReviewResult | null;
+}
 
 export interface ChatImageInput {
   name?: string;
@@ -1106,6 +1150,8 @@ export const chatRewindToUserMessage = (sessionId: string, message: ChatContextU
 export const chatDelete = (sessionId: string, projectId?: string) =>
   invoke<void>("chat_delete", { sessionId, projectId: projectId ?? null });
 export const chatCancel = (sessionId: string) => invoke<void>("chat_cancel", { sessionId });
+export const chatReviewClear = (sessionId: string) =>
+  invoke<void>("chat_review_clear", { sessionId });
 export const chatEventsRead = (sessionId: string) =>
   invoke<ChatEventLogEntry[]>("chat_events_read", { sessionId });
 export const chatEventsExport = (sessionId: string, path?: string | null) =>
@@ -1167,6 +1213,8 @@ export const onChatPermissionRequest = (handler: (event: ChatPermissionRequestEv
   listen<ChatPermissionRequestEvent>("chat-permission-request", (e) => handler(e.payload));
 export const onChatPermissionResolved = (handler: (event: ChatPermissionResolvedEvent) => void) =>
   listen<ChatPermissionResolvedEvent>("chat-permission-resolved", (e) => handler(e.payload));
+export const onChatReview = (handler: (event: IndependentReviewEvent) => void) =>
+  listen<IndependentReviewEvent>("chat-review", (e) => handler(e.payload));
 export interface ChatDoneEvent {
   sessionId: string;
   text: string;

@@ -2,7 +2,7 @@ import React, { useEffect, useState } from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
 import Login from "./auth/Login";
-import DesktopWindowCloseControl from "./DesktopWindowCloseControl";
+import DesktopWindowControls from "./DesktopWindowControls";
 import { isTauri } from "./api/tauri";
 import ErrorBoundary from "./ErrorBoundary";
 import { RemoteP2pBridge } from "./remote/RemoteP2pBridge";
@@ -42,7 +42,7 @@ function Root() {
   if (authed && checkingAuth) {
     return (
       <>
-        <DesktopWindowCloseControl />
+        <DesktopWindowControls />
         <div className="auth-checking" role="status">Verifying sign-in...</div>
       </>
     );

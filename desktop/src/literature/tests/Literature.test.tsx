@@ -331,11 +331,11 @@ describe("Literature library", () => {
     await screen.findAllByText("Persisted Paper on Grounded Reading");
 
     await user.click(screen.getByRole("tab", { name: "文件" }));
-    await user.click(screen.getByRole("button", { name: "+ Core review" }));
-    expect(screen.getByRole("button", { name: "✓ Core review" }).getAttribute("aria-pressed")).toBe("true");
+    await user.click(screen.getByRole("button", { name: "Core review" }));
+    expect(screen.getByRole("button", { name: "Core review" }).getAttribute("aria-pressed")).toBe("true");
 
-    await user.click(screen.getByRole("button", { name: "✓ Core review" }));
-    expect(screen.getByRole("button", { name: "+ Core review" }).getAttribute("aria-pressed")).toBe("false");
+    await user.click(screen.getByRole("button", { name: "Core review" }));
+    expect(screen.getByRole("button", { name: "Core review" }).getAttribute("aria-pressed")).toBe("false");
   });
 
   it("logs literature tool calls made by the agent in Chat", async () => {
@@ -360,7 +360,7 @@ describe("Literature library", () => {
       within(log).getByText(/Agent \(Chat\): saving 3 records to the library/),
     ).toBeTruthy();
     expect(
-      within(log).getByText(/Agent saved 3 new \/ 0 merged → papers\/library.json/),
+      within(log).getByText(/Agent saved 3 new \/ 0 merged to papers\/library.json/),
     ).toBeTruthy();
   });
 
@@ -477,7 +477,7 @@ describe("Literature library", () => {
 
     // Opening a downloaded PDF takes over the body with the immersive reading
     // shell (full-width reader + a back button), not the cramped side panel.
-    expect(screen.getByRole("button", { name: "‹ 返回" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "返回" })).toBeTruthy();
     expect(mocks.literaturePdfOpen).not.toHaveBeenCalled();
     expect(mocks.literatureDownloadPdf).not.toHaveBeenCalled();
   });

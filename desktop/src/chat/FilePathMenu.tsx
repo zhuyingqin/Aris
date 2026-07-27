@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { fileOpen, fileRead } from "../api/tauri";
+import { SvgIcon } from "../SvgIcon";
 
 interface Props {
   x: number;
@@ -108,7 +109,7 @@ export default function FilePathMenu({ x, y, path, projectRoot, onClose, onAttac
       >
         <button role="menuitem">
           在...中打开
-          <span className="file-path-menu-arrow">›</span>
+          <span className="file-path-menu-arrow"><SvgIcon name="chevronRight" size={12} /></span>
         </button>
         {openInOpen && (
           <div className="file-path-menu-sub" role="menu">

@@ -196,4 +196,21 @@ describe("MarkdownContent local links", () => {
 
     expect(apiMocks.fileOpen).toHaveBeenCalledWith("C:/Users/wt/.config/SomniQ/desktop-runtime");
   });
+
+  it.each([
+    ["raw Windows drive path", "[Open source](F:/Agent/Aris/desktop/src/chat/Chat.tsx:347)", "F:/Agent/Aris/desktop/src/chat/Chat.tsx:347"],
+    ["raw Windows backslashes", "[Open source](F:\\Agent\\Aris\\desktop\\src\\chat\\Chat.tsx:347)", "F:/Agent/Aris/desktop/src/chat/Chat.tsx:347"],
+    ["encoded backslashes", "[Open source](F:%5CAgent%5CAris%5Cdesktop%5Csrc%5Cchat%5CChat.tsx:347)", "F:/Agent/Aris/desktop/src/chat/Chat.tsx:347"],
+    ["file URI", "[Open source](file:///F:/Agent/Aris/desktop/src/chat/Chat.tsx)", "F:/Agent/Aris/desktop/src/chat/Chat.tsx"],
+    ["VS Code file URI", "[Open source](vscode://file/F:/Agent/Aris/desktop/src/chat/Chat.tsx:347)", "F:/Agent/Aris/desktop/src/chat/Chat.tsx:347"],
+    ["spaces, Chinese, and line anchor", "[Open source](<F:/研究 项目/论文/main.tex#L12C3>)", "F:/研究 项目/论文/main.tex"],
+    ["relative path and line anchor", "[Open source](../papers/main.tex#L20)", "../papers/main.tex"],
+  ])("opens a %s", async (_case, markdown, expectedPath) => {
+    const user = userEvent.setup();
+    render(<MarkdownContent text={markdown} />);
+
+    await user.click(screen.getByRole("link", { name: "Open source" }));
+
+    expect(apiMocks.fileOpen).toHaveBeenCalledWith(expectedPath);
+  });
 });

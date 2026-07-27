@@ -1,7 +1,9 @@
 //! OpenAI-compatible executor client for ARIS.
 //!
-//! Supports any provider that implements the OpenAI `/v1/chat/completions` API:
-//! OpenAI, Gemini, DeepSeek, GLM, MiniMax, Moonshot, Qwen, Yi, etc.
+//! Supports providers that implement the OpenAI `/v1/chat/completions` API
+//! (Gemini, DeepSeek, GLM, MiniMax, Moonshot, Qwen, Yi, etc.) and routes
+//! tool-using reasoning models on OpenAI's official endpoint through
+//! `/v1/responses` so `reasoning.effort` is actually applied.
 
 use runtime::{
     ApiClient, ApiRequest, AssistantEvent, ContentBlock, ConversationMessage, MessageRole,
@@ -46,6 +48,13 @@ fn supports_reasoning_effort(model: &str) -> bool {
         || m.contains("gpt-5")
         || m.contains("reasoner")
         || m.contains("thinking")
+}
+
+#[must_use]
+fn uses_openai_responses_api(base_url: &str, model: &str, enable_tools: bool) -> bool {
+    let base = base_url.trim().trim_end_matches('/').to_ascii_lowercase();
+    let official_openai = base == "https://api.openai.com" || base == "https://api.openai.com/v1";
+    official_openai && enable_tools && supports_reasoning_effort(model)
 }
 
 /// v0.4.12 P1.C — detect a 400 response whose error body actually fingers
@@ -283,6 +292,7 @@ fn token_usage_from_openai_usage(usage: &Value) -> TokenUsage {
         .unwrap_or(0) as u32;
     let cached_tokens = usage
         .get("prompt_tokens_details")
+        .or_else(|| usage.get("input_tokens_details"))
         .and_then(|d| d.get("cached_tokens"))
         .and_then(|v| v.as_u64())
         .unwrap_or(0) as u32;
@@ -331,6 +341,53 @@ fn stream_error_detail(parsed: &Value) -> Option<String> {
     } else {
         Some(format!("{msg} ({code})"))
     }
+}
+
+fn responses_stream_error_detail(parsed: &Value) -> Option<String> {
+    if parsed.get("type").and_then(Value::as_str) != Some("response.failed") {
+        return None;
+    }
+    let error = parsed.get("response")?.get("error")?;
+    if error.is_null() {
+        return Some("Responses API reported a failed response".to_string());
+    }
+    let message = error
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or("Responses API reported a failed response");
+    let code = error
+        .get("code")
+        .and_then(Value::as_str)
+        .or_else(|| error.get("type").and_then(Value::as_str));
+    Some(match code {
+        Some(code) => format!("{message} ({code})"),
+        None => message.to_string(),
+    })
+}
+
+fn responses_tool_call_from_output_item(item: &Value) -> Option<(String, String, String)> {
+    if item.get("type").and_then(Value::as_str) != Some("function_call") {
+        return None;
+    }
+    let id = item
+        .get("call_id")
+        .and_then(Value::as_str)
+        .or_else(|| item.get("id").and_then(Value::as_str))?
+        .to_string();
+    let name = item.get("name").and_then(Value::as_str)?.to_string();
+    let arguments = item
+        .get("arguments")
+        .and_then(Value::as_str)
+        .unwrap_or("{}")
+        .to_string();
+    Some((id, name, arguments))
+}
+
+fn responses_reasoning_cache_size(cache: &std::collections::HashMap<usize, Vec<Value>>) -> usize {
+    cache
+        .values()
+        .map(|items| serde_json::to_string(items).map_or(0, |json| json.len()))
+        .sum()
 }
 
 fn response_request_id(headers: &reqwest::header::HeaderMap) -> Option<String> {
@@ -671,6 +728,10 @@ pub struct OpenAIRuntimeClient {
     /// Kimi K2.5: stores reasoning_content per assistant turn for replay.
     /// Key = message index in session, Value = reasoning text.
     kimi_reasoning_cache: std::collections::HashMap<usize, String>,
+    /// Raw Responses API reasoning items must be replayed together with a
+    /// function call and its output. Keep them in-memory by assistant-message
+    /// index; final session messages remain provider-neutral and local.
+    responses_reasoning_cache: std::collections::HashMap<usize, Vec<Value>>,
 }
 
 impl OpenAIRuntimeClient {
@@ -695,6 +756,7 @@ impl OpenAIRuntimeClient {
             observer,
             trace_sink: None,
             kimi_reasoning_cache: std::collections::HashMap::new(),
+            responses_reasoning_cache: std::collections::HashMap::new(),
         })
     }
 
@@ -716,6 +778,9 @@ impl ApiClient for OpenAIRuntimeClient {
         if removed_count > 0 && !self.kimi_reasoning_cache.is_empty() {
             self.kimi_reasoning_cache.clear();
         }
+        if removed_count > 0 && !self.responses_reasoning_cache.is_empty() {
+            self.responses_reasoning_cache.clear();
+        }
     }
 
     #[allow(clippy::too_many_lines)]
@@ -733,6 +798,8 @@ impl ApiClient for OpenAIRuntimeClient {
         // emit reasoning_content but don't accept reasoning_effort as a
         // request field, still get cached and replayed.
         let supports_reasoning = supports_reasoning_content_replay(&self.model);
+        let use_responses_api =
+            uses_openai_responses_api(&self.base_url, &self.model, self.enable_tools);
         let messages = convert_messages_openai(
             &request.messages,
             system_prompt.as_deref(),
@@ -780,7 +847,8 @@ impl ApiClient for OpenAIRuntimeClient {
         // Proper fix (Responses API support) is tracked for v0.4.9.
         let on_openai = self.base_url.contains("api.openai.com");
         let model_lower = self.model.to_ascii_lowercase();
-        let openai_tool_reasoning_block = self.enable_tools
+        let openai_tool_reasoning_block = !use_responses_api
+            && self.enable_tools
             && on_openai
             && (model_lower.contains("gpt-5.5")
                 || model_lower.contains("gpt-5.6")
@@ -811,13 +879,53 @@ on a compatible third-party proxy, or use Claude/another provider as executor an
             });
         }
 
-        let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
+        if use_responses_api {
+            let mut responses_body = json!({
+                "model": self.model,
+                "stream": true,
+                "store": false,
+                "include": ["reasoning.encrypted_content"],
+                "input": convert_messages_responses(
+                    &request.messages,
+                    &self.responses_reasoning_cache,
+                ),
+                "reasoning": {
+                    "effort": reasoning_effort(),
+                    "summary": "auto",
+                },
+            });
+            if let Some(prompt) = system_prompt.as_deref() {
+                responses_body["instructions"] = json!(prompt);
+            }
+            if self.enable_tools {
+                responses_body["tools"] = json!(self
+                    .tool_specs
+                    .iter()
+                    .map(convert_tool_spec_responses)
+                    .collect::<Vec<_>>());
+                responses_body["tool_choice"] = json!("auto");
+            }
+            body = responses_body;
+        }
+
+        let endpoint = if use_responses_api {
+            "/responses"
+        } else {
+            "/chat/completions"
+        };
+        let transport = if use_responses_api {
+            "responses"
+        } else {
+            "chat_completions"
+        };
+        let url = format!("{}{}", self.base_url.trim_end_matches('/'), endpoint);
         trace_record(
             &self.trace_sink,
             "llm.tools_snapshot",
             json!({
                 "provider": "openai-compatible",
                 "model": &self.model,
+                "transport": transport,
                 "enabled": self.enable_tools,
                 "toolCount": self.tool_specs.len(),
                 "tools": tool_specs_to_value(&self.tool_specs),
@@ -830,7 +938,8 @@ on a compatible third-party proxy, or use Claude/another provider as executor an
                 "provider": "openai-compatible",
                 "model": &self.model,
                 "baseUrl": &self.base_url,
-                "endpoint": "/chat/completions",
+                "endpoint": endpoint,
+                "transport": transport,
                 "stream": true,
                 "systemPromptInMessages": system_prompt.is_some(),
                 "messageCount": request.messages.len(),
@@ -1044,6 +1153,7 @@ on a compatible third-party proxy, or use Claude/another provider as executor an
 
             // Kimi: accumulate reasoning_content from this turn
             let mut current_reasoning = String::new();
+            let mut current_responses_reasoning_items: Vec<Value> = Vec::new();
             let current_msg_index = request.messages.len(); // index of the new assistant msg
 
             // Accumulate tool calls: index → (id, name, arguments_json)
@@ -1138,6 +1248,7 @@ on a compatible third-party proxy, or use Claude/another provider as executor an
                                 )
                                 .await?;
                                 stream_buf.clear();
+                                current_responses_reasoning_items.clear();
                                 done = false;
                                 continue;
                             }
@@ -1201,6 +1312,7 @@ on a compatible third-party proxy, or use Claude/another provider as executor an
                                 )
                                 .await?;
                                 stream_buf.clear();
+                                current_responses_reasoning_items.clear();
                                 done = false;
                                 continue;
                             }
@@ -1249,6 +1361,7 @@ on a compatible third-party proxy, or use Claude/another provider as executor an
                             )
                             .await?;
                             stream_buf.clear();
+                            current_responses_reasoning_items.clear();
                             done = false;
                             continue;
                         }
@@ -1329,7 +1442,9 @@ on a compatible third-party proxy, or use Claude/another provider as executor an
                     //      discarding, mark it truncated so a cut-off tool call
                     //      is never executed, and let the conversation loop
                     //      attempt a bounded continuation.
-                    if let Some(detail) = stream_error_detail(&parsed) {
+                    if let Some(detail) = stream_error_detail(&parsed)
+                        .or_else(|| responses_stream_error_detail(&parsed))
+                    {
                         if nothing_emitted_yet(&events, &pending_tools, &current_reasoning) {
                             if stream_retries_remaining > 0
                                 && stream_error_is_retryable(&detail)
@@ -1362,6 +1477,7 @@ on a compatible third-party proxy, or use Claude/another provider as executor an
                                 )
                                 .await?;
                                 stream_buf.clear();
+                                current_responses_reasoning_items.clear();
                                 done = false;
                                 break;
                             }
@@ -1377,6 +1493,82 @@ on a compatible third-party proxy, or use Claude/another provider as executor an
                         ));
                         done = true;
                         break;
+                    }
+
+                    if use_responses_api {
+                        match parsed.get("type").and_then(Value::as_str).unwrap_or_default() {
+                            "response.output_text.delta" | "response.refusal.delta" => {
+                                if let Some(delta) = parsed.get("delta").and_then(Value::as_str) {
+                                    if !delta.is_empty() {
+                                        observer.on_text_delta(delta)?;
+                                        push_text_event(&mut events, delta.to_string());
+                                    }
+                                }
+                            }
+                            "response.reasoning_summary_text.delta"
+                            | "response.reasoning_text.delta" => {
+                                if let Some(delta) = parsed.get("delta").and_then(Value::as_str) {
+                                    if !delta.is_empty() {
+                                        observer.on_thinking_delta(delta)?;
+                                        current_reasoning.push_str(delta);
+                                    }
+                                }
+                            }
+                            "response.output_item.done" => {
+                                if let Some(item) = parsed.get("item") {
+                                    if item.get("type").and_then(Value::as_str) == Some("reasoning") {
+                                        current_responses_reasoning_items.push(item.clone());
+                                    } else if let Some(tool_call) =
+                                        responses_tool_call_from_output_item(item)
+                                    {
+                                        pending_tools.push(tool_call);
+                                    }
+                                }
+                            }
+                            "response.completed" => {
+                                if let Some(usage) = parsed
+                                    .get("response")
+                                    .and_then(|response| response.get("usage"))
+                                {
+                                    events.push(AssistantEvent::Usage(
+                                        token_usage_from_openai_usage(usage),
+                                    ));
+                                }
+                                observed_finish_reason = true;
+                                flush_pending_tools(&mut pending_tools, observer, &mut events)?;
+                                events.push(AssistantEvent::StopReason("stop".to_string()));
+                                observer.on_message_stop()?;
+                                events.push(AssistantEvent::MessageStop);
+                                done = true;
+                            }
+                            "response.incomplete" => {
+                                if let Some(usage) = parsed
+                                    .get("response")
+                                    .and_then(|response| response.get("usage"))
+                                {
+                                    events.push(AssistantEvent::Usage(
+                                        token_usage_from_openai_usage(usage),
+                                    ));
+                                }
+                                let reason = parsed
+                                    .get("response")
+                                    .and_then(|response| response.get("incomplete_details"))
+                                    .and_then(|details| details.get("reason"))
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("incomplete");
+                                pending_tools.clear();
+                                observed_finish_reason = true;
+                                events.push(AssistantEvent::StopReason(reason.to_string()));
+                                observer.on_message_stop()?;
+                                events.push(AssistantEvent::MessageStop);
+                                done = true;
+                            }
+                            _ => {}
+                        }
+                        if done {
+                            break;
+                        }
+                        continue;
                     }
 
                     // Extract usage if present (some providers send it).
@@ -1506,7 +1698,7 @@ on a compatible third-party proxy, or use Claude/another provider as executor an
             // MAX_REASONING_CACHE_TOTAL_CHARS across all entries (oldest
             // evicted first) so the request body doesn't balloon over a
             // long session.
-            if supports_reasoning && !current_reasoning.is_empty() {
+            if !use_responses_api && supports_reasoning && !current_reasoning.is_empty() {
                 if current_reasoning.chars().count() > MAX_REASONING_CHARS_PER_TURN {
                     // UTF-8-safe truncate at char boundary
                     let byte_idx = current_reasoning
@@ -1540,6 +1732,23 @@ on a compatible third-party proxy, or use Claude/another provider as executor an
                         break;
                     }
                     self.kimi_reasoning_cache.remove(&oldest_idx);
+                }
+            }
+
+            if use_responses_api && !current_responses_reasoning_items.is_empty() {
+                self.responses_reasoning_cache
+                    .insert(current_msg_index, current_responses_reasoning_items);
+                while responses_reasoning_cache_size(&self.responses_reasoning_cache)
+                    > MAX_REASONING_CACHE_TOTAL_CHARS
+                {
+                    let Some(oldest_idx) = self.responses_reasoning_cache.keys().copied().min()
+                    else {
+                        break;
+                    };
+                    if oldest_idx == current_msg_index {
+                        break;
+                    }
+                    self.responses_reasoning_cache.remove(&oldest_idx);
                 }
             }
 
@@ -1608,7 +1817,21 @@ fn convert_messages_openai(
     for (msg_idx, message) in messages.iter().enumerate() {
         match message.role {
             MessageRole::System => {
-                // Already handled above
+                let text = message
+                    .blocks
+                    .iter()
+                    .filter_map(|block| match block {
+                        ContentBlock::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if !text.is_empty() {
+                    result.push(json!({
+                        "role": "system",
+                        "content": text,
+                    }));
+                }
             }
             MessageRole::User => {
                 for block in &message.blocks {
@@ -1722,6 +1945,184 @@ fn convert_messages_openai(
     result
 }
 
+fn convert_messages_responses(
+    messages: &[ConversationMessage],
+    reasoning_cache: &std::collections::HashMap<usize, Vec<Value>>,
+) -> Vec<Value> {
+    let mut result = Vec::new();
+    let mut pending_tool_call_ids = Vec::new();
+    let mut orphan_tool_results = Vec::new();
+
+    for (message_index, message) in messages.iter().enumerate() {
+        match message.role {
+            MessageRole::System => {
+                let text = message_text(&message.blocks);
+                if !text.is_empty() {
+                    result.push(json!({ "role": "system", "content": text }));
+                }
+            }
+            MessageRole::User => {
+                for block in &message.blocks {
+                    if let ContentBlock::ToolResult {
+                        tool_use_id,
+                        tool_name,
+                        output,
+                        ..
+                    } = block
+                    {
+                        push_responses_tool_result_or_recover(
+                            &mut result,
+                            &mut pending_tool_call_ids,
+                            &mut orphan_tool_results,
+                            tool_use_id,
+                            tool_name,
+                            output,
+                        );
+                    }
+                }
+                recover_responses_tool_call_sequence(
+                    &mut result,
+                    &mut pending_tool_call_ids,
+                    &mut orphan_tool_results,
+                );
+                if let Some(content) = responses_user_content(&message.blocks) {
+                    result.push(json!({ "role": "user", "content": content }));
+                }
+            }
+            MessageRole::Tool => {
+                for block in &message.blocks {
+                    if let ContentBlock::ToolResult {
+                        tool_use_id,
+                        tool_name,
+                        output,
+                        ..
+                    } = block
+                    {
+                        push_responses_tool_result_or_recover(
+                            &mut result,
+                            &mut pending_tool_call_ids,
+                            &mut orphan_tool_results,
+                            tool_use_id,
+                            tool_name,
+                            output,
+                        );
+                    }
+                }
+            }
+            MessageRole::Assistant => {
+                recover_responses_tool_call_sequence(
+                    &mut result,
+                    &mut pending_tool_call_ids,
+                    &mut orphan_tool_results,
+                );
+                if let Some(reasoning_items) = reasoning_cache.get(&message_index) {
+                    result.extend(reasoning_items.iter().cloned());
+                }
+                let text = message_text(&message.blocks);
+                if !text.is_empty() {
+                    result.push(json!({ "role": "assistant", "content": text }));
+                }
+                for block in &message.blocks {
+                    if let ContentBlock::ToolUse { id, name, input } = block {
+                        pending_tool_call_ids.push(id.clone());
+                        result.push(json!({
+                            "type": "function_call",
+                            "call_id": id,
+                            "name": name,
+                            "arguments": input,
+                        }));
+                    }
+                }
+            }
+        }
+    }
+    recover_responses_tool_call_sequence(
+        &mut result,
+        &mut pending_tool_call_ids,
+        &mut orphan_tool_results,
+    );
+    result
+}
+
+fn message_text(blocks: &[ContentBlock]) -> String {
+    blocks
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn responses_user_content(blocks: &[ContentBlock]) -> Option<Value> {
+    let has_image = blocks
+        .iter()
+        .any(|block| matches!(block, ContentBlock::Image { .. }));
+    if !has_image {
+        let text = message_text(blocks);
+        return (!text.is_empty()).then(|| json!(text));
+    }
+    let content = blocks
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } if !text.is_empty() => Some(json!({
+                "type": "input_text",
+                "text": text,
+            })),
+            ContentBlock::Image { media_type, data } => Some(json!({
+                "type": "input_image",
+                "detail": "auto",
+                "image_url": format!("data:{media_type};base64,{data}"),
+            })),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    (!content.is_empty()).then(|| json!(content))
+}
+
+fn recover_responses_tool_call_sequence(
+    result: &mut Vec<Value>,
+    pending_tool_call_ids: &mut Vec<String>,
+    orphan_tool_results: &mut Vec<String>,
+) {
+    for call_id in pending_tool_call_ids.drain(..) {
+        result.push(json!({
+            "type": "function_call_output",
+            "call_id": call_id,
+            "output": "Tool execution stopped before ARIS recorded a result. Treat this as an interrupted or failed tool call and continue from the available context.",
+        }));
+    }
+    for content in orphan_tool_results.drain(..) {
+        result.push(json!({ "role": "user", "content": content }));
+    }
+}
+
+fn push_responses_tool_result_or_recover(
+    result: &mut Vec<Value>,
+    pending_tool_call_ids: &mut Vec<String>,
+    orphan_tool_results: &mut Vec<String>,
+    tool_use_id: &str,
+    tool_name: &str,
+    output: &str,
+) {
+    if let Some(index) = pending_tool_call_ids
+        .iter()
+        .position(|pending| pending == tool_use_id)
+    {
+        pending_tool_call_ids.remove(index);
+        result.push(json!({
+            "type": "function_call_output",
+            "call_id": tool_use_id,
+            "output": output,
+        }));
+        return;
+    }
+    orphan_tool_results.push(format!(
+        "[ARIS recovered an orphan tool result not attached to a pending assistant tool call: {tool_name} ({tool_use_id})]\n{output}"
+    ));
+}
+
 fn recover_openai_tool_call_sequence(
     result: &mut Vec<Value>,
     pending_tool_call_ids: &mut Vec<String>,
@@ -1811,6 +2212,16 @@ fn convert_tool_spec_openai(spec: &ExecutorToolSpec) -> Value {
             "description": spec.description,
             "parameters": spec.input_schema,
         }
+    })
+}
+
+fn convert_tool_spec_responses(spec: &ExecutorToolSpec) -> Value {
+    json!({
+        "type": "function",
+        "name": spec.name,
+        "description": spec.description,
+        "parameters": spec.input_schema,
+        "strict": false,
     })
 }
 

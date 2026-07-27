@@ -138,14 +138,15 @@ pub use process_registry::{
 pub use project_goal::{
     complete_project_goal, load_project_goal, pause_project_goal, project_brief, project_goal_path,
     render_project_goal_prompt, render_project_goal_report, replace_project_goal,
-    resume_project_goal, start_project_goal, update_project_goal_progress, ProjectBrief,
-    ProjectGoal, ProjectGoalDraft, ProjectGoalStatus,
+    resume_project_goal, start_project_goal, update_project_goal_progress,
+    update_project_goal_verified_progress, ProjectBrief, ProjectGoal,
+    ProjectGoalCriterionVerification, ProjectGoalDraft, ProjectGoalStatus,
 };
 pub use project_intent::{
-    apply_project_intent_review, load_project_intent, load_project_intent_state,
-    project_intent_needs_review, project_intent_path, record_project_intent_observations,
-    ProjectIntent, ProjectIntentDraft, ProjectIntentEvidence, ProjectIntentObservation,
-    ProjectIntentState, ProjectIntentStatus,
+    apply_project_intent_review, is_substantive_project_intent_text, load_project_intent,
+    load_project_intent_state, project_intent_needs_review, project_intent_path,
+    record_project_intent_observations, ProjectIntent, ProjectIntentDraft, ProjectIntentEvidence,
+    ProjectIntentObservation, ProjectIntentState, ProjectIntentStatus,
 };
 pub use prompt::{
     instruction_files_fingerprint, load_system_prompt, prepend_bullets, team_orchestration_section,

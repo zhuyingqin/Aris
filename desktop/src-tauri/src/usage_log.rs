@@ -17,6 +17,8 @@ static USAGE_LOG_LOCK: Mutex<()> = Mutex::new(());
 pub struct UsageLogEntry {
     pub created_at: u64,
     pub session_id: String,
+    #[serde(default = "default_usage_role")]
+    pub role: String,
     #[serde(default)]
     pub server: String,
     pub model: String,
@@ -64,6 +66,7 @@ pub struct UsageServerBucketView {
 pub struct UsageLogView {
     pub created_at: u64,
     pub session_id: String,
+    pub role: String,
     pub server: String,
     pub model: String,
     pub provider: String,
@@ -116,6 +119,7 @@ impl Default for UsageSummaryView {
 
 pub fn append_turn_usage(
     session_id: &str,
+    role: &str,
     model: &str,
     provider: &str,
     server: &str,
@@ -128,6 +132,7 @@ pub fn append_turn_usage(
         .map(|usage| UsageLogEntry {
             created_at: now_epoch_secs(),
             session_id: session_id.to_string(),
+            role: role.to_string(),
             server: server.to_string(),
             model: model.to_string(),
             provider: provider.to_string(),
@@ -257,6 +262,7 @@ fn summarize_usage_log(path: &Path, recent_limit: usize) -> Result<UsageSummaryV
         recent.push(UsageLogView {
             created_at: entry.created_at,
             session_id: entry.session_id.clone(),
+            role: entry.role.clone(),
             server: entry.server.clone(),
             model: entry.model.clone(),
             provider: entry.provider.clone(),
@@ -316,6 +322,10 @@ fn has_billable_tokens(usage: &TokenUsage) -> bool {
         || usage.output_tokens > 0
         || usage.cache_creation_input_tokens > 0
         || usage.cache_read_input_tokens > 0
+}
+
+fn default_usage_role() -> String {
+    "executor".to_string()
 }
 
 fn now_epoch_secs() -> u64 {

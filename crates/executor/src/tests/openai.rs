@@ -35,9 +35,7 @@ fn ignores_unrelated_errors() {
 }
 
 #[test]
-fn convert_messages_drops_system_role_in_messages_array() {
-    // Regression: before v0.4.2 the auto-compaction continuation message
-    // was role=System and was silently dropped here, erasing the summary.
+fn convert_messages_preserves_internal_system_instructions() {
     let messages = vec![
         ConversationMessage {
             role: MessageRole::System,
@@ -49,13 +47,132 @@ fn convert_messages_drops_system_role_in_messages_array() {
         ConversationMessage::user_text("next question"),
     ];
     let result = convert_messages_openai(&messages, None, &std::collections::HashMap::new());
-    // Should contain only the User message; the System one is skipped.
-    assert_eq!(result.len(), 1);
-    assert_eq!(result[0]["role"], "user");
-    assert!(result[0]["content"]
+    assert_eq!(result.len(), 2);
+    assert_eq!(result[0]["role"], "system");
+    assert_eq!(result[0]["content"], "compaction summary");
+    assert_eq!(result[1]["role"], "user");
+    assert!(result[1]["content"]
         .as_str()
         .unwrap_or("")
         .contains("next question"));
+}
+
+#[test]
+fn official_openai_tool_reasoning_uses_responses_transport_only() {
+    assert!(uses_openai_responses_api(
+        "https://api.openai.com/v1",
+        "gpt-5.6-sol",
+        true,
+    ));
+    assert!(uses_openai_responses_api(
+        "https://api.openai.com/v1/",
+        "o4-mini",
+        true,
+    ));
+    assert!(!uses_openai_responses_api(
+        "https://proxy.example/v1",
+        "gpt-5.6-sol",
+        true,
+    ));
+    assert!(!uses_openai_responses_api(
+        "https://api.openai.com/v1",
+        "gpt-5.6-sol",
+        false,
+    ));
+}
+
+#[test]
+fn responses_messages_replay_reasoning_and_pair_tool_outputs() {
+    let messages = vec![
+        ConversationMessage::user_text("inspect the workspace"),
+        ConversationMessage::assistant(vec![ContentBlock::ToolUse {
+            id: "call-1".to_string(),
+            name: "bash".to_string(),
+            input: r#"{"command":"cargo check"}"#.to_string(),
+        }]),
+        ConversationMessage::tool_result("call-1", "bash", "finished", false),
+    ];
+    let mut reasoning = std::collections::HashMap::new();
+    reasoning.insert(
+        1,
+        vec![json!({
+            "type": "reasoning",
+            "id": "rs-1",
+            "encrypted_content": "opaque",
+            "summary": [],
+        })],
+    );
+
+    let result = convert_messages_responses(&messages, &reasoning);
+
+    assert_eq!(result[1]["type"], "reasoning");
+    assert_eq!(result[2]["type"], "function_call");
+    assert_eq!(result[2]["call_id"], "call-1");
+    assert_eq!(result[3]["type"], "function_call_output");
+    assert_eq!(result[3]["call_id"], "call-1");
+    assert_eq!(result[3]["output"], "finished");
+}
+
+#[test]
+fn responses_messages_use_native_image_and_function_shapes() {
+    let messages = vec![ConversationMessage::user_blocks(vec![
+        ContentBlock::Text {
+            text: "inspect".into(),
+        },
+        ContentBlock::Image {
+            media_type: "image/png".into(),
+            data: "ZmFrZQ==".into(),
+        },
+    ])];
+    let result = convert_messages_responses(&messages, &std::collections::HashMap::new());
+    assert_eq!(result[0]["content"][0]["type"], "input_text");
+    assert_eq!(result[0]["content"][1]["type"], "input_image");
+    assert_eq!(
+        result[0]["content"][1]["image_url"],
+        "data:image/png;base64,ZmFrZQ=="
+    );
+
+    let spec = ExecutorToolSpec::new(
+        "bash",
+        "Run a command",
+        json!({ "type": "object", "properties": {} }),
+    );
+    let converted = convert_tool_spec_responses(&spec);
+    assert_eq!(converted["type"], "function");
+    assert_eq!(converted["name"], "bash");
+    assert_eq!(converted["strict"], false);
+    assert!(converted.get("function").is_none());
+}
+
+#[test]
+fn responses_stream_helpers_extract_tools_failures_and_cached_usage() {
+    let tool = responses_tool_call_from_output_item(&json!({
+        "type": "function_call",
+        "id": "fc-1",
+        "call_id": "call-1",
+        "name": "bash",
+        "arguments": "{}",
+    }))
+    .expect("function call");
+    assert_eq!(
+        tool,
+        ("call-1".to_string(), "bash".to_string(), "{}".to_string())
+    );
+
+    let failure = responses_stream_error_detail(&json!({
+        "type": "response.failed",
+        "response": { "error": { "message": "bad request", "code": "invalid" } }
+    }));
+    assert_eq!(failure.as_deref(), Some("bad request (invalid)"));
+
+    let usage = token_usage_from_openai_usage(&json!({
+        "input_tokens": 1_000,
+        "output_tokens": 200,
+        "input_tokens_details": { "cached_tokens": 400 }
+    }));
+    assert_eq!(usage.input_tokens, 600);
+    assert_eq!(usage.cache_read_input_tokens, 400);
+    assert_eq!(usage.output_tokens, 200);
 }
 
 #[test]

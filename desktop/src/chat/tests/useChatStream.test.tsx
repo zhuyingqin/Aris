@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
   onChatToolResult: vi.fn(),
   onChatPermissionRequest: vi.fn(),
   onChatPermissionResolved: vi.fn(),
+  onChatReview: vi.fn(),
   onChatDone: vi.fn(),
   onChatError: vi.fn(),
   onChatContextCompacted: vi.fn(),
@@ -30,6 +31,7 @@ vi.mock("../../api/tauri", () => ({
   onChatToolResult: mocks.onChatToolResult,
   onChatPermissionRequest: mocks.onChatPermissionRequest,
   onChatPermissionResolved: mocks.onChatPermissionResolved,
+  onChatReview: mocks.onChatReview,
   onChatDone: mocks.onChatDone,
   onChatError: mocks.onChatError,
   onChatContextCompacted: mocks.onChatContextCompacted,
@@ -46,6 +48,7 @@ const listenerMocks = [
   mocks.onChatToolResult,
   mocks.onChatPermissionRequest,
   mocks.onChatPermissionResolved,
+  mocks.onChatReview,
   mocks.onChatDone,
   mocks.onChatError,
   mocks.onChatContextCompacted,
@@ -136,6 +139,141 @@ describe("useChatStream tool block helpers", () => {
 });
 
 describe("useChatStream concurrent sessions", () => {
+  it("keeps the Executor draft stable while a revision streams, then swaps it atomically", () => {
+    let reviewHandler:
+      | ((event: {
+        sessionId: string;
+        phase: "reviewing" | "result" | "revising" | "complete" | "cleared";
+        attempt: number;
+        revision?: number;
+        maxRevisions: number;
+        reviewerProvider?: string;
+        reviewerModel?: string;
+        result?: null;
+      }) => void)
+      | null = null;
+    let deltaHandler: ((event: { sessionId: string; text: string }) => void) | null = null;
+    mocks.onChatReview.mockImplementation((handler) => {
+      reviewHandler = handler;
+      return Promise.resolve(() => undefined);
+    });
+    mocks.onChatDelta.mockImplementation((handler) => {
+      deltaHandler = handler;
+      return Promise.resolve(() => undefined);
+    });
+
+    let turn = {
+      id: "assistant",
+      role: "assistant" as const,
+      streaming: true,
+      blocks: [
+        { kind: "thinking" as const, text: "self-confirming assumption" },
+        { kind: "text" as const, text: "Everything is fixed." },
+        { kind: "tool" as const, id: "tool-1", name: "bash", input: "{}", output: "unit tests passed" },
+      ],
+    };
+    const patchAssistant = vi.fn((_sessionId: string, patch) => {
+      turn = patch(turn);
+    });
+    renderHook(() => useChatStream({
+      patchAssistant,
+      onComplete: vi.fn(),
+      onError: vi.fn(),
+    }));
+
+    act(() => {
+      reviewHandler?.({
+        sessionId: "chat-review",
+        phase: "reviewing",
+        attempt: 1,
+        maxRevisions: 2,
+        reviewerProvider: "openai",
+        reviewerModel: "gpt-5-reviewer",
+        result: null,
+      });
+    });
+
+    expect(turn.blocks).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: "review",
+        phase: "reviewing",
+        reviewerProvider: "openai",
+        reviewerModel: "gpt-5-reviewer",
+      }),
+    ]));
+
+    act(() => {
+      reviewHandler?.({
+        sessionId: "chat-review",
+        phase: "revising",
+        attempt: 1,
+        revision: 1,
+        maxRevisions: 2,
+        result: null,
+      });
+    });
+
+    expect(turn.blocks).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "text", text: "Everything is fixed." }),
+    ]));
+    expect(turn.blocks).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "tool", id: "tool-1" }),
+      expect.objectContaining({
+        kind: "review",
+        phase: "revising",
+        attempt: 1,
+      }),
+    ]));
+    expect((turn.blocks as Array<{ kind: string }>).filter((block) => block.kind === "review")).toHaveLength(1);
+
+    act(() => {
+      deltaHandler?.({ sessionId: "chat-review", text: "The verified fix includes integration tests." });
+    });
+
+    // The replacement is buffered: the visible answer never disappears and
+    // does not replay token-by-token underneath the Reviewer badge.
+    expect(turn.blocks).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "text", text: "Everything is fixed." }),
+    ]));
+    expect(turn.blocks).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "text", text: "The verified fix includes integration tests." }),
+    ]));
+
+    act(() => {
+      reviewHandler?.({
+        sessionId: "chat-review",
+        phase: "reviewing",
+        attempt: 2,
+        maxRevisions: 2,
+        reviewerProvider: "openai",
+        reviewerModel: "gpt-5-reviewer",
+        result: null,
+      });
+    });
+
+    expect(turn.blocks).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "text", text: "Everything is fixed." }),
+    ]));
+    expect(turn.blocks).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "text", text: "The verified fix includes integration tests." }),
+      expect.objectContaining({ kind: "review", phase: "reviewing", attempt: 2 }),
+    ]));
+    expect((turn.blocks as Array<{ kind: string }>).filter((block) => block.kind === "review")).toHaveLength(1);
+
+    act(() => {
+      reviewHandler?.({
+        sessionId: "chat-review",
+        phase: "cleared",
+        attempt: 0,
+        revision: 0,
+        maxRevisions: 2,
+        result: null,
+      });
+    });
+
+    expect((turn.blocks as Array<{ kind: string }>).filter((block) => block.kind === "review")).toHaveLength(0);
+  });
+
   it("updates progress on the matching running tool block", () => {
     const blocks = updateToolProgress([
       { kind: "tool", id: "older", name: "bash", input: "{}", output: "done" },

@@ -17,6 +17,12 @@ const brief = {
   goal: {
     objective: "Persist project goals across conversations",
     successCriteria: ["A new chat loads the goal", "Focused tests pass"],
+    verifiedCriteria: [{
+      criterionIndex: 0,
+      evidence: ["Focused continuity test passed"],
+      reviewer: "openai / gpt-reviewer",
+      verifiedAt: "2026-07-11T00:00:30Z",
+    }],
     recentStatus: "Goal persistence is implemented.",
     status: "active" as const,
     createdAt: "2026-07-11T00:00:00Z",
@@ -39,6 +45,8 @@ describe("ProjectBriefCard", () => {
     expect(screen.getByText("Build durable research continuity.")).toBeTruthy();
     expect(screen.getByText("Build a local-first research workspace with durable continuity.")).toBeTruthy();
     expect(screen.getByText("Persist project goals across conversations")).toBeTruthy();
+    expect(screen.getByText("A new chat loads the goal")).toBeTruthy();
+    expect(screen.getByText("Focused tests pass")).toBeTruthy();
     expect(screen.getByText("Goal persistence is implemented.")).toBeTruthy();
   });
 

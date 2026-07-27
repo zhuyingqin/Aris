@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { ChatFileChange, ChatTodoItem } from "../types";
+import { SvgIcon, type SvgIconName } from "../SvgIcon";
 import { EditedFilesSummary, type TurnFileChangeSummary } from "./ChatMessage";
 
 interface Props {
@@ -13,9 +14,9 @@ interface Props {
 }
 
 function stepIcon(status: ChatTodoItem["status"]) {
-  if (status === "completed") return "✓";
-  if (status === "in_progress") return "◌";
-  return "○";
+  if (status === "completed") return <SvgIcon name="check" size={12} />;
+  if (status === "in_progress") return <SvgIcon name="spinner" size={12} />;
+  return <SvgIcon name="circle" size={10} />;
 }
 
 function fileStatusLabel(status: ChatFileChange["status"]) {
@@ -25,11 +26,11 @@ function fileStatusLabel(status: ChatFileChange["status"]) {
   return "修改";
 }
 
-function fileStatusIcon(status: ChatFileChange["status"]) {
-  if (status === "added") return "+";
-  if (status === "deleted") return "-";
-  if (status === "renamed") return "↪";
-  return "±";
+function fileStatusIcon(status: ChatFileChange["status"]): SvgIconName {
+  if (status === "added") return "plus";
+  if (status === "deleted") return "minus";
+  if (status === "renamed") return "externalLink";
+  return "modified";
 }
 
 // The "current" step: the one in progress, else the first not-yet-done step,
@@ -90,7 +91,7 @@ export default function WorkflowFlow({
   const title = current
     ? current.status === "in_progress" ? current.activeForm : current.content
     : titlePaths.join("\n");
-  const chipIcon = hasTodos ? (allDone ? "✓" : "◌") : "±";
+  const chipIcon: SvgIconName = hasTodos ? (allDone ? "check" : "spinner") : "modified";
 
   return (
     <div
@@ -129,7 +130,7 @@ export default function WorkflowFlow({
               <div className="chat-workflow-panel-head">本次文件</div>
               {fallbackFileChanges.map((change) => (
                 <div key={`${change.status}:${change.path}`} className={`chat-workflow-file status-${change.status}`}>
-                  <span className="chat-workflow-file-icon">{fileStatusIcon(change.status)}</span>
+                  <span className="chat-workflow-file-icon"><SvgIcon name={fileStatusIcon(change.status)} size={12} /></span>
                   <span className="chat-workflow-file-status">{fileStatusLabel(change.status)}</span>
                   {onOpenFile ? (
                     <button
@@ -157,10 +158,10 @@ export default function WorkflowFlow({
         title={title}
       >
         <span className={`chat-workflow-chip-icon${active && !allDone ? " spin" : ""}`}>
-          {chipIcon}
+          <SvgIcon name={chipIcon} size={13} />
         </span>
         <span className="chat-workflow-chip-label">{label}</span>
-        <span className="chat-workflow-chip-caret">{open ? "▾" : "▴"}</span>
+        <span className="chat-workflow-chip-caret"><SvgIcon name={open ? "chevronDown" : "chevronUp"} size={11} /></span>
       </button>
     </div>
   );
