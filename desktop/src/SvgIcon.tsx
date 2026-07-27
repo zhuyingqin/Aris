@@ -12,6 +12,7 @@ export type SvgIconName =
   | "close"
   | "collection"
   | "diagram"
+  | "document"
   | "download"
   | "edit"
   | "error"
@@ -78,6 +79,8 @@ function iconNodes(name: SvgIconName): IconNode[] {
       return [node("path", { d: "M3 3.2h10v9.6H3zM5 6.2h6M5 8.8h4", strokeLinecap: "round", strokeLinejoin: "round" })];
     case "diagram":
       return [node("path", { d: "M3 12.5 7.7 3l5.3 9.5zM5.4 10.7h5.3M7.7 5.8v4.9", strokeLinecap: "round", strokeLinejoin: "round" })];
+    case "document":
+      return [node("path", { d: "M9 2.4H4.6v11.2h6.8V4.8zM9 2.4v2.4h2.4M6.4 8.4h3.2M6.4 10.8h3.2", strokeLinecap: "round", strokeLinejoin: "round" })];
     case "download":
       return [node("path", { d: "M8 2.7v6.7m-2.7-2.7L8 9.4l2.7-2.7M3 12.8h10", strokeLinecap: "round", strokeLinejoin: "round" })];
     case "edit":

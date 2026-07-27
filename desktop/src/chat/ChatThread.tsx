@@ -97,7 +97,8 @@ export function firstVisibleTurnIndexFromVirtualItems(
 }
 
 export interface ChatStarter {
-  id: "literature" | "research" | "review" | "writing";
+  /** Also selects the starter glyph; unknown ids fall back to the writing glyph. */
+  id: string;
   label: string;
   hint: string;
   prompt: string;
@@ -115,13 +116,13 @@ function StarterIcon({ id }: { id: ChatStarter["id"] }) {
     strokeLinejoin: "round" as const,
     "aria-hidden": true,
   };
-  if (id === "literature") {
+  if (id === "literature" || id === "locate") {
     return <svg {...common}><circle cx="10.5" cy="10.5" r="6" /><path d="m15 15 5 5" /></svg>;
   }
-  if (id === "research") {
+  if (id === "research" || id === "explain") {
     return <svg {...common}><path d="M4 6.5h16M4 12h16M4 17.5h10" /><path d="M18 15.5v5M15.5 18h5" /></svg>;
   }
-  if (id === "review") {
+  if (id === "review" || id === "check") {
     return <svg {...common}><circle cx="12" cy="12" r="8" /><path d="m8.5 12 2.3 2.3 4.8-5" /></svg>;
   }
   return <svg {...common}><path d="m14.5 5.5 4 4M5 19l2.6-.6L18.8 7.2a1.4 1.4 0 0 0-2-2L5.6 16.4 5 19Z" /><path d="M13 7 17 11" /></svg>;

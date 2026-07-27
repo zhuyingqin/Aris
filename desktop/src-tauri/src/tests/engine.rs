@@ -786,13 +786,10 @@ fn generated_chat_title_skips_reasoning_markup() {
 }
 
 #[test]
-fn desktop_chat_hides_team_workflow_tools_and_lets_permission_mode_gate_them() {
+fn desktop_chat_lets_permission_mode_gate_bash() {
     let specs = tool_specs_for(DESKTOP_CHAT_EXTRA_BLOCKED_TOOLS);
     assert!(specs.iter().any(|spec| spec.name == "bash"));
     assert!(specs.iter().any(|spec| spec.name == "Agent"));
-    assert!(!specs.iter().any(|spec| spec.name == "Workflow"));
-    assert!(!specs.iter().any(|spec| spec.name == "ListTeam"));
-    assert!(!specs.iter().any(|spec| spec.name == "AgentSupervisor"));
 
     let workspace = desktop_permission_policy(&specs, PermissionMode::WorkspaceWrite);
     assert!(matches!(
@@ -1236,7 +1233,7 @@ fn gpt5_context_window_uses_proxy_budget() {
 }
 
 #[test]
-fn chat_done_context_tokens_uses_the_larger_of_session_and_provider_prompt() {
+fn chat_done_context_tokens_uses_the_same_session_estimate_as_auto_compaction() {
     let session = Session {
         version: 1,
         messages: vec![
@@ -1254,11 +1251,8 @@ fn chat_done_context_tokens_uses_the_larger_of_session_and_provider_prompt() {
         cache_read_input_tokens: 300_000,
     };
 
-    let usage = latest_provider_usage(&[provider_usage]).expect("provider usage");
-    let context_tokens = chat_done_context_tokens(&session, Some(&usage));
+    let context_tokens = chat_done_context_tokens(&session);
 
-    assert_eq!(context_tokens, u64::from(provider_usage.prompt_tokens()));
-    assert_ne!(context_tokens, u64::from(provider_usage.total_tokens()));
-    assert_eq!(usage.prompt_tokens, provider_usage.prompt_tokens());
-    assert_eq!(usage.total_tokens, provider_usage.total_tokens());
+    assert_eq!(context_tokens, runtime::estimate_session_tokens(&session) as u64);
+    assert_ne!(context_tokens, u64::from(provider_usage.prompt_tokens()));
 }

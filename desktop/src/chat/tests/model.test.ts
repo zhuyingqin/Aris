@@ -305,6 +305,11 @@ describe("project chat grouping", () => {
     expect(migrateSession({ title: "Legacy" }).projectId).toBe("default");
   });
 
+  it("keeps a valid persisted backend context estimate", () => {
+    expect(migrateSession({ contextTokens: 32_768 }).contextTokens).toBe(32_768);
+    expect(migrateSession({ contextTokens: -1 }).contextTokens).toBeUndefined();
+  });
+
   it("cleans generated titles before showing them in the sidebar", () => {
     expect(cleanChatTitle(
       "<think>\nThe user asked me to pick a title.\n</think>\nTitle: Chemistry Slides",

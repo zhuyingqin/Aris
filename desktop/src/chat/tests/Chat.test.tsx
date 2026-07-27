@@ -22,6 +22,7 @@ const apiMocks = vi.hoisted(() => ({
   projectIntentObserve: vi.fn(() => Promise.resolve({ mission: "Test project mission", intent: null, goal: null })),
   chatRewindToUserMessage: vi.fn(() => Promise.resolve<number | null>(null)),
   chatSetContext: vi.fn((_sessionId: string, _messages: unknown[], _mode?: string) => Promise.resolve(0)),
+  chatContextTokens: vi.fn(() => Promise.resolve<number | null>(null)),
   chatDelete: vi.fn(() => Promise.resolve()),
   chatEventsReplay: vi.fn(() => Promise.resolve({ sessionId: "chat", eventCount: 0, lastSeq: 0, turns: [] })),
   chatEventsRead: vi.fn((_sessionId: string) => Promise.resolve([] as Array<{ kind: string; payload: unknown }>)),
@@ -34,6 +35,10 @@ const apiMocks = vi.hoisted(() => ({
   chatUiSessionDelete: vi.fn(() => Promise.resolve()),
   chatUiSessionsSave: vi.fn(() => Promise.resolve()),
   fileRead: vi.fn(() => Promise.resolve("")),
+  fileReadText: vi.fn(() => Promise.resolve({ path: "notes.md", content: "# Notes", bytes: 7, version: "v1" })),
+  fileReadBytes: vi.fn(() => Promise.resolve(new ArrayBuffer(0))),
+  fileOpen: vi.fn(() => Promise.resolve()),
+  fileReveal: vi.fn(() => Promise.resolve()),
   fileSearch: vi.fn(() => Promise.resolve([])),
   chatSend: vi.fn((_sessionId: string, _message: unknown) => Promise.resolve("")),
   chatModelOptions: vi.fn(() => Promise.resolve({ provider: "anthropic-compat", current: "MiniMax-M3", options: [{ value: "MiniMax-M3", label: "MiniMax-M3", description: null }] })),
@@ -58,7 +63,12 @@ const apiMocks = vi.hoisted(() => ({
   onChatUiSessionUpdated: vi.fn(() => Promise.resolve(() => undefined)),
 }));
 
+const dialogMocks = vi.hoisted(() => ({
+  open: vi.fn(() => Promise.resolve<string | null>("F:/project/docs/plan.md")),
+}));
+
 vi.mock("../../api/tauri", () => apiMocks);
+vi.mock("@tauri-apps/plugin-dialog", () => dialogMocks);
 
 vi.mock("../ChatThread", () => ({
   default: ({
@@ -183,6 +193,7 @@ describe("Chat export action", () => {
     apiMocks.chatUiSessionsList.mockResolvedValue([]);
     apiMocks.chatEventsReplay.mockResolvedValue({ sessionId: "chat", eventCount: 0, lastSeq: 0, turns: [] });
     apiMocks.chatEventsRead.mockResolvedValue([]);
+    apiMocks.chatContextTokens.mockResolvedValue(null);
     apiMocks.chatUiSessionLoad.mockResolvedValue(null);
     apiMocks.chatUiSessionSave.mockResolvedValue(undefined);
     apiMocks.chatUiSessionDelete.mockResolvedValue(undefined);
@@ -214,12 +225,25 @@ describe("Chat export action", () => {
     expect(document.getElementById("project-brief-popover")).toBeTruthy();
     expect(document.querySelector(".chat > .project-brief-card")).toBeNull();
     expect(document.querySelector(".chat-head-actions .chat-project-brief-toggle")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Show or hide side task panel" })).toBeTruthy();
-    expect(screen.queryByRole("navigation", { name: "Side task navigation" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Show or hide side panel" })).toBeTruthy();
+    expect(screen.queryByRole("navigation", { name: "Side panel navigation" })).toBeNull();
 
     await userEvent.click(screen.getByRole("button", { name: "Collapse project summary" }));
     await waitFor(() => expect(document.getElementById("project-brief-popover")).toBeNull());
     expect(document.querySelector(".chat-root")?.classList.contains("chat-project-brief-open")).toBe(false);
+  });
+
+  it("hydrates and persists backend context tokens for a legacy compacted chat", async () => {
+    const session = seedChatWithTurns();
+    apiMocks.chatContextTokens.mockResolvedValue(32_768);
+
+    render(<Chat />);
+    await userEvent.click(await screen.findByRole("button", { name: "Export test" }));
+
+    await waitFor(() => expect(apiMocks.chatContextTokens).toHaveBeenCalledWith(session.id));
+    await waitFor(() => expect(apiMocks.chatUiSessionSave).toHaveBeenCalledWith(
+      expect.objectContaining({ id: session.id, contextTokens: 32_768 }),
+    ));
   });
 
   it("loads earlier restart-preview turns from upward scrolling in bounded batches", async () => {
@@ -286,11 +310,11 @@ describe("Chat export action", () => {
     expect(screen.getByText("Future chat turns will skip the automatic Reviewer")).toBeTruthy();
   });
 
-  it("keeps the main task visible beside a hideable, extensible side-task panel", async () => {
+  it("keeps the main task visible beside a hideable, extensible side panel", async () => {
     render(<Chat />);
 
     await waitFor(() => expect(document.getElementById("project-brief-popover")).toBeTruthy());
-    await userEvent.click(screen.getByRole("button", { name: "Show or hide side task panel" }));
+    await userEvent.click(screen.getByRole("button", { name: "Show or hide side panel" }));
 
     await waitFor(() => expect(document.querySelector(".side-task-panel")).toBeTruthy());
     expect(document.getElementById("project-brief-popover")).toBeNull();
@@ -299,22 +323,52 @@ describe("Chat export action", () => {
     expect(document.querySelector('.chat > [data-testid="chat-thread"]')).toBeTruthy();
     expect(screen.getByRole("tab", { name: "Side task 1" }).getAttribute("aria-selected")).toBe("true");
 
-    await userEvent.click(screen.getByRole("button", { name: "Add side task tab" }));
+    await userEvent.click(screen.getByRole("button", { name: "Add side panel tab" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: /New side task/ }));
     expect(screen.getAllByRole("tab")).toHaveLength(2);
     expect(screen.getByRole("tab", { name: "Side task 2" }).getAttribute("aria-selected")).toBe("true");
 
-    await userEvent.click(screen.getByRole("button", { name: "Hide side task panel" }));
+    await userEvent.click(screen.getByRole("button", { name: "Hide side panel" }));
     expect(document.querySelector(".chat-root")?.classList.contains("side-task-open")).toBe(false);
     expect(document.getElementById("side-task-panel")?.hidden).toBe(true);
     expect(document.querySelectorAll(".side-task-panel")).toHaveLength(2);
 
-    await userEvent.click(screen.getByRole("button", { name: "Show or hide side task panel" }));
+    await userEvent.click(screen.getByRole("button", { name: "Show or hide side panel" }));
     expect(document.querySelector(".chat-root")?.classList.contains("side-task-open")).toBe(true);
     expect(screen.getByRole("tab", { name: "Side task 2" }).getAttribute("aria-selected")).toBe("true");
 
-    await userEvent.click(screen.getByRole("button", { name: "Close side task tab: Side task 2" }));
+    await userEvent.click(screen.getByRole("button", { name: "Close side panel tab: Side task 2" }));
     expect(screen.queryByRole("tab", { name: "Side task 2" })).toBeNull();
     expect(screen.getByRole("tab", { name: "Side task 1" }).getAttribute("aria-selected")).toBe("true");
+  });
+
+  it("opens a picked file as a reading tab in the side panel", async () => {
+    render(<Chat />);
+
+    await userEvent.click(await screen.findByRole("button", { name: "Show or hide side panel" }));
+    await waitFor(() => expect(document.querySelector(".side-task-panel")).toBeTruthy());
+
+    await userEvent.click(screen.getByRole("button", { name: "Add side panel tab" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: /Open file/ }));
+
+    await waitFor(() => expect(screen.getByRole("tab", { name: "plan.md" })).toBeTruthy());
+    expect(screen.getByRole("tab", { name: "plan.md" }).getAttribute("aria-selected")).toBe("true");
+    await waitFor(() => expect(apiMocks.fileReadText).toHaveBeenCalledWith("F:/project/docs/plan.md"));
+    // A reading tab always offers its path back to the main task.
+    expect(await screen.findByRole("button", { name: "Send to main task" })).toBeTruthy();
+  });
+
+  it("consumes a reading request raised from inside the thread", async () => {
+    render(<Chat />);
+    await waitFor(() => expect(document.querySelector(".chat-root")).toBeTruthy());
+
+    // File links in tool cards and markdown ask through the store; PDFs route
+    // here instead of taking over the LaTeX workspace.
+    useStore.setState({ pendingSidePanelFilePath: "F:/project/docs/report.md" });
+
+    await waitFor(() => expect(screen.getByRole("tab", { name: "report.md" })).toBeTruthy());
+    expect(document.querySelector(".chat-root")?.classList.contains("side-task-open")).toBe(true);
+    expect(useStore.getState().pendingSidePanelFilePath).toBeNull();
   });
 
   it("keeps Reviewer details closed until the in-chat Agent badge is clicked", async () => {

@@ -8,16 +8,12 @@ pub const ARIS_WORKSPACE_ROOT_ENV: &str = "ARIS_WORKSPACE_ROOT";
 pub const ARIS_RUN_STATE_DIR_ENV: &str = "ARIS_RUN_STATE_DIR";
 pub const ARIS_SESSIONS_DIR_ENV: &str = "ARIS_SESSIONS_DIR";
 pub const ARIS_AGENT_STORE_DIR_ENV: &str = "ARIS_AGENT_STORE_DIR";
-pub const ARIS_WORKFLOWS_DIR_ENV: &str = "ARIS_WORKFLOWS_DIR";
-pub const ARIS_USER_WORKFLOWS_DIR_ENV: &str = "ARIS_USER_WORKFLOWS_DIR";
 pub const CLAWD_AGENT_STORE_ENV: &str = "CLAWD_AGENT_STORE";
 
 pub const SOMNIQ_RUNTIME_DIR_NAME: &str = "runtime";
 pub const RUN_STATE_DIR_NAME: &str = "run-state";
 pub const SESSIONS_DIR_NAME: &str = "sessions";
 pub const AGENTS_DIR_NAME: &str = "agents";
-pub const WORKFLOWS_DIR_NAME: &str = "workflows";
-pub const USER_WORKFLOWS_DIR_NAME: &str = "user-workflows";
 pub const LEGACY_CLAUDE_DIR_NAME: &str = ".claude";
 pub const LEGACY_CLAWD_AGENTS_DIR_NAME: &str = ".clawd-agents";
 
@@ -158,25 +154,6 @@ pub fn project_agent_store_dir_for(workspace: impl AsRef<Path>) -> PathBuf {
         .unwrap_or_else(|| project_runtime_dir_for(workspace).join(AGENTS_DIR_NAME))
 }
 
-#[must_use]
-pub fn project_workflows_dir_from_env() -> PathBuf {
-    project_workflows_dir_for(workspace_root_from_env())
-}
-
-#[must_use]
-pub fn project_workflows_dir_for(workspace: impl AsRef<Path>) -> PathBuf {
-    env::var_os(ARIS_WORKFLOWS_DIR_ENV)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| project_runtime_dir_for(workspace).join(WORKFLOWS_DIR_NAME))
-}
-
-#[must_use]
-pub fn user_workflows_dir_from_env() -> PathBuf {
-    env::var_os(ARIS_USER_WORKFLOWS_DIR_ENV)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| somniq_config_dir_from_env().join(USER_WORKFLOWS_DIR_NAME))
-}
-
 pub fn migrate_legacy_project_runtime_dirs(workspace: impl AsRef<Path>) -> io::Result<()> {
     let workspace = workspace.as_ref();
     let legacy_claude = workspace.join(LEGACY_CLAUDE_DIR_NAME);
@@ -187,10 +164,6 @@ pub fn migrate_legacy_project_runtime_dirs(workspace: impl AsRef<Path>) -> io::R
     migrate_dir_contents(
         &legacy_claude.join(SESSIONS_DIR_NAME),
         &project_sessions_dir_for(workspace),
-    )?;
-    migrate_dir_contents(
-        &legacy_claude.join(WORKFLOWS_DIR_NAME),
-        &project_workflows_dir_for(workspace),
     )?;
     migrate_dir_contents(
         &workspace.join(LEGACY_CLAWD_AGENTS_DIR_NAME),

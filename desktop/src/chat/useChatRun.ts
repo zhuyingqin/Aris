@@ -8,6 +8,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  chatContextTokens,
   chatModelOptions,
   chatModelSet,
   chatPermissionGet,
@@ -89,12 +90,8 @@ export function useChatRun({
     transport: "unsupported",
   });
   const [reasoningBusy, setReasoningBusy] = useState(false);
-  // After `/compact` the backend session shrinks but the visible transcript is
-  // kept intact, so the transcript-derived token estimate (and thus the
-  // ContextRing) would never move. Pin the ring to the real post-compaction
-  // token count reported by the command, plus an anchor (turn count at compact
-  // time) so later turns still accrue on top. Keyed per session; invalidated
-  // automatically once the transcript is truncated below the anchor.
+  // Visible history survives compaction. Keep a live pin here and persist the
+  // same backend value on the ChatSession for reloads and app restarts.
   const [contextOverrides, setContextOverrides] = useState<Map<string, ContextOverride>>(() => new Map());
   const [contextNotice, setContextNotice] = useState<ContextNotice | null>(null);
   const [estimatedContext, setEstimatedContext] = useState<{ sessionId: string; tokens: number }>({
@@ -108,6 +105,7 @@ export function useChatRun({
   const syncedTurnIds = useRef(new Map<string, Set<string>>());
   const backendContextNeedsReset = useRef(new Set<string>());
   const unsavedBackendTurns = useRef(new Map<string, ChatTurn[]>());
+  const contextHydrationRequests = useRef(new Set<string>());
   const contextOverridesRef = useRef(contextOverrides);
   contextOverridesRef.current = contextOverrides;
 
@@ -258,7 +256,10 @@ export function useChatRun({
     const session = allSessionsRef.current.find((item) => item.id === sessionId);
     const anchor = session ? session.turns.length : 0;
     setContextOverrides((prev) => new Map(prev).set(sessionId, { tokens, anchor }));
-  }, [allSessionsRef]);
+    updateSession(sessionId, (item) => item.contextTokens === tokens
+      ? item
+      : { ...item, contextTokens: tokens });
+  }, [allSessionsRef, updateSession]);
 
   const handleContextCompacted = useCallback((sessionId: string, tokensAfter: number) => {
     applyContextTokens(sessionId, tokensAfter);
@@ -295,7 +296,9 @@ export function useChatRun({
   const readContextTokens = useCallback((sessionId: string): number | null => {
     const session = allSessionsRef.current.find((item) => item.id === sessionId);
     if (!session) return null;
-    return ringTokens(session.turns, contextOverridesRef.current.get(sessionId));
+    return contextOverridesRef.current.get(sessionId)?.tokens
+      ?? session.contextTokens
+      ?? ringTokens(session.turns, undefined);
   }, [allSessionsRef]);
 
   const { run, stop, runningSessionIds } = useChatStream({
@@ -314,7 +317,8 @@ export function useChatRun({
   const currentChatBusy = runningSessionIds.has(currentId);
   const turns = currentSession?.turns ?? [];
   const currentContextOverride = contextOverrides.get(currentId);
-  const estimatedTokens = currentContextOverride?.tokens
+  const authoritativeContextTokens = currentContextOverride?.tokens ?? currentSession?.contextTokens;
+  const estimatedTokens = authoritativeContextTokens
     ?? (estimatedContext.sessionId === currentId ? estimatedContext.tokens : 0);
   const contextMax = status?.ready
     ? (status.contextWindow ?? status.compactionBudget ?? null)
@@ -325,8 +329,8 @@ export function useChatRun({
   }, [currentId]);
 
   useEffect(() => {
-    if (currentContextOverride) {
-      setEstimatedContext({ sessionId: currentId, tokens: currentContextOverride.tokens });
+    if (authoritativeContextTokens != null) {
+      setEstimatedContext({ sessionId: currentId, tokens: authoritativeContextTokens });
       return;
     }
     setEstimatedContext((current) => current.sessionId === currentId
@@ -335,7 +339,32 @@ export function useChatRun({
     return deferHeavyUiWork(() => {
       setEstimatedContext({ sessionId: currentId, tokens: estimateTokens(turns) });
     });
-  }, [currentContextOverride, currentId, turns]);
+  }, [authoritativeContextTokens, currentId, turns]);
+
+  // Hydrate chats saved before `contextTokens` was part of the UI projection.
+  // Without this, a reload falls back to the complete visible transcript even
+  // if the backend had already compacted its separate execution session.
+  useEffect(() => {
+    if (
+      !isTauri()
+      || !currentSession
+      || currentSession.contextTokens != null
+      || currentChatBusy
+      || contextHydrationRequests.current.has(currentSession.id)
+    ) return;
+    contextHydrationRequests.current.add(currentSession.id);
+    let disposed = false;
+    void chatContextTokens(currentSession.id)
+      .then((tokens) => {
+        if (!disposed && tokens != null) applyContextTokens(currentSession.id, tokens);
+      })
+      .catch(() => {
+        contextHydrationRequests.current.delete(currentSession.id);
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [applyContextTokens, currentChatBusy, currentSession, currentSession?.contextTokens]);
 
   const refreshStatus = useCallback((model?: string | null) => {
     if (!isTauri()) {
@@ -535,7 +564,7 @@ export function useChatRun({
         if (tokens == null) {
           tokens = await chatSetContext(session.id, await contextForRetry(prefix), "replace");
         }
-        setContextOverrides((prev) => new Map(prev).set(session.id, { tokens, anchor: prefix.length }));
+        applyContextTokens(session.id, tokens);
         markBackendContextSynced(session.id, prefix);
         backendContextNeedsReset.current.delete(session.id);
         unsavedBackendTurns.current.delete(session.id);
@@ -556,7 +585,7 @@ export function useChatRun({
         false,
       );
     }
-  }, [copy.previewResponse, markBackendContextSynced, onError, patchAssistant, patchTurns, run, status?.model, updateSession, setEditingTurnId]);
+  }, [applyContextTokens, copy.previewResponse, markBackendContextSynced, onError, patchAssistant, patchTurns, run, status?.model, updateSession, setEditingTurnId]);
 
   // Resume a stopped OR failed turn without discarding its work: append a
   // continuation on top of the current transcript and let the backend reuse its
@@ -646,7 +675,7 @@ export function useChatRun({
     refreshModelOptions,
     // context accounting
     contextOverrides,
-    setContextOverrides,
+    applyContextTokens,
     estimatedTokens,
     contextMax,
     currentContextNotice,

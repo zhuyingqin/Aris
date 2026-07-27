@@ -449,50 +449,6 @@ fn suffix_contains_orphan_tool_result(messages: &[ConversationMessage], start: u
     false
 }
 
-#[allow(dead_code)]
-fn legacy_plan_compaction_tail_scan(
-    session: &Session,
-    config: &CompactionConfig,
-) -> Option<CompactionPlan> {
-    let initial_keep_from = session
-        .messages
-        .len()
-        .saturating_sub(config.preserve_recent_messages);
-
-    // Find a safe preservation boundary: the first message in `preserved` must be
-    // a User message (not Tool/Assistant) to avoid dangling tool_use/tool_result
-    // pairs crossing the compaction line, which causes the API to return an empty
-    // stream ("assistant stream produced no content").
-    //
-    // Scan forward from initial_keep_from for the next User message. If none is
-    // found in the tail window, drop all preserved messages — the summary alone
-    // is enough context to continue.
-    let mut keep_from = initial_keep_from;
-    while keep_from < session.messages.len()
-        && session.messages[keep_from].role != MessageRole::User
-    {
-        keep_from += 1;
-    }
-    // Critical: `removed` must cover everything NOT in `preserved`, otherwise
-    // the messages in [initial_keep_from, keep_from) silently disappear from
-    // both the summary and the preserved tail.
-    let removed = session.messages[..keep_from].to_vec();
-    if removed.is_empty() {
-        return None;
-    }
-    let preserved = if keep_from < session.messages.len() {
-        session.messages[keep_from..].to_vec()
-    } else {
-        Vec::new()
-    };
-    Some(CompactionPlan {
-        removed,
-        preserved,
-        split_index: keep_from,
-        tokens_before: estimate_session_tokens(session),
-    })
-}
-
 /// Build a compacted session while optionally using the summarizer provider's
 /// reported output token count. The provider count is more faithful than the
 /// character heuristic for the generated summary; preserved messages and the

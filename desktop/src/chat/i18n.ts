@@ -46,7 +46,6 @@ export const CHAT_COPY: Record<Language, {
   previewModel: string;
   browserProvider: string;
   previewPermissionDescription: string;
-  disabledCommand: string;
   previewCommandReply: string;
   previewResponse: string;
   emptyResponse: string;
@@ -112,7 +111,6 @@ export const CHAT_COPY: Record<Language, {
     previewModel: "预览",
     browserProvider: "浏览器",
     previewPermissionDescription: "自动批准工具调用；不会请求操作系统管理员权限",
-    disabledCommand: "此桌面命令在当前构建中已禁用。",
     previewCommandReply: "桌面斜杠命令需要在 Tauri 应用内运行。",
     previewResponse: "浏览器预览回复。运行 Tauri 应用可使用实时对话。",
     emptyResponse: "模型返回了空回复。",
@@ -178,7 +176,6 @@ export const CHAT_COPY: Record<Language, {
     previewModel: "Preview",
     browserProvider: "Browser",
     previewPermissionDescription: "Auto-approve tool calls; no OS administrator elevation",
-    disabledCommand: "This desktop command is disabled in this build.",
     previewCommandReply: "Desktop slash commands run inside the Tauri app.",
     previewResponse: "Browser preview response. Run the Tauri app for live Chat.",
     emptyResponse: "Model returned an empty response.",

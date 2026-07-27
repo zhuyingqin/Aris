@@ -20,8 +20,8 @@ import type {
 import { makeId, textFromTurn } from "./model";
 
 export const EMPTY_ASSISTANT_RESPONSE = "Model returned an empty response.";
-export const UNEXPECTED_RESPONSE_STOP = "Response stopped unexpectedly before completion.";
-export const IMAGE_UNSUPPORTED_MESSAGE =
+const UNEXPECTED_RESPONSE_STOP = "Response stopped unexpectedly before completion.";
+const IMAGE_UNSUPPORTED_MESSAGE =
   "(Image preview only. Vision input is not supported in desktop Chat yet.)";
 
 // Rough token estimate. Latin/code text is ~3.5 chars/token, but CJK characters
@@ -316,12 +316,6 @@ export const FALLBACK_SLASH_COMMANDS: DesktopCommandSpec[] = [
   { name: "model", description: "Show or switch the executor model", argumentHint: "[model]" },
   { name: "permissions", description: "Show or switch the active permission mode", argumentHint: "[mode]" },
 ];
-export const DISABLED_DESKTOP_COMMANDS = new Set(["team", "teams", "workflow", "workflows"]);
-
-export function visibleDesktopCommands(commands: DesktopCommandSpec[]) {
-  return commands.filter((command) => !DISABLED_DESKTOP_COMMANDS.has(command.name.toLowerCase()));
-}
-
 export interface PendingCommandSelection {
   sessionId: string;
   selection: ChatCommandSelection;

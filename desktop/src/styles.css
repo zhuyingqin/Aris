@@ -11868,10 +11868,11 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
 /* Codex-style side tasks: the main task remains visible while the right pane
    owns its own extensible tab strip. Hiding the pane keeps sessions mounted. */
 .chat-root.side-task-open {
-  grid-template-columns: var(--chat-sidebar-w, 218px) minmax(360px, 1fr) minmax(360px, 1fr);
+  grid-template-columns: var(--chat-sidebar-w, 218px) minmax(320px, 1fr) var(--side-panel-w, minmax(360px, 1fr));
 }
 
 .side-task-slot {
+  position: relative;
   display: flex;
   min-width: 0;
   min-height: 0;
@@ -11879,6 +11880,31 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   overflow: hidden;
   border-left: 1px solid var(--border);
   background: var(--bg);
+}
+
+/* Drag the boundary between the main chat and the side panel; double-click
+   restores the even split. */
+.side-panel-resizer {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -3px;
+  z-index: 55;
+  width: 7px;
+  cursor: col-resize;
+  touch-action: none;
+  user-select: none;
+  transition: background 0.15s;
+}
+
+.side-panel-resizer:hover,
+.side-panel-resizer:active {
+  background: color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+body.somniq-resizing-col {
+  cursor: col-resize;
+  user-select: none;
 }
 
 .side-task-slot[hidden] {
@@ -11937,9 +11963,32 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
 }
 
 .chat-navigation-item.active {
+  position: relative;
   border-color: color-mix(in srgb, var(--border) 72%, transparent);
   background: var(--bg-2);
   color: var(--text);
+}
+
+/* Accent rail under the active tab: at side-panel widths the background tint
+   alone is easy to miss. */
+.chat-navigation-item.active::after {
+  position: absolute;
+  right: 9px;
+  bottom: -1px;
+  left: 9px;
+  height: 2px;
+  border-radius: 2px 2px 0 0;
+  background: var(--accent);
+  content: "";
+}
+
+.chat-navigation-icon {
+  opacity: 0.62;
+}
+
+.chat-navigation-item.active .chat-navigation-icon {
+  color: var(--accent);
+  opacity: 1;
 }
 
 .chat-navigation-tab,
@@ -12013,14 +12062,83 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   font-size: 19px;
 }
 
+.chat-navigation-add-wrap {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.chat-navigation-add.active {
+  background: color-mix(in srgb, var(--text) 9%, transparent);
+  color: var(--text);
+}
+
+.chat-navigation-add-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 80;
+  display: flex;
+  min-width: 232px;
+  flex-direction: column;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-1);
+  box-shadow: 0 14px 34px rgb(0 0 0 / 34%);
+}
+
+.chat-navigation-add-menu button {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 7px 8px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+}
+
+.chat-navigation-add-menu button:hover {
+  background: color-mix(in srgb, var(--text) 8%, transparent);
+}
+
+.chat-navigation-add-icon {
+  display: inline-flex;
+  padding-top: 2px;
+  color: var(--accent);
+}
+
+.chat-navigation-add-text {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.chat-navigation-add-label {
+  font-size: 12px;
+  font-weight: 560;
+}
+
+.chat-navigation-add-hint {
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
 .chat-navigation-action {
+  display: inline-flex;
   min-height: 28px;
   flex: 0 0 auto;
+  align-items: center;
+  gap: 5px;
   padding: 4px 9px;
   border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border));
   border-radius: 7px;
   color: var(--accent);
   font-size: 11px;
+  white-space: nowrap;
 }
 
 .chat-navigation-hide {
@@ -12096,9 +12214,158 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   margin-inline: auto;
 }
 
+.side-task-panel .chat-starters {
+  max-width: 420px;
+  margin-inline: auto;
+}
+
+.side-task-panel .chat-starter {
+  padding: 8px 10px;
+}
+
+/* ── Side panel file reading ──────────────────────────────────────────────── */
+
+.side-file-viewer {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  flex: 1;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.side-file-toolbar {
+  display: flex;
+  min-height: 34px;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--bg-1) 88%, transparent);
+}
+
+.side-file-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 3px;
+}
+
+.side-file-actions button {
+  display: inline-flex;
+  min-height: 26px;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 7px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.side-file-actions button:hover {
+  background: color-mix(in srgb, var(--text) 9%, transparent);
+  color: var(--text);
+}
+
+.side-file-actions button.active {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--accent);
+}
+
+.side-file-body {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.side-file-body .lit-pdf-reader {
+  min-height: 0;
+  flex: 1;
+}
+
+.side-file-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 28px 20px;
+  color: var(--text-dim);
+  font-size: 12.5px;
+  text-align: center;
+}
+
+.side-file-state.error {
+  color: var(--text);
+}
+
+.side-file-state button {
+  padding: 5px 11px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-2);
+  color: var(--text);
+  font-size: 12px;
+}
+
+.side-file-image-scroll {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 16px;
+  overflow: auto;
+}
+
+.side-file-image-scroll img {
+  max-width: 100%;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--text) 6%, transparent);
+}
+
+.side-file-markdown {
+  min-height: 0;
+  flex: 1;
+  padding: 14px 18px 26px;
+  overflow: auto;
+  font-size: 13px;
+}
+
+.side-file-editor {
+  min-height: 0;
+  flex: 1;
+  overflow: hidden;
+}
+
+.side-file-editor .cm-editor {
+  height: 100%;
+}
+
+.side-file-selection {
+  flex: 0 0 auto;
+  padding: 6px 12px;
+  border-top: 1px solid var(--border);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  color: var(--accent);
+  font-size: 11px;
+}
+
 @media (max-width: 1024px) {
   .chat-root.side-task-open {
     grid-template-columns: minmax(320px, 1fr) minmax(320px, 1fr);
+  }
+
+  .side-panel-resizer {
+    display: none;
   }
 }
 
@@ -12919,6 +13186,8 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
   z-index: 16;
   left: 50%;
   display: flex;
+  width: min(560px, calc(100% - 32px));
+  max-width: calc(100% - 32px);
   flex-direction: column;
   align-items: center;
   gap: 8px;
@@ -12976,8 +13245,9 @@ body.somniq-chat-sidebar-open .app.app-chat-shell .app-account .sidebar-user-men
 }
 
 .chat-workflow-panel {
-  width: min(1024px, calc(100vw - 96px));
-  max-height: min(62vh, 560px);
+  box-sizing: border-box;
+  width: 100%;
+  max-height: min(46vh, 420px);
   overflow-y: auto;
   padding: 6px;
   border: 1px solid var(--border);
@@ -14941,7 +15211,7 @@ body.chat-companion-window {
 }
 
 .chat-companion-content .chat-project-brief,
-.chat-companion-content .chat-side-task-panel,
+.chat-companion-content .side-task-slot,
 .chat-companion-content .chat-sidebar-resize-handle {
   display: none;
 }

@@ -105,6 +105,47 @@ describe("ChatMessage rendering", () => {
     });
   });
 
+  it("hides Windows extended path prefixes in file change labels and diffs", async () => {
+    const user = userEvent.setup();
+    const rawPath = String.raw`\\?\G:\research\papers\chapter.tex`;
+    const displayPath = "G:/research/papers/chapter.tex";
+    const { container } = render(
+      <ChatMessage
+        turn={{
+          id: "assistant-extended-path",
+          role: "assistant",
+          blocks: [{
+            kind: "tool",
+            name: "edit_file",
+            input: "{}",
+            output: JSON.stringify({
+              changes: {
+                [rawPath]: {
+                  type: "update",
+                  unified_diff: `--- ${rawPath}\n+++ ${rawPath}\n-old\n+new`,
+                },
+              },
+            }),
+          }],
+        }}
+        canRetry={false}
+        onEdit={() => undefined}
+        onRetry={() => undefined}
+        onContinue={() => undefined}
+      />,
+    );
+
+    expect(screen.getByText(displayPath)).toBeTruthy();
+    const header = container.querySelector(".chat-tool-header");
+    expect(header).toBeTruthy();
+    await user.click(header!);
+
+    const diff = container.querySelector(".tool-diff");
+    expect(diff?.textContent).toContain(`--- ${displayPath}`);
+    expect(diff?.textContent).toContain(`+++ ${displayPath}`);
+    expect(diff?.textContent).not.toContain("//?/");
+  });
+
   const auditedFileTurn = (): ChatTurn => ({
     id: "assistant-audited-files",
     role: "assistant",
@@ -215,23 +256,22 @@ describe("ChatMessage rendering", () => {
     expect(apiMocks.fileOpen).not.toHaveBeenCalled();
   });
 
-  it.each([
-    ["LaTeX source", "papers/main.tex"],
-    ["PDF", "papers/main.pdf"],
-  ])("opens generated %s files in the LaTeX workspace", async (_kind, path) => {
+  const fileToolTurn = (path: string) => ({
+    id: `assistant-${path}`,
+    role: "assistant" as const,
+    blocks: [{
+      kind: "tool" as const,
+      name: "write_file",
+      input: JSON.stringify({ path, content: "done" }),
+      output: "ok",
+    }],
+  });
+
+  it("opens a generated LaTeX source in the LaTeX workspace", async () => {
     const user = userEvent.setup();
     render(
       <ChatMessage
-        turn={{
-          id: `assistant-${path}`,
-          role: "assistant",
-          blocks: [{
-            kind: "tool",
-            name: "write_file",
-            input: JSON.stringify({ path, content: "done" }),
-            output: "ok",
-          }],
-        }}
+        turn={fileToolTurn("papers/main.tex")}
         canRetry={false}
         onEdit={() => undefined}
         onRetry={() => undefined}
@@ -239,10 +279,30 @@ describe("ChatMessage rendering", () => {
       />,
     );
 
-    await user.click(screen.getAllByRole("button", { name: path })[0]!);
+    await user.click(screen.getAllByRole("button", { name: "papers/main.tex" })[0]!);
 
     expect(useStore.getState().tab).toBe("typeset");
-    expect(useStore.getState().pendingTypesetFilePath).toBe(path);
+    expect(useStore.getState().pendingTypesetFilePath).toBe("papers/main.tex");
+    expect(apiMocks.fileOpen).not.toHaveBeenCalled();
+  });
+
+  it("reads a generated PDF in the chat side panel instead of the LaTeX workspace", async () => {
+    const user = userEvent.setup();
+    render(
+      <ChatMessage
+        turn={fileToolTurn("papers/main.pdf")}
+        canRetry={false}
+        onEdit={() => undefined}
+        onRetry={() => undefined}
+        onContinue={() => undefined}
+      />,
+    );
+
+    await user.click(screen.getAllByRole("button", { name: "papers/main.pdf" })[0]!);
+
+    expect(useStore.getState().pendingSidePanelFilePath).toBe("papers/main.pdf");
+    expect(useStore.getState().tab).toBe("chat");
+    expect(useStore.getState().pendingTypesetFilePath).toBeNull();
     expect(apiMocks.fileOpen).not.toHaveBeenCalled();
   });
 

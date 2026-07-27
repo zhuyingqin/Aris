@@ -616,13 +616,6 @@ impl LiveCli {
             SlashCommand::Session { action, target } => {
                 self.handle_session_command(action.as_deref(), target.as_deref())?
             }
-            SlashCommand::Team { action, target } => {
-                self.handle_team_command(action.as_deref(), target.as_deref())?;
-                false
-            }
-            SlashCommand::Workflows { action, target } => {
-                self.handle_workflows_command(action.as_deref(), target.as_deref())?
-            }
             SlashCommand::MetaOptimize { action, target } => {
                 self.handle_meta_optimize(action.as_deref(), target.as_deref())?;
                 false
@@ -1450,81 +1443,6 @@ impl LiveCli {
                 Ok(false)
             }
         }
-    }
-
-    fn handle_team_command(
-        &self,
-        action: Option<&str>,
-        target: Option<&str>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let output = match plan_team_command(action, target) {
-            TeamCommandPlan::RenderTeamView { team_id } => {
-                tools::render_team_view(team_id.as_deref()).map_err(|error| {
-                    Box::new(io::Error::new(io::ErrorKind::Other, error))
-                        as Box<dyn std::error::Error>
-                })?
-            }
-            TeamCommandPlan::Tool { name, input } => execute_tool_for_cli(name, &input)?,
-            TeamCommandPlan::Message(message) => {
-                println!("{message}");
-                return Ok(());
-            }
-        };
-        println!("{output}");
-        Ok(())
-    }
-
-    fn handle_workflows_command(
-        &mut self,
-        action: Option<&str>,
-        target: Option<&str>,
-    ) -> Result<bool, Box<dyn std::error::Error>> {
-        match plan_workflows_command(action, target) {
-            WorkflowCommandPlan::Tool { input } => {
-                println!("{}", execute_tool_for_cli("Workflow", &input)?);
-                Ok(false)
-            }
-            WorkflowCommandPlan::Inject { run_id } => self.inject_workflow_result(&run_id),
-            WorkflowCommandPlan::Message(message) => {
-                println!("{message}");
-                Ok(false)
-            }
-        }
-    }
-
-    fn inject_workflow_result(&mut self, run_id: &str) -> Result<bool, Box<dyn std::error::Error>> {
-        let output =
-            execute_tool_for_cli("Workflow", &json!({ "action": "inspect", "runId": run_id }))?;
-        let value: serde_json::Value = serde_json::from_str(&output)?;
-        let result = value
-            .get("run")
-            .and_then(|run| run.get("result"))
-            .and_then(|result| result.as_str())
-            .filter(|result| !result.trim().is_empty())
-            .ok_or_else(|| format!("workflow {run_id} has no completed result to inject"))?;
-        let text =
-            format!("# Workflow Result\n\nRun `{run_id}` completed in the background.\n\n{result}");
-        let mut session = self.runtime.session().clone();
-        session
-            .messages
-            .push(ConversationMessage::assistant(vec![ContentBlock::Text {
-                text: text.clone(),
-            }]));
-        self.runtime = build_runtime(
-            session,
-            self.model.clone(),
-            self.system_prompt.clone(),
-            true,
-            true,
-            self.allowed_tools.clone(),
-            self.permission_mode,
-        )?;
-        self.persist_session()?;
-        println!(
-            "Workflow\n  Result           injected\n  Run              {run_id}\n  Session          {}",
-            self.session.id
-        );
-        Ok(true)
     }
 
     fn handle_plan_mode(&mut self, task: Option<&str>) -> Result<bool, Box<dyn std::error::Error>> {

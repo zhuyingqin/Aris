@@ -32,9 +32,7 @@ use cli_skills::{
 };
 use cli_tool_format::{format_tool_call_start, format_tool_result};
 use commands::{
-    plan_team_command, plan_workflows_command, render_slash_command_help,
-    resume_supported_slash_commands, slash_command_specs, SlashCommand, TeamCommandPlan,
-    WorkflowCommandPlan,
+    render_slash_command_help, resume_supported_slash_commands, slash_command_specs, SlashCommand,
 };
 use compat_harness::{extract_manifest, UpstreamPaths};
 use crossterm::{
@@ -55,7 +53,7 @@ use runtime::{
     StatusContext, StatusUsage, TokenUsage, ToolError, ToolExecutor, UsageTracker,
 };
 use serde_json::json;
-use tools::{execute_tool, execute_tool_with_context, mvp_tool_specs, ToolRunContext};
+use tools::{execute_tool_with_context, mvp_tool_specs, ToolRunContext};
 
 const DEFAULT_MODEL: &str = "claude-opus-4-8";
 const DEFAULT_MODEL_FALLBACK: &str = "claude-opus-4-7";
@@ -1146,8 +1144,6 @@ fn run_resume_command(
         | SlashCommand::Skills { .. }
         | SlashCommand::Permissions { .. }
         | SlashCommand::Session { .. }
-        | SlashCommand::Team { .. }
-        | SlashCommand::Workflows { .. }
         | SlashCommand::MetaOptimize { .. }
         | SlashCommand::Unknown { .. } => Err("unsupported resumed slash command".into()),
     }
@@ -2052,7 +2048,6 @@ fn build_system_prompt(model_id: Option<&str>) -> Result<Vec<String>, Box<dyn st
         product_surface: "research automation CLI".to_string(),
         language: std::env::var("ARIS_LANGUAGE").unwrap_or_else(|_| "cn".to_string()),
         include_language_preference: false,
-        include_team_orchestration: true,
         extra_sections: Vec::new(),
     };
     let mut prompt = match aris_chat::build_common_system_prompt(options) {
@@ -2411,60 +2406,7 @@ fn slash_command_completion_candidates() -> Vec<(String, String)> {
     skill_candidates.sort_by(|a, b| a.0.cmp(&b.0));
     candidates.extend(skill_candidates);
 
-    let mut workflow_candidates = discover_saved_workflow_names()
-        .into_iter()
-        .filter_map(|name| {
-            let candidate = format!("/workflows start {name}");
-            if seen.contains(&candidate) {
-                return None;
-            }
-            seen.insert(candidate.clone());
-            Some((candidate, "Start saved dynamic workflow".to_string()))
-        })
-        .collect::<Vec<_>>();
-    workflow_candidates.sort_by(|a, b| a.0.cmp(&b.0));
-    candidates.extend(workflow_candidates);
-
     candidates
-}
-
-fn discover_saved_workflow_names() -> Vec<String> {
-    let mut names = BTreeSet::new();
-    collect_workflow_names(&runtime::project_workflows_dir_from_env(), &mut names);
-    collect_workflow_names(&runtime::user_workflows_dir_from_env(), &mut names);
-    let cwd = runtime::workspace_root_from_env();
-    collect_workflow_names(&cwd.join(".claude").join("workflows"), &mut names);
-    collect_workflow_names(
-        &PathBuf::from(runtime::home_dir())
-            .join(".claude")
-            .join("workflows"),
-        &mut names,
-    );
-    names.into_iter().collect()
-}
-
-fn collect_workflow_names(dir: &Path, names: &mut BTreeSet<String>) {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|ext| ext.to_str()) != Some("js") {
-            continue;
-        }
-        if let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) {
-            names.insert(stem.to_string());
-        }
-    }
-}
-
-fn execute_tool_for_cli(
-    tool_name: &str,
-    input: &serde_json::Value,
-) -> Result<String, Box<dyn std::error::Error>> {
-    execute_tool(tool_name, input).map_err(|error| {
-        Box::new(io::Error::new(io::ErrorKind::Other, error)) as Box<dyn std::error::Error>
-    })
 }
 
 #[cfg(test)]

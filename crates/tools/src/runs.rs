@@ -16,14 +16,9 @@ use crate::layout;
 
 const RUNS_FILE: &str = "runs.json";
 
-/// `<project>/.somniq/experiments`.
-pub fn experiments_dir_at(base: &Path) -> PathBuf {
-    layout::experiments_dir_at(base)
-}
-
 /// `<project>/.somniq/experiments/runs.json`.
 pub fn runs_path_at(base: &Path) -> PathBuf {
-    experiments_dir_at(base).join(RUNS_FILE)
+    layout::experiments_dir_at(base).join(RUNS_FILE)
 }
 
 /// `<project>/experiments/runs/<id>` — where a run's executed notebook + outputs live.

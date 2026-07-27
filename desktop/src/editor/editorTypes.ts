@@ -1,4 +1,4 @@
-import type { EditorSelection, Extension, Transaction, TransactionSpec } from "@codemirror/state";
+import type { EditorSelection, Extension, TransactionSpec } from "@codemirror/state";
 import type { EditorState } from "@codemirror/state";
 import type { EditorView } from "@codemirror/view";
 
@@ -27,8 +27,6 @@ export interface SharedEditorOptions {
   language: EditorLanguage;
   surface: EditorSurface;
   readOnly?: boolean;
-  /** Defaults to true; both surfaces show line numbers today. */
-  lineNumbers?: boolean;
   /** Stamped onto CodeMirror's `contentDOM` so DOM-query focus (Lab's focus-by-index) keeps working. */
   dataEditor?: string;
   extensions?: Extension[];
@@ -40,8 +38,6 @@ export interface EditorUpdate {
   view: EditorView;
   state: EditorState;
   docChanged: boolean;
-  selectionChanged: boolean;
-  transactions: readonly Transaction[];
 }
 
 export interface SharedEditorHandle {

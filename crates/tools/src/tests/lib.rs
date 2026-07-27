@@ -16,7 +16,6 @@ use std::sync::{
 use std::thread;
 use std::time::Duration;
 
-use super::team_state;
 use super::{
     agent_permission_policy, allowed_tools_for_subagent, discover_skills, execute_agent_with_spawn,
     execute_tool, execute_tool_with_cancel, execute_tool_with_context, extract_latex_diagnostics,
@@ -95,7 +94,5 @@ mod repl;
 mod reviewer;
 #[path = "lib/skill.rs"]
 mod skill;
-#[path = "lib/team.rs"]
-mod team;
 #[path = "lib/web.rs"]
 mod web;

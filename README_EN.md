@@ -348,7 +348,7 @@ shared crates as libraries.
 | `crates/api/` | Anthropic HTTP/SSE client and OAuth |
 | `crates/executor/` | Provider streaming layer — Anthropic and OpenAI-compatible request/stream parsing, normalized into runtime events (both the Executor and the Reviewer model go through here) |
 | `crates/chat/` | Shared chat assembly — resolves providers from config and builds the executor, tool table, permission policy, and system prompt |
-| `crates/tools/` | Kernel tool registry (~50 tools) — file/shell, web, literature search (Scopus / OpenAlex / arXiv), literature/knowledge, notebook execution, LaTeX compile, agent/team/workflow coordination |
+| `crates/tools/` | Kernel tool registry (~50 tools) — file/shell, web, literature search (Scopus / OpenAlex / arXiv), literature/knowledge, notebook execution, LaTeX compile, agent subagent spawning |
 | `crates/commands/` | Slash command specs and parsing |
 | `crates/notebook/` | Jupyter kernel client (ZMQ + nbformat) — the execution substrate for Lab |
 | `crates/remote-protocol/` | End-to-end encryption primitives for mobile remote control (X25519 / Ed25519 / ChaCha20-Poly1305) |

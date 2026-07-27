@@ -63,8 +63,6 @@ pub mod notebook;
 pub mod pdf_rag;
 pub mod runs;
 pub mod sweep;
-mod team_state;
-mod workflow_state;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolManifestEntry {
@@ -155,13 +153,6 @@ impl ToolRunContext {
         }
         context
     }
-}
-
-#[must_use]
-#[allow(clippy::too_many_lines)]
-/// Render the active Agent Team as a readable terminal view (backs `/team`).
-pub fn render_team_view(team_id: Option<&str>) -> Result<String, String> {
-    team_state::render_team_view(team_id)
 }
 
 pub fn mvp_tool_specs() -> Vec<ToolSpec> {
@@ -862,260 +853,6 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             required_permission: PermissionMode::DangerFullAccess,
         },
         ToolSpec {
-            name: "SpawnTeammate",
-            description: "Launch a background teammate in an Agent Team and register it in TeamStore with a claimed task.",
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "teamId": { "type": "string" },
-                    "teamName": { "type": "string" },
-                    "teamDesign": {
-                        "type": "object",
-                        "description": "Required for Agent Team coordination: why multi-agent is justified, who coordinates, how context is bounded, how output is verified, and when the team stops.",
-                        "properties": {
-                            "rationale": { "type": "string" },
-                            "coordinationPattern": { "type": "string" },
-                            "coordinator": { "type": "string" },
-                            "contextPolicy": { "type": "string" },
-                            "verificationPlan": { "type": "string" },
-                            "stopCondition": { "type": "string" },
-                            "maxTeammates": { "type": "integer", "minimum": 1, "maximum": 8 }
-                        },
-                        "required": [
-                            "rationale",
-                            "coordinationPattern",
-                            "coordinator",
-                            "contextPolicy",
-                            "verificationPlan",
-                            "stopCondition"
-                        ],
-                        "additionalProperties": false
-                    },
-                    "leadSession": { "type": "string" },
-                    "description": { "type": "string" },
-                    "prompt": { "type": "string" },
-                    "subagentType": { "type": "string" },
-                    "role": { "type": "string" },
-                    "responsibility": { "type": "string" },
-                    "contextScope": { "type": "string" },
-                    "deliverable": { "type": "string" },
-                    "successCriteria": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "minItems": 2
-                    },
-                    "stopCondition": { "type": "string" },
-                    "name": { "type": "string" },
-                    "model": { "type": "string" },
-                    "taskId": { "type": "string" },
-                    "taskTitle": { "type": "string" },
-                    "dependencies": { "type": "array", "items": { "type": "string" } },
-                    "worktree": { "type": "boolean" },
-                    "worktreeBranch": { "type": "string" },
-                    "worktreePath": { "type": "string" }
-                },
-                "required": [
-                    "description",
-                    "prompt",
-                    "teamDesign",
-                    "role",
-                    "responsibility",
-                    "contextScope",
-                    "deliverable",
-                    "successCriteria",
-                    "stopCondition"
-                ],
-                "additionalProperties": false
-            }),
-            required_permission: PermissionMode::DangerFullAccess,
-        },
-        ToolSpec {
-            name: "SendMessage",
-            description: "Send a mailbox message between teammates or from a teammate to the lead session.",
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "teamId": { "type": "string" },
-                    "from": { "type": "string" },
-                    "to": { "type": "string" },
-                    "subject": { "type": "string" },
-                    "body": { "type": "string" },
-                    "taskId": { "type": "string" }
-                },
-                "required": ["from", "to", "body"],
-                "additionalProperties": false
-            }),
-            required_permission: PermissionMode::WorkspaceWrite,
-        },
-        ToolSpec {
-            name: "ClaimTask",
-            description: "Claim the next unblocked team task or renew a task lease.",
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "teamId": { "type": "string" },
-                    "taskId": { "type": "string" },
-                    "claimant": { "type": "string" },
-                    "leaseSeconds": { "type": "integer", "minimum": 1 }
-                },
-                "required": ["claimant"],
-                "additionalProperties": false
-            }),
-            required_permission: PermissionMode::WorkspaceWrite,
-        },
-        ToolSpec {
-            name: "CompleteTask",
-            description: "Complete or fail a team task, store the result, and unblock dependent tasks.",
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "teamId": { "type": "string" },
-                    "taskId": { "type": "string" },
-                    "actor": { "type": "string" },
-                    "result": { "type": "string" },
-                    "status": { "type": "string", "enum": ["completed", "failed"] }
-                },
-                "required": ["taskId", "actor", "result"],
-                "additionalProperties": false
-            }),
-            required_permission: PermissionMode::WorkspaceWrite,
-        },
-        ToolSpec {
-            name: "ListTeam",
-            description: "Inspect the active Agent Team, including members, task state, mailbox, agent status, and optional event history.",
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "teamId": { "type": "string" },
-                    "includeMessages": { "type": "boolean" },
-                    "includeEvents": { "type": "boolean" }
-                },
-                "additionalProperties": false
-            }),
-            required_permission: PermissionMode::ReadOnly,
-        },
-        ToolSpec {
-            name: "AgentSupervisor",
-            description: "Inspect and control durable background agent lifecycle state: list, status, logs, stop request, or restart.",
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "action": {
-                        "type": "string",
-                        "enum": ["list", "status", "logs", "stop", "restart"]
-                    },
-                    "agentId": { "type": "string" },
-                    "teamId": { "type": "string" },
-                    "tailBytes": { "type": "integer", "minimum": 1 }
-                },
-                "required": ["action"],
-                "additionalProperties": false
-            }),
-            required_permission: PermissionMode::DangerFullAccess,
-        },
-        ToolSpec {
-            name: "WaitForTeammates",
-            description: "Block until an Agent Team's tasks finish (or time out), then return each task's final status and stored result. Use this instead of polling AgentSupervisor/ListTeam in a loop: it waits efficiently on the runtime side and folds the WAIT and GATHER steps into one call. A task settles when its status is terminal or its owning teammate exits, so a teammate that forgets CompleteTask will not hang the wait. Returns early on Ctrl+C or timeout with partial results (check all_settled / pending).",
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "teamId": { "type": "string" },
-                    "taskIds": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "Wait only for these task ids; default waits for all of the team's tasks."
-                    },
-                    "timeoutSeconds": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 7200,
-                        "description": "Max seconds to wait before returning partial results (default 1800)."
-                    },
-                    "pollIntervalSeconds": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 60,
-                        "description": "Seconds between status checks (default 3)."
-                    }
-                },
-                "additionalProperties": false
-            }),
-            required_permission: PermissionMode::ReadOnly,
-        },
-        ToolSpec {
-            name: "VerifyDeliverable",
-            description: "Verification gate for an Agent Team: run an independent reviewer over a completed task's result against its success criteria, then record the GO/NO-GO verdict on the task. Use this in the DECIDE step before trusting or integrating any deliverable involving facts, citations, code, or experiment claims. Returns status passed/failed/needs_judgment plus the full review. Requires a configured reviewer (same setup as LlmReview).",
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "teamId": { "type": "string" },
-                    "taskId": {
-                        "type": "string",
-                        "description": "The completed task whose stored result should be verified."
-                    },
-                    "criteria": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "Override the success criteria to check; defaults to the teammate contract's successCriteria."
-                    },
-                    "instructions": {
-                        "type": "string",
-                        "description": "Extra review guidance specific to this deliverable."
-                    },
-                    "model": {
-                        "type": "string",
-                        "description": "Optional reviewer model override; prefer omitting to use the configured reviewer."
-                    }
-                },
-                "required": ["taskId"],
-                "additionalProperties": false
-            }),
-            required_permission: PermissionMode::ReadOnly,
-        },
-        ToolSpec {
-            name: "Workflow",
-            description: "Plan, start, inspect, pause, resume, stop, save, discover, or restart a dynamic workflow run using a sandboxed orchestration script API.",
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "action": {
-                        "type": "string",
-                        "enum": ["plan", "start", "list", "inspect", "pause", "resume", "stop", "restart", "save", "discover"]
-                    },
-                    "runId": { "type": "string" },
-                    "name": { "type": "string" },
-                    "script": { "type": "string" },
-                    "scriptPath": { "type": "string" },
-                    "saveAs": { "type": "string" },
-                    "approval": {
-                        "type": "string",
-                        "enum": ["allow_once", "always", "deny"]
-                    },
-                    "maxConcurrency": { "type": "integer", "minimum": 1 },
-                    "maxAgents": { "type": "integer", "minimum": 1 }
-                },
-                "required": ["action"],
-                "additionalProperties": false
-            }),
-            required_permission: PermissionMode::DangerFullAccess,
-        },
-        ToolSpec {
-            name: "EnterWorktree",
-            description: "Create or list git worktrees for isolating parallel teammate edits.",
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "action": { "type": "string", "enum": ["create", "list"] },
-                    "branch": { "type": "string" },
-                    "path": { "type": "string" },
-                    "base": { "type": "string" }
-                },
-                "required": ["action"],
-                "additionalProperties": false
-            }),
-            required_permission: PermissionMode::DangerFullAccess,
-        },
-        ToolSpec {
             name: "ToolSearch",
             description: "Search for deferred or specialized tools by exact name or keywords.",
             input_schema: json!({
@@ -1357,30 +1094,6 @@ pub fn execute_tool_with_cancel_and_progress_with_context(
         "LlmReview" => from_value::<LlmReviewInput>(input).and_then(run_llm_review),
         "Skill" => from_value::<SkillInput>(input).and_then(run_skill),
         "Agent" => from_value::<AgentInput>(input).and_then(run_agent),
-        "SpawnTeammate" => {
-            from_value::<team_state::SpawnTeammateInput>(input).and_then(run_spawn_teammate)
-        }
-        "SendMessage" => {
-            from_value::<team_state::SendMessageInput>(input).and_then(run_send_message)
-        }
-        "ClaimTask" => from_value::<team_state::ClaimTaskInput>(input).and_then(run_claim_task),
-        "CompleteTask" => {
-            from_value::<team_state::CompleteTaskInput>(input).and_then(run_complete_task)
-        }
-        "ListTeam" => from_value::<team_state::ListTeamInput>(input).and_then(run_list_team),
-        "AgentSupervisor" => {
-            from_value::<team_state::AgentSupervisorInput>(input).and_then(run_agent_supervisor)
-        }
-        "WaitForTeammates" => {
-            from_value::<team_state::WaitForTeammatesInput>(input).and_then(run_wait_for_teammates)
-        }
-        "VerifyDeliverable" => {
-            from_value::<team_state::VerifyDeliverableInput>(input).and_then(run_verify_deliverable)
-        }
-        "Workflow" => from_value::<workflow_state::WorkflowInput>(input).and_then(run_workflow),
-        "EnterWorktree" => {
-            from_value::<team_state::EnterWorktreeInput>(input).and_then(run_enter_worktree)
-        }
         "ToolSearch" => from_value::<ToolSearchInput>(input).and_then(run_tool_search),
         "NotebookEdit" => from_value::<NotebookEditInput>(input).and_then(run_notebook_edit),
         "Sleep" => {
@@ -1622,48 +1335,6 @@ fn run_skill(input: SkillInput) -> Result<String, String> {
 
 fn run_agent(input: AgentInput) -> Result<String, String> {
     to_pretty_json(execute_agent(input)?)
-}
-
-fn run_spawn_teammate(input: team_state::SpawnTeammateInput) -> Result<String, String> {
-    to_pretty_json(execute_spawn_teammate(input)?)
-}
-
-fn run_send_message(input: team_state::SendMessageInput) -> Result<String, String> {
-    to_pretty_json(team_state::send_message(input)?)
-}
-
-fn run_claim_task(input: team_state::ClaimTaskInput) -> Result<String, String> {
-    to_pretty_json(team_state::claim_task(input)?)
-}
-
-fn run_complete_task(input: team_state::CompleteTaskInput) -> Result<String, String> {
-    to_pretty_json(team_state::complete_task(input)?)
-}
-
-fn run_list_team(input: team_state::ListTeamInput) -> Result<String, String> {
-    to_pretty_json(team_state::list_team(input)?)
-}
-
-fn run_agent_supervisor(input: team_state::AgentSupervisorInput) -> Result<String, String> {
-    to_pretty_json(execute_agent_supervisor(input)?)
-}
-
-fn run_wait_for_teammates(input: team_state::WaitForTeammatesInput) -> Result<String, String> {
-    to_pretty_json(team_state::wait_for_teammates(input)?)
-}
-
-fn run_verify_deliverable(input: team_state::VerifyDeliverableInput) -> Result<String, String> {
-    to_pretty_json(team_state::verify_deliverable(input, |prompt, model| {
-        run_llm_review(LlmReviewInput { prompt, model })
-    })?)
-}
-
-fn run_workflow(input: workflow_state::WorkflowInput) -> Result<String, String> {
-    to_pretty_json(execute_workflow(input)?)
-}
-
-fn run_enter_worktree(input: team_state::EnterWorktreeInput) -> Result<String, String> {
-    to_pretty_json(team_state::enter_worktree(input)?)
 }
 
 fn run_tool_search(input: ToolSearchInput) -> Result<String, String> {
@@ -2380,6 +2051,15 @@ struct HelperEntry {
     error: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct AgentTokenUsage {
+    input_tokens: u32,
+    output_tokens: u32,
+    cache_creation_input_tokens: u32,
+    cache_read_input_tokens: u32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct AgentOutput {
     #[serde(rename = "agentId")]
@@ -2403,7 +2083,7 @@ struct AgentOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    usage: Option<team_state::AgentTokenUsage>,
+    usage: Option<AgentTokenUsage>,
 }
 
 #[derive(Debug, Clone)]
@@ -3421,128 +3101,6 @@ fn execute_agent(input: AgentInput) -> Result<AgentOutput, String> {
     execute_agent_with_spawn(input, spawn_agent_job)
 }
 
-fn execute_spawn_teammate(input: team_state::SpawnTeammateInput) -> Result<Value, String> {
-    let prepared = team_state::prepare_teammate(&input)?;
-    let allowed_tools = allowed_tools_for_teammate(input.subagent_type.as_deref());
-    let agent = execute_agent_with_spawn_and_tools(
-        AgentInput {
-            description: input.description.clone(),
-            prompt: prepared.prompt.clone(),
-            subagent_type: input.subagent_type.clone(),
-            name: prepared.agent_name.clone(),
-            model: input.model.clone(),
-        },
-        spawn_agent_job,
-        Some(allowed_tools),
-    )?;
-    let snapshot = team_state::register_spawned_agent(
-        &prepared,
-        team_state::AgentRecord {
-            agent_id: agent.agent_id.clone(),
-            name: agent.name.clone(),
-            description: agent.description.clone(),
-            subagent_type: agent.subagent_type.clone(),
-            model: agent.model.clone(),
-            status: agent.status.clone(),
-            output_file: agent.output_file.clone(),
-            manifest_file: agent.manifest_file.clone(),
-        },
-    )?;
-    Ok(json!({
-        "agent": agent,
-        "team": snapshot.team,
-        "tasks": snapshot.tasks,
-        "mailbox": snapshot.mailbox,
-        "stateDir": snapshot.state_dir,
-    }))
-}
-
-fn execute_agent_supervisor(input: team_state::AgentSupervisorInput) -> Result<Value, String> {
-    if input.action == team_state::AgentSupervisorAction::Restart {
-        let agent_id = input
-            .agent_id
-            .as_deref()
-            .ok_or_else(|| "agentId is required for restart".to_string())?;
-        let agent = team_state::load_agent_manifest(agent_id)?;
-        let prompt = team_state::extract_agent_prompt(&agent)?;
-        let restarted = execute_agent(AgentInput {
-            description: format!("Restart {}", agent.description),
-            prompt,
-            subagent_type: agent.subagent_type.clone(),
-            name: Some(format!("{}-restart", agent.name)),
-            model: agent.model.clone(),
-        })?;
-        let supervisor = team_state::agent_supervisor(input)?;
-        return Ok(json!({
-            "action": "restart",
-            "restartedAgent": restarted,
-            "supervisor": supervisor,
-        }));
-    }
-    Ok(serde_json::to_value(team_state::agent_supervisor(input)?)
-        .map_err(|error| error.to_string())?)
-}
-
-fn execute_workflow(input: workflow_state::WorkflowInput) -> Result<Value, String> {
-    match input.action {
-        workflow_state::WorkflowAction::Plan => {
-            Ok(serde_json::to_value(workflow_state::plan_workflow(&input)?)
-                .map_err(|error| error.to_string())?)
-        }
-        workflow_state::WorkflowAction::Start | workflow_state::WorkflowAction::Restart => {
-            let created = workflow_state::create_run(&input)?;
-            let mut run = created.run.clone();
-            if matches!(
-                run.status,
-                workflow_state::WorkflowRunStatus::ApprovalRequired
-            ) {
-                return Ok(json!({
-                    "stateDir": team_state::state_root().display().to_string(),
-                    "action": "approval_required",
-                    "run": run,
-                    "plan": created.plan,
-                    "message": "review the phase plan and raw script, then retry with approval=allow_once or approval=always"
-                }));
-            }
-            for spec in &created.plan.agents {
-                let agent = execute_agent(AgentInput {
-                    description: spec.description.clone(),
-                    prompt: spec.prompt.clone(),
-                    subagent_type: spec.subagent_type.clone(),
-                    name: spec.name.clone(),
-                    model: spec.model.clone(),
-                })?;
-                run = workflow_state::record_agent(
-                    &run.run_id,
-                    &agent.agent_id,
-                    &agent.name,
-                    &agent.description,
-                    &agent.status,
-                )?;
-            }
-            if let Some(result) = created.plan.final_result.as_deref() {
-                run = workflow_state::complete_run_with_result(&run.run_id, result)?;
-            }
-            Ok(json!({
-                "stateDir": team_state::state_root().display().to_string(),
-                "action": "start",
-                "run": run,
-                "plan": created.plan,
-            }))
-        }
-        workflow_state::WorkflowAction::List
-        | workflow_state::WorkflowAction::Inspect
-        | workflow_state::WorkflowAction::Pause
-        | workflow_state::WorkflowAction::Resume
-        | workflow_state::WorkflowAction::Stop
-        | workflow_state::WorkflowAction::Save
-        | workflow_state::WorkflowAction::Discover => Ok(serde_json::to_value(
-            workflow_state::control_workflow(&input)?,
-        )
-        .map_err(|error| error.to_string())?),
-    }
-}
-
 fn execute_agent_with_spawn<F>(input: AgentInput, spawn_fn: F) -> Result<AgentOutput, String>
 where
     F: FnOnce(AgentJob) -> Result<(), String>,
@@ -3677,7 +3235,7 @@ fn run_agent_job(job: &AgentJob) -> Result<(), String> {
         "completed",
         Some(final_text.as_str()),
         None,
-        Some(team_state::AgentTokenUsage {
+        Some(AgentTokenUsage {
             input_tokens: summary.usage.input_tokens,
             output_tokens: summary.usage.output_tokens,
             cache_creation_input_tokens: summary.usage.cache_creation_input_tokens,
@@ -3717,7 +3275,7 @@ fn build_agent_system_prompt(subagent_type: &str) -> Result<Vec<String>, String>
     )
     .map_err(|error| error.to_string())?;
     prompt.push(format!(
-        "You are a background sub-agent of type `{subagent_type}`. Work only on the delegated task, use only the tools available to you, do not ask the user questions, and finish with a concise result. You are an individual contributor: do not spawn your own teammates or form nested teams. If you are part of a team, coordinate only through the team tools described in your task and report your result with CompleteTask before finishing."
+        "You are a background sub-agent of type `{subagent_type}`. Work only on the delegated task, use only the tools available to you, do not ask the user questions, and finish with a concise result. You are an individual contributor: do not spawn your own teammates or form nested teams."
     ));
     Ok(prompt)
 }
@@ -3829,24 +3387,13 @@ fn inherited_allowed_tools() -> Option<BTreeSet<String>> {
 
 fn apply_inherited_allowed_tools(base: BTreeSet<String>) -> BTreeSet<String> {
     let inherited = inherited_allowed_tools();
-    let mut allowed = if let Some(inherited) = inherited.as_ref() {
+    if let Some(inherited) = inherited.as_ref() {
         base.intersection(inherited)
             .cloned()
             .collect::<BTreeSet<_>>()
     } else {
         base
-    };
-    for tool in team_state::COORDINATION_TOOLS {
-        if inherited.as_ref().is_none_or(|tools| tools.contains(*tool)) {
-            allowed.insert((*tool).to_string());
-        }
     }
-    allowed
-}
-
-fn allowed_tools_for_teammate(subagent_type: Option<&str>) -> BTreeSet<String> {
-    let normalized = normalize_subagent_type(subagent_type);
-    allowed_tools_for_subagent(&normalized)
 }
 
 fn agent_permission_policy() -> PermissionPolicy {
@@ -3869,7 +3416,7 @@ fn persist_agent_terminal_state(
     status: &str,
     result: Option<&str>,
     error: Option<String>,
-    usage: Option<team_state::AgentTokenUsage>,
+    usage: Option<AgentTokenUsage>,
 ) -> Result<(), String> {
     append_agent_output(
         &manifest.output_file,

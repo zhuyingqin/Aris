@@ -125,7 +125,6 @@ export function TypesetVisualEditor({
   draft: string;
   pdfCursor: VisualPdfCursor | null;
   onChange: (value: string) => void;
-  onOpenCodeAtLine: (line: number) => void;
   onOpenCodeRange: (start: number, end: number) => void;
   onVisibleLineChange?: (line: number) => void;
   // Double-click forward-search: jump the compiled PDF preview to this

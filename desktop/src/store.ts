@@ -219,6 +219,14 @@ interface AppState {
   pendingTypesetFilePath: string | null;
   setPendingTypesetFilePath: (value: string | null) => void;
 
+  /**
+   * One-shot request to read a file in Chat's side panel, consumed by Chat.
+   * PDFs and other read-only material stay beside the conversation instead of
+   * taking over a workspace tab.
+   */
+  pendingSidePanelFilePath: string | null;
+  setPendingSidePanelFilePath: (value: string | null) => void;
+
   stateDir: string;
   error: string | null;
   projects: DesktopProject[];
@@ -315,6 +323,9 @@ export const useStore = create<AppState>((set, get) => ({
 
   pendingTypesetFilePath: null,
   setPendingTypesetFilePath: (value) => set({ pendingTypesetFilePath: value }),
+
+  pendingSidePanelFilePath: null,
+  setPendingSidePanelFilePath: (value) => set({ pendingSidePanelFilePath: value }),
 
   stateDir: "",
   error: null,

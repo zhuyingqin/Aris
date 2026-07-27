@@ -1,7 +1,3 @@
-use std::path::Path;
-
-use serde_json::json;
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandManifestEntry {
     pub name: String,
@@ -216,20 +212,6 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
         resume_supported: false,
     },
     SlashCommandSpec {
-        name: "team",
-        summary: "Inspect Agent Team members, tasks, mailbox, and events",
-        argument_hint: Some("[list|raw|events|messages|supervisor] [team-id]"),
-        resume_supported: false,
-    },
-    SlashCommandSpec {
-        name: "workflows",
-        summary: "List, inspect, control, save, discover, or start dynamic workflows",
-        argument_hint: Some(
-            "[list|inspect|pause|resume|stop|restart|save|discover|start|allow-once|always|deny|inject]",
-        ),
-        resume_supported: false,
-    },
-    SlashCommandSpec {
         name: "meta-optimize",
         summary: "Analyze usage logs and optimize SomniQ skills",
         argument_hint: Some("[apply <N>|status]"),
@@ -298,14 +280,6 @@ pub enum SlashCommand {
         path: Option<String>,
     },
     Session {
-        action: Option<String>,
-        target: Option<String>,
-    },
-    Team {
-        action: Option<String>,
-        target: Option<String>,
-    },
-    Workflows {
         action: Option<String>,
         target: Option<String>,
     },
@@ -422,14 +396,6 @@ impl SlashCommand {
                 };
                 Self::Session { action, target }
             }
-            "team" => Self::Team {
-                action: parts.next().map(ToOwned::to_owned),
-                target: parts.next().map(ToOwned::to_owned),
-            },
-            "workflows" => Self::Workflows {
-                action: parts.next().map(ToOwned::to_owned),
-                target: parts.next().map(ToOwned::to_owned),
-            },
             "meta-optimize" => Self::MetaOptimize {
                 action: parts.next().map(ToOwned::to_owned),
                 target: parts.next().map(ToOwned::to_owned),
@@ -483,165 +449,6 @@ pub fn render_slash_command_help() -> String {
         lines.push(format!("  {name:<20} {}{}", spec.summary, resume));
     }
     lines.join("\n")
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TeamCommandPlan {
-    RenderTeamView {
-        team_id: Option<String>,
-    },
-    Tool {
-        name: &'static str,
-        input: serde_json::Value,
-    },
-    Message(String),
-}
-
-#[must_use]
-pub fn plan_team_command(action: Option<&str>, target: Option<&str>) -> TeamCommandPlan {
-    match action {
-        None | Some("list") => TeamCommandPlan::RenderTeamView {
-            team_id: target.map(ToOwned::to_owned),
-        },
-        Some("raw") => TeamCommandPlan::Tool {
-            name: "ListTeam",
-            input: team_tool_input(target, true, true),
-        },
-        Some("messages") => TeamCommandPlan::Tool {
-            name: "ListTeam",
-            input: team_tool_input(target, true, false),
-        },
-        Some("events") => TeamCommandPlan::Tool {
-            name: "ListTeam",
-            input: team_tool_input(target, true, true),
-        },
-        Some("supervisor") => {
-            let mut input = json!({ "action": "list" });
-            if let Some(team_id) = target {
-                input["teamId"] = json!(team_id);
-            }
-            TeamCommandPlan::Tool {
-                name: "AgentSupervisor",
-                input,
-            }
-        }
-        Some(other) => TeamCommandPlan::Message(format!(
-            "Unknown /team action '{other}'. Use /team [list], /team raw, /team messages, /team events, or /team supervisor."
-        )),
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum WorkflowCommandPlan {
-    Tool { input: serde_json::Value },
-    Inject { run_id: String },
-    Message(String),
-}
-
-#[must_use]
-pub fn plan_workflows_command(action: Option<&str>, target: Option<&str>) -> WorkflowCommandPlan {
-    let action = action.unwrap_or("list");
-    match action {
-        "list" => WorkflowCommandPlan::Tool {
-            input: json!({ "action": "list" }),
-        },
-        "discover" => WorkflowCommandPlan::Tool {
-            input: json!({ "action": "discover" }),
-        },
-        "start" => {
-            let Some(target) = target else {
-                return WorkflowCommandPlan::Message(
-                    "Usage: /workflows start <saved-name-or-script-path>".to_string(),
-                );
-            };
-            WorkflowCommandPlan::Tool {
-                input: workflow_start_input("plan", target, None),
-            }
-        }
-        "allow-once" | "always" => {
-            let Some(target) = target else {
-                return WorkflowCommandPlan::Message(format!(
-                    "Usage: /workflows {action} <saved-name-or-script-path>"
-                ));
-            };
-            let approval = if action == "allow-once" {
-                "allow_once"
-            } else {
-                "always"
-            };
-            WorkflowCommandPlan::Tool {
-                input: workflow_start_input("start", target, Some(approval)),
-            }
-        }
-        "deny" => WorkflowCommandPlan::Message("Workflow approval denied.".to_string()),
-        "inspect" | "pause" | "resume" | "stop" | "restart" => {
-            let Some(run_id) = target else {
-                return WorkflowCommandPlan::Message(format!("Usage: /workflows {action} <run-id>"));
-            };
-            WorkflowCommandPlan::Tool {
-                input: json!({
-                    "action": action,
-                    "runId": run_id,
-                    "approval": "allow_once"
-                }),
-            }
-        }
-        "inject" => {
-            let Some(run_id) = target else {
-                return WorkflowCommandPlan::Message("Usage: /workflows inject <run-id>".to_string());
-            };
-            WorkflowCommandPlan::Inject {
-                run_id: run_id.to_string(),
-            }
-        }
-        "save" => {
-            let Some(script_path) = target else {
-                return WorkflowCommandPlan::Message("Usage: /workflows save <script-path>".to_string());
-            };
-            let save_as = Path::new(script_path)
-                .file_stem()
-                .and_then(|stem| stem.to_str())
-                .unwrap_or("workflow");
-            WorkflowCommandPlan::Tool {
-                input: json!({
-                    "action": "save",
-                    "scriptPath": script_path,
-                    "saveAs": save_as,
-                }),
-            }
-        }
-        other => WorkflowCommandPlan::Message(format!(
-            "Unknown /workflows action '{other}'. Use list, discover, start, allow-once, always, inspect, pause, resume, stop, restart, save, or inject."
-        )),
-    }
-}
-
-fn team_tool_input(
-    team_id: Option<&str>,
-    include_messages: bool,
-    include_events: bool,
-) -> serde_json::Value {
-    let mut input = json!({
-        "includeMessages": include_messages,
-        "includeEvents": include_events,
-    });
-    if let Some(team_id) = team_id {
-        input["teamId"] = json!(team_id);
-    }
-    input
-}
-
-fn workflow_start_input(action: &str, target: &str, approval: Option<&str>) -> serde_json::Value {
-    let mut input = json!({ "action": action });
-    if Path::new(target).exists() {
-        input["scriptPath"] = json!(target);
-    } else {
-        input["name"] = json!(target);
-    }
-    if let Some(approval) = approval {
-        input["approval"] = json!(approval);
-    }
-    input
 }
 
 #[cfg(test)]

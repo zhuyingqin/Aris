@@ -230,7 +230,7 @@ export function isTypesetPreviewMode(): boolean {
   );
 }
 
-export function isPlainBrowserRuntime(): boolean {
+function isPlainBrowserRuntime(): boolean {
   return typeof window !== "undefined" && !("__TAURI_INTERNALS__" in window);
 }
 

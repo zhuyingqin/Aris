@@ -77,60 +77,6 @@ function accountSummary(accounts: MailAccount[], copy: SettingsMailCopy) {
   return copy.accountSummary(connected, accounts.length);
 }
 
-export default function MailSettings({ onOpen }: { onOpen: () => void }) {
-  const language = useStore((state) => state.language);
-  const copy = SETTINGS_COPY[language].mail;
-  const [accounts, setAccounts] = useState<MailAccount[]>([]);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    mailAccountsGet()
-      .then((next) => {
-        setAccounts(next);
-        setError(null);
-      })
-      .catch((e) => setError(String(e)));
-  }, []);
-
-  const connectedCount = useMemo(
-    () => accounts.filter((account) => account.connected).length,
-    [accounts],
-  );
-
-  return (
-    <div className="sp-card-wrap">
-      <div className="sp-card sp-bridge-card">
-        <div
-          className="sp-card-click-zone"
-          role="button"
-          tabIndex={0}
-          onClick={onOpen}
-          onKeyDown={(event) => {
-            if (event.key === "Enter" || event.key === " ") {
-              event.preventDefault();
-              onOpen();
-            }
-          }}
-        >
-          <div className="sp-card-icon sp-card-icon-mail" aria-hidden="true">M</div>
-          <div className="sp-card-body">
-            <div className="sp-card-name">
-              {copy.mail}
-              <span className="sp-role-badge sp-role-mail">{copy.autoconfigBadge}</span>
-              {connectedCount > 0 && <span className="sp-role-badge sp-role-running">{copy.connected}</span>}
-            </div>
-            <div className="sp-card-url">{copy.cardDescription}</div>
-            <div className="sp-card-notes">{error ? copy.cardError : accountSummary(accounts, copy)}</div>
-          </div>
-        </div>
-        <div className="sp-card-actions" onClick={(event) => event.stopPropagation()}>
-          <button className="sp-card-btn" title={copy.configure} type="button" onClick={onOpen}><SvgIcon name="edit" size={15} /></button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 export function MailSettingsDetail() {
   const language = useStore((state) => state.language);
   const copy = SETTINGS_COPY[language].mail;

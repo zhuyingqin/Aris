@@ -15,7 +15,7 @@ crates/executor
   provider clients, streaming conversion, tool-call event normalization
 
 crates/tools
-  ARIS tool implementations, agent/team/workflow coordination state
+  ARIS tool implementations, subagent spawning
 
 crates/commands
   reusable command parsing/specs and command behavior that is not terminal-only
@@ -45,9 +45,8 @@ The current branch mostly follows the intended direction.
 - `runtime::ConversationRuntime` owns the conversation loop through `ApiClient` and `ToolExecutor` traits, so both shells can reuse the same turn execution model.
 - `aris-executor` owns Anthropic/OpenAI-compatible streaming and exposes `StreamObserver`, letting CLI render to terminal while Desktop emits Tauri events.
 - `crates/chat` owns shared chat assembly: provider config resolution, executor construction, max-token policy, tool-spec conversion, permission-policy construction, common prompt sections, and final assistant text extraction.
-- Desktop workflow/team commands are thin wrappers over `tools::execute_tool`, so workflow and team state logic stays in the shared tool layer.
 - Desktop sessions reuse `runtime::Session`, keeping the on-disk conversation format shared with CLI.
-- Slash command specs, parsing, help rendering, `/team` tool plans, and `/workflows` tool plans live in `crates/commands`.
+- Slash command specs, parsing, and help rendering live in `crates/commands`.
 
 ## What does not fully match yet
 
@@ -77,7 +76,7 @@ Remaining rule:
 
 ### 3. Slash commands are only partially shared
 
-`crates/commands` contains specs, parsing, help rendering, resumable command handling, and shared command plans for `/team` and `/workflows`. Some actual command behaviors still live in `aris-cli/src/main.rs`.
+`crates/commands` contains specs, parsing, help rendering, and resumable command handling. Some actual command behaviors still live in `aris-cli/src/main.rs`.
 
 This is acceptable for terminal-only commands, but not for commands whose behavior is domain logic.
 
@@ -108,12 +107,12 @@ Keep this boundary:
 
 ### 5. Frontend types mirror Rust comments instead of generated contracts
 
-`desktop/src/types.ts` and related UI code manually mirror tool/workflow/team structures from Rust.
+`desktop/src/types.ts` and related UI code manually mirror tool output structures from Rust.
 
 Target:
 
 - For fast iteration this is acceptable.
-- Long term, generate or export stable JSON schemas/types for workflow/team outputs to reduce drift.
+- Long term, generate or export stable JSON schemas/types for tool outputs to reduce drift.
 
 ## Placement rules for new code
 
@@ -134,7 +133,7 @@ Use these rules when deciding where to put a new feature.
 ### Put it in `tools` when
 
 - It is an ARIS tool implementation.
-- It changes agent/team/workflow coordination.
+- It changes agent/subagent coordination.
 - It reads or writes shared ARIS tool state.
 
 ### Put it in `commands` when
@@ -203,4 +202,6 @@ Desktop shell  -> shared runtime/executor/tools
 Desktop shell  -X-> aris-cli process
 ```
 
-The main remaining issue is not wrong coupling to CLI. The chat-runtime assembly duplication has been moved into `crates/chat`, and workflow/team slash command planning has moved into `crates/commands`. The next architectural improvement is to keep moving session/config/status command behavior out of `aris-cli/src/main.rs` when it is not inherently terminal-specific.
+The main remaining issue is not wrong coupling to CLI. The chat-runtime assembly duplication has been moved into `crates/chat`. The next architectural improvement is to keep moving session/config/status command behavior out of `aris-cli/src/main.rs` when it is not inherently terminal-specific.
+
+Note: the team/workflow multi-agent coordination subsystem (SpawnTeammate, ListTeam, AgentSupervisor, Workflow, etc.) that previously lived in `crates/tools` and `aris-cli`'s `/team`/`/workflows` commands was removed entirely — it never shipped to desktop users and was still pre-launch on CLI. The plain `Agent` subagent-spawning tool is unaffected.

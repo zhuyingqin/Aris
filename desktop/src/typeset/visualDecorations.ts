@@ -1090,8 +1090,6 @@ export const visualForwardSearchClick = EditorView.domEventHandlers({
     const pos = isBlockTarget
       ? view.lineBlockAtHeight(event.clientY - view.documentTop).to
       : view.posAtCoords({ x: event.clientX, y: event.clientY });
-    // eslint-disable-next-line no-console -- temporary forward-search diagnostic, see conversation
-    console.debug("[typeset] Visual dblclick", { hasHandler: Boolean(handler), isBlockTarget, pos });
     if (!handler) return false;
     if (pos == null) return false;
     const line = view.state.doc.lineAt(pos);

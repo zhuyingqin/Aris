@@ -183,13 +183,11 @@ fn agent_tool_subset_mapping_is_expected() {
     assert!(general.contains("write_file"));
     assert!(general.contains("append_file"));
     assert!(!general.contains("Agent"));
-    assert!(general.contains("ListTeam"));
 
     let explore = allowed_tools_for_subagent("Explore");
     assert!(explore.contains("read_file"));
     assert!(explore.contains("grep_search"));
     assert!(!explore.contains("bash"));
-    assert!(explore.contains("SendMessage"));
 
     let plan = allowed_tools_for_subagent("Plan");
     assert!(plan.contains("TodoWrite"));
@@ -250,26 +248,133 @@ fn shell_tool_descriptions_prefer_dedicated_tools_and_parallel_reads() {
     }
 }
 
+#[derive(Debug)]
+struct MockSubagentApiClient {
+    calls: usize,
+    input_path: String,
+}
+
+impl runtime::ApiClient for MockSubagentApiClient {
+    fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+        self.calls += 1;
+        match self.calls {
+            1 => {
+                assert_eq!(request.messages.len(), 1);
+                Ok(vec![
+                    AssistantEvent::ToolUse {
+                        id: "tool-1".to_string(),
+                        name: "read_file".to_string(),
+                        input: json!({ "path": self.input_path }).to_string(),
+                    },
+                    AssistantEvent::MessageStop,
+                ])
+            }
+            2 => {
+                assert!(request.messages.len() >= 3);
+                Ok(vec![
+                    AssistantEvent::TextDelta("Scope: completed mock review".to_string()),
+                    AssistantEvent::MessageStop,
+                ])
+            }
+            _ => panic!("unexpected mock stream call"),
+        }
+    }
+}
+
 #[test]
-fn inherited_allowed_tools_filter_subagent_and_coordination_tools() {
+fn subagent_runtime_executes_tool_loop_with_isolated_session() {
     let _guard = env_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let _env = EnvGuard::set(
-        "ARIS_ALLOWED_TOOLS",
-        "read_file,grep_search,ListTeam,CompleteTask",
+    let path = temp_path("subagent-input.txt");
+    std::fs::write(&path, "hello from child").expect("write input file");
+    let _workspace_root = EnvGuard::set(
+        ARIS_WORKSPACE_ROOT_ENV,
+        path.parent().expect("temporary file parent"),
     );
 
-    let general = allowed_tools_for_subagent("general-purpose");
+    let mut runtime = ConversationRuntime::new(
+        Session::new(),
+        MockSubagentApiClient {
+            calls: 0,
+            input_path: path.display().to_string(),
+        },
+        SubagentToolExecutor::new(BTreeSet::from([String::from("read_file")])),
+        agent_permission_policy(),
+        vec![String::from("system prompt")],
+    );
 
-    assert!(general.contains("read_file"));
-    assert!(general.contains("grep_search"));
-    assert!(general.contains("ListTeam"));
-    assert!(general.contains("CompleteTask"));
-    assert!(!general.contains("bash"));
-    assert!(!general.contains("PowerShell"));
-    assert!(!general.contains("Workflow"));
-    assert!(!general.contains("EnterWorktree"));
-    assert!(!general.contains("AgentSupervisor"));
-    assert!(!general.contains("SpawnTeammate"));
+    let summary = runtime
+        .run_turn("Inspect the delegated file", None)
+        .expect("subagent loop should succeed");
+
+    assert_eq!(
+        final_assistant_text(&summary),
+        "Scope: completed mock review"
+    );
+    assert!(runtime
+        .session()
+        .messages
+        .iter()
+        .flat_map(|message| message.blocks.iter())
+        .any(|block| matches!(
+            block,
+            runtime::ContentBlock::ToolResult { output, .. }
+                if output.contains("hello from child")
+        )));
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn final_assistant_text_keeps_all_nonempty_text_iterations() {
+    let summary = TurnSummary {
+        assistant_messages: vec![
+            ConversationMessage::assistant(vec![
+                ContentBlock::Text {
+                    text: "Preparing review.".to_string(),
+                },
+                ContentBlock::ToolUse {
+                    id: "tool-1".to_string(),
+                    name: "read_file".to_string(),
+                    input: "{}".to_string(),
+                },
+            ]),
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "Review complete.".to_string(),
+            }]),
+        ],
+        tool_results: Vec::new(),
+        iterations: 2,
+        usage: TokenUsage::default(),
+        auto_compaction: None,
+    };
+
+    assert_eq!(
+        final_assistant_text(&summary),
+        "Preparing review.\n\nReview complete."
+    );
+}
+
+#[test]
+fn agent_rejects_blank_required_fields() {
+    let missing_description = execute_tool(
+        "Agent",
+        &json!({
+            "description": "  ",
+            "prompt": "Inspect"
+        }),
+    )
+    .expect_err("blank description should fail");
+    assert!(missing_description.contains("description must not be empty"));
+
+    let missing_prompt = execute_tool(
+        "Agent",
+        &json!({
+            "description": "Inspect branch",
+            "prompt": " "
+        }),
+    )
+    .expect_err("blank prompt should fail");
+    assert!(missing_prompt.contains("prompt must not be empty"));
 }

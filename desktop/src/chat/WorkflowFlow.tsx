@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { ChatFileChange, ChatTodoItem } from "../types";
 import { SvgIcon, type SvgIconName } from "../SvgIcon";
 import { EditedFilesSummary, type TurnFileChangeSummary } from "./ChatMessage";
+import { displayLocalFilePath } from "./localFileLinks";
 
 interface Props {
   todos: ChatTodoItem[];
@@ -87,7 +88,7 @@ export default function WorkflowFlow({
   const titlePaths = [
     ...(fileChangeSummary?.files.map((change) => change.path) ?? []),
     ...fallbackFileChanges.map((change) => change.path),
-  ];
+  ].map(displayLocalFilePath);
   const title = current
     ? current.status === "in_progress" ? current.activeForm : current.content
     : titlePaths.join("\n");
@@ -136,13 +137,15 @@ export default function WorkflowFlow({
                     <button
                       type="button"
                       className="chat-workflow-file-path"
-                      title={change.path}
+                      title={displayLocalFilePath(change.path)}
                       onClick={() => onOpenFile(change.path)}
                     >
-                      {change.path}
+                      {displayLocalFilePath(change.path)}
                     </button>
                   ) : (
-                    <span className="chat-workflow-file-path" title={change.path}>{change.path}</span>
+                    <span className="chat-workflow-file-path" title={displayLocalFilePath(change.path)}>
+                      {displayLocalFilePath(change.path)}
+                    </span>
                   )}
                 </div>
               ))}

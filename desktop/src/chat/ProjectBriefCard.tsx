@@ -10,7 +10,7 @@ import {
 import type { Language } from "../store";
 import { SvgIcon } from "../SvgIcon";
 
-export const PROJECT_BRIEF_UPDATED_EVENT = "somniq:project-brief-updated";
+const PROJECT_BRIEF_UPDATED_EVENT = "somniq:project-brief-updated";
 
 export function notifyProjectBriefUpdated() {
   window.dispatchEvent(new CustomEvent(PROJECT_BRIEF_UPDATED_EVENT));

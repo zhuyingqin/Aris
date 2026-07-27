@@ -3,7 +3,7 @@ import { requestWindowAction } from "./windowControls";
 // Windows-style minimize / maximize / close glyphs, a 10×10 viewBox centered in
 // a 46×36 hit area. Shared by the app titlebar and the pre-auth window controls
 // so both surfaces stay pixel-identical.
-export const WinCtl = {
+const WinCtl = {
   minimize: (
     <svg className="win-ctl-glyph" width="10" height="10" viewBox="0 0 10 10"
       fill="none" stroke="currentColor" strokeWidth="1" aria-hidden="true">
@@ -30,7 +30,7 @@ export type WindowControlLabels = {
   close: string;
 };
 
-export const DEFAULT_WINDOW_CONTROL_LABELS: WindowControlLabels = {
+const DEFAULT_WINDOW_CONTROL_LABELS: WindowControlLabels = {
   minimize: "最小化窗口",
   maximize: "最大化窗口",
   close: "关闭窗口",

@@ -305,6 +305,7 @@ fn is_chat_ui_question_turn(turn: &Value) -> bool {
     turn.get("role").and_then(Value::as_str) == Some("user")
 }
 
+#[allow(dead_code)]
 fn chat_ui_preview_turns(id: &str, turns: &[Value]) -> (Vec<Value>, bool, Vec<String>) {
     let start = turns
         .len()

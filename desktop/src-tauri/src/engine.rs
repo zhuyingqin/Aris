@@ -139,6 +139,7 @@ fn validate_remote_chat_project(project_id: &str) -> Result<(), String> {
 /// Compatibility validation for callers that need to validate an opaque
 /// session id before its Chat UI projection has been persisted. A real remote
 /// chat read/send must use [`remote_chat_session_validate`] instead.
+#[allow(dead_code)]
 pub(crate) fn validate_remote_chat_target(
     project_id: &str,
     session_id: &str,
@@ -295,8 +296,6 @@ const PROJECT_ENV_VARS: &[&str] = &[
     "ARIS_RUN_STATE_DIR",
     "ARIS_SESSIONS_DIR",
     "ARIS_AGENT_STORE_DIR",
-    "ARIS_WORKFLOWS_DIR",
-    "ARIS_USER_WORKFLOWS_DIR",
     "ARIS_READONLY_ROOTS",
     "CLAWD_AGENT_STORE",
     "CLAWD_TODO_STORE",
@@ -403,35 +402,10 @@ async fn wait_for_cancelled_turn_to_finish(
 
 // ── Tool executor ─────────────────────────────────────────────────────────────
 
-// Team/workflow orchestration is intentionally disabled in desktop Chat for now:
-// the prompt section is off, slash commands are disabled, and the UI has no live
-// team monitor. Keep these tools out of the model-visible registry until the
-// full desktop workflow surface is rebuilt.
-const TEAM_WORKFLOW_BLOCKED_TOOLS: &[&str] = &[
-    "AgentSupervisor",
-    "SpawnTeammate",
-    "SendMessage",
-    "ClaimTask",
-    "CompleteTask",
-    "ListTeam",
-    "WaitForTeammates",
-    "VerifyDeliverable",
-    "TeamControl",
-    "Workflow",
-    "EnterWorktree",
-];
-
 const DESKTOP_CHAT_EXTRA_BLOCKED_TOOLS: &[&str] = &[];
 
-const DISABLED_DESKTOP_SLASH_COMMANDS: &[&str] = &["team", "workflows"];
-const DESKTOP_COMMAND_DISABLED_MESSAGE: &str = "This desktop command is disabled in this build.";
-
 fn is_blocked_tool(tool_name: &str, extra_blocked_tools: &'static [&'static str]) -> bool {
-    TEAM_WORKFLOW_BLOCKED_TOOLS.contains(&tool_name) || extra_blocked_tools.contains(&tool_name)
-}
-
-fn is_disabled_desktop_slash_command(command_name: &str) -> bool {
-    DISABLED_DESKTOP_SLASH_COMMANDS.contains(&command_name)
+    extra_blocked_tools.contains(&tool_name)
 }
 
 fn denied_tool_message(tool_name: &str) -> String {
@@ -2084,7 +2058,7 @@ fn build_system_prompt_uncached(key: &SystemPromptCacheKey) -> Vec<String> {
     let workspace = key.workspace.clone();
     let access = if key.full_tool_registry {
         format!(
-            "Desktop Chat runs in the SomniQ workspace at `{}`. The desktop tool registry, including shell, MCP, and single-agent tools, is available when the active permission mode allows it. Team/Workflow orchestration tools are disabled on this surface. Respect the selected permission mode and keep generated project artifacts in this workspace unless the user explicitly requests another location.",
+            "Desktop Chat runs in the SomniQ workspace at `{}`. The desktop tool registry, including shell, MCP, and single-agent tools, is available when the active permission mode allows it. Respect the selected permission mode and keep generated project artifacts in this workspace unless the user explicitly requests another location.",
             workspace.display()
         )
     } else {
@@ -2128,7 +2102,6 @@ fn build_system_prompt_uncached(key: &SystemPromptCacheKey) -> Vec<String> {
         product_surface: "desktop research automation app".to_string(),
         language: key.language.clone(),
         include_language_preference: true,
-        include_team_orchestration: false,
         extra_sections,
     })
     .unwrap_or_else(|_| vec![access])
@@ -2636,16 +2609,12 @@ impl From<TokenUsage> for ChatDoneProviderUsage {
     }
 }
 
-fn chat_done_context_tokens(
-    session: &Session,
-    provider_usage: Option<&ChatDoneProviderUsage>,
-) -> u64 {
-    let session_estimate = runtime::estimate_session_tokens(session) as u64;
-    // Provider prompt usage includes system prompt and tool schemas, while the
-    // session estimate includes the assistant text just produced for the next
-    // request. Keep the conservative maximum so the ContextRing under-reports
-    // neither side.
-    session_estimate.max(provider_usage.map_or(0, |usage| u64::from(usage.prompt_tokens)))
+fn chat_done_context_tokens(session: &Session) -> u64 {
+    // Keep the displayed value in the same unit as `maybe_auto_compact`: the
+    // stored session history. Provider prompt accounting includes cache, tool,
+    // and system overhead, and mixing it here can show >100% while automatic
+    // compaction correctly remains below its session-history threshold.
+    runtime::estimate_session_tokens(session) as u64
 }
 
 fn latest_provider_usage(turn_usages: &[TokenUsage]) -> Option<ChatDoneProviderUsage> {
@@ -3314,7 +3283,6 @@ impl ChatCommandResult {
 pub fn chat_command_specs() -> Vec<ChatCommandSpec> {
     slash_command_specs()
         .iter()
-        .filter(|spec| !is_disabled_desktop_slash_command(spec.name))
         .map(|spec| ChatCommandSpec {
             name: spec.name.to_string(),
             description: spec.summary.to_string(),
@@ -3480,9 +3448,6 @@ pub fn chat_run_command(
         }
         SlashCommand::Session { action, target } => {
             handle_session_command(&session_id, action.as_deref(), target.as_deref())
-        }
-        SlashCommand::Team { .. } | SlashCommand::Workflows { .. } => {
-            Ok(ChatCommandResult::message(DESKTOP_COMMAND_DISABLED_MESSAGE))
         }
         SlashCommand::Bughunter { scope } => Ok(ChatCommandResult::prompt(bughunter_prompt(
             scope.as_deref(),
@@ -5991,10 +5956,10 @@ async fn run_chat_turn_with_context(
         return Err(error);
     }
 
-    // Combine persisted-session and provider-prompt estimates. Each captures
-    // input the other does not, so the UI must use their conservative maximum.
+    // ContextRing and auto-compaction both use the persisted session-history
+    // estimate. Provider usage remains available separately for telemetry.
     let provider_usage = latest_provider_usage(&turn_usages);
-    let context_tokens = chat_done_context_tokens(&updated, provider_usage.as_ref());
+    let context_tokens = chat_done_context_tokens(&updated);
     let auto_compaction_tokens_after = auto_compaction.map(|event| event.tokens_after);
     let auto_compaction_token_estimate_source =
         auto_compaction.map(|event| event.token_estimate_source.as_str());
@@ -6285,6 +6250,38 @@ pub async fn chat_rewind_to_user_message(
     );
     crate::chat_events::record_session_snapshot(&session_id, "context_rewind", &current);
     Ok(Some(tokens))
+}
+
+/// Return the current compactable backend-history estimate for an existing
+/// session. The UI uses this once to hydrate chats saved before token metadata
+/// was persisted alongside their visible transcript.
+#[tauri::command]
+pub async fn chat_context_tokens(
+    state: State<'_, ChatState>,
+    session_id: String,
+) -> Result<Option<u64>, String> {
+    validate_session_id(&session_id)?;
+    let cached = state
+        .sessions
+        .lock()
+        .map_err(|_| "chat state poisoned".to_string())?
+        .get(&session_id)
+        .cloned();
+    if let Some(session) = cached {
+        return Ok(Some(runtime::estimate_session_tokens(&session) as u64));
+    }
+
+    let path = chat_session_path(&session_id)?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        Session::load_from_path(path)
+            .map(|session| Some(runtime::estimate_session_tokens(&session) as u64))
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -7813,10 +7810,7 @@ fn render_desktop_slash_command_help() -> String {
         "Slash commands".to_string(),
         "  [resume] means the command also works with --resume SESSION.json".to_string(),
     ];
-    for spec in slash_command_specs()
-        .iter()
-        .filter(|spec| !is_disabled_desktop_slash_command(spec.name))
-    {
+    for spec in slash_command_specs().iter() {
         let name = match spec.argument_hint {
             Some(argument_hint) => format!("/{} {}", spec.name, argument_hint),
             None => format!("/{}", spec.name),

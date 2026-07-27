@@ -1315,6 +1315,10 @@ export const chatSetContext = (
   messages: ChatContextMessage[],
   mode: ChatContextSyncMode = "replace",
 ) => invoke<number>("chat_set_context", { sessionId, messages, mode });
+/** Current backend session-history estimate. `null` means this chat has no
+ * backend session yet, so callers should retain their local fallback. */
+export const chatContextTokens = (sessionId: string) =>
+  invoke<number | null>("chat_context_tokens", { sessionId });
 /** Rewind to the server's full context before this one unambiguous user
  * message. `null` means an older/ambiguous session must use the UI fallback. */
 export const chatRewindToUserMessage = (sessionId: string, message: ChatContextUserMessage) =>

@@ -1387,18 +1387,7 @@ interface LiteratureState {
   /** Reload the library when a chat turn ends — literature skills may have
    * upserted papers through the kernel tools. Returns a teardown fn. */
   watchAgentActivity: () => () => void;
-  createReviewTask: (question: string, searchIds?: string[]) => Promise<string>;
-  updateReviewQuestion: (taskId: string, question: string) => void;
-  updateCriterion: (taskId: string, criterionId: string, text: string) => void;
-  addCriterion: (taskId: string, kind: CriterionKind) => void;
-  removeCriterion: (taskId: string, criterionId: string) => void;
   screenPapersForTask: (taskId: string, paperIds?: string[]) => Promise<void>;
-  confirmScreening: (paperId: string, taskId: string) => void;
-  flipScreening: (paperId: string, taskId: string) => void;
-  /** Set an explicit decision (include/exclude/maybe) and confirm it. */
-  decideScreening: (paperId: string, taskId: string, decision: ScreeningDecision) => void;
-  acceptCriteriaSuggestion: (taskId: string, suggestionId: string) => void;
-  dismissCriteriaSuggestion: (taskId: string, suggestionId: string) => void;
   setStage: (ids: string[], stage: PaperStage) => void;
   deletePapers: (ids: string[]) => void;
   toggleStar: (id: string) => void;
@@ -1413,9 +1402,7 @@ interface LiteratureState {
   saveDynamicSearch: (query: string) => string | null;
   addCollection: (label: string, parentId?: string) => void;
   removeCollection: (id: string) => void;
-  assignCollection: (ids: string[], collectionId: string) => void;
   toggleCollection: (paperId: string, collectionId: string) => void;
-  setProjectFocus: (patch: Partial<ProjectFocus>) => void;
   generateBrief: (paperId: string) => Promise<void>;
   generateAnswerChains: (paperId: string) => Promise<void>;
   deleteEvidence: (paperId: string, evidenceId: string) => void;
@@ -1724,93 +1711,6 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
       };
     },
 
-    createReviewTask: async (question, searchIds = []) => {
-      const reviewTask = reviewTaskFromQuery(question, searchIds);
-      mutate((library) => ({
-        ...library,
-        reviewTasks: [reviewTask, ...library.reviewTasks],
-      }));
-      set({ activeReviewTaskId: reviewTask.id });
-      const copy = LITERATURE_COPY[useStore.getState().language].store;
-      log("info", copy.reviewTaskCreated(reviewTask.question));
-      if (isTauri()) {
-        if (persistTimer) {
-          clearTimeout(persistTimer);
-          persistTimer = null;
-        }
-        try {
-          await persistNow("review task");
-        } catch (error) {
-          const message = copy.reviewTaskSaveFailed(String(error));
-          set({ error: message });
-          log("error", message, { open: true });
-        }
-      }
-      return reviewTask.id;
-    },
-
-    updateReviewQuestion: (taskId, question) => {
-      mutate((library) => ({
-        ...library,
-        reviewTasks: library.reviewTasks.map((task) =>
-          task.id === taskId ? { ...task, question, updatedAt: isoNow() } : task,
-        ),
-      }));
-    },
-
-    updateCriterion: (taskId, criterionId, text) => {
-      mutate((library) => ({
-        ...library,
-        reviewTasks: library.reviewTasks.map((task) =>
-          task.id === taskId
-            ? {
-                ...task,
-                criteria: task.criteria.map((criterion) =>
-                  criterion.id === criterionId ? { ...criterion, text } : criterion,
-                ),
-                updatedAt: isoNow(),
-              }
-            : task,
-        ),
-      }));
-    },
-
-    addCriterion: (taskId, kind) => {
-      const criterion: ScreeningCriterion = {
-        id: makeId("crit"),
-        kind,
-        text: kind === "include" ? "Include papers that..." : "Exclude papers that...",
-        createdAt: isoNow(),
-      };
-      mutate((library) => ({
-        ...library,
-        reviewTasks: library.reviewTasks.map((task) =>
-          task.id === taskId
-            ? {
-                ...task,
-                criteria: [...task.criteria, criterion],
-                updatedAt: isoNow(),
-              }
-            : task,
-        ),
-      }));
-    },
-
-    removeCriterion: (taskId, criterionId) => {
-      mutate((library) => ({
-        ...library,
-        reviewTasks: library.reviewTasks.map((task) =>
-          task.id === taskId
-            ? {
-                ...task,
-                criteria: task.criteria.filter((criterion) => criterion.id !== criterionId),
-                updatedAt: isoNow(),
-              }
-            : task,
-        ),
-      }));
-    },
-
     screenPapersForTask: async (taskId, paperIds) => {
       const task = get().library.reviewTasks.find((entry) => entry.id === taskId);
       if (!task) return;
@@ -2003,170 +1903,6 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
       }
     },
 
-    confirmScreening: (paperId, taskId) => {
-      patchPapers([paperId], (paper) => {
-        const screening = paper.screenings?.[taskId];
-        if (!screening) return paper;
-        const confirmed = {
-          ...screening,
-          userConfirmed: true,
-          decidedAt: isoNow(),
-        };
-        return {
-          ...paper,
-          stage: stageForDecision(confirmed.decision),
-          verdict: screeningToVerdict(confirmed),
-          screenings: {
-            ...(paper.screenings ?? {}),
-            [taskId]: confirmed,
-          },
-        };
-      });
-    },
-
-    flipScreening: (paperId, taskId) => {
-      mutate((library) => {
-        const task = library.reviewTasks.find((entry) => entry.id === taskId);
-        if (!task) return library;
-        const papers = library.papers.map((paper) => {
-          if (paper.id !== paperId) return paper;
-          const current = paper.screenings?.[taskId] ?? screenPaperForTask(paper, task);
-          const decision: ScreeningDecision =
-            current.decision === "include" ? "exclude" : "include";
-          const flipped: PaperScreening = {
-            ...current,
-            decision,
-            userConfirmed: true,
-            flippedFrom: current.decision,
-            decidedAt: isoNow(),
-            reasons: [
-              {
-                id: makeId("reason"),
-                criteriaText: "Human review",
-                note: `Reviewer flipped the agent proposal from ${current.decision} to ${decision}.`,
-                anchor: current.reasons[0]?.anchor ?? {
-                  kind: paper.abstract.trim() ? "abstract" : "metadata",
-                  quote: firstUsefulQuote(paper),
-                },
-              },
-              ...current.reasons,
-            ].slice(0, 4),
-          };
-          return {
-            ...paper,
-            stage: stageForDecision(decision),
-            verdict: screeningToVerdict(flipped),
-            screenings: {
-              ...(paper.screenings ?? {}),
-              [taskId]: flipped,
-            },
-          };
-        });
-        const nextLibrary = { ...library, papers };
-        return {
-          ...nextLibrary,
-          reviewTasks: nextLibrary.reviewTasks.map((entry) =>
-            entry.id === taskId ? maybeSuggestCriteria(nextLibrary, entry) : entry,
-          ),
-        };
-      });
-    },
-
-    decideScreening: (paperId, taskId, decision) => {
-      mutate((library) => {
-        const task = library.reviewTasks.find((entry) => entry.id === taskId);
-        if (!task) return library;
-        const papers = library.papers.map((paper) => {
-          if (paper.id !== paperId) return paper;
-          const current = paper.screenings?.[taskId] ?? screenPaperForTask(paper, task);
-          // Agent's original proposal, regardless of prior user edits.
-          const agentOriginal = current.flippedFrom ?? current.decision;
-          const userChanged = decision !== agentOriginal;
-          const decided: PaperScreening = {
-            ...current,
-            decision,
-            userConfirmed: true,
-            flippedFrom: userChanged ? agentOriginal : undefined,
-            decidedAt: isoNow(),
-            reasons: userChanged
-              ? [
-                  {
-                    id: makeId("reason"),
-                    criteriaText: "Human review",
-                    note: `Reviewer set this to ${decision} (agent proposed ${agentOriginal}).`,
-                    anchor: current.reasons[0]?.anchor ?? {
-                      kind: paper.abstract.trim() ? "abstract" : "metadata",
-                      quote: firstUsefulQuote(paper),
-                    },
-                  },
-                  ...current.reasons,
-                ].slice(0, 4)
-              : current.reasons,
-          };
-          return {
-            ...paper,
-            stage: stageForDecision(decision),
-            verdict: screeningToVerdict(decided),
-            screenings: {
-              ...(paper.screenings ?? {}),
-              [taskId]: decided,
-            },
-          };
-        });
-        const nextLibrary = { ...library, papers };
-        return {
-          ...nextLibrary,
-          reviewTasks: nextLibrary.reviewTasks.map((entry) =>
-            entry.id === taskId ? maybeSuggestCriteria(nextLibrary, entry) : entry,
-          ),
-        };
-      });
-    },
-
-    acceptCriteriaSuggestion: (taskId, suggestionId) => {
-      mutate((library) => ({
-        ...library,
-        reviewTasks: library.reviewTasks.map((task) => {
-          if (task.id !== taskId) return task;
-          const suggestion = task.suggestions.find((entry) => entry.id === suggestionId);
-          if (!suggestion) return task;
-          const criterion: ScreeningCriterion = {
-            id: makeId("crit"),
-            kind: "include",
-            text: suggestion.text,
-            createdAt: isoNow(),
-          };
-          return {
-            ...task,
-            criteria: [...task.criteria, criterion],
-            suggestions: task.suggestions.map((entry) =>
-              entry.id === suggestionId ? { ...entry, accepted: true } : entry,
-            ),
-            updatedAt: isoNow(),
-          };
-        }),
-      }));
-    },
-
-    dismissCriteriaSuggestion: (taskId, suggestionId) => {
-      mutate((library) => ({
-        ...library,
-        reviewTasks: library.reviewTasks.map((task) =>
-          task.id === taskId
-            ? {
-                ...task,
-                suggestions: task.suggestions.map((suggestion) =>
-                  suggestion.id === suggestionId
-                    ? { ...suggestion, dismissed: true }
-                    : suggestion,
-                ),
-                updatedAt: isoNow(),
-              }
-            : task,
-        ),
-      }));
-    },
-
     setStage: (ids, stage) => patchPapers(ids, (paper) => ({ ...paper, stage })),
 
     deletePapers: (ids) => {
@@ -2299,14 +2035,6 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
       });
     },
 
-    assignCollection: (ids, collectionId) =>
-      patchPapers(ids, (paper) => ({
-        ...paper,
-        collectionIds: paper.collectionIds.includes(collectionId)
-          ? paper.collectionIds
-          : [...paper.collectionIds, collectionId],
-      })),
-
     toggleCollection: (paperId, collectionId) =>
       patchPapers([paperId], (paper) => ({
         ...paper,
@@ -2314,13 +2042,6 @@ export const useLiteratureStore = create<LiteratureState>((set, get) => {
           ? paper.collectionIds.filter((id) => id !== collectionId)
           : [...paper.collectionIds, collectionId],
       })),
-
-    setProjectFocus: (patch) => {
-      mutate((library) => ({
-        ...library,
-        projectFocus: { ...emptyFocus(), ...(library.projectFocus ?? {}), ...patch },
-      }));
-    },
 
     generateBrief: async (paperId) => {
       const language = useStore.getState().language;

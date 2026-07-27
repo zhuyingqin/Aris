@@ -1,7 +1,5 @@
 use super::{
-    plan_team_command, plan_workflows_command, render_slash_command_help,
-    resume_supported_slash_commands, slash_command_specs, SlashCommand, TeamCommandPlan,
-    WorkflowCommandPlan,
+    render_slash_command_help, resume_supported_slash_commands, slash_command_specs, SlashCommand,
 };
 
 #[test]
@@ -133,20 +131,6 @@ fn parses_supported_slash_commands() {
             target: Some("abc123".to_string())
         })
     );
-    assert_eq!(
-        SlashCommand::parse("/team events team-1"),
-        Some(SlashCommand::Team {
-            action: Some("events".to_string()),
-            target: Some("team-1".to_string())
-        })
-    );
-    assert_eq!(
-        SlashCommand::parse("/workflows inspect workflow-1"),
-        Some(SlashCommand::Workflows {
-            action: Some("inspect".to_string()),
-            target: Some("workflow-1".to_string())
-        })
-    );
 }
 
 #[test]
@@ -180,62 +164,6 @@ fn renders_help_from_shared_specs() {
     assert!(
         help.contains("/session [list|search <query>|switch <session-id>|timeline [session-id]]")
     );
-    assert!(help.contains("/team [list|raw|events|messages|supervisor] [team-id]"));
-    assert!(help.contains(
-        "/workflows [list|inspect|pause|resume|stop|restart|save|discover|start|allow-once|always|deny|inject]"
-    ));
-    assert_eq!(slash_command_specs().len(), 32);
+    assert_eq!(slash_command_specs().len(), 30);
     assert_eq!(resume_supported_slash_commands().len(), 13);
-}
-
-#[test]
-fn plans_team_tool_commands() {
-    assert_eq!(
-        plan_team_command(Some("messages"), Some("team-1")),
-        TeamCommandPlan::Tool {
-            name: "ListTeam",
-            input: serde_json::json!({
-                "includeMessages": true,
-                "includeEvents": false,
-                "teamId": "team-1"
-            }),
-        }
-    );
-    assert_eq!(
-        plan_team_command(Some("supervisor"), None),
-        TeamCommandPlan::Tool {
-            name: "AgentSupervisor",
-            input: serde_json::json!({ "action": "list" }),
-        }
-    );
-}
-
-#[test]
-fn plans_workflow_tool_commands() {
-    assert_eq!(
-        plan_workflows_command(Some("inspect"), Some("run-1")),
-        WorkflowCommandPlan::Tool {
-            input: serde_json::json!({
-                "action": "inspect",
-                "runId": "run-1",
-                "approval": "allow_once"
-            }),
-        }
-    );
-    assert_eq!(
-        plan_workflows_command(Some("allow-once"), Some("saved-flow")),
-        WorkflowCommandPlan::Tool {
-            input: serde_json::json!({
-                "action": "start",
-                "name": "saved-flow",
-                "approval": "allow_once"
-            }),
-        }
-    );
-    assert_eq!(
-        plan_workflows_command(Some("inject"), Some("run-1")),
-        WorkflowCommandPlan::Inject {
-            run_id: "run-1".to_string(),
-        }
-    );
 }
