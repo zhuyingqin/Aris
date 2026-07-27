@@ -2606,37 +2606,31 @@ impl From<TokenUsage> for ChatDoneProviderUsage {
     }
 }
 
-fn chat_done_context_tokens(session: &Session) -> u64 {
-    runtime::estimate_session_tokens(session) as u64
+fn chat_done_context_tokens(
+    session: &Session,
+    provider_usage: Option<&ChatDoneProviderUsage>,
+) -> u64 {
+    let session_estimate = runtime::estimate_session_tokens(session) as u64;
+    // Provider prompt usage includes system prompt and tool schemas, while the
+    // session estimate includes the assistant text just produced for the next
+    // request. Keep the conservative maximum so the ContextRing under-reports
+    // neither side.
+    session_estimate.max(provider_usage.map_or(0, |usage| u64::from(usage.prompt_tokens)))
 }
 
 fn latest_provider_usage(turn_usages: &[TokenUsage]) -> Option<ChatDoneProviderUsage> {
     turn_usages.last().copied().map(ChatDoneProviderUsage::from)
 }
 
+/// Nominal display/telemetry context window. Delegates to `aris_chat` so the
+/// advertised window and the compaction budget share one source of truth and
+/// cannot drift (a chat-side test asserts `budget <= window` per family). This
+/// value is display-only; gating runs off `compaction_budget_for_model`. The
+/// former local table used `starts_with` and advertised 1M for all Kimi models
+/// and no Qwen/GLM entry, which inflated the gauge window (kimi-k2 ~4x) and put
+/// the warn point above the shown window for Qwen/GLM.
 fn context_window_for_model(model: &str) -> u64 {
-    if model.starts_with("claude") {
-        if model.contains("haiku") {
-            return 200_000;
-        }
-        return 1_000_000;
-    }
-    if model.starts_with("MiniMax") || model.starts_with("minimax") {
-        return 1_000_000;
-    }
-    if model.starts_with("gemini-") {
-        return 1_000_000;
-    }
-    if model.starts_with("gpt-5") || model.starts_with("gpt-4.1") {
-        return 300_000;
-    }
-    if model.starts_with("deepseek-v4") {
-        return 1_000_000;
-    }
-    if model.starts_with("deepseek") {
-        return 64_000;
-    }
-    128_000
+    u64::try_from(aris_chat::context_window_for_model(model)).unwrap_or(u64::MAX)
 }
 
 fn compaction_budget_for_model(model: &str) -> u64 {
@@ -6059,16 +6053,13 @@ async fn run_chat_turn_with_context(
         return Err(error);
     }
 
-    // Session-history token estimate after this turn. This is the same budget
-    // unit used by auto-compaction, so it is the value that should drive the
-    // frontend ContextRing. Provider usage is emitted separately below because
-    // it may include fixed system/tool prompt overhead, cached prompt tokens,
-    // and generated output.
-    let context_tokens = chat_done_context_tokens(&updated);
+    // Combine persisted-session and provider-prompt estimates. Each captures
+    // input the other does not, so the UI must use their conservative maximum.
+    let provider_usage = latest_provider_usage(&turn_usages);
+    let context_tokens = chat_done_context_tokens(&updated, provider_usage.as_ref());
     let auto_compaction_tokens_after = auto_compaction.map(|event| event.tokens_after);
     let auto_compaction_token_estimate_source =
         auto_compaction.map(|event| event.token_estimate_source.as_str());
-    let provider_usage = latest_provider_usage(&turn_usages);
     let persist_session_id = session_id.clone();
     let persist_project_id = remote_project_id_owned.clone();
     let updated = match tauri::async_runtime::spawn_blocking(move || {

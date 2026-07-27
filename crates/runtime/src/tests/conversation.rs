@@ -349,6 +349,139 @@ fn context_overflow_force_compacts_and_retries() {
 }
 
 #[test]
+fn context_overflow_compacts_a_long_active_tool_loop() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    struct OverflowAfterToolLoopClient {
+        calls: usize,
+        message_counts: Rc<RefCell<Vec<usize>>>,
+        request_tokens: Rc<RefCell<Vec<usize>>>,
+    }
+    impl ApiClient for OverflowAfterToolLoopClient {
+        fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+            self.message_counts
+                .borrow_mut()
+                .push(request.messages.len());
+            self.request_tokens
+                .borrow_mut()
+                .push(crate::estimate_session_tokens(&Session {
+                    version: 1,
+                    messages: request.messages.clone(),
+                    compactions: Vec::new(),
+                }));
+            self.calls += 1;
+            if self.calls <= 12 {
+                return Ok(vec![
+                    AssistantEvent::ToolUse {
+                        id: format!("tool-{}", self.calls),
+                        name: "echo".to_string(),
+                        input: "large diagnostic request".to_string(),
+                    },
+                    AssistantEvent::MessageStop,
+                ]);
+            }
+            if self.calls == 13 {
+                return Err(RuntimeError::context_overflow(
+                    "context window exceeds limit after a long tool loop",
+                ));
+            }
+            Ok(vec![
+                AssistantEvent::TextDelta("recovered after compaction".to_string()),
+                AssistantEvent::MessageStop,
+            ])
+        }
+    }
+
+    let message_counts = Rc::new(RefCell::new(Vec::new()));
+    let request_tokens = Rc::new(RefCell::new(Vec::new()));
+    let client = OverflowAfterToolLoopClient {
+        calls: 0,
+        message_counts: Rc::clone(&message_counts),
+        request_tokens: Rc::clone(&request_tokens),
+    };
+    let tools = StaticToolExecutor::new().register("echo", |_| {
+        Ok("diagnostic output ".repeat(1_000))
+    });
+    let mut runtime = ConversationRuntime::new(
+        Session::new(),
+        client,
+        tools,
+        PermissionPolicy::new(PermissionMode::WorkspaceWrite),
+        vec!["system".to_string()],
+    );
+
+    let summary = runtime
+        .run_turn("investigate the failure", None)
+        .expect("overflow recovery should summarize the earlier active tool loop");
+
+    let counts = message_counts.borrow();
+    let tokens = request_tokens.borrow();
+    assert_eq!(counts.len(), 14);
+    assert_eq!(tokens.len(), 14);
+    assert!(
+        counts[13] < counts[12],
+        "the retry must send fewer messages than the rejected request: {counts:?}"
+    );
+    assert!(
+        tokens[13] < tokens[12],
+        "the retry must send fewer tokens than the rejected request: {tokens:?}"
+    );
+    assert!(
+        summary
+            .auto_compaction
+            .is_some_and(|event| event.removed_message_count > 0),
+        "the active tool loop should have been compacted"
+    );
+}
+
+#[test]
+fn system_prompt_overhead_triggers_preflight_compaction() {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    struct InspectClient(Rc<Cell<usize>>);
+    impl ApiClient for InspectClient {
+        fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+            self.0.set(request.messages.len());
+            Ok(vec![
+                AssistantEvent::TextDelta("ok".to_string()),
+                AssistantEvent::MessageStop,
+            ])
+        }
+    }
+
+    let mut session = Session::new();
+    session.messages = vec![
+        ConversationMessage::user_text("u".repeat(1_000)),
+        ConversationMessage::assistant(vec![ContentBlock::Text {
+            text: "a".repeat(1_000),
+        }]),
+        ConversationMessage::user_text("u".repeat(1_000)),
+        ConversationMessage::assistant(vec![ContentBlock::Text {
+            text: "a".repeat(1_000),
+        }]),
+    ];
+    let seen_message_count = Rc::new(Cell::new(usize::MAX));
+    let mut runtime = ConversationRuntime::new(
+        session,
+        InspectClient(Rc::clone(&seen_message_count)),
+        StaticToolExecutor::new(),
+        PermissionPolicy::new(PermissionMode::WorkspaceWrite),
+        vec!["system".repeat(500)],
+    )
+    .with_context_compaction_estimated_tokens_threshold(1_300);
+
+    runtime
+        .run_turn("continue", None)
+        .expect("system-prompt-aware preflight compaction should succeed");
+    assert!(
+        seen_message_count.get() < 5,
+        "system prompt overhead should trigger compaction before the request"
+    );
+}
+
+#[test]
 fn context_overflow_surfaces_error_when_irreducible() {
     // A single oversized turn cannot be compacted further, so the error
     // must surface instead of looping forever.

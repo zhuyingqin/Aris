@@ -1041,6 +1041,19 @@ fn classifies_retryable_mid_stream_errors() {
     assert!(!stream_error_is_retryable("model not found"));
 }
 
+#[test]
+fn identifies_context_overflow_in_mid_stream_errors() {
+    let detail = stream_error_detail(&json!({
+        "error": {
+            "message": "Your input exceeds the context window of this model.",
+            "code": "context_length_exceeded"
+        }
+    }))
+    .expect("error envelope");
+
+    assert!(is_context_window_exceeded_error(&detail));
+}
+
 // OE7 (#249): finish_reason read independently of `delta`.
 #[test]
 fn choice_finish_reason_handles_delta_less_and_empty() {

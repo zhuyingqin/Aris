@@ -2145,6 +2145,16 @@ impl ApiClient for OpenAIRuntimeClient {
                         .or_else(|| responses_stream_error_detail(&parsed))
                     {
                         if nothing_emitted_yet(&events, &pending_tools, &current_reasoning) {
+                            // A few compatible gateways accept the HTTP
+                            // request and only report an input overflow in
+                            // the first SSE envelope. Treat that exactly like
+                            // an initial 400 so Conversation force-compacts
+                            // the persisted history and retries the turn.
+                            if is_context_window_exceeded_error(&detail) {
+                                return Err(RuntimeError::context_overflow(format!(
+                                    "OpenAI stream returned a context-window error: {detail}"
+                                )));
+                            }
                             if stream_retries_remaining > 0
                                 && stream_error_is_retryable(&detail)
                             {

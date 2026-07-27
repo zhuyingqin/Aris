@@ -5,9 +5,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::{
     attach_mcp_tools, chat_tool_specs, clear_mcp_discovery_cache,
-    context_compaction_threshold_for_model, final_assistant_text, merge_mcp_tool_search_results,
+    context_compaction_threshold_for_model, context_window_for_model, final_assistant_text,
+    merge_mcp_tool_search_results,
     model_developer, permission_policy_for_tools, resolve_settings_executor_config,
-    resolve_summarizer_model, ChatExecutorConfig,
+    resolve_summarizer_model, tool_schema_context_overhead_tokens, ChatExecutorConfig,
+    ChatToolSpec,
 };
 use api::AuthSource;
 use runtime::{
@@ -74,7 +76,8 @@ fn context_budget_scales_with_model_window() {
         context_compaction_threshold_for_model("gemini-2.5-pro"),
         850_000
     );
-    assert_eq!(context_compaction_threshold_for_model("gpt-5"), 300_000);
+    assert_eq!(context_compaction_threshold_for_model("gpt-5"), 240_000);
+    assert_eq!(context_compaction_threshold_for_model("kimi-k3"), 850_000);
     assert_eq!(
         context_compaction_threshold_for_model("deepseek-v4-pro"),
         850_000
@@ -89,6 +92,65 @@ fn context_budget_scales_with_model_window() {
         context_compaction_threshold_for_model("claude-opus-4-8"),
         160_000
     );
+}
+
+#[test]
+fn context_window_never_below_compaction_budget() {
+    // The advertised (display/telemetry) window must never sit below the
+    // compaction budget: otherwise the gauge shows a warn/compaction point
+    // beyond "100% full". This is the qwen/glm inversion — and the kimi-k2
+    // ~4x inflation — that unifying the two tables in `aris_chat` fixes. One
+    // representative model per family.
+    for model in [
+        "MiniMax-Text-01",
+        "gemini-2.5-pro",
+        "deepseek-v4-pro",
+        "gpt-5.6-luna",
+        "gpt-4.1",
+        "kimi-k3",
+        "kimi-k2",
+        "moonshot-v1-128k",
+        "qwen-max",
+        "deepseek-chat",
+        "claude-opus-4-8",
+        "claude-haiku-4-5-20251001",
+        "glm-4.6",
+        "o3-pro",
+        "gpt-4o",
+        "some-unknown-gateway-model",
+    ] {
+        let budget = context_compaction_threshold_for_model(model);
+        let window = context_window_for_model(model);
+        assert!(
+            budget <= window,
+            "budget ({budget}) must not exceed window ({window}) for {model}"
+        );
+    }
+
+    // Spot-check the families whose window was previously wrong (non-K3 Kimi
+    // and Qwen advertised 1M / defaulted to 128k; GLM defaulted to 128k).
+    assert_eq!(context_window_for_model("kimi-k2"), 256_000);
+    assert_eq!(context_window_for_model("qwen-max"), 256_000);
+    assert_eq!(context_window_for_model("glm-4.6"), 200_000);
+    // Kimi K3 keeps its genuine 1M window.
+    assert_eq!(context_window_for_model("kimi-k3"), 1_000_000);
+}
+
+#[test]
+fn tool_schema_overhead_is_included_in_context_estimates() {
+    let tool = ChatToolSpec {
+        name: "search_records".to_string(),
+        description: "Search a project-local evidence index.".to_string(),
+        input_schema: json!({
+            "type": "object",
+            "properties": { "query": { "type": "string" } },
+            "required": ["query"]
+        }),
+        required_permission: PermissionMode::WorkspaceWrite,
+    };
+
+    assert_eq!(tool_schema_context_overhead_tokens(&[tool.clone()], false), 0);
+    assert!(tool_schema_context_overhead_tokens(&[tool], true) > 128);
 }
 
 fn temp_dir() -> PathBuf {

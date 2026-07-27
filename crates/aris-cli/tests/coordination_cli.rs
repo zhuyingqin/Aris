@@ -424,6 +424,14 @@ fn run_aris_prompt(case: &TestCase, base_url: String, prompt: &str) -> std::proc
         .env("HOME", &case.home)
         .env("USERPROFILE", &case.home)
         .env("CLAUDE_CONFIG_HOME", case.home.join(".claude"))
+        // Keep the child CLI fully inside this isolated test workspace even
+        // when the parent SomniQ process exports project path overrides.
+        .env("ARIS_WORKSPACE_ROOT", case.cwd())
+        .env("ARIS_RUNTIME_ROOT", case.runtime_dir())
+        .env("ARIS_RUN_STATE_DIR", case.run_state_dir())
+        .env("ARIS_SESSIONS_DIR", case.runtime_dir().join("sessions"))
+        .env("ARIS_AGENT_STORE_DIR", case.agent_store_dir())
+        .env("ARIS_WORKFLOWS_DIR", case.workflows_dir())
         .env("EXECUTOR_PROVIDER", "openai")
         .env("EXECUTOR_API_KEY", "sk-test")
         .env("EXECUTOR_BASE_URL", base_url)

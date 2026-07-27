@@ -39,7 +39,7 @@ export function useProjectBrief(projectId?: string | null) {
   const id = projectId ?? "default";
   const [brief, setBrief] = useState<ProjectBriefView | null>(null);
   const [preference, setPreference] = useState<ProjectBriefPreference>(() => loadPreference(id));
-  const [reviewEnabled, setReviewEnabledState] = useState(true);
+  const [reviewEnabled, setReviewEnabledState] = useState(false);
   const [reviewSaving, setReviewSaving] = useState(false);
   const [reviewError, setReviewError] = useState<string | null>(null);
 
@@ -64,7 +64,7 @@ export function useProjectBrief(projectId?: string | null) {
     let active = true;
     void configGet()
       .then((config) => {
-        if (active) setReviewEnabledState(config.reviewEnabled !== false);
+        if (active) setReviewEnabledState(config.reviewEnabled === true);
       })
       .catch((error) => {
         if (active) setReviewError(String(error));

@@ -109,7 +109,7 @@ describe("chatRunHelpers", () => {
   it("continue prompt points at the rebuilt context without embedding the partial", () => {
     const prompt = continueStoppedPrompt();
 
-    expect(prompt).toContain("Continue from where you stopped.");
+    expect(prompt).toContain("Continue from where the previous turn left off.");
     expect(prompt).toContain("already in the conversation above");
     expect(prompt).toContain("Do not repeat");
     // No partial text is embedded (and therefore never truncated at 12k).
