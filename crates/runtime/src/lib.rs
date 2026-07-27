@@ -66,7 +66,7 @@ pub use conversation::{
     assistant_text_from_turn_summary, auto_compaction_threshold_from_env,
     strip_trailing_internal_continuation_messages, ApiClient, ApiRequest, AssistantEvent,
     AutoCompactionEvent, ConversationRuntime, RuntimeError, StaticToolExecutor, ToolError,
-    ToolExecutor, TurnSummary,
+    ToolExecution, ToolExecutor, ToolInvocation, TurnSummary,
 };
 pub use event_sink::{
     now_iso8601, today_iso, EventSink, EventType, JsonlEventSink, MetaLoggingLevel, NoopEventSink,

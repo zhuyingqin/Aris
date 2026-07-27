@@ -22,6 +22,7 @@ beforeEach(() => {
     language: "en",
     pendingLabFilePath: null,
     pendingTypesetFilePath: null,
+    pendingSidePanelEvidence: null,
   });
   apiMocks.isTauri.mockReturnValue(false);
   apiMocks.fileOpen.mockResolvedValue(undefined);
@@ -144,6 +145,74 @@ describe("ChatMessage rendering", () => {
     expect(diff?.textContent).toContain(`--- ${displayPath}`);
     expect(diff?.textContent).toContain(`+++ ${displayPath}`);
     expect(diff?.textContent).not.toContain("//?/");
+  });
+
+  it("renders project evidence searches as readable sources instead of raw diagnostics", async () => {
+    const user = userEvent.setup();
+    const { container } = render(
+      <ChatMessage
+        turn={{
+          id: "assistant-evidence-search",
+          role: "assistant",
+          blocks: [{
+            kind: "tool",
+            name: "ProjectEvidenceSearch",
+            input: JSON.stringify({ query: "evaluation limitations", limit: 8 }),
+            output: JSON.stringify({
+              status: "ready",
+              query: "evaluation limitations",
+              queryPlan: { aliases: ["small sample"] },
+              knowledge: {
+                results: [{
+                  knowledge: {
+                    statement: "The evaluation dataset is small.",
+                    evidence: [{ paperId: "paper-1", page: 2 }],
+                  },
+                }],
+              },
+              literature: {
+                results: [{
+                  chunk: {
+                    chunkId: "chunk-internal-2",
+                    paperId: "paper-1",
+                    relativePath: ".somniq/papers/paper-1.pdf",
+                    pageStart: 2,
+                    text: "Only 20 samples were used in the evaluation.",
+                    contentHash: "internal-hash",
+                  },
+                  cardRank: 1,
+                }],
+              },
+              rerank: [{ id: "P:chunk-internal-2", relevance: 3 }],
+            }),
+          }, {
+            kind: "text",
+            text: "The evaluation uses a small sample [paper-1 p.2].",
+          }],
+        }}
+        canRetry={false}
+        onEdit={() => undefined}
+        onRetry={() => undefined}
+        onContinue={() => undefined}
+      />,
+    );
+
+    expect(screen.getByText("Found 2")).toBeTruthy();
+    expect(screen.getByText("Local literature evidence · evaluation limitations")).toBeTruthy();
+    await user.click(container.querySelector(".chat-tool-header")!);
+
+    expect(screen.getByText("Confirmed knowledge")).toBeTruthy();
+    expect(screen.getByText("Original PDF")).toBeTruthy();
+    expect(screen.getAllByText("[paper-1 p.2]")).toHaveLength(2);
+    expect(screen.getByText("Only 20 samples were used in the evaluation.")).toBeTruthy();
+    expect(screen.queryByText(/chunk-internal-2|internal-hash|cardRank/)).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: /paper-1.*p\.2/ }));
+    expect(useStore.getState().pendingSidePanelEvidence).toMatchObject({
+      path: ".somniq/papers/paper-1.pdf",
+      page: 2,
+      quotes: ["Only 20 samples were used in the evaluation."],
+    });
   });
 
   const auditedFileTurn = (): ChatTurn => ({

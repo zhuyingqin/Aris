@@ -577,7 +577,7 @@ describe("Literature library", () => {
   it("uses the configured SomniQ LLM to answer from local FTS evidence without embeddings", async () => {
     mocks.projectRagAnswer.mockResolvedValue({
       query: "limitations",
-      answer: "The evaluation is limited by a small sample [P1 paper-1 p.2 raw-pdf-ocr].",
+      answer: "The evaluation is limited by a small sample [P1 arxiv:1111.00001 p.2 raw-pdf-ocr].",
       queryPlan: { originalQuery: "limitations", exactTerms: [], aliases: [], subqueries: [], entities: [] },
       knowledge: { query: "limitations", retrieval: "SQLite FTS", note: "", results: [] },
       literature: { query: "limitations", queryPlan: { originalQuery: "limitations", exactTerms: [], aliases: [], subqueries: [], entities: [] }, retrieval: "SQLite FTS", results: [] },
@@ -592,6 +592,10 @@ describe("Literature library", () => {
     await user.click(screen.getByRole("button", { name: "检索并回答" }));
 
     expect(await screen.findByText(/The evaluation is limited by a small sample/)).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "Persisted Paper on Grounded Reading · p.2" }),
+    ).toBeTruthy();
+    expect(screen.queryByText(/P1 arxiv:1111\.00001/)).toBeNull();
     expect(screen.getByText(/独立审校：All claims are page-grounded/)).toBeTruthy();
     expect(mocks.projectRagAnswer).toHaveBeenCalledWith("limitations", 8);
   });

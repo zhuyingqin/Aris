@@ -9,7 +9,8 @@ use std::time::{Duration, Instant};
 use api::AuthSource;
 use runtime::{
     is_interrupted, scoped_mcp_config_hash, ManagedMcpTool, McpServerManager, PermissionMode,
-    PermissionPolicy, PromptBuildError, Session, ToolError, ToolExecutor, TurnSummary,
+    PermissionPolicy, PromptBuildError, Session, ToolError, ToolExecution, ToolExecutor,
+    ToolInvocation, TurnSummary,
 };
 use serde_json::{Map, Value};
 
@@ -414,6 +415,32 @@ where
         } else {
             Ok(output)
         }
+    }
+
+    fn execution(&self, tool_name: &str) -> ToolExecution {
+        if tool_name == "ToolSearch" || self.tool_names.contains(tool_name) {
+            ToolExecution::Serial
+        } else {
+            self.inner.execution(tool_name)
+        }
+    }
+
+    fn execute_batch(&mut self, invocations: &[ToolInvocation]) -> Vec<Result<String, ToolError>> {
+        if invocations.iter().all(|invocation| {
+            invocation.tool_name != "ToolSearch" && !self.tool_names.contains(&invocation.tool_name)
+        }) {
+            return self.inner.execute_batch(invocations);
+        }
+        invocations
+            .iter()
+            .map(|invocation| {
+                self.execute_with_id(
+                    &invocation.tool_use_id,
+                    &invocation.tool_name,
+                    &invocation.input,
+                )
+            })
+            .collect()
     }
 
     fn is_cancelled(&self) -> bool {

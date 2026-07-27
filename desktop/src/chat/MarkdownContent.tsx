@@ -8,7 +8,11 @@ import "katex/dist/katex.min.css";
 import "highlight.js/styles/github-dark.css";
 import { SvgIcon } from "../SvgIcon";
 import { isExplicitLocalFileHref, normalizeLocalFileHref } from "./localFileLinks";
-import { useOpenChatFile } from "./openChatFile";
+import {
+  useOpenChatEvidence,
+  useOpenChatFile,
+  type ChatEvidenceReference,
+} from "./openChatFile";
 import ChatImagePreview, { isDirectImageSource, isPreviewableImagePath } from "./ChatImagePreview";
 import MermaidDiagram from "./MermaidDiagram";
 
@@ -21,6 +25,71 @@ const LARGE_MARKDOWN_TAIL_CHARS = 16_000;
 // (several big blocks in the initial viewport get highlighted at once). Skipping
 // it keeps code readable — just uncolored — and removes the open-time freeze.
 const HIGHLIGHT_MAX_CHARS = 12_000;
+const EVIDENCE_LINK_PREFIX = "somniq-evidence:";
+const EVIDENCE_CITATION_RE =
+  /\[(?:[PK]\d+\s+)?([^\]\r\n]+?)\s+p\.(\d+)(?:\s+raw-pdf-[^\]\r\n]+)?\]/g;
+
+export type MarkdownEvidenceSource = ChatEvidenceReference;
+
+interface MarkdownAstNode {
+  type: string;
+  value?: string;
+  url?: string;
+  children?: MarkdownAstNode[];
+}
+
+/** Turn canonical and legacy paper/page labels into links only in prose nodes. */
+function remarkEvidenceCitations(sources: MarkdownEvidenceSource[]) {
+  return () => (tree: MarkdownAstNode) => {
+    const transform = (parent: MarkdownAstNode) => {
+      if (!parent.children) return;
+      for (let index = 0; index < parent.children.length; index += 1) {
+        const child = parent.children[index];
+        if (child.type === "text" && child.value) {
+          const replacement: MarkdownAstNode[] = [];
+          let cursor = 0;
+          EVIDENCE_CITATION_RE.lastIndex = 0;
+          let match: RegExpExecArray | null;
+          while ((match = EVIDENCE_CITATION_RE.exec(child.value)) !== null) {
+            const paperId = match[1].trim();
+            const page = Number.parseInt(match[2], 10);
+            const sourceIndex = sources.findIndex(
+              (source) => source.paperId === paperId && source.page === page && source.pdfPath,
+            );
+            if (sourceIndex < 0) continue;
+            if (match.index > cursor) {
+              replacement.push({ type: "text", value: child.value.slice(cursor, match.index) });
+            }
+            replacement.push({
+              type: "link",
+              url: `${EVIDENCE_LINK_PREFIX}${sourceIndex}`,
+              children: [{ type: "text", value: match[0] }],
+            });
+            cursor = match.index + match[0].length;
+          }
+          if (replacement.length > 0) {
+            if (cursor < child.value.length) {
+              replacement.push({ type: "text", value: child.value.slice(cursor) });
+            }
+            parent.children.splice(index, 1, ...replacement);
+            index += replacement.length - 1;
+            continue;
+          }
+        }
+        if (
+          child.children
+          && child.type !== "link"
+          && child.type !== "linkReference"
+          && child.type !== "code"
+          && child.type !== "inlineCode"
+        ) {
+          transform(child);
+        }
+      }
+    };
+    transform(tree);
+  };
+}
 
 interface Segment {
   kind: "text" | "think";
@@ -363,6 +432,7 @@ function decodeLocalHref(href: string): string {
 function markdownUrlTransform(url: string, key: string): string {
   if (key === "src" && /^(data:image\/|blob:)/i.test(url)) return url;
   if (key === "href" && /^(data:image\/|blob:)/i.test(url) && isPreviewableImagePath(url)) return url;
+  if (key === "href" && url.startsWith(EVIDENCE_LINK_PREFIX)) return url;
   if (key === "href" && isExplicitLocalFileHref(url)) return url;
   return defaultUrlTransform(url);
 }
@@ -370,11 +440,31 @@ function markdownUrlTransform(url: string, key: string): string {
 function MarkdownLink({
   href,
   children,
+  evidenceSources,
 }: {
   href?: string;
   children?: React.ReactNode;
+  evidenceSources?: MarkdownEvidenceSource[];
 }) {
   const openChatFile = useOpenChatFile();
+  const openChatEvidence = useOpenChatEvidence();
+  if (href?.startsWith(EVIDENCE_LINK_PREFIX)) {
+    const index = Number.parseInt(href.slice(EVIDENCE_LINK_PREFIX.length), 10);
+    const evidence = evidenceSources?.[index];
+    if (!evidence) return <>{children}</>;
+    return (
+      <button
+        type="button"
+        className="md-evidence-citation"
+        title="Open this evidence in the PDF"
+        onClick={() => openChatEvidence(evidence)}
+      >
+        <span>{evidence.paperId}</span>
+        <span>p.{evidence.page}</span>
+        <SvgIcon name="chevronRight" size={11} />
+      </button>
+    );
+  }
   if (href && isPreviewableImagePath(href)) {
     const title = textFromReactNode(children) || decodeLocalHref(href);
     return (
@@ -485,7 +575,15 @@ export const ThinkBlock = memo(function ThinkBlock({
   );
 });
 
-function MarkdownContent({ text, streaming = false }: { text: string; streaming?: boolean }) {
+function MarkdownContent({
+  text,
+  streaming = false,
+  evidenceSources = [],
+}: {
+  text: string;
+  streaming?: boolean;
+  evidenceSources?: MarkdownEvidenceSource[];
+}) {
   const rendered = useThrottledText(text, streaming);
   if (rendered.length > MAX_MARKDOWN_RENDER_CHARS) {
     return (
@@ -521,7 +619,7 @@ function MarkdownContent({ text, streaming = false }: { text: string; streaming?
         return (
           <ReactMarkdown
             key={index}
-            remarkPlugins={[remarkGfm, remarkMath]}
+            remarkPlugins={[remarkGfm, remarkMath, remarkEvidenceCitations(evidenceSources)]}
             rehypePlugins={rehypePlugins}
             urlTransform={markdownUrlTransform}
             components={{
@@ -539,7 +637,11 @@ function MarkdownContent({ text, streaming = false }: { text: string; streaming?
                   : <code className="md-inline-code" {...props}>{children}</code>;
               },
               a({ href, children }) {
-                return <MarkdownLink href={href}>{children}</MarkdownLink>;
+                return (
+                  <MarkdownLink href={href} evidenceSources={evidenceSources}>
+                    {children}
+                  </MarkdownLink>
+                );
               },
               img({ src, alt, title }) {
                 if (!src) return null;

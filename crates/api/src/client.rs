@@ -22,6 +22,41 @@ const ALT_REQUEST_ID_HEADER: &str = "x-request-id";
 const DEFAULT_INITIAL_BACKOFF: Duration = Duration::from_millis(200);
 const DEFAULT_MAX_BACKOFF: Duration = Duration::from_secs(2);
 const DEFAULT_MAX_RETRIES: u32 = 2;
+const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const HTTP_RESPONSE_HEADER_TIMEOUT: Duration = Duration::from_secs(120);
+const HTTP_POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
+const HTTP_TCP_KEEPALIVE: Duration = Duration::from_secs(30);
+
+fn build_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(HTTP_CONNECT_TIMEOUT)
+        // `read_timeout` is idle-between-reads rather than a whole-request
+        // deadline. LLM streams may legitimately run longer than two minutes;
+        // an overall ClientBuilder::timeout would abort a healthy stream.
+        .read_timeout(HTTP_RESPONSE_HEADER_TIMEOUT)
+        .pool_idle_timeout(HTTP_POOL_IDLE_TIMEOUT)
+        .tcp_keepalive(HTTP_TCP_KEEPALIVE)
+        .build()
+        .expect("static Anthropic HTTP client configuration must be valid")
+}
+
+async fn send_with_response_header_timeout(
+    request: reqwest::RequestBuilder,
+) -> Result<reqwest::Response, ApiError> {
+    match tokio::time::timeout(HTTP_RESPONSE_HEADER_TIMEOUT, request.send()).await {
+        Ok(result) => result.map_err(ApiError::from),
+        Err(_) => Err(ApiError::Api {
+            status: reqwest::StatusCode::REQUEST_TIMEOUT,
+            error_type: Some("response_header_timeout".to_string()),
+            message: Some(format!(
+                "upstream returned no response headers within {} seconds",
+                HTTP_RESPONSE_HEADER_TIMEOUT.as_secs()
+            )),
+            body: "Anthropic response-header timeout".to_string(),
+            retryable: true,
+        }),
+    }
+}
 
 pub trait ApiTraceSink: Send + Sync {
     fn record(&self, kind: &str, payload: Value);
@@ -137,7 +172,7 @@ impl AnthropicClient {
     #[must_use]
     pub fn new(api_key: impl Into<String>) -> Self {
         Self {
-            http: reqwest::Client::new(),
+            http: build_http_client(),
             auth: AuthSource::ApiKey(api_key.into()),
             base_url: DEFAULT_BASE_URL.to_string(),
             max_retries: DEFAULT_MAX_RETRIES,
@@ -151,7 +186,7 @@ impl AnthropicClient {
     #[must_use]
     pub fn from_auth(auth: AuthSource) -> Self {
         Self {
-            http: reqwest::Client::new(),
+            http: build_http_client(),
             auth,
             base_url: DEFAULT_BASE_URL.to_string(),
             max_retries: DEFAULT_MAX_RETRIES,
@@ -282,14 +317,13 @@ impl AnthropicClient {
         config: &OAuthConfig,
         request: &OAuthTokenExchangeRequest,
     ) -> Result<OAuthTokenSet, ApiError> {
-        let response = self
-            .http
-            .post(&config.token_url)
-            .header("content-type", "application/x-www-form-urlencoded")
-            .form(&request.form_params())
-            .send()
-            .await
-            .map_err(ApiError::from)?;
+        let response = send_with_response_header_timeout(
+            self.http
+                .post(&config.token_url)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .form(&request.form_params()),
+        )
+        .await?;
         let response = expect_success(response).await?;
         response
             .json::<OAuthTokenSet>()
@@ -302,14 +336,13 @@ impl AnthropicClient {
         config: &OAuthConfig,
         request: &OAuthRefreshRequest,
     ) -> Result<OAuthTokenSet, ApiError> {
-        let response = self
-            .http
-            .post(&config.token_url)
-            .header("content-type", "application/x-www-form-urlencoded")
-            .form(&request.form_params())
-            .send()
-            .await
-            .map_err(ApiError::from)?;
+        let response = send_with_response_header_timeout(
+            self.http
+                .post(&config.token_url)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .form(&request.form_params()),
+        )
+        .await?;
         let response = expect_success(response).await?;
         response
             .json::<OAuthTokenSet>()
@@ -419,7 +452,7 @@ impl AnthropicClient {
         request_builder = self.auth.apply(request_builder);
 
         request_builder = request_builder.json(request);
-        request_builder.send().await.map_err(ApiError::from)
+        send_with_response_header_timeout(request_builder).await
     }
 
     fn backoff_for_attempt(&self, attempt: u32) -> Result<Duration, ApiError> {

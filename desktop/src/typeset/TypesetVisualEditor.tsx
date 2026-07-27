@@ -275,7 +275,14 @@ export function TypesetVisualEditor({
     const view = viewRef.current;
     if (!view || !pdfCursor) return;
     const safeStart = Math.max(0, Math.min(pdfCursor.start, view.state.doc.length));
-    view.focus();
+    const activeElement = document.activeElement;
+    const editingFormField = activeElement instanceof HTMLInputElement
+      || activeElement instanceof HTMLTextAreaElement
+      || activeElement instanceof HTMLSelectElement
+      || Boolean(activeElement && (activeElement as HTMLElement).isContentEditable);
+    // A reverse-search click should focus the source, but an unrelated toolbar
+    // form field must keep its focus while the PDF cursor changes in the background.
+    if (!editingFormField) view.focus();
     view.dispatch({
       // Reverse search is navigation, not a text-selection command. A collapsed
       // cursor keeps the active source line visible without painting a large

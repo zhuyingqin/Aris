@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc, Mutex, OnceLock,
+    Arc, Mutex, OnceLock, Weak,
 };
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -23,7 +23,7 @@ use runtime::{
     AssistantEvent, BashCommandInput, ConversationRuntime, FileChangeGetInput, FileChangeListInput,
     FileChangeOperation, FileChangeRecord, FileChangeRevertInput, FileMutationContext,
     GrepSearchInput, MultiEditOperation, PermissionMode, PermissionPolicy, RuntimeError, Session,
-    StructuredPatchHunk, TokenUsage, ToolError, ToolExecutor,
+    StructuredPatchHunk, TokenUsage, ToolError, ToolExecution, ToolExecutor, ToolInvocation,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -58,6 +58,11 @@ const WORKSPACE_AUDIT_IGNORED_DIRS: &[&str] = &[
     "target",
     "__pycache__",
 ];
+
+/// Per-output-directory compile guards. A weak registry avoids retaining a
+/// lock forever after a project directory is no longer in use.
+static LATEX_OUTPUT_DIRECTORY_LOCKS: OnceLock<Mutex<BTreeMap<PathBuf, Weak<Mutex<()>>>>> =
+    OnceLock::new();
 
 pub mod knowledge;
 pub mod layout;
@@ -102,6 +107,30 @@ pub struct ToolSpec {
     pub description: &'static str,
     pub input_schema: Value,
     pub required_permission: PermissionMode,
+}
+
+/// Classify shared built-ins by side-effect safety. Unknown and stateful tools
+/// stay serial; only known independent reads opt into parallel batches.
+#[must_use]
+pub fn tool_execution(name: &str) -> ToolExecution {
+    match name {
+        "read_file"
+        | "WorkspaceLayout"
+        | "change_list"
+        | "change_get"
+        | "glob_search"
+        | "grep_search"
+        | "session_search"
+        | "WebFetch"
+        | "WebSearch"
+        | "LiteratureSearch"
+        | "LiteratureSearchPreview"
+        | "KnowledgeSearch"
+        | "LlmReview"
+        | "Sleep"
+        | "StructuredOutput" => ToolExecution::Parallel,
+        _ => ToolExecution::Serial,
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -3724,6 +3753,7 @@ fn build_subagent_executor(
     )
 }
 
+#[derive(Clone)]
 struct SubagentToolExecutor {
     allowed_tools: BTreeSet<String>,
 }
@@ -3744,6 +3774,48 @@ impl ToolExecutor for SubagentToolExecutor {
         let value = serde_json::from_str(input)
             .map_err(|error| ToolError::new(format!("invalid tool input JSON: {error}")))?;
         execute_tool(tool_name, &value).map_err(ToolError::new)
+    }
+
+    fn execution(&self, tool_name: &str) -> ToolExecution {
+        tool_execution(tool_name)
+    }
+
+    fn execute_batch(&mut self, invocations: &[ToolInvocation]) -> Vec<Result<String, ToolError>> {
+        if invocations.len() <= 1 {
+            return invocations
+                .iter()
+                .map(|invocation| {
+                    self.execute_with_id(
+                        &invocation.tool_use_id,
+                        &invocation.tool_name,
+                        &invocation.input,
+                    )
+                })
+                .collect();
+        }
+        std::thread::scope(|scope| {
+            let handles = invocations
+                .iter()
+                .map(|invocation| {
+                    let mut executor = self.clone();
+                    scope.spawn(move || {
+                        executor.execute_with_id(
+                            &invocation.tool_use_id,
+                            &invocation.tool_name,
+                            &invocation.input,
+                        )
+                    })
+                })
+                .collect::<Vec<_>>();
+            handles
+                .into_iter()
+                .map(|handle| {
+                    handle
+                        .join()
+                        .unwrap_or_else(|_| Err(ToolError::new("parallel tool worker panicked")))
+                })
+                .collect()
+        })
     }
 }
 
@@ -4899,6 +4971,21 @@ fn execute_latex_compile(
     Ok(output)
 }
 
+fn latex_output_directory_lock(output_dir: &Path) -> Arc<Mutex<()>> {
+    let key = std::fs::canonicalize(output_dir).unwrap_or_else(|_| output_dir.to_path_buf());
+    let mut locks = LATEX_OUTPUT_DIRECTORY_LOCKS
+        .get_or_init(|| Mutex::new(BTreeMap::new()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
+        return lock;
+    }
+    let lock = Arc::new(Mutex::new(()));
+    locks.insert(key, Arc::downgrade(&lock));
+    lock
+}
+
 /// Compile a TeX root with one shared engine-selection, cache-recovery,
 /// cancellation, diagnostic, and provenance path for the desktop and Agent.
 /// Paths must already have been validated by the caller.
@@ -4922,6 +5009,13 @@ pub fn compile_latex_document(
     let input_snapshot = latex_input_snapshot(&input_path, workspace);
     let compile_input_hash = latex_input_manifest_hash(&input_snapshot, workspace);
     std::fs::create_dir_all(output_dir).map_err(|error| error.to_string())?;
+    // TeX writes auxiliary files and its PDF directly into `output_dir`. Keep
+    // the whole artifact lifecycle (including the final copy/fingerprint) to a
+    // single writer so two foreground compiles cannot consume each other's PDF.
+    let output_directory_lock = latex_output_directory_lock(output_dir);
+    let _output_directory_guard = output_directory_lock
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
 
     let expected_pdf = output_dir
         .join(
@@ -4983,30 +5077,22 @@ pub fn compile_latex_document(
     }
     let inputs_changed = latex_input_snapshot_changed(&input_snapshot);
     if inputs_changed {
-        success = false;
         stderr = append_process_status_message(
             stderr,
-            "LaTeX project inputs changed during compilation; the generated PDF was not accepted. Recompile the stable project state.",
+            "LaTeX project inputs changed during compilation; the generated PDF is available but marked stale. Recompile the stable project state.",
         );
         return_code_interpretation = Some("inputs_changed".to_string());
     }
-    let pdf_state = if inputs_changed {
-        if output_path.is_file() {
-            LatexPdfState::Stale
-        } else {
-            LatexPdfState::Missing
-        }
-    } else {
-        latex_pdf_state(
-            success,
-            request.continue_on_error,
-            output.interrupted,
-            output.timed_out,
-            expected_pdf_before.as_ref(),
-            latex_output_fingerprint(&expected_pdf).as_ref(),
-            output_path.is_file(),
-        )
-    };
+    let pdf_state = latex_pdf_state_after_compile(
+        inputs_changed,
+        success,
+        request.continue_on_error,
+        output.interrupted,
+        output.timed_out,
+        expected_pdf_before.as_ref(),
+        latex_output_fingerprint(&expected_pdf).as_ref(),
+        output_path.is_file(),
+    );
     let diagnostics = extract_latex_diagnostics(
         &stdout,
         &stderr,
@@ -5076,6 +5162,35 @@ fn latex_pdf_state(
         LatexPdfState::Stale
     } else {
         LatexPdfState::Missing
+    }
+}
+
+fn latex_pdf_state_after_compile(
+    inputs_changed: bool,
+    success: bool,
+    continue_on_error: bool,
+    interrupted: bool,
+    timed_out: bool,
+    before: Option<&LatexOutputFingerprint>,
+    after: Option<&LatexOutputFingerprint>,
+    output_exists: bool,
+) -> LatexPdfState {
+    if inputs_changed {
+        if output_exists {
+            LatexPdfState::Stale
+        } else {
+            LatexPdfState::Missing
+        }
+    } else {
+        latex_pdf_state(
+            success,
+            continue_on_error,
+            interrupted,
+            timed_out,
+            before,
+            after,
+            output_exists,
+        )
     }
 }
 
@@ -5167,7 +5282,7 @@ fn latex_dependency_variants(base: &Path, value: &str, extensions: &[&str]) -> V
         .trim()
         .trim_matches(['\'', '"'])
         .trim_start_matches("file:");
-    if value.is_empty() || value.contains('\\') || value.contains('#') {
+    if value.is_empty() || value.contains('#') {
         return Vec::new();
     }
     let value = value.replace('\\', "/");

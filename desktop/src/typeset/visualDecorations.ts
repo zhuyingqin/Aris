@@ -868,6 +868,68 @@ type TabularMatch = {
   source: string;
 };
 
+type FrameMatch = {
+  from: number;
+  beginTo: number;
+  endFrom: number;
+  to: number;
+  body: string;
+  title: string | null;
+  titleFrom: number | null;
+  titleTo: number | null;
+};
+
+/**
+ * Match Beamer frames with a depth counter. A regex with a lazy body stops at
+ * the first `\\end{frame}` and therefore leaves an enclosing nested frame raw.
+ */
+function findFrameMatches(text: string, from: number, to: number): FrameMatch[] {
+  const matches: FrameMatch[] = [];
+  const delimiter = /\\(begin|end)\{frame\}/g;
+  delimiter.lastIndex = from;
+  const openFrames: Array<Pick<FrameMatch, "from" | "beginTo" | "title" | "titleFrom" | "titleTo">> = [];
+  let token: RegExpExecArray | null;
+  while ((token = delimiter.exec(text)) && token.index < to) {
+    if (token[1] === "begin") {
+      let cursor = delimiter.lastIndex;
+      const option = /\s*\[[^\]]*\]/y;
+      option.lastIndex = cursor;
+      if (option.exec(text)) cursor = option.lastIndex;
+      const whitespace = /\s*/y;
+      whitespace.lastIndex = cursor;
+      whitespace.exec(text);
+      cursor = whitespace.lastIndex;
+      let title: string | null = null;
+      let titleFrom: number | null = null;
+      let titleTo: number | null = null;
+      if (text[cursor] === "{") {
+        const titleEnd = matchBrace(text, cursor);
+        if (titleEnd >= 0 && titleEnd <= to) {
+          titleFrom = cursor + 1;
+          titleTo = titleEnd - 1;
+          title = text.slice(titleFrom, titleTo);
+          cursor = titleEnd;
+        }
+      }
+      openFrames.push({ from: token.index, beginTo: cursor, title, titleFrom, titleTo });
+      // Do not mistake a delimiter in a frame title for the body boundary.
+      delimiter.lastIndex = cursor;
+      continue;
+    }
+    const frame = openFrames.pop();
+    if (!frame) continue;
+    const endFrom = token.index;
+    const frameTo = delimiter.lastIndex;
+    matches.push({
+      ...frame,
+      endFrom,
+      to: frameTo,
+      body: text.slice(frame.beginTo, endFrom),
+    });
+  }
+  return matches.sort((left, right) => left.from - right.from || right.to - left.to);
+}
+
 function findTabularMatches(text: string, from: number, to: number): TabularMatch[] {
   const matches: TabularMatch[] = [];
   const beginRe = /\\begin\{(tabular|longtable)\}/g;
@@ -1207,7 +1269,42 @@ function simpleMacroText(definition: SimpleMacroDefinition, argumentsText: strin
 
 type Decorated = { from: number; to: number; value: Decoration };
 
-type VisualDecorations = { deco: DecorationSet; atomic: DecorationSet };
+type VisualDecorations = { deco: DecorationSet; atomic: DecorationSet; revealRanges: Range[] };
+
+function rangeInsertionIndex(ranges: Range[], from: number): number {
+  let low = 0;
+  let high = ranges.length;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if (ranges[middle].from < from) low = middle + 1;
+    else high = middle;
+  }
+  return low;
+}
+
+function mergeRanges(ranges: Range[]): Range[] {
+  const sorted = [...ranges].sort((left, right) => left.from - right.from || left.to - right.to);
+  const merged: Range[] = [];
+  for (const range of sorted) {
+    const previous = merged[merged.length - 1];
+    if (previous && range.from <= previous.to) {
+      previous.to = Math.max(previous.to, range.to);
+    } else {
+      merged.push({ ...range });
+    }
+  }
+  return merged;
+}
+
+function selectionTouchesRanges(selection: EditorState["selection"], ranges: Range[]): boolean {
+  for (const selectionRange of selection.ranges) {
+    if (!selectionRange.empty) continue;
+    const index = rangeInsertionIndex(ranges, selectionRange.from + 1);
+    const candidate = ranges[index - 1];
+    if (candidate && selectionRange.from <= candidate.to) return true;
+  }
+  return false;
+}
 
 function buildDecorations(state: EditorState): VisualDecorations {
   const text = state.doc.toString();
@@ -1220,13 +1317,22 @@ function buildDecorations(state: EditorState): VisualDecorations {
   // Accepted hidden intervals, kept sorted, so overlapping replace decorations are
   // never emitted — CodeMirror throws on overlapping replaces, and real documents
   // can nest constructs (e.g. `\vspace` inside a math block) that would collide.
-  const hidden: Array<{ from: number; to: number }> = [];
-  const overlapsHidden = (from: number, to: number) =>
-    hidden.some((h) => from < h.to && to > h.from);
+  const hidden: Range[] = [];
+  const revealRanges: Range[] = [];
+  const touchesSelection = (from: number, to: number) => {
+    revealRanges.push({ from, to });
+    return selectionTouches(state, from, to);
+  };
+  const hiddenInsertionIndex = (from: number) => rangeInsertionIndex(hidden, from);
+  const overlapsHidden = (from: number, to: number) => {
+    const index = hiddenInsertionIndex(from);
+    return (index > 0 && hidden[index - 1].to > from)
+      || (index < hidden.length && hidden[index].from < to);
+  };
   const hide = (from: number, to: number, value: Decoration = hiddenMark) => {
     if (to <= from) return; // never emit a zero-width or inverted replace
     if (overlapsHidden(from, to)) return; // first hide wins; skip the collider
-    hidden.push({ from, to });
+    hidden.splice(hiddenInsertionIndex(from), 0, { from, to });
     marks.push({ from, to, value });
     atomicMarks.push({ from, to, value });
   };
@@ -1286,16 +1392,13 @@ function buildDecorations(state: EditorState): VisualDecorations {
 
   // --- Beamer frames: keep source editing continuous, but make each frame read
   // as a slide card with an editable title and explicit slide number. ---
-  const frameEnvRe = /(\\begin\{frame\}(?:\[[^\]]*\])?\s*(?:\{([^{}\n]*)\})?)([\s\S]*?)(\\end\{frame\})/g;
-  frameEnvRe.lastIndex = bodyStart;
-  let fm: RegExpExecArray | null;
   let frameNumber = 0;
-  while ((fm = frameEnvRe.exec(text)) && fm.index < scanEnd) {
+  for (const fm of findFrameMatches(text, bodyStart, scanEnd)) {
     frameNumber += 1;
-    const frameFrom = fm.index;
-    const beginTo = frameFrom + fm[1].length;
-    const frameTo = frameFrom + fm[0].length;
-    const endFrom = frameTo - fm[4].length;
+    const frameFrom = fm.from;
+    const beginTo = fm.beginTo;
+    const frameTo = fm.to;
+    const endFrom = fm.endFrom;
 
     let linePos = frameFrom;
     let first = true;
@@ -1310,12 +1413,11 @@ function buildDecorations(state: EditorState): VisualDecorations {
       linePos = line.to + 1;
     }
 
-    const inlineTitle = fm[2]?.trim() ?? "";
-    const beginTitleOpen = inlineTitle ? fm[1].lastIndexOf("{") : -1;
-    if (inlineTitle && beginTitleOpen >= 0) {
-      const titleFrom = frameFrom + beginTitleOpen + 1;
-      const titleTo = beginTo - 1;
-      if (!selectionTouches(state, frameFrom, beginTo)) {
+    const inlineTitle = fm.title?.trim() ?? "";
+    if (inlineTitle && fm.titleFrom != null && fm.titleTo != null) {
+      const titleFrom = fm.titleFrom;
+      const titleTo = fm.titleTo;
+      if (!touchesSelection(frameFrom, beginTo)) {
         hide(
           frameFrom,
           titleFrom,
@@ -1325,22 +1427,22 @@ function buildDecorations(state: EditorState): VisualDecorations {
       }
       marks.push({ from: titleFrom, to: titleTo, value: Decoration.mark({ class: "cm-vis-frame-title" }) });
     } else {
-      const frameTitleRe = /\\frametitle\s*\{/.exec(fm[3]);
-      let fallbackTitle = /\\titlepage\b/.test(fm[3]) ? "Title slide" : "Untitled slide";
+      const frameTitleRe = /\\frametitle\s*\{/.exec(fm.body);
+      let fallbackTitle = /\\titlepage\b/.test(fm.body) ? "Title slide" : "Untitled slide";
       if (frameTitleRe) {
         const commandFrom = beginTo + frameTitleRe.index;
         const openBrace = commandFrom + frameTitleRe[0].length - 1;
         const close = matchBrace(text, openBrace);
         if (close > 0 && close <= endFrom) {
           fallbackTitle = "";
-          if (!selectionTouches(state, commandFrom, close)) {
+          if (!touchesSelection(commandFrom, close)) {
             hide(commandFrom, openBrace + 1);
             hide(close - 1, close);
           }
           marks.push({ from: openBrace + 1, to: close - 1, value: Decoration.mark({ class: "cm-vis-frame-title" }) });
         }
       }
-      if (!selectionTouches(state, frameFrom, beginTo)) {
+      if (!touchesSelection(frameFrom, beginTo)) {
         hide(
           frameFrom,
           beginTo,
@@ -1348,7 +1450,7 @@ function buildDecorations(state: EditorState): VisualDecorations {
         );
       }
     }
-    if (!selectionTouches(state, endFrom, frameTo)) hide(endFrom, frameTo);
+    if (!touchesSelection(endFrom, frameTo)) hide(endFrom, frameTo);
   }
 
   // --- Math: display environments, \[…\], and inline $…$ (KaTeX widgets) ---
@@ -1362,7 +1464,7 @@ function buildDecorations(state: EditorState): VisualDecorations {
     // landing at the wrong position (see `visualBlockClick`), not the reveal
     // itself. With clicks fixed, display math can safely support in-place editing
     // like Overleaf's own visual editor does.
-    if (selectionTouches(state, from, to)) {
+    if (touchesSelection(from, to)) {
       if (display) markMathLines(from, to);
       marks.push({ from, to, value: display ? activeMathSourceDisplay : activeMathSourceInline });
       return;
@@ -1424,7 +1526,7 @@ function buildDecorations(state: EditorState): VisualDecorations {
   while ((fe = floatEnvRe.exec(text)) && fe.index < scanEnd) {
     const envFrom = fe.index;
     const envTo = envFrom + fe[0].length;
-    if (selectionTouches(state, envFrom, envTo)) {
+    if (touchesSelection(envFrom, envTo)) {
       openFloatRanges.push({ from: envFrom, to: envTo });
       continue; // caret is editing this float — leave it fully raw
     }
@@ -1487,7 +1589,7 @@ function buildDecorations(state: EditorState): VisualDecorations {
     const from = tb.from;
     const to = tb.to;
     if (withinOpenFloat(from)) continue;
-    if (selectionTouches(state, from, to)) continue;
+    if (touchesSelection(from, to)) continue;
     const parsedTable = tb.environment === "longtable"
       ? longtableRows(tb.body)
       : { rows: parseTabular(tb.body), hasHeader: /\\toprule/.test(tb.source), caption: "" };
@@ -1508,7 +1610,7 @@ function buildDecorations(state: EditorState): VisualDecorations {
     const from = gm.index;
     const to = from + gm[0].length;
     if (withinOpenFloat(from)) continue;
-    if (selectionTouches(state, from, to)) continue;
+    if (touchesSelection(from, to)) continue;
     hide(from, to, Decoration.replace({ widget: new GraphicsWidget(gm[1].trim(), sourcePath), block: true }));
   }
 
@@ -1536,11 +1638,12 @@ function buildDecorations(state: EditorState): VisualDecorations {
     if (!starred && level <= counters.length) {
       counters[level - 1] += 1;
       for (let deeper = level; deeper < counters.length; deeper += 1) counters[deeper] = 0;
-      // A document may have a short unchaptered front matter section before
-      // its first chapter. Keep that section's label readable rather than
-      // rendering a synthetic `0.1` prefix.
-      const firstLevel = hasChapters && level > 1 && counters[0] === 0 ? 1 : level;
-      label = counters.slice(0, firstLevel).join(".");
+      // A document may have unchaptered front matter before its first chapter.
+      // It has no meaningful chapter counter, so do not render a synthetic `0`
+      // (or `0.1`) prefix.
+      if (!(hasChapters && level > 1 && counters[0] === 0)) {
+        label = counters.slice(0, level).join(".");
+      }
     }
     headingBraces.push({ from: hm.index, to: close });
 
@@ -1549,7 +1652,7 @@ function buildDecorations(state: EditorState): VisualDecorations {
     const line = state.doc.lineAt(cmdStart);
     marks.push({ from: line.from, to: line.from, value: headingLine[level] });
 
-    if (!selectionTouches(state, cmdStart, close)) {
+    if (!touchesSelection(cmdStart, close)) {
       // Hide `\section{` and its closing `}`, keep the title text styled.
       hide(cmdStart, cmdEnd);
       if (label) {
@@ -1578,7 +1681,7 @@ function buildDecorations(state: EditorState): VisualDecorations {
         continue;
       }
       const call = macroCallArguments(text, macro.index, name, definition.argumentCount);
-      if (!call || selectionTouches(state, macro.index, call.to)) continue;
+      if (!call || touchesSelection(macro.index, call.to)) continue;
       const rendered = simpleMacroText(definition, call.argumentsText);
       if (!rendered) continue;
       hide(
@@ -1633,7 +1736,7 @@ function buildDecorations(state: EditorState): VisualDecorations {
     const openBrace = im.index + im[0].length - 1;
     const close = matchBrace(text, openBrace);
     if (close < 0) continue;
-    if (selectionTouches(state, im.index, close)) continue; // reveal for editing
+    if (touchesSelection(im.index, close)) continue; // reveal for editing
     hide(im.index, openBrace + 1);
     marks.push({ from: openBrace + 1, to: close - 1, value: Decoration.mark({ class: cls }) });
     hide(close - 1, close);
@@ -1644,7 +1747,7 @@ function buildDecorations(state: EditorState): VisualDecorations {
     const close = matchBrace(text, openBrace);
     if (close < 0) return;
     if (withinOpenFloat(cmdStart)) return; // open float is fully raw
-    if (selectionTouches(state, cmdStart, close)) return; // reveal for editing
+    if (touchesSelection(cmdStart, close)) return; // reveal for editing
     const arg = text.slice(openBrace + 1, close - 1);
     hide(cmdStart, close, Decoration.replace({ widget: render(arg) }));
   };
@@ -1720,7 +1823,7 @@ function buildDecorations(state: EditorState): VisualDecorations {
     listSpacingRe.lastIndex = bodyFrom;
     let spacing: RegExpExecArray | null;
     while ((spacing = listSpacingRe.exec(text)) && spacing.index < bodyTo) {
-      if (!listIsEditing && !selectionTouches(state, spacing.index, spacing.index + spacing[0].length)) {
+      if (!listIsEditing && !touchesSelection(spacing.index, spacing.index + spacing[0].length)) {
         hide(spacing.index, spacing.index + spacing[0].length);
       }
     }
@@ -1739,7 +1842,7 @@ function buildDecorations(state: EditorState): VisualDecorations {
       n += 1;
       const itemRangeEnd = items[index + 1]?.from ?? bodyTo;
       marks.push({ from: item.lineFrom, to: item.lineFrom, value: listItemLine });
-      if (!listIsEditing && !selectionTouches(state, item.from, itemRangeEnd)) {
+      if (!listIsEditing && !touchesSelection(item.from, itemRangeEnd)) {
         const customMarker = item.match[1]?.trim();
         const marker = customMarker || (ordered ? enumitemLabel(lm[2], n) || `${n}.` : "•");
         hide(item.from, item.to, Decoration.replace({ widget: new ItemMarkerWidget(marker) }));
@@ -1750,19 +1853,23 @@ function buildDecorations(state: EditorState): VisualDecorations {
   // --- Standalone structural commands ---
   // \maketitle → centered title block built from the preamble metadata.
   const makeTitle = text.indexOf("\\maketitle");
-  if (makeTitle >= 0 && !selectionTouches(state, makeTitle, makeTitle + "\\maketitle".length)) {
-    const readArgRange = (cmd: string): { text: string; range: Range | null } => {
-      const at = text.search(new RegExp(`\\\\${cmd}\\s*\\{`));
-      if (at < 0) return { text: "", range: null };
+  if (makeTitle >= 0 && !touchesSelection(makeTitle, makeTitle + "\\maketitle".length)) {
+    const readArgRange = (cmd: string): { text: string; rawText: string; range: Range | null } => {
+      // Title metadata belongs to the preamble. Searching the body can bind a
+      // literal `\title{...}` in an example or a user macro invocation.
+      const preambleEnd = beginDoc >= 0 ? beginDoc : text.length;
+      const at = text.slice(0, preambleEnd).search(new RegExp(`\\\\${cmd}\\s*\\{`));
+      if (at < 0) return { text: "", rawText: "", range: null };
       const brace = text.indexOf("{", at);
       const end = matchBrace(text, brace);
-      if (end < 0) return { text: "", range: null };
-      return { text: stripMarkup(text.slice(brace + 1, end - 1)), range: { from: brace + 1, to: end - 1 } };
+      if (end < 0 || end > preambleEnd) return { text: "", rawText: "", range: null };
+      const rawText = text.slice(brace + 1, end - 1);
+      return { text: stripMarkup(rawText), rawText, range: { from: brace + 1, to: end - 1 } };
     };
     const titleArg = readArgRange("title");
     const authorArg = readArgRange("author");
     const dateArg = readArgRange("date");
-    const date = /\\today/.test(dateArg.text) ? "" : dateArg.text;
+    const date = /^\\today\s*$/.test(dateArg.rawText) ? "" : dateArg.text;
     hide(
       makeTitle,
       makeTitle + "\\maketitle".length,
@@ -1792,7 +1899,7 @@ function buildDecorations(state: EditorState): VisualDecorations {
     // `\end{document}` always hides (it is never edited in the visual view); the
     // rest reveal on caret so the source stays reachable.
     const isEndDoc = sm[0] === "\\end{document}";
-    if (!isEndDoc && selectionTouches(state, from, to)) continue;
+    if (!isEndDoc && touchesSelection(from, to)) continue;
     if (/tableofcontents/.test(sm[0])) {
       hide(from, to, Decoration.replace({ widget: new ChipWidget("Table of contents", "toc") }));
     } else if (sm[0] === "\\newpage" || sm[0] === "\\clearpage") {
@@ -1851,7 +1958,7 @@ function buildDecorations(state: EditorState): VisualDecorations {
     // own `withinMath` exclusion; this mirrors that.
     abstractRanges.push({ from: ab.index, to: ab.index + ab[0].length });
     // Touching *any part* of the environment reveals it whole, like math/lists.
-    if (selectionTouches(state, ab.index, ab.index + ab[0].length)) {
+    if (touchesSelection(ab.index, ab.index + ab[0].length)) {
       continue;
     }
     hide(ab.index, innerFrom, Decoration.replace({ widget: new SectionLabelWidget("Abstract") }));
@@ -1879,7 +1986,7 @@ function buildDecorations(state: EditorState): VisualDecorations {
     const openBrace = cap.index + cap[0].length - 1;
     const close = matchBrace(text, openBrace);
     if (close < 0) continue;
-    if (selectionTouches(state, cap.index, close)) continue;
+    if (touchesSelection(cap.index, close)) continue;
     const line = state.doc.lineAt(cap.index);
     marks.push({ from: line.from, to: line.from, value: captionLine });
     hide(cap.index, openBrace + 1);
@@ -1892,7 +1999,7 @@ function buildDecorations(state: EditorState): VisualDecorations {
   let de: RegExpExecArray | null;
   while ((de = DECLARATION_RE.exec(text)) && de.index < scanEnd) {
     if (withinOpenFloat(de.index)) continue; // open float is fully raw
-    if (selectionTouches(state, de.index, de.index + de[0].length)) continue;
+    if (touchesSelection(de.index, de.index + de[0].length)) continue;
     hide(de.index, de.index + de[0].length);
   }
 
@@ -1904,7 +2011,7 @@ function buildDecorations(state: EditorState): VisualDecorations {
   let bl: RegExpExecArray | null;
   while ((bl = beamerLayoutRe.exec(text)) && bl.index < scanEnd) {
     if (withinMath(bl.index) || withinOpenFloat(bl.index)) continue;
-    if (selectionTouches(state, bl.index, bl.index + bl[0].length)) continue;
+    if (touchesSelection(bl.index, bl.index + bl[0].length)) continue;
     hide(bl.index, bl.index + bl[0].length);
   }
 
@@ -1914,7 +2021,7 @@ function buildDecorations(state: EditorState): VisualDecorations {
   let br: RegExpExecArray | null;
   while ((br = breakRe.exec(text)) && br.index < scanEnd) {
     if (withinMath(br.index) || withinOpenFloat(br.index)) continue; // row break / open float is raw
-    if (selectionTouches(state, br.index, br.index + br[0].length)) continue;
+    if (touchesSelection(br.index, br.index + br[0].length)) continue;
     hide(br.index, br.index + br[0].length, Decoration.replace({ widget: new BreakWidget() }));
   }
 
@@ -1926,7 +2033,7 @@ function buildDecorations(state: EditorState): VisualDecorations {
   let esc: RegExpExecArray | null;
   while ((esc = escapeRe.exec(text)) && esc.index < scanEnd) {
     if (withinMath(esc.index)) continue;
-    if (selectionTouches(state, esc.index, esc.index + 2)) continue;
+    if (touchesSelection(esc.index, esc.index + 2)) continue;
     hide(esc.index, esc.index + 1); // hide the backslash only
   }
 
@@ -1943,7 +2050,7 @@ function buildDecorations(state: EditorState): VisualDecorations {
     if (withinOpenFloat(em.index)) continue; // open float is fully raw
     if (withinOpenList(em.index)) continue; // open list is fully raw while editing
     if (withinAbstract(em.index)) continue; // abstract handles both its own markers above
-    if (selectionTouches(state, em.index, em.index + em[0].length)) continue;
+    if (touchesSelection(em.index, em.index + em[0].length)) continue;
     hide(em.index, em.index + em[0].length);
   }
 
@@ -1966,7 +2073,7 @@ function buildDecorations(state: EditorState): VisualDecorations {
     for (const mark of list) builder.add(mark.from, mark.to, mark.value);
     return builder.finish();
   };
-  return { deco: toSet(marks), atomic: toSet(atomicMarks) };
+  return { deco: toSet(marks), atomic: toSet(atomicMarks), revealRanges: mergeRanges(revealRanges) };
 }
 
 /**
@@ -1980,7 +2087,16 @@ const visualDecorationField = StateField.define<VisualDecorations>({
     return buildDecorations(state);
   },
   update(value, tr) {
-    if (tr.docChanged || tr.selection) return buildDecorations(tr.state);
+    if (tr.docChanged) return buildDecorations(tr.state);
+    // Most arrow-key moves stay in visible prose and do not affect which raw
+    // syntax is folded. Rebuild only when entering or leaving a range that can
+    // reveal source; this avoids a full-document decoration pass per cursor move.
+    if (tr.selection && (
+      selectionTouchesRanges(tr.startState.selection, value.revealRanges)
+      || selectionTouchesRanges(tr.state.selection, value.revealRanges)
+    )) {
+      return buildDecorations(tr.state);
+    }
     return value;
   },
   provide: (field) => [

@@ -10,7 +10,7 @@ import {
 import { createPortal } from "react-dom";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { chatReviewClear, chatUiTurnLoad, isTauri } from "../api/tauri";
-import { useStore, type Language } from "../store";
+import { useStore, type Language, type SidePanelEvidenceTarget } from "../store";
 import { SvgIcon } from "../SvgIcon";
 import type { ChatTurn } from "../types";
 import ChatComposer from "./ChatComposer";
@@ -111,7 +111,15 @@ const CHAT_STARTERS: Record<Language, ChatStarter[]> = {
  */
 type SidePanelTab =
   | { kind: "task"; id: string; projectId: string; title: string; handoff: string | null }
-  | { kind: "file"; id: string; projectId: string; path: string; title: string; handoff: string | null };
+  | {
+      kind: "file";
+      id: string;
+      projectId: string;
+      path: string;
+      title: string;
+      handoff: string | null;
+      evidence?: SidePanelEvidenceTarget;
+    };
 
 const SIDE_PANEL_WIDTH_KEY = "somniq-side-panel-width";
 const SIDE_PANEL_MIN_WIDTH = 320;
@@ -147,6 +155,8 @@ export default function Chat() {
   const setTab = useStore((state) => state.setTab);
   const pendingSidePanelFilePath = useStore((state) => state.pendingSidePanelFilePath);
   const setPendingSidePanelFilePath = useStore((state) => state.setPendingSidePanelFilePath);
+  const pendingSidePanelEvidence = useStore((state) => state.pendingSidePanelEvidence);
+  const setPendingSidePanelEvidence = useStore((state) => state.setPendingSidePanelEvidence);
   const setError = useStore((state) => state.setError);
   const projects = useStore((state) => state.projects);
   const currentProject = useStore((state) => state.currentProject);
@@ -256,6 +266,36 @@ export default function Chat() {
     setSideTaskPaneOpen(true);
   }, [currentProject, sideTaskTabs]);
 
+  /** Open a cited PDF at its source page and refresh its evidence overlay. */
+  const openSideEvidence = useCallback((evidence: SidePanelEvidenceTarget) => {
+    if (!currentProject) return;
+    const existing = sideTaskTabs.find(
+      (tab) => tab.kind === "file" && tab.path === evidence.path,
+    );
+    if (existing) {
+      setSideTaskTabs((current) => current.map((tab) =>
+        tab.id === existing.id && tab.kind === "file"
+          ? { ...tab, evidence }
+          : tab
+      ));
+      setActiveSideTaskId(existing.id);
+      setSideTaskPaneOpen(true);
+      return;
+    }
+    const fileTab: SidePanelTab = {
+      kind: "file",
+      id: makeId("side-file-tab"),
+      projectId: currentProject.id,
+      path: evidence.path,
+      title: sideFileTitle(evidence.path),
+      handoff: null,
+      evidence,
+    };
+    setSideTaskTabs((current) => [...current, fileTab]);
+    setActiveSideTaskId(fileTab.id);
+    setSideTaskPaneOpen(true);
+  }, [currentProject, sideTaskTabs]);
+
   const pickSideFile = useCallback(async () => {
     if (!isTauri()) return;
     try {
@@ -329,6 +369,12 @@ export default function Chat() {
     openSideFile(pendingSidePanelFilePath);
     setPendingSidePanelFilePath(null);
   }, [openSideFile, pendingSidePanelFilePath, setPendingSidePanelFilePath]);
+
+  useEffect(() => {
+    if (!pendingSidePanelEvidence) return;
+    openSideEvidence(pendingSidePanelEvidence);
+    setPendingSidePanelEvidence(null);
+  }, [openSideEvidence, pendingSidePanelEvidence, setPendingSidePanelEvidence]);
 
   useEffect(() => {
     if (previousProjectIdRef.current === currentProject?.id) return;
@@ -989,6 +1035,7 @@ export default function Chat() {
                     key={`${sideTask.id}::${sideFileReloadGenerations[sideTask.id] ?? 0}`}
                     tabId={sideTask.id}
                     path={sideTask.path}
+                    evidence={sideTask.evidence}
                     onOpenInWorkspace={openWorkflowFile}
                     onMetadataChange={updateSideTaskMetadata}
                   />

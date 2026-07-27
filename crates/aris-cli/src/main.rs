@@ -47,13 +47,13 @@ use runtime::AssistantEvent;
 use runtime::{
     clear_oauth_credentials, format_compact_report, format_cost_report, format_status_report,
     generate_pkce_pair, generate_state, load_system_prompt, parse_oauth_callback_request_target,
-    save_oauth_credentials, CompactionConfig, ConfigLoader, ContentBlock, ConversationMessage,
-    ConversationRuntime, MessageRole, OAuthAuthorizationRequest, OAuthConfig,
-    OAuthTokenExchangeRequest, PermissionMode, ProjectContext, RuntimeError, Session,
-    StatusContext, StatusUsage, TokenUsage, ToolError, ToolExecutor, UsageTracker,
+    save_oauth_credentials, CompactionConfig, ConfigLoader, ContentBlock, ConversationRuntime,
+    MessageRole, OAuthAuthorizationRequest, OAuthConfig, OAuthTokenExchangeRequest, PermissionMode,
+    ProjectContext, RuntimeError, Session, StatusContext, StatusUsage, ToolError, ToolExecution,
+    ToolExecutor, ToolInvocation, UsageTracker,
 };
 use serde_json::json;
-use tools::{execute_tool_with_context, mvp_tool_specs, ToolRunContext};
+use tools::{execute_tool_with_context, mvp_tool_specs, tool_execution, ToolRunContext};
 
 const DEFAULT_MODEL: &str = "claude-opus-4-8";
 const DEFAULT_MODEL_FALLBACK: &str = "claude-opus-4-7";
@@ -2479,6 +2479,7 @@ fn response_to_events(
     Ok(events)
 }
 
+#[derive(Clone)]
 struct BuiltinCliToolExecutor {
     allowed_tools: Option<AllowedToolSet>,
 }
@@ -2517,6 +2518,48 @@ impl ToolExecutor for BuiltinCliToolExecutor {
             turn_id: std::env::var("ARIS_TURN_ID").ok(),
         };
         execute_tool_with_context(tool_name, &value, context).map_err(ToolError::new)
+    }
+
+    fn execution(&self, tool_name: &str) -> ToolExecution {
+        tool_execution(tool_name)
+    }
+
+    fn execute_batch(&mut self, invocations: &[ToolInvocation]) -> Vec<Result<String, ToolError>> {
+        if invocations.len() <= 1 {
+            return invocations
+                .iter()
+                .map(|invocation| {
+                    self.execute_with_id(
+                        &invocation.tool_use_id,
+                        &invocation.tool_name,
+                        &invocation.input,
+                    )
+                })
+                .collect();
+        }
+        std::thread::scope(|scope| {
+            let handles = invocations
+                .iter()
+                .map(|invocation| {
+                    let mut executor = self.clone();
+                    scope.spawn(move || {
+                        executor.execute_with_id(
+                            &invocation.tool_use_id,
+                            &invocation.tool_name,
+                            &invocation.input,
+                        )
+                    })
+                })
+                .collect::<Vec<_>>();
+            handles
+                .into_iter()
+                .map(|handle| {
+                    handle
+                        .join()
+                        .unwrap_or_else(|_| Err(ToolError::new("parallel tool worker panicked")))
+                })
+                .collect()
+        })
     }
 }
 
@@ -2567,6 +2610,33 @@ impl ToolExecutor for CliToolExecutor {
                 Err(error)
             }
         }
+    }
+
+    fn execution(&self, tool_name: &str) -> ToolExecution {
+        self.inner.execution(tool_name)
+    }
+
+    fn execute_batch(&mut self, invocations: &[ToolInvocation]) -> Vec<Result<String, ToolError>> {
+        let results = self.inner.execute_batch(invocations);
+        invocations
+            .iter()
+            .zip(results)
+            .map(|(invocation, result)| {
+                if self.emit_output {
+                    let markdown = match &result {
+                        Ok(output) => format_tool_result(&invocation.tool_name, output, false),
+                        Err(error) => {
+                            format_tool_result(&invocation.tool_name, &error.to_string(), true)
+                        }
+                    };
+                    if let Err(error) = self.renderer.stream_markdown(&markdown, &mut io::stdout())
+                    {
+                        return Err(ToolError::new(error.to_string()));
+                    }
+                }
+                result
+            })
+            .collect()
     }
 }
 

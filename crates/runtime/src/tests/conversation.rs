@@ -4,7 +4,8 @@ use super::{
     parse_auto_compaction_threshold, run_compaction_singleflight,
     strip_trailing_internal_continuation_messages, ApiClient, ApiRequest, AssistantEvent,
     CompactionFlightKey, ConversationRuntime, RuntimeError, StaticToolExecutor, ToolError,
-    ToolExecutor, TurnSummary, DEFAULT_AUTO_COMPACTION_INPUT_TOKENS_THRESHOLD,
+    ToolExecution, ToolExecutor, ToolInvocation, TurnSummary,
+    DEFAULT_AUTO_COMPACTION_INPUT_TOKENS_THRESHOLD,
 };
 use crate::compact::CompactionTokenEstimateSource;
 
@@ -1076,6 +1077,104 @@ fn runtime_error_keeps_user_and_partial_session_history() {
             matches!(block, ContentBlock::Text { text } if text == "keep this request in history")
         })
     }));
+}
+
+#[test]
+fn adjacent_parallel_tools_execute_as_one_ordered_batch() {
+    struct ParallelToolsApi {
+        calls: usize,
+    }
+    impl ApiClient for ParallelToolsApi {
+        fn stream(&mut self, _request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+            self.calls += 1;
+            if self.calls == 1 {
+                return Ok(vec![
+                    AssistantEvent::ToolUse {
+                        id: "tool-read".to_string(),
+                        name: "read_file".to_string(),
+                        input: r#"{"path":"a.md"}"#.to_string(),
+                    },
+                    AssistantEvent::ToolUse {
+                        id: "tool-grep".to_string(),
+                        name: "grep_search".to_string(),
+                        input: r#"{"query":"needle"}"#.to_string(),
+                    },
+                    AssistantEvent::ToolUse {
+                        id: "tool-glob".to_string(),
+                        name: "glob_search".to_string(),
+                        input: r#"{"pattern":"*.md"}"#.to_string(),
+                    },
+                    AssistantEvent::MessageStop,
+                ]);
+            }
+            Ok(vec![
+                AssistantEvent::TextDelta("done".to_string()),
+                AssistantEvent::MessageStop,
+            ])
+        }
+    }
+
+    struct RecordingBatchExecutor {
+        batches: std::sync::Arc<std::sync::Mutex<Vec<Vec<String>>>>,
+    }
+    impl ToolExecutor for RecordingBatchExecutor {
+        fn execute(&mut self, tool_name: &str, _input: &str) -> Result<String, ToolError> {
+            Ok(format!("{tool_name} output"))
+        }
+
+        fn execution(&self, _tool_name: &str) -> ToolExecution {
+            ToolExecution::Parallel
+        }
+
+        fn execute_batch(
+            &mut self,
+            invocations: &[ToolInvocation],
+        ) -> Vec<Result<String, ToolError>> {
+            self.batches.lock().expect("batch log").push(
+                invocations
+                    .iter()
+                    .map(|call| call.tool_name.clone())
+                    .collect(),
+            );
+            invocations
+                .iter()
+                .map(|call| Ok(format!("{} output", call.tool_name)))
+                .collect()
+        }
+    }
+
+    let batches = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut runtime = ConversationRuntime::new(
+        crate::Session::new(),
+        ParallelToolsApi { calls: 0 },
+        RecordingBatchExecutor {
+            batches: std::sync::Arc::clone(&batches),
+        },
+        crate::PermissionPolicy::new(crate::PermissionMode::DangerFullAccess),
+        vec!["system".to_string()],
+    );
+
+    let summary = runtime
+        .run_turn("inspect in parallel", None)
+        .expect("parallel tool turn");
+
+    assert_eq!(
+        *batches.lock().expect("batch log"),
+        vec![vec![
+            "read_file".to_string(),
+            "grep_search".to_string(),
+            "glob_search".to_string(),
+        ]]
+    );
+    let result_ids = summary.tool_results[0]
+        .blocks
+        .iter()
+        .filter_map(|block| match block {
+            crate::ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(result_ids, vec!["tool-read", "tool-grep", "tool-glob"]);
 }
 
 #[test]

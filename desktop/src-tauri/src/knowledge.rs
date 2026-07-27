@@ -354,22 +354,101 @@ pub(crate) fn project_evidence_search_tool_at(
     let limit = input.limit.unwrap_or(8).clamp(1, 20);
     let (plan, planner_warning) = plan_query(&query);
     let result = project_rag_retrieve_at(base.to_path_buf(), query, plan, planner_warning, limit)?;
-    let has_evidence =
-        !result.knowledge.results.is_empty() || !result.literature.results.is_empty();
-    let mut value = serde_json::to_value(result).map_err(|error| error.to_string())?;
-    if let Some(object) = value.as_object_mut() {
-        object.insert(
-            "status".to_string(),
-            Value::String(if has_evidence { "ready" } else { "empty" }.to_string()),
-        );
-        object.insert(
-            "evidencePolicy".to_string(),
+    let pdf_paths = tools::literature::library_pdf_records_at(base)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|record| (record.paper_id, record.relative_path))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let value = project_evidence_search_output(&result, &pdf_paths);
+    serde_json::to_string_pretty(&value).map_err(|error| error.to_string())
+}
+
+/// Project RAG has a rich diagnostic response for its dedicated Literature UI,
+/// but Chat only needs the authoritative statements, excerpts, and stable
+/// citations required to answer. Keeping routing plans, ranks, hashes, paths,
+/// and retrieval-card payloads out of the tool result makes the conversation
+/// readable and avoids repeatedly feeding internal diagnostics back to the
+/// model.
+fn project_evidence_search_output(
+    result: &ProjectRagSearchResponse,
+    pdf_paths: &std::collections::BTreeMap<String, String>,
+) -> Value {
+    let confirmed_knowledge = result
+        .knowledge
+        .results
+        .iter()
+        .map(|hit| {
+            let statement = if hit.knowledge.statement.trim().is_empty() {
+                &hit.knowledge.answer
+            } else {
+                &hit.knowledge.statement
+            };
+            let evidence = hit
+                .knowledge
+                .evidence
+                .iter()
+                .map(|item| {
+                    json!({
+                        "citation": canonical_citation(&item.paper_id, item.page),
+                        "paperId": item.paper_id,
+                        "page": item.page,
+                        "pdfPath": pdf_paths.get(&item.paper_id),
+                        "quote": item.quote,
+                    })
+                })
+                .collect::<Vec<_>>();
             json!({
-                "authoritative": ["confirmed knowledge", "original PDF page chunks"],
-                "routingOnly": ["retrieval cards", "retrieval ranks", "LLM query expansions"],
-                "citationFormat": "Cite material claims as [paperId p.PAGE] using the returned paperId and pageStart/evidence page."
-            }),
-        );
+                "sourceType": "confirmedKnowledge",
+                "statement": statement,
+                "evidence": evidence,
+            })
+        })
+        .collect::<Vec<_>>();
+    let pdf_evidence = result
+        .literature
+        .results
+        .iter()
+        .map(|hit| {
+            let pdf_path = pdf_paths
+                .get(&hit.chunk.paper_id)
+                .map(String::as_str)
+                .unwrap_or(&hit.chunk.relative_path);
+            json!({
+                "sourceType": "originalPdfText",
+                "citation": canonical_citation(&hit.chunk.paper_id, Some(hit.chunk.page_start)),
+                "paperId": hit.chunk.paper_id,
+                "pageStart": hit.chunk.page_start,
+                "pageEnd": hit.chunk.page_end,
+                "pdfPath": pdf_path,
+                "excerpt": hit.chunk.text.trim(),
+                "highlightQuote": evidence_highlight_quote(&hit.chunk.text, &result.query),
+            })
+        })
+        .collect::<Vec<_>>();
+    let has_evidence = !confirmed_knowledge.is_empty() || !pdf_evidence.is_empty();
+    let mut output = json!({
+        "status": if has_evidence { "ready" } else { "empty" },
+        "query": result.query,
+        "summary": {
+            "confirmedKnowledge": confirmed_knowledge.len(),
+            "pdfExcerpts": pdf_evidence.len(),
+        },
+        "citationFormat": "[paperId p.PAGE]",
+        "confirmedKnowledge": confirmed_knowledge,
+        "pdfEvidence": pdf_evidence,
+    });
+    if let Some(object) = output.as_object_mut() {
+        if let Some(warning) = result
+            .planner_warning
+            .as_deref()
+            .map(str::trim)
+            .filter(|warning| !warning.is_empty())
+        {
+            object.insert(
+                "retrievalNotice".to_string(),
+                Value::String(warning.to_string()),
+            );
+        }
         if !has_evidence {
             object.insert(
                 "nextAction".to_string(),
@@ -380,7 +459,51 @@ pub(crate) fn project_evidence_search_tool_at(
             );
         }
     }
-    serde_json::to_string_pretty(&value).map_err(|error| error.to_string())
+    output
+}
+
+fn canonical_citation(paper_id: &str, page: Option<i64>) -> String {
+    match page {
+        Some(page) => format!("[{paper_id} p.{page}]"),
+        None => format!("[{paper_id}]"),
+    }
+}
+
+/// Select a bounded verbatim sentence for the PDF overlay. The complete chunk
+/// remains available to the answering model, while the side viewer gets a
+/// focused quote that can be matched against the PDF text layer without
+/// painting an entire page.
+fn evidence_highlight_quote(text: &str, query: &str) -> String {
+    const MAX_CHARS: usize = 520;
+    let normalized_query = query.to_lowercase();
+    let terms = normalized_query
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|term| term.chars().count() >= 3)
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut candidates = text
+        .split_inclusive(['.', '!', '?', '。', '！', '？', '\n'])
+        .map(str::trim)
+        .filter(|candidate| !candidate.is_empty())
+        .map(|candidate| {
+            let lowercase = candidate.to_lowercase();
+            let score = terms
+                .iter()
+                .filter(|term| lowercase.contains(**term))
+                .count();
+            (score, candidate)
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by_key(|(score, candidate)| {
+        (
+            std::cmp::Reverse(*score),
+            std::cmp::Reverse(candidate.chars().count().min(MAX_CHARS)),
+        )
+    });
+    let selected = candidates
+        .first()
+        .map(|(_, candidate)| *candidate)
+        .unwrap_or_else(|| text.trim());
+    selected.chars().take(MAX_CHARS).collect()
 }
 
 fn rerank_project_results(
@@ -474,17 +597,19 @@ fn truncate_prompt_text(text: &str, limit: usize) -> String {
 
 const PROJECT_RAG_ANSWER_SYSTEM: &str = r#"You are SomniQ's evidence-grounded research assistant.
 Answer the user's question only from the supplied retrieved evidence. Treat confirmed knowledge
-and raw PDF page chunks as different evidence classes. Cite every material claim inline with the
-exact bracketed source labels supplied in the prompt. Never invent a citation, page, result, or
-method. If the evidence is incomplete or conflicting, say so explicitly. Retrieval rank is not
-confidence. Reply in the user's language with a concise synthesis followed by limitations."#;
+and original PDF page excerpts as different evidence classes. Cite every material claim inline
+with the exact canonical [paperId p.PAGE] citation supplied for its source. Never expose or invent
+temporary source numbers such as P1, P2, K1, or K2, extraction labels, citations, pages, results,
+or methods. If the evidence is incomplete or conflicting, say so explicitly. Retrieval rank is
+not confidence. Reply in the user's language. Start with a short direct answer, then use concise
+evidence bullets when multiple sources are needed, followed by limitations. Unless the user asks
+for depth, keep the answer under eight sentences."#;
 
 fn project_rag_answer_prompt(result: &ProjectRagSearchResponse) -> String {
     let mut context = String::new();
-    for (index, hit) in result.knowledge.results.iter().enumerate() {
-        let label = format!("K{}", index + 1);
+    for hit in &result.knowledge.results {
         context.push_str(&format!(
-            "\n[{label} confirmed-knowledge] {}\n",
+            "\nConfirmed knowledge:\nStatement: {}\n",
             if hit.knowledge.statement.trim().is_empty() {
                 &hit.knowledge.answer
             } else {
@@ -492,28 +617,23 @@ fn project_rag_answer_prompt(result: &ProjectRagSearchResponse) -> String {
             }
         ));
         for evidence in &hit.knowledge.evidence {
-            let page = evidence
-                .page
-                .map(|page| format!(" p.{page}"))
-                .unwrap_or_default();
             context.push_str(&format!(
-                "[{label} {}{}] {}\n",
-                evidence.paper_id, page, evidence.quote
+                "Citation: {}\nSupporting quote: {}\n",
+                canonical_citation(&evidence.paper_id, evidence.page),
+                evidence.quote
             ));
         }
     }
-    for (index, hit) in result.literature.results.iter().enumerate() {
+    for hit in &result.literature.results {
         context.push_str(&format!(
-            "\n[P{} {} p.{} raw-pdf-{}]\n{}\n",
-            index + 1,
-            hit.chunk.paper_id,
-            hit.chunk.page_start,
+            "\nOriginal PDF evidence:\nCitation: {}\nExtraction: {}\nExcerpt:\n{}\n",
+            canonical_citation(&hit.chunk.paper_id, Some(hit.chunk.page_start)),
             hit.chunk.page_source,
             hit.chunk.text
         ));
     }
     format!(
-        "Question:\n{}\n\nRetrieved evidence (cite these exact bracket labels):\n{}",
+        "Question:\n{}\n\nRetrieved evidence (cite only each canonical Citation value):\n{}",
         result.query, context
     )
 }

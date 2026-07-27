@@ -39,6 +39,16 @@ export type Tab =
 export type Theme = "dark" | "light";
 export type Language = "cn" | "en";
 
+/** One-shot request to inspect a cited local-PDF source beside Chat. */
+export interface SidePanelEvidenceTarget {
+  path: string;
+  paperId: string;
+  page: number;
+  citation: string;
+  quotes: string[];
+  requestKey: string;
+}
+
 const THEME_STORAGE_KEY = "somniq-theme";
 const THEME_LEGACY_STORAGE_KEY = "aris-theme";
 const LANGUAGE_STORAGE_KEY = "somniq-ui-language";
@@ -227,6 +237,10 @@ interface AppState {
   pendingSidePanelFilePath: string | null;
   setPendingSidePanelFilePath: (value: string | null) => void;
 
+  /** One-shot citation navigation request consumed by Chat's PDF side panel. */
+  pendingSidePanelEvidence: SidePanelEvidenceTarget | null;
+  setPendingSidePanelEvidence: (value: SidePanelEvidenceTarget | null) => void;
+
   stateDir: string;
   error: string | null;
   projects: DesktopProject[];
@@ -326,6 +340,9 @@ export const useStore = create<AppState>((set, get) => ({
 
   pendingSidePanelFilePath: null,
   setPendingSidePanelFilePath: (value) => set({ pendingSidePanelFilePath: value }),
+
+  pendingSidePanelEvidence: null,
+  setPendingSidePanelEvidence: (value) => set({ pendingSidePanelEvidence: value }),
 
   stateDir: "",
   error: null,

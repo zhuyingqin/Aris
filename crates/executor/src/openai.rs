@@ -10,6 +10,7 @@ use runtime::{
     RuntimeError, TokenUsage,
 };
 use serde_json::{json, Value};
+use std::time::Duration;
 
 use crate::{
     assistant_events_to_value, interrupted_error, push_text_event, stream_cancel_requested,
@@ -18,6 +19,58 @@ use crate::{
 };
 
 const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
+const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const HTTP_RESPONSE_HEADER_TIMEOUT: Duration = Duration::from_secs(120);
+const HTTP_POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
+const HTTP_TCP_KEEPALIVE: Duration = Duration::from_secs(30);
+
+#[derive(Debug)]
+enum OpenAiSendError {
+    Http(reqwest::Error),
+    ResponseHeaderTimeout,
+}
+
+impl OpenAiSendError {
+    fn is_transient(&self) -> bool {
+        match self {
+            Self::Http(error) => {
+                error.is_timeout() || error.is_connect() || error.is_request() || error.is_body()
+            }
+            Self::ResponseHeaderTimeout => true,
+        }
+    }
+}
+
+impl std::fmt::Display for OpenAiSendError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Http(error) => write!(formatter, "{error}"),
+            Self::ResponseHeaderTimeout => write!(
+                formatter,
+                "upstream returned no response headers within {} seconds",
+                HTTP_RESPONSE_HEADER_TIMEOUT.as_secs()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for OpenAiSendError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Http(error) => Some(error),
+            Self::ResponseHeaderTimeout => None,
+        }
+    }
+}
+
+async fn send_with_response_header_timeout(
+    request: reqwest::RequestBuilder,
+) -> Result<reqwest::Response, OpenAiSendError> {
+    match tokio::time::timeout(HTTP_RESPONSE_HEADER_TIMEOUT, request.send()).await {
+        Ok(result) => result.map_err(OpenAiSendError::Http),
+        Err(_) => Err(OpenAiSendError::ResponseHeaderTimeout),
+    }
+}
 
 /// Signature scheme for replayed Responses reasoning items. Two encodings
 /// coexist so existing session files stay byte-stable (the v0.4.24 prompt-cache
@@ -1232,13 +1285,13 @@ async fn stream_restart_send(
                 "maxAttempts": RESTART_MAX_ATTEMPTS,
             }),
         );
-        let send_result = http
-            .post(url)
-            .bearer_auth(api_key)
-            .header("content-type", "application/json")
-            .json(body)
-            .send()
-            .await;
+        let send_result = send_with_response_header_timeout(
+            http.post(url)
+                .bearer_auth(api_key)
+                .header("content-type", "application/json")
+                .json(body),
+        )
+        .await;
         match send_result {
             Ok(resp) => {
                 let status = resp.status();
@@ -1299,7 +1352,7 @@ async fn stream_restart_send(
                 )));
             }
             Err(e) => {
-                let transient = e.is_timeout() || e.is_connect() || e.is_request() || e.is_body();
+                let transient = e.is_transient();
                 if transient && attempt < RESTART_MAX_ATTEMPTS {
                     let backoff_ms: u64 = (1u64 << (attempt - 1)) * 1000;
                     trace_record(
@@ -1388,6 +1441,12 @@ impl OpenAIRuntimeClient {
             runtime: tokio::runtime::Runtime::new().map_err(|error| error.to_string())?,
             http: reqwest::Client::builder()
                 .user_agent(concat!("aris/", env!("CARGO_PKG_VERSION")))
+                .connect_timeout(HTTP_CONNECT_TIMEOUT)
+                // Keep this as an idle read deadline rather than a whole-request
+                // timeout: a healthy streaming answer may exceed two minutes.
+                .read_timeout(HTTP_RESPONSE_HEADER_TIMEOUT)
+                .pool_idle_timeout(HTTP_POOL_IDLE_TIMEOUT)
+                .tcp_keepalive(HTTP_TCP_KEEPALIVE)
                 .build()
                 .map_err(|error| error.to_string())?,
             api_key: config.api_key,
@@ -1541,14 +1600,14 @@ impl ApiClient for OpenAIRuntimeClient {
                         "stream": true,
                     }),
                 );
-                let send_result = self
-                    .http
-                    .post(&url)
-                    .bearer_auth(&self.api_key)
-                    .header("content-type", "application/json")
-                    .json(&body)
-                    .send()
-                    .await;
+                let send_result = send_with_response_header_timeout(
+                    self.http
+                        .post(&url)
+                        .bearer_auth(&self.api_key)
+                        .header("content-type", "application/json")
+                        .json(&body),
+                )
+                .await;
 
                 match send_result {
                     Ok(resp) => {
@@ -1810,7 +1869,7 @@ impl ApiClient for OpenAIRuntimeClient {
                         )));
                     }
                     Err(e) => {
-                        let transient = e.is_timeout() || e.is_connect() || e.is_request() || e.is_body();
+                        let transient = e.is_transient();
                         // Build full error chain for diagnostic visibility
                         let mut chain = vec![e.to_string()];
                         let mut src: Option<&(dyn std::error::Error + 'static)> =

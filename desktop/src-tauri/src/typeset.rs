@@ -53,7 +53,7 @@ pub async fn latex_compile(
     if let Some(run_id) = run_id.as_ref() {
         latex_compilation_cancellations()
             .lock()
-            .map_err(|_| "LaTeX compilation cancellation registry is unavailable".to_string())?
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(run_id.clone(), Arc::clone(&cancellation));
     }
     let cleanup_run_id = run_id.clone();
@@ -71,19 +71,21 @@ pub async fn latex_compile(
     .map_err(|error| error.to_string())
     .and_then(|result| result);
     if let Some(run_id) = cleanup_run_id {
-        if let Ok(mut cancellations) = latex_compilation_cancellations().lock() {
-            cancellations.remove(&run_id);
-        }
+        latex_compilation_cancellations()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&run_id);
     }
     result
 }
 
 #[tauri::command]
 pub fn latex_compile_cancel(run_id: String) -> Result<(), String> {
-    if let Ok(cancellations) = latex_compilation_cancellations().lock() {
-        if let Some(cancellation) = cancellations.get(&run_id) {
-            cancellation.store(true, Ordering::SeqCst);
-        }
+    let cancellations = latex_compilation_cancellations()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(cancellation) = cancellations.get(&run_id) {
+        cancellation.store(true, Ordering::SeqCst);
     }
     Ok(())
 }
@@ -860,7 +862,7 @@ mod tests {
         let cancellation = Arc::new(AtomicBool::new(false));
         latex_compilation_cancellations()
             .lock()
-            .unwrap()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(run_id.clone(), Arc::clone(&cancellation));
 
         latex_compile_cancel(run_id.clone()).unwrap();
@@ -868,7 +870,32 @@ mod tests {
         assert!(cancellation.load(Ordering::SeqCst));
         latex_compilation_cancellations()
             .lock()
-            .unwrap()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&run_id);
+    }
+
+    #[test]
+    fn cancel_recovers_after_cancellation_registry_poisoning() {
+        let registry = latex_compilation_cancellations();
+        let _ = std::thread::spawn(move || {
+            let _guard = registry.lock().expect("lock cancellation registry");
+            panic!("intentionally poison cancellation registry");
+        })
+        .join();
+
+        let run_id = "typeset-test-poisoned-cancel".to_string();
+        let cancellation = Arc::new(AtomicBool::new(false));
+        latex_compilation_cancellations()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(run_id.clone(), Arc::clone(&cancellation));
+
+        latex_compile_cancel(run_id.clone()).expect("cancel through poisoned registry");
+
+        assert!(cancellation.load(Ordering::SeqCst));
+        latex_compilation_cancellations()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&run_id);
     }
 }

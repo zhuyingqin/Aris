@@ -1742,6 +1742,24 @@
   white-space: pre-wrap;
 }
 
+.lit-rag-answer-citation {
+  display: inline;
+  margin: 0 2px;
+  padding: 1px 5px;
+  border: 1px solid color-mix(in srgb, var(--accent) 32%, var(--border));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
+  color: var(--accent);
+  font: inherit;
+  line-height: 1.4;
+  vertical-align: baseline;
+}
+
+.lit-rag-answer-citation:hover {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+}
+
 .lit-rag-results {
   display: grid;
   gap: 14px;

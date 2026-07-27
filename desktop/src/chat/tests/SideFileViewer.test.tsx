@@ -114,6 +114,41 @@ describe("SideFileViewer", () => {
     });
   });
 
+  it("jumps to cited evidence and passes a focused read-only highlight", async () => {
+    render(
+      <SideFileViewer
+        tabId="tab-evidence"
+        path="F:/project/papers/paper-1.pdf"
+        evidence={{
+          path: "F:/project/papers/paper-1.pdf",
+          paperId: "paper-1",
+          page: 7,
+          citation: "[paper-1 p.7]",
+          quotes: ["Only 20 samples were used in the evaluation."],
+          requestKey: "evidence-request-1",
+        }}
+        onOpenInWorkspace={() => undefined}
+        onMetadataChange={() => undefined}
+      />,
+    );
+
+    await screen.findByTestId("pdf-reader");
+    expect(screen.getByText("回答引用证据 · [paper-1 p.7]")).toBeTruthy();
+    expect(pdfMocks.props[0]).toMatchObject({
+      initialPage: 7,
+      pageRequestKey: "evidence-request-1",
+      focusedAnnotationId: "evidence-request-1:0",
+      annotations: [{
+        id: "evidence-request-1:0",
+        page: 7,
+        quote: "Only 20 samples were used in the evaluation.",
+        kind: "answer-support",
+        color: "yellow",
+      }],
+      readOnly: true,
+    });
+  });
+
   it("offers the system app when the file cannot be read in place", async () => {
     apiMocks.fileReadText.mockRejectedValueOnce(new Error("file is too large for the Lab editor"));
     render(

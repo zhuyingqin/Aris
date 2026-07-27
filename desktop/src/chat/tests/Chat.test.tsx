@@ -205,6 +205,8 @@ describe("Chat export action", () => {
       language: "en",
       pendingChatInput: null,
       pendingChatRunInput: null,
+      pendingSidePanelFilePath: null,
+      pendingSidePanelEvidence: null,
       error: null,
       projects: [defaultProject],
       currentProject: defaultProject,
@@ -371,6 +373,26 @@ describe("Chat export action", () => {
     await waitFor(() => expect(screen.getByRole("tab", { name: "report.md" })).toBeTruthy());
     expect(document.querySelector(".chat-root")?.classList.contains("side-task-open")).toBe(true);
     expect(useStore.getState().pendingSidePanelFilePath).toBeNull();
+  });
+
+  it("opens a cited PDF evidence request in the existing side-panel workspace", async () => {
+    render(<Chat />);
+    await waitFor(() => expect(document.querySelector(".chat-root")).toBeTruthy());
+
+    useStore.setState({
+      pendingSidePanelEvidence: {
+        path: "F:/project/papers/paper-1.pdf",
+        paperId: "paper-1",
+        page: 7,
+        citation: "[paper-1 p.7]",
+        quotes: ["Only 20 samples were used in the evaluation."],
+        requestKey: "evidence-request-1",
+      },
+    });
+
+    await waitFor(() => expect(screen.getByRole("tab", { name: "paper-1.pdf" })).toBeTruthy());
+    expect(document.querySelector(".chat-root")?.classList.contains("side-task-open")).toBe(true);
+    expect(useStore.getState().pendingSidePanelEvidence).toBeNull();
   });
 
   it("keeps Reviewer details closed until the in-chat Agent badge is clicked", async () => {

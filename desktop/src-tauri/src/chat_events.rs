@@ -135,6 +135,19 @@ pub fn chat_wire_rotated_log_paths(session_id: &str) -> Result<Vec<PathBuf>, Str
         .collect())
 }
 
+pub fn remove_chat_wire_logs(session_id: &str) -> Result<(), String> {
+    let mut paths = vec![chat_wire_log_path(session_id)?];
+    paths.extend(chat_wire_rotated_log_paths(session_id)?);
+    for path in paths {
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("failed to remove {}: {error}", path.display())),
+        }
+    }
+    Ok(())
+}
+
 pub fn chat_wire_log_exists(session_id: &str) -> bool {
     chat_wire_log_path(session_id).is_ok_and(|path| path.exists())
 }
@@ -464,15 +477,27 @@ fn govern_wire_string(key: Option<&str>, text: String, max_string_chars: usize) 
 
 fn is_sensitive_wire_key(key: &str) -> bool {
     let lower = key.to_ascii_lowercase();
-    lower.contains("api_key")
-        || lower.contains("apikey")
-        || lower.contains("authorization")
-        || lower.contains("password")
-        || lower.contains("secret")
-        || lower.contains("token")
-        || lower.ends_with("_key")
-        || lower.ends_with("_secret")
-        || lower.ends_with("_token")
+    matches!(
+        lower.as_str(),
+        "api_key"
+            | "api-key"
+            | "apikey"
+            | "x-api-key"
+            | "x_api_key"
+            | "authorization"
+            | "proxy-authorization"
+            | "password"
+            | "secret"
+            | "client_secret"
+            | "clientsecret"
+            | "token"
+            | "bearer_token"
+            | "bearertoken"
+            | "access_token"
+            | "accesstoken"
+            | "refresh_token"
+            | "refreshtoken"
+    )
 }
 
 fn is_binary_wire_key(key: &str) -> bool {
